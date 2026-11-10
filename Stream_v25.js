@@ -13,7 +13,10 @@
  *     HDR10 / HLG 依 VUI 或 MKV Colour 信令，并写入 colr / mdcv / clli。
  *   ▸ 音频：AAC / AC-3 / E-AC-3（含 Atmos JOC，CHANNELS="16/JOC"）/ FLAC / ALAC 直通。
  *     默认音轨复用在视频分段里（Dropbox 只读一遍）；其余音轨是 HLS 备选音轨。
- *     DTS / TrueHD 等 Safari 解不了的音轨不进播放列表，播放页会提示。
+ *   ▸ DTS / TrueHD / Opus / Vorbis / MP2 / MP3 / PCM：绑定 audio-tx 转码 Worker
+ *     （Service Binding AUDIO_TX，见仓库 audio-tx/）后实时转为 AC-3（5.1 @ 640k），
+ *     帧落在全局网格上、跨分段预热与越界多读，接缝无爆音；转好的分段进边缘缓存。
+ *     没有绑定时这些音轨不进播放列表，播放页会提示。
  *   ▸ 字幕：内封 SRT / ASS（含 zlib 压缩）靠 Cues 精确定位只读字幕块；同目录外挂
  *     .srt/.ass/.vtt 一并进 HLS 字幕组；全部为带 X-TIMESTAMP-MAP 的分段 WebVTT，
  *     中文字幕（简体优先）默认开启。图形字幕（PGS / VobSub）无法转换，不列出。
@@ -6884,20 +6887,60 @@ function hlsAudioConfig(t, first) {
       if (!f) return a;
       Object.assign(a, { mode: 'copy', codec: 'alac', entry: 'alac', cfg: hlsB64(f.cfg), codecs: 'alac',
         ts: f.rate, fs: f.frame, ch: f.ch, bits: f.bits });
-    } else if (/^A_(DTS|TRUEHD|MLP|OPUS|VORBIS|PCM|MPEG\/L[23]|MS\/ACM)/.test(id)) {
-      a.mode = 'tx';
+    } else {
+      hlsTxConfig(a, t, first);
     }
   } catch {}
   if (a.mode === 'copy') a.anchor = first ? Math.round(first.ns * a.ts / 1e9) : 0;
   return a;
 }
 
+/** Safari 解不了的编码：记下源参数，输出定为 AC-3（需要绑定转码 Worker 才会出现在播放列表里） */
+function hlsTxKind(id, bits) {
+  if (id.startsWith('A_DTS')) return 1;
+  if (id === 'A_TRUEHD') return 2;
+  if (id === 'A_MLP') return 3;
+  if (id === 'A_OPUS') return 4;
+  if (id === 'A_VORBIS') return 5;
+  if (id === 'A_PCM/INT/LIT') return { 8: 14, 16: 6, 24: 7, 32: 8 }[bits] || 0;
+  if (id === 'A_PCM/FLOAT/IEEE') return bits === 32 ? 9 : 0;
+  if (id === 'A_PCM/INT/BIG') return { 16: 10, 24: 11 }[bits] || 0;
+  if (id === 'A_MPEG/L2') return 12;
+  if (id === 'A_MPEG/L3') return 13;
+  return 0;
+}
+function hlsTxConfig(a, t, first) {
+  const kind = hlsTxKind(t.codecId, t.audio?.bits || 0);
+  if (!kind) return;
+  const rate = t.audio?.rate || 48000;
+  const outRate = rate === 44100 || rate === 32000 ? rate : 48000;
+  const outCh = a.ch >= 3 ? 6 : a.ch === 1 ? 1 : 2;
+  const kbps = outCh === 6 ? 640 : outCh === 2 ? 256 : 128;
+  // 源帧时长：决定帧时间戳吸附到哪个网格（TrueHD 一个访问单元 = 1/1200 s）
+  let frameNs = t.dd || 0;
+  if (!frameNs && (kind === 2 || kind === 3)) frameNs = 1e9 / (rate % 44100 === 0 ? 1102.5 : 1200);
+  if (!frameNs && (kind === 12 || kind === 13)) frameNs = 1152 * 1e9 / rate;
+  a.tx = { kind, rate, ch: a.ch, bits: t.audio?.bits || 0,
+    extra: (kind === 4 || kind === 5) && t.priv ? hlsB64(t.priv) : null,
+    frameNs, anchorNs: first ? first.ns : 0, srcCodec: t.codecId };
+  Object.assign(a, {
+    mode: 'tx', codec: 'ac3', entry: 'ac-3', codecs: 'ac-3', ts: outRate, fs: 1536, ch: outCh,
+    bitrate: kbps * 1000, anchor: first ? Math.round(first.ns * outRate / 1e9) : 0,
+    cfg: hlsB64(ac3Dac3({ fscod: outRate === 48000 ? 0 : outRate === 44100 ? 1 : 2, bsid: 8, bsmod: 0,
+      acmod: outCh === 6 ? 7 : outCh === 2 ? 2 : 1, lfeon: outCh === 6 ? 1 : 0,
+      frmsizecod: AC3_KBPS.indexOf(kbps) * 2 })),
+  });
+  if (t.strip) a.strip = hlsB64(t.strip);
+}
+
 const HLS_CODEC_LABEL = { aac: 'AAC', ac3: 'Dolby Digital', eac3: 'Dolby Digital Plus', flac: 'FLAC', alac: 'ALAC' };
 function hlsChLabel(ch) { return ch === 8 ? '7.1' : ch === 6 ? '5.1' : ch === 2 ? '立体声' : ch === 1 ? '单声道' : `${ch}ch`; }
+const HLS_TX_LABEL = { 1: 'DTS', 2: 'TrueHD', 3: 'MLP', 4: 'Opus', 5: 'Vorbis', 12: 'MP2', 13: 'MP3' };
 function hlsAudioLabel(a) {
   let s = a.name || hlsLangName(a.lang);
-  const hasCodec = /(dd|ac-?3|e-?ac-?3|dolby|aac|flac|alac|atmos|truehd|dts|pcm)/i.test(a.name || '');
-  if (!hasCodec) s += ` · ${HLS_CODEC_LABEL[a.codec] || a.codec} ${hlsChLabel(a.ch)}${a.joc ? ' Atmos' : ''}`;
+  const hasCodec = /(dd|ac-?3|e-?ac-?3|dolby|aac|flac|alac|atmos|truehd|dts|pcm|opus|vorbis|mp3)/i.test(a.name || '');
+  if (a.tx) s += ` · ${HLS_TX_LABEL[a.tx.kind] || 'PCM'} → Dolby Digital ${hlsChLabel(a.ch)}`;
+  else if (!hasCodec) s += ` · ${HLS_CODEC_LABEL[a.codec] || a.codec} ${hlsChLabel(a.ch)}${a.joc ? ' Atmos' : ''}`;
   if (a.commentary && !/comment|评论|解说/i.test(s)) s += '（评论音轨）';
   return s;
 }
@@ -7989,6 +8032,117 @@ async function hlsSidecarCues(x, env, ctx) {
   });
 }
 
+// ── 可选：DTS / TrueHD 等音轨实时转 AC-3（绑定转码 Worker AUDIO_TX 后启用）──
+//  转码音轨的分段边界单独排：每段起点 S_k 落在全局 AC-3 帧网格上，并比视频分段
+//  起点晚约 0.35s —— 留出「从本段第一个可解码帧预热到 S_k」的余量（TrueHD 要等
+//  major sync，DTS 的 QMF 要收敛）。本段读完自己的字节后再越过边界多读一点，
+//  让最后一帧的 MDCT 重叠区也用真实采样。于是相邻两段的接缝两边算的是同一段 PCM，
+//  解码端的 TDAC 能正常抵消，不出爆音。
+
+const HLS_TX_MARGIN = 0.35;
+
+function hlsTxOn(env) { return !!(env && env.AUDIO_TX && typeof env.AUDIO_TX.fetch === 'function'); }
+
+/** 转码音轨各分段的起点（输出采样序号），长度 = 分段数 + 1 */
+function hlsTxBounds(idx, a) {
+  const n = idx.segs.length, fs = 1536, r = a.ts;
+  const margin = 1280 + Math.round(HLS_TX_MARGIN * r);
+  const out = [a.anchor];
+  for (let k = 1; k < n; k++) {
+    const t = idx.segs[k][2] * idx.scaleNs / 1e9;
+    const g = a.anchor + Math.ceil((t * r - a.anchor + margin) / fs) * fs;
+    out.push(Math.max(out[k - 1] + fs, g));
+  }
+  const end = a.anchor + Math.max(fs, Math.ceil((idx.dur * r - a.anchor) / fs) * fs);
+  out.push(Math.max(out[n - 1] + fs, end));
+  return out;
+}
+function hlsTxDurs(idx, a) {
+  const B = hlsTxBounds(idx, a);
+  return idx.segs.map((s, k) => Math.round((B[k + 1] - B[k]) / a.ts * 1000) / 1000);
+}
+
+/** Opus 包时长（采样数，48k）——由 TOC 决定 */
+function hlsOpusSamples(d) {
+  if (!d || !d.length) return 960;
+  const toc = d[0], cfg = toc >> 3;
+  const per = cfg < 12 ? [480, 960, 1920, 2880][cfg & 3] : cfg < 16 ? [480, 960][cfg & 1] : [120, 240, 480, 960][cfg & 3];
+  const code = toc & 3;
+  const n = code === 0 ? 1 : code < 3 ? 2 : (d[1] & 0x3F);
+  return per * n;
+}
+
+async function* hlsTxSegmentParts(cx, idx, k, ai) {
+  const A = idx.audio[ai], T = A.tx;
+  const B = hlsTxBounds(idx, A);
+  const S0 = B[k], S1 = B[k + 1];
+  const frames = Math.round((S1 - S0) / 1536);
+  const base = hlsSegPlan(idx, k);
+  // 不在下一段关键帧处停：越过边界读到 S1 之后的音频为止（字节上限 = 下一段末尾）
+  const plan = { ...base, endCl: -1, endRel: -1, endT: Infinity,
+    fetchEnd: k + 1 < idx.segs.length ? hlsSegPlan(idx, k + 1).fetchEnd : base.fetchEnd };
+  const untilNs = (S1 + 256 + 2 * 1536) / A.ts * 1e9;
+  const strip = A.strip ? hlsUnB64(A.strip) : null;
+  const bps = Math.max(1, T.ch * ((T.bits || 16) >> 3));
+  const aus = [], parts = [];
+  let total = 0;
+  const snap = ns => {
+    if (T.frameNs > 0) ns = T.anchorNs + Math.round((ns - T.anchorNs) / T.frameNs) * T.frameNs;
+    return Math.round(ns * A.ts / 1e9);
+  };
+  const src = hlsByteSource(cx, plan.start, plan.fetchEnd);
+  try {
+    outer:
+    for await (const blk of { [Symbol.asyncIterator]: () => hlsBlocks(src, plan, idx, new Set([A.num])) }) {
+      let ns = blk.ts * idx.scaleNs;
+      for (const fr of blk.frames) {
+        if (ns > untilNs) break outer;
+        let size = 0;
+        for (const x of fr) size += x.length;
+        if (strip) { parts.push(strip); size += strip.length; }
+        for (const x of fr) parts.push(x);            // 只记引用，拼请求体时才拷一次
+        aus.push([snap(ns), blk.key ? 1 : 0, size]);
+        total += size;
+        // 帧内时间推进：laced 帧没有各自的时间戳
+        if (T.kind === 4) ns += hlsOpusSamples(strip ? hlsConcat([strip, ...fr]) : fr[0]) * 1e9 / 48000;
+        else if ((T.kind >= 6 && T.kind <= 11) || T.kind === 14) ns += size / bps * 1e9 / T.rate;
+        else ns += T.frameNs || 20e6;
+      }
+      if (total > 64 * 1048576) break;
+    }
+  } finally {
+    src.close('tx');
+  }
+  const head = new TextEncoder().encode(JSON.stringify({
+    kind: T.kind, rate: T.rate, ch: T.ch, bits: T.bits, extra: T.extra,
+    outCh: A.ch, bitrate: A.bitrate, s0: S0, frames, aus,
+  }));
+  const body = new Uint8Array(4 + head.length + total);
+  new DataView(body.buffer).setUint32(0, head.length);
+  body.set(head, 4);
+  let o = 4 + head.length;
+  for (const p of parts) { body.set(p, o); o += p.length; }
+  const res = await cx.env.AUDIO_TX.fetch('https://audio-tx/encode', { method: 'POST', body });
+  if (!res.ok) throw new Error(`audio-tx ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const out = new Uint8Array(await res.arrayBuffer());
+  const dv = new DataView(out.buffer, out.byteOffset);
+  const n = dv.getUint32(0);
+  let p = 4 + n * 4;
+  const samples = [];
+  for (let i = 0; i < n; i++) {
+    const s = dv.getUint32(4 + i * 4);
+    samples.push({ dur: 1536, size: s, pieces: [out.subarray(p, p + s)] });
+    p += s;
+  }
+  const seq = k * 10000 + 1;
+  const half = Math.ceil(samples.length / 2);
+  // 两个 moof：首个更早交付，播放器可以边收边解
+  yield mp4Fragment(seq, [{ id: 1, video: false, base: S0 + HLS_T0 * A.ts, samples: samples.slice(0, half) }]);
+  if (samples.length > half) {
+    yield mp4Fragment(seq + 1, [{ id: 1, video: false, base: S0 + half * 1536 + HLS_T0 * A.ts, samples: samples.slice(half) }]);
+  }
+}
+
 // ── 路由：/hls/<exp>.<sig>.<b64url(path)>/… ──
 //  令牌放在路径里而不是查询串：播放列表里的相对 URI 会自然继承它，
 //  原生播放器（AVPlayer）不带 Cookie 也能一路鉴权。签名与 /stream 完全相同。
@@ -8049,7 +8203,16 @@ async function hlsIndexFor(cx, opts) {
   });
 }
 
-function hlsMaster(idx, xs) {
+/** 所有媒体列表共用一个 TARGETDURATION（Apple 规范 8.2） */
+function hlsTarget(idx, env) {
+  let max = Math.max(...idx.durs.map(d => Math.round(d)));
+  if (hlsTxOn(env)) {
+    for (const a of idx.audio) if (a.mode === 'tx') max = Math.max(max, ...hlsTxDurs(idx, a).map(d => Math.round(d)));
+  }
+  return Math.max(1, max);
+}
+
+function hlsMaster(idx, xs, env) {
   const V = idx.video, idh = idx.idh;
   const L = ['#EXTM3U', '#EXT-X-VERSION:7', '#EXT-X-INDEPENDENT-SEGMENTS'];
   const codecs = [V.codecs];
@@ -8057,14 +8220,23 @@ function hlsMaster(idx, xs) {
   const uniq = s => { let n = s, i = 2; while (used.has(n)) n = `${s} (${i++})`; used.add(n); return n; };
 
   const copy = idx.audio.map((a, i) => i).filter(i => idx.audio[i].mode === 'copy');
-  if (idx.muxed >= 0) {
-    for (const i of [idx.muxed, ...copy.filter(i => i !== idx.muxed)]) {
+  const tx = hlsTxOn(env) ? idx.audio.map((a, i) => i).filter(i => idx.audio[i].mode === 'tx') : [];
+  // 默认音轨：能直通的复用轨；没有就用转码轨（DTS / TrueHD 独占的片源）
+  let def = idx.muxed;
+  if (def < 0 && tx.length) {
+    def = tx.find(i => idx.audio[i].def && !idx.audio[i].commentary)
+      ?? tx.find(i => !idx.audio[i].commentary) ?? tx[0];
+  }
+  const hasAudio = def >= 0;
+  if (hasAudio) {
+    for (const i of [def, ...copy.filter(i => i !== def), ...tx.filter(i => i !== def)]) {
       const a = idx.audio[i];
       if (!codecs.includes(a.codecs)) codecs.push(a.codecs);
       const at = ['TYPE=AUDIO', 'GROUP-ID="aud"', `LANGUAGE="${hlsAttr(a.lang)}"`,
-        `NAME="${hlsAttr(uniq(hlsAudioLabel(a)))}"`, `DEFAULT=${i === idx.muxed ? 'YES' : 'NO'}`,
+        `NAME="${hlsAttr(uniq(hlsAudioLabel(a)))}"`, `DEFAULT=${i === def ? 'YES' : 'NO'}`,
         'AUTOSELECT=YES', `CHANNELS="${a.joc ? `${a.joc}/JOC` : a.ch}"`];
-      if (i !== idx.muxed) at.push(`URI="${idh}/a${i}.m3u8"`);    // 无 URI = 复用在视频分片里
+      // 无 URI = 复用在视频分段里
+      if (i !== idx.muxed) at.push(`URI="${idh}/${a.mode === 'tx' ? 't' : 'a'}${i}.m3u8"`);
       L.push(`#EXT-X-MEDIA:${at.join(',')}`);
     }
   }
@@ -8096,19 +8268,18 @@ function hlsMaster(idx, xs) {
   inf.push(`RESOLUTION=${V.dw}x${V.h}`);
   if (V.fps) inf.push(`FRAME-RATE=${V.fps.toFixed(3)}`);
   inf.push(`VIDEO-RANGE=${V.range}`);
-  if (idx.muxed >= 0) inf.push('AUDIO="aud"');
+  if (hasAudio) inf.push('AUDIO="aud"');
   if (subs.length) inf.push('SUBTITLES="sub"');
   inf.push('CLOSED-CAPTIONS=NONE');
   L.push(`#EXT-X-STREAM-INF:${inf.join(',')}`, `${idh}/v.m3u8`);
   return L.join('\n') + '\n';
 }
 
-function hlsMediaPl(idx, map, seg) {
-  const target = Math.max(1, ...idx.durs.map(d => Math.round(d)));
+function hlsMediaPl(idx, map, seg, target, durs = idx.durs) {
   const L = ['#EXTM3U', '#EXT-X-VERSION:7', `#EXT-X-TARGETDURATION:${target}`, '#EXT-X-MEDIA-SEQUENCE:0',
     '#EXT-X-PLAYLIST-TYPE:VOD', '#EXT-X-INDEPENDENT-SEGMENTS'];
   if (map) L.push(`#EXT-X-MAP:URI="${map}"`);
-  idx.durs.forEach((d, k) => L.push(`#EXTINF:${d.toFixed(3)},`, seg(k)));
+  durs.forEach((d, k) => L.push(`#EXTINF:${d.toFixed(3)},`, seg(k)));
   L.push('#EXT-X-ENDLIST');
   return L.join('\n') + '\n';
 }
@@ -8164,6 +8335,25 @@ async function hlsSegResponse(cx, idx, k, sel, type, request) {
   return new Response(body, { headers: hlsHeaders(type, HLS_LONG) });
 }
 
+/** 转码分段：整段算完再回（体积小），并进边缘缓存 —— 拖动回看不用再转一遍 */
+async function hlsTxSegResponse(cx, idx, k, ai, request) {
+  if (!(k >= 0 && k < idx.segs.length)) return hlsFail(404, 'no such segment');
+  if (request.method === 'HEAD') return new Response(null, { headers: hlsHeaders('audio/mp4', HLS_LONG) });
+  const ck = new Request(`${HLS_SUB_CACHE}t/${idx.idh}/${ai}/${k}`);
+  const hit = await caches.default.match(ck).catch(() => null);
+  if (hit) return new Response(hit.body, { headers: hlsHeaders('audio/mp4', HLS_LONG) });
+  try {
+    const parts = [];
+    for await (const p of hlsTxSegmentParts(cx, idx, k, ai)) parts.push(...p);
+    const res = hlsOut(hlsConcat(parts), 'audio/mp4');
+    cx.ctx?.waitUntil?.(caches.default.put(ck, res.clone()).catch(() => {}));
+    return res;
+  } catch (e) {
+    console.error('hls tx:', cx.filePath, k, e && e.message);
+    return hlsFail(e?.name === 'AbortError' ? 499 : 502, 'audio transcode unavailable');
+  }
+}
+
 async function hlsVttResponse(key, ctx, make) {
   const ck = new Request(`${HLS_SUB_CACHE}${key}`);
   const hit = await caches.default.match(ck).catch(() => null);
@@ -8174,19 +8364,22 @@ async function hlsVttResponse(key, ctx, make) {
   return res;
 }
 
-function hlsInfo(idx, xs) {
-  const V = idx.video;
+function hlsInfo(idx, xs, env) {
+  const V = idx.video, txOn = hlsTxOn(env);
   return {
     ok: true, dur: idx.dur, segments: idx.segs.length,
     video: { codec: V.codec, codecs: V.codecs, supplemental: V.supp || null, range: V.range,
       width: V.dw, height: V.h, fps: V.fps ? +V.fps.toFixed(3) : null,
       dolbyVision: V.dv ? { profile: V.dv.profile, level: V.dv.level, fromProfile7: !!V.dvConvert } : null,
       dvStripped: !!V.dvStrip },
-    audio: idx.audio.map((a, i) => ({ index: i, lang: a.lang, name: a.name, codec: a.codec || a.codecId,
-      channels: a.ch, atmos: !!a.joc, playable: a.mode === 'copy', muxed: i === idx.muxed })),
+    audio: idx.audio.map((a, i) => ({ index: i, lang: a.lang, name: a.name,
+      codec: a.tx ? a.tx.srcCodec : (a.codec || a.codecId), channels: a.ch, atmos: !!a.joc,
+      playable: a.mode === 'copy' || (a.mode === 'tx' && txOn), transcoded: a.mode === 'tx' && txOn,
+      muxed: i === idx.muxed })),
     subtitles: idx.subs.map(s => ({ lang: s.lang, name: s.name, format: s.fmt, forced: s.forced })),
     sidecarSubtitles: xs.length,
-    audioUnsupportedOnly: idx.muxed < 0 && idx.audio.length > 0,
+    audioUnsupportedOnly: idx.muxed < 0 && idx.audio.length > 0 && !(txOn && idx.audio.some(a => a.mode === 'tx')),
+    audioTranscoder: txOn,
   };
 }
 
@@ -8225,17 +8418,18 @@ async function handleHls(url, request, env, ctx) {
   if (isRoot) {
     const xs = await hlsSidecarSubs(filePath, env).catch(() => []);
     if (rest[0] === 'info.json') {
-      return new Response(JSON.stringify(hlsInfo(idx, xs)), { headers: hlsHeaders('application/json; charset=utf-8', 'no-store') });
+      return new Response(JSON.stringify(hlsInfo(idx, xs, env)), { headers: hlsHeaders('application/json; charset=utf-8', 'no-store') });
     }
-    return hlsOut(hlsMaster(idx, xs), HLS_M3U8, 'no-store');
+    return hlsOut(hlsMaster(idx, xs, env), HLS_M3U8, 'no-store');
   }
   // 文件被替换 / 引擎升级 → 旧播放列表作废，让播放页重新取主列表
   if (rest[0] !== idx.idh) return hlsFail(410, 'playlist expired');
 
   const name = rest[1] || '', leaf = rest[2] || '';
   const seg = /^(\d+)\.(m4s|vtt)$/.exec(leaf);
+  const target = hlsTarget(idx, env);
   let m;
-  if (name === 'v.m3u8') return hlsOut(hlsMediaPl(idx, 'v.mp4', k => `v/${k}.m4s`), HLS_M3U8);
+  if (name === 'v.m3u8') return hlsOut(hlsMediaPl(idx, 'v.mp4', k => `v/${k}.m4s`, target), HLS_M3U8);
   if (name === 'v.mp4') {
     const tracks = [{ id: 1, kind: 'v', cfg: idx.video }];
     if (idx.muxed >= 0) tracks.push({ id: 2, kind: 'a', cfg: idx.audio[idx.muxed] });
@@ -8247,14 +8441,21 @@ async function handleHls(url, request, env, ctx) {
   if ((m = /^a(\d+)(\.m3u8|\.mp4)?$/.exec(name))) {
     const i = +m[1], a = idx.audio[i];
     if (!a || a.mode !== 'copy') return hlsFail(404, 'no such audio track');
-    if (m[2] === '.m3u8') return hlsOut(hlsMediaPl(idx, `a${i}.mp4`, k => `a${i}/${k}.m4s`), HLS_M3U8);
+    if (m[2] === '.m3u8') return hlsOut(hlsMediaPl(idx, `a${i}.mp4`, k => `a${i}/${k}.m4s`, target), HLS_M3U8);
     if (m[2] === '.mp4') return hlsOut(mp4Init([{ id: 1, kind: 'a', cfg: a }], false), 'audio/mp4');
     if (seg && seg[2] === 'm4s') return hlsSegResponse(cx, idx, +seg[1], { video: false, audio: i }, 'audio/mp4', request);
+  }
+  if ((m = /^t(\d+)(\.m3u8|\.mp4)?$/.exec(name))) {
+    const i = +m[1], a = idx.audio[i];
+    if (!a || a.mode !== 'tx' || !hlsTxOn(env)) return hlsFail(404, 'no such audio track');
+    if (m[2] === '.m3u8') return hlsOut(hlsMediaPl(idx, `t${i}.mp4`, k => `t${i}/${k}.m4s`, target, hlsTxDurs(idx, a)), HLS_M3U8);
+    if (m[2] === '.mp4') return hlsOut(mp4Init([{ id: 1, kind: 'a', cfg: a }], false), 'audio/mp4');
+    if (seg && seg[2] === 'm4s') return hlsTxSegResponse(cx, idx, +seg[1], i, request);
   }
   if ((m = /^s(\d+)(\.m3u8)?$/.exec(name))) {
     const i = +m[1];
     if (!idx.subs[i]) return hlsFail(404, 'no such subtitle');
-    if (m[2]) return hlsOut(hlsMediaPl(idx, null, k => `s${i}/${k}.vtt`), HLS_M3U8);
+    if (m[2]) return hlsOut(hlsMediaPl(idx, null, k => `s${i}/${k}.vtt`, target), HLS_M3U8);
     if (seg && seg[2] === 'vtt' && +seg[1] < idx.segs.length) {
       try { return await hlsVttResponse(`s/${idx.idh}/${i}/${seg[1]}`, ctx, () => hlsSubSegment(cx, idx, i, +seg[1])); }
       catch (e) { console.error('hls subs:', e && e.message); return hlsFail(502, 'subtitle unavailable'); }
@@ -8262,7 +8463,7 @@ async function handleHls(url, request, env, ctx) {
   }
   if ((m = /^x(\d+)(\.m3u8)?$/.exec(name))) {
     const i = +m[1];
-    if (m[2]) return hlsOut(hlsMediaPl(idx, null, k => `x${i}/${k}.vtt`), HLS_M3U8);
+    if (m[2]) return hlsOut(hlsMediaPl(idx, null, k => `x${i}/${k}.vtt`, target), HLS_M3U8);
     if (seg && seg[2] === 'vtt' && +seg[1] < idx.segs.length) {
       const k = +seg[1];
       try {
@@ -8512,9 +8713,10 @@ function hlsBadgeText(d){
 }
 function hlsAudioNote(d){
   if(!d)return '';
-  if(d.audioUnsupportedOnly)return '此片只有 DTS / TrueHD 等 Safari 无法解码的音轨，当前没有声音；可复制直链用 Infuse 播放';
-  var n=0,list=d.audio||[];
-  for(var i=0;i<list.length;i++)if(!list[i].playable)n++;
+  if(d.audioUnsupportedOnly)return '此片只有 DTS / TrueHD 等 Safari 无法解码的音轨，当前没有声音（部署 audio-tx 转码 Worker 后可实时转为杜比数字）；也可复制直链用 Infuse 播放';
+  var n=0,t=0,mux=false,list=d.audio||[];
+  for(var i=0;i<list.length;i++){if(!list[i].playable)n++;if(list[i].transcoded)t++;if(list[i].muxed)mux=true}
+  if(t&&!mux)return 'DTS / TrueHD 音轨已实时转为 Dolby Digital 5.1 播放';
   return n?('另有 '+n+' 条 DTS / TrueHD 等音轨 Safari 无法解码，已从音轨列表隐藏'):'';
 }
 `;
