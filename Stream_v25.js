@@ -8712,8 +8712,14 @@ async function mountExternalSubs(V,fp,streamOrigin,onSay){
 // ── v25：MKV 走原生 HLS（Worker 实时重封装成 fMP4，杜比视界 / HDR 由系统播放器点亮）──
 // v24 在这里的 MSE「MKV 流式重封装引擎」从未真正向 SourceBuffer 写过数据，
 // 在 iPhone 上 ManagedMediaSource 也因 disableRemotePlayback=false 根本不会打开 —— 已整体移除。
+// 只认 Apple 的原生播放器（macOS Safari，以及 iOS / iPadOS 上的所有浏览器 —— 它们都是 WebKit + AVFoundation）。
+// 新版桌面 Chrome 的 canPlayType(m3u8) 也报 maybe，但它的 HLS 只要 CODECS 里有一个自己解不了的编码
+// （例如备选音轨的 ac-3）就整条拒播（No renditions），杜比视界、AC-3 / E-AC-3 也都解不了：那边走直连。
 function canNativeHls(V){
-  try{return !!(V.canPlayType('application/vnd.apple.mpegurl')||V.canPlayType('application/x-mpegURL'))}catch(e){return false}
+  try{
+    if(!/Apple/.test(navigator.vendor||''))return false;
+    return !!(V.canPlayType('application/vnd.apple.mpegurl')||V.canPlayType('application/x-mpegURL'));
+  }catch(e){return false}
 }
 async function hlsPreflight(master){
   // info.json 与 master.m3u8 同目录：顺带把索引建好，首个分段就不必再等

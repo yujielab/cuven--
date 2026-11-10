@@ -18,9 +18,12 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 | 音频转码（可选） | DTS、TrueHD、Opus、Vorbis、MP2/MP3、PCM → AC-3 5.1（640 kbps），需要 `audio-tx` Worker |
 | 字幕 | 内封 SRT / ASS（含 zlib 压缩）、同目录外挂 `.srt/.ass/.vtt` → 分段 WebVTT（带 `X-TIMESTAMP-MAP`），中文（简体优先）默认开启 |
 
-播放页（`/watch`）和首页弹窗在支持原生 HLS 的浏览器里打开 MKV 时自动走这条链路。
-徽章按码流实测显示（Dolby Vision / HDR10 / HLG）。签名过期或文件被替换时，会换新签名并从原位置重载。
-其它浏览器、MP4/MOV 文件仍走 `/stream` 直连（v24 的 FourCC 热修补照旧生效）。
+播放页（`/watch`）和首页弹窗在 Apple 的原生播放器（macOS Safari，以及 iOS / iPadOS
+上的所有浏览器）里打开 MKV 时自动走这条链路。徽章按码流实测显示（Dolby Vision / HDR10 / HLG）。
+签名过期或文件被替换时，会换新签名并从原位置重载。
+其它浏览器、MP4/MOV 文件仍走 `/stream` 直连（v24 的 FourCC 热修补照旧生效）。新版桌面 Chrome 虽然也
+声称支持 HLS，但只要 `CODECS` 里有一个它解不了的编码（例如备选音轨的 `ac-3`）就整条拒播，
+杜比视界、AC-3 / E-AC-3 它也解不了，所以不给它 HLS；它能直接播放 MKV。
 
 调试用：`/hls/<token>/info.json` 返回识别结果（编码、HDR / 杜比、各音轨是否可播 / 是否转码）。
 
