@@ -110,6 +110,101 @@ console.log('\n■ H.264 / AV1 / 字幕 / 异常');
   ok(same, '乱序请求的分段与顺序请求逐字节一致');
 }
 
+console.log('\n■ 管线：并行窗口、边缘缓存预取、起播跟车、字幕借道');
+{
+  const settle = () => Promise.all(H.pending.splice(0));
+  const clear = async () => { await settle(); caches.default.m.clear(); };
+  const ids = async b => /\n([^/\n]+)\/v\.m3u8/.exec(await (await H.call(b + 'master.m3u8')).text())[1];
+  const file = '/Movies/hdr10_multi.mkv', b = `/hls/${H.token(file)}/`;
+  const seg = async (idh, k) => Buffer.from(await (await H.call(`${b}${idh}/v/${k}.m4s`)).arrayBuffer());
+
+  // 参照：关掉预取、默认窗口，逐段现取；顺手记下每段回源的起点
+  H.env.HLS_PREFETCH = '0';
+  await clear();
+  const idh = await ids(b);
+  await settle();
+  const ref = [], starts = [];
+  for (let k = 0; k < 5; k++) {
+    H.stats.ranges.length = 0;
+    ref.push(await seg(idh, k));
+    await settle();
+    starts.push(new Set(H.stats.ranges.map(r => r[1])));
+  }
+  let same = true;
+  for (const w of ['1', '5']) {
+    H.env.HLS_WINDOW = w;
+    await clear();
+    for (let k = 0; k < 5; k++) if (!(await seg(idh, k)).equals(ref[k])) same = false;
+  }
+  delete H.env.HLS_WINDOW;
+  ok(same, '并行窗口 1 / 3 / 5 产出的分段逐字节一致');
+
+  // 起播：主列表一到就开始取第 0 段；上游放慢，让播放器的请求在半路「跟车」
+  delete H.env.HLS_PREFETCH;
+  await clear();
+  await (await H.call(b + 'info.json')).text();
+  await settle();
+  H.net.chunkDelayMs = 4;
+  H.stats.ranges.length = 0;
+  await (await H.call(b + 'master.m3u8')).text();
+  await new Promise(r => setTimeout(r, 30));
+  const s0 = await seg(idh, 0);
+  await settle();
+  H.net.chunkDelayMs = 0;
+  const head0 = H.stats.ranges.filter(r => starts[0].has(r[1])).length;
+  ok(s0.equals(ref[0]) && head0 === starts[0].size, `起播第 0 段：跟上后台那一路，逐字节一致，回源 ${head0} 次（= 一遍 ${starts[0].size} 次）`);
+
+  // 两个请求同时要第 0 段（一个跟车、一个不能跟）：都要完整、正确，且不重复回源
+  await clear();
+  await (await H.call(b + 'info.json')).text();
+  await settle();
+  H.net.chunkDelayMs = 6;
+  H.stats.ranges.length = 0;
+  await (await H.call(b + 'master.m3u8')).text();
+  const pair = await Promise.all([0, 0].map(async () => (await seg(idh, 0)).equals(ref[0])));
+  await settle();
+  H.net.chunkDelayMs = 0;
+  const twice = H.stats.ranges.filter(r => starts[0].has(r[1])).length;
+  ok(pair.every(Boolean) && twice === starts[0].size, `并发两路第 0 段都逐字节正确，回源 ${twice} 次（不重复）`);
+
+  // 播第 2 段 → 后台取第 3 段；随后的第 3 段请求从边缘缓存出、不再回源
+  await seg(idh, 2);
+  await settle();
+  H.stats.ranges.length = 0;
+  const s3 = await seg(idh, 3);
+  await settle();
+  const again3 = H.stats.ranges.filter(r => starts[3].has(r[1])).length;
+  ok(s3.equals(ref[3]) && again3 === 0, `第 k 段请求时预取 k+1：第 3 段从缓存出（回源 ${again3} 次），逐字节一致`);
+
+  // 没有字幕 Cues：字幕分段不再把整段视频字节重读一遍
+  const f2 = '/Movies/subscan.mkv', b2 = `/hls/${H.token(f2)}/`;
+  H.env.HLS_PREFETCH = '0';
+  await clear();
+  const idh2 = await ids(b2);
+  const vref = [];
+  for (let k = 0; k < 5; k++) vref.push(await (await H.call(`${b2}${idh2}/s0/${k}.vtt`)).text());
+  delete H.env.HLS_PREFETCH;
+  await clear();
+  await (await H.call(b2 + 'info.json')).text();
+  await settle();
+  await (await H.call(`${b2}${idh2}/v/1.m4s`)).arrayBuffer();
+  await settle();
+  H.stats.ranges.length = 0;
+  const t1 = await (await H.call(`${b2}${idh2}/s0/1.vtt`)).text();
+  ok(t1 === vref[1] && H.stats.ranges.length === 0, `字幕第 1 段：直接用视频那一遍顺手写好的 VTT，回源 ${H.stats.ranges.length} 次，与扫描结果一致`);
+  H.stats.ranges.length = 0;
+  const t4 = await (await H.call(`${b2}${idh2}/s0/4.vtt`)).text();
+  await settle();
+  const n4 = H.stats.ranges.length;
+  await (await H.call(`${b2}${idh2}/v/4.m4s`)).arrayBuffer();
+  await settle();
+  ok(t4 === vref[4] && n4 > 0 && H.stats.ranges.length === n4, `先要字幕第 4 段：借道取第 4 段视频（回源 ${n4} 次），随后的视频请求从缓存出（新增 ${H.stats.ranges.length - n4} 次）`);
+  let allSame = true;
+  for (let k = 0; k < 5; k++) if ((await (await H.call(`${b2}${idh2}/s0/${k}.vtt`)).text()) !== vref[k]) allSame = false;
+  ok(allSame, '借道写出的字幕 VTT 与原扫描路径逐字一致（5 段）');
+  await clear();
+}
+
 console.log('\n■ ffmpeg 作为 HLS 客户端（HTTP）');
 {
   const srv = http.createServer(async (req, res) => {

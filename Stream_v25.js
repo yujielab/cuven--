@@ -28,6 +28,10 @@
  *     没有的文件回 422，播放页自动回退直连。
  *   ▸ 新环境变量：HLS_DISABLE=1（关闭）、HLS_SEG_SEC（分段目标时长，默认 6）、
  *     HLS_DV_MODE=auto|dvh1|off（杜比信令策略，主列表也可加 ?dv= 临时覆盖）。
+ *   ▸ 管线：每段开头 1MB 直通、其余 4MB 切片并行回源（HLS_WINDOW，默认 3，1~5）；
+ *     播第 k 段时后台把 k+1 段取进边缘缓存（HLS_PREFETCH，默认 1，0 关闭）；主列表一到就开始取
+ *     第 0 段，播放器晚到的请求从头跟上、不重复回源；没有字幕 Cues 的内封字幕在视频那一遍顺手收下，
+ *     写成该段 VTT —— 开字幕不再把整段视频字节重读一遍。同一 isolate 内按缓存键去重，最多两路后台取段。
  *   ▸ 建议 Workers 付费计划：一个 4K remux 分段约 20~40ms CPU，免费计划的
  *     10ms 上限在高码率片源上可能不够。
  *
@@ -5445,10 +5449,16 @@ const HLS_HEAD = 512 * 1024;                // 索引首读
 const HLS_PROBE = 2 * 1048576;              // 首簇探测
 const HLS_FIRST = 1048576;                  // 分片首段直通（压低首字节延迟）
 const HLS_SLICE = 4 * 1048576;              // 其余字节按 4MB 并行回源
-const HLS_WINDOW = 2;                       // 并行窗口（Workers 每次调用最多 6 条等待中的连接）
+const HLS_WINDOW = 3;                       // 默认并行窗口：首段直通 1 条 + 切片 3 条（每次调用最多 6 条连接）
 const HLS_FRAG_SEC = 1;                     // 一个 moof 覆盖约 1 秒
 const HLS_FRAG_BYTES = 6 * 1048576;         // 或累计到 6MB（高码率时控制内存）
 const hlsSegTarget = env => envInt(env.HLS_SEG_SEC, 6, 2, 10);
+const hlsWindow = env => envInt(env.HLS_WINDOW, HLS_WINDOW, 1, 5);
+const hlsPrefetchN = env => envInt(env.HLS_PREFETCH, 1, 0, 3);
+const HLS_JOIN_CAP = 48 * 1048576;          // 起播第一段「边取边跟」：最多攒这么多字节给晚到的请求回放
+const HLS_FLIGHT_MAX = 2;                   // 每个 isolate 同时最多几路后台取段（内存与连接都有限）
+const HLS_FLIGHT_MS = 25000;                // 后台取段的时限（waitUntil 只给 30 秒）
+const HLS_SUB_AHEAD = 6;                    // 没有 Cues 的字幕最多领先画面几段，才去借视频那一遍
 
 // ── 字节与编码小工具 ──
 
@@ -7439,6 +7449,7 @@ function hlsByteSource(cx, start, end) {
   const open = upstreamOpener(cx.filePath, linkRef, cx.env, cx.ctx, { budget, signal: aborter.signal, hedge: true, label: 'hls-head' });
   const openBg = upstreamOpener(cx.filePath, linkRef, cx.env, cx.ctx, { budget, signal: aborter.signal, hedge: false, label: 'hls-slice' });
   const rOpt = { stallMs: stallMs(cx.env), maxResume: resumeMax(cx.env), maxOpen: openMax(cx.env), signal: aborter.signal };
+  const win = hlsWindow(cx.env);
   const headEnd = Math.min(end, start + HLS_FIRST - 1);
   const rest = end - headEnd;
   const sliceSize = Math.max(HLS_SLICE, Math.ceil(rest / 24 / 1048576) * 1048576);
@@ -7465,7 +7476,7 @@ function hlsByteSource(cx, start, end) {
       if (closed) return { done: true };
       if (!head) {
         head = resumableReader({ ...rOpt, open, start, end: headEnd, label: 'hls-head' });
-        for (let i = 0; i < HLS_WINDOW; i++) launch(i);
+        for (let i = 0; i < win; i++) launch(i);
       }
       if (!headDone) {
         const r = await head.read();
@@ -7477,7 +7488,7 @@ function hlsByteSource(cx, start, end) {
         cur = await inflight.get(next);
         curAt = 0;
         inflight.delete(next);
-        launch(next + HLS_WINDOW);
+        launch(next + win);
         next++;
         return { done: false, value: cur[curAt++] };
       }
@@ -7666,13 +7677,25 @@ function hlsRewriteHevc(pieces, nalLen, mode, stats) {
  * 一个 HLS 分段 → fMP4 分片流（按 ~1s 一个 moof 交付）。
  * sel.video：视频（+ 复用的默认音轨 sel.audio）；否则只出 sel.audio 这条音轨。
  */
-async function* hlsSegmentParts(cx, idx, k, sel) {
+async function* hlsSegmentParts(cx, idx, k, sel, opts = {}) {
   const plan = hlsSegPlan(idx, k);
   const V = idx.video;
   const A = sel.audio >= 0 ? idx.audio[sel.audio] : null;
   const want = new Set();
   if (sel.video) want.add(V.num);
   if (A) want.add(A.num);
+  // 没有字幕 Cues 的内封字幕：视频这一遍顺手把字幕块收下，写成这一段的 VTT 进缓存。
+  // 否则一开字幕，每个字幕分段都要把整段视频字节从 Dropbox 再读一遍。
+  const subGrab = new Map();
+  if (sel.video && opts.subs) {
+    idx.subs.forEach((s, i) => {
+      if (!hlsSubNeedsScan(s)) return;
+      subGrab.set(s.num, { sub: s, i, blocks: [] });
+      want.add(s.num);
+    });
+  }
+  const subWait = subGrab.size ? hlsSubWaitBegin(idx, k) : null;
+  let subSettled = false;
   const src = hlsByteSource(cx, plan.start, plan.fetchEnd);
   const vid = 1, aid = sel.video ? 2 : 1;
   const T0v = HLS_T0 * V.ts;
@@ -7784,6 +7807,8 @@ async function* hlsSegmentParts(cx, idx, k, sel) {
           aRun.end += fs;
           bytes += size;
         });
+      } else if (subGrab.has(blk.track)) {
+        subGrab.get(blk.track).blocks.push({ ts: blk.ts, dur: blk.dur, frame: hlsConcat(blk.frames[0]) });
       }
       const due = sel.video ? (readyVideoSec() >= HLS_FRAG_SEC || bytes >= HLS_FRAG_BYTES)
         : (aRun && (aRun.end - aRun.base) >= 2 * A.ts) || aRuns.length > 0 || bytes >= HLS_FRAG_BYTES;
@@ -7791,8 +7816,16 @@ async function* hlsSegmentParts(cx, idx, k, sel) {
     }
     yield* flush(true);
     if (stats.rpuFail) console.error(`hls: ${stats.rpuFail} RPU 转换失败（${cx.filePath} #${k}）`);
+    if (subWait) {
+      let ok = false;
+      try { await hlsPutSubs(idx, k, subGrab); ok = true; }
+      catch (e) { console.error('hls subs grab:', cx.filePath, k, e && e.message); }
+      subSettled = true;
+      hlsSubWaitEnd(subWait, ok);
+    }
   } finally {
     src.close('segment end');
+    if (subWait && !subSettled) hlsSubWaitEnd(subWait, false);
   }
 }
 
@@ -8319,10 +8352,42 @@ function hlsFail(status, message) {
 async function hlsSegResponse(cx, idx, k, sel, type, request) {
   if (!(k >= 0 && k < idx.segs.length)) return hlsFail(404, 'no such segment');
   if (request.method === 'HEAD') return new Response(null, { headers: hlsHeaders(type, HLS_LONG) });
+  const pf = hlsPrefetchN(cx.env);
+  if (sel.video) hlsHeadMark(idx, k);
+  // 播第 k 段时，后台把后面 pf 段取好放进边缘缓存：下一段请求到达时直接从边缘出，
+  // Dropbox 的首字节延迟与波动都被藏在播放的这几秒里；往回拖也不用再回源
+  const ahead = () => {
+    if (!pf || !sel.video) return;
+    for (let j = 1; j <= pf; j++) hlsFlight(cx, idx, k + j, sel, type, false);
+  };
+  let supersede = null;
+  if (pf) {
+    const key = hlsSegKey(idx, k, sel);
+    const fromCache = async () => {
+      const hit = await caches.default.match(new Request(key)).catch(() => null);
+      return hit && hit.body ? new Response(hit.body, { headers: hlsHeaders(type, HLS_LONG) }) : null;
+    };
+    let res = await fromCache();
+    if (!res) {
+      const f = HLS_FLIGHTS.get(key);
+      if (f) {
+        res = hlsJoin(f, type);
+        if (!res) {
+          // 后台那一路已经过半：等它取完从缓存出；落后太多：自己现取更快，并把它停掉
+          const plan = hlsSegPlan(idx, k);
+          const expect = Math.max(1, plan.fetchEnd - plan.start + 1);
+          // 已经有人跟着它（另一路请求正从它收）：绝不能停，等它取完从缓存出
+          if (f.joined || f.out >= expect * 0.5) { if (await hlsWait(f.promise, HLS_FLIGHT_MS)) res = await fromCache(); }
+          else supersede = f;
+        }
+      }
+    }
+    if (res) { ahead(); return res; }
+  }
   const ac = new AbortController();
   const fwd = () => ac.abort(request.signal.reason);
   if (request.signal?.aborted) fwd(); else request.signal?.addEventListener('abort', fwd, { once: true });
-  const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, sel);
+  const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, sel, { subs: true });
   let queue = [], finished = false;
   try {
     const r = await it.next();
@@ -8332,6 +8397,10 @@ async function hlsSegResponse(cx, idx, k, sel, type, request) {
     console.error('hls segment:', cx.filePath, k, e && e.message);
     return hlsFail(e?.name === 'AbortError' ? 499 : 502, 'segment unavailable');
   }
+  // 首个片段已到手（上游首字节那一下过去了）再停掉落后的那一路、再起下一段的预取 ——
+  // 不跟眼前这一段抢那 6 条连接的头一下
+  if (supersede && !supersede.done) supersede.abort('superseded');
+  ahead();
   const body = new ReadableStream({
     async pull(c) {
       try {
@@ -8352,6 +8421,203 @@ async function hlsSegResponse(cx, idx, k, sel, type, request) {
     },
   });
   return new Response(body, { headers: hlsHeaders(type, HLS_LONG) });
+}
+
+// ── 分段预取：后台取段进边缘缓存；同一 isolate 里后到的请求可以「跟车」 ──
+//
+// · 一段同一时刻只有一路在取（按缓存键去重），每个 isolate 最多 HLS_FLIGHT_MAX 路；
+// · 起播第一段（主列表一到就开始取）边取边把片段留着：播放器拿完二级列表、init 再来要
+//   第 0 段时，从头回放已取到的部分并继续跟着收，不用等整段取完、也不再回源一次；
+// · 其余的段只进缓存，不留副本（4K 的一段动辄几十 MB，isolate 只有 128MB）。
+
+const HLS_FLIGHTS = new Map();    // 分段缓存键 → 正在后台取的那一段
+const HLS_SUBWAIT = new Map();    // `${idh}|${k}` → 这一段的视频正在转，内封字幕随后写进缓存
+const HLS_PLAYHEAD = new Map();   // idh → 最近一次被请求的视频分段号
+
+function hlsSegKey(idx, k, sel) {
+  return `${HLS_SUB_CACHE}seg/${idx.idh}/${sel.video ? 'v' : 'a' + sel.audio}/${k}`;
+}
+const hlsMainSel = idx => ({ video: true, audio: idx.muxed });
+
+function hlsWait(p, ms) {
+  return new Promise(resolve => {
+    const t = setTimeout(() => resolve(false), Math.max(1, ms));
+    Promise.resolve(p).then(v => { clearTimeout(t); resolve(v); }, () => { clearTimeout(t); resolve(false); });
+  });
+}
+
+function hlsHeadMark(idx, k) {
+  HLS_PLAYHEAD.delete(idx.idh);
+  HLS_PLAYHEAD.set(idx.idh, k);
+  if (HLS_PLAYHEAD.size > 64) HLS_PLAYHEAD.delete(HLS_PLAYHEAD.keys().next().value);
+}
+
+/** 后台取第 k 段进边缘缓存。retain：边取边留着片段，供晚到的请求从头跟上（只给起播第一段） */
+function hlsFlight(cx, idx, k, sel, type, retain) {
+  if (!(k >= 0 && k < idx.segs.length)) return null;
+  const key = hlsSegKey(idx, k, sel);
+  const had = HLS_FLIGHTS.get(key);
+  if (had) return had;
+  if (HLS_FLIGHTS.size >= HLS_FLIGHT_MAX) return null;
+  const ac = new AbortController();
+  // 时限只管没人跟的后台预取；有请求跟着它时，它就是那条请求的数据源，不能半路掐断
+  const timer = setTimeout(() => { if (!f.joined) ac.abort(new Error('prefetch timeout')); }, HLS_FLIGHT_MS);
+  const f = { key, k, chunks: retain ? [] : null, kept: 0, out: 0, joined: false,
+    done: false, ok: false, cached: false, wake: new Set(), abort: r => { if (!f.joined) ac.abort(r); } };
+  const notify = () => { const ws = [...f.wake]; f.wake.clear(); for (const w of ws) w(); };
+  HLS_FLIGHTS.set(key, f);
+  f.promise = (async () => {
+    const ck = new Request(key);
+    try {
+      if (await caches.default.match(ck).catch(() => null)) { f.cached = true; return true; }
+      const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, sel, { subs: true });
+      const body = new ReadableStream({
+        async pull(c) {
+          try {
+            const r = await it.next();
+            if (r.done) { c.close(); return; }
+            const buf = hlsConcat(r.value);
+            f.out += buf.length;
+            if (f.chunks) {
+              if (f.joined || f.kept + buf.length <= HLS_JOIN_CAP) { f.chunks.push(buf); f.kept += buf.length; }
+              else f.chunks = null;                 // 没人来跟、又太大：不再留副本
+            }
+            c.enqueue(buf);
+            notify();
+          } catch (e) { c.error(e); }
+        },
+        cancel(reason) { ac.abort(reason); it.return().catch(() => {}); },
+      });
+      await caches.default.put(ck, new Response(body, { headers: hlsHeaders(type, HLS_LONG) }));
+      return true;
+    } catch (e) {
+      if (!ac.signal.aborted) console.error('hls prefetch:', cx.filePath, k, e && e.message);
+      return false;
+    }
+  })().then(ok => {
+    clearTimeout(timer);
+    f.ok = ok;
+    f.done = true;
+    if (HLS_FLIGHTS.get(key) === f) HLS_FLIGHTS.delete(key);
+    notify();
+    return ok;
+  });
+  cx.ctx?.waitUntil?.(f.promise);
+  return f;
+}
+
+/** 起播段：从头回放后台已取到的片段，再跟着收后面的。不能跟（没留副本 / 已有人跟）回 null */
+function hlsJoin(f, type) {
+  if (!f.chunks || f.joined || f.done) return null;
+  f.joined = true;
+  let i = 0, rd = null;
+  const body = new ReadableStream({
+    async pull(c) {
+      for (;;) {
+        if (rd) { const r = await rd.read(); if (r.done) c.close(); else c.enqueue(r.value); return; }
+        if (f.chunks && i < f.chunks.length) {
+          const b = f.chunks[i];
+          f.chunks[i++] = null;                     // 交出去就放手
+          c.enqueue(b);
+          return;
+        }
+        if (f.done) {
+          if (f.ok && f.cached && i === 0) {        // 那一路发现缓存里已经有了：直接从缓存出
+            const h = await caches.default.match(new Request(f.key)).catch(() => null);
+            if (h && h.body) { rd = h.body.getReader(); continue; }
+          }
+          if (f.ok) c.close(); else c.error(new Error('segment unavailable'));
+          return;
+        }
+        await new Promise(r => f.wake.add(r));
+      }
+    },
+    cancel() { /* 播放器走了：后台那一路照样取完、进缓存 */ },
+  });
+  return new Response(body, { headers: hlsHeaders(type, HLS_LONG) });
+}
+
+/** 名额满了就等一路做完再试（字幕借视频那一遍时用） */
+async function hlsFlightQueued(cx, idx, k, sel, type, maxMs) {
+  const until = Date.now() + maxMs;
+  for (;;) {
+    const f = hlsFlight(cx, idx, k, sel, type, false);
+    if (f || Date.now() >= until || cx.signal?.aborted) return f;
+    const busy = [...HLS_FLIGHTS.values()].map(x => x.promise);
+    if (!busy.length) continue;
+    await hlsWait(Promise.race(busy), until - Date.now());
+  }
+}
+
+/** 这条内封字幕有没有可用的 Cues（每条都带块内偏移）—— 没有就只能扫字节 */
+function hlsSubNeedsScan(sub) {
+  return !sub.cues.length || sub.cues.some(c => !(c[3] >= 0));
+}
+
+function hlsSubWaitBegin(idx, k) {
+  const key = `${idx.idh}|${k}`;
+  let w = HLS_SUBWAIT.get(key);
+  if (w) { w.n++; return w; }
+  let resolve;
+  const promise = new Promise(r => { resolve = r; });
+  w = { key, n: 1, promise, resolve };
+  HLS_SUBWAIT.set(key, w);
+  return w;
+}
+/** 有一遍成功写好就放行；全部失败 / 中止才回 false */
+function hlsSubWaitEnd(w, ok) {
+  if (HLS_SUBWAIT.get(w.key) !== w) return;
+  if (ok) { HLS_SUBWAIT.delete(w.key); w.resolve(true); return; }
+  if (--w.n <= 0) { HLS_SUBWAIT.delete(w.key); w.resolve(false); }
+}
+
+/** 视频这一遍收下的字幕块 → 这一段的 VTT（与 hlsSubSegment 的扫描路径同一套规则） */
+async function hlsPutSubs(idx, k, grab) {
+  const sec = u => u * idx.scaleNs / 1e9;
+  await Promise.all([...grab.values()].map(async g => {
+    const cues = [];
+    for (const b of g.blocks) {
+      const t = hlsSubFrameText(g.sub.fmt, await hlsSubDecode(g.sub, b.frame));
+      const s0 = sec(b.ts);
+      if (t.text) cues.push({ s: s0, e: s0 + (b.dur >= 0 ? sec(b.dur) : 3), ...t });
+    }
+    const ck = new Request(`${HLS_SUB_CACHE}s/${idx.idh}/${g.i}/${k}`);
+    await caches.default.put(ck, hlsOut(hlsVtt(cues), 'text/vtt; charset=utf-8'));
+  }));
+}
+
+/**
+ * 内封字幕第 k 段。有 Cues：精确读那几个字幕块（原路径）。
+ * 没有 Cues：等 / 借视频那一遍 —— 同一段字节只从 Dropbox 读一次；字幕跑得比画面
+ * 太远就先等画面跟上来（播放器常把字幕分段远远地提前要），实在等不到才自己扫。
+ */
+async function hlsSubSegmentFast(cx, idx, si, k) {
+  const sub = idx.subs[si];
+  if (!hlsSubNeedsScan(sub) || !hlsPrefetchN(cx.env)) return hlsSubSegment(cx, idx, si, k);
+  const ck = new Request(`${HLS_SUB_CACHE}s/${idx.idh}/${si}/${k}`);
+  const cached = async () => { const h = await caches.default.match(ck).catch(() => null); return h ? await h.text() : null; };
+  // 这个 isolate 没见过画面请求（播放器的视频请求落在别处）就不等：直接借视频那一遍
+  const near = () => { const h = HLS_PLAYHEAD.get(idx.idh); return h == null || k <= h + HLS_SUB_AHEAD; };
+  const until = Date.now() + 24000, hard = until + HLS_FLIGHT_MS;
+  while (Date.now() < hard) {
+    if (cx.signal?.aborted) throw new DOMException('aborted', 'AbortError');
+    const t = await cached();
+    if (t != null) return t;
+    const w = HLS_SUBWAIT.get(`${idx.idh}|${k}`);
+    if (w) { await hlsWait(w.promise, Math.max(1000, hard - Date.now())); continue; }
+    if (near() || Date.now() >= until) {
+      const f = await hlsFlightQueued(cx, idx, k, hlsMainSel(idx), 'video/mp4', 20000);
+      if (!f) break;
+      if (await hlsWait(f.promise, HLS_FLIGHT_MS)) {
+        const t2 = await cached();
+        if (t2 != null) return t2;
+        if (!HLS_SUBWAIT.get(`${idx.idh}|${k}`)) break;    // 视频段早就在缓存里、字幕却没有：只能自己扫
+      }
+      continue;
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  return hlsSubSegment(cx, idx, si, k);
 }
 
 /** 转码分段：整段算完再回（体积小），并进边缘缓存 —— 拖动回看不用再转一遍 */
@@ -8439,6 +8705,9 @@ async function handleHls(url, request, env, ctx) {
     if (rest[0] === 'info.json') {
       return new Response(JSON.stringify(hlsInfo(idx, xs, env)), { headers: hlsHeaders('application/json; charset=utf-8', 'no-store') });
     }
+    // 起播：播放器拿到主列表后还要再取二级列表与 init，才会来要第 0 段 ——
+    // 这几个来回的时间里先把第 0 段从 Dropbox 取起来，它来了就从头跟上
+    if (hlsPrefetchN(env)) hlsFlight(cx, idx, 0, hlsMainSel(idx), 'video/mp4', true);
     return hlsOut(hlsMaster(idx, xs, env), HLS_M3U8, 'no-store');
   }
   // 文件被替换 / 引擎升级 → 旧播放列表作废，让播放页重新取主列表
@@ -8476,7 +8745,7 @@ async function handleHls(url, request, env, ctx) {
     if (!idx.subs[i]) return hlsFail(404, 'no such subtitle');
     if (m[2]) return hlsOut(hlsMediaPl(idx, null, k => `s${i}/${k}.vtt`, target), HLS_M3U8);
     if (seg && seg[2] === 'vtt' && +seg[1] < idx.segs.length) {
-      try { return await hlsVttResponse(`s/${idx.idh}/${i}/${seg[1]}`, ctx, () => hlsSubSegment(cx, idx, i, +seg[1])); }
+      try { return await hlsVttResponse(`s/${idx.idh}/${i}/${seg[1]}`, ctx, () => hlsSubSegmentFast(cx, idx, i, +seg[1])); }
       catch (e) { console.error('hls subs:', e && e.message); return hlsFail(502, 'subtitle unavailable'); }
     }
   }
