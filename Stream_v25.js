@@ -29,9 +29,10 @@
  *   ▸ 新环境变量：HLS_DISABLE=1（关闭）、HLS_SEG_SEC（分段目标时长，默认 6）、
  *     HLS_DV_MODE=auto|dvh1|off（杜比信令策略，主列表也可加 ?dv= 临时覆盖）。
  *   ▸ 管线：每段开头 1MB 直通、其余 4MB 切片并行回源（HLS_WINDOW，默认 3，1~5）；
- *     播第 k 段时后台把 k+1 段取进边缘缓存（HLS_PREFETCH，默认 1，0 关闭）；主列表一到就开始取
- *     第 0 段，播放器晚到的请求从头跟上、不重复回源；没有字幕 Cues 的内封字幕在视频那一遍顺手收下，
- *     写成该段 VTT —— 开字幕不再把整段视频字节重读一遍。同一 isolate 内按缓存键去重，最多两路后台取段。
+ *     主列表一到先取第 0 段、第 k 段取完再取 k+1 段，都进边缘缓存（HLS_PREFETCH=0 关闭）。缓存只认完整写完的段：
+ *     数据写在一次性的键下，写完才发指针，半截的永远读不到。没有字幕 Cues 的内封字幕在视频
+ *     那一遍顺手收下、写成该段 VTT —— 开字幕不再把整段视频字节重读一遍。请求之间只读彼此的
+ *     进度数字，不跨请求 await、不共享流；每个 isolate 同时只跑一路预取。
  *   ▸ 建议 Workers 付费计划：一个 4K remux 分段约 20~40ms CPU，免费计划的
  *     10ms 上限在高码率片源上可能不够。
  *
@@ -5454,11 +5455,14 @@ const HLS_FRAG_SEC = 1;                     // 一个 moof 覆盖约 1 秒
 const HLS_FRAG_BYTES = 6 * 1048576;         // 或累计到 6MB（高码率时控制内存）
 const hlsSegTarget = env => envInt(env.HLS_SEG_SEC, 6, 2, 10);
 const hlsWindow = env => envInt(env.HLS_WINDOW, HLS_WINDOW, 1, 5);
-const hlsPrefetchN = env => envInt(env.HLS_PREFETCH, 1, 0, 3);
-const HLS_JOIN_CAP = 48 * 1048576;          // 起播第一段「边取边跟」：最多攒这么多字节给晚到的请求回放
-const HLS_FLIGHT_MAX = 2;                   // 每个 isolate 同时最多几路后台取段（内存与连接都有限）
+const hlsPrefetchN = env => envInt(env.HLS_PREFETCH, 1, 0, 1);
+const HLS_FLIGHT_MAX = 1;                   // 每个 isolate 同时只跑一路后台预取（4K 一段几十 MB，isolate 只有 128MB）
 const HLS_FLIGHT_MS = 25000;                // 后台取段的时限（waitUntil 只给 30 秒）
-const HLS_SUB_AHEAD = 6;                    // 没有 Cues 的字幕最多领先画面几段，才去借视频那一遍
+const HLS_STALL_MS = 6000;                  // 等别人的那一遍：这么久没进度就当它停了，自己现取
+const HLS_POLL_MS = 50;                     // 等缓存的轮询间隔（只读进度数字，不跨请求 await）
+const HLS_SUB_WAIT_MS = 12000;              // 字幕分段最多等视频那一遍这么久
+const HLS_SUB_GRACE_MS = 200;               // 字幕请求常比同一段的视频请求早到一点点
+const HLS_CACHE_RETRY_MS = 600000;          // 缓存写了读不出：这个 isolate 里先停用预取 10 分钟
 
 // ── 字节与编码小工具 ──
 
@@ -7694,9 +7698,14 @@ async function* hlsSegmentParts(cx, idx, k, sel, opts = {}) {
       want.add(s.num);
     });
   }
-  const subWait = subGrab.size ? hlsSubWaitBegin(idx, k) : null;
-  let subSettled = false;
-  const src = hlsByteSource(cx, plan.start, plan.fetchEnd);
+  const pass = opts.pass || null;
+  if (pass && subGrab.size) pass.subs = 1;
+  const raw = hlsByteSource(cx, plan.start, plan.fetchEnd);
+  // 进度打点：等这一遍的请求（同一段的视频 / 字幕）据此判断它是不是还在动
+  const src = !pass ? raw : {
+    next: async () => { const r = await raw.next(); pass.tick = Date.now(); return r; },
+    close: reason => raw.close(reason),
+  };
   const vid = 1, aid = sel.video ? 2 : 1;
   const T0v = HLS_T0 * V.ts;
   const T0a = A ? HLS_T0 * A.ts : 0;
@@ -7814,18 +7823,18 @@ async function* hlsSegmentParts(cx, idx, k, sel, opts = {}) {
         : (aRun && (aRun.end - aRun.base) >= 2 * A.ts) || aRuns.length > 0 || bytes >= HLS_FRAG_BYTES;
       if (due) yield* flush(false);
     }
+    // 这一段的字幕块已经收齐：先在后台把 VTT 写进缓存（字幕请求可能正等着），再交最后一个片段
+    if (subGrab.size) hlsSubsWrite(cx, idx, k, subGrab, pass);
     yield* flush(true);
     if (stats.rpuFail) console.error(`hls: ${stats.rpuFail} RPU 转换失败（${cx.filePath} #${k}）`);
-    if (subWait) {
-      let ok = false;
-      try { await hlsPutSubs(idx, k, subGrab); ok = true; }
-      catch (e) { console.error('hls subs grab:', cx.filePath, k, e && e.message); }
-      subSettled = true;
-      hlsSubWaitEnd(subWait, ok);
-    }
+    if (pass) pass.ok = true;
   } finally {
     src.close('segment end');
-    if (subWait && !subSettled) hlsSubWaitEnd(subWait, false);
+    if (pass) {
+      pass.ended = Date.now();
+      if (pass.subs === 1) pass.subs = -1;          // 半路停了：字幕没收齐
+      hlsPassDone(pass);
+    }
   }
 }
 
@@ -8348,66 +8357,45 @@ function hlsFail(status, message) {
  * 每个 moof 片段（约 1 秒）拼成一块连续缓冲再交付：同一上游缓冲区的多个子视图
  * 分别入队，在会转移（detach）入队缓冲区的运行时里会互相踩坏；拼一次的代价是
  * 一次 memcpy，换来的是入队次数从几百次降到每秒一次。
+ *
+ * 主画面（视频 + 复用音轨）先查边缘缓存；同一 isolate 里正有一路预取在取这一段，
+ * 就等它写完再从缓存出。现取的这一遍取完以后，后台接着把下一段取进缓存。
  */
 async function hlsSegResponse(cx, idx, k, sel, type, request) {
   if (!(k >= 0 && k < idx.segs.length)) return hlsFail(404, 'no such segment');
   if (request.method === 'HEAD') return new Response(null, { headers: hlsHeaders(type, HLS_LONG) });
-  const pf = hlsPrefetchN(cx.env);
-  if (sel.video) hlsHeadMark(idx, k);
-  // 播第 k 段时，后台把后面 pf 段取好放进边缘缓存：下一段请求到达时直接从边缘出，
-  // Dropbox 的首字节延迟与波动都被藏在播放的这几秒里；往回拖也不用再回源
-  const ahead = () => {
-    if (!pf || !sel.video) return;
-    for (let j = 1; j <= pf; j++) hlsFlight(cx, idx, k + j, sel, type, false);
-  };
-  let supersede = null;
-  if (pf) {
-    const key = hlsSegKey(idx, k, sel);
-    const fromCache = async () => {
-      const hit = await caches.default.match(new Request(key)).catch(() => null);
-      return hit && hit.body ? new Response(hit.body, { headers: hlsHeaders(type, HLS_LONG) }) : null;
-    };
-    let res = await fromCache();
-    if (!res) {
-      const f = HLS_FLIGHTS.get(key);
-      if (f) {
-        res = hlsJoin(f, type);
-        if (!res) {
-          // 后台那一路已经过半：等它取完从缓存出；落后太多：自己现取更快，并把它停掉
-          const plan = hlsSegPlan(idx, k);
-          const expect = Math.max(1, plan.fetchEnd - plan.start + 1);
-          // 已经有人跟着它（另一路请求正从它收）：绝不能停，等它取完从缓存出
-          if (f.joined || f.out >= expect * 0.5) { if (await hlsWait(f.promise, HLS_FLIGHT_MS)) res = await fromCache(); }
-          else supersede = f;
-        }
-      }
-    }
-    if (res) { ahead(); return res; }
+  const main = sel.video && hlsCacheOn(cx);
+  if (main) {
+    const key = hlsSegKey(idx, k);
+    let res = await hlsSegCached(key, type);
+    const f = res ? null : HLS_FLIGHTS.get(key);
+    if (f) res = await hlsAfterFlight(f, key, type, request.signal);
+    if (res) { hlsAhead(cx, idx, k); return res; }
   }
   const ac = new AbortController();
   const fwd = () => ac.abort(request.signal.reason);
   if (request.signal?.aborted) fwd(); else request.signal?.addEventListener('abort', fwd, { once: true });
-  const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, sel, { subs: true });
+  // 登记这一遍：同一段的字幕请求等它顺手写好的 VTT（缓存不生效时没有意义，就不收）
+  const pass = main ? hlsPassBegin(idx, k) : null;
+  const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, sel, { subs: main, pass });
   let queue = [], finished = false;
+  // 整段取完、连接都放掉了，再在后台取下一段 —— 不跟眼前这一段抢那 6 条连接
+  const finish = () => { finished = true; if (main) hlsAhead(cx, idx, k); };
   try {
     const r = await it.next();
-    if (r.done) finished = true; else queue = [hlsConcat(r.value)];
+    if (r.done) finish(); else queue = [hlsConcat(r.value)];
   } catch (e) {
     ac.abort(e);
     console.error('hls segment:', cx.filePath, k, e && e.message);
     return hlsFail(e?.name === 'AbortError' ? 499 : 502, 'segment unavailable');
   }
-  // 首个片段已到手（上游首字节那一下过去了）再停掉落后的那一路、再起下一段的预取 ——
-  // 不跟眼前这一段抢那 6 条连接的头一下
-  if (supersede && !supersede.done) supersede.abort('superseded');
-  ahead();
   const body = new ReadableStream({
     async pull(c) {
       try {
         while (!queue.length) {
           if (finished) { c.close(); return; }
           const r = await it.next();
-          if (r.done) finished = true; else queue = [hlsConcat(r.value)];
+          if (r.done) finish(); else queue = [hlsConcat(r.value)];
         }
         c.enqueue(queue.shift());
       } catch (e) {
@@ -8423,152 +8411,140 @@ async function hlsSegResponse(cx, idx, k, sel, type, request) {
   return new Response(body, { headers: hlsHeaders(type, HLS_LONG) });
 }
 
-// ── 分段预取：后台取段进边缘缓存；同一 isolate 里后到的请求可以「跟车」 ──
+// ── 分段边缘缓存与预取 ──
 //
-// · 一段同一时刻只有一路在取（按缓存键去重），每个 isolate 最多 HLS_FLIGHT_MAX 路；
-// · 起播第一段（主列表一到就开始取）边取边把片段留着：播放器拿完二级列表、init 再来要
-//   第 0 段时，从头回放已取到的部分并继续跟着收，不用等整段取完、也不再回源一次；
-// · 其余的段只进缓存，不留副本（4K 的一段动辄几十 MB，isolate 只有 128MB）。
+// · 只缓存完整的段：数据写在本次独有的键下，整段正常写完以后，才把「指针」写到
+//   这一段的固定键上。workerd 的 cache.put 遇到 body 中途出错会报错，但已经写进去的
+//   那一截照样落进缓存 —— 没有指针指着的半截数据永远不会被读到。
+// · 预取只在发起它的那条请求里跑（waitUntil）。别的请求只读它的进度数字，绝不 await
+//   它的 Promise、读它的流或替它中止 I/O —— 跨请求共享 I/O 在 workerd 里不可靠。
+// · 每个 isolate 同时只跑一路预取：4K 的一段动辄几十 MB，isolate 只有 128MB。
+// · *.workers.dev 上 Cache API 不生效：不预取、不等。
 
-const HLS_FLIGHTS = new Map();    // 分段缓存键 → 正在后台取的那一段
-const HLS_SUBWAIT = new Map();    // `${idh}|${k}` → 这一段的视频正在转，内封字幕随后写进缓存
-const HLS_PLAYHEAD = new Map();   // idh → 最近一次被请求的视频分段号
+const HLS_FLIGHTS = new Map();    // 分段指针键 → 正在后台取的那一段
+const HLS_PASSES = new Map();     // `${idh}|${k}` → 正在过这一段视频字节的几遍（直出 / 预取）
+let hlsCacheDeadAt = -Infinity;   // 写进去却读不出来（缓存不生效）的时刻：之后一阵子不再预取
 
-function hlsSegKey(idx, k, sel) {
-  return `${HLS_SUB_CACHE}seg/${idx.idh}/${sel.video ? 'v' : 'a' + sel.audio}/${k}`;
-}
+const hlsSleep = ms => new Promise(r => setTimeout(r, ms));
 const hlsMainSel = idx => ({ video: true, audio: idx.muxed });
+const hlsSegKey = (idx, k) => `${HLS_SUB_CACHE}seg2/${idx.idh}/v/${k}`;
 
-function hlsWait(p, ms) {
-  return new Promise(resolve => {
-    const t = setTimeout(() => resolve(false), Math.max(1, ms));
-    Promise.resolve(p).then(v => { clearTimeout(t); resolve(v); }, () => { clearTimeout(t); resolve(false); });
-  });
+function hlsCacheOn(cx) {
+  return hlsPrefetchN(cx.env) > 0 && !/\.workers\.dev$/i.test(cx.host || '')
+    && Date.now() - hlsCacheDeadAt > HLS_CACHE_RETRY_MS;
 }
 
-function hlsHeadMark(idx, k) {
-  HLS_PLAYHEAD.delete(idx.idh);
-  HLS_PLAYHEAD.set(idx.idh, k);
-  if (HLS_PLAYHEAD.size > 64) HLS_PLAYHEAD.delete(HLS_PLAYHEAD.keys().next().value);
+/** 缓存里这一段的完整数据：先读指针，再读指针指着的那一份 */
+async function hlsSegCached(key, type) {
+  const ptr = await caches.default.match(new Request(key)).catch(() => null);
+  if (!ptr) return null;
+  const at = await ptr.text().catch(() => '');
+  if (!at.startsWith(key + '/')) return null;
+  const hit = await caches.default.match(new Request(at)).catch(() => null);
+  if (!hit || !hit.body) return null;
+  return new Response(hit.body, { headers: hlsHeaders(type, HLS_LONG) });
 }
 
-/** 后台取第 k 段进边缘缓存。retain：边取边留着片段，供晚到的请求从头跟上（只给起播第一段） */
-function hlsFlight(cx, idx, k, sel, type, retain) {
-  if (!(k >= 0 && k < idx.segs.length)) return null;
-  const key = hlsSegKey(idx, k, sel);
-  const had = HLS_FLIGHTS.get(key);
-  if (had) return had;
-  if (HLS_FLIGHTS.size >= HLS_FLIGHT_MAX) return null;
-  const ac = new AbortController();
-  // 时限只管没人跟的后台预取；有请求跟着它时，它就是那条请求的数据源，不能半路掐断
-  const timer = setTimeout(() => { if (!f.joined) ac.abort(new Error('prefetch timeout')); }, HLS_FLIGHT_MS);
-  const f = { key, k, chunks: retain ? [] : null, kept: 0, out: 0, joined: false,
-    done: false, ok: false, cached: false, wake: new Set(), abort: r => { if (!f.joined) ac.abort(r); } };
-  const notify = () => { const ws = [...f.wake]; f.wake.clear(); for (const w of ws) w(); };
+/** 登记「正在过第 k 段视频字节」的一遍：同一段的视频 / 字幕请求据此决定等不等它 */
+function hlsPassBegin(idx, k) {
+  const id = `${idx.idh}|${k}`;
+  // subs：0 不收字幕 · 1 收集中 · 2 正写进缓存 · 3 已写好 · -1 没写成
+  const p = { id, tick: Date.now(), ended: 0, ok: false, subs: 0 };
+  let set = HLS_PASSES.get(id);
+  if (!set) {
+    if (HLS_PASSES.size >= 64) hlsPrunePasses();
+    HLS_PASSES.set(id, set = new Set());
+  }
+  set.add(p);
+  return p;
+}
+/** 生成器结束、字幕也落定了，就从登记里摘掉 */
+function hlsPassDone(p) {
+  if (!p.ended || p.subs === 1 || p.subs === 2) return;
+  const set = HLS_PASSES.get(p.id);
+  if (set && set.delete(p) && !set.size) HLS_PASSES.delete(p.id);
+}
+/** 还在动：没结束且最近有进度；或刚正常结束、后面的写缓存还没收尾 */
+function hlsPassAlive(p) {
+  const now = Date.now();
+  return p.ended ? p.ok && now - p.ended < HLS_STALL_MS : now - p.tick < HLS_STALL_MS;
+}
+/** 所在请求被中途回收的那几遍不会自己摘掉：太久没动静的清走 */
+function hlsPrunePasses() {
+  const now = Date.now();
+  for (const [id, set] of HLS_PASSES) {
+    for (const p of set) if (now - Math.max(p.tick, p.ended) > 60000) set.delete(p);
+    if (!set.size) HLS_PASSES.delete(id);
+  }
+}
+
+/** 播第 k 段时，后台把下一段取进边缘缓存 */
+function hlsAhead(cx, idx, k) {
+  for (let j = 1; j <= hlsPrefetchN(cx.env); j++) hlsFlight(cx, idx, k + j);
+}
+
+/** 后台把第 k 段取进边缘缓存（在发起它的这条请求里跑）。已在取 / 名额满 → null */
+function hlsFlight(cx, idx, k) {
+  if (!(k >= 0 && k < idx.segs.length) || !hlsCacheOn(cx)) return null;
+  const key = hlsSegKey(idx, k);
+  for (const [fk, f] of HLS_FLIGHTS) {
+    if (!hlsPassAlive(f.pass) && Date.now() - Math.max(f.pass.tick, f.pass.ended) > 30000) HLS_FLIGHTS.delete(fk);
+  }
+  if (HLS_FLIGHTS.has(key) || HLS_FLIGHTS.size >= HLS_FLIGHT_MAX) return null;
+  const pass = hlsPassBegin(idx, k);
+  const f = { pass, done: false, ok: false };
   HLS_FLIGHTS.set(key, f);
-  f.promise = (async () => {
-    const ck = new Request(key);
-    try {
-      if (await caches.default.match(ck).catch(() => null)) { f.cached = true; return true; }
-      const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, sel, { subs: true });
-      const body = new ReadableStream({
-        async pull(c) {
-          try {
-            const r = await it.next();
-            if (r.done) { c.close(); return; }
-            const buf = hlsConcat(r.value);
-            f.out += buf.length;
-            if (f.chunks) {
-              if (f.joined || f.kept + buf.length <= HLS_JOIN_CAP) { f.chunks.push(buf); f.kept += buf.length; }
-              else f.chunks = null;                 // 没人来跟、又太大：不再留副本
-            }
-            c.enqueue(buf);
-            notify();
-          } catch (e) { c.error(e); }
-        },
-        cancel(reason) { ac.abort(reason); it.return().catch(() => {}); },
-      });
-      await caches.default.put(ck, new Response(body, { headers: hlsHeaders(type, HLS_LONG) }));
-      return true;
-    } catch (e) {
-      if (!ac.signal.aborted) console.error('hls prefetch:', cx.filePath, k, e && e.message);
-      return false;
-    }
-  })().then(ok => {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(new Error('prefetch timeout')), HLS_FLIGHT_MS);
+  const run = (async () => {
+    const have = await hlsSegCached(key, 'video/mp4');
+    if (have) { await have.body.cancel().catch(() => {}); return true; }
+    const at = `${key}/${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, hlsMainSel(idx), { subs: true, pass });
+    let complete = false;
+    const body = new ReadableStream({
+      async pull(c) {
+        try {
+          const r = await it.next();
+          if (r.done) { complete = true; c.close(); } else c.enqueue(hlsConcat(r.value));
+        } catch (e) { c.error(e); }
+      },
+      cancel(reason) { ac.abort(reason); it.return().catch(() => {}); },
+    });
+    await caches.default.put(new Request(at), new Response(body, { headers: hlsHeaders('video/mp4', HLS_LONG) }));
+    if (!complete) return false;
+    await caches.default.put(new Request(key), new Response(at, { headers: { 'Cache-Control': HLS_LONG } }));
+    return true;
+  })().catch(e => {
+    if (!ac.signal.aborted) console.error('hls prefetch:', cx.filePath, k, e && e.message);
+    return false;
+  }).then(ok => {
     clearTimeout(timer);
+    if (!pass.ended) { pass.ended = Date.now(); pass.ok = ok; hlsPassDone(pass); }
     f.ok = ok;
     f.done = true;
     if (HLS_FLIGHTS.get(key) === f) HLS_FLIGHTS.delete(key);
-    notify();
-    return ok;
   });
-  cx.ctx?.waitUntil?.(f.promise);
+  cx.ctx?.waitUntil?.(run);
   return f;
 }
 
-/** 起播段：从头回放后台已取到的片段，再跟着收后面的。不能跟（没留副本 / 已有人跟）回 null */
-function hlsJoin(f, type) {
-  if (!f.chunks || f.joined || f.done) return null;
-  f.joined = true;
-  let i = 0, rd = null;
-  const body = new ReadableStream({
-    async pull(c) {
-      for (;;) {
-        if (rd) { const r = await rd.read(); if (r.done) c.close(); else c.enqueue(r.value); return; }
-        if (f.chunks && i < f.chunks.length) {
-          const b = f.chunks[i];
-          f.chunks[i++] = null;                     // 交出去就放手
-          c.enqueue(b);
-          return;
-        }
-        if (f.done) {
-          if (f.ok && f.cached && i === 0) {        // 那一路发现缓存里已经有了：直接从缓存出
-            const h = await caches.default.match(new Request(f.key)).catch(() => null);
-            if (h && h.body) { rd = h.body.getReader(); continue; }
-          }
-          if (f.ok) c.close(); else c.error(new Error('segment unavailable'));
-          return;
-        }
-        await new Promise(r => f.wake.add(r));
-      }
-    },
-    cancel() { /* 播放器走了：后台那一路照样取完、进缓存 */ },
-  });
-  return new Response(body, { headers: hlsHeaders(type, HLS_LONG) });
-}
-
-/** 名额满了就等一路做完再试（字幕借视频那一遍时用） */
-async function hlsFlightQueued(cx, idx, k, sel, type, maxMs) {
-  const until = Date.now() + maxMs;
-  for (;;) {
-    const f = hlsFlight(cx, idx, k, sel, type, false);
-    if (f || Date.now() >= until || cx.signal?.aborted) return f;
-    const busy = [...HLS_FLIGHTS.values()].map(x => x.promise);
-    if (!busy.length) continue;
-    await hlsWait(Promise.race(busy), until - Date.now());
+/** 等那一路预取写完，再从缓存出。它停住 / 失败 / 写了却读不到 → null，由调用方自己现取 */
+async function hlsAfterFlight(f, key, type, signal) {
+  const until = Date.now() + HLS_FLIGHT_MS;
+  while (!f.done) {
+    if (signal?.aborted || Date.now() > until || !hlsPassAlive(f.pass)) return null;
+    await hlsSleep(HLS_POLL_MS);
   }
+  if (!f.ok) return null;
+  const res = await hlsSegCached(key, type);
+  if (!res) hlsCacheDeadAt = Date.now();
+  return res;
 }
 
 /** 这条内封字幕有没有可用的 Cues（每条都带块内偏移）—— 没有就只能扫字节 */
 function hlsSubNeedsScan(sub) {
   return !sub.cues.length || sub.cues.some(c => !(c[3] >= 0));
-}
-
-function hlsSubWaitBegin(idx, k) {
-  const key = `${idx.idh}|${k}`;
-  let w = HLS_SUBWAIT.get(key);
-  if (w) { w.n++; return w; }
-  let resolve;
-  const promise = new Promise(r => { resolve = r; });
-  w = { key, n: 1, promise, resolve };
-  HLS_SUBWAIT.set(key, w);
-  return w;
-}
-/** 有一遍成功写好就放行；全部失败 / 中止才回 false */
-function hlsSubWaitEnd(w, ok) {
-  if (HLS_SUBWAIT.get(w.key) !== w) return;
-  if (ok) { HLS_SUBWAIT.delete(w.key); w.resolve(true); return; }
-  if (--w.n <= 0) { HLS_SUBWAIT.delete(w.key); w.resolve(false); }
 }
 
 /** 视频这一遍收下的字幕块 → 这一段的 VTT（与 hlsSubSegment 的扫描路径同一套规则） */
@@ -8586,38 +8562,50 @@ async function hlsPutSubs(idx, k, grab) {
   }));
 }
 
+/** 后台把这一遍收下的字幕写进缓存（不拖住视频分段收尾），结果记在这一遍上 */
+function hlsSubsWrite(cx, idx, k, grab, pass) {
+  if (pass) pass.subs = 2;
+  const p = hlsPutSubs(idx, k, grab).then(() => true, e => {
+    console.error('hls subs grab:', cx.filePath, k, e && e.message);
+    return false;
+  }).then(ok => { if (pass) { pass.subs = ok ? 3 : -1; hlsPassDone(pass); } });
+  cx.ctx?.waitUntil?.(p);
+}
+
+/**
+ * 等第 k 段的某一遍把字幕顺手写进缓存：只要还有一遍在收这一段的字幕块（而且在动），
+ * 就轮询缓存。等到 → VTT 文本；没人在收 / 停住了 / 超时 → null
+ */
+async function hlsSubAwait(idx, k, ck, signal) {
+  const id = `${idx.idh}|${k}`;
+  const until = Date.now() + HLS_SUB_WAIT_MS;
+  for (;;) {
+    const set = HLS_PASSES.get(id);
+    const live = !!set && [...set].some(p => p.subs === 2 || (p.subs === 1 && hlsPassAlive(p)));
+    const h = await caches.default.match(ck).catch(() => null);
+    if (h) return h.text();
+    if (!live || signal?.aborted || Date.now() > until) return null;
+    await hlsSleep(HLS_POLL_MS);
+  }
+}
+
 /**
  * 内封字幕第 k 段。有 Cues：精确读那几个字幕块（原路径）。
- * 没有 Cues：等 / 借视频那一遍 —— 同一段字节只从 Dropbox 读一次；字幕跑得比画面
- * 太远就先等画面跟上来（播放器常把字幕分段远远地提前要），实在等不到才自己扫。
+ * 没有 Cues：用视频那一遍顺手写好的 VTT，同一段字节只从 Dropbox 读一次 ——
+ * 有一遍正在过这一段就等它；没人在过就自己起一路预取（视频段顺带进缓存）再等它；
+ * 名额满了 / 预取失败才自己扫字节。都不长等：字幕分段迟迟不到，播放器会停住画面。
  */
 async function hlsSubSegmentFast(cx, idx, si, k) {
   const sub = idx.subs[si];
-  if (!hlsSubNeedsScan(sub) || !hlsPrefetchN(cx.env)) return hlsSubSegment(cx, idx, si, k);
+  if (!hlsSubNeedsScan(sub) || !hlsCacheOn(cx)) return hlsSubSegment(cx, idx, si, k);
   const ck = new Request(`${HLS_SUB_CACHE}s/${idx.idh}/${si}/${k}`);
-  const cached = async () => { const h = await caches.default.match(ck).catch(() => null); return h ? await h.text() : null; };
-  // 这个 isolate 没见过画面请求（播放器的视频请求落在别处）就不等：直接借视频那一遍
-  const near = () => { const h = HLS_PLAYHEAD.get(idx.idh); return h == null || k <= h + HLS_SUB_AHEAD; };
-  const until = Date.now() + 24000, hard = until + HLS_FLIGHT_MS;
-  while (Date.now() < hard) {
-    if (cx.signal?.aborted) throw new DOMException('aborted', 'AbortError');
-    const t = await cached();
-    if (t != null) return t;
-    const w = HLS_SUBWAIT.get(`${idx.idh}|${k}`);
-    if (w) { await hlsWait(w.promise, Math.max(1000, hard - Date.now())); continue; }
-    if (near() || Date.now() >= until) {
-      const f = await hlsFlightQueued(cx, idx, k, hlsMainSel(idx), 'video/mp4', 20000);
-      if (!f) break;
-      if (await hlsWait(f.promise, HLS_FLIGHT_MS)) {
-        const t2 = await cached();
-        if (t2 != null) return t2;
-        if (!HLS_SUBWAIT.get(`${idx.idh}|${k}`)) break;    // 视频段早就在缓存里、字幕却没有：只能自己扫
-      }
-      continue;
-    }
-    await new Promise(r => setTimeout(r, 2000));
+  let t = await hlsSubAwait(idx, k, ck, cx.signal);
+  if (t == null) {
+    await hlsSleep(HLS_SUB_GRACE_MS);              // 字幕请求常比同一段的视频请求早到一点点
+    t = await hlsSubAwait(idx, k, ck, cx.signal);
   }
-  return hlsSubSegment(cx, idx, si, k);
+  if (t == null && hlsFlight(cx, idx, k)) t = await hlsSubAwait(idx, k, ck, cx.signal);
+  return t != null ? t : hlsSubSegment(cx, idx, si, k);
 }
 
 /** 转码分段：整段算完再回（体积小），并进边缘缓存 —— 拖动回看不用再转一遍 */
@@ -8680,7 +8668,7 @@ async function handleHls(url, request, env, ctx) {
   catch { return hlsFail(503, 'Dropbox link unavailable'); }
   const meta = linkData?.metadata;
   if (!linkData?.link || !meta || !Number.isFinite(meta.size)) return hlsFail(502, 'invalid metadata');
-  const cx = { filePath, linkData, env, ctx, signal: request.signal, size: meta.size,
+  const cx = { filePath, linkData, env, ctx, signal: request.signal, size: meta.size, host: url.hostname,
     identity: meta.content_hash || meta.rev || String(meta.size) };
 
   const rest = parts.slice(3);
@@ -8705,9 +8693,9 @@ async function handleHls(url, request, env, ctx) {
     if (rest[0] === 'info.json') {
       return new Response(JSON.stringify(hlsInfo(idx, xs, env)), { headers: hlsHeaders('application/json; charset=utf-8', 'no-store') });
     }
-    // 起播：播放器拿到主列表后还要再取二级列表与 init，才会来要第 0 段 ——
-    // 这几个来回的时间里先把第 0 段从 Dropbox 取起来，它来了就从头跟上
-    if (hlsPrefetchN(env)) hlsFlight(cx, idx, 0, hlsMainSel(idx), 'video/mp4', true);
+    // 起播：播放器拿到主列表后还要取二级列表与 init 才来要第 0 段 —— 这几个来回里先在后台
+    // 把第 0 段取进缓存，它来了等一下就从缓存出（只是预取：不跟车、不共享流）
+    if (hlsCacheOn(cx)) hlsFlight(cx, idx, 0);
     return hlsOut(hlsMaster(idx, xs, env), HLS_M3U8, 'no-store');
   }
   // 文件被替换 / 引擎升级 → 旧播放列表作废，让播放页重新取主列表

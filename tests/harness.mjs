@@ -10,14 +10,25 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const SAMPLES = path.join(HERE, 'samples');
 export const SECRET = 'test-secret';
 export const stats = { fetches: 0, bytes: 0, ranges: [] };
-/** 模拟慢速上游：每 64KB 一块之间停顿多少毫秒（测「跟车」这类时序） */
-export const net = { chunkDelayMs: 0 };
+/**
+ * 上游替身的开关：chunkDelayMs 每 64KB 一块之间停顿多少毫秒（测预取、等待这类时序）；
+ * fail(file, start, end) 返回 true 的 Range 交完第一块就断流（测半路失败）
+ */
+export const net = { chunkDelayMs: 0, fail: null };
 
 class MemCache {
   constructor() { this.m = new Map(); }
   key(r) { return typeof r === 'string' ? r : r.url; }
   async match(r) { const e = this.m.get(this.key(r)); return e ? new Response(e.body.slice(0), { status: e.status, headers: e.headers }) : undefined; }
-  async put(r, res) { this.m.set(this.key(r), { body: await res.arrayBuffer(), status: res.status, headers: [...res.headers] }); }
+  // 与 workerd 一致：body 中途出错时 put 报错，但已经写进去的那一截照样落进缓存
+  async put(r, res) {
+    const chunks = [];
+    let err = null;
+    try { if (res.body) for await (const c of res.body) chunks.push(Buffer.from(c)); } catch (e) { err = e; }
+    const b = Buffer.concat(chunks);
+    this.m.set(this.key(r), { body: b.buffer.slice(b.byteOffset, b.byteOffset + b.length), status: res.status, headers: [...res.headers] });
+    if (err) throw err;
+  }
   async delete(r) { return this.m.delete(this.key(r)); }
 }
 globalThis.caches = { default: new MemCache() };
@@ -55,6 +66,10 @@ globalThis.fetch = async (input, init = {}) => {
       const ms = net.chunkDelayMs;
       body = body.pipeThrough(new TransformStream({ async transform(c, ctl) { await new Promise(r => setTimeout(r, ms)); ctl.enqueue(c); } }));
     }
+    if (net.fail && net.fail(path.basename(file), start, end)) {
+      let n = 0;
+      body = body.pipeThrough(new TransformStream({ transform(c, ctl) { if (n++) ctl.error(new Error('injected upstream failure')); else ctl.enqueue(c); } }));
+    }
     return new Response(body, { status: m ? 206 : 200, headers: { 'Content-Range': `bytes ${start}-${end}/${size}` } });
   }
   return new Response('blocked in test', { status: 404 });
@@ -70,8 +85,8 @@ export function token(p) {
   const sig = crypto.createHmac('sha256', SECRET).update(`${p}|${exp}`).digest('hex');
   return `${exp}.${sig}.${Buffer.from(p).toString('base64url')}`;
 }
-export const call = (url, method = 'GET', headers = {}) =>
-  worker.fetch(new Request('https://w.test' + url, { method, headers }), env, ctx);
+export const call = (url, method = 'GET', headers = {}, host = 'w.test') =>
+  worker.fetch(new Request(`https://${host}${url}`, { method, headers }), env, ctx);
 
 /** 把 ../audio-tx 作为 Service Binding 挂上（tx.wasm 存在时） */
 export async function bindAudioTx() {
