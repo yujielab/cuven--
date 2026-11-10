@@ -20099,6 +20099,10 @@ const Player = (() => {
     const ent = { t: Date.now(), base, mkv: /\.mkv$/i.test(name || path), done: false };
     ent.p = (async () => {
       ent.sign = await streamSign(path);
+      /* 直连的片源：让后端现在就去 OpenSubtitles 找缺的中文字幕（HLS 的由 info.json 触发） */
+      if (!(ent.mkv && APPLE_HLS)) {
+        fetchJSON(base + '/api/subs?warm=1&path=' + encodeURIComponent(path), { timeout: 8000, retries: 0 }).catch(() => {});
+      }
       if (ent.mkv && APPLE_HLS) {
         ent.master = base + (ent.sign && ent.sign.hls ? ent.sign.hls : '/hls/0.0.' + b64url(path) + '/master.m3u8');
         try {
@@ -20354,13 +20358,21 @@ const Player = (() => {
     return i >= 0 ? (cur.eps.slice(i + 1).find(e => e && e.path) || null) : null;
   }
 
-  /* ── 直连时挂同目录外挂字幕（HLS 里外挂字幕已经在字幕组里了）；中文（简体优先）默认打开 ── */
+  /* ── 直连时挂同目录外挂字幕与在线找来的字幕（HLS 里这些已经在字幕组里了）；中文（简体优先）默认打开 ── */
   async function mountSidecars(c, my) {
     let d = null;
-    try { d = await fetchJSON(c.base + '/api/subs?path=' + encodeURIComponent(c.path), { timeout: 8000, retries: 0 }); } catch (_) {}
+    try { d = await fetchJSON(c.base + '/api/subs?path=' + encodeURIComponent(c.path), { timeout: 10000, retries: 0 }); } catch (_) {}
     if (my !== seq || cur !== c || !d || !Array.isArray(d.subs) || !d.subs.length) return;
     const v = el.video;
-    const best = d.subs.map(s => ({ s, r: zhRank({ srclang: s.srclang, label: s.label || s.name }) })).sort((a, b) => b.r - a.r)[0];
+    /* 片子自己带了中文字幕轨（MP4 内封）：挂上但不抢默认。轨道要等元数据到了才看得见 */
+    if (v.readyState < 1) {
+      await new Promise(r => { const t = setTimeout(r, 4000); v.addEventListener('loadedmetadata', () => { clearTimeout(t); r(); }, { once: true }); });
+      if (my !== seq || cur !== c) return;
+    }
+    const own = Array.from(v.textTracks || []).some(t => zhRank(t) > 0 || /^(zh|chi|zho)/i.test(t.language || ''));
+    const best = own ? null : d.subs.map(s => ({ s, r: zhRank({ srclang: s.srclang, label: s.label || s.name }) })).sort((a, b) => b.r - a.r)[0];
+    /* 一条字幕都没有、只有在线找来的那条（哪怕是英文）：也默认打开 —— 本来就是为它找的 */
+    const only = !own && d.subs.length === 1 && d.subs[0].online ? d.subs[0] : null;
     let pick = null;
     for (const s of d.subs) {
       const tr = document.createElement('track');
@@ -20368,7 +20380,7 @@ const Player = (() => {
       tr.label = s.label || s.name || '字幕';
       tr.srclang = s.srclang || 'zh';
       tr.src = c.base + s.url;
-      if (best && best.r > 0 && s === best.s) { tr.default = true; pick = tr; }
+      if ((best && best.r > 0 && s === best.s) || s === only) { tr.default = true; pick = tr; }
       v.appendChild(tr);
     }
     /* 每一条都明说。浏览器还会按系统语言 / 字幕偏好异步再挑一条打开（两条字幕就叠着出）——

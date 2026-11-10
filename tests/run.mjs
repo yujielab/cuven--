@@ -1,5 +1,6 @@
 // 回归测试：node tests/run.mjs（先跑一次 tests/make-samples.sh 生成样片）
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
@@ -231,6 +232,131 @@ console.log('\n■ 管线：并行窗口、边缘缓存预取、半路失败不�
   for (let k = 0; k < 5; k++) if ((await (await H.call(`${b2}${idh2}/s0/${k}.vtt`)).text()) !== vref[k]) allSame = false;
   ok(allSame, '借道写出的字幕 VTT 与原扫描路径逐字一致（5 段）');
   await clear();
+}
+
+console.log('\n■ OpenSubtitles 自动补字幕（模拟接口）');
+{
+  /* 后台查询是 info.json 的 waitUntil 里再 waitUntil 出来的：等到队列真正清空 */
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const clear = async () => { await settle(); caches.default.m.clear(); };
+  const calls = p => H.os.calls.filter(c => c.path === p);
+  /* OpenSubtitles 的文件哈希（独立实现，用来核对 Worker 算的） */
+  const mh = f => {
+    const b = fs.readFileSync(S(f));
+    let h = BigInt(b.length);
+    for (const part of [b.subarray(0, 65536), b.subarray(b.length - 65536)]) for (let i = 0; i < 65536; i += 8) h += part.readBigUInt64LE(i);
+    return (h & 0xFFFFFFFFFFFFFFFFn).toString(16).padStart(16, '0');
+  };
+  const tc = t => { const ms = Math.round(t * 1000); const p = (v, n = 2) => String(v).padStart(n, '0'); return `${p(Math.floor(ms / 3600000))}:${p(Math.floor(ms / 60000) % 60)}:${p(Math.floor(ms / 1000) % 60)},${p(ms % 1000, 3)}`; };
+  const srt = (lines, dur) => lines.map((t, i) => { const a = 0.4 + i * (dur - 1) / lines.length; return `${i + 1}\n${tc(a)} --> ${tc(a + 0.5)}\n${t}\n`; }).join('\n');
+  const SIMP = Array.from({ length: 12 }, (_, i) => `这是第${i + 1}句简体字幕，我们说话没问题`);
+  const TRAD = Array.from({ length: 12 }, (_, i) => `這個問題很簡單，第${i + 1}句繁體字幕說話`);
+  const master = async f => (await (await H.call(`/hls/${H.token(f)}/master.m3u8`)).text());
+  const info = async f => (await H.call(`/hls/${H.token(f)}/info.json`)).json();
+  const subLine = (m, re) => m.split('\n').find(l => l.startsWith('#EXT-X-MEDIA:TYPE=SUBTITLES') && re.test(l)) || '';
+  const vtt = async (f, m, k = 0) => { const idh = /\n([^/\n]+)\/v\.m3u8/.exec(m)[1]; return (await H.call(`/hls/${H.token(f)}/${idh}/o0/${k}.vtt`)).text(); };
+  const reset = () => { H.os.calls.length = 0; H.os.subs = []; H.os.files = {}; H.os.quota = false; };
+
+  // 没配 Key：一次都不调
+  await clear(); reset();
+  await info('/Movies/dv81.mkv'); await settle();
+  let m = await master('/Movies/dv81.mkv');
+  ok(!H.os.calls.length && !/o0\.m3u8/.test(m), '没配 OPENSUBTITLES_API_KEY：不调用接口，主列表也没有在线字幕');
+
+  H.env.OPENSUBTITLES_API_KEY = 'test-key'; H.env.OPENSUBTITLES_USERNAME = 'u'; H.env.OPENSUBTITLES_PASSWORD = 'p';
+  // 一条字幕都没有的片子：哈希命中的胜过下载量高的、机翻的；帧率对不上让对方换算
+  await clear(); reset();
+  const h81 = mh('dv81.mkv');
+  H.os.subs = [
+    { id: 1, file_id: 1001, language: 'zh-cn', moviehash: h81, fps: 25, release: 'Some.Movie.2024.2160p.UHD.BluRay', downloads: 120 },
+    { id: 2, file_id: 1002, language: 'zh-cn', query: 'dv81', release: 'Other.Release.720p', downloads: 90000 },
+    { id: 3, file_id: 1003, language: 'zh-cn', moviehash: h81, mt: true, downloads: 500 },
+  ];
+  H.os.files = { 1001: { text: srt(SIMP, 12) }, 1002: { text: srt(['错的那一份'.repeat(2)], 12) }, 1003: { text: srt(['机翻'], 12) } };
+  await info('/Movies/dv81.mkv'); await settle();
+  const sc = calls('/subtitles'), dl = calls('/download');
+  ok(sc.some(c => c.q.moviehash === h81) && sc.some(c => c.q.query === 'dv81'), `先按文件哈希（${h81}）再按片名搜`);
+  const keys = c => c.search.split('&').map(kv => kv.split('=')[0]);
+  ok(sc.every(c => keys(c).join() === keys(c).sort().join() && Object.values(c.q).every(v => v === v.toLowerCase())) && sc.every(c => c.q.languages === 'en,ze,zh-cn,zh-tw'),
+    `查询参数按名字排好、全小写；一条字幕都没有 → 也要英文兜底（${sc[0] && sc[0].q.languages}）`);
+  ok(calls('/login').length === 1 && sc.every(c => c.key === 'test-key' && c.auth === 'Bearer tok-os' && /^CuvenStream v25$/.test(c.ua)), '带 Api-Key / User-Agent，登录一次后带 token');
+  ok(dl.length === 1 && dl[0].body.file_id === 1001 && dl[0].body.sub_format === 'srt' && dl[0].body.in_fps === 25 && dl[0].body.out_fps === 23.976,
+    `挑中哈希命中的那条（不是下载量 9 万的、也不是机翻的），帧率 25 → 23.976 换算：${JSON.stringify(dl[0] && dl[0].body)}`);
+  m = await master('/Movies/dv81.mkv');
+  const line = subLine(m, /o0\.m3u8/);
+  ok(/LANGUAGE="zh-Hans"/.test(line) && /NAME="简体中文（在线）"/.test(line) && /DEFAULT=YES/.test(line), `主列表多了一条在线简体中文，默认打开：${line.replace(/^#EXT-X-MEDIA:/, '').slice(0, 120)}`);
+  const v0 = await vtt('/Movies/dv81.mkv', m, 0);
+  ok(/^WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:900000/.test(v0) && v0.includes('这是第1句简体字幕'), '在线字幕分段：带时间映射，内容是下载来的那一份');
+  H.os.calls.length = 0;
+  await info('/Movies/dv81.mkv'); await master('/Movies/dv81.mkv'); await settle();
+  ok(!calls('/subtitles').length && !calls('/download').length, '再开一次：直接用存下的结果，不再搜索、不再花下载配额');
+
+  // 只有英文内封字幕的片子：只要中文；只有繁体 → 逐字转成简体
+  await clear(); reset();
+  const hsc = mh('subscan.mkv');
+  H.os.subs = [
+    { id: 10, file_id: 1010, language: 'zh-tw', moviehash: hsc, downloads: 30 },
+    { id: 11, file_id: 1011, language: 'en', moviehash: hsc, downloads: 9000 },
+  ];
+  H.os.files = { 1010: { text: srt(TRAD, 25) } };
+  await info('/Movies/subscan.mkv'); await settle();
+  ok(calls('/subtitles').every(c => c.q.languages === 'ze,zh-cn,zh-tw'), '已有英文字幕：只找中文');
+  m = await master('/Movies/subscan.mkv');
+  const v1 = await vtt('/Movies/subscan.mkv', m, 0);
+  ok(/NAME="简体中文（在线 · 繁转简）"/.test(subLine(m, /o0/)) && v1.includes('这个问题很简单') && !v1.includes('這個'), `只有繁体：转成简体再给（${(v1.split('\n').find(l => /问题/.test(l)) || '').slice(0, 20)}）`);
+
+  // 找不到：记下来，7 天内不再查
+  await clear(); reset();
+  await info('/Movies/dv5.mkv'); await settle();
+  const n1 = calls('/subtitles').length;
+  await info('/Movies/dv5.mkv'); m = await master('/Movies/dv5.mkv'); await settle();
+  ok(n1 > 0 && calls('/subtitles').length === n1 && !/o0\.m3u8/.test(m) && !calls('/download').length, `没找到：主列表不加，之后不再重复搜索（搜了 ${n1} 次就停）`);
+
+  // 下载配额用完：不加字幕，过后再查
+  await clear(); reset();
+  const h7 = mh('dv7.mkv');
+  H.os.subs = [{ id: 20, file_id: 1020, language: 'zh-cn', moviehash: h7 }];
+  H.os.files = { 1020: { text: srt(SIMP, 12) } };
+  H.os.quota = true;
+  await info('/Movies/dv7.mkv'); await settle();
+  m = await master('/Movies/dv7.mkv');
+  ok(calls('/download').length === 1 && !/o0\.m3u8/.test(m), '下载配额用完（406）：这次不加，记下等配额重置后再查');
+
+  // 已经有简体：一次都不查
+  await clear(); reset();
+  await info('/Movies/hdr10_multi.mkv'); await master('/Movies/hdr10_multi.mkv'); await settle();
+  await info('/Movies/avc_zsub.mkv'); await master('/Movies/avc_zsub.mkv'); await settle();
+  ok(!H.os.calls.length, '已有简体中文（外挂 zh-Hans / 认作简体的「中文」）：不调用接口');
+
+  // 只标了「中文」、其实是繁体的外挂字幕：算缺简体；主列表里改标繁体，在线简体默认打开
+  await clear(); reset();
+  fs.writeFileSync(S('av1_hdr.zh.srt'), srt(TRAD, 12));
+  const hav = mh('av1_hdr.mkv');
+  H.os.subs = [{ id: 30, file_id: 1030, language: 'zh-cn', moviehash: hav, downloads: 10 }];
+  H.os.files = { 1030: { text: srt(SIMP, 12) } };
+  await info('/Movies/av1_hdr.mkv'); await settle();
+  m = await master('/Movies/av1_hdr.mkv');
+  const x0 = subLine(m, /x0\.m3u8/), o0 = subLine(m, /o0\.m3u8/);
+  ok(/LANGUAGE="zh-Hant"/.test(x0) && /NAME="繁体中文"/.test(x0) && /DEFAULT=NO/.test(x0) && /DEFAULT=YES/.test(o0),
+    '「中文」外挂抽样认出是繁体：改标繁体中文，在线简体默认打开');
+  fs.unlinkSync(S('av1_hdr.zh.srt'));
+
+  // 直连（MP4）：/api/subs 里多一条在线字幕；GBK 编码的字幕照样正确解码
+  await clear(); reset();
+  const hmp = mh('avc_raw.mp4');
+  const gbk = execFileSync('python3', ['-c', 'import sys; sys.stdout.buffer.write(sys.stdin.read().encode("gbk"))'], { input: srt(SIMP, 20) });
+  H.os.subs = [{ id: 40, file_id: 1040, language: 'zh-cn', moviehash: hmp, downloads: 5 }];
+  H.os.files = { 1040: { bytes: gbk } };
+  /* /api/subs 要登录 Cookie（与前端一样）；字幕直链本身靠签名 */
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const list = await (await H.call('/api/subs?path=' + encodeURIComponent('/Movies/avc_raw.mp4'), 'GET', { Cookie: cookie })).json();
+  const online = (list.subs || []).find(x => x.online);
+  ok(online && online.srclang === 'zh-Hans' && /os=1/.test(online.url), `直连：/api/subs 带上在线字幕（${online && online.label}）`);
+  const full = online ? await (await H.call(online.url)).text() : '';
+  ok(/^WEBVTT/.test(full) && full.includes('这是第1句简体字幕') && (full.match(/-->/g) || []).length === 12, 'GBK 编码的字幕解码正确，整份 VTT 给 <track> 用');
+  await clear();
+  for (const k of ['OPENSUBTITLES_API_KEY', 'OPENSUBTITLES_USERNAME', 'OPENSUBTITLES_PASSWORD']) delete H.env[k];
 }
 
 console.log('\n■ ffmpeg 作为 HLS 客户端（HTTP）');

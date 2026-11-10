@@ -97,6 +97,24 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 
 建议使用 **Workers 付费计划**：一个 4K remux 分段大约消耗 20~40ms CPU，免费计划每次请求只有 10ms 上限。
 
+### 可选：OpenSubtitles 自动补字幕
+
+没有简体中文字幕（或一条字幕都没有）的片子，打开详情页时在后台去 OpenSubtitles 找一条，播放时自动带上，
+中文默认打开，全程不用挑。在主 Worker 上配 Secret：
+
+| Secret | 说明 |
+| --- | --- |
+| `OPENSUBTITLES_API_KEY` | 必填。在 opensubtitles.com 登录后，到「API consumers」里新建一个拿到 |
+| `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` | 强烈建议。登录后下载配额按账号算（免费账号每天约 20 条，VIP 1000 条）；不登录就按 Workers 共享的出口 IP 算，基本拿不到 |
+
+可选 `OPENSUBTITLES_DISABLE=1` 关闭。绑了 R2（`FILE_CACHE`）时结果长期存在 R2 里，每部片只用一次下载配额；没绑就放边缘缓存。
+
+- **缺不缺**：已有简体（非强制字幕）就不查。只标了「中文」的那条抽一段文字认繁简：是繁体才算缺，并在播放列表里改标「繁体中文」。
+- **怎么找**：先按文件哈希（命中的字幕与这个文件逐帧同步），再按 TMDB 编号（配了 `TMDB_API_KEY` 时）或片名 + 年份；剧集带季 / 集号。
+- **要什么**：简体 → 简英双语 → 繁体（逐字转成简体）；一条字幕都没有的片子最后才要英文。
+- **怎么挑**：哈希命中 > 发布名接近 > 帧率一致 > 可信上传者 > 下载量；机翻 / AI 翻译、只翻外语部分的往后排；条数太少、时长对不上片长的跳过。帧率对不上时下载时换算。
+- **没找到**：7 天后再查；配额用完：等它重置；接口出错：1 小时后再查。
+
 ### 可选：DTS / TrueHD 转码 Worker（`audio-tx/`）
 
 Workers 不允许运行时编译 WASM，所以转码器是一个单独的小 Worker（精简的 FFmpeg 6.1.1：DTS、TrueHD、MLP、
@@ -134,7 +152,7 @@ service = "cuven-audio-tx"
 
 ```bash
 tests/make-samples.sh     # 用 ffmpeg / mkvmerge 生成样片（约 30 秒）
-node tests/run.mjs        # Worker：40 项回归，约 15 秒
+node tests/run.mjs        # Worker：56 项回归，约 15 秒
 node tests/web.mjs        # 前端：63 项，需要 Playwright + Chromium（PLAYWRIGHT_PATH 可指定其 index.js），约 3 分钟
 ```
 
@@ -164,6 +182,8 @@ node tests/web.mjs        # 前端：63 项，需要 Playwright + Chromium（PLA
 - **兼容性**：ffmpeg 作为 HLS 客户端完整解码所有渲染，帧 MD5 与源一致；Chromium MSE 接受输出的 fMP4，缓冲区连续，可播放、可跳转。
 - **转码**：DTS / TrueHD / Opus → AC-3 与参考解码逐采样对齐（偏移 0），信噪比约 77 dB；分段接缝处的误差最多是中位误差的 1.3 倍（无爆音）。
 - **字幕**：内封 SRT / ASS（含 zlib）、字幕没有 Cues 时的扫描兜底、外挂字幕都正确。乱序请求分段与顺序请求的输出逐字节一致。
+- **OpenSubtitles**（模拟接口）：文件哈希与独立实现一致、查询参数规范（排序、小写）、登录一次后带 token；哈希命中的胜过下载量高的
+  与机翻的，帧率换算；只有繁体时转成简体；GBK 字幕解码；没找到与配额用完都记下、不重复查；已有简体不查；「中文」实为繁体时改标并让在线简体默认；直连 /api/subs 带上它。
 - **管线**：并行窗口 1 / 3 / 5 的输出逐字节一致。第 k+1 段从边缘缓存出、不再回源；预取还在半路时来的请求等它写完再出，
   只回源一遍。预取半路断流时，缓存里留下的半截读不到，下一次请求重新取出完整的一段。没有字幕 Cues 的文件，字幕分段直接用
   视频那一遍写好的 VTT（与扫描结果逐字一致）；同一段的视频与字幕同时到时也只读一遍字节。

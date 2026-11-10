@@ -15,6 +15,11 @@ export const stats = { fetches: 0, bytes: 0, ranges: [] };
  * fail(file, start, end) 返回 true 的 Range 交完第一块就断流（测半路失败）
  */
 export const net = { chunkDelayMs: 0, fail: null };
+/**
+ * OpenSubtitles 替身：登录 / 搜索 / 下载。subs 是候选（按 moviehash / tmdb_id / query 命中），
+ * files 是 file_id → { text } 或 { bytes }；quota=true 时下载回 406；calls 记下每一次请求
+ */
+export const os = { calls: [], subs: [], files: {}, quota: false, loginOk: true };
 
 class MemCache {
   constructor() { this.m = new Map(); }
@@ -54,6 +59,39 @@ globalThis.fetch = async (input, init = {}) => {
     const entries = fs.readdirSync(dir).filter(f => fs.statSync(path.join(dir, f)).isFile())
       .map(f => ({ '.tag': 'file', ...meta(`${p || '/Movies'}/${f}`) }));
     return Response.json({ entries, has_more: false, cursor: 'c' });
+  }
+  if (u.host === 'api.opensubtitles.com') {
+    const p = u.pathname.replace(/^\/api\/v1/, '');
+    const body = req.method === 'POST' ? await req.clone().json().catch(() => null) : null;
+    os.calls.push({ method: req.method, path: p, search: u.search.slice(1), q: Object.fromEntries(u.searchParams), body,
+      key: req.headers.get('api-key'), ua: req.headers.get('user-agent'), auth: req.headers.get('authorization') });
+    if (!req.headers.get('api-key')) return Response.json({ message: 'missing api key' }, { status: 401 });
+    if (p === '/login') {
+      return os.loginOk ? Response.json({ token: 'tok-os', base_url: 'api.opensubtitles.com', user: { allowed_downloads: 100 } })
+        : Response.json({ message: 'bad credentials' }, { status: 401 });
+    }
+    if (p === '/subtitles') {
+      const q = Object.fromEntries(u.searchParams), langs = (q.languages || '').split(',');
+      const data = os.subs.filter(x => langs.includes(x.language) && (
+        (q.moviehash && x.moviehash === q.moviehash) || (q.tmdb_id && String(x.tmdb_id) === q.tmdb_id) ||
+        (q.query && (x.query || '').toLowerCase() === q.query)))
+        .map(x => ({ id: String(x.id), type: 'subtitle', attributes: {
+          language: x.language, download_count: x.downloads || 0, fps: x.fps || 0, release: x.release || '',
+          moviehash_match: !!(q.moviehash && x.moviehash === q.moviehash), machine_translated: !!x.mt, ai_translated: !!x.ai,
+          from_trusted: !!x.trusted, foreign_parts_only: !!x.fpo, hearing_impaired: false, feature_details: x.feature || {},
+          files: [{ file_id: x.file_id, file_name: (x.release || 'sub') + '.srt' }] } }));
+      return Response.json({ total_count: data.length, total_pages: 1, page: 1, per_page: 60, data });
+    }
+    if (p === '/download') {
+      if (os.quota) return Response.json({ message: 'You have downloaded your allowed 20 subtitles for 24h', reset_time_utc: new Date(Date.now() + 3600e3).toISOString() }, { status: 406 });
+      return Response.json({ link: `https://dl.os.mock/${body && body.file_id}.srt`, file_name: 'sub.srt', requests: 1, remaining: 99, message: '', reset_time: '', reset_time_utc: '' });
+    }
+    return Response.json({ message: 'not found' }, { status: 404 });
+  }
+  if (u.host === 'dl.os.mock') {
+    const f = os.files[u.pathname.slice(1).replace(/\.srt$/, '')];
+    if (!f) return new Response('gone', { status: 404 });
+    return new Response(f.bytes || f.text, { headers: { 'Content-Type': 'application/x-subrip' } });
   }
   if (u.host === 'dl.mock') {
     const file = localPath(u.searchParams.get('p'));
