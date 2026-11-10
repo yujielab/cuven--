@@ -5530,7 +5530,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 }
 .ps.on { transform: translateY(0) translateZ(0); visibility: visible; transition: transform var(--silk-present-ms) var(--silk-present), visibility 0s; }
 .ps.dragging { transition: none !important; }
-@media (min-width: 900px) {
+@media (min-width: 900px) and (min-height: 601px) {
   .ps { top: 26px; left: 50%; right: auto; width: min(1180px, calc(100vw - 48px)); translate: -50% 0; border-radius: 16px 16px 0 0; }
 }
 .player-open { overflow: hidden; }
@@ -5710,8 +5710,9 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 .ps-pick .ps-row.on { color: #64d2ff; }
 .ps-pick .ps-row .ps-ck { width: 18px; text-align: right; }
 
-/* 横屏手机：整屏沉浸，sheet 的头与信息区收起，画面上的顶栏出来 */
-@media (orientation: landscape) and (max-height: 540px) {
+/* 横屏手机：整屏沉浸，sheet 的头与信息区收起，画面上的顶栏出来。
+   600 而不是 540：iPhone Duo 展开横拿是 951×543，正是最想整屏看片的姿势 */
+@media (orientation: landscape) and (max-height: 600px) {
   .ps { top: 0; left: 0; right: 0; width: auto; translate: none; border-radius: 0; background: #000; }
   .ps-head, .ps-info { display: none; }
   .ps-video { flex: 1; }
@@ -5727,6 +5728,38 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 /* 「继续观看」卡上的进度条 */
 .card-progress { position: absolute; left: 10px; right: 10px; bottom: 9px; height: 4px; border-radius: 2px; background: rgba(255,255,255,.28); overflow: hidden; z-index: 2; pointer-events: none; }
 .card-progress > i { display: block; height: 100%; background: #fff; border-radius: inherit; }
+/* ══════════ iPhone Duo 与所有「矮横屏」══════════
+   Safari 27.1 在 iPhone Duo 上实测的视口：折起竖拿 382×580、折起横拿 594×368、
+   展开竖拿 669×825、展开横拿 951×543（半折时 Safari 回到外屏，拿到的就是折起的尺寸）。
+   竖拿的几种都落在原有的手机 / 平板断点里，排版本来就对。出问题的是两种横拿：
+   首页主视觉（最小 560）、资料库展厅（最小 460）、详情页剧照（最小 540）、欢迎页
+   都带着按竖屏手机定的最小高度，放到 368 / 543 高的横屏上比屏幕还高 —— 片名、按钮、
+   轮播点正好落进底部导航条下面，详情页的片名和「播放」整个掉到屏幕外。
+   矮横屏下改成「刚好一屏、给底部导航让出位置」。折叠 / 展开只是视口变了：这些都是
+   CSS 条件，各区块本来就跟着 resize 重新量，翻开合上不需要额外处理。 */
+/* 首页主视觉：矮屏（含折起竖拿的 580 高、iPhone SE）也按「刚好停在导航条之上」算 ——
+   原来的最小 560 在这些屏上会让轮播点压到导航条上 */
+@media (max-height: 640px) {
+  .hero-deck { height: calc(100svh - var(--dock-h) - var(--dock-gap) - 8px); min-height: 0; max-height: none; }
+  html.standalone .hero-deck { height: calc(100svh - var(--safe-t) - var(--dock-h) - var(--dock-gap) - 8px); }
+}
+@media (orientation: landscape) and (max-height: 600px) {
+  .sc-sticky { min-height: 0; }
+  /* 展厅：片名居中到「导航条以上」那块，注脚放到导航条上沿 */
+  .sc-copy { top: calc(50% - (var(--dock-h) + var(--dock-gap)) / 2 - 8px); }
+  .sc-note { bottom: calc(var(--dock-h) + var(--dock-gap) + 12px); }
+  .detail-hero { height: 100svh; min-height: 0; }
+  .detail-body { margin-top: -48svh; }
+}
+@media (orientation: landscape) and (max-height: 420px) {
+  /* 折起横拿只有 368 高：主视觉只留片名与按钮，欢迎页收紧 */
+  .hero-content > .hero-status, .hero-content > .hero-tags { display: none; }
+  .hcard { padding-top: 14px; padding-bottom: 18px; }
+  #wc-root .wc-zone-top { flex: 0 0 24%; padding-top: max(16px, calc(env(safe-area-inset-top, 0px) + 10px)); }
+  #wc-root .wc-zone-mid { padding-top: 6px; }
+  #wc-root .wc-avatar { width: 88px; height: 88px; }
+  #wc-root .wc-cta { height: 50px; bottom: calc(env(safe-area-inset-bottom, 0px) + 14px); }
+}
 
 </style>
 <script>

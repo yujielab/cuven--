@@ -245,6 +245,59 @@ await pi.waitForTimeout(800);
 ok((await st(pi)).on, '轻轻拉一下（没过界、松手前停住）：弹回去，不收起');
 await ip.close();
 
+console.log('\n■ iPhone Duo（Safari 27.1 实测视口：折起 382×580 / 594×368，展开 669×825 / 951×543）');
+const DUO = { isMobile: true, hasTouch: true, screen: { width: 466, height: 678 },
+  userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 27_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.1 Mobile/15E148 Safari/604.1' };
+{
+  const wc = await context({ ...DUO, viewport: { width: 594, height: 368 } });
+  const pw0 = await wc.newPage();
+  await pw0.goto(ORIGIN);
+  await pw0.waitForSelector('#wc-cta');
+  const clear = await pw0.evaluate(() => document.getElementById('wc-avatar').getBoundingClientRect().bottom <= document.getElementById('wc-cta').getBoundingClientRect().top);
+  ok(clear, '折起横拿：欢迎页的头像与「确认并继续」不再叠在一起');
+  await wc.close();
+}
+const duo = await context({ ...DUO, viewport: { width: 382, height: 580 } });
+const pd = await enter(duo);
+await pd.waitForTimeout(1500);
+for (const [w, h, label] of [[382, 580, '折起竖拿'], [594, 368, '折起横拿'], [669, 825, '展开竖拿'], [951, 543, '展开横拿']]) {
+  await pd.setViewportSize({ width: w, height: h });
+  await pd.waitForTimeout(800);
+  const g = await pd.evaluate(() => {
+    const card = document.querySelector('.hcard.is-center') || document.querySelector('.hcard');
+    const r = e => e && e.getBoundingClientRect();
+    const dock = r(document.querySelector('.dock')), play = r(card && card.querySelector('.btn-play')), dots = r(document.querySelector('.aap-host .all-access-pass'));
+    return { ok: !!(dock && play && dots) && play.bottom <= dock.top && dots.bottom <= dock.top && play.top >= 0,
+      sw: document.documentElement.scrollWidth, vw: innerWidth };
+  });
+  ok(g.ok && g.sw === g.vw, `${label} ${w}×${h}：主视觉的按钮与轮播点都在导航条之上，没有横向溢出`);
+}
+await pd.setViewportSize({ width: 594, height: 368 });
+await pd.evaluate(() => openDetail('/Movies/dv81.mkv', 'Dune.Part.Two.2024.2160p.DV.mkv'));
+await pd.waitForTimeout(1800);
+ok(await pd.evaluate(() => { const b = document.getElementById('detailPlay'); const r = b && b.getBoundingClientRect(); return !!r && r.top >= 0 && r.bottom <= innerHeight; }),
+  '折起横拿：详情页的「播放」在第一屏（原来最小高度 540 把它挤到屏幕外）');
+await pd.evaluate(() => closeDetail());
+await pd.waitForTimeout(500);
+await pd.setViewportSize({ width: 382, height: 580 });
+await pd.evaluate(() => playVideo('/Movies/long.mp4', 'Long.Test.2024.1080p.mp4'));
+await until(pd, s => document.querySelector(s).currentTime > 1, vid);
+const tFold = await pd.evaluate(s => document.querySelector(s).currentTime, vid);
+const ps = () => pd.evaluate(() => { const sh = document.getElementById('playerSheet'), v = sh.querySelector('video'), b = sh.querySelector('.dp-box').getBoundingClientRect();
+  return { head: getComputedStyle(sh.querySelector('.ps-head')).display, w: Math.round(b.width), h: Math.round(b.height), t: v.currentTime, paused: v.paused, src: v.getAttribute('src') }; });
+const p0 = await ps();
+await pd.setViewportSize({ width: 669, height: 825 });
+await pd.waitForTimeout(900);
+const p1 = await ps();
+await pd.setViewportSize({ width: 951, height: 543 });
+await pd.waitForTimeout(900);
+const p2 = await ps();
+ok(p0.head !== 'none' && p1.head !== 'none' && p1.w === 669 && Math.abs(p1.h - 376) <= 2, `展开竖拿：sheet 播放页，画面 ${p1.w}×${p1.h}`);
+ok(p2.head === 'none' && p2.w === 951 && p2.h === 543, `展开横拿：整屏沉浸（${p2.w}×${p2.h}）`);
+ok(p2.t > tFold && !p2.paused && p2.src === p0.src, '折起 → 展开 → 横过来：同一路视频一直在播，没有重载');
+await pd.keyboard.press('Escape');
+await duo.close();
+
 console.log('\n■ MKV → 原生 HLS（模拟 Safari：Apple vendor + canPlayType）');
 const ap = await context({ viewport: { width: 1280, height: 800 } }, true);
 const pa = await enter(ap, '?hls=1');
