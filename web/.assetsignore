@@ -1,0 +1,5 @@
+# 只上传页面本身：配置文件与 wrangler 的工作目录不当作公开资源
+wrangler.jsonc
+.assetsignore
+.wrangler
+node_modules

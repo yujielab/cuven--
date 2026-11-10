@@ -1,0 +1,12 @@
+// 前端站点 tv.cuven.us（Worker：cuven-tv）：纯静态资源，由 Workers Builds 从这个目录部署
+// （根目录 /web，部署命令 npx wrangler deploy）。name 必须与控制台里的 Worker 名字一致，否则构建会失败。
+// 自定义域名在控制台里绑定，这里不写 routes —— 部署不会去动它。
+{
+  "name": "cuven-tv",
+  "compatibility_date": "2026-11-10",
+  "assets": {
+    "directory": ".",
+    // 任何没有对应文件的路径都回 index.html（与现在线上的行为一致）；/index.html 会 307 到 /
+    "not_found_handling": "single-page-application"
+  }
+}

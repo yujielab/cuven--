@@ -75,6 +75,11 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 
 ## 部署
 
+前端（tv.cuven.us，Worker `cuven-tv`）由 Workers Builds 从仓库部署：连接 `main`，路径 `/web`，构建命令留空，部署命令
+`npx wrangler deploy`。`web/wrangler.jsonc` 把这个目录当作纯静态资源上传（只传 `index.html`，配置文件与
+`.wrangler/` 由 `web/.assetsignore` 排除），没有对应文件的路径都回 `index.html`。其中 `name` 必须与控制台里
+这个 Worker 的名字一致。合并到 `main` 即自动上线；自定义域名在控制台里绑定，部署不会改动它。
+
 主 Worker 照旧部署 `Stream_v25.js` 即可，不需要新的绑定。可选环境变量：
 
 | 变量 | 默认 | 说明 |

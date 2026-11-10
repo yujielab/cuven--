@@ -19,21 +19,23 @@
      iOS Safari 不认 data: URI 的 apple-touch-icon（Chrome / Firefox 认）。
      此前 favicon 与 manifest 图标都是内联 base64（共 ~57KB），图一换就得重新生成；
      2026-08 换图时改成全部指向 CDN 上的同一个文件，以后换图只需重传。
+     2026-11 换成「Cuven max」字标（1254×1254 PNG，蓝色满幅底、无透明通道 —— iOS 主屏不会补黑底）。
      代价：CDN 不可达时 favicon / 安装图标会空（以前不会）。要拿回这份冗余，
      把图源文件重新内联为 base64 即可（maskable 那张记得把 logo 收进
      直径 80% 的安全圆，Android 圆形裁切才不会切到字）。 -->
-<link rel="apple-touch-icon" href="https://data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg">
-<link rel="apple-touch-icon" sizes="180x180" href="https://data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg">
-<link rel="icon" type="image/jpeg" sizes="512x512" href="https://data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg">
+<link rel="apple-touch-icon" href="https://data.cuven.us/logo/ED8BAFA2-9496-4F42-9299-0C72BE967C1D.png">
+<link rel="apple-touch-icon" sizes="180x180" href="https://data.cuven.us/logo/ED8BAFA2-9496-4F42-9299-0C72BE967C1D.png">
+<link rel="icon" type="image/png" sizes="1254x1254" href="https://data.cuven.us/logo/ED8BAFA2-9496-4F42-9299-0C72BE967C1D.png">
 <script>
 /* PWA manifest：内联生成 blob，免额外文件。
    any 与 maskable 目前指向 CDN 上同一张满幅方图。
    ⚠ maskable 要求画面可被圆形裁切而不丢信息，即 logo 本体要落在
      直径 80% 的安全圆内。若新图是顶到边的字标，Android 会切到字，
-     到时另做一张内缩版单独给 ICON_MSK。 */
+     到时另做一张内缩版单独给 ICON_MSK。
+     现在这张（2026-11「Cuven max」）：底色铺满、字在安全圆以内，两种用途共用没问题。 */
 (function () {
-  var ICON = 'https://data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg';
-  var ICON_MSK = 'https://data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg';
+  var ICON = 'https://data.cuven.us/logo/ED8BAFA2-9496-4F42-9299-0C72BE967C1D.png';
+  var ICON_MSK = 'https://data.cuven.us/logo/ED8BAFA2-9496-4F42-9299-0C72BE967C1D.png';
   var m = {
     name: 'Stream', short_name: 'Stream',
     start_url: '.', scope: '.',
@@ -41,8 +43,8 @@
     orientation: 'portrait',
     background_color: '#000000', theme_color: '#000000',
     icons: [
-      { src: ICON, sizes: '512x512', type: 'image/jpeg', purpose: 'any' },
-      { src: ICON_MSK, sizes: '512x512', type: 'image/jpeg', purpose: 'maskable' }
+      { src: ICON, sizes: '1254x1254', type: 'image/png', purpose: 'any' },
+      { src: ICON_MSK, sizes: '1254x1254', type: 'image/png', purpose: 'maskable' }
     ]
   };
   try {
@@ -7239,7 +7241,7 @@ body.voice-on .dock > *{ pointer-events:none !important; }
       <div class="cvl-tile" id="cvlTile">
         <div class="cvl-tile-inner" id="cvlTileInner">
           <img id="cvlTileImg" alt="Cuven Max"
-               src="https://data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg">
+               src="https://data.cuven.us/logo/ED8BAFA2-9496-4F42-9299-0C72BE967C1D.png">
           <div class="cvl-tile-flash" id="cvlTileFlash"></div>
         </div>
       </div>
