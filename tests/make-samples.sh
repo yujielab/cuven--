@@ -78,4 +78,8 @@ mkvmerge -q -o dts_only.mkv -A avc_raw.mp4 --language 0:eng dts_20.dts
 q -f lavfi -i "testsrc2=size=1280x720:rate=30000/1001" -f lavfi -i "sine=frequency=700:sample_rate=48000" -t 12 \
   -c:v libsvtav1 -preset 12 -g 60 -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc \
   -c:a libopus -b:a 128k -f matroska av1_hdr.mkv
+# 前端测试（tests/web.mjs）用：3 分钟的 MP4，续播 / 下一集要有足够长的片长
+q -f lavfi -i "testsrc2=size=640x360:rate=25" -f lavfi -i "sine=frequency=600:sample_rate=48000" -t 180 \
+  -c:v libx264 -preset veryfast -crf 34 -g 50 -c:a aac -b:a 64k -movflags +faststart long.mp4
+cp long.mp4 long_ep2.mp4
 echo "samples ready: $(ls *.mkv | wc -l) mkv"

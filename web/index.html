@@ -5509,6 +5509,89 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   .sc-note { opacity: 1 !important; transform: none !important; }
 }
 
+/* ══════════ 站内播放器（取代 Infuse）══════════
+   整屏黑底盖住一切内容层，但让位给登录 / 隐私门（10000+）。
+   控件用系统原生的：iOS 上原生控件自带音轨 / 字幕 / 画中画 / AirPlay，
+   全屏后就是系统播放器 —— 杜比视界、HDR 由它点亮。自己只画一条顶栏。 */
+.player-view {
+  position: fixed; inset: 0; z-index: 5000; background: #000; color: #fff;
+  opacity: 0; visibility: hidden; transition: opacity .22s var(--silk-out), visibility 0s linear .22s;
+}
+.player-view.on { opacity: 1; visibility: visible; transition: opacity .28s var(--silk-in), visibility 0s; }
+.player-open { overflow: hidden; }
+.player-open .toast { z-index: 5100; bottom: calc(env(safe-area-inset-bottom, 0px) + 96px); }
+.player-view video {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000;
+}
+.pv-top {
+  position: absolute; left: 0; right: 0; top: 0; z-index: 2;
+  display: flex; align-items: center; gap: 10px;
+  padding: calc(env(safe-area-inset-top, 0px) + 10px) calc(env(safe-area-inset-right, 0px) + 14px) 28px calc(env(safe-area-inset-left, 0px) + 14px);
+  background: linear-gradient(rgba(0,0,0,.72), rgba(0,0,0,0));
+  transition: opacity .3s var(--silk-out);
+}
+.player-view.idle .pv-top { opacity: 0; pointer-events: none; }
+.pv-btn {
+  flex-shrink: 0; min-width: 38px; height: 38px; padding: 0 12px; border: 0; border-radius: var(--r-pill);
+  background: rgba(255,255,255,.14); color: #fff; font: inherit; font-size: 13px; font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer;
+  backdrop-filter: var(--glass-thin); -webkit-backdrop-filter: var(--glass-thin);
+}
+.pv-btn.icon { width: 38px; padding: 0; font-size: 19px; }
+.pv-btn[hidden] { display: none; }
+.pv-title { flex: 1; min-width: 0; }
+.pv-t1 { font-size: 15px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pv-t2 { margin-top: 2px; font-size: 12px; color: rgba(255,255,255,.62); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pv-badge {
+  flex-shrink: 0; font-size: 11px; font-weight: 700; letter-spacing: .04em; padding: 3px 8px; border-radius: 6px;
+  background: rgba(255,214,10,.18); color: var(--yellow);
+}
+.pv-badge.dv { background: rgba(10,132,255,.28); color: #64d2ff; border: var(--hairline) solid rgba(100,210,255,.35); }
+.pv-badge[hidden] { display: none; }
+.pv-state {
+  position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 16px; padding: 0 32px; text-align: center; pointer-events: none;
+}
+.pv-state[hidden] { display: none; }
+.pv-spin {
+  width: 34px; height: 34px; border-radius: 50%; border: 3px solid rgba(255,255,255,.18); border-top-color: #fff;
+  animation: pvSpin .9s linear infinite;
+}
+.pv-state.err .pv-spin { display: none; }
+@keyframes pvSpin { to { transform: rotate(360deg); } }
+.pv-msg { max-width: 420px; font-size: 15px; line-height: 1.5; color: rgba(255,255,255,.86); }
+.pv-msg:empty { display: none; }
+.pv-acts { display: flex; gap: 10px; pointer-events: auto; }
+.pv-acts:empty { display: none; }
+.pv-menu {
+  position: absolute; z-index: 3; right: calc(env(safe-area-inset-right, 0px) + 14px); top: calc(env(safe-area-inset-top, 0px) + 58px);
+  min-width: 220px; max-width: 86vw; max-height: 62vh; overflow-y: auto; padding: 6px; border-radius: 14px;
+  background: rgba(28,28,30,.94); border: var(--hairline) solid rgba(255,255,255,.12); box-shadow: 0 16px 40px rgba(0,0,0,.6);
+  backdrop-filter: var(--glass-thin); -webkit-backdrop-filter: var(--glass-thin);
+}
+.pv-menu[hidden] { display: none; }
+.pv-mh { padding: 8px 10px 4px; font-size: 11px; font-weight: 700; letter-spacing: .06em; color: #8e8e93; }
+.pv-mi {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 10px; border: 0; border-radius: 9px;
+  background: transparent; color: #f5f5f7; font: inherit; font-size: 14px; text-align: left; cursor: pointer;
+}
+.pv-mi.on { background: rgba(10,132,255,.24); color: #64d2ff; }
+.pv-next {
+  position: absolute; z-index: 3; right: calc(env(safe-area-inset-right, 0px) + 18px); bottom: calc(env(safe-area-inset-bottom, 0px) + 92px);
+  width: min(320px, calc(100vw - 36px)); padding: 14px; border-radius: 16px;
+  background: rgba(28,28,30,.9); border: var(--hairline) solid rgba(255,255,255,.12); box-shadow: 0 18px 44px rgba(0,0,0,.6);
+  backdrop-filter: var(--glass-thin); -webkit-backdrop-filter: var(--glass-thin);
+}
+.pv-next[hidden] { display: none; }
+.pv-next-k { font-size: 12px; color: rgba(255,255,255,.6); }
+.pv-next-t { margin: 3px 0 12px; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pv-next-row { display: flex; gap: 8px; }
+.pv-next-row .pv-btn { flex: 1; }
+.pv-btn.primary { background: #fff; color: #000; }
+/* 「继续观看」卡上的进度条 */
+.card-progress { position: absolute; left: 10px; right: 10px; bottom: 9px; height: 4px; border-radius: 2px; background: rgba(255,255,255,.28); overflow: hidden; z-index: 2; pointer-events: none; }
+.card-progress > i { display: block; height: 100%; background: #fff; border-radius: inherit; }
+
 </style>
 <script>
 /* standalone 检测：尽早打标，避免 Safari 里闪一下压条 */
@@ -6702,6 +6785,32 @@ body.voice-on .dock > *{ pointer-events:none !important; }
   </div>
 </section>
 
+
+<!-- 站内播放器（取代 Infuse）：见脚本里的 Player 模块 -->
+<div class="player-view" id="playerView" role="dialog" aria-modal="true" aria-hidden="true" aria-label="播放器">
+  <video id="playerVideo" playsinline webkit-playsinline controls preload="auto" crossorigin="anonymous"></video>
+  <div class="pv-state" id="pvState" hidden>
+    <div class="pv-spin" aria-hidden="true"></div>
+    <div class="pv-msg" id="pvMsg"></div>
+    <div class="pv-acts" id="pvActs"></div>
+  </div>
+  <div class="pv-top" id="pvTop">
+    <button class="pv-btn icon" id="pvClose" type="button" aria-label="关闭播放器"><i class="ph ph-caret-down"></i></button>
+    <div class="pv-title"><div class="pv-t1" id="pvTitle"></div><div class="pv-t2" id="pvSub"></div></div>
+    <span class="pv-badge" id="pvBadge" hidden></span>
+    <button class="pv-btn" id="pvAudio" type="button" hidden><i class="ph ph-speaker-high"></i>音轨</button>
+    <button class="pv-btn" id="pvSubs" type="button" hidden><i class="ph ph-subtitles"></i>字幕</button>
+  </div>
+  <div class="pv-menu" id="pvMenu" hidden></div>
+  <div class="pv-next" id="pvNext" hidden>
+    <div class="pv-next-k" id="pvNextK"></div>
+    <div class="pv-next-t" id="pvNextT"></div>
+    <div class="pv-next-row">
+      <button class="pv-btn" id="pvNextNo" type="button">取消</button>
+      <button class="pv-btn primary" id="pvNextGo" type="button">立即播放</button>
+    </div>
+  </div>
+</div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
@@ -11458,6 +11567,7 @@ function currentTVHistoryState() {
   if (authLayer?.classList.contains('is-open')) {
     return { view: 'tv-auth', mode: authFrame?.dataset.mode === 'account' ? 'account' : 'login' };
   }
+  if ($('playerView')?.classList.contains('on')) return { view: 'player' };
   if ($('detailView')?.classList.contains('on')) return { view: 'detail' };
   if ($('searchView')?.classList.contains('on')) return { view: 'search' };
   return { view: 'tv-home' };
@@ -11466,6 +11576,7 @@ function currentTVHistoryState() {
 function currentTVHistoryURL() {
   const s = currentTVHistoryState();
   if (s.view === 'tv-auth') return s.mode === 'account' ? '#account' : '#login';
+  if (s.view === 'player') return '#play';
   if (s.view === 'detail') return '#detail';
   if (s.view === 'search') return '#search';
   return location.pathname + location.search;
@@ -11785,6 +11896,28 @@ const continueWatching = (() => {
     remove(path) { const data = read(); delete data[path]; write(data); },
     list() { return Object.entries(read()).map(([path, v]) => ({ path, name: v.name, ts: v.ts, type: 'file', size: 0 })).sort((a,b) => b.ts - a.ts); },
     clear() { try { localStorage.removeItem(KEY); } catch {} },
+  };
+})();
+
+/* 播放进度（站内播放器写，续播与「继续观看」进度条读）。
+   以前进度记在 Infuse 里，页面一无所知；现在由页面自己记。
+   电影与剧集分集都在这里，按最近播放留 200 条。 */
+const playProgress = (() => {
+  const KEY = 'play_progress_v1';
+  const read = () => { try { return JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (_) { return {}; } };
+  const write = d => { try { localStorage.setItem(KEY, JSON.stringify(d)); } catch (_) {} };
+  return {
+    get(path) { return read()[path] || null; },
+    set(path, pos, dur) {
+      if (!path || !(dur > 0)) return;
+      const d = read();
+      d[path] = { pos: Math.round(pos), dur: Math.round(dur), ts: Date.now() };
+      const keys = Object.keys(d).sort((a, b) => (d[b].ts || 0) - (d[a].ts || 0)).slice(0, 200);
+      const keep = {}; keys.forEach(k => keep[k] = d[k]);
+      write(keep);
+    },
+    remove(path) { const d = read(); if (d[path]) { delete d[path]; write(d); } },
+    ratio(path) { const p = read()[path]; return p && p.dur > 0 ? Math.min(1, p.pos / p.dur) : 0; },
   };
 })();
 
@@ -12529,7 +12662,7 @@ function videoCardHTML(v, opts) {
   const rankBadge = opts.rank ? '<span class="card-rank" aria-hidden="true">' + opts.rank + '</span>' : '';
   const menuBtn = opts.removable ? '<button class="card-menu" tabindex="-1" aria-label="更多操作"><svg class="sf-icon" viewBox="77 -45 874 874" fill="currentColor" style="width:1em;height:1em"><path d="M514 -45Q469 -45 426.5 -36.5Q384 -28 344 -11Q305 6 270.0 29.5Q235 53 205 83Q175 113 151.5 147.5Q128 182 111 222Q94 262 85.5 304.0Q77 346 77 392Q77 437 85.5 479.5Q94 522 111 561Q128 601 151.5 636.0Q175 671 205 701Q235 731 270.0 754.5Q305 778 344 795Q384 812 426.5 820.5Q469 829 514 829Q559 829 601.5 820.5Q644 812 684 795Q723 778 758.0 754.5Q793 731 823 701Q853 671 876.5 636.0Q900 601 917 561Q934 522 942.5 479.5Q951 437 951 392Q951 346 942.5 304.0Q934 262 917 222Q900 182 876.5 147.5Q853 113 823 83Q793 53 758.0 29.5Q723 6 684 -11Q644 -28 601.5 -36.5Q559 -45 514 -45ZM514 27Q552 27 587.0 34.5Q622 42 655 56Q688 70 717.0 89.5Q746 109 771 134Q797 159 816.5 188.0Q836 217 850 250Q864 283 871.0 318.5Q878 354 878 392Q878 429 871.0 464.5Q864 500 850 533Q836 566 816.5 595.0Q797 624 771 649Q746 674 717.0 694.0Q688 714 655 728Q622 742 587.0 749.0Q552 756 514 756Q476 756 440.5 749.0Q405 742 372 728Q339 714 310.0 694.0Q281 674 256 649Q231 624 211.5 595.0Q192 566 178 533Q164 500 157.0 464.5Q150 429 150 392Q150 354 157.0 318.5Q164 283 178 250Q192 217 211.5 188.0Q231 159 256 134Q281 109 310.0 89.5Q339 70 372 56Q405 42 440.5 34.5Q476 27 514 27ZM329 392Q322 392 316.5 394.0Q311 396 307 401Q303 405 300.5 410.5Q298 416 298 423V572Q298 581 300.5 588.0Q303 595 307 599Q312 603 318.5 605.0Q325 607 333 607H482Q488 607 493.5 604.5Q499 602 503 598Q508 594 510.0 588.5Q512 583 512 577Q512 571 510.0 565.5Q508 560 503 555Q499 551 493.5 548.5Q488 546 482 546L461 547L396 551L492 459Q497 454 499.0 448.5Q501 443 501 436Q502 429 499.5 423.5Q497 418 492 413Q488 408 482.0 406.0Q476 404 470 404Q463 404 457.5 406.5Q452 409 447 414L354 511L359 443V423Q359 416 356.5 410.5Q354 405 350 401Q345 396 340.0 394.0Q335 392 329 392ZM545 176Q539 176 533.5 178.0Q528 180 524 185Q519 189 517.0 194.5Q515 200 515 206Q515 212 517.0 217.5Q519 223 524 228Q528 232 533.5 234.5Q539 237 545 237L566 236L632 232L535 324Q531 329 528.5 334.5Q526 340 525 347Q525 354 527.5 359.5Q530 365 535 370Q540 375 545.5 377.0Q551 379 558 379Q564 379 570.0 376.5Q576 374 580 369L673 272L669 340V360Q669 367 671.0 372.5Q673 378 677 382Q682 386 687.0 388.5Q692 391 699 391Q705 391 710.5 388.5Q716 386 720 382Q724 378 726.5 372.5Q729 367 729 360V211Q729 202 726.5 195.0Q724 188 720 184Q715 180 708.5 178.0Q702 176 693 176H545Z"/></svg></button>' : '';
   return '<div class="card card-portrait stagger-in" data-path="' + esc(v.path) + '" data-name="' + esc(v.name) + '" data-removable="' + (opts.removable ? '1' : '0') + '" tabindex="0" role="button" aria-label="' + esc(title || v.name) + '">' +
-    '<div class="card-poster" data-fn="' + esc(v.name) + '"><div class="fallback"><i class="ph ph-film-strip"></i></div>' + playingBadge + rankBadge + menuBtn + '</div>' +
+    '<div class="card-poster" data-fn="' + esc(v.name) + '"><div class="fallback"><i class="ph ph-film-strip"></i></div>' + playingBadge + rankBadge + menuBtn + (opts.removable ? cardProgressHTML(v.path) : '') + '</div>' +
     '<div class="card-info"><div class="card-title">' + esc(title || v.name) + '</div><div class="card-meta">' + sub + tagH + '</div></div></div>';
 }
 
@@ -12540,7 +12673,7 @@ function videoCardLandscapeHTML(v, opts) {
   const playingBadge = opts.removable ? '<span class="card-playing-badge"><i class="ph-fill ph-play"></i>正在观看</span>' : '';
   const menuBtn = opts.removable ? '<button class="card-menu" tabindex="-1" aria-label="更多操作"><svg class="sf-icon" viewBox="77 -45 874 874" fill="currentColor" style="width:1em;height:1em"><path d="M514 -45Q469 -45 426.5 -36.5Q384 -28 344 -11Q305 6 270.0 29.5Q235 53 205 83Q175 113 151.5 147.5Q128 182 111 222Q94 262 85.5 304.0Q77 346 77 392Q77 437 85.5 479.5Q94 522 111 561Q128 601 151.5 636.0Q175 671 205 701Q235 731 270.0 754.5Q305 778 344 795Q384 812 426.5 820.5Q469 829 514 829Q559 829 601.5 820.5Q644 812 684 795Q723 778 758.0 754.5Q793 731 823 701Q853 671 876.5 636.0Q900 601 917 561Q934 522 942.5 479.5Q951 437 951 392Q951 346 942.5 304.0Q934 262 917 222Q900 182 876.5 147.5Q853 113 823 83Q793 53 758.0 29.5Q723 6 684 -11Q644 -28 601.5 -36.5Q559 -45 514 -45ZM514 27Q552 27 587.0 34.5Q622 42 655 56Q688 70 717.0 89.5Q746 109 771 134Q797 159 816.5 188.0Q836 217 850 250Q864 283 871.0 318.5Q878 354 878 392Q878 429 871.0 464.5Q864 500 850 533Q836 566 816.5 595.0Q797 624 771 649Q746 674 717.0 694.0Q688 714 655 728Q622 742 587.0 749.0Q552 756 514 756Q476 756 440.5 749.0Q405 742 372 728Q339 714 310.0 694.0Q281 674 256 649Q231 624 211.5 595.0Q192 566 178 533Q164 500 157.0 464.5Q150 429 150 392Q150 354 157.0 318.5Q164 283 178 250Q192 217 211.5 188.0Q231 159 256 134Q281 109 310.0 89.5Q339 70 372 56Q405 42 440.5 34.5Q476 27 514 27ZM329 392Q322 392 316.5 394.0Q311 396 307 401Q303 405 300.5 410.5Q298 416 298 423V572Q298 581 300.5 588.0Q303 595 307 599Q312 603 318.5 605.0Q325 607 333 607H482Q488 607 493.5 604.5Q499 602 503 598Q508 594 510.0 588.5Q512 583 512 577Q512 571 510.0 565.5Q508 560 503 555Q499 551 493.5 548.5Q488 546 482 546L461 547L396 551L492 459Q497 454 499.0 448.5Q501 443 501 436Q502 429 499.5 423.5Q497 418 492 413Q488 408 482.0 406.0Q476 404 470 404Q463 404 457.5 406.5Q452 409 447 414L354 511L359 443V423Q359 416 356.5 410.5Q354 405 350 401Q345 396 340.0 394.0Q335 392 329 392ZM545 176Q539 176 533.5 178.0Q528 180 524 185Q519 189 517.0 194.5Q515 200 515 206Q515 212 517.0 217.5Q519 223 524 228Q528 232 533.5 234.5Q539 237 545 237L566 236L632 232L535 324Q531 329 528.5 334.5Q526 340 525 347Q525 354 527.5 359.5Q530 365 535 370Q540 375 545.5 377.0Q551 379 558 379Q564 379 570.0 376.5Q576 374 580 369L673 272L669 340V360Q669 367 671.0 372.5Q673 378 677 382Q682 386 687.0 388.5Q692 391 699 391Q705 391 710.5 388.5Q716 386 720 382Q724 378 726.5 372.5Q729 367 729 360V211Q729 202 726.5 195.0Q724 188 720 184Q715 180 708.5 178.0Q702 176 693 176H545Z"/></svg></button>' : '';
   return '<div class="card card-landscape stagger-in" data-path="' + esc(v.path) + '" data-name="' + esc(v.name) + '" data-removable="' + (opts.removable ? '1' : '0') + '" tabindex="0" role="button" aria-label="' + esc(title || v.name) + '">' +
-    '<div class="card-poster" data-fn="' + esc(v.name) + '" data-variant="landscape"><div class="fallback"><i class="ph ph-film-strip"></i></div>' + playingBadge + menuBtn + '<div class="card-overlay"><div class="card-overlay-title">' + esc(title || v.name) + '</div></div></div>' +
+    '<div class="card-poster" data-fn="' + esc(v.name) + '" data-variant="landscape"><div class="fallback"><i class="ph ph-film-strip"></i></div>' + playingBadge + menuBtn + (opts.removable ? cardProgressHTML(v.path) : '') + '<div class="card-overlay"><div class="card-overlay-title">' + esc(title || v.name) + '</div></div></div>' +
     (sub || tagH ? '<div class="card-info"><div class="card-meta">' + sub + tagH + '</div></div>' : '') + '</div>';
 }
 
@@ -12975,6 +13108,7 @@ function openContinueWatchingMenu(path, name, cardEl) {
   openSheet();
   $('cwRemoveBtn').onclick = () => {
     continueWatching.remove(path);
+    playProgress.remove(path);
     closeSheet();
     haptic.success();
     
@@ -14019,7 +14153,7 @@ function setupHeroSwipe() {
     if (!card || !card.classList.contains('is-center')) return;   /* 邻卡的按钮不作数 */
     const v = card._video;
     if (!v) return;                                               /* 骨架卡：还没有内容 */
-    if (btn.classList.contains('btn-play')) openInfuseDirect(v.path, v.name);
+    if (btn.classList.contains('btn-play')) playVideo(v.path, v.name);
     else openDetail(v.path, v.name);
   });
 
@@ -14765,7 +14899,7 @@ async function initTodayRecs(picks){
    · 剧照走 /api/tmdb?type=tv —— 必须带 type，否则《The Killer》这类同名
      电影会把剧集的图顶掉。结果按 'tv:' 前缀存进 tmdbCache，不与电影缓存串味
    · 骨架态与正式卡片同尺寸同圆角，数据到达原位换装、零布局位移
-   · 播放：一集就是一个文件，直接走既有的 openInfuseDirect / streamUrlFor，
+   · 播放：一集就是一个文件，直接走站内播放器（playVideo / streamUrlFor），
      /stream?path= 吃 Dropbox 绝对路径，/ram2 与片库根在它眼里没有区别
    · 看到第几集存在本地（tvProgress）—— 剧集不进「继续观看」那条轨道，
      那条轨道按 state.allVideos 过滤，而剧集本就不在电影库里 */
@@ -15299,13 +15433,15 @@ function tvNextEp(id, eps) {
   return { ep: same, resume: true };
 }
 
-function tvPlayEp(seriesId, ep) {
+function tvPlayEp(seriesId, ep, eps) {
   if (!ep) return;
   tvProgress.mark(seriesId, ep.ep, ep.name);
-  openInfuseDirect(ep.path, ep.name);
-  /* openInfuseDirect 会把这一集写进「继续观看」——但那条轨道按 state.allVideos
-     过滤，剧集不在电影库里、永远显示不出来，留着只会把真正的电影挤出 20 条上限。
-     剧集的进度记在 tvProgress 里，由剧集页自己呈现。 */
+  /* 剧集不进「继续观看」：那条轨道按 state.allVideos 过滤，剧集不在电影库里、
+     永远显示不出来，写进去只会把真正的电影挤出 20 条上限。看到第几集记在
+     tvProgress，集内进度记在 playProgress。带上分集表，播完才能接下一集。 */
+  const s = (_tvCache || []).find(x => x && x.id === seriesId);
+  const title = s ? (s.title || s.folder || '') + (s.season > 1 ? ' 第 ' + s.season + ' 季' : '') : '';
+  playVideo(ep.path, ep.name, { series: { id: seriesId }, ep, eps: Array.isArray(eps) ? eps : null, title, subtitle: tvEpTitle(ep) });
   try { continueWatching.remove(ep.path); } catch (_) {}
 }
 
@@ -15470,7 +15606,7 @@ function tvBindEpisodeTiles(scope, s, eps) {
     tile.classList.add('done');
     const badge = tile.querySelector('.ep-badge');
     if (badge && badge.textContent.indexOf('已看') < 0) badge.textContent += ' · 已看';
-    tvPlayEp(s.id, ep);
+    tvPlayEp(s.id, ep, eps);
   });
 }
 
@@ -17670,7 +17806,7 @@ const SC = (() => {
     if (!act) return;
     const ch = act.closest('.sc-chapter');
     if (!ch) return;
-    if (act.dataset.act === 'play') openInfuseDirect(ch.dataset.path, ch.dataset.name);
+    if (act.dataset.act === 'play') playVideo(ch.dataset.path, ch.dataset.name);
     else openDetail(ch.dataset.path, ch.dataset.name);
   }
 
@@ -18124,7 +18260,7 @@ async function openDetail(path, name, opts) {
       }
     };
   }
-  $('detailPlay').onclick = () => { if (series) { if (nextEp) tvPlayEp(series.id, nextEp.ep); } else openInfuseDirect(path, name); };
+  $('detailPlay').onclick = () => { if (series) { if (nextEp) tvPlayEp(series.id, nextEp.ep, episodes); } else playVideo(path, name, { title: fileTitle }); };
   $('detailMore').onclick = () => openSheetForFile(playTarget.path, playTarget.name);
   $('detailNavMore').onclick = () => openSheetForFile(playTarget.path, playTarget.name);
 
@@ -19274,7 +19410,8 @@ function openSheetForFile(path, name) {
   const { title } = parse(name);
   $('sheetBody').innerHTML = '<div class="sheet-title">' + esc(title || name) + '</div>' +
     
-    '<button class="sheet-btn" onclick="openInfuseDirect(state.selectedFile.path, state.selectedFile.name)"><div class="si" style="color:var(--orange)"><svg class="sf-icon" viewBox="77 -45 874 874" fill="currentColor" style="width:1em;height:1em"><path d="M514 -45Q469 -45 426.5 -36.5Q384 -28 344 -11Q305 6 270.0 29.5Q235 53 205 83Q175 113 151.5 147.5Q128 182 111 222Q94 262 85.5 304.0Q77 346 77 392Q77 437 85.5 479.5Q94 522 111 561Q128 601 151.5 636.0Q175 671 205 701Q235 731 270.0 754.5Q305 778 344 795Q384 812 426.5 820.5Q469 829 514 829Q559 829 601.5 820.5Q644 812 684 795Q723 778 758.0 754.5Q793 731 823 701Q853 671 876.5 636.0Q900 601 917 561Q934 522 942.5 479.5Q951 437 951 392Q951 346 942.5 304.0Q934 262 917 222Q900 182 876.5 147.5Q853 113 823 83Q793 53 758.0 29.5Q723 6 684 -11Q644 -28 601.5 -36.5Q559 -45 514 -45ZM514 27Q552 27 587.0 34.5Q622 42 655 56Q688 70 717.0 89.5Q746 109 771 134Q797 159 816.5 188.0Q836 217 850 250Q864 283 871.0 318.5Q878 354 878 392Q878 429 871.0 464.5Q864 500 850 533Q836 566 816.5 595.0Q797 624 771 649Q746 674 717.0 694.0Q688 714 655 728Q622 742 587.0 749.0Q552 756 514 756Q476 756 440.5 749.0Q405 742 372 728Q339 714 310.0 694.0Q281 674 256 649Q231 624 211.5 595.0Q192 566 178 533Q164 500 157.0 464.5Q150 429 150 392Q150 354 157.0 318.5Q164 283 178 250Q192 217 211.5 188.0Q231 159 256 134Q281 109 310.0 89.5Q339 70 372 56Q405 42 440.5 34.5Q476 27 514 27ZM313 540 420 645Q425 650 430.0 652.0Q435 654 441 654Q447 654 451.5 652.0Q456 650 460 646Q464 642 466.0 637.5Q468 633 468 627Q468 621 466.0 616.0Q464 611 460 607L414 563L397 547H417H695Q701 547 706.0 545.0Q711 543 714 539Q718 535 720.5 530.5Q723 526 723 520Q723 514 720.5 509.0Q718 504 714 500Q711 496 706.0 494.0Q701 492 695 492H417L396 493L414 476L460 432Q464 428 466.0 423.0Q468 418 468 412Q468 406 466.0 401.0Q464 396 460 393Q456 389 451.5 387.0Q447 385 441 385Q435 385 430.0 387.0Q425 389 420 393L313 499Q309 503 306.5 508.0Q304 513 304 519Q304 526 306.5 531.0Q309 536 313 540ZM714 243 606 137Q601 132 596.0 130.0Q591 128 586 128Q580 128 575.0 130.0Q570 132 566 136Q562 140 560.0 145.0Q558 150 558 156Q558 161 560.5 166.0Q563 171 567 175L613 219L630 235H609H332Q326 235 321.0 237.0Q316 239 312 243Q308 247 306.0 252.0Q304 257 304 263Q304 269 306.0 274.0Q308 279 312 282Q316 286 321.0 288.5Q326 291 332 291H610L630 289L613 306L567 350Q562 354 560.0 359.0Q558 364 558 370Q558 376 560.0 380.5Q562 385 566 389Q570 393 575.0 395.0Q580 397 586 397Q592 397 597.0 395.0Q602 393 606 388L714 283Q718 279 720.0 274.0Q722 269 722 263Q722 257 720.0 252.0Q718 247 714 243Z"/></svg></div><div><div class="sl">在 Infuse 中打开</div><div class="sd">杜比视界 · HDR · DTS · 全格式</div></div></button>';
+    '<button class="sheet-btn" onclick="playVideo(state.selectedFile.path, state.selectedFile.name)"><div class="si" style="color:var(--orange)"><i class="ph-fill ph-play-circle"></i></div><div><div class="sl">播放</div><div class="sd">' + (Player.appleHls ? '站内播放 · 杜比视界 · HDR · 多音轨字幕' : '站内播放') + '</div></div></button>' +
+    '<button class="sheet-btn" onclick="copyFileLink()"><div class="si" style="color:var(--blue)"><i class="ph ph-link"></i></div><div><div class="sl">复制直链</div><div class="sd">在 VLC 等其它播放器中打开</div></div></button>';
   openSheet();
 }
 function openSheet() {
@@ -19377,19 +19514,39 @@ function setupSheetDrag() {
 
 
 
-function _cuvenInfuseName(originalFn) {
-  const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; 
-  
+/* ══════════════════════════════════════════════════════════════════════
+   播放 —— 站内播放器（取代 Infuse）
+   ──────────────────────────────────────────────────────────────────────
+   以前点「播放」是用 infuse:// 把直链交给 Infuse：画面、续播进度、音轨字幕
+   全在 Infuse 里，没装 Infuse 就什么也放不了。后端 v25 起会把 MKV 实时重封装
+   成 HLS（杜比视界 / HDR / 多音轨 / 字幕都在里面），Safari 原生就能播 —— 播放
+   于是收回到页面里：
+
+     · 片源：MKV 且浏览器原生支持 HLS（Safari / iOS）→ /hls/<签名>/master.m3u8；
+       其余 → /stream 直链（MP4 / MOV 带 safari=1，走后端的 FourCC 热修补）。
+       签名向 /api/stream-sign 要；后端没开签名（无 AUTH_SECRET）时按无签名令牌拼。
+     · 控件用系统原生的：iOS 原生控件自带音轨 / 字幕 / 画中画 / AirPlay，进全屏
+       就是系统播放器。顶栏另给一份音轨、字幕菜单，横竖屏都够得着。
+     · 续播：进度存在 playProgress（本地），再打开从上次的位置接着放；
+       看到片尾就清掉，并从「继续观看」里摘下。
+     · 剧集：播完 8 秒倒计时接下一集，可取消。
+     · 返回手势 / 返回键 / Esc 关播放器 —— 与详情页同一套历史栈（#play）。
+     · 播放器在场时，页面里其它 <video>（预告片轮播、展厅）一律暂停：
+       iOS 上每一路解码都算数，4K HEVC 不该和后台的预告片抢硬解。
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* 直链里的文件名只是装饰（后端只认 ?path=）—— 换成稳定的短码，
+   真实片名不进 URL，也不进外部播放器的历史与日志 */
+function streamFileName(originalFn) {
+  const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const extMatch = originalFn.match(/\.[a-z0-9]{2,5}$/i);
   const ext = extMatch ? extMatch[0] : '';
-  
   let h1 = 5381, h2 = 0;
   for (let i = 0; i < originalFn.length; i++) {
     const c = originalFn.charCodeAt(i);
-    h1 = ((h1 << 5) + h1 + c) | 0;          
-    h2 = (c + (h2 << 6) + (h2 << 16) - h2) | 0; 
+    h1 = ((h1 << 5) + h1 + c) | 0;
+    h2 = (c + (h2 << 6) + (h2 << 16) - h2) | 0;
   }
-  
   let n = (BigInt(h1 >>> 0) << 32n) | BigInt(h2 >>> 0);
   const base = BigInt(CHARS.length);
   let code7 = '';
@@ -19399,25 +19556,405 @@ function _cuvenInfuseName(originalFn) {
   }
   return `Cuven 流服务-${code7}${ext}`;
 }
-function streamUrlFor(path, name) {
+function streamUrlFor(path, name, sign) {
   const originalFn = name || path.split('/').pop() || 'video';
-  const displayFn = _cuvenInfuseName(originalFn);
-  return API + '/stream/' + encodeURIComponent(displayFn) + '?path=' + encodeURIComponent(path);
+  let u = API + '/stream/' + encodeURIComponent(streamFileName(originalFn)) + '?path=' + encodeURIComponent(path);
+  if (sign && sign.exp && sign.sig) u += '&exp=' + sign.exp + '&sig=' + encodeURIComponent(sign.sig);
+  return u;
 }
-function openInfuseDirect(path, name) {
-  haptic.success();
-  continueWatching.mark(path, name);
-  closeSheet(); closeDetail();
-  window.location.href = 'infuse://x-callback-url/play?url=' + encodeURIComponent(streamUrlFor(path, name));
+/* 签名：与 /stream 同一枚 HMAC；MKV 顺带拿到 HLS 主列表路径。后端没开签名时回 null 也能播 */
+function streamSign(path) {
+  return fetchJSON(API + '/api/stream-sign?path=' + encodeURIComponent(path), { timeout: 8000, retries: 1 }).catch(() => null);
 }
 
-function openSafariFile() {
-  try { closeSheet(); } catch (_) {}
-  try { toast('请使用 Infuse 播放'); } catch (_) {}
+const Player = (() => {
+  /* 只认 Apple 的原生播放器（macOS Safari，以及 iOS / iPadOS 上的所有浏览器 —— 都是 WebKit + AVFoundation）。
+     新版桌面 Chrome 的 canPlayType(m3u8) 也报 maybe，可它的 HLS 只要 CODECS 里有一个自己解不了的编码
+     （例如备选音轨的 ac-3）就整条拒播，杜比视界、AC-3 / E-AC-3 也解不了 —— 那边走直连（Chrome 能直接放 MKV）。 */
+  const NATIVE_HLS = (() => {
+    try {
+      if (!/Apple/.test(navigator.vendor || '')) return false;
+      const v = document.createElement('video');
+      return !!(v.canPlayType('application/vnd.apple.mpegurl') || v.canPlayType('application/x-mpegURL'));
+    } catch (_) { return false; }
+  })();
+  const b64url = s => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const fmt = s => {
+    s = Math.max(0, Math.floor(s || 0));
+    const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = s % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : String(m)) + ':' + String(x).padStart(2, '0');
+  };
+  let el = null, cur = null, seq = 0, frozen = false, saveAt = 0, idleT = 0, nextT = 0, nextLeft = 0;
+
+  function els() {
+    if (el) return el;
+    el = {
+      view: $('playerView'), video: $('playerVideo'), state: $('pvState'), msg: $('pvMsg'), acts: $('pvActs'),
+      title: $('pvTitle'), sub: $('pvSub'), badge: $('pvBadge'), audio: $('pvAudio'), subs: $('pvSubs'),
+      menu: $('pvMenu'), next: $('pvNext'), nextK: $('pvNextK'), nextT: $('pvNextT'),
+    };
+    bind();
+    return el;
+  }
+  const isOpen = () => !!(el && el.view.classList.contains('on'));
+
+  /* ── 状态层：加载中 / 出错 / 等手势 ── */
+  function showState(msg, busy, actions) {
+    el.state.hidden = false;
+    el.state.classList.toggle('err', !busy);
+    el.msg.textContent = msg || '';
+    el.acts.innerHTML = '';
+    (actions || []).forEach(([label, fn, primary]) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pv-btn' + (primary ? ' primary' : '');
+      b.textContent = label;
+      b.onclick = e => { e.stopPropagation(); fn(); };
+      el.acts.appendChild(b);
+    });
+  }
+  const hideState = () => { el.state.hidden = true; };
+  const fail = msg => showState(msg, false, [['复制直链', copyCurrentLink], ['关闭', () => close(), true]]);
+  function flash(msg) { try { toast(msg); } catch (_) {} }
+
+  /* ── 顶栏：播放中 3 秒不动就隐去，一碰就回来 ── */
+  function wake() {
+    if (!el) return;
+    el.view.classList.remove('idle');
+    clearTimeout(idleT);
+    if (!el.video.paused && el.menu.hidden) idleT = setTimeout(() => el.view.classList.add('idle'), 3000);
+  }
+
+  function setBadge(text) {
+    el.badge.hidden = !text;
+    el.badge.textContent = text || '';
+    el.badge.classList.toggle('dv', text === 'Dolby Vision');
+  }
+
+  /* 片源：MKV + 原生 HLS → 先取 info.json（顺带让后端把索引建好），再交主列表 */
+  async function pickSource(c, my) {
+    const sign = await streamSign(c.path);
+    if (my !== seq) return '';
+    c.sign = sign;
+    const name = c.name || c.path;
+    if (/\.mkv$/i.test(name) && NATIVE_HLS) {
+      const master = API + (sign && sign.hls ? sign.hls : '/hls/0.0.' + b64url(c.path) + '/master.m3u8');
+      let res = null, info = null;
+      try {
+        res = await fetch(master.replace(/master\.m3u8$/, 'info.json'), { cache: 'no-store' });
+        info = await res.json().catch(() => null);
+      } catch (_) {}
+      if (my !== seq) return '';
+      if (res && res.ok && info && info.ok) {
+        const v = info.video || {};
+        setBadge(v.dolbyVision ? 'Dolby Vision' : v.range === 'PQ' ? 'HDR10' : v.range === 'HLG' ? 'HLG' : '');
+        if (info.audioUnsupportedOnly) flash('这部片只有 DTS / TrueHD 音轨，Safari 无法解码，当前没有声音');
+        c.mode = 'hls';
+        return master;
+      }
+      /* 422：文件本身转不了 HLS（缺关键帧索引 / 编码 iOS 不支持）—— Safari 直连 MKV 也放不了，直接说明 */
+      if (res && res.status >= 400 && res.status < 500 && res.status !== 404) {
+        throw new Error((info && info.error) || ('无法播放（HTTP ' + res.status + '）'));
+      }
+      /* 404 / 网络错误：多半是还没升级到 v25 的后端 —— 退回直链试一次 */
+    }
+    c.mode = 'direct';
+    let u = streamUrlFor(c.path, c.name, sign);
+    if (/\.(mp4|m4v|mov)$/i.test(name)) u += '&safari=1';
+    return u;
+  }
+
+  function load(src) {
+    const v = el.video;
+    v.src = src;
+    v.load();
+    const p = v.play();
+    if (p && p.catch) {
+      p.catch(err => {
+        if (!cur || !err || err.name !== 'NotAllowedError') return;
+        /* 等签名的那一下把「用户手势」用掉了：给一个按钮，再点一次就放 */
+        showState('', false, [['播放', () => { hideState(); v.play().catch(() => {}); }, true]]);
+      });
+    }
+  }
+
+  async function open(opts) {
+    const path = opts && opts.path;
+    if (!path) return;
+    els();
+    saveNow();                                   /* 切下一集时先把上一集记下来 */
+    const my = ++seq;
+    cancelNext();
+    closeMenu();
+    const name = opts.name || path.split('/').pop();
+    cur = { path, name, series: opts.series || null, ep: opts.ep || null, eps: opts.eps || null,
+      tries: 0, mode: '', resumeAt: 0, playedOnce: false };
+    const { title } = parse(name);
+    el.title.textContent = opts.title || title || name;
+    el.sub.textContent = opts.subtitle || '';
+    setBadge('');
+    el.audio.hidden = el.subs.hidden = true;
+    const v = el.video;
+    v.controls = false;
+    v.pause(); v.removeAttribute('src'); try { v.load(); } catch (_) {}
+    present();
+    showState('正在准备…', true);
+    const saved = playProgress.get(path);
+    cur.resumeAt = saved && saved.pos > 30 && saved.pos < saved.dur - 60 ? saved.pos : 0;
+    if ('mediaSession' in navigator && window.MediaMetadata) {
+      try { navigator.mediaSession.metadata = new MediaMetadata({ title: el.title.textContent, artist: el.sub.textContent || 'Cuven Stream' }); } catch (_) {}
+    }
+    let src = '';
+    try { src = await pickSource(cur, my); }
+    catch (e) { if (my === seq) fail(e.message || '无法播放'); return; }
+    if (my !== seq || !src) return;
+    showState('', true);
+    load(src);
+  }
+
+  function present() {
+    if (isOpen()) return;
+    el.view.classList.add('on');
+    el.view.setAttribute('aria-hidden', 'false');
+    /* immersive：standalone 下顶部那条状态栏色场（.sb-field，z-index 9000）淡出并停掉动画，
+       状态栏底下就是黑色的画面，不再是海报色 */
+    document.documentElement.classList.add('player-open', 'immersive');
+    if (!frozen) { freezeStage(true); frozen = true; }
+    try { stopHeroTimer(); } catch (_) {}
+    document.querySelectorAll('video').forEach(x => { if (x !== el.video && !x.paused) try { x.pause(); } catch (_) {} });
+    if (history.state?.view !== 'player') navHistory.push({ view: 'player' }, '#play');
+    wake();
+  }
+
+  function close(fromPopstate) {
+    if (!isOpen()) return;
+    seq++;
+    saveNow();
+    cancelNext();
+    closeMenu();
+    const v = el.video;
+    try { if (v.webkitDisplayingFullscreen) v.webkitExitFullscreen(); } catch (_) {}
+    try { if (document.fullscreenElement) document.exitFullscreen(); } catch (_) {}
+    v.pause(); v.removeAttribute('src'); try { v.load(); } catch (_) {}
+    hideState();
+    el.view.classList.remove('on', 'idle');
+    el.view.setAttribute('aria-hidden', 'true');
+    document.documentElement.classList.remove('player-open', 'immersive');
+    if (frozen) { freezeStage(false); frozen = false; }
+    const path = cur && cur.path;
+    cur = null;
+    if (path) refreshCardProgress(path);
+    if ('mediaSession' in navigator) { try { navigator.mediaSession.metadata = null; } catch (_) {} }
+    if (!fromPopstate && history.state?.view === 'player') navHistory.back();
+  }
+
+  /* ── 进度：每 5 秒、暂停、关闭、切后台各记一次；看到片尾就清掉 ── */
+  function saveNow() {
+    if (!cur || !el) return;
+    const v = el.video, d = v.duration, t = v.currentTime;
+    if (!(d > 0) || !isFinite(d) || !cur.playedOnce) return;
+    if (t >= d - Math.max(30, d * 0.04)) {
+      playProgress.remove(cur.path);
+      if (!cur.series) continueWatching.remove(cur.path);
+      return;
+    }
+    if (t > 15) playProgress.set(cur.path, t, d);
+  }
+
+  /* ── 剧集：下一集 ── */
+  function nextEpisode() {
+    if (!cur || !cur.series || !Array.isArray(cur.eps)) return null;
+    const i = cur.eps.findIndex(e => e.path === cur.path);
+    return i >= 0 ? (cur.eps.slice(i + 1).find(e => e && e.path) || null) : null;
+  }
+  function cancelNext() {
+    clearInterval(nextT); nextT = 0;
+    if (el) el.next.hidden = true;
+  }
+  function offerNext(ep) {
+    nextLeft = 8;
+    el.nextT.textContent = tvEpTitle(ep);
+    const tick = () => { el.nextK.textContent = '下一集 · ' + nextLeft + ' 秒后播放'; };
+    tick();
+    el.next.hidden = false;
+    wake();
+    nextT = setInterval(() => {
+      if (--nextLeft <= 0) { const s = cur && cur.series; const eps = cur && cur.eps; cancelNext(); if (s) tvPlayEp(s.id, ep, eps); return; }
+      tick();
+    }, 1000);
+    $('pvNextGo').onclick = e => { e.stopPropagation(); const s = cur && cur.series; const eps = cur && cur.eps; cancelNext(); if (s) tvPlayEp(s.id, ep, eps); };
+    $('pvNextNo').onclick = e => { e.stopPropagation(); cancelNext(); };
+  }
+
+  /* ── 音轨 / 字幕菜单（HLS 的备选音轨、字幕组在 Safari 里就是原生轨道） ── */
+  const textTracks = () => Array.from(el.video.textTracks || []).filter(t => /^(subtitles|captions|forced)$/.test(t.kind));
+  function refreshTrackButtons() {
+    if (!el || !cur) return;
+    const at = el.video.audioTracks;
+    el.audio.hidden = !(at && at.length > 1);
+    el.subs.hidden = !textTracks().length;
+  }
+  function closeMenu() { if (el) el.menu.hidden = true; }
+  function openMenu(kind) {
+    if (!el.menu.hidden && el.menu.dataset.kind === kind) { closeMenu(); return; }
+    el.menu.dataset.kind = kind;
+    const rows = [];
+    if (kind === 'audio') {
+      const at = Array.from(el.video.audioTracks || []);
+      rows.push('<div class="pv-mh">音轨</div>');
+      at.forEach((t, i) => rows.push('<button class="pv-mi' + (t.enabled ? ' on' : '') + '" data-i="' + i + '"><span>' +
+        esc(t.label || t.language || ('音轨 ' + (i + 1))) + '</span><span>' + (t.enabled ? '✓' : '') + '</span></button>'));
+    } else {
+      const tt = textTracks(), anyOn = tt.some(t => t.mode === 'showing');
+      rows.push('<div class="pv-mh">字幕</div>');
+      rows.push('<button class="pv-mi' + (anyOn ? '' : ' on') + '" data-i="-1"><span>关闭字幕</span><span>' + (anyOn ? '' : '✓') + '</span></button>');
+      tt.forEach((t, i) => rows.push('<button class="pv-mi' + (t.mode === 'showing' ? ' on' : '') + '" data-i="' + i + '"><span>' +
+        esc(t.label || t.language || ('字幕 ' + (i + 1))) + '</span><span>' + (t.mode === 'showing' ? '✓' : '') + '</span></button>'));
+    }
+    el.menu.innerHTML = rows.join('');
+    el.menu.hidden = false;
+    wake();
+  }
+  function pickMenu(i) {
+    if (el.menu.dataset.kind === 'audio') {
+      Array.from(el.video.audioTracks || []).forEach((t, k) => { t.enabled = k === i; });
+    } else {
+      textTracks().forEach((t, k) => { t.mode = k === i ? 'showing' : 'disabled'; });
+    }
+    closeMenu();
+    wake();
+  }
+
+  /* ── 出错：签名过期 / 网络抖动 → 换新签名从原位置重连，最多两次 ── */
+  async function onError() {
+    if (!cur) return;
+    const v = el.video, code = (v.error && v.error.code) || 0;
+    if (code === 1) return;
+    if (code === 4 && !cur.playedOnce) {
+      fail(cur.mode === 'direct' && /\.mkv$/i.test(cur.name || '')
+        ? '这个浏览器解不了这部片的音视频格式。可以在 iPhone / iPad / Mac 的 Safari 里播放，或复制直链用 VLC 等播放器打开'
+        : '这台设备无法解码这个视频');
+      return;
+    }
+    if (cur.tries >= 2) { fail('播放中断，请稍后再试'); return; }
+    cur.tries++;
+    cur.resumeAt = v.currentTime || cur.resumeAt;
+    showState('正在重新连接…', true);
+    const my = ++seq;
+    let src = '';
+    try { src = await pickSource(cur, my); } catch (e) { if (my === seq) fail(e.message || '无法播放'); return; }
+    if (my === seq && src) load(src);
+  }
+
+  async function copyCurrentLink() {
+    if (!cur) return;
+    await copyStreamLink(cur.path, cur.name);
+  }
+
+  function bind() {
+    const v = el.video;
+    $('pvClose').onclick = e => { e.stopPropagation(); close(); };
+    el.audio.onclick = e => { e.stopPropagation(); openMenu('audio'); };
+    el.subs.onclick = e => { e.stopPropagation(); openMenu('subs'); };
+    el.menu.addEventListener('click', e => {
+      e.stopPropagation();
+      const b = e.target.closest('.pv-mi');
+      if (b) pickMenu(parseInt(b.dataset.i, 10));
+    });
+    ['pointerdown', 'mousemove', 'touchstart'].forEach(t => el.view.addEventListener(t, wake, { passive: true }));
+    el.view.addEventListener('click', e => { if (!el.menu.hidden && !el.menu.contains(e.target)) closeMenu(); });
+
+    v.addEventListener('loadedmetadata', () => {
+      if (!cur) return;
+      v.controls = true;
+      if (cur.resumeAt && isFinite(v.duration) && cur.resumeAt < v.duration - 30) {
+        try { v.currentTime = cur.resumeAt; } catch (_) {}
+        if (!cur.tries) flash('从 ' + fmt(cur.resumeAt) + ' 继续播放');
+      }
+      cur.resumeAt = 0;
+      refreshTrackButtons();
+    });
+    v.addEventListener('playing', () => {
+      if (!cur) return;
+      cur.playedOnce = true;
+      cur.tries = 0;
+      hideState();
+      refreshTrackButtons();
+      wake();
+    });
+    v.addEventListener('pause', () => { saveNow(); wake(); });
+    v.addEventListener('timeupdate', () => {
+      if (!cur) return;
+      const now = Date.now();
+      if (now - saveAt > 5000) { saveAt = now; saveNow(); }
+    });
+    v.addEventListener('ended', () => {
+      saveNow();
+      const ep = nextEpisode();
+      if (ep) offerNext(ep);
+      else wake();
+    });
+    v.addEventListener('error', onError);
+    const tracks = () => setTimeout(refreshTrackButtons, 0);
+    if (v.audioTracks && v.audioTracks.addEventListener) v.audioTracks.addEventListener('addtrack', tracks);
+    if (v.textTracks && v.textTracks.addEventListener) v.textTracks.addEventListener('addtrack', tracks);
+
+    /* 在场时，别的 <video> 一开播就按住（展厅 / 轮播会按自己的节奏重启预告片） */
+    document.addEventListener('play', e => {
+      if (isOpen() && e.target !== v && e.target instanceof HTMLMediaElement) { try { e.target.pause(); } catch (_) {} }
+    }, true);
+    window.addEventListener('pagehide', saveNow);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(); });
+  }
+
+  return { open, close: fromPopstate => close(fromPopstate), isOpen, appleHls: NATIVE_HLS };
+})();
+
+/* 「继续观看」卡上的进度条：关播放器时就地刷新，不必重画整条轨道 */
+function cardProgressHTML(path) {
+  const r = playProgress.ratio(path);
+  return r > 0.01 ? '<div class="card-progress"><i style="width:' + (r * 100).toFixed(1) + '%"></i></div>' : '';
+}
+function refreshCardProgress(path) {
+  document.querySelectorAll('.card[data-removable="1"]').forEach(card => {
+    if (card.dataset.path !== path) return;
+    const poster = card.querySelector('.card-poster');
+    if (!poster) return;
+    const old = poster.querySelector('.card-progress');
+    if (old) old.remove();
+    const html = cardProgressHTML(path);
+    if (html) poster.insertAdjacentHTML('beforeend', html);
+  });
+}
+
+function playVideo(path, name, opts) {
+  if (!path) return;
+  haptic.success();
+  if (!(opts && opts.series)) continueWatching.mark(path, name);
+  if ($('sheetMenu')?.classList.contains('on')) closeSheet();
+  Player.open(Object.assign({ path, name }, opts || {}));
+}
+
+/* 外部播放器用的直链（VLC / Infuse 等仍可用，只是不再依赖它们）。
+   Safari 的剪贴板写入要求在手势内发生 —— 签名得异步取，所以交给
+   ClipboardItem 的 Promise；没有 ClipboardItem 的浏览器取到再写。 */
+async function copyStreamLink(path, name) {
+  const urlP = streamSign(path).then(s => streamUrlFor(path, name, s));
+  try {
+    if (window.ClipboardItem && navigator.clipboard?.write) {
+      await navigator.clipboard.write([new ClipboardItem({ 'text/plain': urlP.then(u => new Blob([u], { type: 'text/plain' })) })]);
+    } else {
+      await navigator.clipboard.writeText(await urlP);
+    }
+    toast('直链已复制');
+  } catch (_) {
+    try { prompt('直链（可在其它播放器中打开）', await urlP); } catch (_) {}
+  }
 }
 function copyFileLink() {
-  try { closeSheet(); } catch (_) {}
-  try { toast('请使用 Infuse 播放'); } catch (_) {}
+  const f = state.selectedFile;
+  if ($('sheetMenu')?.classList.contains('on')) closeSheet();
+  if (f) copyStreamLink(f.path, f.name);
 }
 
 
@@ -19608,6 +20145,7 @@ const CACHE_KEEP = new Set([
   'cuven_profile_v1',           // sessionStorage 的当前会话资料
   'cuven_privacy_consent_v1',   // 隐私同意记录，清掉会重新弹窗
   'continue_watching_v2',       // 观看进度是用户数据，不是缓存
+  'play_progress_v1',           // 站内播放器的续播位置，同上
 ]);
 
 /* 把两个 Storage 扫一遍；返回删除条数 */
@@ -20198,6 +20736,7 @@ function goHome(force) {
 }
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
+    if (Player.isOpen()) { Player.close(); return; }
     if ($('searchView').classList.contains('on')) closeSearch();
     else if ($('detailView').classList.contains('on')) closeDetail();
     else if ($('sheetMenu').classList.contains('on')) closeSheet();
@@ -20215,6 +20754,11 @@ window.addEventListener('popstate', e => {
   }
   if (tvAuthHistoryReturnInFlight) {
     tvAuthHistoryReturnInFlight = false;
+    return;
+  }
+  /* 播放器在最上层：返回先关它，底下的详情页 / 首页原样留着 */
+  if (Player.isOpen()) {
+    Player.close(true);
     return;
   }
   const authLayer = $('tvAuthLayer');
@@ -20315,7 +20859,7 @@ if (DEV) {
     const required = ['view-home','view-library','detailView','searchView','sheetMenu','sheetOverlay','toast','dock','navHome','navLib','navSearch','headerAvatar','detailBackdrop','detailContent','detailNavBar','searchInput','searchBody','sheetBody','sheetHandleArea','appStage'];
     const missingDom = required.filter(id => !$(id));
 
-    const fnNames = ['renderHome','renderLibrary','openDetail','closeDetail','openSearch','closeSearch','setHero','navTo','openInfuseDirect','openSheetForFile','fetchJSON'];
+    const fnNames = ['renderHome','renderLibrary','openDetail','closeDetail','openSearch','closeSearch','setHero','navTo','playVideo','openSheetForFile','fetchJSON'];
     const missingFn = fnNames.filter(n => typeof window[n] !== 'function');
 
     const cs = getComputedStyle(document.documentElement);
