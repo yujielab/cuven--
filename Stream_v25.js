@@ -1,5 +1,33 @@
 /**
- * Dropbox Video Proxy — Cloudflare Worker (v24 · 2026-11-08)
+ * Dropbox Video Proxy — Cloudflare Worker (v25 · 2026-11-10)
+ * ────────────────────────────────────────────────────────────────
+ * v25 变更 —— 主题：MKV → HLS → iOS Safari 完整链路（HDR10 / HLG / 杜比视界）
+ *
+ *   ▸ /hls/<签名>/master.m3u8：MKV 在 Worker 里实时重封装为 fMP4 HLS，交给系统
+ *     原生播放器（AVPlayer）——全屏、画中画、AirPlay、系统音轨 / 字幕菜单全部可用。
+ *     不转码视频：负载零拷贝直通，一个 6 秒分段只回源它自己那段字节。
+ *   ▸ 杜比视界：P5 → dvh1 + dvcC；P8.1 / 8.4 → hvc1 + dvvC + SUPPLEMENTAL-CODECS
+ *     （dvh1.08.LL/db1p | db4h，与 VIDEO-RANGE 交叉校验，遵循 Apple HLS 规范）；
+ *     P7（UHD 蓝光双层 FEL/MEL）逐帧丢弃增强层、把 RPU 改写为 8.1
+ *     （与 dovi_tool mode 2 逐位一致，已用其测试向量逐字节校验）。
+ *     HDR10 / HLG 依 VUI 或 MKV Colour 信令，并写入 colr / mdcv / clli。
+ *   ▸ 音频：AAC / AC-3 / E-AC-3（含 Atmos JOC，CHANNELS="16/JOC"）/ FLAC / ALAC 直通。
+ *     默认音轨复用在视频分段里（Dropbox 只读一遍）；其余音轨是 HLS 备选音轨。
+ *     DTS / TrueHD 等 Safari 解不了的音轨不进播放列表，播放页会提示。
+ *   ▸ 字幕：内封 SRT / ASS（含 zlib 压缩）靠 Cues 精确定位只读字幕块；同目录外挂
+ *     .srt/.ass/.vtt 一并进 HLS 字幕组；全部为带 X-TIMESTAMP-MAP 的分段 WebVTT，
+ *     中文字幕（简体优先）默认开启。图形字幕（PGS / VobSub）无法转换，不列出。
+ *   ▸ 播放页 / 首页弹窗：Safari 打开 MKV 自动走 HLS，徽章按码流实测显示
+ *     （Dolby Vision / HDR10 / HLG）；签名过期或文件被替换会换签名原位重载。
+ *     v24 的 MSE「MKV 引擎」从未向 SourceBuffer 写入数据（且在 iPhone 上
+ *     ManagedMediaSource 因 disableRemotePlayback=false 不会打开），已移除。
+ *   ▸ 需要 Cues 关键帧索引（mkvmerge / MakeMKV / ffmpeg 产出的文件都有）；
+ *     没有的文件回 422，播放页自动回退直连。
+ *   ▸ 新环境变量：HLS_DISABLE=1（关闭）、HLS_SEG_SEC（分段目标时长，默认 6）、
+ *     HLS_DV_MODE=auto|dvh1|off（杜比信令策略，主列表也可加 ?dv= 临时覆盖）。
+ *   ▸ 建议 Workers 付费计划：一个 4K remux 分段约 10~20ms CPU，免费计划的
+ *     10ms 上限在高码率片源上可能不够。
+ *
  * ────────────────────────────────────────────────────────────────
  * v24 变更 —— 主题：原生 Safari 杜比视界 / HDR、完整音轨与内/外挂字幕支持
  *
@@ -565,6 +593,8 @@ export default {
       const isProbe = path === EDGE_PING_PATH;
       // v24：允许跨优选入口的 <track> 字幕请求通过与 /stream 相同的 HMAC 签名鉴权
       const isSubVtt = path === '/api/subs/vtt';
+      // v25：HLS 的签名在路径里（/hls/<exp>.<sig>.<path>/…），相对 URI 自动继承
+      const isHls = path.startsWith('/hls/');
 
       // /stream 鉴权短路：HMAC 签名直链（?exp=&sig=）内联校验放行。
       // 外部播放器（Infuse/VLC）不处理 Set-Cookie，必须在本次请求内完成校验；
@@ -572,7 +602,12 @@ export default {
       // 日志里 —— 已由「可分享、会过期、不含主密钥」的签名取代。
       const authed =
         (cookie.auth && await verifySession(cookie.auth, env)) ||
-        ((isStream || isProbe || isSubVtt) && await verifyStreamSig(url, env));
+        ((isStream || isProbe || isSubVtt) && await verifyStreamSig(url, env)) ||
+        (isHls && await hlsVerifyPath(path, env));
+
+      // 原生播放器拿到 HTML 登录页只会报「无法播放」—— HLS 一律回 401，
+      // 播放页据此换签名重载
+      if (!authed && isHls) return hlsFail(401, 'signature expired');
 
       if (!authed) {
         // 兼容入口：GET ?key= 通过 → 写 Cookie 并 302 跳回干净 URL
@@ -610,6 +645,10 @@ export default {
       // 让 Infuse / VLC 等播放器以 URL 路径里的文件名区分不同影片，避免进度共享
       if (path === '/stream' || path.startsWith('/stream/')) {
         return await handleStream(url, request, env, ctx);
+      }
+      // v25：MKV → HLS（fMP4）实时重封装，iOS / Safari 原生播放
+      if (path.startsWith('/hls/')) {
+        return await handleHls(url, request, env, ctx);
       }
       switch (path) {
         case '/health':         return handleHealth(env, request);
@@ -5376,17 +5415,2882 @@ async function handleStream(url, request, env, ctx) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  v25：MKV → HLS（fMP4）实时重封装 —— iOS / Safari 原生播放链路
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  iPhone 上能稳定点亮杜比视界 / HDR、能用画中画与 AirPlay 的只有原生 HLS。
+//  所以 MKV 不再交给浏览器解，而是在 Worker 里实时换成 fMP4 分片：
+//
+//    索引   读文件头 + Cues + 首簇（三四个小 Range），得到轨道、关键帧表、
+//           各音轨的 dac3 / dec3 / esds 等配置。按 content_hash 缓存，换文件自动换代。
+//    分片   以视频关键帧为界按字节区间切。一个分片只回源它自己那段字节，
+//           EBML 流式解析 → moof + mdat。视频负载零拷贝：只引用、不复制。
+//    音频   默认音轨与视频复用在同一分片里（Dropbox 只读一遍）；其余音轨是
+//           HLS 备选音轨，用户切换时才去读。
+//    字幕   内封 SRT / ASS 靠 Cues 精确定位，只读字幕块本身；同目录外挂字幕
+//           一起挂进 HLS 字幕组。全部是带 X-TIMESTAMP-MAP 的 WebVTT。
+//    杜比   P5 → dvh1；P8.x → hvc1 + dvvC + SUPPLEMENTAL-CODECS；
+//           P7（UHD 蓝光双层）→ 逐帧丢弃增强层、把 RPU 改写为 8.1。
+//
+//  时间轴整体后移 HLS_T0 秒（Apple 分段器同样从 10s 起），B 帧的 DTS 因此
+//  永远非负；字幕用同一个偏移写进 X-TIMESTAMP-MAP，三条轨严格对齐。
+
+const HLS_VER = 1;                          // 输出格式变更时 +1：播放列表与缓存一起换代
+const HLS_IDX_CACHE = 'https://cache.internal/hls-idx/';
+const HLS_SUB_CACHE = 'https://cache.internal/hls-sub/';
+const HLS_T0 = 10;                          // 秒
+const HLS_HEAD = 512 * 1024;                // 索引首读
+const HLS_PROBE = 2 * 1048576;              // 首簇探测
+const HLS_FIRST = 1048576;                  // 分片首段直通（压低首字节延迟）
+const HLS_SLICE = 4 * 1048576;              // 其余字节按 4MB 并行回源
+const HLS_WINDOW = 2;                       // 并行窗口（Workers 每次调用最多 6 条等待中的连接）
+const HLS_FRAG_SEC = 1;                     // 一个 moof 覆盖约 1 秒
+const HLS_FRAG_BYTES = 6 * 1048576;         // 或累计到 6MB（高码率时控制内存）
+const hlsSegTarget = env => envInt(env.HLS_SEG_SEC, 6, 2, 10);
+
+// ── 字节与编码小工具 ──
+
+function hlsB64(u8) {
+  let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) {
+    s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  }
+  return btoa(s);
+}
+function hlsUnB64(s) {
+  const b = atob(s);
+  const u = new Uint8Array(b.length);
+  for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i);
+  return u;
+}
+function hlsB64url(str) {
+  return hlsB64(new TextEncoder().encode(str)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function hlsUnB64url(s) {
+  let t = String(s).replace(/-/g, '+').replace(/_/g, '/');
+  while (t.length % 4) t += '=';
+  return new TextDecoder().decode(hlsUnB64(t));
+}
+function hlsConcat(parts) {
+  let n = 0;
+  for (const p of parts) n += p.length;
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+// ── 位读写（MSB 优先；RPU / SPS / E-AC-3 头都靠它）──
+
+class HlsBits {
+  constructor(u8, startByte = 0, endByte = u8.length) {
+    this.b = u8; this.p = startByte * 8; this.end = endByte * 8;
+  }
+  get left() { return this.end - this.p; }
+  get aligned() { return (this.p & 7) === 0; }
+  u(n) {                                     // n ≤ 32，返回非负整数
+    if (this.p + n > this.end) throw new Error('bitstream overrun');
+    let v = 0;
+    for (let i = 0; i < n; i++) {
+      v = v * 2 + ((this.b[this.p >> 3] >> (7 - (this.p & 7))) & 1);
+      this.p++;
+    }
+    return v;
+  }
+  skip(n) {
+    if (this.p + n > this.end) throw new Error('bitstream overrun');
+    this.p += n;
+  }
+  ue() {
+    let z = 0;
+    while (this.u(1) === 0) { if (++z > 31) throw new Error('bad exp-golomb'); }
+    return z ? (2 ** z - 1) + this.u(z) : 0;
+  }
+  se() {
+    const k = this.ue();
+    return k & 1 ? (k + 1) / 2 : -(k / 2);
+  }
+}
+
+class HlsBitWriter {
+  constructor() { this.bytes = []; this.cur = 0; this.n = 0; }
+  bit(b) {
+    this.cur = (this.cur << 1) | (b & 1);
+    if (++this.n === 8) { this.bytes.push(this.cur); this.cur = 0; this.n = 0; }
+  }
+  u(n, v) {                                  // v 为非负整数（有符号字段先自行转补码）
+    for (let i = n - 1; i >= 0; i--) this.bit(Math.floor(v / 2 ** i) % 2);
+  }
+  ue(v) {
+    const x = v + 1;
+    let len = 0;
+    while (2 ** (len + 1) <= x) len++;
+    this.u(len, 0);
+    this.u(len + 1, x);
+  }
+  se(v) { this.ue(v <= 0 ? -2 * v : 2 * v - 1); }
+  get aligned() { return this.n === 0; }
+  align() { while (this.n) this.bit(0); }
+  out() { return Uint8Array.from(this.bytes); }
+}
+
+// CRC-32/MPEG-2（RPU 末尾校验和用的就是它）
+const HLS_CRC_TAB = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i << 24;
+    for (let k = 0; k < 8; k++) c = (c & 0x80000000) ? ((c << 1) ^ 0x04C11DB7) : (c << 1);
+    t[i] = c >>> 0;
+  }
+  return t;
+})();
+function hlsCrc32(u8, start = 0, end = u8.length) {
+  let c = 0xFFFFFFFF;
+  for (let i = start; i < end; i++) c = ((c << 8) ^ HLS_CRC_TAB[((c >>> 24) ^ u8[i]) & 0xFF]) >>> 0;
+  return c >>> 0;
+}
+
+// NAL 防竞争字节（00 00 03）去除 / 插入
+function nalUnescape(u8) {
+  const out = new Uint8Array(u8.length);
+  let n = 0, zeros = 0;
+  for (let i = 0; i < u8.length; i++) {
+    const b = u8[i];
+    if (zeros >= 2 && b === 3) { zeros = 0; continue; }
+    out[n++] = b;
+    zeros = b === 0 ? zeros + 1 : 0;
+  }
+  return out.subarray(0, n);
+}
+function nalEscape(u8) {
+  const out = [];
+  let zeros = 0;
+  for (let i = 0; i < u8.length; i++) {
+    const b = u8[i];
+    if (zeros >= 2 && b <= 3) { out.push(3); zeros = 0; }
+    out.push(b);
+    zeros = b === 0 ? zeros + 1 : 0;
+  }
+  return Uint8Array.from(out);
+}
+
+// ── EBML ──
+
+const MKV = Object.freeze({
+  EBML: 0x1A45DFA3, DocType: 0x4282, Segment: 0x18538067,
+  SeekHead: 0x114D9B74, Seek: 0x4DBB, SeekID: 0x53AB, SeekPosition: 0x53AC,
+  Info: 0x1549A966, TimestampScale: 0x2AD7B1, Duration: 0x4489,
+  Tracks: 0x1654AE6B, TrackEntry: 0xAE, TrackNumber: 0xD7, TrackType: 0x83,
+  FlagEnabled: 0xB9, FlagDefault: 0x88, FlagForced: 0x55AA, FlagHearingImpaired: 0x55AB,
+  FlagCommentary: 0x55AF, FlagOriginal: 0x55AE,
+  DefaultDuration: 0x23E383, Name: 0x536E, Language: 0x22B59C, LanguageBCP47: 0x22B59D,
+  CodecID: 0x86, CodecPrivate: 0x63A2, CodecDelay: 0x56AA,
+  Video: 0xE0, PixelWidth: 0xB0, PixelHeight: 0xBA, DisplayWidth: 0x54B0, DisplayHeight: 0x54BA,
+  DisplayUnit: 0x54B2, Colour: 0x55B0, MatrixCoefficients: 0x55B1, Range: 0x55B9,
+  TransferCharacteristics: 0x55BA, Primaries: 0x55BB, MaxCLL: 0x55BC, MaxFALL: 0x55BD,
+  MasteringMetadata: 0x55D0, PrimaryRX: 0x55D1, PrimaryRY: 0x55D2, PrimaryGX: 0x55D3,
+  PrimaryGY: 0x55D4, PrimaryBX: 0x55D5, PrimaryBY: 0x55D6, WhiteX: 0x55D7, WhiteY: 0x55D8,
+  LumMax: 0x55D9, LumMin: 0x55DA,
+  Audio: 0xE1, SamplingFrequency: 0xB5, OutputSamplingFrequency: 0x78B5, Channels: 0x9F, BitDepth: 0x6264,
+  ContentEncodings: 0x6D80, ContentEncoding: 0x6240, ContentEncodingType: 0x5033,
+  ContentCompression: 0x5034, ContentCompAlgo: 0x4254, ContentCompSettings: 0x4255,
+  BlockAdditionMapping: 0x41E4, BlockAddIDType: 0x41E7, BlockAddIDExtraData: 0x41ED,
+  Cues: 0x1C53BB6B, CuePoint: 0xBB, CueTime: 0xB3, CueTrackPositions: 0xB7, CueTrack: 0xF7,
+  CueClusterPosition: 0xF1, CueRelativePosition: 0xF0, CueDuration: 0xB2,
+  Cluster: 0x1F43B675, Timestamp: 0xE7, SimpleBlock: 0xA3, BlockGroup: 0xA0, Block: 0xA1,
+  BlockDuration: 0x9B, ReferenceBlock: 0xFB,
+  Tags: 0x1254C367, Chapters: 0x1043A770, Attachments: 0x1941A469, Void: 0xEC,
+});
+// 出现这些顶层元素 = 簇区结束
+const MKV_TOP = new Set([MKV.Cues, MKV.Tags, MKV.Chapters, MKV.Attachments, MKV.SeekHead,
+  MKV.Info, MKV.Tracks, MKV.EBML, MKV.Segment]);
+
+/** EBML ID（保留长度标记位）：返回 [id, len]；字节不够返回 null */
+function ebmlId(u8, p, end) {
+  if (p >= end) return null;
+  const b = u8[p];
+  const len = b & 0x80 ? 1 : b & 0x40 ? 2 : b & 0x20 ? 3 : b & 0x10 ? 4 : 0;
+  if (!len) throw new Error('invalid EBML id');
+  if (p + len > end) return null;
+  let v = 0;
+  for (let i = 0; i < len; i++) v = v * 256 + u8[p + i];
+  return [v, len];
+}
+/** EBML 尺寸：返回 [size, len]，未知尺寸 size = -1 */
+function ebmlSize(u8, p, end) {
+  if (p >= end) return null;
+  const b = u8[p];
+  let len = 1, mask = 0x80;
+  while (len <= 8 && !(b & mask)) { mask >>= 1; len++; }
+  if (len > 8) throw new Error('invalid EBML size');
+  if (p + len > end) return null;
+  let v = b & (mask - 1);
+  let ones = v === mask - 1;
+  for (let i = 1; i < len; i++) {
+    const x = u8[p + i];
+    v = v * 256 + x;
+    if (x !== 0xFF) ones = false;
+  }
+  return [ones ? -1 : v, len];
+}
+function ebmlUint(u8, p, n) { let v = 0; for (let i = 0; i < n; i++) v = v * 256 + u8[p + i]; return v; }
+function ebmlFloat(u8, p, n) {
+  const dv = new DataView(u8.buffer, u8.byteOffset + p, n);
+  return n === 4 ? dv.getFloat32(0) : n === 8 ? dv.getFloat64(0) : 0;
+}
+function ebmlStr(u8, p, n) { return new TextDecoder().decode(u8.subarray(p, p + n)).replace(/\0+$/, ''); }
+
+/** 遍历缓冲区内的同级元素。末尾不完整的元素照样给出（end 被截断），由调用方判断 */
+function* ebmlChildren(u8, start, end) {
+  let p = start;
+  while (p < end) {
+    const id = ebmlId(u8, p, end);
+    if (!id) return;
+    const sz = ebmlSize(u8, p + id[1], end);
+    if (!sz) return;
+    const data = p + id[1] + sz[1];
+    const size = sz[0] < 0 ? end - data : sz[0];
+    yield { id: id[0], pos: p, data, size, end: data + size, cut: data + size > end };
+    p = data + size;
+  }
+}
+function ebmlMap(u8, start, end) {
+  const m = new Map();
+  for (const e of ebmlChildren(u8, start, end)) if (!m.has(e.id)) m.set(e.id, e);
+  return m;
+}
+
+// ── 语言与显示名 ──
+
+const HLS_LANG = {
+  eng: 'en', chi: 'zh', zho: 'zh', jpn: 'ja', kor: 'ko', fre: 'fr', fra: 'fr', ger: 'de', deu: 'de',
+  spa: 'es', ita: 'it', rus: 'ru', por: 'pt', ara: 'ar', hin: 'hi', tha: 'th', vie: 'vi', ind: 'id',
+  may: 'ms', msa: 'ms', tur: 'tr', pol: 'pl', dut: 'nl', nld: 'nl', swe: 'sv', nor: 'no', nob: 'nb',
+  nno: 'nn', dan: 'da', fin: 'fi', gre: 'el', ell: 'el', heb: 'he', hun: 'hu', cze: 'cs', ces: 'cs',
+  slo: 'sk', slk: 'sk', rum: 'ro', ron: 'ro', bul: 'bg', ukr: 'uk', hrv: 'hr', srp: 'sr', slv: 'sl',
+  est: 'et', lav: 'lv', lit: 'lt', ice: 'is', isl: 'is', per: 'fa', fas: 'fa', urd: 'ur', ben: 'bn',
+  tam: 'ta', tel: 'te', mal: 'ml', kan: 'kn', mar: 'mr', guj: 'gu', pan: 'pa', tgl: 'tl', fil: 'fil',
+  cat: 'ca', baq: 'eu', eus: 'eu', glg: 'gl', wel: 'cy', cym: 'cy', gle: 'ga', alb: 'sq', sqi: 'sq',
+  mac: 'mk', mkd: 'mk', bos: 'bs', geo: 'ka', kat: 'ka', arm: 'hy', hye: 'hy', kaz: 'kk', uzb: 'uz',
+  mon: 'mn', bur: 'my', mya: 'my', khm: 'km', lao: 'lo', nep: 'ne', sin: 'si', afr: 'af', swa: 'sw',
+  amh: 'am', yue: 'yue', und: 'und', zxx: 'zxx', mul: 'mul',
+};
+const HLS_LANG_ZH = {
+  en: '英语', zh: '中文', 'zh-Hans': '简体中文', 'zh-Hant': '繁体中文', yue: '粤语', ja: '日语',
+  ko: '韩语', fr: '法语', de: '德语', es: '西班牙语', it: '意大利语', ru: '俄语', pt: '葡萄牙语',
+  th: '泰语', vi: '越南语', ar: '阿拉伯语', hi: '印地语', id: '印尼语', ms: '马来语', tr: '土耳其语',
+  pl: '波兰语', nl: '荷兰语', sv: '瑞典语', no: '挪威语', nb: '挪威语', da: '丹麦语', fi: '芬兰语',
+  el: '希腊语', he: '希伯来语', hu: '匈牙利语', cs: '捷克语', uk: '乌克兰语', ro: '罗马尼亚语',
+  und: '未知语言',
+};
+
+/** MKV 语言 → BCP-47；中文按轨道名细分简繁粤 */
+function hlsLang(t) {
+  let lang = t.langBcp || HLS_LANG[String(t.lang || 'und').toLowerCase()] || String(t.lang || 'und');
+  const nm = String(t.name || '');
+  if (lang === 'zh' || lang === 'chi') {
+    if (/粤|cantonese|yue/i.test(nm)) lang = 'yue';
+    else if (/繁|cht|tc\b|traditional|hant|big5/i.test(nm)) lang = 'zh-Hant';
+    else if (/简|chs|sc\b|simplified|hans|gb/i.test(nm)) lang = 'zh-Hans';
+  }
+  return lang;
+}
+function hlsLangName(lang) { return HLS_LANG_ZH[lang] || HLS_LANG_ZH[lang.split('-')[0]] || lang; }
+/** 播放列表属性值里不允许出现的字符 */
+function hlsAttr(s) { return String(s).replace(/["\r\n]/g, ' ').trim(); }
+
+// ── 视频：HEVC ──
+
+function hevcParseHvcC(u8) {
+  if (!u8 || u8.length < 23) return null;
+  const b = new HlsBits(u8);
+  b.u(8);
+  const ps = b.u(2), tier = b.u(1), pidc = b.u(5);
+  const compat = b.u(32);
+  const cons = [];
+  for (let i = 0; i < 6; i++) cons.push(b.u(8));
+  const level = b.u(8);
+  b.u(16); b.u(8);
+  b.u(6); const chroma = b.u(2);
+  b.u(5); const bdl = b.u(3) + 8;
+  b.u(5); b.u(3);
+  b.u(16); b.u(2); b.u(3); b.u(1);
+  const nalLen = b.u(2) + 1;
+  const n = b.u(8);
+  let p = 23;
+  const nals = [];
+  for (let i = 0; i < n && p + 3 <= u8.length; i++) {
+    const type = u8[p] & 0x3F;
+    const cnt = (u8[p + 1] << 8) | u8[p + 2];
+    p += 3;
+    for (let j = 0; j < cnt && p + 2 <= u8.length; j++) {
+      const len = (u8[p] << 8) | u8[p + 1];
+      p += 2;
+      nals.push({ type, data: u8.subarray(p, p + len) });
+      p += len;
+    }
+  }
+  return { ps, tier, pidc, compat, cons, level, chroma, bdl, nalLen, nals };
+}
+
+/** RFC 6381 / ISO 14496-15 附录 E：hvc1.2.4.L153.B0 */
+function hevcCodecString(h) {
+  let rev = 0;
+  for (let j = 0; j < 32; j++) if ((h.compat >>> (31 - j)) & 1) rev += 2 ** j;
+  const cons = h.cons.slice();
+  while (cons.length && cons[cons.length - 1] === 0) cons.pop();
+  return `hvc1.${['', 'A', 'B', 'C'][h.ps]}${h.pidc}.${rev.toString(16).toUpperCase()}`
+    + `.${h.tier ? 'H' : 'L'}${h.level}` + cons.map(c => '.' + c.toString(16).toUpperCase()).join('');
+}
+
+function hevcSkipScalingList(b) {
+  for (let sizeId = 0; sizeId < 4; sizeId++) {
+    for (let m = 0; m < 6; m += sizeId === 3 ? 3 : 1) {
+      if (!b.u(1)) { b.ue(); continue; }
+      const n = Math.min(64, 1 << (4 + (sizeId << 1)));
+      if (sizeId > 1) b.se();
+      for (let i = 0; i < n; i++) b.se();
+    }
+  }
+}
+
+/** HEVC SPS：只取我们用得到的——重排深度（推 DTS）、VUI 色彩（判 PQ/HLG）、SAR */
+function hevcParseSps(nal) {
+  const d = nalUnescape(nal);
+  const b = new HlsBits(d, 2);
+  b.u(4);
+  const maxSub = b.u(3);
+  b.u(1);
+  b.u(8); b.u(32); b.u(4); b.u(32); b.u(12); b.u(8);
+  const subP = [], subL = [];
+  for (let i = 0; i < maxSub; i++) { subP.push(b.u(1)); subL.push(b.u(1)); }
+  if (maxSub > 0) for (let i = maxSub; i < 8; i++) b.u(2);
+  for (let i = 0; i < maxSub; i++) {
+    if (subP[i]) { b.u(32); b.u(32); b.u(24); }
+    if (subL[i]) b.u(8);
+  }
+  b.ue();
+  const chroma = b.ue();
+  if (chroma === 3) b.u(1);
+  const out = { w: b.ue(), h: b.ue(), chroma };
+  if (b.u(1)) { b.ue(); b.ue(); b.ue(); b.ue(); }
+  out.bdl = b.ue() + 8;
+  b.ue();
+  const log2Poc = b.ue() + 4;
+  const subInfo = b.u(1);
+  for (let i = subInfo ? 0 : maxSub; i <= maxSub; i++) {
+    b.ue();
+    out.reorder = b.ue();
+    b.ue();
+  }
+  try {
+    for (let i = 0; i < 6; i++) b.ue();
+    if (b.u(1) && b.u(1)) hevcSkipScalingList(b);
+    b.u(1); b.u(1);
+    if (b.u(1)) { b.u(4); b.u(4); b.ue(); b.ue(); b.u(1); }
+    const nRps = b.ue();
+    const numDelta = [];
+    for (let i = 0; i < nRps; i++) {
+      const inter = i !== 0 ? b.u(1) : 0;
+      if (inter) {
+        b.u(1); b.ue();
+        let k = 0;
+        for (let j = 0; j <= numDelta[i - 1]; j++) {
+          const used = b.u(1);
+          const useDelta = used ? 1 : b.u(1);
+          if (used || useDelta) k++;
+        }
+        numDelta.push(k);
+      } else {
+        const neg = b.ue(), pos = b.ue();
+        for (let j = 0; j < neg + pos; j++) { b.ue(); b.u(1); }
+        numDelta.push(neg + pos);
+      }
+    }
+    if (b.u(1)) { const n = b.ue(); for (let i = 0; i < n; i++) { b.u(log2Poc); b.u(1); } }
+    b.u(1); b.u(1);
+    if (b.u(1)) hlsParseVuiColour(b, out);
+  } catch {}
+  return out;
+}
+
+/** HEVC 与 AVC 的 VUI 开头几项完全一致：SAR、过扫描、视频信号类型 */
+function hlsParseVuiColour(b, out) {
+  if (b.u(1)) {
+    const idc = b.u(8);
+    if (idc === 255) { out.sarW = b.u(16); out.sarH = b.u(16); }
+    else if (idc > 0 && idc < 17) {
+      const t = [[1, 1], [12, 11], [10, 11], [16, 11], [40, 33], [24, 11], [20, 11], [32, 11],
+        [80, 33], [18, 11], [15, 11], [64, 33], [160, 99], [4, 3], [3, 2], [2, 1]][idc - 1];
+      out.sarW = t[0]; out.sarH = t[1];
+    }
+  }
+  if (b.u(1)) b.u(1);
+  if (b.u(1)) {
+    b.u(3);
+    out.full = b.u(1);
+    if (b.u(1)) { out.prim = b.u(8); out.trc = b.u(8); out.mtx = b.u(8); }
+  }
+}
+
+// ── 视频：AVC ──
+
+function avcParseAvcC(u8) {
+  if (!u8 || u8.length < 7) return null;
+  const out = { profile: u8[1], compat: u8[2], level: u8[3], nalLen: (u8[4] & 3) + 1, sps: [] };
+  const n = u8[5] & 0x1F;
+  let p = 6;
+  for (let i = 0; i < n && p + 2 <= u8.length; i++) {
+    const len = (u8[p] << 8) | u8[p + 1];
+    p += 2;
+    out.sps.push(u8.subarray(p, p + len));
+    p += len;
+  }
+  return out;
+}
+function avcCodecString(a) {
+  const h = v => v.toString(16).padStart(2, '0');
+  return `avc1.${h(a.profile)}${h(a.compat)}${h(a.level)}`;
+}
+function avcSkipHrd(b) {
+  const n = b.ue() + 1;
+  b.u(4); b.u(4);
+  for (let i = 0; i < n; i++) { b.ue(); b.ue(); b.u(1); }
+  b.u(5); b.u(5); b.u(5); b.u(5);
+}
+function avcParseSps(nal) {
+  const d = nalUnescape(nal);
+  const b = new HlsBits(d, 1);
+  const out = { profile: b.u(8), reorder: -1 };
+  b.u(8); b.u(8); b.ue();
+  try {
+    if ([100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].includes(out.profile)) {
+      const chroma = b.ue();
+      if (chroma === 3) b.u(1);
+      out.bdl = b.ue() + 8; b.ue(); b.u(1);
+      if (b.u(1)) {
+        for (let i = 0; i < (chroma !== 3 ? 8 : 12); i++) {
+          if (!b.u(1)) continue;
+          let last = 8, next = 8;
+          for (let j = 0; j < (i < 6 ? 16 : 64); j++) {
+            if (next !== 0) next = (last + b.se() + 256) % 256;
+            if (next !== 0) last = next;
+          }
+        }
+      }
+    }
+    b.ue();
+    const poc = b.ue();
+    if (poc === 0) b.ue();
+    else if (poc === 1) { b.u(1); b.se(); b.se(); const n = b.ue(); for (let i = 0; i < n; i++) b.se(); }
+    b.ue(); b.u(1); b.ue(); b.ue();
+    if (!b.u(1)) b.u(1);
+    b.u(1);
+    if (b.u(1)) { b.ue(); b.ue(); b.ue(); b.ue(); }
+    if (b.u(1)) {
+      hlsParseVuiColour(b, out);
+      if (b.u(1)) { b.ue(); b.ue(); }
+      if (b.u(1)) { b.u(32); b.u(32); b.u(1); }
+      const nalHrd = b.u(1); if (nalHrd) avcSkipHrd(b);
+      const vclHrd = b.u(1); if (vclHrd) avcSkipHrd(b);
+      if (nalHrd || vclHrd) b.u(1);
+      b.u(1);
+      if (b.u(1)) { b.u(1); b.ue(); b.ue(); b.ue(); b.ue(); out.reorder = b.ue(); b.ue(); }
+    }
+  } catch {}
+  return out;
+}
+
+// ── 视频：AV1 ──
+
+function av1Parse(u8) {
+  if (!u8 || u8.length < 4 || !(u8[0] & 0x80)) return null;
+  const profile = u8[1] >> 5, level = u8[1] & 0x1F, tier = u8[2] >> 7;
+  const depth = (u8[2] & 0x40) ? ((u8[2] & 0x20) ? 12 : 10) : 8;
+  return { profile, level, tier, depth };
+}
+function av1CodecString(a) {
+  return `av01.${a.profile}.${String(a.level).padStart(2, '0')}${a.tier ? 'H' : 'M'}.${String(a.depth).padStart(2, '0')}`;
+}
+
+// ── 音频：AAC ──
+
+const AAC_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+
+function aacParseAsc(u8) {
+  if (!u8 || u8.length < 2) return null;
+  const b = new HlsBits(u8);
+  const aot = () => { const a = b.u(5); return a === 31 ? 32 + b.u(6) : a; };
+  const rate = () => { const i = b.u(4); return i === 15 ? b.u(24) : (AAC_RATES[i] || 0); };
+  try {
+    const first = aot();
+    const sr = rate();
+    const ch = b.u(4);
+    // 显式 SBR / PS：外层 AOT 是 5（HE-AAC）或 29（HE-AACv2），CODECS 按外层写
+    if (first === 5 || first === 29) { const out = rate(); aot(); return { aot: first, rate: sr, outRate: out, ch }; }
+    return { aot: first, rate: sr, outRate: sr, ch };
+  } catch { return null; }
+}
+/** 老式 A_AAC/MPEG4/LC 之类没有 CodecPrivate 的 CodecID：自己拼一个 ASC */
+function aacBuildAsc(codecId, rate, ch, outRate) {
+  const idx = r => { const i = AAC_RATES.indexOf(r); return i < 0 ? 3 : i; };
+  const prof = /MAIN/.test(codecId) ? 1 : /SSR/.test(codecId) ? 3 : /LTP/.test(codecId) ? 4 : 2;
+  if (/SBR/.test(codecId) || (outRate && outRate === rate * 2)) {
+    const w = new HlsBitWriter();
+    w.u(5, 5); w.u(4, idx(rate)); w.u(4, ch); w.u(4, idx(outRate || rate * 2)); w.u(5, 2); w.align();
+    return w.out();
+  }
+  const w = new HlsBitWriter();
+  w.u(5, prof); w.u(4, idx(rate)); w.u(4, ch); w.u(3, 0); w.align();
+  return w.out();
+}
+
+// ── 音频：AC-3 / E-AC-3 ──
+
+const AC3_KBPS = [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 576, 640];
+const AC3_CH = [2, 1, 2, 3, 3, 4, 4, 5];
+
+/** 解析一个 AC-3 或 E-AC-3 同步帧头。E-AC-3 会一路读到 addbsi，拿到 Atmos(JOC) 标记 */
+function ac3ParseHeader(d, p = 0) {
+  if (d.length < p + 8 || d[p] !== 0x0B || d[p + 1] !== 0x77) return null;
+  const bsid = d[p + 5] >> 3;
+  if (bsid <= 10) {
+    const b = new HlsBits(d, p + 4);
+    const fscod = b.u(2), frmsizecod = b.u(6);
+    b.u(5);
+    const bsmod = b.u(3), acmod = b.u(3);
+    if ((acmod & 1) && acmod !== 1) b.u(2);
+    if (acmod & 4) b.u(2);
+    if (acmod === 2) b.u(2);
+    const lfeon = b.u(1);
+    if (fscod === 3) return null;
+    const rate = [48000, 44100, 32000][fscod];
+    const kbps = AC3_KBPS[frmsizecod >> 1] || 0;
+    const words = fscod === 1 ? Math.floor(kbps * 1000 * 1536 / 44100 / 16) + (frmsizecod & 1)
+      : kbps * (fscod === 0 ? 2 : 3);
+    return { eac3: false, strmtyp: 0, substreamid: 0, fscod, frmsizecod, bsid, bsmod, acmod, lfeon,
+      rate, blocks: 6, frameSize: words * 2, bitrate: kbps * 1000, ch: AC3_CH[acmod] + lfeon };
+  }
+  if (bsid > 16) return null;
+  const b = new HlsBits(d, p + 2);
+  const strmtyp = b.u(2), substreamid = b.u(3), frmsiz = b.u(11);
+  const fscod = b.u(2);
+  let blocks = 6, rate;
+  if (fscod === 3) { const f2 = b.u(2); if (f2 === 3) return null; rate = [24000, 22050, 16000][f2]; }
+  else { blocks = [1, 2, 3, 6][b.u(2)]; rate = [48000, 44100, 32000][fscod]; }
+  const acmod = b.u(3), lfeon = b.u(1);
+  b.u(5);
+  const frameSize = (frmsiz + 1) * 2;
+  const h = { eac3: true, strmtyp, substreamid, fscod, bsid, bsmod: 0, acmod, lfeon, rate, blocks,
+    frameSize, bitrate: frameSize * 8 * rate / (blocks * 256), ch: AC3_CH[acmod] + lfeon,
+    chanmap: null, joc: false, jocCx: 0 };
+  try {
+    for (let i = 0; i < (acmod ? 1 : 2); i++) { b.u(5); if (b.u(1)) b.u(8); }
+    if (strmtyp === 1 && b.u(1)) h.chanmap = b.u(16);
+    if (b.u(1)) {                                      // mixmdate
+      if (acmod > 2) b.u(2);
+      if ((acmod & 1) && acmod > 2) { b.u(3); b.u(3); }
+      if (acmod & 4) { b.u(3); b.u(3); }
+      if (lfeon && b.u(1)) b.u(5);
+      if (strmtyp === 0) {
+        for (let i = 0; i < (acmod ? 1 : 2); i++) if (b.u(1)) b.u(6);
+        if (b.u(1)) b.u(6);
+        const mixdef = b.u(2);
+        if (mixdef === 1) b.u(5);
+        else if (mixdef === 2) b.u(12);
+        else if (mixdef === 3) b.skip((b.u(5) + 2) * 8);
+        if (acmod < 2) for (let i = 0; i < (acmod ? 1 : 2); i++) if (b.u(1)) b.u(14);
+        if (b.u(1)) for (let k = 0; k < blocks; k++) if (blocks === 1 || b.u(1)) b.u(5);
+      }
+    }
+    if (b.u(1)) {                                      // infomdate
+      h.bsmod = b.u(3);
+      b.u(2);
+      if (acmod === 2) b.u(4);
+      if (acmod >= 6) b.u(2);
+      for (let i = 0; i < (acmod ? 1 : 2); i++) if (b.u(1)) b.u(8);
+      if (fscod !== 3) b.u(1);
+    }
+    if (strmtyp === 0 && blocks !== 6) b.u(1);
+    if (strmtyp === 2 && (blocks === 6 || b.u(1))) b.u(6);
+    if (b.u(1)) {                                      // addbsie：首字节最低位 = flag_ec3_extension_type_a
+      const len = b.u(6) + 1;
+      b.u(7);
+      if (b.u(1)) { h.joc = true; h.jocCx = len >= 2 ? b.u(8) : 0; }
+    }
+  } catch {}
+  return h;
+}
+
+/** 一个 MKV 帧 = 一个 E-AC-3 访问单元（独立子流 + 其依附子流），逐个拆出帧头 */
+function ac3ParseAccessUnit(d) {
+  const out = [];
+  let p = 0;
+  while (p + 8 <= d.length && out.length < 16) {
+    const h = ac3ParseHeader(d, p);
+    if (!h || h.frameSize < 8) break;
+    out.push(h);
+    p += h.frameSize;
+  }
+  return out;
+}
+function ac3Dac3(h) {
+  const w = new HlsBitWriter();
+  w.u(2, h.fscod); w.u(5, h.bsid); w.u(3, h.bsmod); w.u(3, h.acmod); w.u(1, h.lfeon);
+  w.u(5, h.frmsizecod >> 1); w.u(5, 0);
+  return w.out();
+}
+/** dec3（ETSI TS 102 366 附录 F），JOC 时追加 complexity_index_type_a —— Atmos 靠它识别 */
+function eac3Dec3(au) {
+  const subs = [];
+  let kbps = 0;
+  for (const h of au) {
+    kbps += h.bitrate / 1000;
+    if (h.strmtyp !== 1) subs.push({ h, deps: 0, loc: 0 });
+    else if (subs.length) {
+      const s = subs[subs.length - 1];
+      s.deps++;
+      s.loc |= h.chanmap != null ? (h.chanmap >> 5) & 0x1F : h.acmod;
+    }
+  }
+  if (!subs.length) return null;
+  const first = subs[0].h;
+  const w = new HlsBitWriter();
+  w.u(13, Math.min(8191, Math.round(kbps)));
+  w.u(3, subs.length - 1);
+  for (const s of subs) {
+    w.u(2, s.h.fscod); w.u(5, s.h.bsid); w.u(1, 0); w.u(1, 0);
+    w.u(3, s.h.bsmod); w.u(3, s.h.acmod); w.u(1, s.h.lfeon);
+    w.u(3, 0); w.u(4, s.deps);
+    if (s.deps) w.u(9, s.loc); else w.u(1, 0);
+  }
+  if (first.joc) { w.u(7, 0); w.u(1, 1); w.u(8, first.jocCx); }
+  w.align();
+  return w.out();
+}
+
+// ── 音频：FLAC / ALAC ──
+
+/** MKV 的 FLAC CodecPrivate = "fLaC" + 元数据块；dfLa 只要元数据块 */
+function flacParsePrivate(u8) {
+  if (!u8 || u8.length < 42) return null;
+  let p = (u8[0] === 0x66 && u8[1] === 0x4C && u8[2] === 0x61 && u8[3] === 0x43) ? 4 : 0;
+  const blocks = u8.subarray(p);
+  if ((blocks[0] & 0x7F) !== 0) return null;          // 第一块必须是 STREAMINFO
+  const si = blocks.subarray(4, 38);
+  const minBlock = (si[0] << 8) | si[1], maxBlock = (si[2] << 8) | si[3];
+  const rate = (si[10] << 12) | (si[11] << 4) | (si[12] >> 4);
+  const ch = ((si[12] >> 1) & 7) + 1;
+  const bits = (((si[12] & 1) << 4) | (si[13] >> 4)) + 1;
+  // 只保留 STREAMINFO 并置「最后一块」标记：其余块（SEEKTABLE、图片…）在分片里没用
+  const dfla = new Uint8Array(38);
+  dfla.set(blocks.subarray(0, 38));
+  dfla[0] = 0x80;
+  return { dfla, rate, ch, bits, fixed: minBlock === maxBlock ? maxBlock : 0 };
+}
+/** FLAC 帧头里的块大小（变长块流靠它算每帧时长） */
+function flacFrameSamples(d) {
+  if (!d || d.length < 6 || d[0] !== 0xFF || (d[1] & 0xFE) !== 0xF8) return 0;
+  const code = d[2] >> 4;
+  if (code === 1) return 192;
+  if (code >= 2 && code <= 5) return 576 << (code - 2);
+  if (code >= 8) return 256 << (code - 8);
+  if (code === 6 || code === 7) {
+    let p = 4, b = d[4], n = 0;
+    while (b & 0x80) { n++; b <<= 1; }
+    p += n ? n : 1;
+    if (code === 6) return d[p] + 1;
+    return ((d[p] << 8) | d[p + 1]) + 1;
+  }
+  return 0;
+}
+function alacParsePrivate(u8) {
+  if (!u8 || u8.length < 24) return null;
+  let p = 0;
+  // 有的封装器把 'alac' FullBox 头也带进来了
+  if (u8.length >= 36 && u8[4] === 0x61 && u8[5] === 0x6C && u8[6] === 0x61 && u8[7] === 0x63) p = 12;
+  const c = u8.subarray(p, p + 24);
+  const dv = new DataView(c.buffer, c.byteOffset, 24);
+  return { cfg: c, frame: dv.getUint32(0), bits: c[5], ch: c[9], rate: dv.getUint32(20) };
+}
+
+// ── 杜比视界 ──
+//  配置盒 dvcC / dvvC：24 字节，profile 7 bit、level 6 bit、rpu/el/bl 三个标志、
+//  兼容 ID 4 bit。P7 → 8.1 的 RPU 改写与 dovi_tool 的 mode 2 逐位一致：
+//    · 头部 el_spatial_resampling_filter_flag = 0、disable_residual_flag = 1
+//    · 去掉 NLQ（残差量化）段与分区信息
+//    · FEL 片源把映射曲线置为恒等（MEL 保留原映射：它本来就无损）
+//    · DM 色彩矩阵换成 8.1 的标准系数；扩展元数据块（L1/L2/L6…）原样保留
+
+function dvParseConfig(u8) {
+  if (!u8 || u8.length < 5) return null;
+  return {
+    major: u8[0], minor: u8[1],
+    profile: u8[2] >> 1,
+    level: ((u8[2] & 1) << 5) | (u8[3] >> 3),
+    rpu: (u8[3] >> 2) & 1, el: (u8[3] >> 1) & 1, bl: u8[3] & 1,
+    compat: u8[4] >> 4,
+  };
+}
+function dvBuildConfig(c) {
+  const out = new Uint8Array(24);
+  out[0] = c.major || 1;
+  out[1] = c.minor || 0;
+  out[2] = (c.profile << 1) | ((c.level >> 5) & 1);
+  out[3] = ((c.level & 31) << 3) | (c.rpu << 2) | (c.el << 1) | c.bl;
+  out[4] = (c.compat & 15) << 4;
+  return out;
+}
+function dvBoxType(profile) { return profile <= 7 ? 'dvcC' : profile <= 10 ? 'dvvC' : 'dvwC'; }
+
+/** 按像素吞吐推 DV level（Dolby Vision Profiles and Levels 表） */
+function dvLevelFor(w, h, fps) {
+  const pps = w * h * (fps || 24);
+  const T = [[1, 22118400, 1280], [2, 27648000, 1280], [3, 49766400, 1920], [4, 62208000, 2560],
+    [5, 124416000, 3840], [6, 199065600, 3840], [7, 248832000, 3840], [8, 398131200, 3840],
+    [9, 497664000, 3840], [10, 995328000, 3840], [11, 995328000, 7680], [12, 1990656000, 7680],
+    [13, 3981312000, 7680]];
+  for (const [lvl, max, maxW] of T) if (pps <= max * 1.001 && w <= maxW) return lvl;
+  return 13;
+}
+
+// ── RPU 解析 / 改写 ──
+
+const DV_P81_YCC = [9574, 0, 13802, 9574, -1540, -5348, 9574, 17610, 0];
+const DV_P81_OFF = [16777216, 134217728, 134217728];
+const DV_P81_LMS = [7222, 8771, 390, 2654, 12430, 1300, 0, 422, 15962];
+// vdr_dm_data 固定段的字段宽度（未压缩时）
+const DV_DM_FIXED = [16, 16, 16, 16, 16, 16, 16, 16, 16, 32, 32, 32,
+  16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 32, 5, 2, 2, 2, 12, 12, 10];
+
+/** 去掉起始码 / NAL 头 / 防竞争字节，得到以 0x19 开头的 RPU 负载 */
+function dvRpuPayload(nal) {
+  let p = 0;
+  if (nal[0] === 0 && nal[1] === 0 && nal[2] === 0 && nal[3] === 1) p = 4;
+  else if (nal[0] === 0 && nal[1] === 0 && nal[2] === 1) p = 3;
+  if (nal[p] === 0x7C && nal[p + 1] === 0x01) p += 2;
+  return nalUnescape(nal.subarray(p));
+}
+
+function dvRpuParse(data) {
+  let end = data.length, tz = 0;
+  while (end > 0 && data[end - 1] === 0) { end--; tz++; }
+  if (end < 7 || data[0] !== 0x19 || data[end - 1] !== 0x80) throw new Error('RPU framing');
+  const crc = ((data[end - 5] << 24) | (data[end - 4] << 16) | (data[end - 3] << 8) | data[end - 2]) >>> 0;
+  if (hlsCrc32(data, 1, end - 5) !== crc) throw new Error('RPU CRC mismatch');
+  const b = new HlsBits(data, 1, end);
+  const H = { rpu_type: b.u(6) };
+  if (H.rpu_type !== 2) throw new Error('RPU type');
+  H.rpu_format = b.u(11);
+  H.vdr_rpu_profile = b.u(4);
+  H.vdr_rpu_level = b.u(4);
+  H.seq = b.u(1);
+  let coefLen = 0;
+  if (H.seq) {
+    H.chroma_explicit = b.u(1);
+    H.cdt = b.u(2);
+    if (H.cdt === 0) H.log2_denom = b.ue();
+    H.normalized_idc = b.u(2);
+    H.full_range = b.u(1);
+    H.ext = (H.rpu_format & 0x700) === 0;
+    if (H.ext) {
+      H.bl_bit_depth_minus8 = b.ue();
+      H.el_bit_depth_raw = b.ue();
+      H.vdr_bit_depth_minus8 = b.ue();
+      H.spatial_resampling = b.u(1);
+      H.reserved3 = b.u(3);
+      H.el_spatial_resampling = b.u(1);
+      H.disable_residual = b.u(1);
+    }
+    if (H.cdt === 0) coefLen = H.log2_denom;
+    else if (H.cdt === 1) coefLen = 32;
+    else throw new Error('coefficient_data_type');
+  }
+  H.dm_present = b.u(1);
+  H.use_prev = b.u(1);
+  if (H.use_prev) H.prev_id = b.ue();
+  const R = { H, tz, coefLen, data };
+  const blDepth = (H.bl_bit_depth_minus8 || 2) + 8;
+
+  if (!H.use_prev) {
+    if (!H.seq) throw new Error('RPU without sequence info');
+    const M = { id: b.ue(), cs: b.ue(), cf: b.ue(), curves: [] };
+    for (let c = 0; c < 3; c++) {
+      const n = b.ue();
+      if (n >= 8) throw new Error('RPU pivots');
+      const piv = [];
+      for (let i = 0; i < n + 2; i++) piv.push(b.u(blDepth));
+      M.curves.push({ n, piv, pieces: [] });
+    }
+    if (H.ext && !H.disable_residual) {
+      M.nlq_method = b.u(3);
+      if (M.nlq_method !== 0) throw new Error('NLQ method');
+      M.nlq_pivots = [b.u(blDepth), b.u(blDepth)];
+    }
+    M.nx = b.ue();
+    M.ny = b.ue();
+    const coef = () => ({ i: H.cdt === 0 ? b.se() : 0, f: b.u(coefLen) });
+    for (const cv of M.curves) {
+      for (let k = 0; k <= cv.n; k++) {
+        const idc = b.ue();
+        if (idc === 0) {
+          const order = b.ue();
+          if (order > 1) throw new Error('poly order');
+          const lin = order === 0 ? b.u(1) : 0;
+          if (lin) throw new Error('poly linear interpolation');
+          const c = [];
+          for (let j = 0; j < order + 2; j++) c.push(coef());
+          cv.pieces.push({ idc, order, lin, c });
+        } else if (idc === 1) {
+          const order = b.u(2);
+          if (order > 2) throw new Error('mmr order');
+          const k0 = coef();
+          const c = [];
+          for (let j = 0; j < order + 1; j++) for (let m = 0; m < 7; m++) c.push(coef());
+          cv.pieces.push({ idc, order, k0, c });
+        } else throw new Error('mapping idc');
+      }
+    }
+    if (M.nlq_method != null) {
+      const elDepth = (H.el_bit_depth_raw & 0xFF) + 8;
+      M.nlq = [];
+      for (let c = 0; c < 3; c++) {
+        M.nlq.push({
+          off: b.u(elDepth),
+          maxI: H.cdt === 0 ? b.ue() : 0, max: b.u(coefLen),
+          slI: H.cdt === 0 ? b.ue() : 0, sl: b.u(coefLen),
+          thI: H.cdt === 0 ? b.ue() : 0, th: b.u(coefLen),
+        });
+      }
+    }
+    R.M = M;
+  }
+
+  if (H.dm_present) {
+    const D = { compressed: H.reserved3 === 1, ids: [b.ue(), b.ue(), b.ue()] };
+    if (!D.compressed) D.fixed = DV_DM_FIXED.map(n => b.u(n));
+    const blocks = () => {
+      const n = b.ue();
+      while (!b.aligned) if (b.u(1)) throw new Error('dm alignment');
+      const list = [];
+      for (let i = 0; i < n; i++) {
+        const len = b.ue(), level = b.u(8);
+        list.push({ len, level, at: b.p, bits: len * 8 });
+        b.skip(len * 8);
+      }
+      return list;
+    };
+    D.cm29 = blocks();
+    if (b.left >= 56) D.cm40 = blocks();
+    R.D = D;
+  }
+  while (!b.aligned) if (b.u(1)) throw new Error('rpu alignment');
+  if (b.left > 40) { R.rest = { at: b.p, bits: b.left - 40 }; b.skip(b.left - 40); }
+  return R;
+}
+
+/** 元数据层 L1/L2/L5/L6… 原样按位搬运 */
+function dvCopyBits(w, data, at, bits) {
+  for (let i = 0; i < bits; i++) {
+    const p = at + i;
+    w.bit((data[p >> 3] >> (7 - (p & 7))) & 1);
+  }
+}
+
+function dvRpuWrite(R) {
+  const { H, M, D, coefLen, data } = R;
+  const w = new HlsBitWriter();
+  const blDepth = (H.bl_bit_depth_minus8 || 2) + 8;
+  w.u(8, 0x19);
+  w.u(6, H.rpu_type); w.u(11, H.rpu_format); w.u(4, H.vdr_rpu_profile); w.u(4, H.vdr_rpu_level);
+  w.u(1, H.seq);
+  if (H.seq) {
+    w.u(1, H.chroma_explicit); w.u(2, H.cdt);
+    if (H.cdt === 0) w.ue(H.log2_denom);
+    w.u(2, H.normalized_idc); w.u(1, H.full_range);
+    if (H.ext) {
+      w.ue(H.bl_bit_depth_minus8); w.ue(H.el_bit_depth_raw); w.ue(H.vdr_bit_depth_minus8);
+      w.u(1, H.spatial_resampling); w.u(3, H.reserved3);
+      w.u(1, H.el_spatial_resampling); w.u(1, H.disable_residual);
+    }
+  }
+  w.u(1, H.dm_present); w.u(1, H.use_prev);
+  if (H.use_prev) w.ue(H.prev_id);
+  if (M) {
+    w.ue(M.id); w.ue(M.cs); w.ue(M.cf);
+    for (const cv of M.curves) { w.ue(cv.n); for (const p of cv.piv) w.u(blDepth, p); }
+    if (H.ext && !H.disable_residual) { w.u(3, M.nlq_method); w.u(blDepth, M.nlq_pivots[0]); w.u(blDepth, M.nlq_pivots[1]); }
+    w.ue(M.nx); w.ue(M.ny);
+    const coef = c => { if (H.cdt === 0) w.se(c.i); w.u(coefLen, c.f); };
+    for (const cv of M.curves) {
+      for (const pc of cv.pieces) {
+        w.ue(pc.idc);
+        if (pc.idc === 0) { w.ue(pc.order); if (pc.order === 0) w.u(1, pc.lin); pc.c.forEach(coef); }
+        else { w.u(2, pc.order); coef(pc.k0); pc.c.forEach(coef); }
+      }
+    }
+    if (M.nlq && H.ext && !H.disable_residual) {
+      const elDepth = (H.el_bit_depth_raw & 0xFF) + 8;
+      for (const q of M.nlq) {
+        w.u(elDepth, q.off);
+        if (H.cdt === 0) w.ue(q.maxI);
+        w.u(coefLen, q.max);
+        if (H.cdt === 0) w.ue(q.slI);
+        w.u(coefLen, q.sl);
+        if (H.cdt === 0) w.ue(q.thI);
+        w.u(coefLen, q.th);
+      }
+    }
+  }
+  if (D) {
+    D.ids.forEach(v => w.ue(v));
+    if (!D.compressed) DV_DM_FIXED.forEach((n, i) => w.u(n, D.fixed[i]));
+    const blocks = list => {
+      w.ue(list.length);
+      w.align();
+      for (const k of list) { w.ue(k.len); w.u(8, k.level); dvCopyBits(w, data, k.at, k.bits); }
+    };
+    blocks(D.cm29);
+    if (D.cm40) blocks(D.cm40);
+  }
+  w.align();
+  if (R.rest) dvCopyBits(w, data, R.rest.at, R.rest.bits);
+  w.align();
+  const body = w.out();
+  const crc = hlsCrc32(body, 1, body.length);
+  const out = new Uint8Array(body.length + 5 + R.tz);
+  out.set(body);
+  out[body.length] = crc >>> 24; out[body.length + 1] = (crc >>> 16) & 255;
+  out[body.length + 2] = (crc >>> 8) & 255; out[body.length + 3] = crc & 255;
+  out[body.length + 4] = 0x80;
+  return out;
+}
+
+function dvRpuProfile(H) {
+  if (H.vdr_rpu_profile === 0 && H.full_range) return 5;
+  if (H.vdr_rpu_profile === 1) {
+    if (H.el_spatial_resampling && !H.disable_residual) return H.vdr_bit_depth_minus8 === 4 ? 7 : 4;
+    return 8;
+  }
+  return 0;
+}
+function dvRpuIsMel(M) {
+  return !!M && !!M.nlq && M.nlq.every(q => q.off === 0 && q.maxI === 1 && q.max === 0
+    && q.slI === 0 && q.sl === 0 && q.thI === 0 && q.th === 0);
+}
+
+/** P7 → 8.1；removeFelMapping=false 即 dovi_tool 的「保留映射」模式（只用于对照测试） */
+function dvRpuTo81(R, removeFelMapping = true) {
+  const H = R.H;
+  const fel = R.M && R.M.nlq && !dvRpuIsMel(R.M);
+  H.el_spatial_resampling = 0;
+  H.disable_residual = 1;
+  if (R.M) {
+    delete R.M.nlq_method; delete R.M.nlq_pivots; delete R.M.nlq;
+    R.M.nx = 0; R.M.ny = 0;
+    if (fel && removeFelMapping) {
+      for (const cv of R.M.curves) {
+        cv.n = 0;
+        cv.piv = [0, 1023];
+        cv.pieces = [{ idc: 0, order: 0, lin: 0, c: [{ i: 0, f: 0 }, { i: 1, f: 0 }] }];
+      }
+    }
+  }
+  if (R.D && !R.D.compressed) {
+    const s16 = v => (v + 65536) % 65536;
+    for (let i = 0; i < 9; i++) R.D.fixed[i] = s16(DV_P81_YCC[i]);
+    for (let i = 0; i < 3; i++) R.D.fixed[9 + i] = DV_P81_OFF[i];
+    for (let i = 0; i < 9; i++) R.D.fixed[12 + i] = s16(DV_P81_LMS[i]);
+  }
+  return R;
+}
+
+/** 整个 RPU NAL（含 7C01 头）→ 8.1 RPU NAL；失败抛错 */
+function dvConvertRpuNal(nal) {
+  const R = dvRpuParse(dvRpuPayload(nal));
+  if (dvRpuProfile(R.H) === 7) dvRpuTo81(R, true);
+  const esc = nalEscape(dvRpuWrite(R));
+  const out = new Uint8Array(esc.length + 2);
+  out[0] = 0x7C; out[1] = 0x01;
+  out.set(esc, 2);
+  return out;
+}
+
+// ── MKV 块（SimpleBlock / BlockGroup）──
+
+function hlsErr(msg, status = 422) { const e = new Error(msg); e.status = status; return e; }
+
+/** 不把全 1 当「未知尺寸」的原始 vint（EBML lacing 的有符号差值要用） */
+function ebmlVintRaw(u8, p, end) {
+  if (p >= end) return null;
+  const b = u8[p];
+  let len = 1, mask = 0x80;
+  while (len <= 8 && !(b & mask)) { mask >>= 1; len++; }
+  if (len > 8 || p + len > end) return null;
+  let v = b & (mask - 1);
+  for (let i = 1; i < len; i++) v = v * 256 + u8[p + i];
+  return [v, len];
+}
+function mkvBlockHead(u8, p, end) {
+  const tv = ebmlVintRaw(u8, p, end);
+  if (!tv) return null;
+  const q = p + tv[1];
+  if (q + 3 > end) return null;
+  return { track: tv[0], rel: (((u8[q] << 8) | u8[q + 1]) << 16) >> 16, flags: u8[q + 2], data: q + 3 };
+}
+/** lacing → 每帧 [起, 止) 偏移 */
+function mkvLaces(u8, p, end, flags) {
+  const lacing = (flags >> 1) & 3;
+  if (!lacing) return [[p, end]];
+  const n = u8[p] + 1;
+  let q = p + 1;
+  const sizes = [];
+  if (lacing === 1) {
+    for (let i = 0; i < n - 1; i++) {
+      let s = 0, b;
+      do { b = u8[q++]; s += b; } while (b === 255 && q < end);
+      sizes.push(s);
+    }
+  } else if (lacing === 3) {
+    const f = ebmlVintRaw(u8, q, end);
+    q += f[1];
+    let last = f[0];
+    sizes.push(last);
+    for (let i = 1; i < n - 1; i++) {
+      const v = ebmlVintRaw(u8, q, end);
+      q += v[1];
+      last += v[0] - (2 ** (7 * v[1] - 1) - 1);
+      sizes.push(last);
+    }
+  } else {
+    const each = (end - q) / n;
+    for (let i = 0; i < n - 1; i++) sizes.push(each);
+  }
+  const out = [];
+  let o = q;
+  for (const s of sizes) {
+    if (s < 0 || o + s > end) throw new Error('bad lacing');
+    out.push([o, o + s]);
+    o += s;
+  }
+  out.push([o, end]);
+  return out;
+}
+/** 整个块元素都在缓冲区里时用（探测 / 字幕） */
+function mkvParseBlockEl(u8, el) {
+  let blk = el, dur = -1, ref = false;
+  if (el.id === MKV.BlockGroup) {
+    blk = null;
+    for (const c of ebmlChildren(u8, el.data, el.end)) {
+      if (c.id === MKV.Block) blk = c;
+      else if (c.id === MKV.BlockDuration) dur = ebmlUint(u8, c.data, c.size);
+      else if (c.id === MKV.ReferenceBlock) ref = true;
+    }
+    if (!blk) return null;
+  }
+  const h = mkvBlockHead(u8, blk.data, blk.end);
+  if (!h) return null;
+  return {
+    track: h.track, rel: h.rel, dur,
+    key: el.id === MKV.SimpleBlock ? !!(h.flags & 0x80) : !ref,
+    frames: mkvLaces(u8, h.data, blk.end, h.flags).map(([a, b]) => u8.subarray(a, b)),
+  };
+}
+/** 头部剥离压缩（ContentCompAlgo 3）：老版 mkvmerge 默认对 AC-3 / DTS 开这个 */
+function hlsUnstrip(t, frame) {
+  return t.strip ? hlsConcat([t.strip, frame]) : frame;
+}
+
+// ── Tracks / Cues ──
+
+function mkvParseTracks(u8, a, b) {
+  const tracks = [];
+  for (const te of ebmlChildren(u8, a, b)) {
+    if (te.id !== MKV.TrackEntry || te.cut) continue;
+    const t = { num: 0, type: 0, codecId: '', priv: null, name: '', lang: 'eng', langBcp: '',
+      def: true, forced: false, enabled: true, commentary: false, hi: false, dd: 0 };
+    for (const c of ebmlChildren(u8, te.data, te.end)) {
+      const U = () => ebmlUint(u8, c.data, c.size);
+      switch (c.id) {
+        case MKV.TrackNumber: t.num = U(); break;
+        case MKV.TrackType: t.type = U(); break;
+        case MKV.CodecID: t.codecId = ebmlStr(u8, c.data, c.size); break;
+        case MKV.CodecPrivate: t.priv = u8.slice(c.data, c.end); break;
+        case MKV.Name: t.name = ebmlStr(u8, c.data, c.size); break;
+        case MKV.Language: t.lang = ebmlStr(u8, c.data, c.size); break;
+        case MKV.LanguageBCP47: t.langBcp = ebmlStr(u8, c.data, c.size); break;
+        case MKV.FlagDefault: t.def = !!U(); break;
+        case MKV.FlagForced: t.forced = !!U(); break;
+        case MKV.FlagEnabled: t.enabled = !!U(); break;
+        case MKV.FlagCommentary: t.commentary = !!U(); break;
+        case MKV.FlagHearingImpaired: t.hi = !!U(); break;
+        case MKV.DefaultDuration: t.dd = U(); break;
+        case MKV.Video: {
+          const v = t.video = {};
+          for (const x of ebmlChildren(u8, c.data, c.end)) {
+            const X = () => ebmlUint(u8, x.data, x.size);
+            if (x.id === MKV.PixelWidth) v.w = X();
+            else if (x.id === MKV.PixelHeight) v.h = X();
+            else if (x.id === MKV.DisplayWidth) v.dw = X();
+            else if (x.id === MKV.DisplayHeight) v.dh = X();
+            else if (x.id === MKV.DisplayUnit) v.du = X();
+            else if (x.id === MKV.Colour) {
+              const col = v.colour = {};
+              for (const y of ebmlChildren(u8, x.data, x.end)) {
+                const Y = () => ebmlUint(u8, y.data, y.size);
+                if (y.id === MKV.MatrixCoefficients) col.mtx = Y();
+                else if (y.id === MKV.TransferCharacteristics) col.trc = Y();
+                else if (y.id === MKV.Primaries) col.prim = Y();
+                else if (y.id === MKV.Range) col.range = Y();
+                else if (y.id === MKV.MaxCLL) col.maxCLL = Y();
+                else if (y.id === MKV.MaxFALL) col.maxFALL = Y();
+                else if (y.id === MKV.MasteringMetadata) {
+                  const m = col.mastering = {};
+                  for (const z of ebmlChildren(u8, y.data, y.end)) m[z.id] = ebmlFloat(u8, z.data, z.size);
+                }
+              }
+            }
+          }
+          break;
+        }
+        case MKV.Audio: {
+          const au = t.audio = { rate: 8000, ch: 1 };
+          for (const x of ebmlChildren(u8, c.data, c.end)) {
+            if (x.id === MKV.SamplingFrequency) au.rate = Math.round(ebmlFloat(u8, x.data, x.size));
+            else if (x.id === MKV.OutputSamplingFrequency) au.outRate = Math.round(ebmlFloat(u8, x.data, x.size));
+            else if (x.id === MKV.Channels) au.ch = ebmlUint(u8, x.data, x.size);
+            else if (x.id === MKV.BitDepth) au.bits = ebmlUint(u8, x.data, x.size);
+          }
+          break;
+        }
+        case MKV.ContentEncodings:
+          for (const ce of ebmlChildren(u8, c.data, c.end)) {
+            if (ce.id !== MKV.ContentEncoding) continue;
+            let type = 0, algo = 0, settings = null;
+            for (const x of ebmlChildren(u8, ce.data, ce.end)) {
+              if (x.id === MKV.ContentEncodingType) type = ebmlUint(u8, x.data, x.size);
+              else if (x.id === MKV.ContentCompression) {
+                for (const y of ebmlChildren(u8, x.data, x.end)) {
+                  if (y.id === MKV.ContentCompAlgo) algo = ebmlUint(u8, y.data, y.size);
+                  else if (y.id === MKV.ContentCompSettings) settings = u8.slice(y.data, y.end);
+                }
+              }
+            }
+            if (type !== 0) t.encrypted = true;
+            else if (algo === 3) t.strip = settings;
+            else t.zlib = true;
+          }
+          break;
+        case MKV.BlockAdditionMapping: {
+          let type = 0, extra = null;
+          for (const x of ebmlChildren(u8, c.data, c.end)) {
+            if (x.id === MKV.BlockAddIDType) type = ebmlUint(u8, x.data, x.size);
+            else if (x.id === MKV.BlockAddIDExtraData) extra = u8.slice(x.data, x.end);
+          }
+          // 'dvcC' / 'dvvC' / 'dvwC'
+          if ((type === 0x64766343 || type === 0x64767643 || type === 0x64767743) && extra) t.dvcfg = extra;
+          break;
+        }
+      }
+    }
+    tracks.push(t);
+  }
+  return tracks;
+}
+
+function mkvParseCues(u8, a, b) {
+  const by = new Map();
+  for (const cp of ebmlChildren(u8, a, b)) {
+    if (cp.id !== MKV.CuePoint || cp.cut) continue;
+    let t = 0;
+    const tps = [];
+    for (const c of ebmlChildren(u8, cp.data, cp.end)) {
+      if (c.id === MKV.CueTime) t = ebmlUint(u8, c.data, c.size);
+      else if (c.id === MKV.CueTrackPositions) {
+        let tr = 0, cl = -1, rel = -1, dur = -1;
+        for (const d of ebmlChildren(u8, c.data, c.end)) {
+          const v = ebmlUint(u8, d.data, d.size);
+          if (d.id === MKV.CueTrack) tr = v;
+          else if (d.id === MKV.CueClusterPosition) cl = v;
+          else if (d.id === MKV.CueRelativePosition) rel = v;
+          else if (d.id === MKV.CueDuration) dur = v;
+        }
+        if (cl >= 0) tps.push([tr, cl, rel, dur]);
+      }
+    }
+    for (const [tr, cl, rel, dur] of tps) {
+      if (!by.has(tr)) by.set(tr, []);
+      by.get(tr).push([t, cl, rel, dur]);
+    }
+  }
+  for (const list of by.values()) list.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  return by;
+}
+
+// ── 视频时钟：标准帧率用精确有理数时基（23.976 → 24000/1001），帧时间戳可吸附到网格 ──
+
+function hlsVideoClock(ddNs) {
+  if (ddNs > 0) {
+    const fps = 1e9 / ddNs;
+    const STD = [[24000, 1001], [24, 1], [25, 1], [30000, 1001], [30, 1], [48000, 1001], [48, 1],
+      [50, 1], [60000, 1001], [60, 1], [100, 1], [120000, 1001], [120, 1], [15, 1], [12, 1]];
+    for (const [n, d] of STD) {
+      const f = n / d;
+      if (Math.abs(fps - f) / f < 0.0005) {
+        return d === 1001 ? { ts: n, fd: 1001, fps: f } : { ts: 90000, fd: 90000 / n, fps: f };
+      }
+    }
+    return { ts: 90000, fd: 0, fps };
+  }
+  return { ts: 90000, fd: 0, fps: 0 };
+}
+
+// ── 探测首簇：各轨第一帧（dac3/dec3 要从码流里读）、视频重排深度、杜比 RPU ──
+
+function hlsProbe(u8, tracks, scaleNs) {
+  const want = new Map(tracks.map(t => [t.num, t]));
+  const out = { first: new Map(), video: [] };
+  let clusterTs = 0;
+  const walk = (a, b) => {
+    for (const el of ebmlChildren(u8, a, b)) {
+      if (el.id === MKV.Cluster) { walk(el.data, Math.min(b, el.end)); continue; }
+      if (el.cut) return;
+      if (el.id === MKV.Timestamp) { clusterTs = ebmlUint(u8, el.data, el.size); continue; }
+      if (el.id !== MKV.SimpleBlock && el.id !== MKV.BlockGroup) continue;
+      let blk;
+      try { blk = mkvParseBlockEl(u8, el); } catch { continue; }
+      if (!blk) continue;
+      const t = want.get(blk.track);
+      if (!t) continue;
+      const ns = (clusterTs + blk.rel) * scaleNs;
+      if (t.type === 1) {
+        if (out.video.length < 96) out.video.push({ ns, key: blk.key, data: hlsUnstrip(t, blk.frames[0]) });
+      } else if (!out.first.has(t.num)) {
+        out.first.set(t.num, { ns, data: hlsUnstrip(t, blk.frames[0]), dur: blk.dur });
+      }
+    }
+  };
+  walk(0, u8.length);
+  return out;
+}
+
+/** 解码顺序 PTS 序列 → 实际重排深度（SPS 拿不到时的兜底） */
+function hlsReorderDepth(ptsList) {
+  let r = 0;
+  for (let j = 0; j < ptsList.length; j++) {
+    let later = 0;
+    for (let i = 0; i < j; i++) if (ptsList[i] > ptsList[j]) later++;
+    if (later > r) r = later;
+  }
+  return r;
+}
+
+/** 在一帧（长度前缀 NAL 序列）里找杜比 RPU（62）与增强层（63） */
+function hlsScanDvNals(frame, nalLen) {
+  let p = 0, rpu = null, el = false;
+  while (p + nalLen < frame.length) {
+    let len = 0;
+    for (let i = 0; i < nalLen; i++) len = len * 256 + frame[p + i];
+    const s = p + nalLen;
+    if (len < 2 || s + len > frame.length) break;
+    const type = (frame[s] >> 1) & 0x3F;
+    if (type === 62 && !rpu) rpu = frame.subarray(s, s + len);
+    else if (type === 63) el = true;
+    p = s + len;
+  }
+  return { rpu, el };
+}
+
+// ── 轨道配置 ──
+
+const HLS_TEXT_SUBS = new Set(['S_TEXT/UTF8', 'S_TEXT/ASCII', 'S_TEXT/ASS', 'S_TEXT/SSA', 'S_ASS', 'S_SSA', 'S_TEXT/WEBVTT']);
+
+function hlsVideoConfig(t, probe, opts) {
+  const v = { num: t.num, w: t.video?.w || 0, h: t.video?.h || 0, nalLen: 4, reorder: -1 };
+  let sps = {};
+  if (t.codecId === 'V_MPEGH/ISO/HEVC') {
+    const hv = hevcParseHvcC(t.priv);
+    if (!hv) throw hlsErr('HEVC 配置缺失');
+    const spsNal = hv.nals.find(n => n.type === 33);
+    if (!spsNal) throw hlsErr('HEVC 参数集不在 hvcC 中（hev1 流），暂不支持');
+    try { sps = hevcParseSps(spsNal.data); } catch {}
+    Object.assign(v, { codec: 'hevc', entry: 'hvc1', cfgType: 'hvcC', codecs: hevcCodecString(hv), nalLen: hv.nalLen });
+  } else if (t.codecId === 'V_MPEG4/ISO/AVC') {
+    const av = avcParseAvcC(t.priv);
+    if (!av || !av.sps.length) throw hlsErr('AVC 配置缺失');
+    try { sps = avcParseSps(av.sps[0]); } catch {}
+    if (sps.profile === 110 || sps.profile === 122 || sps.profile === 244) {
+      throw hlsErr('H.264 10bit / 4:2:2 / 4:4:4 在 iOS 上无硬件解码');
+    }
+    Object.assign(v, { codec: 'avc', entry: 'avc1', cfgType: 'avcC', codecs: avcCodecString(av), nalLen: av.nalLen });
+  } else if (t.codecId === 'V_AV1') {
+    const a1 = av1Parse(t.priv);
+    if (!a1) throw hlsErr('AV1 配置缺失');
+    Object.assign(v, { codec: 'av1', entry: 'av01', cfgType: 'av1C', codecs: av1CodecString(a1), nalLen: 0 });
+  } else {
+    throw hlsErr(`视频编码 ${t.codecId} 不能在 iOS 上播放`);
+  }
+  if (t.encrypted || t.zlib) throw hlsErr('视频轨使用了压缩或加密的 ContentEncoding');
+  v.cfg = hlsB64(t.priv);
+  if (t.strip) v.strip = hlsB64(t.strip);
+  v.w = v.w || sps.w || 0;
+  v.h = v.h || sps.h || 0;
+
+  // 时钟与 DTS 重排深度
+  const clk = hlsVideoClock(t.dd);
+  v.ts = clk.ts; v.fd = clk.fd; v.fps = clk.fps;
+  const pts = probe.video.map(f => f.ns);
+  if (!v.fps && pts.length > 2) {
+    const s = pts.slice().sort((a, b) => a - b);
+    let d = Infinity;
+    for (let i = 1; i < s.length; i++) if (s[i] > s[i - 1]) d = Math.min(d, s[i] - s[i - 1]);
+    if (Number.isFinite(d)) v.fps = 1e9 / d;
+  }
+  v.reorder = v.codec === 'av1' ? 0 : Math.max(sps.reorder >= 0 ? sps.reorder : 0, hlsReorderDepth(pts));
+  v.anchor = pts.length ? Math.min(...pts.slice(0, 32)) : 0;
+
+  // 色彩
+  const col = t.video?.colour || {};
+  const trc = col.trc ?? sps.trc, prim = col.prim ?? sps.prim, mtx = col.mtx ?? sps.mtx;
+  const full = col.range === 2 ? 1 : col.range === 1 ? 0 : (sps.full || 0);
+  if (trc != null && prim != null && mtx != null && trc !== 2) v.colr = [prim, trc, mtx, full];
+  v.range = trc === 16 ? 'PQ' : trc === 18 ? 'HLG' : 'SDR';
+  const m = col.mastering;
+  if (m && m[MKV.LumMax]) {
+    const c = x => Math.max(0, Math.min(65535, Math.round((x || 0) / 0.00002)));
+    const md = new Uint8Array(24);
+    const dv = new DataView(md.buffer);
+    [[MKV.PrimaryGX, MKV.PrimaryGY], [MKV.PrimaryBX, MKV.PrimaryBY], [MKV.PrimaryRX, MKV.PrimaryRY]]
+      .forEach(([x, y], i) => { dv.setUint16(i * 4, c(m[x])); dv.setUint16(i * 4 + 2, c(m[y])); });
+    dv.setUint16(12, c(m[MKV.WhiteX])); dv.setUint16(14, c(m[MKV.WhiteY]));
+    dv.setUint32(16, Math.round((m[MKV.LumMax] || 0) * 10000));
+    dv.setUint32(20, Math.round((m[MKV.LumMin] || 0) * 10000));
+    v.mdcv = hlsB64(md);
+  }
+  if (col.maxCLL || col.maxFALL) {
+    const cl = new Uint8Array(4);
+    new DataView(cl.buffer).setUint16(0, col.maxCLL || 0);
+    new DataView(cl.buffer).setUint16(2, col.maxFALL || 0);
+    v.clli = hlsB64(cl);
+  }
+  // 像素宽高比
+  let sarW = sps.sarW || 1, sarH = sps.sarH || 1;
+  const vid = t.video || {};
+  if (vid.dw && vid.dh && (vid.du || 0) === 0 && v.w && v.h) {
+    sarW = vid.dw * v.h; sarH = vid.dh * v.w;
+    const g = (a, b) => b ? g(b, a % b) : a;
+    const k = g(sarW, sarH) || 1;
+    sarW /= k; sarH /= k;
+    if (sarW > 65535 || sarH > 65535) { sarW = 1; sarH = 1; }
+  }
+  v.sar = [sarW, sarH];
+  v.dw = Math.round(v.w * sarW / sarH) || v.w;
+
+  // 杜比视界
+  if (v.codec === 'hevc') hlsDvConfig(v, t, probe, opts);
+  return v;
+}
+
+function hlsDvConfig(v, t, probe, opts) {
+  let cfg = t.dvcfg ? dvParseConfig(t.dvcfg) : null;
+  let el = false, rpu = null;
+  for (const f of probe.video.slice(0, 8)) {
+    const s = hlsScanDvNals(f.data, v.nalLen);
+    if (s.rpu && !rpu) rpu = s.rpu;
+    if (s.el) el = true;
+  }
+  if (!cfg && rpu) {
+    try {
+      const R = dvRpuParse(dvRpuPayload(rpu));
+      const profile = dvRpuProfile(R.H);
+      if (profile) {
+        cfg = { major: 1, minor: 0, profile, level: dvLevelFor(v.w, v.h, v.fps), rpu: 1, el: el ? 1 : 0, bl: 1,
+          compat: profile === 5 ? 0 : profile === 7 ? 6 : v.range === 'HLG' ? 4 : v.range === 'SDR' ? 2 : 1 };
+      }
+    } catch {}
+  }
+  if (!cfg || ![5, 7, 8].includes(cfg.profile)) return;
+  if (!cfg.level) cfg.level = dvLevelFor(v.w, v.h, v.fps);
+  const mode = opts.dv;                         // 'auto' | 'dvh1' | 'off'
+  const lvl = String(cfg.level).padStart(2, '0');
+  if (cfg.profile === 5) {
+    // P5 的基础层是 IPTPQc2，脱离杜比管线就是偏色画面 —— 'off' 对它无效
+    v.dv = { profile: 5, level: cfg.level, box: 'dvcC', cfg: hlsB64(dvBuildConfig({ ...cfg, el: 0 })) };
+    v.entry = 'dvh1';
+    v.codecs = `dvh1.05.${lvl}`;
+    v.range = 'PQ';
+    delete v.colr;
+    return;
+  }
+  if (cfg.profile === 7) {
+    // 先拿首帧的 RPU 试转一次：转不动就整条退回 HDR10（丢 RPU 与增强层），绝不输出半坏的 DV
+    let ok = !!rpu;
+    if (rpu) { try { dvConvertRpuNal(rpu); } catch { ok = false; } }
+    v.dvStrip = mode === 'off' || !ok;
+    v.dvConvert = !v.dvStrip;
+    if (v.dvStrip) return;
+    cfg = { ...cfg, profile: 8, el: 0, compat: 1 };
+  }
+  if (mode === 'off') return;
+  const compat = cfg.compat;
+  const brand = compat === 4 ? 'db4h' : compat === 2 ? 'db2g' : 'db1p';
+  v.range = compat === 4 ? 'HLG' : compat === 2 ? 'SDR' : 'PQ';
+  v.dv = { profile: 8, level: cfg.level, compat, box: 'dvvC', cfg: hlsB64(dvBuildConfig({ ...cfg, profile: 8, el: 0, rpu: 1, bl: 1 })) };
+  if (mode === 'dvh1') { v.entry = 'dvh1'; v.codecs = `dvh1.08.${lvl}`; }
+  else v.supp = `dvh1.08.${lvl}/${brand}`;
+}
+
+/** 音频：能直通的编码给出 fMP4 所需的一切；DTS / TrueHD 等标记为需要转码 */
+function hlsAudioConfig(t, first) {
+  const a = { num: t.num, lang: hlsLang(t), name: t.name, def: t.def, forced: t.forced,
+    commentary: t.commentary || /comment|评论|解说/i.test(t.name || ''), codecId: t.codecId,
+    mode: 'none', ch: t.audio?.ch || 2 };
+  if (t.encrypted || t.zlib) return a;
+  if (t.strip) a.strip = hlsB64(t.strip);
+  const id = t.codecId;
+  const data = first?.data;
+  try {
+    if (id === 'A_AAC' || id.startsWith('A_AAC/')) {
+      const rate = t.audio?.rate || 48000;
+      const asc = t.priv && t.priv.length >= 2 ? t.priv : aacBuildAsc(id, rate, a.ch, t.audio?.outRate);
+      const info = aacParseAsc(asc);
+      if (!info) return a;
+      a.ts = info.outRate || t.audio?.outRate || rate;
+      a.fs = t.dd ? Math.round(t.dd * a.ts / 1e9) : (info.outRate > info.rate ? 2048 : 1024);
+      Object.assign(a, { mode: 'copy', codec: 'aac', entry: 'mp4a', cfg: hlsB64(asc),
+        codecs: `mp4a.40.${info.aot}`, ch: info.ch || a.ch });
+    } else if (id === 'A_AC3' || id === 'A_EAC3') {
+      const au = data ? ac3ParseAccessUnit(data) : [];
+      if (!au.length) return a;
+      const h = au[0];
+      a.ts = h.rate;
+      a.fs = 256 * h.blocks;
+      if (!h.eac3 && au.length === 1) {
+        Object.assign(a, { mode: 'copy', codec: 'ac3', entry: 'ac-3', cfg: hlsB64(ac3Dac3(h)), codecs: 'ac-3', ch: h.ch });
+      } else {
+        const dec3 = eac3Dec3(au);
+        if (!dec3) return a;
+        let ch = h.ch;
+        for (const s of au.slice(1)) if (s.strmtyp === 1) ch = Math.max(ch, 8);
+        Object.assign(a, { mode: 'copy', codec: 'eac3', entry: 'ec-3', cfg: hlsB64(dec3), codecs: 'ec-3', ch });
+        if (h.joc) a.joc = h.jocCx || 16;
+      }
+    } else if (id === 'A_FLAC') {
+      const f = flacParsePrivate(t.priv);
+      if (!f) return a;
+      Object.assign(a, { mode: 'copy', codec: 'flac', entry: 'fLaC', cfg: hlsB64(f.dfla), codecs: 'fLaC',
+        ts: f.rate, fs: f.fixed, ch: f.ch, bits: f.bits });
+    } else if (id === 'A_ALAC') {
+      const f = alacParsePrivate(t.priv);
+      if (!f) return a;
+      Object.assign(a, { mode: 'copy', codec: 'alac', entry: 'alac', cfg: hlsB64(f.cfg), codecs: 'alac',
+        ts: f.rate, fs: f.frame, ch: f.ch, bits: f.bits });
+    } else if (/^A_(DTS|TRUEHD|MLP|OPUS|VORBIS|PCM|MPEG\/L[23]|MS\/ACM)/.test(id)) {
+      a.mode = 'tx';
+    }
+  } catch {}
+  if (a.mode === 'copy') a.anchor = first ? Math.round(first.ns * a.ts / 1e9) : 0;
+  return a;
+}
+
+const HLS_CODEC_LABEL = { aac: 'AAC', ac3: 'Dolby Digital', eac3: 'Dolby Digital Plus', flac: 'FLAC', alac: 'ALAC' };
+function hlsChLabel(ch) { return ch === 8 ? '7.1' : ch === 6 ? '5.1' : ch === 2 ? '立体声' : ch === 1 ? '单声道' : `${ch}ch`; }
+function hlsAudioLabel(a) {
+  let s = a.name || hlsLangName(a.lang);
+  const hasCodec = /(dd|ac-?3|e-?ac-?3|dolby|aac|flac|alac|atmos|truehd|dts|pcm)/i.test(a.name || '');
+  if (!hasCodec) s += ` · ${HLS_CODEC_LABEL[a.codec] || a.codec} ${hlsChLabel(a.ch)}${a.joc ? ' Atmos' : ''}`;
+  if (a.commentary && !/comment|评论|解说/i.test(s)) s += '（评论音轨）';
+  return s;
+}
+
+// ── 索引 ──
+
+/**
+ * src = { size, read(start, end) → Promise<Uint8Array> }
+ * 只读三四段小 Range：文件头、（必要时）Info/Tracks、Cues、首簇前 2MB。
+ */
+async function hlsBuildIndex(src, opts) {
+  const size = src.size;
+  const head = await src.read(0, Math.min(size, HLS_HEAD) - 1);
+  const it = ebmlChildren(head, 0, head.length);
+  const e0 = it.next().value;
+  if (!e0 || e0.id !== MKV.EBML || e0.cut) throw hlsErr('不是 Matroska 文件');
+  const dt = ebmlMap(head, e0.data, e0.end).get(MKV.DocType);
+  const docType = dt ? ebmlStr(head, dt.data, dt.size) : 'matroska';
+  if (docType !== 'matroska' && docType !== 'webm') throw hlsErr(`不支持的 DocType: ${docType}`);
+  const segId = ebmlId(head, e0.end, head.length), segSz = segId && ebmlSize(head, e0.end + segId[1], head.length);
+  if (!segId || segId[0] !== MKV.Segment || !segSz) throw hlsErr('找不到 Segment');
+  const segStart = e0.end + segId[1] + segSz[1];
+  const segEnd = segSz[0] > 0 ? Math.min(size, segStart + segSz[0]) : size;
+
+  // 顶层元素：一路跳到第一个 Cluster（附件等大元素按尺寸跳过，不读内容）
+  const top = new Map();
+  let firstCluster = -1;
+  let buf = head, bufAt = 0;
+  for (let q = segStart, guard = 0; q < segEnd && guard < 512; guard++) {
+    if (q + 16 > bufAt + buf.length) {
+      buf = await src.read(q, Math.min(segEnd, q + 65536) - 1);
+      bufAt = q;
+    }
+    const o = q - bufAt;
+    const id = ebmlId(buf, o, buf.length), sz = id && ebmlSize(buf, o + id[1], buf.length);
+    if (!id || !sz) break;
+    if (id[0] === MKV.Cluster) { firstCluster = q; break; }
+    if (!top.has(id[0])) top.set(id[0], { pos: q, data: q + id[1] + sz[1], size: sz[0] });
+    if (sz[0] < 0) break;
+    q += id[1] + sz[1] + sz[0];
+  }
+  const load = async el => {
+    if (!el || el.size < 0) return null;
+    if (el.size > 32 * 1048576) throw hlsErr('索引元素过大');
+    if (el.data >= 0 && el.data + el.size <= head.length) return head.subarray(el.data, el.data + el.size);
+    return src.read(el.data, el.data + el.size - 1);
+  };
+  const loadAt = async pos => {
+    const h = await src.read(pos, Math.min(size, pos + 16) - 1);
+    const id = ebmlId(h, 0, h.length), sz = id && ebmlSize(h, id[1], h.length);
+    if (!id || !sz) return null;
+    return { id: id[0], pos, data: pos + id[1] + sz[1], size: sz[0] };
+  };
+
+  // SeekHead：Cues 通常在文件尾，只有这里知道它在哪
+  const seeks = new Map();
+  const sh = top.get(MKV.SeekHead);
+  if (sh) {
+    const d = await load(sh);
+    for (const s of ebmlChildren(d, 0, d.length)) {
+      if (s.id !== MKV.Seek) continue;
+      let sid = 0, spos = -1;
+      for (const c of ebmlChildren(d, s.data, s.end)) {
+        if (c.id === MKV.SeekID) sid = ebmlUint(d, c.data, c.size);
+        else if (c.id === MKV.SeekPosition) spos = ebmlUint(d, c.data, c.size);
+      }
+      if (sid && spos >= 0 && !seeks.has(sid)) seeks.set(sid, segStart + spos);
+    }
+  }
+  const element = async id => top.get(id) || (seeks.has(id) ? await loadAt(seeks.get(id)) : null);
+
+  const infoEl = await element(MKV.Info);
+  const infoD = await load(infoEl);
+  let scaleNs = 1000000, durUnits = 0;
+  if (infoD) {
+    for (const c of ebmlChildren(infoD, 0, infoD.length)) {
+      if (c.id === MKV.TimestampScale) scaleNs = ebmlUint(infoD, c.data, c.size) || 1000000;
+      else if (c.id === MKV.Duration) durUnits = ebmlFloat(infoD, c.data, c.size);
+    }
+  }
+  const tracksD = await load(await element(MKV.Tracks));
+  if (!tracksD) throw hlsErr('找不到 Tracks');
+  const tracks = mkvParseTracks(tracksD, 0, tracksD.length);
+
+  let cuesEl = await element(MKV.Cues);
+  if (!cuesEl) {
+    // 没登记在 SeekHead 里：去文件尾找 Cues 的 ID
+    const tailStart = Math.max(0, size - 8 * 1048576);
+    const tail = await src.read(tailStart, size - 1);
+    for (let i = tail.length - 8; i >= 0 && !cuesEl; i--) {
+      if (tail[i] === 0x1C && tail[i + 1] === 0x53 && tail[i + 2] === 0xBB && tail[i + 3] === 0x6B) {
+        const sz = ebmlSize(tail, i + 4, tail.length);
+        if (sz && sz[0] > 0 && i + 4 + sz[1] + sz[0] <= tail.length && tail[i + 4 + sz[1]] === MKV.CuePoint) {
+          cuesEl = { pos: tailStart + i, data: tailStart + i + 4 + sz[1], size: sz[0] };
+        }
+      }
+    }
+  }
+  const cuesD = await load(cuesEl);
+  if (!cuesD) throw hlsErr('没有 Cues 关键帧索引，无法分段（可用 mkvmerge 重新封装一次）');
+  const cues = mkvParseCues(cuesD, 0, cuesD.length);
+
+  const vt = tracks.filter(t => t.type === 1 && t.enabled)
+    .sort((a, b) => (b.def ? 1 : 0) - (a.def ? 1 : 0))[0];
+  if (!vt) throw hlsErr('没有视频轨');
+  const vcues = (cues.get(vt.num) || []).filter((c, i, l) => i === 0 || c[0] !== l[i - 1][0]);
+  if (!vcues.length) throw hlsErr('Cues 里没有视频关键帧');
+  if (firstCluster < 0) firstCluster = segStart + Math.min(...vcues.map(c => c[1]));
+
+  // 首簇探测
+  const probeTracks = tracks.filter(t => t === vt || t.type === 2);
+  let probeBuf = await src.read(firstCluster, Math.min(segEnd, firstCluster + HLS_PROBE) - 1);
+  let probe = hlsProbe(probeBuf, probeTracks, scaleNs);
+  const audioTracks = tracks.filter(t => t.type === 2);
+  if (audioTracks.some(t => !probe.first.has(t.num)) && probeBuf.length >= HLS_PROBE) {
+    probeBuf = await src.read(firstCluster, Math.min(segEnd, firstCluster + 4 * HLS_PROBE) - 1);
+    probe = hlsProbe(probeBuf, probeTracks, scaleNs);
+  }
+
+  const video = hlsVideoConfig(vt, probe, opts);
+  const audio = audioTracks.map(t => hlsAudioConfig(t, probe.first.get(t.num)));
+
+  // 复用进视频分片的默认音轨：MKV 默认轨能直通就用它；
+  // 不能（TrueHD / DTS）就找同语言的可直通轨（蓝光 remux 通常附带 AC-3 兼容轨）
+  const copyable = audio.filter(a => a.mode === 'copy');
+  const defT = audio.find(a => a.def) || audio[0];
+  let muxed = -1;
+  if (copyable.length) {
+    let pick = defT && defT.mode === 'copy' ? defT : null;
+    if (!pick && defT) pick = copyable.find(a => a.lang === defT.lang && !a.commentary);
+    if (!pick) pick = copyable.find(a => !a.commentary) || copyable[0];
+    muxed = audio.indexOf(pick);
+  }
+
+  // 字幕
+  const subs = [];
+  for (const t of tracks) {
+    if (t.type !== 17 || !HLS_TEXT_SUBS.has(t.codecId) || t.encrypted) continue;
+    subs.push({
+      num: t.num, lang: hlsLang(t), name: t.name, def: t.def, forced: t.forced, hi: t.hi,
+      fmt: /ASS|SSA/.test(t.codecId) ? 'ass' : /WEBVTT/.test(t.codecId) ? 'vtt' : 'srt',
+      strip: t.strip ? hlsB64(t.strip) : null, zlib: !!t.zlib,
+      cues: (cues.get(t.num) || []).map(c => [c[0], c[3], c[1], c[2]]),
+    });
+  }
+
+  // 分段：以视频关键帧为界，尽量贴近目标时长，并且不让单段超过目标 0.5s 以上
+  const toSec = u => u * scaleNs / 1e9;
+  const durSec = durUnits ? toSec(durUnits) : toSec(vcues[vcues.length - 1][0]) + 1;
+  const target = opts.segSec || 6;
+  const firstTargets = [Math.min(2, target), Math.min(4, target)];
+  const segs = [{ cl: firstCluster - segStart, rel: -2, t: 0 }];
+  let startT = 0;
+  for (let i = 0; i < vcues.length; i++) {
+    const t = toSec(vcues[i][0]);
+    const tgt = segs.length <= firstTargets.length ? firstTargets[segs.length - 1] : target;
+    const el = t - startT;
+    if (el < Math.min(1, tgt * 0.5)) continue;
+    const next = i + 1 < vcues.length ? toSec(vcues[i + 1][0]) : durSec;
+    if (el >= tgt - 0.01 || (next - startT) > tgt + 0.5) {
+      segs.push({ cl: vcues[i][1], rel: vcues[i][2], t: vcues[i][0] });
+      startT = t;
+    }
+  }
+  // 簇区终点：簇后面第一个已知顶层元素（Cues / Tags …）
+  let clustersEnd = segEnd;
+  for (const pos of [cuesEl?.pos, ...seeks.values(), ...[...top.values()].map(e => e.pos)]) {
+    if (pos != null && pos > firstCluster && pos < clustersEnd) clustersEnd = pos;
+  }
+  const durs = segs.map((s, i) => (i + 1 < segs.length ? toSec(segs[i + 1].t) : durSec) - toSec(s.t));
+  let peak = 0, total = 0;
+  segs.forEach((s, i) => {
+    const a = segStart + s.cl, b = i + 1 < segs.length ? segStart + segs[i + 1].cl : clustersEnd;
+    const bits = Math.max(0, b - a) * 8;
+    total += bits;
+    if (durs[i] > 0.5) peak = Math.max(peak, bits / durs[i]);
+  });
+
+  return {
+    v: HLS_VER, size, scaleNs, segStart, firstCluster, clustersEnd, dur: durSec,
+    video, audio, muxed, subs,
+    segs: segs.map(s => [s.cl, s.rel, s.t]),
+    durs: durs.map(d => Math.max(0.001, Math.round(d * 1000) / 1000)),
+    bw: { peak: Math.ceil(peak * 1.1), avg: Math.ceil(total / Math.max(1, durSec)) },
+  };
+}
+
+// ── fMP4（ISO BMFF）写入 ──
+
+const be16 = v => [(v >>> 8) & 255, v & 255];
+const be32 = v => [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
+function mp4Box(type, ...parts) {
+  const list = [];
+  let len = 8;
+  for (const p of parts) {
+    if (p == null) continue;
+    const u = p instanceof Uint8Array ? p : Uint8Array.from(p);
+    list.push(u);
+    len += u.length;
+  }
+  const out = new Uint8Array(len);
+  new DataView(out.buffer).setUint32(0, len);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  let o = 8;
+  for (const u of list) { out.set(u, o); o += u.length; }
+  return out;
+}
+function mp4Full(type, ver, flags, ...parts) {
+  return mp4Box(type, [ver, (flags >>> 16) & 255, (flags >>> 8) & 255, flags & 255], ...parts);
+}
+const MP4_MATRIX = [...be32(0x00010000), ...be32(0), ...be32(0), ...be32(0), ...be32(0x00010000),
+  ...be32(0), ...be32(0), ...be32(0), ...be32(0x40000000)];
+
+function mp4Lang(lang) {
+  const map = { zh: 'zho', 'zh-Hans': 'zho', 'zh-Hant': 'zho', yue: 'yue', en: 'eng', ja: 'jpn', ko: 'kor',
+    fr: 'fra', de: 'deu', es: 'spa', it: 'ita', ru: 'rus', pt: 'por' };
+  const c = (map[lang] || (/^[a-z]{3}$/.test(lang) ? lang : 'und'));
+  return ((c.charCodeAt(0) - 0x60) << 10) | ((c.charCodeAt(1) - 0x60) << 5) | (c.charCodeAt(2) - 0x60);
+}
+
+/** MPEG-4 描述符长度（ESDS 用 4 字节扩展写法，最稳） */
+function mp4Desc(tag, body) {
+  const n = body.length;
+  return [tag, 0x80 | ((n >> 21) & 127), 0x80 | ((n >> 14) & 127), 0x80 | ((n >> 7) & 127), n & 127, ...body];
+}
+function mp4Esds(asc, oti = 0x40) {
+  const dsi = mp4Desc(0x05, [...asc]);
+  const dcd = mp4Desc(0x04, [oti, 0x15, 0, 0, 0, ...be32(0), ...be32(0), ...dsi]);
+  const es = mp4Desc(0x03, [0, 0, 0, ...dcd, ...mp4Desc(0x06, [0x02])]);
+  return mp4Full('esds', 0, 0, es);
+}
+
+function mp4VideoEntry(v) {
+  const head = new Uint8Array(78);
+  const dv = new DataView(head.buffer);
+  dv.setUint16(6, 1);
+  dv.setUint16(24, v.w); dv.setUint16(26, v.h);
+  dv.setUint32(28, 0x00480000); dv.setUint32(32, 0x00480000);
+  dv.setUint16(40, 1);
+  dv.setUint16(74, 0x0018); dv.setInt16(76, -1);
+  const kids = [mp4Box(v.cfgType, hlsUnB64(v.cfg))];
+  if (v.dv) kids.push(mp4Box(v.dv.box, hlsUnB64(v.dv.cfg)));
+  if (v.colr) {
+    kids.push(mp4Box('colr', [0x6E, 0x63, 0x6C, 0x78], be16(v.colr[0]), be16(v.colr[1]), be16(v.colr[2]),
+      [v.colr[3] ? 0x80 : 0]));
+  }
+  if (v.mdcv) kids.push(mp4Box('mdcv', hlsUnB64(v.mdcv)));
+  if (v.clli) kids.push(mp4Box('clli', hlsUnB64(v.clli)));
+  kids.push(mp4Box('pasp', be32(v.sar[0]), be32(v.sar[1])));
+  return mp4Box(v.entry, head, ...kids);
+}
+
+function mp4AudioEntry(a) {
+  const head = new Uint8Array(28);
+  const dv = new DataView(head.buffer);
+  dv.setUint16(6, 1);
+  dv.setUint16(16, a.ch);
+  dv.setUint16(18, a.bits && a.bits > 16 ? a.bits : 16);
+  dv.setUint32(24, a.ts <= 65535 ? a.ts * 65536 : 0);
+  const cfg = hlsUnB64(a.cfg);
+  let box;
+  if (a.codec === 'aac') box = mp4Esds(cfg);
+  else if (a.codec === 'ac3') box = mp4Box('dac3', cfg);
+  else if (a.codec === 'eac3') box = mp4Box('dec3', cfg);
+  else if (a.codec === 'flac') box = mp4Full('dfLa', 0, 0, cfg);
+  else if (a.codec === 'alac') box = mp4Full('alac', 0, 0, cfg);
+  return mp4Box(a.entry, head, box);
+}
+
+function mp4Trak(id, kind, ts, lang, entry, w = 0, h = 0) {
+  const video = kind === 'v';
+  const tkhd = mp4Full('tkhd', 0, 3, be32(0), be32(0), be32(id), be32(0), be32(0), be32(0), be32(0),
+    be16(0), be16(video ? 0 : 1), be16(video ? 0 : 0x0100), be16(0), MP4_MATRIX,
+    be32(w * 65536), be32(h * 65536));
+  const mdhd = mp4Full('mdhd', 0, 0, be32(0), be32(0), be32(ts), be32(0), be16(mp4Lang(lang)), be16(0));
+  const name = video ? 'VideoHandler' : 'SoundHandler';
+  const hdlr = mp4Full('hdlr', 0, 0, be32(0), [...(video ? 'vide' : 'soun')].map(c => c.charCodeAt(0)),
+    be32(0), be32(0), be32(0), [...name].map(c => c.charCodeAt(0)), [0]);
+  const mhd = video ? mp4Full('vmhd', 0, 1, be16(0), be16(0), be16(0), be16(0)) : mp4Full('smhd', 0, 0, be16(0), be16(0));
+  const dinf = mp4Box('dinf', mp4Full('dref', 0, 0, be32(1), mp4Full('url ', 0, 1)));
+  const stbl = mp4Box('stbl', mp4Full('stsd', 0, 0, be32(1), entry), mp4Full('stts', 0, 0, be32(0)),
+    mp4Full('stsc', 0, 0, be32(0)), mp4Full('stsz', 0, 0, be32(0), be32(0)), mp4Full('stco', 0, 0, be32(0)));
+  return mp4Box('trak', tkhd, mp4Box('mdia', mdhd, hdlr, mp4Box('minf', mhd, dinf, stbl)));
+}
+
+/** init 段：tracks = [{ id, kind:'v'|'a', cfg }] */
+function mp4Init(tracks, dvBrand) {
+  const brands = ['iso6', 'iso5', 'mp41', 'dash'];
+  if (dvBrand) brands.push('dby1');
+  const ftyp = mp4Box('ftyp', [...'iso6'].map(c => c.charCodeAt(0)), be32(0),
+    ...brands.map(b => [...b].map(c => c.charCodeAt(0))));
+  const mvhd = mp4Full('mvhd', 0, 0, be32(0), be32(0), be32(1000), be32(0), be32(0x00010000), be16(0x0100),
+    be16(0), be32(0), be32(0), MP4_MATRIX, new Uint8Array(24), be32(tracks.length + 1));
+  const traks = tracks.map(t => t.kind === 'v'
+    ? mp4Trak(t.id, 'v', t.cfg.ts, 'und', mp4VideoEntry(t.cfg), t.cfg.dw, t.cfg.h)
+    : mp4Trak(t.id, 'a', t.cfg.ts, t.cfg.lang, mp4AudioEntry(t.cfg)));
+  const mvex = mp4Box('mvex', ...tracks.map(t => mp4Full('trex', 0, 0, be32(t.id), be32(1), be32(0), be32(0), be32(0))));
+  return hlsConcat([ftyp, mp4Box('moov', mvhd, ...traks, mvex)]);
+}
+
+/**
+ * 一个 moof + mdat。返回 [头部字节, ...负载切片]：负载直接引用回源缓冲区，零拷贝。
+ * runs = [{ id, video, base, samples:[{ dur, size, flags, cto, pieces }] }]
+ */
+function mp4Fragment(seq, runs) {
+  const trafs = [];
+  let moofSize = 8 + 16;
+  for (const r of runs) {
+    if (!r.samples.length) continue;
+    const neg = r.video && r.samples.some(s => s.cto < 0);
+    const per = r.video ? 16 : 8;
+    const tfhd = r.video ? 16 : 20;
+    const trun = 20 + r.samples.length * per;
+    const size = 8 + tfhd + 20 + trun;
+    trafs.push({ r, neg, per, tfhd, trun, size });
+    moofSize += size;
+  }
+  const head = new Uint8Array(moofSize + 8);
+  const dv = new DataView(head.buffer);
+  let o = 0;
+  const box = (size, type) => {
+    dv.setUint32(o, size);
+    for (let i = 0; i < 4; i++) head[o + 4 + i] = type.charCodeAt(i);
+    o += 8;
+  };
+  box(moofSize, 'moof');
+  box(16, 'mfhd'); dv.setUint32(o, 0); dv.setUint32(o + 4, seq); o += 8;
+  let data = moofSize + 8;
+  const pieces = [];
+  for (const tr of trafs) {
+    const r = tr.r;
+    box(tr.size, 'traf');
+    box(tr.tfhd, 'tfhd');
+    dv.setUint32(o, r.video ? 0x020000 : 0x020020); dv.setUint32(o + 4, r.id); o += 8;
+    if (!r.video) { dv.setUint32(o, 0x02000000); o += 4; }
+    box(20, 'tfdt');
+    dv.setUint32(o, 0x01000000);
+    dv.setUint32(o + 4, Math.floor(r.base / 4294967296)); dv.setUint32(o + 8, r.base >>> 0);
+    o += 12;
+    box(tr.trun, 'trun');
+    dv.setUint32(o, ((tr.neg ? 1 : 0) << 24) | (r.video ? 0x000F01 : 0x000301));
+    dv.setUint32(o + 4, r.samples.length);
+    dv.setInt32(o + 8, data);
+    o += 12;
+    for (const s of r.samples) {
+      dv.setUint32(o, s.dur); dv.setUint32(o + 4, s.size); o += 8;
+      if (r.video) {
+        dv.setUint32(o, s.flags);
+        if (tr.neg) dv.setInt32(o + 4, s.cto); else dv.setUint32(o + 4, s.cto);
+        o += 8;
+      }
+      data += s.size;
+      for (const p of s.pieces) pieces.push(p);
+    }
+  }
+  dv.setUint32(o, data - moofSize);
+  head[o + 4] = 0x6D; head[o + 5] = 0x64; head[o + 6] = 0x61; head[o + 7] = 0x74;
+  return [head, ...pieces];
+}
+
+// ── 分片流水线 ──
+
+/** 零拷贝字节队列：只记引用，take() 给出的是原缓冲区上的子视图 */
+class HlsQueue {
+  constructor(pos) { this.bufs = []; this.off = 0; this.len = 0; this.pos = pos; this.drop = 0; }
+  push(u8) {
+    if (this.drop) {
+      const d = Math.min(this.drop, u8.length);
+      this.drop -= d; this.pos += d;
+      u8 = u8.subarray(d);
+    }
+    if (u8.length) { this.bufs.push(u8); this.len += u8.length; }
+  }
+  peek(n) {
+    const m = Math.min(n, this.len);
+    const b0 = this.bufs[0];
+    if (b0 && b0.length - this.off >= m) return b0.subarray(this.off, this.off + m);
+    const out = new Uint8Array(m);
+    let o = 0, i = 0, off = this.off;
+    while (o < m) {
+      const b = this.bufs[i++];
+      const t = Math.min(m - o, b.length - off);
+      out.set(b.subarray(off, off + t), o);
+      o += t; off = 0;
+    }
+    return out;
+  }
+  _advance(n, keep) {
+    const out = keep ? [] : null;
+    let left = n;
+    while (left > 0) {
+      const b = this.bufs[0];
+      const t = Math.min(b.length - this.off, left);
+      if (keep) out.push(b.subarray(this.off, this.off + t));
+      left -= t; this.off += t;
+      if (this.off === b.length) { this.bufs.shift(); this.off = 0; }
+    }
+    this.len -= n; this.pos += n;
+    return out;
+  }
+  take(n) { return this._advance(n, true); }
+  /** 跳过可以超过当前已缓冲的长度：剩下的在后续 push 时直接丢弃，不占内存 */
+  skip(n) {
+    const now = Math.min(n, this.len);
+    this._advance(now, false);
+    this.drop += n - now;
+  }
+}
+
+/** 一串切片上的随机访问（块头解析、NAL 改写都在它上面做，不拼大缓冲） */
+class HlsPieces {
+  constructor(pieces) {
+    this.p = pieces; this.at = [];
+    let o = 0;
+    for (const x of pieces) { this.at.push(o); o += x.length; }
+    this.len = o;
+  }
+  _find(pos) {
+    let lo = 0, hi = this.p.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (this.at[mid] <= pos) lo = mid; else hi = mid - 1;
+    }
+    return lo;
+  }
+  byte(pos) { const i = this._find(pos); return this.p[i][pos - this.at[i]]; }
+  bytes(pos, n) {
+    const out = new Uint8Array(Math.max(0, n));
+    let i = this._find(pos), o = 0, off = pos - this.at[i];
+    while (o < n) {
+      const b = this.p[i++];
+      const t = Math.min(n - o, b.length - off);
+      out.set(b.subarray(off, off + t), o);
+      o += t; off = 0;
+    }
+    return out;
+  }
+  slice(pos, n) {
+    const out = [];
+    if (n <= 0) return out;
+    let i = this._find(pos), off = pos - this.at[i], left = n;
+    while (left > 0) {
+      const b = this.p[i++];
+      const t = Math.min(left, b.length - off);
+      out.push(b.subarray(off, off + t));
+      left -= t; off = 0;
+    }
+    return out;
+  }
+}
+
+/** 取一个切片，但不拼成大缓冲：只收集上游块的引用（省掉整段 memcpy，CPU 与 GC 都减半） */
+async function hlsFetchChunks(open, start, end, rOpt) {
+  const rd = resumableReader({ ...rOpt, start, end, open, label: 'hls-slice' });
+  const out = [];
+  let got = 0, ok = false;
+  try {
+    for (;;) {
+      const r = await rd.read();
+      if (r.done) break;
+      out.push(r.value);
+      got += r.value.length;
+    }
+    if (got !== end - start + 1) throw new Error(`slice short ${got}/${end - start + 1}`);
+    ok = true;
+    return out;
+  } finally {
+    if (!ok) await rd.cancel('slice failed').catch(() => {});
+  }
+}
+
+/**
+ * [start, end] 的字节流：首段 1MB 直通（首字节只等一个 TTFB），其余按切片
+ * 并行预取、按序交付。切片数封顶 24，给免费计划的子请求上限留余量。
+ */
+function hlsByteSource(cx, start, end) {
+  const aborter = new AbortController();
+  const outer = cx.signal;
+  const fwd = () => aborter.abort(outer.reason);
+  if (outer?.aborted) fwd(); else if (outer) outer.addEventListener('abort', fwd, { once: true });
+  const meta = cx.linkData.metadata;
+  const linkRef = { link: cx.linkData.link, metadata: meta, size: meta.size,
+    identity: meta.content_hash || meta.rev || String(meta.size || '') };
+  const budget = makeStreamBudget(cx.env);
+  const open = upstreamOpener(cx.filePath, linkRef, cx.env, cx.ctx, { budget, signal: aborter.signal, hedge: true, label: 'hls-head' });
+  const openBg = upstreamOpener(cx.filePath, linkRef, cx.env, cx.ctx, { budget, signal: aborter.signal, hedge: false, label: 'hls-slice' });
+  const rOpt = { stallMs: stallMs(cx.env), maxResume: resumeMax(cx.env), maxOpen: openMax(cx.env), signal: aborter.signal };
+  const headEnd = Math.min(end, start + HLS_FIRST - 1);
+  const rest = end - headEnd;
+  const sliceSize = Math.max(HLS_SLICE, Math.ceil(rest / 24 / 1048576) * 1048576);
+  const slices = [];
+  for (let p = headEnd + 1; p <= end; p += sliceSize) slices.push([p, Math.min(end, p + sliceSize - 1)]);
+  const inflight = new Map();
+  const launch = i => {
+    if (i >= slices.length || inflight.has(i)) return;
+    const pr = hlsFetchChunks(openBg, slices[i][0], slices[i][1], rOpt);
+    pr.catch(() => {});
+    inflight.set(i, pr);
+  };
+  let head = null, headDone = false, next = 0, closed = false, cur = null, curAt = 0;
+  const close = reason => {
+    if (closed) return;
+    closed = true;
+    if (!aborter.signal.aborted) aborter.abort(reason || 'done');
+    if (outer) outer.removeEventListener('abort', fwd);
+    if (head && !headDone) head.cancel(reason).catch(() => {});
+    inflight.clear();
+  };
+  return {
+    async next() {
+      if (closed) return { done: true };
+      if (!head) {
+        head = resumableReader({ ...rOpt, open, start, end: headEnd, label: 'hls-head' });
+        for (let i = 0; i < HLS_WINDOW; i++) launch(i);
+      }
+      if (!headDone) {
+        const r = await head.read();
+        if (!r.done) return { done: false, value: r.value };
+        headDone = true;
+      }
+      if (cur && curAt < cur.length) return { done: false, value: cur[curAt++] };
+      if (next < slices.length) {
+        cur = await inflight.get(next);
+        curAt = 0;
+        inflight.delete(next);
+        launch(next + HLS_WINDOW);
+        next++;
+        return { done: false, value: cur[curAt++] };
+      }
+      close('complete');
+      return { done: true };
+    },
+    close,
+  };
+}
+
+/** 分段的字节边界：起点总是某个 Cluster 的开头，终点是下一段关键帧块的位置 */
+function hlsSegPlan(idx, k) {
+  const S = idx.segs;
+  const [cl, rel, t] = S[k];
+  const nx = S[k + 1] || null;
+  let fetchEnd = idx.clustersEnd - 1;
+  if (nx) {
+    if (nx[1] >= 0) fetchEnd = idx.segStart + nx[0] + 12 + nx[1] - 1;
+    else {
+      const nn = S.slice(k + 2).find(s => s[0] > nx[0]);
+      fetchEnd = nn ? idx.segStart + nn[0] - 1 : idx.clustersEnd - 1;
+    }
+  }
+  return {
+    start: idx.segStart + cl, startRel: rel, startT: t, first: k === 0,
+    endCl: nx ? idx.segStart + nx[0] : -1, endRel: nx ? nx[1] : -1, endT: nx ? nx[2] : Infinity,
+    fetchEnd: Math.min(idx.size - 1, fetchEnd),
+  };
+}
+
+/**
+ * EBML 流式块解析。只吐 want 里的轨道；分段边界：
+ *   · 已知 CueRelativePosition → 按字节位置精确起止
+ *   · 未知 → 从簇头开始，以「时间戳 ≥ CueTime 的视频关键帧」为界
+ * 两段用同一个判定，所以每个块恰好落在一个分段里，不重不漏。
+ */
+async function* hlsBlocks(src, plan, idx, want) {
+  const q = new HlsQueue(plan.start);
+  const vnum = idx.video.num;
+  let clusterTs = 0, skipping = !plan.first, startBlock = -1, endBlock = -1, endPending = false;
+  const need = async n => {
+    while (q.len < n) {
+      const r = await src.next();
+      if (r.done) return false;
+      q.push(r.value);
+    }
+    return true;
+  };
+  for (;;) {
+    const X = q.pos;
+    if (endBlock >= 0 && X >= endBlock) return;
+    if (!(await need(2))) return;
+    await need(12);
+    const h = q.peek(12);
+    const id = ebmlId(h, 0, h.length);
+    const sz = id && ebmlSize(h, id[1], h.length);
+    if (!id || !sz) return;
+    const hl = id[1] + sz[1], eid = id[0], esz = sz[0];
+    if (eid === MKV.Cluster) {
+      q.skip(hl);
+      const data = X + hl;
+      if (X === plan.start && plan.startRel >= 0) startBlock = data + plan.startRel;
+      if (X === plan.endCl) {
+        if (plan.endRel >= 0) endBlock = data + plan.endRel;
+        else endPending = true;
+      }
+      continue;
+    }
+    if (MKV_TOP.has(eid)) return;
+    if (esz < 0) throw new Error('unknown-size element in cluster');
+    if (eid === MKV.Timestamp) {
+      if (!(await need(hl + esz))) return;
+      clusterTs = ebmlUint(q.peek(hl + esz), hl, esz);
+      q.skip(hl + esz);
+      continue;
+    }
+    if (eid !== MKV.SimpleBlock && eid !== MKV.BlockGroup) { q.skip(hl + esz); continue; }
+    if (skipping && startBlock >= 0) {
+      if (X < startBlock) { q.skip(hl + esz); continue; }
+      skipping = false;
+    }
+
+    // 先看块头里的轨道号，决定要不要把负载留下来
+    await need(Math.min(hl + esz, hl + 48));
+    const hb = q.peek(Math.min(hl + esz, hl + 48));
+    let bh = null;
+    if (eid === MKV.SimpleBlock) bh = mkvBlockHead(hb, hl, hb.length);
+    else {
+      for (let p = hl; p < hb.length;) {
+        const ci = ebmlId(hb, p, hb.length), cs = ci && ebmlSize(hb, p + ci[1], hb.length);
+        if (!ci || !cs) break;
+        if (ci[0] === MKV.Block) { bh = mkvBlockHead(hb, p + ci[1] + cs[1], hb.length); break; }
+        p += ci[1] + cs[1] + cs[0];
+      }
+    }
+    if (!bh) { q.skip(hl + esz); continue; }
+    const isVideo = bh.track === vnum;
+    const boundaryWatch = isVideo && ((skipping && startBlock < 0) || endPending);
+    const keep = want.has(bh.track) && !(skipping && !boundaryWatch);
+    const ts = clusterTs + bh.rel;
+
+    if (!keep && !(boundaryWatch && eid === MKV.BlockGroup)) {
+      if (boundaryWatch) {
+        const key = !!(bh.flags & 0x80);
+        if (endPending && key && ts >= plan.endT) return;
+        if (skipping && key && ts >= plan.startT) skipping = false;
+      }
+      q.skip(hl + esz);
+      continue;
+    }
+
+    if (!(await need(hl + esz))) return;
+    const P = new HlsPieces(q.take(hl + esz));
+    let key, dur = -1, bstart, bend, flags = bh.flags;
+    if (eid === MKV.SimpleBlock) {
+      key = !!(flags & 0x80);
+      bstart = hl; bend = hl + esz;
+    } else {
+      let ref = false;
+      for (let p = hl; p < hl + esz;) {
+        const hdr = P.bytes(p, Math.min(12, hl + esz - p));
+        const ci = ebmlId(hdr, 0, hdr.length), cs = ci && ebmlSize(hdr, ci[1], hdr.length);
+        if (!ci || !cs) break;
+        const d = p + ci[1] + cs[1];
+        if (ci[0] === MKV.Block) { bstart = d; bend = d + cs[0]; }
+        else if (ci[0] === MKV.BlockDuration) dur = ebmlUint(P.bytes(d, cs[0]), 0, cs[0]);
+        else if (ci[0] === MKV.ReferenceBlock) ref = true;
+        p = d + cs[0];
+      }
+      key = !ref;
+      if (bstart == null) continue;
+    }
+    if (boundaryWatch && key) {
+      if (endPending && ts >= plan.endT) return;
+      if (skipping && ts >= plan.startT) skipping = false;
+    }
+    if (skipping || !want.has(bh.track)) continue;
+
+    // 帧切分：无 lacing（视频）零拷贝；有 lacing（音频，小块）拷一份再切
+    const tvl = ebmlVintRaw(P.bytes(bstart, 8), 0, 8)[1];
+    const dataPos = bstart + tvl + 3;
+    let frames;
+    if (!((flags >> 1) & 3)) frames = [P.slice(dataPos, bend - dataPos)];
+    else {
+      const raw = P.bytes(dataPos, bend - dataPos);
+      frames = mkvLaces(raw, 0, raw.length, flags).map(([a, b]) => [raw.subarray(a, b)]);
+    }
+    yield { track: bh.track, ts, key, dur, frames };
+  }
+}
+
+/** P7：丢增强层 NAL（63），RPU（62）改写为 8.1；dvStrip：两者都丢，按 HDR10 输出 */
+function hlsRewriteHevc(pieces, nalLen, mode, stats) {
+  const P = new HlsPieces(pieces);
+  const out = [];
+  let p = 0, size = 0, changed = false;
+  while (p + nalLen <= P.len) {
+    let len = 0;
+    for (let i = 0; i < nalLen; i++) len = len * 256 + P.byte(p + i);
+    const s = p + nalLen;
+    if (len < 1 || s + len > P.len) { out.push(...P.slice(p, P.len - p)); size += P.len - p; changed = true; break; }
+    const type = (P.byte(s) >> 1) & 0x3F;
+    if (type === 63 || (type === 62 && mode === 'strip')) { changed = true; }
+    else if (type === 62) {
+      let nal;
+      try { nal = dvConvertRpuNal(P.bytes(s, len)); stats.rpu++; }
+      catch { nal = P.bytes(s, len); stats.rpuFail++; }
+      const lenb = new Uint8Array(nalLen);
+      for (let i = 0; i < nalLen; i++) lenb[i] = (nal.length >>> (8 * (nalLen - 1 - i))) & 255;
+      out.push(lenb, nal);
+      size += nalLen + nal.length;
+      changed = true;
+    } else {
+      out.push(...P.slice(p, nalLen + len));
+      size += nalLen + len;
+    }
+    p = s + len;
+  }
+  return changed ? { pieces: out, size } : { pieces, size: P.len };
+}
+
+/**
+ * 一个 HLS 分段 → fMP4 分片流（按 ~1s 一个 moof 交付）。
+ * sel.video：视频（+ 复用的默认音轨 sel.audio）；否则只出 sel.audio 这条音轨。
+ */
+async function* hlsSegmentParts(cx, idx, k, sel) {
+  const plan = hlsSegPlan(idx, k);
+  const V = idx.video;
+  const A = sel.audio >= 0 ? idx.audio[sel.audio] : null;
+  const want = new Set();
+  if (sel.video) want.add(V.num);
+  if (A) want.add(A.num);
+  const src = hlsByteSource(cx, plan.start, plan.fetchEnd);
+  const vid = 1, aid = sel.video ? 2 : 1;
+  const T0v = HLS_T0 * V.ts;
+  const T0a = A ? HLS_T0 * A.ts : 0;
+  const vStrip = V.strip ? hlsUnB64(V.strip) : null;
+  const aStrip = A && A.strip ? hlsUnB64(A.strip) : null;
+  const stats = { rpu: 0, rpuFail: 0 };
+
+  // 视频：PTS 吸附帧网格；DTS_j = 第 (j−R) 小的 PTS（不足时按帧长外推）
+  const R = Math.max(0, V.reorder | 0);
+  const fd = V.fd || (V.fps ? Math.round(V.ts / V.fps) : 3750);
+  const vAnchor = Math.round(V.anchor * V.ts / 1e9);
+  const snapV = ns => {
+    const u = ns * V.ts / 1e9;
+    if (V.fd) {
+      const s = vAnchor + Math.round((u - vAnchor) / V.fd) * V.fd;
+      if (Math.abs(s - u) <= V.fd / 4) return s;
+    }
+    return Math.round(u);
+  };
+  const sorted = [];
+  let vCount = 0, vEmitted = 0, lastDts = -Infinity, seenKey = false;
+  const vPend = [];                       // { pts, key, pieces, size, idx }
+  const dtsOf = j => (j >= R ? sorted[j - R] : sorted[0] - (R - j) * fd);
+
+  // 音频：时间戳吸附到「首帧 + n × 帧长」的网格上，保证跨分段无缝
+  let aRun = null;                        // { base, end, samples[] }
+  const aRuns = [];
+  const snapA = (ns, fs) => {
+    const u = Math.round(ns * A.ts / 1e9);
+    return fs > 0 ? A.anchor + Math.round((u - A.anchor) / fs) * fs : u;
+  };
+
+  // 帧 j 可交付 ⇔ DTS_j 与 DTS_{j+1} 都已确定 ⇔ 已见到 max(j+2, R+1) 帧
+  // （重排深度为 R 时，之后的帧不可能再改变第 j−R 小的 PTS）
+  const vReady = () => (vCount >= R + 1 ? Math.max(0, vCount - 1 - vEmitted) : 0);
+  let seq = k * 10000 + 1, bytes = 0;
+  function* flush(final) {
+    const runs = [];
+    if (sel.video) {
+      const n = final ? vPend.length : vReady();
+      if (n > 0) {
+        const samples = [];
+        let base = null;
+        for (let i = 0; i < n; i++) {
+          const f = vPend[i];
+          let dts = Math.max(dtsOf(f.idx), lastDts + 1);
+          let next = f.idx + 1 < vCount ? Math.max(dtsOf(f.idx + 1), dts + 1) : dts + fd;
+          lastDts = dts;
+          if (base === null) base = dts;
+          samples.push({ dur: Math.max(1, next - dts), size: f.size, pieces: f.pieces,
+            flags: f.key ? 0x02000000 : 0x01010000, cto: f.pts - dts });
+        }
+        vPend.splice(0, n);
+        vEmitted += n;
+        runs.push({ id: vid, video: true, base: base + T0v, samples });
+      }
+    }
+    if (A) {
+      if (aRun) { aRuns.push(aRun); aRun = null; }
+      for (const r of aRuns) runs.push({ id: aid, video: false, base: r.base + T0a, samples: r.samples });
+      aRuns.length = 0;
+    }
+    bytes = 0;
+    // 一个 moof 里每条轨只放一个 trun：多段音频（遇到断档）拆成多个分片
+    const v = runs.filter(r => r.video), a = runs.filter(r => !r.video);
+    if (!v.length && !a.length) return;
+    yield mp4Fragment(seq++, [...v, ...a.slice(0, 1)]);
+    for (const r of a.slice(1)) yield mp4Fragment(seq++, [r]);
+  }
+  const readyVideoSec = () => {
+    const e = vReady();
+    return e < 1 ? 0 : (dtsOf(vEmitted + e) - dtsOf(vEmitted)) / V.ts;
+  };
+
+  try {
+    for await (const blk of { [Symbol.asyncIterator]: () => hlsBlocks(src, plan, idx, want) }) {
+      const ns = blk.ts * idx.scaleNs;
+      if (blk.track === V.num) {
+        if (!seenKey) { if (!blk.key) continue; seenKey = true; }
+        let pieces = blk.frames[0], size = pieces.reduce((s, x) => s + x.length, 0);
+        if (vStrip) { pieces = [vStrip, ...pieces]; size += vStrip.length; }
+        if (V.dvConvert || V.dvStrip) {
+          const r = hlsRewriteHevc(pieces, V.nalLen, V.dvStrip ? 'strip' : 'convert', stats);
+          pieces = r.pieces; size = r.size;
+        }
+        const pts = snapV(ns);
+        let lo = 0, hi = sorted.length;
+        while (lo < hi) { const m = (lo + hi) >> 1; if (sorted[m] < pts) lo = m + 1; else hi = m; }
+        sorted.splice(lo, 0, pts);
+        vPend.push({ pts, key: blk.key, pieces, size, idx: vCount });
+        vCount++;
+        bytes += size;
+      } else if (A && blk.track === A.num) {
+        const laceNs = A.fs ? A.fs * 1e9 / A.ts : 0;
+        blk.frames.forEach((fr, i) => {
+          let pieces = fr, size = fr.reduce((s, x) => s + x.length, 0);
+          if (aStrip) { pieces = [aStrip, ...pieces]; size += aStrip.length; }
+          let fs = A.fs;
+          if (!fs && A.codec === 'flac') fs = flacFrameSamples(fr.length === 1 ? fr[0] : hlsConcat(fr)) || 4096;
+          const t = snapA(ns + i * (laceNs || (fs * 1e9 / A.ts)), fs);
+          if (aRun) {
+            if (Math.abs(t - aRun.end) <= fs / 2) { /* 连续 */ }
+            else if (t < aRun.end) return;                       // 重叠帧：丢弃
+            else { aRuns.push(aRun); aRun = null; }               // 断档：另起一段
+          }
+          if (!aRun) aRun = { base: t, end: t, samples: [] };
+          aRun.samples.push({ dur: fs, size, pieces });
+          aRun.end += fs;
+          bytes += size;
+        });
+      }
+      const due = sel.video ? (readyVideoSec() >= HLS_FRAG_SEC || bytes >= HLS_FRAG_BYTES)
+        : (aRun && (aRun.end - aRun.base) >= 2 * A.ts) || aRuns.length > 0 || bytes >= HLS_FRAG_BYTES;
+      if (due) yield* flush(false);
+    }
+    yield* flush(true);
+    if (stats.rpuFail) console.error(`hls: ${stats.rpuFail} RPU 转换失败（${cx.filePath} #${k}）`);
+  } finally {
+    src.close('segment end');
+  }
+}
+
+// ── 字幕：内封 SRT / ASS 与同目录外挂字幕 → 分段 WebVTT ──
+
+function hlsVttTime(sec) {
+  const ms = Math.max(0, Math.round(sec * 1000));
+  const p = (v, n = 2) => String(v).padStart(n, '0');
+  return `${p(Math.floor(ms / 3600000))}:${p(Math.floor(ms / 60000) % 60)}:${p(Math.floor(ms / 1000) % 60)}.${p(ms % 1000, 3)}`;
+}
+/** WebVTT 文本：只保留 <i><b><u>，其余转义；不能有空行，也不能出现 --> */
+function hlsVttEscape(s) {
+  const keep = [];
+  s = String(s).replace(/<(\/?)(i|b|u)\b[^>]*>/gi, (m, sl, t) => { keep.push(`<${sl}${t.toLowerCase()}>`); return `\u0001${keep.length - 1}\u0002`; });
+  s = s.replace(/<[^>]*>/g, '');
+  s = s.replace(/&(?!(amp|lt|gt|nbsp|lrm|rlm);)/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  s = s.replace(/\u0001(\d+)\u0002/g, (m, i) => keep[+i]);
+  return s.replace(/-->/g, '→').replace(/\r\n?/g, '\n').replace(/\n{2,}/g, '\n').trim();
+}
+/** ASS 一行对白的 Text 字段 → VTT（斜体 / 粗体保留，特效标签与绘图丢弃） */
+function hlsAssText(text) {
+  if (/\{[^}]*\\p[1-9]/.test(text)) return { text: '', settings: '' };
+  const settings = /\{[^}]*\\an?[789]\b[^}]*\}/.test(text) ? ' line:8%' : '';
+  let out = '', last = 0, it = false, bd = false, m;
+  const re = /\{([^}]*)\}/g;
+  const esc = s => s.replace(/\\N/gi, '\n').replace(/\\h/g, ' ').replace(/<[^>]*>/g, '');
+  while ((m = re.exec(text))) {
+    out += esc(text.slice(last, m.index));
+    const iv = /\\i([01])(?!\d)/.exec(m[1]);
+    if (iv) { if (iv[1] === '1' && !it) { out += '<i>'; it = true; } else if (iv[1] === '0' && it) { out += '</i>'; it = false; } }
+    const bv = /\\b([01])(?!\d)/.exec(m[1]);
+    if (bv) { if (bv[1] === '1' && !bd) { out += '<b>'; bd = true; } else if (bv[1] === '0' && bd) { out += '</b>'; bd = false; } }
+    last = re.lastIndex;
+  }
+  out += esc(text.slice(last));
+  if (bd) out += '</b>';
+  if (it) out += '</i>';
+  return { text: hlsVttEscape(out), settings };
+}
+/** MKV 字幕块 → { text, settings } */
+function hlsSubFrameText(fmt, bytes) {
+  const s = new TextDecoder().decode(bytes).replace(/\0+$/, '');
+  if (fmt === 'ass') {
+    // ReadOrder, Layer, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+    const parts = s.split(',');
+    return hlsAssText(parts.length >= 9 ? parts.slice(8).join(',') : s);
+  }
+  return { text: hlsVttEscape(s), settings: '' };
+}
+
+function hlsVtt(cues) {
+  const out = ['WEBVTT', `X-TIMESTAMP-MAP=MPEGTS:${HLS_T0 * 90000},LOCAL:00:00:00.000`, ''];
+  const seen = new Set();
+  for (const c of cues.sort((a, b) => a.s - b.s || a.e - b.e)) {
+    if (!c.text || !(c.e > c.s)) continue;
+    const key = `${c.s}|${c.e}|${c.text}`;
+    if (seen.has(key)) continue;          // ASS 多图层常有完全相同的对白
+    seen.add(key);
+    out.push(`${hlsVttTime(c.s)} --> ${hlsVttTime(c.e)}${c.settings || ''}`, c.text, '');
+  }
+  return out.join('\n');
+}
+
+function hlsSegWindow(idx, k) {
+  const sec = u => u * idx.scaleNs / 1e9;
+  const a = k === 0 ? 0 : sec(idx.segs[k][2]);
+  const b = k + 1 < idx.segs.length ? sec(idx.segs[k + 1][2]) : idx.dur + 1;
+  return [a, b];
+}
+
+/** 读一小段字节（字幕块 / 簇头），走与 /stream 相同的可续传上游 */
+function hlsSmallReader(cx) {
+  const meta = cx.linkData.metadata;
+  const linkRef = { link: cx.linkData.link, metadata: meta, size: meta.size,
+    identity: meta.content_hash || meta.rev || String(meta.size || '') };
+  const budget = makeStreamBudget(cx.env);
+  const open = upstreamOpener(cx.filePath, linkRef, cx.env, cx.ctx, { budget, signal: cx.signal, hedge: true, label: 'hls-small' });
+  const rOpt = { stallMs: stallMs(cx.env), maxResume: resumeMax(cx.env), maxOpen: openMax(cx.env), signal: cx.signal };
+  return (a, b) => fetchExact(open, a, Math.min(meta.size - 1, b), rOpt);
+}
+
+async function hlsSubDecode(sub, frame) {
+  let d = frame;
+  if (sub.strip) d = hlsConcat([hlsUnB64(sub.strip), d]);
+  else if (sub.zlib) {
+    const ds = new Response(new Blob([d]).stream().pipeThrough(new DecompressionStream('deflate')));
+    d = new Uint8Array(await ds.arrayBuffer());
+  }
+  return d;
+}
+
+/** 内封字幕的第 k 段 */
+async function hlsSubSegment(cx, idx, si, k) {
+  const sub = idx.subs[si];
+  const [T1, T2] = hlsSegWindow(idx, k);
+  const sec = u => u * idx.scaleNs / 1e9;
+  const cues = [];
+  const pick = sub.cues.filter(c => {
+    const s = sec(c[0]), e = c[1] >= 0 ? s + sec(c[1]) : s + 10;
+    return s < T2 && e > T1;
+  });
+  if (sub.cues.length && pick.every(c => c[3] >= 0)) {
+    // Cues 精确到块：簇头 16 字节 + 字幕块附近一小窗，两段并行读，绝不读整簇
+    const read = hlsSmallReader(cx);
+    const byCluster = new Map();
+    for (const c of pick) {
+      if (!byCluster.has(c[2])) byCluster.set(c[2], []);
+      byCluster.get(c[2]).push(c);
+    }
+    await Promise.all([...byCluster].map(async ([cl, list]) => {
+      const abs = idx.segStart + cl;
+      const wins = [];
+      for (const c of list.sort((a, b) => a[3] - b[3])) {
+        const w = wins[wins.length - 1];
+        if (w && c[3] - w.hi < 65536) { w.hi = c[3]; w.cues.push(c); }
+        else wins.push({ lo: c[3], hi: c[3], cues: [c] });
+      }
+      // 簇数据起点 = abs + 4(ID) + L(尺寸字段 1~8 字节)；窗口从 abs+5+rel 开始，块在窗口内偏移 L−1
+      const hdrP = read(abs, abs + 15);
+      const bufs = wins.map(w => read(abs + 5 + w.lo, abs + 12 + w.hi + 16383));
+      const hdr = await hdrP;
+      const id = ebmlId(hdr, 0, hdr.length), sz = id && ebmlSize(hdr, id[1], hdr.length);
+      if (!id || id[0] !== MKV.Cluster || !sz) return;
+      const data = abs + id[1] + sz[1];
+      for (let i = 0; i < wins.length; i++) {
+        let buf = await bufs[i];
+        const base = abs + 5 + wins[i].lo;
+        for (const c of wins[i].cues) {
+          let at = data + c[3] - base;
+          let el = ebmlChildren(buf, at, buf.length).next().value;
+          if (el && el.cut && el.size < 4 * 1048576) {
+            buf = await read(base + at, base + el.end - 1);      // 罕见的超长字幕块：补读整块
+            at = 0;
+            el = ebmlChildren(buf, 0, buf.length).next().value;
+          }
+          if (!el || el.cut) continue;
+          const b = mkvParseBlockEl(buf, el);
+          if (!b || b.track !== sub.num) continue;
+          const s = sec(c[0]);
+          const dur = b.dur >= 0 ? sec(b.dur) : c[1] >= 0 ? sec(c[1]) : 3;
+          const t = hlsSubFrameText(sub.fmt, await hlsSubDecode(sub, b.frames[0]));
+          if (t.text) cues.push({ s, e: s + dur, ...t });
+        }
+      }
+    }));
+  } else if (!sub.cues.length || pick.length) {
+    // 没有字幕 Cues（少数封装器）：扫这一段的字节
+    const plan = hlsSegPlan(idx, k);
+    const src = hlsByteSource(cx, plan.start, plan.fetchEnd);
+    try {
+      for await (const b of { [Symbol.asyncIterator]: () => hlsBlocks(src, plan, idx, new Set([sub.num])) }) {
+        const s = sec(b.ts);
+        const t = hlsSubFrameText(sub.fmt, await hlsSubDecode(sub, hlsConcat(b.frames[0])));
+        if (t.text) cues.push({ s, e: s + (b.dur >= 0 ? sec(b.dur) : 3), ...t });
+      }
+    } finally { src.close('subs'); }
+  }
+  return hlsVtt(cues);
+}
+
+// ── 外挂字幕 ──
+
+/** 同目录字幕文件（与 /api/subs 同一套匹配规则） */
+async function hlsSidecarSubs(filePath, env) {
+  const slash = filePath.lastIndexOf('/');
+  const folder = slash > 0 ? filePath.slice(0, slash) : (env.ROOT_FOLDER || '');
+  const fileName = filePath.slice(slash + 1);
+  const dot = fileName.lastIndexOf('.');
+  const stem = (dot > 0 ? fileName.slice(0, dot) : fileName).toLowerCase();
+  let entries = [];
+  try {
+    entries = await singleFlight(`sub-dir:${folder}`, async () => {
+      const list = [];
+      let res = await dbxListFolder(folder, env);
+      list.push(...(res.entries || []));
+      while (res.has_more) {
+        res = await dbxListFolder(null, env, res.cursor);
+        list.push(...(res.entries || []));
+      }
+      return list;
+    });
+  } catch { return []; }
+  const videoCount = entries.filter(e => e['.tag'] === 'file' && VIDEO_EXTS.has(getExt(e.name))).length;
+  return entries
+    .filter(e => e['.tag'] === 'file' && SUB_EXTS.has(getExt(e.name))
+      && (e.name.toLowerCase().startsWith(stem) || videoCount <= 1))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map(e => ({ name: e.name, path: e.path_display, rev: e.rev || e.content_hash || '', ext: getExt(e.name), ...inferSubLang(e.name, stem) }));
+}
+
+/** 字幕文件全文 → [{ s, e, text, settings }]（秒） */
+function hlsParseSubFile(text, ext) {
+  const norm = String(text).replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+  const cues = [];
+  const t2s = (h, m, s, f) => (+h) * 3600 + (+m) * 60 + (+s) + (+(`${f}`.padEnd(3, '0').slice(0, 3))) / 1000;
+  if (ext === '.ass' || ext === '.ssa' || /\[Events\]/i.test(norm)) {
+    let inEv = false, si = 1, ei = 2, ti = 9;
+    for (const raw of norm.split('\n')) {
+      const l = raw.trim();
+      if (/^\[Events\]/i.test(l)) { inEv = true; continue; }
+      if (/^\[.*\]$/.test(l)) { if (inEv) break; continue; }
+      if (!inEv) continue;
+      if (/^Format\s*:/i.test(l)) {
+        const cols = l.slice(l.indexOf(':') + 1).split(',').map(x => x.trim().toLowerCase());
+        if (cols.includes('start')) si = cols.indexOf('start');
+        if (cols.includes('end')) ei = cols.indexOf('end');
+        if (cols.includes('text')) ti = cols.indexOf('text');
+        continue;
+      }
+      if (!/^Dialogue\s*:/i.test(l)) continue;
+      const body = l.slice(l.indexOf(':') + 1);
+      const ps = [];
+      let cur = 0;
+      for (let i = 0; i < ti; i++) { const c = body.indexOf(',', cur); if (c < 0) break; ps.push(body.slice(cur, c)); cur = c + 1; }
+      ps.push(body.slice(cur));
+      const a = /(\d+):(\d{2}):(\d{2})[.:](\d{1,3})/.exec(ps[si] || ''), b = /(\d+):(\d{2}):(\d{2})[.:](\d{1,3})/.exec(ps[ei] || '');
+      if (!a || !b) continue;
+      const s = t2s(a[1], a[2], a[3], a[4].length === 2 ? a[4] + '0' : a[4]);
+      const e = t2s(b[1], b[2], b[3], b[4].length === 2 ? b[4] + '0' : b[4]);
+      const t = hlsAssText(ps[ti] || '');
+      if (t.text && e > s) cues.push({ s, e, ...t });
+    }
+    return cues;
+  }
+  for (const block of norm.replace(/^WEBVTT[^\n]*\n+/, '').split(/\n{2,}/)) {
+    const ls = block.trim().split('\n');
+    const at = ls.findIndex(x => x.includes('-->'));
+    if (at < 0) continue;
+    const m = /(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[,.](\d{1,3})\s*-->\s*(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[,.](\d{1,3})/.exec(ls[at]);
+    if (!m) continue;
+    const s = t2s(m[1] || 0, m[2], m[3], m[4]), e = t2s(m[5] || 0, m[6], m[7], m[8]);
+    const text = hlsVttEscape(ls.slice(at + 1).join('\n'));
+    if (text && e > s) cues.push({ s, e, text, settings: '' });
+  }
+  return cues;
+}
+
+async function hlsSidecarCues(x, env, ctx) {
+  const ck = new Request(`${HLS_SUB_CACHE}x?p=${encodeURIComponent(x.path)}&r=${encodeURIComponent(x.rev)}&v=${HLS_VER}`);
+  const hit = await caches.default.match(ck);
+  if (hit) { try { return await hit.json(); } catch {} }
+  return singleFlight(`hls-x:${x.path}|${x.rev}`, async () => {
+    const link = await getTempLink(x.path, env, ctx);
+    const res = await fetchRetry(link.link, {}, { retries: 1, timeout: 10_000 });
+    if (!res.ok) throw hlsErr('外挂字幕读取失败', 502);
+    const cues = hlsParseSubFile(decodeSubtitleBytes(new Uint8Array(await res.arrayBuffer())), x.ext);
+    ctx?.waitUntil?.(caches.default.put(ck, new Response(JSON.stringify(cues), {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=86400' },
+    })).catch(() => {}));
+    return cues;
+  });
+}
+
+// ── 路由：/hls/<exp>.<sig>.<b64url(path)>/… ──
+//  令牌放在路径里而不是查询串：播放列表里的相对 URI 会自然继承它，
+//  原生播放器（AVPlayer）不带 Cookie 也能一路鉴权。签名与 /stream 完全相同。
+
+function hlsTokenFor(filePath, sign) {
+  return `${sign ? sign.exp : 0}.${sign ? sign.sig : 0}.${hlsB64url(filePath)}`;
+}
+function hlsParseToken(seg) {
+  const m = /^(\d+)\.([0-9a-f]+)\.([A-Za-z0-9_-]+)$/.exec(seg || '');
+  if (!m) return null;
+  try { return { exp: +m[1], sig: m[2], path: hlsUnB64url(m[3]) }; } catch { return null; }
+}
+async function hlsVerifyPath(pathname, env) {
+  try {
+    const tok = hlsParseToken(pathname.split('/')[2]);
+    if (!tok || !tok.path || tok.exp * 1000 < Date.now()) return false;
+    return timingSafeEqualStr(tok.sig, await hmacHex(env.AUTH_SECRET, `${tok.path}|${tok.exp}`));
+  } catch { return false; }
+}
+/** 只有 MKV 走 HLS；MP4/MOV 仍由 /stream 直出（v24 的 FourCC 热修补照旧生效） */
+function hlsEligible(filePath) { return getExt(filePath) === '.mkv'; }
+async function hlsMasterPath(filePath, env) {
+  const sign = env.AUTH_SECRET ? await signStreamPath(filePath, env) : null;
+  return `/hls/${hlsTokenFor(filePath, sign)}/master.m3u8`;
+}
+
+const _hlsIdx = new Map();
+function hlsRemember(key, idx) {
+  _hlsIdx.delete(key);
+  _hlsIdx.set(key, idx);
+  while (_hlsIdx.size > 12) _hlsIdx.delete(_hlsIdx.keys().next().value);
+}
+async function hlsIndexFor(cx, opts) {
+  const key = `${cx.identity}|${cx.size}|${opts.dv}|${opts.segSec}|v${HLS_VER}`;
+  const mem = _hlsIdx.get(key);
+  if (mem) { if (mem.error) throw hlsErr(mem.error, mem.status); return mem; }
+  return singleFlight(`hls-idx:${key}`, async () => {
+    const ck = new Request(`${HLS_IDX_CACHE}${encodeURIComponent(key)}`);
+    let idx = null;
+    try { const hit = await caches.default.match(ck); if (hit) idx = await hit.json(); } catch {}
+    if (!idx) {
+      try {
+        // 不挂请求的中止信号：首个请求被取消也要把索引建完，后面的请求都等着用
+        idx = await hlsBuildIndex({ size: cx.size, read: hlsSmallReader({ ...cx, signal: undefined }) }, opts);
+        idx.idh = fnv1a(key) + (opts.dv !== 'auto' ? `.${opts.dv}` : '');
+      } catch (e) {
+        if (!e.status || e.status >= 500) throw e;       // 瞬时故障不落缓存
+        idx = { error: e.message, status: e.status };
+      }
+      cx.ctx?.waitUntil?.(caches.default.put(ck, new Response(JSON.stringify(idx), {
+        headers: { 'Content-Type': 'application/json',
+          'Cache-Control': `public, max-age=${idx.error ? 86400 : 30 * 86400}` },
+      })).catch(() => {}));
+    }
+    hlsRemember(key, idx);
+    if (idx.error) throw hlsErr(idx.error, idx.status);
+    return idx;
+  });
+}
+
+function hlsMaster(idx, xs) {
+  const V = idx.video, idh = idx.idh;
+  const L = ['#EXTM3U', '#EXT-X-VERSION:7', '#EXT-X-INDEPENDENT-SEGMENTS'];
+  const codecs = [V.codecs];
+  const used = new Set();
+  const uniq = s => { let n = s, i = 2; while (used.has(n)) n = `${s} (${i++})`; used.add(n); return n; };
+
+  const copy = idx.audio.map((a, i) => i).filter(i => idx.audio[i].mode === 'copy');
+  if (idx.muxed >= 0) {
+    for (const i of [idx.muxed, ...copy.filter(i => i !== idx.muxed)]) {
+      const a = idx.audio[i];
+      if (!codecs.includes(a.codecs)) codecs.push(a.codecs);
+      const at = ['TYPE=AUDIO', 'GROUP-ID="aud"', `LANGUAGE="${hlsAttr(a.lang)}"`,
+        `NAME="${hlsAttr(uniq(hlsAudioLabel(a)))}"`, `DEFAULT=${i === idx.muxed ? 'YES' : 'NO'}`,
+        'AUTOSELECT=YES', `CHANNELS="${a.joc ? `${a.joc}/JOC` : a.ch}"`];
+      if (i !== idx.muxed) at.push(`URI="${idh}/a${i}.m3u8"`);    // 无 URI = 复用在视频分片里
+      L.push(`#EXT-X-MEDIA:${at.join(',')}`);
+    }
+  }
+
+  const subs = [
+    ...idx.subs.map((s, i) => ({ uri: `${idh}/s${i}.m3u8`, lang: s.lang, name: s.name, forced: s.forced, hi: s.hi })),
+    ...xs.map((x, i) => ({ uri: `${idh}/x${i}.m3u8`, lang: x.srclang || 'und', name: x.label, forced: false, hi: false })),
+  ];
+  // 默认显示中文字幕（简体优先）——与之前播放页自动挂第一条外挂字幕的行为一致
+  const rank = l => ({ 'zh-Hans': 1, zh: 2, 'zh-Hant': 3, yue: 4 }[l] || 9);
+  const best = subs.filter(s => !s.forced).sort((a, b) => rank(a.lang) - rank(b.lang))[0];
+  const usedS = new Set();
+  for (const s of subs) {
+    let n = s.name || hlsLangName(s.lang);
+    if (s.forced && !/强制|forced/i.test(n)) n += '（强制）';
+    let nn = n, i = 2;
+    while (usedS.has(nn)) nn = `${n} (${i++})`;
+    usedS.add(nn);
+    const at = ['TYPE=SUBTITLES', 'GROUP-ID="sub"', `LANGUAGE="${hlsAttr(s.lang)}"`, `NAME="${hlsAttr(nn)}"`,
+      `DEFAULT=${best && s === best && rank(s.lang) < 9 ? 'YES' : 'NO'}`, 'AUTOSELECT=YES', `FORCED=${s.forced ? 'YES' : 'NO'}`];
+    if (s.hi) at.push('CHARACTERISTICS="public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound"');
+    at.push(`URI="${s.uri}"`);
+    L.push(`#EXT-X-MEDIA:${at.join(',')}`);
+  }
+
+  const inf = [`BANDWIDTH=${Math.max(idx.bw.peak, idx.bw.avg, 1)}`, `AVERAGE-BANDWIDTH=${Math.max(idx.bw.avg, 1)}`,
+    `CODECS="${codecs.join(',')}"`];
+  if (V.supp) inf.push(`SUPPLEMENTAL-CODECS="${V.supp}"`);
+  inf.push(`RESOLUTION=${V.dw}x${V.h}`);
+  if (V.fps) inf.push(`FRAME-RATE=${V.fps.toFixed(3)}`);
+  inf.push(`VIDEO-RANGE=${V.range}`);
+  if (idx.muxed >= 0) inf.push('AUDIO="aud"');
+  if (subs.length) inf.push('SUBTITLES="sub"');
+  inf.push('CLOSED-CAPTIONS=NONE');
+  L.push(`#EXT-X-STREAM-INF:${inf.join(',')}`, `${idh}/v.m3u8`);
+  return L.join('\n') + '\n';
+}
+
+function hlsMediaPl(idx, map, seg) {
+  const target = Math.max(1, ...idx.durs.map(d => Math.round(d)));
+  const L = ['#EXTM3U', '#EXT-X-VERSION:7', `#EXT-X-TARGETDURATION:${target}`, '#EXT-X-MEDIA-SEQUENCE:0',
+    '#EXT-X-PLAYLIST-TYPE:VOD', '#EXT-X-INDEPENDENT-SEGMENTS'];
+  if (map) L.push(`#EXT-X-MAP:URI="${map}"`);
+  idx.durs.forEach((d, k) => L.push(`#EXTINF:${d.toFixed(3)},`, seg(k)));
+  L.push('#EXT-X-ENDLIST');
+  return L.join('\n') + '\n';
+}
+
+const HLS_M3U8 = 'application/vnd.apple.mpegurl';
+const HLS_LONG = 'public, max-age=86400';
+function hlsHeaders(type, cc) {
+  return { 'Content-Type': type, 'Cache-Control': cc, 'X-Content-Type-Options': 'nosniff', ...CORS_HEADERS };
+}
+function hlsOut(body, type, cc = HLS_LONG) { return new Response(body, { headers: hlsHeaders(type, cc) }); }
+function hlsFail(status, message) {
+  return new Response(JSON.stringify({ error: message }), {
+    status, headers: { ...hlsHeaders('application/json; charset=utf-8', 'no-store') },
+  });
+}
+
+/** 分段响应：先拿到第一个 moof 再发响应头 —— 回源失败时还能回一个干净的错误码 */
+async function hlsSegResponse(cx, idx, k, sel, type, request) {
+  if (!(k >= 0 && k < idx.segs.length)) return hlsFail(404, 'no such segment');
+  if (request.method === 'HEAD') return new Response(null, { headers: hlsHeaders(type, HLS_LONG) });
+  const ac = new AbortController();
+  const fwd = () => ac.abort(request.signal.reason);
+  if (request.signal?.aborted) fwd(); else request.signal?.addEventListener('abort', fwd, { once: true });
+  const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, sel);
+  let queue = [], finished = false;
+  try {
+    const r = await it.next();
+    if (r.done) finished = true; else queue = r.value.slice();
+  } catch (e) {
+    ac.abort(e);
+    console.error('hls segment:', cx.filePath, k, e && e.message);
+    return hlsFail(e?.name === 'AbortError' ? 499 : 502, 'segment unavailable');
+  }
+  const body = new ReadableStream({
+    async pull(c) {
+      try {
+        while (!queue.length) {
+          if (finished) { c.close(); return; }
+          const r = await it.next();
+          if (r.done) finished = true; else queue = r.value.slice();
+        }
+        c.enqueue(queue.shift());
+      } catch (e) {
+        ac.abort(e);
+        c.error(e);
+      }
+    },
+    cancel(reason) {
+      ac.abort(reason);
+      it.return().catch(() => {});
+    },
+  });
+  return new Response(body, { headers: hlsHeaders(type, HLS_LONG) });
+}
+
+async function hlsVttResponse(key, ctx, make) {
+  const ck = new Request(`${HLS_SUB_CACHE}${key}`);
+  const hit = await caches.default.match(ck).catch(() => null);
+  if (hit) return new Response(hit.body, { headers: hlsHeaders('text/vtt; charset=utf-8', HLS_LONG) });
+  const text = await make();
+  const res = hlsOut(text, 'text/vtt; charset=utf-8');
+  ctx?.waitUntil?.(caches.default.put(ck, res.clone()).catch(() => {}));
+  return res;
+}
+
+function hlsInfo(idx, xs) {
+  const V = idx.video;
+  return {
+    ok: true, dur: idx.dur, segments: idx.segs.length,
+    video: { codec: V.codec, codecs: V.codecs, supplemental: V.supp || null, range: V.range,
+      width: V.dw, height: V.h, fps: V.fps ? +V.fps.toFixed(3) : null,
+      dolbyVision: V.dv ? { profile: V.dv.profile, level: V.dv.level, fromProfile7: !!V.dvConvert } : null,
+      dvStripped: !!V.dvStrip },
+    audio: idx.audio.map((a, i) => ({ index: i, lang: a.lang, name: a.name, codec: a.codec || a.codecId,
+      channels: a.ch, atmos: !!a.joc, playable: a.mode === 'copy', muxed: i === idx.muxed })),
+    subtitles: idx.subs.map(s => ({ lang: s.lang, name: s.name, format: s.fmt, forced: s.forced })),
+    sidecarSubtitles: xs.length,
+    audioUnsupportedOnly: idx.muxed < 0 && idx.audio.length > 0,
+  };
+}
+
+async function handleHls(url, request, env, ctx) {
+  const parts = url.pathname.split('/');
+  const tok = hlsParseToken(parts[2]);
+  if (!tok || !tok.path) return hlsFail(400, 'bad token');
+  if (env.HLS_DISABLE === '1') return hlsFail(404, 'HLS disabled');
+  const filePath = tok.path;
+  if (!hlsEligible(filePath)) return hlsFail(415, 'only MKV is remuxed to HLS');
+  let linkData;
+  try { linkData = await getTempLink(filePath, env, ctx); }
+  catch { return hlsFail(503, 'Dropbox link unavailable'); }
+  const meta = linkData?.metadata;
+  if (!linkData?.link || !meta || !Number.isFinite(meta.size)) return hlsFail(502, 'invalid metadata');
+  const cx = { filePath, linkData, env, ctx, signal: request.signal, size: meta.size,
+    identity: meta.content_hash || meta.rev || String(meta.size) };
+
+  const rest = parts.slice(3);
+  let dv = ['auto', 'dvh1', 'off'].includes(env.HLS_DV_MODE) ? env.HLS_DV_MODE : 'auto';
+  const isRoot = rest[0] === 'master.m3u8' || rest[0] === 'info.json';
+  if (isRoot) {
+    const q = url.searchParams.get('dv');
+    if (['auto', 'dvh1', 'off'].includes(q)) dv = q;
+  } else {
+    const flag = String(rest[0] || '').split('.')[1];
+    if (['dvh1', 'off'].includes(flag)) dv = flag;
+  }
+  let idx;
+  try { idx = await hlsIndexFor(cx, { dv, segSec: hlsSegTarget(env) }); }
+  catch (e) {
+    if (!e.status || e.status >= 500) console.error('hls index:', filePath, e && e.stack || e);
+    return hlsFail(e.status || 503, e.status ? e.message : 'index unavailable');
+  }
+
+  if (isRoot) {
+    const xs = await hlsSidecarSubs(filePath, env).catch(() => []);
+    if (rest[0] === 'info.json') {
+      return new Response(JSON.stringify(hlsInfo(idx, xs)), { headers: hlsHeaders('application/json; charset=utf-8', 'no-store') });
+    }
+    return hlsOut(hlsMaster(idx, xs), HLS_M3U8, 'no-store');
+  }
+  // 文件被替换 / 引擎升级 → 旧播放列表作废，让播放页重新取主列表
+  if (rest[0] !== idx.idh) return hlsFail(410, 'playlist expired');
+
+  const name = rest[1] || '', leaf = rest[2] || '';
+  const seg = /^(\d+)\.(m4s|vtt)$/.exec(leaf);
+  let m;
+  if (name === 'v.m3u8') return hlsOut(hlsMediaPl(idx, 'v.mp4', k => `v/${k}.m4s`), HLS_M3U8);
+  if (name === 'v.mp4') {
+    const tracks = [{ id: 1, kind: 'v', cfg: idx.video }];
+    if (idx.muxed >= 0) tracks.push({ id: 2, kind: 'a', cfg: idx.audio[idx.muxed] });
+    return hlsOut(mp4Init(tracks, !!idx.video.dv), 'video/mp4');
+  }
+  if (name === 'v' && seg && seg[2] === 'm4s') {
+    return hlsSegResponse(cx, idx, +seg[1], { video: true, audio: idx.muxed }, 'video/mp4', request);
+  }
+  if ((m = /^a(\d+)(\.m3u8|\.mp4)?$/.exec(name))) {
+    const i = +m[1], a = idx.audio[i];
+    if (!a || a.mode !== 'copy') return hlsFail(404, 'no such audio track');
+    if (m[2] === '.m3u8') return hlsOut(hlsMediaPl(idx, `a${i}.mp4`, k => `a${i}/${k}.m4s`), HLS_M3U8);
+    if (m[2] === '.mp4') return hlsOut(mp4Init([{ id: 1, kind: 'a', cfg: a }], false), 'audio/mp4');
+    if (seg && seg[2] === 'm4s') return hlsSegResponse(cx, idx, +seg[1], { video: false, audio: i }, 'audio/mp4', request);
+  }
+  if ((m = /^s(\d+)(\.m3u8)?$/.exec(name))) {
+    const i = +m[1];
+    if (!idx.subs[i]) return hlsFail(404, 'no such subtitle');
+    if (m[2]) return hlsOut(hlsMediaPl(idx, null, k => `s${i}/${k}.vtt`), HLS_M3U8);
+    if (seg && seg[2] === 'vtt' && +seg[1] < idx.segs.length) {
+      try { return await hlsVttResponse(`s/${idx.idh}/${i}/${seg[1]}`, ctx, () => hlsSubSegment(cx, idx, i, +seg[1])); }
+      catch (e) { console.error('hls subs:', e && e.message); return hlsFail(502, 'subtitle unavailable'); }
+    }
+  }
+  if ((m = /^x(\d+)(\.m3u8)?$/.exec(name))) {
+    const i = +m[1];
+    if (m[2]) return hlsOut(hlsMediaPl(idx, null, k => `x${i}/${k}.vtt`), HLS_M3U8);
+    if (seg && seg[2] === 'vtt' && +seg[1] < idx.segs.length) {
+      const k = +seg[1];
+      try {
+        const xs = await hlsSidecarSubs(filePath, env);
+        const x = xs[i];
+        if (!x) return hlsFail(404, 'no such subtitle');
+        return await hlsVttResponse(`x/${idx.idh}/${encodeURIComponent(x.path)}/${x.rev}/${k}`, ctx, async () => {
+          const [T1, T2] = hlsSegWindow(idx, k);
+          return hlsVtt((await hlsSidecarCues(x, env, ctx)).filter(c => c.s < T2 && c.e > T1));
+        });
+      } catch (e) { console.error('hls sidecar:', e && e.message); return hlsFail(502, 'subtitle unavailable'); }
+    }
+  }
+  return hlsFail(404, 'not found');
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  /watch
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async function handleStreamSign(url, env) {
   const filePath = url.searchParams.get('path') || '';
   if (!filePath) return jsonResponse({ error: 'Missing path' }, 400, { 'Cache-Control': 'no-store' });
-  if (!env.AUTH_SECRET) {
-    return jsonResponse({ exp: null, sig: null }, 200, { 'Cache-Control': 'no-store' });
-  }
-  const sign = await signStreamPath(filePath, env);
-  return jsonResponse(sign, 200, { 'Cache-Control': 'no-store' });
+  // v25：MKV 同时给出 HLS 主列表路径（与 /stream 共用同一枚签名）
+  const sign = env.AUTH_SECRET ? await signStreamPath(filePath, env) : { exp: null, sig: null };
+  const hls = hlsEligible(filePath) && env.HLS_DISABLE !== '1'
+    ? `/hls/${hlsTokenFor(filePath, sign.sig ? sign : null)}/master.m3u8` : null;
+  return jsonResponse({ ...sign, hls }, 200, { 'Cache-Control': 'no-store' });
 }
 
 async function handleWatch(url, request, env, ctx) {
@@ -5585,217 +8489,33 @@ async function mountExternalSubs(V,fp,streamOrigin,onSay){
   }catch(e){}
 }
 
-// ── ISO-BMFF (fMP4) 构造器（支持 dvh1 杜比视界 / hvc1 HDR10 / avc1 / ec-3 / ac-3 / mp4a）──
-function u32(v){return[(v>>>24)&255,(v>>>16)&255,(v>>>8)&255,v&255]}
-function u16(v){return[(v>>>8)&255,v&255]}
-function strBytes(s){var a=[];for(var i=0;i<s.length;i++)a.push(s.charCodeAt(i)&255);return a}
-function box(type){
-  var parts=[],total=8;
-  for(var i=1;i<arguments.length;i++){
-    var p=arguments[i];
-    if(!p)continue;
-    var u=p instanceof Uint8Array?p:new Uint8Array(p);
-    parts.push(u);total+=u.length;
-  }
-  var out=new Uint8Array(total);
-  out[0]=(total>>>24)&255;out[1]=(total>>>16)&255;out[2]=(total>>>8)&255;out[3]=total&255;
-  for(var j=0;j<4;j++)out[4+j]=type.charCodeAt(j)&255;
-  var off=8;
-  for(var k=0;k<parts.length;k++){out.set(parts[k],off);off+=parts[k].length}
-  return out;
+// ── v25：MKV 走原生 HLS（Worker 实时重封装成 fMP4，杜比视界 / HDR 由系统播放器点亮）──
+// v24 在这里的 MSE「MKV 流式重封装引擎」从未真正向 SourceBuffer 写过数据，
+// 在 iPhone 上 ManagedMediaSource 也因 disableRemotePlayback=false 根本不会打开 —— 已整体移除。
+function canNativeHls(V){
+  try{return !!(V.canPlayType('application/vnd.apple.mpegurl')||V.canPlayType('application/x-mpegURL'))}catch(e){return false}
 }
-function fullBox(type,ver,flags){
-  var hdr=new Uint8Array([ver,(flags>>>16)&255,(flags>>>8)&255,flags&255]);
-  var args=[type,hdr];
-  for(var i=3;i<arguments.length;i++)args.push(arguments[i]);
-  return box.apply(null,args);
+async function hlsPreflight(master){
+  // info.json 与 master.m3u8 同目录：顺带把索引建好，首个分段就不必再等
+  var r=await fetch(master.replace(/master\.m3u8(\?.*)?$/,'info.json'),{cache:'no-store',credentials:'omit'});
+  var d=null;
+  try{d=await r.json()}catch(e){}
+  if(!r.ok||!d||!d.ok){var e=new Error((d&&d.error)||('HTTP '+r.status));e.status=r.status;throw e}
+  return d;
 }
-
-function buildVideoInitMp4(vt,durationSec){
-  var isHevc=vt.codecId==='V_MPEGH/ISO/HEVC';
-  var fourcc=isHevc?(vt.doviConfig?'dvh1':'hvc1'):'avc1';
-  var cfgBox=isHevc?box('hvcC',vt.codecPrivate||new Uint8Array(0)):box('avcC',vt.codecPrivate||new Uint8Array(0));
-  var doviBox=vt.doviConfig?box((vt.doviConfig[2]>>>1)>7?'dvvC':'dvcC',vt.doviConfig):null;
-  var colrBox=(vt.isHdr||vt.doviConfig)?box('colr',strBytes('nclx'),u16(9),u16(16),u16(9),[128]):null;
-
-  var seh=new Uint8Array(78);
-  seh[13]=1;
-  var w=vt.width||1920,h=vt.height||1080;
-  seh[24]=(w>>>8)&255;seh[25]=w&255;seh[26]=(h>>>8)&255;seh[27]=h&255;
-  seh[30]=0x00;seh[31]=0x48;seh[34]=0x00;seh[35]=0x48;
-  seh[41]=1;seh[74]=0x00;seh[75]=0x18;seh[76]=0xFF;seh[77]=0xFF;
-
-  var vse=box(fourcc,seh,cfgBox,doviBox,colrBox,box('pasp',u32(1),u32(1)));
-  var stsd=fullBox('stsd',0,0,u32(1),vse);
-  var stbl=box('stbl',stsd,fullBox('stts',0,0,u32(0)),fullBox('stsc',0,0,u32(0)),fullBox('stsz',0,0,u32(0),u32(0)),fullBox('stco',0,0,u32(0)));
-  var dinf=box('dinf',fullBox('dref',0,0,u32(1),fullBox('url ',0,1)));
-  var minf=box('minf',fullBox('vmhd',0,1,u16(0),u16(0),u16(0),u16(0)),dinf,stbl);
-  var mdia=box('mdia',fullBox('mdhd',0,0,u32(0),u32(0),u32(90000),u32(0),u16(0x55c4),u16(0)),
-    fullBox('hdlr',0,0,u32(0),strBytes('vide'),u32(0),u32(0),u32(0),strBytes('VideoHandler\0')),minf);
-  var tkhd=fullBox('tkhd',0,3,u32(0),u32(0),u32(1),u32(0),u32(0),u32(0),u32(0),u16(0),u16(0),u16(0),u16(0),
-    u32(0x00010000),u32(0),u32(0),u32(0),u32(0x00010000),u32(0),u32(0),u32(0),u32(0x40000000),u32(w<<16),u32(h<<16));
-  var trak=box('trak',tkhd,mdia);
-  var mvex=box('mvex',fullBox('trex',0,0,u32(1),u32(1),u32(0),u32(0),u32(0)));
-  var mvhd=fullBox('mvhd',0,0,u32(0),u32(0),u32(90000),u32(Math.round((durationSec||0)*90000)),
-    u32(0x00010000),u16(0x0100),u16(0),u32(0),u32(0),
-    u32(0x00010000),u32(0),u32(0),u32(0),u32(0x00010000),u32(0),u32(0),u32(0),u32(0x40000000),
-    u32(0),u32(0),u32(0),u32(0),u32(0),u32(0),u32(2));
-  var ftyp=box('ftyp',strBytes('isom'),u32(512),strBytes('isomiso6mp41dby1'));
-  var moov=box('moov',mvhd,trak,mvex);
-  var res=new Uint8Array(ftyp.length+moov.length);
-  res.set(ftyp,0);res.set(moov,ftyp.length);
-  return res;
+function hlsBadgeText(d){
+  var v=(d&&d.video)||{};
+  if(v.dolbyVision)return 'Dolby Vision';
+  if(v.range==='PQ')return 'HDR10';
+  if(v.range==='HLG')return 'HLG';
+  return '';
 }
-
-function buildFmp4MediaSegment(seq,trackId,baseDts90k,samples){
-  var count=samples.length;
-  var trunData=new Uint8Array(count*16);
-  var totalBytes=0;
-  for(var i=0;i<count;i++)totalBytes+=samples[i].data.length;
-  var mdatPayload=new Uint8Array(totalBytes);
-  var pOff=0;
-  for(var j=0;j<count;j++){
-    var s=samples[j];
-    var dur=Math.max(1,s.dur||3000);
-    var sz=s.data.length;
-    var flg=s.key?0x02000000:0x01010000;
-    var cto=s.cto||0;
-    var b=j*16;
-    trunData[b]=(dur>>>24)&255;trunData[b+1]=(dur>>>16)&255;trunData[b+2]=(dur>>>8)&255;trunData[b+3]=dur&255;
-    trunData[b+4]=(sz>>>24)&255;trunData[b+5]=(sz>>>16)&255;trunData[b+6]=(sz>>>8)&255;trunData[b+7]=sz&255;
-    trunData[b+8]=(flg>>>24)&255;trunData[b+9]=(flg>>>16)&255;trunData[b+10]=(flg>>>8)&255;trunData[b+11]=flg&255;
-    trunData[b+12]=(cto>>>24)&255;trunData[b+13]=(cto>>>16)&255;trunData[b+14]=(cto>>>8)&255;trunData[b+15]=cto&255;
-    mdatPayload.set(s.data,pOff);pOff+=sz;
-  }
-  var tfhd=fullBox('tfhd',0,0x020000,u32(trackId));
-  var hi=Math.floor(baseDts90k/4294967296),lo=(baseDts90k>>>0);
-  var tfdt=fullBox('tfdt',1,0,u32(hi),u32(lo));
-  var trun=fullBox('trun',1,0x000F01,u32(count),u32(0),trunData);
-  var traf=box('traf',tfhd,tfdt,trun);
-  var mfhd=fullBox('mfhd',0,0,u32(seq));
-  var moof=box('moof',mfhd,traf);
-  var dataOffset=moof.length+8;
-  var doPos=moof.length-trunData.length-4;
-  moof[doPos]=(dataOffset>>>24)&255;moof[doPos+1]=(dataOffset>>>16)&255;
-  moof[doPos+2]=(dataOffset>>>8)&255;moof[doPos+3]=dataOffset&255;
-
-  var mdat=box('mdat',mdatPayload);
-  var out=new Uint8Array(moof.length+mdat.length);
-  out.set(moof,0);out.set(mdat,moof.length);
-  return out;
-}
-
-var _libavInst=null;
-function ensureLibav(){
-  if(_libavInst)return _libavInst;
-  _libavInst=new Promise(function(resolve,reject){
-    var s=document.createElement('script');
-    s.src='https://cdn.jsdelivr.net/npm/@libav.js/variant-default@6.5.5/dist/libav-6.5.7.1-default.js';
-    s.onload=function(){
-      if(window.LibAV)window.LibAV.LibAV({noworker:false}).then(resolve,reject);
-      else reject(new Error('LibAV missing'));
-    };
-    s.onerror=function(){reject(new Error('WASM 音频解码器加载失败'))};
-    document.head.appendChild(s);
-  });
-  return _libavInst;
-}
-
-// ── MKV / 特种音轨 Safari 流式重封装与 WASM 解码引擎 ──
-async function runSafariMkvSession(V,streamUrl,opts){
-  opts=opts||{};
-  var onSay=opts.onSay||function(){};
-  var onBadge=opts.onBadge||function(){};
-  var onTracks=opts.onTracks||function(){};
-  var signal=opts.signal;
-
-  var MMS=window.ManagedMediaSource||window.MediaSource;
-  if(!MMS){onSay('当前设备不支持 MediaSource 流式解封装');return}
-
-  onSay('正在初始化杜比视界 / MKV 流式重封装引擎…',6000);
-  var libav;
-  try{libav=await ensureLibav()}
-  catch(e){onSay('引擎加载失败：'+e.message);return}
-  if(signal&&signal.aborted)return;
-
-  var rawUrl=new URL(streamUrl);
-  rawUrl.searchParams.delete('safari');
-  var cleanUrl=rawUrl.href;
-
-  var headRes=await fetch(cleanUrl,{headers:{Range:'bytes=0-2097151'},signal:signal});
-  if(!headRes.ok){onSay('流读取失败 HTTP '+headRes.status);return}
-  var totalSize=0;
-  var cr=headRes.headers.get('Content-Range')||'';
-  var mSize=/\/(\d+)$/.exec(cr);
-  if(mSize)totalSize=parseInt(mSize[1],10);
-  var headBuf=new Uint8Array(await headRes.arrayBuffer());
-
-  var devName='input_'+Date.now()+'.mkv';
-  await libav.mkreaderdev(devName);
-  await libav.ff_reader_dev_send(devName,headBuf);
-
-  var fmtInfo=await libav.ff_init_demuxer_file(devName);
-  var fmt_ctx=fmtInfo[0],streams=fmtInfo[1];
-  var pktPtr=await libav.av_packet_alloc();
-
-  var vStream=null,aStreams=[],sStreams=[];
-  for(var i=0;i<streams.length;i++){
-    var st=streams[i];
-    if(st.codec_type===0&&!vStream)vStream=st;
-    else if(st.codec_type===1)aStreams.push(st);
-    else if(st.codec_type===3)sStreams.push(st);
-  }
-
-  onTracks(aStreams.map(function(st,idx){
-    return {index:st.index,st:st,label:'音轨 #'+(idx+1)+' ('+(st.codec_name||'Audio').toUpperCase()+')'};
-  }));
-
-  var subTrackMap={};
-  for(var sIdx=0;sIdx<sStreams.length;sIdx++){
-    var sst=sStreams[sIdx];
-    var tr=V.addTextTrack('subtitles','内封字幕 #'+(sIdx+1),'zh');
-    if(sIdx===0&&(!V.textTracks||V.textTracks.length===1))tr.mode='showing';
-    subTrackMap[sst.index]={track:tr,st:sst};
-  }
-
-  onBadge(vStream&&vStream.codec_name==='hevc'?'Dolby Vision / HDR':'MKV Direct',true);
-  onSay('MKV 流式引擎就绪，正在缓冲视频与内封字幕…',3500);
-
-  var ms=new MMS();
-  V.disableRemotePlayback=false;
-  V.src=URL.createObjectURL(ms);
-
-  ms.addEventListener('sourceopen',async function(){
-    try{
-      var offset=headBuf.length;
-      while(!(signal&&signal.aborted)&&(totalSize===0||offset<totalSize)){
-        var end=totalSize?Math.min(totalSize-1,offset+4194303):offset+4194303;
-        var r=await fetch(cleanUrl,{headers:{Range:'bytes='+offset+'-'+end},signal:signal});
-        if(!r.ok)break;
-        var chunk=new Uint8Array(await r.arrayBuffer());
-        if(!chunk.length)break;
-        offset+=chunk.length;
-        await libav.ff_reader_dev_send(devName,chunk);
-        var readRes=await libav.ff_read_multi(fmt_ctx,pktPtr,null,{limit:256});
-        var pkts=readRes[1]||{};
-        for(var k in subTrackMap){
-          var spkts=pkts[k]||[];
-          var entry=subTrackMap[k];
-          var tb=(entry.st.time_base_num||1)/(entry.st.time_base_den||1000);
-          for(var p=0;p<spkts.length;p++){
-            var sp=spkts[p];
-            if(!sp.data)continue;
-            var txt=new TextDecoder().decode(sp.data).replace(/\{[^}]*\}/g,'').replace(/\\N/g,'\n').trim();
-            var t0=(sp.pts||0)*tb;
-            var dur=Math.max(0.5,(sp.duration||2000)*tb);
-            if(txt&&window.VTTCue){
-              try{entry.track.addCue(new VTTCue(t0,t0+dur,txt))}catch(e){}
-            }
-          }
-        }
-      }
-    }catch(e){}
-  },{once:true});
+function hlsAudioNote(d){
+  if(!d)return '';
+  if(d.audioUnsupportedOnly)return '此片只有 DTS / TrueHD 等 Safari 无法解码的音轨，当前没有声音；可复制直链用 Infuse 播放';
+  var n=0,list=d.audio||[];
+  for(var i=0;i<list.length;i++)if(!list[i].playable)n++;
+  return n?('另有 '+n+' 条 DTS / TrueHD 等音轨 Safari 无法解码，已从音轨列表隐藏'):'';
 }
 `;
 }
@@ -5898,7 +8618,7 @@ var modal=document.getElementById('modal'),MV=document.getElementById('mv'),
     mamenu=document.getElementById('mamenu'),msmenu=document.getElementById('msmenu'),
     msubfile=document.getElementById('msubfile'),mcp=document.getElementById('mcp'),
     mfull=document.getElementById('mfull'),mtoast=document.getElementById('mtoast');
-var curStreamUrl='',curRawUrl='',ttTimer=0,inlineMseAbort=null,inlineMseTracks=[];
+var curStreamUrl='',curRawUrl='',curHls='',curPath='',hlsRetries=0,openSeq=0,ttTimer=0;
 
 function toast(msg,ms){
   mtoast.textContent=msg;mtoast.classList.add('on');
@@ -5913,10 +8633,10 @@ function getPreferredHost(){
 }
 
 async function openInlinePlayer(path,name){
-  if(inlineMseAbort){inlineMseAbort.abort();inlineMseAbort=null}
-  inlineMseTracks=[];
+  var my=++openSeq;
   modal.classList.add('open');
   mtitle.textContent=name;
+  curPath=path;curHls='';hlsRetries=0;
   mfull.href='/watch?path='+encodeURIComponent(path);
   if(/(?:dolby[\s._-]?vision|dovi|\bdv\b|杜比视界)/i.test(name)){mbdg.textContent='Dolby Vision';mbdg.style.display='inline-block'}
   else if(/\bhdr10\+?\b|\bhdr\b|\bhlg\b/i.test(name)){mbdg.textContent='HDR';mbdg.style.display='inline-block'}
@@ -5925,14 +8645,15 @@ async function openInlinePlayer(path,name){
   clearVideoTracks(MV);
   MV.pause();MV.removeAttribute('src');MV.load();
 
-  var qs=new URLSearchParams({path:path});
+  var qs=new URLSearchParams({path:path}),sd=null;
   try{
     var sr=await fetch('/api/stream-sign?path='+encodeURIComponent(path),{cache:'no-store'});
     if(sr.ok){
-      var sd=await sr.json();
+      sd=await sr.json();
       if(sd.exp&&sd.sig){qs.set('exp',String(sd.exp));qs.set('sig',sd.sig)}
     }
   }catch(e){}
+  if(my!==openSeq)return;
 
   var baseOrigin=getPreferredHost();
   curRawUrl=baseOrigin+'/stream/'+encodeURIComponent(name)+'?'+qs.toString();
@@ -5940,27 +8661,51 @@ async function openInlinePlayer(path,name){
   if(/\.(mp4|m4v|mov)$/i.test(name))playUrl.searchParams.set('safari','1');
   curStreamUrl=playUrl.href;
 
+  // v25：MKV 在 Safari / iOS 上走原生 HLS（Worker 实时重封装），字幕与音轨都在 HLS 里
+  if(sd&&sd.hls&&canNativeHls(MV)){
+    var hlsUrl=baseOrigin+sd.hls;
+    try{
+      var info=await hlsPreflight(hlsUrl);
+      if(my!==openSeq)return;
+      var bt=hlsBadgeText(info);
+      if(bt){mbdg.textContent=bt;mbdg.style.display='inline-block'}
+      var note=hlsAudioNote(info);
+      if(note)toast(note,6000);
+      curHls=hlsUrl;
+      MV.src=hlsUrl;MV.load();MV.play().catch(function(){});
+      return;
+    }catch(e){
+      if(my!==openSeq)return;
+      toast('无法生成 HLS（'+e.message+'），改用直连',5000);
+    }
+  }
   mountExternalSubs(MV,path,baseOrigin,toast);
   MV.src=curStreamUrl;
   MV.load();
   MV.play().catch(function(){});
 }
 
-MV.addEventListener('error',function(){
+// HLS 中途出错（签名过期 / 文件被替换 / 网络抖动）：换新签名，从原位置重载，最多两次
+MV.addEventListener('error',async function(){
   var code=MV.error&&MV.error.code||0;
-  if(code===4&&curRawUrl&&!inlineMseAbort){
-    inlineMseAbort=new AbortController();
-    runSafariMkvSession(MV,curRawUrl,{
-      signal:inlineMseAbort.signal,
-      onSay:toast,
-      onBadge:function(t){mbdg.textContent=t;mbdg.style.display='inline-block'},
-      onTracks:function(ts){inlineMseTracks=ts;if(ts.length>0)mabtn.style.display='inline-flex'}
-    });
-  }
+  if(code===1||!curHls)return;
+  if(hlsRetries>=2){toast('播放失败，可复制直链用 Infuse 播放',6000);return}
+  hlsRetries++;
+  var my=openSeq,at=MV.currentTime||0;
+  try{
+    var sr=await fetch('/api/stream-sign?path='+encodeURIComponent(curPath),{cache:'no-store'});
+    var sd=await sr.json();
+    if(my!==openSeq||!sd.hls)return;
+    curHls=getPreferredHost()+sd.hls;
+    MV.src=curHls;MV.load();
+    if(at>0)MV.addEventListener('loadedmetadata',function(){try{MV.currentTime=at}catch(e){}},{once:true});
+    MV.play().catch(function(){});
+    toast('已重新连接',2500);
+  }catch(e){toast('重新连接失败',4000)}
 });
 
 document.getElementById('mclose').onclick=function(){
-  if(inlineMseAbort){inlineMseAbort.abort();inlineMseAbort=null}
+  openSeq++;curHls='';
   modal.classList.remove('open');
   mamenu.classList.remove('open');msmenu.classList.remove('open');
   MV.pause();MV.removeAttribute('src');MV.load();
@@ -6016,18 +8761,12 @@ msubfile.onchange=async function(){
 
 MV.addEventListener('loadedmetadata',function(){
   var ats=MV.audioTracks||[];
-  mabtn.style.display=(ats.length>1||inlineMseTracks.length>0)?'inline-flex':'none';
+  mabtn.style.display=ats.length>1?'inline-flex':'none';
 });
 mabtn.onclick=function(){
   msmenu.classList.remove('open');
   var ats=MV.audioTracks||[];
   var h='<div class=mh>音轨选择</div>';
-  if(inlineMseTracks.length>0){
-    for(var x=0;x<inlineMseTracks.length;x++){
-      h+='<button class="mi'+(x===0?' act':'')+'"><span>'+E(inlineMseTracks[x].label)+'</span><span>'+(x===0?'✓':'')+'</span></button>';
-    }
-    mamenu.innerHTML=h;mamenu.classList.toggle('open');return;
-  }
   for(var i=0;i<ats.length;i++){
     var a=ats[i];
     h+='<button class="mi'+(a.enabled?' act':'')+'" data-a="'+i+'"><span>'+E(a.label||a.language||('音轨 #'+(i+1)))+'</span><span>'+(a.enabled?'✓':'')+'</span></button>';
@@ -6082,6 +8821,11 @@ function playerPage(fp, fn, sign, host, hosts, probe, env, pageOrigin = '') {
   const originUrl = new URL(pageOrigin || ('https://' + (hosts[0] || host)));
   const abs = originUrl.protocol + '//' + host + src;
   const fallbackAbs = originUrl.origin + src;
+  // v25：MKV 给出原生 HLS 主列表（同一枚签名，签名写在路径里）
+  const hlsPath = (fp && hlsEligible(fp) && env.HLS_DISABLE !== '1')
+    ? `/hls/${hlsTokenFor(fp, sign)}/master.m3u8` : '';
+  const hlsAbs = hlsPath ? originUrl.protocol + '//' + host + hlsPath : '';
+  const hlsFallback = hlsPath ? originUrl.origin + hlsPath : '';
   const safe = escHtml(fn);
   const J = v => JSON.stringify(v).replace(/</g, '\u003c');
   const probeBytes = envInt(env.EDGE_PROBE_BYTES, EDGE_PING_DEF, 32 * 1024, EDGE_PING_MAX);
@@ -6137,11 +8881,12 @@ var ABS=${J(abs)},FALLBACK=${J(fallbackAbs)},FP=${J(fp)},FN=${J(fn)},
     SIGNED=${sign ? 'true' : 'false'},
     HOSTS=${J(hosts)},PB=${J(probe)},PP=${J(EDGE_PING_PATH)},
     PZ=${probeBytes},CUR=${J(originUrl.host)},SCHEME=${J(originUrl.protocol)},
-    CK=${J(EDGE_COOKIE)},TTL=${EDGE_COOKIE_TTL};
+    CK=${J(EDGE_COOKIE)},TTL=${EDGE_COOKIE_TTL},
+    HLS=${J(hlsAbs)},HLS_FB=${J(hlsFallback)};
 
 ${safariMediaEngineScript()}
 
-var sayTimer=0,mseAbort=null,mseTracks=[];
+var sayTimer=0,hlsMode=false;
 function say(m,ms){
   eb.textContent=m;eb.classList.add('on');
   clearTimeout(sayTimer);
@@ -6172,8 +8917,9 @@ function clearPin(){
 }
 function useOriginFallback(){
   if(sameEntry(ABS))return false;
-  ABS=FALLBACK;clearPin();return true;
+  ABS=FALLBACK;if(HLS_FB)HLS=HLS_FB;clearPin();return true;
 }
+function playSrc(){return hlsMode?HLS:withSafariUrl(ABS)}
 function withSafariUrl(u){
   var x=new URL(u);
   if(/\.(mp4|m4v|mov)$/i.test(FN))x.searchParams.set('safari','1');
@@ -6224,7 +8970,8 @@ subfile.onchange=async function(){
 
 V.addEventListener('loadedmetadata',function(){
   var ats=V.audioTracks||[];
-  if(ats.length>1||mseTracks.length>0)abtn.style.display='inline-flex';
+  if(ats.length>1)abtn.style.display='inline-flex';
+  if(hlsMode)return;                         // HLS 模式的徽章来自码流检测，不按文件名猜
   if(/\b(dovi|dolby[\s._-]?vision|dv)\b/i.test(FN))setBadge('Dolby Vision',true);
   else if(/\b(hdr10\+?|hdr|hlg|2160p|4k)\b/i.test(FN))setBadge('HDR',false);
 });
@@ -6233,12 +8980,6 @@ abtn.onclick=function(){
   smenu.classList.remove('open');
   var ats=V.audioTracks||[];
   var html='<div class=mh>音轨选择</div>';
-  if(mseTracks.length>0){
-    for(var x=0;x<mseTracks.length;x++){
-      html+='<button class="mi'+(x===0?' act':'')+'"><span>'+mseTracks[x].label+'</span><span>'+(x===0?'✓':'')+'</span></button>';
-    }
-    amenu.innerHTML=html;amenu.classList.toggle('open');return;
-  }
   for(var k=0;k<ats.length;k++){
     var a=ats[k];
     html+='<button class="mi'+(a.enabled?' act':'')+'" data-na="'+k+'"><span>'+(a.label||a.language||('音轨 #'+(k+1)))+'</span><span>'+(a.enabled?'✓':'')+'</span></button>';
@@ -6264,6 +9005,25 @@ async function candidateReady(u){
   }catch(e){return false}finally{clearTimeout(tm)}
 }
 async function bootstrap(){
+  // v25：MKV + Safari / iOS → 原生 HLS。先取 info.json：既是可用性探测，也顺带把索引建好
+  if(HLS&&canNativeHls(V)){
+    try{
+      var info;
+      try{info=await hlsPreflight(HLS)}
+      catch(e){
+        if(e.status||!HLS_FB||HLS_FB===HLS)throw e;   // 只有网络级失败才换入口
+        HLS=HLS_FB;clearPin();info=await hlsPreflight(HLS);
+      }
+      hlsMode=true;
+      var bt=hlsBadgeText(info);
+      if(bt)setBadge(bt,bt==='Dolby Vision');
+      var note=hlsAudioNote(info);
+      if(note)say(note,7000);
+      V.src=HLS;V.load();
+      V.play().catch(function(){});
+      return;
+    }catch(e){say('无法生成 HLS（'+e.message+'），改用直连播放',5000)}
+  }
   if(!(await candidateReady(ABS))){
     useOriginFallback();say('优选入口不可用，已回退当前入口');
   }
@@ -6272,7 +9032,7 @@ async function bootstrap(){
   V.play().catch(function(){});
 }
 
-var recovering=false,failures=0,stallTimer=0,stableTimer=0,retryTimer=0,raceStarted=false,companionAudioStarted=false;
+var recovering=false,failures=0,stallTimer=0,stableTimer=0,retryTimer=0,raceStarted=false;
 function pause(ms){return new Promise(function(ok){setTimeout(ok,ms)})}
 function clearStall(){if(stallTimer){clearTimeout(stallTimer);stallTimer=0}}
 function markStable(){
@@ -6287,6 +9047,7 @@ async function renewLink(){
   if(!s.sig||!s.exp)throw new Error('empty sign');
   var u=new URL(ABS);u.searchParams.set('exp',String(s.exp));u.searchParams.set('sig',s.sig);
   u.searchParams.delete('_retry');ABS=u.href;
+  if(HLS&&s.hls){var h=new URL(HLS);HLS=h.protocol+'//'+h.host+s.hls}
 }
 function loaded(){
   return new Promise(function(resolve,reject){
@@ -6298,7 +9059,7 @@ function loaded(){
   });
 }
 async function recover(reason){
-  if(recovering||V.ended||mseAbort)return;
+  if(recovering||V.ended)return;
   if(failures>=4){say('视频持续加载失败，请刷新页面或使用外部播放器');return}
   var switched=useOriginFallback();
   recovering=true;clearStall();clearTimeout(retryTimer);clearTimeout(stableTimer);failures++;
@@ -6307,7 +9068,7 @@ async function recover(reason){
   try{
     await pause(switched?0:([0,500,1500,4000,7000][failures]||7000));
     try{await renewLink()}catch(e){}
-    var u=new URL(withSafariUrl(ABS));u.searchParams.set('_retry',String(Date.now()));
+    var u=new URL(playSrc());u.searchParams.set('_retry',String(Date.now()));
     var ready=loaded();
     V.src=u.href;V.load();await ready;
     if(at>0&&Number.isFinite(V.duration))V.currentTime=Math.min(at,Math.max(0,V.duration-.25));
@@ -6318,7 +9079,7 @@ async function recover(reason){
   }finally{recovering=false}
 }
 function armStall(reason){
-  clearStall();if(V.paused||V.ended||document.hidden||recovering||mseAbort)return;
+  clearStall();if(V.paused||V.ended||document.hidden||recovering)return;
   var at=V.currentTime;
   stallTimer=setTimeout(function(){
     stallTimer=0;
@@ -6329,35 +9090,16 @@ function scheduleRace(){
   if(raceStarted)return;raceStarted=true;
   setTimeout(function(){race().catch(function(){})},2500);
 }
-function checkSafariAudioHealth(){
-  if(companionAudioStarted||mseAbort)return;
-  if(V.paused||V.muted||V.currentTime<1.2)return;
-  if(typeof V.webkitAudioDecodedByteCount==='number'&&V.webkitAudioDecodedByteCount===0){
-    if(/\b(dts|truehd|mlp)\b/i.test(FN)){
-      companionAudioStarted=true;
-      say('检测到 DTS/TrueHD 音轨，正在启用 WASM 伴音解码…',4000);
-      setBadge('DV/HDR + WASM Audio',true);
-    }
-  }
-}
 V.addEventListener('playing',function(){clearStall();markStable();scheduleRace()});
-V.addEventListener('timeupdate',function(){clearStall();checkSafariAudioHealth()});
+V.addEventListener('timeupdate',clearStall);
 V.addEventListener('waiting',function(){armStall('缓冲超时')});
 V.addEventListener('stalled',function(){armStall('网络停滞')});
 V.addEventListener('seeking',clearStall);
 V.addEventListener('error',function(){
   var code=V.error&&V.error.code||0;
   if(code===1)return;
-  if(code===4&&!mseAbort){
-    mseAbort=new AbortController();
-    runSafariMkvSession(V,ABS,{
-      signal:mseAbort.signal,
-      onSay:say,
-      onBadge:setBadge,
-      onTracks:function(ts){mseTracks=ts;if(ts.length>0)abtn.style.display='inline-flex'}
-    });
-    return;
-  }
+  // HLS 下的 code 4 = 本机解码器不支持这种视频（如老设备不支持 10bit HEVC），重试无用
+  if(hlsMode&&code===4&&!V.currentTime){say('此设备无法解码该视频，可复制直链用 Infuse 播放',8000);return}
   recover(code===3?'视频解码失败':'视频加载失败');
 });
 
@@ -6392,7 +9134,7 @@ async function race(){
     : '已选用更快入口 '+w.h+' · '+Math.round(w.ttfb)+'ms · 下次起播生效');
 }
 
-bootstrap().catch(function(){useOriginFallback();V.src=withSafariUrl(ABS);V.load()});
+bootstrap().catch(function(){useOriginFallback();V.src=playSrc();V.load()});
 </script></body></html>`;
 }
 
