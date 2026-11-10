@@ -69,13 +69,23 @@ service = "cuven-audio-tx"
 - 双轨式杜比视界（BL 与 EL 分在两条 MKV 轨道）按 HDR10 播放。单轨 P7（MakeMKV / mkvmerge 默认）会被正确转为 8.1。
 - TrueHD Atmos 转码后是 5.1 声道床（没有开源的 Atmos 编码器）。E-AC-3 Atmos（WEB-DL）是直通的，Atmos 完整保留。
 
+## 测试
+
+```bash
+tests/make-samples.sh     # 用 ffmpeg / mkvmerge 生成样片（约 30 秒）
+node tests/run.mjs        # 30 项回归，约 10 秒
+```
+
+测试台直接运行 `Stream_v25.js` 的真实代码，并模拟 Dropbox（OAuth、临时链接、目录列表、带 Range 的下载）和 Cache API。
+`audio-tx/tx.wasm` 存在时，会把转码 Worker 当作 Service Binding 挂上一起测。
+
 ## 已验证（本地测试台：真实 Worker 代码 + 模拟 Dropbox）
 
 - **视频直通**：HEVC 10bit HDR10（开放 GOP + B 帧金字塔）、H.264（B 帧金字塔）的每个包都与源 MKV 逐字节一致；DTS 单调且不大于 PTS，跨分段连续。
 - **音频直通**：E-AC-3 / AC-3 / AAC / FLAC 逐包一致，时间轴吸附到精确的采样网格。
 - **杜比视界**：P5、P8.1、P7 FEL 三种样片的信令都正确。P7 的增强层全部丢弃，RPU 全部转为 profile 8。RPU 改写逐字节对照了 dovi_tool 的测试向量：MEL/FEL→8.1 与参考输出完全一致，705 个 RPU 往返中有 704 个一致；剩下那个是测试素材本身缺少防竞争字节。
 - **兼容性**：ffmpeg 作为 HLS 客户端完整解码所有渲染，帧 MD5 与源一致；Chromium MSE 接受输出的 fMP4，缓冲区连续，可播放、可跳转。
-- **转码**：DTS / TrueHD / Opus → AC-3 与参考解码逐采样对齐（偏移 0），分段接缝处误差与平时相同（无爆音）。
+- **转码**：DTS / TrueHD / Opus → AC-3 与参考解码逐采样对齐（偏移 0），信噪比约 77 dB；分段接缝处的误差最多是中位误差的 1.3 倍（无爆音）。
 - **字幕**：内封 SRT / ASS（含 zlib）、字幕没有 Cues 时的扫描兜底、外挂字幕都正确。乱序请求分段与顺序请求的输出逐字节一致。
 
 > 没有在 iPhone 真机上测试。上线后建议用一两部片子在 iPhone 上确认。如果 P8 片源没有点亮杜比视界，

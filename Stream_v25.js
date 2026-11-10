@@ -6997,9 +6997,9 @@ async function hlsBuildIndex(src, opts) {
 
   // SeekHead：Cues 通常在文件尾，只有这里知道它在哪
   const seeks = new Map();
-  const sh = top.get(MKV.SeekHead);
-  if (sh) {
-    const d = await load(sh);
+  const readSeeks = async el => {
+    const d = await load(el);
+    if (!d) return;
     for (const s of ebmlChildren(d, 0, d.length)) {
       if (s.id !== MKV.Seek) continue;
       let sid = 0, spos = -1;
@@ -7008,6 +7008,16 @@ async function hlsBuildIndex(src, opts) {
         else if (c.id === MKV.SeekPosition) spos = ebmlUint(d, c.data, c.size);
       }
       if (sid && spos >= 0 && !seeks.has(sid)) seeks.set(sid, segStart + spos);
+    }
+  };
+  const sh = top.get(MKV.SeekHead);
+  if (sh) {
+    await readSeeks(sh);
+    // 有的封装器把 Cues 登记在文件尾的第二个 SeekHead 里，开头那个只指向它
+    const second = seeks.get(MKV.SeekHead);
+    if (!seeks.has(MKV.Cues) && second && second !== sh.pos) {
+      const el = await loadAt(second);
+      if (el && el.id === MKV.SeekHead) await readSeeks(el);
     }
   }
   const element = async id => top.get(id) || (seeks.has(id) ? await loadAt(seeks.get(id)) : null);
@@ -7368,7 +7378,8 @@ class HlsPieces {
   }
   byte(pos) { const i = this._find(pos); return this.p[i][pos - this.at[i]]; }
   bytes(pos, n) {
-    const out = new Uint8Array(Math.max(0, n));
+    n = Math.max(0, Math.min(n, this.len - pos));
+    const out = new Uint8Array(n);
     let i = this._find(pos), o = 0, off = pos - this.at[i];
     while (o < n) {
       const b = this.p[i++];
@@ -7606,8 +7617,11 @@ async function* hlsBlocks(src, plan, idx, want) {
     if (skipping || !want.has(bh.track)) continue;
 
     // 帧切分：无 lacing（视频）零拷贝；有 lacing（音频，小块）拷一份再切
-    const tvl = ebmlVintRaw(P.bytes(bstart, 8), 0, 8)[1];
-    const dataPos = bstart + tvl + 3;
+    // （块可以只有几个字节 —— AV1 的「显示已有帧」—— 块头按实际长度读）
+    const hb2 = P.bytes(bstart, Math.min(8, bend - bstart));
+    const tv = ebmlVintRaw(hb2, 0, hb2.length);
+    if (!tv || bstart + tv[1] + 3 > bend) continue;
+    const dataPos = bstart + tv[1] + 3;
     let frames;
     if (!((flags >> 1) & 3)) frames = [P.slice(dataPos, bend - dataPos)];
     else {
