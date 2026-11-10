@@ -5511,10 +5511,9 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   .sc-note { opacity: 1 !important; transform: none !important; }
 }
 
-/* ══════════ 播放：点「播放」直接进系统全屏播放器 ══════════
-   没有自绘的播放页：iPhone 上 <video> 不带 playsinline，一开播就是系统播放器（杜比视界 / HDR、
-   音轨与字幕菜单、画中画、隔空播放都是系统的）；iPad / Mac 的 Safari 进系统全屏，其它浏览器整块全屏。
-   这层黑底只在「准备中 / 出错 / 全屏进不去」时露出来：转圈、说明与按钮、关闭键，外加一个带原生控件的
+/* ══════════ 播放：点「播放」→ 加载画面 → 系统全屏播放器 ══════════
+   没有自绘的播放页：开播那一刻进系统播放器（杜比视界 / HDR、音轨与字幕菜单、画中画、隔空播放
+   都是系统的）。点下去到开播之间是加载画面；出错时是说明与按钮。这层下面还有一个带原生控件的
    <video> —— 全屏进不去时它就是播放器本身。 */
 .np {
   position: fixed; inset: 0; z-index: 5000; background: #000; color: #fff;
@@ -5527,17 +5526,16 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 .np:fullscreen { width: 100%; height: 100%; }
 .np:-webkit-full-screen { width: 100%; height: 100%; }
 .np-x {
-  position: absolute; z-index: 2; top: calc(env(safe-area-inset-top, 0px) + 10px); left: calc(env(safe-area-inset-left, 0px) + 12px);
+  position: absolute; z-index: 4; top: calc(env(safe-area-inset-top, 0px) + 10px); left: calc(env(safe-area-inset-left, 0px) + 12px);
   width: 40px; height: 40px; border: 0; border-radius: 50%; padding: 0; display: grid; place-items: center;
   color: #fff; background: rgba(255,255,255,.16); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); cursor: pointer;
 }
 .np-x svg { width: 20px; height: 20px; }
 .np-x:active { transform: scale(.92); }
-/* 准备中 / 出错时整块盖黑：底下那个还没有画面（或已出错）的 <video> 的原生灰底与图标不透出来 */
-.np-state { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px; text-align: center; background: #000; }
+/* 出错时整块盖黑：底下那个已出错的 <video> 的原生灰底与图标不透出来；over：透明地叠在加载画面上 */
+.np-state { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px; text-align: center; background: #000; }
 .np-state[hidden] { display: none; }
-.np-spin { width: 34px; height: 34px; border-radius: 50%; border: 3px solid rgba(255,255,255,.2); border-top-color: #fff; animation: np-spin .9s linear infinite; }
-.np-state:not(.busy) .np-spin { display: none; }
+.np-state.over { background: transparent; justify-content: flex-end; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 16vh); }
 .np-msg { max-width: 520px; font-size: 15px; line-height: 1.55; color: rgba(255,255,255,.86); }
 .np-msg:empty { display: none; }
 .np-acts { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
@@ -5545,8 +5543,34 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 .np-btn { min-width: 96px; height: 44px; padding: 0 20px; border: 0; border-radius: 22px; font: inherit; font-size: 15px; font-weight: 600; color: #fff; background: rgba(255,255,255,.16); cursor: pointer; }
 .np-btn.primary { color: #000; background: #fff; }
 .np-btn:active { transform: scale(.96); }
-@keyframes np-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .np-spin { animation-duration: 2.4s; } }
+/* 加载画面：极光背景 + Cuven max + iOS 更新式的胶囊进度条 + 一句句模糊消散 / 模糊进入的文案 */
+.np-load { position: absolute; inset: 0; z-index: 1; display: grid; place-items: center; background: rgb(10, 9, 15); transition: opacity .46s ease; }
+.np-load[hidden] { display: none; }
+.np-load.out { opacity: 0; }
+.np-aurora { position: absolute; inset: 0; overflow: hidden; }
+.np-mid { position: relative; display: flex; flex-direction: column; align-items: center; width: 100%; padding: 0 24px; transform: translateY(-3vh); }
+.np-brand {
+  display: flex; flex-direction: column; align-items: center; color: #fff; line-height: 1;
+  font-family: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+  text-shadow: 0 2px 22px rgba(10, 9, 15, .32); -webkit-user-select: none; user-select: none;
+}
+.np-b1 { font-size: clamp(25px, 7.4vw, 38px); font-weight: 500; letter-spacing: -0.01em; }
+.np-b2 { margin-top: -0.02em; font-size: clamp(58px, 17.5vw, 92px); font-weight: 800; letter-spacing: -0.045em; }
+.np-bar {
+  --p: 0; position: relative; width: min(50vw, 232px); height: 6px; margin-top: clamp(34px, 6vh, 56px);
+  border-radius: 3px; overflow: hidden; background: rgba(255, 255, 255, .24);
+  box-shadow: 0 0 0 .5px rgba(10, 9, 15, .14), 0 2px 14px rgba(10, 9, 15, .22);   /* 光带最亮那一下也看得清 */
+}
+.np-bar > i { position: absolute; inset: 0; border-radius: inherit; background: #fff; transform: translate3d(calc((var(--p) - 1) * 100%), 0, 0); }
+.np-tips { height: 22px; margin-top: 18px; font-size: 15px; font-weight: 500; letter-spacing: .02em; color: rgba(255, 255, 255, .86); white-space: nowrap; text-shadow: 0 1px 12px rgba(10, 9, 15, .5); }
+.np-tip { display: inline-block; transition: opacity .52s cubic-bezier(.4, 0, .2, 1), filter .52s cubic-bezier(.4, 0, .2, 1), transform .52s cubic-bezier(.4, 0, .2, 1); }
+.np-tip.leave { opacity: 0; filter: blur(10px); transform: scale(1.06); }
+.np-tip.enter { opacity: 0; filter: blur(10px); transform: scale(.94); transition: none; }
+@media (orientation: landscape) and (max-height: 500px) {
+  .np-b1 { font-size: clamp(20px, 5.4vh, 30px); }
+  .np-b2 { font-size: clamp(44px, 13vh, 68px); }
+  .np-bar { margin-top: 24px; }
+}
 .player-open { overflow: hidden; }
 .player-open .toast { z-index: 5100; bottom: calc(env(safe-area-inset-bottom, 0px) + 28px); }
 /* 「继续观看」卡上的进度条 */
@@ -19603,6 +19627,299 @@ const Edge = (() => {
   return { base, schedule, reset() { cur = null; }, get host() { return cur || self; } };
 })();
 
+/* ══════════ 加载画面的背景：复刻 Framer「Aurora Flow」══════════
+   参照 homely-mindset-354396.framer.app 上那一份组件，参数照抄：底色 rgb(10,9,15)、
+   颜色 rgb(46,85,242) / rgb(133,231,255)、角度 −119°、尺寸 114%、速度 50、悬停 145%、
+   范围 240px、内部分辨率 25%、不理会「减少动态」。两遍 WebGL2：84 层极光场画进 1/4 分辨率的
+   半浮点纹理，再与底色合成、加一层逐帧抖动。着色器、常数、时间与指针（按住拖动会扭动光带）
+   的推进方式都与原组件逐行一致；没有 WebGL2 时退回原组件自带的三团径向渐变。 */
+const Aurora = (() => {
+  const OPT = { background: [10, 9, 15], color1: [46, 85, 242], color2: [133, 231, 255],
+    speed: 50, size: 114, angle: -119, hover: 145, reach: 240, resolution: 25 };
+  const MAX_DPR = 2;
+  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  const css = c => 'rgb(' + c.join(', ') + ')';
+  const K = {
+    bg: OPT.background.map(v => v / 255), c1: OPT.color1.map(v => v / 255), c2: OPT.color2.map(v => v / 255),
+    speed: clamp(OPT.speed, 0, 100) / 50, size: clamp(OPT.size, 50, 200) / 100,
+    angle: clamp(OPT.angle, -180, 180) * Math.PI / 180, hover: clamp(OPT.hover, 0, 200) / 100,
+    reach: clamp(OPT.reach, 10, 800), scale: clamp(OPT.resolution, 25, 100) / 100,
+  };
+  K.paper = clamp((0.2126 * K.bg[0] + 0.7152 * K.bg[1] + 0.0722 * K.bg[2] - 0.35) / 0.3, 0, 1);
+  const VS = `#version 300 es
+const vec2 P[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+void main() { gl_Position = vec4(P[gl_VertexID], 0.0, 1.0); }
+`;
+  const FIELD = `#version 300 es
+precision highp float;
+uniform vec2 uRes;
+uniform float uTime;
+uniform vec3 uC1;
+uniform vec3 uC2;
+uniform float uSize;
+uniform float uAngle;
+uniform vec2 uMouse;
+uniform float uOn;
+uniform float uReach;
+uniform vec2 uVel;
+out vec4 o;
+
+const float TAU = 6.28318530718;
+const float LAYERS = 84.0;
+const float TWIST = 1.250;
+const float DRAG = 0.180;
+const float GAIN = 0.62;
+const vec2 CENTRE = vec2(-0.62, 0.24);
+const float TILT = 0.6;
+const float ZOOM = 1.05;
+const float THETA = 2.13;
+const float SHEAR = 0.963;
+const float SHRINK = 0.953;
+const vec2 WARP_FREQ = vec2(0.42, 2.4);
+const vec2 WARP_AMP = vec2(0.13, 0.027);
+const vec2 ASPECT = vec2(2.1, 0.17);
+const float OFFSET = 0.36;
+const float GLOW = 0.0021;
+const float SOFT = 0.0019;
+const float FALLOFF = 0.37;
+const float PHASE = 12.0;
+const float CYCLE = 0.16;
+const float HUE_TRAVEL = 2.0;
+
+mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, s, -s, c); }
+
+void main() {
+  vec2 R = uRes;
+  vec2 pos = (gl_FragCoord.xy - 0.5 * R) / R.y;
+
+  vec2 d = pos - uMouse;
+  float w = uOn * exp(-dot(d, d) / (uReach * uReach));
+  if (w > 1e-4) pos = uMouse + rot(w * TWIST) * d * (1.0 - 0.3 * min(w, 1.0)) - uVel * min(w, 1.0) * DRAG;
+
+  pos = rot(uAngle) * pos / uSize;
+  float t = uTime * 0.49 + PHASE;
+  float breath = (-sin(uTime * 0.735) + sin(uTime * 0.49 + 1.0)) * 0.25 + 0.5;
+  vec2 u = rot(TILT) * ((pos - CENTRE) * (ZOOM - breath * 0.085));
+  mat2 fold = mat2(cos(THETA), sin(THETA), -SHEAR, cos(THETA));
+
+  vec3 col = vec3(0.0);
+  for (float i = 1.0; i <= LAYERS; i += 1.0) {
+    u.x -= sin(u.y * WARP_FREQ.x + t + i * 0.007) * WARP_AMP.x;
+    u.y -= sin(u.x * WARP_FREQ.y - t + i * 0.02) * WARP_AMP.y;
+    u = fold * u * SHRINK;
+    vec2 q = (u - vec2(OFFSET + breath * 0.1, 0.0)) * ASPECT;
+    float g = GLOW / (dot(q, q) + SOFT) * (0.25 + breath * 0.4);
+    float r = length(u);
+    float k = sin(i * CYCLE + t * 1.2 + r * HUE_TRAVEL) * 0.5 + 0.5;
+    col += g * mix(uC1, uC2, k) * (0.62 + 0.5 * k) * exp2(-r * FALLOFF);
+  }
+  vec3 x = max(col * GAIN, 0.0);
+  col = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+  col = pow(clamp(col, 0.0, 1.0), vec3(0.85, 0.92, 0.98));
+  col *= 1.0 - smoothstep(0.5, 1.6, length(pos)) * 0.07;
+  o = vec4(col, 1.0);
+}
+`;
+  const FINISH = `#version 300 es
+precision highp float;
+uniform sampler2D uField;
+uniform vec2 uRes;
+uniform float uTime;
+uniform vec3 uBg;
+uniform float uPaper;
+out vec4 o;
+
+float ign(vec2 p, float f) { p += 5.588238 * mod(f, 64.0); return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y)); }
+
+void main() {
+  vec2 frag = gl_FragCoord.xy;
+  vec3 L = max(texture(uField, frag / uRes).rgb, 0.0);
+
+  vec3 dark = uBg + L * (1.0 - uBg);
+  float strength = clamp(max(L.r, max(L.g, L.b)), 0.0, 1.0);
+  vec3 paper = uBg * (1.0 - strength) + L * 0.96;
+  vec3 col = mix(dark, paper, uPaper);
+  col += (ign(frag, floor(uTime * 24.0)) - 0.5) / 255.0;
+  o = vec4(clamp(col, 0.0, 1.0), 1.0);
+}
+`;
+
+  function compile(gl, fs, label) {
+    const sh = (type, src) => {
+      const s = gl.createShader(type);
+      if (!s) return null;
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (gl.getShaderParameter(s, gl.COMPILE_STATUS)) return s;
+      console.error('Aurora ' + label + ' shader:', gl.getShaderInfoLog(s));
+      gl.deleteShader(s);
+      return null;
+    };
+    const v = sh(gl.VERTEX_SHADER, VS), f = sh(gl.FRAGMENT_SHADER, fs);
+    if (!v || !f) return null;
+    const p = gl.createProgram();
+    if (!p) return null;
+    gl.attachShader(p, v); gl.attachShader(p, f); gl.linkProgram(p);
+    gl.deleteShader(v); gl.deleteShader(f);
+    if (gl.getProgramParameter(p, gl.LINK_STATUS)) return p;
+    console.error('Aurora ' + label + ' link:', gl.getProgramInfoLog(p));
+    gl.deleteProgram(p);
+    return null;
+  }
+  const locate = (gl, p, names) => { const u = {}; for (const n of names) u[n] = gl.getUniformLocation(p, n); return u; };
+  /* 离屏纹理：能用半浮点就用（光带叠 84 层不截断），不行退回 8 位 */
+  function target(gl) {
+    const fbo = gl.createFramebuffer();
+    let tex = null, w = 0, h = 0, half = !!gl.getExtension('EXT_color_buffer_float');
+    return {
+      fbo, tex: () => tex, w: () => w, h: () => h,
+      resize(nw, nh) {
+        if (nw === w && nh === h && tex) return;
+        for (let i = 0; i < 2; i++) {
+          if (tex) gl.deleteTexture(tex);
+          tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, half ? gl.RGBA16F : gl.RGBA8, nw, nh, 0, gl.RGBA, half ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE, null);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+          const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          if (ok || !half) break;
+          half = false;
+        }
+        w = nw; h = nh;
+      },
+    };
+  }
+
+  /* 在 host（定位容器）里铺一张 canvas。start() 从头开始动，stop() 停下（不占 GPU），
+     画面停在最后一帧 */
+  function mount(host) {
+    host.style.background = css(OPT.background);
+    const canvas = document.createElement('canvas');
+    canvas.setAttribute('aria-hidden', 'true');
+    canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block';
+    host.appendChild(canvas);
+    let W = host.clientWidth || 1200, H = host.clientHeight || 800;
+    if (window.ResizeObserver) new ResizeObserver(() => { W = host.clientWidth || 1; H = host.clientHeight || 1; }).observe(host);
+    const ptr = { tx: 0, ty: 0, inside: false };
+    const onPtr = e => {
+      const r = host.getBoundingClientRect(), sx = host.offsetWidth / (r.width || 1), sy = host.offsetHeight / (r.height || 1);
+      ptr.tx = (e.clientX - r.left) * sx;
+      ptr.ty = (e.clientY - r.top) * sy;
+      ptr.inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+    };
+    const onOut = e => { if (!e.relatedTarget) ptr.inside = false; };
+    const onVis = () => { last = -1; };
+    let gl = null, field = null, finish = null, uF = null, uK = null, rt = null, ready = false, failed = false;
+    let raf = 0, lost = false, last = -1;
+    let time = 0, mx = 0, my = 0, vx = 0, vy = 0, on = 0;        /* 与原组件同一套推进状态 */
+
+    function init() {
+      gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false, stencil: false });
+      if (!gl) return false;
+      field = compile(gl, FIELD, 'field');
+      finish = compile(gl, FINISH, 'finish');
+      if (!field || !finish) return false;
+      uF = locate(gl, field, ['uRes', 'uTime', 'uC1', 'uC2', 'uSize', 'uAngle', 'uMouse', 'uOn', 'uReach', 'uVel']);
+      uK = locate(gl, finish, ['uField', 'uRes', 'uTime', 'uBg', 'uPaper']);
+      gl.bindVertexArray(gl.createVertexArray());
+      rt = target(gl);
+      return true;
+    }
+    function fallback() {
+      canvas.remove();
+      const f = document.createElement('div');
+      f.style.cssText = 'position:absolute;inset:0;opacity:.5;filter:blur(24px);background:' +
+        'radial-gradient(70% 35% at 25% 45%, ' + css(OPT.color1) + ' 0%, transparent 70%), ' +
+        'radial-gradient(60% 30% at 75% 55%, ' + css(OPT.color2) + ' 0%, transparent 70%), ' +
+        'radial-gradient(50% 25% at 50% 50%, ' + css(OPT.color1) + ' 0%, transparent 75%)';
+      host.appendChild(f);
+    }
+    function draw(t) {
+      time = (time + t * K.speed) % 3600;
+      const m = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+      const cw = Math.max(1, Math.round(W * m)), ch = Math.max(1, Math.round(H * m));
+      if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
+      rt.resize(Math.max(1, Math.round(cw * K.scale)), Math.max(1, Math.round(ch * K.scale)));
+      const want = ptr.inside ? 1 : 0;
+      if (want && on < 0.02) { mx = ptr.tx; my = ptr.ty; }
+      on += (want - on) * (1 - Math.exp(-t * 5));
+      const k = 1 - Math.exp(-t * 16), nx = mx + (ptr.tx - mx) * k, ny = my + (ptr.ty - my) * k;
+      if (t > 0) {
+        const e = 1 - Math.exp(-t * 8);
+        vx += ((nx - mx) / t - vx) * e;
+        vy += ((ny - my) / t - vy) * e;
+      }
+      mx = nx; my = ny;
+      const sp = Math.hypot(vx, vy) / H, lim = sp > 3 ? 3 / sp : 1;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, rt.fbo);
+      gl.viewport(0, 0, rt.w(), rt.h());
+      gl.useProgram(field);
+      gl.uniform2f(uF.uRes, rt.w(), rt.h());
+      gl.uniform1f(uF.uTime, time);
+      gl.uniform3f(uF.uC1, K.c1[0], K.c1[1], K.c1[2]);
+      gl.uniform3f(uF.uC2, K.c2[0], K.c2[1], K.c2[2]);
+      gl.uniform1f(uF.uSize, K.size);
+      gl.uniform1f(uF.uAngle, K.angle);
+      gl.uniform2f(uF.uMouse, (mx - W / 2) / H, (H / 2 - my) / H);
+      gl.uniform1f(uF.uOn, on * K.hover);
+      gl.uniform1f(uF.uReach, K.reach / H);
+      gl.uniform2f(uF.uVel, vx / H * lim, -vy / H * lim);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, cw, ch);
+      gl.useProgram(finish);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, rt.tex());
+      gl.uniform1i(uK.uField, 0);
+      gl.uniform2f(uK.uRes, cw, ch);
+      gl.uniform1f(uK.uTime, time);
+      gl.uniform3f(uK.uBg, K.bg[0], K.bg[1], K.bg[2]);
+      gl.uniform1f(uK.uPaper, K.paper);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    function frame(ts) {
+      raf = requestAnimationFrame(frame);
+      if (lost) return;
+      if (document.hidden) { last = -1; return; }
+      const t = last < 0 ? 0 : clamp((ts - last) / 1000, 0, 0.05);
+      last = ts;
+      draw(t);
+    }
+    canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); lost = true; });
+    canvas.addEventListener('webglcontextrestored', () => { ready = init(); lost = !ready; });
+
+    return {
+      start() {
+        if (!ready && !failed) { ready = init(); if (!ready) { failed = true; fallback(); } }
+        if (!ready || raf) return;
+        time = 0; mx = my = vx = vy = on = 0; last = -1;
+        window.addEventListener('pointermove', onPtr, { passive: true });
+        window.addEventListener('pointerdown', onPtr, { passive: true });
+        document.addEventListener('pointerout', onOut);
+        document.addEventListener('visibilitychange', onVis);
+        raf = requestAnimationFrame(frame);
+      },
+      stop() {
+        if (raf) cancelAnimationFrame(raf);
+        raf = 0;
+        ptr.inside = false;
+        window.removeEventListener('pointermove', onPtr);
+        window.removeEventListener('pointerdown', onPtr);
+        document.removeEventListener('pointerout', onOut);
+        document.removeEventListener('visibilitychange', onVis);
+      },
+      get running() { return !!raf; },
+    };
+  }
+  return { mount };
+})();
+
 /* ══════════ Player：点「播放」直接进系统全屏播放器 ══════════ */
 const Player = (() => {
   /* 只认 Apple 的原生播放器（macOS Safari，以及 iOS / iPadOS 上的所有浏览器 —— 都是 WebKit + AVFoundation）。
@@ -19616,8 +19933,9 @@ const Player = (() => {
     } catch (_) { return false; }
   })();
   /* 全屏方式 ——
-       video：Apple 的系统播放器（iPhone / iPad / Mac 的 Safari）。iPhone 上 <video> 不带 playsinline，
-              play() 一开始就进系统全屏；iPad / Mac 拿到元数据后调 webkitEnterFullscreen()。
+       video：Apple 的系统播放器（iPhone / iPad / Mac 的 Safari）。<video> 带 playsinline：点下去在手势里
+              就起播，先在播放层里缓冲（被加载画面盖着），真正开始播放（playing）的那一刻再
+              webkitEnterFullscreen() 进系统播放器 —— 加载那几秒看到的是加载画面，不是系统播放器的转圈。
        element：其它浏览器，在点下去的那一刻把播放层整块全屏（requestFullscreen 必须在手势里发起）。
      两种都进不去时，播放层本身就是一个带原生控件的黑底播放器 —— 照样能看。 */
   const FS = (() => {
@@ -19627,7 +19945,6 @@ const Player = (() => {
     } catch (_) {}
     return 'none';
   })();
-  const AUTO_FS = FS === 'video' && !(document.fullscreenEnabled || document.webkitFullscreenEnabled);   /* iPhone */
   const WARM_MS = 10 * 60 * 1000;
   const b64url = s => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const fmt = s => {
@@ -19647,7 +19964,7 @@ const Player = (() => {
   const held = new Set();     /* 播放时按住的背景视频（预告片、轮播）：关掉播放器后放回去 */
   const warm = new Map();     /* path → 预热：签名、info.json（打开详情页时就取） */
 
-  /* ── DOM：第一次用到时建好。只有黑底、关闭键和状态层，控件全是系统的 ── */
+  /* ── DOM：第一次用到时建好。黑底、加载画面、关闭键和状态层；播放控件全是系统的 ── */
   function els() {
     if (el) return el;
     const root = document.createElement('div');
@@ -19658,12 +19975,17 @@ const Player = (() => {
     root.setAttribute('aria-hidden', 'true');
     root.setAttribute('aria-label', '播放');
     root.innerHTML =
-      '<video controls preload="auto" x-webkit-airplay="allow"></video>' +
+      '<video controls playsinline webkit-playsinline preload="auto" x-webkit-airplay="allow"></video>' +
+      '<div class="np-load" hidden><div class="np-aurora"></div><div class="np-mid">' +
+        '<div class="np-brand" role="img" aria-label="Cuven max"><span class="np-b1">Cuven</span><span class="np-b2">max</span></div>' +
+        '<div class="np-bar" role="progressbar" aria-label="加载进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div>' +
+        '<div class="np-tips" aria-live="polite"><span class="np-tip"></span></div></div></div>' +
       '<button class="np-x" type="button" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg></button>' +
-      '<div class="np-state" hidden><div class="np-spin" aria-hidden="true"></div><div class="np-msg" role="status"></div><div class="np-acts"></div></div>';
+      '<div class="np-state" hidden><div class="np-msg" role="status"></div><div class="np-acts"></div></div>';
     document.body.appendChild(root);
     const q = s => root.querySelector(s);
-    el = { root, video: q('video'), x: q('.np-x'), state: q('.np-state'), msg: q('.np-msg'), acts: q('.np-acts') };
+    el = { root, video: q('video'), x: q('.np-x'), state: q('.np-state'), msg: q('.np-msg'), acts: q('.np-acts'),
+      load: q('.np-load'), aurora: q('.np-aurora'), bar: q('.np-bar'), tip: q('.np-tip') };
     bind();
     return el;
   }
@@ -19672,11 +19994,11 @@ const Player = (() => {
   const notify = () => { try { window.dispatchEvent(new Event('cuven:player')); } catch (_) {} };
   const flash = msg => { try { toast(msg); } catch (_) {} };
 
-  /* ── 状态层：准备中 / 出错 / 等再点一下 ── */
-  function showState(msg, err, actions) {
+  /* ── 状态层：出错（黑底） / 等再点一下（over：透明地叠在加载画面上） ── */
+  function showState(msg, err, actions, over) {
     el.state.hidden = false;
     el.state.classList.toggle('err', !!err);
-    el.state.classList.toggle('busy', !err && !(actions && actions.length));
+    el.state.classList.toggle('over', !!over);
     el.msg.textContent = msg || '';
     el.acts.innerHTML = '';
     for (const [label, fn, primary] of actions || []) {
@@ -19690,8 +20012,82 @@ const Player = (() => {
   }
   const hideState = () => { if (el) el.state.hidden = true; };
   function fail(msg) {
+    loaderHide();
     leaveFs(true);
     showState(msg, true, [['复制直链', () => cur && copyStreamLink(cur.path, cur.name)], ['重试', () => cur && retry(), true]]);
+  }
+
+  /* ── 加载画面：点下去到真正开播之间，盖在播放层上 ——
+     极光背景（Aurora）＋ Cuven max ＋ iOS 更新式的胶囊进度条 ＋ 下方一句句模糊消散、模糊进入的文案
+     （停在最后一句）。进度按真实阶段推进：拿到片源 → 元数据 → 首帧 → 可以播 → 开播；阶段之间缓缓爬升，
+     不会倒退，也不会在开播前走满 ── */
+  const TIPS = ['请保持屏幕亮起', '正在渲染绚烂颜色', '正在预热画面质量', '正在添加全景声系统', '正在为您的设备优化',
+    '正在量身定制体验', '正为您添加动态字幕', '一切几乎就绪', '还需要一小会', '即将完成'];
+  const STAGE = { open: [0.04, 0.2], source: [0.18, 0.4], meta: [0.4, 0.64], data: [0.62, 0.82], ready: [0.8, 0.94], play: [1, 1] };
+  const TIP_MS = 2400, TIP_SWAP_MS = 520;
+  let aurora = null;
+  const ld = { on: false, p: 0, base: 0, cap: 0, at: 0, last: 0, raf: 0, tip: 0, tipT: 0, swapT: 0, doneT: 0 };
+
+  function loaderShow() {
+    if (!aurora) aurora = Aurora.mount(el.aurora);
+    loaderHide();
+    ld.on = true; ld.p = 0; ld.base = 0; ld.cap = 0; ld.tip = 0; ld.last = 0;
+    el.load.hidden = false;
+    el.tip.textContent = TIPS[0];
+    el.tip.classList.remove('leave', 'enter');
+    paintBar();
+    loaderStage('open');
+    aurora.start();
+    ld.raf = requestAnimationFrame(barFrame);
+    ld.tipT = setInterval(nextTip, TIP_MS);
+  }
+  function loaderStage(name) {
+    const st = STAGE[name];
+    if (!ld.on || !st || st[0] <= ld.base) return;
+    ld.base = st[0]; ld.cap = st[1]; ld.at = performance.now();
+  }
+  function barFrame(ts) {
+    if (!ld.on) return;
+    ld.raf = requestAnimationFrame(barFrame);
+    const dt = ld.last ? Math.min(0.1, (ts - ld.last) / 1000) : 0;
+    ld.last = ts;
+    const goal = ld.base + (ld.cap - ld.base) * (1 - Math.exp(-Math.max(0, ts - ld.at) / 2600));
+    ld.p += (goal - ld.p) * (1 - Math.exp(-dt * (ld.base >= 1 ? 14 : 5)));
+    paintBar();
+  }
+  function paintBar() {
+    el.bar.style.setProperty('--p', ld.p.toFixed(4));
+    el.bar.setAttribute('aria-valuenow', String(Math.round(ld.p * 100)));
+  }
+  function nextTip() {
+    if (ld.tip >= TIPS.length - 1) { clearInterval(ld.tipT); return; }
+    const t = el.tip, text = TIPS[++ld.tip];
+    t.classList.add('leave');
+    clearTimeout(ld.swapT);
+    ld.swapT = setTimeout(() => {
+      t.textContent = text;
+      t.classList.remove('leave');
+      t.classList.add('enter');
+      void t.offsetWidth;                                     /* 先落在模糊态，再过渡到清晰 */
+      t.classList.remove('enter');
+    }, TIP_SWAP_MS);
+  }
+  /* 开播：进度条走满再淡出（Apple 上系统播放器这时正在升起，盖住它） */
+  function loaderDone() {
+    if (!ld.on || ld.base >= 1) return;
+    loaderStage('play');
+    clearInterval(ld.tipT);
+    ld.doneT = setTimeout(() => {
+      el.load.classList.add('out');
+      ld.doneT = setTimeout(loaderHide, 460);
+    }, 260);
+  }
+  function loaderHide() {
+    clearTimeout(ld.doneT); clearTimeout(ld.swapT); clearInterval(ld.tipT);
+    cancelAnimationFrame(ld.raf);
+    ld.on = false;
+    if (el) { el.load.hidden = true; el.load.classList.remove('out'); }
+    if (aurora) aurora.stop();                                /* 不再占 GPU：留给 4K / HDR 解码 */
   }
 
   /* ── 预热：打开详情页就把签名、HLS 索引（info.json）取好 —— 点播放时片源当场就有 ── */
@@ -19800,13 +20196,14 @@ const Player = (() => {
       tries: 0, mode: '', playedOnce: false, keep: false, swapAt: cur ? cur.swapAt : 0, nextWarm: false, info: null };
     present();
     mediaMeta();
+    hideState();
+    loaderShow();
     let src = null;
     try { src = sourceNow(cur); } catch (e) { fail(e.message || '无法播放'); return; }
     if (src) { start(src); return; }
     /* 预热还没回来：手势里先 load 一下 —— iOS 从此把这个元素记成「用户允许出声播放、允许全屏」，
        隔着网络请求再 play / 进全屏都不会被拦。元素全屏也只能在手势里发起，先进去等着 */
     clearMedia();
-    showState('', false);
     if (FS === 'element') enterFs();
     sourceLater(cur).then(s => { if (my === seq && s) start(s); }, e => { if (my === seq) fail(e.message || '无法播放'); });
   }
@@ -19817,16 +20214,18 @@ const Player = (() => {
     /* 直连要挂跨域的外挂字幕（<track>），得是 CORS 请求；HLS 的字幕在主列表里，不需要 */
     if (cur.mode === 'direct') v.crossOrigin = 'anonymous'; else v.removeAttribute('crossorigin');
     if (cur.info && cur.info.audioUnsupportedOnly) flash('这部片只有 DTS / TrueHD 音轨，Safari 无法解码，当前没有声音');
+    loaderStage('source');
+    cur.wantFs = FS === 'video';                               /* 开播（playing）时再进系统播放器 */
     v.src = src;
-    const p = v.play();                                        /* 先 play 再全屏：Chromium 的 requestFullscreen 会用掉这次手势 */
+    const p = v.play();
     if (p && p.catch) {
       p.catch(err => {
         if (!cur || !err || err.name !== 'NotAllowedError') return;
-        /* 取片源那一下把「用户手势」用掉了（少见）：给一个按钮，再点一次就放 */
-        showState('', false, [['播放', () => { hideState(); v.play().catch(() => {}); enterFs(); }, true]]);
+        /* 取片源那一下把「用户手势」用掉了（少见）：在加载画面上给一个按钮，再点一次就放 */
+        showState('', false, [['播放', () => { hideState(); v.play().catch(() => {}); enterFs(); }, true]], true);
       });
     }
-    if (!AUTO_FS) enterFs();
+    if (FS === 'element') enterFs();                           /* 先 play 再全屏：Chromium 的 requestFullscreen 会用掉这次手势 */
     if (cur.mode === 'direct') mountSidecars(cur, seq);
   }
   /* 停下、摘掉片源与外挂字幕。fresh：马上要换新片源（设 src 自己会触发加载，不必再 load 一次） */
@@ -19854,6 +20253,7 @@ const Player = (() => {
   function hide(fromPopstate) {
     if (!isOpen()) return;
     hideState();
+    loaderHide();
     el.root.classList.remove('on');
     el.root.setAttribute('aria-hidden', 'true');
     document.documentElement.classList.remove('player-open', 'immersive');
@@ -19879,6 +20279,7 @@ const Player = (() => {
     try { if (document.pictureInPictureElement === v) document.exitPictureInPicture(); } catch (_) {}
     try { if (v.webkitPresentationMode === 'picture-in-picture') v.webkitSetPresentationMode('inline'); } catch (_) {}
     clearMedia();
+    loaderHide();
     const path = cur.path;
     cur = null;
     refreshCardProgress(path);
@@ -19891,7 +20292,8 @@ const Player = (() => {
     cur.resumeAt = el.video.currentTime || cur.resumeAt;
     cur.keep = false;
     cur.swapAt = Date.now();                                  /* 换片源时系统播放器可能先退出全屏：那一下不算「关掉」 */
-    showState('正在重新连接…', false);
+    hideState();
+    loaderShow();
     const my = ++seq;
     let src = '';
     try { src = await sourceLater(cur); } catch (e) { if (my === seq) fail(e.message || '无法播放'); return; }
@@ -20012,13 +20414,15 @@ const Player = (() => {
     el.x.onclick = e => { e.stopPropagation(); close(); };
     v.addEventListener('loadedmetadata', () => {
       if (!cur) return;
+      loaderStage('meta');
       if (cur.resumeAt && isFinite(v.duration) && cur.resumeAt < v.duration - 30) {
         try { v.currentTime = cur.resumeAt; } catch (_) {}
         if (!cur.tries) flash('从 ' + fmt(cur.resumeAt) + ' 继续播放');
       }
       cur.resumeAt = 0;
-      if (!AUTO_FS || !inFs()) enterFs();
     });
+    v.addEventListener('loadeddata', () => loaderStage('data'));
+    v.addEventListener('canplay', () => loaderStage('ready'));
     v.addEventListener('playing', () => {
       if (!cur) return;
       cur.playedOnce = true;
@@ -20026,6 +20430,10 @@ const Player = (() => {
       cur.keep = false;
       cur.swapAt = 0;
       hideState();
+      /* 真正开播：Apple 上这时进系统播放器（元数据早到了；手势里 play / load 过，这里不必再要手势）。
+         只进一次 —— 之后的 playing（拖动、缓冲、画中画里暂停再放）不能把人拽回全屏 */
+      if (cur.wantFs && !inFs() && !inPip()) { cur.wantFs = false; enterFs(); }
+      loaderDone();
     });
     v.addEventListener('pause', saveNow);
     v.addEventListener('timeupdate', () => {

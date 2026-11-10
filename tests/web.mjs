@@ -1,4 +1,4 @@
-// 前端回归：web/index.html 的播放（点播放直接进系统全屏）、续播、字幕、剧集、预告片、优选入口（Playwright + Chromium）
+// 前端回归：web/index.html 的播放（加载画面 → 系统全屏）、续播、字幕、剧集、预告片、优选入口（Playwright + Chromium）
 //   node tests/web.mjs            （需要 playwright；PLAYWRIGHT_PATH 可指定其 index.js）
 // 静态服务托管 web/index.html，发往 stream.cuven.online（以及测试用的第二入口 s2.test）的请求交给本地运行的真实 Worker。
 import fs from 'node:fs';
@@ -21,12 +21,14 @@ const srv = http.createServer((q, r) => {
   r.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); r.end(html);
 });
 await new Promise(r => srv.listen(18301, '127.0.0.1', r));
-const browser = await chromium.launch();
+/* SwiftShader：无头 Chromium 也有 WebGL2，加载画面的极光背景走真实路径 */
+const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
 const ORIGIN = 'http://127.0.0.1:18301/';
 const TRAILER = 'https://stream.cuven.online/stream/t.mp4?path=' + encodeURIComponent('/Movies/long.mp4') + '&safari=1';
 const hits = [];
 const errors = [];
 let pingDelay = 0;
+let streamDelay = 0;                          // 放慢 /stream：开播前看清加载画面
 
 async function context(opts = {}, apple = false, probe = false) {
   const ctx = await browser.newContext(opts);
@@ -51,6 +53,7 @@ async function context(opts = {}, apple = false, probe = false) {
         if (this.__fs) return;
         this.__fs = true;
         window.__fsIn = (window.__fsIn || 0) + 1;
+        window.__fsWhen = { playing: !this.paused && this.readyState >= 3, loader: !!document.querySelector('#nativePlayer .np-load:not([hidden])') };
         this.dispatchEvent(new Event('webkitbeginfullscreen'));
       };
       P.webkitExitFullscreen = function () { if (!this.__fs) return; this.__fs = false; this.dispatchEvent(new Event('webkitendfullscreen')); };
@@ -79,6 +82,7 @@ async function context(opts = {}, apple = false, probe = false) {
         body: JSON.stringify({ id: 'tt1', video: { best: TRAILER, mp4: { '720p': TRAILER, '1080p': TRAILER }, thumb: null }, stills: [] }) });
     }
     if (url.pathname === '/api/edge/ping' && url.host === 'stream.cuven.online' && pingDelay) await new Promise(r => setTimeout(r, pingDelay));
+    if (url.pathname.startsWith('/stream/') && streamDelay) await new Promise(r => setTimeout(r, streamDelay));
     const req = route.request();
     const res = await H.worker.fetch(new Request(u, { method: req.method(), headers: req.headers() }), H.env, H.ctx);
     await route.fulfill({ status: res.status, headers: Object.fromEntries(res.headers), body: Buffer.from(await res.arrayBuffer()) });
@@ -109,8 +113,25 @@ const st = pg => pg.evaluate(() => {
   };
 });
 const vid = '#nativePlayer video';
+/* 加载画面的状态：在不在、字样、当前文案、进度、背景是不是 WebGL 画的 */
+const loader = pg => pg.evaluate(() => {
+  const l = document.querySelector('#nativePlayer .np-load'), bar = l && l.querySelector('.np-bar'), c = l && l.querySelector('canvas');
+  return { shown: !!l && !l.hidden && !l.classList.contains('out'), brand: l ? l.querySelector('.np-brand').getAttribute('aria-label') : '',
+    text: l ? l.querySelector('.np-brand').textContent : '', tip: l ? l.querySelector('.np-tip').textContent : '',
+    p: bar ? parseFloat(bar.style.getPropertyValue('--p') || '0') : -1, now: bar ? +bar.getAttribute('aria-valuenow') : -1,
+    webgl: !!c && c.width > 0 && c.height > 0, when: window.__fsWhen || null };
+});
 const until = (pg, fn, arg, ms = 20000) => pg.waitForFunction(fn, arg, { timeout: ms });
-const reset = pg => pg.evaluate(() => { window.__plays = []; window.__loads = []; window.__fsIn = 0; });
+const reset = pg => pg.evaluate(() => { window.__plays = []; window.__loads = []; window.__fsIn = 0; window.__fsWhen = null; });
+/* 盯着加载画面的文案：每换一句记下时刻、文字与当时的进度（截图很慢，不能靠 sleep 卡时间） */
+const watchTips = pg => pg.evaluate(() => {
+  const t0 = performance.now(), log = window.__tips = [];
+  const tip = document.querySelector('#nativePlayer .np-tip'), bar = document.querySelector('#nativePlayer .np-bar');
+  const v = document.querySelector('#nativePlayer video');
+  const rec = () => log.push({ t: Math.round(performance.now() - t0), text: tip.textContent, p: parseFloat(bar.style.getPropertyValue('--p') || '0'), playing: v.currentTime > 0 });
+  rec();
+  new MutationObserver(rec).observe(tip, { childList: true, characterData: true, subtree: true });
+});
 /* 打开详情页并等预热（签名 / info.json）回来 */
 const detail = async (pg, path, name) => {
   await pg.evaluate(([p, n]) => openDetail(p, n), [path, name]);
@@ -134,7 +155,7 @@ let s = await st(page);
 ok(s.on && s.fs && s.hash === '#play' && s.view === 'player', `一点就是全屏播放（全屏 ${s.fs}，历史栈 ${s.hash}）`);
 ok(s.plays.length && s.plays[0].gesture && /\/stream\//.test(s.plays[0].src), 'play() 在点击的手势里发起，片源当场就有（打开详情页时已预热）');
 ok(/\/stream\/Cuven%20.*\?path=%2FMovies%2Flong\.mp4&safari=1$/.test(s.src) && !s.paused, `直链 + safari=1，正在播放（t=${s.t.toFixed(1)}s）`);
-ok(s.controls && !s.inline, '用浏览器 / 系统的原生控件（<video controls>，不带 playsinline）');
+ok(s.controls && s.inline, '用浏览器 / 系统的原生控件（<video controls playsinline>：先在播放层里起播，开播再进系统全屏）');
 await page.evaluate(s => { document.querySelector(s).currentTime = 95; }, vid);
 await until(page, s => document.querySelector(s).currentTime > 95.5, vid, 15000);
 await page.evaluate(s => document.querySelector(s).pause(), vid);
@@ -160,6 +181,23 @@ await page.goBack();
 await page.waitForTimeout(600);
 s = await st(page);
 ok(!s.on && !s.src && s.detail, '返回键：关掉播放器，详情页还在');
+
+console.log('\n■ 加载画面 · 桌面（点下去就整块全屏，加载画面在全屏里）');
+await detail(page, '/Movies/long_ep2.mp4', 'Other.Movie.2023.1080p.mp4');
+streamDelay = 2500;
+await reset(page);
+await page.click('#detailPlay');
+await page.waitForTimeout(500);
+let L = await loader(page);
+s = await st(page);
+ok(L.shown && s.fs && s.t === 0, `点下去：全屏的播放层里先是加载画面，视频还没开播（全屏 ${s.fs}，t=${s.t}）`);
+await until(page, s => document.querySelector(s).currentTime > 0.3, vid, 20000);
+await page.waitForTimeout(900);
+L = await loader(page);
+ok(!L.shown && !(await st(page)).paused, '开播后加载画面淡出，视频在全屏里播放');
+streamDelay = 0;
+await page.keyboard.press('Escape');
+await page.waitForTimeout(500);
 await page.evaluate(() => closeDetail());
 await page.waitForTimeout(400);
 
@@ -248,8 +286,9 @@ await reset(pi);
 await pi.tap('#detailPlay');
 await until(pi, s => document.querySelector(s) && document.querySelector(s).currentTime > 0.5, vid);
 s = await st(pi);
-ok(s.plays.length && s.plays[0].gesture && /\/stream\//.test(s.plays[0].src), '点按的手势里就带着片源 play() —— iOS 据此直接打开系统播放器');
-ok(!s.inline && s.fs && s.fsIn === 1, `<video> 不带 playsinline，进了系统全屏（webkitEnterFullscreen ${s.fsIn} 次）`);
+ok(s.plays.length && s.plays[0].gesture && /\/stream\//.test(s.plays[0].src), '点按的手势里就带着片源 play()（iOS 允许出声播放、之后进全屏不必再要手势）');
+const w0 = (await loader(pi)).when;
+ok(s.inline && s.fs && s.fsIn === 1 && w0 && w0.playing, `先在加载画面后面起播，开播那一刻才进系统全屏（webkitEnterFullscreen ${s.fsIn} 次，调用时已在播放：${w0 && w0.playing}）`);
 await pi.evaluate(s => document.querySelector(s).webkitExitFullscreen(), vid);
 await pi.waitForTimeout(500);
 s = await st(pi);
@@ -275,6 +314,44 @@ await pi.waitForTimeout(400);
 s = await st(pi);
 ok(!s.src && !s.on, '画中画里叉掉：停下并释放');
 await ip.close();
+
+console.log('\n■ 加载画面 · iPhone（极光背景 + Cuven max + 胶囊进度条 + 模糊轮播文案）');
+{
+  const ip2 = await context({ ...devices['iPhone 15 Pro'] }, 'iphone');
+  const p2 = await enter(ip2);
+  await detail(p2, '/Movies/long.mp4', 'Long.Test.2024.1080p.mp4');
+  streamDelay = 8000;
+  await reset(p2);
+  await p2.tap('#detailPlay');
+  await watchTips(p2);
+  await p2.waitForTimeout(300);
+  const A = await loader(p2), s0 = await st(p2);
+  ok(A.shown && !s0.fs && s0.t === 0, '点下去先是加载画面，系统播放器还没打开');
+  ok(A.brand === 'Cuven max' && /^Cuven\s*max$/.test(A.text), `画面中央叠着「${A.text.replace(/max$/, ' max')}」`);
+  ok(A.webgl, '背景是 WebGL2 画的极光（Aurora Flow 复刻）');
+  const clip = { x: 0, y: 0, width: 120, height: 120 };
+  const f1 = await p2.screenshot({ clip, scale: 'css' });
+  await p2.waitForTimeout(400);
+  const f2 = await p2.screenshot({ clip, scale: 'css' });
+  ok(!f1.equals(f2), '背景在动');
+  await until(p2, s => document.querySelector(s).currentTime > 0.3, vid, 40000);
+  const A2 = await loader(p2), s2 = await st(p2);
+  ok(A2.when && A2.when.playing && A2.when.loader && s2.fs, '开播那一刻进系统全屏（加载画面一直盖到这时）');
+  await p2.waitForTimeout(900);
+  const A3 = await loader(p2);
+  const tips = await p2.evaluate(() => window.__tips);
+  const before = tips.filter(x => !x.playing);
+  const want = ['请保持屏幕亮起', '正在渲染绚烂颜色', '正在预热画面质量', '正在添加全景声系统', '正在为您的设备优化'];
+  const order = before.map(x => x.text);
+  const gaps = before.slice(1).map((x, i) => x.t - before[i].t);
+  ok(order.length >= 3 && order.every((t, i) => t === want[i]) && gaps.every(g => g > 2100 && g < 2900),
+    `文案按顺序一句句换：${order.join(' → ')}（间隔 ${gaps.join(' / ')} ms）`);
+  const ps = before.map(x => x.p);
+  ok(ps.every((p, i) => p > 0 && p < 0.95 && (!i || p >= ps[i - 1])), `开播前进度只增不减、不走满：${ps.map(p => Math.round(p * 100) + '%').join(' → ')}`);
+  ok(!A3.shown, '开播后加载画面收起');
+  streamDelay = 0;
+  await ip2.close();
+}
 
 console.log('\n■ iPhone Duo（Safari 27.1 实测视口：折起 382×580 / 594×368，展开 669×825 / 951×543）');
 const DUO = { isMobile: true, hasTouch: true, screen: { width: 466, height: 678 },
@@ -326,7 +403,7 @@ await reset(pa);
 await pa.click('#detailPlay');
 await until(pa, s => document.querySelector(s) && document.querySelector(s).currentTime > 0.5, vid);
 s = await st(pa);
-ok(s.plays[0] && s.plays[0].gesture && s.fs && s.fsIn === 1, '手势里 play()；拿到元数据后进系统全屏（webkitEnterFullscreen 早调会抛错，等 loadedmetadata 再进）');
+ok(s.plays[0] && s.plays[0].gesture && s.fs && s.fsIn === 1, '手势里 play()；开播那一刻进系统全屏（只进一次）');
 await pa.evaluate(s => document.querySelector(s).webkitExitFullscreen(), vid);
 await pa.waitForTimeout(500);
 s = await st(pa);
