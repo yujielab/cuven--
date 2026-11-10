@@ -1,0 +1,17 @@
+# cuven 音频转码 Worker（DTS / TrueHD / Opus 等 → AC-3）
+# 部署：在本目录执行  npx wrangler deploy
+# 然后在主 Worker（Stream_v25.js）的 wrangler.toml 里加 Service Binding：
+#
+#   [[services]]
+#   binding = "AUDIO_TX"
+#   service = "cuven-audio-tx"
+#
+# 不绑定时主 Worker 一切照旧，只是 DTS / TrueHD 音轨不出现在 HLS 音轨列表里。
+name = "cuven-audio-tx"
+main = "worker.js"
+compatibility_date = "2025-06-01"
+workers_dev = false
+
+# 一个 6 秒分段的转码约需几十到一两百毫秒 CPU：需要 Workers 付费计划
+[limits]
+cpu_ms = 30000
