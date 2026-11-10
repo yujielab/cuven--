@@ -34,7 +34,7 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 | `HLS_SEG_SEC` | `6` | 分段目标时长（2~10 秒） |
 | `HLS_DV_MODE` | `auto` | `auto`：按 Apple 规范；`dvh1`：P8 改用 `dvh1` 样本入口；`off`：不发杜比信令（按 HDR10 播放，P5 除外）。主列表加 `?dv=` 可临时覆盖，方便在真机上对比 |
 
-建议使用 **Workers 付费计划**：一个 4K remux 分段大约消耗 10~20ms CPU，免费计划每次请求只有 10ms 上限。
+建议使用 **Workers 付费计划**：一个 4K remux 分段大约消耗 20~40ms CPU，免费计划每次请求只有 10ms 上限。
 
 ### 可选：DTS / TrueHD 转码 Worker（`audio-tx/`）
 

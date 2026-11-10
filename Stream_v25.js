@@ -28,7 +28,7 @@
  *     没有的文件回 422，播放页自动回退直连。
  *   ▸ 新环境变量：HLS_DISABLE=1（关闭）、HLS_SEG_SEC（分段目标时长，默认 6）、
  *     HLS_DV_MODE=auto|dvh1|off（杜比信令策略，主列表也可加 ?dv= 临时覆盖）。
- *   ▸ 建议 Workers 付费计划：一个 4K remux 分段约 10~20ms CPU，免费计划的
+ *   ▸ 建议 Workers 付费计划：一个 4K remux 分段约 20~40ms CPU，免费计划的
  *     10ms 上限在高码率片源上可能不够。
  *
  * ────────────────────────────────────────────────────────────────
@@ -8310,7 +8310,12 @@ function hlsFail(status, message) {
   });
 }
 
-/** 分段响应：先拿到第一个 moof 再发响应头 —— 回源失败时还能回一个干净的错误码 */
+/**
+ * 分段响应：先拿到第一个 moof 再发响应头 —— 回源失败时还能回一个干净的错误码。
+ * 每个 moof 片段（约 1 秒）拼成一块连续缓冲再交付：同一上游缓冲区的多个子视图
+ * 分别入队，在会转移（detach）入队缓冲区的运行时里会互相踩坏；拼一次的代价是
+ * 一次 memcpy，换来的是入队次数从几百次降到每秒一次。
+ */
 async function hlsSegResponse(cx, idx, k, sel, type, request) {
   if (!(k >= 0 && k < idx.segs.length)) return hlsFail(404, 'no such segment');
   if (request.method === 'HEAD') return new Response(null, { headers: hlsHeaders(type, HLS_LONG) });
@@ -8321,7 +8326,7 @@ async function hlsSegResponse(cx, idx, k, sel, type, request) {
   let queue = [], finished = false;
   try {
     const r = await it.next();
-    if (r.done) finished = true; else queue = r.value.slice();
+    if (r.done) finished = true; else queue = [hlsConcat(r.value)];
   } catch (e) {
     ac.abort(e);
     console.error('hls segment:', cx.filePath, k, e && e.message);
@@ -8333,7 +8338,7 @@ async function hlsSegResponse(cx, idx, k, sel, type, request) {
         while (!queue.length) {
           if (finished) { c.close(); return; }
           const r = await it.next();
-          if (r.done) finished = true; else queue = r.value.slice();
+          if (r.done) finished = true; else queue = [hlsConcat(r.value)];
         }
         c.enqueue(queue.shift());
       } catch (e) {
