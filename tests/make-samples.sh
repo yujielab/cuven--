@@ -82,4 +82,31 @@ q -f lavfi -i "testsrc2=size=1280x720:rate=30000/1001" -f lavfi -i "sine=frequen
 q -f lavfi -i "testsrc2=size=640x360:rate=25" -f lavfi -i "sine=frequency=600:sample_rate=48000" -t 180 \
   -c:v libx264 -preset veryfast -crf 34 -g 50 -c:a aac -b:a 64k -movflags +faststart long.mp4
 cp long.mp4 long_ep2.mp4
+# 同目录外挂字幕（中文那份故意放了两条一模一样的 cue：播放页只该画一行）
+cat > long.zh.srt <<'S'
+1
+00:00:01,000 --> 00:00:04,000
+第一句中文字幕
+
+2
+00:00:01,000 --> 00:00:04,000
+第一句中文字幕
+
+3
+00:00:05,000 --> 00:00:08,000
+第二句，<i>斜体</i>
+
+4
+00:01:40,000 --> 00:01:44,000
+一百秒处的字幕
+S
+cat > long.en.srt <<'S'
+1
+00:00:01,000 --> 00:00:04,000
+First English line
+
+2
+00:00:05,000 --> 00:00:08,000
+Second English line
+S
 echo "samples ready: $(ls *.mkv | wc -l) mkv"

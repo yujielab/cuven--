@@ -9,7 +9,9 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const SAMPLES = path.join(HERE, 'samples');
 export const SECRET = 'test-secret';
-export const stats = { fetches: 0, bytes: 0 };
+export const stats = { fetches: 0, bytes: 0, ranges: [] };
+/** 模拟慢速上游：每 64KB 一块之间停顿多少毫秒（测「跟车」这类时序） */
+export const net = { chunkDelayMs: 0 };
 
 class MemCache {
   constructor() { this.m = new Map(); }
@@ -47,8 +49,12 @@ globalThis.fetch = async (input, init = {}) => {
     const size = fs.statSync(file).size;
     const m = /bytes=(\d+)-(\d*)/.exec(req.headers.get('Range') || '');
     const start = m ? +m[1] : 0, end = m && m[2] ? Math.min(size - 1, +m[2]) : size - 1;
-    stats.fetches++; stats.bytes += end - start + 1;
-    const body = Readable.toWeb(fs.createReadStream(file, { start, end, highWaterMark: 65536 }));
+    stats.fetches++; stats.bytes += end - start + 1; stats.ranges.push([path.basename(file), start, end]);
+    let body = Readable.toWeb(fs.createReadStream(file, { start, end, highWaterMark: 65536 }));
+    if (net.chunkDelayMs > 0) {
+      const ms = net.chunkDelayMs;
+      body = body.pipeThrough(new TransformStream({ async transform(c, ctl) { await new Promise(r => setTimeout(r, ms)); ctl.enqueue(c); } }));
+    }
     return new Response(body, { status: m ? 206 : 200, headers: { 'Content-Range': `bytes ${start}-${end}/${size}` } });
   }
   return new Response('blocked in test', { status: 404 });
