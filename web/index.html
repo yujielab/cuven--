@@ -22,9 +22,9 @@
      代价：CDN 不可达时 favicon / 安装图标会空（以前不会）。要拿回这份冗余，
      把图源文件重新内联为 base64 即可（maskable 那张记得把 logo 收进
      直径 80% 的安全圆，Android 圆形裁切才不会切到字）。 -->
-<link rel="apple-touch-icon" href="../data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg">
-<link rel="apple-touch-icon" sizes="180x180" href="../data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg">
-<link rel="icon" type="image/jpeg" sizes="512x512" href="../data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg">
+<link rel="apple-touch-icon" href="https://data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg">
+<link rel="apple-touch-icon" sizes="180x180" href="https://data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg">
+<link rel="icon" type="image/jpeg" sizes="512x512" href="https://data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg">
 <script>
 /* PWA manifest：内联生成 blob，免额外文件。
    any 与 maskable 目前指向 CDN 上同一张满幅方图。
@@ -7165,7 +7165,7 @@ body.voice-on .dock > *{ pointer-events:none !important; }
       <div class="cvl-tile" id="cvlTile">
         <div class="cvl-tile-inner" id="cvlTileInner">
           <img id="cvlTileImg" alt="Cuven Max"
-               src="../data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg">
+               src="https://data.cuven.us/logo/CDFC9C3A-A2D2-4021-B994-E95878F03F74.jpeg">
           <div class="cvl-tile-flash" id="cvlTileFlash"></div>
         </div>
       </div>
@@ -13446,7 +13446,7 @@ function heroBodyHtml(video, art) {
   if (art.year) parts.push(art.year);
   parts.push(art.type === 'tv' ? 'TV Series' : 'Feature Film');
   const logoBlock = art.logo
-    ? '<img class="hero-logo-img" src="https://www.cuven.us/'&#32;+&#32;esc(art.logo)&#32;+&#32;'" alt="' + esc(art.title) + '">'
+    ? '<img class="hero-logo-img" src="' + esc(art.logo) + '" alt="' + esc(art.title) + '">'
     : '<div class="hero-logo-text">' + esc(art.title) + '</div>';
   let metaHtml;
   if (art.atv) {
@@ -14937,7 +14937,7 @@ function tvHeroCardHTML(x) {
       '<div class="tv-hero-scrim"></div>' +
       '<div class="tv-hero-in">' +
         (withLogo
-          ? '<img class="tv-hero-logo" src="https://www.cuven.us/'&#32;+&#32;esc(downsizeForCard(m.logo,&#32;false))&#32;+&#32;'" alt="' + esc(name) + '">'
+          ? '<img class="tv-hero-logo" src="' + esc(downsizeForCard(m.logo, false)) + '" alt="' + esc(name) + '">'
           : (art ? '' : '<div class="tv-hero-title">' + esc(name) + '</div>')) +
         '<span class="tv-hero-link">查看剧集</span>' +
       '</div>' +
@@ -16370,7 +16370,7 @@ async function openComingSoonDetail(c){
   const creditsRow = creditsParts.length ? '<div class="detail-credits-row">' + creditsParts.join('<span class="credit-sep">·</span>') + '</div>' : '';
 
   const logoBlock = art.logo
-    ? '<img class="detail-logo-img" id="detailLogoImg" src="https://www.cuven.us/'&#32;+&#32;esc(art.logo)&#32;+&#32;'" alt="' + esc(art.title) + '">'
+    ? '<img class="detail-logo-img" id="detailLogoImg" src="' + esc(art.logo) + '" alt="' + esc(art.title) + '">'
     : '<div class="detail-logo-text">' + esc(art.title) + '</div>';
 
   const overview = art.overview || '';
@@ -17346,7 +17346,7 @@ const SC = (() => {
     track.innerHTML = list.map(s => {
       const url = esc(s.thumb || s.url);
       return '<li class="sc-shot"><div class="sc-shot-media">' +
-        '<img loading="lazy" decoding="async" fetchpriority="low" alt="" src="https://www.cuven.us/'&#32;+&#32;&#32;&#32;&#32;&#32;&#32;&#32;&#32;(cold&#32;?&#32;PIXEL_GIF&#32;:&#32;url)&#32;+&#32;'"' + (cold ? ' data-src="' + url + '"' : '') + '>' +
+        '<img loading="lazy" decoding="async" fetchpriority="low" alt="" src="' +        (cold ? PIXEL_GIF : url) + '"' + (cold ? ' data-src="' + url + '"' : '') + '>' +
       '</div>' + (s.caption ? '<p class="sc-shot-cap">' + esc(s.caption) + '</p>' : '') + '</li>';
     }).join('');
     if (!cold) {
@@ -17989,7 +17989,7 @@ async function openDetail(path, name, opts) {
 
   
   const logoBlock = art.logo
-    ? '<img class="detail-logo-img" id="detailLogoImg" src="https://www.cuven.us/'&#32;+&#32;esc(art.logo)&#32;+&#32;'" alt="' + esc(fileTitle) + '">'
+    ? '<img class="detail-logo-img" id="detailLogoImg" src="' + esc(art.logo) + '" alt="' + esc(fileTitle) + '">'
     : '<div class="detail-logo-text">' + esc(fileTitle) + '</div>';
 
   
@@ -20376,7 +20376,6 @@ if (DEV) {
 
 
 
-<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a104c386b9ce752a',t:'MTc4MjIzMTAzNQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script>
 <script>
 /* ══════════════════════════════════════════════════════════════════════
    Liquid Glass — SEMANTIC redraw, SHARED renderer (real WebGL).
@@ -21083,5 +21082,5 @@ if (DEV) {
   else start();
 })();
 </script>
-<script>window.__CF$cv$params={r:'a555f9587db19314',t:'MTc5MzgyMDAwNQ==',u:'01a1a80113777188956654e656d0a9e8',ut:'VK5Y.XjIfeFGrXJwQnM2bnwxviUI9tTRXmdSbhvsmtU-1793820005-1.2.1.1-ChQbBYmJ.AukSWhwCCs3DVpN10rrhbCctMqyDqqeIjIyBpu3qZ.gW1JwpSBWsNbFbIgccJpDpYWulnn9FmS5_tXQroJKzjDCoImc1NcOp.I',i:60};(function(){if(!document.body)return;var l=window.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/precursor/main.js?ray=a555f9587db19314',s=document.createElement('script');s.src=o?new URL(u,o).href:u;document.head.appendChild(s);})();</script></body>
+</body>
 </html>
