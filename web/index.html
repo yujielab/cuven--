@@ -5849,6 +5849,12 @@ html.rail.rail-float .hero-deck,
 html.rail.rail-float.standalone .hero-deck { top: 0; height: 100svh; min-height: 0; max-height: none; }
 html.rail.rail-float.standalone .hero-stage { padding-top: 0; }
 html.rail.rail-float .hero-deck .aap-host { bottom: calc((1 - var(--m, 0)) * (var(--safe-b) + 16px) + var(--m, 0) * var(--gap-y, 0px)); }
+/* 文案只留三行：片名 → 「年份 · 类型」胶囊 → 按钮。片名下那行（类型 · 片长 / 严选标）不要，
+   原来在片名上面的年份胶囊挪到它那个位置。只改视觉顺序（order），DOM 不动；入场的先后跟着视觉顺序走 */
+html.rail.rail-float .hero-content > .hero-tags { display: none; }
+html.rail.rail-float .hero-content > .hero-logo-wrap { order: 1; transition-delay: 0s; }
+html.rail.rail-float .hero-content > .hero-status { order: 2; transition-delay: .08s; }
+html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay: .16s; }
 
 /* 没有封面的片子不显示之后，一排可能整排都没了：那一段（连同标题）一起藏起来 */
 .section:has(> .scroll-row:empty):not(:has(.year-tv.on)) { display: none; }   /* 年份轨道：同年份的剧集还在就不藏 */
