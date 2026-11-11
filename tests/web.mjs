@@ -589,17 +589,33 @@ for (const [w, h, label, mode, sai] of [[382, 580, '折起竖拿', 'float'], [46
     const play = r(card && card.querySelector('.btn-play')), circ = r(card && card.querySelector('.btn-circle')), dots = r(document.querySelector('.aap-host .all-access-pass'));
     const apart = (a, b) => !a || !b || a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top;
     const shift = parseFloat(getComputedStyle(document.getElementById('appStage')).paddingLeft) || 0;
+    /* 浮动导航下大图专门排过：标签 / 片名 / 按钮 / 暂停钮与轮播点同一条中线（居中到导航左边那块） */
+    const midX = b => b ? (b.left + b.right) / 2 : NaN;
+    const btns = r(card && card.querySelector('.hero-buttons')), ttl = r(card && (card.querySelector('.hero-logo-img') || card.querySelector('.hero-logo-text')));
+    const aligned = Math.abs(midX(btns) - midX(dots)) <= 4 && (!ttl || Math.abs(midX(ttl) - midX(dots)) <= 4);
     const clear = !!(nav && play && dots) && play.top >= 0 && (float
       ? apart(play, nav) && apart(circ, nav) && apart(dots, nav) && apart(dots, srch) && nav.left > innerWidth / 2 && nav.right >= innerWidth - 24
-        && srch.top >= nav.bottom && Math.abs((srch.left + srch.right) / 2 - (nav.left + nav.right) / 2) <= 4 && shift === 0
+        && srch.top >= nav.bottom && Math.abs((srch.left + srch.right) / 2 - (nav.left + nav.right) / 2) <= 4 && shift === 0 && aligned
       : rail ? apart(play, nav) && apart(dots, nav) && play.left >= nav.right
       : play.bottom <= nav.top && dots.bottom <= nav.top);
     const pillOk = !!(pill && act) && Math.abs(pill.left - act.left) <= 2 && Math.abs(pill.top - act.top) <= 2 && Math.abs(pill.width - act.width) <= 2 && Math.abs(pill.height - act.height) <= 2;
     return { mode: float ? 'float' : rail ? 'rail' : 'bottom', vertical: nav ? nav.height > nav.width : false, clear, pillOk, sw: document.documentElement.scrollWidth, vw: innerWidth };
   });
   ok(g.mode === mode && g.vertical === (mode !== 'bottom') && g.clear && g.pillOk && g.sw === g.vw,
-    `${label} ${w}×${h}：${DESC[mode]}，选中指示器对齐，主视觉的按钮与轮播点不被导航挡住，没有横向溢出${g.mode === mode ? '' : `（实际：${g.mode}）`}`);
+    `${label} ${w}×${h}：${DESC[mode]}，选中指示器对齐，主视觉的按钮与轮播点不被导航挡住${mode === 'float' ? '、居中到导航左边那块' : ''}，没有横向溢出${g.mode === mode ? '' : `（实际：${g.mode}）`}`);
 }
+/* 往下一滚、大图收成卡片：卡与卡下的进度胶囊落在导航左边那块，两者同宽，不钻到导航底下（实机的右侧安全区） */
+await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: { top: 0, right: 84, bottom: 20, left: 0 } });
+await pd.setViewportSize({ width: 466, height: 678 });
+await pd.waitForTimeout(600);
+await pd.evaluate(() => scrollTo(0, 300));
+await pd.waitForTimeout(900);
+const mo = await pd.evaluate(() => { const r = e => e && e.getBoundingClientRect(); const c = r(document.querySelector('.hcard.is-center')), q = r(document.querySelector('.aap-host .all-access-pass')), n = r(document.getElementById('navContainer'));
+  return { morphed: document.querySelector('.hero-deck').classList.contains('morphed'), card: [Math.round(c.left), Math.round(c.right)], pill: [Math.round(q.left), Math.round(q.right)], nav: Math.round(n.left) }; });
+ok(mo.morphed && mo.card[1] <= mo.nav - 8 && Math.abs(mo.pill[0] - mo.card[0]) <= 2 && Math.abs(mo.pill[1] - mo.card[1]) <= 2,
+  `折起竖拿 · 大图收成卡片：卡 ${mo.card.join('–')}、进度胶囊 ${mo.pill.join('–')} 同宽，停在导航（${mo.nav}）左边`);
+await pd.evaluate(() => scrollTo(0, 0));
+await pd.waitForTimeout(500);
 await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: NO_SAI });
 /* 浮动侧边导航下搜索：搜索场到顶部、几乎通栏；头像圆钮留在右下角 */
 await pd.setViewportSize({ width: 466, height: 678 });
