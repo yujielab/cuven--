@@ -130,7 +130,7 @@ globalThis.fetch = async (input, init = {}) => {
     }
     if (p === '/search/movie') {
       const ql = (q.query || '').toLowerCase();
-      return Response.json({ results: tmdb.movies.filter(x => x.title.toLowerCase() === ql)
+      return Response.json({ results: tmdb.movies.filter(x => (x.query || x.title).toLowerCase() === ql)
         .map(x => ({ id: x.id, title: x.title, release_date: x.date, poster_path: '/m.jpg', overview: '', vote_average: 7 })) });
     }
     let m = /^\/(movie|tv)\/(\d+)\/videos$/.exec(p);

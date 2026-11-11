@@ -335,6 +335,43 @@ console.log('\n■ 展厅预告片 · YouTube 官方预告（IMDb 不给直链�
   trailerYt = false;
 }
 
+console.log('\n■ 片名一律中文（卡片、搜索、播放器 / 正在播放）');
+{
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  H.tmdb.movies = [{ id: 9001, query: 'long', title: '漫长的测试', date: '2024-05-01' }];
+  const zc = await context({ viewport: { width: 1280, height: 800 } });
+  await zc.route('https://image.tmdb.org/**', r => r.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>' }));
+  const zp = await enter(zc);
+  await zp.evaluate(() => { openSearch && openSearch(); });
+  await zp.fill('#searchInput', 'long');
+  await zp.evaluate(() => runSearch('long'));
+  const up = await until(zp, () => { const t = document.querySelector('#searchBody .card[data-name="long.mp4"] .card-title'); return !!(t && t.textContent === '漫长的测试'); }, null, 15000)
+    .then(() => true).catch(() => false);
+  ok(up, '搜索结果的卡片显示 TMDB 的中文名「漫长的测试」（文件名是 long.mp4）');
+  const sw = await zp.evaluate(() => {
+    const box = document.createElement('div');
+    box.innerHTML = videoCardHTML({ name: 'Some.Film.2020.1080p.mkv', path: '/Movies/x.mkv' });
+    document.body.appendChild(box);
+    const card = box.firstElementChild, before = card.querySelector('.card-title').textContent;
+    upgradeCardTitle(card.querySelector('.card-poster'), { title: '某部电影', year: '2020' });
+    const r = { before, after: card.querySelector('.card-title').textContent, aria: card.getAttribute('aria-label') };
+    box.remove();
+    return r;
+  });
+  ok(sw.before === 'Some Film' && sw.after === '某部电影' && sw.aria.startsWith('某部电影'), `还没有中文名的卡先按原名排（${sw.before}），中文名一到原位换字（${sw.after}），读屏标签跟着换`);
+  const again = await zp.evaluate(() => videoCardHTML({ name: 'long.mp4', path: '/Movies/long.mp4' }).includes('漫长的测试'));
+  ok(again, '记进中文名索引：之后新排的卡一出来就是中文');
+  const hit = await zp.evaluate(() => { runSearch('漫长'); return !!document.querySelector('#searchBody .card[data-name="long.mp4"]'); });
+  ok(hit, '用中文名搜得到');
+  await zp.evaluate(() => playVideo('/Movies/long.mp4', 'long.mp4'));
+  await until(zp, s => document.querySelector(s).currentTime > 0.3, vid);
+  const ms = await zp.evaluate(() => navigator.mediaSession && navigator.mediaSession.metadata ? navigator.mediaSession.metadata.title : '');
+  ok(ms === '漫长的测试', `播放器 / 锁屏的「正在播放」也是中文名（${ms}）`);
+  await zp.keyboard.press('Escape');
+  await zc.close();
+  delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
+}
+
 console.log('\n■ iPhone（系统播放器的替身：webkitEnterFullscreen / webkitendfullscreen）');
 const ip = await context({ ...devices['iPhone 15 Pro'] }, 'iphone');
 const pi = await enter(ip);

@@ -12018,6 +12018,9 @@ const cnIndex = (() => {
       if (prev && prev.t === t) { prev.a = Date.now(); return false; }
       mem[name] = { t: t, y: String(year == null ? '' : year), a: Date.now() };
       persist();
+      /* 中文名变了，检索表就旧了：作废它，下次搜索时重建（几千部也就几毫秒）。
+         放在这里而不是各个调用点 —— 有的调用点只记名字、不管检索表 */
+      if (t) { try { state.searchIndex = null; } catch (_) {} }
       return !!t;
     },
     clear() { mem = {}; try { localStorage.removeItem(KEY); } catch (_) {} }
@@ -12108,6 +12111,39 @@ const cnWarm = (() => {
     reset() { finished = false; fails = 0; }
   };
 })();
+
+/* ── 片名一律中文 ─────────────────────────────────────────────────────
+   文件名几乎全是英文原名；中文名按可信度取三处：总账（与片库同源同版本）→ 中文名索引
+   （cnIndex，后台补齐、落盘）→ 海报管线顺路拉到的 TMDB（本来就是 zh-CN）。
+   都没有才退回文件名解析出的原名 —— 卡片先按它排上，中文名一到原位换字（upgradeCardTitle）：
+   标题行都是单行省略或固定高度的面板，换字不重排、不跳动。 */
+function zhTitle(name) {
+  if (!name) return '';
+  try {
+    const rx = RecvIndex.zh(name);
+    if (rx && rx.t && CJK.test(rx.t)) return rx.t;
+  } catch (_) {}
+  const rec = cnIndex.get(name);
+  if (rec && rec.t && CJK.test(rec.t)) return rec.t;
+  const d = tmdbCache.get(name + ':logo') || tmdbCache.get(name);
+  return d && d.title && CJK.test(d.title) ? d.title : '';
+}
+function showTitle(name) { return zhTitle(name) || parse(name).title || name || ''; }
+
+/* 海报管线拿到 TMDB 那一刻：卡上的原名换成中文名，并记进中文名索引（下次一出来就是中文） */
+function upgradeCardTitle(el, d) {
+  if (!d || !d.title || !CJK.test(d.title)) return;
+  const card = el.closest && el.closest('.card');
+  if (!card) return;
+  const name = card.dataset.name;
+  if (name) cnIndex.put(name, d.title, d.year);
+  card.querySelectorAll('.card-title, .card-overlay-title, .lib-title, .mas-t').forEach(t => {
+    if (t.textContent !== d.title) t.textContent = d.title;
+  });
+  const al = card.getAttribute('aria-label') || '';
+  const old = name ? (parse(name).title || name) : '';
+  if (old && al.startsWith(old)) card.setAttribute('aria-label', d.title + al.slice(old.length));
+}
 
 /* 中文查询 → 英文原名的映射。同一个词只问一次，落盘复用。 */
 const cnQueryMap = (() => {
@@ -12295,7 +12331,7 @@ async function fetchHeroArtwork(video) {
     tmdb: tmdb,
     itunes: itunes,
     
-    title: (tmdb && tmdb.title) || (itunes && itunes.title) || title,
+    title: (tmdb && tmdb.title) || zhTitle(video.name) || (itunes && itunes.title) || title,
     logo: tmdb && tmdb.logo, 
     year: (tmdb && tmdb.year) || (itunes && itunes.year) || year,
     runtime: tmdb && tmdb.runtime,
@@ -12670,7 +12706,7 @@ setInterval(() => ResBudget.gc(), 30000);
 
 function videoCardHTML(v, opts) {
   opts = opts || {}; if (opts.landscape) return videoCardLandscapeHTML(v, opts);
-  const { title, year, tags } = parse(v.name); const top = topTag(tags); const k4 = tags.includes('4K'); const hd = tags.includes('HD'); let tagH = '';
+  const { year, tags } = parse(v.name); const title = showTitle(v.name); const top = topTag(tags); const k4 = tags.includes('4K'); const hd = tags.includes('HD'); let tagH = '';
   if (top) tagH += ' <span class="tag-border ' + (top === 'DV' ? 'dv' : 'hdr') + '">' + top + '</span>'; if (k4) tagH += ' <span class="tag-border k4">8K+</span>'; else if (hd) tagH += ' <span class="tag-border hd">高动态</span>';
   const subParts = []; if (year) subParts.push(year); if (opts.showRelTime && v.ts) subParts.push(fmtRelTime(v.ts)); const sub = subParts.join(' · ');
   
@@ -12683,7 +12719,7 @@ function videoCardHTML(v, opts) {
 }
 
 function videoCardLandscapeHTML(v, opts) {
-  opts = opts || {}; const { title, year, tags } = parse(v.name); const top = topTag(tags); const k4 = tags.includes('4K'); const hd = tags.includes('HD'); let tagH = '';
+  opts = opts || {}; const { year, tags } = parse(v.name); const title = showTitle(v.name); const top = topTag(tags); const k4 = tags.includes('4K'); const hd = tags.includes('HD'); let tagH = '';
   if (top) tagH += ' <span class="tag-border ' + (top === 'DV' ? 'dv' : 'hdr') + '">' + top + '</span>'; if (k4) tagH += ' <span class="tag-border k4">8K+</span>'; else if (hd) tagH += ' <span class="tag-border hd">高动态</span>';
   const subParts = []; if (opts.showRelTime && v.ts) subParts.push(fmtRelTime(v.ts)); else if (year) subParts.push(year); const sub = subParts.join(' · ');
   const playingBadge = opts.removable ? '<span class="card-playing-badge"><i class="ph-fill ph-play"></i>正在观看</span>' : '';
@@ -12713,8 +12749,8 @@ function folderCardHTML(f) {
    上方 —— 拿不到就不贴，绝不用片名再排一个字标，那只会让片名在同一张卡上
    出现两次。 */
 function libCardHTML(v) {
-  const { title, year, tags } = parse(v.name);
-  const name = title || v.name;
+  const { year, tags } = parse(v.name);
+  const name = showTitle(v.name);
   const top = topTag(tags);
 
   let specs = '';
@@ -12751,8 +12787,8 @@ const MAS_RATIOS = [
 const masCols = w => (w < 560 ? 2 : w < 900 ? 3 : w < 1280 ? 4 : 5);
 
 function masCardHTML(v, r) {
-  const { title, year, tags } = parse(v.name);
-  const name = title || v.name;
+  const { year, tags } = parse(v.name);
+  const name = showTitle(v.name);
   const top = topTag(tags);
   const spec = [year, tags.includes('4K') ? '4K' : (tags.includes('HD') ? 'HD' : ''), top === 'DV' ? '杜比视界' : top]
     .filter(Boolean).join(' · ');
@@ -13027,6 +13063,7 @@ async function loadPosterElement(el) {
     }
     if (d.title) el.dataset.tmdbTitle = d.title;
     if (d.year) el.dataset.tmdbYear = d.year;
+    upgradeCardTitle(el, d);
     el.removeAttribute('data-fn');
     return;
   }
@@ -13053,6 +13090,7 @@ async function loadPosterElement(el) {
   if (d.rating) el.dataset.rating = d.rating;
   if (d.title) el.dataset.tmdbTitle = d.title;
   if (d.year) el.dataset.tmdbYear = d.year;
+  upgradeCardTitle(el, d);
   applyCuvenSeal(el, d.rating);   /* 8 分以上：右下角盖章 */
   el.removeAttribute('data-fn');
 }
@@ -19653,7 +19691,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function openSheetForFile(path, name) {
   state.selectedFile = { path, name };
-  const { title } = parse(name);
+  const title = showTitle(name);
   $('sheetBody').innerHTML = '<div class="sheet-title">' + esc(title || name) + '</div>' +
     
     '<button class="sheet-btn" onclick="playVideo(state.selectedFile.path, state.selectedFile.name)"><div class="si" style="color:var(--orange)"><i class="ph-fill ph-play-circle"></i></div><div><div class="sl">播放</div><div class="sd">' + (Player.appleHls ? '站内播放 · 杜比视界 · HDR · 多音轨字幕' : '站内播放') + '</div></div></button>' +
@@ -20438,7 +20476,7 @@ const Player = (() => {
     const name = opts.name || path.split('/').pop();
     const saved = playProgress.get(path);
     cur = { path, name, series: opts.series || null, ep: opts.ep || null, eps: opts.eps || null,
-      title: opts.title || parse(name).title || name, subtitle: opts.subtitle || '',
+      title: opts.title || showTitle(name), subtitle: opts.subtitle || '',
       resumeAt: saved && saved.pos > 30 && saved.pos < saved.dur - 60 ? saved.pos : 0,
       tries: 0, mode: '', playedOnce: false, keep: false, swapAt: cur ? cur.swapAt : 0, nextWarm: false, info: null };
     present();
