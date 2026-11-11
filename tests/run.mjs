@@ -569,7 +569,7 @@ if (fs.existsSync(path.join(HERE, '..', 'audio-tx', 'tx.wasm'))) {
   const h0 = await health();
   await H.bindAudioTx();
   const h1 = await health();
-  ok(/DTS \/ TrueHD<\/span><span>— 未绑定 AUDIO_TX/.test(h0) && /DTS \/ TrueHD<\/span><span>✅ 已绑定，转码 Worker 在线/.test(h1),
+  ok(/DTS \/ TrueHD<\/span><span>— 未配置（绑定 AUDIO_TX 或设 AUDIO_TX_URL/.test(h0) && /DTS \/ TrueHD<\/span><span>✅ 已绑定，转码 Worker 在线/.test(h1),
     '健康页：转码 Worker 绑没绑、在不在线，一眼看得到（还有 TMDB / OpenSubtitles / 剧集目录 / 访问保护）');
   const b = `/hls/${H.token('/Movies/hdr10_multi.mkv')}/`;
   const m = await (await H.call(b + 'master.m3u8')).text();
@@ -603,6 +603,35 @@ if (fs.existsSync(path.join(HERE, '..', 'audio-tx', 'tx.wasm'))) {
     ok(snr > 50 && seams === durs.length - 1 && worst < 4,
       `${label} → AC-3：SNR ${snr.toFixed(1)} dB（零偏移对齐），${seams} 个接缝处误差 / 中位误差 最大 ${worst.toFixed(2)}`);
   }
+}
+
+if (H.audioTx.worker) {
+  console.log('\n■ 转码 Worker 走公网地址（AUDIO_TX_URL + AUDIO_TX_KEY，不用 Service Binding）');
+  const b = `/hls/${H.token('/Movies/hdr10_multi.mkv')}/`;
+  const m = await (await H.call(b + 'master.m3u8')).text();
+  const u4 = new RegExp('URI="([^"]*t4\\.m3u8)"').exec(m)[1];
+  const seg = b + u4.replace(/[^/]+$/, '') + 't4/1.m4s';
+  const ref = Buffer.from(await (await H.call(seg)).arrayBuffer());           // Service Binding 转出来的那份
+  const bound = H.env.AUDIO_TX;
+  delete H.env.AUDIO_TX;
+  H.env.AUDIO_TX_URL = 'https://audio.test/'; H.env.AUDIO_TX_KEY = 'k-test-123';
+  H.audioTx.key = 'k-test-123'; H.audioTx.calls = 0;
+  caches.default.m.clear();                                                    // 清掉边缘缓存：这次必须真的去转
+  const got = await H.call(seg);
+  const viaUrl = Buffer.from(await got.arrayBuffer());
+  ok(got.status === 200 && H.audioTx.calls > 0 && viaUrl.length > 1000 && viaUrl.equals(ref),
+    `经公网地址转码：输出与 Service Binding 逐字节一致（${viaUrl.length} 字节，${H.audioTx.calls} 次调用）`);
+  const health = async () => (await H.call('/health')).text();
+  ok(/DTS \/ TrueHD<\/span><span>✅ 经 audio\.test，转码 Worker 在线，密钥一致/.test(await health()), '健康页：经 audio.test、在线、密钥一致');
+  H.audioTx.key = 'another-key'; caches.default.m.clear();
+  const bad = await H.call(seg);
+  ok(bad.status === 502 && /密钥不对/.test(await health()), `两边密钥不一样：转码分段失败（${bad.status}），健康页直说「密钥不对」`);
+  H.audioTx.key = '';
+  ok(/没配 AUDIO_TX_KEY/.test(await health()), '转码 Worker 没配密钥：健康页提醒公网地址谁都能调');
+  delete H.env.AUDIO_TX_KEY;
+  H.audioTx.key = 'k-test-123';
+  ok(/密钥不对/.test(await health()), '主 Worker 没带密钥、转码 Worker 要密钥：一样报「密钥不对」');
+  H.env.AUDIO_TX = bound; delete H.env.AUDIO_TX_URL; H.audioTx.key = '';
 }
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} 通过，${fail} 失败`);

@@ -176,13 +176,22 @@ Opus、Vorbis、MP2/MP3、PCM 解码器 + AC-3 编码器 + libswresample，编�
    - 部署命令：`npx wrangler deploy`
 
    也可以在本机 `cd audio-tx && npx wrangler deploy`。
-2. 给主 Worker（`stream.cuven.online` 那个）加 Service Binding：主 Worker → 设置 → 绑定 → 添加 → 服务绑定，
-   变量名 `AUDIO_TX`，服务选 `cuven-audio-tx`，保存（会自动重新部署）。
+2. 把主 Worker（`stream.cuven.online` 那个）接上它，两种方式任选其一：
+   - **Service Binding**：主 Worker → 设置 → 绑定 → 添加 → 服务绑定，变量名 `AUDIO_TX`，服务选 `cuven-audio-tx`。
+   - **公网地址（不用绑定）**：转码 Worker 挂自定义域名（`audio-tx/wrangler.toml` 里写的是 `audio.cuven.us`，
+     每次构建都会保留）。然后：
+     1. 转码 Worker → 设置 → 变量和机密 → 添加，类型选「密钥（Secret）」，名称 `AUDIO_TX_KEY`，值随便一串够长的随机字符。
+     2. 主 Worker → 设置 → 变量和机密：添加文本变量 `AUDIO_TX_URL` = `https://audio.cuven.us`，
+        再添加密钥 `AUDIO_TX_KEY`，值和上一步**完全一样**。
 
-打开 `https://stream.cuven.online/health`，「DTS / TrueHD」一行显示「✅ 已绑定，转码 Worker 在线」就生效了。
+     密钥是为了挡住外人：自定义域名谁都能访问，不设的话任何人都能拿它转码、耗你的 CPU。
+     配了之后，不带或带错密钥的请求一律 401。
+
+打开 `https://stream.cuven.online/health`，「DTS / TrueHD」一行显示「✅ 已绑定，转码 Worker 在线」
+（公网地址时是「✅ 经 audio.cuven.us，转码 Worker 在线，密钥一致」）就生效了；两边密钥不一样时会直接写「密钥不对」。
 （健康页还会列出 TMDB、OpenSubtitles、剧集目录、访问保护是否配好。）
 
-用 wrangler 部署主 Worker 的，等价写法是在主 Worker 的 `wrangler.toml` 里加：
+用 wrangler 部署主 Worker、走 Service Binding 的，等价写法是在主 Worker 的 `wrangler.toml` 里加：
 
 ```toml
 [[services]]
@@ -190,10 +199,10 @@ binding = "AUDIO_TX"
 service = "cuven-audio-tx"
 ```
 
-绑定后，这些音轨会以「DTS → Dolby Digital 5.1」之类的名字出现在音轨菜单里。如果片源只有 DTS / TrueHD，
+接上后，这些音轨会以「DTS → Dolby Digital 5.1」之类的名字出现在音轨菜单里。如果片源只有 DTS / TrueHD，
 转码轨就是默认音轨。转码轨的分段落在全局 AC-3 帧网格上，跨分段时先预热、并越过分段边界多读一点，
 所以接缝处不会出爆音（测试里与原声对比 SNR 76 dB 以上）。转好的分段会进边缘缓存，拖动回看时不必重新转码。
-不绑定时，这些音轨不进播放列表，播放页会给出提示。
+没接时，这些音轨不进播放列表，播放页会给出提示。
 
 从源码重建 WASM：`audio-tx/build.sh`（需要 emscripten 与 FFmpeg 6.1.1 源码）。
 
@@ -209,7 +218,7 @@ service = "cuven-audio-tx"
 
 ```bash
 tests/make-samples.sh     # 用 ffmpeg / mkvmerge 生成样片（约 30 秒）
-node tests/run.mjs        # Worker：86 项回归，约 1 分钟
+node tests/run.mjs        # Worker：91 项回归，约 1 分钟
 node tests/web.mjs        # 前端：91 项，需要 Playwright + Chromium（PLAYWRIGHT_PATH 可指定其 index.js），约 5 分钟
 ```
 

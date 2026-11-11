@@ -164,6 +164,10 @@ globalThis.fetch = async (input, init = {}) => {
     if (imdb.status !== 200) return new Response('<html><body>403 Forbidden</body></html>', { status: imdb.status, headers: { 'Content-Type': 'text/html' } });
     return Response.json({ data: { title: imdb.title } });
   }
+  if (u.host === 'audio.test' && audioTx.worker) {
+    audioTx.calls++;
+    return audioTx.worker.fetch(req, { AUDIO_TX_KEY: audioTx.key });
+  }
   if (u.host === 'dl.os.mock') {
     const f = os.files[u.pathname.slice(1).replace(/\.srt$/, '')];
     if (!f) return new Response('gone', { status: 404 });
@@ -203,12 +207,15 @@ export const call = (url, method = 'GET', headers = {}, host = 'w.test') =>
   worker.fetch(new Request(`https://${host}${url}`, { method, headers }), env, ctx);
 
 /** 把 ../audio-tx 作为 Service Binding 挂上（tx.wasm 存在时） */
+/** 转码 Worker 的公网地址替身（AUDIO_TX_URL = https://audio.test）：key = 它那边配的 AUDIO_TX_KEY，calls 记次数 */
+export const audioTx = { worker: null, key: '', calls: 0 };
 export async function bindAudioTx() {
   const dir = path.join(HERE, '..', 'audio-tx');
   globalThis.__TX_WASM = new WebAssembly.Module(fs.readFileSync(path.join(dir, 'tx.wasm')));
   const src = fs.readFileSync(path.join(dir, 'worker.js'), 'utf8').replace("import wasm from './tx.wasm';", 'const wasm = globalThis.__TX_WASM;');
   fs.writeFileSync(path.join(HERE, '_txworker.mjs'), src);
   const tx = (await import(path.join(HERE, '_txworker.mjs'))).default;
+  audioTx.worker = tx;
   env.AUDIO_TX = { fetch: (url, init) => tx.fetch(new Request(url, init)) };
 }
 

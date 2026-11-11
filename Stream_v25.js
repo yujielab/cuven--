@@ -13,10 +13,10 @@
  *     HDR10 / HLG 依 VUI 或 MKV Colour 信令，并写入 colr / mdcv / clli。
  *   ▸ 音频：AAC / AC-3 / E-AC-3（含 Atmos JOC，CHANNELS="16/JOC"）/ FLAC / ALAC 直通。
  *     默认音轨复用在视频分段里（Dropbox 只读一遍）；其余音轨是 HLS 备选音轨。
- *   ▸ DTS / TrueHD / Opus / Vorbis / MP2 / MP3 / PCM：绑定 audio-tx 转码 Worker
- *     （Service Binding AUDIO_TX，见仓库 audio-tx/）后实时转为 AC-3（5.1 @ 640k），
- *     帧落在全局网格上、跨分段预热与越界多读，接缝无爆音；转好的分段进边缘缓存。
- *     没有绑定时这些音轨不进播放列表，播放页会提示。
+ *   ▸ DTS / TrueHD / Opus / Vorbis / MP2 / MP3 / PCM：接上 audio-tx 转码 Worker
+ *     （Service Binding AUDIO_TX，或变量 AUDIO_TX_URL + 共享密钥 AUDIO_TX_KEY，见仓库 audio-tx/）
+ *     后实时转为 AC-3（5.1 @ 640k），帧落在全局网格上、跨分段预热与越界多读，接缝无爆音；
+ *     转好的分段进边缘缓存。没接时这些音轨不进播放列表，播放页会提示。
  *   ▸ 字幕：内封 SRT / ASS（含 zlib 压缩）靠 Cues 精确定位只读字幕块；同目录外挂
  *     .srt/.ass/.vtt 一并进 HLS 字幕组；全部为带 X-TIMESTAMP-MAP 的分段 WebVTT，
  *     中文字幕（简体优先）默认开启。图形字幕（PGS / VobSub）无法转换，不列出。
@@ -2953,12 +2953,18 @@ async function handleHealth(env, request) {
 
   // 可选功能配好了没有：部署之后看这几行就知道哪些在生效、缺什么
   const feat = async () => {
-    let tx = '— 未绑定 AUDIO_TX（DTS / TrueHD 音轨不出现，见 README）';
-    if (hlsTxOn(env)) {
+    let tx = '— 未配置（绑定 AUDIO_TX 或设 AUDIO_TX_URL；DTS / TrueHD 音轨不出现，见 README）';
+    const svc = hlsTxService(env);
+    if (svc) {
+      const how = svc.via === 'binding' ? '已绑定' : `经 ${svc.via}`;
       try {
-        const r = await env.AUDIO_TX.fetch('https://audio-tx/');
-        tx = r.ok ? '✅ 已绑定，转码 Worker 在线' : `⚠️ 已绑定，但转码 Worker 回 ${r.status}`;
-      } catch (e) { tx = '⚠️ 已绑定，但转码 Worker 连不上'; }
+        const r = await svc.fetch('/');
+        const guard = r.ok && /key=on/.test(await r.text().catch(() => ''));
+        tx = r.ok ? `✅ ${how}，转码 Worker 在线${guard ? '，密钥一致' : ''}`
+          : r.status === 401 ? `⚠️ ${how}，但密钥不对（两边的 AUDIO_TX_KEY 要填同一个值）`
+          : `⚠️ ${how}，但转码 Worker 回 ${r.status}`;
+        if (r.ok && svc.via !== 'binding' && !guard) tx += '（转码 Worker 没配 AUDIO_TX_KEY：公网地址谁都能调，建议两边都配）';
+      } catch (e) { tx = `⚠️ ${how}，但转码 Worker 连不上`; }
     }
     c.extras = [
       ['DTS / TrueHD', tx],
@@ -9041,7 +9047,7 @@ async function hlsSidecarCues(x, env, ctx) {
   });
 }
 
-// ── 可选：DTS / TrueHD 等音轨实时转 AC-3（绑定转码 Worker AUDIO_TX 后启用）──
+// ── 可选：DTS / TrueHD 等音轨实时转 AC-3（接上转码 Worker 后启用：绑定 AUDIO_TX 或设 AUDIO_TX_URL）──
 //  转码音轨的分段边界单独排：每段起点 S_k 落在全局 AC-3 帧网格上，并比视频分段
 //  起点晚约 0.35s —— 留出「从本段第一个可解码帧预热到 S_k」的余量（TrueHD 要等
 //  major sync，DTS 的 QMF 要收敛）。本段读完自己的字节后再越过边界多读一点，
@@ -9050,7 +9056,29 @@ async function hlsSidecarCues(x, env, ctx) {
 
 const HLS_TX_MARGIN = 0.35;
 
-function hlsTxOn(env) { return !!(env && env.AUDIO_TX && typeof env.AUDIO_TX.fetch === 'function'); }
+/**
+ * 转码 Worker 的两种接法，调用方一视同仁：
+ *  · Service Binding `AUDIO_TX`（进程内调用，最快）
+ *  · 变量 `AUDIO_TX_URL`（例如 https://audio.cuven.us，转码 Worker 挂了自定义域名时用）
+ * 配了 `AUDIO_TX_KEY` 就在请求头里带上共享密钥 —— 转码 Worker 那边配了同一个值时，
+ * 不带或带错的请求一律 401，公网地址不会被外人拿去白耗 CPU。
+ */
+function hlsTxService(env) {
+  if (!env) return null;
+  const key = env.AUDIO_TX_KEY ? String(env.AUDIO_TX_KEY) : '';
+  const bound = env.AUDIO_TX && typeof env.AUDIO_TX.fetch === 'function' ? env.AUDIO_TX : null;
+  const base = !bound && env.AUDIO_TX_URL ? String(env.AUDIO_TX_URL).trim().replace(/\/+$/, '') : '';
+  if (!bound && !/^https?:\/\/[^/\s]+/i.test(base)) return null;
+  return {
+    via: bound ? 'binding' : base.replace(/^https?:\/\//i, ''),
+    fetch(path, init = {}) {
+      const headers = new Headers(init.headers || undefined);
+      if (key) headers.set('X-Audio-Tx-Key', key);
+      return bound ? bound.fetch(`https://audio-tx${path}`, { ...init, headers }) : fetch(`${base}${path}`, { ...init, headers });
+    },
+  };
+}
+function hlsTxOn(env) { return !!hlsTxService(env); }
 
 /** 转码音轨各分段的起点（输出采样序号），长度 = 分段数 + 1 */
 function hlsTxBounds(idx, a) {
@@ -9131,7 +9159,7 @@ async function* hlsTxSegmentParts(cx, idx, k, ai) {
   body.set(head, 4);
   let o = 4 + head.length;
   for (const p of parts) { body.set(p, o); o += p.length; }
-  const res = await cx.env.AUDIO_TX.fetch('https://audio-tx/encode', { method: 'POST', body });
+  const res = await hlsTxService(cx.env).fetch('/encode', { method: 'POST', body });
   if (!res.ok) throw new Error(`audio-tx ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const out = new Uint8Array(await res.arrayBuffer());
   const dv = new DataView(out.buffer, out.byteOffset);
