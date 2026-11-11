@@ -2698,7 +2698,7 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
   .yl-row .yl-more.card-menu:hover { background: rgba(255,255,255,.08); color: var(--text); }
 }
 /* 右缘浮动导航（iPhone Duo 折起竖拿）：列表右端让出那一列，「…」不钻到导航底下 */
-html.rail.rail-float .yl-group { padding-right: calc(var(--rail-w) + 20px + env(safe-area-inset-right, 0px)); }
+html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 
 @media (max-width: 420px) {
   /* 宽度不再在这里改 —— 它现在按参考线算（86vw + 14），写死 120 会把
@@ -5796,16 +5796,21 @@ html.rail .net-banner { left: calc(50% + (var(--rail-space) - env(safe-area-inse
    · 只认 iPhone Duo：看屏幕本身（外屏 466 宽，别的 iPhone 最宽 440），不看视口（Safari 页面缩放会改视口）。
      由 <head> 里的脚本在 html.rail 之外再打 html.rail-float；展开、横拿仍是上一节贴左缘、内容让位的导航条。
    · 竖排、指示器竖着走、搜索场到顶部，都沿用 html.rail；这里只改位置与「不让位」。
+   · 右缘那一列安全区：外屏的状态栏竖着排在右上角，iOS 为它报一整列 safe-area-inset-right（实机约 84px）。
+     导航放进这一列、居中在状态栏下面（Apple TV 也这么放）；照搬「安全区以内再缩 10px」会被推到屏幕中间、
+     压在内容上。没有这一列时离右缘 10px。要躲开导航的内容一律按 --float-space 让，不再另加安全区。
    · 提示条放在搜索圆钮左边那块的正中，不压到右侧这一列。 */
 html.rail.rail-float {
   --rail-w: 64px;
   --rail-space: 0px;
   --app-w: 100vw;
+  --float-r: max(10px, calc((env(safe-area-inset-right, 0px) - var(--rail-w)) / 2));   /* 导航离右缘多远 */
+  --float-space: calc(var(--float-r) + var(--rail-w) + 8px);                           /* 内容右侧要让出的宽度 */
 }
 html.rail.rail-float body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }   /* 最后一排还能滚到右下角的搜索钮上面 */
 html.rail.rail-float #appStage { padding-left: 0; padding-right: 0; }
 html.rail.rail-float .dock {
-  top: auto; bottom: var(--dock-gap); left: auto; right: calc(env(safe-area-inset-right, 0px) + 10px);
+  top: auto; bottom: var(--dock-gap); left: auto; right: var(--float-r);
   justify-content: flex-end; gap: var(--dock-sep);
 }
 html.rail.rail-float .dock.searching #navSearch {
@@ -5814,13 +5819,14 @@ html.rail.rail-float .dock.searching #navSearch {
 html.rail.rail-float .search-chips { left: calc(env(safe-area-inset-left, 0px) + 16px); }
 html.rail.rail-float .toast {
   bottom: calc(var(--dock-gap) + 6px);
-  left: calc((100% - var(--rail-w) - 10px - env(safe-area-inset-right, 0px)) / 2);
-  max-width: calc(100% - var(--rail-w) - 40px - env(safe-area-inset-right, 0px));
+  left: calc((100% - var(--float-space)) / 2);
+  max-width: calc(100% - var(--float-space) - 20px);
 }
-html.rail.rail-float .net-banner { left: 50%; }
+/* 顶上居中那枚提示：两边都按右侧安全区收，免得压到右上角竖排的状态栏 */
+html.rail.rail-float .net-banner { left: 50%; max-width: calc(100% - 2 * env(safe-area-inset-right, 0px) - 16px); }
 /* 大图底部的暂停钮 + 轮播点：居中到导航这一列左边那块（Safari 里只有 382 宽，原样居中会伸到导航胶囊底下）——
    右侧让出这一列，左边那个给暂停钮配平的占位也收掉。收成卡以后照旧与卡同宽 */
-html.rail.rail-float .hero-deck:not(.morphed) .aap-host { padding-right: calc(var(--rail-w) + 18px + env(safe-area-inset-right, 0px)); }
+html.rail.rail-float .hero-deck:not(.morphed) .aap-host { padding-right: var(--float-space); }
 html.rail.rail-float .hero-deck:not(.morphed) .aap-host .aap-media-card-gallery.all-access-pass::before { width: 0; }
 
 /* 没有封面的片子不显示之后，一排可能整排都没了：那一段（连同标题）一起藏起来 */
