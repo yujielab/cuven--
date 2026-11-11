@@ -985,7 +985,7 @@ async function handleSubVtt(url, env, ctx) {
   if (!SUB_EXTS.has(ext)) return new Response('Unsupported subtitle format', { status: 400 });
 
   const { g } = await ptrGet(env);
-  const ck = new Request(`${SUB_CACHE}?p=${encodeURIComponent(filePath)}&g=${g}`);
+  const ck = new Request(`${SUB_CACHE}?p=${encodeURIComponent(filePath)}&g=${g}&c=${SUB_CLEAN_V}`);
   const cache = caches.default;
   const hit = await cache.match(ck);
   if (hit) return new Response(hit.body, { headers: hit.headers });
@@ -996,7 +996,9 @@ async function handleSubVtt(url, env, ctx) {
 
   const u8 = new Uint8Array(await res.arrayBuffer());
   const rawText = decodeSubtitleBytes(u8);
-  const vtt = convertToWebVtt(rawText, ext);
+  // 解析成字幕条 → 清洗（字幕组、网址、声明、广告）→ 整份 VTT；解析不出的怪格式退回逐字转换
+  const cues = hlsParseSubFile(rawText, ext);
+  const vtt = cues.length ? osVttFull(cues) : convertToWebVtt(rawText, ext);
 
   const resp = new Response(vtt, {
     headers: {
@@ -1346,10 +1348,10 @@ async function osFor(env, ctx, file, tracks, waitMs) {
   return { rec: rec && rec.status === 'ok' ? rec : null, need, key, pending: OS_BUSY.has(key) };
 }
 
-/** 整份 WebVTT（直连的 <track> 用；HLS 分段用 hlsVtt） */
-function osVttFull(cues) {
+/** 整份 WebVTT（直连的 <track> 用；HLS 分段用 hlsVtt）。先清洗：dur 不知道就按最后一条字幕算 */
+function osVttFull(cues, dur) {
   const out = ['WEBVTT', ''];
-  for (const c of cues) out.push(`${hlsVttTime(c.s)} --> ${hlsVttTime(c.e)}${c.settings || ''}`, c.text, '');
+  for (const c of subClean(cues, dur).slice().sort((a, b) => a.s - b.s || a.e - b.e)) out.push(`${hlsVttTime(c.s)} --> ${hlsVttTime(c.e)}${c.settings || ''}`, c.text, '');
   return out.join('\n');
 }
 
@@ -8694,15 +8696,101 @@ function hlsSubFrameText(fmt, bytes) {
   if (fmt === 'ass') {
     // ReadOrder, Layer, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const parts = s.split(',');
+    if (parts.length >= 9 && (SUB_STAFF_STYLE.test((parts[2] || '').trim()) || SUB_STAFF_STYLE.test((parts[3] || '').trim()))) return { text: '', settings: '' };
     return hlsAssText(parts.length >= 9 ? parts.slice(8).join(',') : s);
   }
   return { text: hlsVttEscape(s), settings: '' };
 }
 
-function hlsVtt(cues) {
+// ── 字幕清洗：字幕组署名、发布 / 来源声明、网址、广告、水印 ──
+//  内封、外挂、在线找来的字幕，输出 WebVTT 之前都过这一遍。按行打分，过线就删那一行；
+//  一条字幕的行删光了（或只剩装饰符号）就整条不要。
+//  · 片头 / 片尾各 SUB_EDGE_S 秒（以及最前 / 最后 SUB_EDGE_N 条）是署名与广告的重灾区：过 3 分就删
+//  · 正片中间只删「几乎不可能是台词」的东西（网址、字幕组、OpenSubtitles 的广告、「仅供学习交流」
+//    这类声明）：过 4 分才删 —— 台词里提到「翻译」「出品」「伊甸园」不会被误删
+const SUB_EDGE_S = 240;
+const SUB_EDGE_N = 6;
+const SUB_CLEAN_V = 'c1';             // 清洗规则的版本：进缓存键，规则改了旧的 VTT 不会再被端上来
+const SUB_RULES = [
+  // 网址：带协议 / www 的一定是；裸域名只认常见后缀（e.g. / Mr.Smith 这类不会命中）
+  [/(?:https?:\/\/|www\.)[^\s]+/i, 4],
+  [/(?:^|[^\w@.\-])[a-z0-9][\w-]{1,62}\.(?:com|net|org|cn|cc|tv|la|io|info|xyz|top|vip|club|site|link|ru|tw|hk)(?:\/[^\s]*)?(?![\w.])/i, 3],
+  // 字幕组 / 压制组 / 翻译组
+  [/字幕[组組社团團坊]|翻[译譯][组組]|[压壓]制[组組]|(?:^|[^a-z])(?:fansub|sub(?:s|titles?)?\s*team)(?:[^a-z]|$)/i, 4],
+  // 认得出名字的字幕站 / 字幕组（这些词不会出现在台词里）
+  [/人人影[视視]|YYeTs|破[烂爛]熊|射手[网網]|字幕[库庫吧]|SubHD|zimuku|assrt|天天美[剧劇]|美[剧劇]天堂|澄空[学學][园園]|[圣聖]城家[园園]|FRDS|CMCT|HDChina|OurBits|SweetSub|A4Sub/i, 4],
+  // 英文字幕站与 OpenSubtitles 自己插的广告（这些说法不会出现在台词里）
+  [/open\s*subtitles|osdb\.link|subscene|addic7ed|podnapisi|\bsubdl\b|yifysubtitles|advertise your product|become (?:a )?vip member|rate this subtitle|help other users to choose|get (?:the )?(?:latest|more) subtitles|best subtitles? (?:at|on|from)/i, 4],
+  // 英文署名：只认行首（台词里也会有「corrected by the teacher」）
+  [/^[\s\-=~*#\[(]*(?:(?:re-?)?sync(?:ed|hronized)?(?: (?:and|&) corrected)? by|corrected by|ripped by|encoded by|(?:subtitles?|subs|captions?) (?:by|from|ripped|synced|corrected|edited|translated)\b|captioned by|closed captions? (?:provided )?by|captioning (?:sponsored|made possible|provided|performed) by)/i, 4],
+  [/^[\s\-=~*#\[(]*(?:downloaded from|transcri(?:pt|bed) by)\b/i, 3],
+  // 声明：学习交流 / 禁止商用 / 下载后删除（「仅供参考」「未经授权」是台词里的常用语，不算）
+  [/仅供(?:学习|交流|研究)|僅供(?:學習|交流|研究)|禁止(?:用于|用於)?(?:任何)?(?:商业|商業)(?:用途)?|(?:请|請)(?:于|於)下[载載]|24\s*小[时時]内?(?:删除|刪除)/, 4],
+  [/版[权權](?:归|歸)/, 3],
+  // 引流：QQ 群 / 群号最像广告；公众号、微博、淘宝、招人在台词里也会出现，只在片头片尾删
+  [/(?:QQ|Q)\s*群|群[号號]\s*[:：]?\s*\d|t\.me\//i, 4],
+  [/微信\s*(?:公众号|公眾號|号|號)|公众号|公眾號|微博\s*[@：:]|新浪微博|[电電][报報]群/, 3],
+  [/淘[宝寶]|招募|招聘|[诚誠]聘|加入我[们們]/, 2],
+  // 「本字幕由……」
+  [/^(?:本|此)?字幕(?:由|仅|僅|来自|來自|出自|提供|制作|製作|翻[译譯])/, 4],
+  // 文件名 / 片源规格（一行里出现两个以上才算）
+  [/(?:\b(?:480p|720p|1080[pi]|2160p|4K|BluRay|Blu-ray|BDRip|WEB-?DL|WEBRip|HDTV|x26[45]|H\.?26[45]|HEVC|AVC|REMUX|DTS(?:-HD)?|TrueHD|Atmos|DDP?5\.1|AAC)\b.*){2}/i, 4],
+  // 英文署名「Translated by」：台词里也可能出现，只在片头片尾删
+  [/^[\s\-=~*#\[(]*(?:translated|translation|transcribed|timed|typeset|edited|proofread|subtitled|captioned) by\b/i, 3],
+  // 职位 + 冒号开头：翻译：/ 校对：/ 时间轴：/ Translated: / Timing:
+  [/^[\s\-=~*#★☆◆◇■□●○【\[(（]*(?:翻[译譯]|校[对對订訂]|[时時][间間]?轴|[时時][间間]?軸|[调調][轴軸]|[压壓]制|后期|後期|特效|片源|字幕|[总總][监監]|[监監]制|美工|策[划劃]|[听聽][译譯翻]|[终終][审審]|[审審]核|整理|制作|製作|出品|[发發]布|首[发發]|翻校|校[译譯]|分割|上[传傳]|Translat(?:ion|ed|ors?)|Subtitles?|Timing|Typeset(?:ting)?|Encod(?:e|ing|er)|QC|Editor|Edit(?:ing)?|Proofread(?:ing|er)?|Sync)\s*[:：]/i, 3],
+  // 「×× 出品 / 发布 / 首发 / 压制 / 荣誉出品」结尾
+  [/(?:出品|[发發]布|首[发發]|[压壓]制|[荣榮]誉出品|[倾傾]情奉[献獻]|[独獨]家(?:首[发發]|[发發]布)?|呈[现現]|presents?|releases?d?)\s*$/i, 2],
+  // 署名常用的机构字眼 / 英文缩写
+  [/影[视視]|字幕|[论論][坛壇]|社[区區]|[网網]站|工作室|部落|[联聯]盟|小[组組]|家[园園]|\bTV\b|\bSub\b|\bTeam\b|\bHD\b/i, 1],
+  // @账号 水印
+  [/(?:^|\s)@[\w一-鿿]{2,}/, 2],
+  // 整行只是装饰包着的一小段：【……】、==……==、★……★
+  [/^[\s\-=~*#★☆◆◇■□●○【\[]{1,}.{1,40}[\s\-=~*#★☆◆◇■□●○】\]]{1,}$/, 1],
+];
+// 整行就是一个发布组名
+const SUB_GROUP_LINE = /^(?:TLF|SPARKS|GECKOS|FGT|NTb|FLUX|CMRG|EVO|ION10|PSA|YTS(?:\.\w+)?|YIFY|RARBG|ETRG|TGx|QxR|Tigole|UTR|BeyondHD|ADWeb|HHWEB|M-?Team|WiKi|TTG|CHD|HDSky|FFans|PTer|BtsTV|LeagueWEB|NGB|原[创創]翻[译譯]|中英(?:双语|雙語)?字幕|(?:双语|雙語)字幕|特效字幕|精校版?|校[对對]版|中文字幕|英文字幕)$/i;
+const SUB_DECOR = /^[\s\-=~*#★☆◆◇■□●○【】\[\]()（）<>《》|_.·•…!！?？,，、:：;；'"“”‘’]*$/;
+
+function subLineScore(line) {
+  const t = String(line).replace(/<[^>]*>/g, '').replace(/&(?:amp|lt|gt|nbsp);/g, ' ').trim();
+  if (!t) return 0;
+  let n = 0;
+  for (const [re, w] of SUB_RULES) if (re.test(t)) n += w;
+  if (SUB_GROUP_LINE.test(t.replace(/^[\s\-=~*#★☆◆◇■□●○【\[(（]+|[\s\-=~*#★☆◆◇■□●○】\])）]+$/g, ''))) n += 3;
+  return n;
+}
+
+/** [{ s, e, text, settings }] → 清洗过的（不改原数组）。dur = 片长（秒），不知道就按最后一条字幕的结束时间算 */
+function subClean(cues, dur) {
+  if (!cues || !cues.length) return cues || [];
+  const end = dur > 0 ? dur : cues.reduce((m, c) => Math.max(m, c.e || 0), 0);
+  const sorted = cues.map((c, i) => [c.s, i]).sort((a, b) => a[0] - b[0]);
+  const rank = new Array(cues.length);
+  sorted.forEach(([, i], r) => { rank[i] = r; });
+  const out = [];
+  for (let i = 0; i < cues.length; i++) {
+    const c = cues[i];
+    if (!c || !c.text) continue;
+    const edge = c.s < SUB_EDGE_S || (end > 0 && c.e > end - SUB_EDGE_S) || rank[i] < SUB_EDGE_N || rank[i] >= cues.length - SUB_EDGE_N;
+    const bar = edge ? 3 : 4;
+    const lines = c.text.split('\n');
+    const keep = lines.filter(l => subLineScore(l) < bar);
+    if (keep.length === lines.length) { out.push(c); continue; }
+    const text = keep.join('\n').trim();
+    if (!text || SUB_DECOR.test(text.replace(/<[^>]*>/g, ''))) continue;
+    out.push({ ...c, text: hlsVttEscape(text) });
+  }
+  return out;
+}
+// ASS 里专门放署名 / 广告的样式（Staff、Credit、字幕组……）：整条不要。注释（Note / 注释）与内容有关，留着
+const SUB_STAFF_STYLE = /^(?:staff\w*|credits?|ads?|advert\w*|promo\w*|制作人?[员員]?|製作人?[員员]?|字幕[组組]|广告|廣告|声明|聲明|信息|資訊|资讯|info)$/i;
+
+/** 分段 WebVTT。dur = 片长（秒）：清洗时分片头片尾用 */
+function hlsVtt(cues, dur) {
   const out = ['WEBVTT', `X-TIMESTAMP-MAP=MPEGTS:${HLS_T0 * 90000},LOCAL:00:00:00.000`, ''];
   const seen = new Set();
-  for (const c of cues.sort((a, b) => a.s - b.s || a.e - b.e)) {
+  for (const c of subClean(cues, dur).sort((a, b) => a.s - b.s || a.e - b.e)) {
     if (!c.text || !(c.e > c.s)) continue;
     const key = `${c.s}|${c.e}|${c.text}`;
     if (seen.has(key)) continue;          // ASS 多图层常有完全相同的对白
@@ -8806,7 +8894,7 @@ async function hlsSubSegment(cx, idx, si, k) {
       }
     } finally { src.close('subs'); }
   }
-  return hlsVtt(cues);
+  return hlsVtt(cues, idx.dur);
 }
 
 // ── 外挂字幕 ──
@@ -8870,7 +8958,7 @@ function hlsParseSubFile(text, ext) {
   const cues = [];
   const t2s = (h, m, s, f) => (+h) * 3600 + (+m) * 60 + (+s) + (+(`${f}`.padEnd(3, '0').slice(0, 3))) / 1000;
   if (ext === '.ass' || ext === '.ssa' || /\[Events\]/i.test(norm)) {
-    let inEv = false, si = 1, ei = 2, ti = 9;
+    let inEv = false, si = 1, ei = 2, ti = 9, sti = 3, ni = 4;
     for (const raw of norm.split('\n')) {
       const l = raw.trim();
       if (/^\[Events\]/i.test(l)) { inEv = true; continue; }
@@ -8881,6 +8969,7 @@ function hlsParseSubFile(text, ext) {
         if (cols.includes('start')) si = cols.indexOf('start');
         if (cols.includes('end')) ei = cols.indexOf('end');
         if (cols.includes('text')) ti = cols.indexOf('text');
+        sti = cols.indexOf('style'); ni = cols.indexOf('name');
         continue;
       }
       if (!/^Dialogue\s*:/i.test(l)) continue;
@@ -8891,6 +8980,7 @@ function hlsParseSubFile(text, ext) {
       ps.push(body.slice(cur));
       const a = /(\d+):(\d{2}):(\d{2})[.:](\d{1,3})/.exec(ps[si] || ''), b = /(\d+):(\d{2}):(\d{2})[.:](\d{1,3})/.exec(ps[ei] || '');
       if (!a || !b) continue;
+      if ((sti >= 0 && SUB_STAFF_STYLE.test((ps[sti] || '').trim())) || (ni >= 0 && SUB_STAFF_STYLE.test((ps[ni] || '').trim()))) continue;
       const s = t2s(a[1], a[2], a[3], a[4].length === 2 ? a[4] + '0' : a[4]);
       const e = t2s(b[1], b[2], b[3], b[4].length === 2 ? b[4] + '0' : b[4]);
       const t = hlsAssText(ps[ti] || '');
@@ -8912,7 +9002,7 @@ function hlsParseSubFile(text, ext) {
 }
 
 async function hlsSidecarCues(x, env, ctx) {
-  const ck = new Request(`${HLS_SUB_CACHE}x?p=${encodeURIComponent(x.path)}&r=${encodeURIComponent(x.rev)}&v=${HLS_VER}`);
+  const ck = new Request(`${HLS_SUB_CACHE}x?p=${encodeURIComponent(x.path)}&r=${encodeURIComponent(x.rev)}&v=${HLS_VER}&c=${SUB_CLEAN_V}`);
   const hit = await caches.default.match(ck);
   if (hit) { try { return await hit.json(); } catch {} }
   return singleFlight(`hls-x:${x.path}|${x.rev}`, async () => {
@@ -9404,8 +9494,8 @@ async function hlsPutSubs(idx, k, grab) {
       const s0 = sec(b.ts);
       if (t.text) cues.push({ s: s0, e: s0 + (b.dur >= 0 ? sec(b.dur) : 3), ...t });
     }
-    const ck = new Request(`${HLS_SUB_CACHE}s/${idx.idh}/${g.i}/${k}`);
-    await caches.default.put(ck, hlsOut(hlsVtt(cues), 'text/vtt; charset=utf-8'));
+    const ck = new Request(`${HLS_SUB_CACHE}s${SUB_CLEAN_V}/${idx.idh}/${g.i}/${k}`);
+    await caches.default.put(ck, hlsOut(hlsVtt(cues, idx.dur), 'text/vtt; charset=utf-8'));
   }));
 }
 
@@ -9445,7 +9535,7 @@ async function hlsSubAwait(idx, k, ck, signal) {
 async function hlsSubSegmentFast(cx, idx, si, k) {
   const sub = idx.subs[si];
   if (!hlsSubNeedsScan(sub) || !hlsCacheOn(cx)) return hlsSubSegment(cx, idx, si, k);
-  const ck = new Request(`${HLS_SUB_CACHE}s/${idx.idh}/${si}/${k}`);
+  const ck = new Request(`${HLS_SUB_CACHE}s${SUB_CLEAN_V}/${idx.idh}/${si}/${k}`);
   let t = await hlsSubAwait(idx, k, ck, cx.signal);
   if (t == null) {
     await hlsSleep(HLS_SUB_GRACE_MS);              // 字幕请求常比同一段的视频请求早到一点点
@@ -9585,7 +9675,7 @@ async function handleHls(url, request, env, ctx) {
     if (!idx.subs[i]) return hlsFail(404, 'no such subtitle');
     if (m[2]) return hlsOut(hlsMediaPl(idx, null, k => `s${i}/${k}.vtt`, target), HLS_M3U8);
     if (seg && seg[2] === 'vtt' && +seg[1] < idx.segs.length) {
-      try { return await hlsVttResponse(`s/${idx.idh}/${i}/${seg[1]}`, ctx, () => hlsSubSegmentFast(cx, idx, i, +seg[1])); }
+      try { return await hlsVttResponse(`s${SUB_CLEAN_V}/${idx.idh}/${i}/${seg[1]}`, ctx, () => hlsSubSegmentFast(cx, idx, i, +seg[1])); }
       catch (e) { console.error('hls subs:', e && e.message); return hlsFail(502, 'subtitle unavailable'); }
     }
   }
@@ -9598,9 +9688,9 @@ async function handleHls(url, request, env, ctx) {
         const xs = await hlsSidecarSubs(filePath, env);
         const x = xs[i];
         if (!x) return hlsFail(404, 'no such subtitle');
-        return await hlsVttResponse(`x/${idx.idh}/${encodeURIComponent(x.path)}/${x.rev}/${k}`, ctx, async () => {
+        return await hlsVttResponse(`x${SUB_CLEAN_V}/${idx.idh}/${encodeURIComponent(x.path)}/${x.rev}/${k}`, ctx, async () => {
           const [T1, T2] = hlsSegWindow(idx, k);
-          return hlsVtt((await hlsSidecarCues(x, env, ctx)).filter(c => c.s < T2 && c.e > T1));
+          return hlsVtt((await hlsSidecarCues(x, env, ctx)).filter(c => c.s < T2 && c.e > T1), idx.dur);
         });
       } catch (e) { console.error('hls sidecar:', e && e.message); return hlsFail(502, 'subtitle unavailable'); }
     }
@@ -9613,9 +9703,9 @@ async function handleHls(url, request, env, ctx) {
       const k = +seg[1];
       const rec = osOn(env) ? await osLoad(env, await osKeyOf(osIdentity(filePath, meta))).catch(() => null) : null;
       if (!rec || rec.status !== 'ok') return hlsOut(hlsVtt([]), 'text/vtt; charset=utf-8', 'no-store');
-      return await hlsVttResponse(`o/${idx.idh}/${rec.src.file}/${k}`, ctx, async () => {
+      return await hlsVttResponse(`o${SUB_CLEAN_V}/${idx.idh}/${rec.src.file}/${k}`, ctx, async () => {
         const [T1, T2] = hlsSegWindow(idx, k);
-        return hlsVtt(rec.cues.filter(c => c.s < T2 && c.e > T1));
+        return hlsVtt(rec.cues.filter(c => c.s < T2 && c.e > T1), idx.dur);
       });
     }
   }

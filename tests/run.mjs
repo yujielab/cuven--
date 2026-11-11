@@ -499,6 +499,52 @@ console.log('\n■ 预告片：IMDb 直链优先，被拒时退到 TMDB 登记�
   delete H.env.TMDB_API_KEY;
 }
 
+console.log('\n■ 字幕清洗：字幕组、发布 / 来源声明、网址、广告');
+{
+  const X = await H.internals();
+  const D = 6000;                                                     // 片长 100 分钟
+  const cue = (s, text) => ({ s, e: s + 2, text, settings: '' });
+  const head = ['本字幕由XX字幕组翻译制作\n仅供学习交流，请于下载后24小时内删除', '翻译：张三  校对：李四', '人人影视原创翻译', '【YYeTs】',
+    '-=TLF=-', 'www.zimuku.la 字幕库', 'Subtitles by explosiveskull', '中英字幕', 'Movie.2019.1080p.BluRay.x264-SPARKS', '@破烂熊字幕组',
+    'Translated by: Jane Doe', '时间轴：王五', 'Sync and corrected by elderman', '微信公众号：电影字幕'];
+  const keepHead = ['我们出发吧', '<i>Previously on...</i>', '- Where are you going?\n- Home.', '♪ 夜色多美好 ♪'];
+  const mid = ['我们公司出品的东西都很好', '翻译一下这句话', '伊甸园里有一棵树', 'Email me at john@example.com', 'This book was translated by my father',
+    '他是这家工作室的老板', '2019年我们在北京', 'Mr.Smith is here.', '你愿意加入我们吗？', '我在淘宝上买的', 'A telegram for you, sir.',
+    '这仅供参考', '未经授权不得入内', 'I stand corrected by the facts.', '关注我的公众号', 'His mistake was corrected by the teacher.'];
+  const dropMid = ['Visit www.badsite.com for more subs', 'QQ群：123456789', 'Please rate this subtitle at www.osdb.link/abc', '本片仅供学习交流'];
+  const tail = ['Advertise your product or brand here\ncontact www.OpenSubtitles.org today', 'Support us and become VIP member\nto remove all ads from www.OpenSubtitles.org', '压制：CMCT'];
+  const cues = [
+    ...head.map((t, i) => cue(1 + i * 3, t)), ...keepHead.map((t, i) => cue(60 + i * 3, t)),
+    ...mid.map((t, i) => cue(3000 + i * 3, t)), ...dropMid.map((t, i) => cue(3100 + i * 3, t)),
+    cue(3200, '好的\n字幕组招募翻译 QQ群123456'),
+    ...tail.map((t, i) => cue(D - 100 + i * 3, t)),
+  ];
+  const out = X.subClean(cues, D);
+  const texts = out.map(c => c.text);
+  const gone = [...head, ...dropMid, ...tail].filter(t => texts.includes(t) || texts.some(x => t.split('\n').some(l => x.includes(l) && l.length > 4)));
+  ok(!gone.length, `片头片尾的署名 / 声明 / 广告、正片里的网址与引流全部删掉（${head.length + dropMid.length + tail.length} 条）${gone.length ? '；漏了：' + gone.join(' | ') : ''}`);
+  const lost = [...keepHead, ...mid].filter(t => !texts.includes(t));
+  ok(!lost.length, `台词一条不误删（片头的对白、正片里提到「出品」「翻译」「伊甸园」、邮箱、Mr.Smith…）${lost.length ? '；误删：' + lost.join(' | ') : ''}`);
+  ok(texts.includes('好的'), '一条里混着广告行：只删那一行，台词留下');
+  const vtt = X.hlsVtt(cues.filter(c => c.s > 2900 && c.s < 3300), D);
+  ok(vtt.includes('伊甸园里有一棵树') && !vtt.includes('osdb') && !vtt.includes('QQ群'), 'HLS 分段 VTT 走同一套清洗');
+  const ass = '[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n' +
+    'Dialogue: 0,0:00:01.00,0:00:05.00,Staff,,0,0,0,,本片由 Cuven 校对\n' +
+    'Dialogue: 0,0:00:06.00,0:00:08.00,Default,,0,0,0,,你好\n' +
+    'Dialogue: 0,0:00:09.00,0:00:11.00,Note,,0,0,0,,注：双关语\n';
+  const pc = X.hlsParseSubFile(ass, '.ass').map(c => c.text);
+  ok(pc.join('|') === '你好|注：双关语', 'ASS 里 Staff 样式的署名整条不要；译注（Note）留着');
+  // 直连外挂字幕：/api/subs/vtt 输出已清洗
+  const srt = [['00:00:01,000', '00:00:04,000', '本字幕由XX字幕组翻译\nwww.example-subs.com'], ['00:00:05,000', '00:00:07,000', '你好'],
+    ['00:00:08,000', '00:00:10,000', '再见']].map((c, i) => `${i + 1}\n${c[0]} --> ${c[1]}\n${c[2]}\n`).join('\n');
+  fs.writeFileSync(S('clean_case.zh.srt'), srt);
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const v = await (await H.call('/api/subs/vtt?path=' + encodeURIComponent('/Movies/clean_case.zh.srt'), 'GET', { Cookie: cookie })).text();
+  fs.unlinkSync(S('clean_case.zh.srt'));
+  ok(/^WEBVTT/.test(v) && v.includes('你好') && v.includes('再见') && !/字幕组|example-subs/.test(v), '直连的外挂字幕（/api/subs/vtt）也清洗过');
+}
+
 console.log('\n■ ffmpeg 作为 HLS 客户端（HTTP）');
 {
   const srv = http.createServer(async (req, res) => {
