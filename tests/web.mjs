@@ -840,13 +840,15 @@ console.log('\n■ 没有封面的影片不显示（确定的答案才算，网�
   const gone = await until(np, () => !document.querySelector('.card[data-name="dv81.mkv"]') && !document.querySelector('.card[data-name="hdr10_multi.mkv"]'), null, 20000)
     .then(() => true).catch(() => false);
   await np.waitForTimeout(6000);                     /* 后台补中文名那一轮（kick 5s）也把整库问了一遍 */
-  const kept = await np.evaluate(() => ({ long: document.querySelectorAll('.card[data-name="long.mp4"]').length,
+  /* 首页排哪些片子跟片单有关（样片多一个就换一批），只看「排出来的都是有海报的、而且不少」 */
+  const kept = await np.evaluate(() => ({ cards: [...new Set([...document.querySelectorAll('#view-home .card[data-name]')].map(c => c.dataset.name))],
     none: JSON.parse(localStorage.getItem('art_none_v1') || '{}') }));
   ok(gone && 'dv81.mkv' in kept.none && 'hdr10_multi.mkv' in kept.none, '认得出但没有海报的（dv81）、TMDB 里没有的（hdr10_multi）：屏上的卡收起来，并记下');
   await np.evaluate(async () => { await openSearch(); runSearch('avc'); });   /* openSearch 末尾会铺初始页，等它完再搜 */
   await np.waitForTimeout(500);
   const zsub = await np.evaluate(() => !!document.querySelector('#searchBody .card[data-name="avc_zsub.mkv"]'));
-  ok(zsub && !('avc_zsub.mkv' in kept.none) && kept.long > 0, 'TMDB 这次出错的（avc_zsub）照常显示（搜得到）、不记账；有海报的照常');
+  ok(zsub && !('avc_zsub.mkv' in kept.none) && kept.cards.length >= 8,
+    `TMDB 这次出错的（avc_zsub）照常显示（搜得到）、不记账；有海报的照常（首页 ${kept.cards.length} 部）`);
   await np.evaluate(() => closeSearch());
   const ranks = await np.evaluate(() => [...document.querySelectorAll('#todayRecsRow .card .card-rank')].map(b => +b.textContent));
   ok(ranks.length > 0 && ranks.every((r, i) => r === i + 1), `「今日推荐」的名次连续（${ranks.join(',')}）`);
@@ -864,7 +866,7 @@ console.log('\n■ 没有封面的影片不显示（确定的答案才算，网�
   await until(np2, () => document.querySelectorAll('#view-home .card[data-path]').length > 0, null, 20000);
   await np2.waitForTimeout(1500);
   const seen = await np2.evaluate(() => [...window.__seen]);
-  ok(!seen.includes('dv81.mkv') && !seen.includes('hdr10_multi.mkv') && seen.includes('long.mp4'), '再次打开：没有封面的从头到尾没被排出来过');
+  ok(!seen.includes('dv81.mkv') && !seen.includes('hdr10_multi.mkv') && seen.length >= 8, `再次打开：没有封面的从头到尾没被排出来过（排出来 ${seen.length} 部）`);
   await np2.evaluate(() => { openSearch(); });
   await np2.fill('#searchInput', 'dv81');
   await np2.evaluate(() => runSearch('dv81'));

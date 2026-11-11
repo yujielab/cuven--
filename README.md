@@ -287,7 +287,7 @@ service = "cuven-audio-tx"
 
 ```bash
 tests/make-samples.sh     # 用 ffmpeg / mkvmerge 生成样片（约 30 秒）
-node tests/run.mjs        # Worker：144 项回归，约 1 分钟
+node tests/run.mjs        # Worker：145 项回归，约 1 分钟
 node tests/web.mjs        # 前端：133 项，需要 Playwright + Chromium（PLAYWRIGHT_PATH 可指定其 index.js），约 8 分钟
 ```
 
