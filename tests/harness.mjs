@@ -138,7 +138,8 @@ globalThis.fetch = async (input, init = {}) => {
     const movieEn = x => x.en || x.original || x.query || x.title;
     const movieBrief = x => ({ id: x.id, title: q.language === 'zh-CN' ? x.title : movieEn(x), original_title: x.original || movieEn(x),
       original_language: x.lang || 'en', release_date: x.date, poster_path: x.poster === null ? null : (x.poster || '/m.jpg'),
-      backdrop_path: x.backdrop, overview: '', vote_average: x.rating || 7, vote_count: x.votes != null ? x.votes : 100, popularity: x.pop || 0 });
+      backdrop_path: x.backdrop, overview: '', vote_average: x.rating || 7, vote_count: x.votes != null ? x.votes : 100, popularity: x.pop || 0,
+      genre_ids: x.genres || [18] });
     if (p === '/search/movie') {
       const ql = (q.query || '').toLowerCase();
       const res = tmdb.movies.filter(x => [x.query || x.title, ...(x.q || [])].some(n => String(n).toLowerCase() === ql)

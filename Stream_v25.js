@@ -4332,6 +4332,17 @@ const NP_GENRES_ZH = {
   10752: '战争', 37: '西部',
 };
 
+/* 电影与剧集两套类型编号合在一起：搜索结果里只有编号（genre_ids），对照表一查就是中文类型名，
+   不必为了「剧情 · 犯罪」这几个字再去取一次详情 */
+const TMDB_GENRES_ZH = {
+  ...NP_GENRES_ZH,
+  10759: '动作冒险', 10762: '儿童', 10763: '新闻', 10764: '真人秀', 10765: '科幻奇幻', 10766: '肥皂剧', 10767: '脱口秀', 10768: '战争政治',
+};
+/** 一条 TMDB 结果的类型：详情里是 genres（对象，带中文名），搜索结果里是 genre_ids（编号） */
+const tmdbGenres = r => (!r ? [] : (Array.isArray(r.genres) && r.genres.length
+  ? r.genres.map(g => g && g.name).filter(Boolean)
+  : (r.genre_ids || []).map(id => TMDB_GENRES_ZH[id]).filter(Boolean))).slice(0, 3);
+
 function pickLogo(logos) {
   if (!Array.isArray(logos) || !logos.length) return null;
   const pick = f => logos.find(f);
@@ -4576,7 +4587,7 @@ async function _itunesSearch(title, year, mediaType, country, names) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 // v8：匹配管线重写（候选打分 + 校验）。旧缓存里的错配不换命名空间的话要再压 7 天
-const TMDB_CACHE = 'https://cache.internal/tmdb-v8/';
+const TMDB_CACHE = 'https://cache.internal/tmdb-v9/';   // v9：简要结果也带类型（genres）
 
 /** q：一句片名，或 mtParse 的结果（中英文名都进键 —— 只拿其中一个当键，两部片会互相顶掉），或 { id, type } */
 function tmdbCacheKey(q, year, full, kind) {
@@ -4952,7 +4963,7 @@ async function fetchMetadata(title, year, full, env, kind = '', budget = null) {
     match: m.score != null ? Math.round(m.score) : null,   // 匹配分（排查错配用）
     logo: null, logoAspect: null,
     imdb: null,
-    runtime: null, genres: [],
+    runtime: null, genres: tmdbGenres(c.raw),       // 列表里那行「剧情 · 犯罪」：搜索结果自带编号，不多花请求
     cast: [], director: null, creators: [],
     artworkSource: 'tmdb',
   };

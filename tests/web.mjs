@@ -910,6 +910,114 @@ console.log('\n■ 没有封面的影片不显示（确定的答案才算，网�
   delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
 }
 
+console.log('\n■ 年份页：一行一部的列表（竖版小海报 + 中文片名 + 类型 + 「…」，行间发丝线）');
+{
+  /* 样片的文件名里没有年份：临时挂几个带 2024 的硬链接当这一年的片子，跑完删掉 */
+  const SM = f => path.join(HERE, 'samples', f);
+  const YL = [['Dune.Part.Two.2024.2160p.DV.mkv', 'dv81.mkv', 'dune part two', '沙丘2', [878, 12]],
+    ['Inside.Out.2.2024.1080p.mkv', 'avc_zsub.mkv', 'inside out 2', '头脑特工队2', [16, 10751]],
+    ['Civil.War.2024.1080p.mkv', 'nocues.mkv', 'civil war', '美国内战', [10752, 28]]];
+  for (const [n, src] of YL) { try { fs.unlinkSync(SM(n)); } catch {} fs.linkSync(SM(src), SM(n)); }
+  const tv0 = H.tv.entries, shows0 = H.tmdb.shows;
+  try {
+    H.env.TMDB_API_KEY = 'tmdb-test';
+    caches.default.m.clear();
+    H.tmdb.movies = YL.map(([, , q, zh, g], i) => ({ id: 9500 + i, query: q, title: zh, date: '2024-03-01', genres: g }));
+    H.tv.entries = [1, 2, 3].map(i => ({ path_display: `/ram2/Shogun.S01.2160p.DV/Shogun.S01E0${i}.mkv`, size: 5000, server_modified: '2026-03-01T00:00:00Z' }));
+    H.tmdb.shows = [{ id: 126308, name: '幕府将军', original: 'Shogun', first: '2024-02-27', seasons: [{ n: 1, air: '2024-02-27', count: 10 }] }];
+    const img = r => r.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>' });
+    const yc = await context({ ...devices['iPhone 15 Pro'] });
+    await yc.route('https://image.tmdb.org/**', img);
+    const yp = await enter(yc);
+    await yp.waitForTimeout(800);
+    await yp.evaluate(() => openYearLibrary(2024));
+    await until(yp, () => document.querySelectorAll('#yearList .yl-row').length >= 3 && !!document.querySelector('.yl-tv-section:not([hidden]) .yl-row'), null, 12000);
+    await until(yp, () => [...document.querySelectorAll('#yearList .yl-genre')].every(g => g.textContent !== '电影'), null, 8000).catch(() => {});
+    await until(yp, () => [...document.querySelectorAll('#yearList .yl-row')].every(r => r.querySelector('img.main-img')), null, 8000).catch(() => {});
+    const L = await yp.evaluate(() => {
+      const rows = [...document.querySelectorAll('.yl-row')];
+      return rows.map(r => {
+        const t = r.querySelector('.yl-thumb').getBoundingClientRect(), b = r.getBoundingClientRect(), m = r.querySelector('.yl-more').getBoundingClientRect();
+        const sep = getComputedStyle(r, '::before');
+        return { title: r.querySelector('.card-title').textContent, sub: r.querySelector('.yl-genre').textContent, tags: r.querySelectorAll('.tag-border').length,
+          ratio: +(t.height / t.width).toFixed(2), thumbLeft: Math.round(t.left - b.left), sepLeft: parseFloat(sep.left), textLeft: Math.round(r.querySelector('.yl-copy').getBoundingClientRect().left - b.left),
+          moreRight: Math.round(b.right - m.right), img: (r.querySelector('img.main-img, img.tv-art-img') || {}).src || '', tv: !!r.dataset.tvPath };
+      });
+    });
+    const mv = L.filter(x => !x.tv), tvr = L.filter(x => x.tv);
+    ok(mv.length === 3 && mv.every(x => /[\u4e00-\u9fff]/.test(x.title) && Math.abs(x.ratio - 1.5) < 0.05 && x.thumbLeft === 0 && x.moreRight <= 2),
+      `电影一行一部：竖版小海报在最左（2:3）、中文片名、「…」在行尾（${mv.map(x => x.title).join(' / ')}）`);
+    /* 模拟的 TMDB 详情一律回「剧情」：被首页大图先取过详情的那部会是「剧情」，其余是搜索结果里那两个类型 */
+    const viaSearch = mv.filter(x => /^(科幻 · 冒险|动画 · 家庭|战争 · 动作)$/.test(x.sub));
+    ok(mv.every(x => x.sub && x.sub !== '电影' && x.tags >= 1) && viaSearch.length >= 1,
+      `副标题是类型 + 规格徽标（${mv.map(x => x.sub).join(' / ')}）；类型来自 TMDB 搜索结果自带的类型编号，不多花请求`);
+    ok(L.every(x => Math.abs(x.sepLeft - x.textLeft) <= 1), '行间发丝线从文字那一列起头，海报底下不画');
+    ok(mv.every(x => /\/w185\//.test(x.img)), `小海报取 w185（${(mv[0] && mv[0].img.split('/t/p/')[1]) || ''}），不拉卡片那种大图`);
+    ok(tvr.length === 1 && tvr[0].title === '幕府将军' && /集/.test(tvr[0].sub) && Math.abs(tvr[0].ratio - 1.5) < 0.05,
+      `剧集一组排在电影下面：${tvr[0] && tvr[0].title}（${tvr[0] && tvr[0].sub}）`);
+    /* 「…」：电影是文件弹层（播放 / 复制直链），不会顺带点开详情 */
+    await yp.click('#yearList .yl-row:first-child .yl-more');
+    await yp.waitForTimeout(500);
+    const sh1 = await yp.evaluate(() => ({ on: document.getElementById('sheetMenu').classList.contains('on'), text: document.getElementById('sheetBody').textContent,
+      detail: document.getElementById('detailView').classList.contains('on') }));
+    ok(sh1.on && /播放/.test(sh1.text) && /复制直链/.test(sh1.text) && !sh1.detail, '电影的「…」：弹出「播放 / 复制直链」，不点开详情');
+    await yp.evaluate(() => closeSheet());
+    await yp.waitForTimeout(400);
+    /* 剧集的「…」：「从第 1 集看起 / 查看分集」，查看分集进剧集详情 */
+    await yp.click('.yl-tv-section .yl-row .yl-more');
+    await yp.waitForTimeout(500);
+    const sh2 = await yp.evaluate(() => document.getElementById('sheetBody').textContent);
+    ok(/从第 1 集看起/.test(sh2) && /查看分集/.test(sh2), '剧集的「…」：弹出「从第 1 集看起 / 查看分集」');
+    await yp.click('#sheetBody [data-yl-act="detail"]');
+    const d1 = await until(yp, () => document.getElementById('detailView').classList.contains('on'), null, 8000).then(() => true).catch(() => false);
+    ok(d1, '「查看分集」进剧集详情');
+    await yp.evaluate(() => closeDetail());
+    await yp.waitForTimeout(700);
+    /* 点整行：进这部片的详情 */
+    await yp.click('#yearList .yl-row:first-child .card-title');
+    const d2 = await until(yp, () => document.getElementById('detailView').classList.contains('on'), null, 8000).then(() => true).catch(() => false);
+    ok(d2, '点整行进详情（与卡片一样）');
+    await yp.evaluate(() => closeDetail());
+    await yp.waitForTimeout(900);
+    ok(await yp.evaluate(() => state.currentTab === 'library' && state.libraryYear === 2024 && document.getElementById('pageBack').classList.contains('on') && history.state && history.state.view === 'sub'),
+      '在年份页上开详情再关掉：还停在年份页（原来详情页自己退的那一格历史会被当成「后退」，把年份页也退掉）');
+    await yc.close();
+
+    /* 宽屏：排成几列，每一列各自是一条列表；第一排没有顶线 */
+    const wc2 = await context({ viewport: { width: 1280, height: 800 } });
+    await wc2.route('https://image.tmdb.org/**', img);
+    const wp = await enter(wc2);
+    await wp.waitForTimeout(800);
+    await wp.evaluate(() => openYearLibrary(2024));
+    await until(wp, () => document.querySelectorAll('#yearList .yl-row').length >= 3, null, 12000);
+    const W = await wp.evaluate(() => {
+      const rows = [...document.querySelectorAll('#yearList .yl-row')].map(r => r.getBoundingClientRect());
+      const cols = new Set(rows.map(r => Math.round(r.left))).size, firstTop = Math.round(rows[0].top);
+      return { cols, sameRow: rows.filter(r => Math.round(r.top) === firstTop).length, clip: getComputedStyle(document.querySelector('#yearList .yl-list')).clipPath };
+    });
+    ok(W.cols >= 2 && W.sameRow >= 2 && /inset\(1px/.test(W.clip), `宽屏排成 ${W.cols} 列，第一排的顶线裁掉（clip-path ${W.clip}）`);
+    await wc2.close();
+
+    /* iPhone Duo 折起竖拿：列表右端让出右缘那一列浮动导航 */
+    const dc = await context({ isMobile: true, hasTouch: true, screen: { width: 466, height: 678 }, viewport: { width: 466, height: 678 },
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 27_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.1 Mobile/15E148 Safari/604.1' });
+    await dc.route('https://image.tmdb.org/**', img);
+    const dp = await enter(dc);
+    await dp.waitForTimeout(800);
+    await dp.evaluate(() => openYearLibrary(2024));
+    await until(dp, () => document.querySelectorAll('#yearList .yl-row').length >= 3, null, 12000);
+    const F = await dp.evaluate(() => ({ more: Math.max(...[...document.querySelectorAll('.yl-more')].map(b => b.getBoundingClientRect().right)),
+      nav: document.getElementById('navContainer').getBoundingClientRect().left, float: document.documentElement.classList.contains('rail-float') }));
+    ok(F.float && F.more <= F.nav - 8, `折起竖拿：「…」停在右缘导航左边（${Math.round(F.more)} ≤ ${Math.round(F.nav)}），不钻到导航底下`);
+    await dc.close();
+  } finally {
+    for (const [n] of YL) { try { fs.unlinkSync(SM(n)); } catch {} }
+    H.tv.entries = tv0; H.tmdb.shows = shows0;
+    delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
+    caches.default.m.clear();
+  }
+}
+
 console.log('\n■ 登录页：品牌区（流体底图 + Cuven max 字标 + 蓝色脉冲）+ 白色面板');
 {
   for (const [label, opt] of [['iPhone', { ...devices['iPhone 15 Pro'], deviceScaleFactor: 2 }], ['Mac', { viewport: { width: 1440, height: 900 } }]]) {

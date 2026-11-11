@@ -1087,9 +1087,6 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
 /* 用类而不是 hidden 属性控制显隐 —— hidden 会被作者样式里的 display 压掉 */
 .year-tv { display: none; }
 .year-tv.on { display: block; }
-/* 年份页那条：瀑布流自带 7px 外边距，分割线跟卡片外沿对齐，别按 5% 缩进 */
-.year-tv-mas .year-split { margin: 0 var(--mas-pad, 7px) 34px; }   /* 上侧 34px 由瀑布流自带的下内边距给 */
-@media (min-width: 560px) { .year-tv-mas .year-split { margin-left: 16px; margin-right: 16px; } }
 .mas-card .tv-art-ph { padding: 0 10% 26%; font-size: 14px; }
 
 /* 年份行里的剧集轨道 = 「精心佳作品质」那条轨道，只是住在一个带 5% 左内边距
@@ -2638,6 +2635,70 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
 .year-library-copy .library-title { font-variant-numeric: tabular-nums; }
 .year-library-section { margin-top: 12px; }
 .year-library-grid { padding-left: 0; }
+
+/* ══ 年份页 · 列表 ══════════════════════════════════════════════════
+   点「查看电影和剧集」进来的那一页，照 Apple TV「全部 … 剧集」那种列表排：一行一部，左边竖版海报，
+   右边片名 + 类型两行字，最右一枚「…」；行与行之间一条发丝线，从文字那一列起头（海报底下不画）。
+   材质照旧：海报的内描边、投影、模糊渐显，片名中文、规格徽标、依次入场都与卡片同一套 ——
+   每一行仍是 .card[data-path]（剧集是 [data-tv-path]），点开详情、取图、没有封面就收起，全走原来那几条管线。
+   宽屏上一行排几列（每列各自一条列表），手机上一列。 */
+.yl-section { margin-top: 10px; content-visibility: visible; }
+.yl-section + .yl-section { margin-top: 34px; }
+.yl-group { padding-right: 5%; }                             /* 左边那 5% 由 .section 给，与页头对齐 */
+.yl-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 2px; }
+.yl-head .t { font-size: 20px; font-weight: 700; letter-spacing: -.014em; color: var(--text); }
+.yl-head .n { font-size: 13px; font-weight: 600; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.yl-list {
+  --yl-w: 56px; --yl-gap: 16px;
+  display: grid; grid-template-columns: minmax(0, 1fr); column-gap: 40px;
+  /* 每行顶上一条线；列表最上沿那 1px 裁掉 —— 第一行（宽屏上是第一排的每一列）就没有线了。
+     左右下三边往外放：海报投影不被裁 */
+  clip-path: inset(1px -24px -24px -24px);
+}
+@media (min-width: 760px) { .yl-list { --yl-w: 62px; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); } }
+@media (min-width: 1680px) { .yl-list { --yl-w: 70px; --yl-gap: 18px; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); } }
+.yl-row.card {
+  display: flex; align-items: center; gap: var(--yl-gap); padding: 12px 0;
+  border-radius: 0; scroll-snap-align: none; -webkit-tap-highlight-color: transparent;
+}
+.yl-row::before {
+  content: ''; position: absolute; top: 0; right: 0; left: calc(var(--yl-w) + var(--yl-gap));
+  height: var(--hairline); background: rgba(255,255,255,.13); pointer-events: none;
+}
+.yl-row .card-poster.yl-thumb {
+  flex: 0 0 var(--yl-w); width: var(--yl-w); height: auto; aspect-ratio: 2/3;
+  border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,.32);
+}
+.yl-row .card-poster.tv-art { position: relative; inset: auto; }
+.yl-thumb .fallback { font-size: 20px; }
+.yl-thumb .cuven-seal { display: none; }                   /* 8 分印章在 56px 的小图上盖不下 */
+.yl-thumb .tv-art-ph { padding: 0 8%; font-size: 10px; line-height: 1.25; }
+.yl-copy { flex: 1 1 auto; min-width: 0; }
+.yl-row .card-title { font-size: 17px; font-weight: 600; line-height: 1.3; color: var(--text); }
+.yl-sub {
+  display: flex; align-items: center; gap: 8px; min-width: 0; margin-top: 4px;
+  font-size: 14px; font-weight: 500; color: var(--text-3); white-space: nowrap; overflow: hidden;
+}
+.yl-genre { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.yl-genre:empty { display: none; }
+.yl-sub .tag-border { flex: 0 0 auto; }
+/* 「…」：常驻在行尾，不是浮在海报上的那种 */
+.yl-row .yl-more.card-menu {
+  position: relative; top: auto; right: auto; z-index: 2; flex: 0 0 auto;
+  width: 40px; height: 40px; font-size: 22px; color: var(--text-3); border: 0;
+  background: transparent; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+  opacity: 1; pointer-events: auto; transform: none;
+}
+.yl-row .yl-more.card-menu svg { width: 22px; height: 22px; display: block; }
+.yl-row .yl-more.card-menu:active { background: rgba(255,255,255,.1); transform: scale(.92); }
+@media (hover: hover) and (pointer: fine) {
+  /* 列表里放大海报会撞上下两行：只提亮描边与投影 */
+  .yl-row.card:hover .card-poster { transform: none; box-shadow: 0 8px 20px rgba(0,0,0,.5); outline-color: rgba(255,255,255,.3); }
+  .yl-row.card:hover .card-title { color: #fff; }
+  .yl-row .yl-more.card-menu:hover { background: rgba(255,255,255,.08); color: var(--text); }
+}
+/* 右缘浮动导航（iPhone Duo 折起竖拿）：列表右端让出那一列，「…」不钻到导航底下 */
+html.rail.rail-float .yl-group { padding-right: calc(var(--rail-w) + 20px + env(safe-area-inset-right, 0px)); }
 
 @media (max-width: 420px) {
   /* 宽度不再在这里改 —— 它现在按参考线算（86vw + 14），写死 120 会把
@@ -12530,13 +12591,14 @@ function topTag(tags) {
 
 const tmdbCache = (() => {
   
-  /* v7：后端匹配管线重写（候选打分 + 校验），v6 里可能认错的旧结果整批作废 */
-  const KEY = 'tmdb_cache_v7'; const MAX = 600;
+  /* v7：后端匹配管线重写（候选打分 + 校验），v6 里可能认错的旧结果整批作废；
+     v8：简要结果也带类型（年份页列表那行「剧情 · 犯罪」），旧的没有这一项 */
+  const KEY = 'tmdb_cache_v8'; const MAX = 600;
   let mem = {};
   try {
     const raw = localStorage.getItem(KEY);
     if (raw) mem = JSON.parse(raw);
-    ['tmdb_cache_v1','tmdb_cache_v2','tmdb_cache_v3','tmdb_cache_v4','tmdb_cache_v5','tmdb_cache_v6'].forEach(k => { try { localStorage.removeItem(k); sessionStorage.removeItem(k); } catch {} });
+    ['tmdb_cache_v1','tmdb_cache_v2','tmdb_cache_v3','tmdb_cache_v4','tmdb_cache_v5','tmdb_cache_v6','tmdb_cache_v7'].forEach(k => { try { localStorage.removeItem(k); sessionStorage.removeItem(k); } catch {} });
   } catch {}
   let saveT = 0;
   const persist = () => {
@@ -13684,6 +13746,110 @@ function masTvCardHTML(s, r) {
     '</article>';
 }
 
+/* ══ 年份页 · 列表的行 ════════════════════════════════════════════
+   电影一行：小海报（data-variant="thumb"，走海报管线）、中文片名、类型 + 规格徽标、「…」。
+   类型在 TMDB 那趟回包到了才有（ylMeta）；之前先写「电影」，不留一行空白。 */
+const YL_MORE_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="19" cy="12" r="1.9"/></svg>';
+/* 规格徽标：与卡片底下那排同一套 */
+function cardTagsHTML(tags) {
+  const top = topTag(tags);
+  let h = '';
+  if (top) h += '<span class="tag-border ' + (top === 'DV' ? 'dv' : 'hdr') + '">' + top + '</span>';
+  if (tags.includes('4K')) h += '<span class="tag-border k4">8K+</span>';
+  else if (tags.includes('HD')) h += '<span class="tag-border hd">高动态</span>';
+  return h;
+}
+/* 只写类型（参考稿那样）：片长只有详情那趟才有，有的行有、有的行没有，一列看下去参差不齐 */
+const ylMovieMeta = d => (d && d.genres && d.genres.length ? d.genres.slice(0, 2).join(' · ') : '');
+const ylTvCount = s => ((s.full || s.complete) ? '全 ' : '更新至 ') + s.episodes + ' 集';
+function ylRowHTML(v) {
+  if (!v || ArtGate.none(v.name)) return '';
+  const title = showTitle(v.name);
+  const d = tmdbCache.get(v.name) || tmdbCache.get(v.name + ':logo') || null;
+  return '<div class="card yl-row stagger-in" data-path="' + esc(v.path) + '" data-name="' + esc(v.name) + '" data-removable="0" tabindex="0" role="button" aria-label="' + esc(title) + '">' +
+      '<div class="card-poster yl-thumb" data-fn="' + esc(v.name) + '" data-variant="thumb"><div class="fallback"><i class="ph ph-film-strip"></i></div></div>' +
+      '<div class="yl-copy">' +
+        '<div class="card-title">' + esc(title) + '</div>' +
+        '<div class="yl-sub"><span class="yl-genre">' + esc(ylMovieMeta(d) || '电影') + '</span>' + cardTagsHTML(parse(v.name).tags) + '</div>' +
+      '</div>' +
+      '<button class="card-menu yl-more" type="button" tabindex="0" aria-label="更多操作：' + esc(title) + '">' + YL_MORE_SVG + '</button>' +
+    '</div>';
+}
+/* 剧集一行：取图走 type=tv 那条（data-tv-thumb：取小图），点开进剧集详情；副标题「类型 · 全 N 集」 */
+function ylTvRowHTML(s) {
+  if (!s) return '';
+  const name = (s.title || s.folder || '') + (s.season > 1 ? ' 第 ' + s.season + ' 季' : '');
+  const count = ylTvCount(s);
+  const hdr = s.hdr === 'DV' ? '<span class="tag-border dv">DV</span>' : (s.hdr ? '<span class="tag-border hdr">' + esc(s.hdr) + '</span>' : '');
+  return '<div class="card yl-row yl-tv stagger-in" data-tv-path="' + esc(s.path) + '" tabindex="0" role="button" aria-label="' + esc(name) + '，' + esc(count) + '">' +
+      '<div class="card-poster tv-art yl-thumb" data-tv-art="' + esc(s.id) + '" data-tv-id="' + esc(s.tmdbId || '') + '" data-tv-q="' + esc(s.en || s.zh || (s.title || s.folder)) + '"' +
+        ' data-tv-y="' + esc(s.year || '') + '" data-tv-thumb="1"><div class="tv-art-ph">' + esc(name) + '</div></div>' +
+      '<div class="yl-copy">' +
+        '<div class="card-title">' + esc(name) + '</div>' +
+        '<div class="yl-sub"><span class="yl-genre" data-count="' + esc(count) + '">' + esc(count) + '</span>' + hdr + '</div>' +
+      '</div>' +
+      '<button class="card-menu yl-more" type="button" tabindex="0" aria-label="更多操作：' + esc(name) + '">' + YL_MORE_SVG + '</button>' +
+    '</div>';
+}
+/** 一组：标题 + 部数 + 列表；一行都没有（全被 ArtGate 筛掉）就不出这一组 */
+function ylGroupHTML(label, rows) {
+  rows = (rows || []).filter(Boolean);
+  if (!rows.length) return '';
+  return '<div class="yl-group"><div class="yl-head"><span class="t">' + esc(label) + '</span><span class="n">' + rows.length + '</span></div>' +
+    '<div class="yl-list">' + rows.join('') + '</div></div>';
+}
+/** TMDB 那趟回包到了：列表那行写上类型（剧集是「类型 · 全 N 集」） */
+function ylMeta(el, d) {
+  const row = el && el.closest && el.closest('.yl-row');
+  const g = row && row.querySelector('.yl-genre');
+  if (!g || !d) return;
+  const t = row.dataset.tvPath
+    ? [(d.genres || []).slice(0, 2).join(' · '), g.dataset.count || ''].filter(Boolean).join(' · ')
+    : ylMovieMeta(d);
+  if (t && g.textContent !== t) g.textContent = t;
+}
+/** 「…」：电影是原来那张文件弹层（播放 / 复制直链），剧集是「继续看 / 查看分集」 */
+function ylBind(scope) {
+  (scope || document).querySelectorAll('.yl-more').forEach(b => {
+    if (b.dataset.bound) return; b.dataset.bound = '1';
+    b.addEventListener('click', e => {
+      e.stopPropagation();
+      try { haptic.light(); } catch (_) {}
+      const row = b.closest('.yl-row');
+      if (!row) return;
+      if (row.dataset.tvPath) openSheetForSeries(row.dataset.tvPath);
+      else openSheetForFile(row.dataset.path, row.dataset.name);
+    });
+    /* 焦点在「…」上按回车：别让外层那一行也把它当成「点开详情」 */
+    b.addEventListener('keydown', e => e.stopPropagation());
+  });
+}
+/* 剧集的弹层。分集表在弹层打开时就去取（通常是缓存），点「继续看」时多半已经到了 ——
+   在点按的手势里直接起播；没到才等它（那时 iOS 可能要再点一下播放） */
+function openSheetForSeries(path) {
+  const s = (_tvCache || []).find(x => x && x.path === path);
+  if (!s) { openSeries(path); return; }
+  const name = (s.title || s.folder || '') + (s.season > 1 ? ' 第 ' + s.season + ' 季' : '');
+  let eps = null;
+  const pending = tvEpisodes(path).then(d => (eps = (d && d.episodes) || [])).catch(() => (eps = []));
+  const seen = tvProgress.get(s.id);
+  const body = $('sheetBody');
+  body.innerHTML = '<div class="sheet-title">' + esc(name) + '</div>' +
+    '<button class="sheet-btn" data-yl-act="play"><div class="si" style="color:var(--orange)"><i class="ph-fill ph-play-circle"></i></div><div><div class="sl">' + (seen && seen.ep ? '继续看' : '从第 1 集看起') + '</div><div class="sd">' + esc(ylTvCount(s)) + '</div></div></button>' +
+    '<button class="sheet-btn" data-yl-act="detail"><div class="si" style="color:var(--blue)"><i class="ph ph-info"></i></div><div><div class="sl">查看分集</div><div class="sd">简介、演员与每一集</div></div></button>';
+  body.querySelector('[data-yl-act="play"]').onclick = () => {
+    const go = list => {
+      if (!list || !list.length) { toast('暂无可播放文件'); return; }
+      const n = tvNextEp(s.id, list);
+      tvPlayEp(s.id, n.ep, list);
+    };
+    closeSheet();
+    if (eps) go(eps); else pending.then(go);
+  };
+  body.querySelector('[data-yl-act="detail"]').onclick = () => { closeSheet(); openSeries(path); };
+  openSheet();
+}
+
 /* 旋转 / 改窗宽会改变列数，而列数决定了 HTML 的分栏结构 —— 只有列数真的
    变了才重排，改个几像素不动它。挂在 state 上而不是闭包里：视图一换，
    容器就断开了，isConnected 是最省事的过期判据。 */
@@ -13844,6 +14010,7 @@ async function loadPosterElement(el) {
   const variant = el.dataset.variant || '';
   const isLandscape = variant === 'landscape';
   const isLogo = variant === 'logo';
+  const isThumb = variant === 'thumb';             /* 年份页列表的小海报：56–70px 宽，w185 足够 */
   /* 字标卡与横版卡要的是 logo / backdrop —— 总账里都有，不必发请求 */
   const d = RecvIndex.tmdb(fn) || await fetchTmdb(fn, isLandscape || isLogo);
   if (!el.isConnected) return;
@@ -13920,9 +14087,9 @@ async function loadPosterElement(el) {
     img.decoding = 'async';
     img.fetchPriority = 'low';
     img.onload = () => { requestAnimationFrame(() => img.classList.add('loaded')); };
-    const src = downsizeForCard(imgUrl, isLandscape);
+    const src = isThumb ? tmdbThumb(imgUrl) : downsizeForCard(imgUrl, isLandscape);
     img.src = src;
-    ResBudget.hold(img, src, isLandscape ? 'backdrop' : 'poster');
+    ResBudget.hold(img, src, isThumb ? 'thumb' : isLandscape ? 'backdrop' : 'poster');
     const overlay = el.querySelector('.card-overlay');
     if (overlay) el.insertBefore(img, overlay);
     else el.appendChild(img);
@@ -13933,8 +14100,14 @@ async function loadPosterElement(el) {
   if (d.title) el.dataset.tmdbTitle = d.title;
   if (d.year) el.dataset.tmdbYear = d.year;
   upgradeCardTitle(el, d);
+  ylMeta(el, d);                  /* 年份页列表那行的类型 */
   applyCuvenSeal(el, d.rating);   /* 8 分以上：右下角盖章 */
   el.removeAttribute('data-fn');
+}
+/* TMDB 图换成小图版（列表那种几十像素宽的海报） */
+function tmdbThumb(url) {
+  if (!url || !url.includes('image.tmdb.org') || /\.svg(\?|$)/i.test(url)) return url;
+  return url.replace(/\/t\/p\/(original|w\d+|h\d+)\//, '/t/p/w185/');
 }
 
 function observePosters(scope) { (scope || document).querySelectorAll('.card-poster[data-fn], .lib-art[data-fn]').forEach(el => state.posterObserver.observe(el)); }
@@ -16142,20 +16315,18 @@ function tvYearSlotHTML(year) {
 
 /* 资料库年份页：电影瀑布流下面接一条分割线 + 同年份的剧集瀑布流。
    与首页那排同一份数据、同一条规矩，只是卡型换成瀑布流格 */
-async function tvFillYearMasonry(year) {
-  const slot = document.querySelector('.year-tv-mas[data-year="' + year + '"]');
-  if (!slot) return;
+async function tvFillYearList(year) {
+  const sec = document.querySelector('.yl-tv-section[data-year="' + year + '"]');
+  if (!sec) return;
   const list = ArtGate.filterTv(await tvEnsureList());
-  if (!slot.isConnected) return;
+  if (!sec.isConnected) return;
   const items = (list || []).filter(s => String(s.year) === String(year));
-  if (!items.length) return;
   items.sort((a, b) => (a.season || 0) - (b.season || 0) || String(a.title).localeCompare(String(b.title), 'zh'));
-  const host = slot.querySelector('.year-tv-host');
-  if (!host) return;
-  host.innerHTML = masonryHTML(items, null, masTvCardHTML);
-  slot.classList.add('on');
-  masMount(host, items, masTvCardHTML);
-  tvBind(host); observeCards(host); tvObserveArt();
+  const html = ylGroupHTML('剧集', items.map(ylTvRowHTML));
+  if (!html) return;
+  sec.innerHTML = html;
+  sec.hidden = false;
+  tvBind(sec); ylBind(sec); observeCards(sec); tvObserveArt();
 }
 
 /* 按首播年份回填每个年份轨道下面那一排。年份来自 /api/tv（服务端查 TMDB 后
@@ -16217,7 +16388,7 @@ function tvBind(scope) {
   /* 选择器不限定 .tv-card —— hero 卡也带 data-tv-path，两者同一套点开逻辑 */
   (scope || document).querySelectorAll('[data-tv-path]').forEach(el => {
     if (el.dataset.bound) return; el.dataset.bound = '1';
-    el.addEventListener('click', () => openSeries(el.dataset.tvPath));
+    el.addEventListener('click', e => { if (e.target.closest && e.target.closest('.card-menu')) return; openSeries(el.dataset.tvPath); });
     el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.click(); } });
   });
 }
@@ -16285,6 +16456,7 @@ async function tvLoadArt(el) {
   const pic = d && (d.posterClean || d.poster || d.backdrop);
   if (host && (pic || d || tvMetaMiss.has(tid ? 'tv:#' + tid : tvMetaKey(q, el.dataset.tvY)))) ArtGate.settleTv(host.dataset.tvPath, !!pic);
   if (!d) { done(false); return; }
+  ylMeta(el, d);
   const clean = d.posterClean || '';
   /* data-tv-land：这一格要横图（16:10 大卡、瀑布流矮格）—— 剧照优先，
      否则竖版海报会被裁成中间一条。
@@ -16328,7 +16500,7 @@ async function tvLoadArt(el) {
     img.onload = () => { el.classList.add('has-img'); requestAnimationFrame(() => img.classList.add('loaded')); };
     img.onerror = () => img.remove();
     el.insertBefore(img, el.firstChild);
-    img.src = downsizeForCard(url, url === d.backdrop);
+    img.src = el.dataset.tvThumb === '1' ? tmdbThumb(url) : downsizeForCard(url, url === d.backdrop);
   }
   /* 同一趟回包顺路把卡面补齐：中文剧名、底栏缩略图。
      位置在骨架时就定好了，这里只是换内容，不产生位移。 */
@@ -19140,7 +19312,7 @@ async function renderLibrary() {
   /* ── 资料库只有展映一种形态 ────────────────────────────────────────
      网格模式已经拆掉：同一个页面塞两套排版，两边都不好用。要按片名找片子的
      人走搜索，要按年份翻的走年份胶囊 —— 那两条路本来就更直。
-     年份分类页仍旧是网格：那个入口的诉求是「找」，展映的诉求是「逛」。
+     年份分类页是一行一部的列表：那个入口的诉求是「找」，展映的诉求是「逛」。
      展映分支刻意不调 scrollTo —— SC.render 已经把文档高度同步还原了，位置
      交给 navTo 的 lockScroll，它才有东西可落。 */
   if (!isYearHeading(state.libraryYear)) {
@@ -19171,21 +19343,16 @@ async function renderLibrary() {
     '</div>';
 
   if (items.length) {
-    html += '<section class="section mas-section year-library-section" id="yearMas">' + masonryHTML(items) + '</section>' +
-      '<div class="year-tv year-tv-mas" data-year="' + selectedYear + '">' +
-        '<div class="year-split" aria-hidden="true"></div>' +
-        '<div class="year-tv-host"></div>' +
-      '</div>';
+    /* 一行一部的列表（见 .yl-list）：电影一组，剧集一组 —— 剧集要等 /api/tv，先占个位 */
+    html += '<section class="section yl-section" id="yearList">' + ylGroupHTML('电影', items.map(ylRowHTML)) + '</section>' +
+      '<section class="section yl-section yl-tv-section" data-year="' + selectedYear + '" hidden></section>';
   } else {
     html += '<div class="empty"><i class="ph ph-film-slate"></i><div class="empty-title">该年份暂无影片</div></div>';
   }
 
   view.innerHTML = html;
-  if (items.length) {
-    masMount($('yearMas'), items);                  /* 列数随窗宽变，登记一下好重排 */
-    tvFillYearMasonry(selectedYear);                /* 分割线下面那段剧集，等 /api/tv */
-  }
-  bindCards(view); observePosters(view); observeCards(view);
+  if (items.length) tvFillYearList(selectedYear);
+  bindCards(view); ylBind(view); observePosters(view); observeCards(view);
   initYearPills(view);
   swapIn(view);
   if (!state.navBusy) window.scrollTo({ top: 0, behavior: 'instant' });
@@ -19676,6 +19843,7 @@ function openTmdbActor() {
   closeSheet();
 }
 
+let _detailSelfPop = 0;
 function closeDetail(fromPopstate) {
   const view = $('detailView');
   if (!view || !view.classList.contains('on')) return;
@@ -19727,7 +19895,9 @@ function closeDetail(fromPopstate) {
   state.castListContext = null;
   state.detailReq = null;
 
-  if (!fromPopstate && history.state?.view === 'detail') navHistory.back();
+  /* 自己退的那一格：popstate 到的时候详情页已经关了，二级页面（年份 / 文件夹）那条「后退 = 回上一页」
+     会把它当成又一次后退，把底下的年份页也一起退掉 —— 记一笔，让 popstate 吞掉这一次 */
+  if (!fromPopstate && history.state?.view === 'detail') { _detailSelfPop = Date.now(); navHistory.back(); }
 
   if (state.currentTab === 'home' && state.heroVideos.length) {
     setHero(state.heroVideos[state.heroIdx], true);
@@ -22704,6 +22874,8 @@ window.addEventListener('popstate', e => {
   if (Player.takePop()) return;
   /* 悬浮返回钮自己退的那一格：同理吞掉 */
   if (PageBack.takePop()) return;
+  /* 详情页自己关掉时退的那一格：同理（1 秒内没等到就作废，别吞掉之后真正的那次后退） */
+  if (_detailSelfPop) { const t = _detailSelfPop; _detailSelfPop = 0; if (Date.now() - t < 1000) return; }
   /* 二级页面（年份 / 文件夹）在最上层：后退手势 = 回上一页（放在锁之前 —— 这一格是它自己记的） */
   if (PageBack.on && !Player.isOpen() && !$('detailView').classList.contains('on') && !$('searchView').classList.contains('on') &&
       !$('sheetMenu').classList.contains('on') && !$('tvAuthLayer')?.classList.contains('is-open')) {
