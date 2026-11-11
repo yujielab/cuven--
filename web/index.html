@@ -1716,7 +1716,11 @@ html.standalone .hero-stage { padding-top: var(--safe-t); }
     radial-gradient(ellipse at 50% 100%, rgba(0,0,0,0.4) 0%, transparent 60%);
 
   position: sticky; top: 0; z-index: 2;
-  height: 85vh; min-height: 560px; max-height: 860px;
+  /* 860 封顶是给竖着放的平板和窄屏定的；到了 Studio Display / Pro Display XDR 这种又宽又高
+     的屏上，它让大图只占上半屏、下面整整一截是黑的（3008×1570 的窗口里黑了 388px）。
+     上限改成「不低于 860，宽屏上放到 85vh」：62.5vw 那一项挡住竖屏显示器 —— 太高的大图
+     会把 16:9 的剧照裁成一条竖缝。宽度不到 1376 的屏上这一项比 860 小，所以那些屏不受影响。 */
+  height: 85vh; min-height: 560px; max-height: max(860px, min(85vh, 62.5vw));
   /* 纵向归浏览器，横向归我们。不写死的话，横拖会在某些内核上先被判成滚动，
      等 pointercancel 回来时手指已经走了几十像素，接管就是一跳。 */
   touch-action: pan-y;
@@ -5722,6 +5726,96 @@ html.rail .net-banner { left: calc(50% + (var(--rail-space) - env(safe-area-inse
   html.rail .sc-copy { top: 50%; }
   html.rail .sc-note { bottom: max(14px, calc(10px + env(safe-area-inset-bottom))); }
 }
+
+/* ══════════ Mac 大屏：MacBook Pro 16" → iMac → Studio Display → Pro Display XDR ══════════
+   macOS 的「looks like」分辨率已经替我们把物理尺寸换算好了：同一个 15px 的字，在 14" MacBook
+   Pro 和 32" Pro Display XDR 上看着差不多大。可人离 XDR 远得多，屏幕又宽出一倍 —— 原来一切
+   都在 1680 那一档封顶，结果是一排挤十几张小海报、详情只占屏幕中间三分之一、大图下面一截黑。
+   这里不整页放大（导航条、按钮这些「系统件」保持 macOS 的物理尺寸，和系统 App 一样），
+   只让内容跟着宽度长：卡片、标题、按钮、详情列宽。
+   全部用 clamp + vw 连续插值，不一档一档跳 —— Mac 的 looks-like 有十几种（1920 / 2056 / 2240 /
+   2304 / 2560 / 3008 / 3360 / 3840…），外接显示器还有任意缩放，连续插值才每一种都对。
+   锚点：1920 宽时与原来一致，3008（XDR 默认）时约 1.25 倍，再往上封顶。iPad、iPhone 都在
+   1680 以下，一条都不受影响。 */
+@media (min-width: 1680px) {
+  :root {
+    --card-w-p: clamp(236px, calc(5.72vw + 140px), 360px);    /* 1920 → 250，2560 → 286，3008 → 312 */
+    --card-w-l: clamp(440px, calc(10.54vw + 263px), 680px);   /* 1920 → 465，2560 → 533，3008 → 580 */
+  }
+  /* 悬停放大 5% 时海报上沿要多出 2.5%：卡长高以后 8px 的上边距不够，顶边会被行裁掉一条 */
+  .scroll-row { padding-top: max(8px, calc(var(--card-w-p) * .0375 + 3px)); }
+}
+@media (min-width: 1920px) {
+  :where(.section):not(.year-section) { margin-top: clamp(48px, calc(1.47vw + 19.8px), 72px); }
+  .section { contain-intrinsic-size: auto calc(var(--card-w-p) * 1.5 + 180px); }
+  .section-header { font-size: clamp(22px, calc(.55vw + 11.4px), 30px); margin-bottom: clamp(20px, calc(.55vw + 9.4px), 28px); }
+  .scroll-row { gap: clamp(16px, calc(.368vw + 8.9px), 24px); }
+  .card-info { margin-top: clamp(12px, calc(.184vw + 8.5px), 16px); }
+  .card-title { font-size: clamp(15px, calc(.184vw + 11.47px), 18px); }
+  .card-meta { font-size: clamp(12.5px, calc(.138vw + 9.85px), 15px); }
+
+  /* 首页大图 */
+  .hero-status { font-size: clamp(11px, calc(.138vw + 8.35px), 13px); padding: 6px clamp(18px, calc(.37vw + 11px), 24px); }
+  .hero-logo-text { font-size: clamp(48px, calc(1.47vw + 19.8px), 72px); }
+  .hero-logo-img {
+    max-width: calc(clamp(320px, calc(9.19vw + 143.6px), 480px) - var(--m, 0) * 60px);
+    max-height: calc(clamp(110px, calc(3.125vw + 50px), 168px) - var(--m, 0) * 18px);
+  }
+  .hero-tags { font-size: clamp(14px, calc(.184vw + 10.47px), 17px); }
+  .btn-play, .btn-circle { height: clamp(50px, calc(.735vw + 35.9px), 62px); font-size: clamp(16px, calc(.184vw + 12.47px), 19px); }
+  .btn-play { padding: 0 clamp(40px, calc(.735vw + 25.9px), 52px); }
+  .btn-circle { width: clamp(50px, calc(.735vw + 35.9px), 62px); font-size: clamp(22px, calc(.276vw + 16.7px), 27px); }
+  .hero-buttons { gap: clamp(16px, calc(.37vw + 9px), 22px); }
+
+  /* 详情页：两侧内边距是视口的 5%（XDR 上一边 150px），所以盒子要按「正文宽 + 两侧边距」算 ——
+     正文 708（1920）→ 1000（3008）→ 封顶约 1056（3840）；字跟着长一号，每行字数和 14" 上差不多 */
+  .detail-body { max-width: clamp(900px, calc(36.86vw + 192.3px), 1440px); }
+  .detail-logo-text { font-size: clamp(48px, calc(1.47vw + 19.8px), 72px); }
+  .detail-logo-img { max-width: clamp(320px, calc(9.19vw + 143.6px), 480px); max-height: clamp(110px, calc(3.125vw + 50px), 168px); }
+  .detail-meta-row, .detail-credits-row { font-size: clamp(13px, calc(.184vw + 9.47px), 16px); }
+  .detail-credits-row { max-width: clamp(620px, calc(18.38vw + 267px), 900px); }
+  .detail-badge { font-size: clamp(10px, calc(.138vw + 7.35px), 12px); height: clamp(18px, calc(.276vw + 12.7px), 22px); }
+  .detail-actions .btn-play { padding: 0 clamp(48px, calc(.735vw + 33.9px), 60px); }
+  .detail-synopsis { font-size: clamp(15px, calc(.184vw + 11.47px), 18px); }
+  .detail-info-label, .detail-info-value { font-size: clamp(15px, calc(.184vw + 11.47px), 18px); }
+  .detail-row { font-size: clamp(14px, calc(.184vw + 10.47px), 17px); padding: clamp(12px, calc(.184vw + 8.47px), 15px) 0; }
+  .detail-section h3 { font-size: clamp(18px, calc(.276vw + 12.7px), 22px); }
+  .detail-info-section-title { font-size: clamp(13px, calc(.138vw + 10.35px), 15px); }
+  .detail-info-badge-desc { font-size: clamp(14px, calc(.184vw + 10.47px), 17px); }
+
+  /* 资料库 */
+  .library-title { font-size: clamp(32px, calc(.735vw + 17.9px), 44px); }
+  .library-grid { grid-template-columns: repeat(auto-fill, minmax(clamp(220px, calc(5.5vw + 114px), 330px), 1fr)); gap: clamp(40px, calc(.735vw + 25.9px), 52px) clamp(20px, calc(.368vw + 12.9px), 28px); }
+}
+
+/* ── 行的左右翻页（触控板 / 鼠标）─────────────────────────────────
+   触控板两指横扫能滚一排，可鼠标不能；Magic Mouse 能扫但没人知道。和 Apple TV 网页版一样：
+   指针放到一排上，两侧边距里浮出一枚玻璃圆钮，点一下翻一屏。只认鼠标 / 触控板的指针
+   （iPad 接妙控板也算），手指触摸不出。按钮由脚本在第一次悬停时补进去。 */
+.row-nav-host { position: relative; }
+.row-nav {
+  position: absolute; z-index: 20; top: var(--rn-top, 50%);
+  width: 44px; height: 44px; margin-top: -22px; border-radius: 50%;
+  display: grid; place-items: center; padding: 0; border: var(--hairline) solid rgba(255,255,255,.22);
+  background: rgba(30, 30, 32, .62); color: #fff; cursor: pointer;
+  backdrop-filter: blur(20px) saturate(1.6); -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  opacity: 0; pointer-events: none; transform: scale(.86) translateZ(0);
+  transition: opacity .22s ease, transform .3s var(--ease-spring-soft), background-color .2s;
+}
+.row-nav svg { width: 18px; height: 18px; }
+.row-nav.prev { left: max(6px, calc(2.5% - 22px)); }
+.row-nav.next { right: max(6px, calc(2.5% - 22px)); }
+.row-nav-host.rn-hover .row-nav.can { opacity: 1; pointer-events: auto; transform: scale(1) translateZ(0); }
+.row-nav:hover { background: rgba(58, 58, 62, .78); }
+.row-nav:active { transform: scale(.92) translateZ(0); transition-duration: .08s; }
+@media (min-width: 1920px) {
+  .row-nav { width: 52px; height: 52px; margin-top: -26px; }
+  .row-nav svg { width: 21px; height: 21px; }
+}
+@media (prefers-reduced-motion: reduce) { .row-nav { transition: opacity .15s linear; transform: none !important; } }
+/* 没有任何能悬停的输入（纯触屏）就不出；iPad 接了妙控板 / 鼠标时 any-hover 成立，照常出 */
+@media (any-hover: none) { .row-nav { display: none !important; } }
 
 /* ══ 折叠屏的铰链（viewport segments）══
    Duo 半折时 Safari 回到外屏，拿到的是一整块视口；但别的折叠屏在书本姿态会报两块屏 ——
@@ -11361,6 +11455,9 @@ const NetQ = (() => {
     new PerformanceObserver(list => {
       for (const e of list.getEntries()) {
         if (!/image\.tmdb\.org|i\.ytimg\.com|m\.media-amazon\.com/.test(e.name)) continue;
+        /* 原图是给 Retina 大屏取的几 MB 的大图：三秒下完是正常的，不能拿它判网慢 ——
+           否则 Mac 一打开首页就会被自己取的大图「判」进省流模式，海报反而全降成小图 */
+        if (/\/t\/p\/original\//.test(e.name)) continue;
         if (e.duration > 3000) mark(false); else if (e.duration < 800) mark(true);
       }
     }).observe({ type: 'resource', buffered: true });
@@ -11378,6 +11475,144 @@ const NetQ = (() => {
     on(fn) { subs.add(fn); return () => subs.delete(fn); },
   };
 })();
+
+/* ══ 取图尺寸：要多少像素，给多少像素 ═════════════════════════════════════
+   以前每处写死一档：卡片 w500 / w780，首页大图和详情 w1280，logo w500，Apple TV 的大图 1600。
+   放在手机上刚好 —— 到了 Mac 就不够了：14" MacBook Pro 的首页大图要铺 1512 CSS px × 2 =
+   3024 个物理像素，Studio Display 5120，Pro Display XDR 6016。w1280 铺上去放大 2.4–4.7 倍，
+   一眼就糊；logo 的 w500 在 Retina 上也起毛边。可也不能一律取原图：一张 4K 剧照解码后
+   33MB，手机扛不住。所以：
+   · 按这张图在屏上实际占的物理像素，挑「最小够用」的一档（放大 12% 以内看不出来）；
+   · 永远不比原来那档小 —— 原来的写死值就是下限，手机上的取图一张都不变；
+   · 固定档位不够时才取原图，而且只在内存宽裕、网络不慢、不是手机屏的设备上；
+   · DPR 封顶 2：3x 的手机屏上，2x 的图已经看不出差别。
+   TMDB 的档位按官方配置走（海报 342/500/780、剧照 300/780/1280、logo 300/500），不自造。 */
+/* 桌面级：能悬停、指针精确、屏幕至少 1440 宽 —— Mac（含外接显示器）这一类。Safari 不给
+   deviceMemory，hardwareConcurrency 也可能为防指纹报得比实际少；只凭这两项，Mac 会被误判成
+   「内存紧」那一档，取图、展厅的预载全按手机的规格来。这类机器内存都在 8GB 以上，单独认出来。 */
+const DESKTOP_CLASS = (() => {
+  try { return matchMedia('(hover: hover) and (pointer: fine)').matches && Math.max(screen.width || 0, screen.height || 0) >= 1440; }
+  catch (_) { return false; }
+})();
+const ImgFit = (() => {
+  const RE_T = /\/t\/p\/(original|w\d+|h\d+)\//;
+  const STEPS = { poster: [342, 500, 780], backdrop: [300, 780, 1280], logo: [300, 500] };
+  const roomy = (() => {
+    const dm = navigator.deviceMemory || 0, hc = navigator.hardwareConcurrency || 0;   /* Safari 不给 deviceMemory */
+    if (dm > 0 && dm <= 4) return false;
+    if (DESKTOP_CLASS) return true;                 /* Mac：打开时窗口拉得再窄，也还是那台 Mac */
+    return !matchMedia('(max-width: 734px)').matches && !(hc > 0 && hc <= 4);
+  })();
+  const dpr = () => Math.min(window.devicePixelRatio || 1, 2);
+  /* 铺满一个盒子（cover）时图的显示宽度：横图放进竖盒子，要的是高度那一边 */
+  const cover = (boxW, boxH, ar) => Math.max(boxW, boxH * ar) * dpr();
+  const rank = v => v === 'original' ? 1e9 : (parseInt(String(v).slice(1), 10) || 0);
+  function size(kind, need, floor) {
+    if (NetQ.slow && floor) return floor;          /* 弱网：调用方给的就是降过一档的，不再往上取 */
+    const steps = STEPS[kind] || STEPS.backdrop;
+    let out = null;
+    for (const s of steps) if (s >= need * 0.88) { out = 'w' + s; break; }
+    if (!out) out = roomy && !NetQ.slow ? 'original' : 'w' + steps[steps.length - 1];
+    return floor && rank(floor) > rank(out) ? floor : out;
+  }
+  /* need：要的物理像素宽；floor：这个位置原来写死的那一档 */
+  function tmdb(url, kind, need, floor) {
+    if (!url || url.indexOf('image.tmdb.org') < 0) return url;
+    if (/\.svg(\?|$)/i.test(url)) return url.replace(RE_T, '/t/p/original/');   /* 矢量 logo：尺寸前缀没意义 */
+    if (/\.png(\?|$)/i.test(url)) kind = 'logo';                                 /* TMDB 只有 logo 是 PNG */
+    return url.replace(RE_T, '/t/p/' + size(kind, need, floor) + '/');
+  }
+  /* Apple 的图床（mzstatic）什么尺寸都能出：要多大给多大，封顶 3840。
+     bb = 等比放进正方形框（原来一律 1280x1280bb，这里不比它小）；
+     sr = 按原比例出的成品图（Apple TV 大图，Worker 给的是 1600 宽），只往大里换。 */
+  function mz(url, need, floorPx) {
+    if (!url || url.indexOf('mzstatic.com') < 0) return url;
+    const big = need > floorPx * 1.12 && roomy && !NetQ.slow;
+    const W = big ? Math.min(3840, Math.ceil(need / 160) * 160) : floorPx;
+    const sr = /\/(\d+)x(\d+)sr\.(jpg|png|webp)/i.exec(url);
+    if (sr) {
+      const w0 = +sr[1], h0 = +sr[2];
+      if (!big || !w0 || W <= w0) return url;
+      return url.replace(sr[0], '/' + W + 'x' + Math.round(W * h0 / w0) + 'sr.' + sr[3]);
+    }
+    return url.replace(/\/\d+x\d+bb(-\d+)?\.(jpg|png)/i, '/' + W + 'x' + W + 'bb.$2');
+  }
+  /* 卡片此刻的 CSS 宽（--card-w-p / --card-w-l 在大屏上随视口连续变化，只能量） */
+  let cwAt = -1, cwP = 216, cwL = 420;
+  function cardW(landscape) {
+    if (cwAt !== innerWidth && document.body) {
+      cwAt = innerWidth;
+      const probe = document.createElement('div');
+      probe.style.cssText = 'position:absolute;left:-9999px;top:0;height:0;visibility:hidden;pointer-events:none;width:var(--card-w-p)';
+      document.body.appendChild(probe);
+      cwP = probe.getBoundingClientRect().width || cwP;
+      probe.style.width = 'var(--card-w-l)';
+      cwL = probe.getBoundingClientRect().width || cwL;
+      probe.remove();
+    }
+    return landscape ? cwL : cwP;
+  }
+  /* 「先看得见」的那一档：原来写死的尺寸（TMDB w1280、Apple TV 1600 宽、iTunes 1280 框）。
+     取了大图的地方先把它铺上 —— 它小、多半已在缓存里 —— 大图到了再盖上去，只是变清楚。
+     没升档的 URL 返回空串（不需要垫底） */
+  function lite(url) {
+    if (!url) return '';
+    if (url.indexOf('image.tmdb.org') >= 0) return /\/t\/p\/original\/[^/?]+\.jpe?g(\?|$)/i.test(url) ? url.replace('/t/p/original/', '/t/p/w1280/') : '';
+    if (url.indexOf('mzstatic.com') >= 0) {
+      const sr = /\/(\d+)x(\d+)sr\.(jpg|png|webp)/i.exec(url);
+      if (sr && +sr[1] > 1600) return url.replace(sr[0], '/1600x' + Math.round(1600 * sr[2] / sr[1]) + 'sr.' + sr[3]);
+      const bb = /\/(\d+)x(\d+)bb\.(jpg|png)/i.exec(url);
+      if (bb && +bb[1] > 1280 && bb[1] === bb[2]) return url.replace(bb[0], '/1280x1280bb.' + bb[3]);
+    }
+    return '';
+  }
+  return { tmdb, mz, cover, dpr, cardW, size, lite, get roomy() { return roomy; } };
+})();
+
+/* 背景图两层叠：大图在上、垫底的小图在下。大图没到时露出的是小图，到了直接盖住（剧照都是不透明的 JPG） */
+function bgLayers(url) {
+  const l = ImgFit.lite(url);
+  return 'url("' + url + '")' + (l ? ', url("' + l + '")' : '');
+}
+/* <img> 版：先放小图，大图在后台下好、解码完再换上；中途被换掉 / 被回收位图就不动它 */
+function sharpenImg(img, full) {
+  const l = ImgFit.lite(full);
+  if (!l) return full;
+  const im = new Image();
+  im.decoding = 'async';
+  im.onload = () => (im.decode ? im.decode().catch(() => {}) : Promise.resolve()).then(() => {
+    if (img.getAttribute('src') === l) img.setAttribute('src', full);
+    else if (img.dataset.src === l) img.dataset.src = full;
+  });
+  im.src = full;
+  return l;
+}
+
+/* 首页大图 / 详情页剧照 / logo 各自要多大 —— 换算只写一遍。
+   heroBgUrl 是首页卡组的底图 URL 归一化：三张卡走同一条，命中同一份缓存 */
+function heroBgUrl(raw) {
+  if (!raw) return '';
+  const vw = innerWidth, vh = innerHeight;
+  /* 大图盒子：宽 = 视口，高 ≈ 85vh（见 .hero-deck）；竖屏版铺海报（2:3），横屏版铺剧照（16:9） */
+  const need = ImgFit.cover(vw, vh * 0.85, vw < 735 ? 2 / 3 : 16 / 9);
+  if (raw.includes('image.tmdb.org')) return ImgFit.tmdb(raw, 'backdrop', need, 'w1280');
+  if (raw.includes('mzstatic.com')) return ImgFit.mz(raw, need, 1280);
+  return raw;
+}
+function detailBgUrl(raw) {
+  if (!raw) return '';
+  /* .detail-backdrop：100vw × 75vh（至少 540），inset -5% 再 scale(1.02)，实际要再大一成 */
+  const need = ImgFit.cover(innerWidth * 1.12, Math.max(540, innerHeight * 0.75) * 1.12, 16 / 9);
+  if (raw.includes('image.tmdb.org')) return ImgFit.tmdb(raw, 'backdrop', need, 'w1280');
+  if (raw.includes('mzstatic.com')) return ImgFit.mz(raw, need, 1280);
+  return raw;
+}
+/* 首页 / 详情的片名 logo：CSS 上限 320px，1920 以上随宽度长到 480（见 Mac 大屏那段） */
+function logoUrl(url) {
+  if (!url || url.indexOf('image.tmdb.org') < 0) return url;
+  const css = innerWidth >= 1920 ? Math.min(480, innerWidth * 0.0919 + 143.6) : 320;
+  return ImgFit.tmdb(url, 'logo', css * ImgFit.dpr(), 'w500');
+}
 
 /* 顶部那枚提示胶囊：断网常驻，恢复 / 省流提示一会儿就收 */
 const NetBanner = (() => {
@@ -11447,10 +11682,20 @@ const LibSnap = (() => {
   };
 })();
 
+/* 只有自家接口的成败才拿来判网速。第三方（iTunes 搜索）会被内容拦截器 / 地区网络挡掉，
+   R2 直连没开公开读时也会一直失败 —— 这些都不是网慢。算进去的话，一台千兆网的 Mac
+   打开首页就被判进省流模式，海报统统降一档，在 Retina 上糊成一片。 */
+function netSignal(url) {
+  if (/^https:\/\/itunes\.apple\.com\//.test(url)) return false;
+  try { if (url.indexOf(RECV_R2) === 0) return false; } catch (_) {}   /* RECV_R2 在下文才声明 */
+  return true;
+}
+
 async function fetchJSON(url, opts) {
   opts = opts || {};
   const { retries = 1, init = {} } = opts;
   const timeout = NetQ.timeout(opts.timeout || 12000);
+  const counts = netSignal(String(url));
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     const ctrl = new AbortController();
@@ -11463,11 +11708,11 @@ async function fetchJSON(url, opts) {
       answered = true;                                  /* 回了状态码就说明网络是通的（404 也算） */
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const j = await r.json();
-      NetQ.note(performance.now() - t0, true);
+      if (counts) NetQ.note(performance.now() - t0, true);
       return j;
     } catch (e) {
       clearTimeout(t);
-      NetQ.note(performance.now() - t0, answered);
+      if (counts) NetQ.note(performance.now() - t0, answered);
       lastErr = timedOut ? new Error('请求超时 (' + timeout + 'ms)') : e;
 
       if (e?.name === 'AbortError' && !timedOut) break;
@@ -12597,7 +12842,12 @@ async function fetchHeroArtwork(video) {
   ]);
 
   
-  const heroBg = (itunes && itunes.poster) || (tmdb && (tmdb.backdrop || tmdb.poster)) || '';
+  /* 竖屏（手机）的大图是竖的，iTunes 海报正合适；横屏上铺一张 2:3 的海报只能裁出中间一条、
+     再放大好几倍（XDR 上是 7 倍）—— 横屏先用 TMDB 的 16:9 剧照，没有才退回海报 */
+  const wide = !matchMedia('(max-width: 734px)').matches;
+  const heroBg = (wide
+    ? (tmdb && tmdb.backdrop) || (itunes && itunes.poster) || (tmdb && tmdb.poster)
+    : (itunes && itunes.poster) || (tmdb && (tmdb.backdrop || tmdb.poster))) || '';
 
   return {
     bgUrl: heroBg,
@@ -13221,10 +13471,12 @@ function downsizeForCard(url, landscape) {
   if (!url || !url.includes('image.tmdb.org')) return url;
   /* TMDB 的部分 logo 是矢量文件，尺寸前缀对它没意义（有时还会 404），原样取 */
   if (/\.svg(\?|$)/i.test(url)) return url.replace(/\/t\/p\/(w\d+|h\d+)\//, '/t/p/original/');
-  // 卡片放大后（196–216px × 2~3x DPR）w342 会发虚，竖版 / logo 升到 w500；横版 w780 仍够用。
+  // 卡片放大后（196–216px × 2~3x DPR）w342 会发虚，竖版 / logo 升到 w500；横版 w780。
+  // 这两档是下限：大屏 Mac 上卡会长到 300 / 580px 宽，按实际像素再往上取（ImgFit）。
   // 弱网 / 省流量：各降一档（w342 / w500）—— 先看得见，比看得清更要紧
   const slow = NetQ.slow;
-  return url.replace(/\/t\/p\/(original|w\d+|h\d+)\//, landscape ? (slow ? '/t/p/w500/' : '/t/p/w780/') : (slow ? '/t/p/w342/' : '/t/p/w500/'));
+  const floor = landscape ? (slow ? 'w500' : 'w780') : (slow ? 'w342' : 'w500');
+  return ImgFit.tmdb(url, landscape ? 'backdrop' : 'poster', ImgFit.cardW(landscape) * ImgFit.dpr(), floor);
 }
 
 const posterLoader = (() => {
@@ -13899,14 +14151,6 @@ let heroHandoff = null;
 let heroAnimating = false;
 let heroGen = 0;
 
-/* 底图 URL 归一化。三张卡走同一条，命中同一份缓存 */
-function heroBgUrl(raw) {
-  if (!raw) return '';
-  if (raw.includes('image.tmdb.org')) return raw.replace(/\/t\/p\/(original|w\d+|h\d+)\//, '/t/p/w1280/');
-  if (raw.includes('mzstatic.com')) return raw.replace(/\/\d+x\d+bb(-\d+)?\.(jpg|png)/i, '/1280x1280bb.$2');
-  return raw;
-}
-
 /* Apple TV 源的素材随片单一次带齐、同步可得。邻卡只吃这一条路 ——
    要发网络请求的回落只留给中心卡，否则滑一次就是三个请求。 */
 function heroArtOf(v) {
@@ -13938,7 +14182,7 @@ function heroBodyHtml(video, art) {
   if (art.year) parts.push(art.year);
   parts.push(art.type === 'tv' ? 'TV Series' : 'Feature Film');
   const logoBlock = art.logo
-    ? '<img class="hero-logo-img" src="' + esc(art.logo) + '" alt="' + esc(art.title) + '">'
+    ? '<img class="hero-logo-img" src="' + esc(logoUrl(art.logo)) + '" alt="' + esc(art.title) + '">'
     : '<div class="hero-logo-text">' + esc(art.title) + '</div>';
   let metaHtml;
   if (art.atv) {
@@ -13977,7 +14221,7 @@ function heroPaint(el, video, art) {
 
   const layer = document.createElement('div');
   layer.className = 'hcard-art';
-  if (art.bgUrl) layer.style.backgroundImage = 'url("' + art.bgUrl + '")';
+  if (art.bgUrl) layer.style.backgroundImage = bgLayers(art.bgUrl);   /* 取了大图时下面垫着原来那档 */
   else layer.style.background = 'linear-gradient(135deg,#1a1a2e,#16213e)';
   el.insertBefore(layer, anchor);
 
@@ -14057,7 +14301,7 @@ async function railWarmCold(idxs, gen) {
       catch (_) { art = heroArtFallback(v); }
       if (gen !== HERO.gen || !el.isConnected) return;
       heroPaint(el, v, art);
-      if (el._slot === 0) syncStatusField(art.bgUrl || '');
+      if (el._slot === 0) syncStatusField(ImgFit.lite(art.bgUrl) || art.bgUrl || '');
     }
   } finally { HERO.warming = false; }
 }
@@ -15296,12 +15540,18 @@ async function initTodayRecs(picks){
   const cards = {}; row.querySelectorAll('.card[data-path]').forEach(c => { cards[c.dataset.path] = c; });
   const before = {}; Object.keys(cards).forEach(p => { before[p] = cards[p].getBoundingClientRect().left; });
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const sl0 = row.scrollLeft;
 
   sorted.forEach((v, i) => {
     const c = cards[v.path]; if (!c) return;
     row.appendChild(c);
     const rk = c.querySelector('.card-rank'); if (rk) rk.textContent = i + 1;
   });
+  /* 这一排开着 scroll-snap：原先吸在最左的那张卡被挪走时，浏览器会跟着它把整排滚过去
+    （吸附目标跟随）—— 评分一到、重排完，整排就停在了末尾，第一名反而看不见。
+     按重排前的位置还回去（量 FLIP 的终点之前，否则位移里会混进这一下滚动） */
+  if (row.scrollLeft !== sl0) row.scrollLeft = sl0;
+  requestAnimationFrame(() => { if (row.isConnected && row.scrollLeft !== sl0 && !row.matches(':hover')) row.scrollLeft = sl0; });
 
   if (reduced) return;
   const moved = [];
@@ -16837,9 +17087,10 @@ async function revealBackdrop(url, guard) {
   const bd = $('detailBackdrop');
   if (!bd) return;
   if (url) {
-    await decodeImg(url, 1400);                 /* 超时也放行:宁可退回旧观感,不能卡住呈现 */
+    /* 取了大图（Retina 大屏）时，揭幕只等垫底那张 —— 不让几 MB 的原图拖住呈现，原图到了自己盖上去 */
+    await decodeImg(ImgFit.lite(url) || url, 1400);   /* 超时也放行:宁可退回旧观感,不能卡住呈现 */
     if (guard && !guard()) return;              /* 期间用户已经翻页 → 丢弃 */
-    bd.style.backgroundImage = 'url("' + url + '")';
+    bd.style.backgroundImage = bgLayers(url);
   } else {
     bd.style.background = 'linear-gradient(135deg, #1a1a2e, #16213e)';
   }
@@ -16923,10 +17174,8 @@ async function openComingSoonDetail(c){
     bg: (tmdb && (tmdb.backdrop || tmdb.poster)) || c.backdrop || c.poster || '',
   };
 
-  /* 背景：与 openDetail 同规格（TMDB 图统一压到 w1280） */
-  const detailBg = art.bg && art.bg.includes('image.tmdb.org')
-    ? art.bg.replace(/\/t\/p\/(original|w\d+|h\d+)\//, '/t/p/w1280/')
-    : art.bg;
+  /* 背景：与 openDetail 同规格（TMDB 图下限 w1280，大屏按实际像素往上取） */
+  const detailBg = art.bg && art.bg.includes('image.tmdb.org') ? detailBgUrl(art.bg) : art.bg;
   await revealBackdrop(detailBg, () => state.detailReq === myReq);
   if (state.detailReq !== myReq) return;
 
@@ -16937,7 +17186,7 @@ async function openComingSoonDetail(c){
   const creditsRow = creditsParts.length ? '<div class="detail-credits-row">' + creditsParts.join('<span class="credit-sep">·</span>') + '</div>' : '';
 
   const logoBlock = art.logo
-    ? '<img class="detail-logo-img" id="detailLogoImg" src="' + esc(art.logo) + '" alt="' + esc(art.title) + '">'
+    ? '<img class="detail-logo-img" id="detailLogoImg" src="' + esc(logoUrl(art.logo)) + '" alt="' + esc(art.title) + '">'
     : '<div class="detail-logo-text">' + esc(art.title) + '</div>';
 
   const overview = art.overview || '';
@@ -17206,7 +17455,8 @@ const SC = (() => {
     const dm = navigator.deviceMemory || 0;              /* Safari: undefined */
     const hc = navigator.hardwareConcurrency || 0;
     const small = matchMedia('(max-width: 734px)').matches;
-    return (dm > 0 && dm <= 4) || (hc > 0 && hc <= 4) || small;
+    /* Mac 上 Safari 报的核数可能被压低（防指纹）—— 桌面级的机器不凭核数判紧（见 DESKTOP_CLASS） */
+    return (dm > 0 && dm <= 4) || (!DESKTOP_CLASS && hc > 0 && hc <= 4) || small;
   })();
 
   const LIVE_MAX      = LOW_MEM ? 5 : 9;     /* 同时挂着完整 DOM 的章数上限 */
@@ -17847,7 +18097,10 @@ const SC = (() => {
      16:9 那么大。取小图不是省网络，是省那 33MB —— 位图的账永远比传输的账大 */
   function downsizeBackdrop(url) {
     if (!url || !url.includes('image.tmdb.org') || /\.svg(\?|$)/i.test(url)) return url;
-    return url.replace(/\/t\/p\/(original|w\d+|h\d+)\//, LOW_MEM || NetQ.slow ? '/t/p/w780/' : '/t/p/w1280/');
+    if (LOW_MEM || NetQ.slow) return url.replace(/\/t\/p\/(original|w\d+|h\d+)\//, '/t/p/w780/');
+    /* 放到头时铺满整块视口。Retina 大屏上 w1280 不够 → 按实际像素取（下限仍是 w1280）。
+       章节只给视口上下各 WARM 屏留位图，同时解码着的原图最多四五张 */
+    return ImgFit.tmdb(url, 'backdrop', ImgFit.cover(innerWidth, innerHeight, 16 / 9), 'w1280');
   }
 
   function setPoster(ch, url) {
@@ -17855,9 +18108,11 @@ const SC = (() => {
     if (!img) return;
     const src = downsizeBackdrop(url);
     if (!src || img.getAttribute('src') === src || img.dataset.src === src) return;
+    const lite = ImgFit.lite(src);
+    if (lite && img.getAttribute('src') === lite) return;   /* 垫底那张已经挂着、原图正在路上 */
     if (ch._sc.cold) { img.dataset.src = src; return; }   /* 冷档：URL 先寄存 */
     img.onload = () => img.classList.add('is-loaded');
-    img.src = src;
+    img.src = sharpenImg(img, src);                       /* 原图：先放 w1280，原图解码完再换上 */
   }
 
   function paintMeta(ch, meta, title, year) {
@@ -18766,13 +19021,7 @@ async function openDetail(path, name, opts) {
   
   
   const rawDetailBg = (art.tmdb && (art.tmdb.backdrop || art.tmdb.poster)) || art.bgUrl;
-  const detailBg = rawDetailBg
-    ? (rawDetailBg.includes('image.tmdb.org')
-        ? rawDetailBg.replace(/\/t\/p\/(original|w\d+|h\d+)\//, '/t/p/w1280/')
-        : rawDetailBg.includes('mzstatic.com')
-          ? rawDetailBg.replace(/\/\d+x\d+bb(-\d+)?\.(jpg|png)/i, '/1280x1280bb.$2')
-          : rawDetailBg)
-    : '';
+  const detailBg = detailBgUrl(rawDetailBg);   /* 下限仍是原来的 w1280 / 1280x1280bb，大屏按实际像素往上取 */
   await revealBackdrop(detailBg, () => state.detailReq === myReq);
   if (state.detailReq !== myReq) return;
 
@@ -18788,7 +19037,7 @@ async function openDetail(path, name, opts) {
 
   
   const logoBlock = art.logo
-    ? '<img class="detail-logo-img" id="detailLogoImg" src="' + esc(art.logo) + '" alt="' + esc(fileTitle) + '">'
+    ? '<img class="detail-logo-img" id="detailLogoImg" src="' + esc(logoUrl(art.logo)) + '" alt="' + esc(fileTitle) + '">'
     : '<div class="detail-logo-text">' + esc(fileTitle) + '</div>';
 
   
@@ -22048,6 +22297,108 @@ document.addEventListener('keydown', e => {
     if (e.key === 'ArrowRight') nextHero();
   }
 });
+
+/* ══ Mac 键盘：⌘K / Ctrl+K 或 / 打开搜索 ══════════════════════════════════
+   和 Spotlight、Apple 开发者网站、大多数 Web App 同一个习惯。正在打字时不抢 /；
+   输入法组字中（中文拼音选词时按的键）一律不碰；播放器、详情页、菜单开着时不响应 ——
+   从详情页直接跳搜索要同时动两格历史，后退会乱。登录前 / 欢迎页没过也不响应。 */
+document.addEventListener('keydown', e => {
+  if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+  const k = e.key;
+  const cmdK = (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && (k === 'k' || k === 'K');
+  const slash = k === '/' && !e.metaKey && !e.ctrlKey && !e.altKey;
+  if (!cmdK && !slash) return;
+  const t = e.target;
+  if (slash && t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+  if (typeof Player !== 'undefined' && Player.isOpen()) return;
+  if (!isTVLoggedIn() || document.getElementById('wc-root')) return;
+  if ($('detailView')?.classList.contains('on') || $('sheetMenu')?.classList.contains('on')) return;
+  e.preventDefault();
+  openSearch();
+});
+
+/* ══ 行的左右翻页（触控板 / 鼠标）══════════════════════════════════════
+   样式见 .row-nav。只跟鼠标 / 触控板的指针走（Mac、接了妙控板 / 鼠标的 iPad），手指触摸不出。
+   各页的行都是字符串拼出来的，没有统一的出生点 —— 所以不在渲染时挂，而是指针第一次
+   进到某一排时才补两枚按钮，事件委托一处管全站。翻一页 = 屏上能完整看到的卡数 × 步距，
+   露了半张的那张翻过去正好落在最左边，和 Apple TV 网页版一样。 */
+const RowNav = (() => {
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)');
+  const svg = d => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' + d + '"/></svg>';
+  let cur = null;
+  const rowOf = host => host && host.querySelector(':scope > .scroll-row');
+  function hostFrom(t) {
+    if (!t || !t.closest) return null;
+    const row = t.closest('.scroll-row');
+    if (row) return row.parentElement;
+    const btn = t.closest('.row-nav');
+    if (btn) return btn.parentElement;
+    const sec = t.closest('.section');
+    return sec && rowOf(sec) ? sec : null;
+  }
+  function sync(host) {
+    const rn = host._rn; if (!rn) return;
+    const r = rn.row, max = r.scrollWidth - r.clientWidth;
+    rn.prev.classList.toggle('can', r.scrollLeft > 4);
+    rn.next.classList.toggle('can', r.scrollLeft < max - 4);
+  }
+  function page(host, dir) {
+    const rn = host._rn; if (!rn) return;
+    const r = rn.row;
+    const cards = r.querySelectorAll(':scope > .card');
+    const pitch = cards.length > 1 ? cards[1].getBoundingClientRect().left - cards[0].getBoundingClientRect().left : 0;
+    const step = pitch > 0 ? Math.max(1, Math.floor(r.clientWidth / pitch)) * pitch : r.clientWidth * 0.85;
+    r.scrollBy({ left: dir * step, behavior: reduce.matches ? 'auto' : 'smooth' });
+  }
+  function ensure(host) {
+    if (host._rn && host._rn.row.isConnected && host._rn.row.parentElement === host) return host._rn;
+    const row = rowOf(host);
+    if (!row) return null;
+    if (host._rn) { host._rn.prev.remove(); host._rn.next.remove(); }   /* 行被整段重画过 */
+    host.classList.add('row-nav-host');
+    const mk = (cls, label, d, dir) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'row-nav ' + cls; b.tabIndex = -1;
+      b.setAttribute('aria-hidden', 'true'); b.title = label;
+      b.innerHTML = svg(d);
+      b.addEventListener('click', e => { e.stopPropagation(); page(host, dir); });
+      host.appendChild(b);
+      return b;
+    };
+    host._rn = { row, prev: mk('prev', '向左翻', 'M15 5l-7 7 7 7', -1), next: mk('next', '向右翻', 'M9 5l7 7-7 7', 1) };
+    row.addEventListener('scroll', () => { if (cur === host) sync(host); }, { passive: true });
+    return host._rn;
+  }
+  /* 按钮的竖直落点 = 第一张卡画面的中线（横卡竖卡、有没有标题行都对）。
+     按布局量（offsetTop 一路加到宿主），不按矩形量：一排刚滚进来时卡还在播入场动画
+     （从下方 20px 升上来），那一刻量矩形会把钮放低一截，动画停了钮却不跟着走 */
+  function place(host) {
+    const rn = host._rn;
+    const poster = rn.row.querySelector('.card-poster, .card-folder');
+    if (!poster) return;
+    let top = poster.offsetHeight / 2, n = poster;
+    while (n && n !== host) { top += n.offsetTop; n = n.offsetParent; }
+    if (n !== host) { const pr = poster.getBoundingClientRect(), hr = host.getBoundingClientRect(); top = pr.top - hr.top + pr.height / 2; }
+    host.style.setProperty('--rn-top', Math.round(top) + 'px');
+  }
+  function leave() { if (cur) { cur.classList.remove('rn-hover'); cur = null; } }
+  function enter(host) {
+    if (cur === host) return;
+    leave();
+    if (!ensure(host)) return;
+    cur = host;
+    place(host); sync(host);
+    host.classList.add('rn-hover');
+  }
+  document.addEventListener('pointerover', e => {
+    if (e.pointerType !== 'mouse') return;          /* 手指 / 笔不出；iPad 的妙控板报的就是 mouse */
+    const host = hostFrom(e.target);
+    if (host) enter(host); else leave();
+  }, { passive: true });
+  document.addEventListener('pointerout', e => { if (!e.relatedTarget) leave(); }, { passive: true });
+  window.addEventListener('blur', leave);
+  return { page, leave };
+})();
 
 window.addEventListener('popstate', e => {
   /* 播放器关掉时自己退的那一格历史：吞掉，底下的详情页 / 首页原样留着 */
