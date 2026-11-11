@@ -95,12 +95,14 @@ async function context(opts = {}, apple = false, probe = false) {
   return ctx;
 }
 /* 已登录用户进站先看到欢迎页（全屏，盖在一切之上），点「确认并继续」才进入应用 */
-async function enter(ctx, q = '') {
+/* wait：欢迎页退场的时限。XDR 这种 6016×3140 物理像素的视口上，无头环境用软件渲染画 WebGL 极光，
+   退场动画要慢得多 —— 真机上没有这回事 */
+async function enter(ctx, q = '', wait = 5000) {
   const pg = await ctx.newPage();
   pg.on('pageerror', e => errors.push(e.message));
   await pg.goto(ORIGIN + q);
   await pg.waitForFunction(() => typeof playVideo === 'function' && typeof Player === 'object', null, { timeout: 15000 });
-  if (await pg.$('#wc-cta')) { await pg.click('#wc-cta'); await pg.waitForSelector('#wc-root', { state: 'detached', timeout: 5000 }); }
+  if (await pg.$('#wc-cta')) { await pg.click('#wc-cta'); await pg.waitForSelector('#wc-root', { state: 'detached', timeout: wait }); }
   return pg;
 }
 const st = pg => pg.evaluate(() => {
@@ -643,6 +645,174 @@ ok(s.plays.length && s.plays[0].gesture && /\/hls\/0\.0\.[A-Za-z0-9_-]+\/master\
 ok(hits.filter(h => h.endsWith('/info.json')).length === nInfo, '点播放时不再等 info.json（预热结果直接用上）');
 ok(!s.plays[0] || !/crossorigin/.test(await pa.evaluate(s => document.querySelector(s).outerHTML, vid)), 'HLS 不带 crossorigin（字幕在主列表里，不需要 CORS 模式）');
 await pa.keyboard.press('Escape');
+
+console.log('\n■ Mac 大屏（14" / 16" MacBook Pro、Studio Display、Pro Display XDR）与 iPhone / iPad 不变');
+{
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  /* 其余样片也给上 TMDB 条目：评分到齐后「今日推荐」会重排（见下面那条吸附跟随的回归） */
+  const extra = fs.readdirSync(path.join(HERE, 'samples')).filter(f => /\.(mkv|mp4)$/.test(f) && f !== 'long.mp4')
+    .map((f, i) => ({ id: 9100 + i, query: f.replace(/\.[^.]+$/, '').replace(/[._]/g, ' ').toLowerCase(), title: '样片' + i, date: '2020-05-01' }));
+  H.tmdb.movies = [{ id: 9001, query: 'long', title: '漫长的测试', date: '2024-05-01', backdrop: '/b9001.jpg' }, ...extra];
+  /* Apple Silicon 上的 Safari：不给 deviceMemory，核数按 4 报（防指纹时最坏的情况） */
+  const macSafari = () => {
+    Object.defineProperty(Navigator.prototype, 'deviceMemory', { configurable: true, get: () => undefined });
+    Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', { configurable: true, get: () => 4 });
+  };
+  const img = r => r.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>' });
+  const lay = pg => pg.evaluate(() => {
+    const deck = document.querySelector('#view-home .hero-deck').getBoundingClientRect();
+    const h = document.querySelector('#view-home .section-header');
+    return { p: Math.round(ImgFit.cardW(false)), l: Math.round(ImgFit.cardW(true)), deckH: Math.round(deck.height),
+      hdr: h ? parseFloat(getComputedStyle(h).fontSize) : 0, sw: document.documentElement.scrollWidth, vw: innerWidth,
+      roomy: ImgFit.roomy, slow: NetQ.slow, banner: (document.getElementById('netBanner') || {}).textContent || '' };
+  });
+  const pick = pg => pg.evaluate(() => ({
+    hero: heroBgUrl('https://image.tmdb.org/t/p/w1280/b1.jpg').split('/t/p/')[1],
+    atv: heroBgUrl('https://is1-ssl.mzstatic.com/image/thumb/x/1600x900sr.jpg').split('/').pop(),
+    itunes: heroBgUrl('https://is1-ssl.mzstatic.com/image/thumb/x/2000x3000bb.jpg').split('/').pop(),
+    detail: detailBgUrl('https://image.tmdb.org/t/p/w1280/b1.jpg').split('/t/p/')[1],
+    logo: logoUrl('https://image.tmdb.org/t/p/w500/l1.png').split('/t/p/')[1],
+    poster: downsizeForCard('https://image.tmdb.org/t/p/w780/p1.jpg', false).split('/t/p/')[1],
+    land: downsizeForCard('https://image.tmdb.org/t/p/w1280/b1.jpg', true).split('/t/p/')[1],
+  }));
+  const homeReady = pg => until(pg, () => document.querySelectorAll('#view-home .card[data-path]').length > 0, null, 20000);
+
+  /* 14" MacBook Pro：Safari 窗口 1512×860，Retina */
+  const m14 = await context({ viewport: { width: 1512, height: 860 }, deviceScaleFactor: 2 });
+  await m14.addInitScript(macSafari);
+  await m14.route('https://image.tmdb.org/**', img);
+  let itunesHits = 0;
+  await m14.route('https://itunes.apple.com/**', r => { itunesHits++; return r.abort(); });   /* 被拦截器 / 地区网络挡掉的第三方 */
+  const p14 = await enter(m14, '', 60000);
+  await homeReady(p14);
+  await p14.waitForTimeout(2500);
+  let L = await lay(p14), P = await pick(p14);
+  ok(L.p === 216 && L.l === 400 && L.deckH === Math.round(860 * 0.85), `14" MacBook Pro（1512×860）：卡 ${L.p} / ${L.l}、大图 ${L.deckH}px（85vh）—— 与原来一致`);
+  ok(L.roomy && /^original\//.test(P.hero) && /^original\//.test(P.detail) && /^original\//.test(P.logo),
+    `Retina：首页大图 / 详情剧照 / logo 取原图（${P.hero.split('/')[0]} / ${P.detail.split('/')[0]} / ${P.logo.split('/')[0]}）—— Safari 报 4 核也认得出是 Mac`);
+  ok(P.atv === '3040x1710sr.jpg' && P.itunes === '3040x3040bb.jpg', `Apple 图床按屏幕要的像素取：Apple TV 大图 1600 → ${P.atv}，iTunes ${P.itunes}`);
+  ok(/^w500\//.test(P.poster) && /^w780\//.test(P.land), `卡片仍是 w500 / w780（216 / 400px × 2 用不着更大）`);
+  const lay2 = await p14.evaluate(() => ({ bg: bgLayers(heroBgUrl('https://image.tmdb.org/t/p/w1280/b1.jpg')),
+    sr: bgLayers(heroBgUrl('https://is1-ssl.mzstatic.com/image/thumb/x/1600x900sr.jpg')), plain: bgLayers('https://image.tmdb.org/t/p/w1280/b1.jpg') }));
+  ok(/original\/b1\.jpg"\), url\(".*\/w1280\/b1\.jpg"\)$/.test(lay2.bg) && /3040x1710sr\.jpg"\), url\(".*\/1600x900sr\.jpg"\)$/.test(lay2.sr) && !/,/.test(lay2.plain),
+    '取了大图的背景下面垫着原来那档：先看得见，原图到了盖上去（没升档的不垫）');
+  ok(itunesHits > 0 && !L.slow && !/网络较慢/.test(L.banner), `第三方（iTunes 搜索）失败 ${itunesHits} 次：不算网慢，不进省流模式`);
+  const recSl = await p14.evaluate(() => { const r = document.getElementById('todayRecsRow'); return r ? r.scrollLeft : -1; });
+  ok(recSl === 0, `「今日推荐」评分到齐、重排之后仍停在第一名（scrollLeft ${recSl}；原来会被 scroll-snap 的吸附跟随带到末尾）`);
+
+  /* 行的左右翻页：找一排放不下的 */
+  const has = await p14.evaluate(() => {
+    const rows = [...document.querySelectorAll('#view-home .section > .scroll-row')].filter(r => r.scrollWidth > r.clientWidth + 200);
+    const r = rows[0]; if (!r) return false;
+    r.style.scrollBehavior = 'auto'; r.scrollLeft = 0; r.style.scrollBehavior = '';
+    r.parentElement.id = 'rnTest';
+    r.scrollIntoView({ block: 'center' });            /* 首页的行都在首屏大图下面 */
+    return true;
+  });
+  await p14.waitForTimeout(250);                      /* 卡还在播入场动画时就把指针放上去：钮按布局落位，不跟着动画偏 */
+  const row = has ? await p14.evaluate(() => { const b = document.querySelector('#rnTest .card-poster').getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; }) : null;
+  ok(!!row, '首页有一排卡放不下（翻页钮有活干）');
+  if (row) {
+    await p14.mouse.move(row.x, row.y);
+    await p14.waitForTimeout(400);
+    /* 卡的入场动画 / 悬停放大都停了再比对（负载高时入场动画会晚开） */
+    await p14.waitForFunction(() => { const c = document.querySelector('#rnTest .card'); return !!c && c.getAnimations({ subtree: true }).every(a => a.playState !== 'running'); },
+      null, { timeout: 8000, polling: 100 }).catch(() => {});
+    const rn = await p14.evaluate(() => { const h = document.getElementById('rnTest'); const n = h.querySelector('.row-nav.next'), pv = h.querySelector('.row-nav.prev');
+      const pr = h.querySelector('.card-poster').getBoundingClientRect(), nr = n && n.getBoundingClientRect();
+      return n ? { hover: h.classList.contains('rn-hover'), prev: pv.classList.contains('can'), next: n.classList.contains('can'), op: +getComputedStyle(n).opacity,
+        mid: Math.abs((nr.top + nr.height / 2) - (pr.top + pr.height / 2)), right: Math.round(innerWidth - nr.right) } : null; });
+    ok(rn && rn.hover && rn.next && !rn.prev, '指针放到一排上：右侧浮出翻页钮；在最左端时不出左钮');
+    ok(rn && rn.mid < 2, `翻页钮落在海报的竖直中线上（差 ${rn && rn.mid.toFixed(1)}px），离屏幕右缘 ${rn && rn.right}px`);
+    /* 等平滑滚动停稳（负载高时一屏要滚一秒多）：每 200ms 看一次，两次一样才算停 */
+    const settled = pred => p14.waitForFunction(pred, null, { timeout: 8000, polling: 200 }).then(() => true).catch(() => false);
+    await p14.click('#rnTest .row-nav.next');
+    await settled(() => { const v = document.querySelector('#rnTest > .scroll-row').scrollLeft; const same = v > 0 && window.__rnLast === v; window.__rnLast = v; return same; });
+    const af = await p14.evaluate(() => { const h = document.getElementById('rnTest'), r = h.querySelector(':scope > .scroll-row'), cs = r.querySelectorAll(':scope > .card');
+      const pitch = cs[1].getBoundingClientRect().left - cs[0].getBoundingClientRect().left;
+      return { sl: r.scrollLeft, pitch, fit: Math.floor(r.clientWidth / pitch), prev: h.querySelector('.row-nav.prev').classList.contains('can') }; });
+    const n = af.sl / af.pitch;
+    ok(af.sl > 0 && Math.abs(n - Math.round(n)) < 0.05 && Math.round(n) === af.fit && af.prev,
+      `点右钮翻一屏：正好 ${Math.round(n)} 张卡（屏上能完整看到的张数），左钮出现`);
+    await p14.click('#rnTest .row-nav.prev');
+    ok(await settled(() => document.querySelector('#rnTest > .scroll-row').scrollLeft < 2), '点左钮翻回最左');
+    await p14.mouse.move(4, 4);
+    await p14.waitForTimeout(300);
+    ok(await p14.evaluate(() => !document.getElementById('rnTest').classList.contains('rn-hover')), '指针离开：翻页钮收起');
+  }
+
+  /* 键盘：/ 与 ⌘K */
+  await p14.keyboard.press('/');
+  const s1 = await until(p14, () => document.getElementById('searchView').classList.contains('on'), null, 3000).then(() => true).catch(() => false);
+  await p14.keyboard.type('a/b');
+  const typed = await p14.evaluate(() => document.getElementById('searchInput').value);
+  ok(s1 && typed === 'a/b', `「/」打开搜索；搜索框里的「/」照常打字（${typed}）`);
+  await p14.keyboard.press('Escape');
+  await until(p14, () => !document.getElementById('searchView').classList.contains('on'), null, 3000).catch(() => {});
+  await p14.keyboard.press('Meta+k');
+  const s2 = await until(p14, () => document.getElementById('searchView').classList.contains('on'), null, 3000).then(() => true).catch(() => false);
+  ok(s2, '⌘K 打开搜索');
+  await p14.keyboard.press('Escape');
+  await until(p14, () => !document.getElementById('searchView').classList.contains('on'), null, 3000).catch(() => {});
+  await detail(p14, '/Movies/long.mp4', 'long.mp4');
+  await p14.keyboard.press('Meta+k');
+  await p14.waitForTimeout(400);
+  ok(await p14.evaluate(() => !document.getElementById('searchView').classList.contains('on') && document.getElementById('detailView').classList.contains('on')),
+    '详情页开着时 ⌘K 不抢（从详情直接跳搜索会把后退搞乱）');
+  await m14.close();
+
+  /* Pro Display XDR：3008×1570（looks like 3008×1692 去掉菜单栏和 Safari 工具栏） */
+  const xdr = await context({ viewport: { width: 3008, height: 1570 }, deviceScaleFactor: 2 });
+  await xdr.addInitScript(macSafari);
+  await xdr.route('https://image.tmdb.org/**', img);
+  await xdr.route('https://itunes.apple.com/**', r => r.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' },
+    body: JSON.stringify({ results: [{ trackName: 'Long', releaseDate: '2024-05-01T00:00:00Z', artworkUrl100: 'https://is1-ssl.mzstatic.com/image/thumb/Video/x/100x100bb.jpg' }] }) }));
+  const px = await enter(xdr, '', 60000);
+  await homeReady(px);
+  L = await lay(px); P = await pick(px);
+  ok(L.p >= 306 && L.p <= 318 && L.l >= 570 && L.l <= 590, `Pro Display XDR（3008）：卡随宽度长到 ${L.p} / ${L.l}（原来 1680 起就封顶 236 / 440）`);
+  ok(Math.abs(L.deckH - 1570 * 0.85) < 1.5, `首页大图 ${L.deckH}px = 85vh，不再 860 封顶、下面不再露一截黑`);
+  ok(L.hdr >= 27 && L.hdr <= 29 && L.sw === L.vw, `分区标题 ${L.hdr}px；没有横向溢出`);
+  ok(/^w780\//.test(P.poster) && /^w1280\//.test(P.land) && P.atv === '3840x2160sr.jpg',
+    `大卡取大图：海报 ${P.poster.split('/')[0]}、横卡 ${P.land.split('/')[0]}；Apple TV 大图 ${P.atv}（封顶 3840）`);
+  const heroArt = await px.evaluate(() => fetchHeroArtwork({ name: 'long.mp4', path: '/Movies/long.mp4' }).then(a => a.bgUrl));
+  ok(/image\.tmdb\.org\/.*\/b9001\.jpg$/.test(heroArt), `横屏大图先用 TMDB 的 16:9 剧照，不拿 2:3 的 iTunes 海报去裁（${heroArt.split('/').slice(-2).join('/')}）`);
+  await detail(px, '/Movies/long.mp4', 'long.mp4');
+  const dw = await px.evaluate(() => { const b = document.querySelector('.detail-body'), cs = getComputedStyle(b);
+    return { w: Math.round(b.getBoundingClientRect().width - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)),
+      fs: parseFloat(getComputedStyle(document.querySelector('.detail-row .value, .detail-info-value') || b).fontSize) }; });
+  ok(dw.w >= 985 && dw.w <= 1015, `详情页正文宽 ${dw.w}px（原来 600），字 ${dw.fs}px`);
+  const bdl = await px.evaluate(() => { const b = document.getElementById('detailBackdrop'); return { bg: b.style.backgroundImage, ready: b.classList.contains('ready') }; });
+  ok(bdl.ready && /original\/b9001\.jpg"\), url\(".*\/w1280\/b9001\.jpg"\)/.test(bdl.bg), '详情剧照：揭幕只等 w1280，原图叠在上面');
+  await xdr.close();
+
+  /* iPhone / iPad：取图与布局逐项不变 */
+  const iph = await context({ ...devices['iPhone 15 Pro'] });
+  await iph.route('https://image.tmdb.org/**', img);
+  await iph.route('https://itunes.apple.com/**', r => r.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' },
+    body: JSON.stringify({ results: [{ trackName: 'Long', releaseDate: '2024-05-01T00:00:00Z', artworkUrl100: 'https://is1-ssl.mzstatic.com/image/thumb/Video/x/100x100bb.jpg' }] }) }));
+  const pi = await enter(iph, '', 60000);
+  await homeReady(pi);
+  P = await pick(pi);
+  ok(P.hero === 'w1280/b1.jpg' && P.detail === 'w1280/b1.jpg' && P.logo === 'w500/l1.png' && P.poster === 'w500/p1.jpg' && P.land === 'w780/b1.jpg'
+    && P.atv === '1600x900sr.jpg' && P.itunes === '1280x1280bb.jpg', 'iPhone：每一处取图都与原来一致（w1280 / w500 / w780，Apple 图床 1280）');
+  const iArt = await pi.evaluate(() => fetchHeroArtwork({ name: 'long.mp4', path: '/Movies/long.mp4' }).then(a => a.bgUrl));
+  ok(/mzstatic\.com/.test(iArt), '竖屏手机的大图仍先用 iTunes 竖版海报');
+  ok(await pi.evaluate(() => !matchMedia('(hover: hover) and (pointer: fine)').matches && !document.querySelector('.row-nav')), '触屏上没有翻页钮');
+  await iph.close();
+  for (const [label, dev, cw] of [['iPad Pro 11" 横拿', devices['iPad Pro 11 landscape'], [196, 360]], ['iPad 竖拿 820×1180', { ...devices['iPad Pro 11'], viewport: { width: 820, height: 1180 } }, [196, 360]]]) {
+    const ic = await context(dev);
+    await ic.route('https://image.tmdb.org/**', img);
+    const pg = await enter(ic, '', 60000);
+    await homeReady(pg);
+    const l = await lay(pg), pk = await pick(pg);
+    const vh = dev.viewport.height;
+    ok(l.p === cw[0] && l.l === cw[1] && l.deckH === Math.round(Math.min(vh * 0.85, 860)) && pk.hero === 'w1280/b1.jpg' && pk.poster === 'w500/p1.jpg',
+      `${label}：卡 ${l.p} / ${l.l}、大图 ${l.deckH}px、取图 ${pk.hero.split('/')[0]} / ${pk.poster.split('/')[0]} —— 与原来一致`);
+    await ic.close();
+  }
+  delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
+}
 
 console.log('\n■ 优选入口（EDGE_HOSTS）');
 H.env.EDGE_HOSTS = 's2.test';

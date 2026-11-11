@@ -21,9 +21,11 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 | 回源 | 每段开头 1 MB 直通（压低首字节），其余按 4 MB 切片并行取（默认同时 3 片，`HLS_WINDOW` 可调） |
 | 预取 | 第 k 段取完后，后台把第 k+1 段取进边缘缓存；主列表一到就先取第 0 段。播放器来要时：缓存里有就直接出，预取还在半路就等它写完再出（不重复回源）；拖动回看也从缓存出 |
 | 缓存 | 只缓存完整写完的段：数据写在一次性的键下，整段正常写完才把「指针」写到这一段的固定键上，半截的数据永远读不到。请求之间只读彼此的进度数字，不跨请求等待 Promise、不共享流；每个 isolate 同时只跑一路预取 |
-| 视频 | 不转码，负载零拷贝直通；DTS 由 PTS 与 SPS 重排深度推出，跨分段连续 |
+| 视频 | H.264、HEVC、AV1。不转码，负载零拷贝直通；DTS 由 PTS 与 SPS 重排深度推出，跨分段连续 |
+| 参数集 | `CodecPrivate` 里的 hvcC / avcC / av1C 齐全时一个字节不动地用。不齐时（参数集只在码流里的 hev1 / avc3 风格流、整个 `CodecPrivate` 都没有、长度前缀宽度写错）从片头几帧里把 VPS / SPS / PPS（AV1 是序列头 OBU）捞出来，与配置里的按编号合并去重，按 SPS 的 profile / tier / level 重建配置盒（`hvc1` / `avc1` 要求参数集都在配置盒里，苹果只认这一种）。帧里是 Annex B 起始码的，出分段时就地转成 4 字节长度前缀。凑不齐时直接说缺了哪几个 |
+| 不支持的编码 | MPEG-2、VC-1、MPEG-4 Part 2（DivX / Xvid）、VP8、VP9、Theora、ProRes 等进不了系统播放器：播放页直接说是哪种编码、建议用 VLC 打开直链 |
 | 杜比视界 | P5 → `dvh1`+`dvcC`；P8.1 / 8.4 → `hvc1`+`dvvC`+`SUPPLEMENTAL-CODECS`（`db1p` / `db4h`）；**P7（UHD 蓝光双层）逐帧丢弃增强层并把 RPU 改写为 8.1** |
-| HDR | 依 VUI / MKV Colour 写 `VIDEO-RANGE` 与 `colr` / `mdcv` / `clli` |
+| HDR | 依 MKV Colour、HEVC / H.264 的 SPS VUI、AV1 的序列头写 `VIDEO-RANGE` 与 `colr` / `mdcv` / `clli`（MKV 没写 Colour 的 HDR 片不会被当成 SDR） |
 | 音频直通 | AAC、AC-3、E-AC-3（含 Atmos：`CHANNELS="16/JOC"`）、FLAC、ALAC。默认音轨复用在视频分段里，其余为备选音轨 |
 | 音频转码（可选） | DTS、TrueHD、Opus、Vorbis、MP2/MP3、PCM → AC-3 5.1（640 kbps），需要 `audio-tx` Worker |
 | 字幕 | 内封 SRT / ASS（含 zlib 压缩）、同目录外挂 `.srt/.ass/.vtt` → 分段 WebVTT（带 `X-TIMESTAMP-MAP`），中文（简体优先）默认开启。没有字幕 Cues 的文件：字幕块在转视频那一遍顺手收下，不再为字幕把整段视频重读一遍 |
@@ -31,7 +33,8 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 播放页（`/watch`）、首页弹窗和前端站内播放器在 Apple 的原生播放器（macOS Safari，以及 iOS / iPadOS
 上的所有浏览器）里打开 MKV 时自动走这条链路。徽章按码流实测显示（Dolby Vision / HDR10 / HLG）。
 签名过期或文件被替换时，会换新签名并从原位置重载。
-其它浏览器、MP4/MOV 文件仍走 `/stream` 直连（v24 的 FourCC 热修补照旧生效）。新版桌面 Chrome 虽然也
+其它浏览器、MP4/MOV 文件仍走 `/stream` 直连（v24 的 FourCC 热修补照旧生效：`hev1` → `hvc1`、`dvhe` → `dvh1`，
+但只在 hvcC 里带齐 VPS / SPS / PPS 时才改名 —— 参数集只在码流里的流改了名，苹果的解码器反而彻底拒播）。新版桌面 Chrome 虽然也
 声称支持 HLS，但只要 `CODECS` 里有一个它解不了的编码（例如备选音轨的 `ac-3`）就整条拒播，
 杜比视界、AC-3 / E-AC-3 它也解不了，所以不给它 HLS；它能直接播放 MKV。
 
@@ -72,6 +75,27 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
     提示胶囊、toast 居中到内容区。报两块屏的折叠屏（书本姿态）上，提示与底部弹层挪到右半屏，不压折缝。
   - **矮屏**：首页主视觉、资料库展厅、详情页剧照、欢迎页原来带着按竖屏手机定的最小高度，片名、按钮、轮播点会落进导航条下面；
     现在矮屏下刚好一屏。
+- **Mac 与大屏**（MacBook Air / Pro、iMac、Studio Display、Pro Display XDR，外接显示器同理）：
+  - **尺寸**：macOS 的「looks like」分辨率已经换算好物理尺寸，导航条、按钮这些「系统件」保持原样（和系统 App 一样）；
+    内容随窗口宽度连续地长（clamp + vw 插值，Mac 的十几种 looks-like 每种都对）：1920 宽时与原来一致，到 XDR 的 3008 时
+    竖卡 236 → 312px、横卡 440 → 580px，分区标题、卡片字、首页片名与按钮、详情页字号约大 1.25 倍；详情页正文宽 600 → 1000px。
+    1680 以下（所有 iPad、iPhone）一条都不变。
+  - **首页大图**：原来 860px 封顶，在 Studio Display / XDR 上只占上半屏、下面整整一截黑；现在宽屏上放到 85vh
+    （竖放的显示器另有上限，不会把剧照裁成一条竖缝）。
+  - **清晰度**：按图在屏上实际占的物理像素取图，原来写死的那档是下限（iPhone / iPad 的取图逐张不变）：
+    Retina Mac 上首页大图、详情剧照、片名 logo 取原图，Apple TV 大图按需要取到 3040–3840px（原来 1600 / 1280），
+    大屏上的卡片取 w780 / w1280。原图只在内存宽裕、网络不慢、不是手机屏的设备上取；Safari 不报内存、
+    核数也可能报少，桌面级（能悬停、指针精确、屏宽 ≥ 1440）的机器单独认出来。横屏的首页大图先用 TMDB 的 16:9 剧照，
+    不再拿 2:3 的 iTunes 海报去裁（XDR 上要放大 7 倍）。
+  - **触控板 / 鼠标**：指针放到一排卡上，两侧浮出玻璃翻页钮，一次翻一屏（屏上能完整看到的张数）；
+    iPad 接了妙控板 / 鼠标时一样有，手指触摸不出现。
+  - **渐进清晰**：取了原图的地方下面垫着原来那档（w1280 / Apple TV 1600），先看得见，原图到了盖上去 ——
+    慢一点的网络也不会因为几 MB 的大图迟迟不出画面。
+  - **键盘**：`/` 或 ⌘K（Ctrl+K）打开搜索；正在打字、输入法组字、播放器或详情页开着时不响应。
+  - **「今日推荐」开在第一名**：评分到齐后这一排会重排，而它开着 scroll-snap —— 原先吸在最左的那张卡被挪走时，
+    浏览器会跟着它把整排滚过去，于是整排停在末尾（第 9–15 名），第一名反而看不见（各种设备都会）。重排后按原位置还回去。
+  - **网速判断**：只有自家接口的成败算数。第三方（iTunes 搜索被内容拦截器 / 地区网络挡掉）、R2 直连失败不再被当成网慢 ——
+    原来一台千兆网的 Mac 打开首页就可能被判进省流模式，海报全降一档；为 Retina 取的大图也不拿来计时。
 - **预告片**：资料库展厅的预告片原来全部来自 IMDb，而 IMDb 现在不接 Cloudflare Worker 的请求（每部片都回空，展厅只剩剧照）。
   现在 IMDb 给得出直链 MP4 时照旧用直链；给不出就用 TMDB 登记的 YouTube 官方预告（正式预告优先、官方优先、中文略优先），
   套成与 `<video>` 同样的接口放：静音自动开播、从第 3 秒进、进度环、取消静音、给播放器让路都与直链一致，
@@ -176,13 +200,22 @@ Opus、Vorbis、MP2/MP3、PCM 解码器 + AC-3 编码器 + libswresample，编�
    - 部署命令：`npx wrangler deploy`
 
    也可以在本机 `cd audio-tx && npx wrangler deploy`。
-2. 给主 Worker（`stream.cuven.online` 那个）加 Service Binding：主 Worker → 设置 → 绑定 → 添加 → 服务绑定，
-   变量名 `AUDIO_TX`，服务选 `cuven-audio-tx`，保存（会自动重新部署）。
+2. 把主 Worker（`stream.cuven.online` 那个）接上它，两种方式任选其一：
+   - **Service Binding**：主 Worker → 设置 → 绑定 → 添加 → 服务绑定，变量名 `AUDIO_TX`，服务选 `cuven-audio-tx`。
+   - **公网地址（不用绑定）**：转码 Worker 挂自定义域名（`audio-tx/wrangler.toml` 里写的是 `audio.cuven.us`，
+     每次构建都会保留）。然后：
+     1. 转码 Worker → 设置 → 变量和机密 → 添加，类型选「密钥（Secret）」，名称 `AUDIO_TX_KEY`，值随便一串够长的随机字符。
+     2. 主 Worker → 设置 → 变量和机密：添加文本变量 `AUDIO_TX_URL` = `https://audio.cuven.us`，
+        再添加密钥 `AUDIO_TX_KEY`，值和上一步**完全一样**。
 
-打开 `https://stream.cuven.online/health`，「DTS / TrueHD」一行显示「✅ 已绑定，转码 Worker 在线」就生效了。
+     密钥是为了挡住外人：自定义域名谁都能访问，不设的话任何人都能拿它转码、耗你的 CPU。
+     配了之后，不带或带错密钥的请求一律 401。
+
+打开 `https://stream.cuven.online/health`，「DTS / TrueHD」一行显示「✅ 已绑定，转码 Worker 在线」
+（公网地址时是「✅ 经 audio.cuven.us，转码 Worker 在线，密钥一致」）就生效了；两边密钥不一样时会直接写「密钥不对」。
 （健康页还会列出 TMDB、OpenSubtitles、剧集目录、访问保护是否配好。）
 
-用 wrangler 部署主 Worker 的，等价写法是在主 Worker 的 `wrangler.toml` 里加：
+用 wrangler 部署主 Worker、走 Service Binding 的，等价写法是在主 Worker 的 `wrangler.toml` 里加：
 
 ```toml
 [[services]]
@@ -190,10 +223,10 @@ binding = "AUDIO_TX"
 service = "cuven-audio-tx"
 ```
 
-绑定后，这些音轨会以「DTS → Dolby Digital 5.1」之类的名字出现在音轨菜单里。如果片源只有 DTS / TrueHD，
+接上后，这些音轨会以「DTS → Dolby Digital 5.1」之类的名字出现在音轨菜单里。如果片源只有 DTS / TrueHD，
 转码轨就是默认音轨。转码轨的分段落在全局 AC-3 帧网格上，跨分段时先预热、并越过分段边界多读一点，
 所以接缝处不会出爆音（测试里与原声对比 SNR 76 dB 以上）。转好的分段会进边缘缓存，拖动回看时不必重新转码。
-不绑定时，这些音轨不进播放列表，播放页会给出提示。
+没接时，这些音轨不进播放列表，播放页会给出提示。
 
 从源码重建 WASM：`audio-tx/build.sh`（需要 emscripten 与 FFmpeg 6.1.1 源码）。
 
@@ -209,8 +242,8 @@ service = "cuven-audio-tx"
 
 ```bash
 tests/make-samples.sh     # 用 ffmpeg / mkvmerge 生成样片（约 30 秒）
-node tests/run.mjs        # Worker：86 项回归，约 1 分钟
-node tests/web.mjs        # 前端：91 项，需要 Playwright + Chromium（PLAYWRIGHT_PATH 可指定其 index.js），约 5 分钟
+node tests/run.mjs        # Worker：114 项回归，约 1 分钟
+node tests/web.mjs        # 前端：119 项，需要 Playwright + Chromium（PLAYWRIGHT_PATH 可指定其 index.js），约 8 分钟
 ```
 
 测试台直接运行 `Stream_v25.js` 的真实代码，并模拟 Dropbox（OAuth、临时链接、目录列表、带 Range 的下载，可放慢、可半路断流）
@@ -230,6 +263,10 @@ node tests/web.mjs        # 前端：91 项，需要 Playwright + Chromium（PLA
 - **片源**：Chrome 上 MKV 走直连，模拟 Safari 时打开详情页就预热 `info.json`、点击的手势里就交出 HLS 主列表；
 - **iPhone Duo**：四种实测视口（再加一次合上）下是侧边导航条还是底部胶囊、选中指示器对齐、主视觉不被导航挡住、没有横向溢出；
   侧边导航下的资料库与搜索；折起横拿时欢迎页与详情页的关键按钮在第一屏；
+- **Mac 大屏**：模拟 Apple Silicon 上的 Safari（不报内存、核数报 4）：14" MacBook Pro 的卡宽与大图高度与原来一致、
+  Retina 上大图 / 剧照 / logo 取原图、Apple 图床按像素取、第三方失败不进省流模式；行翻页钮的出现、落点、翻一屏、翻回、收起；
+  「今日推荐」重排后仍停在第一名；`/` 与 ⌘K 打开搜索、搜索框里照常打 `/`、详情页开着时不抢；XDR 上卡宽、大图 85vh、标题字号、没有横向溢出、大卡取大图、
+  横屏大图用 16:9 剧照、详情正文宽；iPhone 与 iPad（横拿 / 竖拿）的取图与布局逐项不变；
 - **预告片**：展厅预告片自动开播、给播放器与详情页让路后接着放；IMDb 不给直链时用 YouTube 官方预告（用替身播放器测：
   静音自动开播、进度环、取消静音、让路、离开时销毁）；
 - **片名**：卡片先排原名、中文名一到原位换字，之后新排的卡一出来就是中文，中文名搜得到，「正在播放」也是中文名；
@@ -254,6 +291,10 @@ node tests/web.mjs        # 前端：91 项，需要 Playwright + Chromium（PLA
   一季的中文集名 / 简介（缺的补英文）/ 剧照；`type=tv` 不会被同名电影顶掉；目录不存在回空表。
 - **预告片**：IMDb 给直链时照旧用（缓存 6 小时）；IMDb 回 403 时几毫秒内退到 TMDB 的官方 YouTube 预告（挑正式、官方、中文那条），
   之后 30 分钟不再白等 IMDb；缓存；只有片名年份也能找到；查无此片回空。
+- **参数集**（由正常 MKV 原地改出的样片：参数集只在码流里 / 没有 `CodecPrivate` / Annex B 帧，HEVC 与 H.264 各三种，
+  外加没有 av1C 也没有 Colour 的 AV1）：重建的配置盒带齐参数集，`CODECS` 与标准文件一致，视频逐包一致（Annex B 转回长度前缀后
+  与原文件逐字节相同），ffmpeg 完整解码无错误；AV1 仍判为 PQ。凑不齐时报出缺了哪几个；不支持的编码说清是哪种；
+  MP4 直连只给带齐参数集的 `hev1` 改名。
 - **字幕清洗**：21 条片头片尾的署名 / 声明 / 广告与正片里的网址、引流全部删掉；16 条容易误伤的台词（「加入我们」「淘宝」
   「仅供参考」「未经授权」、邮箱、Mr.Smith、「corrected by the teacher」……）一条不误删；混着广告行的只删那一行；
   ASS 的 Staff 样式整条不要、译注留着；直连 `/api/subs/vtt` 与 HLS 分段同一套。

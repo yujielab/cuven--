@@ -111,6 +111,64 @@ console.log('\n■ H.264 / AV1 / 字幕 / 异常');
   ok(same, '乱序请求的分段与顺序请求逐字节一致');
 }
 
+console.log('\n■ 参数集：只在码流里 / 没有 CodecPrivate / Annex B 帧（HEVC、H.264、AV1）');
+{
+  const X = await H.internals();
+  const box = (buf, type) => { const i = buf.indexOf(Buffer.from(type)); return i < 4 ? null : buf.subarray(i + 4, i - 4 + buf.readUInt32BE(i - 4)); };
+  const codecOf = m => (/CODECS="([^",]+)/.exec(m) || [])[1];
+  const ref = { hevc: codecOf((await H.dump('/Movies/hevc_rh.mkv', path.join(OUT, 'ps_ref_hevc'))).master),
+    avc: codecOf((await H.dump('/Movies/avc_rh.mkv', path.join(OUT, 'ps_ref_avc'))).master) };
+  for (const kind of ['hevc', 'avc']) {
+    for (const v of ['inband', 'nopriv', 'annexb']) {
+      const f = `${kind}_${v}`, dir = path.join(OUT, 'ps_' + f);
+      const r = await H.dump(`/Movies/${f}.mkv`, dir);
+      const mp4 = path.join(dir, 'v.mp4');
+      const cfg = box(fs.readFileSync(mp4), kind === 'hevc' ? 'hvcC' : 'avcC');
+      const p = kind === 'hevc' ? X.hevcParseHvcC(cfg) : X.avcParseAvcC(cfg);
+      const have = kind === 'hevc' ? [32, 33, 34].every(t => p.nals.some(n => n.type === t)) : p.sps.length > 0 && p.pps.length > 0;
+      const what = { inband: '参数集只在码流里', nopriv: '没有 CodecPrivate', annexb: 'Annex B 帧' }[v];
+      ok(have && codecOf(r.master) === ref[kind],
+        `${kind === 'hevc' ? 'HEVC' : 'H.264'} ${what}：重建的 ${kind === 'hevc' ? 'hvcC' : 'avcC'} 带齐参数集，CODECS 与标准文件一致（${codecOf(r.master)}）`);
+      samePackets(S(`${kind}_rh.mkv`), 'v:0', mp4, 'v:0', `${kind === 'hevc' ? 'HEVC' : 'H.264'} ${what}：视频逐包一致${v === 'annexb' ? '（起始码转回长度前缀）' : ''}`);
+      let err = '';
+      try { ff(['-xerror', '-i', mp4, '-f', 'null', '-'], { stdio: ['ignore', 'ignore', 'pipe'] }); } catch (e) { err = String(e.stderr || e.message).slice(0, 160); }
+      ok(!err, `${kind === 'hevc' ? 'HEVC' : 'H.264'} ${what}：ffmpeg 完整解码无错误${err ? '：' + err : ''}`);
+    }
+  }
+  // AV1：没有 av1C、也没有 MKV 的 Colour —— av1C 与 PQ 都从序列头 OBU 里来
+  {
+    const refM = (await H.dump('/Movies/av1_hdr.mkv', path.join(OUT, 'ps_ref_av1'))).master;
+    const r = await H.dump('/Movies/av1_nopriv.mkv', path.join(OUT, 'ps_av1_nopriv'));
+    const mp4 = path.join(OUT, 'ps_av1_nopriv', 'v.mp4');
+    const c1 = box(fs.readFileSync(mp4), 'av1C');
+    ok(c1 && c1[0] === 0x81 && codecOf(r.master) === codecOf(refM) && /VIDEO-RANGE=PQ/.test(r.master),
+      `AV1 没有 av1C 也没有 Colour：序列头里重建 av1C（${codecOf(r.master)}），仍判为 PQ（不会被当成 SDR 播得发灰）`);
+    samePackets(S('av1_hdr.mkv'), 'v:0', mp4, 'v:0', 'AV1 没有 av1C：视频逐包一致');
+  }
+  // 凑不齐参数集：说清缺什么，而不是一句「暂不支持」
+  const P = X.hlsParamConfig;
+  let msg = '';
+  try { P('hevc', { priv: null }, { video: [{ data: new Uint8Array([0, 0, 0, 3, 0x26, 0x01, 0xAF]) }] }); } catch (e) { msg = e.message; }
+  ok(/缺 VPS \/ SPS \/ PPS/.test(msg), `参数集哪儿都找不到：报出缺了哪几个（${msg}）`);
+  // 不支持的编码：说清是什么
+  const u = X.hlsUnsupportedVideo;
+  const vfw = new Uint8Array(40); vfw.set([0x57, 0x56, 0x43, 0x31], 16);       // 'WVC1'
+  ok(/MPEG-2/.test(u({ codecId: 'V_MPEG2' })) && /VC-1/.test(u({ codecId: 'V_MS/VFW/FOURCC', priv: vfw })) && /VP9/.test(u({ codecId: 'V_VP9' })) && /VLC/.test(u({ codecId: 'V_VP9' })),
+    '不支持的编码说清是什么（MPEG-2、VC-1、VP9……）和怎么办');
+  // MP4 直连：hev1 只有带齐参数集才改名成 hvc1
+  const entry = (cc, arrays) => {
+    const e = new Uint8Array(200); e.set([...cc].map(c => c.charCodeAt(0)), 0); e[11] = 1;
+    const hv = new Uint8Array(23 + arrays.length * 5); hv[22] = arrays.length;
+    arrays.forEach((t, i) => hv.set([0x80 | t, 0, 1, 0, 0], 23 + i * 5));
+    e.set([0, 0, 0, 8 + hv.length, 0x68, 0x76, 0x63, 0x43], 78); e.set(hv, 86);
+    return e;
+  };
+  const full = entry('hev1', [32, 33, 34]), bare = entry('hev1', []);
+  X.patchSafariMp4Buffer(full); X.patchSafariMp4Buffer(bare);
+  ok(String.fromCharCode(...full.subarray(0, 4)) === 'hvc1' && String.fromCharCode(...bare.subarray(0, 4)) === 'hev1',
+    'MP4 直连：hvcC 带齐参数集的 hev1 改名 hvc1；参数集只在码流里的不改（改了苹果反而拒播）');
+}
+
 console.log('\n■ 管线：并行窗口、边缘缓存预取、半路失败不落半截、字幕借道');
 {
   const settle = () => Promise.all(H.pending.splice(0));
@@ -569,7 +627,7 @@ if (fs.existsSync(path.join(HERE, '..', 'audio-tx', 'tx.wasm'))) {
   const h0 = await health();
   await H.bindAudioTx();
   const h1 = await health();
-  ok(/DTS \/ TrueHD<\/span><span>— 未绑定 AUDIO_TX/.test(h0) && /DTS \/ TrueHD<\/span><span>✅ 已绑定，转码 Worker 在线/.test(h1),
+  ok(/DTS \/ TrueHD<\/span><span>— 未配置（绑定 AUDIO_TX 或设 AUDIO_TX_URL/.test(h0) && /DTS \/ TrueHD<\/span><span>✅ 已绑定，转码 Worker 在线/.test(h1),
     '健康页：转码 Worker 绑没绑、在不在线，一眼看得到（还有 TMDB / OpenSubtitles / 剧集目录 / 访问保护）');
   const b = `/hls/${H.token('/Movies/hdr10_multi.mkv')}/`;
   const m = await (await H.call(b + 'master.m3u8')).text();
@@ -603,6 +661,35 @@ if (fs.existsSync(path.join(HERE, '..', 'audio-tx', 'tx.wasm'))) {
     ok(snr > 50 && seams === durs.length - 1 && worst < 4,
       `${label} → AC-3：SNR ${snr.toFixed(1)} dB（零偏移对齐），${seams} 个接缝处误差 / 中位误差 最大 ${worst.toFixed(2)}`);
   }
+}
+
+if (H.audioTx.worker) {
+  console.log('\n■ 转码 Worker 走公网地址（AUDIO_TX_URL + AUDIO_TX_KEY，不用 Service Binding）');
+  const b = `/hls/${H.token('/Movies/hdr10_multi.mkv')}/`;
+  const m = await (await H.call(b + 'master.m3u8')).text();
+  const u4 = new RegExp('URI="([^"]*t4\\.m3u8)"').exec(m)[1];
+  const seg = b + u4.replace(/[^/]+$/, '') + 't4/1.m4s';
+  const ref = Buffer.from(await (await H.call(seg)).arrayBuffer());           // Service Binding 转出来的那份
+  const bound = H.env.AUDIO_TX;
+  delete H.env.AUDIO_TX;
+  H.env.AUDIO_TX_URL = 'https://audio.test/'; H.env.AUDIO_TX_KEY = 'k-test-123';
+  H.audioTx.key = 'k-test-123'; H.audioTx.calls = 0;
+  caches.default.m.clear();                                                    // 清掉边缘缓存：这次必须真的去转
+  const got = await H.call(seg);
+  const viaUrl = Buffer.from(await got.arrayBuffer());
+  ok(got.status === 200 && H.audioTx.calls > 0 && viaUrl.length > 1000 && viaUrl.equals(ref),
+    `经公网地址转码：输出与 Service Binding 逐字节一致（${viaUrl.length} 字节，${H.audioTx.calls} 次调用）`);
+  const health = async () => (await H.call('/health')).text();
+  ok(/DTS \/ TrueHD<\/span><span>✅ 经 audio\.test，转码 Worker 在线，密钥一致/.test(await health()), '健康页：经 audio.test、在线、密钥一致');
+  H.audioTx.key = 'another-key'; caches.default.m.clear();
+  const bad = await H.call(seg);
+  ok(bad.status === 502 && /密钥不对/.test(await health()), `两边密钥不一样：转码分段失败（${bad.status}），健康页直说「密钥不对」`);
+  H.audioTx.key = '';
+  ok(/没配 AUDIO_TX_KEY/.test(await health()), '转码 Worker 没配密钥：健康页提醒公网地址谁都能调');
+  delete H.env.AUDIO_TX_KEY;
+  H.audioTx.key = 'k-test-123';
+  ok(/密钥不对/.test(await health()), '主 Worker 没带密钥、转码 Worker 要密钥：一样报「密钥不对」');
+  H.env.AUDIO_TX = bound; delete H.env.AUDIO_TX_URL; H.audioTx.key = '';
 }
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} 通过，${fail} 失败`);

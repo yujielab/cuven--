@@ -1,7 +1,8 @@
 /**
  * cuven audio-tx —— DTS / TrueHD / Opus / Vorbis / MP2 / MP3 / PCM → AC-3 转码 Worker
  * ────────────────────────────────────────────────────────────────
- * 主 Worker（Stream_v25.js）通过 Service Binding `AUDIO_TX` 调用它，把一个 HLS 分段
+ * 主 Worker（Stream_v25.js）通过 Service Binding `AUDIO_TX`、或者公网地址（变量 `AUDIO_TX_URL`，
+ * 本 Worker 挂自定义域名）调用它，把一个 HLS 分段
  * 所需的源音频帧发过来，这里在 WASM（精简 libavcodec + libswresample）里解码、
  * 对齐到全局 AC-3 帧网格、编码，回传 AC-3 帧。
  *
@@ -101,9 +102,23 @@ export function transcode(X, h, data) {
   }
 }
 
+/* 公网地址调用时的共享密钥：配了 AUDIO_TX_KEY（Secret），请求头 X-Audio-Tx-Key 必须是同一个值，否则 401 ——
+   挂在自定义域名上谁都能访问，不设密钥等于把转码 CPU 白送给外人。走 Service Binding 时可以不设 */
+function keyOk(request, env) {
+  const want = env && env.AUDIO_TX_KEY ? String(env.AUDIO_TX_KEY) : '';
+  if (!want) return true;
+  const got = request.headers.get('X-Audio-Tx-Key') || '';
+  if (got.length !== want.length) return false;
+  let d = 0;
+  for (let i = 0; i < want.length; i++) d |= got.charCodeAt(i) ^ want.charCodeAt(i);
+  return d === 0;
+}
+
 export default {
-  async fetch(request) {
-    if (request.method !== 'POST') return new Response('cuven audio-tx', { status: 200 });
+  async fetch(request, env) {
+    if (!keyOk(request, env)) return new Response('unauthorized', { status: 401 });
+    // GET：健康检查。告诉主 Worker 这边有没有在校验密钥（它据此在 /health 上提示）
+    if (request.method !== 'POST') return new Response(`cuven audio-tx; key=${env && env.AUDIO_TX_KEY ? 'on' : 'off'}`, { status: 200 });
     const buf = new Uint8Array(await request.arrayBuffer());
     const hl = new DataView(buf.buffer, buf.byteOffset).getUint32(0);
     const h = JSON.parse(new TextDecoder().decode(buf.subarray(4, 4 + hl)));

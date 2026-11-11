@@ -78,6 +78,16 @@ mkvmerge -q -o dts_only.mkv -A avc_raw.mp4 --language 0:eng dts_20.dts
 q -f lavfi -i "testsrc2=size=1280x720:rate=30000/1001" -f lavfi -i "sine=frequency=700:sample_rate=48000" -t 12 \
   -c:v libsvtav1 -preset 12 -g 60 -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc \
   -c:a libopus -b:a 128k -f matroska av1_hdr.mkv
+# 参数集：编码器在每个关键帧前重复 VPS / SPS / PPS（x265 repeat-headers；x264 裸流默认就这样），
+# 再由 mkv-variants.mjs 原地派生「配置盒里没有参数集 / 没有 CodecPrivate / Annex B 帧」三种不规范的版本
+q -f lavfi -i "testsrc2=size=640x360:rate=25" -t 10 -c:v libx265 -preset ultrafast \
+  -x265-params "log-level=error:keyint=25:min-keyint=25:bframes=3:repeat-headers=1" -pix_fmt yuv420p hevc_rh.hevc
+q -f lavfi -i "testsrc2=size=640x360:rate=25" -t 10 -c:v libx264 -preset veryfast -bf 3 -g 25 -f h264 avc_rh.h264
+mkvmerge -q -o hevc_rh.mkv hevc_rh.hevc
+mkvmerge -q -o avc_rh.mkv --default-duration 0:25fps avc_rh.h264
+node ../mkv-variants.mjs hevc_rh.mkv hevc
+node ../mkv-variants.mjs avc_rh.mkv avc
+node ../mkv-variants.mjs av1_hdr.mkv av1
 # 前端测试（tests/web.mjs）用：3 分钟的 MP4，续播 / 下一集要有足够长的片长
 q -f lavfi -i "testsrc2=size=640x360:rate=25" -f lavfi -i "sine=frequency=600:sample_rate=48000" -t 180 \
   -c:v libx264 -preset veryfast -crf 34 -g 50 -c:a aac -b:a 64k -movflags +faststart long.mp4

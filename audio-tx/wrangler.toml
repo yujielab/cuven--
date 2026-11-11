@@ -1,16 +1,21 @@
 # cuven 音频转码 Worker（DTS / TrueHD / Opus 等 → AC-3）
-# 部署：在本目录执行  npx wrangler deploy
-# 然后在主 Worker（Stream_v25.js）的 wrangler.toml 里加 Service Binding：
+# 部署：Workers Builds（根目录 audio-tx、部署命令 npx wrangler deploy），或在本目录执行 npx wrangler deploy
 #
-#   [[services]]
-#   binding = "AUDIO_TX"
-#   service = "cuven-audio-tx"
+# 主 Worker（Stream_v25.js）接它的两种方式，二选一：
+#   ① Service Binding：主 Worker → 设置 → 绑定 → 服务绑定，变量名 AUDIO_TX，服务 cuven-audio-tx
+#   ② 公网地址：本 Worker 挂下面这个自定义域名；主 Worker 设变量 AUDIO_TX_URL = https://audio.cuven.us，
+#      并在两边各加一个 Secret：AUDIO_TX_KEY（同一个随机长串）—— 不带或带错密钥的请求一律 401
 #
-# 不绑定时主 Worker 一切照旧，只是 DTS / TrueHD 音轨不出现在 HLS 音轨列表里。
+# 两样都没配时主 Worker 一切照旧，只是 DTS / TrueHD 音轨不出现在 HLS 音轨列表里。
 name = "cuven-audio-tx"
 main = "worker.js"
 compatibility_date = "2025-06-01"
 workers_dev = false
+
+# 自定义域名写在配置里：每次自动构建部署都会保留它（不写的话以控制台上的为准）
+routes = [
+  { pattern = "audio.cuven.us", custom_domain = true },
+]
 
 # 一个 6 秒分段的转码约需几十到一两百毫秒 CPU：需要 Workers 付费计划
 [limits]
