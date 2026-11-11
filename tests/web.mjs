@@ -593,16 +593,19 @@ for (const [w, h, label, mode, sai] of [[382, 580, '折起竖拿', 'float'], [46
     const midX = b => b ? (b.left + b.right) / 2 : NaN;
     const btns = r(card && card.querySelector('.hero-buttons')), ttl = r(card && (card.querySelector('.hero-logo-img') || card.querySelector('.hero-logo-text')));
     const aligned = Math.abs(midX(btns) - midX(dots)) <= 4 && (!ttl || Math.abs(midX(ttl) - midX(dots)) <= 4);
+    /* 沉浸：大图铺满一整屏，暂停钮与轮播点在 Home 指示条之上 */
+    const deck = r(document.querySelector('.hero-deck'));
+    const immersive = !!deck && Math.abs(deck.top) <= 1 && Math.abs(deck.height - innerHeight) <= 1 && dots.bottom <= innerHeight - 14;
     const clear = !!(nav && play && dots) && play.top >= 0 && (float
       ? apart(play, nav) && apart(circ, nav) && apart(dots, nav) && apart(dots, srch) && nav.left > innerWidth / 2 && nav.right >= innerWidth - 24
-        && srch.top >= nav.bottom && Math.abs((srch.left + srch.right) / 2 - (nav.left + nav.right) / 2) <= 4 && shift === 0 && aligned
+        && srch.top >= nav.bottom && Math.abs((srch.left + srch.right) / 2 - (nav.left + nav.right) / 2) <= 4 && shift === 0 && aligned && immersive
       : rail ? apart(play, nav) && apart(dots, nav) && play.left >= nav.right
       : play.bottom <= nav.top && dots.bottom <= nav.top);
     const pillOk = !!(pill && act) && Math.abs(pill.left - act.left) <= 2 && Math.abs(pill.top - act.top) <= 2 && Math.abs(pill.width - act.width) <= 2 && Math.abs(pill.height - act.height) <= 2;
     return { mode: float ? 'float' : rail ? 'rail' : 'bottom', vertical: nav ? nav.height > nav.width : false, clear, pillOk, sw: document.documentElement.scrollWidth, vw: innerWidth };
   });
   ok(g.mode === mode && g.vertical === (mode !== 'bottom') && g.clear && g.pillOk && g.sw === g.vw,
-    `${label} ${w}×${h}：${DESC[mode]}，选中指示器对齐，主视觉的按钮与轮播点不被导航挡住${mode === 'float' ? '、居中到导航左边那块' : ''}，没有横向溢出${g.mode === mode ? '' : `（实际：${g.mode}）`}`);
+    `${label} ${w}×${h}：${DESC[mode]}，选中指示器对齐，主视觉的按钮与轮播点不被导航挡住${mode === 'float' ? '、居中到导航左边那块，大图铺满整屏' : ''}，没有横向溢出${g.mode === mode ? '' : `（实际：${g.mode}）`}`);
 }
 /* 往下一滚、大图收成卡片：卡与卡下的进度胶囊落在导航左边那块，两者同宽，不钻到导航底下（实机的右侧安全区） */
 await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: { top: 0, right: 84, bottom: 20, left: 0 } });
@@ -637,8 +640,9 @@ for (const [label, opts] of [['普通 iPhone（393 宽）', devices['iPhone 15 P
   const pa = await enter(ac);
   await pa.waitForTimeout(800);
   const b = await pa.evaluate(() => { const n = document.getElementById('navContainer').getBoundingClientRect(), c = document.documentElement.classList;
-    return { off: !c.contains('rail') && !c.contains('rail-float'), bottom: n.bottom >= innerHeight - 90 && n.width > n.height }; });
-  ok(b.off && b.bottom, `${label}：不当成 iPhone Duo，照旧底部胶囊`);
+    const d = document.querySelector('.hero-deck').getBoundingClientRect();
+    return { off: !c.contains('rail') && !c.contains('rail-float'), bottom: n.bottom >= innerHeight - 90 && n.width > n.height, deck: Math.round(d.height), vh: innerHeight }; });
+  ok(b.off && b.bottom && b.deck < b.vh - 40, `${label}：不当成 iPhone Duo，照旧底部胶囊，大图照旧不铺满（${b.deck} / ${b.vh}）`);
   await ac.close();
 }
 await pd.setViewportSize({ width: 951, height: 543 });

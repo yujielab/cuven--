@@ -5842,6 +5842,13 @@ html.rail.rail-float .hcard {
 html.rail.rail-float .hero-deck:not(.morphed) .aap-host { padding-right: var(--float-space); }
 html.rail.rail-float .hero-deck:not(.morphed) .aap-host .aap-media-card-gallery.all-access-pass::before { width: 0; }
 html.rail.rail-float .hero-deck.morphed .aap-host { padding-right: calc(var(--m, 0) * var(--gap-x, 0px) + var(--float-space)); }
+/* 沉浸：大图铺满一整屏（别的手机是 85%）。状态栏在右边那一列，顶上没有要躲的 —— 画面从屏幕最上沿铺到最下沿，
+   主屏幕 App 里也不给顶上的安全区让位；片名与按钮跟着落到下半屏，暂停钮与轮播点抬到 Home 指示条之上。
+   往下一滚照旧收成卡片（形变的行程是 .hero-run 那一截，与大图多高无关） */
+html.rail.rail-float .hero-deck,
+html.rail.rail-float.standalone .hero-deck { top: 0; height: 100svh; min-height: 0; max-height: none; }
+html.rail.rail-float.standalone .hero-stage { padding-top: 0; }
+html.rail.rail-float .hero-deck .aap-host { bottom: calc((1 - var(--m, 0)) * (var(--safe-b) + 16px) + var(--m, 0) * var(--gap-y, 0px)); }
 
 /* 没有封面的片子不显示之后，一排可能整排都没了：那一段（连同标题）一起藏起来 */
 .section:has(> .scroll-row:empty):not(:has(.year-tv.on)) { display: none; }   /* 年份轨道：同年份的剧集还在就不藏 */
