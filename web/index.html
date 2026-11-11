@@ -22875,7 +22875,10 @@ window.addEventListener('popstate', e => {
   /* 悬浮返回钮自己退的那一格：同理吞掉 */
   if (PageBack.takePop()) return;
   /* 详情页自己关掉时退的那一格：同理（1 秒内没等到就作废，别吞掉之后真正的那次后退） */
-  if (_detailSelfPop) { const t = _detailSelfPop; _detailSelfPop = 0; if (Date.now() - t < 1000) return; }
+  if (_detailSelfPop) {
+    const t = _detailSelfPop; _detailSelfPop = 0;
+    if (Date.now() - t < 1000) { if (e.state && e.state.__tvBackLock === 'base') restoreNativeBackLock(); return; }   /* 退到底了：照旧把防滑走的那一格补回去 */
+  }
   /* 二级页面（年份 / 文件夹）在最上层：后退手势 = 回上一页（放在锁之前 —— 这一格是它自己记的） */
   if (PageBack.on && !Player.isOpen() && !$('detailView').classList.contains('on') && !$('searchView').classList.contains('on') &&
       !$('sheetMenu').classList.contains('on') && !$('tvAuthLayer')?.classList.contains('is-open')) {
