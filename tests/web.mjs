@@ -553,7 +553,7 @@ console.log('\n■ 加载画面 · iPhone（极光背景 + Cuven max + 胶囊进
   await ip2.close();
 }
 
-console.log('\n■ iPhone Duo（Safari 27.1 实测视口：折起 382×580 / 594×368，展开 669×825 / 951×543）');
+console.log('\n■ iPhone Duo（Safari 27.1 实测视口：折起 382×580 / 594×368，展开 669×825 / 951×543；主屏幕 App 折起 466×678）');
 const DUO = { isMobile: true, hasTouch: true, screen: { width: 466, height: 678 },
   userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 27_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.1 Mobile/15E148 Safari/604.1' };
 {
@@ -568,22 +568,56 @@ const DUO = { isMobile: true, hasTouch: true, screen: { width: 466, height: 678 
 const duo = await context({ ...DUO, viewport: { width: 382, height: 580 } });
 const pd = await enter(duo);
 await pd.waitForTimeout(1500);
-for (const [w, h, label, rail] of [[382, 580, '折起竖拿', false], [594, 368, '折起横拿', true], [669, 825, '展开竖拿', true], [951, 543, '展开横拿', true], [382, 580, '再合上竖拿', false]]) {
+/* 折起竖拿（Safari 382 宽 / 主屏幕 App 466 宽）：贴右缘浮着的竖向导航；展开、横拿：贴左缘、内容让位的导航条；
+   普通 iPhone（393 宽）照旧底部胶囊 */
+const DESC = { float: '右缘浮动侧边导航（竖排、叠在搜索钮上面、内容不让位）', rail: '侧边导航条（竖排）', bottom: '底部导航胶囊' };
+for (const [w, h, label, mode] of [[382, 580, '折起竖拿', 'float'], [466, 678, '折起竖拿 · 主屏幕 App', 'float'], [594, 368, '折起横拿', 'rail'],
+  [669, 825, '展开竖拿', 'rail'], [951, 543, '展开横拿', 'rail'], [382, 580, '再合上竖拿', 'float']]) {
   await pd.setViewportSize({ width: w, height: h });
   await pd.waitForTimeout(800);
   const g = await pd.evaluate(() => {
     const card = document.querySelector('.hcard.is-center') || document.querySelector('.hcard');
     const r = e => e && e.getBoundingClientRect();
-    const rail = document.documentElement.classList.contains('rail');
+    const cls = document.documentElement.classList, rail = cls.contains('rail'), float = cls.contains('rail-float');
     const nav = r(document.getElementById('navContainer')), pill = r(document.getElementById('navPill')), act = r(document.querySelector('#navContainer .nav-item.active'));
-    const play = r(card && card.querySelector('.btn-play')), dots = r(document.querySelector('.aap-host .all-access-pass'));
-    const apart = (a, b) => a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top;
-    const clear = !!(nav && play && dots) && (rail ? apart(play, nav) && apart(dots, nav) && play.left >= nav.right : play.bottom <= nav.top && dots.bottom <= nav.top) && play.top >= 0;
+    const srch = r(document.getElementById('navSearch'));
+    const play = r(card && card.querySelector('.btn-play')), circ = r(card && card.querySelector('.btn-circle')), dots = r(document.querySelector('.aap-host .all-access-pass'));
+    const apart = (a, b) => !a || !b || a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top;
+    const shift = parseFloat(getComputedStyle(document.getElementById('appStage')).paddingLeft) || 0;
+    const clear = !!(nav && play && dots) && play.top >= 0 && (float
+      ? apart(play, nav) && apart(circ, nav) && apart(dots, nav) && apart(dots, srch) && nav.left > innerWidth / 2 && nav.right >= innerWidth - 24
+        && srch.top >= nav.bottom && Math.abs((srch.left + srch.right) / 2 - (nav.left + nav.right) / 2) <= 4 && shift === 0
+      : rail ? apart(play, nav) && apart(dots, nav) && play.left >= nav.right
+      : play.bottom <= nav.top && dots.bottom <= nav.top);
     const pillOk = !!(pill && act) && Math.abs(pill.left - act.left) <= 2 && Math.abs(pill.top - act.top) <= 2 && Math.abs(pill.width - act.width) <= 2 && Math.abs(pill.height - act.height) <= 2;
-    return { rail, vertical: nav ? nav.height > nav.width : false, clear, pillOk, sw: document.documentElement.scrollWidth, vw: innerWidth };
+    return { mode: float ? 'float' : rail ? 'rail' : 'bottom', vertical: nav ? nav.height > nav.width : false, clear, pillOk, sw: document.documentElement.scrollWidth, vw: innerWidth };
   });
-  ok(g.rail === rail && g.vertical === rail && g.clear && g.pillOk && g.sw === g.vw,
-    `${label} ${w}×${h}：${rail ? '侧边导航条（竖排）' : '底部导航胶囊'}，选中指示器对齐，主视觉的按钮与轮播点不被导航挡住，没有横向溢出`);
+  ok(g.mode === mode && g.vertical === (mode !== 'bottom') && g.clear && g.pillOk && g.sw === g.vw,
+    `${label} ${w}×${h}：${DESC[mode]}，选中指示器对齐，主视觉的按钮与轮播点不被导航挡住，没有横向溢出${g.mode === mode ? '' : `（实际：${g.mode}）`}`);
+}
+/* 浮动侧边导航下搜索：搜索场到顶部、几乎通栏；头像圆钮留在右下角 */
+await pd.setViewportSize({ width: 466, height: 678 });
+await pd.waitForTimeout(600);
+await pd.evaluate(() => openSearch());
+await pd.waitForTimeout(800);
+const fs0 = await pd.evaluate(() => { const b = document.getElementById('navSearch').getBoundingClientRect(), a = document.getElementById('navContainer').getBoundingClientRect();
+  return { top: b.top, left: b.left, w: b.width, ax: a.right, ay: a.bottom, vw: innerWidth, vh: innerHeight }; });
+ok(fs0.top < 80 && fs0.left <= 24 && fs0.w >= fs0.vw - 48 && fs0.ax >= fs0.vw - 24 && fs0.ay >= fs0.vh - 80,
+  `折起竖拿 · 搜索：搜索场在顶部通栏展开（${Math.round(fs0.w)} 宽），头像圆钮留在右下角`);
+await pd.evaluate(() => closeSearch());
+await pd.waitForTimeout(600);
+/* 别的手机照旧底部胶囊：普通 iPhone；Safari 放大到 115% 的 Pro Max（视口只剩 383 宽，但屏幕还是 430）；同样 382 宽的安卓机 */
+for (const [label, opts] of [['普通 iPhone（393 宽）', devices['iPhone 15 Pro']],
+  ['Safari 页面放大 115% 的 iPhone Pro Max（视口 383 宽）', { ...devices['iPhone 15 Pro Max'], viewport: { width: 383, height: 700 } }],
+  ['382 宽的安卓机', { isMobile: true, hasTouch: true, viewport: { width: 382, height: 580 }, screen: { width: 382, height: 820 },
+    userAgent: 'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36' }]]) {
+  const ac = await context(opts);
+  const pa = await enter(ac);
+  await pa.waitForTimeout(800);
+  const b = await pa.evaluate(() => { const n = document.getElementById('navContainer').getBoundingClientRect(), c = document.documentElement.classList;
+    return { off: !c.contains('rail') && !c.contains('rail-float'), bottom: n.bottom >= innerHeight - 90 && n.width > n.height }; });
+  ok(b.off && b.bottom, `${label}：不当成 iPhone Duo，照旧底部胶囊`);
+  await ac.close();
 }
 await pd.setViewportSize({ width: 951, height: 543 });
 await pd.waitForTimeout(600);

@@ -5672,7 +5672,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
    竖向导航条（iPadOS 的侧边栏、Material 的 navigation rail）：头像、主页、资料库竖排在
    同一枚液态玻璃胶囊里，搜索圆钮在它下方；内容区整体右移让出这一条，底部不再为导航留空。
    · 何时用：横拿且高 ≤ 600（折起 / 展开横拿、手机横拿），或竖拿宽 600–720（展开的 Duo）。
-     折起竖拿（382 宽）仍是手机形态：底部胶囊离拇指最近，不改。由 <head> 里的脚本打 html.rail。
+     折起竖拿（382 / 466 宽）是下一节贴右缘浮着的那种（html.rail-float）。由 <head> 里的脚本打 html.rail。
    · 安全区：横拿时左右两侧可能是灵动岛 / 摄像头 —— 导航条贴 safe-area-inset-left 之内，
      内容区右侧让出 safe-area-inset-right；底部只留 Home 指示条的距离。
    · 搜索：胶囊照旧收成头像圆钮；搜索场改到顶部横向展开（竖条里放不下一行字），
@@ -5726,6 +5726,41 @@ html.rail .net-banner { left: calc(50% + (var(--rail-space) - env(safe-area-inse
   html.rail .sc-copy { top: 50%; }
   html.rail .sc-note { bottom: max(14px, calc(10px + env(safe-area-inset-bottom))); }
 }
+
+/* ══════════ 浮动侧边导航（只在 iPhone Duo 折起竖拿）══════════
+   折起竖拿的外屏（Safari 里 382 宽，主屏幕 App 里 466 宽）比普通 iPhone 宽、比它矮，底部那条胶囊
+   横跨整个底边，正压在大图的下半截。这一种改成贴右缘浮着的竖向导航：头像、主页、资料库竖排在同一枚
+   液态玻璃胶囊里，叠在右下角的搜索圆钮上面 —— 右手拇指一伸就到。它浮在内容上，内容不让位
+   （屏幕本来就窄，再让出一条 80 像素太亏）。
+   · 只认 iPhone Duo：看屏幕本身（外屏 466 宽，别的 iPhone 最宽 440），不看视口（Safari 页面缩放会改视口）。
+     由 <head> 里的脚本在 html.rail 之外再打 html.rail-float；展开、横拿仍是上一节贴左缘、内容让位的导航条。
+   · 竖排、指示器竖着走、搜索场到顶部，都沿用 html.rail；这里只改位置与「不让位」。
+   · 提示条放在搜索圆钮左边那块的正中，不压到右侧这一列。 */
+html.rail.rail-float {
+  --rail-w: 64px;
+  --rail-space: 0px;
+  --app-w: 100vw;
+}
+html.rail.rail-float body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }   /* 最后一排还能滚到右下角的搜索钮上面 */
+html.rail.rail-float #appStage { padding-left: 0; padding-right: 0; }
+html.rail.rail-float .dock {
+  top: auto; bottom: var(--dock-gap); left: auto; right: calc(env(safe-area-inset-right, 0px) + 10px);
+  justify-content: flex-end; gap: var(--dock-sep);
+}
+html.rail.rail-float .dock.searching #navSearch {
+  left: calc(env(safe-area-inset-left, 0px) + 16px); right: calc(env(safe-area-inset-right, 0px) + 16px); max-width: none;
+}
+html.rail.rail-float .search-chips { left: calc(env(safe-area-inset-left, 0px) + 16px); }
+html.rail.rail-float .toast {
+  bottom: calc(var(--dock-gap) + 6px);
+  left: calc((100% - var(--rail-w) - 10px - env(safe-area-inset-right, 0px)) / 2);
+  max-width: calc(100% - var(--rail-w) - 40px - env(safe-area-inset-right, 0px));
+}
+html.rail.rail-float .net-banner { left: 50%; }
+/* 大图底部的暂停钮 + 轮播点：居中到导航这一列左边那块（Safari 里只有 382 宽，原样居中会伸到导航胶囊底下）——
+   右侧让出这一列，左边那个给暂停钮配平的占位也收掉。收成卡以后照旧与卡同宽 */
+html.rail.rail-float .hero-deck:not(.morphed) .aap-host { padding-right: calc(var(--rail-w) + 18px + env(safe-area-inset-right, 0px)); }
+html.rail.rail-float .hero-deck:not(.morphed) .aap-host .aap-media-card-gallery.all-access-pass::before { width: 0; }
 
 /* 没有封面的片子不显示之后，一排可能整排都没了：那一段（连同标题）一起藏起来 */
 .section:has(> .scroll-row:empty):not(:has(.year-tv.on)) { display: none; }   /* 年份轨道：同年份的剧集还在就不藏 */
@@ -5838,21 +5873,35 @@ html.rail .net-banner { left: calc(50% + (var(--rail-space) - env(safe-area-inse
   if (sa) document.documentElement.classList.add('standalone');
 })();
 /* 侧边导航条：横拿且矮（折起 / 展开横拿、手机横拿）或竖拿宽 600–720（展开的 iPhone Duo）。
-   与 CSS 的 html.rail 一一对应；尽早打标，首帧就是对的形态，不会先闪一下底部胶囊 */
+   iPhone Duo 折起竖拿（Safari 382 宽 / 主屏幕 App 466 宽）是贴右缘浮着的那种：rail + rail-float。
+   与 CSS 的 html.rail / html.rail-float 一一对应；尽早打标，首帧就是对的形态，不会先闪一下底部胶囊 */
 (function () {
   if (!window.matchMedia) return;
   var q = window.matchMedia('(orientation: landscape) and (max-height: 600px) and (min-width: 560px), (orientation: portrait) and (min-width: 600px) and (max-width: 720px)');
+  /* 认 Duo 看屏幕本身，不看视口：折起的外屏 466 宽，别的 iPhone 最宽 440（375 / 390 / 393 / 402 / 414 / 420 / 428 /
+     430 / 440）。视口会跟着 Safari 的页面缩放变（440 宽的 Pro Max 放大到 115% 就只剩 383），屏幕不会。
+     万一 Safari 把外屏按 382 报（与视口一样），也认。屏幕尺寸每次都重新读：开着页面翻开 / 合上，它会变 */
+  var iphone = /iPhone/.test(navigator.userAgent || '');
+  var p1 = window.matchMedia('(orientation: portrait) and (max-width: 599px)');
+  var p2 = window.matchMedia('(orientation: portrait) and (min-width: 376px) and (max-width: 389px)');
+  var duo = function () {
+    if (!iphone || !window.screen) return false;
+    var w = Math.min(screen.width, screen.height);
+    return (w > 440 && w < 600 && p1.matches) || (w >= 376 && w <= 389 && p2.matches);
+  };
   var root = document.documentElement, t = 0;
   var set = function () {
-    if (root.classList.contains('rail') === q.matches) return;
+    var fl = duo(), on = q.matches || fl;
+    if (root.classList.contains('rail') === on && root.classList.contains('rail-float') === fl) return;
     /* 翻开 / 合上 / 转屏那一下直接换形态：胶囊条的宽度补间不跑（否则指示器量到的是半途的宽度） */
     root.classList.add('rail-switching');
-    root.classList.toggle('rail', q.matches);
+    root.classList.toggle('rail', on);
+    root.classList.toggle('rail-float', fl);
     clearTimeout(t);
     t = setTimeout(function () { root.classList.remove('rail-switching'); try { window.dispatchEvent(new Event('railchange')); } catch (_) {} }, 120);
   };
   set();
-  if (q.addEventListener) q.addEventListener('change', set); else if (q.addListener) q.addListener(set);
+  [q, p1, p2].forEach(function (m) { if (m.addEventListener) m.addEventListener('change', set); else if (m.addListener) m.addListener(set); });
 })();
 </script>
 </head>
