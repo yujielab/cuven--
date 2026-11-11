@@ -6,6 +6,9 @@
  *   ▸ /hls/<签名>/master.m3u8：MKV 在 Worker 里实时重封装为 fMP4 HLS，交给系统
  *     原生播放器（AVPlayer）——全屏、画中画、AirPlay、系统音轨 / 字幕菜单全部可用。
  *     不转码视频：负载零拷贝直通，一个 6 秒分段只回源它自己那段字节。
+ *   ▸ 参数集：hvcC / avcC / av1C 齐全时原样用；参数集只在码流里（hev1 / avc3 风格）、没有
+ *     CodecPrivate、帧是 Annex B 起始码时，从片头几帧里捞出 VPS / SPS / PPS（AV1 是序列头 OBU）
+ *     重建配置盒、帧就地转成长度前缀 —— 苹果的 hvc1 / avc1 只认参数集齐全的配置盒。
  *   ▸ 杜比视界：P5 → dvh1 + dvcC；P8.1 / 8.4 → hvc1 + dvvC + SUPPLEMENTAL-CODECS
  *     （dvh1.08.LL/db1p | db4h，与 VIDEO-RANGE 交叉校验，遵循 Apple HLS 规范）；
  *     P7（UHD 蓝光双层 FEL/MEL）逐帧丢弃增强层、把 RPU 改写为 8.1
@@ -1359,6 +1362,33 @@ function osVttFull(cues, dur) {
 //  v24：Safari MP4/MOV FourCC 零拷贝流式热修补
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+/**
+ * hev1 / dvhe 样本入口里的 hvcC 带没带齐 VPS / SPS / PPS：true / false；读不全（跨块）→ null。
+ * hev1 允许参数集只放在码流里，这种流改名成 hvc1 / dvh1 之后配置盒里没有参数集，
+ * 苹果的解码器反而彻底拒播 —— 只有带齐了才改名。
+ */
+function mp4HvccHasParams(buf, from, to) {
+  for (let j = from; j + 8 <= to; j++) {
+    if (buf[j] !== 0x68 || buf[j + 1] !== 0x76 || buf[j + 2] !== 0x63 || buf[j + 3] !== 0x43) continue;   // 'hvcC'
+    const c = j + 4;
+    if (c + 23 > buf.length) return null;
+    let p = c + 23;
+    const seen = new Set();
+    for (let a = 0, na = buf[c + 22]; a < na; a++) {
+      if (p + 3 > buf.length) return null;
+      const type = buf[p] & 0x3F, cnt = (buf[p + 1] << 8) | buf[p + 2];
+      p += 3;
+      if (cnt) seen.add(type);
+      for (let k = 0; k < cnt; k++) {
+        if (p + 2 > buf.length) return null;
+        p += 2 + ((buf[p] << 8) | buf[p + 1]);
+      }
+    }
+    return seen.has(32) && seen.has(33) && seen.has(34);
+  }
+  return null;
+}
+
 function patchSafariMp4Buffer(buf) {
   const n = buf.length;
   for (let i = 0; i <= n - 12; i++) {
@@ -1373,11 +1403,13 @@ function patchSafariMp4Buffer(buf) {
     const isHvc1 = c0 === 0x68 && c1 === 0x76 && c2 === 0x63 && c3 === 0x31;
     const isDvhe = c0 === 0x64 && c1 === 0x76 && c2 === 0x68 && c3 === 0x65;
 
+    // 参数集只在码流里的 hev1 / dvhe：改了名苹果更播不了，原样放过（见 mp4HvccHasParams）
+    const paramsOk = isHev1 || isDvhe ? mp4HvccHasParams(buf, i + 78, Math.min(n, i + 600)) !== false : true;
     if (isDvhe) {
-      buf[i] = 0x64; buf[i + 1] = 0x76; buf[i + 2] = 0x68; buf[i + 3] = 0x31; // dvh1
+      if (paramsOk) { buf[i] = 0x64; buf[i + 1] = 0x76; buf[i + 2] = 0x68; buf[i + 3] = 0x31; } // dvh1
       continue;
     }
-    if (isHev1 || isHvc1) {
+    if ((isHev1 && paramsOk) || isHvc1) {
       const scanEnd = Math.min(n - 4, i + 600);
       let hasDolbyVisionBox = false;
       for (let j = i + 78; j <= scanEnd; j++) {
@@ -6290,6 +6322,7 @@ async function handleStream(url, request, env, ctx) {
 
 const HLS_VER = 1;                          // 输出格式变更时 +1：播放列表与缓存一起换代
 const HLS_IDX_CACHE = 'https://cache.internal/hls-idx/';
+const HLS_IDX_V = 2;                          // 索引结构变更时 +1（只换索引缓存，不动分段缓存）：v2 参数集重建 / Annex B
 const HLS_SUB_CACHE = 'https://cache.internal/hls-sub/';
 const HLS_T0 = 10;                          // 秒
 const HLS_HEAD = 512 * 1024;                // 索引首读
@@ -6561,6 +6594,222 @@ function hlsLangName(lang) { return HLS_LANG_ZH[lang] || HLS_LANG_ZH[lang.split(
 /** 播放列表属性值里不允许出现的字符 */
 function hlsAttr(s) { return String(s).replace(/["\r\n]/g, ' ').trim(); }
 
+// ── 视频：NAL 单元与参数集 ──
+//  MKV 里 HEVC / AVC 的帧本该是「长度前缀 + NAL」序列，前缀宽度与参数集（HEVC 的 VPS / SPS / PPS，
+//  AVC 的 SPS / PPS）都写在 CodecPrivate（hvcC / avcC）里。hvc1 / avc1 样本入口要求参数集齐全地
+//  放在配置盒里，苹果的解码器只认这一种。实际片源里三种「不本该」都见得到：
+//   · 参数集只在码流里（hev1 / avc3 风格：广播录制、直播切片转封装、某些编码器）——
+//     CodecPrivate 只有个头、参数集不全，或者整个没有
+//   · 帧里不是长度前缀而是 Annex B 起始码（00 00 01 / 00 00 00 01）
+//   · 长度前缀的宽度与 CodecPrivate 里写的对不上
+//  这里把它们都收拾成标准形态：从前几帧里把参数集捞出来，与 CodecPrivate 里的按编号合并去重，
+//  重建配置盒；Annex B 的帧在出分段时就地转成 4 字节长度前缀。码流里重复出现的参数集原样留着 ——
+//  与配置盒里的一致，播放器不在意，视频字节也就不必改动。
+
+/** 按给定前缀宽度能把整帧切干净（每个 NAL 头的禁止位为 0），才算长度前缀 */
+function nalLenOk(f, nalLen) {
+  if (!f || !(nalLen >= 1 && nalLen <= 4)) return false;
+  let p = 0, n = 0;
+  while (p < f.length) {
+    if (p + nalLen > f.length) return false;
+    let len = 0;
+    for (let i = 0; i < nalLen; i++) len = len * 256 + f[p + i];
+    p += nalLen;
+    if (len < 1 || p + len > f.length || (f[p] & 0x80)) return false;
+    p += len; n++;
+  }
+  return n > 0;
+}
+/** 帧以起始码开头 */
+function nalLooksAnnexB(f) {
+  return !!f && f.length > 4 && f[0] === 0 && f[1] === 0 && (f[2] === 1 || (f[2] === 0 && f[3] === 1));
+}
+/** Annex B → 各 NAL（不含起始码；去掉 trailing_zero_8bits） */
+function nalSplitAnnexB(f) {
+  const out = [];
+  const n = f.length;
+  let i = 0, start = -1;
+  const close = e => { while (e > start && f[e - 1] === 0) e--; if (e > start) out.push(f.subarray(start, e)); };
+  while (i + 2 < n) {
+    if (f[i] === 0 && f[i + 1] === 0 && f[i + 2] === 1) {
+      if (start >= 0) close(i);
+      i += 3; start = i;
+      continue;
+    }
+    i++;
+  }
+  if (start >= 0) close(n);
+  return out;
+}
+/** 一帧 → 各 NAL（长度前缀或 Annex B；data 不含前缀 / 起始码） */
+function nalUnits(f, nalLen, annexB) {
+  if (!f) return [];
+  if (annexB) return nalSplitAnnexB(f);
+  const out = [];
+  let p = 0;
+  while (p + nalLen <= f.length) {
+    let len = 0;
+    for (let i = 0; i < nalLen; i++) len = len * 256 + f[p + i];
+    p += nalLen;
+    if (len < 1 || p + len > f.length) break;
+    out.push(f.subarray(p, p + len));
+    p += len;
+  }
+  return out;
+}
+const nalTypeOf = (codec, d) => (codec === 'hevc' ? (d[0] >> 1) & 0x3F : d[0] & 0x1F);
+const nalBytesEq = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+/** Annex B 的一帧 → 4 字节长度前缀的 NAL 序列（与分段写入同一套 pieces / size 形状） */
+function hlsAnnexBToLen(pieces) {
+  const f = pieces.length === 1 ? pieces[0] : hlsConcat(pieces);
+  const out = [];
+  let size = 0;
+  for (const d of nalSplitAnnexB(f)) {
+    const L = new Uint8Array(4);
+    new DataView(L.buffer).setUint32(0, d.length);
+    out.push(L, d);
+    size += 4 + d.length;
+  }
+  return { pieces: out, size };
+}
+
+/** 参数集的编号：同一类型同一编号只能留一份（码流里的优先 —— 那才是真在用的） */
+function nalParamId(codec, type, d) {
+  try {
+    if (codec === 'hevc') {
+      if (type === 32) return (d[2] >> 4) & 15;                               // vps_video_parameter_set_id
+      if (type === 33) return hevcParseSps(d).id;
+      if (type === 34) return new HlsBits(nalUnescape(d), 2).ue();           // pps_pic_parameter_set_id
+    } else {
+      if (type === 7 || type === 13) return new HlsBits(nalUnescape(d), type === 7 ? 4 : 1).ue();
+      if (type === 8) return new HlsBits(nalUnescape(d), 1).ue();
+    }
+  } catch {}
+  return -1;
+}
+
+/** hvcC（ISO/IEC 14496-15 §8.3.3.1）：头部字段按 SPS 现算，数组 VPS → SPS → PPS，array_completeness = 1 */
+function hevcBuildHvcC(s, arrays, nalLen = 4) {
+  let size = 23;
+  for (const [, list] of arrays) { size += 3; for (const d of list) size += 2 + d.length; }
+  const out = new Uint8Array(size);
+  const dv = new DataView(out.buffer);
+  const P = s.ptl || {};
+  out[0] = 1;
+  out[1] = ((P.ps & 3) << 6) | ((P.tier & 1) << 5) | (P.pidc & 31);
+  dv.setUint32(2, (P.compat || 0) >>> 0);
+  for (let i = 0; i < 6; i++) out[6 + i] = (P.cons && P.cons[i]) || 0;
+  out[12] = P.level || 0;
+  dv.setUint16(13, 0xF000);                        // min_spatial_segmentation_idc = 0（未知）
+  out[15] = 0xFC;                                  // parallelismType = 0（未知）
+  out[16] = 0xFC | ((s.chroma ?? 1) & 3);
+  out[17] = 0xF8 | (((s.bdl || 8) - 8) & 7);
+  out[18] = 0xF8 | (((s.bdc || s.bdl || 8) - 8) & 7);
+  dv.setUint16(19, 0);                             // avgFrameRate = 0（未指定）
+  out[21] = (((s.layers || 1) & 7) << 3) | ((s.nested ? 1 : 0) << 2) | ((nalLen - 1) & 3);
+  out[22] = arrays.length;
+  let p = 23;
+  for (const [type, list] of arrays) {
+    out[p++] = 0x80 | (type & 0x3F);
+    dv.setUint16(p, list.length); p += 2;
+    for (const d of list) { dv.setUint16(p, d.length); p += 2; out.set(d, p); p += d.length; }
+  }
+  return out;
+}
+
+/** avcC（ISO/IEC 14496-15 §5.3.3.1）：High 系列带上色度 / 位深扩展 */
+function avcBuildAvcC(sps, pps, ext, nalLen = 4) {
+  const s0 = sps[0];
+  const info = avcParseSps(s0);
+  const high = [100, 110, 122, 144].includes(s0[1]);
+  let size = 7;
+  for (const d of [...sps, ...pps]) size += 2 + d.length;
+  if (high) { size += 4; for (const d of ext) size += 2 + d.length; }
+  const out = new Uint8Array(size);
+  const dv = new DataView(out.buffer);
+  out[0] = 1; out[1] = s0[1]; out[2] = s0[2]; out[3] = s0[3];
+  out[4] = 0xFC | ((nalLen - 1) & 3);
+  out[5] = 0xE0 | (sps.length & 31);
+  let p = 6;
+  for (const d of sps) { dv.setUint16(p, d.length); p += 2; out.set(d, p); p += d.length; }
+  out[p++] = pps.length & 255;
+  for (const d of pps) { dv.setUint16(p, d.length); p += 2; out.set(d, p); p += d.length; }
+  if (high) {
+    out[p++] = 0xFC | ((info.chroma ?? 1) & 3);
+    out[p++] = 0xF8 | (((info.bdl || 8) - 8) & 7);
+    out[p++] = 0xF8 | (((info.bdc || info.bdl || 8) - 8) & 7);
+    out[p++] = ext.length & 255;
+    for (const d of ext) { dv.setUint16(p, d.length); p += 2; out.set(d, p); p += d.length; }
+  }
+  return out;
+}
+
+/**
+ * HEVC / AVC 的配置盒。CodecPrivate 里参数集齐全、帧也是标准长度前缀时原样用（一个字节都不动）；
+ * 否则从前几帧里把参数集补齐、重建。返回 { cfg, nalLen, annexB, rebuilt, sps }，
+ * 实在凑不齐（缺 SPS / PPS，HEVC 还要 VPS）就抛出能直接给人看的原因。
+ */
+function hlsParamConfig(codec, t, probe) {
+  const hevc = codec === 'hevc';
+  const name = hevc ? 'HEVC' : 'H.264';
+  const need = hevc ? [32, 33, 34] : [7, 8];
+  const label = { 32: 'VPS', 33: 'SPS', 34: 'PPS', 7: 'SPS', 8: 'PPS' };
+  let parsed = null;
+  try { parsed = t.priv && t.priv.length ? (hevc ? hevcParseHvcC(t.priv) : avcParseAvcC(t.priv)) : null; } catch { parsed = null; }
+  const fromCfg = !parsed ? [] : hevc ? parsed.nals.map(n => ({ type: n.type, data: n.data }))
+    : [...parsed.sps.map(d => ({ type: 7, data: d })), ...parsed.pps.map(d => ({ type: 8, data: d })), ...(parsed.ext || []).map(d => ({ type: 13, data: d }))];
+
+  // 帧的封装：按配置盒里的前缀宽度切得开就是长度前缀；切不开而以起始码开头就是 Annex B
+  const frames = probe.video.map(f => f.data).filter(f => f && f.length > 4);
+  let nalLen = parsed ? parsed.nalLen : 4, annexB = false;
+  const sample = frames.slice(0, 6);
+  if (sample.length && !sample.every(f => nalLenOk(f, nalLen))) {
+    if (sample.some(nalLooksAnnexB)) annexB = true;
+    else {
+      const alt = [4, 2, 1].find(n => n !== nalLen && sample.every(f => nalLenOk(f, n)));
+      if (alt) nalLen = alt;
+    }
+  }
+  const cfgComplete = !!parsed && need.every(ty => fromCfg.some(n => n.type === ty));
+  if (cfgComplete && !annexB && nalLen === parsed.nalLen) {
+    return { cfg: t.priv, nalLen, annexB: false, rebuilt: false, sps: fromCfg.filter(n => n.type === need[hevc ? 1 : 0]).map(n => n.data) };
+  }
+
+  // 码流里的参数集优先（那才是真在用的），配置盒里同类型同编号的不再要
+  const keep = new Map();                                  // type → [{ id, data }]
+  const add = (type, data) => {
+    if (!keep.has(type)) keep.set(type, []);
+    const L = keep.get(type);
+    if (L.some(x => nalBytesEq(x.data, data))) return;
+    const id = nalParamId(codec, type, data);
+    if (id >= 0 && L.some(x => x.id === id)) return;
+    L.push({ id, data });
+  };
+  const paramTypes = hevc ? new Set([32, 33, 34]) : new Set([7, 8, 13]);
+  for (const f of frames.slice(0, 48)) {
+    for (const d of nalUnits(f, nalLen, annexB)) {
+      const ty = nalTypeOf(codec, d);
+      if (paramTypes.has(ty)) add(ty, d);
+    }
+  }
+  for (const n of fromCfg) if (paramTypes.has(n.type)) add(n.type, n.data);
+  const missing = need.filter(ty => !(keep.get(ty) || []).length);
+  if (missing.length) {
+    throw hlsErr(`${name} 参数集不全：缺 ${missing.map(ty => label[ty]).join(' / ')}（配置里没有，片头几帧里也找不到）`);
+  }
+  const list = ty => (keep.get(ty) || []).map(x => x.data);
+  const outLen = annexB ? 4 : nalLen;
+  let cfg;
+  if (hevc) {
+    const s = hevcParseSps(list(33)[0]);
+    cfg = hevcBuildHvcC(s, [[32, list(32)], [33, list(33)], [34, list(34)]], outLen);
+  } else {
+    cfg = avcBuildAvcC(list(7), list(8), list(13), outLen);
+  }
+  return { cfg, nalLen: outLen, annexB, rebuilt: true, sps: list(hevc ? 33 : 7) };
+}
+
 // ── 视频：HEVC ──
 
 function hevcParseHvcC(u8) {
@@ -6616,14 +6865,17 @@ function hevcSkipScalingList(b) {
   }
 }
 
-/** HEVC SPS：只取我们用得到的——重排深度（推 DTS）、VUI 色彩（判 PQ/HLG）、SAR */
+/** HEVC SPS：只取我们用得到的——编号、profile / tier / level（重建 hvcC 与 CODECS 串）、
+ *  尺寸（按一致性窗口裁剪）、色度与位深、重排深度（推 DTS）、VUI 色彩（判 PQ/HLG）、SAR */
 function hevcParseSps(nal) {
   const d = nalUnescape(nal);
   const b = new HlsBits(d, 2);
-  b.u(4);
+  b.u(4);                                          // sps_video_parameter_set_id
   const maxSub = b.u(3);
-  b.u(1);
-  b.u(8); b.u(32); b.u(4); b.u(32); b.u(12); b.u(8);
+  const nested = b.u(1);
+  const ptl = { ps: b.u(2), tier: b.u(1), pidc: b.u(5), compat: b.u(32), cons: [], level: 0 };
+  for (let i = 0; i < 6; i++) ptl.cons.push(b.u(8));
+  ptl.level = b.u(8);
   const subP = [], subL = [];
   for (let i = 0; i < maxSub; i++) { subP.push(b.u(1)); subL.push(b.u(1)); }
   if (maxSub > 0) for (let i = maxSub; i < 8; i++) b.u(2);
@@ -6631,13 +6883,17 @@ function hevcParseSps(nal) {
     if (subP[i]) { b.u(32); b.u(32); b.u(24); }
     if (subL[i]) b.u(8);
   }
-  b.ue();
+  const id = b.ue();                               // sps_seq_parameter_set_id
   const chroma = b.ue();
   if (chroma === 3) b.u(1);
-  const out = { w: b.ue(), h: b.ue(), chroma };
-  if (b.u(1)) { b.ue(); b.ue(); b.ue(); b.ue(); }
+  const out = { id, ptl, layers: maxSub + 1, nested, w: b.ue(), h: b.ue(), chroma };
+  if (b.u(1)) {                                    // 一致性窗口：编码尺寸（如 1088）裁成显示尺寸（1080）
+    const l = b.ue(), r = b.ue(), t = b.ue(), bt = b.ue();
+    const sw = chroma === 1 || chroma === 2 ? 2 : 1, sh = chroma === 1 ? 2 : 1;
+    out.w -= sw * (l + r); out.h -= sh * (t + bt);
+  }
   out.bdl = b.ue() + 8;
-  b.ue();
+  out.bdc = b.ue() + 8;
   const log2Poc = b.ue() + 4;
   const subInfo = b.u(1);
   for (let i = subInfo ? 0 : maxSub; i <= maxSub; i++) {
@@ -6698,16 +6954,21 @@ function hlsParseVuiColour(b, out) {
 // ── 视频：AVC ──
 
 function avcParseAvcC(u8) {
-  if (!u8 || u8.length < 7) return null;
-  const out = { profile: u8[1], compat: u8[2], level: u8[3], nalLen: (u8[4] & 3) + 1, sps: [] };
-  const n = u8[5] & 0x1F;
-  let p = 6;
-  for (let i = 0; i < n && p + 2 <= u8.length; i++) {
-    const len = (u8[p] << 8) | u8[p + 1];
-    p += 2;
-    out.sps.push(u8.subarray(p, p + len));
-    p += len;
-  }
+  if (!u8 || u8.length < 7 || u8[0] !== 1) return null;
+  const out = { profile: u8[1], compat: u8[2], level: u8[3], nalLen: (u8[4] & 3) + 1, sps: [], pps: [], ext: [] };
+  let p = 5;
+  const take = (n, into) => {
+    for (let i = 0; i < n && p + 2 <= u8.length; i++) {
+      const len = (u8[p] << 8) | u8[p + 1];
+      p += 2;
+      if (!len || p + len > u8.length) { p = u8.length; return; }
+      into.push(u8.subarray(p, p + len));
+      p += len;
+    }
+  };
+  take(u8[p++] & 0x1F, out.sps);
+  if (p < u8.length) take(u8[p++], out.pps);
+  if (p + 4 <= u8.length && [100, 110, 122, 144].includes(out.profile)) { p += 3; take(u8[p++], out.ext); }
   return out;
 }
 function avcCodecString(a) {
@@ -6723,13 +6984,14 @@ function avcSkipHrd(b) {
 function avcParseSps(nal) {
   const d = nalUnescape(nal);
   const b = new HlsBits(d, 1);
-  const out = { profile: b.u(8), reorder: -1 };
+  const out = { profile: b.u(8), reorder: -1, chroma: 1, bdl: 8, bdc: 8 };
   b.u(8); b.u(8); b.ue();
   try {
     if ([100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].includes(out.profile)) {
       const chroma = b.ue();
+      out.chroma = chroma;
       if (chroma === 3) b.u(1);
-      out.bdl = b.ue() + 8; b.ue(); b.u(1);
+      out.bdl = b.ue() + 8; out.bdc = b.ue() + 8; b.u(1);
       if (b.u(1)) {
         for (let i = 0; i < (chroma !== 3 ? 8 : 12); i++) {
           if (!b.u(1)) continue;
@@ -6770,6 +7032,105 @@ function av1Parse(u8) {
   const profile = u8[1] >> 5, level = u8[1] & 0x1F, tier = u8[2] >> 7;
   const depth = (u8[2] & 0x40) ? ((u8[2] & 0x20) ? 12 : 10) : 8;
   return { profile, level, tier, depth };
+}
+/** AV1 的 leb128（OBU 大小字段）→ [值, 字节数] */
+function av1Leb128(u8, p) {
+  let v = 0, n = 0;
+  for (let i = 0; i < 8 && p + i < u8.length; i++) {
+    const b = u8[p + i];
+    v += (b & 0x7F) * 2 ** (7 * i);
+    n++;
+    if (!(b & 0x80)) break;
+  }
+  return [v, n];
+}
+/** 一帧（低开销 OBU 流）里找序列头 OBU（type 1）→ { obu（含头，原样）, payload } */
+function av1FindSeqHeader(frame) {
+  let p = 0;
+  while (frame && p < frame.length) {
+    const h = frame[p];
+    if (h & 0x80) return null;                                 // forbidden bit
+    const type = (h >> 3) & 15, ext = (h >> 2) & 1, hasSize = (h >> 1) & 1;
+    let q = p + 1 + ext, size;
+    if (hasSize) { const [v, n] = av1Leb128(frame, q); size = v; q += n; } else size = frame.length - q;
+    if (q + size > frame.length) return null;
+    if (type === 1) return { obu: frame.subarray(p, q + size), payload: frame.subarray(q, q + size) };
+    p = q + size;
+  }
+  return null;
+}
+function av1Uvlc(b) {
+  let z = 0;
+  while (!b.u(1)) { if (++z >= 32) return 2 ** 32 - 1; }
+  return z ? b.u(z) + 2 ** z - 1 : 0;
+}
+/** AV1 序列头（AV1 规范 5.5）：profile / level / tier、尺寸、色彩（color_config） */
+function av1ParseSeqHeader(payload) {
+  const b = new HlsBits(payload);
+  const o = { profile: b.u(3), level: 0, tier: 0 };
+  b.u(1);                                                      // still_picture
+  const reduced = b.u(1);
+  if (reduced) o.level = b.u(5);
+  else {
+    let model = 0, delayLen = 0;
+    if (b.u(1)) {                                              // timing_info_present_flag
+      b.u(32); b.u(32);
+      if (b.u(1)) av1Uvlc(b);                                  // equal_picture_interval
+      model = b.u(1);
+      if (model) { delayLen = b.u(5) + 1; b.u(32); b.u(5); b.u(5); }
+    }
+    const initDelay = b.u(1);
+    const ops = b.u(5) + 1;
+    for (let i = 0; i < ops; i++) {
+      b.u(12);
+      const lvl = b.u(5), tier = lvl > 7 ? b.u(1) : 0;
+      if (i === 0) { o.level = lvl; o.tier = tier; }
+      if (model && b.u(1)) { b.u(delayLen); b.u(delayLen); b.u(1); }
+      if (initDelay && b.u(1)) b.u(4);
+    }
+  }
+  const wb = b.u(4) + 1, hb = b.u(4) + 1;
+  o.w = b.u(wb) + 1; o.h = b.u(hb) + 1;
+  if (!reduced && b.u(1)) { b.u(4); b.u(3); }                 // frame_id_numbers_present_flag
+  b.u(1); b.u(1); b.u(1);                                      // 128×128 超块、filter_intra、intra_edge
+  if (!reduced) {
+    b.u(1); b.u(1); b.u(1); b.u(1);                            // interintra、masked、warped、dual_filter
+    const orderHint = b.u(1);
+    if (orderHint) { b.u(1); b.u(1); }                         // jnt_comp、ref_frame_mvs
+    const sct = b.u(1) ? 2 : b.u(1);                           // seq_force_screen_content_tools
+    if (sct > 0 && !b.u(1)) b.u(1);                            // seq_force_integer_mv
+    if (orderHint) b.u(3);
+  }
+  b.u(1); b.u(1); b.u(1);                                      // superres、cdef、restoration
+  const hbd = b.u(1);
+  o.highBd = hbd;
+  o.twelve = o.profile === 2 && hbd ? b.u(1) : 0;
+  o.depth = o.twelve ? 12 : hbd ? 10 : 8;
+  o.mono = o.profile === 1 ? 0 : b.u(1);
+  o.prim = 2; o.trc = 2; o.mtx = 2; o.csp = 0;
+  if (b.u(1)) { o.prim = b.u(8); o.trc = b.u(8); o.mtx = b.u(8); }
+  if (o.mono) { o.full = b.u(1); o.ssx = 1; o.ssy = 1; }
+  else if (o.prim === 1 && o.trc === 13 && o.mtx === 0) { o.full = 1; o.ssx = 0; o.ssy = 0; }
+  else {
+    o.full = b.u(1);
+    if (o.profile === 0) { o.ssx = 1; o.ssy = 1; }
+    else if (o.profile === 1) { o.ssx = 0; o.ssy = 0; }
+    else if (o.depth === 12) { o.ssx = b.u(1); o.ssy = o.ssx ? b.u(1) : 0; }
+    else { o.ssx = 1; o.ssy = 0; }
+    if (o.ssx && o.ssy) o.csp = b.u(2);
+  }
+  return o;
+}
+/** av1C（AV1-ISOBMFF §2.3）：头 4 字节按序列头现算，configOBUs = 序列头 OBU 原样 */
+function av1BuildAv1C(o, seqObu) {
+  const out = new Uint8Array(4 + seqObu.length);
+  out[0] = 0x81;
+  out[1] = ((o.profile & 7) << 5) | (o.level & 31);
+  out[2] = ((o.tier & 1) << 7) | ((o.highBd & 1) << 6) | ((o.twelve & 1) << 5) | ((o.mono & 1) << 4)
+    | ((o.ssx & 1) << 3) | ((o.ssy & 1) << 2) | (o.csp & 3);
+  out[3] = 0;
+  out.set(seqObu, 4);
+  return out;
 }
 function av1CodecString(a) {
   return `av01.${a.profile}.${String(a.level).padStart(2, '0')}${a.tier ? 'H' : 'M'}.${String(a.depth).padStart(2, '0')}`;
@@ -7547,18 +7908,14 @@ function hlsReorderDepth(ptsList) {
   return r;
 }
 
-/** 在一帧（长度前缀 NAL 序列）里找杜比 RPU（62）与增强层（63） */
-function hlsScanDvNals(frame, nalLen) {
-  let p = 0, rpu = null, el = false;
-  while (p + nalLen < frame.length) {
-    let len = 0;
-    for (let i = 0; i < nalLen; i++) len = len * 256 + frame[p + i];
-    const s = p + nalLen;
-    if (len < 2 || s + len > frame.length) break;
-    const type = (frame[s] >> 1) & 0x3F;
-    if (type === 62 && !rpu) rpu = frame.subarray(s, s + len);
+/** 在一帧（长度前缀或 Annex B 的 NAL 序列）里找杜比 RPU（62）与增强层（63） */
+function hlsScanDvNals(frame, nalLen, annexB) {
+  let rpu = null, el = false;
+  for (const d of nalUnits(frame, nalLen, annexB)) {
+    if (d.length < 2) continue;
+    const type = (d[0] >> 1) & 0x3F;
+    if (type === 62 && !rpu) rpu = d;
     else if (type === 63) el = true;
-    p = s + len;
   }
   return { rpu, el };
 }
@@ -7569,31 +7926,47 @@ const HLS_TEXT_SUBS = new Set(['S_TEXT/UTF8', 'S_TEXT/ASCII', 'S_TEXT/ASS', 'S_T
 
 function hlsVideoConfig(t, probe, opts) {
   const v = { num: t.num, w: t.video?.w || 0, h: t.video?.h || 0, nalLen: 4, reorder: -1 };
-  let sps = {};
-  if (t.codecId === 'V_MPEGH/ISO/HEVC') {
-    const hv = hevcParseHvcC(t.priv);
-    if (!hv) throw hlsErr('HEVC 配置缺失');
-    const spsNal = hv.nals.find(n => n.type === 33);
-    if (!spsNal) throw hlsErr('HEVC 参数集不在 hvcC 中（hev1 流），暂不支持');
-    try { sps = hevcParseSps(spsNal.data); } catch {}
-    Object.assign(v, { codec: 'hevc', entry: 'hvc1', cfgType: 'hvcC', codecs: hevcCodecString(hv), nalLen: hv.nalLen });
-  } else if (t.codecId === 'V_MPEG4/ISO/AVC') {
-    const av = avcParseAvcC(t.priv);
-    if (!av || !av.sps.length) throw hlsErr('AVC 配置缺失');
-    try { sps = avcParseSps(av.sps[0]); } catch {}
-    if (sps.profile === 110 || sps.profile === 122 || sps.profile === 244) {
-      throw hlsErr('H.264 10bit / 4:2:2 / 4:4:4 在 iOS 上无硬件解码');
+  // 压缩 / 加密的帧连 NAL 都切不开：先挡掉，免得参数集扫描读一堆乱码
+  if (t.encrypted || t.zlib) throw hlsErr('视频轨使用了压缩或加密的 ContentEncoding');
+  let sps = {}, cfg = t.priv;
+  if (t.codecId === 'V_MPEGH/ISO/HEVC' || t.codecId === 'V_MPEG4/ISO/AVC') {
+    const hevc = t.codecId === 'V_MPEGH/ISO/HEVC';
+    const pc = hlsParamConfig(hevc ? 'hevc' : 'avc', t, probe);
+    cfg = pc.cfg;
+    try { sps = (hevc ? hevcParseSps : avcParseSps)(pc.sps[0]); } catch {}
+    if (hevc) {
+      const hv = hevcParseHvcC(cfg);
+      if (!hv) throw hlsErr('HEVC 配置无法解析');
+      Object.assign(v, { codec: 'hevc', entry: 'hvc1', cfgType: 'hvcC', codecs: hevcCodecString(hv) });
+    } else {
+      const av = avcParseAvcC(cfg);
+      if (!av) throw hlsErr('H.264 配置无法解析');
+      if (sps.profile === 110 || sps.profile === 122 || sps.profile === 244) {
+        throw hlsErr('H.264 10bit / 4:2:2 / 4:4:4 在 iOS 上没有硬件解码');
+      }
+      Object.assign(v, { codec: 'avc', entry: 'avc1', cfgType: 'avcC', codecs: avcCodecString(av) });
     }
-    Object.assign(v, { codec: 'avc', entry: 'avc1', cfgType: 'avcC', codecs: avcCodecString(av), nalLen: av.nalLen });
+    Object.assign(v, { nalLen: pc.nalLen, annexB: pc.annexB, psRebuilt: pc.rebuilt });
   } else if (t.codecId === 'V_AV1') {
-    const a1 = av1Parse(t.priv);
-    if (!a1) throw hlsErr('AV1 配置缺失');
+    // 序列头：av1C 的 configOBUs 里有就用它，没有就从片头几帧里找（关键帧前必有一份）。
+    // 它给两样东西：av1C 缺了时据此重建；MKV 没写 Colour 时据此判 PQ / HLG（不然 HDR 片会被标成 SDR）
+    let a1 = av1Parse(t.priv);
+    const seq = (t.priv && t.priv.length > 4 ? av1FindSeqHeader(t.priv.subarray(4)) : null)
+      || probe.video.map(f => av1FindSeqHeader(f.data)).find(Boolean) || null;
+    let si = null;
+    try { si = seq && av1ParseSeqHeader(seq.payload); } catch { si = null; }
+    if (!a1) {
+      if (!si) throw hlsErr('AV1 配置缺失：没有 av1C，片头几帧里也找不到序列头');
+      cfg = av1BuildAv1C(si, seq.obu);
+      a1 = av1Parse(cfg);
+      v.psRebuilt = true;
+    }
+    if (si) sps = { w: si.w, h: si.h, prim: si.prim, trc: si.trc, mtx: si.mtx, full: si.full };
     Object.assign(v, { codec: 'av1', entry: 'av01', cfgType: 'av1C', codecs: av1CodecString(a1), nalLen: 0 });
   } else {
-    throw hlsErr(`视频编码 ${t.codecId} 不能在 iOS 上播放`);
+    throw hlsErr(hlsUnsupportedVideo(t));
   }
-  if (t.encrypted || t.zlib) throw hlsErr('视频轨使用了压缩或加密的 ContentEncoding');
-  v.cfg = hlsB64(t.priv);
+  v.cfg = hlsB64(cfg);
   if (t.strip) v.strip = hlsB64(t.strip);
   v.w = v.w || sps.w || 0;
   v.h = v.h || sps.h || 0;
@@ -7653,11 +8026,33 @@ function hlsVideoConfig(t, probe, opts) {
   return v;
 }
 
+/** 进不了系统播放器的视频编码：说清是什么、为什么、怎么办（播放页原样展示这句话） */
+function hlsUnsupportedVideo(t) {
+  const id = String(t.codecId || '');
+  const names = [
+    [/^V_MPEG2/, 'MPEG-2'], [/^V_MPEG1/, 'MPEG-1'], [/^V_MPEG4\/ISO\/(ASP|SP|AP)/, 'MPEG-4 Part 2（DivX / Xvid）'],
+    [/^V_MPEG4\/MS\//, '微软 MPEG-4'], [/^V_VP8/, 'VP8'], [/^V_VP9/, 'VP9'], [/^V_THEORA/, 'Theora'],
+    [/^V_REAL\//, 'RealVideo'], [/^V_PRORES/, 'Apple ProRes'], [/^V_QUICKTIME/, 'QuickTime 旧式编码'],
+    [/^V_UNCOMPRESSED/, '未压缩视频'], [/^V_FFV1/, 'FFV1'], [/^V_DIRAC/, 'Dirac'], [/^V_MJPEG/, 'Motion JPEG'],
+  ];
+  let name = (names.find(([re]) => re.test(id)) || [null, id || '未知编码'])[1];
+  if (id === 'V_MS/VFW/FOURCC' && t.priv && t.priv.length >= 20) {
+    const cc = String.fromCharCode(...t.priv.subarray(16, 20)).replace(/[^\x20-\x7e]/g, '').trim();
+    const C = cc.toUpperCase();
+    name = /^(WVC1|WMV3|WMVA)$/.test(C) ? `VC-1 / WMV（${cc}）`
+      : /^(XVID|DIVX|DX50|FMP4|MP4V|DIV3|MP43)$/.test(C) ? `MPEG-4 Part 2（${cc}）`
+      : /^(MJPG|AVRN|JPEG)$/.test(C) ? 'Motion JPEG'
+      : /^(H264|X264|AVC1)$/.test(C) ? 'H.264（AVI 式的 VfW 封装，没有时间戳重排信息）'
+      : `VfW 封装的 ${cc || '未知编码'}`;
+  }
+  return `视频是 ${name}，iPhone / iPad / Mac 的系统播放器解不了（支持 H.264、HEVC、AV1）。可以复制直链用 VLC 等播放器打开`;
+}
+
 function hlsDvConfig(v, t, probe, opts) {
   let cfg = t.dvcfg ? dvParseConfig(t.dvcfg) : null;
   let el = false, rpu = null;
   for (const f of probe.video.slice(0, 8)) {
-    const s = hlsScanDvNals(f.data, v.nalLen);
+    const s = hlsScanDvNals(f.data, v.nalLen, v.annexB);
     if (s.rpu && !rpu) rpu = s.rpu;
     if (s.el) el = true;
   }
@@ -8633,6 +9028,7 @@ async function* hlsSegmentParts(cx, idx, k, sel, opts = {}) {
         if (!seenKey) { if (!blk.key) continue; seenKey = true; }
         let pieces = blk.frames[0], size = pieces.reduce((s, x) => s + x.length, 0);
         if (vStrip) { pieces = [vStrip, ...pieces]; size += vStrip.length; }
+        if (V.annexB) { const r = hlsAnnexBToLen(pieces); pieces = r.pieces; size = r.size; }
         if (V.dvConvert || V.dvStrip) {
           const r = hlsRewriteHevc(pieces, V.nalLen, V.dvStrip ? 'strip' : 'convert', stats);
           pieces = r.pieces; size = r.size;
@@ -9217,14 +9613,15 @@ async function hlsIndexFor(cx, opts) {
   const mem = _hlsIdx.get(key);
   if (mem) { if (mem.error) throw hlsErr(mem.error, mem.status); return mem; }
   return singleFlight(`hls-idx:${key}`, async () => {
-    const ck = new Request(`${HLS_IDX_CACHE}${encodeURIComponent(key)}`);
+    const ck = new Request(`${HLS_IDX_CACHE}i${HLS_IDX_V}/${encodeURIComponent(key)}`);
     let idx = null;
     try { const hit = await caches.default.match(ck); if (hit) idx = await hit.json(); } catch {}
     if (!idx) {
       try {
         // 不挂请求的中止信号：首个请求被取消也要把索引建完，后面的请求都等着用
         idx = await hlsBuildIndex({ size: cx.size, read: hlsSmallReader({ ...cx, signal: undefined }) }, opts);
-        idx.idh = fnv1a(key) + (opts.dv !== 'auto' ? `.${opts.dv}` : '');
+        idx.idh = fnv1a(key) + (opts.dv !== 'auto' ? `.${opts.dv}` : '')
+          + (idx.video && (idx.video.annexB || idx.video.psRebuilt) ? '.ps' : '');
       } catch (e) {
         if (!e.status || e.status >= 500) throw e;       // 瞬时故障不落缓存
         idx = { error: e.message, status: e.status };
@@ -9631,6 +10028,8 @@ function hlsInfo(idx, xs, env) {
   return {
     ok: true, dur: idx.dur, segments: idx.segs.length,
     video: { codec: V.codec, codecs: V.codecs, supplemental: V.supp || null, range: V.range,
+      // 配置盒从哪来：CodecPrivate 原样 / 从码流里补齐重建（annexB：帧是起始码，出分段时转成长度前缀）
+      paramSets: V.psRebuilt ? 'rebuilt' : 'codec-private', annexB: !!V.annexB,
       width: V.dw, height: V.h, fps: V.fps ? +V.fps.toFixed(3) : null,
       dolbyVision: V.dv ? { profile: V.dv.profile, level: V.dv.level, fromProfile7: !!V.dvConvert } : null,
       dvStripped: !!V.dvStrip },

@@ -21,9 +21,11 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 | 回源 | 每段开头 1 MB 直通（压低首字节），其余按 4 MB 切片并行取（默认同时 3 片，`HLS_WINDOW` 可调） |
 | 预取 | 第 k 段取完后，后台把第 k+1 段取进边缘缓存；主列表一到就先取第 0 段。播放器来要时：缓存里有就直接出，预取还在半路就等它写完再出（不重复回源）；拖动回看也从缓存出 |
 | 缓存 | 只缓存完整写完的段：数据写在一次性的键下，整段正常写完才把「指针」写到这一段的固定键上，半截的数据永远读不到。请求之间只读彼此的进度数字，不跨请求等待 Promise、不共享流；每个 isolate 同时只跑一路预取 |
-| 视频 | 不转码，负载零拷贝直通；DTS 由 PTS 与 SPS 重排深度推出，跨分段连续 |
+| 视频 | H.264、HEVC、AV1。不转码，负载零拷贝直通；DTS 由 PTS 与 SPS 重排深度推出，跨分段连续 |
+| 参数集 | `CodecPrivate` 里的 hvcC / avcC / av1C 齐全时一个字节不动地用。不齐时（参数集只在码流里的 hev1 / avc3 风格流、整个 `CodecPrivate` 都没有、长度前缀宽度写错）从片头几帧里把 VPS / SPS / PPS（AV1 是序列头 OBU）捞出来，与配置里的按编号合并去重，按 SPS 的 profile / tier / level 重建配置盒（`hvc1` / `avc1` 要求参数集都在配置盒里，苹果只认这一种）。帧里是 Annex B 起始码的，出分段时就地转成 4 字节长度前缀。凑不齐时直接说缺了哪几个 |
+| 不支持的编码 | MPEG-2、VC-1、MPEG-4 Part 2（DivX / Xvid）、VP8、VP9、Theora、ProRes 等进不了系统播放器：播放页直接说是哪种编码、建议用 VLC 打开直链 |
 | 杜比视界 | P5 → `dvh1`+`dvcC`；P8.1 / 8.4 → `hvc1`+`dvvC`+`SUPPLEMENTAL-CODECS`（`db1p` / `db4h`）；**P7（UHD 蓝光双层）逐帧丢弃增强层并把 RPU 改写为 8.1** |
-| HDR | 依 VUI / MKV Colour 写 `VIDEO-RANGE` 与 `colr` / `mdcv` / `clli` |
+| HDR | 依 MKV Colour、HEVC / H.264 的 SPS VUI、AV1 的序列头写 `VIDEO-RANGE` 与 `colr` / `mdcv` / `clli`（MKV 没写 Colour 的 HDR 片不会被当成 SDR） |
 | 音频直通 | AAC、AC-3、E-AC-3（含 Atmos：`CHANNELS="16/JOC"`）、FLAC、ALAC。默认音轨复用在视频分段里，其余为备选音轨 |
 | 音频转码（可选） | DTS、TrueHD、Opus、Vorbis、MP2/MP3、PCM → AC-3 5.1（640 kbps），需要 `audio-tx` Worker |
 | 字幕 | 内封 SRT / ASS（含 zlib 压缩）、同目录外挂 `.srt/.ass/.vtt` → 分段 WebVTT（带 `X-TIMESTAMP-MAP`），中文（简体优先）默认开启。没有字幕 Cues 的文件：字幕块在转视频那一遍顺手收下，不再为字幕把整段视频重读一遍 |
@@ -31,7 +33,8 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 播放页（`/watch`）、首页弹窗和前端站内播放器在 Apple 的原生播放器（macOS Safari，以及 iOS / iPadOS
 上的所有浏览器）里打开 MKV 时自动走这条链路。徽章按码流实测显示（Dolby Vision / HDR10 / HLG）。
 签名过期或文件被替换时，会换新签名并从原位置重载。
-其它浏览器、MP4/MOV 文件仍走 `/stream` 直连（v24 的 FourCC 热修补照旧生效）。新版桌面 Chrome 虽然也
+其它浏览器、MP4/MOV 文件仍走 `/stream` 直连（v24 的 FourCC 热修补照旧生效：`hev1` → `hvc1`、`dvhe` → `dvh1`，
+但只在 hvcC 里带齐 VPS / SPS / PPS 时才改名 —— 参数集只在码流里的流改了名，苹果的解码器反而彻底拒播）。新版桌面 Chrome 虽然也
 声称支持 HLS，但只要 `CODECS` 里有一个它解不了的编码（例如备选音轨的 `ac-3`）就整条拒播，
 杜比视界、AC-3 / E-AC-3 它也解不了，所以不给它 HLS；它能直接播放 MKV。
 
@@ -218,7 +221,7 @@ service = "cuven-audio-tx"
 
 ```bash
 tests/make-samples.sh     # 用 ffmpeg / mkvmerge 生成样片（约 30 秒）
-node tests/run.mjs        # Worker：91 项回归，约 1 分钟
+node tests/run.mjs        # Worker：114 项回归，约 1 分钟
 node tests/web.mjs        # 前端：91 项，需要 Playwright + Chromium（PLAYWRIGHT_PATH 可指定其 index.js），约 5 分钟
 ```
 
@@ -263,6 +266,10 @@ node tests/web.mjs        # 前端：91 项，需要 Playwright + Chromium（PLA
   一季的中文集名 / 简介（缺的补英文）/ 剧照；`type=tv` 不会被同名电影顶掉；目录不存在回空表。
 - **预告片**：IMDb 给直链时照旧用（缓存 6 小时）；IMDb 回 403 时几毫秒内退到 TMDB 的官方 YouTube 预告（挑正式、官方、中文那条），
   之后 30 分钟不再白等 IMDb；缓存；只有片名年份也能找到；查无此片回空。
+- **参数集**（由正常 MKV 原地改出的样片：参数集只在码流里 / 没有 `CodecPrivate` / Annex B 帧，HEVC 与 H.264 各三种，
+  外加没有 av1C 也没有 Colour 的 AV1）：重建的配置盒带齐参数集，`CODECS` 与标准文件一致，视频逐包一致（Annex B 转回长度前缀后
+  与原文件逐字节相同），ffmpeg 完整解码无错误；AV1 仍判为 PQ。凑不齐时报出缺了哪几个；不支持的编码说清是哪种；
+  MP4 直连只给带齐参数集的 `hev1` 改名。
 - **字幕清洗**：21 条片头片尾的署名 / 声明 / 广告与正片里的网址、引流全部删掉；16 条容易误伤的台词（「加入我们」「淘宝」
   「仅供参考」「未经授权」、邮箱、Mr.Smith、「corrected by the teacher」……）一条不误删；混着广告行的只删那一行；
   ASS 的 Staff 样式整条不要、译注留着；直连 `/api/subs/vtt` 与 HLS 分段同一套。
