@@ -6050,8 +6050,22 @@ html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay:
     clearTimeout(t);
     t = setTimeout(function () { root.classList.remove('rail-switching'); try { window.dispatchEvent(new Event('railchange')); } catch (_) {} }, 120);
   };
+  /* 翻开 / 合上时视口与屏幕尺寸不一定同一刻更新：媒体查询先变、screen 晚一拍的话，
+     合上那一下会读到展开时的屏幕宽度、认不出这是 Duo 的外屏，导航就卡在错的形态上，直到下一次转屏。
+     所以除了媒体查询的 change，resize / 转屏 / visualViewport 也都重判，每次变化后再补查两次（250ms、900ms）。
+     set() 只比对 class，重复调用没有代价 */
+  var again = 0;
+  var check = function () {
+    set();
+    clearTimeout(again);
+    again = setTimeout(function () { set(); again = setTimeout(set, 650); }, 250);
+  };
   set();
-  [q, p1, p2].forEach(function (m) { if (m.addEventListener) m.addEventListener('change', set); else if (m.addListener) m.addListener(set); });
+  [q, p1, p2].forEach(function (m) { if (m.addEventListener) m.addEventListener('change', check); else if (m.addListener) m.addListener(check); });
+  window.addEventListener('resize', check, { passive: true });
+  window.addEventListener('orientationchange', check);
+  try { if (screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener('change', check); } catch (_) {}
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', check, { passive: true });
 })();
 </script>
 </head>
@@ -15667,6 +15681,10 @@ window.addEventListener('railchange', () => {
   _navPillBaseLeft = null;
   updateNavPill(false);
   try { window.NavGlass && window.NavGlass.refresh(); } catch (_) {}
+  /* 翻开 / 合上换了形态：大图的形变进度、行程、瀑布流列数都按新版面重算一遍 ——
+     这次换形态不一定伴着 resize（补查那一下就没有），不能指望 resize 那几个监听 */
+  try { _heroRunVH = -1; heroMorphP = -1; updateHeroMorph(); } catch (_) {}
+  try { masRelayout(); } catch (_) {}
 });
 
 
@@ -23653,7 +23671,9 @@ if (DEV) {
       return r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw;   // must be on-screen
     }
     function eligible(ctx) { return contexts.indexOf(ctx) >= 0; }
-    function hostRect() { var el = resolve(); return (el && visible(el)) ? el.getBoundingClientRect() : null; }
+    /* 画布自己被 CSS 藏起来了（iPhone Duo 折起时的新导航整枚是一层 CSS 玻璃）：宿主看得见也不画，白耗电 */
+    function canvasHidden() { try { return !!canvas && getComputedStyle(canvas).display === "none"; } catch (e) { return false; } }
+    function hostRect() { var el = resolve(); return (el && visible(el) && !canvasHidden()) ? el.getBoundingClientRect() : null; }
     function fitTo(nr) {
       var w = nr.width, h = nr.height; DPR = computeDPR(w, h);
       var cw = Math.max(1, Math.round(w * DPR)), ch = Math.max(1, Math.round(h * DPR));

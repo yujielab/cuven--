@@ -631,6 +631,23 @@ ok(mo.morphed && mo.card[1] <= mo.nav - 8 && Math.abs(mo.pill[0] - mo.card[0]) <
 await pd.evaluate(() => scrollTo(0, 0));
 await pd.waitForTimeout(500);
 await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: NO_SAI });
+/* 实机上翻开 / 合上时，视口与屏幕尺寸不一定同一刻更新：合上那一下视口先变、screen 晚一拍还是内屏的尺寸，
+   当场认不出外屏。屏幕尺寸跟上来之后（视口不再变、没有媒体查询事件），补查要把导航换回 Duo 的那种 */
+const metrics = (w, h, sw, sh) => duoCdp.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: true, screenWidth: sw, screenHeight: sh });
+await metrics(669, 825, 669, 880);
+await pd.waitForTimeout(700);
+const fold0 = await pd.evaluate(() => document.documentElement.className);
+await metrics(466, 678, 669, 880);              /* 视口已是外屏，screen 还是内屏 */
+await pd.waitForTimeout(400);
+const stale = await pd.evaluate(() => document.documentElement.classList.contains('rail-float'));
+await metrics(466, 678, 466, 678);              /* screen 跟上来（视口不变，没有媒体查询事件） */
+await pd.waitForTimeout(1300);
+const fold1 = await pd.evaluate(() => { const c = document.documentElement.classList, d = document.getElementById('dock').getBoundingClientRect();
+  return { float: c.contains('rail') && c.contains('rail-float') && !c.contains('rail-switching'), atRight: d.right >= innerWidth - 24 && d.height > d.width * 2.5 }; });
+ok(/\brail\b/.test(fold0) && !/rail-float/.test(fold0) && !stale && fold1.float && fold1.atRight,
+  '翻开再合上、屏幕尺寸晚一拍才更新：补查把导航换回右缘那枚胶囊（不卡在展开时的形态）');
+await pd.setViewportSize({ width: 466, height: 678 });
+await pd.waitForTimeout(500);
 /* 浮动侧边导航下搜索：搜索场到顶部、几乎通栏；头像圆钮留在右下角 */
 await pd.setViewportSize({ width: 466, height: 678 });
 await pd.waitForTimeout(600);
