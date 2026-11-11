@@ -1,5 +1,6 @@
 // 回归测试：node tests/run.mjs（先跑一次 tests/make-samples.sh 生成样片）
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
@@ -233,6 +234,317 @@ console.log('\n■ 管线：并行窗口、边缘缓存预取、半路失败不�
   await clear();
 }
 
+console.log('\n■ OpenSubtitles 自动补字幕（模拟接口）');
+{
+  /* 后台查询是 info.json 的 waitUntil 里再 waitUntil 出来的：等到队列真正清空 */
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const clear = async () => { await settle(); caches.default.m.clear(); };
+  const calls = p => H.os.calls.filter(c => c.path === p);
+  /* OpenSubtitles 的文件哈希（独立实现，用来核对 Worker 算的） */
+  const mh = f => {
+    const b = fs.readFileSync(S(f));
+    let h = BigInt(b.length);
+    for (const part of [b.subarray(0, 65536), b.subarray(b.length - 65536)]) for (let i = 0; i < 65536; i += 8) h += part.readBigUInt64LE(i);
+    return (h & 0xFFFFFFFFFFFFFFFFn).toString(16).padStart(16, '0');
+  };
+  const tc = t => { const ms = Math.round(t * 1000); const p = (v, n = 2) => String(v).padStart(n, '0'); return `${p(Math.floor(ms / 3600000))}:${p(Math.floor(ms / 60000) % 60)}:${p(Math.floor(ms / 1000) % 60)},${p(ms % 1000, 3)}`; };
+  const srt = (lines, dur) => lines.map((t, i) => { const a = 0.4 + i * (dur - 1) / lines.length; return `${i + 1}\n${tc(a)} --> ${tc(a + 0.5)}\n${t}\n`; }).join('\n');
+  const SIMP = Array.from({ length: 12 }, (_, i) => `这是第${i + 1}句简体字幕，我们说话没问题`);
+  const TRAD = Array.from({ length: 12 }, (_, i) => `這個問題很簡單，第${i + 1}句繁體字幕說話`);
+  const master = async f => (await (await H.call(`/hls/${H.token(f)}/master.m3u8`)).text());
+  const info = async f => (await H.call(`/hls/${H.token(f)}/info.json`)).json();
+  const subLine = (m, re) => m.split('\n').find(l => l.startsWith('#EXT-X-MEDIA:TYPE=SUBTITLES') && re.test(l)) || '';
+  const vtt = async (f, m, k = 0) => { const idh = /\n([^/\n]+)\/v\.m3u8/.exec(m)[1]; return (await H.call(`/hls/${H.token(f)}/${idh}/o0/${k}.vtt`)).text(); };
+  const reset = () => { H.os.calls.length = 0; H.os.subs = []; H.os.files = {}; H.os.quota = false; };
+
+  // 没配 Key：一次都不调
+  await clear(); reset();
+  await info('/Movies/dv81.mkv'); await settle();
+  let m = await master('/Movies/dv81.mkv');
+  ok(!H.os.calls.length && !/o0\.m3u8/.test(m), '没配 OPENSUBTITLES_API_KEY：不调用接口，主列表也没有在线字幕');
+
+  H.env.OPENSUBTITLES_API_KEY = 'test-key'; H.env.OPENSUBTITLES_USERNAME = 'u'; H.env.OPENSUBTITLES_PASSWORD = 'p';
+  // 一条字幕都没有的片子：哈希命中的胜过下载量高的、机翻的；帧率对不上让对方换算
+  await clear(); reset();
+  const h81 = mh('dv81.mkv');
+  H.os.subs = [
+    { id: 1, file_id: 1001, language: 'zh-cn', moviehash: h81, fps: 25, release: 'Some.Movie.2024.2160p.UHD.BluRay', downloads: 120 },
+    { id: 2, file_id: 1002, language: 'zh-cn', query: 'dv81', release: 'Other.Release.720p', downloads: 90000 },
+    { id: 3, file_id: 1003, language: 'zh-cn', moviehash: h81, mt: true, downloads: 500 },
+  ];
+  H.os.files = { 1001: { text: srt(SIMP, 12) }, 1002: { text: srt(['错的那一份'.repeat(2)], 12) }, 1003: { text: srt(['机翻'], 12) } };
+  await info('/Movies/dv81.mkv'); await settle();
+  const sc = calls('/subtitles'), dl = calls('/download');
+  ok(sc.some(c => c.q.moviehash === h81) && sc.some(c => c.q.query === 'dv81'), `先按文件哈希（${h81}）再按片名搜`);
+  const keys = c => c.search.split('&').map(kv => kv.split('=')[0]);
+  ok(sc.every(c => keys(c).join() === keys(c).sort().join() && Object.values(c.q).every(v => v === v.toLowerCase())) && sc.every(c => c.q.languages === 'en,ze,zh-cn,zh-tw'),
+    `查询参数按名字排好、全小写；一条字幕都没有 → 也要英文兜底（${sc[0] && sc[0].q.languages}）`);
+  ok(calls('/login').length === 1 && sc.every(c => c.key === 'test-key' && c.auth === 'Bearer tok-os' && /^CuvenStream v25$/.test(c.ua)), '带 Api-Key / User-Agent，登录一次后带 token');
+  ok(dl.length === 1 && dl[0].body.file_id === 1001 && dl[0].body.sub_format === 'srt' && dl[0].body.in_fps === 25 && dl[0].body.out_fps === 23.976,
+    `挑中哈希命中的那条（不是下载量 9 万的、也不是机翻的），帧率 25 → 23.976 换算：${JSON.stringify(dl[0] && dl[0].body)}`);
+  m = await master('/Movies/dv81.mkv');
+  const line = subLine(m, /o0\.m3u8/);
+  ok(/LANGUAGE="zh-Hans"/.test(line) && /NAME="简体中文（在线）"/.test(line) && /DEFAULT=YES/.test(line), `主列表多了一条在线简体中文，默认打开：${line.replace(/^#EXT-X-MEDIA:/, '').slice(0, 120)}`);
+  const v0 = await vtt('/Movies/dv81.mkv', m, 0);
+  ok(/^WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:900000/.test(v0) && v0.includes('这是第1句简体字幕'), '在线字幕分段：带时间映射，内容是下载来的那一份');
+  H.os.calls.length = 0;
+  await info('/Movies/dv81.mkv'); await master('/Movies/dv81.mkv'); await settle();
+  ok(!calls('/subtitles').length && !calls('/download').length, '再开一次：直接用存下的结果，不再搜索、不再花下载配额');
+
+  // 只有英文内封字幕的片子：只要中文；只有繁体 → 逐字转成简体
+  await clear(); reset();
+  const hsc = mh('subscan.mkv');
+  H.os.subs = [
+    { id: 10, file_id: 1010, language: 'zh-tw', moviehash: hsc, downloads: 30 },
+    { id: 11, file_id: 1011, language: 'en', moviehash: hsc, downloads: 9000 },
+  ];
+  H.os.files = { 1010: { text: srt(TRAD, 25) } };
+  await info('/Movies/subscan.mkv'); await settle();
+  ok(calls('/subtitles').every(c => c.q.languages === 'ze,zh-cn,zh-tw'), '已有英文字幕：只找中文');
+  m = await master('/Movies/subscan.mkv');
+  const v1 = await vtt('/Movies/subscan.mkv', m, 0);
+  ok(/NAME="简体中文（在线 · 繁转简）"/.test(subLine(m, /o0/)) && v1.includes('这个问题很简单') && !v1.includes('這個'), `只有繁体：转成简体再给（${(v1.split('\n').find(l => /问题/.test(l)) || '').slice(0, 20)}）`);
+
+  // 找不到：记下来，7 天内不再查
+  await clear(); reset();
+  await info('/Movies/dv5.mkv'); await settle();
+  const n1 = calls('/subtitles').length;
+  await info('/Movies/dv5.mkv'); m = await master('/Movies/dv5.mkv'); await settle();
+  ok(n1 > 0 && calls('/subtitles').length === n1 && !/o0\.m3u8/.test(m) && !calls('/download').length, `没找到：主列表不加，之后不再重复搜索（搜了 ${n1} 次就停）`);
+
+  // 下载配额用完：不加字幕，过后再查
+  await clear(); reset();
+  const h7 = mh('dv7.mkv');
+  H.os.subs = [{ id: 20, file_id: 1020, language: 'zh-cn', moviehash: h7 }];
+  H.os.files = { 1020: { text: srt(SIMP, 12) } };
+  H.os.quota = true;
+  await info('/Movies/dv7.mkv'); await settle();
+  m = await master('/Movies/dv7.mkv');
+  ok(calls('/download').length === 1 && !/o0\.m3u8/.test(m), '下载配额用完（406）：这次不加，记下等配额重置后再查');
+
+  // 已经有简体：一次都不查
+  await clear(); reset();
+  await info('/Movies/hdr10_multi.mkv'); await master('/Movies/hdr10_multi.mkv'); await settle();
+  await info('/Movies/avc_zsub.mkv'); await master('/Movies/avc_zsub.mkv'); await settle();
+  ok(!H.os.calls.length, '已有简体中文（外挂 zh-Hans / 认作简体的「中文」）：不调用接口');
+
+  // 只标了「中文」、其实是繁体的外挂字幕：算缺简体；主列表里改标繁体，在线简体默认打开
+  await clear(); reset();
+  fs.writeFileSync(S('av1_hdr.zh.srt'), srt(TRAD, 12));
+  const hav = mh('av1_hdr.mkv');
+  H.os.subs = [{ id: 30, file_id: 1030, language: 'zh-cn', moviehash: hav, downloads: 10 }];
+  H.os.files = { 1030: { text: srt(SIMP, 12) } };
+  await info('/Movies/av1_hdr.mkv'); await settle();
+  m = await master('/Movies/av1_hdr.mkv');
+  const x0 = subLine(m, /x0\.m3u8/), o0 = subLine(m, /o0\.m3u8/);
+  ok(/LANGUAGE="zh-Hant"/.test(x0) && /NAME="繁体中文"/.test(x0) && /DEFAULT=NO/.test(x0) && /DEFAULT=YES/.test(o0),
+    '「中文」外挂抽样认出是繁体：改标繁体中文，在线简体默认打开');
+  fs.unlinkSync(S('av1_hdr.zh.srt'));
+
+  // 直连（MP4）：/api/subs 里多一条在线字幕；GBK 编码的字幕照样正确解码
+  await clear(); reset();
+  const hmp = mh('avc_raw.mp4');
+  const gbk = execFileSync('python3', ['-c', 'import sys; sys.stdout.buffer.write(sys.stdin.read().encode("gbk"))'], { input: srt(SIMP, 20) });
+  H.os.subs = [{ id: 40, file_id: 1040, language: 'zh-cn', moviehash: hmp, downloads: 5 }];
+  H.os.files = { 1040: { bytes: gbk } };
+  /* /api/subs 要登录 Cookie（与前端一样）；字幕直链本身靠签名 */
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const list = await (await H.call('/api/subs?path=' + encodeURIComponent('/Movies/avc_raw.mp4'), 'GET', { Cookie: cookie })).json();
+  const online = (list.subs || []).find(x => x.online);
+  ok(online && online.srclang === 'zh-Hans' && /os=1/.test(online.url), `直连：/api/subs 带上在线字幕（${online && online.label}）`);
+  const full = online ? await (await H.call(online.url)).text() : '';
+  ok(/^WEBVTT/.test(full) && full.includes('这是第1句简体字幕') && (full.match(/-->/g) || []).length === 12, 'GBK 编码的字幕解码正确，整份 VTT 给 <track> 用');
+  await clear();
+  for (const k of ['OPENSUBTITLES_API_KEY', 'OPENSUBTITLES_USERNAME', 'OPENSUBTITLES_PASSWORD']) delete H.env[k];
+}
+
+console.log('\n■ 剧集：/api/tv、/api/tv/episodes、/api/tmdb/season、/api/tmdb?type=tv');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const get = async u => { const r = await H.call(u, 'GET', { Cookie: cookie }); return { status: r.status, body: await r.json() }; };
+  const ST = '/ram2/怪奇物语 Stranger Things S04 [Full-9] 2160p NF WEB-DL DV Atmos';
+  const LOU = '/ram2/The.Last.of.Us.S02.2160p.MAX.WEB-DL.DDP5.1.Atmos.DV.H.265';
+  const f = (p, size = 1000, at = '2026-01-01T00:00:00Z') => ({ path_display: p, size, server_modified: at });
+  H.tv.entries = [
+    ...[1, 2, 3, 4, 5].map(i => f(`${ST}/Stranger.Things.S04E0${i}.2160p.mkv`, 5000, `2026-03-0${i}T00:00:00Z`)),
+    f(`${ST}/Stranger.Things.S04E03.1080p.mkv`, 2000), f(`${ST}/sample.mkv`, 10), f(`${ST}/Stranger.Things.S04E01.zh.srt`),
+    ...[1, 2, 3].map(i => f(`${LOU}/The.Last.of.Us.S02E0${i}.mkv`)),
+    f('/ram2/繁花 全30集 4K 国语/第01集.mp4'), f('/ram2/繁花 全30集 4K 国语/第十集.mp4'), f('/ram2/繁花 全30集 4K 国语/第02集.mp4'),
+    f('/ram2/Fargo/Season 1/Fargo.S01E01.mkv'), f('/ram2/Fargo/Season 2/Fargo.S02E01.mkv'), f('/ram2/Fargo/Season 2/Fargo.S02E02.mkv'),
+    f('/ram2/Fargo/Specials/Fargo.S00E01.mkv'), f('/ram2/Fargo/Season 2/Featurettes/Making.Of.mkv'),
+    f('/ram2/Mixed Show/Mixed.Show.S01E01.mkv'), f('/ram2/Mixed Show/Mixed.Show.S01E02.mkv'), f('/ram2/Mixed Show/Mixed.Show.S02E01.mkv'),
+    f('/ram2/loose.mkv'),
+  ];
+  H.tv.pageSize = 4;          // 分页：每页 4 条，翻好几页
+  H.tmdb.shows = [
+    { id: 100088, name: '最后生还者', original: 'The Last of Us', first: '2023-01-15',
+      seasons: [{ n: 1, air: '2023-01-15', count: 9 }, { n: 2, air: '2025-04-13', count: 7 }] },
+    { id: 66732, name: '怪奇物语', original: 'Stranger Things', first: '2016-07-15', seasons: [{ n: 4, air: '2022-05-27', count: 9 }] },
+    { id: 60622, name: '冰血暴', original: 'Fargo', first: '2014-04-15',
+      seasons: [{ n: 1, air: '2014-04-15', count: 10 }, { n: 2, air: '2015-10-12', count: 10,
+        eps: [{ zh: '等待达美航空', en: 'Waiting for Dutch', overview: '', still: '/s1.jpg' }, { zh: '在雪地里', en: 'Before the Law', overview: '中文简介', still: '/s2.jpg' }] }] },
+  ];
+  H.tmdb.movies = [{ id: 275, title: 'Fargo', date: '1996-03-08' }];
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  delete H.env.TV_FOLDER;
+
+  const t0 = await get('/api/tv');
+  await settle();
+  const L = t0.body.series || [];
+  const by = p => L.find(s => s.path === p);
+  ok(t0.status === 200 && L.length === 7, `剧集表：7 部（${L.map(s => s.title + (s.season ? ' S' + s.season : '')).join('、')}），根目录散放的文件不算`);
+  const st = by(ST);
+  ok(st && st.zh === '怪奇物语' && st.en === 'Stranger Things' && st.season === 4 && st.declared === 9 && st.res === '4K' &&
+     st.hdr === 'DV' && st.audio === 'Atmos' && st.brand === 'Netflix' && st.episodes === 5 && st.complete === false && st.title === '怪奇物语',
+    '目录名解析：中英名、第 4 季、共 9 集、4K 杜比视界全景声、Netflix；样片与字幕不算集，1080p 重复版合并');
+  ok(st && st.tmdbId === 66732 && st.year === '2022' && st.total === 9 && st.added === '2026-03-05T00:00:00Z',
+    'TMDB 补上编号、这一季的年份、集数；入库时间取最新那集');
+  const lou = by(LOU);
+  ok(lou && lou.zh === '最后生还者' && lou.title === '最后生还者' && lou.year === '2025' && lou.tmdbId === 100088 && lou.brand === 'HBO',
+    '只有英文名的目录：中文名由 TMDB 补（最后生还者），年份是第二季的 2025 而不是首播的 2023');
+  const fh = by('/ram2/繁花 全30集 4K 国语');
+  ok(fh && fh.zh === '繁花' && fh.declared === 30 && fh.langs.join() === '国语' && fh.episodes === 3 && fh.complete === false, '中文目录：全 30 集 / 国语，目前 3 集');
+  ok(by('/ram2/Fargo/Season 1') && by('/ram2/Fargo/Season 2') && by('/ram2/Fargo/Season 2').episodes === 2 && by('/ram2/Fargo/Season 2').title === '冰血暴',
+    'Season 1 / Season 2 子目录各算一季；特别篇与花絮目录不算');
+  ok(by('/ram2/Mixed Show#S1') && by('/ram2/Mixed Show#S1').episodes === 2 && by('/ram2/Mixed Show#S2') && by('/ram2/Mixed Show#S2').season === 2,
+    '一个目录混着两季：按文件里的季号拆成两张卡');
+
+  const lists = H.tv.lists, calls = H.tmdb.calls.length;
+  const t1 = await get('/api/tv');
+  await settle();
+  ok(t1.body.series.length === 7 && H.tv.lists === lists && H.tmdb.calls.length === calls, '10 分钟内再取：直接用存着的表，不再列目录、不再查 TMDB');
+
+  const e1 = await get('/api/tv/episodes?path=' + encodeURIComponent(ST));
+  ok(e1.status === 200 && e1.body.series.id === st.id && e1.body.episodes.map(e => e.ep).join() === '1,2,3,4,5' &&
+     e1.body.episodes[2].name === 'Stranger.Things.S04E03.2160p.mkv', '分集表：按集号排，同一集留大的那个版本');
+  const e2 = await get('/api/tv/episodes?path=' + encodeURIComponent('/ram2/繁花 全30集 4K 国语'));
+  ok(e2.body.episodes.map(e => e.ep).join() === '1,2,10' && e2.body.episodes[2].path === '/ram2/繁花 全30集 4K 国语/第十集.mp4', '「第十集」认成第 10 集');
+  const e3 = await get('/api/tv/episodes?path=' + encodeURIComponent('/ram2/没有这部剧'));
+  ok(e3.status === 404, '不存在的剧：404');
+
+  const s2 = await get('/api/tmdb/season?id=60622&season=2');
+  const eps = s2.body.episodes || [];
+  ok(eps.length === 2 && eps[0].name === '等待达美航空' && eps[0].overview === 'EN: Waiting for Dutch' && eps[1].overview === '中文简介' &&
+     eps[0].still === 'https://image.tmdb.org/t/p/w780/s1.jpg' && eps[0].runtime === 50, 'TMDB 一季：中文集名，中文简介缺的补英文，剧照 w780');
+  const n = H.tmdb.calls.length;
+  await get('/api/tmdb/season?id=60622&season=2'); await settle();
+  ok(H.tmdb.calls.length === n, '一季的分集信息有缓存');
+
+  const m1 = await get('/api/tmdb?query=Fargo&type=tv&logo=1&year=2015');
+  ok(m1.body && m1.body.type === 'tv' && m1.body.id === 60622 && m1.body.posterClean === 'https://image.tmdb.org/t/p/w780/clean.jpg',
+    'type=tv：同名电影《冰血暴》(1996) 不会顶掉剧集；第二季的年份也能搜到；带纯净海报');
+  const m2 = await get('/api/tmdb?query=Fargo');
+  ok(m2.body && m2.body.type === 'movie' && m2.body.id === 275, '不带 type：老规矩，电影优先');
+
+  // TV 目录不存在 → 空表（前端据此整段不显示），不报错
+  H.env.TV_FOLDER = '/nope';
+  const t2 = await get('/api/tv');
+  await settle();
+  ok(t2.status === 200 && Array.isArray(t2.body.series) && t2.body.series.length === 0, 'TV_FOLDER 不存在：回空表');
+  delete H.env.TV_FOLDER; delete H.env.TMDB_API_KEY;
+  H.tv.entries = []; H.tv.pageSize = 0;
+}
+
+console.log('\n■ 预告片：IMDb 直链优先，被拒时退到 TMDB 登记的 YouTube 官方预告');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const get = async u => { const r = await H.call(u, 'GET', { Cookie: cookie }); return { status: r.status, cc: r.headers.get('cache-control'), body: await r.json() }; };
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  const mp4 = 'https://imdb-video.media-imdb.com/vi1/1080.mp4?Expires=1794453949&Signature=x';
+  H.imdb.status = 200; H.imdb.calls = 0;
+  H.imdb.title = { id: 'tt0111161', titleText: { text: 'The Shawshank Redemption' }, releaseYear: { year: 1994 }, plot: null, images: { edges: [] },
+    primaryVideos: { edges: [{ node: { id: 'vi1', name: { value: 'Trailer' }, runtime: { value: 120 }, contentType: { displayName: { value: 'Trailer' } },
+      thumbnail: null, playbackURLs: [{ displayName: { value: '1080p' }, videoMimeType: 'MP4', url: mp4 }] } }] } };
+  const r0 = await get('/api/imdb/video?id=tt0111161&stills=0');
+  ok(r0.body.video && r0.body.video.best === mp4 && r0.body.yt === null && /max-age=21600/.test(r0.cc), 'IMDb 给得出直链：照旧用直链 MP4（缓存 6 小时，短于签名有效期）');
+
+  H.imdb.status = 403; H.imdb.calls = 0;
+  H.tmdb.find.tt15239678 = { movie_results: [{ id: 693134 }], tv_results: [] };
+  H.tmdb.videos['movie/693134'] = [
+    { iso_639_1: 'en', key: 'Way9Dexny3w', site: 'YouTube', size: 1080, type: 'Trailer', official: true, published_at: '2023-12-21T00:00:00.000Z', name: 'Official Trailer 3' },
+    { iso_639_1: 'en', key: 'U2Qp5pL3ovA', site: 'YouTube', size: 2160, type: 'Teaser', official: true, published_at: '2023-05-03T00:00:00.000Z', name: 'Teaser' },
+    { iso_639_1: 'zh', key: 'zhTrailer01', site: 'YouTube', size: 1080, type: 'Trailer', official: true, published_at: '2024-02-01T00:00:00.000Z', name: '终极预告' },
+    { iso_639_1: 'en', key: 'fanTrailer1', site: 'YouTube', size: 2160, type: 'Trailer', official: false, published_at: '2024-03-01T00:00:00.000Z', name: 'Fan made' },
+    { iso_639_1: 'en', key: '123456789ab', site: 'Vimeo', size: 1080, type: 'Trailer', official: true, published_at: '2024-03-01T00:00:00.000Z', name: 'Vimeo' },
+  ];
+  const t0 = Date.now();
+  const r1 = await get('/api/imdb/video?id=tt15239678&stills=0');
+  ok(r1.body.video === null && r1.body.yt && r1.body.yt.key === 'zhTrailer01' && r1.body.yt.official && H.imdb.calls === 1 && Date.now() - t0 < 3000,
+    `IMDb 回 403：退到 TMDB 的官方预告（${r1.body.yt && r1.body.yt.name}，${Date.now() - t0}ms，不等满超时）`);
+  ok(/max-age=259200/.test(r1.cc), '只有 YouTube 预告的回包缓存 3 天');
+
+  H.tmdb.videos['movie/27205'] = [{ iso_639_1: 'en', key: 'YoHD9XEInc0', site: 'YouTube', size: 1080, type: 'Trailer', official: true, published_at: '2010-05-01T00:00:00.000Z', name: 'Trailer' }];
+  const c0 = H.tmdb.calls.length;
+  const r2 = await get('/api/imdb/video?id=tt1375666&tmdb=27205&type=movie&stills=0');
+  ok(r2.body.yt && r2.body.yt.key === 'YoHD9XEInc0' && H.imdb.calls === 1 && H.tmdb.calls.length - c0 === 1,
+    'IMDb 刚拒绝过：下一部不再去问它；带着 TMDB 编号只要一次请求');
+
+  await settle();
+  const c1 = H.tmdb.calls.length;
+  const r3 = await get('/api/imdb/video?id=tt15239678&stills=0');
+  ok(r3.body.yt && r3.body.yt.key === 'zhTrailer01' && H.tmdb.calls.length === c1, '同一部再问：走缓存');
+
+  H.tmdb.movies = [{ id: 275, title: 'Fargo', date: '1996-03-08' }];
+  H.tmdb.videos['movie/275'] = [{ iso_639_1: 'en', key: 'h2tY82z3xXU', site: 'YouTube', size: 480, type: 'Trailer', official: true, published_at: '2016-01-01T00:00:00.000Z', name: 'Trailer' }];
+  const r4 = await get('/api/imdb/video?query=Fargo&year=1996&stills=0');
+  ok(r4.body.yt && r4.body.yt.key === 'h2tY82z3xXU', '只有片名和年份：TMDB 搜到再取预告');
+  const r5 = await get('/api/imdb/video?query=NoSuchFilm&stills=0');
+  ok(r5.status === 200 && r5.body.video === null && r5.body.yt === null, '查无此片：空回包，前端退回剧照');
+  await settle();
+  delete H.env.TMDB_API_KEY;
+}
+
+console.log('\n■ 字幕清洗：字幕组、发布 / 来源声明、网址、广告');
+{
+  const X = await H.internals();
+  const D = 6000;                                                     // 片长 100 分钟
+  const cue = (s, text) => ({ s, e: s + 2, text, settings: '' });
+  const head = ['本字幕由XX字幕组翻译制作\n仅供学习交流，请于下载后24小时内删除', '翻译：张三  校对：李四', '人人影视原创翻译', '【YYeTs】',
+    '-=TLF=-', 'www.zimuku.la 字幕库', 'Subtitles by explosiveskull', '中英字幕', 'Movie.2019.1080p.BluRay.x264-SPARKS', '@破烂熊字幕组',
+    'Translated by: Jane Doe', '时间轴：王五', 'Sync and corrected by elderman', '微信公众号：电影字幕'];
+  const keepHead = ['我们出发吧', '<i>Previously on...</i>', '- Where are you going?\n- Home.', '♪ 夜色多美好 ♪'];
+  const mid = ['我们公司出品的东西都很好', '翻译一下这句话', '伊甸园里有一棵树', 'Email me at john@example.com', 'This book was translated by my father',
+    '他是这家工作室的老板', '2019年我们在北京', 'Mr.Smith is here.', '你愿意加入我们吗？', '我在淘宝上买的', 'A telegram for you, sir.',
+    '这仅供参考', '未经授权不得入内', 'I stand corrected by the facts.', '关注我的公众号', 'His mistake was corrected by the teacher.'];
+  const dropMid = ['Visit www.badsite.com for more subs', 'QQ群：123456789', 'Please rate this subtitle at www.osdb.link/abc', '本片仅供学习交流'];
+  const tail = ['Advertise your product or brand here\ncontact www.OpenSubtitles.org today', 'Support us and become VIP member\nto remove all ads from www.OpenSubtitles.org', '压制：CMCT'];
+  const cues = [
+    ...head.map((t, i) => cue(1 + i * 3, t)), ...keepHead.map((t, i) => cue(60 + i * 3, t)),
+    ...mid.map((t, i) => cue(3000 + i * 3, t)), ...dropMid.map((t, i) => cue(3100 + i * 3, t)),
+    cue(3200, '好的\n字幕组招募翻译 QQ群123456'),
+    ...tail.map((t, i) => cue(D - 100 + i * 3, t)),
+  ];
+  const out = X.subClean(cues, D);
+  const texts = out.map(c => c.text);
+  const gone = [...head, ...dropMid, ...tail].filter(t => texts.includes(t) || texts.some(x => t.split('\n').some(l => x.includes(l) && l.length > 4)));
+  ok(!gone.length, `片头片尾的署名 / 声明 / 广告、正片里的网址与引流全部删掉（${head.length + dropMid.length + tail.length} 条）${gone.length ? '；漏了：' + gone.join(' | ') : ''}`);
+  const lost = [...keepHead, ...mid].filter(t => !texts.includes(t));
+  ok(!lost.length, `台词一条不误删（片头的对白、正片里提到「出品」「翻译」「伊甸园」、邮箱、Mr.Smith…）${lost.length ? '；误删：' + lost.join(' | ') : ''}`);
+  ok(texts.includes('好的'), '一条里混着广告行：只删那一行，台词留下');
+  const vtt = X.hlsVtt(cues.filter(c => c.s > 2900 && c.s < 3300), D);
+  ok(vtt.includes('伊甸园里有一棵树') && !vtt.includes('osdb') && !vtt.includes('QQ群'), 'HLS 分段 VTT 走同一套清洗');
+  const ass = '[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n' +
+    'Dialogue: 0,0:00:01.00,0:00:05.00,Staff,,0,0,0,,本片由 Cuven 校对\n' +
+    'Dialogue: 0,0:00:06.00,0:00:08.00,Default,,0,0,0,,你好\n' +
+    'Dialogue: 0,0:00:09.00,0:00:11.00,Note,,0,0,0,,注：双关语\n';
+  const pc = X.hlsParseSubFile(ass, '.ass').map(c => c.text);
+  ok(pc.join('|') === '你好|注：双关语', 'ASS 里 Staff 样式的署名整条不要；译注（Note）留着');
+  // 直连外挂字幕：/api/subs/vtt 输出已清洗
+  const srt = [['00:00:01,000', '00:00:04,000', '本字幕由XX字幕组翻译\nwww.example-subs.com'], ['00:00:05,000', '00:00:07,000', '你好'],
+    ['00:00:08,000', '00:00:10,000', '再见']].map((c, i) => `${i + 1}\n${c[0]} --> ${c[1]}\n${c[2]}\n`).join('\n');
+  fs.writeFileSync(S('clean_case.zh.srt'), srt);
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const v = await (await H.call('/api/subs/vtt?path=' + encodeURIComponent('/Movies/clean_case.zh.srt'), 'GET', { Cookie: cookie })).text();
+  fs.unlinkSync(S('clean_case.zh.srt'));
+  ok(/^WEBVTT/.test(v) && v.includes('你好') && v.includes('再见') && !/字幕组|example-subs/.test(v), '直连的外挂字幕（/api/subs/vtt）也清洗过');
+}
+
 console.log('\n■ ffmpeg 作为 HLS 客户端（HTTP）');
 {
   const srv = http.createServer(async (req, res) => {
@@ -253,7 +565,12 @@ console.log('\n■ ffmpeg 作为 HLS 客户端（HTTP）');
 
 if (fs.existsSync(path.join(HERE, '..', 'audio-tx', 'tx.wasm'))) {
   console.log('\n■ DTS / TrueHD / Opus → AC-3 转码');
+  const health = async () => (await H.call('/health')).text();
+  const h0 = await health();
   await H.bindAudioTx();
+  const h1 = await health();
+  ok(/DTS \/ TrueHD<\/span><span>— 未绑定 AUDIO_TX/.test(h0) && /DTS \/ TrueHD<\/span><span>✅ 已绑定，转码 Worker 在线/.test(h1),
+    '健康页：转码 Worker 绑没绑、在不在线，一眼看得到（还有 TMDB / OpenSubtitles / 剧集目录 / 访问保护）');
   const b = `/hls/${H.token('/Movies/hdr10_multi.mkv')}/`;
   const m = await (await H.call(b + 'master.m3u8')).text();
   for (const [i, label] of [[4, 'DTS'], [5, 'TrueHD'], [6, 'Opus']]) {

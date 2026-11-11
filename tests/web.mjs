@@ -1,4 +1,4 @@
-// 前端回归：web/index.html 的播放（点播放直接进系统全屏）、续播、字幕、剧集、预告片、优选入口（Playwright + Chromium）
+// 前端回归：web/index.html 的播放（加载画面 → 系统全屏）、续播、字幕、剧集、预告片、优选入口（Playwright + Chromium）
 //   node tests/web.mjs            （需要 playwright；PLAYWRIGHT_PATH 可指定其 index.js）
 // 静态服务托管 web/index.html，发往 stream.cuven.online（以及测试用的第二入口 s2.test）的请求交给本地运行的真实 Worker。
 import fs from 'node:fs';
@@ -21,12 +21,16 @@ const srv = http.createServer((q, r) => {
   r.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); r.end(html);
 });
 await new Promise(r => srv.listen(18301, '127.0.0.1', r));
-const browser = await chromium.launch();
+/* SwiftShader：无头 Chromium 也有 WebGL2，加载画面的极光背景走真实路径 */
+const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
 const ORIGIN = 'http://127.0.0.1:18301/';
 const TRAILER = 'https://stream.cuven.online/stream/t.mp4?path=' + encodeURIComponent('/Movies/long.mp4') + '&safari=1';
 const hits = [];
 const errors = [];
 let pingDelay = 0;
+let streamDelay = 0;                          // 放慢 /stream：开播前看清加载画面
+let trailerYt = false;                        // 预告片回包：false = IMDb 直链 MP4，true = 只有 YouTube 官方预告
+let apiDown = false;                          // 模拟弱网 / 断网：发往 Worker 的请求一律连不上
 
 async function context(opts = {}, apple = false, probe = false) {
   const ctx = await browser.newContext(opts);
@@ -51,6 +55,7 @@ async function context(opts = {}, apple = false, probe = false) {
         if (this.__fs) return;
         this.__fs = true;
         window.__fsIn = (window.__fsIn || 0) + 1;
+        window.__fsWhen = { playing: !this.paused && this.readyState >= 3, loader: !!document.querySelector('#nativePlayer .np-load:not([hidden])') };
         this.dispatchEvent(new Event('webkitbeginfullscreen'));
       };
       P.webkitExitFullscreen = function () { if (!this.__fs) return; this.__fs = false; this.dispatchEvent(new Event('webkitendfullscreen')); };
@@ -74,11 +79,15 @@ async function context(opts = {}, apple = false, probe = false) {
     const url = new URL(u);
     if (url.host !== 'stream.cuven.online' && url.host !== 's2.test') return route.abort();
     hits.push(url.host + url.pathname);
+    if (apiDown) return route.abort('internetdisconnected');
     if (url.pathname === '/api/imdb/video') {
       return route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' },
-        body: JSON.stringify({ id: 'tt1', video: { best: TRAILER, mp4: { '720p': TRAILER, '1080p': TRAILER }, thumb: null }, stills: [] }) });
+        body: JSON.stringify(trailerYt
+          ? { id: 'tt1', video: null, stills: [], yt: { key: 'Way9Dexny3w', name: 'Official Trailer', kind: 'Trailer', official: true } }
+          : { id: 'tt1', video: { best: TRAILER, mp4: { '720p': TRAILER, '1080p': TRAILER }, thumb: null }, stills: [] }) });
     }
     if (url.pathname === '/api/edge/ping' && url.host === 'stream.cuven.online' && pingDelay) await new Promise(r => setTimeout(r, pingDelay));
+    if (url.pathname.startsWith('/stream/') && streamDelay) await new Promise(r => setTimeout(r, streamDelay));
     const req = route.request();
     const res = await H.worker.fetch(new Request(u, { method: req.method(), headers: req.headers() }), H.env, H.ctx);
     await route.fulfill({ status: res.status, headers: Object.fromEntries(res.headers), body: Buffer.from(await res.arrayBuffer()) });
@@ -109,8 +118,25 @@ const st = pg => pg.evaluate(() => {
   };
 });
 const vid = '#nativePlayer video';
+/* 加载画面的状态：在不在、字样、当前文案、进度、背景是不是 WebGL 画的 */
+const loader = pg => pg.evaluate(() => {
+  const l = document.querySelector('#nativePlayer .np-load'), bar = l && l.querySelector('.np-bar'), c = l && l.querySelector('canvas');
+  return { shown: !!l && !l.hidden && !l.classList.contains('out'), brand: l ? l.querySelector('.np-brand').getAttribute('aria-label') : '',
+    text: l ? l.querySelector('.np-brand').textContent : '', tip: l ? l.querySelector('.np-tip').textContent : '',
+    p: bar ? parseFloat(bar.style.getPropertyValue('--p') || '0') : -1, now: bar ? +bar.getAttribute('aria-valuenow') : -1,
+    webgl: !!c && c.width > 0 && c.height > 0, when: window.__fsWhen || null };
+});
 const until = (pg, fn, arg, ms = 20000) => pg.waitForFunction(fn, arg, { timeout: ms });
-const reset = pg => pg.evaluate(() => { window.__plays = []; window.__loads = []; window.__fsIn = 0; });
+const reset = pg => pg.evaluate(() => { window.__plays = []; window.__loads = []; window.__fsIn = 0; window.__fsWhen = null; });
+/* 盯着加载画面的文案：每换一句记下时刻、文字与当时的进度（截图很慢，不能靠 sleep 卡时间） */
+const watchTips = pg => pg.evaluate(() => {
+  const t0 = performance.now(), log = window.__tips = [];
+  const tip = document.querySelector('#nativePlayer .np-tip'), bar = document.querySelector('#nativePlayer .np-bar');
+  const v = document.querySelector('#nativePlayer video');
+  const rec = () => log.push({ t: Math.round(performance.now() - t0), text: tip.textContent, p: parseFloat(bar.style.getPropertyValue('--p') || '0'), playing: v.currentTime > 0 });
+  rec();
+  new MutationObserver(rec).observe(tip, { childList: true, characterData: true, subtree: true });
+});
 /* 打开详情页并等预热（签名 / info.json）回来 */
 const detail = async (pg, path, name) => {
   await pg.evaluate(([p, n]) => openDetail(p, n), [path, name]);
@@ -134,7 +160,7 @@ let s = await st(page);
 ok(s.on && s.fs && s.hash === '#play' && s.view === 'player', `一点就是全屏播放（全屏 ${s.fs}，历史栈 ${s.hash}）`);
 ok(s.plays.length && s.plays[0].gesture && /\/stream\//.test(s.plays[0].src), 'play() 在点击的手势里发起，片源当场就有（打开详情页时已预热）');
 ok(/\/stream\/Cuven%20.*\?path=%2FMovies%2Flong\.mp4&safari=1$/.test(s.src) && !s.paused, `直链 + safari=1，正在播放（t=${s.t.toFixed(1)}s）`);
-ok(s.controls && !s.inline, '用浏览器 / 系统的原生控件（<video controls>，不带 playsinline）');
+ok(s.controls && s.inline, '用浏览器 / 系统的原生控件（<video controls playsinline>：先在播放层里起播，开播再进系统全屏）');
 await page.evaluate(s => { document.querySelector(s).currentTime = 95; }, vid);
 await until(page, s => document.querySelector(s).currentTime > 95.5, vid, 15000);
 await page.evaluate(s => document.querySelector(s).pause(), vid);
@@ -160,6 +186,23 @@ await page.goBack();
 await page.waitForTimeout(600);
 s = await st(page);
 ok(!s.on && !s.src && s.detail, '返回键：关掉播放器，详情页还在');
+
+console.log('\n■ 加载画面 · 桌面（点下去就整块全屏，加载画面在全屏里）');
+await detail(page, '/Movies/long_ep2.mp4', 'Other.Movie.2023.1080p.mp4');
+streamDelay = 2500;
+await reset(page);
+await page.click('#detailPlay');
+await page.waitForTimeout(500);
+let L = await loader(page);
+s = await st(page);
+ok(L.shown && s.fs && s.t === 0, `点下去：全屏的播放层里先是加载画面，视频还没开播（全屏 ${s.fs}，t=${s.t}）`);
+await until(page, s => document.querySelector(s).currentTime > 0.3, vid, 20000);
+await page.waitForTimeout(900);
+L = await loader(page);
+ok(!L.shown && !(await st(page)).paused, '开播后加载画面淡出，视频在全屏里播放');
+streamDelay = 0;
+await page.keyboard.press('Escape');
+await page.waitForTimeout(500);
 await page.evaluate(() => closeDetail());
 await page.waitForTimeout(400);
 
@@ -240,6 +283,195 @@ ok(back2, '详情页开过 2 秒（视频被卸下）再关掉：预告片重新
 await page.evaluate(() => navTo('home'));
 await desk.close();
 
+console.log('\n■ 展厅预告片 · YouTube 官方预告（IMDb 不给直链时）');
+{
+  trailerYt = true;
+  const yc = await context({ viewport: { width: 1280, height: 800 } });
+  /* YouTube 播放器的替身：与 IFrame API 同名同参的方法，状态按真播放器的顺序回调（缓冲 3 → 播放 1 → 暂停 2） */
+  await yc.addInitScript(() => {
+    window.YT = { Player: class {
+      constructor(el, o) {
+        this.o = o; this.muted = true; this.t = o.playerVars.start || 0; this.state = -1;
+        const f = document.createElement('iframe'); f.dataset.fakeYt = o.videoId; el.replaceWith(f); this.f = f;
+        window.__yt = this; window.__ytOpts = o;
+        setTimeout(() => o.events.onReady({ target: this }), 30);
+      }
+      emit(s) { this.state = s; this.o.events.onStateChange({ data: s, target: this }); }
+      getIframe() { return this.f; }
+      playVideo() { if (this.state === 1 || this.state === 3) return; this.emit(3); setTimeout(() => this.state === 3 && this.emit(1), 80); }
+      pauseVideo() { if (this.state === 1 || this.state === 3) this.emit(2); }
+      mute() { this.muted = true; } unMute() { this.muted = false; } isMuted() { return this.muted; }
+      seekTo(t) { this.t = t; }
+      getCurrentTime() { if (this.state === 1) this.t += 0.25; return this.t; }
+      getDuration() { return 150; }
+      destroy() { this.f.remove(); window.__ytGone = (window.__ytGone || 0) + 1; }
+    } };
+  });
+  const yp = await enter(yc);
+  await yp.evaluate(() => navTo('library'));
+  const up = await until(yp, () => {
+    const m = document.querySelector('.sc-chapter .sc-media');
+    return !!(m && m.classList.contains('is-yt') && m.classList.contains('is-playing') && m.querySelector('.sc-yt iframe[data-fake-yt]') && window.__yt.state === 1);
+  }, null, 40000).then(() => true).catch(() => false);
+  const o = await yp.evaluate(() => ({ v: window.__ytOpts && window.__ytOpts.playerVars, host: window.__ytOpts && window.__ytOpts.host,
+    vsrc: document.querySelector('.sc-chapter video').getAttribute('src'), muted: window.__yt && window.__yt.muted }));
+  ok(up && o.muted && !o.vsrc && o.v && o.v.mute === 1 && o.v.controls === 0 && o.v.playsinline === 1 && o.v.start === 3 && /nocookie/.test(o.host),
+    'IMDb 没给直链：第一章挂上 YouTube 官方预告并静音自动开播（无控件、内联、从第 3 秒进，原生 <video> 让位）');
+  const ring = await until(yp, () => parseFloat(document.querySelector('.sc-chapter .sc-ring-value').style.strokeDashoffset) < 106.8, null, 5000)
+    .then(() => true).catch(() => false);
+  ok(ring, '进度环跟着 YouTube 播放器走');
+  const un = await yp.evaluate(() => { const b = document.querySelector('.sc-chapter .sc-mutectl'); b.click(); return { yt: window.__yt.muted, btn: b.dataset.muted }; });
+  ok(un.yt === false && un.btn === '0', '点「取消静音」：播放器 unMute，按钮同步');
+  await yp.evaluate(() => playVideo('/Movies/long.mp4', 'Long.Test.2024.1080p.mp4'));
+  await until(yp, s => document.querySelector(s).currentTime > 0.3, vid);
+  await yp.waitForTimeout(300);
+  ok(await yp.evaluate(() => window.__yt.state === 2), '正片开播：YouTube 预告也让路（暂停）');
+  await yp.keyboard.press('Escape');
+  const back = await until(yp, () => window.__yt && window.__yt.state === 1, null, 8000).then(() => true).catch(() => false);
+  ok(back, '关掉播放器：YouTube 预告接着放');
+  await yp.evaluate(() => navTo('home'));
+  const gone = await until(yp, () => (window.__ytGone || 0) >= 1 || window.__yt.state === 2, null, 5000).then(() => true).catch(() => false);
+  const how = await yp.evaluate(() => ((window.__ytGone || 0) >= 1 ? '已销毁' : '已暂停'));
+  ok(gone, `离开资料库：YouTube 预告不再播放（${how}，与原生 <video> 同一套规矩）`);
+  await yc.close();
+  trailerYt = false;
+}
+
+console.log('\n■ 片名一律中文（卡片、搜索、播放器 / 正在播放）');
+{
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  H.tmdb.movies = [{ id: 9001, query: 'long', title: '漫长的测试', date: '2024-05-01' }];
+  const zc = await context({ viewport: { width: 1280, height: 800 } });
+  await zc.route('https://image.tmdb.org/**', r => r.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>' }));
+  const zp = await enter(zc);
+  await zp.evaluate(() => { openSearch && openSearch(); });
+  await zp.fill('#searchInput', 'long');
+  await zp.evaluate(() => runSearch('long'));
+  const up = await until(zp, () => { const t = document.querySelector('#searchBody .card[data-name="long.mp4"] .card-title'); return !!(t && t.textContent === '漫长的测试'); }, null, 15000)
+    .then(() => true).catch(() => false);
+  ok(up, '搜索结果的卡片显示 TMDB 的中文名「漫长的测试」（文件名是 long.mp4）');
+  const sw = await zp.evaluate(() => {
+    const box = document.createElement('div');
+    box.innerHTML = videoCardHTML({ name: 'Some.Film.2020.1080p.mkv', path: '/Movies/x.mkv' });
+    document.body.appendChild(box);
+    const card = box.firstElementChild, before = card.querySelector('.card-title').textContent;
+    upgradeCardTitle(card.querySelector('.card-poster'), { title: '某部电影', year: '2020' });
+    const r = { before, after: card.querySelector('.card-title').textContent, aria: card.getAttribute('aria-label') };
+    box.remove();
+    return r;
+  });
+  ok(sw.before === 'Some Film' && sw.after === '某部电影' && sw.aria.startsWith('某部电影'), `还没有中文名的卡先按原名排（${sw.before}），中文名一到原位换字（${sw.after}），读屏标签跟着换`);
+  const again = await zp.evaluate(() => videoCardHTML({ name: 'long.mp4', path: '/Movies/long.mp4' }).includes('漫长的测试'));
+  ok(again, '记进中文名索引：之后新排的卡一出来就是中文');
+  const hit = await zp.evaluate(() => { runSearch('漫长'); return !!document.querySelector('#searchBody .card[data-name="long.mp4"]'); });
+  ok(hit, '用中文名搜得到');
+  await zp.evaluate(() => playVideo('/Movies/long.mp4', 'long.mp4'));
+  await until(zp, s => document.querySelector(s).currentTime > 0.3, vid);
+  const ms = await zp.evaluate(() => navigator.mediaSession && navigator.mediaSession.metadata ? navigator.mediaSession.metadata.title : '');
+  ok(ms === '漫长的测试', `播放器 / 锁屏的「正在播放」也是中文名（${ms}）`);
+  await zp.keyboard.press('Escape');
+  await zc.close();
+  delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
+}
+
+console.log('\n■ 弱网 / 断网');
+{
+  const nc = await context({ viewport: { width: 1280, height: 800 } });
+  const np = await enter(nc);
+  await until(np, () => document.querySelectorAll('#view-home .card[data-path]').length > 0, null, 20000);
+  const absent = await np.evaluate(() => Number(localStorage.getItem('received_absent_until') || 0) > Date.now());
+  ok(absent, '后端没有总账：记下来（12 小时内开张不再先撞那几个 404）');
+  await np.waitForTimeout(600);                                    /* 本地副本是异步写的 */
+  await np.close();
+
+  hits.length = 0;
+  const np2 = await enter(nc);
+  await until(np2, () => document.querySelectorAll('#view-home .card[data-path]').length > 0, null, 20000);
+  ok(!hits.some(h => /\/api\/received/.test(h)), '再次打开：不再请求总账');
+  await np2.close();
+
+  apiDown = true;
+  const t0 = Date.now();
+  const np3 = await enter(nc);
+  const opened = await until(np3, () => document.querySelectorAll('#view-home .card[data-path]').length > 0, null, 20000).then(() => true).catch(() => false);
+  const failed = await np3.evaluate(() => [...document.querySelectorAll('.empty-title')].some(e => /加载失败/.test(e.textContent)));
+  ok(opened && !failed, `连不上 Worker：用本地副本照常开张（${Date.now() - t0}ms，不显示「加载失败」）`);
+  await nc.setOffline(true);
+  await np3.evaluate(() => window.dispatchEvent(new Event('offline')));
+  const off = await until(np3, () => { const b = document.getElementById('netBanner'); return !!(b && b.classList.contains('show') && /网络已断开/.test(b.textContent)); }, null, 3000).then(() => true).catch(() => false);
+  ok(off, '断网：顶部胶囊「网络已断开 · 正在显示离线内容」');
+  apiDown = false;
+  await nc.setOffline(false);
+  await np3.evaluate(() => window.dispatchEvent(new Event('online')));
+  const back = await until(np3, () => { const b = document.getElementById('netBanner'); return !!(b && /网络已恢复/.test(b.textContent)); }, null, 3000).then(() => true).catch(() => false);
+  ok(back, '恢复：「网络已恢复」，没加载出来的重新排队');
+  await nc.close();
+
+  /* 省流量模式（Chrome / Android 的 navigator.connection）：图片降一档、预告片不挂 */
+  const sc = await context({ viewport: { width: 1280, height: 800 } });
+  await sc.addInitScript(() => { Object.defineProperty(Navigator.prototype, 'connection', { configurable: true, get: () => ({ saveData: true, effectiveType: '4g', addEventListener() {} }) }); });
+  const sp = await enter(sc);
+  const r = await sp.evaluate(() => ({ slow: NetQ.slow, p: downsizeForCard('https://image.tmdb.org/t/p/original/a.jpg', false), l: downsizeForCard('https://image.tmdb.org/t/p/original/a.jpg', true) }));
+  ok(r.slow && /\/w342\//.test(r.p) && /\/w500\//.test(r.l), `省流量 / 弱网：海报 w342、剧照 w500（${r.p.split('/t/p/')[1]}，${r.l.split('/t/p/')[1]}）`);
+  await sp.evaluate(() => navTo('library'));
+  await sp.waitForTimeout(4000);
+  ok(await sp.evaluate(() => { const v = document.querySelector('.sc-chapter video'); return !!v && !v.getAttribute('src') && !document.querySelector('.sc-yt'); }), '省流量：资料库的预告片不自动挂，只放剧照');
+  await sc.close();
+}
+
+console.log('\n■ 悬浮返回钮 · 返回手势 · 正在播放');
+{
+  const bc = await context({ ...devices['iPhone 15 Pro'] });
+  const bp = await enter(bc);
+  await bp.waitForTimeout(800);
+  const pb = () => bp.evaluate(() => {
+    const b = document.getElementById('pageBack'), r = b && b.getBoundingClientRect();
+    return { on: !!(b && b.classList.contains('on')), top: r ? Math.round(r.top) : null, label: b ? b.getAttribute('aria-label') : '', view: history.state && history.state.view,
+      slot: !!document.querySelector('.page-back-slot') };
+  });
+  await bp.evaluate(() => openYearLibrary(2024));
+  await until(bp, () => !!document.querySelector('.view-section.active .page-back-slot'), null, 8000);
+  await bp.waitForTimeout(400);
+  const y0 = await pb();
+  await bp.evaluate(() => { document.body.style.minHeight = '4000px'; window.scrollTo(0, 900); });
+  await bp.waitForTimeout(300);
+  const y1 = await pb();
+  ok(y0.on && y0.slot && y0.view === 'sub' && /返回/.test(y0.label) && y1.on && y1.top === y0.top,
+    `年份页：返回钮悬浮在左上角（往下翻 900px 仍在 ${y1.top}px 处），页头留着原位，记了一格历史`);
+  await bp.evaluate(() => { document.body.style.minHeight = ''; history.back(); });
+  const gone = await until(bp, () => !document.querySelector('.view-section.active .page-back-slot') && !document.getElementById('pageBack').classList.contains('on') &&
+    !(history.state && history.state.view === 'sub'), null, 6000).then(() => true).catch(() => false);
+  ok(gone, '边缘右滑 / 浏览器后退：回到上一页（原来在二级页面上什么都不发生）');
+  await bp.evaluate(() => enterFolder('/Movies/dovi', 'dovi'));
+  await until(bp, () => !!document.querySelector('.view-section.active .page-back-slot') && document.getElementById('pageBack').classList.contains('on'), null, 8000);
+  await bp.click('#pageBack');
+  const f = await until(bp, () => !document.querySelector('.view-section.active .page-back-slot'), null, 6000).then(() => true).catch(() => false);
+  const st2 = await pb();
+  ok(f && !st2.on && st2.view !== 'sub', '文件夹页：点悬浮返回钮回到上一页，那一格历史一并退掉');
+  await bp.waitForTimeout(1000);                                   /* 切页动画走完（navTo 在动画中途不接新的切换） */
+  await bp.evaluate(() => openYearLibrary(2024));
+  await until(bp, () => document.getElementById('pageBack').classList.contains('on'), null, 8000);
+  await bp.keyboard.press('Escape');
+  ok(await until(bp, () => !document.getElementById('pageBack').classList.contains('on'), null, 4000).then(() => true).catch(() => false), 'Esc 也能返回');
+  await bc.close();
+
+  const mc = await context({ viewport: { width: 1280, height: 800 } });
+  const mp = await enter(mc);
+  await mp.evaluate(() => playVideo('/Movies/long.mp4', 'Long.Test.2024.1080p.mp4'));
+  await until(mp, s => document.querySelector(s).currentTime > 0.3, vid);
+  const m1 = await mp.evaluate(() => ({ st: navigator.mediaSession.playbackState, t: navigator.mediaSession.metadata && navigator.mediaSession.metadata.title,
+    album: navigator.mediaSession.metadata && navigator.mediaSession.metadata.album }));
+  ok(m1.st === 'playing' && m1.t && m1.album === 'Cuven', `「正在播放」：${m1.t}，状态 playing（锁屏 / 灵动岛 / 控制中心都读这一份）`);
+  await mp.evaluate(() => document.querySelector('#nativePlayer video').pause());
+  await mp.waitForTimeout(200);
+  ok(await mp.evaluate(() => navigator.mediaSession.playbackState === 'paused'), '暂停：状态跟着变成 paused');
+  await mp.keyboard.press('Escape');
+  await mp.waitForTimeout(400);
+  const m3 = await mp.evaluate(() => ({ meta: navigator.mediaSession.metadata, st: navigator.mediaSession.playbackState }));
+  ok(m3.meta === null && m3.st === 'none', '关掉播放器：「正在播放」整块撤掉');
+  await mc.close();
+}
+
 console.log('\n■ iPhone（系统播放器的替身：webkitEnterFullscreen / webkitendfullscreen）');
 const ip = await context({ ...devices['iPhone 15 Pro'] }, 'iphone');
 const pi = await enter(ip);
@@ -248,8 +480,9 @@ await reset(pi);
 await pi.tap('#detailPlay');
 await until(pi, s => document.querySelector(s) && document.querySelector(s).currentTime > 0.5, vid);
 s = await st(pi);
-ok(s.plays.length && s.plays[0].gesture && /\/stream\//.test(s.plays[0].src), '点按的手势里就带着片源 play() —— iOS 据此直接打开系统播放器');
-ok(!s.inline && s.fs && s.fsIn === 1, `<video> 不带 playsinline，进了系统全屏（webkitEnterFullscreen ${s.fsIn} 次）`);
+ok(s.plays.length && s.plays[0].gesture && /\/stream\//.test(s.plays[0].src), '点按的手势里就带着片源 play()（iOS 允许出声播放、之后进全屏不必再要手势）');
+const w0 = (await loader(pi)).when;
+ok(s.inline && s.fs && s.fsIn === 1 && w0 && w0.playing, `先在加载画面后面起播，开播那一刻才进系统全屏（webkitEnterFullscreen ${s.fsIn} 次，调用时已在播放：${w0 && w0.playing}）`);
 await pi.evaluate(s => document.querySelector(s).webkitExitFullscreen(), vid);
 await pi.waitForTimeout(500);
 s = await st(pi);
@@ -276,6 +509,45 @@ s = await st(pi);
 ok(!s.src && !s.on, '画中画里叉掉：停下并释放');
 await ip.close();
 
+console.log('\n■ 加载画面 · iPhone（极光背景 + Cuven max + 胶囊进度条 + 模糊轮播文案）');
+{
+  const ip2 = await context({ ...devices['iPhone 15 Pro'] }, 'iphone');
+  const p2 = await enter(ip2);
+  await detail(p2, '/Movies/long.mp4', 'Long.Test.2024.1080p.mp4');
+  streamDelay = 8000;
+  await reset(p2);
+  await p2.tap('#detailPlay');
+  await watchTips(p2);
+  await p2.waitForTimeout(300);
+  const A = await loader(p2), s0 = await st(p2);
+  ok(A.shown && !s0.fs && s0.t === 0, '点下去先是加载画面，系统播放器还没打开');
+  ok(A.brand === 'Cuven max' && /^Cuven\s*max$/.test(A.text), `画面中央叠着「${A.text.replace(/max$/, ' max')}」`);
+  ok(A.webgl, '背景是 WebGL2 画的极光（Aurora Flow 复刻）');
+  const clip = { x: 0, y: 0, width: 120, height: 120 };
+  const f1 = await p2.screenshot({ clip, scale: 'css' });
+  await p2.waitForTimeout(400);
+  const f2 = await p2.screenshot({ clip, scale: 'css' });
+  ok(!f1.equals(f2), '背景在动');
+  await until(p2, s => document.querySelector(s).currentTime > 0.3, vid, 40000);
+  const A2 = await loader(p2), s2 = await st(p2);
+  ok(A2.when && A2.when.playing && A2.when.loader && s2.fs, '开播那一刻进系统全屏（加载画面一直盖到这时）');
+  await p2.waitForTimeout(900);
+  const A3 = await loader(p2);
+  const tips = await p2.evaluate(() => window.__tips);
+  const before = tips.filter(x => !x.playing);
+  const want = ['请保持屏幕亮起', '正在渲染绚烂颜色', '正在预热画面质量', '正在添加全景声系统', '正在为您的设备优化'];
+  const order = before.map(x => x.text);
+  const gaps = before.slice(1).map((x, i) => x.t - before[i].t);
+  ok(order.length >= 3 && order.every((t, i) => t === want[i]) && gaps.every(g => g > 2100 && g < 2900),
+    `文案按顺序一句句换：${order.join(' → ')}（间隔 ${gaps.join(' / ')} ms）`);
+  const ps = before.map(x => x.p);
+  /* 第一句是在加载画面出现的同一帧记下的，那时进度可能还是 0；之后每一句都得在涨、且不走满 */
+  ok(ps.every((p, i) => (i ? p > 0 : p >= 0) && p < 0.95 && (!i || p >= ps[i - 1])) && ps[ps.length - 1] > 0, `开播前进度只增不减、不走满：${ps.map(p => Math.round(p * 100) + '%').join(' → ')}`);
+  ok(!A3.shown, '开播后加载画面收起');
+  streamDelay = 0;
+  await ip2.close();
+}
+
 console.log('\n■ iPhone Duo（Safari 27.1 实测视口：折起 382×580 / 594×368，展开 669×825 / 951×543）');
 const DUO = { isMobile: true, hasTouch: true, screen: { width: 466, height: 678 },
   userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 27_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.1 Mobile/15E148 Safari/604.1' };
@@ -291,18 +563,42 @@ const DUO = { isMobile: true, hasTouch: true, screen: { width: 466, height: 678 
 const duo = await context({ ...DUO, viewport: { width: 382, height: 580 } });
 const pd = await enter(duo);
 await pd.waitForTimeout(1500);
-for (const [w, h, label] of [[382, 580, '折起竖拿'], [594, 368, '折起横拿'], [669, 825, '展开竖拿'], [951, 543, '展开横拿']]) {
+for (const [w, h, label, rail] of [[382, 580, '折起竖拿', false], [594, 368, '折起横拿', true], [669, 825, '展开竖拿', true], [951, 543, '展开横拿', true], [382, 580, '再合上竖拿', false]]) {
   await pd.setViewportSize({ width: w, height: h });
   await pd.waitForTimeout(800);
   const g = await pd.evaluate(() => {
     const card = document.querySelector('.hcard.is-center') || document.querySelector('.hcard');
     const r = e => e && e.getBoundingClientRect();
-    const dock = r(document.querySelector('.dock')), play = r(card && card.querySelector('.btn-play')), dots = r(document.querySelector('.aap-host .all-access-pass'));
-    return { ok: !!(dock && play && dots) && play.bottom <= dock.top && dots.bottom <= dock.top && play.top >= 0,
-      sw: document.documentElement.scrollWidth, vw: innerWidth };
+    const rail = document.documentElement.classList.contains('rail');
+    const nav = r(document.getElementById('navContainer')), pill = r(document.getElementById('navPill')), act = r(document.querySelector('#navContainer .nav-item.active'));
+    const play = r(card && card.querySelector('.btn-play')), dots = r(document.querySelector('.aap-host .all-access-pass'));
+    const apart = (a, b) => a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top;
+    const clear = !!(nav && play && dots) && (rail ? apart(play, nav) && apart(dots, nav) && play.left >= nav.right : play.bottom <= nav.top && dots.bottom <= nav.top) && play.top >= 0;
+    const pillOk = !!(pill && act) && Math.abs(pill.left - act.left) <= 2 && Math.abs(pill.top - act.top) <= 2 && Math.abs(pill.width - act.width) <= 2 && Math.abs(pill.height - act.height) <= 2;
+    return { rail, vertical: nav ? nav.height > nav.width : false, clear, pillOk, sw: document.documentElement.scrollWidth, vw: innerWidth };
   });
-  ok(g.ok && g.sw === g.vw, `${label} ${w}×${h}：主视觉的按钮与轮播点都在导航条之上，没有横向溢出`);
+  ok(g.rail === rail && g.vertical === rail && g.clear && g.pillOk && g.sw === g.vw,
+    `${label} ${w}×${h}：${rail ? '侧边导航条（竖排）' : '底部导航胶囊'}，选中指示器对齐，主视觉的按钮与轮播点不被导航挡住，没有横向溢出`);
 }
+await pd.setViewportSize({ width: 951, height: 543 });
+await pd.waitForTimeout(600);
+await pd.evaluate(() => navTo('library'));
+await pd.waitForTimeout(1200);
+const lr = await pd.evaluate(() => {
+  const r = e => e && e.getBoundingClientRect();
+  const nav = r(document.getElementById('navContainer')), head = r(document.querySelector('#view-library .library-sub'));
+  const pill = r(document.getElementById('navPill')), lib = r(document.getElementById('navLib'));
+  return { sw: document.documentElement.scrollWidth, vw: innerWidth, headOk: !!head && head.left >= nav.right, pillOk: !!(pill && lib) && Math.abs(pill.top - lib.top) <= 2 };
+});
+ok(lr.sw === lr.vw && lr.headOk && lr.pillOk, '展开横拿 · 资料库：内容从导航条右边开始，指示器竖着滑到「资料库」，没有横向溢出');
+await pd.evaluate(() => openSearch());
+await pd.waitForTimeout(800);
+const sr = await pd.evaluate(() => { const b = document.getElementById('navSearch').getBoundingClientRect(); return { top: b.top, w: b.width, left: b.left, rail: document.getElementById('navContainer').getBoundingClientRect().right }; });
+ok(sr.top < 80 && sr.w > 400 && sr.left >= sr.rail, `侧边导航下搜索：搜索场在顶部横向展开（${Math.round(sr.w)} 宽），不压导航条`);
+await pd.evaluate(() => closeSearch());
+await pd.waitForTimeout(600);
+await pd.evaluate(() => navTo('home'));
+await pd.waitForTimeout(600);
 await pd.setViewportSize({ width: 594, height: 368 });
 await pd.evaluate(() => openDetail('/Movies/dv81.mkv', 'Dune.Part.Two.2024.2160p.DV.mkv'));
 await pd.waitForTimeout(1800);
@@ -326,7 +622,7 @@ await reset(pa);
 await pa.click('#detailPlay');
 await until(pa, s => document.querySelector(s) && document.querySelector(s).currentTime > 0.5, vid);
 s = await st(pa);
-ok(s.plays[0] && s.plays[0].gesture && s.fs && s.fsIn === 1, '手势里 play()；拿到元数据后进系统全屏（webkitEnterFullscreen 早调会抛错，等 loadedmetadata 再进）');
+ok(s.plays[0] && s.plays[0].gesture && s.fs && s.fsIn === 1, '手势里 play()；开播那一刻进系统全屏（只进一次）');
 await pa.evaluate(s => document.querySelector(s).webkitExitFullscreen(), vid);
 await pa.waitForTimeout(500);
 s = await st(pa);
