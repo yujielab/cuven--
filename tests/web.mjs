@@ -1086,6 +1086,47 @@ console.log('\n■ 年份页：一行一部的列表（竖版小海报 + 中文�
   }
 }
 
+console.log('\n■ 今日推荐：大号描边名次 + 海报压在数字右缘 + 「最近添加」');
+{
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  caches.default.m.clear();
+  const q = f => f.replace(/\.[^.]+$/, '').replace(/[._]/g, ' ').toLowerCase().replace(/ hdr$/, '');
+  const files = fs.readdirSync(path.join(HERE, 'samples')).filter(f => /\.(mkv|mp4)$/.test(f) && !/^long/.test(f));
+  H.tmdb.movies = [{ id: 9001, query: 'long', title: '漫长的测试', date: '2024-05-01' }, ...files.map((f, i) => ({ id: 9200 + i, query: q(f), title: '样片' + i, date: '2020-05-01' }))];
+  const img = r => r.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>' });
+  const rc = await context({ ...devices['iPhone 15 Pro'] });
+  await rc.route('https://image.tmdb.org/**', img);
+  const rp = await enter(rc);
+  await until(rp, () => document.querySelectorAll('#todayRecsRow .card.rank-card').length >= 10, null, 20000);
+  await rp.evaluate(() => document.getElementById('todayRecsSection').scrollIntoView({ block: 'center' }));
+  await rp.waitForTimeout(1500);
+  const R = await rp.evaluate(() => {
+    const cards = [...document.querySelectorAll('#todayRecsRow .card.rank-card')];
+    return cards.map((c, i) => {
+      const k = c.querySelector(':scope > .card-rank'), q = c.querySelector('.card-poster'), kr = k && k.getBoundingClientRect(), qr = q.getBoundingClientRect(), cs = k && getComputedStyle(k);
+      const info = c.querySelector('.card-info');
+      return { n: k ? +k.textContent : 0, outside: !!k && !q.contains(k), stroke: cs ? parseFloat(cs.webkitTextStrokeWidth) || 0 : 0, fill: cs ? cs.color : '',
+        left: kr ? Math.round(kr.left) : 0, right: kr ? Math.round(kr.right) : 0, pl: Math.round(qr.left), pb: Math.round(qr.bottom), kb: kr ? Math.round(kr.bottom) : 0,
+        big: kr ? kr.height > qr.height * 0.55 : false, rk2: c.classList.contains('rk2'), title: info ? info.getBoundingClientRect().width <= 1 : true, label: c.getAttribute('aria-label') || '' };
+    });
+  });
+  ok(R.length >= 10 && R.every((x, i) => x.n === i + 1 && x.outside && x.big && x.stroke >= 2 && /rgba\(0, 0, 0, 0\)|transparent/.test(x.fill)),
+    `名次是海报左边的大号描边数字（只描边不填色，${R.length} 张，1 → ${R.length} 连续）`);
+  ok(R.every(x => x.left < x.pl && x.right > x.pl && Math.abs(x.kb - x.pb) <= 30), '数字在海报左边、右缘被海报盖住，底边与海报底边对齐');
+  ok(R.every((x, i) => x.rk2 === (i + 1 >= 10)) && R.every(x => x.title) && R.every((x, i) => x.label.startsWith('第 ' + (i + 1) + ' 名，')),
+    '两位数（10 起）那一格放宽；海报下不再写片名（读屏照读「第 N 名，片名」）');
+  /* 「最近添加」：两周内入库的才挂 */
+  const NB = await rp.evaluate(() => {
+    const mk = days => videoCardHTML({ name: 'Probe.2024.1080p.mkv', path: '/Movies/probe.mkv', added: new Date(Date.now() - days * 86400000).toISOString() }, { rank: 3 });
+    const plain = videoCardHTML({ name: 'Probe.2024.1080p.mkv', path: '/Movies/probe.mkv', added: new Date().toISOString() }, {});
+    return { fresh: /card-new[^>]*>最近添加/.test(mk(3)), old: /card-new/.test(mk(40)), plain: /card-new/.test(plain) };
+  });
+  ok(NB.fresh && !NB.old && !NB.plain, '「最近添加」只挂在两周内入库的名次卡上（40 天前的不挂，别的排也不挂）');
+  await rc.close();
+  delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
+  caches.default.m.clear();
+}
+
 console.log('\n■ 登录页：品牌区（流体底图 + Cuven max 字标 + 蓝色脉冲）+ 白色面板');
 {
   for (const [label, opt] of [['iPhone', { ...devices['iPhone 15 Pro'], deviceScaleFactor: 2 }], ['Mac', { viewport: { width: 1440, height: 900 } }]]) {
