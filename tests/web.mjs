@@ -30,6 +30,7 @@ const errors = [];
 let pingDelay = 0;
 let streamDelay = 0;                          // 放慢 /stream：开播前看清加载画面
 let trailerYt = false;                        // 预告片回包：false = IMDb 直链 MP4，true = 只有 YouTube 官方预告
+let apiDown = false;                          // 模拟弱网 / 断网：发往 Worker 的请求一律连不上
 
 async function context(opts = {}, apple = false, probe = false) {
   const ctx = await browser.newContext(opts);
@@ -78,6 +79,7 @@ async function context(opts = {}, apple = false, probe = false) {
     const url = new URL(u);
     if (url.host !== 'stream.cuven.online' && url.host !== 's2.test') return route.abort();
     hits.push(url.host + url.pathname);
+    if (apiDown) return route.abort('internetdisconnected');
     if (url.pathname === '/api/imdb/video') {
       return route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' },
         body: JSON.stringify(trailerYt
@@ -370,6 +372,51 @@ console.log('\n■ 片名一律中文（卡片、搜索、播放器 / 正在播�
   await zp.keyboard.press('Escape');
   await zc.close();
   delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
+}
+
+console.log('\n■ 弱网 / 断网');
+{
+  const nc = await context({ viewport: { width: 1280, height: 800 } });
+  const np = await enter(nc);
+  await until(np, () => document.querySelectorAll('#view-home .card[data-path]').length > 0, null, 20000);
+  const absent = await np.evaluate(() => Number(localStorage.getItem('received_absent_until') || 0) > Date.now());
+  ok(absent, '后端没有总账：记下来（12 小时内开张不再先撞那几个 404）');
+  await np.waitForTimeout(600);                                    /* 本地副本是异步写的 */
+  await np.close();
+
+  hits.length = 0;
+  const np2 = await enter(nc);
+  await until(np2, () => document.querySelectorAll('#view-home .card[data-path]').length > 0, null, 20000);
+  ok(!hits.some(h => /\/api\/received/.test(h)), '再次打开：不再请求总账');
+  await np2.close();
+
+  apiDown = true;
+  const t0 = Date.now();
+  const np3 = await enter(nc);
+  const opened = await until(np3, () => document.querySelectorAll('#view-home .card[data-path]').length > 0, null, 20000).then(() => true).catch(() => false);
+  const failed = await np3.evaluate(() => [...document.querySelectorAll('.empty-title')].some(e => /加载失败/.test(e.textContent)));
+  ok(opened && !failed, `连不上 Worker：用本地副本照常开张（${Date.now() - t0}ms，不显示「加载失败」）`);
+  await nc.setOffline(true);
+  await np3.evaluate(() => window.dispatchEvent(new Event('offline')));
+  const off = await until(np3, () => { const b = document.getElementById('netBanner'); return !!(b && b.classList.contains('show') && /网络已断开/.test(b.textContent)); }, null, 3000).then(() => true).catch(() => false);
+  ok(off, '断网：顶部胶囊「网络已断开 · 正在显示离线内容」');
+  apiDown = false;
+  await nc.setOffline(false);
+  await np3.evaluate(() => window.dispatchEvent(new Event('online')));
+  const back = await until(np3, () => { const b = document.getElementById('netBanner'); return !!(b && /网络已恢复/.test(b.textContent)); }, null, 3000).then(() => true).catch(() => false);
+  ok(back, '恢复：「网络已恢复」，没加载出来的重新排队');
+  await nc.close();
+
+  /* 省流量模式（Chrome / Android 的 navigator.connection）：图片降一档、预告片不挂 */
+  const sc = await context({ viewport: { width: 1280, height: 800 } });
+  await sc.addInitScript(() => { Object.defineProperty(Navigator.prototype, 'connection', { configurable: true, get: () => ({ saveData: true, effectiveType: '4g', addEventListener() {} }) }); });
+  const sp = await enter(sc);
+  const r = await sp.evaluate(() => ({ slow: NetQ.slow, p: downsizeForCard('https://image.tmdb.org/t/p/original/a.jpg', false), l: downsizeForCard('https://image.tmdb.org/t/p/original/a.jpg', true) }));
+  ok(r.slow && /\/w342\//.test(r.p) && /\/w500\//.test(r.l), `省流量 / 弱网：海报 w342、剧照 w500（${r.p.split('/t/p/')[1]}，${r.l.split('/t/p/')[1]}）`);
+  await sp.evaluate(() => navTo('library'));
+  await sp.waitForTimeout(4000);
+  ok(await sp.evaluate(() => { const v = document.querySelector('.sc-chapter video'); return !!v && !v.getAttribute('src') && !document.querySelector('.sc-yt'); }), '省流量：资料库的预告片不自动挂，只放剧照');
+  await sc.close();
 }
 
 console.log('\n■ iPhone（系统播放器的替身：webkitEnterFullscreen / webkitendfullscreen）');

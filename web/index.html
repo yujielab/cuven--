@@ -4167,6 +4167,12 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
    一起卷进去过渡，等于每帧重建模糊，代价全在看不见的地方。 */
 .toast { position: fixed; bottom: calc(var(--dock-gap) + var(--dock-h) + 14px); left: 50%; transform: translateX(-50%) translateY(20px) translateZ(0); background: rgba(44,44,46,.62); backdrop-filter: var(--glass-thin); -webkit-backdrop-filter: var(--glass-thin); color: var(--text); padding: 12px 28px; border-radius: var(--r-pill); font-size: 15px; font-weight: 600; opacity: 0; pointer-events: none; transition: opacity var(--silk-out-ms) var(--silk-out), transform var(--silk-settle-ms) var(--silk-settle); z-index: 400; box-shadow: var(--glass-edge), 0 12px 32px rgba(0,0,0,.45); will-change: transform, opacity; max-width: calc(100% - 40px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0) translateZ(0); transition: opacity var(--silk-in-ms) var(--silk-in), transform var(--silk-snap-ms) var(--silk-snap); }
+/* 网络提示：顶部居中的一枚胶囊，避开状态栏与灵动岛；断网常驻，其余几秒后收起 */
+.net-banner { position: fixed; top: calc(env(safe-area-inset-top, 0px) + 10px); left: 50%; transform: translateX(-50%) translateY(-14px) translateZ(0); z-index: 450; padding: 9px 18px 9px 34px; border-radius: var(--r-pill); font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; color: var(--text); background: rgba(44,44,46,.66); backdrop-filter: var(--glass-thin); -webkit-backdrop-filter: var(--glass-thin); box-shadow: var(--glass-edge), 0 10px 28px rgba(0,0,0,.4); opacity: 0; pointer-events: none; white-space: nowrap; max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis; transition: opacity var(--silk-out-ms) var(--silk-out), transform var(--silk-settle-ms) var(--silk-settle); }
+.net-banner::before { content: ''; position: absolute; left: 15px; top: 50%; width: 8px; height: 8px; margin-top: -4px; border-radius: 50%; background: #FF9F0A; box-shadow: 0 0 10px currentColor; }
+.net-banner[data-kind="off"]::before { background: #FF453A; }
+.net-banner[data-kind="ok"]::before { background: #30D158; }
+.net-banner.show { opacity: 1; transform: translateX(-50%) translateY(0) translateZ(0); transition: opacity var(--silk-in-ms) var(--silk-in), transform var(--silk-snap-ms) var(--silk-snap); }
 .empty { text-align: center; padding: 100px 5%; color: var(--text-2); }
 .empty i { font-size: 56px; color: var(--text-3); margin-bottom: 24px; display: block; }
 .empty-title { font-size: 18px; font-weight: 700; color: var(--text); margin-bottom: 8px; letter-spacing: -0.02em; }
@@ -11193,25 +11199,171 @@ window.addEventListener('unhandledrejection', e => {
 });
 
 
+/* ══ 网络状况 · NetQ ═══════════════════════════════════════════════════
+   弱网下最伤人的不是慢，是「不知道发生了什么」和「一断就白屏」。这里管三件事：
+
+   ① 判断网络好坏。iOS Safari 不给 navigator.connection，只能自己量，而且只量「纯网络」
+      的东西：TMDB / YouTube 图片 CDN 上每张图的下载时长（慢于 3 秒记一笔坏、快于 0.8 秒
+      记一笔好），以及接口请求的成败（没回来记坏，0.8 秒内回来记好；回来得慢不算 ——
+      Worker 第一次去问 TMDB 本来就要两三秒，那是服务端在干活，不是网络差）。
+      最近 8 笔里坏的过半就算弱网，最近 3 笔都好就恢复。Chrome / Android 有 connection 的，
+      省流量模式 / 2G / 3G / RTT > 600ms / 下行 < 1.2Mbps 直接算弱网。
+   ② 弱网时整站降一档：海报与剧照取小一号、预告片不自动播、海报并发减半、
+      请求超时放宽一倍（慢不等于断，等一等就回来了，别急着报错）。
+   ③ 断网 / 恢复给一句话：顶部一枚胶囊「网络已断开 · 正在显示离线内容」，恢复时
+      「网络已恢复」并把没加载出来的海报重新排队；进入弱网时提示一次「已切换省流模式」。
+   ══════════════════════════════════════════════════════════════════════ */
+const NetQ = (() => {
+  const marks = [];
+  let measuredSlow = false, offline = typeof navigator.onLine === 'boolean' ? !navigator.onLine : false;
+  const subs = new Set();
+  const conn = () => navigator.connection || navigator.mozConnection || navigator.webkitConnection || null;
+  function connSlow() {
+    const c = conn();
+    if (!c) return null;
+    if (c.saveData === true) return true;
+    if (/^(slow-2g|2g|3g)$/.test(c.effectiveType || '')) return true;
+    if ((c.rtt || 0) > 600 || (c.downlink > 0 && c.downlink < 1.2)) return true;
+    return false;
+  }
+  const isSlow = () => { const c = connSlow(); return c === null ? measuredSlow : (c || measuredSlow); };
+  let last = null;
+  function emit() {
+    const now = { slow: isSlow(), offline };
+    if (last && last.slow === now.slow && last.offline === now.offline) return;
+    const prev = last; last = now;
+    subs.forEach(fn => { try { fn(now, prev); } catch (_) {} });
+  }
+  function mark(good) {
+    marks.push(good);
+    if (marks.length > 8) marks.shift();
+    const bad = marks.filter(g => !g).length;
+    const tail = marks.slice(-3);
+    if (marks.length >= 4 && bad >= marks.length / 2) measuredSlow = true;
+    else if (tail.length === 3 && tail.every(Boolean)) measuredSlow = false;
+    emit();
+  }
+  /* 接口：没回来 = 坏；0.8 秒内回来 = 好；回来得慢不计（可能是服务端在干活） */
+  function note(ms, answered) {
+    if (!answered) mark(false);
+    else if (ms < 800) mark(true);
+  }
+  /* 图片 CDN：纯网络，下载时长就是网络的样子 */
+  try {
+    new PerformanceObserver(list => {
+      for (const e of list.getEntries()) {
+        if (!/image\.tmdb\.org|i\.ytimg\.com|m\.media-amazon\.com/.test(e.name)) continue;
+        if (e.duration > 3000) mark(false); else if (e.duration < 800) mark(true);
+      }
+    }).observe({ type: 'resource', buffered: true });
+  } catch (_) {}
+  window.addEventListener('online', () => { offline = false; emit(); });
+  window.addEventListener('offline', () => { offline = true; emit(); });
+  try { const c = conn(); if (c && c.addEventListener) c.addEventListener('change', emit); } catch (_) {}
+  last = { slow: isSlow(), offline };
+  return {
+    get slow() { return isSlow(); },
+    get offline() { return offline; },
+    note,
+    /* 弱网时把超时放宽一倍：慢不等于断 */
+    timeout(ms) { return isSlow() ? ms * 2 : ms; },
+    on(fn) { subs.add(fn); return () => subs.delete(fn); },
+  };
+})();
+
+/* 顶部那枚提示胶囊：断网常驻，恢复 / 省流提示一会儿就收 */
+const NetBanner = (() => {
+  let el = null, hideT = 0;
+  function node() {
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'netBanner';
+    el.className = 'net-banner';
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
+    document.body.appendChild(el);
+    return el;
+  }
+  function show(text, kind, ms) {
+    const b = node();
+    clearTimeout(hideT);
+    b.textContent = text;
+    b.dataset.kind = kind;
+    requestAnimationFrame(() => b.classList.add('show'));
+    if (ms) hideT = setTimeout(hide, ms);
+  }
+  function hide() { if (el) el.classList.remove('show'); }
+  NetQ.on((now, prev) => {
+    if (now.offline) { show('网络已断开 · 正在显示离线内容', 'off', 0); return; }
+    if (prev && prev.offline) {
+      show('网络已恢复', 'ok', 2200);
+      /* 断网期间没加载出来的海报重新排队；片库没拉下来的那一屏重新拉 */
+      try { observePosters(document); } catch (_) {}
+      try { if (!state.allVideos.length) goHome(true); } catch (_) {}
+      try { LibSync.probe(true); } catch (_) {}
+      return;
+    }
+    if (now.slow && !(prev && prev.slow)) show('网络较慢 · 已切换省流模式', 'slow', 3200);
+  });
+  return { show, hide };
+})();
+
+/* 片库本地副本：/api/all 那条路的离线底。拉成功一次就存进 Cache Storage；下次打开时
+   网络 3.5 秒内没回来（或者干脆断网）就先用它开张，新的到了由 LibSync 照常换上。 */
+const LibSnap = (() => {
+  const CACHE = 'cuven-lib-v1';
+  const KEY = 'https://lib.local/all';
+  const store = () => (window.caches && caches.open) ? caches.open(CACHE) : null;
+  return {
+    async read() {
+      try {
+        const c = await store(); if (!c) return null;
+        const r = await c.match(KEY); if (!r) return null;
+        const d = await r.json();
+        return d && Array.isArray(d.videos) && d.videos.length ? d : null;
+      } catch (_) { return null; }
+    },
+    async get(k) {
+      try { const c = await store(); const r = c && await c.match('https://lib.local/' + k); return r ? await r.json() : null; } catch (_) { return null; }
+    },
+    async put(k, d) {
+      try { const c = await store(); if (c) await c.put('https://lib.local/' + k, new Response(JSON.stringify(d), { headers: { 'Content-Type': 'application/json' } })); } catch (_) {}
+    },
+    async write(d, ptr) {
+      try {
+        const c = await store(); if (!c || !d || !Array.isArray(d.videos)) return;
+        await c.put(KEY, new Response(JSON.stringify({ v: 1, at: Date.now(), ptr: ptr || null,
+          root: d.root || '', videos: d.videos, folders: d.folders || [] }), { headers: { 'Content-Type': 'application/json' } }));
+      } catch (_) {}
+    },
+  };
+})();
+
 async function fetchJSON(url, opts) {
   opts = opts || {};
-  const { timeout = 12000, retries = 1, init = {} } = opts;
+  const { retries = 1, init = {} } = opts;
+  const timeout = NetQ.timeout(opts.timeout || 12000);
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     const ctrl = new AbortController();
-    let timedOut = false;
+    let timedOut = false, answered = false;
+    const t0 = performance.now();
     const t = setTimeout(() => { timedOut = true; ctrl.abort(); }, timeout);
     try {
       const r = await fetch(url, Object.assign({}, init, { signal: ctrl.signal }));
       clearTimeout(t);
+      answered = true;                                  /* 回了状态码就说明网络是通的（404 也算） */
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      return await r.json();
+      const j = await r.json();
+      NetQ.note(performance.now() - t0, true);
+      return j;
     } catch (e) {
       clearTimeout(t);
-      
+      NetQ.note(performance.now() - t0, answered);
       lastErr = timedOut ? new Error('请求超时 (' + timeout + 'ms)') : e;
-      
+
       if (e?.name === 'AbortError' && !timedOut) break;
+      if (NetQ.offline) break;                          /* 断网时重试只是白等：直接交给调用方的离线兜底 */
       if (attempt < retries) {
         const backoff = 800 * (attempt + 1);
         log('retry', url, 'after', backoff, 'ms');
@@ -11300,10 +11452,18 @@ const RecvIndex = (() => {
       retries: 0,
       init: { cache: 'no-store', credentials: cross ? 'omit' : 'same-origin' },
     }).catch(err => {
+      if (/HTTP 404/.test(err && err.message)) miss404[viaWorker ? 'w' : 'r'] = true;
       if (cross) { r2Dead = true; log('Received: R2 不可用，改走 Worker —', err && err.message); }
       throw err;
     });
   }
+
+  /* 后端没部署总账（Worker 与 R2 都回 404）：记 12 小时，这期间开张与探测都不再去撞 ——
+     弱网下这三个注定失败的请求就是开张前白等的三个来回。部署了总账，最迟 12 小时自动用上 */
+  const ABSENT_KEY = 'received_absent_until';
+  const miss404 = { r: false, w: false };
+  const absent = () => { try { return Number(localStorage.getItem(ABSENT_KEY) || 0) > Date.now(); } catch (_) { return false; } };
+  const markAbsent = on => { try { if (on) localStorage.setItem(ABSENT_KEY, String(Date.now() + 12 * 3600e3)); else localStorage.removeItem(ABSENT_KEY); } catch (_) {} };
 
   /* R2 先、Worker 后。R2 失败一次就整个会话记账，不再重复试。 */
   async function grabAny(what, opts) {
@@ -11418,8 +11578,12 @@ const RecvIndex = (() => {
     loading = (async () => {
       const local = force ? null : await readLocal();
       let fresh = null;
+      if (!local && absent()) { loading = null; throw new Error('后端没有总账（已记住，12 小时内不再询问）'); }
       try {
+        miss404.r = miss404.w = false;
         const meta = await grabAny('meta', { timeout: 8000 }).catch(() => null);
+        if (!meta && miss404.w) { markAbsent(true); throw new Error('后端没有总账'); }   /* Worker 说没有就是没有：R2 只是加速层 */
+        if (meta) markAbsent(false);
 
         if (local && meta && meta.gen && local.gen === meta.gen) {
           fresh = local;                                     /* 零字节 */
@@ -11472,6 +11636,7 @@ const RecvIndex = (() => {
     /* 指针。LibSync 拿它当第四个分量 —— 一部片刚匹配上 TMDB 时，
        库指纹不会变，但总账会变，只看 /api/gen 是发现不了的。 */
     async probeGen() {
+      if (!doc && absent()) return null;
       try { const m = await grabAny('meta', { timeout: 6000 }); return (m && m.gen) || null; }
       catch (_) { return null; }
     },
@@ -12478,7 +12643,34 @@ async function loadLibrary(force) {
 
   /* ② 兜底：后端还没升到 v22、总账还没建完、或 R2 与 Worker 都不通。
      旧路径一行没改，坏掉的只是「快」，不是「能不能用」。 */
+  let viaSnap = false;
   if (!ok) {
+    let d;
+    /* 有本地副本时不让网络卡住开张：3.5 秒（或断网）就先用副本，新的到了由 LibSync 换上 */
+    const snap = force ? null : await LibSnap.read();
+    if (snap) {
+      const net = (async () => {
+        const p = await fetchJSON(API + '/api/gen', { timeout: 6000, retries: 0 }).catch(() => null);
+        const v = p && p.gen ? '?v=' + encodeURIComponent(p.gen) : '';
+        const dd = await fetchJSON(API + '/api/all' + v, { timeout: 15000, retries: 1 });
+        LibSnap.write(dd, p);
+        return { p, dd };
+      })();
+      const got = NetQ.offline ? null : await Promise.race([net.catch(() => null), new Promise(r => setTimeout(() => r(null), 3500))]);
+      if (got) {
+        d = got.dd;
+        if (got.p) LibSync.mark(got.p);
+      } else {
+        d = snap;
+        if (snap.ptr) LibSync.mark(snap.ptr);           /* 基线 = 副本那一版：网络回来后 LibSync 自会发现新版本并换上 */
+        net.then(() => { try { LibSync.probe(true); } catch (_) {} }).catch(() => {});
+        log('loadLibrary: 网络没赶上，先用本地副本（' + snap.videos.length + ' 部）');
+      }
+      state.rootPrefix = d.root || ''; state.allVideos = d.videos || []; state.folders = d.folders || [];
+      viaSnap = true;
+    }
+  }
+  if (!ok && !viaSnap) {
     let d;
     try {
       /* 指针必须先拿、再拉库 —— 这里的顺序就是正确性本身:
@@ -12493,6 +12685,7 @@ async function loadLibrary(force) {
       const v = p && p.gen ? '?v=' + encodeURIComponent(p.gen) : '';
       d = await fetchJSON(API + '/api/all' + v, { timeout: 15000, retries: 1 });
       if (p) LibSync.mark(p);
+      LibSnap.write(d, p);
     } catch (e) {
       throw new Error('无法连接到 ' + API + (e?.message ? '（' + e.message + '）' : ''));
     }
@@ -12920,8 +13113,10 @@ function downsizeForCard(url, landscape) {
   if (!url || !url.includes('image.tmdb.org')) return url;
   /* TMDB 的部分 logo 是矢量文件，尺寸前缀对它没意义（有时还会 404），原样取 */
   if (/\.svg(\?|$)/i.test(url)) return url.replace(/\/t\/p\/(w\d+|h\d+)\//, '/t/p/original/');
-  // 卡片放大后（196–216px × 2~3x DPR）w342 会发虚，竖版 / logo 升到 w500；横版 w780 仍够用
-  return url.replace(/\/t\/p\/(original|w\d+|h\d+)\//, landscape ? '/t/p/w780/' : '/t/p/w500/');
+  // 卡片放大后（196–216px × 2~3x DPR）w342 会发虚，竖版 / logo 升到 w500；横版 w780 仍够用。
+  // 弱网 / 省流量：各降一档（w342 / w500）—— 先看得见，比看得清更要紧
+  const slow = NetQ.slow;
+  return url.replace(/\/t\/p\/(original|w\d+|h\d+)\//, landscape ? (slow ? '/t/p/w500/' : '/t/p/w780/') : (slow ? '/t/p/w342/' : '/t/p/w500/'));
 }
 
 const posterLoader = (() => {
@@ -12930,6 +13125,7 @@ const posterLoader = (() => {
   let active = 0;
   let scheduled = false;
   const MAX_ACTIVE = 6;
+  const maxActive = () => (NetQ.slow ? 3 : MAX_ACTIVE);   /* 弱网减半：先把眼前这几张拿完整，别六张一起卡着 */
 
   const schedule = () => {
     if (scheduled) return;
@@ -12940,7 +13136,7 @@ const posterLoader = (() => {
   };
 
   const pump = () => {
-    while (active < MAX_ACTIVE && queue.length) {
+    while (active < maxActive() && queue.length) {
       const el = queue.shift();
       if (!el || !el.isConnected || !el.dataset.fn) continue;
       active++;
@@ -15037,9 +15233,15 @@ async function tvEnsureList() {
     const d = await fetchJSON(API + '/api/tv', { timeout: 12000, retries: 1 });
     _tvCache = (d && Array.isArray(d.series)) ? d.series.filter(s => s && s.episodes > 0) : [];
     _tvCacheTs = Date.now();
+    if (_tvCache.length) LibSnap.put('tv', { series: _tvCache });
     if (state.searchIndex) buildSearchIndex();   /* 索引可能在剧集到货前就建好了 */
     return _tvCache;
-  } catch (_) { return null; }
+  } catch (_) {
+    /* 弱网 / 断网：用上次的剧集表，不让整段剧集消失（时间戳不记，网络回来下次就重取） */
+    const snap = await LibSnap.get('tv');
+    if (snap && Array.isArray(snap.series) && snap.series.length) { _tvCache = snap.series; return _tvCache; }
+    return null;
+  }
 }
 
 async function initTvSeries() {
@@ -17471,7 +17673,7 @@ const SC = (() => {
      16:9 那么大。取小图不是省网络，是省那 33MB —— 位图的账永远比传输的账大 */
   function downsizeBackdrop(url) {
     if (!url || !url.includes('image.tmdb.org') || /\.svg(\?|$)/i.test(url)) return url;
-    return url.replace(/\/t\/p\/(original|w\d+|h\d+)\//, LOW_MEM ? '/t/p/w780/' : '/t/p/w1280/');
+    return url.replace(/\/t\/p\/(original|w\d+|h\d+)\//, LOW_MEM || NetQ.slow ? '/t/p/w780/' : '/t/p/w1280/');
   }
 
   function setPoster(ch, url) {
@@ -17764,7 +17966,7 @@ const SC = (() => {
   /* 省流量模式 / 2G：预告片一律不挂，剧照推镜照样成立 —— 起不来的视频比没有视频更糟 */
   function thinNet() {
     const c = navigator.connection || {};
-    return c.saveData === true || /^(slow-2g|2g)$/.test(c.effectiveType || '');
+    return c.saveData === true || /^(slow-2g|2g)$/.test(c.effectiveType || '') || NetQ.slow || NetQ.offline;
   }
 
   /* ── 视频挂载 ──────────────────────────────────────────────────── */
@@ -20341,8 +20543,14 @@ const Player = (() => {
     el.bar.setAttribute('aria-valuenow', String(Math.round(ld.p * 100)));
   }
   function nextTip() {
-    if (ld.tip >= TIPS.length - 1) { clearInterval(ld.tipT); return; }
-    const t = el.tip, text = TIPS[++ld.tip];
+    let text;
+    if (ld.tip >= TIPS.length - 1) {
+      /* 十句都轮完了还没开播（约 24 秒）：不再停在「即将完成」骗人，如实说网络的情况 */
+      const want = NetQ.offline ? '网络已断开，恢复后自动继续' : '网络较慢，正在为您缓冲';
+      if (el.tip.textContent === want) return;
+      text = want;
+    } else text = TIPS[++ld.tip];
+    const t = el.tip;
     t.classList.add('leave');
     clearTimeout(ld.swapT);
     ld.swapT = setTimeout(() => {
