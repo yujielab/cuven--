@@ -92,6 +92,17 @@ node ../mkv-variants.mjs av1_hdr.mkv av1
 q -f lavfi -i "testsrc2=size=640x360:rate=25" -f lavfi -i "sine=frequency=600:sample_rate=48000" -t 180 \
   -c:v libx264 -preset veryfast -crf 34 -g 50 -c:a aac -b:a 64k -movflags +faststart long.mp4
 cp long.mp4 long_ep2.mp4
+# 在线字幕自动对齐（tests/run.mjs）用：3 分钟、内封约 100 条英文字幕当参照（间隔、时长都不规则，像真对白）；
+# sync_nosub.mkv 不带字幕 —— 只能拿 OpenSubtitles 上同哈希的他语种字幕当参照
+node -e '
+let seed = 11, t = 1.2; const r = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+const tc = x => { const ms = Math.round(x * 1000), p = (v, n = 2) => String(v).padStart(n, "0");
+  return p(Math.floor(ms / 3600000)) + ":" + p(Math.floor(ms / 60000) % 60) + ":" + p(Math.floor(ms / 1000) % 60) + "," + p(ms % 1000, 3); };
+const out = [];
+for (let i = 0; i < 150 && t < 176; i++) { const d = 0.5 + r() * 1.4; out.push((i + 1) + "\n" + tc(t) + " --> " + tc(t + d) + "\nLine " + (i + 1) + "\n"); t += d + 0.12 + r() * r() * 1.6; }
+require("fs").writeFileSync("sync_en.srt", out.join("\n"));'
+mkvmerge -q -o sync_ref.mkv long.mp4 --language 0:eng sync_en.srt
+mkvmerge -q -o sync_nosub.mkv long.mp4
 # 同目录外挂字幕（中文那份故意放了两条一模一样的 cue：播放页只该画一行）
 cat > long.zh.srt <<'S'
 1

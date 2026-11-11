@@ -948,6 +948,7 @@ async function handleSubsList(url, env, ctx) {
       const sign = env.AUTH_SECRET ? await signStreamPath(filePath, env) : null;
       const qs = new URLSearchParams({ path: filePath, os: '1' });
       if (sign) { qs.set('exp', String(sign.exp)); qs.set('sig', sign.sig); }
+      qs.set('v', `${(os.rec.src && os.rec.src.file) || ''}.${syncId(os.rec.sync)}`);   // 换了字幕或对齐：链接跟着变，浏览器不会拿旧时间
       subs.push({ name: os.rec.label, path: filePath, ext: '.vtt', srclang: os.rec.lang, label: os.rec.label, online: true,
         url: `/api/subs/vtt?${qs.toString()}` });
     }
@@ -967,7 +968,9 @@ async function subsOnline(filePath, fileName, stem, subFiles, env, ctx, waitMs) 
       sample: async () => (await hlsSidecarCues(x, env, ctx)).slice(0, 400).map(c => c.text).join('\n') };
   });
   const cx = { filePath, linkData, env, ctx };
-  return osFor(env, ctx, { filePath, name: fileName, meta, read: hlsSmallReader(cx), fps: 0, dur: 0 }, tracks, waitMs);
+  const xs = subFiles.map(f => ({ name: f.name, path: f.path_display, rev: f.rev || f.content_hash || '', ext: getExt(f.name) }));
+  const refs = () => syncRefFromSidecars(xs, env, ctx);
+  return osFor(env, ctx, { filePath, name: fileName, meta, read: hlsSmallReader(cx), fps: 0, dur: 0, refs }, tracks, waitMs);
 }
 
 async function handleSubVtt(url, env, ctx) {
@@ -980,7 +983,7 @@ async function handleSubVtt(url, env, ctx) {
     const linkData = await getTempLink(filePath, env, ctx);
     const rec = await osLoad(env, await osKeyOf(osIdentity(filePath, linkData.metadata))).catch(() => null);
     if (!rec || rec.status !== 'ok') return empty();
-    return new Response(osVttFull(rec.cues), {
+    return new Response(osVttFull(osCuesOut(rec)), {
       headers: { 'Content-Type': 'text/vtt; charset=utf-8', 'Cache-Control': 'public, max-age=3600' },
     });
   }
@@ -1046,7 +1049,7 @@ const OS_LANGS = {
   'zh-cn': { lang: 'zh-Hans', label: '简体中文（在线）', score: 40 },
   ze: { lang: 'zh-Hans', label: '简英双语（在线）', score: 34 },
   'zh-tw': { lang: 'zh-Hans', label: '简体中文（在线 · 繁转简）', score: 30, toSimp: true },
-  en: { lang: 'en', label: 'English（在线）', score: 10 },
+  en: { lang: 'en', label: 'English（在线）', score: -20 },      // 只在没有像样的中文时才用：有对齐以后，哈希不一致的中文也能对上时间
 };
 const OS_MEM = new Map();                           // 记录键 → 记录（进程内，最近 24 条）
 const OS_BUSY = new Map();                          // 记录键 → 开始时刻（同一 isolate 不重复查）
@@ -1105,7 +1108,7 @@ function osGuess(name) {
   const stem = String(name || '').replace(/\.[^./]+$/, '');
   const ep = /(?:^|[ ._\-[(])S(\d{1,2})[ ._-]?E(\d{1,3})(?!\d)/i.exec(stem) || /(?:^|[ ._-])(\d{1,2})x(\d{2,3})(?!\d)/.exec(stem);
   const p = parseFilename((ep ? stem.slice(0, ep.index) : stem) + '.x');
-  return { title: p.title, year: p.year, season: ep ? +ep[1] : null, episode: ep ? +ep[2] : null, tokens: osTokens(stem) };
+  return { title: p.title, year: p.year, q: p, season: ep ? +ep[1] : null, episode: ep ? +ep[2] : null, tokens: osTokens(stem) };
 }
 /** 发布名有多像：两边词集合的 Jaccard */
 function osSim(tokens, release) {
@@ -1209,15 +1212,29 @@ async function osDownload(env, auth, c, fps) {
 async function osTmdb(g, env) {
   if (!env.TMDB_API_KEY || !g.title) return null;
   if (g.season != null) { const h = await tmdbSearch('tv', g.title, '', env).catch(() => null); return h && h.id ? { id: h.id, type: 'tv' } : null; }
-  const ck = tmdbCacheKey(g.title, g.year, false);
+  const ck = tmdbCacheKey(g.q || g.title, g.year, false);
   const hit = await caches.default.match(ck).catch(() => null);
   let m = null;
   if (hit) { try { m = await hit.json(); } catch {} }
-  if (!m) m = await fetchMetadata(g.title, g.year, false, env).catch(() => null);
+  if (!m) m = await fetchMetadata(g.q || g.title, g.year, false, env).catch(() => null);
   return m && m.id && m.type === 'movie' ? { id: m.id, type: 'movie' } : null;
 }
 
-/** 真正去查一遍：job = { filePath, name, size, read, fps, dur, allowEn } → 存储记录 */
+/** 本地没有参照时的退路：OpenSubtitles 上与这个文件哈希一致（为这个文件做的）、条数够的那一条，任何语种 */
+async function osHashRef(env, auth, items, chosen, job) {
+  if (!items || !items.length) return null;
+  const pick = items.map(it => it && it.attributes).filter(a => a && a.moviehash_match === true && Array.isArray(a.files) && a.files.length === 1
+    && a.files[0].file_id && String(a.files[0].file_id) !== String(chosen.file) && !a.foreign_parts_only)
+    .sort((x, y) => (+y.download_count || 0) - (+x.download_count || 0))[0];
+  if (!pick) return null;
+  // 哈希一致 = 本来就是这个文件的时间，不做帧率换算
+  const got = await osDownload(env, auth, { file: pick.files[0].file_id, fps: 0 }, 0).catch(() => null);
+  if (!got) return null;
+  const cues = hlsParseSubFile(got.text, /\[Events\]/i.test(got.text) ? '.ass' : '.srt');
+  return cues.length >= 40 ? { label: `OpenSubtitles 同哈希（${pick.language || '?'}）`, pointsOnly: false, cues, rank: SYNC_RANK.os } : null;
+}
+
+/** 真正去查一遍：job = { filePath, name, size, read, fps, dur, allowEn, refs } → 存储记录 */
 async function osRun(env, job) {
   const g = osGuess(job.name);
   const langs = ['ze', 'zh-cn', 'zh-tw', ...(job.allowEn ? ['en'] : [])].sort().join(',');
@@ -1247,7 +1264,17 @@ async function osRun(env, job) {
         for (const x of cues) x.text = zhToSimp(x.text);
         converted = true;
       }
-      return { ...base, status: 'ok', lang: L.lang, label: L.label, cues,
+      // 对齐：记录里存原始时间与对齐参数（参照以后变好了还能重算，见 hlsOnline）
+      let sync = null;
+      try {
+        const ref = job.refs ? await job.refs() : null;
+        if (ref) sync = osSyncWith(cues, ref);
+        else if (!c.hash) {
+          const hr = await osHashRef(env, auth, lists[0] || [], c, job);
+          if (hr) sync = osSyncWith(cues, hr);
+        }
+      } catch (e) { console.error('subsync:', job.filePath, e && e.message); }
+      return { ...base, status: 'ok', lang: L.lang, label: L.label, cues, sync,
         src: { id: c.id, file: c.file, language: c.language, release: c.release, hash: c.hash, fps: c.fps, score: c.score, converted, fpsFix: got.fpsFix } };
     }
     return { ...base, status: 'none', retryAt: Date.now() + OS_RETRY.none, tried: cands.length };
@@ -1345,7 +1372,7 @@ async function osFor(env, ctx, file, tracks, waitMs) {
   const key = await osKeyOf(osIdentity(file.filePath, file.meta));
   let rec = await osLoad(env, key);
   if (!osFresh(rec, need.allowEn)) {
-    osKick(env, ctx, key, { filePath: file.filePath, name: file.name, size: file.meta.size, read: file.read, fps: file.fps, dur: file.dur, allowEn: need.allowEn });
+    osKick(env, ctx, key, { filePath: file.filePath, name: file.name, size: file.meta.size, read: file.read, fps: file.fps, dur: file.dur, allowEn: need.allowEn, refs: file.refs });
     if (waitMs) rec = (await osAwait(key, waitMs, need.allowEn)) || rec;
   }
   return { rec: rec && rec.status === 'ok' ? rec : null, need, key, pending: OS_BUSY.has(key) };
@@ -1357,6 +1384,366 @@ function osVttFull(cues, dur) {
   for (const c of subClean(cues, dur).slice().sort((a, b) => a.s - b.s || a.e - b.e)) out.push(`${hlsVttTime(c.s)} --> ${hlsVttTime(c.e)}${c.settings || ''}`, c.text, '');
   return out.join('\n');
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  在线字幕自动对齐（只给 OpenSubtitles 找来的那条；内封 / 外挂字幕原样用）
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  在线字幕常常是给另一个版本做的：整体早 / 晚几秒（片头长短不同）、越放越偏（23.976 ↔ 25 帧的 PAL 加速、
+//  1.001 的 NTSC 误差）、中途突然错开一截（多 / 少一段剧情）。对齐要一份「这个文件自己的时间」做参照 ——
+//  不必是同一种语言，只要时间来自这个文件：
+//    ① 内封字幕（文字或 PGS 图形，任何语言）：MKV Cues 里就有每一条的起止时间，一个字节都不用多读；
+//    ② 同目录的外挂字幕；
+//    ③ 都没有时：OpenSubtitles 里与这个文件哈希一致（就是为这个文件做的）的其他语种字幕。
+//  算法与 alass / ffsubsync 同一思路，按「事件」对齐：
+//    · 两边各取字幕出现 / 消失的时刻当事件（出现只和出现比、消失只和消失比），两两相减投票
+//      （直方图 + 三角核平滑）；每个候选帧率比（1、25/23.976、24/23.976 …）各投一次；
+//    · 全局投票里的几个高峰当候选偏移，逐条字幕动态规划选偏移、每换一次扣分 —— 偏移成台阶就自然切成几段，
+//      切点落在两条字幕之间；每段要比用相邻段的偏移明显对得更好才保留，再在 ±0.4s 内用 20ms 的格子细调（syncFit）；
+//    · 最后核对：字幕按单双条分两半各自对齐、拿去给另一半用（交叉验证），对上的比例都要显著高于随机水平；
+//      整体也要明显好于对齐前、好于随机水平才采用，否则原样不动 —— 宁可不改，也不能改坏（subSync）。
+const SYNC_V = 2;
+const SYNC_SCALES = [1, 25 / 23.976, 23.976 / 25, 24 / 23.976, 23.976 / 24, 25 / 24, 24 / 25, 30 / 29.97, 29.97 / 30];
+const SYNC_RANGE = 900;          // 全局偏移最多 ±15 分钟
+const SYNC_TOL = 0.25;           // 「对上了」：参照事件落在 ±0.25s 内
+const SYNC_KER = 0.3;            // 分段打分用的软核半宽
+const SYNC_PEN = 6;              // 换一次偏移（切一刀）至少要多对上这么多分
+const SYNC_SHIFTS = [-151.3, -97.3, -61.7, -43.1, -29.9, -17.3, 13.1, 23.9, 37.7, 53.3, 79.1, 113.9];   // 随机水平：整体挪开这些秒数再数
+
+/** 字幕 → 事件：出现时刻 s、消失时刻 e 各一列，排好序。出现只和出现比、消失只和消失比（消失权重 0.6）；
+    参照只有时刻（PGS 不分出现消失）时两列都是全部时刻 */
+function syncEvents(cues, pointsOnly) {
+  const s = [], e = [];
+  for (const c of cues || []) {
+    if (!c || !Number.isFinite(c.s) || c.s < 0) continue;
+    s.push(c.s);
+    if (Number.isFinite(c.e) && c.e > c.s + 0.05) e.push(c.e);
+  }
+  if (pointsOnly) { const all = Float64Array.from([...s, ...e]).sort(); return { s: all, e: all, pts: true }; }
+  return { s: Float64Array.from(s).sort(), e: Float64Array.from(e).sort(), pts: false };
+}
+
+/** 偏移直方图：每对（目标事件 x，参照事件 y）投 d = y − 比例 × x 一票，只统计 d ∈ [lo, hi] */
+function syncVote(h, xs, ys, scale, lo, hi, bin, w) {
+  let j0 = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const x = xs[i] * scale;
+    while (j0 < ys.length && ys[j0] < x + lo) j0++;
+    for (let j = j0; j < ys.length; j++) {
+      const d = ys[j] - x;
+      if (d > hi) break;
+      h[Math.round((d - lo) / bin)] += w;
+    }
+  }
+}
+function syncHist(tg, rf, scale, lo, hi, bin) {
+  const h = new Float32Array(Math.ceil((hi - lo) / bin) + 1);
+  syncVote(h, tg.s, rf.s, scale, lo, hi, bin, 1);
+  syncVote(h, tg.e, rf.e, scale, lo, hi, bin, 0.6);
+  return h;
+}
+/** 三角核平滑（半宽 k 格） */
+function syncSmooth(h, k) {
+  const out = new Float32Array(h.length), norm = (k + 1) * (k + 1);
+  for (let i = 0; i < h.length; i++) {
+    let s = 0;
+    for (let d = -k; d <= k; d++) { const j = i + d; if (j >= 0 && j < h.length) s += h[j] * (k + 1 - Math.abs(d)); }
+    out[i] = s / norm;
+  }
+  return out;
+}
+/** 峰：位置（抛物线插值到格子以下）、高度、相对背景的稳健 z 分（中位数 + MAD，峰两侧 excl 秒不算背景）；
+    顺带给出背景的 med / sd，挑候选峰时用 */
+function syncPeak(h, lo, bin, excl) {
+  let bi = 0;
+  for (let i = 1; i < h.length; i++) if (h[i] > h[bi]) bi = i;
+  const ex = Math.max(1, Math.round(excl / bin));
+  const rest = [];
+  for (let i = 0; i < h.length; i += (h.length > 4000 ? 3 : 1)) if (Math.abs(i - bi) > ex) rest.push(h[i]);
+  rest.sort((a, b) => a - b);
+  const med = rest.length ? rest[rest.length >> 1] : 0;
+  const dev = rest.map(v => Math.abs(v - med)).sort((a, b) => a - b);
+  const mad = dev.length ? dev[dev.length >> 1] : 0;
+  let mean = 0, sq = 0;
+  for (const v of rest) { mean += v; sq += v * v; }
+  mean /= rest.length || 1;
+  const sd = Math.max(1.4826 * mad, Math.sqrt(Math.max(0, sq / (rest.length || 1) - mean * mean)) * 0.5, 1e-6);
+  return { off: lo + syncSub(h, bi) * bin, v: h[bi], z: (h[bi] - med) / sd, med, sd };
+}
+/** 抛物线插值：峰在第 i 格附近的亚格位置 */
+function syncSub(h, i) {
+  if (i <= 0 || i >= h.length - 1) return i;
+  const a = h[i - 1], b = h[i], c = h[i + 1], den = a - 2 * b + c;
+  return den < 0 ? i + Math.max(-0.5, Math.min(0.5, 0.5 * (a - c) / den)) : i;
+}
+/** 前 k 个彼此相距 ≥ sep 秒、且高出背景 zmin 个 sd 的峰（偏移，从高到低） */
+function syncPeaks(h, lo, bin, pk, k, sep, zmin) {
+  const idx = [];
+  for (let i = 1; i < h.length - 1; i++) if (h[i] >= h[i - 1] && h[i] > h[i + 1] && (h[i] - pk.med) / pk.sd >= zmin) idx.push(i);
+  idx.sort((a, b) => h[b] - h[a]);
+  const out = [], gap = sep / bin;
+  for (const i of idx) {
+    if (out.length >= k) break;
+    if (!out.some(j => Math.abs(j - i) < gap)) out.push(i);
+  }
+  return out.map(i => lo + syncSub(h, i) * bin);
+}
+
+/** 映射：比例 + 分段偏移。segs = [{ until, off }]（until：目标时间，这一段管到哪；最后一段 until = null） */
+function syncMap(sync, t) {
+  const segs = sync.segs;
+  let off = segs[segs.length - 1].off;
+  for (const s of segs) if (s.until == null || t < s.until) { off = s.off; break; }
+  return t * sync.scale + off;
+}
+/** 排好序的时刻表 ys 里离 x 最近的有多远 */
+function syncNear(ys, x) {
+  if (!ys.length) return Infinity;
+  let lo = 0, hi = ys.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (ys[m] < x) lo = m + 1; else hi = m; }
+  let d = Math.abs(ys[lo] - x);
+  if (lo > 0) d = Math.min(d, Math.abs(ys[lo - 1] - x));
+  return d;
+}
+/** 对上的比例：目标字幕的出现时刻映射过去后，±tol 内有参照字幕出现的占多少 */
+function syncRate(tgStarts, rf, map, tol = SYNC_TOL) {
+  if (!tgStarts.length || !rf.s.length) return 0;
+  let hit = 0;
+  for (const s of tgStarts) if (syncNear(rf.s, map(s)) <= tol) hit++;
+  return hit / tgStarts.length;
+}
+/** 随机水平：把映射整体挪开若干秒再数，均值与标准差（标准差不小于二项分布那么大） */
+function syncChance(starts, rf, map) {
+  const r = SYNC_SHIFTS.map(d => syncRate(starts, rf, t => map(t) + d));
+  const mu = r.reduce((a, b) => a + b, 0) / r.length;
+  const sd = Math.sqrt(r.reduce((a, b) => a + (b - mu) * (b - mu), 0) / r.length);
+  return { mu, sd: Math.max(sd, Math.sqrt(Math.max(mu * (1 - mu), 0.01) / starts.length)) };
+}
+
+/**
+ * 拟合一组目标字幕 cs（按出现排好）：hs = 每个比例的平滑全局直方图（这组字幕自己的）
+ *   ① 比例：每个候选比例的直方图取最尖的峰（非 1 的比例要明显更尖才换）；
+ *   ② 候选偏移：这个比例下全局直方图前 12 个彼此相距 ≥ 0.5s 的峰（剪辑差、广告切口各成一个峰）；
+ *   ③ 每条字幕对每个候选偏移打分（出现 / 消失离最近参照事件多近，软核），
+ *      逐条动态规划选偏移：换一次偏移扣 SYNC_PEN 分 —— 自然切成若干段，切点落在两条字幕之间；
+ *   ④ 每段要「挣得到」：比用相邻段的偏移多对上 max(罚分, 段长 × 8%) 才保留，不然并进去；
+ *   ⑤ 每段在 ±0.4s 内用 20ms 的格子细调；细调后相差不到 0.25s 的相邻段合并。
+ */
+function syncFit(cs, hs, rf) {
+  // 比例 1 一定试；别的比例只试峰最尖的两个（且不比 1 的峰差太多）。各自走完分段，总分高的胜（非 1 要高 3% 才换）——
+  // 一级一级往后错的台阶（广告切口）近似一条斜线，光比峰会误认成帧率差，比分段后的总分就不会
+  const peaks = SYNC_SCALES.map(sc => ({ ...syncPeak(hs.get(sc), -SYNC_RANGE, 0.1, 2), scale: sc }));
+  const one = peaks[0];
+  const tries = [one, ...peaks.slice(1).sort((a, b) => b.z - a.z).slice(0, 2).filter(p => p.z >= Math.max(6, one.z * 0.8))];
+  let best = null;
+  for (const p of tries) {
+    const m = syncFitAt(cs, hs.get(p.scale), rf, p);
+    if (!best || m.obj > best.obj * 1.03) best = m;
+  }
+  return best;
+}
+function syncFitAt(cs, h, rf, best) {
+  const scale = best.scale, n = cs.length;
+  const cands = syncPeaks(h, -SYNC_RANGE, 0.1, best, 12, 0.5, 4);
+  if (!cands.length) cands.push(best.off);
+  const K = cands.length, sc = new Float32Array(n * K);
+  const ker = d => d >= SYNC_KER ? 0 : 1 - d / SYNC_KER;
+  for (let i = 0; i < n; i++) for (let k = 0; k < K; k++) {
+    const c = cs[i];
+    sc[i * K + k] = ker(syncNear(rf.s, c.s * scale + cands[k])) + (c.e != null ? 0.6 * ker(syncNear(rf.e, c.e * scale + cands[k])) : 0);
+  }
+  // ③ 动态规划（Viterbi）
+  const back = new Uint8Array(n * K);
+  let V = new Float64Array(K), NV = new Float64Array(K);
+  for (let k = 0; k < K; k++) V[k] = sc[k];
+  for (let i = 1; i < n; i++) {
+    let bp = 0;
+    for (let k = 1; k < K; k++) if (V[k] > V[bp]) bp = k;
+    for (let k = 0; k < K; k++) {
+      const sw = V[bp] - SYNC_PEN;
+      if (sw > V[k]) { NV[k] = sw + sc[i * K + k]; back[i * K + k] = bp; } else { NV[k] = V[k] + sc[i * K + k]; back[i * K + k] = k; }
+    }
+    [V, NV] = [NV, V];
+  }
+  const pick = new Uint8Array(n);
+  let k = 0;
+  for (let j = 1; j < K; j++) if (V[j] > V[k]) k = j;
+  const obj = V[k];
+  for (let i = n - 1; i >= 0; i--) { pick[i] = k; k = back[i * K + k]; }
+  // 连续同一偏移 → 段 { i0, i1, k }
+  let runs = [];
+  for (let i = 0; i < n; i++) {
+    if (runs.length && runs[runs.length - 1].k === pick[i]) runs[runs.length - 1].i1 = i + 1;
+    else runs.push({ i0: i, i1: i + 1, k: pick[i] });
+  }
+  const sum = (r, kk) => { let s = 0; for (let i = r.i0; i < r.i1; i++) s += sc[i * K + kk]; return s; };
+  // ④ 挣不到的段并给相邻段（每次并掉最不值的那段，直到都站得住）
+  for (;;) {
+    let worst = -1, wv = Infinity, wto = -1;
+    runs.forEach((r, j) => {
+      if (runs.length === 1) return;
+      const own = sum(r, r.k);
+      let alt = -Infinity, to = -1;
+      for (const q of [j - 1, j + 1]) if (q >= 0 && q < runs.length) { const v = sum(r, runs[q].k); if (v > alt) { alt = v; to = q; } }
+      const need = Math.max(SYNC_PEN, 0.08 * (r.i1 - r.i0));
+      if (own - alt < need && own - alt - need < wv) { wv = own - alt - need; worst = j; wto = to; }
+    });
+    if (worst < 0) break;
+    runs[worst].k = runs[wto].k;
+    const merged = [];
+    for (const r of runs) {
+      if (merged.length && merged[merged.length - 1].k === r.k) merged[merged.length - 1].i1 = r.i1;
+      else merged.push({ ...r });
+    }
+    runs = merged;
+  }
+  // 切点：交界两侧各 15 条里重新挑总分最高的位置；平手（交界附近对不上参照的字幕两边都是 0 分，动态规划随便切）
+  // 就挑两条字幕之间空档最大的那个 —— 剪辑点通常就是那段空白
+  for (let j = 1; j < runs.length; j++) {
+    const A = runs[j - 1], B = runs[j], lo = Math.max(A.i0 + 1, B.i0 - 15), hi = Math.min(B.i1 - 1, B.i0 + 15);
+    if (hi <= lo) continue;
+    const tot = [];
+    for (let p = lo; p <= hi; p++) {
+      let v = 0;
+      for (let i = lo - 1; i < p; i++) v += sc[i * K + A.k];
+      for (let i = p; i <= hi; i++) v += sc[i * K + B.k];
+      tot.push(v);
+    }
+    const mx = Math.max(...tot);
+    let bp = B.i0, bg = -1;
+    tot.forEach((v, q) => { const p = lo + q, g = cs[p].s - cs[p - 1].s; if (v >= mx - 0.01 && g > bg) { bg = g; bp = p; } });
+    A.i1 = bp; B.i0 = bp;
+  }
+  // ⑤ 细调：这一段的全部事件在候选偏移 ±0.4s 内找峰
+  const refine = (r, off) => {
+    const ev = syncEvents(cs.slice(r.i0, r.i1));
+    if (ev.s.length < 4) return off;
+    const h = syncSmooth(syncHist(ev, rf, scale, off - 0.4, off + 0.4, 0.02), 2);
+    let bi = 0;
+    for (let i = 1; i < h.length; i++) if (h[i] > h[bi]) bi = i;
+    return h[bi] > 0 ? off - 0.4 + syncSub(h, bi) * 0.02 : off;
+  };
+  let segs = runs.map(r => ({ i0: r.i0, i1: r.i1, off: refine(r, cands[r.k]) }));
+  for (let j = segs.length - 1; j > 0; j--) {
+    if (Math.abs(segs[j].off - segs[j - 1].off) < 0.25) {
+      const m = { i0: segs[j - 1].i0, i1: segs[j].i1 };
+      m.off = refine(m, (segs[j - 1].off * (segs[j - 1].i1 - segs[j - 1].i0) + segs[j].off * (segs[j].i1 - segs[j].i0)) / (m.i1 - m.i0));
+      segs.splice(j - 1, 2, m);
+    }
+  }
+  return {
+    scale, z: best.z, obj,
+    segs: segs.map((g, j) => ({ until: j < segs.length - 1 ? +((cs[g.i1 - 1].s + cs[g.i1].s) / 2).toFixed(3) : null, off: Math.round(g.off * 1000) / 1000 })),
+  };
+}
+
+/**
+ * 主入口。target：在线字幕 [{s,e}]（秒）；ref：参照字幕 [{s,e}]，pointsOnly = 参照只有时刻（PGS）。
+ * 返回 { v, scale, segs, before, after, chance, cv, applied, why }；applied=false 时 scale=1、segs=[{until:null,off:0}]
+ * 核对（宁可不改，也不能改坏）：
+ *   · 交叉验证：字幕按单双条分两半，各自独立拟合，拿去给另一半用 —— 对上的比例都要显著高于随机水平
+ *     （z ≥ 3 且高 8 个百分点以上）。和片子对不上的字幕找到的「峰」是凑出来的，换一半就不灵；
+ *   · 整体：对齐后对上的比例要比随机水平高 10 个百分点、比对齐前高 4 个百分点。
+ */
+function subSync(target, ref, opts = {}) {
+  const ident = { scale: 1, segs: [{ until: null, off: 0 }] };
+  const out = why => ({ v: SYNC_V, ...ident, applied: false, why });
+  const cs = (target || []).filter(c => c && Number.isFinite(c.s) && c.s >= 0)
+    .map(c => ({ s: c.s, e: Number.isFinite(c.e) && c.e > c.s + 0.05 ? c.e : null })).sort((a, b) => a.s - b.s);
+  const rf = syncEvents(ref, !!opts.pointsOnly);
+  if (cs.length < 40 || rf.s.length < 40) return out('too-few');
+  const A = cs.filter((_, i) => i % 2 === 0), B = cs.filter((_, i) => i % 2 === 1);
+  const eA = syncEvents(A), eB = syncEvents(B);
+  const hA = new Map(), hB = new Map(), hF = new Map();
+  for (const s of SYNC_SCALES) {
+    const a = syncHist(eA, rf, s, -SYNC_RANGE, SYNC_RANGE, 0.1), b = syncHist(eB, rf, s, -SYNC_RANGE, SYNC_RANGE, 0.1);
+    const f = new Float32Array(a.length);
+    for (let i = 0; i < a.length; i++) f[i] = a[i] + b[i];
+    hA.set(s, syncSmooth(a, 3)); hB.set(s, syncSmooth(b, 3)); hF.set(s, syncSmooth(f, 3));
+  }
+  const fit = syncFit(cs, hF, rf);
+  if (fit.z < 6) return out('no-peak');
+  const starts = cs.map(c => c.s);
+  const f = t => syncMap(fit, t);
+  const before = syncRate(starts, rf, t => t), after = syncRate(starts, rf, f);
+  const ch = syncChance(starts, rf, f);
+  const res = { v: SYNC_V, scale: fit.scale, segs: fit.segs, before: +before.toFixed(3), after: +after.toFixed(3), chance: +ch.mu.toFixed(3), z: +fit.z.toFixed(1) };
+  let moved = 0;
+  for (const s of starts) moved = Math.max(moved, Math.abs(f(s) - s));
+  if (moved < 0.12) return { ...res, ...ident, applied: false, why: 'in-sync' };
+  const cvz = (half, m) => {
+    const st = half.map(c => c.s), mp = t => syncMap(m, t);
+    const r = syncRate(st, rf, mp), c = syncChance(st, rf, mp);
+    return r - c.mu < 0.08 ? Math.min(0, (r - c.mu) / c.sd) : (r - c.mu) / c.sd;
+  };
+  res.cv = +Math.min(cvz(B, syncFit(A, hA, rf)), cvz(A, syncFit(B, hB, rf))).toFixed(1);
+  if (res.cv < 3) return { ...res, ...ident, applied: false, why: 'unstable' };
+  if (after < ch.mu + 0.1 || after < before + 0.04) return { ...res, ...ident, applied: false, why: 'not-better' };
+  return { ...res, applied: true, why: 'ok' };
+}
+
+/** 把对齐用到一组字幕上（新数组，原样不动）；落到 0 秒以前的整条丢掉 */
+function syncApply(cues, sync) {
+  if (!sync || !sync.applied) return cues;
+  const out = [];
+  for (const c of cues) {
+    const s = syncMap(sync, c.s), e = syncMap(sync, c.s) + (c.e - c.s) * sync.scale;
+    if (e <= 0.05) continue;
+    out.push({ ...c, s: Math.max(0, s), e });
+  }
+  return out;
+}
+
+/* ── 参照来源 ──────────────────────────────────────────────────────────
+   都只取时间，不看内容；取「字幕最多、不是 forced（只翻外语对白的那种）」的那一条。
+   rank：3 = 这个文件自己的字幕（内封 / 外挂），2 = OpenSubtitles 上与这个文件哈希一致的 */
+const SYNC_RANK = { local: 3, os: 2 };
+/** 内封字幕：文字轨（idx.subs，Cues 里有起止）与图形轨（idx.subRefs：PGS / VobSub，Cues 里只有时刻） */
+function syncRefFromIdx(idx) {
+  if (!idx) return null;
+  const sec = u => u * idx.scaleNs / 1e9;
+  const cand = [];
+  (idx.subs || []).forEach((sub, i) => {
+    if (sub.forced || !sub.cues || sub.cues.length < 40) return;
+    cand.push({ label: `内封 #${i}（${sub.lang || '未知'}）`, pointsOnly: false, n: sub.cues.length,
+      cues: () => sub.cues.map(c => { const st = sec(c[0]); return { s: st, e: c[1] >= 0 ? st + sec(c[1]) : null }; }) });
+  });
+  for (const r of idx.subRefs || []) {
+    if (r.forced || !r.t || r.t.length < 60) continue;
+    cand.push({ label: `内封图形字幕（${r.lang || '未知'}）`, pointsOnly: true, n: r.t.length / 2,
+      cues: () => r.t.map(ms => ({ s: ms / 1000 })) });
+  }
+  if (!cand.length) return null;
+  cand.sort((a, b) => (b.pointsOnly ? b.n * 0.8 : b.n) - (a.pointsOnly ? a.n * 0.8 : a.n));
+  const c = cand[0];
+  return { label: c.label, pointsOnly: c.pointsOnly, cues: c.cues(), rank: SYNC_RANK.local };
+}
+/** 同目录外挂字幕：挑条数最多的那份 */
+async function syncRefFromSidecars(xs, env, ctx) {
+  let best = null;
+  for (const x of xs || []) {
+    const cues = await hlsSidecarCues(x, env, ctx).catch(() => null);
+    if (cues && cues.length >= 40 && (!best || cues.length > best.cues.length)) best = { label: `外挂 ${x.name || x.path}`, pointsOnly: false, cues, rank: SYNC_RANK.local };
+  }
+  return best;
+}
+/** 对齐结果的指纹：HLS 字幕分段的缓存键带上它，换了对齐就不会读到旧分段 */
+const syncId = sync => (sync && sync.applied) ? fnv1a(`${sync.scale.toFixed(6)}|${sync.segs.map(g => `${g.off}@${g.until == null ? '' : g.until.toFixed(2)}`).join(',')}`) : 'n';
+/** 在线字幕的成品时间轴：原始时间 + 对齐（记录里只存原始字幕与对齐参数，对齐可以后补、可以重算） */
+const _osOut = new WeakMap();
+function osCuesOut(rec) {
+  if (!rec || !rec.cues) return [];
+  if (!rec.sync || !rec.sync.applied) return rec.cues;
+  let o = _osOut.get(rec);
+  if (!o || o.id !== syncId(rec.sync)) { o = { id: syncId(rec.sync), cues: syncApply(rec.cues, rec.sync) }; _osOut.set(rec, o); }
+  return o.cues;
+}
+/** 对齐一条在线字幕：ref = { cues, pointsOnly, label, rank } */
+function osSyncWith(cues, ref) {
+  const r = subSync(cues, ref.cues, { pointsOnly: ref.pointsOnly });
+  return { ...r, ref: ref.label, rank: ref.rank, at: Date.now() };
+}
+/** 记录里的对齐还能不能更好：没有对齐过，或者当时只有更弱的参照 */
+const osSyncWeaker = (rec, rank) => !!rec && rec.status === 'ok' && (!rec.sync || (rec.sync.rank || 0) < rank || rec.sync.v !== SYNC_V);
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  v24：Safari MP4/MOV FourCC 零拷贝流式热修补
@@ -3494,7 +3881,8 @@ async function buildFeatured(candidates, n, env, memo = null) {
 
   await parallel(
     candidates.map(video => async () => {
-      const { title, year } = parseFilename(video.name);
+      const pf = parseFilename(video.name);
+      const { title, year } = pf;
       const key = `${title || video.name}|${year || ''}`;
       let releaseDate = null;
       let releaseYear = year ? parseInt(year, 10) : 0;
@@ -3505,7 +3893,7 @@ async function buildFeatured(candidates, n, env, memo = null) {
         releaseYear = cached.y || releaseYear;
       } else if (title) {
         try {
-          const p = await fetchMetadata(title, year, false, env);
+          const p = await fetchMetadata(pf, '', false, env);
           if (p?.release_date) {
             releaseDate = p.release_date;
             releaseYear = parseInt(p.release_date.slice(0, 4), 10) || releaseYear;
@@ -3944,6 +4332,17 @@ const NP_GENRES_ZH = {
   10752: '战争', 37: '西部',
 };
 
+/* 电影与剧集两套类型编号合在一起：搜索结果里只有编号（genre_ids），对照表一查就是中文类型名，
+   不必为了「剧情 · 犯罪」这几个字再去取一次详情 */
+const TMDB_GENRES_ZH = {
+  ...NP_GENRES_ZH,
+  10759: '动作冒险', 10762: '儿童', 10763: '新闻', 10764: '真人秀', 10765: '科幻奇幻', 10766: '肥皂剧', 10767: '脱口秀', 10768: '战争政治',
+};
+/** 一条 TMDB 结果的类型：详情里是 genres（对象，带中文名），搜索结果里是 genre_ids（编号） */
+const tmdbGenres = r => (!r ? [] : (Array.isArray(r.genres) && r.genres.length
+  ? r.genres.map(g => g && g.name).filter(Boolean)
+  : (r.genre_ids || []).map(id => TMDB_GENRES_ZH[id]).filter(Boolean))).slice(0, 3);
+
 function pickLogo(logos) {
   if (!Array.isArray(logos) || !logos.length) return null;
   const pick = f => logos.find(f);
@@ -4132,18 +4531,21 @@ async function handleRemind(request, env, ctx) {
 //  iTunes / Apple TV（并行双区，取先到的有效结果）
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async function fetchITunesArtwork(title, year, mediaType) {
+async function fetchITunesArtwork(title, year, mediaType, names) {
+  if (!title) return null;
   try {
     // 并发 cn + us，Promise.any 取首个成功
     const result = await Promise.any([
-      _itunesSearch(title, year, mediaType, 'cn'),
-      _itunesSearch(title, year, mediaType, 'us'),
+      _itunesSearch(title, year, mediaType, 'cn', names),
+      _itunesSearch(title, year, mediaType, 'us', names),
     ]);
     return result;
   } catch { return null; }
 }
 
-async function _itunesSearch(title, year, mediaType, country) {
+/* 只认片名对得上（中文区对中文名、美区对英文名 / 原名，相似度 ≥ 0.8）、年份差不过一年的那条。
+   原来拿第一条：同名的另一部、续集、纪录片都可能顶上来，详情页的海报就换成了别的片子 */
+async function _itunesSearch(title, year, mediaType, country, names) {
   const entity = mediaType === 'tv' ? 'tvShow' : 'movie';
   const params = new URLSearchParams({ term: title, entity, country, limit: '5' });
   const res = await fetchRetry(
@@ -4156,11 +4558,16 @@ async function _itunesSearch(title, year, mediaType, country) {
   const results = data.results || [];
   if (!results.length) throw new Error('no results');
 
-  let best = results[0];
-  if (year) {
-    const match = results.find(r => (r.releaseDate || '').startsWith(year));
-    if (match) best = match;
-  }
+  const want = (names && names.length ? names : [title]).filter(Boolean);
+  const y = parseInt(year, 10) || 0;
+  const fits = r => {
+    const n = r.trackName || r.collectionName || (mediaType === 'tv' ? r.artistName : '') || '';
+    if (!want.some(w => mtSim(n, w) >= 0.8)) return false;
+    const ry = parseInt(String(r.releaseDate || '').slice(0, 4), 10) || 0;
+    return !y || !ry || Math.abs(ry - y) <= 1;
+  };
+  const best = results.find(fits);
+  if (!best) throw new Error('no matching artwork');
 
   const raw = best.artworkUrl100;
   if (!raw) throw new Error('no artwork');
@@ -4179,11 +4586,16 @@ async function _itunesSearch(title, year, mediaType, country) {
 //  TMDB + iTunes 融合元数据
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-const TMDB_CACHE = 'https://cache.internal/tmdb-v7/';   // v7：payload 新增 imdb —— 不换命名空间的话，旧缓存要压 7 天才吐出新字段
+// v8：匹配管线重写（候选打分 + 校验）。旧缓存里的错配不换命名空间的话要再压 7 天
+const TMDB_CACHE = 'https://cache.internal/tmdb-v9/';   // v9：简要结果也带类型（genres）
 
-function tmdbCacheKey(title, year, full, kind) {
-  const p = new URLSearchParams({ q: title.toLowerCase() });
-  if (year) p.set('y', year);
+/** q：一句片名，或 mtParse 的结果（中英文名都进键 —— 只拿其中一个当键，两部片会互相顶掉），或 { id, type } */
+function tmdbCacheKey(q, year, full, kind) {
+  const obj = q && typeof q === 'object';
+  const t = obj ? (q.id ? `#${q.type}:${q.id}` : [q.en, q.zh, q.alt].filter(Boolean).join('|')) : String(q || '');
+  const y = obj ? (q.year || '') : (year || '');
+  const p = new URLSearchParams({ q: t.toLowerCase() });
+  if (y) p.set('y', y);
   if (full) p.set('f', '1');
   if (kind) p.set('t', kind);       // type=tv / movie 各存一份：同名的电影与剧集不能互相顶掉
   return new Request(`${TMDB_CACHE}?${p}`);
@@ -4196,14 +4608,19 @@ async function handleTmdb(url, env, ctx) {
   const full = url.searchParams.get('logo') === '1';
   // type=tv 只搜剧集、type=movie 只搜电影；不带就是老规矩（电影优先，搜不到再搜剧集）
   const kind = ['tv', 'movie'].includes(url.searchParams.get('type')) ? url.searchParams.get('type') : '';
-  if (!query) return jsonResponse({ error: 'Missing query' }, 400);
+  // id：剧集表已经认好的编号 —— 剧照、详情、分集用同一部，不再按名字各认各的
+  const id = parseInt(url.searchParams.get('id') || '', 10) || 0;
+  if (!query && !(id && kind)) return jsonResponse({ error: 'Missing query' }, 400);
 
-  const ck = tmdbCacheKey(query, year, full, kind);
+  const q = id && kind ? { id, type: kind } : mtQuery(query, year);
+  const ck = tmdbCacheKey(q, year, full, kind);
   const cache = caches.default;
   const hit = await cache.match(ck);
   if (hit) return new Response(hit.body, { headers: hit.headers });
 
-  const payload = await fetchMetadata(query, year, full, env, kind);
+  let payload;
+  try { payload = await fetchMetadata(q, year, full, env, kind); }
+  catch (e) { return jsonResponse({ error: 'tmdb unavailable' }, 502, { 'Cache-Control': 'no-store' }); }   // 出错不缓存、不回 null
   const body = payload ? JSON.stringify(payload) : 'null';
   const resp = new Response(body, {
     headers: {
@@ -4228,13 +4645,15 @@ async function handleTmdbBatch(request, env, ctx) {
 
   const cache = caches.default;
   const result = {};
+  // 一次批量最多发这么多个 TMDB 请求（每部片 2–10 个不等）：超了的那几部这次不答，前端过会儿再问
+  const budget = { left: 700 };
 
   await parallel(
     queries.filter(q => q?.name).map(q => async () => {
-      const { title, year } = parseFilename(q.name);
-      if (!title) { result[q.name] = null; return; }
+      const p = parseFilename(q.name);
+      if (!p.title || p.extra) { result[q.name] = null; return; }   // 认不出片名 / 样片、预告、花絮：明确没有
       const full = !!q.logo;
-      const ck = tmdbCacheKey(title, year, full);
+      const ck = tmdbCacheKey(p, '', full);
 
       const hit = await cache.match(ck);
       if (hit) {
@@ -4242,14 +4661,14 @@ async function handleTmdbBatch(request, env, ctx) {
         return;
       }
 
-      // 修复：fetchMetadata 抛错会让该 key 直接从结果里消失（前端拿不到任何信号）
-      // → 抛错置 null；且瞬时失败不写缓存，避免把一次网络抖动负缓存一周
+      // 认不上 → null（写缓存）；TMDB 出错 / 超预算 → 这个键不回（不写缓存）。
+      // 前端靠这一点分清「TMDB 说没有这部」与「这次没问成」：前者不显示，后者过会儿再问
       let data = null;
       let failed = false;
-      try { data = await fetchMetadata(title, year, full, env); }
+      try { data = await fetchMetadata(p, '', full, env, '', budget); }
       catch { failed = true; }
-      result[q.name] = data;
       if (failed) return;
+      result[q.name] = data;
       const resp = new Response(data ? JSON.stringify(data) : 'null', {
         headers: {
           'Content-Type': 'application/json; charset=utf-8',
@@ -4261,6 +4680,8 @@ async function handleTmdbBatch(request, env, ctx) {
     6,
   );
 
+  // 版本记号：前端据此知道这里的 null 是确定的「认不出」（旧版出错时也回 null，不能拿来藏片）
+  result.__match = 2;
   return jsonResponse(result);
 }
 
@@ -4382,9 +4803,8 @@ async function tmdbTrailer({ imdb, tmdb, type, query, year }, env) {
     if (hit) { kind = hit[0]; id = hit[1].id; }
   }
   if (!id && query) {
-    const hit = (kind !== 'tv' && await tmdbSearch('movie', query, year, env).catch(() => null))
-      || (kind !== 'movie' && await tmdbSearch('tv', query, year, env).catch(() => null));
-    if (hit) { kind = hit.title ? 'movie' : 'tv'; id = hit.id; }
+    const m = await tmdbMatch(mtQuery(query, year), env, kind).catch(() => null);
+    if (m) { kind = m.c.type; id = m.c.id; }
   }
   if (!id) return null;
   const j = await get(`https://api.themoviedb.org/3/${kind || 'movie'}/${id}/videos?api_key=${key}&language=zh-CN&include_video_language=zh,en,null`);
@@ -4444,9 +4864,10 @@ async function imdbTrailer(id, nStills) {
 async function resolveImdbId(query, year, env) {
   if (!env.TMDB_API_KEY) return null;
   try {
-    const hit = await tmdbSearch('movie', query, year, env) || await tmdbSearch('tv', query, year, env);
-    if (!hit) return null;
-    const type = hit.title ? 'movie' : 'tv';
+    const m = await tmdbMatch(mtQuery(query, year), env, '');
+    if (!m) return null;
+    const hit = { id: m.c.id };
+    const type = m.c.type;
     const r = await fetchRetry(
       `https://api.themoviedb.org/3/${type}/${hit.id}/external_ids?api_key=${env.TMDB_API_KEY}`,
       {}, { retries: 1, timeout: 6000 },
@@ -4505,52 +4926,75 @@ async function handleImdbVideo(url, env, ctx) {
 
 // ── 核心：融合 TMDB + iTunes ──
 
-async function fetchMetadata(title, year, full, env, kind = '') {
-  // TMDB 搜索：kind 指定了就只搜那一类；没指定则 movie 优先、fallback tv
-  let hit = null, type = kind || 'movie';
-  if (kind !== 'tv') hit = await tmdbSearch('movie', title, year, env);
-  if (!hit && kind !== 'movie') {
-    type = 'tv';
-    hit = await tmdbSearch('tv', title, year, env);
-    // 剧集的年份常是「这一季」的年份，第一季不在那年时按年份搜不到 —— 去掉年份再搜一次
-    if (!hit && year && kind === 'tv') hit = await tmdbSearch('tv', title, '', env);
-  }
-  if (!hit) return null;
+/** 按编号取（剧集表里已经认好的那部、前端带回来的编号）：与 tmdbMatch 的返回同形 */
+async function mtById(type, id, env) {
+  const r = await fetchRetry(`https://api.themoviedb.org/3/${type}/${encodeURIComponent(id)}?api_key=${env.TMDB_API_KEY}&language=zh-CN`, {}, { retries: 1, timeout: 6000 });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error('tmdb ' + r.status);
+  const d = await r.json();
+  return { sim: 1, score: null, c: { type, id: d.id, rank: 0, zh: d.title || d.name || '', en: '', orig: d.original_title || d.original_name || '',
+    lang: d.original_language || '', date: d.release_date || d.first_air_date || '', votes: d.vote_count || 0, rating: d.vote_average || 0,
+    poster: d.poster_path || null, backdrop: d.backdrop_path || null, overview: d.overview || '', alt: null, raw: d } };
+}
+
+/**
+ * title：mtParse 的结果（文件名里解析好的中英文名 + 年份），或一句片名（配 year）；
+ *        { id, type } 直接按编号取（剧集表认好的那部 —— 剧照与分集用的是同一个编号，不会两边各认一部）
+ * 认不上返回 null；TMDB 出错抛错 —— 调用方不能把一次网络抖动当成「没有这部片」缓存下来
+ */
+async function fetchMetadata(title, year, full, env, kind = '', budget = null) {
+  const q = title && typeof title === 'object' ? title : mtQuery(title, year);
+  const m = q.id && (q.type === 'tv' || q.type === 'movie') ? await mtById(q.type, q.id, env) : await tmdbMatch(q, env, kind, budget);
+  if (!m) return null;
+  const c = m.c, type = c.type;
 
   const out = {
-    id: hit.id,
-    title: hit.title || hit.name,
-    year: (hit.release_date || hit.first_air_date || '').slice(0, 4),
-    release_date: hit.release_date || hit.first_air_date || null,
-    poster: hit.poster_path ? `https://image.tmdb.org/t/p/w342${hit.poster_path}` : null,
-    backdrop: hit.backdrop_path ? `https://image.tmdb.org/t/p/w1280${hit.backdrop_path}` : null,
-    overview: hit.overview || '',
-    rating: hit.vote_average || 0,
+    id: c.id,
+    title: c.zh || c.en || c.orig,
+    en: c.en || '',
+    original_title: c.orig || '',
+    year: (c.date || '').slice(0, 4),
+    release_date: c.date || null,
+    poster: c.poster ? `https://image.tmdb.org/t/p/w342${c.poster}` : null,
+    backdrop: c.backdrop ? `https://image.tmdb.org/t/p/w1280${c.backdrop}` : null,
+    overview: c.overview || '',
+    rating: c.rating || 0,
     type,
+    match: m.score != null ? Math.round(m.score) : null,   // 匹配分（排查错配用）
     logo: null, logoAspect: null,
     imdb: null,
-    runtime: null, genres: [],
+    runtime: null, genres: tmdbGenres(c.raw),       // 列表里那行「剧情 · 犯罪」：搜索结果自带编号，不多花请求
     cast: [], director: null, creators: [],
     artworkSource: 'tmdb',
   };
 
-  if (!full) return out;
+  // iTunes 按「认好的那部」的片名与年份去搜、并逐条核对 —— 不再拿文件名里的半截片名搜、取第一条
+  const itTitle = c.en || c.orig || c.zh, itNames = [c.en, c.orig, c.zh].filter(Boolean);
+  if (!full) {
+    // TMDB 没有海报（冷门片、刚上架的）：拿 iTunes 补一张，补不到前端就不显示这部
+    if (!out.poster) {
+      const it = await fetchITunesArtwork(itTitle, out.year, type, itNames);
+      if (it) { out.poster = it.poster; out.artworkSource = 'itunes'; }
+    }
+    return out;
+  }
 
   // ── 全量模式：并发 iTunes + TMDB images/detail/credits ──
   const key = env.TMDB_API_KEY;
-  const id = hit.id;
+  const id = c.id;
 
   const [itunes, imgRes, detailRes, creditsRes] = await Promise.allSettled([
-    fetchITunesArtwork(title, year, type),
+    fetchITunesArtwork(itTitle, out.year, type, itNames),
     fetchRetry(`https://api.themoviedb.org/3/${type}/${id}/images?api_key=${key}&include_image_language=zh,en,null`, {}, { retries: 1, timeout: 6000 }),
     fetchRetry(`https://api.themoviedb.org/3/${type}/${id}?api_key=${key}&language=zh-CN&append_to_response=external_ids`, {}, { retries: 1, timeout: 6000 }),
     fetchRetry(`https://api.themoviedb.org/3/${type}/${id}/credits?api_key=${key}&language=zh-CN`, {}, { retries: 1, timeout: 6000 }),
   ]);
 
-  // iTunes 优先：海报 & 背景
+  // iTunes 优先的只有海报（片名与年份核对过）。背景只在 TMDB 没有时才用 —— iTunes 给的是竖版海报，
+  // 铺到横向的详情背景上只能裁出中间一条、再放大好几倍
   if (itunes.status === 'fulfilled' && itunes.value) {
     out.poster = itunes.value.poster;
-    out.backdrop = itunes.value.backdrop;
+    if (!out.backdrop) out.backdrop = itunes.value.backdrop;
     out.artworkSource = 'itunes';
   }
 
@@ -4590,7 +5034,7 @@ async function fetchMetadata(title, year, full, env, kind = '') {
       const enLang = backdrops.filter(b => b.iso_639_1 === 'en').sort(sortByVote);
       const ranked = [...noLang, ...zhLang, ...enLang];
       // 排除已用作 hero backdrop 的那张（避免重复）
-      const heroBdPath = hit.backdrop_path;
+      const heroBdPath = c.backdrop;
       const stillsList = ranked
         .filter(b => b.file_path && b.file_path !== heroBdPath)
         .slice(0, 12)
@@ -4635,29 +5079,294 @@ async function fetchMetadata(title, year, full, env, kind = '') {
   return out;
 }
 
-async function tmdbSearch(type, query, year, env) {
-  const p = new URLSearchParams({ api_key: env.TMDB_API_KEY, query, language: 'zh-CN', page: '1' });
-  // 剧集用 year 而不是 first_air_date_year：前者首播与任一集的播出年份都算 —— 第四季那年也能搜到
-  if (year) p.set('year', year);
-  const res = await fetchRetry(
-    `https://api.themoviedb.org/3/search/${type}?${p}`,
-    {},
-    { retries: 1, timeout: 6000 },
-  );
-  if (!res.ok) return null;
-  return (await res.json()).results?.[0] || null;
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  片名匹配：文件名 → TMDB
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  原来是「解析出一个片名 → 搜一次 → 拿第一条」，错配主要出在四处：
+//   ① 片名里本身带年份（《银翼杀手2049》《神奇女侠1984》《1917》），取第一个年份当上映年，片名被截断；
+//   ② TMDB 的第一条按热度排，同名不同年（《沙丘》1984 / 2021）、续集（《玩具总动员 3 / 4》）常排在前面；
+//   ③ 电影搜不到就拿剧集顶上 —— 片名噪声一大，名字沾边的剧都能「匹配」上；
+//   ④ 详情页的 iTunes 海报按片名搜、拿第一条，TMDB 认对了，海报还可能换成另一部。
+//  现在：
+//   · 解析出中文名、英文名、上映年（取最后一个合理的年份，片名里的年份留在片名里）、季集号、样片 / 预告；
+//   · 中英两种语言各搜一次、候选合在一起，按片名相似度（中文名 / 英文名 / 原名，罗马数字、数字词、
+//     全角、标点、变音符都归一）、年份、类型、热度打分；续集号对不上直接压分，年份差两年以上压到认不上；
+//   · 分数不够宁可不认 —— 认错比没认更糟（前端对拿不到海报的片子直接不显示）；
+//   · 拿不准、但年份对得上的前两名，再取别名表与各语言译名（罗马音、繁体、港台译名）比一次。
+
+const MT_NATIVE = /[぀-ヿ㐀-鿿豈-﫿가-힯]/;   // 汉字 / 假名 / 谚文
+const MT_YEAR = /^[(（\[]?((?:19|20)\d{2})[)）\]]?$/;
+const MT_SE = /^(?:s\d{1,2}(?:e\d{1,4})?(?:-?e\d{1,4})?|e\d{1,4}|ep\d{1,4}|\d{1,2}x\d{2,3}|season|第[一二三四五六七八九十\d]+[季集话話]|全\d+集)$/i;
+// 片名到此为止的规格词（强）：画质、片源、编码、音轨
+const MT_SPEC = /^(?:4320p|2160p|1440p|1080[pi]|720p|576p|480p|4k|8k|uhd|fhd|hdr10\+?|hdr|dv|dovi|hlg|sdr|blu-?ray|bdrip|brrip|bdremux|remux|web-?dl|web-?rip|hdtv|dvdrip|dvd|hdrip|x26[45]|h26[45]|hevc|avc|av1|xvid|divx|aac\d?(?:\.\d)?|ac3|eac3|e-ac-3|ddp?\d?(?:\.\d)?|dd\+|dts(?:-?hd)?(?:-?ma)?|truehd|atmos|flac|lpcm|opus|10bit|8bit|hi10p|60fps|120fps)$/i;
+// 版本词：只收不会是片名的那些（《The Cut》《Special》这类单词不收，免得把片名削掉一截）
+const MT_EDITION = /^(?:extended|unrated|uncut|remastered|restored|imax|criterion|repack|rerip|proper|internal|dubbed|subbed|multisubs?|chs|cht|中字|中英|中英字幕|双语|雙語|国语|國語|粤语|粵語|国英|国粤|國粵|未删减|未刪減|导演剪辑版|導演剪輯版|加长版|加長版|蓝光|藍光|高清)$/i;
+// 两个词的版本：Director's Cut / Special Edition / Extended Edition …（只在片名末尾、年份之前时剥掉）
+const MT_EDITION2 = /^(?:directors?|theatrical|special|extended|collectors?|anniversary|ultimate|final|definitive|criterion)\s(?:cut|edition|version)$/i;
+const MT_EXTRA_WORD = /^(?:sample|trailer|teaser|featurette|preview|behindthescenes|deletedscenes?|makingof|ncop|nced)$/i;
+const MT_EXTRA_ZH = /预告|預告|花絮|特辑|特輯|样片|樣片|片花/;
+const MT_SITE = /www|\.(?:com|net|org|cn|cc|me|tv)\b|电影|電影|影视|影視|字幕|论坛|論壇|下载|下載|高清|发布|發布|首发|首發|小组|小組|压制|壓制|\bbt\b|\bpt\b/i;
+
+/** 一个词是什么：spec（画质 / 片源 / 编码 / 音轨，带发布组后缀的也算）、ed（版本词）、se（季集号） */
+function mtKind(t) {
+  const base = t.split('-')[0];
+  if (MT_SPEC.test(t) || (base !== t && base && MT_SPEC.test(base))) return 'spec';
+  if (MT_EDITION.test(t)) return 'ed';
+  if (MT_SE.test(t)) return 'se';
+  return '';
 }
 
-function parseFilename(fn) {
-  let n = fn.replace(/\.[^.]+$/, '');
-  const ym = n.match(/[\.\s\-_\(]((?:19|20)\d{2})[\.\s\-_\)]/);
-  const year = ym ? ym[1] : '';
-  let title = n;
-  if (ym) title = n.slice(0, n.indexOf(ym[0]));
-  else title = n.split(/[\.\s_\-](?:2160p|1080p|720p|4K|UHD|BluRay|BDRip|WEB[\-.]?DL|WEB[\-.]?Rip|x264|x265|HEVC|H\.?26[45]|AAC|DTS|FLAC|REMUX|DoVi|DV|HDR|Atmos|10bit)/i)[0];
-  title = title.replace(/[\._]/g, ' ').replace(/\[.*?\]|\{.*?\}/g, '').replace(/\s+/g, ' ').trim();
-  return { title, year };
+/** 文件名 / 目录名 → { zh, en, alt, year, tv, season, extra, title } */
+function mtParse(name) {
+  const nowY = new Date().getUTCFullYear();
+  let s = String(name || '').replace(/\.(mkv|mp4|m4v|mov|avi|webm|ts|m2ts|iso|wmv|flv|rmvb)$/i, '');
+  // 方括号 / 书名号 / 花括号：站名、字幕组多半写在这里；里面是中文片名的留作备选
+  let alt = '';
+  s = s.replace(/[\[【{〔]([^\]】}〕]*)[\]】}〕]/g, (m, inner) => {
+    const t = inner.trim();
+    if (!alt && MT_NATIVE.test(t) && !MT_SITE.test(t) && !MT_EXTRA_ZH.test(t)) alt = t;
+    return ' ';
+  });
+  s = s.replace(/《([^》]+)》/g, ' $1 ');
+  // 分隔符：点、下划线、加号；「 - 」两边有空格的也是；单词里的连字符（Spider-Man）保留
+  s = s.replace(/[._+]+/g, ' ').replace(/\s[-–—]+\s|\s[-–—]+$|^[-–—]+\s/g, ' ').replace(/\s+/g, ' ').trim();
+  const toks = s ? s.split(' ') : [];
+  const kind = mtKind;
+  // 上映年：前面得有片名；取最后一个合理的年份（片名里的年份 ——《银翼杀手2049》《神奇女侠1984》——
+  // 留在片名里）。规格词 / 季集号之后的不看；版本词之后只在前面还没有年份时才认
+  // （「Title 2019 REMASTERED 2021」是 2019，「Avatar Extended Edition 2009」是 2009）
+  let yi = -1, edSeen = false;
+  for (let i = 1; i < toks.length; i++) {
+    const k = kind(toks[i - 1]);
+    if (k === 'spec' || k === 'se') break;
+    if (k === 'ed') edSeen = true;
+    const m = MT_YEAR.exec(toks[i]);
+    if (m && +m[1] >= 1900 && +m[1] <= nowY + 1 && !(edSeen && yi > 0)) yi = i;
+  }
+  let end = toks.length;
+  if (yi > 0) end = yi;
+  for (let i = 0; i < end; i++) {
+    const k = kind(toks[i]);
+    if (i > 0 && (k === 'spec' || k === 'se')) { end = i; break; }
+  }
+  let head = toks.slice(0, end);
+  for (;;) {
+    const n = head.length;
+    if (n > 2 && MT_EDITION2.test(head[n - 2].replace(/['’]/g, '') + ' ' + head[n - 1])) { head = head.slice(0, n - 2); continue; }
+    if (n > 1 && kind(head[n - 1]) === 'ed') { head = head.slice(0, n - 1); continue; }
+    break;
+  }
+  const tail = toks.slice(end);
+  const out = { zh: '', en: '', alt: '', year: yi > 0 ? MT_YEAR.exec(toks[yi])[1] : '', tv: false, season: 0, extra: false, title: '' };
+  // 季集号：S01E02 / 1x02 / Season 1 / 第一季
+  const se = /(?:^|\s)s(\d{1,2})(?:e\d{1,4})?(?:\s|$)|(?:^|\s)(\d{1,2})x\d{2,3}(?:\s|$)|season\s?(\d{1,2})|第\s*([一二三四五六七八九十\d]{1,3})\s*季/i.exec(s);
+  if (se) { out.tv = true; out.season = +(se[1] || se[2] || se[3]) || ({ 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 })[se[4]] || +se[4] || 0; }
+  else if (/(?:^|\s)(?:e|ep)\d{1,4}(?:\s|$)|第\s*\d+\s*[集话話]/i.test(s)) out.tv = true;
+  // 样片 / 预告 / 花絮：片名之后出现、或整个名字就是它；中文标记在哪都算
+  const tailWords = tail.join(' ').toLowerCase().replace(/[^a-z]+/g, ' ');
+  out.extra = MT_EXTRA_ZH.test(String(name || ''))
+    || /\b(?:sample|trailer|teaser|featurette|ncop|nced)\b|behind the scenes|deleted scenes?|making of/.test(tailWords)
+    || (head.length <= 2 && head.some(t => MT_EXTRA_WORD.test(t)));
+  // 中英分开：含汉字 / 假名 / 谚文的词归原文名，其余归英文名
+  const nat = [], lat = [];
+  for (const t of head) (MT_NATIVE.test(t) ? nat : lat).push(t);
+  out.zh = nat.join(' ').replace(/[\s:：·\-–—]+$/, '').trim();
+  out.en = /[a-z0-9]/i.test(lat.join('')) ? lat.join(' ').replace(/^[\s:：\-–—]+|[\s:：\-–—]+$/g, '').trim() : '';
+  if (alt && alt !== out.zh) out.alt = alt;
+  if (!out.zh && out.alt) { out.zh = out.alt; out.alt = ''; }
+  out.title = out.en || out.zh;
+  return out;
 }
+
+/** 一句自由文本的查询（前端传来的 query + year）→ 与 mtParse 同形 */
+function mtQuery(query, year) {
+  const q = mtParse(String(query || ''));
+  // 前端传的已经是片名：解析不出东西就原样用
+  if (!q.title) { const t = String(query || '').trim(); if (MT_NATIVE.test(t)) q.zh = t; else q.en = t; q.title = t; }
+  if (year && /^(?:19|20)\d{2}$/.test(String(year))) q.year = String(year);
+  q.extra = false;   // 前端问的是片名，不是文件名
+  return q;
+}
+
+const MT_ROMAN = { ii: 2, iii: 3, iv: 4, vi: 6, vii: 7, viii: 8, ix: 9 };
+const MT_WORDNUM = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+const MT_ZHNUM = { 一: '1', 二: '2', 三: '3', 四: '4', 五: '5', 六: '6', 七: '7', 八: '8', 九: '9', 十: '10' };
+
+function mtNorm(s) {
+  let t = String(s || '').normalize('NFKC').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  t = t.replace(/&/g, ' and ').replace(/['’‘`´]/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  // 「第二部」「第3集」里的中文数字 → 阿拉伯数字（续集号要能比）
+  t = t.replace(/第([一二三四五六七八九十])(?=[部集季章])/g, (m, d) => '第' + MT_ZHNUM[d]);
+  return t.split(' ').filter(Boolean).map(w => MT_ROMAN[w] ? String(MT_ROMAN[w]) : MT_WORDNUM[w] ? String(MT_WORDNUM[w]) : w).join(' ');
+}
+
+/** 片名相似度 0–1：字二元组的 Dice（中英文都适用）；片名里的数字（续集号）对不上就压分 */
+function mtSim(a, b) {
+  const A = mtNorm(a), B = mtNorm(b);
+  if (!A || !B) return 0;
+  if (A === B) return 1;
+  const a0 = A.replace(/ /g, ''), b0 = B.replace(/ /g, '');
+  if (a0 === b0) return 0.97;
+  const big = x => { const m = new Map(); if (x.length < 2) { m.set(x, 1); return m; } for (let i = 0; i < x.length - 1; i++) { const k = x.substr(i, 2); m.set(k, (m.get(k) || 0) + 1); } return m; };
+  const x = big(a0), y = big(b0);
+  let inter = 0, nx = 0, ny = 0;
+  for (const v of x.values()) nx += v;
+  for (const v of y.values()) ny += v;
+  for (const [k, v] of x) inter += Math.min(v, y.get(k) || 0);
+  let sim = (2 * inter) / (nx + ny);
+  const nums = s => (s.match(/\d+/g) || []).join(',');
+  const na = nums(A), nb = nums(B);
+  if (na !== nb) sim *= (na && nb) ? 0.55 : 0.8;
+  return sim;
+}
+
+function mtYearScore(qy, cy, tv) {
+  if (!qy) return 0;
+  if (!cy) return -12;
+  const d = cy - qy;
+  if (tv) {   // 剧集：文件里的年份常是「这一季」的年份 —— 首播不晚于它就行
+    if (d === 0) return 20;
+    if (d < 0 && d >= -40) return 8;
+    if (d === 1) return 4;
+    return -45;
+  }
+  const ad = Math.abs(d);
+  return ad === 0 ? 25 : ad === 1 ? 12 : ad === 2 ? -10 : -45;
+}
+
+function mtScore(c, q, kind) {
+  const names = [c.zh, c.en, c.orig, ...(c.alt || [])].filter(Boolean);
+  const qs = [q.en, q.zh, q.alt].filter(Boolean);
+  let sim = 0;
+  for (const a of qs) for (const b of names) { const v = mtSim(a, b); if (v > sim) sim = v; }
+  const cy = parseInt(String(c.date || '').slice(0, 4), 10) || 0;
+  const ys = mtYearScore(parseInt(q.year, 10) || 0, cy, c.type === 'tv');
+  const pop = Math.min(8, Math.log10(1 + (c.votes || 0)) * 2.4);
+  const typeAdj = kind ? 0 : ((c.type === 'tv') !== !!q.tv ? -15 : 0);
+  const first = c.rank === 0 ? 3 : 0;   // TMDB 自己也认它最相关
+  return { sim, ys, score: sim * 100 + ys + pop + typeAdj + first };
+}
+
+/** 一次 TMDB 搜索（失败抛错，和「搜了没有」分开 —— 前者不能当成没有这部片） */
+async function mtSearch(type, query, year, lang, env, budget) {
+  if (budget) { if (budget.left <= 0) throw new Error('tmdb budget'); budget.left--; }
+  const p = new URLSearchParams({ api_key: env.TMDB_API_KEY, query, language: lang, page: '1', include_adult: 'false' });
+  // 剧集用 year 而不是 first_air_date_year：前者首播与任一集的播出年份都算 —— 第四季那年也能搜到
+  if (year) p.set('year', year);
+  const res = await fetchRetry(`https://api.themoviedb.org/3/search/${type}?${p}`, {}, { retries: 1, timeout: 6000 });
+  if (!res.ok) throw new Error('tmdb search ' + res.status);
+  return ((await res.json()).results || []).slice(0, 10);
+}
+
+/** 中英两种语言各搜一次，候选按「类型:编号」合并：中文名 / 海报 / 简介取中文那份，英文名取英文那份 */
+async function mtCollect(cands, type, query, year, env, budget) {
+  const [zh, en] = await Promise.all([
+    mtSearch(type, query, year, 'zh-CN', env, budget),
+    mtSearch(type, query, year, 'en-US', env, budget),
+  ]);
+  const add = (list, lang) => list.forEach((r, i) => {
+    const k = type + ':' + r.id;
+    let c = cands.get(k);
+    if (!c) {
+      c = { type, id: r.id, rank: i, zh: '', en: '', orig: r.original_title || r.original_name || '', lang: r.original_language || '',
+        date: r.release_date || r.first_air_date || '', votes: r.vote_count || 0, rating: r.vote_average || 0,
+        poster: null, backdrop: null, overview: '', alt: null, raw: r };
+      cands.set(k, c);
+    }
+    c.rank = Math.min(c.rank, i);
+    const name = r.title || r.name || '';
+    if (lang === 'zh') {
+      c.zh = name; c.raw = r;
+      if (r.poster_path) c.poster = r.poster_path;
+      if (r.backdrop_path) c.backdrop = r.backdrop_path;
+      if (r.overview) c.overview = r.overview;
+    } else {
+      c.en = name;
+      if (!c.poster && r.poster_path) c.poster = r.poster_path;
+      if (!c.backdrop && r.backdrop_path) c.backdrop = r.backdrop_path;
+      if (!c.overview && r.overview) c.overview = r.overview;
+    }
+  });
+  add(zh, 'zh'); add(en, 'en');
+}
+
+/** 别名表 + 各语言译名（罗马音、繁体、港台译名）：只给拿不准的前两名补 */
+async function mtAliases(c, env, budget) {
+  if (c.alt) return;
+  if (budget) { if (budget.left <= 0) return; budget.left--; }
+  const r = await fetchRetry(`https://api.themoviedb.org/3/${c.type}/${c.id}?api_key=${env.TMDB_API_KEY}&append_to_response=alternative_titles,translations`,
+    {}, { retries: 1, timeout: 6000 }).catch(() => null);
+  const d = r && r.ok ? await r.json().catch(() => null) : null;
+  const alt = [];
+  const at = d && d.alternative_titles;
+  for (const x of (at && (at.titles || at.results)) || []) if (x && x.title) alt.push(x.title);
+  for (const x of (d && d.translations && d.translations.translations) || []) {
+    const t = x && x.data && (x.data.title || x.data.name);
+    if (t) alt.push(t);
+  }
+  c.alt = [...new Set(alt)].slice(0, 80);
+}
+
+const MT_ACCEPT = 75;   // 总分门槛：片名一模一样、没有年份时约 100–108；片名七成像、年份正好时约 95
+
+/**
+ * q：mtParse / mtQuery 的结果；kind：'movie' | 'tv' | ''（'' = 电影优先，剧集只在明显是剧集、或电影一个都认不上时才看）
+ * 返回 { c, sim, score }，认不上返回 null；TMDB 出错抛错（调用方不能把它记成「没有这部片」）
+ */
+async function tmdbMatch(q, env, kind = '', budget = null) {
+  if (!q || q.extra || !(q.en || q.zh || q.alt)) return null;
+  const cands = new Map();
+  const queries = [...new Set([q.en, q.zh, q.alt].filter(Boolean))];
+  const best = () => {
+    let b = null;
+    for (const c of cands.values()) { const s = mtScore(c, q, kind); if (!b || s.score > b.score) b = { c, ...s }; }
+    return b;
+  };
+  const sure = b => b && b.sim >= 0.95 && (b.ys >= 12 || !q.year);
+  // strict：电影优先时拿剧集顶上 —— 片名要几乎一样，年份要正好是首播那年（不然随便哪部老剧在那年播过一季都能顶上）
+  const ok = (b, strict) => b && b.sim >= (strict ? 0.85 : 0.5) && b.score >= MT_ACCEPT && (!strict || !q.year || b.ys >= 20);
+  const types = kind ? [kind] : (q.tv ? ['tv', 'movie'] : ['movie', 'tv']);
+  for (let ti = 0; ti < types.length; ti++) {
+    const type = types[ti];
+    // 不限类型时，第二类（电影优先时的剧集）只在第一类一个都认不上时才看，只搜一次，而且要更像才认
+    if (ti > 0) {
+      if (ok(best(), false)) break;
+      await mtCollect(cands, type, queries[0], q.year, env, budget);
+      continue;
+    }
+    for (const query of queries) {
+      await mtCollect(cands, type, query, q.year, env, budget);
+      if (sure(best())) return best();
+    }
+    // 年份可能写错（再版年 / 制作年）：去掉年份再搜一次，打分里年份照样算
+    if (q.year) {
+      await mtCollect(cands, type, queries[0], '', env, budget);
+      if (sure(best())) return best();
+    }
+  }
+  let b = best();
+  const strictTv = c => !kind && !q.tv && c.type === 'tv';
+  if (b && ok(b, strictTv(b.c))) return b;
+  // 别名补救：年份对得上（±1）、TMDB 也排得靠前的两名，取别名表与各语言译名再比一次
+  if (q.year) {
+    const near = [...cands.values()].filter(c => mtScore(c, q, kind).ys >= 12 && c.rank <= 2)
+      .sort((x, y) => x.rank - y.rank).slice(0, 2);
+    for (const c of near) await mtAliases(c, env, budget);
+    b = best();
+    if (b && ok(b, strictTv(b.c))) return b;
+  }
+  return null;
+}
+
+/** 兼容外壳：按类型认一部片，返回 TMDB 搜索结果那个形状（认不上 / 出错 → null） */
+async function tmdbSearch(type, query, year, env) {
+  const m = await tmdbMatch(mtQuery(query, year), env, type).catch(() => null);
+  return m ? Object.assign({}, m.c.raw, { id: m.c.id }) : null;
+}
+
+/** 文件名 → { title, year, zh, en, alt, tv, season, extra }（title = 英文名，没有就中文名）。
+    文件名一定带扩展名（osGuess 还会特意补一个「.x」）：先去掉最后一段，再交给 mtParse */
+function parseFilename(fn) { return mtParse(String(fn || '').replace(/\.[^./\s]{1,6}$/, '')); }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  剧集（TV_FOLDER，默认 /ram2）：/api/tv、/api/tv/episodes、/api/tmdb/season
@@ -4676,7 +5385,8 @@ const TV_STORE = 'tv/list-v1.json';
 const TV_CACHE_KEY = 'https://cache.internal/tv/list-v1';
 const TV_FRESH_MS = 10 * 60e3;            // 目录表多久重扫一次
 const TV_META_RETRY_MS = 3 * 86400e3;     // TMDB 查不到的剧，三天后再试
-const TV_META_BUDGET = 16;                // 一次请求最多给几部剧查 TMDB（每部 2 个子请求，免费套餐也够）
+const TV_META_BUDGET = 16;                // 一次请求最多给几部剧查 TMDB（每部 2–8 个子请求）
+const TV_META_V = 2;                      // 2：匹配管线重写 —— 旧算法认的编号（可能认错）整批重认
 const tvRoot = env => ('/' + String(env.TV_FOLDER || '/ram2').replace(/^\/+|\/+$/g, '')).replace(/^\/$/, '');
 let tvMem = null;                         // { v, at, root, series, eps, meta }
 
@@ -4865,16 +5575,15 @@ async function tvScan(env) {
 
 const tvMetaKey = s => `${String(s.en || s.zh || s.title || '').toLowerCase()}|${s.season || 0}`;
 
-/** TMDB：编号、中文名、这一季的首播年份、这一季的集数 */
+/** TMDB：编号、中文名、这一季的首播年份、这一季的集数。
+    中英文名一起交给 tmdbMatch 打分（不再拿第一条）；认不上记 miss、三天后再试；TMDB 出错一小时后再试 */
 async function tvLookup(s, env) {
-  const queries = [...new Set([s.en, s.zh].filter(Boolean))];
-  let hit = null;
-  for (const q of queries) {
-    hit = await tmdbSearch('tv', q, s.year, env).catch(() => null);
-    if (!hit && s.year) hit = await tmdbSearch('tv', q, '', env).catch(() => null);
-    if (hit) break;
-  }
-  if (!hit) return { miss: 1, at: Date.now() };
+  const q = { en: s.en || '', zh: s.zh || '', alt: '', year: s.year || '', tv: true, season: s.season || 0, extra: false, title: s.en || s.zh || '' };
+  let m = null;
+  try { m = await tmdbMatch(q, env, 'tv'); }
+  catch { return { miss: 1, err: 1, at: Date.now() - TV_META_RETRY_MS + 3600e3 }; }
+  if (!m) return { miss: 1, at: Date.now() };
+  const hit = Object.assign({}, m.c.raw, { id: m.c.id });
   const d = await fetchRetry(`https://api.themoviedb.org/3/tv/${hit.id}?api_key=${env.TMDB_API_KEY}&language=zh-CN`, {}, { retries: 1, timeout: 6000 })
     .then(r => (r.ok ? r.json() : null)).catch(() => null);
   const sn = s.season || 1;
@@ -4888,6 +5597,8 @@ async function tvLookup(s, env) {
 function tvApplyMeta(d) {
   for (const s of d.series) {
     const m = d.meta[tvMetaKey(s)];
+    // TMDB 确定认不出这部剧（不是出错）：标出来，前端不排它 —— 没有封面的剧不显示
+    if (m && m.miss && !m.err) s.tmdbMiss = true; else delete s.tmdbMiss;
     if (!m || m.miss) continue;
     s.tmdbId = m.id;
     if (!s.zh && m.zh) { s.zh = m.zh; s.title = m.zh; }
@@ -4935,7 +5646,8 @@ async function tvSave(env, d) {
 async function tvRefresh(env, ctx) {
   const prev = tvMem || await tvLoad(env);
   const { series, eps } = await tvScan(env);
-  const d = { v: 1, at: Date.now(), root: tvRoot(env), series, eps, meta: (prev && prev.root === tvRoot(env) && prev.meta) || {} };
+  const d = { v: 1, mv: TV_META_V, at: Date.now(), root: tvRoot(env), series, eps,
+    meta: (prev && prev.root === tvRoot(env) && prev.mv === TV_META_V && prev.meta) || {} };
   tvApplyMeta(d);
   await tvEnrich(env, d, prev ? 0 : 4000);
   tvMem = d;
@@ -4953,6 +5665,7 @@ async function tvEnrichMore(env) {
 async function tvData(env, ctx, force) {
   const root = tvRoot(env);
   if (!tvMem || tvMem.root !== root) { const d = await tvLoad(env); if (d && d.root === root && d.v === 1) tvMem = d; }
+  if (tvMem && tvMem.mv !== TV_META_V) tvMem.at = 0;     // 旧版匹配的表：照旧先给，后台重扫重认
   if (tvMem && tvMem.root === root && !force) {
     if (Date.now() - (tvMem.at || 0) > TV_FRESH_MS) ctx?.waitUntil?.(singleFlight('tv-scan', () => tvRefresh(env, ctx)).catch(e => console.error('tv scan:', e && e.message)));
     else if (tvMetaPending(tvMem)) ctx?.waitUntil?.(singleFlight('tv-meta', () => tvEnrichMore(env)).catch(() => {}));
@@ -8351,6 +9064,16 @@ async function hlsBuildIndex(src, opts) {
       cues: (cues.get(t.num) || []).map(c => [c[0], c[3], c[1], c[2]]),
     });
   }
+  // 图形字幕（PGS / VobSub / DVB）放不进 WebVTT，但它的时间是这个文件自己的 —— 在线字幕对齐拿它当参照。
+  // Cues 里每一个显示集（出现、消失各一个）都有时刻，只记毫秒数，不读一个字节
+  const subRefs = [];
+  for (const t of tracks) {
+    if (t.type !== 17 || HLS_TEXT_SUBS.has(t.codecId)) continue;
+    const list = cues.get(t.num) || [];
+    if (list.length < 60) continue;
+    subRefs.push({ num: t.num, lang: hlsLang(t), codec: t.codecId, forced: !!t.forced,
+      t: list.map(c => Math.round(c[0] * scaleNs / 1e6)) });
+  }
 
   // 分段：以视频关键帧为界，尽量贴近目标时长，并且不让单段超过目标 0.5s 以上
   const toSec = u => u * scaleNs / 1e9;
@@ -8386,7 +9109,7 @@ async function hlsBuildIndex(src, opts) {
 
   return {
     v: HLS_VER, size, scaleNs, segStart, firstCluster, clustersEnd, dur: durSec,
-    video, audio, muxed, subs,
+    video, audio, muxed, subs, subRefs,
     segs: segs.map(s => [s.cl, s.rel, s.t]),
     durs: durs.map(d => Math.max(0.001, Math.round(d * 1000) / 1000)),
     bw: { peak: Math.ceil(peak * 1.1), avg: Math.ceil(total / Math.max(1, durSec)) },
@@ -9362,9 +10085,21 @@ function hlsOnline(cx, idx, xs, waitMs) {
     ...xs.map((x, i) => ({ id: 'x' + i, lang: x.srclang, rev: x.rev,
       sample: async () => (await hlsSidecarCues(x, cx.env, cx.ctx)).slice(0, 400).map(c => c.text).join('\n') })),
   ];
+  // 对齐参照：内封（不花一个字节）优先，再外挂
+  const refs = async () => syncRefFromIdx(idx) || await syncRefFromSidecars(xs, cx.env, cx.ctx);
   const file = { filePath: cx.filePath, name: cx.filePath.split('/').pop(), meta: cx.linkData.metadata,
-    read: hlsSmallReader(bg), fps: idx.video.fps || 0, dur: idx.dur || 0 };
-  return osFor(cx.env, cx.ctx, file, tracks, waitMs);
+    read: hlsSmallReader(bg), fps: idx.video.fps || 0, dur: idx.dur || 0, refs };
+  return osFor(cx.env, cx.ctx, file, tracks, waitMs).then(r => osUpgradeSync(cx.env, cx.ctx, r, refs));
+}
+/** 记录是直连那边先建的（只有外挂参照，或者没对齐过）：这边有内封参照就重算一次，存回去 */
+async function osUpgradeSync(env, ctx, r, refs) {
+  if (!r || !r.rec || !r.key || !osSyncWeaker(r.rec, SYNC_RANK.local)) return r;
+  const ref = await Promise.race([refs().catch(() => null), new Promise(res => setTimeout(() => res(null), 1500))]);
+  if (!ref) return r;
+  const rec = { ...r.rec, sync: osSyncWith(r.rec.cues, ref) };
+  ctx?.waitUntil?.(osSave(env, r.key, rec).catch(e => console.error('subsync save:', e && e.message)));
+  osRemember(r.key, rec);
+  return { ...r, rec };
 }
 /** 内封字幕抽一段文字（认繁简用）：有 Cues 才抽（精确读几个字幕块）；没有就不抽，当作认不出 */
 async function hlsSubSample(cx, idx, si) {
@@ -10023,7 +10758,7 @@ async function hlsVttResponse(key, ctx, make) {
   return res;
 }
 
-function hlsInfo(idx, xs, env) {
+function hlsInfo(idx, xs, env, os) {
   const V = idx.video, txOn = hlsTxOn(env);
   return {
     ok: true, dur: idx.dur, segments: idx.segs.length,
@@ -10039,6 +10774,10 @@ function hlsInfo(idx, xs, env) {
       muxed: i === idx.muxed })),
     subtitles: idx.subs.map(s => ({ lang: s.lang, name: s.name, format: s.fmt, forced: s.forced })),
     sidecarSubtitles: xs.length,
+    // 在线字幕（已经查到的话）与它的自动对齐结果：参照是谁、整体偏移 / 速度比 / 分段、对齐前后对上的比例
+    online: os && os.status === 'ok' ? { lang: os.lang, label: os.label, release: os.src && os.src.release, hashMatch: !!(os.src && os.src.hash),
+      sync: os.sync ? { applied: !!os.sync.applied, why: os.sync.why, ref: os.sync.ref || null, scale: os.sync.scale, segs: os.sync.segs,
+        before: os.sync.before, after: os.sync.after, chance: os.sync.chance, cv: os.sync.cv ?? null } : null } : null,
     audioUnsupportedOnly: idx.muxed < 0 && idx.audio.length > 0 && !(txOn && idx.audio.some(a => a.mode === 'tx')),
     audioTranscoder: txOn,
   };
@@ -10081,7 +10820,8 @@ async function handleHls(url, request, env, ctx) {
     if (rest[0] === 'info.json') {
       // 打开详情页：没有简体中文字幕的片子，在后台去 OpenSubtitles 找一条（不等）
       if (osOn(env)) ctx?.waitUntil?.(hlsOnline(cx, idx, xs, 0).catch(() => null));
-      return new Response(JSON.stringify(hlsInfo(idx, xs, env)), { headers: hlsHeaders('application/json; charset=utf-8', 'no-store') });
+      const os = osOn(env) ? await osLoad(env, await osKeyOf(osIdentity(filePath, meta))).catch(() => null) : null;
+      return new Response(JSON.stringify(hlsInfo(idx, xs, env, os)), { headers: hlsHeaders('application/json; charset=utf-8', 'no-store') });
     }
     // 起播：播放器拿到主列表后还要取二级列表与 init 才来要第 0 段 —— 这几个来回里先在后台
     // 把第 0 段取进缓存，它来了等一下就从缓存出（只是预取：不跟车、不共享流）
@@ -10154,9 +10894,9 @@ async function handleHls(url, request, env, ctx) {
       const k = +seg[1];
       const rec = osOn(env) ? await osLoad(env, await osKeyOf(osIdentity(filePath, meta))).catch(() => null) : null;
       if (!rec || rec.status !== 'ok') return hlsOut(hlsVtt([]), 'text/vtt; charset=utf-8', 'no-store');
-      return await hlsVttResponse(`o${SUB_CLEAN_V}/${idx.idh}/${rec.src.file}/${k}`, ctx, async () => {
+      return await hlsVttResponse(`o${SUB_CLEAN_V}/${idx.idh}/${rec.src.file}/${syncId(rec.sync)}/${k}`, ctx, async () => {
         const [T1, T2] = hlsSegWindow(idx, k);
-        return hlsVtt(rec.cues.filter(c => c.s < T2 && c.e > T1), idx.dur);
+        return hlsVtt(osCuesOut(rec).filter(c => c.s < T2 && c.e > T1), idx.dur);
       });
     }
   }

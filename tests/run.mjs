@@ -413,6 +413,118 @@ console.log('\n■ OpenSubtitles 自动补字幕（模拟接口）');
   ok(online && online.srclang === 'zh-Hans' && /os=1/.test(online.url), `直连：/api/subs 带上在线字幕（${online && online.label}）`);
   const full = online ? await (await H.call(online.url)).text() : '';
   ok(/^WEBVTT/.test(full) && full.includes('这是第1句简体字幕') && (full.match(/-->/g) || []).length === 12, 'GBK 编码的字幕解码正确，整份 VTT 给 <track> 用');
+
+  // ── 在线字幕自动对齐（内封字幕不动，只给在线那条对时间）──
+  const parseT = x => { const m = /(\d+):(\d+):(\d+)[,.](\d+)/.exec(x); return +m[1] * 3600 + +m[2] * 60 + +m[3] + +m[4] / 1000; };
+  const cuesOf = text => [...text.matchAll(/(\d+:\d+:\d+[,.]\d+)\s*-->\s*(\d+:\d+:\d+[,.]\d+)/g)].map(m => ({ s: parseT(m[1]), e: parseT(m[2]) }));
+  const REF = cuesOf(fs.readFileSync(S('sync_en.srt'), 'utf8'));
+  const mkSrt = (cues, txt = i => `第${i + 1}句简体中文，我们说话没问题`) => cues.map((c, i) => `${i + 1}\n${tc(c.s)} --> ${tc(c.e)}\n${txt(i)}\n`).join('\n');
+  const move = f => REF.map(c => ({ s: f(c.s), e: f(c.e) }));
+  /* 直连那份整条 VTT（时间 = 对齐后的）：与参照逐条比，平均差多少秒 */
+  const onlineVtt = async f => {
+    const lst = await (await H.call('/api/subs?path=' + encodeURIComponent(f), 'GET', { Cookie: cookie })).json();
+    const o = (lst.subs || []).find(x => x.online);
+    return o ? (await H.call(o.url)).text() : '';
+  };
+  const err = text => { const c = cuesOf(text); if (c.length !== REF.length) return Infinity; let e = 0; c.forEach((x, i) => { e += Math.abs(x.s - REF[i].s); }); return e / c.length; };
+  /* 每个情形用样片的一份拷贝：在线字幕的记录按文件存（进程内 + R2），同一个文件第二次就直接用上次的了 */
+  const copies = [];
+  const syncCase = async (label, src, cues, extra = {}) => {
+    await clear(); reset();
+    const f = `sync-${label}.mkv`;
+    fs.copyFileSync(S(src), S(f)); copies.push(S(f));
+    const hc = mh(f);
+    const subs = (extra.subs || []).map(x => x.moviehash === 'SELF' ? { ...x, moviehash: hc } : x);
+    H.os.subs = [{ id: 70, file_id: 1070, language: 'zh-cn', query: `sync-${label}`, ...(extra.main || {}), ...(extra.main && extra.main.moviehash === 'SELF' ? { moviehash: hc } : {}) }, ...subs];
+    H.os.files = { 1070: { text: mkSrt(cues) }, ...(extra.files || {}) };
+    await info('/Movies/' + f); await settle();
+    const inf = await info('/Movies/' + f);
+    return { sync: inf.online && inf.online.sync, vtt: await onlineVtt('/Movies/' + f), inf, f };
+  };
+  let r1 = await syncCase('offset', 'sync_ref.mkv', move(t => t + 3.2));
+  ok(r1.sync && r1.sync.applied && r1.sync.segs.length === 1 && Math.abs(r1.sync.segs[0].off + 3.2) < 0.03 && /内封/.test(r1.sync.ref) && err(r1.vtt) < 0.03,
+    `在线字幕整体晚 3.2 秒：拿内封英文字幕的时间当参照，偏移 ${r1.sync && r1.sync.segs[0].off}s，对齐后与参照平均差 ${err(r1.vtt).toFixed(3)}s（对上 ${r1.sync && r1.sync.before} → ${r1.sync && r1.sync.after}）`);
+  const m1 = await master('/Movies/' + r1.f);
+  const seg = await vtt('/Movies/' + r1.f, m1, 2);
+  const segC = cuesOf(seg);
+  ok(segC.length > 0 && segC.every(c => REF.some(x => Math.abs(x.s - c.s) < 0.03)), `HLS 的在线字幕分段也是对齐后的时间（第 2 段 ${segC.length} 条，都落在参照上）`);
+  const lst1 = await (await H.call('/api/subs?path=' + encodeURIComponent('/Movies/' + r1.f), 'GET', { Cookie: cookie })).json();
+  const u1 = ((lst1.subs || []).find(x => x.online) || {}).url || '';
+  ok(/[?&]v=1070\.[0-9a-z]{3,}(&|$)/.test(u1), `直连的字幕链接带着对齐指纹（${(u1.match(/v=[^&]+/) || [''])[0]}）：换了对齐，浏览器不会拿旧时间`);
+  r1 = await syncCase('pal', 'sync_ref.mkv', move(t => (t + 1.5) * 23.976 / 25));
+  ok(r1.sync && r1.sync.applied && Math.abs(r1.sync.scale - 25 / 23.976) < 1e-4 && err(r1.vtt) < 0.05,
+    `给 25 帧（PAL 加速）版本做的：认出速度比 ${r1.sync && r1.sync.scale.toFixed(5)}，越往后偏得越多的那种也拉回来（平均差 ${err(r1.vtt).toFixed(3)}s）`);
+  r1 = await syncCase('cut', 'sync_ref.mkv', REF.map(c => c.s < 90 ? c : { s: c.s + 6.5, e: c.e + 6.5 }));
+  ok(r1.sync && r1.sync.applied && r1.sync.segs.length === 2 && err(r1.vtt) < 0.05,
+    `中途错开一截（后半段晚 6.5 秒：字幕是给中间多一段的版本做的）：切成两段各自对齐（${r1.sync && r1.sync.segs.map(g => g.off + 's').join(' / ')}，平均差 ${err(r1.vtt).toFixed(3)}s）`);
+  r1 = await syncCase('in sync', 'sync_ref.mkv', REF.map(c => ({ s: c.s + 0.04, e: c.e - 0.03 })));
+  ok(r1.sync && !r1.sync.applied && r1.sync.why === 'in-sync' && err(r1.vtt) < 0.05, '本来就对得上的：原样不动');
+  let seedU = 5; const ru = () => ((seedU = (seedU * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const unrel = []; for (let x = 2; unrel.length < 90 && x < 170; x += 0.6 + ru() * 2.5) unrel.push({ s: x, e: x + 0.4 + ru() });
+  r1 = await syncCase('unrelated', 'sync_ref.mkv', unrel);
+  ok(r1.sync && !r1.sync.applied && cuesOf(r1.vtt).length === unrel.length && Math.abs(cuesOf(r1.vtt)[0].s - unrel[0].s) < 0.01,
+    `和这部片对不上的（${r1.sync && r1.sync.why}）：不硬对，原样不动`);
+  // 没有内封 / 外挂字幕：拿 OpenSubtitles 上同哈希（为这个文件做的）英文字幕当参照
+  r1 = await syncCase('hashref', 'sync_nosub.mkv', move(t => t + 2.25), {
+    subs: [{ id: 71, file_id: 1071, language: 'en', moviehash: 'SELF', downloads: 10 }], files: { 1071: { text: mkSrt(REF, i => `Line ${i + 1}`) } } });
+  ok(r1.sync && r1.sync.applied && /同哈希/.test(r1.sync.ref) && Math.abs(r1.sync.segs[0].off + 2.25) < 0.03 && err(r1.vtt) < 0.03,
+    `片子里没有字幕：拿 OpenSubtitles 上与这个文件哈希一致的英文字幕当参照（偏移 ${r1.sync && r1.sync.segs[0].off}s）`);
+  ok(calls('/download').length === 2, '为了对齐多花一次下载配额，只在本地没有参照、选中的又不是为这个文件做的时候');
+  // 选中的就是为这个文件做的（哈希一致）：不另花配额找参照
+  r1 = await syncCase('selfhash', 'sync_nosub.mkv', REF, { main: { moviehash: 'SELF' },
+    subs: [{ id: 73, file_id: 1073, language: 'en', moviehash: 'SELF', downloads: 10 }], files: { 1073: { text: mkSrt(REF, i => `Line ${i + 1}`) } } });
+  ok(calls('/download').length === 1 && r1.sync === null, '选中的在线字幕本身哈希一致：不再下载参照，也不对齐');
+  copies.forEach(f => { try { fs.unlinkSync(f); } catch (_) {} });
+  // 图形字幕（PGS）当参照：只有时刻、不分出现消失
+  const I = await H.internals();
+  const pgsIdx = { scaleNs: 1e6, subs: [], subRefs: [{ lang: 'en', forced: false, t: REF.flatMap(c => [Math.round(c.s * 1000), Math.round(c.e * 1000)]) }] };
+  const pref = I.syncRefFromIdx(pgsIdx);
+  const pr = pref && I.subSync(move(t => t + 4), pref.cues, { pointsOnly: pref.pointsOnly });
+  ok(pref && pref.pointsOnly && pr.applied && Math.abs(pr.segs[0].off + 4) < 0.03, `内封图形字幕（PGS）只有时刻也能当参照（偏移 ${pr && pr.segs[0].off}s）`);
+  const both = I.syncRefFromIdx({ scaleNs: 1e6, subs: [{ forced: true, cues: REF.map(c => [c.s * 1000, (c.e - c.s) * 1000, 0, 0]) }], subRefs: [] });
+  ok(both === null, 'forced 字幕（只翻外语对白的那种）不当参照');
+  // 长片（合成）：一部片 = 一串说话片段；参照与在线字幕各自从说话片段做出来（各自抖动、拆合、漏译），再给在线那份加上各种错位
+  const rng = seed => { let x = seed >>> 0 || 1; return () => { x = (x * 1664525 + 1013904223) >>> 0; return x / 4294967296; }; };
+  const gauss = r => Math.sqrt(-2 * Math.log(Math.max(1e-9, r()))) * Math.cos(2 * Math.PI * r());
+  const speech = (seed, dur) => {
+    const r = rng(seed), out = [];
+    for (let t = 20 + r() * 60; t < dur - 30;) {
+      for (let i = 0, n = 3 + Math.floor(r() * 25); i < n && t < dur - 30; i++) { const d = 0.7 + r() * 4.5; out.push({ s: t, e: t + d }); t += d + 0.15 + r() * (r() < 0.8 ? 1.5 : 6); }
+      t += 4 + r() * (r() < 0.7 ? 40 : 150);
+    }
+    return out;
+  };
+  const subsOf = (sp, seed, jit, drop) => {
+    const r = rng(seed), out = [];
+    for (let i = 0; i < sp.length; i++) {
+      if (r() < drop) continue;
+      let { s, e } = sp[i];
+      if (i + 1 < sp.length && r() < 0.2 && sp[i + 1].s - e < 1 && e - s < 2.5) { e = sp[i + 1].e; i++; }
+      const js = s + gauss(r) * jit, je = e + gauss(r) * jit + 0.2;
+      if (e - s > 4 && r() < 0.3) { const m = (js + je) / 2; out.push({ s: js, e: m - 0.05 }, { s: m, e: je }); } else out.push({ s: js, e: Math.max(js + 0.4, je) });
+    }
+    return out;
+  };
+  const shift = (cues, f) => cues.map(c => { const x = f(c.s), k = (f(c.s + 0.001) - x) / 0.001; return { s: x, e: x + (c.e - c.s) * k }; });
+  /* 对齐后，离真实时间 0.3 秒以内的字幕占多少 */
+  const good = (tg, truth, r) => { const o = I.syncApply(tg, r); return o.length !== truth.length ? 0 : o.filter((c, i) => Math.abs(c.s - truth[i].s) <= 0.3).length / truth.length; };
+  const longCase = (dur, seed, f) => {
+    const sp = speech(seed, dur), ref = subsOf(sp, seed + 1, 0.08, 0.05), truth = subsOf(sp, seed + 2, 0.12, 0.1), tg = shift(truth, f);
+    const t0 = Date.now(), r = I.subSync(tg, ref);
+    return { r, g: good(tg, truth, r), ms: Date.now() - t0, ref };
+  };
+  let L = longCase(2700, 31, t => t + 0.8 + 1.7 * Math.floor(t / 540));
+  ok(L.r.applied && L.r.segs.length >= 4 && L.g >= 0.97,
+    `45 分钟一集、每段广告切口都错开一点（5 级台阶）：切成 ${L.r.segs.length} 段（${L.r.segs.map(g => g.off).join(' / ')}），${(L.g * 100).toFixed(1)}% 的字幕回到 0.3 秒以内`);
+  L = longCase(7200, 41, t => t < 3300 ? t + 1.2 : t + 39.6);
+  ok(L.r.applied && L.r.segs.length === 2 && L.g >= 0.98 && L.ms < 8000,
+    `两小时的片子，中间多了 38 秒（加长版做的字幕）：两段 ${L.r.segs.map(g => g.off).join(' / ')}，${(L.g * 100).toFixed(1)}% 回到 0.3 秒以内（算了 ${L.ms} ms）`);
+  L = longCase(7200, 51, t => t * 23.976 / 24 + 0.5);
+  ok(L.r.applied && Math.abs(L.r.scale - 24 / 23.976) < 1e-6 && L.g >= 0.98,
+    `24 帧与 23.976 帧之差（两小时差出 7 秒）：认出速度比 ${L.r.scale.toFixed(5)}，${(L.g * 100).toFixed(1)}% 回到 0.3 秒以内`);
+  const other = subsOf(speech(99, 7200), 100, 0.1, 0.05);
+  const ru2 = I.subSync(other, L.ref);
+  ok(!ru2.applied, `别的片子的字幕（同样密度、同样长）：不对齐（${ru2.why}）`);
   await clear();
   for (const k of ['OPENSUBTITLES_API_KEY', 'OPENSUBTITLES_USERNAME', 'OPENSUBTITLES_PASSWORD']) delete H.env[k];
 }
@@ -555,6 +667,104 @@ console.log('\n■ 预告片：IMDb 直链优先，被拒时退到 TMDB 登记�
   ok(r5.status === 200 && r5.body.video === null && r5.body.yt === null, '查无此片：空回包，前端退回剧照');
   await settle();
   delete H.env.TMDB_API_KEY;
+}
+
+console.log('\n■ 片名匹配：文件名 → TMDB（候选打分、校验、宁缺毋滥）');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const clear = async () => { await settle(); caches.default.m.clear(); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const batch = async (names, logo = false) => {
+    const r = await H.worker.fetch(new Request('https://w.test/api/tmdb-batch', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ queries: names.map(name => ({ name, logo })) }) }), H.env, H.ctx);
+    await settle();
+    return r.json();
+  };
+  const one = async (name, logo) => (await batch([name], logo))[name];
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  H.tmdb.shows = [{ id: 7001, name: '某部冷门剧', original: 'Some Obscure Film', first: '1990-01-01',
+    seasons: [{ n: 1, air: '1990-01-01', count: 8 }, { n: 9, air: '2015-03-01', count: 8 }] }];
+  H.tmdb.movies = [
+    // 同名不同年 + 续集：「Dune」三部都会被搜出来，最热门的是续集
+    { id: 841, query: 'dune', title: '沙丘', en: 'Dune', date: '1984-12-14', pop: 40, votes: 3000 },
+    { id: 438631, query: 'dune', title: '沙丘', en: 'Dune', date: '2021-09-15', pop: 120, votes: 12000, backdrop: '/b438631.jpg' },
+    { id: 693134, query: 'dune part two', q: ['dune'], title: '沙丘2', en: 'Dune: Part Two', date: '2024-02-27', pop: 300, votes: 6000 },
+    // 片名本身带年份
+    { id: 335984, query: 'blade runner 2049', title: '银翼杀手2049', en: 'Blade Runner 2049', date: '2017-10-04', pop: 80 },
+    { id: 78, query: 'blade runner', q: ['blade runner 2049'], title: '银翼杀手', en: 'Blade Runner', date: '1982-06-25', pop: 90 },
+    { id: 464052, query: 'wonder woman 1984', title: '神奇女侠1984', en: 'Wonder Woman 1984', date: '2020-12-16', pop: 60 },
+    { id: 297762, query: 'wonder woman', q: ['wonder woman 1984'], title: '神奇女侠', en: 'Wonder Woman', date: '2017-05-30', pop: 70 },
+    // 续集号
+    { id: 10193, query: 'toy story 3', title: '玩具总动员3', en: 'Toy Story 3', date: '2010-06-16', pop: 50 },
+    { id: 301528, query: 'toy story 4', q: ['toy story 3'], title: '玩具总动员4', en: 'Toy Story 4', date: '2019-06-19', pop: 90 },
+    // 中英文名都在文件名里；前作更热门、也会被搜出来
+    { id: 842675, query: 'the wandering earth ii', q: ['流浪地球2'], title: '流浪地球2', en: 'The Wandering Earth II', original: '流浪地球2', lang: 'zh', date: '2023-01-22', pop: 40 },
+    { id: 535167, query: 'the wandering earth', q: ['the wandering earth ii', '流浪地球2'], title: '流浪地球', en: 'The Wandering Earth', original: '流浪地球', lang: 'zh', date: '2019-02-05', pop: 90 },
+    // 原名不是英文：只能靠英文名认
+    { id: 496243, query: 'parasite', title: '寄生虫', en: 'Parasite', original: '기생충', lang: 'ko', date: '2019-05-30' },
+    // 罗马音文件名：搜得到，但中英文名、原名都对不上 → 取别名表才认得出
+    { id: 372058, query: 'kimi no na wa', title: '你的名字。', en: 'Your Name.', original: '君の名は。', lang: 'ja', date: '2016-08-26', aka: ['Kimi no Na wa.'] },
+    // TMDB 上没有海报
+    { id: 900001, query: 'no art film', title: '没有海报的片子', en: 'No Art Film', date: '2011-01-01', poster: null },
+    { id: 900002, query: 'shaky', title: '网络抖动', en: 'Shaky', date: '2012-01-01' },
+  ];
+  await clear();
+  let r = await batch(['Dune.1984.1080p.BluRay.mkv', 'Dune.mkv', 'Dune.Part.Two.2024.2160p.WEB-DL.DV.mkv']);
+  ok(r['Dune.1984.1080p.BluRay.mkv']?.id === 841 && r['Dune.mkv']?.id === 438631 && r['Dune.Part.Two.2024.2160p.WEB-DL.DV.mkv']?.id === 693134,
+    `同名不同年 / 续集：《沙丘》1984 → ${r['Dune.1984.1080p.BluRay.mkv']?.year}、不带年份 → ${r['Dune.mkv']?.year}（片名一样里票数最多的，不是更热门的续集）、《沙丘2》→ ${r['Dune.Part.Two.2024.2160p.WEB-DL.DV.mkv']?.year}`);
+  r = await batch(['Blade.Runner.2049.2017.2160p.UHD.BluRay.x265-GRP.mkv', 'Wonder.Woman.1984.2020.1080p.WEB-DL.mkv']);
+  ok(r['Blade.Runner.2049.2017.2160p.UHD.BluRay.x265-GRP.mkv']?.id === 335984 && r['Wonder.Woman.1984.2020.1080p.WEB-DL.mkv']?.id === 464052,
+    `片名里的年份留在片名里：${r['Blade.Runner.2049.2017.2160p.UHD.BluRay.x265-GRP.mkv']?.title}、${r['Wonder.Woman.1984.2020.1080p.WEB-DL.mkv']?.title}（原来会截成《银翼杀手》《神奇女侠》）`);
+  r = await batch(['Toy.Story.3.mkv']);
+  ok(r['Toy.Story.3.mkv']?.id === 10193, `续集号对不上的不认：Toy.Story.3 → ${r['Toy.Story.3.mkv']?.title}（更热门的 4 也被搜出来了）`);
+  r = await batch(['流浪地球2.The.Wandering.Earth.II.2023.2160p.WEB-DL.H265.mkv', 'Parasite.2019.1080p.mkv']);
+  ok(r['流浪地球2.The.Wandering.Earth.II.2023.2160p.WEB-DL.H265.mkv']?.id === 842675 && r['Parasite.2019.1080p.mkv']?.id === 496243 && r['Parasite.2019.1080p.mkv']?.title === '寄生虫',
+    `中英文名都用上：${r['流浪地球2.The.Wandering.Earth.II.2023.2160p.WEB-DL.H265.mkv']?.title}；原名是韩文的靠英文名认：${r['Parasite.2019.1080p.mkv']?.title}`);
+  H.tmdb.calls.length = 0;
+  r = await batch(['Kimi.no.Na.wa.2016.BluRay.1080p.mkv']);
+  ok(r['Kimi.no.Na.wa.2016.BluRay.1080p.mkv']?.id === 372058 && H.tmdb.calls.some(c => c.path === '/movie/372058' && /alternative_titles/.test(c.q.append_to_response || '')),
+    `罗马音文件名：取别名表认出《${r['Kimi.no.Na.wa.2016.BluRay.1080p.mkv']?.title}》`);
+  H.tmdb.calls.length = 0;
+  r = await batch(['Some.Obscure.Film.2015.1080p.mkv', 'Movie.Name.2019.1080p-sample.mkv', 'Totally.Unknown.Thing.2020.mkv']);
+  ok(r['Some.Obscure.Film.2015.1080p.mkv'] === null && r['Totally.Unknown.Thing.2020.mkv'] === null,
+    '电影认不上时不拿剧集顶：同名老剧那年播过一季也不认（首播 1990 ≠ 2015）；搜不到的就是没有（null）');
+  ok(r['Movie.Name.2019.1080p-sample.mkv'] === null && !H.tmdb.calls.some(c => /movie name/i.test(c.q.query || '')), '样片 / 预告 / 花絮：直接回没有，不去搜');
+  r = await batch(['No.Art.Film.2011.mkv']);
+  ok(r['No.Art.Film.2011.mkv'] && r['No.Art.Film.2011.mkv'].id === 900001 && r['No.Art.Film.2011.mkv'].poster === null, 'TMDB 上没有海报：认得出，但 poster 为空（前端据此不显示）');
+  await clear();
+  H.itunes.results = [{ trackName: 'No Art Film', releaseDate: '2011-03-01T00:00:00Z', artworkUrl100: 'https://is1.mzstatic.com/image/thumb/a/100x100bb.jpg' }];
+  r = await batch(['No.Art.Film.2011.mkv']);
+  ok(/mzstatic/.test(r['No.Art.Film.2011.mkv']?.poster || ''), 'TMDB 没有海报时用 iTunes 补一张（片名、年份对得上的那条）');
+  await clear();
+  H.itunes.results = [{ trackName: 'No Art Film 2', releaseDate: '2016-03-01T00:00:00Z', artworkUrl100: 'https://is1.mzstatic.com/image/thumb/b/100x100bb.jpg' },
+    { trackName: 'Something Else', releaseDate: '2011-03-01T00:00:00Z', artworkUrl100: 'https://is1.mzstatic.com/image/thumb/c/100x100bb.jpg' }];
+  r = await batch(['No.Art.Film.2011.mkv']);
+  ok(r['No.Art.Film.2011.mkv']?.poster === null, 'iTunes 只有续集 / 别的片子：不拿来顶（原来取第一条）');
+  await clear();
+  H.itunes.results = [{ trackName: 'Dune', releaseDate: '2021-10-22T00:00:00Z', artworkUrl100: 'https://is1.mzstatic.com/image/thumb/d/100x100bb.jpg' }];
+  const full = await one('Dune.1984.1080p.BluRay.mkv', true);
+  ok(full && full.id === 841 && !/mzstatic/.test(full.poster || '') && full.artworkSource === 'tmdb',
+    '详情页：iTunes 搜到的是 2021 版 → 不换海报（TMDB 认的是 1984 版）');
+  await clear();
+  H.itunes.results = [{ trackName: 'Dune', releaseDate: '2021-10-22T00:00:00Z', artworkUrl100: 'https://is1.mzstatic.com/image/thumb/e/100x100bb.jpg' }];
+  const full2 = await one('Dune.2021.2160p.mkv', true);
+  ok(full2 && /mzstatic/.test(full2.poster || '') && /image\.tmdb\.org/.test(full2.backdrop || ''),
+    '对得上的 iTunes 海报照用，但横向背景仍是 TMDB 的剧照（iTunes 只有竖版海报）');
+  H.itunes.results = null;
+  // TMDB 出错：这一项不回（不是 null），也不缓存；好了以后正常认
+  await clear();
+  H.tmdb.fail = (path, q) => /shaky/i.test(q.query || '');
+  r = await batch(['Shaky.2012.mkv', 'Parasite.2019.1080p.mkv']);
+  ok(!('Shaky.2012.mkv' in r) && r['Parasite.2019.1080p.mkv']?.id === 496243, 'TMDB 出错的那一项不回（前端过会儿再问），别的照常');
+  H.tmdb.fail = null;
+  r = await batch(['Shaky.2012.mkv']);
+  ok(r['Shaky.2012.mkv']?.id === 900002, '出错那次没被当成「没有」缓存下来：恢复后正常认出');
+  // 单条接口：剧集按编号取（剧集表认好的那部）
+  const byId = await (await H.call('/api/tmdb?id=7001&type=tv&logo=1', 'GET', { Cookie: cookie })).json();
+  ok(byId && byId.id === 7001 && byId.type === 'tv' && byId.title === '某部冷门剧', `/api/tmdb?id=&type=tv：按编号取，不再按名字重认（${byId && byId.title}）`);
+  delete H.env.TMDB_API_KEY; H.tmdb.movies = []; H.tmdb.shows = [];
+  await clear();
 }
 
 console.log('\n■ 字幕清洗：字幕组、发布 / 来源声明、网址、广告');
