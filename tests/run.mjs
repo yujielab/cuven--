@@ -557,6 +557,104 @@ console.log('\n■ 预告片：IMDb 直链优先，被拒时退到 TMDB 登记�
   delete H.env.TMDB_API_KEY;
 }
 
+console.log('\n■ 片名匹配：文件名 → TMDB（候选打分、校验、宁缺毋滥）');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const clear = async () => { await settle(); caches.default.m.clear(); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const batch = async (names, logo = false) => {
+    const r = await H.worker.fetch(new Request('https://w.test/api/tmdb-batch', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ queries: names.map(name => ({ name, logo })) }) }), H.env, H.ctx);
+    await settle();
+    return r.json();
+  };
+  const one = async (name, logo) => (await batch([name], logo))[name];
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  H.tmdb.shows = [{ id: 7001, name: '某部冷门剧', original: 'Some Obscure Film', first: '1990-01-01',
+    seasons: [{ n: 1, air: '1990-01-01', count: 8 }, { n: 9, air: '2015-03-01', count: 8 }] }];
+  H.tmdb.movies = [
+    // 同名不同年 + 续集：「Dune」三部都会被搜出来，最热门的是续集
+    { id: 841, query: 'dune', title: '沙丘', en: 'Dune', date: '1984-12-14', pop: 40, votes: 3000 },
+    { id: 438631, query: 'dune', title: '沙丘', en: 'Dune', date: '2021-09-15', pop: 120, votes: 12000, backdrop: '/b438631.jpg' },
+    { id: 693134, query: 'dune part two', q: ['dune'], title: '沙丘2', en: 'Dune: Part Two', date: '2024-02-27', pop: 300, votes: 6000 },
+    // 片名本身带年份
+    { id: 335984, query: 'blade runner 2049', title: '银翼杀手2049', en: 'Blade Runner 2049', date: '2017-10-04', pop: 80 },
+    { id: 78, query: 'blade runner', q: ['blade runner 2049'], title: '银翼杀手', en: 'Blade Runner', date: '1982-06-25', pop: 90 },
+    { id: 464052, query: 'wonder woman 1984', title: '神奇女侠1984', en: 'Wonder Woman 1984', date: '2020-12-16', pop: 60 },
+    { id: 297762, query: 'wonder woman', q: ['wonder woman 1984'], title: '神奇女侠', en: 'Wonder Woman', date: '2017-05-30', pop: 70 },
+    // 续集号
+    { id: 10193, query: 'toy story 3', title: '玩具总动员3', en: 'Toy Story 3', date: '2010-06-16', pop: 50 },
+    { id: 301528, query: 'toy story 4', q: ['toy story 3'], title: '玩具总动员4', en: 'Toy Story 4', date: '2019-06-19', pop: 90 },
+    // 中英文名都在文件名里；前作更热门、也会被搜出来
+    { id: 842675, query: 'the wandering earth ii', q: ['流浪地球2'], title: '流浪地球2', en: 'The Wandering Earth II', original: '流浪地球2', lang: 'zh', date: '2023-01-22', pop: 40 },
+    { id: 535167, query: 'the wandering earth', q: ['the wandering earth ii', '流浪地球2'], title: '流浪地球', en: 'The Wandering Earth', original: '流浪地球', lang: 'zh', date: '2019-02-05', pop: 90 },
+    // 原名不是英文：只能靠英文名认
+    { id: 496243, query: 'parasite', title: '寄生虫', en: 'Parasite', original: '기생충', lang: 'ko', date: '2019-05-30' },
+    // 罗马音文件名：搜得到，但中英文名、原名都对不上 → 取别名表才认得出
+    { id: 372058, query: 'kimi no na wa', title: '你的名字。', en: 'Your Name.', original: '君の名は。', lang: 'ja', date: '2016-08-26', aka: ['Kimi no Na wa.'] },
+    // TMDB 上没有海报
+    { id: 900001, query: 'no art film', title: '没有海报的片子', en: 'No Art Film', date: '2011-01-01', poster: null },
+    { id: 900002, query: 'shaky', title: '网络抖动', en: 'Shaky', date: '2012-01-01' },
+  ];
+  await clear();
+  let r = await batch(['Dune.1984.1080p.BluRay.mkv', 'Dune.mkv', 'Dune.Part.Two.2024.2160p.WEB-DL.DV.mkv']);
+  ok(r['Dune.1984.1080p.BluRay.mkv']?.id === 841 && r['Dune.mkv']?.id === 438631 && r['Dune.Part.Two.2024.2160p.WEB-DL.DV.mkv']?.id === 693134,
+    `同名不同年 / 续集：《沙丘》1984 → ${r['Dune.1984.1080p.BluRay.mkv']?.year}、不带年份 → ${r['Dune.mkv']?.year}（片名一样里票数最多的，不是更热门的续集）、《沙丘2》→ ${r['Dune.Part.Two.2024.2160p.WEB-DL.DV.mkv']?.year}`);
+  r = await batch(['Blade.Runner.2049.2017.2160p.UHD.BluRay.x265-GRP.mkv', 'Wonder.Woman.1984.2020.1080p.WEB-DL.mkv']);
+  ok(r['Blade.Runner.2049.2017.2160p.UHD.BluRay.x265-GRP.mkv']?.id === 335984 && r['Wonder.Woman.1984.2020.1080p.WEB-DL.mkv']?.id === 464052,
+    `片名里的年份留在片名里：${r['Blade.Runner.2049.2017.2160p.UHD.BluRay.x265-GRP.mkv']?.title}、${r['Wonder.Woman.1984.2020.1080p.WEB-DL.mkv']?.title}（原来会截成《银翼杀手》《神奇女侠》）`);
+  r = await batch(['Toy.Story.3.mkv']);
+  ok(r['Toy.Story.3.mkv']?.id === 10193, `续集号对不上的不认：Toy.Story.3 → ${r['Toy.Story.3.mkv']?.title}（更热门的 4 也被搜出来了）`);
+  r = await batch(['流浪地球2.The.Wandering.Earth.II.2023.2160p.WEB-DL.H265.mkv', 'Parasite.2019.1080p.mkv']);
+  ok(r['流浪地球2.The.Wandering.Earth.II.2023.2160p.WEB-DL.H265.mkv']?.id === 842675 && r['Parasite.2019.1080p.mkv']?.id === 496243 && r['Parasite.2019.1080p.mkv']?.title === '寄生虫',
+    `中英文名都用上：${r['流浪地球2.The.Wandering.Earth.II.2023.2160p.WEB-DL.H265.mkv']?.title}；原名是韩文的靠英文名认：${r['Parasite.2019.1080p.mkv']?.title}`);
+  H.tmdb.calls.length = 0;
+  r = await batch(['Kimi.no.Na.wa.2016.BluRay.1080p.mkv']);
+  ok(r['Kimi.no.Na.wa.2016.BluRay.1080p.mkv']?.id === 372058 && H.tmdb.calls.some(c => c.path === '/movie/372058' && /alternative_titles/.test(c.q.append_to_response || '')),
+    `罗马音文件名：取别名表认出《${r['Kimi.no.Na.wa.2016.BluRay.1080p.mkv']?.title}》`);
+  H.tmdb.calls.length = 0;
+  r = await batch(['Some.Obscure.Film.2015.1080p.mkv', 'Movie.Name.2019.1080p-sample.mkv', 'Totally.Unknown.Thing.2020.mkv']);
+  ok(r['Some.Obscure.Film.2015.1080p.mkv'] === null && r['Totally.Unknown.Thing.2020.mkv'] === null,
+    '电影认不上时不拿剧集顶：同名老剧那年播过一季也不认（首播 1990 ≠ 2015）；搜不到的就是没有（null）');
+  ok(r['Movie.Name.2019.1080p-sample.mkv'] === null && !H.tmdb.calls.some(c => /movie name/i.test(c.q.query || '')), '样片 / 预告 / 花絮：直接回没有，不去搜');
+  r = await batch(['No.Art.Film.2011.mkv']);
+  ok(r['No.Art.Film.2011.mkv'] && r['No.Art.Film.2011.mkv'].id === 900001 && r['No.Art.Film.2011.mkv'].poster === null, 'TMDB 上没有海报：认得出，但 poster 为空（前端据此不显示）');
+  await clear();
+  H.itunes.results = [{ trackName: 'No Art Film', releaseDate: '2011-03-01T00:00:00Z', artworkUrl100: 'https://is1.mzstatic.com/image/thumb/a/100x100bb.jpg' }];
+  r = await batch(['No.Art.Film.2011.mkv']);
+  ok(/mzstatic/.test(r['No.Art.Film.2011.mkv']?.poster || ''), 'TMDB 没有海报时用 iTunes 补一张（片名、年份对得上的那条）');
+  await clear();
+  H.itunes.results = [{ trackName: 'No Art Film 2', releaseDate: '2016-03-01T00:00:00Z', artworkUrl100: 'https://is1.mzstatic.com/image/thumb/b/100x100bb.jpg' },
+    { trackName: 'Something Else', releaseDate: '2011-03-01T00:00:00Z', artworkUrl100: 'https://is1.mzstatic.com/image/thumb/c/100x100bb.jpg' }];
+  r = await batch(['No.Art.Film.2011.mkv']);
+  ok(r['No.Art.Film.2011.mkv']?.poster === null, 'iTunes 只有续集 / 别的片子：不拿来顶（原来取第一条）');
+  await clear();
+  H.itunes.results = [{ trackName: 'Dune', releaseDate: '2021-10-22T00:00:00Z', artworkUrl100: 'https://is1.mzstatic.com/image/thumb/d/100x100bb.jpg' }];
+  const full = await one('Dune.1984.1080p.BluRay.mkv', true);
+  ok(full && full.id === 841 && !/mzstatic/.test(full.poster || '') && full.artworkSource === 'tmdb',
+    '详情页：iTunes 搜到的是 2021 版 → 不换海报（TMDB 认的是 1984 版）');
+  await clear();
+  H.itunes.results = [{ trackName: 'Dune', releaseDate: '2021-10-22T00:00:00Z', artworkUrl100: 'https://is1.mzstatic.com/image/thumb/e/100x100bb.jpg' }];
+  const full2 = await one('Dune.2021.2160p.mkv', true);
+  ok(full2 && /mzstatic/.test(full2.poster || '') && /image\.tmdb\.org/.test(full2.backdrop || ''),
+    '对得上的 iTunes 海报照用，但横向背景仍是 TMDB 的剧照（iTunes 只有竖版海报）');
+  H.itunes.results = null;
+  // TMDB 出错：这一项不回（不是 null），也不缓存；好了以后正常认
+  await clear();
+  H.tmdb.fail = (path, q) => /shaky/i.test(q.query || '');
+  r = await batch(['Shaky.2012.mkv', 'Parasite.2019.1080p.mkv']);
+  ok(!('Shaky.2012.mkv' in r) && r['Parasite.2019.1080p.mkv']?.id === 496243, 'TMDB 出错的那一项不回（前端过会儿再问），别的照常');
+  H.tmdb.fail = null;
+  r = await batch(['Shaky.2012.mkv']);
+  ok(r['Shaky.2012.mkv']?.id === 900002, '出错那次没被当成「没有」缓存下来：恢复后正常认出');
+  // 单条接口：剧集按编号取（剧集表认好的那部）
+  const byId = await (await H.call('/api/tmdb?id=7001&type=tv&logo=1', 'GET', { Cookie: cookie })).json();
+  ok(byId && byId.id === 7001 && byId.type === 'tv' && byId.title === '某部冷门剧', `/api/tmdb?id=&type=tv：按编号取，不再按名字重认（${byId && byId.title}）`);
+  delete H.env.TMDB_API_KEY; H.tmdb.movies = []; H.tmdb.shows = [];
+  await clear();
+}
+
 console.log('\n■ 字幕清洗：字幕组、发布 / 来源声明、网址、广告');
 {
   const X = await H.internals();

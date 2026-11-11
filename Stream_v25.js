@@ -1105,7 +1105,7 @@ function osGuess(name) {
   const stem = String(name || '').replace(/\.[^./]+$/, '');
   const ep = /(?:^|[ ._\-[(])S(\d{1,2})[ ._-]?E(\d{1,3})(?!\d)/i.exec(stem) || /(?:^|[ ._-])(\d{1,2})x(\d{2,3})(?!\d)/.exec(stem);
   const p = parseFilename((ep ? stem.slice(0, ep.index) : stem) + '.x');
-  return { title: p.title, year: p.year, season: ep ? +ep[1] : null, episode: ep ? +ep[2] : null, tokens: osTokens(stem) };
+  return { title: p.title, year: p.year, q: p, season: ep ? +ep[1] : null, episode: ep ? +ep[2] : null, tokens: osTokens(stem) };
 }
 /** 发布名有多像：两边词集合的 Jaccard */
 function osSim(tokens, release) {
@@ -1209,11 +1209,11 @@ async function osDownload(env, auth, c, fps) {
 async function osTmdb(g, env) {
   if (!env.TMDB_API_KEY || !g.title) return null;
   if (g.season != null) { const h = await tmdbSearch('tv', g.title, '', env).catch(() => null); return h && h.id ? { id: h.id, type: 'tv' } : null; }
-  const ck = tmdbCacheKey(g.title, g.year, false);
+  const ck = tmdbCacheKey(g.q || g.title, g.year, false);
   const hit = await caches.default.match(ck).catch(() => null);
   let m = null;
   if (hit) { try { m = await hit.json(); } catch {} }
-  if (!m) m = await fetchMetadata(g.title, g.year, false, env).catch(() => null);
+  if (!m) m = await fetchMetadata(g.q || g.title, g.year, false, env).catch(() => null);
   return m && m.id && m.type === 'movie' ? { id: m.id, type: 'movie' } : null;
 }
 
@@ -3494,7 +3494,8 @@ async function buildFeatured(candidates, n, env, memo = null) {
 
   await parallel(
     candidates.map(video => async () => {
-      const { title, year } = parseFilename(video.name);
+      const pf = parseFilename(video.name);
+      const { title, year } = pf;
       const key = `${title || video.name}|${year || ''}`;
       let releaseDate = null;
       let releaseYear = year ? parseInt(year, 10) : 0;
@@ -3505,7 +3506,7 @@ async function buildFeatured(candidates, n, env, memo = null) {
         releaseYear = cached.y || releaseYear;
       } else if (title) {
         try {
-          const p = await fetchMetadata(title, year, false, env);
+          const p = await fetchMetadata(pf, '', false, env);
           if (p?.release_date) {
             releaseDate = p.release_date;
             releaseYear = parseInt(p.release_date.slice(0, 4), 10) || releaseYear;
@@ -4132,18 +4133,21 @@ async function handleRemind(request, env, ctx) {
 //  iTunes / Apple TV（并行双区，取先到的有效结果）
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async function fetchITunesArtwork(title, year, mediaType) {
+async function fetchITunesArtwork(title, year, mediaType, names) {
+  if (!title) return null;
   try {
     // 并发 cn + us，Promise.any 取首个成功
     const result = await Promise.any([
-      _itunesSearch(title, year, mediaType, 'cn'),
-      _itunesSearch(title, year, mediaType, 'us'),
+      _itunesSearch(title, year, mediaType, 'cn', names),
+      _itunesSearch(title, year, mediaType, 'us', names),
     ]);
     return result;
   } catch { return null; }
 }
 
-async function _itunesSearch(title, year, mediaType, country) {
+/* 只认片名对得上（中文区对中文名、美区对英文名 / 原名，相似度 ≥ 0.8）、年份差不过一年的那条。
+   原来拿第一条：同名的另一部、续集、纪录片都可能顶上来，详情页的海报就换成了别的片子 */
+async function _itunesSearch(title, year, mediaType, country, names) {
   const entity = mediaType === 'tv' ? 'tvShow' : 'movie';
   const params = new URLSearchParams({ term: title, entity, country, limit: '5' });
   const res = await fetchRetry(
@@ -4156,11 +4160,16 @@ async function _itunesSearch(title, year, mediaType, country) {
   const results = data.results || [];
   if (!results.length) throw new Error('no results');
 
-  let best = results[0];
-  if (year) {
-    const match = results.find(r => (r.releaseDate || '').startsWith(year));
-    if (match) best = match;
-  }
+  const want = (names && names.length ? names : [title]).filter(Boolean);
+  const y = parseInt(year, 10) || 0;
+  const fits = r => {
+    const n = r.trackName || r.collectionName || (mediaType === 'tv' ? r.artistName : '') || '';
+    if (!want.some(w => mtSim(n, w) >= 0.8)) return false;
+    const ry = parseInt(String(r.releaseDate || '').slice(0, 4), 10) || 0;
+    return !y || !ry || Math.abs(ry - y) <= 1;
+  };
+  const best = results.find(fits);
+  if (!best) throw new Error('no matching artwork');
 
   const raw = best.artworkUrl100;
   if (!raw) throw new Error('no artwork');
@@ -4179,11 +4188,16 @@ async function _itunesSearch(title, year, mediaType, country) {
 //  TMDB + iTunes 融合元数据
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-const TMDB_CACHE = 'https://cache.internal/tmdb-v7/';   // v7：payload 新增 imdb —— 不换命名空间的话，旧缓存要压 7 天才吐出新字段
+// v8：匹配管线重写（候选打分 + 校验）。旧缓存里的错配不换命名空间的话要再压 7 天
+const TMDB_CACHE = 'https://cache.internal/tmdb-v8/';
 
-function tmdbCacheKey(title, year, full, kind) {
-  const p = new URLSearchParams({ q: title.toLowerCase() });
-  if (year) p.set('y', year);
+/** q：一句片名，或 mtParse 的结果（中英文名都进键 —— 只拿其中一个当键，两部片会互相顶掉），或 { id, type } */
+function tmdbCacheKey(q, year, full, kind) {
+  const obj = q && typeof q === 'object';
+  const t = obj ? (q.id ? `#${q.type}:${q.id}` : [q.en, q.zh, q.alt].filter(Boolean).join('|')) : String(q || '');
+  const y = obj ? (q.year || '') : (year || '');
+  const p = new URLSearchParams({ q: t.toLowerCase() });
+  if (y) p.set('y', y);
   if (full) p.set('f', '1');
   if (kind) p.set('t', kind);       // type=tv / movie 各存一份：同名的电影与剧集不能互相顶掉
   return new Request(`${TMDB_CACHE}?${p}`);
@@ -4196,14 +4210,19 @@ async function handleTmdb(url, env, ctx) {
   const full = url.searchParams.get('logo') === '1';
   // type=tv 只搜剧集、type=movie 只搜电影；不带就是老规矩（电影优先，搜不到再搜剧集）
   const kind = ['tv', 'movie'].includes(url.searchParams.get('type')) ? url.searchParams.get('type') : '';
-  if (!query) return jsonResponse({ error: 'Missing query' }, 400);
+  // id：剧集表已经认好的编号 —— 剧照、详情、分集用同一部，不再按名字各认各的
+  const id = parseInt(url.searchParams.get('id') || '', 10) || 0;
+  if (!query && !(id && kind)) return jsonResponse({ error: 'Missing query' }, 400);
 
-  const ck = tmdbCacheKey(query, year, full, kind);
+  const q = id && kind ? { id, type: kind } : mtQuery(query, year);
+  const ck = tmdbCacheKey(q, year, full, kind);
   const cache = caches.default;
   const hit = await cache.match(ck);
   if (hit) return new Response(hit.body, { headers: hit.headers });
 
-  const payload = await fetchMetadata(query, year, full, env, kind);
+  let payload;
+  try { payload = await fetchMetadata(q, year, full, env, kind); }
+  catch (e) { return jsonResponse({ error: 'tmdb unavailable' }, 502, { 'Cache-Control': 'no-store' }); }   // 出错不缓存、不回 null
   const body = payload ? JSON.stringify(payload) : 'null';
   const resp = new Response(body, {
     headers: {
@@ -4228,13 +4247,15 @@ async function handleTmdbBatch(request, env, ctx) {
 
   const cache = caches.default;
   const result = {};
+  // 一次批量最多发这么多个 TMDB 请求（每部片 2–10 个不等）：超了的那几部这次不答，前端过会儿再问
+  const budget = { left: 700 };
 
   await parallel(
     queries.filter(q => q?.name).map(q => async () => {
-      const { title, year } = parseFilename(q.name);
-      if (!title) { result[q.name] = null; return; }
+      const p = parseFilename(q.name);
+      if (!p.title || p.extra) { result[q.name] = null; return; }   // 认不出片名 / 样片、预告、花絮：明确没有
       const full = !!q.logo;
-      const ck = tmdbCacheKey(title, year, full);
+      const ck = tmdbCacheKey(p, '', full);
 
       const hit = await cache.match(ck);
       if (hit) {
@@ -4242,14 +4263,14 @@ async function handleTmdbBatch(request, env, ctx) {
         return;
       }
 
-      // 修复：fetchMetadata 抛错会让该 key 直接从结果里消失（前端拿不到任何信号）
-      // → 抛错置 null；且瞬时失败不写缓存，避免把一次网络抖动负缓存一周
+      // 认不上 → null（写缓存）；TMDB 出错 / 超预算 → 这个键不回（不写缓存）。
+      // 前端靠这一点分清「TMDB 说没有这部」与「这次没问成」：前者不显示，后者过会儿再问
       let data = null;
       let failed = false;
-      try { data = await fetchMetadata(title, year, full, env); }
+      try { data = await fetchMetadata(p, '', full, env, '', budget); }
       catch { failed = true; }
-      result[q.name] = data;
       if (failed) return;
+      result[q.name] = data;
       const resp = new Response(data ? JSON.stringify(data) : 'null', {
         headers: {
           'Content-Type': 'application/json; charset=utf-8',
@@ -4261,6 +4282,8 @@ async function handleTmdbBatch(request, env, ctx) {
     6,
   );
 
+  // 版本记号：前端据此知道这里的 null 是确定的「认不出」（旧版出错时也回 null，不能拿来藏片）
+  result.__match = 2;
   return jsonResponse(result);
 }
 
@@ -4382,9 +4405,8 @@ async function tmdbTrailer({ imdb, tmdb, type, query, year }, env) {
     if (hit) { kind = hit[0]; id = hit[1].id; }
   }
   if (!id && query) {
-    const hit = (kind !== 'tv' && await tmdbSearch('movie', query, year, env).catch(() => null))
-      || (kind !== 'movie' && await tmdbSearch('tv', query, year, env).catch(() => null));
-    if (hit) { kind = hit.title ? 'movie' : 'tv'; id = hit.id; }
+    const m = await tmdbMatch(mtQuery(query, year), env, kind).catch(() => null);
+    if (m) { kind = m.c.type; id = m.c.id; }
   }
   if (!id) return null;
   const j = await get(`https://api.themoviedb.org/3/${kind || 'movie'}/${id}/videos?api_key=${key}&language=zh-CN&include_video_language=zh,en,null`);
@@ -4444,9 +4466,10 @@ async function imdbTrailer(id, nStills) {
 async function resolveImdbId(query, year, env) {
   if (!env.TMDB_API_KEY) return null;
   try {
-    const hit = await tmdbSearch('movie', query, year, env) || await tmdbSearch('tv', query, year, env);
-    if (!hit) return null;
-    const type = hit.title ? 'movie' : 'tv';
+    const m = await tmdbMatch(mtQuery(query, year), env, '');
+    if (!m) return null;
+    const hit = { id: m.c.id };
+    const type = m.c.type;
     const r = await fetchRetry(
       `https://api.themoviedb.org/3/${type}/${hit.id}/external_ids?api_key=${env.TMDB_API_KEY}`,
       {}, { retries: 1, timeout: 6000 },
@@ -4505,28 +4528,41 @@ async function handleImdbVideo(url, env, ctx) {
 
 // ── 核心：融合 TMDB + iTunes ──
 
-async function fetchMetadata(title, year, full, env, kind = '') {
-  // TMDB 搜索：kind 指定了就只搜那一类；没指定则 movie 优先、fallback tv
-  let hit = null, type = kind || 'movie';
-  if (kind !== 'tv') hit = await tmdbSearch('movie', title, year, env);
-  if (!hit && kind !== 'movie') {
-    type = 'tv';
-    hit = await tmdbSearch('tv', title, year, env);
-    // 剧集的年份常是「这一季」的年份，第一季不在那年时按年份搜不到 —— 去掉年份再搜一次
-    if (!hit && year && kind === 'tv') hit = await tmdbSearch('tv', title, '', env);
-  }
-  if (!hit) return null;
+/** 按编号取（剧集表里已经认好的那部、前端带回来的编号）：与 tmdbMatch 的返回同形 */
+async function mtById(type, id, env) {
+  const r = await fetchRetry(`https://api.themoviedb.org/3/${type}/${encodeURIComponent(id)}?api_key=${env.TMDB_API_KEY}&language=zh-CN`, {}, { retries: 1, timeout: 6000 });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error('tmdb ' + r.status);
+  const d = await r.json();
+  return { sim: 1, score: null, c: { type, id: d.id, rank: 0, zh: d.title || d.name || '', en: '', orig: d.original_title || d.original_name || '',
+    lang: d.original_language || '', date: d.release_date || d.first_air_date || '', votes: d.vote_count || 0, rating: d.vote_average || 0,
+    poster: d.poster_path || null, backdrop: d.backdrop_path || null, overview: d.overview || '', alt: null, raw: d } };
+}
+
+/**
+ * title：mtParse 的结果（文件名里解析好的中英文名 + 年份），或一句片名（配 year）；
+ *        { id, type } 直接按编号取（剧集表认好的那部 —— 剧照与分集用的是同一个编号，不会两边各认一部）
+ * 认不上返回 null；TMDB 出错抛错 —— 调用方不能把一次网络抖动当成「没有这部片」缓存下来
+ */
+async function fetchMetadata(title, year, full, env, kind = '', budget = null) {
+  const q = title && typeof title === 'object' ? title : mtQuery(title, year);
+  const m = q.id && (q.type === 'tv' || q.type === 'movie') ? await mtById(q.type, q.id, env) : await tmdbMatch(q, env, kind, budget);
+  if (!m) return null;
+  const c = m.c, type = c.type;
 
   const out = {
-    id: hit.id,
-    title: hit.title || hit.name,
-    year: (hit.release_date || hit.first_air_date || '').slice(0, 4),
-    release_date: hit.release_date || hit.first_air_date || null,
-    poster: hit.poster_path ? `https://image.tmdb.org/t/p/w342${hit.poster_path}` : null,
-    backdrop: hit.backdrop_path ? `https://image.tmdb.org/t/p/w1280${hit.backdrop_path}` : null,
-    overview: hit.overview || '',
-    rating: hit.vote_average || 0,
+    id: c.id,
+    title: c.zh || c.en || c.orig,
+    en: c.en || '',
+    original_title: c.orig || '',
+    year: (c.date || '').slice(0, 4),
+    release_date: c.date || null,
+    poster: c.poster ? `https://image.tmdb.org/t/p/w342${c.poster}` : null,
+    backdrop: c.backdrop ? `https://image.tmdb.org/t/p/w1280${c.backdrop}` : null,
+    overview: c.overview || '',
+    rating: c.rating || 0,
     type,
+    match: m.score != null ? Math.round(m.score) : null,   // 匹配分（排查错配用）
     logo: null, logoAspect: null,
     imdb: null,
     runtime: null, genres: [],
@@ -4534,23 +4570,33 @@ async function fetchMetadata(title, year, full, env, kind = '') {
     artworkSource: 'tmdb',
   };
 
-  if (!full) return out;
+  // iTunes 按「认好的那部」的片名与年份去搜、并逐条核对 —— 不再拿文件名里的半截片名搜、取第一条
+  const itTitle = c.en || c.orig || c.zh, itNames = [c.en, c.orig, c.zh].filter(Boolean);
+  if (!full) {
+    // TMDB 没有海报（冷门片、刚上架的）：拿 iTunes 补一张，补不到前端就不显示这部
+    if (!out.poster) {
+      const it = await fetchITunesArtwork(itTitle, out.year, type, itNames);
+      if (it) { out.poster = it.poster; out.artworkSource = 'itunes'; }
+    }
+    return out;
+  }
 
   // ── 全量模式：并发 iTunes + TMDB images/detail/credits ──
   const key = env.TMDB_API_KEY;
-  const id = hit.id;
+  const id = c.id;
 
   const [itunes, imgRes, detailRes, creditsRes] = await Promise.allSettled([
-    fetchITunesArtwork(title, year, type),
+    fetchITunesArtwork(itTitle, out.year, type, itNames),
     fetchRetry(`https://api.themoviedb.org/3/${type}/${id}/images?api_key=${key}&include_image_language=zh,en,null`, {}, { retries: 1, timeout: 6000 }),
     fetchRetry(`https://api.themoviedb.org/3/${type}/${id}?api_key=${key}&language=zh-CN&append_to_response=external_ids`, {}, { retries: 1, timeout: 6000 }),
     fetchRetry(`https://api.themoviedb.org/3/${type}/${id}/credits?api_key=${key}&language=zh-CN`, {}, { retries: 1, timeout: 6000 }),
   ]);
 
-  // iTunes 优先：海报 & 背景
+  // iTunes 优先的只有海报（片名与年份核对过）。背景只在 TMDB 没有时才用 —— iTunes 给的是竖版海报，
+  // 铺到横向的详情背景上只能裁出中间一条、再放大好几倍
   if (itunes.status === 'fulfilled' && itunes.value) {
     out.poster = itunes.value.poster;
-    out.backdrop = itunes.value.backdrop;
+    if (!out.backdrop) out.backdrop = itunes.value.backdrop;
     out.artworkSource = 'itunes';
   }
 
@@ -4590,7 +4636,7 @@ async function fetchMetadata(title, year, full, env, kind = '') {
       const enLang = backdrops.filter(b => b.iso_639_1 === 'en').sort(sortByVote);
       const ranked = [...noLang, ...zhLang, ...enLang];
       // 排除已用作 hero backdrop 的那张（避免重复）
-      const heroBdPath = hit.backdrop_path;
+      const heroBdPath = c.backdrop;
       const stillsList = ranked
         .filter(b => b.file_path && b.file_path !== heroBdPath)
         .slice(0, 12)
@@ -4635,29 +4681,294 @@ async function fetchMetadata(title, year, full, env, kind = '') {
   return out;
 }
 
-async function tmdbSearch(type, query, year, env) {
-  const p = new URLSearchParams({ api_key: env.TMDB_API_KEY, query, language: 'zh-CN', page: '1' });
-  // 剧集用 year 而不是 first_air_date_year：前者首播与任一集的播出年份都算 —— 第四季那年也能搜到
-  if (year) p.set('year', year);
-  const res = await fetchRetry(
-    `https://api.themoviedb.org/3/search/${type}?${p}`,
-    {},
-    { retries: 1, timeout: 6000 },
-  );
-  if (!res.ok) return null;
-  return (await res.json()).results?.[0] || null;
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  片名匹配：文件名 → TMDB
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  原来是「解析出一个片名 → 搜一次 → 拿第一条」，错配主要出在四处：
+//   ① 片名里本身带年份（《银翼杀手2049》《神奇女侠1984》《1917》），取第一个年份当上映年，片名被截断；
+//   ② TMDB 的第一条按热度排，同名不同年（《沙丘》1984 / 2021）、续集（《玩具总动员 3 / 4》）常排在前面；
+//   ③ 电影搜不到就拿剧集顶上 —— 片名噪声一大，名字沾边的剧都能「匹配」上；
+//   ④ 详情页的 iTunes 海报按片名搜、拿第一条，TMDB 认对了，海报还可能换成另一部。
+//  现在：
+//   · 解析出中文名、英文名、上映年（取最后一个合理的年份，片名里的年份留在片名里）、季集号、样片 / 预告；
+//   · 中英两种语言各搜一次、候选合在一起，按片名相似度（中文名 / 英文名 / 原名，罗马数字、数字词、
+//     全角、标点、变音符都归一）、年份、类型、热度打分；续集号对不上直接压分，年份差两年以上压到认不上；
+//   · 分数不够宁可不认 —— 认错比没认更糟（前端对拿不到海报的片子直接不显示）；
+//   · 拿不准、但年份对得上的前两名，再取别名表与各语言译名（罗马音、繁体、港台译名）比一次。
+
+const MT_NATIVE = /[぀-ヿ㐀-鿿豈-﫿가-힯]/;   // 汉字 / 假名 / 谚文
+const MT_YEAR = /^[(（\[]?((?:19|20)\d{2})[)）\]]?$/;
+const MT_SE = /^(?:s\d{1,2}(?:e\d{1,4})?(?:-?e\d{1,4})?|e\d{1,4}|ep\d{1,4}|\d{1,2}x\d{2,3}|season|第[一二三四五六七八九十\d]+[季集话話]|全\d+集)$/i;
+// 片名到此为止的规格词（强）：画质、片源、编码、音轨
+const MT_SPEC = /^(?:4320p|2160p|1440p|1080[pi]|720p|576p|480p|4k|8k|uhd|fhd|hdr10\+?|hdr|dv|dovi|hlg|sdr|blu-?ray|bdrip|brrip|bdremux|remux|web-?dl|web-?rip|hdtv|dvdrip|dvd|hdrip|x26[45]|h26[45]|hevc|avc|av1|xvid|divx|aac\d?(?:\.\d)?|ac3|eac3|e-ac-3|ddp?\d?(?:\.\d)?|dd\+|dts(?:-?hd)?(?:-?ma)?|truehd|atmos|flac|lpcm|opus|10bit|8bit|hi10p|60fps|120fps)$/i;
+// 版本词：只收不会是片名的那些（《The Cut》《Special》这类单词不收，免得把片名削掉一截）
+const MT_EDITION = /^(?:extended|unrated|uncut|remastered|restored|imax|criterion|repack|rerip|proper|internal|dubbed|subbed|multisubs?|chs|cht|中字|中英|中英字幕|双语|雙語|国语|國語|粤语|粵語|国英|国粤|國粵|未删减|未刪減|导演剪辑版|導演剪輯版|加长版|加長版|蓝光|藍光|高清)$/i;
+// 两个词的版本：Director's Cut / Special Edition / Extended Edition …（只在片名末尾、年份之前时剥掉）
+const MT_EDITION2 = /^(?:directors?|theatrical|special|extended|collectors?|anniversary|ultimate|final|definitive|criterion)\s(?:cut|edition|version)$/i;
+const MT_EXTRA_WORD = /^(?:sample|trailer|teaser|featurette|preview|behindthescenes|deletedscenes?|makingof|ncop|nced)$/i;
+const MT_EXTRA_ZH = /预告|預告|花絮|特辑|特輯|样片|樣片|片花/;
+const MT_SITE = /www|\.(?:com|net|org|cn|cc|me|tv)\b|电影|電影|影视|影視|字幕|论坛|論壇|下载|下載|高清|发布|發布|首发|首發|小组|小組|压制|壓制|\bbt\b|\bpt\b/i;
+
+/** 一个词是什么：spec（画质 / 片源 / 编码 / 音轨，带发布组后缀的也算）、ed（版本词）、se（季集号） */
+function mtKind(t) {
+  const base = t.split('-')[0];
+  if (MT_SPEC.test(t) || (base !== t && base && MT_SPEC.test(base))) return 'spec';
+  if (MT_EDITION.test(t)) return 'ed';
+  if (MT_SE.test(t)) return 'se';
+  return '';
 }
 
-function parseFilename(fn) {
-  let n = fn.replace(/\.[^.]+$/, '');
-  const ym = n.match(/[\.\s\-_\(]((?:19|20)\d{2})[\.\s\-_\)]/);
-  const year = ym ? ym[1] : '';
-  let title = n;
-  if (ym) title = n.slice(0, n.indexOf(ym[0]));
-  else title = n.split(/[\.\s_\-](?:2160p|1080p|720p|4K|UHD|BluRay|BDRip|WEB[\-.]?DL|WEB[\-.]?Rip|x264|x265|HEVC|H\.?26[45]|AAC|DTS|FLAC|REMUX|DoVi|DV|HDR|Atmos|10bit)/i)[0];
-  title = title.replace(/[\._]/g, ' ').replace(/\[.*?\]|\{.*?\}/g, '').replace(/\s+/g, ' ').trim();
-  return { title, year };
+/** 文件名 / 目录名 → { zh, en, alt, year, tv, season, extra, title } */
+function mtParse(name) {
+  const nowY = new Date().getUTCFullYear();
+  let s = String(name || '').replace(/\.(mkv|mp4|m4v|mov|avi|webm|ts|m2ts|iso|wmv|flv|rmvb)$/i, '');
+  // 方括号 / 书名号 / 花括号：站名、字幕组多半写在这里；里面是中文片名的留作备选
+  let alt = '';
+  s = s.replace(/[\[【{〔]([^\]】}〕]*)[\]】}〕]/g, (m, inner) => {
+    const t = inner.trim();
+    if (!alt && MT_NATIVE.test(t) && !MT_SITE.test(t) && !MT_EXTRA_ZH.test(t)) alt = t;
+    return ' ';
+  });
+  s = s.replace(/《([^》]+)》/g, ' $1 ');
+  // 分隔符：点、下划线、加号；「 - 」两边有空格的也是；单词里的连字符（Spider-Man）保留
+  s = s.replace(/[._+]+/g, ' ').replace(/\s[-–—]+\s|\s[-–—]+$|^[-–—]+\s/g, ' ').replace(/\s+/g, ' ').trim();
+  const toks = s ? s.split(' ') : [];
+  const kind = mtKind;
+  // 上映年：前面得有片名；取最后一个合理的年份（片名里的年份 ——《银翼杀手2049》《神奇女侠1984》——
+  // 留在片名里）。规格词 / 季集号之后的不看；版本词之后只在前面还没有年份时才认
+  // （「Title 2019 REMASTERED 2021」是 2019，「Avatar Extended Edition 2009」是 2009）
+  let yi = -1, edSeen = false;
+  for (let i = 1; i < toks.length; i++) {
+    const k = kind(toks[i - 1]);
+    if (k === 'spec' || k === 'se') break;
+    if (k === 'ed') edSeen = true;
+    const m = MT_YEAR.exec(toks[i]);
+    if (m && +m[1] >= 1900 && +m[1] <= nowY + 1 && !(edSeen && yi > 0)) yi = i;
+  }
+  let end = toks.length;
+  if (yi > 0) end = yi;
+  for (let i = 0; i < end; i++) {
+    const k = kind(toks[i]);
+    if (i > 0 && (k === 'spec' || k === 'se')) { end = i; break; }
+  }
+  let head = toks.slice(0, end);
+  for (;;) {
+    const n = head.length;
+    if (n > 2 && MT_EDITION2.test(head[n - 2].replace(/['’]/g, '') + ' ' + head[n - 1])) { head = head.slice(0, n - 2); continue; }
+    if (n > 1 && kind(head[n - 1]) === 'ed') { head = head.slice(0, n - 1); continue; }
+    break;
+  }
+  const tail = toks.slice(end);
+  const out = { zh: '', en: '', alt: '', year: yi > 0 ? MT_YEAR.exec(toks[yi])[1] : '', tv: false, season: 0, extra: false, title: '' };
+  // 季集号：S01E02 / 1x02 / Season 1 / 第一季
+  const se = /(?:^|\s)s(\d{1,2})(?:e\d{1,4})?(?:\s|$)|(?:^|\s)(\d{1,2})x\d{2,3}(?:\s|$)|season\s?(\d{1,2})|第\s*([一二三四五六七八九十\d]{1,3})\s*季/i.exec(s);
+  if (se) { out.tv = true; out.season = +(se[1] || se[2] || se[3]) || ({ 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 })[se[4]] || +se[4] || 0; }
+  else if (/(?:^|\s)(?:e|ep)\d{1,4}(?:\s|$)|第\s*\d+\s*[集话話]/i.test(s)) out.tv = true;
+  // 样片 / 预告 / 花絮：片名之后出现、或整个名字就是它；中文标记在哪都算
+  const tailWords = tail.join(' ').toLowerCase().replace(/[^a-z]+/g, ' ');
+  out.extra = MT_EXTRA_ZH.test(String(name || ''))
+    || /\b(?:sample|trailer|teaser|featurette|ncop|nced)\b|behind the scenes|deleted scenes?|making of/.test(tailWords)
+    || (head.length <= 2 && head.some(t => MT_EXTRA_WORD.test(t)));
+  // 中英分开：含汉字 / 假名 / 谚文的词归原文名，其余归英文名
+  const nat = [], lat = [];
+  for (const t of head) (MT_NATIVE.test(t) ? nat : lat).push(t);
+  out.zh = nat.join(' ').replace(/[\s:：·\-–—]+$/, '').trim();
+  out.en = /[a-z0-9]/i.test(lat.join('')) ? lat.join(' ').replace(/^[\s:：\-–—]+|[\s:：\-–—]+$/g, '').trim() : '';
+  if (alt && alt !== out.zh) out.alt = alt;
+  if (!out.zh && out.alt) { out.zh = out.alt; out.alt = ''; }
+  out.title = out.en || out.zh;
+  return out;
 }
+
+/** 一句自由文本的查询（前端传来的 query + year）→ 与 mtParse 同形 */
+function mtQuery(query, year) {
+  const q = mtParse(String(query || ''));
+  // 前端传的已经是片名：解析不出东西就原样用
+  if (!q.title) { const t = String(query || '').trim(); if (MT_NATIVE.test(t)) q.zh = t; else q.en = t; q.title = t; }
+  if (year && /^(?:19|20)\d{2}$/.test(String(year))) q.year = String(year);
+  q.extra = false;   // 前端问的是片名，不是文件名
+  return q;
+}
+
+const MT_ROMAN = { ii: 2, iii: 3, iv: 4, vi: 6, vii: 7, viii: 8, ix: 9 };
+const MT_WORDNUM = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+const MT_ZHNUM = { 一: '1', 二: '2', 三: '3', 四: '4', 五: '5', 六: '6', 七: '7', 八: '8', 九: '9', 十: '10' };
+
+function mtNorm(s) {
+  let t = String(s || '').normalize('NFKC').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  t = t.replace(/&/g, ' and ').replace(/['’‘`´]/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  // 「第二部」「第3集」里的中文数字 → 阿拉伯数字（续集号要能比）
+  t = t.replace(/第([一二三四五六七八九十])(?=[部集季章])/g, (m, d) => '第' + MT_ZHNUM[d]);
+  return t.split(' ').filter(Boolean).map(w => MT_ROMAN[w] ? String(MT_ROMAN[w]) : MT_WORDNUM[w] ? String(MT_WORDNUM[w]) : w).join(' ');
+}
+
+/** 片名相似度 0–1：字二元组的 Dice（中英文都适用）；片名里的数字（续集号）对不上就压分 */
+function mtSim(a, b) {
+  const A = mtNorm(a), B = mtNorm(b);
+  if (!A || !B) return 0;
+  if (A === B) return 1;
+  const a0 = A.replace(/ /g, ''), b0 = B.replace(/ /g, '');
+  if (a0 === b0) return 0.97;
+  const big = x => { const m = new Map(); if (x.length < 2) { m.set(x, 1); return m; } for (let i = 0; i < x.length - 1; i++) { const k = x.substr(i, 2); m.set(k, (m.get(k) || 0) + 1); } return m; };
+  const x = big(a0), y = big(b0);
+  let inter = 0, nx = 0, ny = 0;
+  for (const v of x.values()) nx += v;
+  for (const v of y.values()) ny += v;
+  for (const [k, v] of x) inter += Math.min(v, y.get(k) || 0);
+  let sim = (2 * inter) / (nx + ny);
+  const nums = s => (s.match(/\d+/g) || []).join(',');
+  const na = nums(A), nb = nums(B);
+  if (na !== nb) sim *= (na && nb) ? 0.55 : 0.8;
+  return sim;
+}
+
+function mtYearScore(qy, cy, tv) {
+  if (!qy) return 0;
+  if (!cy) return -12;
+  const d = cy - qy;
+  if (tv) {   // 剧集：文件里的年份常是「这一季」的年份 —— 首播不晚于它就行
+    if (d === 0) return 20;
+    if (d < 0 && d >= -40) return 8;
+    if (d === 1) return 4;
+    return -45;
+  }
+  const ad = Math.abs(d);
+  return ad === 0 ? 25 : ad === 1 ? 12 : ad === 2 ? -10 : -45;
+}
+
+function mtScore(c, q, kind) {
+  const names = [c.zh, c.en, c.orig, ...(c.alt || [])].filter(Boolean);
+  const qs = [q.en, q.zh, q.alt].filter(Boolean);
+  let sim = 0;
+  for (const a of qs) for (const b of names) { const v = mtSim(a, b); if (v > sim) sim = v; }
+  const cy = parseInt(String(c.date || '').slice(0, 4), 10) || 0;
+  const ys = mtYearScore(parseInt(q.year, 10) || 0, cy, c.type === 'tv');
+  const pop = Math.min(8, Math.log10(1 + (c.votes || 0)) * 2.4);
+  const typeAdj = kind ? 0 : ((c.type === 'tv') !== !!q.tv ? -15 : 0);
+  const first = c.rank === 0 ? 3 : 0;   // TMDB 自己也认它最相关
+  return { sim, ys, score: sim * 100 + ys + pop + typeAdj + first };
+}
+
+/** 一次 TMDB 搜索（失败抛错，和「搜了没有」分开 —— 前者不能当成没有这部片） */
+async function mtSearch(type, query, year, lang, env, budget) {
+  if (budget) { if (budget.left <= 0) throw new Error('tmdb budget'); budget.left--; }
+  const p = new URLSearchParams({ api_key: env.TMDB_API_KEY, query, language: lang, page: '1', include_adult: 'false' });
+  // 剧集用 year 而不是 first_air_date_year：前者首播与任一集的播出年份都算 —— 第四季那年也能搜到
+  if (year) p.set('year', year);
+  const res = await fetchRetry(`https://api.themoviedb.org/3/search/${type}?${p}`, {}, { retries: 1, timeout: 6000 });
+  if (!res.ok) throw new Error('tmdb search ' + res.status);
+  return ((await res.json()).results || []).slice(0, 10);
+}
+
+/** 中英两种语言各搜一次，候选按「类型:编号」合并：中文名 / 海报 / 简介取中文那份，英文名取英文那份 */
+async function mtCollect(cands, type, query, year, env, budget) {
+  const [zh, en] = await Promise.all([
+    mtSearch(type, query, year, 'zh-CN', env, budget),
+    mtSearch(type, query, year, 'en-US', env, budget),
+  ]);
+  const add = (list, lang) => list.forEach((r, i) => {
+    const k = type + ':' + r.id;
+    let c = cands.get(k);
+    if (!c) {
+      c = { type, id: r.id, rank: i, zh: '', en: '', orig: r.original_title || r.original_name || '', lang: r.original_language || '',
+        date: r.release_date || r.first_air_date || '', votes: r.vote_count || 0, rating: r.vote_average || 0,
+        poster: null, backdrop: null, overview: '', alt: null, raw: r };
+      cands.set(k, c);
+    }
+    c.rank = Math.min(c.rank, i);
+    const name = r.title || r.name || '';
+    if (lang === 'zh') {
+      c.zh = name; c.raw = r;
+      if (r.poster_path) c.poster = r.poster_path;
+      if (r.backdrop_path) c.backdrop = r.backdrop_path;
+      if (r.overview) c.overview = r.overview;
+    } else {
+      c.en = name;
+      if (!c.poster && r.poster_path) c.poster = r.poster_path;
+      if (!c.backdrop && r.backdrop_path) c.backdrop = r.backdrop_path;
+      if (!c.overview && r.overview) c.overview = r.overview;
+    }
+  });
+  add(zh, 'zh'); add(en, 'en');
+}
+
+/** 别名表 + 各语言译名（罗马音、繁体、港台译名）：只给拿不准的前两名补 */
+async function mtAliases(c, env, budget) {
+  if (c.alt) return;
+  if (budget) { if (budget.left <= 0) return; budget.left--; }
+  const r = await fetchRetry(`https://api.themoviedb.org/3/${c.type}/${c.id}?api_key=${env.TMDB_API_KEY}&append_to_response=alternative_titles,translations`,
+    {}, { retries: 1, timeout: 6000 }).catch(() => null);
+  const d = r && r.ok ? await r.json().catch(() => null) : null;
+  const alt = [];
+  const at = d && d.alternative_titles;
+  for (const x of (at && (at.titles || at.results)) || []) if (x && x.title) alt.push(x.title);
+  for (const x of (d && d.translations && d.translations.translations) || []) {
+    const t = x && x.data && (x.data.title || x.data.name);
+    if (t) alt.push(t);
+  }
+  c.alt = [...new Set(alt)].slice(0, 80);
+}
+
+const MT_ACCEPT = 75;   // 总分门槛：片名一模一样、没有年份时约 100–108；片名七成像、年份正好时约 95
+
+/**
+ * q：mtParse / mtQuery 的结果；kind：'movie' | 'tv' | ''（'' = 电影优先，剧集只在明显是剧集、或电影一个都认不上时才看）
+ * 返回 { c, sim, score }，认不上返回 null；TMDB 出错抛错（调用方不能把它记成「没有这部片」）
+ */
+async function tmdbMatch(q, env, kind = '', budget = null) {
+  if (!q || q.extra || !(q.en || q.zh || q.alt)) return null;
+  const cands = new Map();
+  const queries = [...new Set([q.en, q.zh, q.alt].filter(Boolean))];
+  const best = () => {
+    let b = null;
+    for (const c of cands.values()) { const s = mtScore(c, q, kind); if (!b || s.score > b.score) b = { c, ...s }; }
+    return b;
+  };
+  const sure = b => b && b.sim >= 0.95 && (b.ys >= 12 || !q.year);
+  // strict：电影优先时拿剧集顶上 —— 片名要几乎一样，年份要正好是首播那年（不然随便哪部老剧在那年播过一季都能顶上）
+  const ok = (b, strict) => b && b.sim >= (strict ? 0.85 : 0.5) && b.score >= MT_ACCEPT && (!strict || !q.year || b.ys >= 20);
+  const types = kind ? [kind] : (q.tv ? ['tv', 'movie'] : ['movie', 'tv']);
+  for (let ti = 0; ti < types.length; ti++) {
+    const type = types[ti];
+    // 不限类型时，第二类（电影优先时的剧集）只在第一类一个都认不上时才看，只搜一次，而且要更像才认
+    if (ti > 0) {
+      if (ok(best(), false)) break;
+      await mtCollect(cands, type, queries[0], q.year, env, budget);
+      continue;
+    }
+    for (const query of queries) {
+      await mtCollect(cands, type, query, q.year, env, budget);
+      if (sure(best())) return best();
+    }
+    // 年份可能写错（再版年 / 制作年）：去掉年份再搜一次，打分里年份照样算
+    if (q.year) {
+      await mtCollect(cands, type, queries[0], '', env, budget);
+      if (sure(best())) return best();
+    }
+  }
+  let b = best();
+  const strictTv = c => !kind && !q.tv && c.type === 'tv';
+  if (b && ok(b, strictTv(b.c))) return b;
+  // 别名补救：年份对得上（±1）、TMDB 也排得靠前的两名，取别名表与各语言译名再比一次
+  if (q.year) {
+    const near = [...cands.values()].filter(c => mtScore(c, q, kind).ys >= 12 && c.rank <= 2)
+      .sort((x, y) => x.rank - y.rank).slice(0, 2);
+    for (const c of near) await mtAliases(c, env, budget);
+    b = best();
+    if (b && ok(b, strictTv(b.c))) return b;
+  }
+  return null;
+}
+
+/** 兼容外壳：按类型认一部片，返回 TMDB 搜索结果那个形状（认不上 / 出错 → null） */
+async function tmdbSearch(type, query, year, env) {
+  const m = await tmdbMatch(mtQuery(query, year), env, type).catch(() => null);
+  return m ? Object.assign({}, m.c.raw, { id: m.c.id }) : null;
+}
+
+/** 文件名 → { title, year, zh, en, alt, tv, season, extra }（title = 英文名，没有就中文名）。
+    文件名一定带扩展名（osGuess 还会特意补一个「.x」）：先去掉最后一段，再交给 mtParse */
+function parseFilename(fn) { return mtParse(String(fn || '').replace(/\.[^./\s]{1,6}$/, '')); }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  剧集（TV_FOLDER，默认 /ram2）：/api/tv、/api/tv/episodes、/api/tmdb/season
@@ -4676,7 +4987,8 @@ const TV_STORE = 'tv/list-v1.json';
 const TV_CACHE_KEY = 'https://cache.internal/tv/list-v1';
 const TV_FRESH_MS = 10 * 60e3;            // 目录表多久重扫一次
 const TV_META_RETRY_MS = 3 * 86400e3;     // TMDB 查不到的剧，三天后再试
-const TV_META_BUDGET = 16;                // 一次请求最多给几部剧查 TMDB（每部 2 个子请求，免费套餐也够）
+const TV_META_BUDGET = 16;                // 一次请求最多给几部剧查 TMDB（每部 2–8 个子请求）
+const TV_META_V = 2;                      // 2：匹配管线重写 —— 旧算法认的编号（可能认错）整批重认
 const tvRoot = env => ('/' + String(env.TV_FOLDER || '/ram2').replace(/^\/+|\/+$/g, '')).replace(/^\/$/, '');
 let tvMem = null;                         // { v, at, root, series, eps, meta }
 
@@ -4865,16 +5177,15 @@ async function tvScan(env) {
 
 const tvMetaKey = s => `${String(s.en || s.zh || s.title || '').toLowerCase()}|${s.season || 0}`;
 
-/** TMDB：编号、中文名、这一季的首播年份、这一季的集数 */
+/** TMDB：编号、中文名、这一季的首播年份、这一季的集数。
+    中英文名一起交给 tmdbMatch 打分（不再拿第一条）；认不上记 miss、三天后再试；TMDB 出错一小时后再试 */
 async function tvLookup(s, env) {
-  const queries = [...new Set([s.en, s.zh].filter(Boolean))];
-  let hit = null;
-  for (const q of queries) {
-    hit = await tmdbSearch('tv', q, s.year, env).catch(() => null);
-    if (!hit && s.year) hit = await tmdbSearch('tv', q, '', env).catch(() => null);
-    if (hit) break;
-  }
-  if (!hit) return { miss: 1, at: Date.now() };
+  const q = { en: s.en || '', zh: s.zh || '', alt: '', year: s.year || '', tv: true, season: s.season || 0, extra: false, title: s.en || s.zh || '' };
+  let m = null;
+  try { m = await tmdbMatch(q, env, 'tv'); }
+  catch { return { miss: 1, err: 1, at: Date.now() - TV_META_RETRY_MS + 3600e3 }; }
+  if (!m) return { miss: 1, at: Date.now() };
+  const hit = Object.assign({}, m.c.raw, { id: m.c.id });
   const d = await fetchRetry(`https://api.themoviedb.org/3/tv/${hit.id}?api_key=${env.TMDB_API_KEY}&language=zh-CN`, {}, { retries: 1, timeout: 6000 })
     .then(r => (r.ok ? r.json() : null)).catch(() => null);
   const sn = s.season || 1;
@@ -4888,6 +5199,8 @@ async function tvLookup(s, env) {
 function tvApplyMeta(d) {
   for (const s of d.series) {
     const m = d.meta[tvMetaKey(s)];
+    // TMDB 确定认不出这部剧（不是出错）：标出来，前端不排它 —— 没有封面的剧不显示
+    if (m && m.miss && !m.err) s.tmdbMiss = true; else delete s.tmdbMiss;
     if (!m || m.miss) continue;
     s.tmdbId = m.id;
     if (!s.zh && m.zh) { s.zh = m.zh; s.title = m.zh; }
@@ -4935,7 +5248,8 @@ async function tvSave(env, d) {
 async function tvRefresh(env, ctx) {
   const prev = tvMem || await tvLoad(env);
   const { series, eps } = await tvScan(env);
-  const d = { v: 1, at: Date.now(), root: tvRoot(env), series, eps, meta: (prev && prev.root === tvRoot(env) && prev.meta) || {} };
+  const d = { v: 1, mv: TV_META_V, at: Date.now(), root: tvRoot(env), series, eps,
+    meta: (prev && prev.root === tvRoot(env) && prev.mv === TV_META_V && prev.meta) || {} };
   tvApplyMeta(d);
   await tvEnrich(env, d, prev ? 0 : 4000);
   tvMem = d;
@@ -4953,6 +5267,7 @@ async function tvEnrichMore(env) {
 async function tvData(env, ctx, force) {
   const root = tvRoot(env);
   if (!tvMem || tvMem.root !== root) { const d = await tvLoad(env); if (d && d.root === root && d.v === 1) tvMem = d; }
+  if (tvMem && tvMem.mv !== TV_META_V) tvMem.at = 0;     // 旧版匹配的表：照旧先给，后台重扫重认
   if (tvMem && tvMem.root === root && !force) {
     if (Date.now() - (tvMem.at || 0) > TV_FRESH_MS) ctx?.waitUntil?.(singleFlight('tv-scan', () => tvRefresh(env, ctx)).catch(e => console.error('tv scan:', e && e.message)));
     else if (tvMetaPending(tvMem)) ctx?.waitUntil?.(singleFlight('tv-meta', () => tvEnrichMore(env)).catch(() => {}));

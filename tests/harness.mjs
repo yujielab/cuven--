@@ -26,9 +26,11 @@ export const os = { calls: [], subs: [], files: {}, quota: false, loginOk: true 
  */
 export const tv = { entries: [], pageSize: 0, lists: 0 };
 /** TMDB 替身：shows = [{ id, name, original, first, seasons: [{ n, air, count, eps: [{ zh, en, overview, still }] }] }] */
-export const tmdb = { calls: [], shows: [], movies: [], videos: {}, find: {} };
+export const tmdb = { calls: [], shows: [], movies: [], videos: {}, find: {}, fail: null };   // fail(path, q) → true：这次回 500
 /** IMDb GraphQL 替身：status ≠ 200 时照实回那个状态（现实里 Worker 打过去多半是 403）；title = 回给 data.title 的对象 */
 export const imdb = { status: 403, calls: 0, title: null };
+/* iTunes Search：results 原样回给 /search（不设就 404，等于 iTunes 不可用） */
+export const itunes = { results: null, calls: 0 };
 
 class MemCache {
   constructor() { this.m = new Map(); }
@@ -119,6 +121,7 @@ globalThis.fetch = async (input, init = {}) => {
     const p = u.pathname.replace(/^\/3/, ''), q = Object.fromEntries(u.searchParams);
     tmdb.calls.push({ path: p, q });
     if (!q.api_key) return Response.json({ status_message: 'Invalid API key' }, { status: 401 });
+    if (tmdb.fail && tmdb.fail(p, q)) return Response.json({ status_message: 'Internal error' }, { status: 500 });
     const show = id => tmdb.shows.find(x => String(x.id) === String(id));
     const brief = x => ({ id: x.id, name: q.language === 'zh-CN' ? x.name : x.original, original_name: x.original, first_air_date: x.first,
       poster_path: `/p${x.id}.jpg`, backdrop_path: `/b${x.id}.jpg`, overview: '', vote_average: 8 });
@@ -128,10 +131,28 @@ globalThis.fetch = async (input, init = {}) => {
         (!q.year || x.first.startsWith(q.year) || x.seasons.some(se => (se.air || '').startsWith(q.year))));
       return Response.json({ results: res.map(brief) });
     }
+    /* 电影：zh-CN 回中文名，en-US 回英文名（x.en，没写就是文件里那个英文名 x.query）；original_title 是原名。
+       x.q：这部片还会被哪些搜索词搜到（真 TMDB 是模糊搜索 ——「Dune」会同时搜出 1984、2021 与《沙丘2》）；
+       排序按 x.pop 从高到低（模拟「热门的错片排在第一」）；x.poster === null 表示 TMDB 上没有海报；
+       x.aka：别名表 / 各语言译名（罗马音、繁体等，拿不准时才去取） */
+    const movieEn = x => x.en || x.original || x.query || x.title;
+    const movieBrief = x => ({ id: x.id, title: q.language === 'zh-CN' ? x.title : movieEn(x), original_title: x.original || movieEn(x),
+      original_language: x.lang || 'en', release_date: x.date, poster_path: x.poster === null ? null : (x.poster || '/m.jpg'),
+      backdrop_path: x.backdrop, overview: '', vote_average: x.rating || 7, vote_count: x.votes != null ? x.votes : 100, popularity: x.pop || 0 });
     if (p === '/search/movie') {
       const ql = (q.query || '').toLowerCase();
-      return Response.json({ results: tmdb.movies.filter(x => (x.query || x.title).toLowerCase() === ql)
-        .map(x => ({ id: x.id, title: x.title, release_date: x.date, poster_path: '/m.jpg', backdrop_path: x.backdrop, overview: '', vote_average: 7 })) });
+      const res = tmdb.movies.filter(x => [x.query || x.title, ...(x.q || [])].some(n => String(n).toLowerCase() === ql)
+        && (!q.year || String(x.date || '').startsWith(q.year)))
+        .sort((a, b) => (b.pop || 0) - (a.pop || 0));
+      return Response.json({ results: res.map(movieBrief) });
+    }
+    let mm = /^\/movie\/(\d+)$/.exec(p);
+    if (mm) {
+      const x = tmdb.movies.find(z => String(z.id) === mm[1]);
+      if (!x) return Response.json({ status_message: 'not found' }, { status: 404 });
+      return Response.json({ ...movieBrief(x), runtime: 120, genres: [{ name: '剧情' }], imdb_id: 'tt' + x.id,
+        alternative_titles: { titles: (x.aka || []).map(t => ({ iso_3166_1: 'JP', title: t })) },
+        translations: { translations: [{ iso_639_1: 'zh', data: { title: x.title } }, { iso_639_1: 'en', data: { title: movieEn(x) } }] } });
     }
     let m = /^\/(movie|tv)\/(\d+)\/videos$/.exec(p);
     if (m) return Response.json({ id: +m[2], results: (tmdb.videos[m[1] + '/' + m[2]] || [])
@@ -158,6 +179,10 @@ globalThis.fetch = async (input, init = {}) => {
     m = /^\/tv\/(\d+)\/credits$/.exec(p);
     if (m && show(m[1])) return Response.json({ cast: [], crew: [] });
     return Response.json({ status_message: 'not found' }, { status: 404 });
+  }
+  if (u.host === 'itunes.apple.com' && itunes.results) {
+    itunes.calls++;
+    return Response.json({ resultCount: itunes.results.length, results: itunes.results });
   }
   if (u.host === 'api.graphql.imdb.com') {
     imdb.calls++;
