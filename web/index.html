@@ -14930,10 +14930,12 @@ function tvSpecLine(s) {
   return [line, langs].filter(Boolean).join(' · ') || (s.source || '');
 }
 
-/* 集数状态：命名里写了 [Full-9] 而目录里只有 5 个文件时，说实话 */
+/* 集数状态：命名里写了 [Full-9] 而目录里只有 5 个文件时，说实话。
+   目录名没写总集数的，用 TMDB 那一季的集数（/api/tv 的 total）补上「共 N 集」 */
 function tvCountLabel(s) {
   const n = s.episodes || 0;
-  if (s.declared && n < s.declared) return '更新至第 ' + n + ' 集 / 共 ' + s.declared + ' 集';
+  const of = s.declared || s.total || 0;
+  if (of && n < of) return '更新至第 ' + n + ' 集 / 共 ' + of + ' 集';
   if (s.full || (s.declared && n >= s.declared)) return '全 ' + n + ' 集';
   return '更新至第 ' + n + ' 集';
 }

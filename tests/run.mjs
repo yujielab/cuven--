@@ -359,6 +359,95 @@ console.log('\n■ OpenSubtitles 自动补字幕（模拟接口）');
   for (const k of ['OPENSUBTITLES_API_KEY', 'OPENSUBTITLES_USERNAME', 'OPENSUBTITLES_PASSWORD']) delete H.env[k];
 }
 
+console.log('\n■ 剧集：/api/tv、/api/tv/episodes、/api/tmdb/season、/api/tmdb?type=tv');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const get = async u => { const r = await H.call(u, 'GET', { Cookie: cookie }); return { status: r.status, body: await r.json() }; };
+  const ST = '/ram2/怪奇物语 Stranger Things S04 [Full-9] 2160p NF WEB-DL DV Atmos';
+  const LOU = '/ram2/The.Last.of.Us.S02.2160p.MAX.WEB-DL.DDP5.1.Atmos.DV.H.265';
+  const f = (p, size = 1000, at = '2026-01-01T00:00:00Z') => ({ path_display: p, size, server_modified: at });
+  H.tv.entries = [
+    ...[1, 2, 3, 4, 5].map(i => f(`${ST}/Stranger.Things.S04E0${i}.2160p.mkv`, 5000, `2026-03-0${i}T00:00:00Z`)),
+    f(`${ST}/Stranger.Things.S04E03.1080p.mkv`, 2000), f(`${ST}/sample.mkv`, 10), f(`${ST}/Stranger.Things.S04E01.zh.srt`),
+    ...[1, 2, 3].map(i => f(`${LOU}/The.Last.of.Us.S02E0${i}.mkv`)),
+    f('/ram2/繁花 全30集 4K 国语/第01集.mp4'), f('/ram2/繁花 全30集 4K 国语/第十集.mp4'), f('/ram2/繁花 全30集 4K 国语/第02集.mp4'),
+    f('/ram2/Fargo/Season 1/Fargo.S01E01.mkv'), f('/ram2/Fargo/Season 2/Fargo.S02E01.mkv'), f('/ram2/Fargo/Season 2/Fargo.S02E02.mkv'),
+    f('/ram2/Fargo/Specials/Fargo.S00E01.mkv'), f('/ram2/Fargo/Season 2/Featurettes/Making.Of.mkv'),
+    f('/ram2/Mixed Show/Mixed.Show.S01E01.mkv'), f('/ram2/Mixed Show/Mixed.Show.S01E02.mkv'), f('/ram2/Mixed Show/Mixed.Show.S02E01.mkv'),
+    f('/ram2/loose.mkv'),
+  ];
+  H.tv.pageSize = 4;          // 分页：每页 4 条，翻好几页
+  H.tmdb.shows = [
+    { id: 100088, name: '最后生还者', original: 'The Last of Us', first: '2023-01-15',
+      seasons: [{ n: 1, air: '2023-01-15', count: 9 }, { n: 2, air: '2025-04-13', count: 7 }] },
+    { id: 66732, name: '怪奇物语', original: 'Stranger Things', first: '2016-07-15', seasons: [{ n: 4, air: '2022-05-27', count: 9 }] },
+    { id: 60622, name: '冰血暴', original: 'Fargo', first: '2014-04-15',
+      seasons: [{ n: 1, air: '2014-04-15', count: 10 }, { n: 2, air: '2015-10-12', count: 10,
+        eps: [{ zh: '等待达美航空', en: 'Waiting for Dutch', overview: '', still: '/s1.jpg' }, { zh: '在雪地里', en: 'Before the Law', overview: '中文简介', still: '/s2.jpg' }] }] },
+  ];
+  H.tmdb.movies = [{ id: 275, title: 'Fargo', date: '1996-03-08' }];
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  delete H.env.TV_FOLDER;
+
+  const t0 = await get('/api/tv');
+  await settle();
+  const L = t0.body.series || [];
+  const by = p => L.find(s => s.path === p);
+  ok(t0.status === 200 && L.length === 7, `剧集表：7 部（${L.map(s => s.title + (s.season ? ' S' + s.season : '')).join('、')}），根目录散放的文件不算`);
+  const st = by(ST);
+  ok(st && st.zh === '怪奇物语' && st.en === 'Stranger Things' && st.season === 4 && st.declared === 9 && st.res === '4K' &&
+     st.hdr === 'DV' && st.audio === 'Atmos' && st.brand === 'Netflix' && st.episodes === 5 && st.complete === false && st.title === '怪奇物语',
+    '目录名解析：中英名、第 4 季、共 9 集、4K 杜比视界全景声、Netflix；样片与字幕不算集，1080p 重复版合并');
+  ok(st && st.tmdbId === 66732 && st.year === '2022' && st.total === 9 && st.added === '2026-03-05T00:00:00Z',
+    'TMDB 补上编号、这一季的年份、集数；入库时间取最新那集');
+  const lou = by(LOU);
+  ok(lou && lou.zh === '最后生还者' && lou.title === '最后生还者' && lou.year === '2025' && lou.tmdbId === 100088 && lou.brand === 'HBO',
+    '只有英文名的目录：中文名由 TMDB 补（最后生还者），年份是第二季的 2025 而不是首播的 2023');
+  const fh = by('/ram2/繁花 全30集 4K 国语');
+  ok(fh && fh.zh === '繁花' && fh.declared === 30 && fh.langs.join() === '国语' && fh.episodes === 3 && fh.complete === false, '中文目录：全 30 集 / 国语，目前 3 集');
+  ok(by('/ram2/Fargo/Season 1') && by('/ram2/Fargo/Season 2') && by('/ram2/Fargo/Season 2').episodes === 2 && by('/ram2/Fargo/Season 2').title === '冰血暴',
+    'Season 1 / Season 2 子目录各算一季；特别篇与花絮目录不算');
+  ok(by('/ram2/Mixed Show#S1') && by('/ram2/Mixed Show#S1').episodes === 2 && by('/ram2/Mixed Show#S2') && by('/ram2/Mixed Show#S2').season === 2,
+    '一个目录混着两季：按文件里的季号拆成两张卡');
+
+  const lists = H.tv.lists, calls = H.tmdb.calls.length;
+  const t1 = await get('/api/tv');
+  await settle();
+  ok(t1.body.series.length === 7 && H.tv.lists === lists && H.tmdb.calls.length === calls, '10 分钟内再取：直接用存着的表，不再列目录、不再查 TMDB');
+
+  const e1 = await get('/api/tv/episodes?path=' + encodeURIComponent(ST));
+  ok(e1.status === 200 && e1.body.series.id === st.id && e1.body.episodes.map(e => e.ep).join() === '1,2,3,4,5' &&
+     e1.body.episodes[2].name === 'Stranger.Things.S04E03.2160p.mkv', '分集表：按集号排，同一集留大的那个版本');
+  const e2 = await get('/api/tv/episodes?path=' + encodeURIComponent('/ram2/繁花 全30集 4K 国语'));
+  ok(e2.body.episodes.map(e => e.ep).join() === '1,2,10' && e2.body.episodes[2].path === '/ram2/繁花 全30集 4K 国语/第十集.mp4', '「第十集」认成第 10 集');
+  const e3 = await get('/api/tv/episodes?path=' + encodeURIComponent('/ram2/没有这部剧'));
+  ok(e3.status === 404, '不存在的剧：404');
+
+  const s2 = await get('/api/tmdb/season?id=60622&season=2');
+  const eps = s2.body.episodes || [];
+  ok(eps.length === 2 && eps[0].name === '等待达美航空' && eps[0].overview === 'EN: Waiting for Dutch' && eps[1].overview === '中文简介' &&
+     eps[0].still === 'https://image.tmdb.org/t/p/w780/s1.jpg' && eps[0].runtime === 50, 'TMDB 一季：中文集名，中文简介缺的补英文，剧照 w780');
+  const n = H.tmdb.calls.length;
+  await get('/api/tmdb/season?id=60622&season=2'); await settle();
+  ok(H.tmdb.calls.length === n, '一季的分集信息有缓存');
+
+  const m1 = await get('/api/tmdb?query=Fargo&type=tv&logo=1&year=2015');
+  ok(m1.body && m1.body.type === 'tv' && m1.body.id === 60622 && m1.body.posterClean === 'https://image.tmdb.org/t/p/w780/clean.jpg',
+    'type=tv：同名电影《冰血暴》(1996) 不会顶掉剧集；第二季的年份也能搜到；带纯净海报');
+  const m2 = await get('/api/tmdb?query=Fargo');
+  ok(m2.body && m2.body.type === 'movie' && m2.body.id === 275, '不带 type：老规矩，电影优先');
+
+  // TV 目录不存在 → 空表（前端据此整段不显示），不报错
+  H.env.TV_FOLDER = '/nope';
+  const t2 = await get('/api/tv');
+  await settle();
+  ok(t2.status === 200 && Array.isArray(t2.body.series) && t2.body.series.length === 0, 'TV_FOLDER 不存在：回空表');
+  delete H.env.TV_FOLDER; delete H.env.TMDB_API_KEY;
+  H.tv.entries = []; H.tv.pageSize = 0;
+}
+
 console.log('\n■ ffmpeg 作为 HLS 客户端（HTTP）');
 {
   const srv = http.createServer(async (req, res) => {

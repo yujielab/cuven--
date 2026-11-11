@@ -20,6 +20,13 @@ export const net = { chunkDelayMs: 0, fail: null };
  * files 是 file_id → { text } 或 { bytes }；quota=true 时下载回 406；calls 记下每一次请求
  */
 export const os = { calls: [], subs: [], files: {}, quota: false, loginOk: true };
+/**
+ * 剧集目录替身：entries 是 Dropbox 风格的文件条目（path_display / name / size / server_modified），
+ * 递归列 /ram2 时按 pageSize 分页（0 = 一页给完）；lists 记下 list_folder 被调了几次
+ */
+export const tv = { entries: [], pageSize: 0, lists: 0 };
+/** TMDB 替身：shows = [{ id, name, original, first, seasons: [{ n, air, count, eps: [{ zh, en, overview, still }] }] }] */
+export const tmdb = { calls: [], shows: [], movies: [] };
 
 class MemCache {
   constructor() { this.m = new Map(); }
@@ -52,6 +59,23 @@ globalThis.fetch = async (input, init = {}) => {
     const { path: p } = await req.json();
     if (!fs.existsSync(localPath(p))) return new Response('not found', { status: 409 });
     return Response.json({ link: 'https://dl.mock/f?p=' + encodeURIComponent(p), metadata: meta(p) });
+  }
+  if (u.host === 'api.dropboxapi.com' && (u.pathname === '/2/files/list_folder' || u.pathname === '/2/files/list_folder/continue')) {
+    const body = await req.clone().json();
+    const tvPage = from => {
+      const all = tv.entries.filter(e => e.path_display.toLowerCase().startsWith(tv.prefix));
+      const n = tv.pageSize || all.length || 1;
+      const entries = all.slice(from, from + n).map(e => ({ '.tag': 'file', size: 1000, server_modified: '2026-01-01T00:00:00Z', ...e, name: e.path_display.split('/').pop() }));
+      return Response.json({ entries, has_more: from + n < all.length, cursor: 'tv:' + (from + n) });
+    };
+    if (u.pathname.endsWith('/continue')) { tv.lists++; return tvPage(+String(body.cursor).slice(3)); }
+    if (body.recursive) {
+      tv.lists++;
+      tv.prefix = String(body.path || '').toLowerCase() + '/';
+      if (!tv.entries.some(e => e.path_display.toLowerCase().startsWith(tv.prefix)))
+        return Response.json({ error_summary: 'path/not_found/..', error: { '.tag': 'path', path: { '.tag': 'not_found' } } }, { status: 409 });
+      return tvPage(0);
+    }
   }
   if (u.host === 'api.dropboxapi.com' && u.pathname === '/2/files/list_folder') {
     const { path: p } = await req.json();
@@ -87,6 +111,45 @@ globalThis.fetch = async (input, init = {}) => {
       return Response.json({ link: `https://dl.os.mock/${body && body.file_id}.srt`, file_name: 'sub.srt', requests: 1, remaining: 99, message: '', reset_time: '', reset_time_utc: '' });
     }
     return Response.json({ message: 'not found' }, { status: 404 });
+  }
+  if (u.host === 'api.themoviedb.org') {
+    const p = u.pathname.replace(/^\/3/, ''), q = Object.fromEntries(u.searchParams);
+    tmdb.calls.push({ path: p, q });
+    if (!q.api_key) return Response.json({ status_message: 'Invalid API key' }, { status: 401 });
+    const show = id => tmdb.shows.find(x => String(x.id) === String(id));
+    const brief = x => ({ id: x.id, name: q.language === 'zh-CN' ? x.name : x.original, original_name: x.original, first_air_date: x.first,
+      poster_path: `/p${x.id}.jpg`, backdrop_path: `/b${x.id}.jpg`, overview: '', vote_average: 8 });
+    if (p === '/search/tv') {
+      const ql = (q.query || '').toLowerCase();
+      const res = tmdb.shows.filter(x => [x.name, x.original].some(n => n && n.toLowerCase() === ql) &&
+        (!q.year || x.first.startsWith(q.year) || x.seasons.some(se => (se.air || '').startsWith(q.year))));
+      return Response.json({ results: res.map(brief) });
+    }
+    if (p === '/search/movie') {
+      const ql = (q.query || '').toLowerCase();
+      return Response.json({ results: tmdb.movies.filter(x => x.title.toLowerCase() === ql)
+        .map(x => ({ id: x.id, title: x.title, release_date: x.date, poster_path: '/m.jpg', overview: '', vote_average: 7 })) });
+    }
+    let m = /^\/tv\/(\d+)$/.exec(p);
+    if (m && show(m[1])) {
+      const x = show(m[1]);
+      return Response.json({ ...brief(x), seasons: x.seasons.map(se => ({ season_number: se.n, air_date: se.air, episode_count: se.count })),
+        genres: [{ name: '剧情' }], episode_run_time: [50], external_ids: { imdb_id: 'tt' + x.id } });
+    }
+    m = /^\/tv\/(\d+)\/season\/(\d+)$/.exec(p);
+    if (m && show(m[1])) {
+      const se = show(m[1]).seasons.find(z => z.n === +m[2]);
+      if (!se) return Response.json({ status_message: 'not found' }, { status: 404 });
+      const zh = q.language === 'zh-CN';
+      return Response.json({ name: `第 ${se.n} 季`, episodes: (se.eps || []).map((e, i) => ({ episode_number: i + 1,
+        name: zh ? e.zh : e.en, overview: zh ? (e.overview || '') : 'EN: ' + e.en, still_path: e.still || null, runtime: 50, air_date: se.air })) });
+    }
+    m = /^\/tv\/(\d+)\/images$/.exec(p);
+    if (m && show(m[1])) return Response.json({ logos: [{ file_path: '/logo.png', iso_639_1: 'zh', aspect_ratio: 3 }],
+      posters: [{ file_path: '/titled.jpg', iso_639_1: 'en', vote_average: 9 }, { file_path: '/clean.jpg', iso_639_1: null, vote_average: 5 }], backdrops: [] });
+    m = /^\/tv\/(\d+)\/credits$/.exec(p);
+    if (m && show(m[1])) return Response.json({ cast: [], crew: [] });
+    return Response.json({ status_message: 'not found' }, { status: 404 });
   }
   if (u.host === 'dl.os.mock') {
     const f = os.files[u.pathname.slice(1).replace(/\.srt$/, '')];
