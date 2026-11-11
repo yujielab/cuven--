@@ -5727,6 +5727,9 @@ html.rail .net-banner { left: calc(50% + (var(--rail-space) - env(safe-area-inse
   html.rail .sc-note { bottom: max(14px, calc(10px + env(safe-area-inset-bottom))); }
 }
 
+/* 没有封面的片子不显示之后，一排可能整排都没了：那一段（连同标题）一起藏起来 */
+.section:has(> .scroll-row:empty):not(:has(.year-tv.on)) { display: none; }   /* 年份轨道：同年份的剧集还在就不藏 */
+
 /* ══════════ Mac 大屏：MacBook Pro 16" → iMac → Studio Display → Pro Display XDR ══════════
    macOS 的「looks like」分辨率已经替我们把物理尺寸换算好了：同一个 15px 的字，在 14" MacBook
    Pro 和 32" Pro Display XDR 上看着差不多大。可人离 XDR 远得多，屏幕又宽出一倍 —— 原来一切
@@ -7154,47 +7157,57 @@ body.voice-on .dock > *{ pointer-events:none !important; }
 
 #cvlHost .cvl-scrim {
   position: absolute; inset: 0; z-index: 1; opacity: 0; pointer-events: none;
-  background: linear-gradient(to bottom,
-    rgba(0,0,0,.20)  0%,
-    rgba(0,0,0,.30) 40%,
-    rgba(0,0,0,.48) 76%,
-    rgba(0,0,0,.60) 100%);
-}
-#cvlHost .cvl-dock { z-index: 2; }
-
-/* ── SHEET ─────────────────────────────────────────────────────────── */
-#cvlHost .cvl-dock {
-  position: absolute; left: 50%; bottom: 0; transform: translateX(-50%);
-  width: 100%; max-width: var(--cvl-max);
-  height: calc(var(--cvl-h) + var(--cvl-gap) + 24px);
-  padding-bottom: env(safe-area-inset-bottom);
-  /* 输入法弹起时整张 sheet 骑到键盘上沿（iOS 的布局视口不随键盘变，
-     fixed 元素照旧钉在屏底 → 只有 visualViewport 量得准，见 JS 里的 initKb） */
-  bottom: var(--cvl-kb, 0px);
-  transition: height .5s var(--cvl-ios), bottom .36s var(--cvl-ios);
-}
-#cvlHost .cvl-sheet-back {
-  position: absolute; left: 44px; right: 44px; bottom: var(--cvl-gap);
-  height: calc(var(--cvl-h) - 36px);
-  border-radius: 30px; background: var(--cvl-sheet-back);
-  transition: height .5s var(--cvl-ios);
-}
-#cvlHost .cvl-sheet {
-  position: absolute; left: var(--cvl-gap); right: var(--cvl-gap); bottom: var(--cvl-gap);
-  height: var(--cvl-h);
-  border-radius: var(--cvl-r); background: var(--cvl-sheet);
-  overflow: hidden; isolation: isolate;
-  box-shadow: 0 -1px 0 0 rgba(255,255,255,.06) inset, 0 -20px 50px rgba(0,0,0,.6);
-  transition: height .5s var(--cvl-ios);
+  /* 品牌区压一点暗，白色字标在流体最亮的那一刻也读得清 */
+  background: linear-gradient(to bottom, rgba(0,0,0,.34) 0%, rgba(0,0,0,.16) 26%, rgba(0,0,0,.30) 100%);
 }
 
-/* 环境脉冲 · 裁剪层与混合层分离（overflow 对合成层只裁矩形，靠 clip-path 补圆角） */
-#cvlHost .cvl-fx-clip {
-  position: absolute; inset: 0; pointer-events: none;
-  border-radius: var(--cvl-r); overflow: hidden;
-  clip-path: inset(0 round var(--cvl-r));
+/* ══ 布局：品牌区 + 白色面板 ═══════════════════════════════════════════
+   上半截是品牌区 —— Sky Pro 流体底图铺满整屏，从白色面板上沿露出来；左上角圆形返回 / 关闭钮，
+   居中 Cuven max 字标，登录成功时蓝色脉冲从字标向外扩。下半截是一整张白色圆角面板：
+   「Cuven 账户」小字标、左对齐的大标题、浅灰填充的输入框、黑色胶囊主按钮、分割线、账户体系说明。
+   手机上面板贴到屏底、内容在面板里滚；宽屏上收成居中的一张卡，四周露出流体。
+   输入法弹起时面板整体上移（品牌区让出来），底边骑在键盘上沿 —— --cvl-kb 由 JS 按 visualViewport 写入。 */
+#cvlHost {
+  --cvl-head: clamp(118px, 24svh, 250px);       /* 面板上沿离屏顶（含状态栏） */
+  --cvl-sheet: #ffffff;
+  --cvl-ink:   #1d1d1f;
+  --cvl-ink-2: #3a3a3c;
+  --cvl-ink-3: #6e6e73;
+  --cvl-fill:  #ececf0;
+  --cvl-line:  #e4e4e9;
+  --cvl-r:     40px;
+  --cvl-pad:   24px;
 }
-#cvlHost .cvl-fx { position: absolute; left: 50%; top: 145px; width: 0; height: 0; mix-blend-mode: screen; }
+#cvlHost .cvl-head {
+  position: absolute; left: 0; right: 0; top: 0; z-index: 3;
+  height: var(--cvl-head);
+  padding-top: env(safe-area-inset-top, 0px);
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+/* 品牌字标：与播放加载画面那枚 Cuven max 同一套字（圆体、max 粗而大） */
+#cvlHost .cvl-tile { position: relative; z-index: 3; will-change: transform; }
+#cvlHost .cvl-tile-inner { position: relative; }
+#cvlHost .cvl-word {
+  display: flex; flex-direction: column; align-items: center; line-height: 1; color: #fff;
+  font-family: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+  text-shadow: 0 2px 24px rgba(10, 9, 15, .34);
+  -webkit-user-select: none; user-select: none;
+}
+#cvlHost .cvl-word .w1 { font-size: clamp(16px, 2.7svh, 25px); font-weight: 500; letter-spacing: -.01em; }
+#cvlHost .cvl-word .w2 { margin-top: -.03em; font-size: clamp(38px, 6.6svh, 64px); font-weight: 800; letter-spacing: -.045em; }
+#cvlHost .cvl-tile-flash {
+  position: absolute; left: 50%; top: 50%; width: 220px; height: 150px; margin: -75px 0 0 -110px;
+  border-radius: 50%; opacity: 0; pointer-events: none;
+  background: radial-gradient(closest-side, rgba(255,255,255,.55), rgba(var(--cvl-glow-rgb),.3) 55%, transparent);
+}
+
+/* 蓝色脉冲：中心落在字标上。铺在整层上、压在白色面板之下 —— 往外扩时只在流体那一截看得见 */
+#cvlHost .cvl-fx-clip { position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; }
+#cvlHost .cvl-fx {
+  position: absolute; left: 50%; width: 0; height: 0; mix-blend-mode: screen;
+  top: calc(env(safe-area-inset-top, 0px) + (var(--cvl-head) - env(safe-area-inset-top, 0px)) / 2);
+}
 #cvlHost .cvl-fx > * {
   position: absolute; left: -380px; top: -380px; width: 760px; height: 760px;
   border-radius: 50%; opacity: 0; will-change: transform, opacity;
@@ -7213,213 +7226,178 @@ body.voice-on .dock > *{ pointer-events:none !important; }
     rgba(var(--cvl-glow-rgb),0) 80%);
   filter: blur(26px);
 }
-
-/* 左上角：关闭 / 返回 */
-#cvlHost .cvl-nav {
-  position: absolute; left: 20px; top: 20px; width: 38px; height: 38px; z-index: 5;
-  display: grid; place-items: center; border: 0; cursor: pointer;
-  border-radius: 50%; background: rgba(255,255,255,.085);
-  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-  transition: background .18s ease, transform .18s var(--cvl-out), opacity .2s ease;
-}
-#cvlHost .cvl-nav:active { transform: scale(.92); background: rgba(255,255,255,.14); }
-#cvlHost .cvl-nav[hidden] { display: none; }
-#cvlHost .cvl-nav svg { width: 17px; height: 17px; stroke: #fff; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; fill: none; }
-#cvlHost .cvl-nav .cvl-ico-back { display: none; }
-#cvlHost .cvl-nav.is-back .cvl-ico-close { display: none; }
-#cvlHost .cvl-nav.is-back .cvl-ico-back  { display: block; }
-
-/* App 图标 */
-#cvlHost .cvl-tile {
-  position: absolute; left: 50%; top: 103px; width: 84px; height: 84px;
-  transform: translate(-50%, var(--cvl-ty)); will-change: transform; z-index: 3;
-  transition: transform .5s var(--cvl-out);
-}
-#cvlHost .cvl-tile-inner {
-  position: relative; width: 100%; height: 100%;
-  border-radius: var(--cvl-r-tile); clip-path: inset(0 round var(--cvl-r-tile));
-  background: #0b1030; overflow: hidden; will-change: transform;
-  box-shadow: 0 0 0 1px var(--cvl-hairline), 0 8px 24px rgba(0,0,0,.55);
-}
-#cvlHost .cvl-tile-inner img { width: 100%; height: 100%; object-fit: cover; display: block; }
-#cvlHost .cvl-tile-fallback {
-  position: absolute; inset: 0; display: grid; place-items: center;
-  background: linear-gradient(150deg,#1b3ce0,#04061f);
-  font-size: 34px; font-weight: 700; color: #fff; letter-spacing: -1px;
-}
-#cvlHost .cvl-tile-flash {
-  position: absolute; inset: 0; opacity: 0;
-  background: radial-gradient(circle at 50% 50%,
-    rgba(255,255,255,.5) 0%, rgba(var(--cvl-glow-rgb),.3) 45%, transparent 72%);
-}
-/* 面容 ID 页：图标外的呼吸扫描环 */
+/* 面容 ID 页：字标外一圈呼吸的扫描环 */
 #cvlHost .cvl-scan {
-  position: absolute; left: 50%; top: 103px; width: 84px; height: 84px; z-index: 2;
-  transform: translate(-50%, var(--cvl-ty)); opacity: 0;
-  border-radius: 30px; box-shadow: 0 0 0 1.5px rgba(var(--cvl-glow-rgb),.55);
+  position: absolute; left: 50%; z-index: 2; width: 170px; height: 118px;
+  top: calc(env(safe-area-inset-top, 0px) + (var(--cvl-head) - env(safe-area-inset-top, 0px)) / 2);
+  transform: translate(-50%, -50%); opacity: 0; border-radius: 40px;
+  box-shadow: 0 0 0 1.5px rgba(var(--cvl-glow-rgb),.6), 0 0 28px rgba(var(--cvl-glow-rgb),.35);
   transition: opacity .35s ease;
 }
 #cvlHost[data-pane="face"] .cvl-scan { opacity: 1; animation: cvl-breathe 2.1s ease-in-out infinite; }
 @keyframes cvl-breathe {
-  0%,100% { transform: translate(-50%, var(--cvl-ty)) scale(1);    opacity: .85; }
-  50%     { transform: translate(-50%, var(--cvl-ty)) scale(1.22); opacity: .12; }
+  0%,100% { transform: translate(-50%, -50%) scale(1);    opacity: .85; }
+  50%     { transform: translate(-50%, -50%) scale(1.16); opacity: .12; }
 }
 
-/* ── 页（pane）：同一张 sheet 内切换，高度跟随内容 ─────────────────── */
+/* 左上角：关闭 / 返回（品牌区里的半透明圆钮） */
+#cvlHost .cvl-nav {
+  position: absolute; z-index: 6; left: 16px; top: calc(env(safe-area-inset-top, 0px) + 12px);
+  width: 40px; height: 40px; display: grid; place-items: center; border: 0; cursor: pointer;
+  border-radius: 50%; background: rgba(255,255,255,.16);
+  backdrop-filter: blur(20px) saturate(1.4); -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  transition: background .18s ease, transform .18s var(--cvl-out), opacity .2s ease;
+}
+#cvlHost .cvl-nav:active { transform: scale(.92); background: rgba(255,255,255,.26); }
+#cvlHost .cvl-nav:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+#cvlHost .cvl-nav[hidden] { display: none; }
+#cvlHost .cvl-nav svg { width: 18px; height: 18px; stroke: #fff; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+#cvlHost .cvl-nav .cvl-ico-back { display: none; }
+#cvlHost .cvl-nav.is-back .cvl-ico-close { display: none; }
+#cvlHost .cvl-nav.is-back .cvl-ico-back  { display: block; }
+
+/* ── 白色面板 ─────────────────────────────────────────────────────── */
+#cvlHost .cvl-dock {
+  position: absolute; z-index: 4; left: 0; right: 0;
+  top: max(calc(env(safe-area-inset-top, 0px) + 64px), calc(var(--cvl-head) - var(--cvl-kb, 0px)));
+  bottom: var(--cvl-kb, 0px);
+  transition: top .36s var(--cvl-ios), bottom .36s var(--cvl-ios);
+}
+#cvlHost .cvl-sheet-back { display: none; }
+#cvlHost .cvl-sheet {
+  position: absolute; inset: 0;
+  border-radius: var(--cvl-r) var(--cvl-r) 0 0;
+  background: var(--cvl-sheet); color: var(--cvl-ink);
+  overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;                       /* 本层吃掉了所有手势（防背后主页被划动），面板自己要能滚 */
+  padding: 34px max(var(--cvl-pad), calc(env(safe-area-inset-right, 0px) + 16px)) calc(30px + env(safe-area-inset-bottom, 0px))
+           max(var(--cvl-pad), calc(env(safe-area-inset-left, 0px) + 16px));
+  box-shadow: 0 -12px 44px rgba(0,0,0,.28);
+  scrollbar-width: none;
+}
+#cvlHost .cvl-sheet::-webkit-scrollbar { display: none; }
+
+/* 「Cuven 账户」小字标（面板里的品牌签名，与上面的 Cuven max 字标同一套圆体） */
+#cvlHost .cvl-mark {
+  display: flex; align-items: baseline; gap: 5px; margin: 2px 0 30px; color: #000; line-height: 1;
+  -webkit-user-select: none; user-select: none;
+}
+#cvlHost .cvl-mark b {
+  font-family: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+  font-size: 27px; font-weight: 800; letter-spacing: -.035em;
+}
+#cvlHost .cvl-mark span { font-size: 18px; font-weight: 600; letter-spacing: .04em; }
+
+/* 各页：同一张面板里交叉切换；容器高度跟着当前页走（--cvl-h 由 JS 量好写入） */
+#cvlHost .cvl-panes { position: relative; height: var(--cvl-h, 330px); transition: height .5s var(--cvl-ios); }
 #cvlHost .cvl-pane {
-  position: absolute; left: 0; right: 0; top: var(--pt, 136px);
-  padding: 0 24px; z-index: 2;
+  position: absolute; left: 0; right: 0; top: 0; padding: 0; z-index: 2;
   opacity: 0; visibility: hidden; pointer-events: none;
   transform: translateY(8px);
   transition: opacity .24s var(--cvl-in), transform .3s var(--cvl-out), visibility 0s linear .3s;
 }
 #cvlHost .cvl-pane.is-on {
-  opacity: 1; visibility: visible; pointer-events: auto;
-  transform: none;
+  opacity: 1; visibility: visible; pointer-events: auto; transform: none;
   transition: opacity .34s var(--cvl-ios) .06s, transform .44s var(--cvl-ios) .06s, visibility 0s;
 }
 /* 成功动效期间：旧页留在原位不参与 class 过渡，交给 WAAPI 逐条淡出 */
-#cvlHost .cvl-pane.cvl-exiting {
-  opacity: 1; visibility: visible; transform: none;
-  transition: none; pointer-events: none;
-}
-#cvlHost .cvl-pane-done { --pt: 205px; }
+#cvlHost .cvl-pane.cvl-exiting { opacity: 1; visibility: visible; transform: none; transition: none; pointer-events: none; }
 
 #cvlHost .cvl-title {
-  text-align: center; font-size: 21px; line-height: 1.2; font-weight: 700;
-  letter-spacing: -.45px; color: var(--cvl-ink);
+  text-align: left; font-size: clamp(27px, 7.8vw, 33px); line-height: 1.2; font-weight: 700;
+  letter-spacing: -.02em; color: var(--cvl-ink);
 }
 #cvlHost .cvl-sub {
-  margin-top: 5px; text-align: center; font-size: 15px; line-height: 1.35;
-  font-weight: 400; letter-spacing: -.15px; color: var(--cvl-ink-2);
-  min-height: 20px;
+  margin-top: 14px; text-align: left; font-size: 17px; line-height: 1.5; font-weight: 400;
+  letter-spacing: 0; color: var(--cvl-ink-2); min-height: 0;
 }
 #cvlHost .cvl-sub b { color: var(--cvl-ink); font-weight: 600; }
-#cvlHost .cvl-pane-done .cvl-sub { margin-top: 7px; font-size: 16px; letter-spacing: -.2px; }
 
-/* 密码框按需展开：认出是账号才出现，认出是邮箱就不出现。
-   用 hidden 控 display 而不是 max-height 动画 —— sizeSheet() 靠 offsetHeight
-   量高度，max-height 过渡期间量到的是中间值，sheet 会跟着抖。
-   display 切换让布局瞬间正确，位移交给 sheet 自己那条 .5s 高度过渡，
-   字段本身只做淡入（opacity/transform 不参与布局）。 */
+/* 密码框按需展开：认出是账号才出现，认出是邮箱就不出现（见 JS revealPass）。
+   用 hidden 控 display —— sizeSheet() 靠 offsetHeight 量高度，max-height 动画会让量到的值跟着抖 */
 #cvlHost .cvl-reveal { opacity: 0; transform: translateY(-8px); }
-#cvlHost .cvl-reveal.is-on {
-  opacity: 1; transform: none;
-  transition: opacity .34s var(--cvl-ios) .06s, transform .42s var(--cvl-ios) .06s;
-}
+#cvlHost .cvl-reveal.is-on { opacity: 1; transform: none; transition: opacity .34s var(--cvl-ios) .06s, transform .42s var(--cvl-ios) .06s; }
 #cvlHost .cvl-reveal[hidden] { display: none; }
 
-/* 输入 */
-#cvlHost .cvl-field { position: relative; height: 52px; margin-top: 8px; }
-#cvlHost .cvl-field:first-of-type { margin-top: 16px; }
+/* 输入：浅灰填充、左对齐；聚焦时变白底 + 深色描边 */
+#cvlHost .cvl-field { position: relative; height: 60px; margin-top: 12px; }
+#cvlHost .cvl-field:first-of-type { margin-top: 30px; }
 #cvlHost .cvl-field input {
-  width: 100%; height: 52px; border-radius: var(--cvl-pill);
-  border: 1.5px solid rgba(255,255,255,.12);
-  background: rgba(255,255,255,.06);
-  backdrop-filter: blur(30px) saturate(150%); -webkit-backdrop-filter: blur(30px) saturate(150%);
-  padding: 0 46px; font-size: 17px; font-weight: 500; text-align: center;
-  color: var(--cvl-ink); outline: none; font-family: inherit;
-  box-shadow: inset 0 1px 1px rgba(255,255,255,.08);
-  touch-action: manipulation;
-  transition: border-color .3s ease, box-shadow .3s ease, background .3s ease, opacity .3s ease;
+  width: 100%; height: 60px; border-radius: 12px; border: 1.5px solid transparent;
+  background: var(--cvl-fill); color: var(--cvl-ink);
+  padding: 0 52px 0 18px; font-size: 17px; font-weight: 500; text-align: left;
+  outline: none; font-family: inherit; touch-action: manipulation;
+  transition: border-color .2s ease, background .2s ease, box-shadow .2s ease, opacity .2s ease;
 }
-#cvlHost .cvl-field input::placeholder { color: #636366; font-weight: 400; }
-#cvlHost .cvl-field input:focus {
-  border-color: rgba(10,132,255,.5); background: rgba(255,255,255,.1);
-  box-shadow: inset 0 1px 1px rgba(255,255,255,.1), 0 0 0 4px rgba(10,132,255,.18);
-}
-#cvlHost .cvl-field input:disabled { opacity: .4; }
+#cvlHost .cvl-field input::placeholder { color: var(--cvl-ink-3); font-weight: 400; }
+#cvlHost .cvl-field input:focus { background: #fff; border-color: var(--cvl-ink); box-shadow: 0 0 0 4px rgba(0,0,0,.06); }
+#cvlHost .cvl-field input:disabled { opacity: .45; }
 #cvlHost .cvl-eye {
-  position: absolute; right: 8px; top: 8px; width: 36px; height: 36px;
+  position: absolute; right: 8px; top: 10px; width: 40px; height: 40px;
   display: grid; place-items: center; border: 0; background: none; cursor: pointer;
-  color: rgba(255,255,255,.4); border-radius: 50%;
+  color: #8e8e93; border-radius: 50%;
 }
-#cvlHost .cvl-eye:active { color: #fff; background: rgba(255,255,255,.08); }
-#cvlHost .cvl-eye svg { width: 19px; height: 19px; }
+#cvlHost .cvl-eye:active { color: var(--cvl-ink); background: rgba(0,0,0,.06); }
+#cvlHost .cvl-eye svg { width: 20px; height: 20px; }
 #cvlHost .cvl-chk {
-  position: absolute; left: 10px; top: 8px; width: 36px; height: 36px;
-  display: grid; place-items: center; pointer-events: none;
-  opacity: 0; transition: opacity .25s ease;
+  position: absolute; right: 12px; top: 12px; width: 36px; height: 36px;
+  display: grid; place-items: center; pointer-events: none; opacity: 0; transition: opacity .25s ease;
 }
 #cvlHost .cvl-chk.on { opacity: 1; }
-#cvlHost .cvl-chk svg {
-  width: 18px; height: 18px; stroke: var(--cvl-green); stroke-width: 2.6;
-  fill: none; stroke-linecap: round; stroke-linejoin: round;
-}
+#cvlHost .cvl-chk svg { width: 19px; height: 19px; stroke: #248a3d; stroke-width: 2.6; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 
-/* 6 位验证码 */
-#cvlHost .cvl-code { display: flex; gap: 8px; justify-content: center; margin-top: 18px; }
+/* 6 位验证码：与输入框同一套填充，格子随面板宽度收放 */
+#cvlHost .cvl-code { display: flex; gap: 8px; justify-content: flex-start; margin-top: 30px; }
 #cvlHost .cvl-code input {
-  width: 46px; height: 58px; padding: 0; text-align: center;
+  flex: 1 1 0; min-width: 0; max-width: 54px; height: 62px; padding: 0; text-align: center;
   font-family: inherit; font-size: 24px; font-weight: 600; color: var(--cvl-ink);
-  border-radius: 16px; border: 1.5px solid rgba(255,255,255,.12);
-  background: rgba(255,255,255,.06); outline: none;
-  box-shadow: inset 0 1px 1px rgba(255,255,255,.08);
-  transition: border-color .22s ease, box-shadow .22s ease, background .22s ease;
+  border-radius: 12px; border: 1.5px solid transparent; background: var(--cvl-fill); outline: none;
+  transition: border-color .2s ease, background .2s ease, box-shadow .2s ease;
 }
-#cvlHost .cvl-code input:focus {
-  border-color: rgba(10,132,255,.5); background: rgba(255,255,255,.1);
-  box-shadow: inset 0 1px 1px rgba(255,255,255,.1), 0 0 0 4px rgba(10,132,255,.18);
-}
-#cvlHost .cvl-code.err input { border-color: rgba(255,69,58,.55); }
+#cvlHost .cvl-code input:focus { background: #fff; border-color: var(--cvl-ink); box-shadow: 0 0 0 4px rgba(0,0,0,.06); }
+#cvlHost .cvl-code.err input { border-color: rgba(215,0,21,.7); }
 
-/* 状态行 */
+/* 状态行：没字的时候不占地方（输入框与按钮之间就是一个按钮的间距）；有字时页高变了，
+   ResizeObserver 让面板里的页容器跟着长（见 JS） */
+#cvlHost .cvl-status:empty { min-height: 0; margin-top: 0; }
 #cvlHost .cvl-status {
-  margin-top: 8px; min-height: 18px; text-align: center;
-  font-size: 13px; line-height: 18px; font-weight: 500; letter-spacing: .2px;
-  color: var(--cvl-ink-2); transition: color .3s ease;
+  margin-top: 10px; min-height: 18px; text-align: left;
+  font-size: 14px; line-height: 18px; font-weight: 500; color: var(--cvl-ink-3); transition: color .3s ease;
 }
-#cvlHost .cvl-status.found { color: var(--cvl-blue);  font-weight: 600; }
-#cvlHost .cvl-status.good  { color: var(--cvl-green); font-weight: 600; }
-#cvlHost .cvl-status.bad   { color: var(--cvl-red);   font-weight: 600; }
+#cvlHost .cvl-status.found { color: #0066cc; font-weight: 600; }
+#cvlHost .cvl-status.good  { color: #248a3d; font-weight: 600; }
+#cvlHost .cvl-status.bad   { color: #d70015; font-weight: 600; }
 
-/* 主按钮：浅白毛玻璃。
-   底下是不透明的 sheet，backdrop-filter 其实没什么可模糊的 —— 它在这里的作用
-   是跟输入框保持同一套材质声明（真正撑起"玻璃感"的是半透明白 + 顶缘高光 + 细描边）。
-   禁用态不用 opacity 压整块：一是入场那组 WAAPI 动画会碰 opacity（见 JS 里
-   fill:'backwards' 那条注释），二是 iOS 的做法本来就是靠填充强弱区分可用性。 */
+/* 主按钮：黑色胶囊。不可用时是浅灰底 —— 不用 opacity 压整块：入场那组 WAAPI 动画会碰 opacity */
 #cvlHost .cvl-cta {
   position: relative; display: grid; place-items: center;
-  width: 100%; height: 56px; margin-top: 12px;
-  border: 0; border-radius: var(--cvl-pill); cursor: pointer;
-  background: rgba(255,255,255,.17); color: #fff;
-  backdrop-filter: blur(30px) saturate(180%);
-  -webkit-backdrop-filter: blur(30px) saturate(180%);
-  font-family: inherit; font-size: 18px; font-weight: 600; letter-spacing: -.2px;
-  box-shadow:
-    inset 0 1.5px 0 rgba(255,255,255,.30),
-    inset 0 0 0 1px rgba(255,255,255,.16),
-    0 10px 32px rgba(0,0,0,.38);
-  transition: transform .35s var(--cvl-out), background .3s ease, box-shadow .3s ease, color .3s ease;
+  width: 100%; height: 56px; margin-top: 24px;
+  border: 0; border-radius: 999px; cursor: pointer;
+  background: #000; color: #fff; box-shadow: none;
+  font-family: inherit; font-size: 17px; font-weight: 600; letter-spacing: 0;
+  transition: transform .3s var(--cvl-out), background .2s ease, color .2s ease;
 }
-#cvlHost .cvl-cta:active:not(:disabled) {
-  transform: scale(1.015,.955);
-  background: rgba(255,255,255,.25);
-}
-#cvlHost .cvl-cta:disabled {
-  cursor: default;
-  background: rgba(255,255,255,.06);
-  color: rgba(255,255,255,.36);
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.07);
-}
+#cvlHost .cvl-cta:active:not(:disabled) { transform: scale(.98); background: #2c2c2e; }
+#cvlHost .cvl-cta:focus-visible { outline: 2px solid #000; outline-offset: 3px; }
+#cvlHost .cvl-cta:disabled { cursor: default; background: #d1d1d6; color: #fff; }
 #cvlHost .cvl-cta .lbl { transition: opacity .2s ease; }
 #cvlHost .cvl-cta.busy .lbl { opacity: 0; }
 #cvlHost .cvl-cta .spin { position: absolute; left: 50%; top: 50%; margin: -10px 0 0 -10px; opacity: 0; transition: opacity .2s ease; }
 #cvlHost .cvl-cta.busy .spin { opacity: 1; }
 
-/* 次级链接行 */
+/* 次级链接（忘记密码 / 改用密码 / 重新发送 / 暂不设定…） */
 #cvlHost .cvl-alt {
-  display: block; width: 100%; height: 30px; margin-top: 8px;
+  display: block; width: 100%; height: 44px; margin-top: 6px;
   border: 0; background: none; cursor: pointer; font-family: inherit;
-  color: rgba(255,255,255,.55); font-size: 14px; font-weight: 500; letter-spacing: .2px;
-  border-radius: var(--cvl-pill); transition: color .3s ease, background .3s ease, opacity .3s ease;
+  color: var(--cvl-ink-2); font-size: 15px; font-weight: 600; letter-spacing: 0;
+  border-radius: 999px; transition: color .2s ease, background .2s ease, opacity .2s ease;
 }
-#cvlHost .cvl-alt:active { color: #fff; background: rgba(255,255,255,.08); }
+#cvlHost .cvl-alt:active { color: #000; background: rgba(0,0,0,.05); }
 #cvlHost .cvl-alt[hidden] { display: none; }
 #cvlHost .cvl-alt:disabled { opacity: .4; }
-#cvlHost .cvl-alt-danger { color: rgba(255,255,255,.45); }
+#cvlHost .cvl-alt-danger { color: #d70015; }
 
-/* iOS 12 齿转子 */
+/* iOS 齿转子 */
 #cvlHost .cvl-spinner { position: relative; width: 20px; height: 20px; }
 #cvlHost .cvl-spinner i {
   position: absolute; left: calc(50% - 1px); top: 0;
@@ -7428,31 +7406,52 @@ body.voice-on .dock > *{ pointer-events:none !important; }
 }
 @keyframes cvl-spoke { to { opacity: .12; } }
 
-/* 成功态 */
+/* 成功页 */
 #cvlHost .cvl-pane-done .cvl-title,
 #cvlHost .cvl-pane-done .cvl-sub { opacity: 0; }
-/* 成功页的「开始观看」跟主按钮同一套玻璃。原本它是 .055 的暗底 —— 主按钮改成
-   浅白玻璃之后，那个亮度正好落在新的禁用态附近，唯一的行动按钮会读成不可点。 */
+#cvlHost .cvl-pane-done .cvl-sub { margin-top: 10px; }
 #cvlHost .cvl-cta-dark {
-  display: block; width: calc(100% + 16px); margin: 82px -8px 0; height: 56px; opacity: 0;
-  border: 0; border-radius: 28px; cursor: pointer;
-  background: rgba(255,255,255,.15);
-  backdrop-filter: blur(30px) saturate(180%);
-  -webkit-backdrop-filter: blur(30px) saturate(180%);
-  box-shadow:
-    inset 0 1.5px 0 rgba(255,255,255,.28),
-    inset 0 0 0 1px rgba(255,255,255,.15),
-    0 10px 32px rgba(0,0,0,.38);
-  color: #fff; font-family: inherit; font-size: 17px; font-weight: 600; letter-spacing: -.25px;
+  display: block; width: 100%; margin: 34px 0 0; height: 56px; opacity: 0;
+  border: 0; border-radius: 999px; cursor: pointer; background: #000; color: #fff;
+  font-family: inherit; font-size: 17px; font-weight: 600;
   transition: background .18s ease, transform .18s var(--cvl-out);
 }
-#cvlHost .cvl-cta-dark:active { background: rgba(255,255,255,.23); transform: scale(.985); }
+#cvlHost .cvl-cta-dark:active { background: #2c2c2e; transform: scale(.985); }
 
-@media (max-height: 620px) {
-  #cvlHost .cvl-dock { transform: translateX(-50%) scale(.9); transform-origin: bottom center; }
+/* 账户体系说明：分割线之下，只在输入账户 / 电子邮件两页出现 */
+#cvlHost .cvl-foot { margin-top: 32px; padding-top: 30px; border-top: 1px solid var(--cvl-line); }
+#cvlHost .cvl-foot h3 { font-size: 20px; line-height: 1.4; font-weight: 700; letter-spacing: -.01em; color: #55575d; }
+#cvlHost .cvl-foot p { margin-top: 12px; font-size: 16px; line-height: 1.65; color: #6b6e75; }
+#cvlHost:not([data-pane="signin"]):not([data-pane="email"]) .cvl-foot { display: none; }
+
+/* 宽屏（平板、Mac）：收成居中的一张卡，四周露出流体；高度随内容，超出就在卡里滚 */
+@media (min-width: 640px) and (min-height: 540px) {
+  #cvlHost { --cvl-head: clamp(170px, 27svh, 280px); --cvl-pad: 40px; }
+  #cvlHost .cvl-dock {
+    left: 50%; right: auto; width: min(480px, calc(100% - 48px)); transform: translateX(-50%);
+    top: max(calc(env(safe-area-inset-top, 0px) + 72px), calc(var(--cvl-head) - var(--cvl-kb, 0px)));
+    bottom: auto;
+  }
+  #cvlHost .cvl-sheet {
+    position: relative; inset: auto; border-radius: 34px;
+    max-height: calc(100svh - var(--cvl-head) - 40px);
+    padding: 40px var(--cvl-pad) 36px;
+    box-shadow: 0 30px 90px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.06);
+  }
+}
+/* 矮横屏（手机横拿、折叠屏折起横拿）：品牌区压扁，字标缩小，面板留出更多高度 */
+@media (orientation: landscape) and (max-height: 539px) {
+  #cvlHost { --cvl-head: max(84px, 22svh); }
+  #cvlHost .cvl-word { flex-direction: row; align-items: baseline; gap: .28em; }
+  #cvlHost .cvl-word .w2 { margin-top: 0; font-size: clamp(30px, 9svh, 44px); }
+  #cvlHost .cvl-sheet { padding-top: 24px; }
+  #cvlHost .cvl-mark { margin-bottom: 18px; }
+  /* 横着的手机足有 800 多宽：一行字拉满整屏读不动，内容收在中间 560 宽里 */
+  #cvlHost .cvl-sheet > * { max-width: 560px; margin-left: auto; margin-right: auto; }
 }
 @media (prefers-reduced-motion: reduce) {
   #cvlHost[data-pane="face"] .cvl-scan { animation: none; opacity: .8; }
+  #cvlHost .cvl-dock, #cvlHost .cvl-panes { transition: none; }
 }
 </style>
 
@@ -7477,39 +7476,44 @@ body.voice-on .dock > *{ pointer-events:none !important; }
   <div class="cvl-viz" id="cvlViz" aria-hidden="true"><canvas id="cvlVizCanvas"></canvas></div>
   <div class="cvl-scrim" id="cvlScrim"></div>
 
+  <!-- 品牌区：Sky Pro 流体底图从白色面板上沿露出来的那一截。
+       蓝色脉冲从 Cuven max 字标向外扩（铺在流体上，白色面板盖住下半截） -->
+  <div class="cvl-fx-clip" aria-hidden="true">
+    <div class="cvl-fx">
+      <div class="cvl-glow" id="cvlGlow"></div>
+      <div class="cvl-ring" id="cvlRing1"></div>
+      <div class="cvl-ring" id="cvlRing2"></div>
+    </div>
+  </div>
+  <header class="cvl-head">
+    <div class="cvl-scan" aria-hidden="true"></div>
+    <div class="cvl-tile" id="cvlTile">
+      <div class="cvl-tile-inner" id="cvlTileInner">
+        <div class="cvl-word" role="img" aria-label="Cuven max"><span class="w1">Cuven</span><span class="w2">max</span></div>
+        <div class="cvl-tile-flash" id="cvlTileFlash"></div>
+      </div>
+    </div>
+  </header>
+
+  <button class="cvl-nav" id="cvlNav" type="button" aria-label="关闭">
+    <svg class="cvl-ico-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    <svg class="cvl-ico-back"  viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+  </button>
+
   <div class="cvl-dock" id="cvlDock">
     <div class="cvl-sheet-back" id="cvlSheetBack"></div>
 
-    <section class="cvl-sheet" id="cvlSheet" role="group" aria-label="登录到 Cuven Max">
-      <div class="cvl-fx-clip">
-        <div class="cvl-fx">
-          <div class="cvl-glow" id="cvlGlow"></div>
-          <div class="cvl-ring" id="cvlRing1"></div>
-          <div class="cvl-ring" id="cvlRing2"></div>
-        </div>
-      </div>
+    <section class="cvl-sheet" id="cvlSheet" role="group" aria-label="登录到 Cuven max">
+      <div class="cvl-mark" aria-hidden="true"><b>Cuven</b><span>账户</span></div>
 
-      <button class="cvl-nav" id="cvlNav" type="button" aria-label="关闭">
-        <svg class="cvl-ico-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        <svg class="cvl-ico-back"  viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
-      </button>
-
-      <div class="cvl-scan" aria-hidden="true"></div>
-      <div class="cvl-tile" id="cvlTile">
-        <div class="cvl-tile-inner" id="cvlTileInner">
-          <img id="cvlTileImg" alt="Cuven Max"
-               src="https://data.cuven.us/logo/ED8BAFA2-9496-4F42-9299-0C72BE967C1D.png">
-          <div class="cvl-tile-flash" id="cvlTileFlash"></div>
-        </div>
-      </div>
-
+      <div class="cvl-panes" id="cvlPanes">
       <!-- ① 登录 · 账户查找 + 密码 -->
       <div class="cvl-pane is-on" id="cvlPaneSignin" data-pane="signin">
-        <h2 class="cvl-title" id="cvlSiTitle">登录到 Cuven Max</h2>
-        <p class="cvl-sub" id="cvlSiSub">使用 Cuven 账户继续</p>
+        <h2 class="cvl-title" id="cvlSiTitle">输入电子邮件以继续</h2>
+        <p class="cvl-sub" id="cvlSiSub">使用你的 Cuven 账户登录 Cuven max。</p>
 
         <div class="cvl-field">
-          <input id="cvlUser" type="text" placeholder="用户名或电子邮件" enterkeyhint="next"
+          <input id="cvlUser" type="text" placeholder="电子邮件或用户名" aria-label="电子邮件或用户名" enterkeyhint="next"
                  autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false">
           <span class="cvl-chk" id="cvlUserChk" aria-hidden="true">
             <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
@@ -7616,9 +7620,16 @@ body.voice-on .dock > *{ pointer-events:none !important; }
 
       <!-- ⑥ 成功 -->
       <div class="cvl-pane cvl-pane-done" id="cvlPaneDone" data-pane="done">
-        <h2 class="cvl-title" id="cvlDoneTitle">已登录 Cuven Max</h2>
+        <h2 class="cvl-title" id="cvlDoneTitle">已登录 Cuven max</h2>
         <p class="cvl-sub" id="cvlDoneSub">欢迎回来</p>
         <button class="cvl-cta-dark" id="cvlDoneBtn" type="button">开始观看</button>
+      </div>
+      </div>
+
+      <!-- 账户体系说明：只在输入账户 / 电子邮件这两页出现 -->
+      <div class="cvl-foot" id="cvlFoot">
+        <h3>Cuven max 属于 Cuven 账户体系</h3>
+        <p>一个 Cuven 账户即可登录 Cuven max、Cuven TV 以及 Cuven 的其他服务。观看进度、收藏与偏好随账户同步，换一台设备也能接着看。</p>
       </div>
     </section>
   </div>
@@ -7783,8 +7794,10 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
   var IOS = 'cubic-bezier(.32,.72,0,1)',
       OUT = 'cubic-bezier(.22,1,.36,1)',
       IN  = 'cubic-bezier(.4,0,1,1)';
-  var PANE_TOP = { signin: 136, email: 136, code: 136, pass: 136, face: 136, done: 205 };
-  var BOTTOM_PAD = 50;
+  /* 各页在面板里从顶上开始排（品牌字标在面板外的品牌区里），容器高度 = 当前页的高度 */
+  var PANE_TOP = { signin: 0, email: 0, code: 0, pass: 0, face: 0, done: 0 };
+  var BOTTOM_PAD = 0;
+  var paneTop = function (k) { return PANE_TOP[k] != null ? PANE_TOP[k] : 0; };
 
   var haptic = function (p) { try { if (navigator.vibrate) navigator.vibrate(p); } catch (_) {} };
   var reduceMotion = function () {
@@ -7792,7 +7805,7 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
   };
 
   /* ── DOM ────────────────────────────────────────────────────── */
-  var sheet = $('cvlSheet'), scrim = $('cvlScrim'), sheetBack = $('cvlSheetBack'),
+  var sheet = $('cvlSheet'), scrim = $('cvlScrim'), sheetBack = $('cvlSheetBack'), panesBox = $('cvlPanes'),
       tile = $('cvlTile'), tileInner = $('cvlTileInner'), tileFlash = $('cvlTileFlash'),
       glow = $('cvlGlow'), ring1 = $('cvlRing1'), ring2 = $('cvlRing2'),
       navBtn = $('cvlNav');
@@ -7988,7 +8001,7 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
     /* 层还没挂上 .is-open（或整块被 display:none）时量不到真值，
        此时别把 --cvl-h 写坏 —— open() 里的 rAF 会补一次 */
     if (!p.offsetHeight) return;
-    var h = Math.round((PANE_TOP[st.pane] || 136) + p.offsetHeight + BOTTOM_PAD);
+    var h = Math.round(paneTop(st.pane) + p.offsetHeight + BOTTOM_PAD);
     host.style.setProperty('--cvl-h', h + 'px');
     return h;
   }
@@ -8587,7 +8600,7 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
     if (from && from !== panes.done) { from.classList.remove('is-on'); from.classList.add('cvl-exiting'); }
     navBtn.hidden = true;
     var Hd = sizeSheet();
-    var H0 = Math.round((PANE_TOP[wasPane] || 136) + (from ? from.offsetHeight : 310) + BOTTOM_PAD);
+    var H0 = Math.round(paneTop(wasPane) + (from ? from.offsetHeight : 310) + BOTTOM_PAD);
     var Hm = Hd + 12;
 
     if (reduceMotion()) {
@@ -8621,23 +8634,23 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
       });
     }
 
-    /* ② 表单高度：先收起，再走 iOS detent 落位 */
+    /* ② 页容器高度：先收起，再走 iOS detent 落位（面板本身贴满到底，不再跟着变高变矮） */
     var HD = T0 + 640 + 70;
-    A(sheet, [
+    A(panesBox, [
       { height: H0 + 'px', offset: 0,               easing: IOS },
       { height: Hm + 'px', offset: Math.min(420 / HD, .99),      easing: 'linear' },
       { height: Hm + 'px', offset: Math.min((T0 + 70) / HD, .995), easing: IOS },
       { height: Hd + 'px', offset: 1 }
     ], { duration: HD });
 
-    /* ③ 图标下移归位：先微缩、后过冲、末端回落 */
+    /* ③ 品牌字标原地「吸一口气」：先微缩、后过冲、末端回落 —— 脉冲就从这一下扩出去 */
     var TD = T0 + 70 + 660, s0 = (T0 + 70) / TD;
     A(tile, [
-      { transform: 'translate(-50%,-62px) scale(1)',   offset: 0,                easing: 'linear' },
-      { transform: 'translate(-50%,-62px) scale(1)',   offset: s0,               easing: 'cubic-bezier(.4,0,.6,1)' },
-      { transform: 'translate(-50%,-30px) scale(.95)', offset: s0 + (1 - s0) * .38, easing: 'cubic-bezier(.2,.7,.2,1)' },
-      { transform: 'translate(-50%,3px) scale(1.07)',  offset: s0 + (1 - s0) * .76, easing: 'cubic-bezier(.4,0,.3,1)' },
-      { transform: 'translate(-50%,0) scale(1)',       offset: 1 }
+      { transform: 'scale(1)',    offset: 0,                    easing: 'linear' },
+      { transform: 'scale(1)',    offset: s0,                   easing: 'cubic-bezier(.4,0,.6,1)' },
+      { transform: 'scale(.94)',  offset: s0 + (1 - s0) * .38,  easing: 'cubic-bezier(.2,.7,.2,1)' },
+      { transform: 'scale(1.07)', offset: s0 + (1 - s0) * .76,  easing: 'cubic-bezier(.4,0,.3,1)' },
+      { transform: 'scale(1)',    offset: 1 }
     ], { duration: TD });
 
     /* ④ 环境脉冲 */
@@ -8845,13 +8858,7 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
     try { document.getElementById('tvAuthLayer').classList.remove('is-open'); } catch (_) {}
   }
 
-  $('cvlTileImg').addEventListener('error', function () {
-    this.remove();
-    var f = document.createElement('div');
-    f.className = 'cvl-tile-fallback';
-    f.textContent = 'C';
-    tileInner.prepend(f);
-  });
+  /* 品牌区现在是文字字标（Cuven max），没有要兜底的图片了 */
 
   /* ══ 对外接口 ══════════════════════════════════════════════════ */
   function reset() {
@@ -8866,6 +8873,7 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
     });
     host.style.removeProperty('--cvl-ty');
     sheet.style.height = '';
+    if (panesBox) panesBox.style.height = '';
     [siBtn, emBtn, coBtn, pwBtn, faBtn].forEach(function (b) { b.classList.remove('busy'); });
     faSkip.disabled = false;
     userIn.value = ''; passIn.value = ''; emailIn.value = ''; pw1.value = ''; pw2.value = '';
@@ -8929,9 +8937,21 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
        backwards 只在延迟期间压住起始态，动画一结束就把控制权还给 CSS。
        transform 里也不能写 var()，Safari 的 WAAPI 不解析自定义属性。 */
     A(tile, [
-      { transform: 'translate(-50%,-62px) scale(.82)', opacity: 0 },
-      { transform: 'translate(-50%,-62px) scale(1)',   opacity: 1 }
-    ], { duration: 620, delay: 200, easing: IOS, fill: 'backwards' });
+      { transform: 'scale(.86)', opacity: 0, filter: 'blur(8px)' },
+      { transform: 'scale(1)',   opacity: 1, filter: 'blur(0px)' }
+    ], { duration: 680, delay: 180, easing: IOS, fill: 'backwards' });
+    if (!reduceMotion()) {
+      A(glow, [
+        { transform: 'scale(.3)',  opacity: 0,   offset: 0,   easing: 'cubic-bezier(.1,.7,.3,1)' },
+        { transform: 'scale(.78)', opacity: .7,  offset: .24, easing: 'cubic-bezier(.3,.1,.4,1)' },
+        { transform: 'scale(1.45)', opacity: 0,  offset: 1 }
+      ], { duration: 1300, delay: 420 });
+      A(ring1, [
+        { transform: 'scale(.24)', opacity: 0,   offset: 0,  easing: OUT },
+        { transform: 'scale(.72)', opacity: .45, offset: .2, easing: 'cubic-bezier(.3,.1,.4,1)' },
+        { transform: 'scale(1.7)', opacity: 0,   offset: 1 }
+      ], { duration: 1400, delay: 480 });
+    }
     var live = panes[st.pane];
     if (live) {
       [].slice.call(live.children).forEach(function (el, i) {
@@ -8964,6 +8984,13 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
   }
 
   window.CuvenLogin = { open: open, close: close, reset: reset, finish: finish, state: st };
+
+  /* 页高一变就重新量：状态行出字 / 清空、密码框展开、次级链接出现 —— 面板里的页容器跟着长，
+     下面那段账户说明平滑让开，不会叠在一起。成功页由 playSuccess 的动画接管，不在这里量 */
+  if (window.ResizeObserver) {
+    var paneRO = new ResizeObserver(function () { if (st.opened && st.pane !== 'done') sizeSheet(); });
+    Object.keys(panes).forEach(function (k) { paneRO.observe(panes[k]); });
+  }
 
   /* 窗口尺寸变化 / 键盘弹出时重新丈量 */
   window.addEventListener('resize', function () { if (st.opened && st.pane !== 'done') sizeSheet(); });
@@ -11861,6 +11888,13 @@ const RecvIndex = (() => {
     return IMG + (size || 'w342') + path;
   }
 
+  function trusted(name) {
+    const it = byName && byName[name];
+    if (!it || !it.tmdb) return null;
+    const fy = parseInt(parse(name).year, 10) || 0, ty = parseInt(it.year, 10) || 0;
+    return (fy && ty && Math.abs(fy - ty) > 1) ? null : it;
+  }
+
   /* 一条总账 → /api/tmdb 那个形状。演员与剧照留空 —— 需要它们的调用点
      （详情页）本来就没走这条路。 */
   function legacy(it) {
@@ -11976,13 +12010,14 @@ const RecvIndex = (() => {
     get pending() { return doc ? (doc.pending || 0) : 0; },
 
     img,
-    /* 名字 → /api/tmdb 形状；没有就 null，调用方自然退回网络 */
-    tmdb(name) { return (byName && byName[name]) ? legacy(byName[name]) : null; },
-    has(name) { const it = byName && byName[name]; return !!(it && it.tmdb); },
+    /* 名字 → /api/tmdb 形状；没有就 null，调用方自然退回网络。
+       总账是旧版后端算的：年份与文件名差一年以上的那条多半认错了 —— 不信它，交给现在的匹配管线重认 */
+    tmdb(name) { const it = trusted(name); return it ? legacy(it) : null; },
+    has(name) { return !!trusted(name); },
     /* 检索索引用：中文名 + 年份 */
     zh(name) {
-      const it = byName && byName[name];
-      return (it && it.tmdb) ? { t: it.title || '', y: it.year || '' } : null;
+      const it = trusted(name);
+      return it ? { t: it.title || '', y: it.year || '' } : null;
     },
     item(path) { return (byPath && byPath[path]) || null; },
 
@@ -12338,20 +12373,104 @@ function debounce(fn, ms) {
   let t; return function() { clearTimeout(t); const a = arguments; t = setTimeout(() => fn.apply(this, a), ms); };
 }
 
+/* ══ 文件名 → 片名 / 年份 ════════════════════════════════════════════════
+   与后端 mtParse 同一套规则（改一边记得改另一边）：
+   · 上映年取最后一个合理的年份 —— 片名里的年份（《银翼杀手2049》《神奇女侠1984》《1917》）留在片名里；
+   · 片名截到第一个规格词（画质 / 片源 / 编码 / 音轨）或季集号为止，末尾的版本词（加长版、导演剪辑版…）剥掉；
+   · 中文名与英文名分开：显示用中文名，没有才用英文名；
+   · 方括号里的站名、字幕组扔掉，是中文片名的留作备选。 */
+const PN_NATIVE = /[぀-ヿ㐀-鿿豈-﫿가-힯]/;
+const PN_YEAR = /^[(（\[]?((?:19|20)\d{2})[)）\]]?$/;
+const PN_SE = /^(?:s\d{1,2}(?:e\d{1,4})?(?:-?e\d{1,4})?|e\d{1,4}|ep\d{1,4}|\d{1,2}x\d{2,3}|season|第[一二三四五六七八九十\d]+[季集话話]|全\d+集)$/i;
+const PN_SPEC = /^(?:4320p|2160p|1440p|1080[pi]|720p|576p|480p|4k|8k|uhd|fhd|hdr10\+?|hdr|dv|dovi|hlg|sdr|blu-?ray|bdrip|brrip|bdremux|remux|web-?dl|web-?rip|hdtv|dvdrip|dvd|hdrip|x26[45]|h26[45]|hevc|avc|av1|xvid|divx|aac\d?(?:\.\d)?|ac3|eac3|e-ac-3|ddp?\d?(?:\.\d)?|dd\+|dts(?:-?hd)?(?:-?ma)?|truehd|atmos|flac|lpcm|opus|10bit|8bit|hi10p|60fps|120fps)$/i;
+const PN_EDITION = /^(?:extended|unrated|uncut|remastered|restored|imax|criterion|repack|rerip|proper|internal|dubbed|subbed|multisubs?|chs|cht|中字|中英|中英字幕|双语|雙語|国语|國語|粤语|粵語|国英|国粤|國粵|未删减|未刪減|导演剪辑版|導演剪輯版|加长版|加長版|蓝光|藍光|高清)$/i;
+const PN_EDITION2 = /^(?:directors?|theatrical|special|extended|collectors?|anniversary|ultimate|final|definitive|criterion)\s(?:cut|edition|version)$/i;
+const PN_SITE = /www|\.(?:com|net|org|cn|cc|me|tv)\b|电影|電影|影视|影視|字幕|论坛|論壇|下载|下載|高清|发布|發布|首发|首發|小组|小組|压制|壓制|\bbt\b|\bpt\b/i;
+function pnKind(t) {
+  const base = t.split('-')[0];
+  if (PN_SPEC.test(t) || (base !== t && base && PN_SPEC.test(base))) return 'spec';
+  if (PN_EDITION.test(t)) return 'ed';
+  if (PN_SE.test(t)) return 'se';
+  return '';
+}
+function parseName(name) {
+  const nowY = new Date().getFullYear();
+  let s = String(name || '').replace(/\.[^./\s]{1,6}$/, '');
+  let alt = '';
+  s = s.replace(/[\[【{〔]([^\]】}〕]*)[\]】}〕]/g, (m, inner) => {
+    const t = inner.trim();
+    if (!alt && PN_NATIVE.test(t) && !PN_SITE.test(t) && !/预告|預告|花絮|特辑|特輯|样片|樣片/.test(t)) alt = t;
+    return ' ';
+  });
+  s = s.replace(/《([^》]+)》/g, ' $1 ').replace(/[._+]+/g, ' ').replace(/\s[-–—]+\s|\s[-–—]+$|^[-–—]+\s/g, ' ').replace(/\s+/g, ' ').trim();
+  const toks = s ? s.split(' ') : [];
+  let yi = -1, edSeen = false;
+  for (let i = 1; i < toks.length; i++) {
+    const k = pnKind(toks[i - 1]);
+    if (k === 'spec' || k === 'se') break;
+    if (k === 'ed') edSeen = true;
+    const m = PN_YEAR.exec(toks[i]);
+    if (m && +m[1] >= 1900 && +m[1] <= nowY + 1 && !(edSeen && yi > 0)) yi = i;
+  }
+  let end = yi > 0 ? yi : toks.length;
+  for (let i = 1; i < end; i++) { const k = pnKind(toks[i]); if (k === 'spec' || k === 'se') { end = i; break; } }
+  let head = toks.slice(0, end);
+  for (;;) {
+    const n = head.length;
+    if (n > 2 && PN_EDITION2.test(head[n - 2].replace(/['’]/g, '') + ' ' + head[n - 1])) { head = head.slice(0, n - 2); continue; }
+    if (n > 1 && pnKind(head[n - 1]) === 'ed') { head = head.slice(0, n - 1); continue; }
+    break;
+  }
+  const nat = [], lat = [];
+  head.forEach(t => (PN_NATIVE.test(t) ? nat : lat).push(t));
+  let zh = nat.join(' ').replace(/[\s:：·\-–—]+$/, '').trim();
+  const en = /[a-z0-9]/i.test(lat.join('')) ? lat.join(' ').replace(/^[\s:：\-–—]+|[\s:：\-–—]+$/g, '').trim() : '';
+  if (!zh && alt) zh = alt;
+  return { zh, en, year: yi > 0 ? PN_YEAR.exec(toks[yi])[1] : '' };
+}
+/* 片名相似度 0–1（与后端 mtSim 相同）：字二元组 Dice，罗马数字 / 数字词 / 全角 / 标点 / 变音符归一，续集号对不上压分 */
+const PN_ROMAN = { ii: 2, iii: 3, iv: 4, vi: 6, vii: 7, viii: 8, ix: 9 };
+const PN_WORDNUM = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+function titleNorm(x) {
+  let t = String(x || '').normalize('NFKC').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  t = t.replace(/&/g, ' and ').replace(/['’‘`´]/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  return t.split(' ').filter(Boolean).map(w => PN_ROMAN[w] ? String(PN_ROMAN[w]) : PN_WORDNUM[w] ? String(PN_WORDNUM[w]) : w).join(' ');
+}
+function titleSim(a, b) {
+  const A = titleNorm(a), B = titleNorm(b);
+  if (!A || !B) return 0;
+  if (A === B) return 1;
+  const a0 = A.replace(/ /g, ''), b0 = B.replace(/ /g, '');
+  if (a0 === b0) return 0.97;
+  const big = x => { const m = new Map(); if (x.length < 2) { m.set(x, 1); return m; } for (let i = 0; i < x.length - 1; i++) { const k = x.substr(i, 2); m.set(k, (m.get(k) || 0) + 1); } return m; };
+  const X = big(a0), Y = big(b0);
+  let inter = 0, nx = 0, ny = 0;
+  X.forEach(v => { nx += v; }); Y.forEach(v => { ny += v; });
+  X.forEach((v, k) => { inter += Math.min(v, Y.get(k) || 0); });
+  let sim = (2 * inter) / (nx + ny);
+  const nums = z => (z.match(/\d+/g) || []).join(',');
+  const na = nums(A), nb = nums(B);
+  if (na !== nb) sim *= (na && nb) ? 0.55 : 0.8;
+  return sim;
+}
+
+/* { title：显示用（中文名优先）, en, zh, q：发给后端的查询（中英文名都带上）, year, tags } */
+const _parseMemo = new Map();
 function parse(fn) {
-  let n = fn.replace(/\.[^.]+$/, '');
-  const ym = n.match(/[\.\s\-_\(]((?:19|20)\d{2})[\.\s\-_\)]/);
-  const year = ym ? ym[1] : '';
+  fn = String(fn || '');
+  const hit = _parseMemo.get(fn);
+  if (hit) return hit;
+  const n = fn.replace(/\.[^.]+$/, '');
   const tags = [];
   if (/DOLBY[\.\s_-]?VISION|[\.\s_\-]DV[\.\s_\-]|[\.\s_\-]DoVi/i.test(n)) tags.push('DV');
   else if (/HDR10\+?|[\.\s_\-]HDR[\.\s_\-]/i.test(n)) tags.push('HDR');
   if (/2160[Pp]|[\.\s_\-]4[Kk][\.\s_\-]|UHD/i.test(n)) tags.push('4K');
   else if (/1080[Pp]/i.test(n)) tags.push('HD');
-  let title = n;
-  if (ym) title = n.slice(0, n.indexOf(ym[0]));
-  else title = n.split(/[\.\s_\-](?:2160p|1080p|720p|4K|UHD|BluRay|BDRip|WEB[\-.]?DL|WEB[\-.]?Rip|x264|x265|HEVC|H\.?26[45]|AAC|DTS|FLAC|REMUX|DoVi|DV|HDR|Atmos|10bit)/i)[0];
-  title = title.replace(/[\._]/g, ' ').replace(/\[.*?\]|\{.*?\}/g, '').replace(/\s+/g, ' ').trim();
-  return { title, year, tags };
+  const p = parseName(fn);
+  const out = { title: p.zh || p.en || n.replace(/[._]/g, ' ').trim(), en: p.en, zh: p.zh, q: [p.zh, p.en].filter(Boolean).join(' '), year: p.year, tags };
+  if (_parseMemo.size > 4000) _parseMemo.clear();
+  _parseMemo.set(fn, out);
+  return out;
 }
 function topTag(tags) {
   if (tags.includes('DV')) return 'DV';
@@ -12362,12 +12481,13 @@ function topTag(tags) {
 
 const tmdbCache = (() => {
   
-  const KEY = 'tmdb_cache_v6'; const MAX = 600;
+  /* v7：后端匹配管线重写（候选打分 + 校验），v6 里可能认错的旧结果整批作废 */
+  const KEY = 'tmdb_cache_v7'; const MAX = 600;
   let mem = {};
   try {
     const raw = localStorage.getItem(KEY);
     if (raw) mem = JSON.parse(raw);
-    ['tmdb_cache_v1','tmdb_cache_v2','tmdb_cache_v3','tmdb_cache_v4','tmdb_cache_v5'].forEach(k => { try { localStorage.removeItem(k); sessionStorage.removeItem(k); } catch {} });
+    ['tmdb_cache_v1','tmdb_cache_v2','tmdb_cache_v3','tmdb_cache_v4','tmdb_cache_v5','tmdb_cache_v6'].forEach(k => { try { localStorage.removeItem(k); sessionStorage.removeItem(k); } catch {} });
   } catch {}
   let saveT = 0;
   const persist = () => {
@@ -12393,8 +12513,9 @@ const tmdbCache = (() => {
 
 
 const itunesCache = (() => {
-  const KEY = 'itunes_cache_v1'; const MAX = 400;
+  const KEY = 'itunes_cache_v2'; const MAX = 400;   /* v2：结果要核对片名与年份，v1 里取第一条的旧结果作废 */
   let mem = {};
+  try { localStorage.removeItem('itunes_cache_v1'); } catch {}
   try { mem = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch {}
   let saveT = 0;
   const persist = () => {
@@ -12505,7 +12626,8 @@ function normKey(s) {
 }
 
 const cnIndex = (() => {
-  const KEY = 'cn_title_index_v1';
+  const KEY = 'cn_title_index_v2';                 /* v2：旧匹配算法认错的中文名作废 */
+  try { localStorage.removeItem('cn_title_index_v1'); } catch (_) {}
   const RETRY_MS = 3 * 86400000;         /* TMDB 确实查不到的片子，三天后再试一次 */
   let mem = {};
   try { mem = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (_) { mem = {}; }
@@ -12597,9 +12719,12 @@ const cnWarm = (() => {
             }
           });
           fails = 0;
+          const sure = !!(data && data.__match >= 2);
           batch.forEach(v => {
-            const d = data && data[v.name];
+            if (!data || !Object.prototype.hasOwnProperty.call(data, v.name)) return;   /* 这次没问成：下一轮再问 */
+            const d = data[v.name];
             if (cnIndex.put(v.name, d && d.title, d && d.year)) changed++;
+            if (d || sure) ArtGate.settle(v.name, d);
           });
         } catch (_) {
           /* 网络抖动 / 后端没这个接口：连挫三次就收手，中文搜不到只是退化，不该刷屏 */
@@ -12676,6 +12801,109 @@ const cnQueryMap = (() => {
 })();
 
 
+/* ══ 没有封面的影片 / 剧集不显示 ═══════════════════════════════════════════
+   「没有封面」只认确定的答案：后端明确说「认不出这部」（null），或认出来了但没有海报（iTunes 也补不上）。
+   网络出错、超时、这次没问成都不算 —— 弱网下整库消失，比满屏占位糟得多。
+   答案记在本地（三天后再问一次：TMDB 上可能补了海报），下次排版时直接跳过；已经在屏上的卡，
+   答案一到就收起来（淡出 + 宽度收拢，旁边的卡平滑靠过来），一排收空了整段藏起来。 */
+const ArtGate = (() => {
+  const KEY = 'art_none_v1', TTL = 3 * 86400000;
+  let mem = {};
+  try { mem = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (_) { mem = {}; }
+  const t0 = Date.now();
+  for (const k in mem) if (!(t0 - mem[k] < TTL)) delete mem[k];
+  let saveT = 0;
+  const persist = () => { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(KEY, JSON.stringify(mem)); } catch (_) {} }, 600); };
+  const hasArt = d => !!(d && (d.poster || d.posterClean));
+  const none = k => !!(k && mem[k]);
+  const reduce = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* 一排收空了：整段藏起来；「今日推荐」的名次重新数。
+     年份轨道里电影、剧集各一排：剧集那排空了只收剧集那块，两排都空了才藏整段 */
+  function tidy(row) {
+    if (!row || !row.isConnected) return;
+    if (row.id === 'todayRecsRow') row.querySelectorAll('.card .card-rank').forEach((b, i) => { b.textContent = i + 1; });
+    if (row.querySelector('.card, [data-tv-path]')) return;
+    const slot = row.closest('.year-tv');
+    if (slot) {
+      slot.classList.remove('on');
+      row = slot.parentElement && slot.parentElement.querySelector(':scope > .scroll-row');
+      if (!row || row.querySelector('.card')) return;
+    }
+    const sec = row.closest('.section, .tv-hero-wrap');
+    if (sec && !sec.querySelector('.year-tv.on')) sec.hidden = true;
+  }
+  function collapse(card) {
+    if (!card || card._artGone) return;
+    card._artGone = true;
+    const row = card.parentElement;
+    /* 横排开着 scroll-snap：收掉的正好是吸住的那张时，浏览器会跟着它把整排滚走（吸附目标跟随）。
+       收起期间先关掉吸附，收完按原位置还回去 —— 收掉的卡在可视区左边时，减掉它让出的那一格 */
+    const scroller = row && row.scrollWidth > row.clientWidth + 1 ? row : null;
+    const sl0 = scroller ? scroller.scrollLeft : 0;
+    const leftOf = scroller ? (card.offsetLeft + card.offsetWidth <= sl0 + 1) : false;
+    const pitch = scroller ? card.offsetWidth + (parseFloat(getComputedStyle(scroller).columnGap) || 0) : 0;
+    if (scroller) scroller.style.scrollSnapType = 'none';
+    const done = () => {
+      const r = card.parentElement;
+      card.remove();
+      if (scroller && scroller.isConnected) {
+        scroller.scrollLeft = Math.max(0, leftOf ? sl0 - pitch : sl0);
+        scroller.style.scrollSnapType = '';
+      }
+      tidy(r || row);
+    };
+    if (!card.isConnected || reduce() || !card.getClientRects().length) { done(); return; }
+    card.style.transition = 'opacity .2s ease, transform .2s ease';
+    card.style.opacity = '0';
+    card.style.transform = 'scale(.94)';
+    const cs = row ? getComputedStyle(row) : null;
+    const across = cs && cs.display === 'flex' && !/column/.test(cs.flexDirection);
+    setTimeout(() => {
+      if (!across || !card.isConnected) { done(); return; }
+      /* 横排：宽度与那一格的间距一起收掉，右边的卡平滑靠过来，而不是「啪」地补位 */
+      const w = card.getBoundingClientRect().width, gap = parseFloat(cs.columnGap) || 0;
+      card.style.flex = '0 0 auto'; card.style.width = w + 'px'; card.style.overflow = 'hidden';
+      void card.offsetWidth;
+      card.style.transition = 'width .28s ease, margin .28s ease';
+      card.style.width = '0px'; card.style.marginRight = (-gap) + 'px';
+      setTimeout(done, 300);
+    }, 200);
+  }
+  /* 屏上所有这部片的卡（首页各排、搜索、年份 / 文件夹页、资料库卡）都收起来；详情页与播放器不动 */
+  function prune(name) {
+    let esc = name;
+    try { esc = CSS.escape(name); } catch (_) { esc = String(name).replace(/["\\]/g, '\\$&'); }
+    document.querySelectorAll('.card[data-name="' + esc + '"]').forEach(c => { if (!c.closest('#detailView, #nativePlayer')) collapse(c); });
+  }
+  return {
+    hasArt,
+    /** 这部片（文件名）/ 这部剧（'tv:' + 目录路径）是不是已知没有封面 */
+    none,
+    /** 确定的答案到了：d = 结果（null = 认不出）。没有封面 → 记下并把屏上的卡收起来；返回「是否没有封面」 */
+    settle(key, d) {
+      if (!key) return false;
+      if (hasArt(d)) { if (mem[key]) { delete mem[key]; persist(); } return false; }
+      if (!mem[key]) { mem[key] = Date.now(); persist(); }
+      prune(key);
+      return true;
+    },
+    /** 剧集：没有封面就把这部剧的卡收起来（记在 'tv:' + 路径 名下） */
+    settleTv(path, hasPic) {
+      const key = 'tv:' + path;
+      if (hasPic) { if (mem[key]) { delete mem[key]; persist(); } return; }
+      if (!mem[key]) { mem[key] = Date.now(); persist(); }
+      let esc = path;
+      try { esc = CSS.escape(path); } catch (_) {}
+      document.querySelectorAll('[data-tv-path="' + esc + '"]').forEach(c => { if (!c.closest('#detailView')) collapse(c); });
+    },
+    /** 排版前先筛：已知没有封面的不排 */
+    filter: list => (list || []).filter(v => !(v && v.name && mem[v.name])),
+    filterTv: list => (list || []).filter(s => !(s && (s.tmdbMiss || (s.path && mem['tv:' + s.path])))),
+    prune, collapse,
+  };
+})();
+
 const negTmdbCache = new Map(); 
 const NEG_TTL = 90 * 1000;
 function negSet(k) { negTmdbCache.set(k, Date.now() + NEG_TTL); }
@@ -12724,14 +12952,19 @@ async function flushTmdbBatch() {
         }),
       },
     });
+    /* __match ≥ 2（新版后端）：这里的 null 是确定的「认不出」，出错的那几项干脆不回键。
+       旧版后端出错时也回 null —— 那时只有「认出来了但没海报」才算确定的答案 */
+    const sure = !!(data && data.__match >= 2);
     items.forEach(i => {
       const k = i.name + (i.withLogo ? ':logo' : '');
-      const result = data[i.name] !== undefined ? data[i.name] : null;
+      const answered = !!data && Object.prototype.hasOwnProperty.call(data, i.name);
+      const result = answered ? data[i.name] : null;
       if (result) { tmdbCache.set(k, result); }
-      else { negSet(k); } 
+      else { negSet(k); }
       /* 顺手把中文名收进检索索引:这一趟本来就是 zh-CN,补齐管线能少发一次请求。
-         空结果也记账 —— TMDB 明确说了没有,后台补齐不必再问一遍 */
-      try { cnIndex.put(i.name, result && result.title, result && result.year); } catch (_) {}
+         空结果也记账 —— TMDB 明确说了没有,后台补齐不必再问一遍（没问成的不记） */
+      if (answered) { try { cnIndex.put(i.name, result && result.title, result && result.year); } catch (_) {} }
+      if (result || (answered && sure)) ArtGate.settle(i.name, result);   /* 没有封面 → 屏上这部片的卡收起来 */
       i.resolve(result);
     });
   } catch {
@@ -12739,8 +12972,8 @@ async function flushTmdbBatch() {
     await Promise.all(items.map(async i => {
       const k = i.name + (i.withLogo ? ':logo' : '');
       try {
-        const { title, year } = parse(i.name); if (!title) { negSet(k); i.resolve(null); return; }
-        const p = new URLSearchParams({ query: title });
+        const pq = parse(i.name), year = pq.year; if (!pq.title) { negSet(k); i.resolve(null); return; }
+        const p = new URLSearchParams({ query: pq.q || pq.title });
         if (year) p.set('year', year);
         if (i.withLogo) p.set('logo', '1');
         
@@ -12748,7 +12981,7 @@ async function flushTmdbBatch() {
         p.set('image_language', 'en');
         p.set('include_image_language', 'en,null');
         const d = await fetchJSON(API + '/api/tmdb?' + p, { timeout: 8000, retries: 0 });
-        if (d) { tmdbCache.set(k, d); } else { negSet(k); }
+        if (d) { tmdbCache.set(k, d); ArtGate.settle(i.name, d); } else { negSet(k); }
         /* 这条路是批接口挂了才走的 —— 只收正结果,空结果可能只是网络抖动,
            不该被当成「TMDB 里没有」而记进索引 */
         try { if (d && d.title) cnIndex.put(i.name, d.title, d.year); } catch (_) {}
@@ -12782,19 +13015,16 @@ async function fetchItunesArtwork(title, year) {
       } catch { itunesCache.set(key, null); return null; }
       if (!data.results || !data.results.length) { itunesCache.set(key, null); return null; }
 
-      
-      let match = data.results[0];
-      if (year) {
-        const yearNum = parseInt(year, 10);
-        const yearMatch = data.results.find(it => {
-          if (!it.releaseDate) return false;
-          const ry = new Date(it.releaseDate).getFullYear();
-          return Math.abs(ry - yearNum) <= 1;
-        });
-        if (yearMatch) match = yearMatch;
-      }
+      /* 只认片名对得上（相似度 ≥ 0.8）、年份差不过一年的那条 —— 原来拿第一条，
+         同名的另一部、续集都可能顶上来，首页大图就换成了别的片子 */
+      const yearNum = parseInt(year, 10) || 0;
+      const match = data.results.find(it => {
+        if (titleSim(it.trackName || it.collectionName || '', title) < 0.8) return false;
+        if (!yearNum || !it.releaseDate) return true;
+        return Math.abs(new Date(it.releaseDate).getFullYear() - yearNum) <= 1;
+      });
 
-      if (!match.artworkUrl100) { itunesCache.set(key, null); return null; }
+      if (!match || !match.artworkUrl100) { itunesCache.set(key, null); return null; }
 
       
       const upscale = url => url
@@ -12822,7 +13052,8 @@ async function fetchItunesArtwork(title, year) {
 
 
 async function fetchHeroArtwork(video) {
-  const { title, year } = parse(video.name);
+  const pv = parse(video.name);
+  const title = pv.en || pv.title, year = pv.year;
 
   
   
@@ -13095,7 +13326,7 @@ function buildSearchIndex() {
   /* 剧集也进这张表 —— dock 上写着「搜索电影、剧集」，之前只兑现了一半。
      记录形状与电影一致（打分函数只认 zhKey/enKey/en/words/key），
      多一个 tv 标记供渲染分流；带上季号，「战酋 第二季」这种搜法才落得下去 */
-  (_tvCache || []).forEach(s2 => {
+  ArtGate.filterTv(_tvCache || []).forEach(s2 => {
     const zh = s2.zh || s2.title || '';
     const en = s2.en || '';
     const en_ = (en + ' ' + (s2.folder || '') + ' ' + (s2.seasonLabel || '')).toLowerCase();
@@ -13257,6 +13488,7 @@ setInterval(() => ResBudget.gc(), 30000);
 
 function videoCardHTML(v, opts) {
   opts = opts || {}; if (opts.landscape) return videoCardLandscapeHTML(v, opts);
+  if (v && ArtGate.none(v.name)) return '';          /* 没有封面的不显示（见 ArtGate） */
   const { year, tags } = parse(v.name); const title = showTitle(v.name); const top = topTag(tags); const k4 = tags.includes('4K'); const hd = tags.includes('HD'); let tagH = '';
   if (top) tagH += ' <span class="tag-border ' + (top === 'DV' ? 'dv' : 'hdr') + '">' + top + '</span>'; if (k4) tagH += ' <span class="tag-border k4">8K+</span>'; else if (hd) tagH += ' <span class="tag-border hd">高动态</span>';
   const subParts = []; if (year) subParts.push(year); if (opts.showRelTime && v.ts) subParts.push(fmtRelTime(v.ts)); const sub = subParts.join(' · ');
@@ -13270,6 +13502,7 @@ function videoCardHTML(v, opts) {
 }
 
 function videoCardLandscapeHTML(v, opts) {
+  if (v && ArtGate.none(v.name)) return '';
   opts = opts || {}; const { year, tags } = parse(v.name); const title = showTitle(v.name); const top = topTag(tags); const k4 = tags.includes('4K'); const hd = tags.includes('HD'); let tagH = '';
   if (top) tagH += ' <span class="tag-border ' + (top === 'DV' ? 'dv' : 'hdr') + '">' + top + '</span>'; if (k4) tagH += ' <span class="tag-border k4">8K+</span>'; else if (hd) tagH += ' <span class="tag-border hd">高动态</span>';
   const subParts = []; if (opts.showRelTime && v.ts) subParts.push(fmtRelTime(v.ts)); else if (year) subParts.push(year); const sub = subParts.join(' · ');
@@ -13300,6 +13533,7 @@ function folderCardHTML(f) {
    上方 —— 拿不到就不贴，绝不用片名再排一个字标，那只会让片名在同一张卡上
    出现两次。 */
 function libCardHTML(v) {
+  if (v && ArtGate.none(v.name)) return '';
   const { year, tags } = parse(v.name);
   const name = showTitle(v.name);
   const top = topTag(tags);
@@ -13338,6 +13572,7 @@ const MAS_RATIOS = [
 const masCols = w => (w < 560 ? 2 : w < 900 ? 3 : w < 1280 ? 4 : 5);
 
 function masCardHTML(v, r) {
+  if (v && ArtGate.none(v.name)) return '';
   const { year, tags } = parse(v.name);
   const name = showTitle(v.name);
   const top = topTag(tags);
@@ -13362,6 +13597,7 @@ function masCardHTML(v, r) {
 /* 列高在拼字符串时就算完：等宽 → 高度正比于比例，不必知道像素。
    于是「最短列优先」这条经典瀑布流规则可以在零测量的情况下跑完。 */
 function masonryHTML(items, cols, cardFn) {
+  items = cardFn === masTvCardHTML ? ArtGate.filterTv(items) : ArtGate.filter(items);
   if (!items || !items.length) return '';
   const n = cols || masCols(window.innerWidth);
   const make = cardFn || masCardHTML;      /* 剧集传 masTvCardHTML，排布逻辑共用 */
@@ -13387,7 +13623,7 @@ function masTvCardHTML(s, r) {
   const land = r < 1.05;                    /* 矮格取剧照，与电影卡同一条规矩 */
   return '<article class="card mas-card stagger-in" style="--r:' + r + '"' +
       ' data-tv-path="' + esc(s.path) + '" tabindex="0" role="button" aria-label="' + esc(name) + '">' +
-      '<div class="card-poster tv-art" data-tv-art="' + esc(s.id) + '" data-tv-q="' + esc(s.en || s.zh || (s.title || s.folder)) + '"' +
+      '<div class="card-poster tv-art" data-tv-art="' + esc(s.id) + '" data-tv-id="' + esc(s.tmdbId || '') + '" data-tv-q="' + esc(s.en || s.zh || (s.title || s.folder)) + '"' +
         ' data-tv-y="' + esc(s.year || '') + '"' + (land ? ' data-tv-land="1"' : '') + '>' +
         '<div class="tv-art-ph">' + esc(name) + '</div>' +
       '</div>' +
@@ -13562,7 +13798,8 @@ async function loadPosterElement(el) {
   /* 字标卡与横版卡要的是 logo / backdrop —— 总账里都有，不必发请求 */
   const d = RecvIndex.tmdb(fn) || await fetchTmdb(fn, isLandscape || isLogo);
   if (!el.isConnected) return;
-  if (!d) { el.removeAttribute('data-fn'); return; }
+  if (!d) { el.removeAttribute('data-fn'); if (ArtGate.none(fn)) ArtGate.prune(fn); return; }
+  if (ArtGate.settle(fn, d)) return;                /* 认出来了但没有海报：这张卡不显示 */
 
   /* 资料库卡：只认 logo。没有 logo 就保留已经排好的片名字标 —— 白卡面上
      退回海报会把整套版式毁掉，宁可不换。 */
@@ -15250,7 +15487,7 @@ async function renderHome() {
     /* 截到 15 之前必须先定序：/api/all 的顺序是 Dropbox 目录序，照它截等于
        随机挑 15 部。按入库时间倒序，最近加的排前面。
        计数仍传整年的真实数量 —— 年份胶囊上报的是「这一年有多少部」，不是「这排摆了几张」 */
-    const shown = all.slice()
+    const shown = ArtGate.filter(all)
       .sort((a, b) => String(b.added || b.modified || '').localeCompare(String(a.added || a.modified || '')))
       .slice(0, YEAR_RAIL_MAX);
     railsHTML += railSection(y, all.length, shown.map(v => videoCardHTML(v)).join(''), '', '', tvYearSlotHTML(y));
@@ -15272,6 +15509,7 @@ async function renderHome() {
     heroSet = fb || [];
     upgradeHeroToAtv();
   }
+  heroSet = heroSet.filter(v => !(v && v.name && ArtGate.none(v.name)));
   state.heroVideos = heroSet; state.heroIdx = 0;
   if (heroSet.length) { setHero(heroSet[0], true); setupHeroSwipe(); startHeroTimer(); }
 
@@ -15503,7 +15741,7 @@ function recSort(list){
 function pickTodayRecs(){
   const slot = recSlotNow();
   const seen = new Set(), pool = [];
-  state.allVideos.forEach(v => { const k = (parse(v.name).title || v.name).toLowerCase(); if (!seen.has(k)) { seen.add(k); pool.push(v); } });
+  ArtGate.filter(state.allVideos).forEach(v => { const k = (parse(v.name).title || v.name).toLowerCase(); if (!seen.has(k)) { seen.add(k); pool.push(v); } });
   return { slot, picks: recSort(recShuffle(pool, slot.key).slice(0, REC_COUNT)) };
 }
 
@@ -15672,7 +15910,7 @@ async function initTvSeries() {
   if (!sec || sec.dataset.ready) return;
   sec.dataset.ready = '1';
 
-  const list = await tvEnsureList();
+  const list = ArtGate.filterTv(await tvEnsureList());
   if (!sec.isConnected) return;                       /* 等待期间已离开首页 */
   if (!list || !list.length) { sec.remove(); return; } /* 没配 /ram2 / 空目录 → 整段不出现 */
 
@@ -15696,7 +15934,7 @@ async function tvBuildHero(sec, list) {
   const wrap = sec.querySelector('#tvHeroWrap');
   if (!wrap) return;
   const cands = list.slice(0, 8);
-  const metas = await Promise.all(cands.map(s => tvFetchMeta(s.en || s.zh || s.title, s.year).catch(() => null)));
+  const metas = await Promise.all(cands.map(s => tvFetchMeta(s.en || s.zh || s.title, s.year, s.tmdbId).catch(() => null)));
   if (!wrap.isConnected) return;
 
   const relKey = x => {
@@ -15704,9 +15942,10 @@ async function tvBuildHero(sec, list) {
     const d = (m && (m.release_date || (m.year ? m.year + '-01-01' : ''))) || x.s.added || '';
     return Date.parse(d) || 0;
   };
-  let items = cands.map((s, i) => ({ s, m: metas[i] }));
-  const withArt = items.filter(x => x.m && (x.m.posterClean || x.m.poster || x.m.backdrop));
-  items = (withArt.length ? withArt : items).sort((a, b) => relKey(b) - relKey(a));
+  /* 没有封面的剧不上 hero（原来一张图都没有时退回全部 —— 那就是一排空卡） */
+  let items = cands.map((s, i) => ({ s, m: metas[i] }))
+    .filter(x => x.m && (x.m.posterClean || x.m.poster || x.m.backdrop))
+    .sort((a, b) => relKey(b) - relKey(a));
   /* 同一部剧只上一次：一次补进来三季，hero 不该被同一张脸占三格。留季号大的那个 */
   const seen = new Map();
   items.forEach(x => {
@@ -15857,7 +16096,7 @@ function tvYearSlotHTML(year) {
 async function tvFillYearMasonry(year) {
   const slot = document.querySelector('.year-tv-mas[data-year="' + year + '"]');
   if (!slot) return;
-  const list = await tvEnsureList();
+  const list = ArtGate.filterTv(await tvEnsureList());
   if (!slot.isConnected) return;
   const items = (list || []).filter(s => String(s.year) === String(year));
   if (!items.length) return;
@@ -15902,7 +16141,7 @@ function tvCardHTML(s) {
   const name = s.title || s.folder;
   const footSub = [s.seasonLabel, s.res, s.hdr === 'DV' ? '杜比视界' : s.hdr].filter(Boolean).join(' · ');
   return '<article class="tv-card tv-loading" data-tv-path="' + esc(s.path) + '" data-tv-id="' + esc(s.id) + '" tabindex="0" role="button" aria-label="' + esc(name) + '，' + esc(tvCountLabel(s)) + '">' +
-    '<div class="tv-art" data-tv-art="' + esc(s.id) + '" data-tv-q="' + esc(s.en || s.zh || name) + '" data-tv-y="' + esc(s.year || '') + '" data-tv-land="1">' +
+    '<div class="tv-art" data-tv-art="' + esc(s.id) + '" data-tv-id="' + esc(s.tmdbId || '') + '" data-tv-q="' + esc(s.en || s.zh || name) + '" data-tv-y="' + esc(s.year || '') + '" data-tv-land="1">' +
       '<div class="tv-haze"></div>' +
       '<div class="tv-sharp"></div>' +
       '<div class="tv-art-ph">' + esc(name) + '</div>' +
@@ -15938,17 +16177,22 @@ function tvBind(scope) {
 const tvMetaInflight = new Map();
 function tvMetaKey(q, y) { return 'tv:' + String(q || '').toLowerCase() + (y ? '@' + y : ''); }
 
-function tvFetchMeta(q, year) {
-  if (!q) return Promise.resolve(null);
-  const key = tvMetaKey(q, year);
+/* id：剧集表（/api/tv）里已经认好的 TMDB 编号 —— 剧照、详情、分集用同一部，不再按名字各认各的。
+   返回 null 时，tvMetaMiss 里记着这一次是不是确定的「没有」（后端回了 null），还是没问成（出错） */
+const tvMetaMiss = new Set();
+function tvFetchMeta(q, year, id) {
+  if (!q && !id) return Promise.resolve(null);
+  const key = id ? 'tv:#' + id : tvMetaKey(q, year);
   if (tmdbCache.has(key)) { const v = tmdbCache.get(key); if (v) return Promise.resolve(v); }
   if (tvMetaInflight.has(key)) return tvMetaInflight.get(key);
   const p = (async () => {
     try {
-      const qs = new URLSearchParams({ query: q, type: 'tv', logo: '1', language: 'zh-CN', include_image_language: 'zh,en,null' });
+      const qs = new URLSearchParams({ query: q || '', type: 'tv', logo: '1', language: 'zh-CN', include_image_language: 'zh,en,null' });
       if (year) qs.set('year', year);
+      if (id) qs.set('id', id);
       const d = await fetchJSON(API + '/api/tmdb?' + qs, { timeout: 9000, retries: 0 });
       tmdbCache.set(key, d || null);
+      if (!d) tvMetaMiss.add(key); else tvMetaMiss.delete(key);
       return d || null;
     } catch (_) { return null; }
   })();
@@ -15983,8 +16227,14 @@ async function tvLoadArt(el) {
   };
   if (!q) { done(false); return; }
   el.removeAttribute('data-tv-art');
-  const d = await tvFetchMeta(q, el.dataset.tvY);
+  const tid = el.dataset.tvId || '';
+  const d = await tvFetchMeta(q, el.dataset.tvY, tid);
   if (!el.isConnected) return;
+  /* 没有封面的剧不显示：后端确定说没有这部、或者认出来了却一张图都没有 —— 卡收起来，下次不排。
+     没问成（出错）的照旧留着占位，不算 */
+  const host = el.closest('[data-tv-path]');
+  const pic = d && (d.posterClean || d.poster || d.backdrop);
+  if (host && (pic || d || tvMetaMiss.has(tid ? 'tv:#' + tid : tvMetaKey(q, el.dataset.tvY)))) ArtGate.settleTv(host.dataset.tvPath, !!pic);
   if (!d) { done(false); return; }
   const clean = d.posterClean || '';
   /* data-tv-land：这一格要横图（16:10 大卡、瀑布流矮格）—— 剧照优先，
@@ -16150,7 +16400,7 @@ async function openSeries(path) {
    《The Killer》这类同名电影会把剧的图顶掉 */
 async function tvSeriesArt(s) {
   const name = s.title || s.folder || '';
-  const d = await tvFetchMeta(s.en || s.zh || name, s.year).catch(() => null);
+  const d = await tvFetchMeta(s.en || s.zh || name, s.year, s.tmdbId).catch(() => null);
   return {
     bgUrl: (d && (d.backdrop || d.poster)) || '',
     tmdb: d, itunes: null,
@@ -19852,10 +20102,10 @@ function renderSearchResults(raw, results, note) {
   const body = $('searchBody'); if (!body) return;
   /* 剧集与电影分两段：卡型本来就不一样（一横一竖），混在同一个网格里
      只会两边都别扭。剧集在上 —— 库里剧集少，压在电影后面等于没有 */
-  const tv = results.filter(r => r.tv).map(r => r.s);
-  const mv = results.filter(r => !r.tv).map(r => r.v);
+  const tv = ArtGate.filterTv(results.filter(r => r.tv).map(r => r.s));
+  const mv = ArtGate.filter(results.filter(r => !r.tv).map(r => r.v));
   body.innerHTML =
-    '<div class="search-result-count"><b>“' + esc(raw) + '”</b> · ' + results.length + ' 个结果' +
+    '<div class="search-result-count"><b>“' + esc(raw) + '”</b> · ' + (tv.length + mv.length) + ' 个结果' +
       (note ? ' · ' + esc(note) : '') + '</div>' +
     (tv.length
       ? '<div class="search-sub">剧集 · ' + tv.length + '</div>' +

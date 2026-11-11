@@ -89,7 +89,9 @@ async function context(opts = {}, apple = false, probe = false) {
     if (url.pathname === '/api/edge/ping' && url.host === 'stream.cuven.online' && pingDelay) await new Promise(r => setTimeout(r, pingDelay));
     if (url.pathname.startsWith('/stream/') && streamDelay) await new Promise(r => setTimeout(r, streamDelay));
     const req = route.request();
-    const res = await H.worker.fetch(new Request(u, { method: req.method(), headers: req.headers() }), H.env, H.ctx);
+    /* POST 要把正文一起交给 Worker（/api/tmdb-batch）—— 原来漏了，批接口在测试里一直回 Invalid JSON，
+       页面全走单条兜底，批接口这条真实路径根本没被测到 */
+    const res = await H.worker.fetch(new Request(u, { method: req.method(), headers: req.headers(), body: req.method() === 'POST' ? req.postData() : undefined }), H.env, H.ctx);
     await route.fulfill({ status: res.status, headers: Object.fromEntries(res.headers), body: Buffer.from(await res.arrayBuffer()) });
   });
   return ctx;
@@ -342,6 +344,7 @@ console.log('\n■ 展厅预告片 · YouTube 官方预告（IMDb 不给直链�
 console.log('\n■ 片名一律中文（卡片、搜索、播放器 / 正在播放）');
 {
   H.env.TMDB_API_KEY = 'tmdb-test';
+  caches.default.m.clear();         /* Worker 的 TMDB 结果缓存跨节共享：上一节那份片单的「认不出」不能带进来 */
   H.tmdb.movies = [{ id: 9001, query: 'long', title: '漫长的测试', date: '2024-05-01' }];
   const zc = await context({ viewport: { width: 1280, height: 800 } });
   await zc.route('https://image.tmdb.org/**', r => r.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>' }));
@@ -649,9 +652,11 @@ await pa.keyboard.press('Escape');
 console.log('\n■ Mac 大屏（14" / 16" MacBook Pro、Studio Display、Pro Display XDR）与 iPhone / iPad 不变');
 {
   H.env.TMDB_API_KEY = 'tmdb-test';
+  caches.default.m.clear();         /* Worker 的 TMDB 结果缓存跨节共享：上一节那份片单的「认不出」不能带进来 */
   /* 其余样片也给上 TMDB 条目：评分到齐后「今日推荐」会重排（见下面那条吸附跟随的回归） */
-  const extra = fs.readdirSync(path.join(HERE, 'samples')).filter(f => /\.(mkv|mp4)$/.test(f) && f !== 'long.mp4')
-    .map((f, i) => ({ id: 9100 + i, query: f.replace(/\.[^.]+$/, '').replace(/[._]/g, ' ').toLowerCase(), title: '样片' + i, date: '2020-05-01' }));
+  /* 搜索词按后端的解析规则来：av1_hdr 解析出的片名是「av1」（hdr 是规格词），long_ep2 是「long」第 2 集 */
+  const extra = fs.readdirSync(path.join(HERE, 'samples')).filter(f => /\.(mkv|mp4)$/.test(f) && !/^long/.test(f))
+    .map((f, i) => ({ id: 9100 + i, query: f.replace(/\.[^.]+$/, '').replace(/[._]/g, ' ').toLowerCase().replace(/ hdr$/, ''), title: '样片' + i, date: '2020-05-01' }));
   H.tmdb.movies = [{ id: 9001, query: 'long', title: '漫长的测试', date: '2024-05-01', backdrop: '/b9001.jpg' }, ...extra];
   /* Apple Silicon 上的 Safari：不给 deviceMemory，核数按 4 报（防指纹时最坏的情况） */
   const macSafari = () => {
@@ -812,6 +817,99 @@ console.log('\n■ Mac 大屏（14" / 16" MacBook Pro、Studio Display、Pro Dis
     await ic.close();
   }
   delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
+}
+
+console.log('\n■ 没有封面的影片不显示（确定的答案才算，网络出错不算）');
+{
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  caches.default.m.clear();         /* Worker 的 TMDB 结果缓存跨节共享：上一节那份片单的「认不出」不能带进来 */
+  const q = f => f.replace(/\.[^.]+$/, '').replace(/[._]/g, ' ').toLowerCase().replace(/ hdr$/, '');
+  const files = fs.readdirSync(path.join(HERE, 'samples')).filter(f => /\.(mkv|mp4)$/.test(f) && !/^long/.test(f));
+  H.tmdb.movies = [{ id: 9001, query: 'long', title: '漫长的测试', date: '2024-05-01' },
+    ...files.filter(f => !/^(dv81|hdr10_multi)\./.test(f)).map((f, i) => ({ id: 9200 + i, query: q(f), title: '样片' + i, date: '2020-05-01' })),
+    { id: 9300, query: 'dv81', title: '没有海报', date: '2021-01-01', poster: null }];     // 认得出，但 TMDB 上没有海报
+  // hdr10_multi：TMDB 里根本没有；avc_zsub：这一次 TMDB 出错（不能当成没有）
+  H.tmdb.fail = (p, qq) => (qq.query || '') === 'avc zsub';
+  const img = r => r.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>' });
+  const nc = await context({ viewport: { width: 1280, height: 800 } });
+  await nc.route('https://image.tmdb.org/**', img);
+  const np = await enter(nc);
+  await until(np, () => document.querySelectorAll('#view-home .card[data-path]').length > 0, null, 20000);
+  /* 首页的行都在大图下面：滚一遍，让每一排的海报都去取 */
+  await np.evaluate(async () => { for (let y = 0; y < document.body.scrollHeight; y += 500) { scrollTo(0, y); await new Promise(r => setTimeout(r, 120)); } scrollTo(0, 0); });
+  const gone = await until(np, () => !document.querySelector('.card[data-name="dv81.mkv"]') && !document.querySelector('.card[data-name="hdr10_multi.mkv"]'), null, 20000)
+    .then(() => true).catch(() => false);
+  await np.waitForTimeout(6000);                     /* 后台补中文名那一轮（kick 5s）也把整库问了一遍 */
+  const kept = await np.evaluate(() => ({ long: document.querySelectorAll('.card[data-name="long.mp4"]').length,
+    none: JSON.parse(localStorage.getItem('art_none_v1') || '{}') }));
+  ok(gone && 'dv81.mkv' in kept.none && 'hdr10_multi.mkv' in kept.none, '认得出但没有海报的（dv81）、TMDB 里没有的（hdr10_multi）：屏上的卡收起来，并记下');
+  await np.evaluate(async () => { await openSearch(); runSearch('avc'); });   /* openSearch 末尾会铺初始页，等它完再搜 */
+  await np.waitForTimeout(500);
+  const zsub = await np.evaluate(() => !!document.querySelector('#searchBody .card[data-name="avc_zsub.mkv"]'));
+  ok(zsub && !('avc_zsub.mkv' in kept.none) && kept.long > 0, 'TMDB 这次出错的（avc_zsub）照常显示（搜得到）、不记账；有海报的照常');
+  await np.evaluate(() => closeSearch());
+  const ranks = await np.evaluate(() => [...document.querySelectorAll('#todayRecsRow .card .card-rank')].map(b => +b.textContent));
+  ok(ranks.length > 0 && ranks.every((r, i) => r === i + 1), `「今日推荐」的名次连续（${ranks.join(',')}）`);
+  await np.close();
+  /* 再进一次：已知没有封面的，一开始就不排（不是先出来再收） */
+  H.tmdb.fail = null;
+  const np2 = await nc.newPage();
+  await np2.addInitScript(() => {
+    window.__seen = new Set();
+    new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(n => { if (n.querySelectorAll) n.querySelectorAll('.card[data-name]').forEach(c => window.__seen.add(c.dataset.name)); }))).observe(document, { childList: true, subtree: true });
+  });
+  await np2.goto(ORIGIN);
+  await np2.waitForFunction(() => typeof playVideo === 'function', null, { timeout: 15000 });
+  if (await np2.$('#wc-cta')) { await np2.click('#wc-cta'); await np2.waitForSelector('#wc-root', { state: 'detached', timeout: 15000 }); }
+  await until(np2, () => document.querySelectorAll('#view-home .card[data-path]').length > 0, null, 20000);
+  await np2.waitForTimeout(1500);
+  const seen = await np2.evaluate(() => [...window.__seen]);
+  ok(!seen.includes('dv81.mkv') && !seen.includes('hdr10_multi.mkv') && seen.includes('long.mp4'), '再次打开：没有封面的从头到尾没被排出来过');
+  await np2.evaluate(() => { openSearch(); });
+  await np2.fill('#searchInput', 'dv81');
+  await np2.evaluate(() => runSearch('dv81'));
+  await np2.waitForTimeout(400);
+  ok(await np2.evaluate(() => !document.querySelector('#searchBody .card[data-name="dv81.mkv"]')), '搜索里也不出现');
+  await nc.close();
+  delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
+}
+
+console.log('\n■ 登录页：品牌区（流体底图 + Cuven max 字标 + 蓝色脉冲）+ 白色面板');
+{
+  for (const [label, opt] of [['iPhone', { ...devices['iPhone 15 Pro'], deviceScaleFactor: 2 }], ['Mac', { viewport: { width: 1440, height: 900 } }]]) {
+    const lc = await browser.newContext(opt);
+    await lc.addInitScript(() => { localStorage.setItem('cuven_privacy_consent_v1', JSON.stringify({ v: '2026-07-18', ts: Date.now() })); });
+    await lc.route('**/*', r => r.request().url().startsWith(ORIGIN) ? r.continue() : r.abort());
+    const lp = await lc.newPage();
+    lp.on('pageerror', e => errors.push('login: ' + e.message));
+    await lp.goto(ORIGIN);
+    await lp.waitForFunction(() => window.CuvenLogin && document.getElementById('tvAuthLayer'), null, { timeout: 15000 });
+    if (await lp.$('#wc-cta')) { try { await lp.click('#wc-cta', { timeout: 3000 }); } catch (_) {} }
+    await lp.waitForTimeout(400);
+    if (!(await lp.evaluate(() => document.getElementById('tvAuthLayer').classList.contains('is-open')))) await lp.evaluate(() => enforceTVLoginGate());
+    await lp.waitForTimeout(1600);
+    const L = await lp.evaluate(() => {
+      const r = s => document.querySelector(s).getBoundingClientRect();
+      const sheet = r('#cvlSheet'), word = r('#cvlHost .cvl-word'), title = r('#cvlSiTitle'), input = r('#cvlUser'), cta = r('#cvlSiBtn'), foot = r('#cvlFoot');
+      const cs = s => getComputedStyle(document.querySelector(s));
+      const w = document.querySelector('#cvlHost .cvl-word');
+      return { wordText: [...w.children].map(e => e.textContent).join(' ') + '|' + w.getAttribute('aria-label'), wordAbove: word.bottom <= sheet.top + 1,
+        bgUnder: document.getElementById('cvlViz').getBoundingClientRect().top <= 0, sheetBg: cs('#cvlSheet').backgroundColor,
+        order: sheet.top < title.top && title.bottom < input.top && input.bottom < cta.top && cta.bottom < foot.top,
+        titleLeft: cs('#cvlSiTitle').textAlign, ctaBg: cs('#cvlSiBtn').backgroundColor, inputBg: cs('#cvlUser').backgroundColor,
+        pulse: document.getAnimations().some(a => a.effect && a.effect.target && /cvlGlow|cvlRing1/.test(a.effect.target.id || '')),
+        wide: sheet.width < innerWidth - 40, radius: cs('#cvlSheet').borderTopLeftRadius };
+    });
+    ok(L.wordText === 'Cuven max|Cuven max' && L.wordAbove && L.bgUnder, `${label}：Cuven max 字标在品牌区（白色面板上沿之上），底下是流体底图`);
+    ok(L.sheetBg === 'rgb(255, 255, 255)' && parseFloat(L.radius) >= 30 && L.order && L.titleLeft === 'left',
+      `${label}：白色圆角面板，从上到下「Cuven 账户」→ 大标题（左对齐）→ 输入框 → 主按钮 → 账户说明`);
+    ok(/rgb\(23[0-9], 23[0-9], 24[0-9]\)/.test(L.inputBg) && L.pulse, `${label}：浅灰填充的输入框；打开时蓝色脉冲从字标扩出去一次`);
+    if (label === 'Mac') ok(L.wide, 'Mac：面板收成居中的一张卡，四周露出流体');
+    await lp.fill('#cvlUser', 'someone');
+    await lp.waitForTimeout(200);
+    ok(await lp.evaluate(() => getComputedStyle(document.getElementById('cvlSiBtn')).backgroundColor !== ''), `${label}：输入后主按钮照常可交互`);
+    await lc.close();
+  }
 }
 
 console.log('\n■ 优选入口（EDGE_HOSTS）');
