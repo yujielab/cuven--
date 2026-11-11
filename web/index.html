@@ -2609,6 +2609,28 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
 }
 .year-library-back:active { transform: scale(.9); transition: transform var(--press-in); }
 .year-library-copy { min-width: 0; }
+/* 悬浮返回钮：落在页头左上角那块空位上（第一屏与原来一模一样），往下翻它留在原处 */
+.year-library-heading.has-float { flex-direction: column; align-items: flex-start; gap: 12px; }
+.page-back-slot { display: block; flex: 0 0 auto; width: 44px; height: 44px; }
+.page-back {
+  position: fixed; z-index: 85;
+  top: calc(var(--safe-t) + 28px);
+  left: calc(var(--rail-space, 0px) + var(--app-w, 100vw) * 0.05);
+  width: 44px; height: 44px; padding: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text); cursor: pointer;
+  background: rgba(44,44,46,.62);
+  backdrop-filter: blur(24px) saturate(150%); -webkit-backdrop-filter: blur(24px) saturate(150%);
+  border: var(--hairline) solid rgba(255,255,255,.16);
+  box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  opacity: 0; transform: scale(.86) translateZ(0); pointer-events: none;
+  transition: opacity .28s var(--ease-out), transform .42s var(--ease-spring);
+  -webkit-tap-highlight-color: transparent;
+}
+.page-back.on { opacity: 1; transform: none; pointer-events: auto; }
+.page-back svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.page-back:active { transform: scale(.9); transition: transform var(--press-in); }
+@media (min-width: 768px) { .page-back { top: calc(var(--safe-t) + 36px); } }
 .year-library-copy .library-title { font-variant-numeric: tabular-nums; }
 .year-library-section { margin-top: 12px; }
 .year-library-grid { padding-left: 0; }
@@ -3212,7 +3234,7 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
 /* 手指在上面 → 交出控制权。松手时 JS 会写一条带初速度的弹簧覆盖这里 */
 .detail-view.dragging { transition: none !important; }
 
-.detail-nav-bar { position: fixed; top: calc(var(--safe-t) + 16px); left: 24px; right: 24px; z-index: 210; display: flex; justify-content: space-between; pointer-events: none; transition: opacity .3s; }
+.detail-nav-bar { position: fixed; top: calc(var(--safe-t) + 16px); left: max(24px, calc(env(safe-area-inset-left, 0px) + 12px)); right: max(24px, calc(env(safe-area-inset-right, 0px) + 12px)); z-index: 210; display: flex; justify-content: space-between; pointer-events: none; transition: opacity .3s; }
 .detail-nav-bar > * { pointer-events: auto; }
 .detail-btn-circle { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #fff; background: rgba(0,0,0,.4); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: var(--hairline) solid rgba(255,255,255,.15); cursor: pointer; }
 
@@ -13430,7 +13452,7 @@ function bindCards(scope) {
 
 
 function openContinueWatchingMenu(path, name, cardEl) {
-  const { title } = parse(name);
+  const title = showTitle(name);
   $('sheetBody').innerHTML =
     '<div class="sheet-title">' + esc(title || name) + '</div>' +
     '<button class="sheet-btn" id="cwRemoveBtn">' +
@@ -14856,8 +14878,60 @@ window.addEventListener('railchange', () => {
 });
 
 
+/* ══ 悬浮返回钮 ═══════════════════════════════════════════════════════
+   二级页面（年份页、文件夹页）的返回原来排在页头里，往下一翻就跟着页头走了 ——
+   想回去得先翻回顶上。现在是一枚与详情页同材质的玻璃圆钮，钉在页头左上角那个位置、
+   浮在内容之上（播放时播放器整个盖住它；搜索、详情页、弹层都在它上面）；页头里原来
+   的位置留一块同尺寸的空位，所以第一屏看上去一模一样，只是往下翻它不走了。
+   同时给这两种页面记一格历史：iOS 边缘右滑、安卓返回键、浏览器后退、Esc 都回上一页 ——
+   原来这几种手势在二级页面上什么都不发生。 */
+const PageBack = (() => {
+  let el = null, onBack = null, skipPop = false;
+  function node() {
+    if (el) return el;
+    el = document.createElement('button');
+    el.type = 'button';
+    el.id = 'pageBack';
+    el.className = 'page-back';
+    el.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5-7 7 7 7"></path></svg>';
+    el.addEventListener('click', () => { try { haptic.light(); } catch (_) {} back(false); });
+    document.body.appendChild(el);
+    return el;
+  }
+  function show(label, fn) {
+    const b = node();
+    onBack = fn;
+    b.setAttribute('aria-label', label || '返回');
+    requestAnimationFrame(() => b.classList.add('on'));
+    if (history.state?.view !== 'sub') navHistory.push({ view: 'sub' }, location.pathname + location.search + '#sub');
+  }
+  function hide() { if (el) el.classList.remove('on'); onBack = null; }
+  /* fromPop：浏览器后退触发的（那一格历史已经退了，不要再退一次） */
+  function back(fromPop) {
+    const fn = onBack;
+    if (!fn) return false;
+    hide();
+    if (!fromPop && history.state?.view === 'sub') { skipPop = true; navHistory.back(); }
+    fn();
+    return true;
+  }
+  return {
+    show, hide, back,
+    get on() { return !!onBack; },
+    /* 自己退的那一格：popstate 里认出来吞掉 */
+    takePop() { if (!skipPop) return false; skipPop = false; return true; },
+  };
+})();
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || !PageBack.on) return;
+  if ($('detailView')?.classList.contains('on') || $('searchView')?.classList.contains('on') || $('sheetMenu')?.classList.contains('on')) return;
+  if (typeof Player !== 'undefined' && Player.isOpen()) return;
+  PageBack.back(false);
+});
+
 async function renderHome() {
   state.currentTab = 'home';
+  PageBack.hide();
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
   $('navHome').classList.add('active');
   requestAnimationFrame(() => updateNavPill(true));
@@ -15120,6 +15194,7 @@ function openYearLibrary(year) {
 }
 
 function closeYearLibrary() {
+  if (PageBack.on) { PageBack.back(false); return; }   /* 走悬浮钮那条路：顺手退掉那一格历史 */
   const origin = state.yearLibraryOrigin;
   state.libraryYear = null;
   state.yearLibraryOrigin = null;
@@ -18515,6 +18590,7 @@ async function renderLibrary() {
      展映分支刻意不调 scrollTo —— SC.render 已经把文档高度同步还原了，位置
      交给 navTo 的 lockScroll，它才有东西可落。 */
   if (!isYearHeading(state.libraryYear)) {
+    PageBack.hide();
     SC.render(view);
     swapIn(view);
     return;
@@ -18522,19 +18598,17 @@ async function renderLibrary() {
   SC.teardown();
 
   const selectedYear = Number(state.libraryYear);
+  PageBack.show(state.yearLibraryOrigin === 'home' ? '返回主页' : '返回资料库', closeYearLibrary);
   const items = state.allVideos
     .filter(v => parse(v.name).year === String(selectedYear))
     .sort((a, b) => parse(a.name).title.localeCompare(parse(b.name).title));
 
   /* 年份分类：标签退场完成后才会进入这里。只呈现该年份，返回按钮按入口来源
      回主页或完整资料库；底部「资料库」再次点按也会回到展映。 */
-  const backLabel = state.yearLibraryOrigin === 'home' ? '返回主页' : '返回资料库';
   let html =
     '<div class="library-header year-library-header">' +
-      '<div class="year-library-heading">' +
-        '<button class="year-library-back" type="button" onclick="closeYearLibrary()" aria-label="' + backLabel + '">' +
-          '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5-7 7 7 7"></path></svg>' +
-        '</button>' +
+      '<div class="year-library-heading has-float">' +
+        '<span class="page-back-slot" aria-hidden="true"></span>' +
         '<div class="year-library-copy">' +
           '<div class="library-title">' + selectedYear + ' 年</div>' +
           '<div class="library-sub">' + items.length + ' 部影片</div>' +
@@ -18566,8 +18640,9 @@ async function renderLibrary() {
 async function enterFolder(fullPath, name) {
   state.scrollMemory[state.currentTab] = window.scrollY; stopHeroTimer();
   setupPosterObserver(); setupCardRevealObserver();
-  const view = $('view-' + state.currentTab); const backBtn = '<button onclick="exitFolder()" style="background:rgba(255,255,255,.08);border:var(--hairline) solid rgba(255,255,255,.1);color:var(--text);width:36px;height:36px;border-radius:50%;font-size:18px;cursor:pointer;font-family:inherit;transform:translateZ(0);transition:transform .25s var(--ease-spring)" onmousedown="this.style.transform=\'scale(0.92)\'" onmouseup="this.style.transform=\'\'" onmouseleave="this.style.transform=\'\'">‹</button>';
-  view.innerHTML = '<div class="library-header"><div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">' + backBtn + '<div class="library-title" style="font-size:28px">' + esc(name) + '</div></div></div><div class="loading-full"><div class="loader"></div></div>';
+  const view = $('view-' + state.currentTab); const backBtn = '<span class="page-back-slot" aria-hidden="true"></span>';
+  PageBack.show('返回' + (state.currentTab === 'home' ? '主页' : '资料库'), exitFolder);
+  view.innerHTML = '<div class="library-header"><div class="year-library-heading has-float" style="margin-bottom:8px">' + backBtn + '<div class="library-title" style="font-size:28px">' + esc(name) + '</div></div></div><div class="loading-full"><div class="loader"></div></div>';
   const rel = state.rootPrefix ? fullPath.slice(state.rootPrefix.length) : fullPath;
   try {
     const data = await fetchJSON(API + '/api/list?path=' + encodeURIComponent(rel), { timeout: 12000, retries: 1 });
@@ -18575,7 +18650,7 @@ async function enterFolder(fullPath, name) {
     /* 文件夹页与年份页同一套瀑布流 —— 从主页进还是从资料库进不再分岔，
        两边本来就是同一件事：把一堆影片摊开给人挑 */
     const byYear = {}; videos.forEach(v => { const { year } = parse(v.name); if (year) (byYear[year] = byYear[year] || []).push(v); else (byYear._ = byYear._ || []).push(v); }); const years = Object.keys(byYear).filter(y => y !== '_').map(Number).sort((a,b) => b-a);
-    let html = '<div class="library-header"><div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">' + backBtn + '<div class="library-title" style="font-size:28px">' + esc(name) + '</div></div></div>';
+    let html = '<div class="library-header"><div class="year-library-heading has-float" style="margin-bottom:8px">' + backBtn + '<div class="library-title" style="font-size:28px">' + esc(name) + '</div></div></div>';
     if (folders.length) { html += '<section class="section"><div class="scroll-row">' + folders.map(folderCardHTML).join('') + '</div></section>'; }
     const groups = [];
     years.forEach(y => { groups.push({ key: 'y' + y, label: y + ' 年', items: byYear[y] }); });
@@ -18593,7 +18668,10 @@ async function enterFolder(fullPath, name) {
   } catch (e) { view.innerHTML = '<div class="empty"><i class="ph ph-warning-circle"></i><div class="empty-title">加载失败</div><div>' + esc(e.message) + '</div></div>'; }
 }
 
-function exitFolder() { if (state.currentTab === 'home') renderHome(); else renderLibrary(); }
+function exitFolder() {
+  if (PageBack.on) { PageBack.back(false); return; }
+  if (state.currentTab === 'home') renderHome(); else renderLibrary();
+}
 
 
 /* 详情页顶栏按钮（返回 / 更多）：抽为常量，供资料库详情与「即将加入」TMDB 详情复用 */
@@ -20875,7 +20953,7 @@ const Player = (() => {
     const path = cur.path;
     cur = null;
     refreshCardProgress(path);
-    if ('mediaSession' in navigator) { try { navigator.mediaSession.metadata = null; } catch (_) {} }
+    mediaHandlers(false);                                      /* 「正在播放」整块撤掉，系统里不留一张空卡 */
   }
   async function retry() {
     if (!cur) return;
@@ -20988,10 +21066,57 @@ const Player = (() => {
     v.textTracks.addEventListener('change', onChange);
   }
 
+  /* ── 锁屏 / 灵动岛 / 控制中心的「正在播放」──────────────────────────
+     原来只给了片名一行：卡片上没有海报、没有进度条，按钮也只是系统猜的那一套。
+     现在给全：中文片名 + 集名 / 年份、海报（两档尺寸，系统挑合适的）、播放 / 暂停状态、
+     进度（时长、位置、倍速 —— 灵动岛展开后那根进度条靠它），以及「后退 / 前进 10 秒」「拖动」
+     「停止」。关掉播放器时全部撤掉：资料库里静音的预告片永远不会占用这块地方。 */
+  function mediaArt() {
+    if (!cur) return [];
+    let d = null;
+    try { d = RecvIndex.tmdb(cur.name) || tmdbCache.get(cur.name + ':logo') || tmdbCache.get(cur.name); } catch (_) {}
+    if (!d && cur.series) {
+      try {
+        const s = (_tvCache || []).find(x => x && x.id === cur.series.id);
+        if (s) d = tmdbCache.get(tvMetaKey(s.en || s.zh || s.title, s.year));
+      } catch (_) {}
+    }
+    const src = d && (d.poster || d.posterClean || d.backdrop);
+    if (!src || !/image\.tmdb\.org/.test(src)) return src ? [{ src, sizes: '512x512' }] : [];
+    const at = w => src.replace(/\/t\/p\/(original|w\d+|h\d+)\//, '/t/p/' + w + '/');
+    return [{ src: at('w342'), sizes: '342x513', type: 'image/jpeg' }, { src: at('w780'), sizes: '780x1170', type: 'image/jpeg' }];
+  }
   function mediaMeta() {
     if (!('mediaSession' in navigator) || !window.MediaMetadata || !cur) return;
-    try { navigator.mediaSession.metadata = new MediaMetadata({ title: cur.title, artist: cur.subtitle || 'Cuven Stream' }); } catch (_) {}
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({ title: cur.title, artist: cur.subtitle || 'Cuven', album: 'Cuven', artwork: mediaArt() });
+    } catch (_) {}
+    mediaHandlers(true);
   }
+  function mediaHandlers(on) {
+    if (!('mediaSession' in navigator)) return;
+    const ms = navigator.mediaSession, v = el.video;
+    const set = (a, f) => { try { ms.setActionHandler(a, on ? f : null); } catch (_) {} };
+    set('play', () => { v.play().catch(() => {}); });
+    set('pause', () => v.pause());
+    set('seekbackward', e => { v.currentTime = Math.max(0, v.currentTime - ((e && e.seekOffset) || 10)); mediaPos(); });
+    set('seekforward', e => { v.currentTime = Math.min((v.duration || 0) - 1, v.currentTime + ((e && e.seekOffset) || 10)); mediaPos(); });
+    set('seekto', e => {
+      if (!e || e.seekTime == null) return;
+      if (e.fastSeek && typeof v.fastSeek === 'function') v.fastSeek(e.seekTime); else v.currentTime = e.seekTime;
+      mediaPos();
+    });
+    set('stop', () => close());
+    if (!on) { try { ms.metadata = null; ms.playbackState = 'none'; } catch (_) {} }
+  }
+  function mediaPos() {
+    const v = el.video, ms = navigator.mediaSession;
+    if (!ms || typeof ms.setPositionState !== 'function' || !cur) return;
+    const d = v.duration;
+    if (!(d > 0) || !isFinite(d)) return;
+    try { ms.setPositionState({ duration: d, playbackRate: v.playbackRate || 1, position: Math.min(d, Math.max(0, v.currentTime || 0)) }); } catch (_) {}
+  }
+  function mediaState(st) { try { if ('mediaSession' in navigator && cur) navigator.mediaSession.playbackState = st; } catch (_) {} }
 
   /* ── 出错：签名过期 / 网络抖动 → 换新签名从原位置重连，最多两次 ── */
   function onError() {
@@ -21034,8 +21159,12 @@ const Player = (() => {
          只进一次 —— 之后的 playing（拖动、缓冲、画中画里暂停再放）不能把人拽回全屏 */
       if (cur.wantFs && !inFs() && !inPip()) { cur.wantFs = false; enterFs(); }
       loaderDone();
+      mediaState('playing'); mediaPos();
     });
-    v.addEventListener('pause', saveNow);
+    v.addEventListener('pause', () => { saveNow(); mediaState('paused'); mediaPos(); });
+    v.addEventListener('seeked', mediaPos);
+    v.addEventListener('ratechange', mediaPos);
+    v.addEventListener('durationchange', mediaPos);
     v.addEventListener('timeupdate', () => {
       if (!cur) return;
       const now = Date.now();
@@ -21923,6 +22052,14 @@ document.addEventListener('keydown', e => {
 window.addEventListener('popstate', e => {
   /* 播放器关掉时自己退的那一格历史：吞掉，底下的详情页 / 首页原样留着 */
   if (Player.takePop()) return;
+  /* 悬浮返回钮自己退的那一格：同理吞掉 */
+  if (PageBack.takePop()) return;
+  /* 二级页面（年份 / 文件夹）在最上层：后退手势 = 回上一页（放在锁之前 —— 这一格是它自己记的） */
+  if (PageBack.on && !Player.isOpen() && !$('detailView').classList.contains('on') && !$('searchView').classList.contains('on') &&
+      !$('sheetMenu').classList.contains('on') && !$('tvAuthLayer')?.classList.contains('is-open')) {
+    PageBack.back(true);
+    return;
+  }
   if (shouldBlockNativeBackPop(e)) {
     restoreNativeBackLock();
     return;

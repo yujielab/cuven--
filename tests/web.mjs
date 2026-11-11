@@ -419,6 +419,59 @@ console.log('\n■ 弱网 / 断网');
   await sc.close();
 }
 
+console.log('\n■ 悬浮返回钮 · 返回手势 · 正在播放');
+{
+  const bc = await context({ ...devices['iPhone 15 Pro'] });
+  const bp = await enter(bc);
+  await bp.waitForTimeout(800);
+  const pb = () => bp.evaluate(() => {
+    const b = document.getElementById('pageBack'), r = b && b.getBoundingClientRect();
+    return { on: !!(b && b.classList.contains('on')), top: r ? Math.round(r.top) : null, label: b ? b.getAttribute('aria-label') : '', view: history.state && history.state.view,
+      slot: !!document.querySelector('.page-back-slot') };
+  });
+  await bp.evaluate(() => openYearLibrary(2024));
+  await until(bp, () => !!document.querySelector('.view-section.active .page-back-slot'), null, 8000);
+  await bp.waitForTimeout(400);
+  const y0 = await pb();
+  await bp.evaluate(() => { document.body.style.minHeight = '4000px'; window.scrollTo(0, 900); });
+  await bp.waitForTimeout(300);
+  const y1 = await pb();
+  ok(y0.on && y0.slot && y0.view === 'sub' && /返回/.test(y0.label) && y1.on && y1.top === y0.top,
+    `年份页：返回钮悬浮在左上角（往下翻 900px 仍在 ${y1.top}px 处），页头留着原位，记了一格历史`);
+  await bp.evaluate(() => { document.body.style.minHeight = ''; history.back(); });
+  const gone = await until(bp, () => !document.querySelector('.view-section.active .page-back-slot') && !document.getElementById('pageBack').classList.contains('on') &&
+    !(history.state && history.state.view === 'sub'), null, 6000).then(() => true).catch(() => false);
+  ok(gone, '边缘右滑 / 浏览器后退：回到上一页（原来在二级页面上什么都不发生）');
+  await bp.evaluate(() => enterFolder('/Movies/dovi', 'dovi'));
+  await until(bp, () => !!document.querySelector('.view-section.active .page-back-slot') && document.getElementById('pageBack').classList.contains('on'), null, 8000);
+  await bp.click('#pageBack');
+  const f = await until(bp, () => !document.querySelector('.view-section.active .page-back-slot'), null, 6000).then(() => true).catch(() => false);
+  const st2 = await pb();
+  ok(f && !st2.on && st2.view !== 'sub', '文件夹页：点悬浮返回钮回到上一页，那一格历史一并退掉');
+  await bp.waitForTimeout(1000);                                   /* 切页动画走完（navTo 在动画中途不接新的切换） */
+  await bp.evaluate(() => openYearLibrary(2024));
+  await until(bp, () => document.getElementById('pageBack').classList.contains('on'), null, 8000);
+  await bp.keyboard.press('Escape');
+  ok(await until(bp, () => !document.getElementById('pageBack').classList.contains('on'), null, 4000).then(() => true).catch(() => false), 'Esc 也能返回');
+  await bc.close();
+
+  const mc = await context({ viewport: { width: 1280, height: 800 } });
+  const mp = await enter(mc);
+  await mp.evaluate(() => playVideo('/Movies/long.mp4', 'Long.Test.2024.1080p.mp4'));
+  await until(mp, s => document.querySelector(s).currentTime > 0.3, vid);
+  const m1 = await mp.evaluate(() => ({ st: navigator.mediaSession.playbackState, t: navigator.mediaSession.metadata && navigator.mediaSession.metadata.title,
+    album: navigator.mediaSession.metadata && navigator.mediaSession.metadata.album }));
+  ok(m1.st === 'playing' && m1.t && m1.album === 'Cuven', `「正在播放」：${m1.t}，状态 playing（锁屏 / 灵动岛 / 控制中心都读这一份）`);
+  await mp.evaluate(() => document.querySelector('#nativePlayer video').pause());
+  await mp.waitForTimeout(200);
+  ok(await mp.evaluate(() => navigator.mediaSession.playbackState === 'paused'), '暂停：状态跟着变成 paused');
+  await mp.keyboard.press('Escape');
+  await mp.waitForTimeout(400);
+  const m3 = await mp.evaluate(() => ({ meta: navigator.mediaSession.metadata, st: navigator.mediaSession.playbackState }));
+  ok(m3.meta === null && m3.st === 'none', '关掉播放器：「正在播放」整块撤掉');
+  await mc.close();
+}
+
 console.log('\n■ iPhone（系统播放器的替身：webkitEnterFullscreen / webkitendfullscreen）');
 const ip = await context({ ...devices['iPhone 15 Pro'] }, 'iphone');
 const pi = await enter(ip);
