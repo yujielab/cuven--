@@ -448,6 +448,57 @@ console.log('\n■ 剧集：/api/tv、/api/tv/episodes、/api/tmdb/season、/api
   H.tv.entries = []; H.tv.pageSize = 0;
 }
 
+console.log('\n■ 预告片：IMDb 直链优先，被拒时退到 TMDB 登记的 YouTube 官方预告');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const get = async u => { const r = await H.call(u, 'GET', { Cookie: cookie }); return { status: r.status, cc: r.headers.get('cache-control'), body: await r.json() }; };
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  const mp4 = 'https://imdb-video.media-imdb.com/vi1/1080.mp4?Expires=1794453949&Signature=x';
+  H.imdb.status = 200; H.imdb.calls = 0;
+  H.imdb.title = { id: 'tt0111161', titleText: { text: 'The Shawshank Redemption' }, releaseYear: { year: 1994 }, plot: null, images: { edges: [] },
+    primaryVideos: { edges: [{ node: { id: 'vi1', name: { value: 'Trailer' }, runtime: { value: 120 }, contentType: { displayName: { value: 'Trailer' } },
+      thumbnail: null, playbackURLs: [{ displayName: { value: '1080p' }, videoMimeType: 'MP4', url: mp4 }] } }] } };
+  const r0 = await get('/api/imdb/video?id=tt0111161&stills=0');
+  ok(r0.body.video && r0.body.video.best === mp4 && r0.body.yt === null && /max-age=21600/.test(r0.cc), 'IMDb 给得出直链：照旧用直链 MP4（缓存 6 小时，短于签名有效期）');
+
+  H.imdb.status = 403; H.imdb.calls = 0;
+  H.tmdb.find.tt15239678 = { movie_results: [{ id: 693134 }], tv_results: [] };
+  H.tmdb.videos['movie/693134'] = [
+    { iso_639_1: 'en', key: 'Way9Dexny3w', site: 'YouTube', size: 1080, type: 'Trailer', official: true, published_at: '2023-12-21T00:00:00.000Z', name: 'Official Trailer 3' },
+    { iso_639_1: 'en', key: 'U2Qp5pL3ovA', site: 'YouTube', size: 2160, type: 'Teaser', official: true, published_at: '2023-05-03T00:00:00.000Z', name: 'Teaser' },
+    { iso_639_1: 'zh', key: 'zhTrailer01', site: 'YouTube', size: 1080, type: 'Trailer', official: true, published_at: '2024-02-01T00:00:00.000Z', name: '终极预告' },
+    { iso_639_1: 'en', key: 'fanTrailer1', site: 'YouTube', size: 2160, type: 'Trailer', official: false, published_at: '2024-03-01T00:00:00.000Z', name: 'Fan made' },
+    { iso_639_1: 'en', key: '123456789ab', site: 'Vimeo', size: 1080, type: 'Trailer', official: true, published_at: '2024-03-01T00:00:00.000Z', name: 'Vimeo' },
+  ];
+  const t0 = Date.now();
+  const r1 = await get('/api/imdb/video?id=tt15239678&stills=0');
+  ok(r1.body.video === null && r1.body.yt && r1.body.yt.key === 'zhTrailer01' && r1.body.yt.official && H.imdb.calls === 1 && Date.now() - t0 < 3000,
+    `IMDb 回 403：退到 TMDB 的官方预告（${r1.body.yt && r1.body.yt.name}，${Date.now() - t0}ms，不等满超时）`);
+  ok(/max-age=259200/.test(r1.cc), '只有 YouTube 预告的回包缓存 3 天');
+
+  H.tmdb.videos['movie/27205'] = [{ iso_639_1: 'en', key: 'YoHD9XEInc0', site: 'YouTube', size: 1080, type: 'Trailer', official: true, published_at: '2010-05-01T00:00:00.000Z', name: 'Trailer' }];
+  const c0 = H.tmdb.calls.length;
+  const r2 = await get('/api/imdb/video?id=tt1375666&tmdb=27205&type=movie&stills=0');
+  ok(r2.body.yt && r2.body.yt.key === 'YoHD9XEInc0' && H.imdb.calls === 1 && H.tmdb.calls.length - c0 === 1,
+    'IMDb 刚拒绝过：下一部不再去问它；带着 TMDB 编号只要一次请求');
+
+  await settle();
+  const c1 = H.tmdb.calls.length;
+  const r3 = await get('/api/imdb/video?id=tt15239678&stills=0');
+  ok(r3.body.yt && r3.body.yt.key === 'zhTrailer01' && H.tmdb.calls.length === c1, '同一部再问：走缓存');
+
+  H.tmdb.movies = [{ id: 275, title: 'Fargo', date: '1996-03-08' }];
+  H.tmdb.videos['movie/275'] = [{ iso_639_1: 'en', key: 'h2tY82z3xXU', site: 'YouTube', size: 480, type: 'Trailer', official: true, published_at: '2016-01-01T00:00:00.000Z', name: 'Trailer' }];
+  const r4 = await get('/api/imdb/video?query=Fargo&year=1996&stills=0');
+  ok(r4.body.yt && r4.body.yt.key === 'h2tY82z3xXU', '只有片名和年份：TMDB 搜到再取预告');
+  const r5 = await get('/api/imdb/video?query=NoSuchFilm&stills=0');
+  ok(r5.status === 200 && r5.body.video === null && r5.body.yt === null, '查无此片：空回包，前端退回剧照');
+  await settle();
+  delete H.env.TMDB_API_KEY;
+}
+
 console.log('\n■ ffmpeg 作为 HLS 客户端（HTTP）');
 {
   const srv = http.createServer(async (req, res) => {

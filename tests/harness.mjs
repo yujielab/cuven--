@@ -26,7 +26,9 @@ export const os = { calls: [], subs: [], files: {}, quota: false, loginOk: true 
  */
 export const tv = { entries: [], pageSize: 0, lists: 0 };
 /** TMDB 替身：shows = [{ id, name, original, first, seasons: [{ n, air, count, eps: [{ zh, en, overview, still }] }] }] */
-export const tmdb = { calls: [], shows: [], movies: [] };
+export const tmdb = { calls: [], shows: [], movies: [], videos: {}, find: {} };
+/** IMDb GraphQL 替身：status ≠ 200 时照实回那个状态（现实里 Worker 打过去多半是 403）；title = 回给 data.title 的对象 */
+export const imdb = { status: 403, calls: 0, title: null };
 
 class MemCache {
   constructor() { this.m = new Map(); }
@@ -68,8 +70,9 @@ globalThis.fetch = async (input, init = {}) => {
       const entries = all.slice(from, from + n).map(e => ({ '.tag': 'file', size: 1000, server_modified: '2026-01-01T00:00:00Z', ...e, name: e.path_display.split('/').pop() }));
       return Response.json({ entries, has_more: from + n < all.length, cursor: 'tv:' + (from + n) });
     };
-    if (u.pathname.endsWith('/continue')) { tv.lists++; return tvPage(+String(body.cursor).slice(3)); }
-    if (body.recursive) {
+    if (u.pathname.endsWith('/continue') && String(body.cursor).startsWith('tv:')) { tv.lists++; return tvPage(+String(body.cursor).slice(3)); }
+    // 剧集树只管 /Movies 以外的递归列目录（/api/all 列片库也是递归的，照旧交给下面那段）
+    if (body.recursive && !/^\/movies(\/|$)/i.test(body.path || '')) {
       tv.lists++;
       tv.prefix = String(body.path || '').toLowerCase() + '/';
       if (!tv.entries.some(e => e.path_display.toLowerCase().startsWith(tv.prefix)))
@@ -130,7 +133,12 @@ globalThis.fetch = async (input, init = {}) => {
       return Response.json({ results: tmdb.movies.filter(x => x.title.toLowerCase() === ql)
         .map(x => ({ id: x.id, title: x.title, release_date: x.date, poster_path: '/m.jpg', overview: '', vote_average: 7 })) });
     }
-    let m = /^\/tv\/(\d+)$/.exec(p);
+    let m = /^\/(movie|tv)\/(\d+)\/videos$/.exec(p);
+    if (m) return Response.json({ id: +m[2], results: (tmdb.videos[m[1] + '/' + m[2]] || [])
+      .filter(v => (q.include_video_language || 'en').split(',').includes(v.iso_639_1 === null ? 'null' : v.iso_639_1)) });
+    m = /^\/find\/(tt\d+)$/.exec(p);
+    if (m) return Response.json(tmdb.find[m[1]] || { movie_results: [], tv_results: [] });
+    m = /^\/tv\/(\d+)$/.exec(p);
     if (m && show(m[1])) {
       const x = show(m[1]);
       return Response.json({ ...brief(x), seasons: x.seasons.map(se => ({ season_number: se.n, air_date: se.air, episode_count: se.count })),
@@ -150,6 +158,11 @@ globalThis.fetch = async (input, init = {}) => {
     m = /^\/tv\/(\d+)\/credits$/.exec(p);
     if (m && show(m[1])) return Response.json({ cast: [], crew: [] });
     return Response.json({ status_message: 'not found' }, { status: 404 });
+  }
+  if (u.host === 'api.graphql.imdb.com') {
+    imdb.calls++;
+    if (imdb.status !== 200) return new Response('<html><body>403 Forbidden</body></html>', { status: imdb.status, headers: { 'Content-Type': 'text/html' } });
+    return Response.json({ data: { title: imdb.title } });
   }
   if (u.host === 'dl.os.mock') {
     const f = os.files[u.pathname.slice(1).replace(/\.srt$/, '')];

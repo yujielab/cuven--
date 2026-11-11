@@ -4908,6 +4908,31 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 
 .sc-media.is-playing video { opacity: 1; }
 
+/* YouTube 预告片（IMDb 拿不到直链时）：与 <video> 同一个位置、同一套淡入。
+   不接指针 —— YouTube 的悬停层、标题条一样都冒不出来；画幅盒与 YouTube 播放器同为 16:9，
+   放大 1.2 倍只为裁掉四边的标题与水印 */
+.sc-media.is-yt video { display: none; }
+.sc-yt {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateZ(0);
+  transition: opacity .8s var(--sc-ease-apple);
+}
+.sc-media.is-playing .sc-yt { opacity: 1; }
+.sc-yt > iframe,
+.sc-yt > div {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  transform: scale(1.2);
+}
+
 .sc-scrim {
   position: absolute;
   inset: 0;
@@ -17125,7 +17150,7 @@ const SC = (() => {
       portal:  ch.querySelector('.sc-portal'),
       sticky:  ch.querySelector('.sc-sticky'),
       media:   ch.querySelector('.sc-media'),
-      video:   ch.querySelector('video'),
+      video:   trailerMedia(ch.querySelector('video'), ch.querySelector('.sc-media')),
       poster:  ch.querySelector('.sc-poster'),
       content: ch.querySelector('.sc-content'),
       ctl:     ch.querySelector('.sc-mediactl'),
@@ -17342,11 +17367,16 @@ const SC = (() => {
     const data = await fetchTrailer(meta, title, year, ch);
     if (!alive()) return;
 
-    if (data && data.video && data.video.best) {
-      ch._sc.src = pickSource(data.video);
+    /* 直链 MP4（IMDb）优先；没有就用 TMDB 登记的 YouTube 官方预告。省流量 / 2G 两样都不挂 */
+    const src = thinNet() ? null
+      : data && data.video && data.video.best ? pickSource(data.video)
+      : data && data.yt && data.yt.key ? 'yt:' + data.yt.key : null;
+    if (src) {
+      ch._sc.src = src;
       ch._sc.ctl.hidden = false;
       if (ch._sc.mute) ch._sc.mute.hidden = false;
-      if (!ch._sc.poster.getAttribute('src') && !ch._sc.poster.dataset.src && data.video.thumb) setPoster(ch, data.video.thumb);
+      const thumb = (data.video && data.video.thumb) || (data.yt ? 'https://i.ytimg.com/vi/' + data.yt.key + '/maxresdefault.jpg' : '');
+      if (!ch._sc.poster.getAttribute('src') && !ch._sc.poster.dataset.src && thumb) setPoster(ch, thumb);
       /* 预告片地址常常比「滚到眼前」晚到（TMDB + IMDb 两跳）—— 那一下 mountVideo
          因为没有 src 早早返回了，不在这里补挂，这一章就一直停在剧照上 */
       if (ch === active || ch === current) mountVideo(ch);
@@ -17372,6 +17402,8 @@ const SC = (() => {
     const p = new URLSearchParams();
     if (meta?.imdb) p.set('id', meta.imdb);
     else { p.set('query', title); if (year) p.set('year', year); }
+    /* TMDB 编号一并带上：IMDb 不给直链时，Worker 凭它一次请求就能取到 YouTube 官方预告 */
+    if (meta?.id) { p.set('tmdb', meta.id); p.set('type', meta.type === 'tv' ? 'tv' : 'movie'); }
     /* TMDB 已经有剧照就不必再要 IMDb 那份，省一半回包 */
     p.set('stills', (meta?.stills?.length || 0) >= 4 ? '0' : '8');
 
@@ -17495,6 +17527,208 @@ const SC = (() => {
     syncGallery(ch);
   }
 
+  /* ── YouTube 预告片：套成 <video> 的样子 ──────────────────────────────
+     IMDb 不再接 Cloudflare Worker 的请求以后，大多数片子能拿到的预告片是 TMDB 登记的
+     YouTube 官方预告（Worker 回包里的 yt）。展映这套代码只认 <video> 的一小撮接口：
+     paused / play() / pause() / muted / currentTime / duration / src / load() 和几个事件 ——
+     这里给 YouTube 播放器套一层同样的壳，挂载、静音钮、进度环、跳片头、卸载交还解码器，
+     原来的逻辑一行不改。
+     · src 写 "yt:<key>" 走 YouTube；其余照旧交给原生 <video>（IMDb 的直链 MP4）
+     · iframe 不接指针、真正开播才淡入：YouTube 的封面、转圈、悬停层一样都露不出来；
+       放大 1.2 倍裁掉四边的标题与水印，看上去就是这一屏自己的片源
+     · API 脚本第一次用到才加载；8 秒内加载不到（地区屏蔽、断网）就当这部片没有预告片 */
+  let ytApi = null, ytTag = null;
+  function loadYt() {
+    if (window.YT && window.YT.Player) return Promise.resolve(window.YT);
+    if (ytApi) return ytApi;
+    ytApi = new Promise((resolve, reject) => {
+      const tid = setTimeout(() => { ytApi = null; reject(new Error('youtube api timeout')); }, 8000);
+      const prev = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = () => {
+        clearTimeout(tid);
+        if (typeof prev === 'function') { try { prev(); } catch {} }
+        resolve(window.YT);
+      };
+      if (ytTag && ytTag.isConnected) return;            /* 上一次超时了但脚本还在路上：接着等它 */
+      ytTag = document.createElement('script');
+      ytTag.src = 'https://www.youtube.com/iframe_api';
+      ytTag.async = true;
+      ytTag.onerror = () => { clearTimeout(tid); ytApi = null; ytTag.remove(); ytTag = null; reject(new Error('youtube api blocked')); };
+      document.head.appendChild(ytTag);
+    });
+    return ytApi;
+  }
+
+  function trailerMedia(video, media) {
+    const et = new EventTarget();
+    const fire = type => et.dispatchEvent(new Event(type));
+    let key = '';                     /* 当前的 YouTube 视频；空 = 原生 <video> */
+    let player = null, box = null, gen = 0, poll = 0, guard = 0;
+    let want = false, muted = true, state = -1, cur = 0, dur = NaN, meta = false, unmuteAt = 0;
+    let waiters = [];                 /* play() 还没兑现的 promise */
+
+    ['loadedmetadata', 'playing', 'timeupdate', 'error', 'volumechange'].forEach(type =>
+      video.addEventListener(type, () => { if (!key) fire(type); }));
+
+    const resolveAll = () => { const w = waiters; waiters = []; clearTimeout(guard); w.forEach(x => x.res()); };
+    const rejectAll = err => { const w = waiters; waiters = []; clearTimeout(guard); w.forEach(x => x.rej(err)); };
+
+    function teardown() {
+      gen++;
+      clearInterval(poll); poll = 0;
+      clearTimeout(guard);
+      waiters = [];                   /* 被换下的那次 play() 不兑现也不报错 —— 与它有关的那一章已经不在乎了 */
+      try { if (player) player.destroy(); } catch {}
+      player = null;
+      if (box) { box.remove(); box = null; }
+      state = -1; cur = 0; dur = NaN; meta = false;
+    }
+
+    function tick() {
+      if (!player || typeof player.getCurrentTime !== 'function') return;
+      try {
+        cur = player.getCurrentTime() || 0;
+        const d = player.getDuration();
+        if (d > 0) { dur = d; if (!meta) { meta = true; fire('loadedmetadata'); } }
+      } catch {}
+      fire('timeupdate');
+    }
+
+    /* 想要的状态 → 播放器：静音与否、播与停 */
+    function apply() {
+      if (!player || typeof player.playVideo !== 'function') return;
+      try {
+        if (muted) player.mute(); else player.unMute();
+        if (want) player.playVideo(); else player.pauseVideo();
+      } catch {}
+    }
+
+    function onState(s) {
+      state = s;
+      if (s === 1) {                                     /* PLAYING */
+        if (!poll) poll = setInterval(tick, 250);
+        tick();
+        resolveAll();
+        fire('playing');
+        return;
+      }
+      if (s !== 3) { clearInterval(poll); poll = 0; }   /* 缓冲中接着量时间 */
+      if (s === 2 && want) {
+        if (!muted && Date.now() - unmuteAt < 1500) {
+          /* 带声起播被浏览器挡回来：退回静音接着放，并让外面知道 —— 静音钮得说真话 */
+          muted = true; apply(); fire('volumechange');
+        } else {
+          want = false;                                  /* 被系统停下（切到后台等）：与 <video> 一样算作暂停 */
+        }
+      }
+      if (s === 0 && want) { try { player.seekTo(START_AT, true); player.playVideo(); } catch {} }   /* loop 偶尔不灵：自己回卷 */
+    }
+
+    function build() {
+      const my = ++gen;
+      box = document.createElement('div');
+      box.className = 'sc-yt';
+      box.setAttribute('aria-hidden', 'true');
+      const slot = document.createElement('div');
+      box.appendChild(slot);
+      video.after(box);
+      const k = key;
+      loadYt().then(YT => {
+        if (my !== gen) return;
+        player = new YT.Player(slot, {
+          host: 'https://www.youtube-nocookie.com',
+          videoId: k,
+          width: '100%', height: '100%',
+          playerVars: {
+            autoplay: 0, mute: 1, controls: 0, disablekb: 1, fs: 0, rel: 0, iv_load_policy: 3, cc_load_policy: 0,
+            playsinline: 1, modestbranding: 1, loop: 1, playlist: k, start: START_AT, origin: location.origin,
+          },
+          events: {
+            onReady: () => {
+              if (my !== gen) return;
+              const f = player.getIframe && player.getIframe();
+              if (f) { f.setAttribute('tabindex', '-1'); f.setAttribute('aria-hidden', 'true'); }
+              apply();
+            },
+            onStateChange: e => { if (my === gen) onState(e.data); },
+            onError: () => { if (my !== gen) return; rejectAll(new Error('youtube error')); fire('error'); },
+          },
+        });
+      }).catch(err => { if (my !== gen) return; rejectAll(err); fire('error'); });
+    }
+
+    return {
+      get paused() { return key ? !want : video.paused; },
+      get muted() { return key ? muted : video.muted; },
+      set muted(v) {
+        if (!key) { video.muted = v; return; }
+        if (muted && !v) unmuteAt = Date.now();
+        muted = !!v;
+        apply();
+      },
+      get defaultMuted() { return video.defaultMuted; },
+      set defaultMuted(v) { video.defaultMuted = v; },
+      get currentTime() { return key ? cur : video.currentTime; },
+      set currentTime(v) {
+        if (!key) { video.currentTime = v; return; }
+        cur = v;
+        try { if (player && player.seekTo) player.seekTo(v, true); } catch {}
+      },
+      get duration() { return key ? dur : video.duration; },
+      play() {
+        if (!key) return video.play();
+        want = true;
+        if (!box) build();
+        apply();
+        if (state === 1) return Promise.resolve();
+        return new Promise((res, rej) => {
+          waiters.push({ res, rej });
+          /* 低电量模式等情况下 YouTube 静音也起不来：10 秒没动静就按「不许播」处理，那一章退回剧照 */
+          clearTimeout(guard);
+          guard = setTimeout(() => rejectAll(new DOMException('youtube did not start', 'NotAllowedError')), 10000);
+        });
+      },
+      pause() {
+        if (!key) { video.pause(); return; }
+        want = false;
+        clearTimeout(guard);
+        try { if (player && player.pauseVideo) player.pauseVideo(); } catch {}
+      },
+      load() { if (key) { if (!box) build(); } else video.load(); },
+      getAttribute(n) { return n === 'src' && key ? 'yt:' + key : video.getAttribute(n); },
+      setAttribute(n, v) {
+        if (n !== 'src') { video.setAttribute(n, v); return; }
+        const m = /^yt:([\w-]{11})$/.exec(String(v || ''));
+        if (m) {
+          if (key === m[1]) return;
+          if (!key) {
+            muted = video.muted;
+            try { video.pause(); video.removeAttribute('src'); video.load(); } catch {}
+          }
+          teardown();
+          key = m[1]; want = false;
+          media.classList.add('is-yt');
+          return;
+        }
+        if (key) { teardown(); key = ''; want = false; media.classList.remove('is-yt'); }
+        video.setAttribute('src', v);
+      },
+      removeAttribute(n) {
+        if (n !== 'src') { video.removeAttribute(n); return; }
+        if (key) { want = false; teardown(); key = ''; media.classList.remove('is-yt'); return; }
+        video.removeAttribute('src');
+      },
+      addEventListener: (t, f, o) => et.addEventListener(t, f, o),
+      removeEventListener: (t, f, o) => et.removeEventListener(t, f, o),
+    };
+  }
+
+  /* 省流量模式 / 2G：预告片一律不挂，剧照推镜照样成立 —— 起不来的视频比没有视频更糟 */
+  function thinNet() {
+    const c = navigator.connection || {};
+    return c.saveData === true || /^(slow-2g|2g)$/.test(c.effectiveType || '');
+  }
+
   /* ── 视频挂载 ──────────────────────────────────────────────────── */
 
   function mountVideo(ch) {
@@ -17567,7 +17801,10 @@ const SC = (() => {
     const ch = active;
     if (!ch || !ch._sc) return;
     const s = ch._sc;
-    const should = s.wantPlay && !s.covered && !blocked() && !userPaused && !reduce.matches;
+    /* 「减弱动态效果」只管界面动效（推镜、视差、弹簧都已按它收敛），不管预告片：
+       原先在这里一并挡掉，开着它的 iPhone 上预告片永远不自己放，连播放钮都按不动。
+       要停就按暂停 —— userPaused 对整条流生效，直到再按播放 */
+    const should = s.wantPlay && !s.covered && !blocked() && !userPaused;
     if (should) {
       if (s.video.paused) {
         const p = s.video.play();
@@ -17755,6 +17992,10 @@ const SC = (() => {
     });
 
     s.video.addEventListener('playing', () => s.media.classList.add('is-playing'));
+    /* 播放器自己改了静音（带声起播被挡回静音）：按钮跟着说真话 */
+    s.video.addEventListener('volumechange', () => {
+      if (s.video.muted !== s.muted) { s.muted = s.video.muted; syncMuteBtn(ch); }
+    });
 
     /* 解除静音只有在这个 click 的调用栈里做才作数 —— 这是 Safari 唯一认的
        那一下手势。所以先改元素、再落盘，不绕任何异步。 */

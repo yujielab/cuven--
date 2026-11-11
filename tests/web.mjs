@@ -29,6 +29,7 @@ const hits = [];
 const errors = [];
 let pingDelay = 0;
 let streamDelay = 0;                          // 放慢 /stream：开播前看清加载画面
+let trailerYt = false;                        // 预告片回包：false = IMDb 直链 MP4，true = 只有 YouTube 官方预告
 
 async function context(opts = {}, apple = false, probe = false) {
   const ctx = await browser.newContext(opts);
@@ -79,7 +80,9 @@ async function context(opts = {}, apple = false, probe = false) {
     hits.push(url.host + url.pathname);
     if (url.pathname === '/api/imdb/video') {
       return route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' },
-        body: JSON.stringify({ id: 'tt1', video: { best: TRAILER, mp4: { '720p': TRAILER, '1080p': TRAILER }, thumb: null }, stills: [] }) });
+        body: JSON.stringify(trailerYt
+          ? { id: 'tt1', video: null, stills: [], yt: { key: 'Way9Dexny3w', name: 'Official Trailer', kind: 'Trailer', official: true } }
+          : { id: 'tt1', video: { best: TRAILER, mp4: { '720p': TRAILER, '1080p': TRAILER }, thumb: null }, stills: [] }) });
     }
     if (url.pathname === '/api/edge/ping' && url.host === 'stream.cuven.online' && pingDelay) await new Promise(r => setTimeout(r, pingDelay));
     if (url.pathname.startsWith('/stream/') && streamDelay) await new Promise(r => setTimeout(r, streamDelay));
@@ -277,6 +280,60 @@ const back2 = await until(page, () => { const v = document.querySelector('.sc-ch
 ok(back2, '详情页开过 2 秒（视频被卸下）再关掉：预告片重新挂上开播');
 await page.evaluate(() => navTo('home'));
 await desk.close();
+
+console.log('\n■ 展厅预告片 · YouTube 官方预告（IMDb 不给直链时）');
+{
+  trailerYt = true;
+  const yc = await context({ viewport: { width: 1280, height: 800 } });
+  /* YouTube 播放器的替身：与 IFrame API 同名同参的方法，状态按真播放器的顺序回调（缓冲 3 → 播放 1 → 暂停 2） */
+  await yc.addInitScript(() => {
+    window.YT = { Player: class {
+      constructor(el, o) {
+        this.o = o; this.muted = true; this.t = o.playerVars.start || 0; this.state = -1;
+        const f = document.createElement('iframe'); f.dataset.fakeYt = o.videoId; el.replaceWith(f); this.f = f;
+        window.__yt = this; window.__ytOpts = o;
+        setTimeout(() => o.events.onReady({ target: this }), 30);
+      }
+      emit(s) { this.state = s; this.o.events.onStateChange({ data: s, target: this }); }
+      getIframe() { return this.f; }
+      playVideo() { if (this.state === 1 || this.state === 3) return; this.emit(3); setTimeout(() => this.state === 3 && this.emit(1), 80); }
+      pauseVideo() { if (this.state === 1 || this.state === 3) this.emit(2); }
+      mute() { this.muted = true; } unMute() { this.muted = false; } isMuted() { return this.muted; }
+      seekTo(t) { this.t = t; }
+      getCurrentTime() { if (this.state === 1) this.t += 0.25; return this.t; }
+      getDuration() { return 150; }
+      destroy() { this.f.remove(); window.__ytGone = (window.__ytGone || 0) + 1; }
+    } };
+  });
+  const yp = await enter(yc);
+  await yp.evaluate(() => navTo('library'));
+  const up = await until(yp, () => {
+    const m = document.querySelector('.sc-chapter .sc-media');
+    return !!(m && m.classList.contains('is-yt') && m.classList.contains('is-playing') && m.querySelector('.sc-yt iframe[data-fake-yt]') && window.__yt.state === 1);
+  }, null, 40000).then(() => true).catch(() => false);
+  const o = await yp.evaluate(() => ({ v: window.__ytOpts && window.__ytOpts.playerVars, host: window.__ytOpts && window.__ytOpts.host,
+    vsrc: document.querySelector('.sc-chapter video').getAttribute('src'), muted: window.__yt && window.__yt.muted }));
+  ok(up && o.muted && !o.vsrc && o.v && o.v.mute === 1 && o.v.controls === 0 && o.v.playsinline === 1 && o.v.start === 3 && /nocookie/.test(o.host),
+    'IMDb 没给直链：第一章挂上 YouTube 官方预告并静音自动开播（无控件、内联、从第 3 秒进，原生 <video> 让位）');
+  const ring = await until(yp, () => parseFloat(document.querySelector('.sc-chapter .sc-ring-value').style.strokeDashoffset) < 106.8, null, 5000)
+    .then(() => true).catch(() => false);
+  ok(ring, '进度环跟着 YouTube 播放器走');
+  const un = await yp.evaluate(() => { const b = document.querySelector('.sc-chapter .sc-mutectl'); b.click(); return { yt: window.__yt.muted, btn: b.dataset.muted }; });
+  ok(un.yt === false && un.btn === '0', '点「取消静音」：播放器 unMute，按钮同步');
+  await yp.evaluate(() => playVideo('/Movies/long.mp4', 'Long.Test.2024.1080p.mp4'));
+  await until(yp, s => document.querySelector(s).currentTime > 0.3, vid);
+  await yp.waitForTimeout(300);
+  ok(await yp.evaluate(() => window.__yt.state === 2), '正片开播：YouTube 预告也让路（暂停）');
+  await yp.keyboard.press('Escape');
+  const back = await until(yp, () => window.__yt && window.__yt.state === 1, null, 8000).then(() => true).catch(() => false);
+  ok(back, '关掉播放器：YouTube 预告接着放');
+  await yp.evaluate(() => navTo('home'));
+  const gone = await until(yp, () => (window.__ytGone || 0) >= 1 || window.__yt.state === 2, null, 5000).then(() => true).catch(() => false);
+  const how = await yp.evaluate(() => ((window.__ytGone || 0) >= 1 ? '已销毁' : '已暂停'));
+  ok(gone, `离开资料库：YouTube 预告不再播放（${how}，与原生 <video> 同一套规矩）`);
+  await yc.close();
+  trailerYt = false;
+}
 
 console.log('\n■ iPhone（系统播放器的替身：webkitEnterFullscreen / webkitendfullscreen）');
 const ip = await context({ ...devices['iPhone 15 Pro'] }, 'iphone');

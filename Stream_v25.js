@@ -4220,9 +4220,15 @@ async function handleTmdbBatch(request, env, ctx) {
    ══════════════════════════════════════════════════════════════════════ */
 
 const IMDB_GQL   = 'https://api.graphql.imdb.com/';
-const IMDB_CACHE = 'https://cache.internal/imdb-v1/';
+const IMDB_CACHE = 'https://cache.internal/imdb-v2/';   // v2：回包多了 yt（TMDB 登记的 YouTube 官方预告）
 const IMDB_TTL   = 21600;        // 6h —— 必须 < 签名的 24h
 const IMDB_MISS_TTL = 3600;      // 查无此片：缓存 1h，别每次都去打 IMDb
+const YT_TTL     = 259200;       // 只有 YouTube 预告：3 天（key 不会过期，留着也好让 IMDb 恢复后能换回直链）
+const IMDB_WAIT_MS = 4000;       // IMDb 最多等这么久，过了就用 YouTube 那条
+/* IMDb 现在多半不接 Cloudflare Worker 的请求（403 / 超时）。失败一次就先歇 30 分钟：
+   不然每个没缓存的预告片请求都要先白等一轮，前端 9 秒的超时都不够 */
+let imdbDownUntil = 0;
+const imdbUp = () => Date.now() >= imdbDownUntil;
 
 const IMDB_QUERY = `query V($id: ID!, $n: Int!) {
   title(id: $id) {
@@ -4277,10 +4283,97 @@ async function imdbGraphQL(id, stills) {
       'Referer': 'https://www.imdb.com/',
     },
     body: JSON.stringify({ query: IMDB_QUERY, variables: { id, n: stills } }),
-  }, { retries: 1, timeout: 8000 });
-  if (!res?.ok) throw new Error('imdb ' + (res?.status || 'fail'));
+  }, { retries: 0, timeout: IMDB_WAIT_MS }).catch(e => { imdbDownUntil = Date.now() + 30 * 60e3; throw e; });
+  if (!res?.ok) {
+    if (res && (res.status === 403 || res.status === 429 || res.status >= 500)) imdbDownUntil = Date.now() + 30 * 60e3;
+    throw new Error('imdb ' + (res?.status || 'fail'));
+  }
   const j = await res.json();
   return j?.data?.title || null;
+}
+
+/* ── TMDB 登记的官方预告（YouTube）──────────────────────────────────────
+   IMDb 拿不到直链时的退路，覆盖面也更广：几乎每部院线片都有片方上传的官方预告。
+   前端用 YouTube 的嵌入播放器放（不经过我们的 HLS，也不经过 Worker）。
+   挑法：正式预告 > 先导 > 片段；官方的优先；中文的略优先（片方中文预告常带中文字幕）；
+   同等条件下清晰度高、发布晚的那条（「终极预告」通常最后发）。 */
+function pickYouTube(list) {
+  const ok = (list || []).filter(v => v && v.site === 'YouTube' && /^[\w-]{11}$/.test(v.key || ''));
+  const score = v => (v.type === 'Trailer' ? 100 : v.type === 'Teaser' ? 60 : v.type === 'Clip' ? 20 : 0)
+    + (v.official ? 30 : 0) + (v.iso_639_1 === 'zh' ? 12 : v.iso_639_1 === 'en' ? 8 : 0)
+    + (v.size >= 2160 ? 6 : v.size >= 1080 ? 5 : v.size >= 720 ? 2 : 0)
+    + (Date.parse(v.published_at || '') || 0) / 1e13;
+  return ok.sort((a, b) => score(b) - score(a))[0] || null;
+}
+
+async function tmdbTrailer({ imdb, tmdb, type, query, year }, env) {
+  if (!env.TMDB_API_KEY) return null;
+  const key = env.TMDB_API_KEY;
+  const get = u => fetchRetry(u, {}, { retries: 1, timeout: 5000 }).then(r => (r.ok ? r.json() : null)).catch(() => null);
+  let kind = type === 'tv' || type === 'movie' ? type : '';
+  let id = tmdb > 0 ? tmdb : 0;
+  if (!id && imdb) {
+    const f = await get(`https://api.themoviedb.org/3/find/${imdb}?api_key=${key}&external_source=imdb_id`);
+    const hit = f && ((f.movie_results || [])[0] ? ['movie', f.movie_results[0]] : (f.tv_results || [])[0] ? ['tv', f.tv_results[0]] : null);
+    if (hit) { kind = hit[0]; id = hit[1].id; }
+  }
+  if (!id && query) {
+    const hit = (kind !== 'tv' && await tmdbSearch('movie', query, year, env).catch(() => null))
+      || (kind !== 'movie' && await tmdbSearch('tv', query, year, env).catch(() => null));
+    if (hit) { kind = hit.title ? 'movie' : 'tv'; id = hit.id; }
+  }
+  if (!id) return null;
+  const j = await get(`https://api.themoviedb.org/3/${kind || 'movie'}/${id}/videos?api_key=${key}&language=zh-CN&include_video_language=zh,en,null`);
+  const v = pickYouTube(j && j.results);
+  return v ? { key: v.key, name: v.name || '预告片', kind: v.type || 'Trailer', lang: v.iso_639_1 || '', size: v.size || 0,
+    official: !!v.official, at: v.published_at || null } : null;
+}
+
+/* IMDb 那条：直链 MP4（多档）+ 剧照。拿不到 → null */
+async function imdbTrailer(id, nStills) {
+  const t = await imdbGraphQL(id, nStills);
+  if (!t) return null;
+  const nodes = (t.primaryVideos?.edges || []).map(e => e.node).filter(Boolean);
+  const v = pickImdbVideo(nodes);
+  let video = null;
+  if (v) {
+    const mp4 = {};
+    let hls = null;
+    for (const p of (v.playbackURLs || [])) {
+      const label = p?.displayName?.value || '';
+      if (p.videoMimeType === 'MP4') mp4[label] = p.url;
+      else if (p.videoMimeType === 'M3U8' && !hls) hls = p.url;
+    }
+    /* 由高到低给一条优先级链；前端按网络状况自己挑，拿不到就顺位下取 */
+    const order = ['1080p', '720p', '480p', 'SD'];
+    const best = order.map(k => mp4[k]).find(Boolean) || Object.values(mp4)[0] || null;
+    if (best) {
+      video = {
+        id: v.id,
+        name: v.name?.value || '预告片',
+        kind: v.contentType?.displayName?.value || 'Trailer',
+        runtime: v.runtime?.value || null,
+        thumb: v.thumbnail?.url ? amzImg(v.thumbnail.url, 1280) : null,
+        mp4, hls, best,
+        expires: imdbExpiry(best),
+      };
+    }
+  }
+  const stills = (t.images?.edges || []).map(e => e.node).filter(n => n?.url).map(n => ({
+    url:   amzImg(n.url, 1600),
+    thumb: amzImg(n.url, 640),
+    w: n.width || null,
+    h: n.height || null,
+    caption: n.caption?.plainText || '',
+  }));
+  return {
+    id: t.id || id,
+    title: t.titleText?.text || null,
+    year: t.releaseYear?.year || null,
+    plot: t.plot?.plotText?.plainText || null,
+    video,
+    stills,
+  };
 }
 
 /* 前端还没有 imdb 字段时的兜底：TMDB 现查一次拿编号 */
@@ -4304,84 +4397,42 @@ async function handleImdbVideo(url, env, ctx) {
   let id = (url.searchParams.get('id') || '').trim();
   const query = (url.searchParams.get('query') || '').trim();
   const year  = (url.searchParams.get('year')  || '').trim();
+  const tmdb  = parseInt(url.searchParams.get('tmdb') || '', 10) || 0;
+  const type  = (url.searchParams.get('type') || '').trim();
   const nStills = Math.min(24, Math.max(0, Number(url.searchParams.get('stills') ?? 10) || 0));
 
   if (!/^tt\d+$/.test(id)) {
-    if (!query) return jsonResponse({ error: 'Missing id or query' }, 400);
-    id = await resolveImdbId(query, year, env);
-    if (!id) {
-      return jsonResponse({ id: null, video: null, stills: [] }, 200, {
-        'Cache-Control': `public, max-age=${IMDB_MISS_TTL}`,
-      });
-    }
+    if (!query && !tmdb) return jsonResponse({ error: 'Missing id or query' }, 400);
+    id = imdbUp() && query ? await resolveImdbId(query, year, env) : null;
   }
 
-  const ck = new Request(`${IMDB_CACHE}${id}?n=${nStills}`);
+  const who = id || (tmdb ? `tmdb-${type || 'movie'}-${tmdb}` : `q-${encodeURIComponent(query.toLowerCase())}-${year}`);
+  const ck = new Request(`${IMDB_CACHE}${who}?n=${nStills}`);
   const cache = caches.default;
   const hit = await cache.match(ck);
   if (hit) return new Response(hit.body, { headers: hit.headers });
 
-  let payload;
-  try {
-    const t = await imdbGraphQL(id, nStills);
-    if (!t) throw new Error('no title');
+  // 两路一起问：IMDb（直链 MP4，最好，但常被拒）与 TMDB（YouTube 官方预告）。IMDb 最多等 IMDB_WAIT_MS
+  const imdbP = id && imdbUp() ? imdbTrailer(id, nStills).catch(() => null) : Promise.resolve(null);
+  const ytP = tmdbTrailer({ imdb: id, tmdb, type, query, year }, env).catch(() => null);
+  const imdb = await Promise.race([imdbP, sleep(IMDB_WAIT_MS + 500).then(() => null)]);
+  const yt = imdb && imdb.video ? null : await ytP;
 
-    const nodes = (t.primaryVideos?.edges || []).map(e => e.node).filter(Boolean);
-    const v = pickImdbVideo(nodes);
-
-    let video = null;
-    if (v) {
-      const mp4 = {};
-      let hls = null;
-      for (const p of (v.playbackURLs || [])) {
-        const label = p?.displayName?.value || '';
-        if (p.videoMimeType === 'MP4') mp4[label] = p.url;
-        else if (p.videoMimeType === 'M3U8' && !hls) hls = p.url;
-      }
-      /* 由高到低给一条优先级链；前端按网络状况自己挑，拿不到就顺位下取 */
-      const order = ['1080p', '720p', '480p', 'SD'];
-      const best = order.map(k => mp4[k]).find(Boolean) || Object.values(mp4)[0] || null;
-      if (best) {
-        video = {
-          id: v.id,
-          name: v.name?.value || '预告片',
-          kind: v.contentType?.displayName?.value || 'Trailer',
-          runtime: v.runtime?.value || null,
-          thumb: v.thumbnail?.url ? amzImg(v.thumbnail.url, 1280) : null,
-          mp4, hls, best,
-          expires: imdbExpiry(best),
-        };
-      }
-    }
-
-    const stills = (t.images?.edges || []).map(e => e.node).filter(n => n?.url).map(n => ({
-      url:   amzImg(n.url, 1600),
-      thumb: amzImg(n.url, 640),
-      w: n.width || null,
-      h: n.height || null,
-      caption: n.caption?.plainText || '',
-    }));
-
-    payload = {
-      id: t.id || id,
-      title: t.titleText?.text || null,
-      year: t.releaseYear?.year || null,
-      plot: t.plot?.plotText?.plainText || null,
-      video,
-      stills,
-    };
-  } catch {
-    /* IMDb 抽风不该把整屏拖垮：回一个空壳，短缓存，下次再试 */
-    return jsonResponse({ id, video: null, stills: [] }, 200, {
-      'Cache-Control': 'public, max-age=300',
-    });
-  }
-
+  const payload = {
+    id: (imdb && imdb.id) || id || null,
+    title: (imdb && imdb.title) || null,
+    year: (imdb && imdb.year) || null,
+    plot: (imdb && imdb.plot) || null,
+    video: (imdb && imdb.video) || null,
+    stills: (imdb && imdb.stills) || [],
+    yt: yt || null,
+  };
+  const ttl = payload.video ? IMDB_TTL : payload.yt ? YT_TTL : (imdb ? IMDB_MISS_TTL : 300);
   const resp = new Response(JSON.stringify(payload), {
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
       /* stale-while-revalidate 故意不给：过期的签名地址不能再端上来 */
-      'Cache-Control': `public, max-age=${payload.video ? IMDB_TTL : IMDB_MISS_TTL}`,
+      'Cache-Control': `public, max-age=${ttl}`,
     },
   });
   ctx?.waitUntil?.(cache.put(ck, resp.clone()));
