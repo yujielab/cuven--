@@ -119,13 +119,25 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 
 Workers 不允许运行时编译 WASM，所以转码器是一个单独的小 Worker（精简的 FFmpeg 6.1.1：DTS、TrueHD、MLP、
 Opus、Vorbis、MP2/MP3、PCM 解码器 + AC-3 编码器 + libswresample，编成 1 MB 的 WASM，已编好放在仓库里）。
+它要 Workers 付费计划（一个 6 秒分段的转码要几十到一两百毫秒 CPU）。
 
-```bash
-cd audio-tx
-npx wrangler deploy
-```
+**开启只要两步，都在 Cloudflare 控制台里点：**
 
-然后在主 Worker 的 `wrangler.toml` 里加：
+1. 部署转码 Worker（与前端 cuven-tv 同一种方式，用 Workers Builds 从仓库部署）：
+   Workers 和 Pages → 创建 → 导入存储库 → 选这个仓库，然后填
+   - 项目名称：`cuven-audio-tx`（必须是这个名字，与 `audio-tx/wrangler.toml` 一致）
+   - 根目录：`audio-tx`
+   - 构建命令：留空
+   - 部署命令：`npx wrangler deploy`
+
+   也可以在本机 `cd audio-tx && npx wrangler deploy`。
+2. 给主 Worker（`stream.cuven.online` 那个）加 Service Binding：主 Worker → 设置 → 绑定 → 添加 → 服务绑定，
+   变量名 `AUDIO_TX`，服务选 `cuven-audio-tx`，保存（会自动重新部署）。
+
+打开 `https://stream.cuven.online/health`，「DTS / TrueHD」一行显示「✅ 已绑定，转码 Worker 在线」就生效了。
+（健康页还会列出 TMDB、OpenSubtitles、剧集目录、访问保护是否配好。）
+
+用 wrangler 部署主 Worker 的，等价写法是在主 Worker 的 `wrangler.toml` 里加：
 
 ```toml
 [[services]]
@@ -135,7 +147,7 @@ service = "cuven-audio-tx"
 
 绑定后，这些音轨会以「DTS → Dolby Digital 5.1」之类的名字出现在音轨菜单里。如果片源只有 DTS / TrueHD，
 转码轨就是默认音轨。转码轨的分段落在全局 AC-3 帧网格上，跨分段时先预热、并越过分段边界多读一点，
-所以接缝处不会出爆音。转好的分段会进边缘缓存，拖动回看时不必重新转码。
+所以接缝处不会出爆音（测试里与原声对比 SNR 76 dB 以上）。转好的分段会进边缘缓存，拖动回看时不必重新转码。
 不绑定时，这些音轨不进播放列表，播放页会给出提示。
 
 从源码重建 WASM：`audio-tx/build.sh`（需要 emscripten 与 FFmpeg 6.1.1 源码）。

@@ -565,7 +565,12 @@ console.log('\n■ ffmpeg 作为 HLS 客户端（HTTP）');
 
 if (fs.existsSync(path.join(HERE, '..', 'audio-tx', 'tx.wasm'))) {
   console.log('\n■ DTS / TrueHD / Opus → AC-3 转码');
+  const health = async () => (await H.call('/health')).text();
+  const h0 = await health();
   await H.bindAudioTx();
+  const h1 = await health();
+  ok(/DTS \/ TrueHD<\/span><span>— 未绑定 AUDIO_TX/.test(h0) && /DTS \/ TrueHD<\/span><span>✅ 已绑定，转码 Worker 在线/.test(h1),
+    '健康页：转码 Worker 绑没绑、在不在线，一眼看得到（还有 TMDB / OpenSubtitles / 剧集目录 / 访问保护）');
   const b = `/hls/${H.token('/Movies/hdr10_multi.mkv')}/`;
   const m = await (await H.call(b + 'master.m3u8')).text();
   for (const [i, label] of [[4, 'DTS'], [5, 'TrueHD'], [6, 'Opus']]) {

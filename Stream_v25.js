@@ -2948,7 +2948,27 @@ async function handleHealth(env, request) {
     token: false, account: null, folder: null,
     videos: 0, r2: false, status: 'checking',
     gen: null, snap: null, edge: null, hosts: null,
+    extras: [],
   };
+
+  // 可选功能配好了没有：部署之后看这几行就知道哪些在生效、缺什么
+  const feat = async () => {
+    let tx = '— 未绑定 AUDIO_TX（DTS / TrueHD 音轨不出现，见 README）';
+    if (hlsTxOn(env)) {
+      try {
+        const r = await env.AUDIO_TX.fetch('https://audio-tx/');
+        tx = r.ok ? '✅ 已绑定，转码 Worker 在线' : `⚠️ 已绑定，但转码 Worker 回 ${r.status}`;
+      } catch (e) { tx = '⚠️ 已绑定，但转码 Worker 连不上'; }
+    }
+    c.extras = [
+      ['DTS / TrueHD', tx],
+      ['TMDB', env.TMDB_API_KEY ? '✅' : '❌ 未配 TMDB_API_KEY（海报、中文片名、剧集、预告片都靠它）'],
+      ['OpenSubtitles', !osOn(env) ? '— 未配置' : env.OPENSUBTITLES_USERNAME ? '✅ 账号登录' : '⚠️ 只有 API Key（下载配额按共享出口 IP 算）'],
+      ['剧集目录', `${tvRoot(env) || '/'}${tvMem && tvMem.root === tvRoot(env) ? ` · ${tvMem.series.length} 部` : ''}`],
+      ['访问保护', env.AUTH_SECRET ? '✅ 需要登录' : '⚠️ 未开启（知道地址就能浏览和播放）'],
+    ];
+  };
+  const featP = feat().catch(() => {});
 
   // v19：优选到底生效了没有，看这两行 —— colo 是打到了哪个 PoP，
   // RTT 是客户端到该 PoP 的握手往返（比任何 ping 值都诚实）。
@@ -2993,7 +3013,9 @@ async function handleHealth(env, request) {
   ]);
 
   if (acctP.status === 'fulfilled' && acctP.value) {
-    c.account = `${acctP.value.name?.display_name} (${acctP.value.email})`;
+    // 健康页不需要登录：邮箱只露首字母与域名
+    const em = String(acctP.value.email || '').replace(/^(.)[^@]*(@.*)$/, '$1***$2');
+    c.account = `${acctP.value.name?.display_name} (${em})`;
   }
   if (listP.status === 'fulfilled' && listP.value) {
     const entries = listP.value.entries || [];
@@ -3015,6 +3037,7 @@ async function handleHealth(env, request) {
   } catch {}
 
   c.status = c.account && c.folder ? '✅ OK' : '⚠️ Partial';
+  await featP;
 
   return healthHTML(c, c.account ? 200 : 503);
 }
@@ -3025,7 +3048,7 @@ function healthHTML(c, status) {
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Health</title>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{min-height:100dvh;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;background:#000;color:#f5f5f7}
-.c{width:400px;max-width:90vw;background:#111;border-radius:20px;padding:28px;border:1px solid #222}.r{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #1a1a1a;font-size:14px}.r:last-child{border:none}.l{color:#86868b}.s{margin-top:16px;padding:12px;border-radius:12px;text-align:center;font-weight:600;font-size:15px}
+.c{width:440px;max-width:92vw;background:#111;border-radius:20px;padding:28px;border:1px solid #222}.r{display:flex;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:1px solid #1a1a1a;font-size:14px}.r span:last-child{text-align:right}.r:last-child{border:none}.l{color:#86868b;flex:none}.s{margin-top:16px;padding:12px;border-radius:12px;text-align:center;font-weight:600;font-size:15px}
 .ok{background:rgba(48,209,88,.12);color:#30D158}.fail{background:rgba(255,69,58,.12);color:#FF453A}a{display:block;text-align:center;margin-top:12px;color:#0A84FF;text-decoration:none;font-size:14px}</style>
 <body><div class=c>
 <div class=r><span class=l>Token</span><span>${c.token ? '✅' : '❌'}</span></div>
@@ -3037,6 +3060,7 @@ function healthHTML(c, status) {
 <div class=r><span class=l>Pointer</span><span>${escHtml(c.gen || '—')}</span></div>
 <div class=r><span class=l>Edge</span><span>${escHtml(c.edge || '—')}</span></div>
 <div class=r><span class=l>入口</span><span>${escHtml(c.hosts || '—')}</span></div>
+${(c.extras || []).map(([k, v]) => `<div class=r><span class=l>${escHtml(k)}</span><span>${escHtml(v)}</span></div>`).join('\n')}
 <div class="s ${ok ? 'ok' : 'fail'}">${c.status}</div>
 <a href="/">← Back</a></div>`, {
     status,
