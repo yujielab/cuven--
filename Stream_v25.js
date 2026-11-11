@@ -948,6 +948,7 @@ async function handleSubsList(url, env, ctx) {
       const sign = env.AUTH_SECRET ? await signStreamPath(filePath, env) : null;
       const qs = new URLSearchParams({ path: filePath, os: '1' });
       if (sign) { qs.set('exp', String(sign.exp)); qs.set('sig', sign.sig); }
+      qs.set('v', `${(os.rec.src && os.rec.src.file) || ''}.${syncId(os.rec.sync)}`);   // 换了字幕或对齐：链接跟着变，浏览器不会拿旧时间
       subs.push({ name: os.rec.label, path: filePath, ext: '.vtt', srclang: os.rec.lang, label: os.rec.label, online: true,
         url: `/api/subs/vtt?${qs.toString()}` });
     }
@@ -967,7 +968,9 @@ async function subsOnline(filePath, fileName, stem, subFiles, env, ctx, waitMs) 
       sample: async () => (await hlsSidecarCues(x, env, ctx)).slice(0, 400).map(c => c.text).join('\n') };
   });
   const cx = { filePath, linkData, env, ctx };
-  return osFor(env, ctx, { filePath, name: fileName, meta, read: hlsSmallReader(cx), fps: 0, dur: 0 }, tracks, waitMs);
+  const xs = subFiles.map(f => ({ name: f.name, path: f.path_display, rev: f.rev || f.content_hash || '', ext: getExt(f.name) }));
+  const refs = () => syncRefFromSidecars(xs, env, ctx);
+  return osFor(env, ctx, { filePath, name: fileName, meta, read: hlsSmallReader(cx), fps: 0, dur: 0, refs }, tracks, waitMs);
 }
 
 async function handleSubVtt(url, env, ctx) {
@@ -980,7 +983,7 @@ async function handleSubVtt(url, env, ctx) {
     const linkData = await getTempLink(filePath, env, ctx);
     const rec = await osLoad(env, await osKeyOf(osIdentity(filePath, linkData.metadata))).catch(() => null);
     if (!rec || rec.status !== 'ok') return empty();
-    return new Response(osVttFull(rec.cues), {
+    return new Response(osVttFull(osCuesOut(rec)), {
       headers: { 'Content-Type': 'text/vtt; charset=utf-8', 'Cache-Control': 'public, max-age=3600' },
     });
   }
@@ -1046,7 +1049,7 @@ const OS_LANGS = {
   'zh-cn': { lang: 'zh-Hans', label: '简体中文（在线）', score: 40 },
   ze: { lang: 'zh-Hans', label: '简英双语（在线）', score: 34 },
   'zh-tw': { lang: 'zh-Hans', label: '简体中文（在线 · 繁转简）', score: 30, toSimp: true },
-  en: { lang: 'en', label: 'English（在线）', score: 10 },
+  en: { lang: 'en', label: 'English（在线）', score: -20 },      // 只在没有像样的中文时才用：有对齐以后，哈希不一致的中文也能对上时间
 };
 const OS_MEM = new Map();                           // 记录键 → 记录（进程内，最近 24 条）
 const OS_BUSY = new Map();                          // 记录键 → 开始时刻（同一 isolate 不重复查）
@@ -1217,7 +1220,21 @@ async function osTmdb(g, env) {
   return m && m.id && m.type === 'movie' ? { id: m.id, type: 'movie' } : null;
 }
 
-/** 真正去查一遍：job = { filePath, name, size, read, fps, dur, allowEn } → 存储记录 */
+/** 本地没有参照时的退路：OpenSubtitles 上与这个文件哈希一致（为这个文件做的）、条数够的那一条，任何语种 */
+async function osHashRef(env, auth, items, chosen, job) {
+  if (!items || !items.length) return null;
+  const pick = items.map(it => it && it.attributes).filter(a => a && a.moviehash_match === true && Array.isArray(a.files) && a.files.length === 1
+    && a.files[0].file_id && String(a.files[0].file_id) !== String(chosen.file) && !a.foreign_parts_only)
+    .sort((x, y) => (+y.download_count || 0) - (+x.download_count || 0))[0];
+  if (!pick) return null;
+  // 哈希一致 = 本来就是这个文件的时间，不做帧率换算
+  const got = await osDownload(env, auth, { file: pick.files[0].file_id, fps: 0 }, 0).catch(() => null);
+  if (!got) return null;
+  const cues = hlsParseSubFile(got.text, /\[Events\]/i.test(got.text) ? '.ass' : '.srt');
+  return cues.length >= 40 ? { label: `OpenSubtitles 同哈希（${pick.language || '?'}）`, pointsOnly: false, cues, rank: SYNC_RANK.os } : null;
+}
+
+/** 真正去查一遍：job = { filePath, name, size, read, fps, dur, allowEn, refs } → 存储记录 */
 async function osRun(env, job) {
   const g = osGuess(job.name);
   const langs = ['ze', 'zh-cn', 'zh-tw', ...(job.allowEn ? ['en'] : [])].sort().join(',');
@@ -1247,7 +1264,17 @@ async function osRun(env, job) {
         for (const x of cues) x.text = zhToSimp(x.text);
         converted = true;
       }
-      return { ...base, status: 'ok', lang: L.lang, label: L.label, cues,
+      // 对齐：记录里存原始时间与对齐参数（参照以后变好了还能重算，见 hlsOnline）
+      let sync = null;
+      try {
+        const ref = job.refs ? await job.refs() : null;
+        if (ref) sync = osSyncWith(cues, ref);
+        else if (!c.hash) {
+          const hr = await osHashRef(env, auth, lists[0] || [], c, job);
+          if (hr) sync = osSyncWith(cues, hr);
+        }
+      } catch (e) { console.error('subsync:', job.filePath, e && e.message); }
+      return { ...base, status: 'ok', lang: L.lang, label: L.label, cues, sync,
         src: { id: c.id, file: c.file, language: c.language, release: c.release, hash: c.hash, fps: c.fps, score: c.score, converted, fpsFix: got.fpsFix } };
     }
     return { ...base, status: 'none', retryAt: Date.now() + OS_RETRY.none, tried: cands.length };
@@ -1345,7 +1372,7 @@ async function osFor(env, ctx, file, tracks, waitMs) {
   const key = await osKeyOf(osIdentity(file.filePath, file.meta));
   let rec = await osLoad(env, key);
   if (!osFresh(rec, need.allowEn)) {
-    osKick(env, ctx, key, { filePath: file.filePath, name: file.name, size: file.meta.size, read: file.read, fps: file.fps, dur: file.dur, allowEn: need.allowEn });
+    osKick(env, ctx, key, { filePath: file.filePath, name: file.name, size: file.meta.size, read: file.read, fps: file.fps, dur: file.dur, allowEn: need.allowEn, refs: file.refs });
     if (waitMs) rec = (await osAwait(key, waitMs, need.allowEn)) || rec;
   }
   return { rec: rec && rec.status === 'ok' ? rec : null, need, key, pending: OS_BUSY.has(key) };
@@ -1357,6 +1384,366 @@ function osVttFull(cues, dur) {
   for (const c of subClean(cues, dur).slice().sort((a, b) => a.s - b.s || a.e - b.e)) out.push(`${hlsVttTime(c.s)} --> ${hlsVttTime(c.e)}${c.settings || ''}`, c.text, '');
   return out.join('\n');
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  在线字幕自动对齐（只给 OpenSubtitles 找来的那条；内封 / 外挂字幕原样用）
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  在线字幕常常是给另一个版本做的：整体早 / 晚几秒（片头长短不同）、越放越偏（23.976 ↔ 25 帧的 PAL 加速、
+//  1.001 的 NTSC 误差）、中途突然错开一截（多 / 少一段剧情）。对齐要一份「这个文件自己的时间」做参照 ——
+//  不必是同一种语言，只要时间来自这个文件：
+//    ① 内封字幕（文字或 PGS 图形，任何语言）：MKV Cues 里就有每一条的起止时间，一个字节都不用多读；
+//    ② 同目录的外挂字幕；
+//    ③ 都没有时：OpenSubtitles 里与这个文件哈希一致（就是为这个文件做的）的其他语种字幕。
+//  算法与 alass / ffsubsync 同一思路，按「事件」对齐：
+//    · 两边各取字幕出现 / 消失的时刻当事件（出现只和出现比、消失只和消失比），两两相减投票
+//      （直方图 + 三角核平滑）；每个候选帧率比（1、25/23.976、24/23.976 …）各投一次；
+//    · 全局投票里的几个高峰当候选偏移，逐条字幕动态规划选偏移、每换一次扣分 —— 偏移成台阶就自然切成几段，
+//      切点落在两条字幕之间；每段要比用相邻段的偏移明显对得更好才保留，再在 ±0.4s 内用 20ms 的格子细调（syncFit）；
+//    · 最后核对：字幕按单双条分两半各自对齐、拿去给另一半用（交叉验证），对上的比例都要显著高于随机水平；
+//      整体也要明显好于对齐前、好于随机水平才采用，否则原样不动 —— 宁可不改，也不能改坏（subSync）。
+const SYNC_V = 2;
+const SYNC_SCALES = [1, 25 / 23.976, 23.976 / 25, 24 / 23.976, 23.976 / 24, 25 / 24, 24 / 25, 30 / 29.97, 29.97 / 30];
+const SYNC_RANGE = 900;          // 全局偏移最多 ±15 分钟
+const SYNC_TOL = 0.25;           // 「对上了」：参照事件落在 ±0.25s 内
+const SYNC_KER = 0.3;            // 分段打分用的软核半宽
+const SYNC_PEN = 6;              // 换一次偏移（切一刀）至少要多对上这么多分
+const SYNC_SHIFTS = [-151.3, -97.3, -61.7, -43.1, -29.9, -17.3, 13.1, 23.9, 37.7, 53.3, 79.1, 113.9];   // 随机水平：整体挪开这些秒数再数
+
+/** 字幕 → 事件：出现时刻 s、消失时刻 e 各一列，排好序。出现只和出现比、消失只和消失比（消失权重 0.6）；
+    参照只有时刻（PGS 不分出现消失）时两列都是全部时刻 */
+function syncEvents(cues, pointsOnly) {
+  const s = [], e = [];
+  for (const c of cues || []) {
+    if (!c || !Number.isFinite(c.s) || c.s < 0) continue;
+    s.push(c.s);
+    if (Number.isFinite(c.e) && c.e > c.s + 0.05) e.push(c.e);
+  }
+  if (pointsOnly) { const all = Float64Array.from([...s, ...e]).sort(); return { s: all, e: all, pts: true }; }
+  return { s: Float64Array.from(s).sort(), e: Float64Array.from(e).sort(), pts: false };
+}
+
+/** 偏移直方图：每对（目标事件 x，参照事件 y）投 d = y − 比例 × x 一票，只统计 d ∈ [lo, hi] */
+function syncVote(h, xs, ys, scale, lo, hi, bin, w) {
+  let j0 = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const x = xs[i] * scale;
+    while (j0 < ys.length && ys[j0] < x + lo) j0++;
+    for (let j = j0; j < ys.length; j++) {
+      const d = ys[j] - x;
+      if (d > hi) break;
+      h[Math.round((d - lo) / bin)] += w;
+    }
+  }
+}
+function syncHist(tg, rf, scale, lo, hi, bin) {
+  const h = new Float32Array(Math.ceil((hi - lo) / bin) + 1);
+  syncVote(h, tg.s, rf.s, scale, lo, hi, bin, 1);
+  syncVote(h, tg.e, rf.e, scale, lo, hi, bin, 0.6);
+  return h;
+}
+/** 三角核平滑（半宽 k 格） */
+function syncSmooth(h, k) {
+  const out = new Float32Array(h.length), norm = (k + 1) * (k + 1);
+  for (let i = 0; i < h.length; i++) {
+    let s = 0;
+    for (let d = -k; d <= k; d++) { const j = i + d; if (j >= 0 && j < h.length) s += h[j] * (k + 1 - Math.abs(d)); }
+    out[i] = s / norm;
+  }
+  return out;
+}
+/** 峰：位置（抛物线插值到格子以下）、高度、相对背景的稳健 z 分（中位数 + MAD，峰两侧 excl 秒不算背景）；
+    顺带给出背景的 med / sd，挑候选峰时用 */
+function syncPeak(h, lo, bin, excl) {
+  let bi = 0;
+  for (let i = 1; i < h.length; i++) if (h[i] > h[bi]) bi = i;
+  const ex = Math.max(1, Math.round(excl / bin));
+  const rest = [];
+  for (let i = 0; i < h.length; i += (h.length > 4000 ? 3 : 1)) if (Math.abs(i - bi) > ex) rest.push(h[i]);
+  rest.sort((a, b) => a - b);
+  const med = rest.length ? rest[rest.length >> 1] : 0;
+  const dev = rest.map(v => Math.abs(v - med)).sort((a, b) => a - b);
+  const mad = dev.length ? dev[dev.length >> 1] : 0;
+  let mean = 0, sq = 0;
+  for (const v of rest) { mean += v; sq += v * v; }
+  mean /= rest.length || 1;
+  const sd = Math.max(1.4826 * mad, Math.sqrt(Math.max(0, sq / (rest.length || 1) - mean * mean)) * 0.5, 1e-6);
+  return { off: lo + syncSub(h, bi) * bin, v: h[bi], z: (h[bi] - med) / sd, med, sd };
+}
+/** 抛物线插值：峰在第 i 格附近的亚格位置 */
+function syncSub(h, i) {
+  if (i <= 0 || i >= h.length - 1) return i;
+  const a = h[i - 1], b = h[i], c = h[i + 1], den = a - 2 * b + c;
+  return den < 0 ? i + Math.max(-0.5, Math.min(0.5, 0.5 * (a - c) / den)) : i;
+}
+/** 前 k 个彼此相距 ≥ sep 秒、且高出背景 zmin 个 sd 的峰（偏移，从高到低） */
+function syncPeaks(h, lo, bin, pk, k, sep, zmin) {
+  const idx = [];
+  for (let i = 1; i < h.length - 1; i++) if (h[i] >= h[i - 1] && h[i] > h[i + 1] && (h[i] - pk.med) / pk.sd >= zmin) idx.push(i);
+  idx.sort((a, b) => h[b] - h[a]);
+  const out = [], gap = sep / bin;
+  for (const i of idx) {
+    if (out.length >= k) break;
+    if (!out.some(j => Math.abs(j - i) < gap)) out.push(i);
+  }
+  return out.map(i => lo + syncSub(h, i) * bin);
+}
+
+/** 映射：比例 + 分段偏移。segs = [{ until, off }]（until：目标时间，这一段管到哪；最后一段 until = null） */
+function syncMap(sync, t) {
+  const segs = sync.segs;
+  let off = segs[segs.length - 1].off;
+  for (const s of segs) if (s.until == null || t < s.until) { off = s.off; break; }
+  return t * sync.scale + off;
+}
+/** 排好序的时刻表 ys 里离 x 最近的有多远 */
+function syncNear(ys, x) {
+  if (!ys.length) return Infinity;
+  let lo = 0, hi = ys.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (ys[m] < x) lo = m + 1; else hi = m; }
+  let d = Math.abs(ys[lo] - x);
+  if (lo > 0) d = Math.min(d, Math.abs(ys[lo - 1] - x));
+  return d;
+}
+/** 对上的比例：目标字幕的出现时刻映射过去后，±tol 内有参照字幕出现的占多少 */
+function syncRate(tgStarts, rf, map, tol = SYNC_TOL) {
+  if (!tgStarts.length || !rf.s.length) return 0;
+  let hit = 0;
+  for (const s of tgStarts) if (syncNear(rf.s, map(s)) <= tol) hit++;
+  return hit / tgStarts.length;
+}
+/** 随机水平：把映射整体挪开若干秒再数，均值与标准差（标准差不小于二项分布那么大） */
+function syncChance(starts, rf, map) {
+  const r = SYNC_SHIFTS.map(d => syncRate(starts, rf, t => map(t) + d));
+  const mu = r.reduce((a, b) => a + b, 0) / r.length;
+  const sd = Math.sqrt(r.reduce((a, b) => a + (b - mu) * (b - mu), 0) / r.length);
+  return { mu, sd: Math.max(sd, Math.sqrt(Math.max(mu * (1 - mu), 0.01) / starts.length)) };
+}
+
+/**
+ * 拟合一组目标字幕 cs（按出现排好）：hs = 每个比例的平滑全局直方图（这组字幕自己的）
+ *   ① 比例：每个候选比例的直方图取最尖的峰（非 1 的比例要明显更尖才换）；
+ *   ② 候选偏移：这个比例下全局直方图前 12 个彼此相距 ≥ 0.5s 的峰（剪辑差、广告切口各成一个峰）；
+ *   ③ 每条字幕对每个候选偏移打分（出现 / 消失离最近参照事件多近，软核），
+ *      逐条动态规划选偏移：换一次偏移扣 SYNC_PEN 分 —— 自然切成若干段，切点落在两条字幕之间；
+ *   ④ 每段要「挣得到」：比用相邻段的偏移多对上 max(罚分, 段长 × 8%) 才保留，不然并进去；
+ *   ⑤ 每段在 ±0.4s 内用 20ms 的格子细调；细调后相差不到 0.25s 的相邻段合并。
+ */
+function syncFit(cs, hs, rf) {
+  // 比例 1 一定试；别的比例只试峰最尖的两个（且不比 1 的峰差太多）。各自走完分段，总分高的胜（非 1 要高 3% 才换）——
+  // 一级一级往后错的台阶（广告切口）近似一条斜线，光比峰会误认成帧率差，比分段后的总分就不会
+  const peaks = SYNC_SCALES.map(sc => ({ ...syncPeak(hs.get(sc), -SYNC_RANGE, 0.1, 2), scale: sc }));
+  const one = peaks[0];
+  const tries = [one, ...peaks.slice(1).sort((a, b) => b.z - a.z).slice(0, 2).filter(p => p.z >= Math.max(6, one.z * 0.8))];
+  let best = null;
+  for (const p of tries) {
+    const m = syncFitAt(cs, hs.get(p.scale), rf, p);
+    if (!best || m.obj > best.obj * 1.03) best = m;
+  }
+  return best;
+}
+function syncFitAt(cs, h, rf, best) {
+  const scale = best.scale, n = cs.length;
+  const cands = syncPeaks(h, -SYNC_RANGE, 0.1, best, 12, 0.5, 4);
+  if (!cands.length) cands.push(best.off);
+  const K = cands.length, sc = new Float32Array(n * K);
+  const ker = d => d >= SYNC_KER ? 0 : 1 - d / SYNC_KER;
+  for (let i = 0; i < n; i++) for (let k = 0; k < K; k++) {
+    const c = cs[i];
+    sc[i * K + k] = ker(syncNear(rf.s, c.s * scale + cands[k])) + (c.e != null ? 0.6 * ker(syncNear(rf.e, c.e * scale + cands[k])) : 0);
+  }
+  // ③ 动态规划（Viterbi）
+  const back = new Uint8Array(n * K);
+  let V = new Float64Array(K), NV = new Float64Array(K);
+  for (let k = 0; k < K; k++) V[k] = sc[k];
+  for (let i = 1; i < n; i++) {
+    let bp = 0;
+    for (let k = 1; k < K; k++) if (V[k] > V[bp]) bp = k;
+    for (let k = 0; k < K; k++) {
+      const sw = V[bp] - SYNC_PEN;
+      if (sw > V[k]) { NV[k] = sw + sc[i * K + k]; back[i * K + k] = bp; } else { NV[k] = V[k] + sc[i * K + k]; back[i * K + k] = k; }
+    }
+    [V, NV] = [NV, V];
+  }
+  const pick = new Uint8Array(n);
+  let k = 0;
+  for (let j = 1; j < K; j++) if (V[j] > V[k]) k = j;
+  const obj = V[k];
+  for (let i = n - 1; i >= 0; i--) { pick[i] = k; k = back[i * K + k]; }
+  // 连续同一偏移 → 段 { i0, i1, k }
+  let runs = [];
+  for (let i = 0; i < n; i++) {
+    if (runs.length && runs[runs.length - 1].k === pick[i]) runs[runs.length - 1].i1 = i + 1;
+    else runs.push({ i0: i, i1: i + 1, k: pick[i] });
+  }
+  const sum = (r, kk) => { let s = 0; for (let i = r.i0; i < r.i1; i++) s += sc[i * K + kk]; return s; };
+  // ④ 挣不到的段并给相邻段（每次并掉最不值的那段，直到都站得住）
+  for (;;) {
+    let worst = -1, wv = Infinity, wto = -1;
+    runs.forEach((r, j) => {
+      if (runs.length === 1) return;
+      const own = sum(r, r.k);
+      let alt = -Infinity, to = -1;
+      for (const q of [j - 1, j + 1]) if (q >= 0 && q < runs.length) { const v = sum(r, runs[q].k); if (v > alt) { alt = v; to = q; } }
+      const need = Math.max(SYNC_PEN, 0.08 * (r.i1 - r.i0));
+      if (own - alt < need && own - alt - need < wv) { wv = own - alt - need; worst = j; wto = to; }
+    });
+    if (worst < 0) break;
+    runs[worst].k = runs[wto].k;
+    const merged = [];
+    for (const r of runs) {
+      if (merged.length && merged[merged.length - 1].k === r.k) merged[merged.length - 1].i1 = r.i1;
+      else merged.push({ ...r });
+    }
+    runs = merged;
+  }
+  // 切点：交界两侧各 15 条里重新挑总分最高的位置；平手（交界附近对不上参照的字幕两边都是 0 分，动态规划随便切）
+  // 就挑两条字幕之间空档最大的那个 —— 剪辑点通常就是那段空白
+  for (let j = 1; j < runs.length; j++) {
+    const A = runs[j - 1], B = runs[j], lo = Math.max(A.i0 + 1, B.i0 - 15), hi = Math.min(B.i1 - 1, B.i0 + 15);
+    if (hi <= lo) continue;
+    const tot = [];
+    for (let p = lo; p <= hi; p++) {
+      let v = 0;
+      for (let i = lo - 1; i < p; i++) v += sc[i * K + A.k];
+      for (let i = p; i <= hi; i++) v += sc[i * K + B.k];
+      tot.push(v);
+    }
+    const mx = Math.max(...tot);
+    let bp = B.i0, bg = -1;
+    tot.forEach((v, q) => { const p = lo + q, g = cs[p].s - cs[p - 1].s; if (v >= mx - 0.01 && g > bg) { bg = g; bp = p; } });
+    A.i1 = bp; B.i0 = bp;
+  }
+  // ⑤ 细调：这一段的全部事件在候选偏移 ±0.4s 内找峰
+  const refine = (r, off) => {
+    const ev = syncEvents(cs.slice(r.i0, r.i1));
+    if (ev.s.length < 4) return off;
+    const h = syncSmooth(syncHist(ev, rf, scale, off - 0.4, off + 0.4, 0.02), 2);
+    let bi = 0;
+    for (let i = 1; i < h.length; i++) if (h[i] > h[bi]) bi = i;
+    return h[bi] > 0 ? off - 0.4 + syncSub(h, bi) * 0.02 : off;
+  };
+  let segs = runs.map(r => ({ i0: r.i0, i1: r.i1, off: refine(r, cands[r.k]) }));
+  for (let j = segs.length - 1; j > 0; j--) {
+    if (Math.abs(segs[j].off - segs[j - 1].off) < 0.25) {
+      const m = { i0: segs[j - 1].i0, i1: segs[j].i1 };
+      m.off = refine(m, (segs[j - 1].off * (segs[j - 1].i1 - segs[j - 1].i0) + segs[j].off * (segs[j].i1 - segs[j].i0)) / (m.i1 - m.i0));
+      segs.splice(j - 1, 2, m);
+    }
+  }
+  return {
+    scale, z: best.z, obj,
+    segs: segs.map((g, j) => ({ until: j < segs.length - 1 ? +((cs[g.i1 - 1].s + cs[g.i1].s) / 2).toFixed(3) : null, off: Math.round(g.off * 1000) / 1000 })),
+  };
+}
+
+/**
+ * 主入口。target：在线字幕 [{s,e}]（秒）；ref：参照字幕 [{s,e}]，pointsOnly = 参照只有时刻（PGS）。
+ * 返回 { v, scale, segs, before, after, chance, cv, applied, why }；applied=false 时 scale=1、segs=[{until:null,off:0}]
+ * 核对（宁可不改，也不能改坏）：
+ *   · 交叉验证：字幕按单双条分两半，各自独立拟合，拿去给另一半用 —— 对上的比例都要显著高于随机水平
+ *     （z ≥ 3 且高 8 个百分点以上）。和片子对不上的字幕找到的「峰」是凑出来的，换一半就不灵；
+ *   · 整体：对齐后对上的比例要比随机水平高 10 个百分点、比对齐前高 4 个百分点。
+ */
+function subSync(target, ref, opts = {}) {
+  const ident = { scale: 1, segs: [{ until: null, off: 0 }] };
+  const out = why => ({ v: SYNC_V, ...ident, applied: false, why });
+  const cs = (target || []).filter(c => c && Number.isFinite(c.s) && c.s >= 0)
+    .map(c => ({ s: c.s, e: Number.isFinite(c.e) && c.e > c.s + 0.05 ? c.e : null })).sort((a, b) => a.s - b.s);
+  const rf = syncEvents(ref, !!opts.pointsOnly);
+  if (cs.length < 40 || rf.s.length < 40) return out('too-few');
+  const A = cs.filter((_, i) => i % 2 === 0), B = cs.filter((_, i) => i % 2 === 1);
+  const eA = syncEvents(A), eB = syncEvents(B);
+  const hA = new Map(), hB = new Map(), hF = new Map();
+  for (const s of SYNC_SCALES) {
+    const a = syncHist(eA, rf, s, -SYNC_RANGE, SYNC_RANGE, 0.1), b = syncHist(eB, rf, s, -SYNC_RANGE, SYNC_RANGE, 0.1);
+    const f = new Float32Array(a.length);
+    for (let i = 0; i < a.length; i++) f[i] = a[i] + b[i];
+    hA.set(s, syncSmooth(a, 3)); hB.set(s, syncSmooth(b, 3)); hF.set(s, syncSmooth(f, 3));
+  }
+  const fit = syncFit(cs, hF, rf);
+  if (fit.z < 6) return out('no-peak');
+  const starts = cs.map(c => c.s);
+  const f = t => syncMap(fit, t);
+  const before = syncRate(starts, rf, t => t), after = syncRate(starts, rf, f);
+  const ch = syncChance(starts, rf, f);
+  const res = { v: SYNC_V, scale: fit.scale, segs: fit.segs, before: +before.toFixed(3), after: +after.toFixed(3), chance: +ch.mu.toFixed(3), z: +fit.z.toFixed(1) };
+  let moved = 0;
+  for (const s of starts) moved = Math.max(moved, Math.abs(f(s) - s));
+  if (moved < 0.12) return { ...res, ...ident, applied: false, why: 'in-sync' };
+  const cvz = (half, m) => {
+    const st = half.map(c => c.s), mp = t => syncMap(m, t);
+    const r = syncRate(st, rf, mp), c = syncChance(st, rf, mp);
+    return r - c.mu < 0.08 ? Math.min(0, (r - c.mu) / c.sd) : (r - c.mu) / c.sd;
+  };
+  res.cv = +Math.min(cvz(B, syncFit(A, hA, rf)), cvz(A, syncFit(B, hB, rf))).toFixed(1);
+  if (res.cv < 3) return { ...res, ...ident, applied: false, why: 'unstable' };
+  if (after < ch.mu + 0.1 || after < before + 0.04) return { ...res, ...ident, applied: false, why: 'not-better' };
+  return { ...res, applied: true, why: 'ok' };
+}
+
+/** 把对齐用到一组字幕上（新数组，原样不动）；落到 0 秒以前的整条丢掉 */
+function syncApply(cues, sync) {
+  if (!sync || !sync.applied) return cues;
+  const out = [];
+  for (const c of cues) {
+    const s = syncMap(sync, c.s), e = syncMap(sync, c.s) + (c.e - c.s) * sync.scale;
+    if (e <= 0.05) continue;
+    out.push({ ...c, s: Math.max(0, s), e });
+  }
+  return out;
+}
+
+/* ── 参照来源 ──────────────────────────────────────────────────────────
+   都只取时间，不看内容；取「字幕最多、不是 forced（只翻外语对白的那种）」的那一条。
+   rank：3 = 这个文件自己的字幕（内封 / 外挂），2 = OpenSubtitles 上与这个文件哈希一致的 */
+const SYNC_RANK = { local: 3, os: 2 };
+/** 内封字幕：文字轨（idx.subs，Cues 里有起止）与图形轨（idx.subRefs：PGS / VobSub，Cues 里只有时刻） */
+function syncRefFromIdx(idx) {
+  if (!idx) return null;
+  const sec = u => u * idx.scaleNs / 1e9;
+  const cand = [];
+  (idx.subs || []).forEach((sub, i) => {
+    if (sub.forced || !sub.cues || sub.cues.length < 40) return;
+    cand.push({ label: `内封 #${i}（${sub.lang || '未知'}）`, pointsOnly: false, n: sub.cues.length,
+      cues: () => sub.cues.map(c => { const st = sec(c[0]); return { s: st, e: c[1] >= 0 ? st + sec(c[1]) : null }; }) });
+  });
+  for (const r of idx.subRefs || []) {
+    if (r.forced || !r.t || r.t.length < 60) continue;
+    cand.push({ label: `内封图形字幕（${r.lang || '未知'}）`, pointsOnly: true, n: r.t.length / 2,
+      cues: () => r.t.map(ms => ({ s: ms / 1000 })) });
+  }
+  if (!cand.length) return null;
+  cand.sort((a, b) => (b.pointsOnly ? b.n * 0.8 : b.n) - (a.pointsOnly ? a.n * 0.8 : a.n));
+  const c = cand[0];
+  return { label: c.label, pointsOnly: c.pointsOnly, cues: c.cues(), rank: SYNC_RANK.local };
+}
+/** 同目录外挂字幕：挑条数最多的那份 */
+async function syncRefFromSidecars(xs, env, ctx) {
+  let best = null;
+  for (const x of xs || []) {
+    const cues = await hlsSidecarCues(x, env, ctx).catch(() => null);
+    if (cues && cues.length >= 40 && (!best || cues.length > best.cues.length)) best = { label: `外挂 ${x.name || x.path}`, pointsOnly: false, cues, rank: SYNC_RANK.local };
+  }
+  return best;
+}
+/** 对齐结果的指纹：HLS 字幕分段的缓存键带上它，换了对齐就不会读到旧分段 */
+const syncId = sync => (sync && sync.applied) ? fnv1a(`${sync.scale.toFixed(6)}|${sync.segs.map(g => `${g.off}@${g.until == null ? '' : g.until.toFixed(2)}`).join(',')}`) : 'n';
+/** 在线字幕的成品时间轴：原始时间 + 对齐（记录里只存原始字幕与对齐参数，对齐可以后补、可以重算） */
+const _osOut = new WeakMap();
+function osCuesOut(rec) {
+  if (!rec || !rec.cues) return [];
+  if (!rec.sync || !rec.sync.applied) return rec.cues;
+  let o = _osOut.get(rec);
+  if (!o || o.id !== syncId(rec.sync)) { o = { id: syncId(rec.sync), cues: syncApply(rec.cues, rec.sync) }; _osOut.set(rec, o); }
+  return o.cues;
+}
+/** 对齐一条在线字幕：ref = { cues, pointsOnly, label, rank } */
+function osSyncWith(cues, ref) {
+  const r = subSync(cues, ref.cues, { pointsOnly: ref.pointsOnly });
+  return { ...r, ref: ref.label, rank: ref.rank, at: Date.now() };
+}
+/** 记录里的对齐还能不能更好：没有对齐过，或者当时只有更弱的参照 */
+const osSyncWeaker = (rec, rank) => !!rec && rec.status === 'ok' && (!rec.sync || (rec.sync.rank || 0) < rank || rec.sync.v !== SYNC_V);
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  v24：Safari MP4/MOV FourCC 零拷贝流式热修补
@@ -8666,6 +9053,16 @@ async function hlsBuildIndex(src, opts) {
       cues: (cues.get(t.num) || []).map(c => [c[0], c[3], c[1], c[2]]),
     });
   }
+  // 图形字幕（PGS / VobSub / DVB）放不进 WebVTT，但它的时间是这个文件自己的 —— 在线字幕对齐拿它当参照。
+  // Cues 里每一个显示集（出现、消失各一个）都有时刻，只记毫秒数，不读一个字节
+  const subRefs = [];
+  for (const t of tracks) {
+    if (t.type !== 17 || HLS_TEXT_SUBS.has(t.codecId)) continue;
+    const list = cues.get(t.num) || [];
+    if (list.length < 60) continue;
+    subRefs.push({ num: t.num, lang: hlsLang(t), codec: t.codecId, forced: !!t.forced,
+      t: list.map(c => Math.round(c[0] * scaleNs / 1e6)) });
+  }
 
   // 分段：以视频关键帧为界，尽量贴近目标时长，并且不让单段超过目标 0.5s 以上
   const toSec = u => u * scaleNs / 1e9;
@@ -8701,7 +9098,7 @@ async function hlsBuildIndex(src, opts) {
 
   return {
     v: HLS_VER, size, scaleNs, segStart, firstCluster, clustersEnd, dur: durSec,
-    video, audio, muxed, subs,
+    video, audio, muxed, subs, subRefs,
     segs: segs.map(s => [s.cl, s.rel, s.t]),
     durs: durs.map(d => Math.max(0.001, Math.round(d * 1000) / 1000)),
     bw: { peak: Math.ceil(peak * 1.1), avg: Math.ceil(total / Math.max(1, durSec)) },
@@ -9677,9 +10074,21 @@ function hlsOnline(cx, idx, xs, waitMs) {
     ...xs.map((x, i) => ({ id: 'x' + i, lang: x.srclang, rev: x.rev,
       sample: async () => (await hlsSidecarCues(x, cx.env, cx.ctx)).slice(0, 400).map(c => c.text).join('\n') })),
   ];
+  // 对齐参照：内封（不花一个字节）优先，再外挂
+  const refs = async () => syncRefFromIdx(idx) || await syncRefFromSidecars(xs, cx.env, cx.ctx);
   const file = { filePath: cx.filePath, name: cx.filePath.split('/').pop(), meta: cx.linkData.metadata,
-    read: hlsSmallReader(bg), fps: idx.video.fps || 0, dur: idx.dur || 0 };
-  return osFor(cx.env, cx.ctx, file, tracks, waitMs);
+    read: hlsSmallReader(bg), fps: idx.video.fps || 0, dur: idx.dur || 0, refs };
+  return osFor(cx.env, cx.ctx, file, tracks, waitMs).then(r => osUpgradeSync(cx.env, cx.ctx, r, refs));
+}
+/** 记录是直连那边先建的（只有外挂参照，或者没对齐过）：这边有内封参照就重算一次，存回去 */
+async function osUpgradeSync(env, ctx, r, refs) {
+  if (!r || !r.rec || !r.key || !osSyncWeaker(r.rec, SYNC_RANK.local)) return r;
+  const ref = await Promise.race([refs().catch(() => null), new Promise(res => setTimeout(() => res(null), 1500))]);
+  if (!ref) return r;
+  const rec = { ...r.rec, sync: osSyncWith(r.rec.cues, ref) };
+  ctx?.waitUntil?.(osSave(env, r.key, rec).catch(e => console.error('subsync save:', e && e.message)));
+  osRemember(r.key, rec);
+  return { ...r, rec };
 }
 /** 内封字幕抽一段文字（认繁简用）：有 Cues 才抽（精确读几个字幕块）；没有就不抽，当作认不出 */
 async function hlsSubSample(cx, idx, si) {
@@ -10338,7 +10747,7 @@ async function hlsVttResponse(key, ctx, make) {
   return res;
 }
 
-function hlsInfo(idx, xs, env) {
+function hlsInfo(idx, xs, env, os) {
   const V = idx.video, txOn = hlsTxOn(env);
   return {
     ok: true, dur: idx.dur, segments: idx.segs.length,
@@ -10354,6 +10763,10 @@ function hlsInfo(idx, xs, env) {
       muxed: i === idx.muxed })),
     subtitles: idx.subs.map(s => ({ lang: s.lang, name: s.name, format: s.fmt, forced: s.forced })),
     sidecarSubtitles: xs.length,
+    // 在线字幕（已经查到的话）与它的自动对齐结果：参照是谁、整体偏移 / 速度比 / 分段、对齐前后对上的比例
+    online: os && os.status === 'ok' ? { lang: os.lang, label: os.label, release: os.src && os.src.release, hashMatch: !!(os.src && os.src.hash),
+      sync: os.sync ? { applied: !!os.sync.applied, why: os.sync.why, ref: os.sync.ref || null, scale: os.sync.scale, segs: os.sync.segs,
+        before: os.sync.before, after: os.sync.after, chance: os.sync.chance, cv: os.sync.cv ?? null } : null } : null,
     audioUnsupportedOnly: idx.muxed < 0 && idx.audio.length > 0 && !(txOn && idx.audio.some(a => a.mode === 'tx')),
     audioTranscoder: txOn,
   };
@@ -10396,7 +10809,8 @@ async function handleHls(url, request, env, ctx) {
     if (rest[0] === 'info.json') {
       // 打开详情页：没有简体中文字幕的片子，在后台去 OpenSubtitles 找一条（不等）
       if (osOn(env)) ctx?.waitUntil?.(hlsOnline(cx, idx, xs, 0).catch(() => null));
-      return new Response(JSON.stringify(hlsInfo(idx, xs, env)), { headers: hlsHeaders('application/json; charset=utf-8', 'no-store') });
+      const os = osOn(env) ? await osLoad(env, await osKeyOf(osIdentity(filePath, meta))).catch(() => null) : null;
+      return new Response(JSON.stringify(hlsInfo(idx, xs, env, os)), { headers: hlsHeaders('application/json; charset=utf-8', 'no-store') });
     }
     // 起播：播放器拿到主列表后还要取二级列表与 init 才来要第 0 段 —— 这几个来回里先在后台
     // 把第 0 段取进缓存，它来了等一下就从缓存出（只是预取：不跟车、不共享流）
@@ -10469,9 +10883,9 @@ async function handleHls(url, request, env, ctx) {
       const k = +seg[1];
       const rec = osOn(env) ? await osLoad(env, await osKeyOf(osIdentity(filePath, meta))).catch(() => null) : null;
       if (!rec || rec.status !== 'ok') return hlsOut(hlsVtt([]), 'text/vtt; charset=utf-8', 'no-store');
-      return await hlsVttResponse(`o${SUB_CLEAN_V}/${idx.idh}/${rec.src.file}/${k}`, ctx, async () => {
+      return await hlsVttResponse(`o${SUB_CLEAN_V}/${idx.idh}/${rec.src.file}/${syncId(rec.sync)}/${k}`, ctx, async () => {
         const [T1, T2] = hlsSegWindow(idx, k);
-        return hlsVtt(rec.cues.filter(c => c.s < T2 && c.e > T1), idx.dur);
+        return hlsVtt(osCuesOut(rec).filter(c => c.s < T2 && c.e > T1), idx.dur);
       });
     }
   }

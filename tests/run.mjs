@@ -413,6 +413,118 @@ console.log('\n■ OpenSubtitles 自动补字幕（模拟接口）');
   ok(online && online.srclang === 'zh-Hans' && /os=1/.test(online.url), `直连：/api/subs 带上在线字幕（${online && online.label}）`);
   const full = online ? await (await H.call(online.url)).text() : '';
   ok(/^WEBVTT/.test(full) && full.includes('这是第1句简体字幕') && (full.match(/-->/g) || []).length === 12, 'GBK 编码的字幕解码正确，整份 VTT 给 <track> 用');
+
+  // ── 在线字幕自动对齐（内封字幕不动，只给在线那条对时间）──
+  const parseT = x => { const m = /(\d+):(\d+):(\d+)[,.](\d+)/.exec(x); return +m[1] * 3600 + +m[2] * 60 + +m[3] + +m[4] / 1000; };
+  const cuesOf = text => [...text.matchAll(/(\d+:\d+:\d+[,.]\d+)\s*-->\s*(\d+:\d+:\d+[,.]\d+)/g)].map(m => ({ s: parseT(m[1]), e: parseT(m[2]) }));
+  const REF = cuesOf(fs.readFileSync(S('sync_en.srt'), 'utf8'));
+  const mkSrt = (cues, txt = i => `第${i + 1}句简体中文，我们说话没问题`) => cues.map((c, i) => `${i + 1}\n${tc(c.s)} --> ${tc(c.e)}\n${txt(i)}\n`).join('\n');
+  const move = f => REF.map(c => ({ s: f(c.s), e: f(c.e) }));
+  /* 直连那份整条 VTT（时间 = 对齐后的）：与参照逐条比，平均差多少秒 */
+  const onlineVtt = async f => {
+    const lst = await (await H.call('/api/subs?path=' + encodeURIComponent(f), 'GET', { Cookie: cookie })).json();
+    const o = (lst.subs || []).find(x => x.online);
+    return o ? (await H.call(o.url)).text() : '';
+  };
+  const err = text => { const c = cuesOf(text); if (c.length !== REF.length) return Infinity; let e = 0; c.forEach((x, i) => { e += Math.abs(x.s - REF[i].s); }); return e / c.length; };
+  /* 每个情形用样片的一份拷贝：在线字幕的记录按文件存（进程内 + R2），同一个文件第二次就直接用上次的了 */
+  const copies = [];
+  const syncCase = async (label, src, cues, extra = {}) => {
+    await clear(); reset();
+    const f = `sync-${label}.mkv`;
+    fs.copyFileSync(S(src), S(f)); copies.push(S(f));
+    const hc = mh(f);
+    const subs = (extra.subs || []).map(x => x.moviehash === 'SELF' ? { ...x, moviehash: hc } : x);
+    H.os.subs = [{ id: 70, file_id: 1070, language: 'zh-cn', query: `sync-${label}`, ...(extra.main || {}), ...(extra.main && extra.main.moviehash === 'SELF' ? { moviehash: hc } : {}) }, ...subs];
+    H.os.files = { 1070: { text: mkSrt(cues) }, ...(extra.files || {}) };
+    await info('/Movies/' + f); await settle();
+    const inf = await info('/Movies/' + f);
+    return { sync: inf.online && inf.online.sync, vtt: await onlineVtt('/Movies/' + f), inf, f };
+  };
+  let r1 = await syncCase('offset', 'sync_ref.mkv', move(t => t + 3.2));
+  ok(r1.sync && r1.sync.applied && r1.sync.segs.length === 1 && Math.abs(r1.sync.segs[0].off + 3.2) < 0.03 && /内封/.test(r1.sync.ref) && err(r1.vtt) < 0.03,
+    `在线字幕整体晚 3.2 秒：拿内封英文字幕的时间当参照，偏移 ${r1.sync && r1.sync.segs[0].off}s，对齐后与参照平均差 ${err(r1.vtt).toFixed(3)}s（对上 ${r1.sync && r1.sync.before} → ${r1.sync && r1.sync.after}）`);
+  const m1 = await master('/Movies/' + r1.f);
+  const seg = await vtt('/Movies/' + r1.f, m1, 2);
+  const segC = cuesOf(seg);
+  ok(segC.length > 0 && segC.every(c => REF.some(x => Math.abs(x.s - c.s) < 0.03)), `HLS 的在线字幕分段也是对齐后的时间（第 2 段 ${segC.length} 条，都落在参照上）`);
+  const lst1 = await (await H.call('/api/subs?path=' + encodeURIComponent('/Movies/' + r1.f), 'GET', { Cookie: cookie })).json();
+  const u1 = ((lst1.subs || []).find(x => x.online) || {}).url || '';
+  ok(/[?&]v=1070\.[0-9a-z]{3,}(&|$)/.test(u1), `直连的字幕链接带着对齐指纹（${(u1.match(/v=[^&]+/) || [''])[0]}）：换了对齐，浏览器不会拿旧时间`);
+  r1 = await syncCase('pal', 'sync_ref.mkv', move(t => (t + 1.5) * 23.976 / 25));
+  ok(r1.sync && r1.sync.applied && Math.abs(r1.sync.scale - 25 / 23.976) < 1e-4 && err(r1.vtt) < 0.05,
+    `给 25 帧（PAL 加速）版本做的：认出速度比 ${r1.sync && r1.sync.scale.toFixed(5)}，越往后偏得越多的那种也拉回来（平均差 ${err(r1.vtt).toFixed(3)}s）`);
+  r1 = await syncCase('cut', 'sync_ref.mkv', REF.map(c => c.s < 90 ? c : { s: c.s + 6.5, e: c.e + 6.5 }));
+  ok(r1.sync && r1.sync.applied && r1.sync.segs.length === 2 && err(r1.vtt) < 0.05,
+    `中途错开一截（后半段晚 6.5 秒：字幕是给中间多一段的版本做的）：切成两段各自对齐（${r1.sync && r1.sync.segs.map(g => g.off + 's').join(' / ')}，平均差 ${err(r1.vtt).toFixed(3)}s）`);
+  r1 = await syncCase('in sync', 'sync_ref.mkv', REF.map(c => ({ s: c.s + 0.04, e: c.e - 0.03 })));
+  ok(r1.sync && !r1.sync.applied && r1.sync.why === 'in-sync' && err(r1.vtt) < 0.05, '本来就对得上的：原样不动');
+  let seedU = 5; const ru = () => ((seedU = (seedU * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const unrel = []; for (let x = 2; unrel.length < 90 && x < 170; x += 0.6 + ru() * 2.5) unrel.push({ s: x, e: x + 0.4 + ru() });
+  r1 = await syncCase('unrelated', 'sync_ref.mkv', unrel);
+  ok(r1.sync && !r1.sync.applied && cuesOf(r1.vtt).length === unrel.length && Math.abs(cuesOf(r1.vtt)[0].s - unrel[0].s) < 0.01,
+    `和这部片对不上的（${r1.sync && r1.sync.why}）：不硬对，原样不动`);
+  // 没有内封 / 外挂字幕：拿 OpenSubtitles 上同哈希（为这个文件做的）英文字幕当参照
+  r1 = await syncCase('hashref', 'sync_nosub.mkv', move(t => t + 2.25), {
+    subs: [{ id: 71, file_id: 1071, language: 'en', moviehash: 'SELF', downloads: 10 }], files: { 1071: { text: mkSrt(REF, i => `Line ${i + 1}`) } } });
+  ok(r1.sync && r1.sync.applied && /同哈希/.test(r1.sync.ref) && Math.abs(r1.sync.segs[0].off + 2.25) < 0.03 && err(r1.vtt) < 0.03,
+    `片子里没有字幕：拿 OpenSubtitles 上与这个文件哈希一致的英文字幕当参照（偏移 ${r1.sync && r1.sync.segs[0].off}s）`);
+  ok(calls('/download').length === 2, '为了对齐多花一次下载配额，只在本地没有参照、选中的又不是为这个文件做的时候');
+  // 选中的就是为这个文件做的（哈希一致）：不另花配额找参照
+  r1 = await syncCase('selfhash', 'sync_nosub.mkv', REF, { main: { moviehash: 'SELF' },
+    subs: [{ id: 73, file_id: 1073, language: 'en', moviehash: 'SELF', downloads: 10 }], files: { 1073: { text: mkSrt(REF, i => `Line ${i + 1}`) } } });
+  ok(calls('/download').length === 1 && r1.sync === null, '选中的在线字幕本身哈希一致：不再下载参照，也不对齐');
+  copies.forEach(f => { try { fs.unlinkSync(f); } catch (_) {} });
+  // 图形字幕（PGS）当参照：只有时刻、不分出现消失
+  const I = await H.internals();
+  const pgsIdx = { scaleNs: 1e6, subs: [], subRefs: [{ lang: 'en', forced: false, t: REF.flatMap(c => [Math.round(c.s * 1000), Math.round(c.e * 1000)]) }] };
+  const pref = I.syncRefFromIdx(pgsIdx);
+  const pr = pref && I.subSync(move(t => t + 4), pref.cues, { pointsOnly: pref.pointsOnly });
+  ok(pref && pref.pointsOnly && pr.applied && Math.abs(pr.segs[0].off + 4) < 0.03, `内封图形字幕（PGS）只有时刻也能当参照（偏移 ${pr && pr.segs[0].off}s）`);
+  const both = I.syncRefFromIdx({ scaleNs: 1e6, subs: [{ forced: true, cues: REF.map(c => [c.s * 1000, (c.e - c.s) * 1000, 0, 0]) }], subRefs: [] });
+  ok(both === null, 'forced 字幕（只翻外语对白的那种）不当参照');
+  // 长片（合成）：一部片 = 一串说话片段；参照与在线字幕各自从说话片段做出来（各自抖动、拆合、漏译），再给在线那份加上各种错位
+  const rng = seed => { let x = seed >>> 0 || 1; return () => { x = (x * 1664525 + 1013904223) >>> 0; return x / 4294967296; }; };
+  const gauss = r => Math.sqrt(-2 * Math.log(Math.max(1e-9, r()))) * Math.cos(2 * Math.PI * r());
+  const speech = (seed, dur) => {
+    const r = rng(seed), out = [];
+    for (let t = 20 + r() * 60; t < dur - 30;) {
+      for (let i = 0, n = 3 + Math.floor(r() * 25); i < n && t < dur - 30; i++) { const d = 0.7 + r() * 4.5; out.push({ s: t, e: t + d }); t += d + 0.15 + r() * (r() < 0.8 ? 1.5 : 6); }
+      t += 4 + r() * (r() < 0.7 ? 40 : 150);
+    }
+    return out;
+  };
+  const subsOf = (sp, seed, jit, drop) => {
+    const r = rng(seed), out = [];
+    for (let i = 0; i < sp.length; i++) {
+      if (r() < drop) continue;
+      let { s, e } = sp[i];
+      if (i + 1 < sp.length && r() < 0.2 && sp[i + 1].s - e < 1 && e - s < 2.5) { e = sp[i + 1].e; i++; }
+      const js = s + gauss(r) * jit, je = e + gauss(r) * jit + 0.2;
+      if (e - s > 4 && r() < 0.3) { const m = (js + je) / 2; out.push({ s: js, e: m - 0.05 }, { s: m, e: je }); } else out.push({ s: js, e: Math.max(js + 0.4, je) });
+    }
+    return out;
+  };
+  const shift = (cues, f) => cues.map(c => { const x = f(c.s), k = (f(c.s + 0.001) - x) / 0.001; return { s: x, e: x + (c.e - c.s) * k }; });
+  /* 对齐后，离真实时间 0.3 秒以内的字幕占多少 */
+  const good = (tg, truth, r) => { const o = I.syncApply(tg, r); return o.length !== truth.length ? 0 : o.filter((c, i) => Math.abs(c.s - truth[i].s) <= 0.3).length / truth.length; };
+  const longCase = (dur, seed, f) => {
+    const sp = speech(seed, dur), ref = subsOf(sp, seed + 1, 0.08, 0.05), truth = subsOf(sp, seed + 2, 0.12, 0.1), tg = shift(truth, f);
+    const t0 = Date.now(), r = I.subSync(tg, ref);
+    return { r, g: good(tg, truth, r), ms: Date.now() - t0, ref };
+  };
+  let L = longCase(2700, 31, t => t + 0.8 + 1.7 * Math.floor(t / 540));
+  ok(L.r.applied && L.r.segs.length >= 4 && L.g >= 0.97,
+    `45 分钟一集、每段广告切口都错开一点（5 级台阶）：切成 ${L.r.segs.length} 段（${L.r.segs.map(g => g.off).join(' / ')}），${(L.g * 100).toFixed(1)}% 的字幕回到 0.3 秒以内`);
+  L = longCase(7200, 41, t => t < 3300 ? t + 1.2 : t + 39.6);
+  ok(L.r.applied && L.r.segs.length === 2 && L.g >= 0.98 && L.ms < 8000,
+    `两小时的片子，中间多了 38 秒（加长版做的字幕）：两段 ${L.r.segs.map(g => g.off).join(' / ')}，${(L.g * 100).toFixed(1)}% 回到 0.3 秒以内（算了 ${L.ms} ms）`);
+  L = longCase(7200, 51, t => t * 23.976 / 24 + 0.5);
+  ok(L.r.applied && Math.abs(L.r.scale - 24 / 23.976) < 1e-6 && L.g >= 0.98,
+    `24 帧与 23.976 帧之差（两小时差出 7 秒）：认出速度比 ${L.r.scale.toFixed(5)}，${(L.g * 100).toFixed(1)}% 回到 0.3 秒以内`);
+  const other = subsOf(speech(99, 7200), 100, 0.1, 0.05);
+  const ru2 = I.subSync(other, L.ref);
+  ok(!ru2.applied, `别的片子的字幕（同样密度、同样长）：不对齐（${ru2.why}）`);
   await clear();
   for (const k of ['OPENSUBTITLES_API_KEY', 'OPENSUBTITLES_USERNAME', 'OPENSUBTITLES_PASSWORD']) delete H.env[k];
 }
