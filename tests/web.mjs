@@ -571,8 +571,13 @@ await pd.waitForTimeout(1500);
 /* 折起竖拿（Safari 382 宽 / 主屏幕 App 466 宽）：贴右缘浮着的竖向导航；展开、横拿：贴左缘、内容让位的导航条；
    普通 iPhone（393 宽）照旧底部胶囊 */
 const DESC = { float: '右缘浮动侧边导航（竖排、叠在搜索钮上面、内容不让位）', rail: '侧边导航条（竖排）', bottom: '底部导航胶囊' };
-for (const [w, h, label, mode] of [[382, 580, '折起竖拿', 'float'], [466, 678, '折起竖拿 · 主屏幕 App', 'float'], [594, 368, '折起横拿', 'rail'],
+/* 实机上折起的外屏右侧有一整列安全区（状态栏竖着排在右上角，safe-area-inset-right ≈ 84px）：用 CDP 模拟同样的安全区 */
+const duoCdp = await duo.newCDPSession(pd);
+const NO_SAI = { top: 0, right: 0, bottom: 0, left: 0 };
+for (const [w, h, label, mode, sai] of [[382, 580, '折起竖拿', 'float'], [466, 678, '折起竖拿 · 主屏幕 App', 'float'],
+  [466, 678, '折起竖拿 · 主屏幕 App · 右侧 84px 安全区（实机）', 'float', { top: 0, right: 84, bottom: 20, left: 0 }], [594, 368, '折起横拿', 'rail'],
   [669, 825, '展开竖拿', 'rail'], [951, 543, '展开横拿', 'rail'], [382, 580, '再合上竖拿', 'float']]) {
+  await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: sai || NO_SAI });
   await pd.setViewportSize({ width: w, height: h });
   await pd.waitForTimeout(800);
   const g = await pd.evaluate(() => {
@@ -595,6 +600,7 @@ for (const [w, h, label, mode] of [[382, 580, '折起竖拿', 'float'], [466, 67
   ok(g.mode === mode && g.vertical === (mode !== 'bottom') && g.clear && g.pillOk && g.sw === g.vw,
     `${label} ${w}×${h}：${DESC[mode]}，选中指示器对齐，主视觉的按钮与轮播点不被导航挡住，没有横向溢出${g.mode === mode ? '' : `（实际：${g.mode}）`}`);
 }
+await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: NO_SAI });
 /* 浮动侧边导航下搜索：搜索场到顶部、几乎通栏；头像圆钮留在右下角 */
 await pd.setViewportSize({ width: 466, height: 678 });
 await pd.waitForTimeout(600);
@@ -1007,12 +1013,13 @@ console.log('\n■ 年份页：一行一部的列表（竖版小海报 + 中文�
       userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 27_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.1 Mobile/15E148 Safari/604.1' });
     await dc.route('https://image.tmdb.org/**', img);
     const dp = await enter(dc);
+    await (await dc.newCDPSession(dp)).send('Emulation.setSafeAreaInsetsOverride', { insets: { top: 0, right: 84, bottom: 20, left: 0 } });
     await dp.waitForTimeout(800);
     await dp.evaluate(() => openYearLibrary(2024));
     await until(dp, () => document.querySelectorAll('#yearList .yl-row').length >= 3, null, 12000);
     const F = await dp.evaluate(() => ({ more: Math.max(...[...document.querySelectorAll('.yl-more')].map(b => b.getBoundingClientRect().right)),
       nav: document.getElementById('navContainer').getBoundingClientRect().left, float: document.documentElement.classList.contains('rail-float') }));
-    ok(F.float && F.more <= F.nav - 8, `折起竖拿：「…」停在右缘导航左边（${Math.round(F.more)} ≤ ${Math.round(F.nav)}），不钻到导航底下`);
+    ok(F.float && F.more <= F.nav - 8 && F.nav >= 466 - 84, `折起竖拿（实机的右侧安全区）：导航在右缘那一列里（${Math.round(F.nav)}），「…」停在它左边（${Math.round(F.more)}），不钻到导航底下`);
     await dc.close();
   } finally {
     for (const [n] of YL) { try { fs.unlinkSync(SM(n)); } catch {} }
