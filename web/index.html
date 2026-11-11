@@ -979,9 +979,9 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
 .tv-hero-wrap { margin-bottom: 40px; }
 /* 卡宽声明在 section 上而不是 hero 容器上 —— 字标胶囊也要按它对齐，
    声明在 hero 里的话字标那行取不到（自定义属性只向下继承） */
-.section.tv-section { --hero-w: min(calc(100vw - 58px), 330px); --hero-gap: 12px; }
-@media (min-width: 481px) { .section.tv-section { --hero-w: min(calc(100vw - 58px), 421px); } }
-@media (min-width: 735px) { .section.tv-section { --hero-w: min(calc(100vw - 58px), 642px); } }
+.section.tv-section { --hero-w: min(calc(var(--app-w, 100vw) - 58px), 330px); --hero-gap: 12px; }
+@media (min-width: 481px) { .section.tv-section { --hero-w: min(calc(var(--app-w, 100vw) - 58px), 421px); } }
+@media (min-width: 735px) { .section.tv-section { --hero-w: min(calc(var(--app-w, 100vw) - 58px), 642px); } }
 /* 版式取自 HeroGallery（apple.com/apps）：一屏只见一张卡、居中、不露邻卡，
    控制条压在卡下面 —— 播放/暂停居中，上一张/下一张贴右缘。
    参考稿是 grid 叠卡 + transform 翻页；这里保留吸附轨道当运力（iOS 上的
@@ -994,7 +994,7 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
      间距直接给 —— 露边量是它的补数：露边 = 留白 − 间距。
      间距越小，邻卡探进屏内越多；减到 0 时两卡贴在一起、露边等于整段留白。 */
   display: flex; gap: var(--hero-gap);
-  overflow-x: auto; padding: 2px calc((100vw - var(--hero-w)) / 2) 0;
+  overflow-x: auto; padding: 2px calc((var(--app-w, 100vw) - var(--hero-w)) / 2) 0;
   scroll-snap-type: x mandatory; scroll-behavior: smooth;
   scrollbar-width: none; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain;
 }
@@ -4777,7 +4777,7 @@ body.tv-auth-open { overflow: hidden; }
      顺序不能反 —— 落幅是一整幅完整画面，满屏只是它被放大后裁掉左右的样子。
      反过来写（满屏 cover 再收成一条带）落幅永远是裁剪带，完整画幅拿不回来。 */
   --sc-top: 0px;
-  --sc-box-h: min(calc(100vw * 9 / 16), 74svh);
+  --sc-box-h: min(calc(var(--app-w, 100vw) * 9 / 16), 74svh);
   --sc-box-w: calc(var(--sc-box-h) * 16 / 9);
 
   --sc-card-h: calc(var(--sc-top) + var(--sc-box-h));
@@ -4787,7 +4787,7 @@ body.tv-auth-open { overflow: hidden; }
 @supports (height: 100dvh) {
   .lib-showcase {
     --sc-hold: 16dvh;
-    --sc-box-h: min(calc(100vw * 9 / 16), 74dvh);
+    --sc-box-h: min(calc(var(--app-w, 100vw) * 9 / 16), 74dvh);
     --sc-overlap: calc(100dvh - var(--sc-card-h));
   }
 }
@@ -5363,7 +5363,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-inline: contain;
-  scroll-padding-inline: max(var(--sc-gutter), calc((100vw - var(--sc-content-w)) / 2));
+  scroll-padding-inline: max(var(--sc-gutter), calc((var(--app-w, 100vw) - var(--sc-content-w)) / 2));
   scroll-snap-type: x mandatory;
   scrollbar-width: none;
   -webkit-overflow-scrolling: touch;
@@ -5377,7 +5377,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   grid-auto-columns: 820px;
   width: max-content;
   margin: 0;
-  padding: 0 max(var(--sc-gutter), calc((100vw - var(--sc-content-w)) / 2)) 8px;
+  padding: 0 max(var(--sc-gutter), calc((var(--app-w, 100vw) - var(--sc-content-w)) / 2)) 8px;
   gap: 20px;
   list-style: none;
 }
@@ -5640,6 +5640,75 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   #wc-root .wc-cta { height: 50px; bottom: calc(env(safe-area-inset-bottom, 0px) + 14px); }
 }
 
+/* ══════════ 侧边导航条（iPhone Duo 展开、各种横拿）══════════
+   底部那条胶囊在矮横屏上要吃掉 70 多像素高度（折起横拿整屏才 368、展开横拿 543），
+   在展开竖拿的 Duo（669 宽，像一台小平板）上又离拇指太远。这几种形态改成贴左缘的
+   竖向导航条（iPadOS 的侧边栏、Material 的 navigation rail）：头像、主页、资料库竖排在
+   同一枚液态玻璃胶囊里，搜索圆钮在它下方；内容区整体右移让出这一条，底部不再为导航留空。
+   · 何时用：横拿且高 ≤ 600（折起 / 展开横拿、手机横拿），或竖拿宽 600–720（展开的 Duo）。
+     折起竖拿（382 宽）仍是手机形态：底部胶囊离拇指最近，不改。由 <head> 里的脚本打 html.rail。
+   · 安全区：横拿时左右两侧可能是灵动岛 / 摄像头 —— 导航条贴 safe-area-inset-left 之内，
+     内容区右侧让出 safe-area-inset-right；底部只留 Home 指示条的距离。
+   · 搜索：胶囊照旧收成头像圆钮；搜索场改到顶部横向展开（竖条里放不下一行字），
+     最近搜索的胶囊栈跟到它下方往下排，结果面板从搜索场下面开始。 */
+html.rail {
+  --rail-w: 72px;
+  --rail-x: calc(env(safe-area-inset-left, 0px) + 10px);
+  --rail-space: calc(var(--rail-x) + var(--rail-w) + 8px);
+  --app-w: calc(100vw - var(--rail-space) - env(safe-area-inset-right, 0px));
+}
+html.rail body { padding-bottom: calc(var(--safe-b) + 24px); }
+html.rail #appStage { padding-left: var(--rail-space); padding-right: env(safe-area-inset-right, 0px); }
+html.rail .dock {
+  top: 0; bottom: 0; left: var(--rail-x); width: var(--rail-w);
+  flex-direction: column; justify-content: center; align-items: center; gap: 12px;
+  transform: none; will-change: auto;
+}
+html.rail .nav-container {
+  width: var(--rail-w); height: auto;
+  flex-direction: column; align-items: stretch; padding: 8px 6px; gap: 6px;
+  transition: none;
+}
+html.rail .nav-container .nav-item { flex: 0 0 auto; width: auto; height: 58px; padding: 0 2px; }
+html.rail .tv-avatar { align-self: center; margin: 2px 0 4px; }
+html.rail .nav-pill { top: 8px; left: 6px; }
+html.rail .nav-search { width: var(--dock-h); height: var(--dock-h); }
+html.rail-switching .dock, html.rail-switching .dock * { transition: none !important; }
+/* 搜索态：头像圆钮留在原处，搜索场到顶部 */
+html.rail .dock.searching .nav-container { width: var(--rail-w); height: var(--rail-w); padding: 0; justify-content: center; align-items: center; }
+html.rail .dock.searching .nav-container .nav-item { display: none; }
+html.rail .dock.searching .tv-avatar { margin: 0; }
+html.rail .dock.searching #navSearch {
+  position: fixed; top: calc(var(--safe-t) + 10px);
+  left: var(--rail-space); right: calc(env(safe-area-inset-right, 0px) + 16px);
+  width: auto; max-width: 760px;
+}
+html.rail .search-view { padding-left: var(--rail-space); padding-right: env(safe-area-inset-right, 0px); padding-top: calc(var(--dock-h) + 20px); }
+html.rail .search-chips {
+  left: calc(var(--rail-space) + 4px); right: auto; bottom: auto; top: calc(var(--safe-t) + var(--dock-h) + 22px);
+  width: auto; transform: none; flex-direction: column;
+}
+/* 浮在内容上的提示：居中到内容区（不是整个视口），底部不再垫导航条的高度 */
+html.rail .toast { bottom: calc(var(--safe-b) + 20px); left: calc(50% + (var(--rail-space) - env(safe-area-inset-right, 0px)) / 2); }
+html.rail .net-banner { left: calc(50% + (var(--rail-space) - env(safe-area-inset-right, 0px)) / 2); }
+/* 矮屏那几条「给底部导航让位」的规则，在侧边导航下不需要了 */
+@media (max-height: 640px) {
+  html.rail .hero-deck { height: calc(100svh - 16px); }
+  html.rail.standalone .hero-deck { height: calc(100svh - var(--safe-t) - 16px); }
+}
+@media (orientation: landscape) and (max-height: 600px) {
+  html.rail .sc-copy { top: 50%; }
+  html.rail .sc-note { bottom: max(14px, calc(10px + env(safe-area-inset-bottom))); }
+}
+
+/* ══ 折叠屏的铰链（viewport segments）══
+   Duo 半折时 Safari 回到外屏，拿到的是一整块视口；但别的折叠屏在书本姿态会报两块屏 ——
+   那时居中的提示、底部弹层正好压在折缝上。改到右半屏的正中 / 只铺右半屏。 */
+@media (horizontal-viewport-segments: 2) {
+  .toast, .net-banner { left: calc(env(viewport-segment-left 1 0, 50vw) + env(viewport-segment-width 1 0, 50vw) / 2); }
+  .sheet { left: env(viewport-segment-left 1 0, 0px); right: 0; width: auto; max-width: none; }
+}
+
 </style>
 <script>
 /* standalone 检测：尽早打标，避免 Safari 里闪一下压条 */
@@ -5648,6 +5717,23 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
            (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
            (window.matchMedia && window.matchMedia('(display-mode: fullscreen)').matches);
   if (sa) document.documentElement.classList.add('standalone');
+})();
+/* 侧边导航条：横拿且矮（折起 / 展开横拿、手机横拿）或竖拿宽 600–720（展开的 iPhone Duo）。
+   与 CSS 的 html.rail 一一对应；尽早打标，首帧就是对的形态，不会先闪一下底部胶囊 */
+(function () {
+  if (!window.matchMedia) return;
+  var q = window.matchMedia('(orientation: landscape) and (max-height: 600px) and (min-width: 560px), (orientation: portrait) and (min-width: 600px) and (max-width: 720px)');
+  var root = document.documentElement, t = 0;
+  var set = function () {
+    if (root.classList.contains('rail') === q.matches) return;
+    /* 翻开 / 合上 / 转屏那一下直接换形态：胶囊条的宽度补间不跑（否则指示器量到的是半途的宽度） */
+    root.classList.add('rail-switching');
+    root.classList.toggle('rail', q.matches);
+    clearTimeout(t);
+    t = setTimeout(function () { root.classList.remove('rail-switching'); try { window.dispatchEvent(new Event('railchange')); } catch (_) {} }, 120);
+  };
+  set();
+  if (q.addEventListener) q.addEventListener('change', set); else if (q.addListener) q.addListener(set);
 })();
 </script>
 </head>
@@ -14720,7 +14806,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }, { passive: true });
 });
 
-let _navPillBaseLeft = null;
+let _navPillBaseLeft = null, _navPillBaseTop = 0;
 function updateNavPill(animate) {
   const pill = $('navPill');
   const navContainer = $('navContainer');
@@ -14736,11 +14822,17 @@ function updateNavPill(animate) {
   /* 顶部胶囊恒为横向：让指示器宽高与激活项精确对齐 → 根除固定 78px 造成的偏移 */
   /* left 是静态 CSS（6px / 桌面 7px），形变途中不变 —— 缓存住，
      免得跟踪循环里每帧多一次样式解算 */
-  if (_navPillBaseLeft === null) _navPillBaseLeft = parseFloat(getComputedStyle(pill).left) || 0;
+  if (_navPillBaseLeft === null) {
+    const cs = getComputedStyle(pill);
+    _navPillBaseLeft = parseFloat(cs.left) || 0;
+    _navPillBaseTop = parseFloat(cs.top) || 0;
+  }
   const baseLeft = _navPillBaseLeft;
+  /* 侧边导航条：各项竖排，指示器要竖着走；底部胶囊各项同高，竖向永远是 0 */
+  const dy = document.documentElement.classList.contains('rail') ? activeRect.top - navRect.top - _navPillBaseTop : 0;
   pill.style.width = activeRect.width + 'px';
   pill.style.height = activeRect.height + 'px';
-  pill.style.transform = `translateX(${activeRect.left - navRect.left - baseLeft}px) translateZ(0)`;
+  pill.style.transform = `translate(${activeRect.left - navRect.left - baseLeft}px, ${dy}px) translateZ(0)`;
   if (!animate) { void pill.offsetWidth; pill.style.transition = ''; return; }
   /* 模糊渐入渐隐脉冲：移除 → 回流 → 重加，确保每次切换都重新触发动画 */
   pill.classList.remove('nav-pill-morph');
@@ -14756,6 +14848,12 @@ window.addEventListener('resize', () => {
     updateNavPill(false);
   });
 }, { passive: true });
+/* 底部胶囊 ⇄ 侧边导航条：形态落定后再量一次指示器，并让液态玻璃按新形状重画 */
+window.addEventListener('railchange', () => {
+  _navPillBaseLeft = null;
+  updateNavPill(false);
+  try { window.NavGlass && window.NavGlass.refresh(); } catch (_) {}
+});
 
 
 async function renderHome() {
@@ -17235,7 +17333,8 @@ const SC = (() => {
     boxH = ruler.offsetHeight || 1;
     boxTop = ruler.offsetTop || 0;
     /* 满屏所需倍数：竖着要盖住 sticky 剩下的高度，横着要盖满视口宽 */
-    cover = Math.max((stickyH - boxTop) / boxH, window.innerWidth / w, 1);
+    const appW = (rootView && rootView.clientWidth) || window.innerWidth;
+    cover = Math.max((stickyH - boxTop) / boxH, appW / w, 1);
   }
 
   /* ── 生命周期 ──────────────────────────────────────────────────── */

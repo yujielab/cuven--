@@ -488,7 +488,8 @@ console.log('\n■ 加载画面 · iPhone（极光背景 + Cuven max + 胶囊进
   ok(order.length >= 3 && order.every((t, i) => t === want[i]) && gaps.every(g => g > 2100 && g < 2900),
     `文案按顺序一句句换：${order.join(' → ')}（间隔 ${gaps.join(' / ')} ms）`);
   const ps = before.map(x => x.p);
-  ok(ps.every((p, i) => p > 0 && p < 0.95 && (!i || p >= ps[i - 1])), `开播前进度只增不减、不走满：${ps.map(p => Math.round(p * 100) + '%').join(' → ')}`);
+  /* 第一句是在加载画面出现的同一帧记下的，那时进度可能还是 0；之后每一句都得在涨、且不走满 */
+  ok(ps.every((p, i) => (i ? p > 0 : p >= 0) && p < 0.95 && (!i || p >= ps[i - 1])) && ps[ps.length - 1] > 0, `开播前进度只增不减、不走满：${ps.map(p => Math.round(p * 100) + '%').join(' → ')}`);
   ok(!A3.shown, '开播后加载画面收起');
   streamDelay = 0;
   await ip2.close();
@@ -509,18 +510,42 @@ const DUO = { isMobile: true, hasTouch: true, screen: { width: 466, height: 678 
 const duo = await context({ ...DUO, viewport: { width: 382, height: 580 } });
 const pd = await enter(duo);
 await pd.waitForTimeout(1500);
-for (const [w, h, label] of [[382, 580, '折起竖拿'], [594, 368, '折起横拿'], [669, 825, '展开竖拿'], [951, 543, '展开横拿']]) {
+for (const [w, h, label, rail] of [[382, 580, '折起竖拿', false], [594, 368, '折起横拿', true], [669, 825, '展开竖拿', true], [951, 543, '展开横拿', true], [382, 580, '再合上竖拿', false]]) {
   await pd.setViewportSize({ width: w, height: h });
   await pd.waitForTimeout(800);
   const g = await pd.evaluate(() => {
     const card = document.querySelector('.hcard.is-center') || document.querySelector('.hcard');
     const r = e => e && e.getBoundingClientRect();
-    const dock = r(document.querySelector('.dock')), play = r(card && card.querySelector('.btn-play')), dots = r(document.querySelector('.aap-host .all-access-pass'));
-    return { ok: !!(dock && play && dots) && play.bottom <= dock.top && dots.bottom <= dock.top && play.top >= 0,
-      sw: document.documentElement.scrollWidth, vw: innerWidth };
+    const rail = document.documentElement.classList.contains('rail');
+    const nav = r(document.getElementById('navContainer')), pill = r(document.getElementById('navPill')), act = r(document.querySelector('#navContainer .nav-item.active'));
+    const play = r(card && card.querySelector('.btn-play')), dots = r(document.querySelector('.aap-host .all-access-pass'));
+    const apart = (a, b) => a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top;
+    const clear = !!(nav && play && dots) && (rail ? apart(play, nav) && apart(dots, nav) && play.left >= nav.right : play.bottom <= nav.top && dots.bottom <= nav.top) && play.top >= 0;
+    const pillOk = !!(pill && act) && Math.abs(pill.left - act.left) <= 2 && Math.abs(pill.top - act.top) <= 2 && Math.abs(pill.width - act.width) <= 2 && Math.abs(pill.height - act.height) <= 2;
+    return { rail, vertical: nav ? nav.height > nav.width : false, clear, pillOk, sw: document.documentElement.scrollWidth, vw: innerWidth };
   });
-  ok(g.ok && g.sw === g.vw, `${label} ${w}×${h}：主视觉的按钮与轮播点都在导航条之上，没有横向溢出`);
+  ok(g.rail === rail && g.vertical === rail && g.clear && g.pillOk && g.sw === g.vw,
+    `${label} ${w}×${h}：${rail ? '侧边导航条（竖排）' : '底部导航胶囊'}，选中指示器对齐，主视觉的按钮与轮播点不被导航挡住，没有横向溢出`);
 }
+await pd.setViewportSize({ width: 951, height: 543 });
+await pd.waitForTimeout(600);
+await pd.evaluate(() => navTo('library'));
+await pd.waitForTimeout(1200);
+const lr = await pd.evaluate(() => {
+  const r = e => e && e.getBoundingClientRect();
+  const nav = r(document.getElementById('navContainer')), head = r(document.querySelector('#view-library .library-sub'));
+  const pill = r(document.getElementById('navPill')), lib = r(document.getElementById('navLib'));
+  return { sw: document.documentElement.scrollWidth, vw: innerWidth, headOk: !!head && head.left >= nav.right, pillOk: !!(pill && lib) && Math.abs(pill.top - lib.top) <= 2 };
+});
+ok(lr.sw === lr.vw && lr.headOk && lr.pillOk, '展开横拿 · 资料库：内容从导航条右边开始，指示器竖着滑到「资料库」，没有横向溢出');
+await pd.evaluate(() => openSearch());
+await pd.waitForTimeout(800);
+const sr = await pd.evaluate(() => { const b = document.getElementById('navSearch').getBoundingClientRect(); return { top: b.top, w: b.width, left: b.left, rail: document.getElementById('navContainer').getBoundingClientRect().right }; });
+ok(sr.top < 80 && sr.w > 400 && sr.left >= sr.rail, `侧边导航下搜索：搜索场在顶部横向展开（${Math.round(sr.w)} 宽），不压导航条`);
+await pd.evaluate(() => closeSearch());
+await pd.waitForTimeout(600);
+await pd.evaluate(() => navTo('home'));
+await pd.waitForTimeout(600);
 await pd.setViewportSize({ width: 594, height: 368 });
 await pd.evaluate(() => openDetail('/Movies/dv81.mkv', 'Dune.Part.Two.2024.2160p.DV.mkv'));
 await pd.waitForTimeout(1800);
