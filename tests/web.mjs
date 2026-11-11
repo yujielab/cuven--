@@ -766,7 +766,8 @@ console.log('\n■ Mac 大屏（14" / 16" MacBook Pro、Studio Display、Pro Dis
     /* 等平滑滚动停稳（负载高时一屏要滚一秒多）：每 200ms 看一次，两次一样才算停 */
     const settled = pred => p14.waitForFunction(pred, null, { timeout: 8000, polling: 200 }).then(() => true).catch(() => false);
     await p14.click('#rnTest .row-nav.next');
-    await settled(() => { const v = document.querySelector('#rnTest > .scroll-row').scrollLeft; const same = v > 0 && window.__rnLast === v; window.__rnLast = v; return same; });
+    /* 三次读数（400ms）一样才算停：负载高时平滑滚动两帧之间能隔 200ms 以上，两次一样还可能是半路 */
+    await settled(() => { const v = document.querySelector('#rnTest > .scroll-row').scrollLeft; window.__rnSame = v > 0 && window.__rnLast === v ? (window.__rnSame || 0) + 1 : 0; window.__rnLast = v; return window.__rnSame >= 2; });
     const af = await p14.evaluate(() => { const h = document.getElementById('rnTest'), r = h.querySelector(':scope > .scroll-row'), cs = r.querySelectorAll(':scope > .card');
       const pitch = cs[1].getBoundingClientRect().left - cs[0].getBoundingClientRect().left;
       return { sl: r.scrollLeft, pitch, fit: Math.floor(r.clientWidth / pitch), prev: h.querySelector('.row-nav.prev').classList.contains('can') }; });
@@ -925,6 +926,9 @@ console.log('\n■ 年份页：一行一部的列表（竖版小海报 + 中文�
     H.tmdb.movies = YL.map(([, , q, zh, g], i) => ({ id: 9500 + i, query: q, title: zh, date: '2024-03-01', genres: g }));
     H.tv.entries = [1, 2, 3].map(i => ({ path_display: `/ram2/Shogun.S01.2160p.DV/Shogun.S01E0${i}.mkv`, size: 5000, server_modified: '2026-03-01T00:00:00Z' }));
     H.tmdb.shows = [{ id: 126308, name: '幕府将军', original: 'Shogun', first: '2024-02-27', seasons: [{ n: 1, air: '2024-02-27', count: 10 }] }];
+    /* 剧集表在 Worker 进程里留 10 分钟：前面几节已经扫过一张空表，这里强制重扫一次 */
+    const tvRefresh = async () => { await H.worker.fetch(new Request('https://stream.cuven.online/api/tv?refresh=1'), H.env, H.ctx); while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+    await tvRefresh();
     const img = r => r.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>' });
     const yc = await context({ ...devices['iPhone 15 Pro'] });
     await yc.route('https://image.tmdb.org/**', img);
@@ -1013,6 +1017,8 @@ console.log('\n■ 年份页：一行一部的列表（竖版小海报 + 中文�
   } finally {
     for (const [n] of YL) { try { fs.unlinkSync(SM(n)); } catch {} }
     H.tv.entries = tv0; H.tmdb.shows = shows0;
+    /* 剧集表也还原：后面几节看到的还是原来那张 */
+    try { await H.worker.fetch(new Request('https://stream.cuven.online/api/tv?refresh=1'), H.env, H.ctx); while (H.pending.length) await Promise.all(H.pending.splice(0)); } catch (_) {}
     delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
     caches.default.m.clear();
   }
