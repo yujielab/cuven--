@@ -5824,6 +5824,62 @@ html.rail.rail-float .toast {
 }
 /* 顶上居中那枚提示：两边都按右侧安全区收，免得压到右上角竖排的状态栏 */
 html.rail.rail-float .net-banner { left: 50%; max-width: calc(100% - 2 * env(safe-area-inset-right, 0px) - 16px); }
+/* ── 全新导航栏（只在 iPhone Duo 折起竖拿）─────────────────────────────
+   一枚高的竖向玻璃胶囊，只放图标，自上而下：主页、资料库、搜索，头像（圆角方块）垫在最底 ——
+   搜索不再是胶囊外另一枚圆钮。选中那一项是白色图标 + 一圈柔光圆底，其余是灰色；文字收起（读屏照读）。
+   结构不动：.dock 自己当胶囊，.nav-container 用 display: contents 把头像、主页、资料库摊进同一列，
+   再用 order 排好（头像在 DOM 里排第一）。原来那枚会滑的选中指示器在这里不用，选中靠每一项自己的圆底。
+   折射玻璃（WebGL）也不挂：胶囊整枚是一层 CSS 毛玻璃，透出底下的画面。
+   进搜索态时一切照旧（搜索场到顶部，胶囊收成头像圆钮），所以下面每条都只管「不在搜索」的时候。 */
+html.rail.rail-float .dock:not(.searching) {
+  width: var(--rail-w); padding: 9px 0 10px; gap: 6px;
+  justify-content: flex-start; align-items: center;
+  border-radius: 999px; pointer-events: auto;
+  background:
+    linear-gradient(to bottom, rgba(255,255,255,.10) 0%, rgba(255,255,255,.02) 38%, rgba(255,255,255,0) 60%),
+    rgba(24,24,26,.44);
+  backdrop-filter: blur(26px) saturate(180%); -webkit-backdrop-filter: blur(26px) saturate(180%);
+  border: var(--hairline) solid rgba(255,255,255,.16);
+  box-shadow: 0 18px 44px rgba(0,0,0,.45), inset 0 1px .5px rgba(255,255,255,.30), inset 0 -1px .5px rgba(0,0,0,.35);
+}
+html.rail.rail-float .dock:not(.searching) .nav-container { display: contents; }
+html.rail.rail-float .dock:not(.searching) #navPill { display: none; }
+html.rail.rail-float .dock:not(.searching) .nav-item {
+  flex: 0 0 auto; width: 48px; height: 48px; padding: 0; margin: 0; gap: 0;
+  display: grid; place-items: center; border-radius: 50%;
+  color: rgba(235,235,245,.52);
+  background: transparent; border: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+  transition: background-color .25s var(--ease-out), color .25s var(--ease-out), transform var(--press-out);
+}
+html.rail.rail-float .dock:not(.searching) #navHome { order: 1; }
+html.rail.rail-float .dock:not(.searching) #navLib { order: 2; }
+/* #navSearch 的玻璃底是一条 ID 规则（#navContainer, #navSearch）给的，这里也得带 ID 才盖得过 */
+html.rail.rail-float .dock:not(.searching) #navSearch {
+  order: 3; overflow: hidden;
+  background: transparent; border: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+html.rail.rail-float .dock:not(.searching) #headerAvatar { order: 4; width: 40px; height: 40px; margin: 6px 0 0; border-radius: 12px; }
+html.rail.rail-float .dock:not(.searching) .nav-item.active {
+  color: #fff; background: rgba(255,255,255,.13);
+  box-shadow: inset 0 0 0 .5px rgba(255,255,255,.14), inset 0 1px 0 rgba(255,255,255,.10);
+}
+html.rail.rail-float .dock:not(.searching) .nav-item.active .nav-icon { transform: none; }
+html.rail.rail-float .dock:not(.searching) .nav-svg { width: 25px; height: 25px; }
+html.rail.rail-float .dock:not(.searching) .nav-text {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+html.rail.rail-float .dock:not(.searching) #navSearch .ns-icon { inset: 0; width: auto; height: auto; }
+html.rail.rail-float .dock:not(.searching) #navSearch .ns-glyph { width: 24px; height: 24px; }
+html.rail.rail-float .dock:not(.searching) .nav-lg-canvas,
+html.rail.rail-float .dock:not(.searching) #navSearch .ns-field,
+html.rail.rail-float .dock:not(.searching) #navSearch .ns-mic,
+html.rail.rail-float .dock:not(.searching) #navSearch .ns-cancel { display: none; }
+html.rail.rail-float .dock:not(.searching) .nav-item:active,
+html.rail.rail-float .dock:not(.searching) #headerAvatar:active { transform: scale(.9); transition: transform var(--press-in); }
+@media (hover: hover) and (pointer: fine) {
+  html.rail.rail-float .dock:not(.searching) .nav-item:not(.active):hover { color: rgba(255,255,255,.85); background: rgba(255,255,255,.06); }
+}
+
 /* ── 首页大图（hero）：按这块屏专门排 ──────────────────────────────────
    能放内容的是右侧那一列（状态栏 + 导航）以左的那一块 —— Safari 的视口本来就只有这么宽（466 − 84 = 382）。
    · 全出血时：画面照旧铺满整屏（右边那一列也是画面），但标签、片名、按钮、暂停钮与轮播点都居中到左边那块，
