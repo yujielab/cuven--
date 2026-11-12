@@ -587,7 +587,7 @@ const pd = await enter(duo);
 await pd.waitForTimeout(1500);
 /* 折起竖拿（Safari 382 宽 / 主屏幕 App 466 宽）：贴右缘浮着的竖向导航；展开、横拿：贴左缘、内容让位的导航条；
    普通 iPhone（393 宽）照旧底部胶囊 */
-const DESC = { float: '右缘浮动的全新导航栏（一枚竖向玻璃胶囊：主页 / 资料库 / 搜索 / 头像在底，只有图标，内容不让位）', rail: '侧边导航条（竖排）', bottom: '底部导航胶囊' };
+const DESC = { float: '右缘浮动的全新导航栏（一枚收窄的竖向玻璃胶囊，挂在屏幕中线偏下一点：主页 / 资料库 / 搜索 / 头像在底，只有图标，内容不让位）', rail: '侧边导航条（竖排）', bottom: '底部导航胶囊' };
 /* 实机上折起的外屏右侧有一整列安全区（状态栏竖着排在右上角，safe-area-inset-right ≈ 84px）：用 CDP 模拟同样的安全区 */
 const duoCdp = await duo.newCDPSession(pd);
 const NO_SAI = { top: 0, right: 0, bottom: 0, left: 0 };
@@ -626,6 +626,7 @@ for (const [w, h, label, mode, sai] of [[382, 580, '折起竖拿', 'float'], [46
     const newNav = inside && ordered && !!actBg && actBg !== 'rgba(0, 0, 0, 0)' && iconOnly && getComputedStyle(document.getElementById('navPill')).display === 'none';
     const clear = !!(nav && play && dots) && play.top >= 0 && (float
       ? apart(play, nav) && apart(circ, nav) && apart(dots, nav) && nav.left > innerWidth / 2 && nav.right >= innerWidth - 24
+        && nav.width <= 56 && Math.abs((nav.top + nav.bottom) / 2 - innerHeight * 0.55) <= 6
         && newNav && shift === 0 && aligned && immersive && order3
       : rail ? apart(play, nav) && apart(dots, nav) && play.left >= nav.right
       : play.bottom <= nav.top && dots.bottom <= nav.top);
@@ -665,15 +666,16 @@ ok(/\brail\b/.test(fold0) && !/rail-float/.test(fold0) && !stale && fold1.float 
   '翻开再合上、屏幕尺寸晚一拍才更新：补查把导航换回右缘那枚胶囊（不卡在展开时的形态）');
 await pd.setViewportSize({ width: 466, height: 678 });
 await pd.waitForTimeout(500);
-/* 浮动侧边导航下搜索：搜索场到顶部、几乎通栏；头像圆钮留在右下角 */
+/* 浮动侧边导航下搜索：搜索场到顶部、几乎通栏；胶囊收成头像圆钮，留在胶囊最底下那一格（头像原来的位置） */
 await pd.setViewportSize({ width: 466, height: 678 });
 await pd.waitForTimeout(600);
+const cap0 = await pd.evaluate(() => { const d = document.getElementById('dock').getBoundingClientRect(); return { bottom: d.bottom, right: d.right }; });
 await pd.evaluate(() => openSearch());
 await pd.waitForTimeout(800);
 const fs0 = await pd.evaluate(() => { const b = document.getElementById('navSearch').getBoundingClientRect(), a = document.getElementById('navContainer').getBoundingClientRect();
   return { top: b.top, left: b.left, w: b.width, ax: a.right, ay: a.bottom, vw: innerWidth, vh: innerHeight }; });
-ok(fs0.top < 80 && fs0.left <= 24 && fs0.w >= fs0.vw - 48 && fs0.ax >= fs0.vw - 24 && fs0.ay >= fs0.vh - 80,
-  `折起竖拿 · 搜索：搜索场在顶部通栏展开（${Math.round(fs0.w)} 宽），头像圆钮留在右下角`);
+ok(fs0.top < 80 && fs0.left <= 24 && fs0.w >= fs0.vw - 48 && fs0.ax >= fs0.vw - 24 && Math.abs(fs0.ay - cap0.bottom) <= 6 && Math.abs(fs0.ax - cap0.right) <= 2,
+  `折起竖拿 · 搜索：搜索场在顶部通栏展开（${Math.round(fs0.w)} 宽），头像圆钮留在胶囊最底下那一格`);
 await pd.evaluate(() => closeSearch());
 await pd.waitForTimeout(600);
 const back = await pd.evaluate(() => { const d = document.getElementById('dock').getBoundingClientRect(), s = document.getElementById('navSearch').getBoundingClientRect();
