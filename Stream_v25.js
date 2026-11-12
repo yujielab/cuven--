@@ -10996,16 +10996,46 @@ async function hlsAltSegResponse(cx, idx, k, i, request) {
     r = await hlsAltAwait(idx, k, i, request.signal);
     if (r) return r;
   }
+  // 自己读：照旧边切边交（首字节不等整段），同时留一份，整段正常切完再写进缓存
+  const ac = new AbortController();
+  const fwd = () => ac.abort(request.signal.reason);
+  if (request.signal?.aborted) fwd(); else request.signal?.addEventListener('abort', fwd, { once: true });
+  const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, { video: false, audio: i });
+  const kept = [];
+  let queue = [], finished = false;
+  const done = () => {
+    finished = true;
+    cx.ctx?.waitUntil?.(caches.default.put(new Request(hlsAltKey(idx, i, k)), hlsOut(hlsConcat(kept), 'audio/mp4')).catch(() => {}));
+  };
+  const take = parts => { const ch = hlsChunks(parts); for (const x of ch) kept.push(x); return ch; };
   try {
-    const parts = [];
-    for await (const p of hlsSegmentParts({ ...cx, signal: request.signal }, idx, k, { video: false, audio: i })) parts.push(...p);
-    const res = hlsOut(hlsConcat(parts), 'audio/mp4');
-    cx.ctx?.waitUntil?.(caches.default.put(new Request(hlsAltKey(idx, i, k)), res.clone()).catch(() => {}));
-    return res;
+    const r = await it.next();
+    if (r.done) done(); else queue = take(r.value);
   } catch (e) {
+    ac.abort(e);
     console.error('hls alt audio:', cx.filePath, k, e && e.message);
     return hlsFail(e?.name === 'AbortError' ? 499 : 502, 'segment unavailable');
   }
+  const body = new ReadableStream({
+    async pull(c) {
+      try {
+        while (!queue.length) {
+          if (finished) { c.close(); return; }
+          const r = await it.next();
+          if (r.done) done(); else queue = take(r.value);
+        }
+        c.enqueue(queue.shift());
+      } catch (e) {
+        ac.abort(e);
+        c.error(e);
+      }
+    },
+    cancel(reason) {
+      ac.abort(reason);
+      it.return().catch(() => {});
+    },
+  });
+  return new Response(body, { headers: hlsHeaders('audio/mp4', HLS_LONG) });
 }
 
 /**
