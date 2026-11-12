@@ -1,4 +1,17 @@
 /**
+ * Cuven ᴿ 索引库 · v6.4 —— 未匹配处理管线升级 · 剧集乱码修复
+ * ══════════════════════════════════════════════════════════════════
+ * 一、剧集版块是 UTF-8，以前一律按 GBK 解码：「余生有你」存成「浣欑敓鏈夊姩」，五千多组全进了「未匹配」。
+ *   · decodeHTML：响应头 / <meta> 声明 UTF-8 就按 UTF-8；否则能按 UTF-8 严格解开的按 UTF-8，其余按 GBK；
+ *   · mojibake()：把乱码按 GBK 编回字节、再按 UTF-8 解，能还原成像样的中文就是乱码 —— 留底队列抽查，
+ *     体检与「未匹配」给「重建本源索引」（先自动备份；另一个源不动；之后用极限模式重抓）。
+ * 二、认定管线（matchBatch）从两轮改成最多五轮，每轮只给还没认下的组再搜一次：
+ *   中文名 + 年份 → 原名 / 中文名原样 / 不锁年份 → 英文（外语片在 TMDB 上常常没有中文译名，
+ *   中文结果里只剩意大利语 / 西班牙语原名）→ 拆开「A/B」两个译名、去掉副标题 → 英文去副标题。
+ *   宽的几轮认出来的要求年份对得上；英文认下来的片名用论坛的中文名；配额不够或断过网的不下「认不出」的结论。
+ *   规则版本升到 v3：以前「认不出」的结论作废、重试次数归零。
+ * 三、「重试匹配」改成整批排队交给认定工并行认（极限模式），认不出的记一次重试。
+ * ══════════════════════════════════════════════════════════════════
  * Cuven ᴿ 索引库 · v6.3 —— 缺片检测以 Stream v25 的实时清单为准
  * ══════════════════════════════════════════════════════════════════
  * 「库里有的片还显示成缺片」：总账 Received.json 是 Stream v22 写的，v25 不再写它 ——
@@ -1075,28 +1088,93 @@ function decodeGBK(b){
   return dec.decode(b);
 }
 let gtab = null;
+/** GBK 编码表：字 → [前导字节, 尾字节]。第一次用到时用 TextDecoder 反查出来（约两万字，几毫秒） */
+function gbkTable(){
+  if (gtab) return gtab;
+  const d = new TextDecoder('gbk'); gtab = new Map();
+  for (let l=0x81;l<=0xfe;l++){
+    const by=[],pr=[];
+    for (let t=0x40;t<=0xfe;t++){ if(t===0x7f) continue; by.push(l,t); pr.push([l,t]); }
+    const cs = Array.from(d.decode(new Uint8Array(by)));
+    if (cs.length !== pr.length) continue;
+    for (let i=0;i<cs.length;i++) if (cs[i]!=='\uFFFD' && !gtab.has(cs[i])) gtab.set(cs[i], pr[i]);
+  }
+  return gtab;
+}
 function gbkEncode(s){
   let out = '', tab = null;
   for (const ch of s){
     const c = ch.codePointAt(0);
     if (c < 0x80){ out += /[A-Za-z0-9\-_.~]/.test(ch) ? ch : '%'+c.toString(16).toUpperCase().padStart(2,'0'); continue; }
-    if (!tab){
-      if (!gtab){
-        const d = new TextDecoder('gbk'); gtab = new Map();
-        for (let l=0x81;l<=0xfe;l++){
-          const by=[],pr=[];
-          for (let t=0x40;t<=0xfe;t++){ if(t===0x7f) continue; by.push(l,t); pr.push([l,t]); }
-          const cs = Array.from(d.decode(new Uint8Array(by)));
-          if (cs.length !== pr.length) continue;
-          for (let i=0;i<cs.length;i++) if (cs[i]!=='\uFFFD' && !gtab.has(cs[i])) gtab.set(cs[i], pr[i]);
-        }
-      }
-      tab = gtab;
-    }
+    if (!tab) tab = gbkTable();
     const p = tab.get(ch);
     out += p ? '%'+p[0].toString(16).toUpperCase()+'%'+p[1].toString(16).toUpperCase() : encodeURIComponent(ch);
   }
   return out;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   [v6.4] 页面编码自适应 + 乱码识别
+   ──────────────────────────────────────────────────────────────────
+   以前一律按 GBK 解码。剧集版块回的是 UTF-8 —— 于是「余生有你」存成了「浣欑敓鏈夊姩」，
+   片名切不出来、TMDB 认不出，5000 多组全进了「未匹配」；认上的也只靠英文那一截，可能认错。
+   现在：响应头 / <meta> 声明了 UTF-8 就按 UTF-8；没声明或声明 GBK 时，能按 UTF-8 严格解开、
+   又确实有非 ASCII 字符的也按 UTF-8（GBK 的汉字几乎不可能凑成合法的 UTF-8：B0–BF 开头的字节
+   在 UTF-8 里只能当后续字节），其余按 GBK。
+   已经存进去的乱码靠 mojibake() 认出来：把它按 GBK 编回字节、再按 UTF-8 解 —— 乱码能还原成
+   像样的中文（替换符很少），真中文会解出一堆替换符。认出来之后在体检和「未匹配」里给「重建本源索引」。
+   ══════════════════════════════════════════════════════════════════ */
+const ENC_SEEN = { utf8: 0, gbk: 0 };
+let u8fatal = null, u8loose = null;
+function declaredCharset(b, r){
+  const ct = r && r.headers ? String(r.headers.get('content-type') || '') : '';
+  let m = /charset\s*=\s*["']?([\w-]+)/i.exec(ct);
+  if (!m){
+    let head = '';
+    const n = Math.min(b.length, 2048);
+    for (let i = 0; i < n; i++) head += String.fromCharCode(b[i]);
+    m = /<meta[^>]+charset\s*=\s*["']?([\w-]+)/i.exec(head);
+  }
+  return m ? m[1].toLowerCase() : '';
+}
+function decodeHTML(buf, r){
+  const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let hi = false;
+  for (let i = 0; i < b.length; i++) if (b[i] >= 0x80){ hi = true; break; }
+  if (!hi) return decodeGBK(b);                                     // 纯 ASCII：怎么解都一样
+  const cs = declaredCharset(b, r);
+  if (cs === 'utf-8' || cs === 'utf8'){
+    if (!u8loose) u8loose = new TextDecoder('utf-8');
+    ENC_SEEN.utf8++;
+    return u8loose.decode(b);
+  }
+  if (!u8fatal) u8fatal = new TextDecoder('utf-8', { fatal: true });
+  try { const t = u8fatal.decode(b); ENC_SEEN.utf8++; return t; } catch {}
+  ENC_SEEN.gbk++;
+  return decodeGBK(b);
+}
+/** 一段文字的 GBK 字节（编不出来的字跳过） */
+function gbkBytes(s){
+  const tab = gbkTable(), out = [];
+  for (const ch of String(s || '')){
+    const c = ch.codePointAt(0);
+    if (c < 0x80){ out.push(c); continue; }
+    const p = tab.get(ch);
+    if (p) out.push(p[0], p[1]);
+  }
+  return new Uint8Array(out);
+}
+/** 是不是「UTF-8 当成 GBK 解出来」的乱码 */
+function mojibake(s){
+  s = String(s || '');
+  let hi = 0;
+  for (const ch of s) if (ch.charCodeAt(0) > 0x7f && ch !== '\uFFFD') hi++;
+  if (hi < 3) return false;
+  if (!u8loose) u8loose = new TextDecoder('utf-8');
+  const u = u8loose.decode(gbkBytes(s));
+  let bad = 0, cjk = 0;
+  for (const ch of u){ if (ch === '\uFFFD') bad++; else if (/[\u3400-\u9fff]/.test(ch)) cjk++; }
+  return cjk >= 2 && bad * 3 <= cjk;
 }
 
 /* ══════════ 会话 ══════════ */
@@ -1142,7 +1220,7 @@ const req = (env, path, o = {}) => autoRetry('fetch '+String(path).slice(0,60), 
 async function reqHTML(env, path, o = {}){
   const r = await rawReq(env, path, o);
   const buf = await r.arrayBuffer();
-  const html = decodeGBK(buf);
+  const html = decodeHTML(buf, r);
   if (buf.byteLength < MIN_BODY){
     govPenalize('响应过短');
     const e = new Error('论坛返回空响应（HTTP ' + r.status + '，仅 ' + buf.byteLength +
@@ -1182,7 +1260,7 @@ async function login(env){
         + '&questionid=0&answer=&cookietime=2592000&loginsubmit=true',
   });
   const jar = { ...jar0, ...setCookies(r) };
-  const reply = decodeGBK(await r.arrayBuffer());
+  const reply = decodeHTML(await r.arrayBuffer(), r);
   if (!/欢迎您回来|succeedhandle_/.test(reply)){
     const why = (reply.match(/<!\[CDATA\[([\s\S]{0,220})/)?.[1]||'').replace(/<[^>]+>/g,'').trim();
     throw new Error('论坛登录失败：'+(why||'账号或密码不正确'));
@@ -1618,78 +1696,130 @@ function pickTMDB(results, cn, latin, years, opt = {}){
   return top >= (tv ? 5 : (opt.yearLocked ? 4.5 : 6)) ? best : null;
 }
 
+/* [v6.4] 一个标题里的别名：「没人知道我在这/歌手的秘密」拆开；「主标题：副标题」只留主标题 */
+const mainTitle = (s) => String(s || '').split(/\s*(?:[:：]|\s[-–—]\s|——)\s*/)[0].trim();
+function altNames(cn){
+  const raw = String(cn || '').trim();
+  if (!raw) return [];
+  const out = [];
+  const push = (x) => { x = cleanCN(String(x || '').trim()); if (x && x.length >= 2 && x !== raw && !out.includes(x)) out.push(x); };
+  for (const part of raw.split(/\s*(?:[\/／|｜]|又名)\s*/)) push(part);
+  push(mainTitle(raw));
+  return out;
+}
+
 /**
- * 一批片名一起认。两轮并发，每组最多花 2 个子请求：
- *   ① 中文名 + 年份 —— 年份锁死之后片名沾边就够
- *   ② 没认下来的换个说法：有原名就用原名，没有就去掉年份 / 去掉版本后缀
- * 两轮的候选合起来再评一次 —— 单轮里排在后面的，合并之后可能才是最优。
- * 返回 Map：{hit} 认下来了 / {miss,why} 认不出 / null 网络失败（不下结论）。
+ * [v6.4] 一批片名一起认：最多五轮，每轮只给还没认下来的那几组再搜一次（并发），
+ * 候选按语言分池累积，每轮连同之前的候选再评一次：
+ *   ① 洗过的中文名 + 年份（剧集不锁年份：版块年份是这一季的，TMDB 记的是首播年）
+ *   ② 换说法：原名 / 洗之前的中文名 / 去掉年份
+ *   ③ 英文：原名 + 年份，language=en-US —— 外语片在 TMDB 上常常没有中文译名，中文结果里只剩
+ *      意大利语 / 西班牙语原名，论坛给的英文名一个都对不上；英文结果里才有英文片名
+ *   ④ 别名：「A/B」两个译名拆开、「主标题：副标题」只留主标题，各搜一次
+ *   ⑤ 英文名去掉副标题（「Alex Fernandez: The Best Comedian in the World」→「Alex Fernandez」）
+ * ③–⑤ 认出来的要求年份对得上（差一年以内）：这几轮的说法更宽，不能拿同名的另一部顶上。
+ * 后几轮按剩余配额开：配额不够、或者有一轮是网络失败的，不下「认不出」的结论（按没下结论交回，下次再认）。
+ * 返回 Map：{hit, via} 认下来了 / {miss, why} 认不出 / null 这次没下结论。
  */
 async function matchBatch(env, groups, opt = {}){
-  const out = new Map(), pool = new Map(), rest = [];
+  const out = new Map(), rest = [];
   for (const g of groups){
     const nm = notMovie(g.title || g.cn);
     if (nm){ out.set(g.key, { miss:1, why:nm }); continue; }   // 一个子请求都不花
     rest.push(g);
   }
   if (!rest.length) return out;
+  const tv = isTV();
+  const left = () => env.__sub ? env.__sub.max - env.__sub.n : subLeft();
 
-  const ask = (g, q, yr) => {
-    const p = { query: q, include_adult:'false' };
-    if (yr) p[SRC.yparam] = yr;
+  const ask = (g, P) => {
+    const p = { query: P.q, include_adult:'false' };
+    if (P.y) p[SRC.yparam] = P.y;
+    if (P.lang) p.language = P.lang;
     return tmdb(env, '/search/' + SRC.kind, p)
-      .then(j => ({ g, j, locked: !!yr }))
+      .then(j => ({ g, P, j }))
       .catch(e => {
-        /* soft（认定工）：配额用完的那几组按「网络失败」交回去，已经认下的照样带回，不整批作废 */
+        /* soft（认定工）：配额用完的那几组按「没下结论」交回去，已经认下的照样带回，不整批作废 */
         if (e.budget && !opt.soft) throw e;
-        if (e.budget) return { g, j: null };
-        /* [v5.2 修复 5] 以前这里静悄悄地吞掉：出网失败和"认不出"在界面上
-           长得一模一样（都是入库 0），只是前者连 calls 都不加一。
-           现在原样记进「匹配」频道，带上查询串，一眼看得出是哪一类。 */
-        trace('tmdb', 'TMDB 搜索失败（' + SRC.kind + '「' + String(q).slice(0, 24) + '」）：' +
-          (e.message || e), { lvl: 'err', ch: 'match' });
-        return { g, j: null };
+        if (!e.budget)
+          /* [v5.2 修复 5] 出网失败和「认不出」在界面上长得一模一样 —— 原样记进「匹配」频道，带上查询串 */
+          trace('tmdb', 'TMDB 搜索失败（' + SRC.kind + '「' + String(P.q).slice(0, 24) + '」）：' +
+            (e.message || e), { lvl: 'err', ch: 'match' });
+        return { g, P, j: null };
       });
   };
 
-  /* 第一轮就用洗过的中文名：版本后缀留在搜索串里几乎必然搜不中，
-     而洗掉之后中文名的命中率高得多。评分仍然拿原始片名去比。 */
+  /* 第一轮就用洗过的中文名：版本后缀留在搜索串里几乎必然搜不中。评分仍然拿原始片名去比 */
   const q1 = (g) => { const c = cleanCN(g.cn); return (c && c.length >= 2) ? c : g.cn; };
-  const round2 = [];
-  /* 剧集不锁年份：版块的年份是这一季的，TMDB 的是首播年，锁下去只会把
-     真正对的那条筛掉 */
-  const r1 = await Promise.all(rest.map(g => ask(g, q1(g), isTV() ? '' : pickYear(g.years, g.hint))));
-  for (const { g, j, locked } of r1){
-    if (!j){ out.set(g.key, null); continue; }           // 网络失败，留待下轮
-    pool.set(g.key, (j.results||[]).slice(0, 8));
-    const h = pickTMDB(j.results, g.cn, g.latin, g.years||[], { yearLocked: locked, tv: isTV() });
-    if (h) out.set(g.key, { hit:h, via: locked ? '中文名+年份' : '中文名' });
-    else round2.push(g);
-  }
-
-  /* 第二轮换说法：原名最管用，其次是去掉年份限制，最后是洗过的中文名 */
-  const alt = (g) => {
-    if (g.latin && norm(g.latin) !== norm(g.cn)) return { q:g.latin, y:'' };
-    if (norm(q1(g)) !== norm(g.cn)) return { q:g.cn, y:'' };   // 洗过的没中，用原名再试
-    if ((g.years||[]).length) return { q:g.cn, y:'' };         // 去掉年份限制再试
-    return null;
+  const plansOf = (g) => {
+    const y = tv ? '' : pickYear(g.years, g.hint);
+    const P = [], seen = new Set();
+    const add = (q, yy, lang, via, wide, alt) => {
+      q = String(q || '').trim();
+      if (q.length < 2) return;
+      const k = q.toLowerCase() + '|' + yy + '|' + lang;
+      if (seen.has(k)) return;
+      seen.add(k); P.push({ q, y: yy, lang, via, wide: !!wide, alt: alt || '' });
+    };
+    add(q1(g), y, '', y ? '中文名+年份' : '中文名');
+    if (g.latin && norm(g.latin) !== norm(g.cn)) add(g.latin, '', '', '原名');
+    else if (norm(q1(g)) !== norm(g.cn)) add(g.cn, '', '', '中文名原样');
+    else if ((g.years || []).length) add(g.cn, '', '', '不锁年份');
+    const lat = g.latin && !/[㐀-鿿]/.test(g.latin) ? g.latin : '';
+    if (lat) add(lat, y, 'en-US', '英文名', 1);
+    for (const a of altNames(g.cn).slice(0, 2)) add(a, y, '', '别名「' + a.slice(0, 12) + '」', 1, a);
+    if (lat){ const m = mainTitle(lat); if (m && m.length >= 4 && m !== lat) add(m, y, 'en-US', '英文主标题', 1); }
+    return P;
   };
-  const plans = round2.map(g => ({ g, a: alt(g) })).filter(x => x.a);
-  const r2 = await Promise.all(plans.map(x => ask(x.g, x.a.q, x.a.y)));
-  const r2fail = new Set();
-  for (const { g, j } of r2){
-    if (!j) r2fail.add(g.key);
-    const merged = (pool.get(g.key) || []).concat(j ? (j.results||[]).slice(0,8) : []);
-    const h = pickTMDB(merged, g.cn, g.latin, g.years||[], { tv: isTV() });
-    if (h) out.set(g.key, { hit:h, via: g.latin ? '原名' : '合并候选' });
+
+  const S = new Map();                      // key → { g, plans, pz（中文候选）, pe（英文候选）, alts, failed }
+  for (const g of rest) S.set(g.key, { g, plans: plansOf(g), pz: [], pe: [], alts: [], failed: false });
+  const yearOk = (g, h) => {
+    if (tv || !(g.years || []).length) return true;
+    const hy = Number(String(h.release_date || '').slice(0, 4));
+    return !hy || g.years.some(y => Math.abs(Number(y) - hy) <= 1);
+  };
+  let open = rest.slice();
+  for (let r = 0; r < 5 && open.length; r++){
+    const todo = open.filter(g => S.get(g.key).plans[r]);
+    if (!todo.length) break;
+    /* 第一轮之后按剩余配额开：不够这一轮的，留着下次认（不下结论） */
+    if (r > 0 && left() < todo.length + 3) break;
+    const res = await Promise.all(todo.map(g => ask(g, S.get(g.key).plans[r])));
+    for (const { g, P, j } of res){
+      const s = S.get(g.key);
+      s.next = r + 1;                         // 第 r 条计划问过了
+      if (!j){
+        s.failed = true;
+        if (r === 0){ out.set(g.key, null); open = open.filter(x => x.key !== g.key); }   // 第一轮就断网：这一组先不认了
+        continue;
+      }
+      const list = (j.results || []).slice(0, 8);
+      if (P.lang) s.pe = s.pe.concat(list); else s.pz = s.pz.concat(list);
+      if (P.alt) s.alts.push(P.alt);
+      /* 这一轮自己的候选（锁了年份时门槛放低），再看合起来的候选 */
+      let h = pickTMDB(list, P.alt || g.cn, g.latin, g.years || [], { yearLocked: !!P.y, tv });
+      if (!h && r > 0) h = pickTMDB(P.lang ? s.pe : s.pz, g.cn, g.latin, g.years || [], { tv });
+      if (!h && r > 0 && !P.lang) for (const a of s.alts){ h = pickTMDB(s.pz, a, g.latin, g.years || [], { tv }); if (h) break; }
+      if (h && P.wide && !yearOk(g, h)) h = null;
+      /* 英文那几轮认下来的：TMDB 上多半没有中文译名（中文结果里的标题是原名）—— 片名用论坛给的中文名 */
+      if (h && P.lang && /[\u3400-\u9fff]/.test(g.cn || '') && !/[\u3400-\u9fff]/.test(h.title || '')){
+        const zh = cleanCN(g.cn.split(/\s*[\/／|｜]\s*/)[0]) || g.cn;
+        h = { ...h, title: zh };
+      }
+      if (h){ out.set(g.key, { hit: h, via: P.via }); open = open.filter(x => x.key !== g.key); }
+    }
   }
-  for (const g of round2){
+  for (const g of open){
     if (out.has(g.key)) continue;
-    /* 只搜过一轮、且第二轮没得搜的，用第一轮的候选再宽松评一次 */
-    const h = pickTMDB(pool.get(g.key) || [], g.cn, g.latin, g.years||[], { tv: isTV() });
-    /* [v6.2] 第二轮是网络失败（或配额用完）而不是真的没搜到：不下「认不出」的结论，
-       按网络失败交回去，下轮再认 —— 以前这里直接判 miss，帖子行只留 12 条，其余就丢了 */
-    out.set(g.key, h ? { hit:h, via:'候选复评' } : (r2fail.has(g.key) ? null : { miss:1, why:'nohit' }));
+    const s = S.get(g.key);
+    /* 最后用中文候选宽松评一次（同 v5：只搜过一轮的，第一轮的候选可能就够） */
+    let h = pickTMDB(s.pz, g.cn, g.latin, g.years || [], { tv });
+    if (h && (s.next || 0) > 2 && !yearOk(g, h)) h = null;     // 候选里混着别名那几轮的结果：同样要求年份对得上
+    if (h){ out.set(g.key, { hit: h, via: '候选复评' }); continue; }
+    /* 计划没走完（配额不够）或者中途断过网：不下「认不出」的结论，下次再认 */
+    const exhausted = (s.next || 0) >= s.plans.length;
+    out.set(g.key, (s.failed || !exhausted) ? null : { miss: 1, why: 'nohit' });
   }
   return out;
 }
@@ -1812,7 +1942,8 @@ const blankMovies = () => ({ v:4, m:{}, k:{}, u:{}, pv:0 });
    另外给跳过标记加了保质期：七天之后自然再试一次，认不出的片子等
    TMDB 补了条目就能自己捡回来。
    ══════════════════════════════════════════════════════════════════ */
-const PARSER_V = 2;
+/* v3（v6.4）：认定加了英文、别名、英文主标题三轮 —— 以前「认不出」的结论全部作废、重新排队可重试 */
+const PARSER_V = 3;
 const U_TTL = 7 * 86400_000;
 
 function parserMigrate(movies, pend){
@@ -2411,6 +2542,7 @@ async function pendApply(X, k, r){
   if (!e || X.doneNow.has(k)) return 'gone';
   if (r.miss){
     if (e.w !== 'wait') return 'gone';             // 已经有结论的不覆盖（重试次数、跳过原因都留着）
+    if (e.rq){ e.n = (e.n || 0) + 1; delete e.rq; }  // 「重试匹配」排进来的：认不出算一次重试
     e.w = r.miss;
     if (e.r.length > PEND.rows) e.r = e.r.slice(0, PEND.rows);
     X.movies.u[k] = Date.now();
@@ -3493,6 +3625,11 @@ async function diagnose(env){
         + (ps2.sample.length ? ' · 例如：' + ps2.sample.slice(0,3).join(' / ') : ''))
         : '全部片名都已认下',
       ps2.retry ? 'retryUnmatched' : null);
+    if (ps2.gchk >= 3 && ps2.garbled * 2 >= ps2.gchk)
+      add('idx.garbled','片名乱码', 'fail',
+        '留底队列里抽查 ' + ps2.gchk + ' 条，' + ps2.garbled + ' 条是乱码（版块页面是 UTF-8，旧版按 GBK 解了）。'
+        + '新抓的页面已经按真实编码解码；存进去的乱码只能重建' + SRC.name + '索引（先自动备份）',
+        'rebuildSource');
     if (legacy > 20)
       add('idx.unmatched.legacy','v4 老账未匹配', 'warn',
         legacy + ' 条是 v4 时期跳过的，当时没留下帖子行。倒回年份游标重走一遍列表页即可捡回来 —— '
@@ -3547,6 +3684,32 @@ async function repair(env, action, arg){
     return { ok:true, msg:'已清除限速冷却，请求间隔重置为 260ms' };
   }
   if (action === 'relogin'){ await dropSession(env); await session(env, true); return { ok:true }; }
+  /**
+   * [v6.4] 重建本源索引 —— 给「片名存成了乱码」用的（v6.3 及更早把 UTF-8 的版块当 GBK 解）。
+   * 乱码已经写进了分片和留底队列，tid 表又会挡住重抓，只能整源清掉重来：
+   * 先备份一份（体检里能「从备份恢复」），分片 / tid 表记进 grave（十分钟后删），影片表、留底队列清空，
+   * 游标全部回到第 1 页。之后点「继续建立索引」（极限模式几分钟走完）。另一个源一点不动。
+   */
+  if (action === 'rebuildSource'){
+    return withIndexLock(env, async (deaths, lk) => {
+      const bk = await backupNow(env, true).catch(e => ({ err: e.message || String(e) }));
+      if (bk && bk.err) throw new Error('重建前的备份没做成，先不动索引：' + bk.err);
+      const { movies, state } = await loadForWrite(env);
+      const n0 = Object.keys(movies.m).length, r0 = state.rels || 0;
+      for (const k of liveKeys(state)) graveAdd(state, k);
+      const st2 = { ...blankState(), grave: (state.grave || []).slice(-2000), bakAt: state.bakAt, bakDay: state.bakDay,
+                    ver: state.ver || 0, migrated: state.migrated || {}, cool: state.cool };
+      if (!st2.cool) delete st2.cool;
+      const mv2 = blankMovies(); mv2.pv = PARSER_V;
+      await commitIndex(env, lk, mv2, st2, { shrink: true, force: true });
+      /* 留底队列在提交之后清：掐在两次写之间，旧队列还在，重建时会被新抓的覆盖掉 */
+      await r2put(env, PEND.key, blankPend()).catch(e => trace('sys', '清留底队列失败（重建时会覆盖）：' + (e.message || e), { lvl: 'warn' }));
+      dropCaches();
+      trace('sys', '已重建 ' + SRC.name + ' 索引：清掉 ' + n0 + ' 部 / ' + r0 + ' 个片源（重建前已备份到 ' + (bk && bk.day || '') + '），游标回到第 1 页', { lvl: 'warn' });
+      return { ok: true, dropped: n0, rels: r0, backup: bk && bk.day,
+               msg: '已清空' + SRC.name + '索引（' + n0 + ' 部，重建前已备份），现在点「继续建立索引」重新抓 —— 这次按页面真实编码解码' };
+    });
+  }
   /* 备份 / 恢复：movies.json + state.json 每天备一份（cron 自动做），留最近 BAK_KEEP 份。
      恢复只恢复这两份 —— 它们引用的分片都是不可变对象，备份时在用的那一批十分钟内不会被删，
      更早的备份所引用的分片若已被清理，恢复后跑一遍「重算汇总」即可对齐。 */
@@ -3559,6 +3722,30 @@ async function repair(env, action, arg){
    * v5 从留底队列里取，行就在手边：认下来直接写进当年的分片，不碰论坛。
    * 分批做，一批的大小按剩余子请求预算算，返回 left>0 就再调一次。
    */
+  /**
+   * [v6.4] 重试匹配（极限模式）：可重试的留底条目整批改成「排队待认」，交给浏览器的认定工并行认 ——
+   * 以前一次调用认 10 组、一组一组磨，五千组要几百次调用。认不出的算一次重试（e.rq），满 PEND.tries 次进「反复认不出」。
+   * 标题是乱码的不排（认了也白认，先「重建本源索引」）。
+   */
+  if (action === 'requeueUnmatched'){
+    return withIndexLock(env, async (deaths, lk) => {
+      const { state } = await loadForWrite(env);
+      const pend = await pendLoad(env);
+      pendSync(pend, state);
+      let n = 0, garbled = 0;
+      for (const k of Object.keys(pend.q)){
+        const e = pend.q[k];
+        if (PEND_SKIP.has(e.w) || e.w === 'wait' || (e.n || 0) >= PEND.tries) continue;
+        if (mojibake(e.t)){ garbled++; continue; }
+        e.w = 'wait'; e.rq = 1; n++;
+      }
+      await pendSave(env, pend, state);
+      pdoneSet(state, new Set(), true);
+      await commitIndex(env, lk, null, state);
+      trace('match', '重试匹配：' + n + ' 组排进队列，交给认定工' + (garbled ? '（' + garbled + ' 组标题是乱码，没排）' : ''), { lvl: 'info' });
+      return { ok: true, queued: n, garbled, msg: n + ' 组排进队列' + (garbled ? '，' + garbled + ' 组标题是乱码没排（先重建本源索引）' : '') };
+    });
+  }
   if (action === 'retryUnmatched'){
     return withIndexLock(env, async (deaths, lk) => {
       const t0 = Date.now();
@@ -4381,19 +4568,21 @@ function pendRowsByYear(e){
 /** 队列摘要写进 state，前端和体检就不用每次再读一遍 R2。skip：这一轮已经写进分片、只是还没删的键 */
 function pendStat(doc, skip){
   const ks = Object.keys(doc.q);
-  let tv = 0, pack = 0, dead = 0, retry = 0, wait = 0, n = 0;
+  let tv = 0, pack = 0, dead = 0, retry = 0, wait = 0, n = 0, garbled = 0, gchk = 0;
   const sample = [];
   for (const k of ks){
     if (skip && skip.has(k)) continue;
     n++;
     const e = doc.q[k];
+    /* [v6.4] 抽查前 80 条的标题是不是乱码（UTF-8 当 GBK 解的）：多数是 → 界面上给「重建本源索引」 */
+    if (gchk < 80 && e.t){ gchk++; if (mojibake(e.t)) garbled++; }
     if (e.w === 'wait') wait++;                   // 极限模式排队等认定，不算「认不出」
     else if (e.w === 'tv' || e.w === 'other') tv++;    // 本来就不属于这个源
     else if (e.w === 'pack') pack++;
     else if ((e.n||0) >= PEND.tries) dead++;
     else { retry++; if (sample.length < 8 && e.t) sample.push(e.t); }
   }
-  return { n, tv, pack, dead, retry, wait, sample, at: Date.now() };
+  return { n, tv, pack, dead, retry, wait, sample, garbled, gchk, at: Date.now() };
 }
 async function pendSave(env, doc, state, skip){
   doc.at = Date.now();
@@ -5255,7 +5444,7 @@ async function threadDetail(env, tid, ctx){
   const r = await authed(env,'forum.php?mod=viewthread&tid='+encodeURIComponent(tid));
   const buf = await r.arrayBuffer();
   if (buf.byteLength < 600){ govPenalize('帖子页空响应'); throw new Error('帖子页返回空响应（可能被限速）'); }
-  const html = decodeGBK(buf);
+  const html = decodeHTML(buf, r);
   if (loginWall(html)) throw new Error('帖子需要登录或权限不足（登录墙）');
   govReward();
   const attachments = [];
@@ -5357,7 +5546,7 @@ async function torrentBytes(env, aid){
   if (r.status>=300 && r.status<400) throw new Error('附件不可直接下载');
   const buf = new Uint8Array(await r.arrayBuffer());
   if (buf[0]!==0x64){
-    const head = strip(decodeGBK(buf.slice(0,300))).slice(0,60);
+    const head = strip(decodeHTML(buf.slice(0,300), r)).slice(0,60);
     /* 空壳页 = 被限速（会过去）；有内容的提示页 = 积分 / 权限（不会过去） */
     if (buf.length < MIN_BODY){ govPenalize('附件空响应'); throw new Error('附件返回空响应（被限速）'); }
     throw Object.assign(new Error('返回的不是种子（可能需要积分或权限）：'+head), { hard: 1 });
@@ -5734,7 +5923,15 @@ export default {
       }
 
       if (p==='/api/state'){
-        const st = await r2get(env, IDX.state, blankState());
+        let st = await r2get(env, IDX.state, blankState());
+        /* [v6.4] 旧版写的留底摘要没有乱码抽查：当场算一次、写回 state（只做这一次），界面才能及时提示重建 */
+        if (st.pend && st.pend.n && st.pend.gchk == null){
+          const pd = await pendLoad(env).catch(() => null);
+          if (pd){
+            const fresh = pendStat(pd, new Set(Array.isArray(st.pdone) ? st.pdone : []));
+            st = await stateMutate(env, (x) => { if (x.pend && x.pend.gchk != null) return false; x.pend = fresh; }).catch(() => ({ ...st, pend: fresh }));
+          }
+        }
         govLoad(st);
         const at = lockAt(st.lock), age = at ? Date.now()-at : 0;
         const busy = age > 0 && age < LOCK_MS;
@@ -8866,10 +9063,29 @@ function renderIndex(){
     .then(function(){ toast('已清除冷却'); loadState(); }).catch(function(e){ toast(e.message); }); });
   bind('lscan', libScanRun);
   bind('lres', libResolveRun);
+  bind('urebuild', function(){
+    var b = document.getElementById('urebuild');
+    if (b.dataset.sure !== '1'){
+      b.dataset.sure = '1'; b.textContent = '会清空本源索引再重抓，确定？再点一次';
+      setTimeout(function(){ if (b){ b.dataset.sure = ''; b.textContent = '重建' + (S.src === 'tv' ? '剧集' : '电影') + '索引'; } }, 6000);
+      return;
+    }
+    rebuildSource(b);
+  });
   bind('uretry', function(){
     var b = document.getElementById('uretry');
+    if (RUN.on){ toast('有任务在跑，先停止'); return; }
     b.disabled = true; b.textContent = '重试中…';
     S.logch = 'run'; renderLogs();
+    /* [v6.4] 极限模式：整批排进队列，交给认定工并行认（几分钟认完几千组）；关着就照旧一批一批认 */
+    if (turboWanted()){
+      api('/api/repair?do=requeueUnmatched').then(function(r){
+        say('重试匹配：' + r.msg);
+        if (!r.queued){ b.disabled = false; b.textContent = '重试匹配'; loadState(); return; }
+        runTurbo(null);
+      }).catch(function(e){ b.disabled = false; b.textContent = '重试匹配'; say('重试中断：' + e.message, 1); });
+      return;
+    }
     runFix('retryUnmatched', null, function(r, n){
       if (r.msg) say(r.msg);
       b.textContent = '重试中 ' + n + (r.left ? '（剩 ' + r.left + '）' : '');
@@ -8953,13 +9169,23 @@ function unmatchedHTML(st){
         + '帖子行都在留底里；接着建索引（或每天的定时任务）会认完，不算认不出。</p>' : '')
     + '<p class="fine" style="margin-top:12px">'
     + '认不出来的那一组，帖子行也一起留着了 —— 重试是直接从留底里认，不用把列表页重爬一遍。'
-    + '剧集 / 合集本来就不在 TMDB 电影库里，跳过是对的。</p>';
+    + '剧集 / 合集本来就不在 TMDB 电影库里，跳过是对的。'
+    + '认定会依次试：中文名 + 年份、原名、英文（外语片常常没有中文译名）、拆开的别名、去掉副标题。</p>';
+  /* [v6.4] 片名是乱码（UTF-8 的版块被旧版当 GBK 解了）：重试只会白花 TMDB 请求，先重建本源索引 */
+  var garbled = p.gchk >= 3 && p.garbled * 2 >= p.gchk;
+  if (garbled)
+    body = '<div class="warnbox">抽查 ' + p.gchk + ' 条，' + p.garbled + ' 条片名是乱码：' + (S.src === 'tv' ? '剧集' : '电影')
+      + '版块的页面是 UTF-8，旧版一律按 GBK 解码，「余生有你」存成了「浣欑敓鏈夊姩」，所以认不出来。'
+      + '新抓的页面已经按真实编码解码；已经存进去的乱码要重建' + (S.src === 'tv' ? '剧集' : '电影') + '索引才能清掉'
+      + '（会先自动备份一份；另一个源一点不动；重建完自动开始重新抓）。'
+      + '<div class="row" style="margin-top:12px"><button class="btn fixed on" id="urebuild">重建' + (S.src === 'tv' ? '剧集' : '电影') + '索引</button></div></div>'
+      + body;
   if (p.sample && p.sample.length)
     body += '<div class="qlist" style="max-height:160px">' + p.sample.map(function(t){
       return '<div class="qrow"><span class="dot warn"></span><span class="qn">' + esc(t) + '</span></div>';
     }).join('') + '</div>';
   body += '<div class="row" style="margin-top:14px">'
-    + '<button class="btn fixed' + (p.retry ? ' on' : '') + '" id="uretry"' + (p.retry ? '' : ' disabled') + '>'
+    + '<button class="btn fixed' + (p.retry && !garbled ? ' on' : '') + '" id="uretry"' + (p.retry ? '' : ' disabled') + '>'
     + '重试匹配' + (p.retry ? ' ' + p.retry + ' 组' : '') + '</button>'
     + '<button class="btn fixed" id="urescan">重扫未匹配</button></div>'
     + '<p class="fine" style="margin-top:8px">'
@@ -8967,7 +9193,8 @@ function unmatchedHTML(st){
     + 'v4 时期认不出来、没留底的老账，以及 v6.1 及更早版本一轮认不完时漏掉的帖子。'
     + '升级到 v6.2 之后建议跑一次（极限模式下几分钟就走完）。</p>';
   return dxHTML('pend', '未匹配片名',
-    (p.retry ? '<span class="pill warn">' + p.retry + ' 组可重试</span>' : '<span class="sub">' + p.n + ' 条留底</span>'),
+    (garbled ? '<span class="pill warn">片名乱码</span>'
+      : p.retry ? '<span class="pill warn">' + p.retry + ' 组可重试</span>' : '<span class="sub">' + p.n + ' 条留底</span>'),
     body);
 }
 function libPanelHTML(){
@@ -9637,7 +9864,21 @@ function runIncremental(){
 var FIXNAME = { unlock:'强制解锁', resetTask:'重置任务', cooldown:'清除冷却', relogin:'重新登录',
   prune:'清理孤儿', resync:'重算汇总', retryUnmatched:'重试匹配', rescanUnmatched:'重扫未匹配',
   optimize:'重训码本', migrate:'从 v3 迁移', build:'去建索引', split:'拆分大片', libscan:'重新扫描片库',
-  restore:'从备份恢复', backup:'立即备份' };
+  restore:'从备份恢复', backup:'立即备份', rebuildSource:'重建本源索引' };
+/* [v6.4] 重建本源索引：服务端先备份、再清空，然后用当前模式（默认极限）从第 1 页重抓 */
+function rebuildSource(btn){
+  if (RUN.on){ toast('有任务在跑，先停止'); return; }
+  if (btn){ btn.disabled = true; btn.textContent = '重建中…'; }
+  S.logch = 'run';
+  api('/api/repair?do=rebuildSource').then(function(r){
+    say(r.msg || '已清空，开始重抓');
+    pageCache = {}; pre = {};
+    runBuild(null);
+  }).catch(function(e){
+    if (btn){ btn.disabled = false; btn.textContent = '重建失败'; }
+    say('重建没做成：' + e.message, 1); toast(e.message);
+  });
+}
 function runFix(act, arg, onStep, done){
   var url = '/api/repair?do=' + encodeURIComponent(act) + (arg ? '&year=' + encodeURIComponent(arg) : '');
   var n = 0;
@@ -9673,6 +9914,16 @@ function runDiagnose(btn){
         var act = b.dataset.fix;
         if (act === 'build'){ runBuild(null); return; }
         if (act === 'libscan'){ libScanRun(); return; }
+        if (act === 'rebuildSource'){
+          if (b.dataset.sure !== '1'){ b.dataset.sure = '1'; b.textContent = '会清空本源索引再重抓，再点一次'; return; }
+          rebuildSource(b); return;
+        }
+        if (act === 'retryUnmatched' && turboWanted()){
+          b.disabled = true; b.textContent = '排队中…';
+          api('/api/repair?do=requeueUnmatched').then(function(r){ say('重试匹配：' + r.msg); b.textContent = '已排队'; if (r.queued) runTurbo(null); })
+            .catch(function(e){ b.disabled = false; b.textContent = '失败'; toast(e.message); });
+          return;
+        }
         b.disabled = true; b.textContent = '处理中…';
         runFix(act, b.dataset.arg, function(r, n){
           if (r.left) b.textContent = '处理中 ' + n + '（剩 ' + r.left + '）';

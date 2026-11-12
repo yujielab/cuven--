@@ -111,7 +111,8 @@ class MemCache {
    recv：{ base, meta, doc } */
 export function world() {
   return {
-    forum: { base: 'https://forum.test/', boards: {}, threads: {}, perPage: 20, calls: 0, fail: null, slow: 0 },
+    /* encByFid：某个版块的页面编码（'utf8' = UTF-8 并在响应头里声明；'utf8-bare' = UTF-8 但不声明；默认 GBK） */
+    forum: { base: 'https://forum.test/', boards: {}, threads: {}, perPage: 20, calls: 0, fail: null, slow: 0, encByFid: {} },
     tmdb: { movie: [], tv: [], calls: 0, fail: null },
     /* recv：公开 R2 域名。总账（Stream v22）+ v25 的实时清单（files = file-list-v2.json、tv = tv/list-v1.json、ptr = lib-ptr.json）
        hits：按路径记的请求次数 */
@@ -122,7 +123,7 @@ export function world() {
   };
 }
 
-const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9一-龥]/g, '');
+const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9一-龥]/g, '');
 const pad = html => html + '<!--' + 'x'.repeat(1200) + '-->';
 
 function forumPage(W, u) {
@@ -148,6 +149,9 @@ function forumPage(W, u) {
     for (const r of rows) html += `<a href="${r.tid}_1.html" title="${r.title.replace(/"/g, '&quot;')}">x</a>\n`;
     html += `<a href="list_${fid}_${last}.html" class="last">... ${last}</a></div>`;
     void ykey;
+    const enc = F.encByFid && F.encByFid[fid];
+    if (enc === 'utf8') return new Response(new TextEncoder().encode(pad(html)), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+    if (enc === 'utf8-bare') return new Response(new TextEncoder().encode(pad(html)), { headers: { 'content-type': 'text/html' } });
     return new Response(gbk(pad(html)));
   }
   if (q.get('mod') === 'viewthread') {
@@ -179,12 +183,15 @@ function tmdbApi(W, u) {
   const yr = u.searchParams.get(yk);
   const en = /^en/.test(u.searchParams.get('language') || '');
   const res = db.filter(x => {
-    const names = [x.title, x.original_title, x.name, x.original_name, x.en, ...(x.aka || [])].map(norm).filter(Boolean);
-    if (!names.some(n => n.includes(q) || (q.includes(n) && n.length >= 2))) return false;
+    /* noZh：TMDB 上没有中文译名 —— 中文名搜不到它，中文结果里的标题是原名 */
+    const names = (x.noZh ? [x.original_title, x.original_name, x.en, ...(x.aka || [])] : [x.title, x.original_title, x.name, x.original_name, x.en, ...(x.aka || [])]).map(norm).filter(Boolean);
+    /* strict：只认「查询串是某个名字的一部分」（真 TMDB 按词搜，「A/B」两个译名连在一起的查询搜不到） */
+    if (!names.some(n => n.includes(q) || (!x.strict && q.includes(n) && n.length >= 2))) return false;
     if (yr) { const d = x.release_date || x.first_air_date || ''; if (d.slice(0, 4) !== yr) return false; }
     return true;
   });
-  return Response.json({ results: res.slice(0, 20).map(x => (en && x.en) ? { ...x, title: x.en, name: x.en } : x) });
+  return Response.json({ results: res.slice(0, 20).map(x => (en && x.en) ? { ...x, title: x.en, name: x.en }
+    : (!en && x.noZh) ? { ...x, title: x.original_title || x.title, name: x.original_name || x.name } : x) });
 }
 /** 公开 R2 域名上的对象（总账 + v25 实时清单） */
 function recvObj(W, url) {
