@@ -301,6 +301,13 @@ const tv = await until(page, () => {
   return v && v.getAttribute('src') && v.currentTime > 0.3 ? true : false;
 }, null, 40000).then(() => true).catch(() => false);
 ok(tv, '第一章的预告片地址晚到也会自己挂上开播（不用先滚走再滚回来）');
+const facts = await page.evaluate(() => [...document.querySelectorAll('.sc-chapter .sc-fact')].map(f => f.textContent));
+ok(facts.every(f => !/4K|1080p|杜比视界|HDR|8K|DV/.test(f)), `展厅介绍下面那排小胶囊没有规格小标签（${facts.join(' / ') || '无'}）`);
+/* 从第 10 秒进（跳过片头厂标），一律静音：没有开声音的钮，谁把它打开了就立刻关回去 */
+const t10 = await page.evaluate(() => { const v = document.querySelector('.sc-chapter video'); const t = v.currentTime; v.muted = false; return { t, btn: !!document.querySelector('.sc-chapter .sc-mutectl') }; });
+await page.waitForTimeout(150);
+t10.muted = await page.evaluate(() => document.querySelector('.sc-chapter video').muted);
+ok(t10.t >= 10 && t10.muted && !t10.btn, `预告片从第 10 秒进（t=${t10.t.toFixed(1)}s），一律静音：没有开声音的钮，被打开也立刻关回去`);
 const trailerPlaying = () => page.evaluate(() => { const v = document.querySelector('.sc-chapter video'); return !!(v && v.getAttribute('src') && !v.paused); });
 await page.evaluate(() => playVideo('/Movies/long.mp4', 'Long.Test.2024.1080p.mp4'));
 await until(page, s => document.querySelector(s).currentTime > 0.3, vid);
@@ -339,7 +346,7 @@ console.log('\n■ 展厅预告片 · YouTube 官方预告（IMDb 不给直链�
         if (this.state === 1 || this.state === 3) this.emit(2);
       }
       unloadModule(m) { (window.__ytUnload = window.__ytUnload || []).push(m); }
-      mute() { this.muted = true; } unMute() { this.muted = false; } isMuted() { return this.muted; }
+      mute() { this.muted = true; } unMute() { this.muted = false; window.__ytUnmuted = (window.__ytUnmuted || 0) + 1; } isMuted() { return this.muted; }
       seekTo(t) { this.t = t; }
       getCurrentTime() { if (this.state === 1) this.t += 0.25; return this.t; }
       getDuration() { return 150; }
@@ -354,8 +361,8 @@ console.log('\n■ 展厅预告片 · YouTube 官方预告（IMDb 不给直链�
   }, null, 40000).then(() => true).catch(() => false);
   const o = await yp.evaluate(() => ({ v: window.__ytOpts && window.__ytOpts.playerVars, host: window.__ytOpts && window.__ytOpts.host,
     vsrc: document.querySelector('.sc-chapter video').getAttribute('src'), muted: window.__yt && window.__yt.muted }));
-  ok(up && o.muted && !o.vsrc && o.v && o.v.mute === 1 && o.v.controls === 0 && o.v.playsinline === 1 && o.v.start === 3 && /nocookie/.test(o.host),
-    'IMDb 没给直链：第一章挂上 YouTube 官方预告并静音自动开播（无控件、内联、从第 3 秒进，原生 <video> 让位）');
+  ok(up && o.muted && !o.vsrc && o.v && o.v.mute === 1 && o.v.controls === 0 && o.v.playsinline === 1 && o.v.start === 10 && /nocookie/.test(o.host),
+    'IMDb 没给直链：第一章挂上 YouTube 官方预告并静音自动开播（无控件、内联、从第 10 秒进，原生 <video> 让位）');
   /* YouTube 自己的界面一样都不露：开播那几秒（片名条、上一个 / 暂停 / 下一个）画面不露，底下是剧照 */
   const c0 = await yp.evaluate(() => { const b = document.querySelector('.sc-chapter .sc-yt'); return { clean: b.classList.contains('clean'), op: getComputedStyle(b).opacity }; });
   const c1 = await until(yp, () => { const b = document.querySelector('.sc-chapter .sc-yt'); return !!b && b.classList.contains('clean') && getComputedStyle(b).opacity === '1'; }, null, 7000)
@@ -365,13 +372,13 @@ console.log('\n■ 展厅预告片 · YouTube 官方预告（IMDb 不给直链�
   const ring = await until(yp, () => parseFloat(document.querySelector('.sc-chapter .sc-ring-value').style.strokeDashoffset) < 106.8, null, 5000)
     .then(() => true).catch(() => false);
   ok(ring, '进度环跟着 YouTube 播放器走');
-  /* 片尾画面（订阅、推荐视频）出来之前：先隐去，回卷到第 3 秒，播稳了再露 */
+  /* 片尾画面（订阅、推荐视频）出来之前：先隐去，回卷到第 10 秒，播稳了再露 */
   await yp.evaluate(() => { window.__yt.t = 140; });
-  const looped = await until(yp, () => window.__yt.t < 10 && !document.querySelector('.sc-chapter .sc-yt.clean'), null, 3000).then(() => true).catch(() => false);
+  const looped = await until(yp, () => window.__yt.t >= 10 && window.__yt.t < 20 && !document.querySelector('.sc-chapter .sc-yt.clean'), null, 3000).then(() => true).catch(() => false);
   const again = await until(yp, () => !!document.querySelector('.sc-chapter .sc-yt.clean'), null, 6000).then(() => true).catch(() => false);
-  ok(looped && again, '片尾画面出来之前先隐去、回卷到第 3 秒，播稳了再露出来');
-  const un = await yp.evaluate(() => { const b = document.querySelector('.sc-chapter .sc-mutectl'); b.click(); return { yt: window.__yt.muted, btn: b.dataset.muted }; });
-  ok(un.yt === false && un.btn === '0', '点「取消静音」：播放器 unMute，按钮同步');
+  ok(looped && again, '片尾画面出来之前先隐去、回卷到第 10 秒，播稳了再露出来');
+  const un = await yp.evaluate(() => ({ btn: !!document.querySelector('.sc-chapter .sc-mutectl'), yt: window.__yt.muted, unmuted: window.__ytUnmuted || 0 }));
+  ok(!un.btn && un.yt === true && un.unmuted === 0, `预告片一律静音：没有开声音的钮，YouTube 播放器从没被 unMute（${JSON.stringify(un)}）`);
   await yp.evaluate(() => playVideo('/Movies/long.mp4', 'Long.Test.2024.1080p.mp4'));
   await until(yp, s => document.querySelector(s).currentTime > 0.3, vid);
   await yp.waitForTimeout(300);
@@ -413,6 +420,35 @@ console.log('\n■ 片名一律中文（卡片、搜索、播放器 / 正在播�
     return r;
   });
   ok(sw.before === 'Some Film' && sw.after === '某部电影' && sw.aria.startsWith('某部电影'), `还没有中文名的卡先按原名排（${sw.before}），中文名一到原位换字（${sw.after}），读屏标签跟着换`);
+  /* 卡片上不出规格小标签：文件名里写满了 2160p / DV / HDR，竖版、横版卡都只写年份；首页、搜索结果里的卡也一枚都没有 */
+  const nb = await zp.evaluate(() => {
+    const f = { name: 'Big.Film.2021.2160p.UHD.DV.HDR10.Atmos.mkv', path: '/Movies/big.mkv' };
+    const box = document.createElement('div');
+    box.innerHTML = videoCardHTML(f) + videoCardHTML(f, { landscape: true });
+    const meta = [...box.querySelectorAll('.card-meta')].map(m => m.textContent).join(' | ');
+    /* 剧集卡：底部只留名字，那行小字（第 1 季 · 4K · 杜比视界）不出 */
+    box.innerHTML = tvCardHTML({ title: '幕府将军', en: 'Shogun', zh: '幕府将军', folder: 'Shogun.S01.2160p.DV', path: '/ram2/x', id: 'x', seasonLabel: '第 1 季', res: '4K', hdr: 'DV', episodes: 3 });
+    const foot = box.querySelector('.tv-foot').textContent;
+    return { html: box.querySelectorAll('.tag-border').length > 0 || /8K|高动态|DV|HDR|4K/.test(meta), meta, dom: document.querySelectorAll('.card .tag-border').length,
+      tvFoot: !box.querySelector('.tv-foot-s') && !/4K|杜比视界|第 1 季/.test(foot) && /Shogun/.test(foot) };
+  });
+  ok(!nb.html && nb.dom === 0 && nb.tvFoot, `卡片上不出 DV / 8K+ / 高动态这类规格小标签（文件名写满规格的卡，底下只写「${nb.meta}」；首页与搜索结果里的卡：${nb.dom} 枚）；剧集卡底部只留名字`);
+  /* 年份那行字不被卡的圆角裁到：卡自己带圆角又挂着 contain: paint，原来卡框下沿就是年份的下沿，左下角的圆弧切掉「2026」的 2 一角。
+     现在卡框往下多出一个圆角半径（再用等量负外边距收回，版面不动） */
+  const corner = await zp.evaluate(() => {
+    /* 一张卡一行：同一行里矮的那张会被拉高到和高的一样（flex 默认 stretch），量不出它自己的下沿 */
+    return [videoCardHTML({ name: 'Gatta.Kusthi.2.2026.mkv', path: '/Movies/g.mkv' }), videoCardHTML({ name: 'Wide.Film.2026.mkv', path: '/Movies/w.mkv' }, { landscape: true })].map(html => {
+      const row = document.createElement('div'); row.className = 'scroll-row'; row.style.cssText = 'position:fixed;left:0;top:0;';
+      row.innerHTML = html;
+      document.body.appendChild(row);
+      const c = row.querySelector('.card'), m = c.querySelector('.card-meta').getBoundingClientRect(), r = c.getBoundingClientRect(), cs = getComputedStyle(c);
+      const res = { gap: Math.round((r.bottom - m.bottom) * 10) / 10, radius: parseFloat(cs.borderBottomLeftRadius), flush: Math.abs(r.bottom + parseFloat(cs.marginBottom) - m.bottom) <= .5 };
+      row.remove();
+      return res;
+    });
+  });
+  ok(corner.length === 2 && corner.every(c => c.gap >= c.radius - .5 && c.flush),
+    `卡片底下那行年份不被卡的圆角裁到：字下面留出 ${corner.map(c => c.gap).join(' / ')}px（≥ 圆角半径），版面不动`);
   const again = await zp.evaluate(() => videoCardHTML({ name: 'long.mp4', path: '/Movies/long.mp4' }).includes('漫长的测试'));
   ok(again, '记进中文名索引：之后新排的卡一出来就是中文');
   const hit = await zp.evaluate(() => { runSearch('漫长'); return !!document.querySelector('#searchBody .card[data-name="long.mp4"]'); });
@@ -641,9 +677,15 @@ for (const [w, h, label, mode, sai] of [[382, 580, '折起竖拿', 'float'], [46
     const midX = b => b ? (b.left + b.right) / 2 : NaN;
     const btns = r(card && card.querySelector('.hero-buttons')), ttl = r(card && (card.querySelector('.hero-logo-img') || card.querySelector('.hero-logo-text')));
     const aligned = Math.abs(midX(btns) - midX(dots)) <= 4 && (!ttl || Math.abs(midX(ttl) - midX(dots)) <= 4);
-    /* 沉浸：大图铺满一整屏，暂停钮与轮播点在 Home 指示条之上 */
-    const deck = r(document.querySelector('.hero-deck'));
+    /* 大图那一块占满一整屏，圆点在 Home 指示条之上 */
+    const deckEl = document.querySelector('.hero-deck'), deck = r(deckEl);
     const immersive = !!deck && Math.abs(deck.top) <= 1 && Math.abs(deck.height - innerHeight) <= 1 && dots.bottom <= innerHeight - 14;
+    /* 一打开就是卡片态（没滚动）：没有铺满整屏的大图那一态，也没有吸顶空转的那段行程；卡左右露出邻卡，卡下是圆点（不是进度条） */
+    const cc = r(card), run = document.querySelector('#view-home .hero-run');
+    const sib = [...document.querySelectorAll('.hcard:not(.is-center)')].map(r).filter(b => b.width > 0 && b.right > 0 && b.left < innerWidth);
+    const cardNow = scrollY === 0 && !!(deckEl && cc) && deckEl.classList.contains('morphed') && Math.abs(parseFloat(getComputedStyle(deckEl).getPropertyValue('--m')) - 1) < 0.01
+      && !!run && run.getBoundingClientRect().height === 0 && cc.left >= 8 && cc.width < innerWidth * 0.9 && sib.length >= 1
+      && getComputedStyle(document.getElementById('heroDots'), '::after').content === 'none';
     /* 文案三行：片名 → 年份胶囊 → 按钮；片名下那行（类型 · 片长 / 严选标）不出 */
     const st = r(card && card.querySelector('.hero-status')), tg = card && card.querySelector('.hero-tags');
     const order3 = !!(st && ttl && btns) && ttl.bottom <= st.top + 1 && st.bottom <= btns.top + 1 && (!tg || getComputedStyle(tg).display === 'none');
@@ -657,21 +699,20 @@ for (const [w, h, label, mode, sai] of [[382, 580, '折起竖拿', 'float'], [46
     const clear = !!(nav && play && dots) && play.top >= 0 && (float
       ? apart(play, nav) && apart(circ, nav) && apart(dots, nav) && nav.left > innerWidth / 2 && nav.right >= innerWidth - 24
         && nav.width <= 56 && Math.abs((nav.top + nav.bottom) / 2 - innerHeight * 0.55) <= 6
-        && newNav && shift === 0 && aligned && immersive && order3
+        && newNav && shift === 0 && aligned && immersive && cardNow && order3
       : rail ? apart(play, nav) && apart(dots, nav) && play.left >= nav.right
       : play.bottom <= nav.top && dots.bottom <= nav.top);
     const pillOk = float ? newNav : !!(pill && act) && Math.abs(pill.left - act.left) <= 2 && Math.abs(pill.top - act.top) <= 2 && Math.abs(pill.width - act.width) <= 2 && Math.abs(pill.height - act.height) <= 2;
     return { mode: float ? 'float' : rail ? 'rail' : 'bottom', vertical: nav ? nav.height > nav.width : false, clear, pillOk, sw: document.documentElement.scrollWidth, vw: innerWidth };
   });
   ok(g.mode === mode && g.vertical === (mode !== 'bottom') && g.clear && g.pillOk && g.sw === g.vw,
-    `${label} ${w}×${h}：${DESC[mode]}，${mode === 'float' ? '选中项有柔光圆底' : '选中指示器对齐'}，主视觉的按钮与轮播点不被导航挡住${mode === 'float' ? '、居中到导航左边那块，大图铺满整屏，文案是片名 → 年份胶囊 → 按钮' : ''}，没有横向溢出${g.mode === mode ? '' : `（实际：${g.mode}）`}`);
+    `${label} ${w}×${h}：${DESC[mode]}，${mode === 'float' ? '选中项有柔光圆底' : '选中指示器对齐'}，主视觉的按钮与轮播点不被导航挡住${mode === 'float' ? '、居中到导航左边那块；一打开就是卡片态（左右露出邻卡、卡下一排圆点，不先铺满整屏），卡上只留片名（年份胶囊、按钮收在它下面）' : ''}，没有横向溢出${g.mode === mode ? '' : `（实际：${g.mode}）`}`);
 }
-/* 往下一滚、大图收成卡片：卡落在导航左边那块，不钻到导航底下（实机的右侧安全区）。卡下不是与卡同宽的进度条，
+/* 一打开（不用往下滚）就是卡片态：卡落在导航左边那块，不钻到导航底下（实机的右侧安全区）。卡下不是与卡同宽的进度条，
    而是 iOS 页码控件那样的圆点胶囊：紧凑、居中在卡下，一张一颗点，当前那颗纯白、略大，其余半透明 */
 await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: { top: 0, right: 84, bottom: 20, left: 0 } });
 await pd.setViewportSize({ width: 466, height: 678 });
-await pd.waitForTimeout(600);
-await pd.evaluate(() => scrollTo(0, 300));
+await pd.evaluate(() => scrollTo(0, 0));
 await pd.waitForTimeout(900);
 const dotsOf = () => pd.evaluate(() => {
   const r = e => e.getBoundingClientRect(), ul = document.getElementById('heroDots');
@@ -680,17 +721,17 @@ const dotsOf = () => pd.evaluate(() => {
     const a = li.querySelector('.dotnav-link'), b = r(a);
     return { w: Math.round(b.width * 10) / 10, bg: getComputedStyle(a).backgroundColor, cur: a.classList.contains('current') };
   });
-  return { morphed: document.querySelector('.hero-deck').classList.contains('morphed'), card: [Math.round(c.left), Math.round(c.right), Math.round(c.bottom)],
+  return { y: Math.round(scrollY), morphed: document.querySelector('.hero-deck').classList.contains('morphed'), card: [Math.round(c.left), Math.round(c.right), Math.round(c.bottom)],
     cap: [Math.round(q.left), Math.round(q.right), Math.round(q.top), Math.round(q.height)], nav: Math.round(n.left),
     bar: getComputedStyle(ul, '::after').content, dots, n: state.heroVideos.length, idx: state.heroIdx, playing: AAP.playing };
 });
 const mo = await dotsOf();
 const cur0 = mo.dots.find(d => d.cur), rest0 = mo.dots.filter(d => !d.cur);
-ok(mo.morphed && mo.card[1] <= mo.nav - 8 && Math.abs((mo.cap[0] + mo.cap[1]) / 2 - (mo.card[0] + mo.card[1]) / 2) <= 2
+ok(mo.y === 0 && mo.morphed && mo.card[1] <= mo.nav - 8 && Math.abs((mo.cap[0] + mo.cap[1]) / 2 - (mo.card[0] + mo.card[1]) / 2) <= 2
   && mo.cap[1] - mo.cap[0] < (mo.card[1] - mo.card[0]) * 0.6 && mo.cap[3] >= 28 && mo.cap[3] <= 32 && mo.cap[2] >= mo.card[2] + 8
   && mo.bar === 'none' && mo.n > 1 && mo.dots.length === mo.n && !!cur0 && cur0.bg === 'rgb(255, 255, 255)'
   && rest0.every(d => d.bg === 'rgba(255, 255, 255, 0.5)' && cur0.w > d.w * 1.1),
-  `折起竖拿 · 大图收成卡片：卡 ${mo.card[0]}–${mo.card[1]} 停在导航（${mo.nav}）左边；卡下是居中的圆点胶囊（${mo.cap[0]}–${mo.cap[1]}，${mo.cap[3]} 高），` +
+  `折起竖拿 · 一打开（没滚动）就是卡片态：卡 ${mo.card[0]}–${mo.card[1]} 停在导航（${mo.nav}）左边；卡下是居中的圆点胶囊（${mo.cap[0]}–${mo.cap[1]}，${mo.cap[3]} 高），` +
   `${mo.dots.length} 张 ${mo.dots.length} 颗点，当前那颗纯白、略大（${cur0 && cur0.w} / ${rest0[0] && rest0[0].w}），不再是进度条`);
 /* 点最后一颗：跳到那一张；卡片态照旧不自动轮播（原来直接走 _jumpAap 会把轮播开起来） */
 await pd.click(`#heroDots .dotnav-item:nth-child(${mo.n}) .dotnav-link`);
@@ -716,13 +757,39 @@ const pat = (ds, l, r) => ds.length === 8 && (l ? small(ds[0]) && small(ds[1]) &
 ok(pat(many[2], false, true) && many[2][2].cur && pat(many[5], true, true) && many[5][4].cur && pat(many[10], true, false) && many[10][7].cur,
   `折起竖拿 · 片单超过 8 张：只排 8 颗，第 3 张时右端两颗渐小（${many[2].map(d => d.w).join(' ')}），` +
   `居中时两端渐小（${many[5].map(d => d.w).join(' ')}），到末尾左端渐小（${many[10].map(d => d.w).join(' ')}）`);
+/* 往下滚：大图跟着页面一起滚走（没有吸在顶上空转的那段行程），一直是卡片态 */
+await pd.evaluate(() => scrollTo(0, 200));
+await pd.waitForTimeout(500);
+const sc1 = await pd.evaluate(() => { const d = document.querySelector('.hero-deck');
+  return { y: Math.round(scrollY), top: Math.round(d.getBoundingClientRect().top), morphed: d.classList.contains('morphed'), m: getComputedStyle(d).getPropertyValue('--m').trim() }; });
+ok(sc1.y === 200 && Math.abs(sc1.top + 200) <= 1 && sc1.morphed && Math.abs(parseFloat(sc1.m) - 1) < 0.01,
+  `折起竖拿 · 往下滚 ${sc1.y}：大图跟着页面滚走（顶边到 ${sc1.top}），没有吸顶空转那一截，一直是卡片态（--m ${sc1.m}）`);
 await pd.evaluate(() => scrollTo(0, 0));
 await pd.waitForTimeout(500);
+/* 卡上不出按钮（与图一一样）：点中间那张开它的详情页；点露在左边的邻卡就翻到那张（不开详情、不开始轮播） */
+const pts = await pd.evaluate(() => {
+  const r = e => e.getBoundingClientRect(), c = r(document.querySelector('.hcard.is-center'));
+  const left = [...document.querySelectorAll('.hcard:not(.is-center)')].map(e => [e, r(e)]).find(([, b]) => b.left < 0 && b.right > 6);
+  const lx = left ? left[1].right / 2 : -1, ly = (c.top + c.bottom) / 2, hit = left && document.elementFromPoint(lx, ly);
+  return { cx: (c.left + c.right) / 2, cy: c.top + c.height * 0.3, lx, ly, leftOk: !!hit && hit.closest('.hcard') === left[0],
+    leftIdx: left ? state.heroVideos.indexOf(left[0]._video) : -1, idx: state.heroIdx };
+});
+await pd.mouse.click(pts.cx, pts.cy);
+const opened = await until(pd, () => document.getElementById('detailView').classList.contains('on'), null, 8000).then(() => true, () => false);
+await pd.evaluate(() => closeDetail());
+await pd.waitForTimeout(800);
+await pd.mouse.click(pts.lx, pts.ly);
+await pd.waitForTimeout(900);
+const tapped = await pd.evaluate(() => ({ idx: state.heroIdx, det: document.getElementById('detailView').classList.contains('on'), playing: AAP.playing }));
+ok(opened && pts.leftOk && pts.leftIdx >= 0 && tapped.idx === pts.leftIdx && !tapped.det && !tapped.playing,
+  `折起竖拿 · 卡上不出按钮：点中间那张开它的详情页${opened ? '' : '（没开）'}；点露在左边的邻卡翻到那张（第 ${pts.idx + 1} → ${tapped.idx + 1} 张，` +
+  `不开详情、不开始轮播）${pts.leftOk ? '' : '（左边没有露出的邻卡）'}`);
 /* 资料库展映：背景视频、片名都收在右侧那一列（状态栏 + 导航）以左，那一列底下是黑的；
-   画面右上角的播放 / 静音不出，进资料库时并进导航胶囊（「资料库」下面长出两格），离开就收回 */
+   画面右上角的播放钮不出，进资料库时顶替「资料库」那一格并进导航胶囊，离开就换回；预告片一律静音，没有声音钮 */
 const navBox = () => pd.evaluate(() => { const r = e => e.getBoundingClientRect(), d = r(document.getElementById('dock')), m = r(document.getElementById('navMedia'));
   return { on: document.documentElement.classList.contains('sc-nav'), top: Math.round(d.top), h: Math.round(d.height), at55: Math.abs((d.top + d.bottom) / 2 - innerHeight * .55) <= 6, grp: Math.round(m.height), op: +getComputedStyle(document.getElementById('navMedia')).opacity,
-    selOp: +getComputedStyle(document.querySelector('#dock .nav-sel')).opacity, homeGlass: getComputedStyle(document.getElementById('navHome')).backgroundColor !== 'rgba(0, 0, 0, 0)' }; });
+    selOp: +getComputedStyle(document.querySelector('#dock .nav-sel')).opacity, homeGlass: getComputedStyle(document.getElementById('navHome')).backgroundColor !== 'rgba(0, 0, 0, 0)',
+    libBack: (() => { const lb = document.getElementById('navLib'), c = getComputedStyle(lb); return Math.abs(lb.getBoundingClientRect().height - 44) <= 1 && +c.opacity === 1 && c.visibility === 'visible'; })() }; });
 const home0 = await navBox();
 const libRes = {};
 for (const [w, h, sai, col, tag] of [[466, 678, { top: 0, right: 84, bottom: 20, left: 0 }, 84, '主屏幕 App（右侧 84px 那一列）'], [382, 580, NO_SAI, 72, 'Safari（导航自己那一条 72px）']]) {
@@ -736,33 +803,32 @@ for (const [w, h, sai, col, tag] of [[466, 678, { top: 0, right: 84, bottom: 20,
     const r = e => e && e.getBoundingClientRect(), edge = innerWidth - col;
     const view = r(document.getElementById('view-library')), st = r(document.querySelector('.sc-chapter .sc-sticky')), cp = r(document.querySelector('.sc-chapter .sc-copy'));
     const d = r(document.getElementById('dock')), m = r(document.getElementById('navMedia')), lib = r(document.getElementById('navLib')), srch = r(document.getElementById('navSearch'));
-    const play = document.getElementById('navScPlay'), mute = document.getElementById('navScMute');
+    const play = document.getElementById('navScPlay');
     return { edge, view: Math.round(view.right), sticky: Math.round(st.right), copyMid: Math.round((cp.left + cp.right) / 2),
       fenced: Math.round(view.right) <= edge && Math.round(st.right) <= edge && Math.abs((cp.left + cp.right) / 2 - edge / 2) <= 3 && document.documentElement.scrollWidth === innerWidth,
-      merged: document.documentElement.classList.contains('sc-nav') && m.height >= 88 && m.top >= lib.bottom - 1 && m.bottom <= srch.top + 1 && m.left >= d.left && m.right <= d.right
-        && Math.abs((d.top + d.bottom) / 2 - innerHeight * .55) <= 6 && !play.disabled && play.dataset.state === 'playing' && mute.dataset.muted === '1'
+      merged: document.documentElement.classList.contains('sc-nav') && m.height >= 40 && m.height <= 48 && m.top >= lib.bottom - 1 && m.bottom <= srch.top + 1 && m.left >= d.left && m.right <= d.right
+        && Math.abs((d.top + d.bottom) / 2 - innerHeight * .55) <= 6 && !play.disabled && play.dataset.state === 'playing' && !document.getElementById('navScMute')
         && [...document.querySelectorAll('.sc-chapter .sc-mediactl, .sc-chapter .sc-mutectl')].every(b => getComputedStyle(b).display === 'none'),
       /* 标题那一条：画面从屏幕最上沿铺起，标题浮在上面；底下四层渐进模糊（模糊一层比一层重、遮罩一层比一层往上收）+ 由暗到透明 */
       under: (() => { const hd = r(document.querySelector('#view-library > .library-header')), layers = [...document.querySelectorAll('.library-veil > i')].map(i => getComputedStyle(i));
         const px = layers.map(c => parseFloat(((c.backdropFilter || c.webkitBackdropFilter || '').match(/blur\(([\d.]+)px\)/) || [])[1] || 0));
         return Math.abs(st.top) <= 1 && hd.top <= 1 && hd.bottom >= 100 && cp.top > hd.bottom && layers.length === 4 && px.every((v, i) => v > 0 && (!i || v > px[i - 1]))
           && layers.every(c => /gradient/.test(c.maskImage || c.webkitMaskImage || '')); })(),
-      /* 选中项的玻璃：一枚竖胶囊从「资料库」上沿包到静音下沿；「资料库」自己那圈圆底让给它 */
-      sel: (() => { const pill = document.querySelector('#dock .nav-sel'), pr = r(pill), lb = r(document.getElementById('navLib')), mt = r(mute);
-        return +getComputedStyle(pill).opacity === 1 && Math.abs(pr.top - lb.top) <= 2 && Math.abs(pr.bottom - mt.bottom) <= 2 && Math.abs(pr.left - lb.left) <= 2 && Math.abs(pr.right - lb.right) <= 2
-          && getComputedStyle(document.getElementById('navLib')).backgroundColor === 'rgba(0, 0, 0, 0)'; })(),
+      capH: Math.round(d.height),
+      /* 「资料库」那一格让位（收成 0 高、看不见），播放钮顶上它的位置；选中项的玻璃包住播放钮 */
+      sel: (() => { const pill = document.querySelector('#dock .nav-sel'), pr = r(pill), lbEl = document.getElementById('navLib'), lb = r(lbEl), pl = r(play);
+        return +getComputedStyle(pill).opacity === 1 && Math.abs(pr.top - pl.top) <= 2 && Math.abs(pr.bottom - pl.bottom) <= 2 && Math.abs(pr.left - pl.left) <= 2 && Math.abs(pr.right - pl.right) <= 2
+          && lb.height <= 1 && getComputedStyle(lbEl).visibility === 'hidden' && pl.top >= r(document.getElementById('navHome')).bottom; })(),
       round: (() => { const av = document.getElementById('headerAvatar'), w = av.getBoundingClientRect().width, rad = getComputedStyle(av).borderTopLeftRadius;
         return rad === '50%' || Math.abs(parseFloat(rad) - w / 2) <= 1; })() };
   }, col);
   if (tag.startsWith('主屏幕')) {
-    /* 点胶囊里那两格：转给眼前那一章自己的钮 —— 暂停 / 接着放、解除静音 / 再静音 */
+    /* 点胶囊里那一格：转给眼前那一章自己的钮 —— 暂停 / 接着放；预告片始终静音 */
     const vstate = () => pd.evaluate(() => { const v = document.querySelector('.sc-chapter .sc-media video');
-      return { paused: v.paused, muted: v.muted, nav: document.getElementById('navScPlay').dataset.state, navMuted: document.getElementById('navScMute').dataset.muted }; });
+      return { paused: v.paused, muted: v.muted, nav: document.getElementById('navScPlay').dataset.state }; });
     await pd.click('#navScPlay'); await pd.waitForTimeout(400); const a = await vstate();
     await pd.click('#navScPlay'); await pd.waitForTimeout(600); const b = await vstate();
-    await pd.click('#navScMute'); await pd.waitForTimeout(300); const c2 = await vstate();
-    await pd.click('#navScMute'); await pd.waitForTimeout(300); const d2 = await vstate();
-    libRes.ctl = { a, b, c: c2, d: d2, ok: a.paused && a.nav === 'paused' && !b.paused && b.nav === 'playing' && !c2.muted && c2.navMuted === '0' && d2.muted && d2.navMuted === '1' };
+    libRes.ctl = { a, b, ok: a.paused && a.nav === 'paused' && !b.paused && b.nav === 'playing' && a.muted && b.muted };
   }
   await pd.evaluate(() => navTo('home'));
   await pd.waitForTimeout(1000);
@@ -775,11 +841,12 @@ ok(la.fenced && ls.fenced,
 ok(la.under && ls.under,
   '折起竖拿 · 资料库：标题那一条不是黑底硬边 —— 画面从屏幕最上沿铺起，标题浮在上面，底下四层渐进模糊（越往上越糊）+ 由暗到透明');
 ok(la.sel && ls.sel && la.round && ls.round,
-  '折起竖拿 · 资料库：选中项的玻璃把「资料库」和长出来的播放 / 静音一起包成一枚竖胶囊；底部头像是圆形');
-ok(la.merged && ls.merged && libRes.ctl.ok,
-  `折起竖拿 · 资料库：播放 / 静音并进导航胶囊（「资料库」下面两格，胶囊中心仍在 55% 高处，画面上不再有那两个钮）；点它们转给眼前这一章：暂停 / 接着放、解除静音 / 再静音（${JSON.stringify(libRes.ctl)}）`);
-ok(!home0.on && home0.grp === 0 && !home1.on && home1.grp === 0 && home1.op === 0 && Math.abs(home1.h - home0.h) <= 1 && home0.at55 && home1.at55 && home1.selOp === 0 && home1.homeGlass,
-  `折起竖拿 · 离开资料库：那两格和包住它们的玻璃一起收回，胶囊回到原来的高（${home0.h} → ${home1.h}），选中的圆底回到「主页」`);
+  '折起竖拿 · 资料库：「资料库」那一格让位（图标收掉），播放钮顶上它的位置，选中项的玻璃包住它；底部头像是圆形');
+ok(la.merged && ls.merged && libRes.ctl.ok && la.capH === home0.h && ls.capH === home0.h,
+  `折起竖拿 · 资料库：播放 / 暂停并进导航胶囊（顶替「资料库」那一格，胶囊不长不缩（${la.capH}），中心仍在 55% 高处，画面上不再有那个钮，没有声音钮）；` +
+  `点它转给眼前这一章：暂停 / 接着放，预告片始终静音（${JSON.stringify(libRes.ctl)}）`);
+ok(!home0.on && home0.grp === 0 && !home1.on && home1.grp === 0 && home1.op === 0 && Math.abs(home1.h - home0.h) <= 1 && home0.at55 && home1.at55 && home1.selOp === 0 && home1.homeGlass && home1.libBack,
+  `折起竖拿 · 离开资料库：播放钮和包住它的玻璃一起收回，「资料库」图标长回来，胶囊仍是原来的高（${home0.h} → ${home1.h}），选中的圆底回到「主页」`);
 await pd.evaluate(() => scrollTo(0, 0));
 await pd.waitForTimeout(300);
 await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: NO_SAI });
@@ -844,7 +911,7 @@ for (const [label, opts] of [['普通 iPhone（393 宽）', devices['iPhone 15 P
     const st = card.querySelector('.hero-status').getBoundingClientRect(), lg = card.querySelector('.hero-logo-wrap').getBoundingClientRect();
     const tags = getComputedStyle(card.querySelector('.hero-tags')).display !== 'none';
     return { off: !c.contains('rail') && !c.contains('rail-float'), bottom: n.bottom >= innerHeight - 90 && n.width > n.height, deck: Math.round(d.height), vh: innerHeight,
-      same: tags && st.bottom <= lg.top + 1 }; });
+      same: tags && st.bottom <= lg.top + 1, full0: scrollY === 0 && !document.querySelector('.hero-deck').classList.contains('morphed') }; });
   /* 收成卡片后卡下照旧是那条与卡同宽的浏览进度条（圆点胶囊只给 Duo 折起）。等它真的收成卡（机器忙时滚动后的那一帧会晚到），
      再等合并那 .4 秒的宽度过渡走完 */
   await pa.evaluate(() => scrollTo(0, 400));
@@ -857,17 +924,18 @@ for (const [label, opts] of [['普通 iPhone（393 宽）', devices['iPhone 15 P
       && (!li || getComputedStyle(li).display === 'none') && Math.abs(q.left - c.left) <= 2 && Math.abs(q.right - c.right) <= 2,
       card: [Math.round(c.left), Math.round(c.right)], bar: [Math.round(q.left), Math.round(q.right)], fill: af.width };
   });
-  ok(b.off && b.bottom && b.deck < b.vh - 40 && b.same && bar.ok,
-    `${label}：不当成 iPhone Duo，照旧底部胶囊；大图照旧不铺满（${b.deck} / ${b.vh}），文案照旧（年份胶囊在片名上面，类型那行还在），` +
-    `收成卡片后卡下照旧是与卡同宽的进度条（卡 ${bar.card.join('–')}，进度条 ${bar.bar.join('–')}）${b.off && b.bottom && b.same ? '' : JSON.stringify(b)}`);
+  ok(b.off && b.bottom && b.deck < b.vh - 40 && b.same && b.full0 && bar.ok,
+    `${label}：不当成 iPhone Duo，照旧底部胶囊；大图照旧不铺满（${b.deck} / ${b.vh}），一打开照旧是全出血大图、往下滚才收成卡，文案照旧（年份胶囊在片名上面，类型那行还在），` +
+    `收成卡片后卡下照旧是与卡同宽的进度条（卡 ${bar.card.join('–')}，进度条 ${bar.bar.join('–')}）${b.off && b.bottom && b.same && b.full0 ? '' : JSON.stringify(b)}`);
   if (label.startsWith('普通 iPhone')) {
-    /* 资料库照旧：展映铺满整宽，播放 / 静音还在画面右上角，导航里没有多出那两格 */
+    /* 资料库照旧：展映铺满整宽，播放钮还在画面右上角（没有声音钮），导航里没有多出那一格 */
     await pa.evaluate(() => navTo('library'));
     await until(pa, () => { const c = document.querySelector('.sc-chapter .sc-mediactl'); return !!(c && !c.hidden); }, null, 40000).catch(() => {});
     await pa.waitForTimeout(600);
     const lb = await pa.evaluate(() => ({ full: Math.round(document.getElementById('view-library').getBoundingClientRect().width) === innerWidth,
-      ctl: getComputedStyle(document.querySelector('.sc-chapter .sc-mediactl')).display !== 'none', nav: getComputedStyle(document.getElementById('navMedia')).display === 'none' }));
-    ok(lb.full && lb.ctl && lb.nav, `${label} · 资料库：展映照旧铺满整宽，播放 / 静音照旧在画面右上角，导航里不多出两格（${JSON.stringify(lb)}）`);
+      ctl: getComputedStyle(document.querySelector('.sc-chapter .sc-mediactl')).display !== 'none' && !document.querySelector('.sc-chapter .sc-mutectl'),
+      nav: getComputedStyle(document.getElementById('navMedia')).display === 'none' }));
+    ok(lb.full && lb.ctl && lb.nav, `${label} · 资料库：展映照旧铺满整宽，播放钮照旧在画面右上角（没有声音钮），导航里不多出一格（${JSON.stringify(lb)}）`);
   }
   await ac.close();
 }
@@ -1205,8 +1273,8 @@ console.log('\n■ 年份页：一行一部的列表（竖版小海报 + 中文�
       `电影一行一部：竖版小海报在最左（2:3）、中文片名、「…」在行尾（${mv.map(x => x.title).join(' / ')}）`);
     /* 模拟的 TMDB 详情一律回「剧情」：被首页大图先取过详情的那部会是「剧情」，其余是搜索结果里那两个类型 */
     const viaSearch = mv.filter(x => /^(科幻 · 冒险|动画 · 家庭|战争 · 动作)$/.test(x.sub));
-    ok(mv.every(x => x.sub && x.sub !== '电影' && x.tags >= 1) && viaSearch.length >= 1,
-      `副标题是类型 + 规格徽标（${mv.map(x => x.sub).join(' / ')}）；类型来自 TMDB 搜索结果自带的类型编号，不多花请求`);
+    ok(mv.every(x => x.sub && x.sub !== '电影' && x.tags === 0) && tvr.every(x => x.tags === 0) && viaSearch.length >= 1,
+      `副标题只有类型（${mv.map(x => x.sub).join(' / ')}），没有 DV / 8K+ / 高动态这类规格小标签；类型来自 TMDB 搜索结果自带的类型编号，不多花请求`);
     ok(L.every(x => Math.abs(x.sepLeft - x.textLeft) <= 1), '行间发丝线从文字那一列起头，海报底下不画');
     ok(mv.every(x => /\/w185\//.test(x.img)), `小海报取 w185（${(mv[0] && mv[0].img.split('/t/p/')[1]) || ''}），不拉卡片那种大图`);
     ok(tvr.length === 1 && tvr[0].title === '幕府将军' && /集/.test(tvr[0].sub) && Math.abs(tvr[0].ratio - 1.5) < 0.05,

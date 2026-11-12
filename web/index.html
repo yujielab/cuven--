@@ -1176,7 +1176,6 @@ img.res-parked { opacity: 0 !important; }
 .tv-card.tv-loading .tv-kick   { width: 74px; }
 .tv-card.tv-loading .tv-title  { width: 62%; }
 .tv-card.tv-loading .tv-foot-n { width: 56%; }
-.tv-card.tv-loading .tv-foot-s { width: 36%; }
 .tv-card.tv-loading .tv-play   { background: var(--surface-2); border: none; box-shadow: none; }
 .tv-card.tv-loading .ico-ini { opacity: 0; }
 /* 字标是在元数据回来那一刻插进来的，而骨架要撑到「图真的画出来」——
@@ -1246,7 +1245,6 @@ img.res-parked { opacity: 0 !important; }
 .tv-foot-n { font-size: 16px; font-weight: 700; letter-spacing: -.014em; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 缩略图从方块变成 16:9 之后底栏宽了一截 —— 副行收到 12px 才装得下
    「第 1 季 · 4K · 杜比视界」这一串，不然尾巴会被切成「杜…」 */
-.tv-foot-s { font-size: 12px; font-weight: 500; color: rgba(255,255,255,.66); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tv-play {
   flex: none; height: 34px; min-width: 84px; padding: 0 20px; border: none; border-radius: var(--r-pill);
   background: rgba(255,255,255,.24); color: #fff;
@@ -2733,6 +2731,10 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 
 .card { position: relative; flex-shrink: 0; cursor: pointer; border-radius: var(--r-card); scroll-snap-align: start; contain: layout paint; }
 .card-portrait  { width: var(--card-w-p); } .card-landscape { width: var(--card-w-l); }
+/* 卡自己带圆角（海报 inherit 它），又挂着 contain: paint —— 绘制按带圆角的卡框裁。卡框的下沿就是最后那行字（年份）的下沿，
+   左下角那一截圆弧正好压在年份的头一个字上（「2026」的 2 被切掉一角）。卡框往下多撑一个圆角半径、再用等量的负外边距收回：
+   圆弧落到字下面的空白里，版面一像素不动。名次卡没有圆角、也不裁，它的大号数字又是贴卡框下沿摆的，不动它 */
+.card-portrait:not(.rank-card), .card-landscape { padding-bottom: var(--r-card); margin-bottom: calc(-1 * var(--r-card)); }
 @media (min-width: 768px)  { :root { --card-w-p: 196px; --card-w-l: 360px; } }
 @media (min-width: 1280px) { :root { --card-w-p: 216px; --card-w-l: 400px; } }
 @media (min-width: 1680px) { :root { --card-w-p: 236px; --card-w-l: 440px; } }
@@ -5223,8 +5225,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 
 /* ── 播放 / 暂停 + 进度环 ──────────────────────────────────────────── */
 
-/* 两个钮同规格、同一条淡出曲线、右上角竖排：位置抽成变量，
-   改一个数两个一起挪，不会走散 */
+/* 右上角那个钮（播放 / 暂停 + 进度环）：位置抽成变量。预告片一律静音，没有声音钮 */
 .lib-showcase {
   --sc-ctl-top: calc(env(safe-area-inset-top) + 18px);
   --sc-ctl-size: 38px;
@@ -5254,57 +5255,8 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 .sc-mediactl[hidden] { display: none; }
 .sc-mediactl:active { transform: scale(.94); }
 
-/* ── 静音钮：一章一个，只管本章这一条预告片 ─────────────────────────
-   翻到下一章重新从静音开始 —— 换片即换声，不把上一部的音量决定带过去。
-   解除静音这一下必须由真手势直接带出来：Safari 只认这一下，事后补的
-   video.muted = false 一律无效。 */
-.sc-mutectl {
-  position: absolute;
-  top: calc(var(--sc-ctl-top) + var(--sc-ctl-size) + var(--sc-ctl-gap));
-  right: max(20px, env(safe-area-inset-right));
-  z-index: 5;
-  display: grid;
-  width: var(--sc-ctl-size);
-  height: var(--sc-ctl-size);
-  padding: 0;
-  place-items: center;
-  border: 0;
-  border-radius: 50%;
-  outline: 0;
-  color: #fff;
-  background: transparent;
-  cursor: pointer;
-  opacity: var(--sc-ctl-opacity, 1);
-  transition: opacity .18s linear, transform .2s ease;
-}
-
-.sc-mutectl[hidden] { display: none; }
-.sc-mutectl:active { transform: scale(.94); }
-
-/* 图标那一层单独一个 class：不能用 .sc-mutectl svg 泛选，
-   描边环也是 svg，会被一起缩成 22px */
-.sc-mutectl .sc-spk {
-  position: relative;
-  z-index: 1;
-  width: 21px;
-  height: 21px;
-  overflow: visible;
-}
-.sc-mutectl .sc-spk path {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.9;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.sc-mutectl .sc-spk-body { fill: currentColor; stroke-width: 1.4; }
-.sc-mutectl[data-muted="1"] .sc-spk-wave { display: none; }
-.sc-mutectl[data-muted="0"] .sc-spk-slash { display: none; }
-
-.sc-chapter[data-state="skeleton"] .sc-mutectl { visibility: hidden; }
-
+/* 预告片一律静音，没有静音 / 开声音的钮 */
 .sc-mediactl:focus-visible,
-.sc-mutectl:focus-visible,
 .sc-gnav:focus-visible {
   outline: 3px solid rgba(10, 132, 255, .6);
   outline-offset: 3px;
@@ -5926,11 +5878,10 @@ html.rail.rail-float .dock:not(.searching) #headerAvatar:active { transform: sca
 
 /* ── 首页大图（hero）：按这块屏专门排 ──────────────────────────────────
    能放内容的是右侧那一列（状态栏 + 导航）以左的那一块 —— Safari 的视口本来就只有这么宽（466 − 84 = 382）。
-   · 全出血时：画面照旧铺满整屏（右边那一列也是画面），但标签、片名、按钮、暂停钮与轮播点都居中到左边那块，
-     彼此对齐，谁也不伸进右边那一列；左边那个给暂停钮配平的占位也收掉；
-   · 收成卡片时：卡落在左边那块里（左右边距收窄一档，卡不至于太窄），右邻那张从导航底下露一条边，
-     卡下面那条进度胶囊与卡同宽，同样不钻到导航底下。
-   步距、卡宽都还是那几条带 --m 的 calc，只是右边多减一个 --float-space；JS 的拖拽步距是从 DOM 量的，跟着变。 */
+   折起竖拿一打开就是卡片态，没有全出血那一态（--m 恒为 1，见下）：卡落在左边那块里（左右边距收窄一档，卡不至于太窄），
+   左右露出邻卡、右邻那张从导航底下露一条边；卡里的片名、年份胶囊、按钮居中对齐，卡下那排圆点同样不钻到导航底下。
+   步距、卡宽都还是那几条带 --m 的 calc，只是右边多减一个 --float-space；JS 的拖拽步距是从 DOM 量的，跟着变。
+   下面几条 :not(.morphed) 只管脚本打上 .morphed 之前的那一瞬。 */
 html.rail.rail-float .hero-deck {
   --gap-x: clamp(22px, 7vw, 40px);
   --pitch: calc(100% - var(--m) * (var(--gap-x) * 2 + var(--float-space)) + var(--gutter));
@@ -5942,11 +5893,14 @@ html.rail.rail-float .hcard {
 html.rail.rail-float .hero-deck:not(.morphed) .aap-host { padding-right: var(--float-space); }
 html.rail.rail-float .hero-deck:not(.morphed) .aap-host .aap-media-card-gallery.all-access-pass::before { width: 0; }
 html.rail.rail-float .hero-deck.morphed .aap-host { padding-right: calc(var(--m, 0) * var(--gap-x, 0px) + var(--float-space)); }
-/* 沉浸：大图铺满一整屏（别的手机是 85%）。状态栏在右边那一列，顶上没有要躲的 —— 画面从屏幕最上沿铺到最下沿，
-   主屏幕 App 里也不给顶上的安全区让位；片名与按钮跟着落到下半屏，暂停钮与轮播点抬到 Home 指示条之上。
-   往下一滚照旧收成卡片（形变的行程是 .hero-run 那一截，与大图多高无关） */
+/* 大图那一块占满一整屏（别的手机是 85%）：状态栏在右边那一列，顶上没有要躲的，主屏幕 App 里也不给顶上的安全区让位。
+   折起竖拿只有卡片态（见下）：卡落在这一屏里、左右露出邻卡，卡下一排圆点；不再有铺满整屏的那一态 */
 html.rail.rail-float .hero-deck,
 html.rail.rail-float.standalone .hero-deck { top: 0; height: 100svh; min-height: 0; max-height: none; }
+/* 一打开就是卡片态（见 updateHeroMorph）：没有「吸在顶上从大图收成卡」那段行程，大图跟着页面正常滚走；
+   脚本写 --m 之前的头一帧也已经是卡片的几何，不先闪一下整屏大图 */
+html.rail.rail-float .hero-run { height: 0; }
+html.rail.rail-float .hero-deck { --m: 1; }
 html.rail.rail-float.standalone .hero-stage { padding-top: 0; }
 html.rail.rail-float .hero-deck .aap-host { bottom: calc((1 - var(--m, 0)) * (var(--safe-b) + 16px) + var(--m, 0) * var(--gap-y, 0px)); }
 /* 文案只留三行：片名 → 「年份 · 类型」胶囊 → 按钮。片名下那行（类型 · 片长 / 严选标）不要，
@@ -5955,10 +5909,10 @@ html.rail.rail-float .hero-content > .hero-tags { display: none; }
 html.rail.rail-float .hero-content > .hero-logo-wrap { order: 1; transition-delay: 0s; }
 html.rail.rail-float .hero-content > .hero-status { order: 2; transition-delay: .08s; }
 html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay: .16s; }
-/* 收成卡片后卡下那一条：别的设备是与卡同宽的浏览进度条，这里换成 iOS 页码控件的样子 —— 一枚紧凑的玻璃胶囊
+/* 卡下那一条：别的设备是与卡同宽的浏览进度条，这里换成 iOS 页码控件的样子 —— 一枚紧凑的玻璃胶囊
    居中在卡下，一张一颗圆点：当前那颗纯白、略大，其余半透明，点哪颗跳到哪张。片单超过 8 张时只排 8 颗、跟着当前那张挪，
    还有更多的那一端最外两颗渐小（class 由 AAP.setCurrent 打）。胶囊 30 高，外面那层透明的 56 高不变，
-   中线还在原来那条进度条的中线上。全出血时的暂停钮 + 轮播点不变 */
+   中线还在原来那条进度条的中线上 */
 html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery.all-access-pass {
   width: auto; padding-inline: 0;
   background-color: transparent; box-shadow: none;
@@ -5998,22 +5952,20 @@ html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-a
    右侧那一列归状态栏与导航：主屏幕 App 里是那一整列安全区（实机约 84px），Safari 里是导航自己那一条（--float-space）。
    背景视频、剧照、压暗层、片名、介绍面板、剧照条都不越过它的左缘，那一列底下是黑的 —— 整个视图让出这一列，
    展映的几何（--app-w、满屏倍数按视图宽度量）跟着收窄，不用逐个元素去躲。只在展映形态；年份列表自己已经按 --float-space 让过。
-   画面右上角那两个钮（播放 / 暂停、静音）不在画面上了：进资料库时并进导航胶囊（见下一节） */
+   画面右上角那个播放 / 暂停钮不在画面上了：进资料库时并进导航胶囊（见下一节）。预告片一律静音，没有声音钮 */
 html.rail.rail-float #view-library:has(.lib-showcase) {
   --float-col: max(var(--float-space), env(safe-area-inset-right, 0px));
   --app-w: calc(100vw - var(--float-col));
   width: calc(100% - var(--float-col));
 }
 html.rail.rail-float .lib-showcase .sc-note { right: 20px; }
-html.rail.rail-float .lib-showcase .sc-mediactl,
-html.rail.rail-float .lib-showcase .sc-mutectl { display: none; }
+html.rail.rail-float .lib-showcase .sc-mediactl { display: none; }
 
-/* ── 导航胶囊里的播放 / 静音（折起竖拿 · 资料库）─────────────────────────
-   进资料库，胶囊在「资料库」那一格下面长出两格：播放 / 暂停（带预告片进度环）、静音；离开就收回去。
-   长出来的那两格由 0 高展开（grid 0fr → 1fr），胶囊的高（--fl-media）跟着加，中心仍钉在 55% 高处 ——
-   上下各长半截，top 在这一下补间（sc-nav-anim 只挂在切换那一刻，不去影响搜索态的形变）。
-   钮只是传话：状态照抄眼前那一章，点下去转给那一章自己的钮（解除静音得在这一下手势里，Safari 只认它） */
-html.rail.rail-float.sc-nav { --fl-media: calc(2 * var(--fl-item) + 2 * var(--fl-gap)); }
+/* ── 导航胶囊里的播放 / 暂停（折起竖拿 · 资料库）─────────────────────────
+   进资料库，「资料库」那一格让位（图标淡掉、格子并拢），播放 / 暂停（带预告片进度环）顶上它的位置；离开就倒回来。
+   那一格由 0 高展开（grid 0fr → 1fr），「资料库」那格同时收成 0 高 —— 一进一出，胶囊不长不缩（--fl-media 留着 0：
+   以后要在这里多放一格，胶囊的高、中心与 top 的补间都按它算，sc-nav-anim 只挂在切换那一刻，不去影响搜索态的形变）。
+   预告片一律静音，没有声音钮。钮只是传话：状态照抄眼前那一章，点下去转给那一章自己的钮 */
 html.rail.rail-float.sc-nav-anim .dock:not(.searching) {
   transition: transform .55s var(--ease-spring-soft), opacity .35s var(--ease-smooth), top .46s var(--ease-out);
 }
@@ -6044,18 +5996,12 @@ html.rail.rail-float.sc-nav .dock:not(.searching) .nav-media {
 .nm-btn > .sc-ico-pause, .nm-btn > .sc-ico-play { grid-area: 1 / 1; }
 .nm-play[data-state="paused"] .sc-ico-pause { display: none; }
 .nm-play[data-state="paused"] .sc-ico-play { display: block; }
-.nm-btn .sc-spk { position: relative; z-index: 1; width: 21px; height: 21px; overflow: visible; }
-.nm-btn .sc-spk path { fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
-.nm-btn .sc-spk-body { fill: currentColor; stroke-width: 1.4; }
-.nm-mute[data-muted="1"] .sc-spk-wave { display: none; }
-.nm-mute[data-muted="0"] .sc-spk-slash { display: none; }
 @media (prefers-reduced-motion: reduce) {
   html.rail.rail-float .dock:not(.searching) .nav-media { transition: opacity .2s linear; transform: none; }
   html.rail.rail-float.sc-nav-anim .dock:not(.searching) { transition: opacity .35s var(--ease-smooth); }
 }
-/* 选中项的玻璃把「资料库」和长出来的那两格一起包住：一枚竖着的玻璃胶囊，从「资料库」那一格的上沿
-   一直到静音那一格的下沿 —— 一眼看得出这两格是资料库自己的。它跟着那两格一起长（高 = 一格 + --fl-media，
-   同一条曲线、同一个时长），收回时淡掉；这时「资料库」自己那圈圆底让给它，免得叠两层 */
+/* 选中项的玻璃包住顶替了「资料库」的那一格（播放 / 暂停）—— 选中的还是资料库，只是它此刻长成了播放钮。
+   高 = 一格 + --fl-media（现在是 0，就是一枚圆），与「资料库」原来那圈圆底一模一样，换过来时看不出接缝；收回时淡掉 */
 .nav-sel { display: none; }
 html.rail.rail-float .dock:not(.searching) .nav-sel {
   display: block; position: absolute; z-index: 0; pointer-events: none;
@@ -6069,12 +6015,24 @@ html.rail.rail-float .dock:not(.searching) .nav-sel {
   transition: height .46s var(--ease-out), opacity .28s var(--ease-out);
 }
 html.rail.rail-float.sc-nav .dock:not(.searching) .nav-sel { opacity: 1; transition: height .46s var(--ease-out), opacity 0s; }
-html.rail.rail-float.sc-nav .dock:not(.searching) #navLib.active {
+/* 「资料库」那一格：在资料库里收成 0 高、图标淡掉（读屏 / Tab 也够不着 —— 眼下就在这一页），把位置让给播放钮；
+   离开时长回来，图标晚一拍淡入（格子先撑开一点，图标不会挤在一条缝里） */
+html.rail.rail-float .dock:not(.searching) #navLib {
+  overflow: hidden;
+  transition: background-color .25s var(--ease-out), color .25s var(--ease-out), transform var(--press-out),
+              height .46s var(--ease-out), margin-top .46s var(--ease-out), opacity .3s var(--ease-out) .12s;
+}
+html.rail.rail-float.sc-nav .dock:not(.searching) #navLib {
+  height: 0; margin-top: calc(-1 * var(--fl-gap)); opacity: 0;
+  visibility: hidden; pointer-events: none;
   background: transparent; box-shadow: none;
-  transition: color .25s var(--ease-out), transform var(--press-out);
+  transition: height .46s var(--ease-out), margin-top .46s var(--ease-out), opacity .16s var(--ease-out),
+              color .25s var(--ease-out), visibility 0s linear .46s;
 }
 @media (prefers-reduced-motion: reduce) {
   html.rail.rail-float .dock:not(.searching) .nav-sel { transition: opacity .2s linear; }
+  html.rail.rail-float .dock:not(.searching) #navLib,
+  html.rail.rail-float.sc-nav .dock:not(.searching) #navLib { transition: background-color .25s linear, color .25s linear; }
 }
 
 /* 资料库的标题那一条（折起竖拿）：不再是一条黑底压在画面上沿、中间一道硬边 —— 画面一直铺到屏幕最上沿，
@@ -6240,7 +6198,7 @@ html.rail.rail-float #view-library:has(.lib-showcase) .library-veil {
     var w = Math.min(screen.width, screen.height);
     return w >= 600 && w < 760;
   };
-  var root = document.documentElement, t = 0;
+  var root = document.documentElement, t = 0, gen = 0;
   var set = function () {
     var fl = duo(), on = q.matches || fl || open();
     if (root.classList.contains('rail') === on && root.classList.contains('rail-float') === fl) return;
@@ -6248,8 +6206,21 @@ html.rail.rail-float #view-library:has(.lib-showcase) .library-veil {
     root.classList.add('rail-switching');
     root.classList.toggle('rail', on);
     root.classList.toggle('rail-float', fl);
+    /* 当场把新形态的样式算出来。合上那一下页面若正忙（整页按新尺寸重排、重绘），120ms 里一帧都没画，
+       样式系统就从没见过「新形态 + 不补间」这一态：等 rail-switching 摘掉才头一回算，格子照样从旧尺寸慢慢补间过去
+       （折起后胶囊条的格子从 58 一点点缩到 44、选中项的玻璃也是半透明的）。先算一次，这一跳就定死了。
+       页面头一回打标时（还在 <head> 里）没有旧形态可补间，不用算 */
+    if (document.body) void root.offsetWidth;
     clearTimeout(t);
-    t = setTimeout(function () { root.classList.remove('rail-switching'); try { window.dispatchEvent(new Event('railchange')); } catch (_) {} }, 120);
+    var my = ++gen;
+    /* 摘 rail-switching 也等真画出一帧之后：跟着视口尺寸走的那些样式（媒体查询）是在下一帧才换的，也得在不补间时落定 */
+    t = setTimeout(function () {
+      requestAnimationFrame(function () { requestAnimationFrame(function () {
+        if (my !== gen) return;
+        root.classList.remove('rail-switching');
+        try { window.dispatchEvent(new Event('railchange')); } catch (_) {}
+      }); });
+    }, 120);
   };
   /* 翻开 / 合上时视口与屏幕尺寸不一定同一刻更新：媒体查询先变、screen 晚一拍的话，
      合上那一下会读到展开时的屏幕宽度、认不出这是 Duo 的外屏，导航就卡在错的形态上，直到下一次转屏。
@@ -6338,8 +6309,8 @@ html.rail.rail-float #view-library:has(.lib-showcase) .library-veil {
     </a>
   </nav>
 
-  <!-- 资料库展映的播放 / 静音：只在 iPhone Duo 折起时、进了资料库才并进这枚胶囊（「资料库」下面那两格），
-       别处一律不显示。状态与点击都转给眼前那一章自己的钮（见 SC 的 navSync） -->
+  <!-- 资料库展映的播放 / 暂停：只在 iPhone Duo 折起时、进了资料库才并进这枚胶囊（顶替「资料库」那一格），
+       别处一律不显示。状态与点击都转给眼前那一章自己的钮（见 SC 的 navSync）。预告片一律静音，没有声音钮 -->
   <div class="nav-media" id="navMedia" role="group" aria-label="预告片">
     <div class="nav-media-in">
       <button class="nm-btn nm-play" id="navScPlay" type="button" data-state="paused" aria-label="播放预告片" disabled>
@@ -6349,16 +6320,6 @@ html.rail.rail-float #view-library:has(.lib-showcase) .library-veil {
         </svg>
         <span class="sc-ico-pause" aria-hidden="true"></span>
         <span class="sc-ico-play" aria-hidden="true"></span>
-      </button>
-      <button class="nm-btn nm-mute" id="navScMute" type="button" data-muted="1" aria-label="取消静音" disabled>
-        <svg class="sc-ring" viewBox="0 0 40 40" aria-hidden="true"><circle class="sc-ring-track" cx="20" cy="20" r="17"></circle></svg>
-        <svg class="sc-spk" viewBox="0 0 24 24" aria-hidden="true">
-          <path class="sc-spk-body" d="M11 4.6 6.9 8H4.2a1.2 1.2 0 0 0-1.2 1.2v5.6A1.2 1.2 0 0 0 4.2 16h2.7l4.1 3.4a.55.55 0 0 0 .9-.42V5.02a.55.55 0 0 0-.9-.42z"></path>
-          <path class="sc-spk-wave" d="M15.4 9.4a3.7 3.7 0 0 1 0 5.2"></path>
-          <path class="sc-spk-wave" d="M18 6.8a7.4 7.4 0 0 1 0 10.4"></path>
-          <path class="sc-spk-slash" d="m15.4 9.6 5 4.8"></path>
-          <path class="sc-spk-slash" d="m20.4 9.6-5 4.8"></path>
-        </svg>
       </button>
     </div>
   </div>
@@ -13931,8 +13892,8 @@ setInterval(() => ResBudget.gc(), 30000);
 function videoCardHTML(v, opts) {
   opts = opts || {}; if (opts.landscape) return videoCardLandscapeHTML(v, opts);
   if (v && ArtGate.none(v.name)) return '';          /* 没有封面的不显示（见 ArtGate） */
-  const { year, tags } = parse(v.name); const title = showTitle(v.name); const top = topTag(tags); const k4 = tags.includes('4K'); const hd = tags.includes('HD'); let tagH = '';
-  if (top) tagH += ' <span class="tag-border ' + (top === 'DV' ? 'dv' : 'hdr') + '">' + top + '</span>'; if (k4) tagH += ' <span class="tag-border k4">8K+</span>'; else if (hd) tagH += ' <span class="tag-border hd">高动态</span>';
+  /* 卡片底下只写年份（与「最近更新」的相对时间）：DV、8K+、高动态这类规格小标签一律不出（详情页的「格式」照旧） */
+  const { year } = parse(v.name); const title = showTitle(v.name);
   const subParts = []; if (year) subParts.push(year); if (opts.showRelTime && v.ts) subParts.push(fmtRelTime(v.ts)); const sub = subParts.join(' · ');
   
   const playingBadge = opts.removable ? '<span class="card-playing-badge"><i class="ph-fill ph-play"></i>正在观看</span>' : '';
@@ -13945,19 +13906,18 @@ function videoCardHTML(v, opts) {
   return '<div class="card card-portrait' + rankCls + ' stagger-in" data-path="' + esc(v.path) + '" data-name="' + esc(v.name) + '" data-removable="' + (opts.removable ? '1' : '0') + '" tabindex="0" role="button" aria-label="' + esc((opts.rank ? '第 ' + opts.rank + ' 名，' : '') + (title || v.name)) + '">' +
     rankBadge +
     '<div class="card-poster" data-fn="' + esc(v.name) + '"><div class="fallback"><i class="ph ph-film-strip"></i></div>' + playingBadge + newBadge + menuBtn + (opts.removable ? cardProgressHTML(v.path) : '') + '</div>' +
-    '<div class="card-info"><div class="card-title">' + esc(title || v.name) + '</div><div class="card-meta">' + sub + tagH + '</div></div></div>';
+    '<div class="card-info"><div class="card-title">' + esc(title || v.name) + '</div><div class="card-meta">' + sub + '</div></div></div>';
 }
 
 function videoCardLandscapeHTML(v, opts) {
   if (v && ArtGate.none(v.name)) return '';
-  opts = opts || {}; const { year, tags } = parse(v.name); const title = showTitle(v.name); const top = topTag(tags); const k4 = tags.includes('4K'); const hd = tags.includes('HD'); let tagH = '';
-  if (top) tagH += ' <span class="tag-border ' + (top === 'DV' ? 'dv' : 'hdr') + '">' + top + '</span>'; if (k4) tagH += ' <span class="tag-border k4">8K+</span>'; else if (hd) tagH += ' <span class="tag-border hd">高动态</span>';
+  opts = opts || {}; const { year } = parse(v.name); const title = showTitle(v.name);   /* 规格小标签不出（同竖版卡） */
   const subParts = []; if (opts.showRelTime && v.ts) subParts.push(fmtRelTime(v.ts)); else if (year) subParts.push(year); const sub = subParts.join(' · ');
   const playingBadge = opts.removable ? '<span class="card-playing-badge"><i class="ph-fill ph-play"></i>正在观看</span>' : '';
   const menuBtn = opts.removable ? '<button class="card-menu" tabindex="-1" aria-label="更多操作"><svg class="sf-icon" viewBox="77 -45 874 874" fill="currentColor" style="width:1em;height:1em"><path d="M514 -45Q469 -45 426.5 -36.5Q384 -28 344 -11Q305 6 270.0 29.5Q235 53 205 83Q175 113 151.5 147.5Q128 182 111 222Q94 262 85.5 304.0Q77 346 77 392Q77 437 85.5 479.5Q94 522 111 561Q128 601 151.5 636.0Q175 671 205 701Q235 731 270.0 754.5Q305 778 344 795Q384 812 426.5 820.5Q469 829 514 829Q559 829 601.5 820.5Q644 812 684 795Q723 778 758.0 754.5Q793 731 823 701Q853 671 876.5 636.0Q900 601 917 561Q934 522 942.5 479.5Q951 437 951 392Q951 346 942.5 304.0Q934 262 917 222Q900 182 876.5 147.5Q853 113 823 83Q793 53 758.0 29.5Q723 6 684 -11Q644 -28 601.5 -36.5Q559 -45 514 -45ZM514 27Q552 27 587.0 34.5Q622 42 655 56Q688 70 717.0 89.5Q746 109 771 134Q797 159 816.5 188.0Q836 217 850 250Q864 283 871.0 318.5Q878 354 878 392Q878 429 871.0 464.5Q864 500 850 533Q836 566 816.5 595.0Q797 624 771 649Q746 674 717.0 694.0Q688 714 655 728Q622 742 587.0 749.0Q552 756 514 756Q476 756 440.5 749.0Q405 742 372 728Q339 714 310.0 694.0Q281 674 256 649Q231 624 211.5 595.0Q192 566 178 533Q164 500 157.0 464.5Q150 429 150 392Q150 354 157.0 318.5Q164 283 178 250Q192 217 211.5 188.0Q231 159 256 134Q281 109 310.0 89.5Q339 70 372 56Q405 42 440.5 34.5Q476 27 514 27ZM329 392Q322 392 316.5 394.0Q311 396 307 401Q303 405 300.5 410.5Q298 416 298 423V572Q298 581 300.5 588.0Q303 595 307 599Q312 603 318.5 605.0Q325 607 333 607H482Q488 607 493.5 604.5Q499 602 503 598Q508 594 510.0 588.5Q512 583 512 577Q512 571 510.0 565.5Q508 560 503 555Q499 551 493.5 548.5Q488 546 482 546L461 547L396 551L492 459Q497 454 499.0 448.5Q501 443 501 436Q502 429 499.5 423.5Q497 418 492 413Q488 408 482.0 406.0Q476 404 470 404Q463 404 457.5 406.5Q452 409 447 414L354 511L359 443V423Q359 416 356.5 410.5Q354 405 350 401Q345 396 340.0 394.0Q335 392 329 392ZM545 176Q539 176 533.5 178.0Q528 180 524 185Q519 189 517.0 194.5Q515 200 515 206Q515 212 517.0 217.5Q519 223 524 228Q528 232 533.5 234.5Q539 237 545 237L566 236L632 232L535 324Q531 329 528.5 334.5Q526 340 525 347Q525 354 527.5 359.5Q530 365 535 370Q540 375 545.5 377.0Q551 379 558 379Q564 379 570.0 376.5Q576 374 580 369L673 272L669 340V360Q669 367 671.0 372.5Q673 378 677 382Q682 386 687.0 388.5Q692 391 699 391Q705 391 710.5 388.5Q716 386 720 382Q724 378 726.5 372.5Q729 367 729 360V211Q729 202 726.5 195.0Q724 188 720 184Q715 180 708.5 178.0Q702 176 693 176H545Z"/></svg></button>' : '';
   return '<div class="card card-landscape stagger-in" data-path="' + esc(v.path) + '" data-name="' + esc(v.name) + '" data-removable="' + (opts.removable ? '1' : '0') + '" tabindex="0" role="button" aria-label="' + esc(title || v.name) + '">' +
     '<div class="card-poster" data-fn="' + esc(v.name) + '" data-variant="landscape"><div class="fallback"><i class="ph ph-film-strip"></i></div>' + playingBadge + menuBtn + (opts.removable ? cardProgressHTML(v.path) : '') + '<div class="card-overlay"><div class="card-overlay-title">' + esc(title || v.name) + '</div></div></div>' +
-    (sub || tagH ? '<div class="card-info"><div class="card-meta">' + sub + tagH + '</div></div>' : '') + '</div>';
+    (sub ? '<div class="card-info"><div class="card-meta">' + sub + '</div></div>' : '') + '</div>';
 }
 
 /* 继续观看只剩一张时垫在右边的「没有更多了」——
@@ -14086,15 +14046,6 @@ function masTvCardHTML(s, r) {
    电影一行：小海报（data-variant="thumb"，走海报管线）、中文片名、类型 + 规格徽标、「…」。
    类型在 TMDB 那趟回包到了才有（ylMeta）；之前先写「电影」，不留一行空白。 */
 const YL_MORE_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="19" cy="12" r="1.9"/></svg>';
-/* 规格徽标：与卡片底下那排同一套 */
-function cardTagsHTML(tags) {
-  const top = topTag(tags);
-  let h = '';
-  if (top) h += '<span class="tag-border ' + (top === 'DV' ? 'dv' : 'hdr') + '">' + top + '</span>';
-  if (tags.includes('4K')) h += '<span class="tag-border k4">8K+</span>';
-  else if (tags.includes('HD')) h += '<span class="tag-border hd">高动态</span>';
-  return h;
-}
 /* 只写类型（参考稿那样）：片长只有详情那趟才有，有的行有、有的行没有，一列看下去参差不齐 */
 const ylMovieMeta = d => (d && d.genres && d.genres.length ? d.genres.slice(0, 2).join(' · ') : '');
 const ylTvCount = s => ((s.full || s.complete) ? '全 ' : '更新至 ') + s.episodes + ' 集';
@@ -14106,7 +14057,7 @@ function ylRowHTML(v) {
       '<div class="card-poster yl-thumb" data-fn="' + esc(v.name) + '" data-variant="thumb"><div class="fallback"><i class="ph ph-film-strip"></i></div></div>' +
       '<div class="yl-copy">' +
         '<div class="card-title">' + esc(title) + '</div>' +
-        '<div class="yl-sub"><span class="yl-genre">' + esc(ylMovieMeta(d) || '电影') + '</span>' + cardTagsHTML(parse(v.name).tags) + '</div>' +
+        '<div class="yl-sub"><span class="yl-genre">' + esc(ylMovieMeta(d) || '电影') + '</span></div>' +   /* 规格小标签不出 */
       '</div>' +
       '<button class="card-menu yl-more" type="button" tabindex="0" aria-label="更多操作：' + esc(title) + '">' + YL_MORE_SVG + '</button>' +
     '</div>';
@@ -14116,13 +14067,12 @@ function ylTvRowHTML(s) {
   if (!s) return '';
   const name = (s.title || s.folder || '') + (s.season > 1 ? ' 第 ' + s.season + ' 季' : '');
   const count = ylTvCount(s);
-  const hdr = s.hdr === 'DV' ? '<span class="tag-border dv">DV</span>' : (s.hdr ? '<span class="tag-border hdr">' + esc(s.hdr) + '</span>' : '');
   return '<div class="card yl-row yl-tv stagger-in" data-tv-path="' + esc(s.path) + '" tabindex="0" role="button" aria-label="' + esc(name) + '，' + esc(count) + '">' +
       '<div class="card-poster tv-art yl-thumb" data-tv-art="' + esc(s.id) + '" data-tv-id="' + esc(s.tmdbId || '') + '" data-tv-q="' + esc(s.en || s.zh || (s.title || s.folder)) + '"' +
         ' data-tv-y="' + esc(s.year || '') + '" data-tv-thumb="1"><div class="tv-art-ph">' + esc(name) + '</div></div>' +
       '<div class="yl-copy">' +
         '<div class="card-title">' + esc(name) + '</div>' +
-        '<div class="yl-sub"><span class="yl-genre" data-count="' + esc(count) + '">' + esc(count) + '</span>' + hdr + '</div>' +
+        '<div class="yl-sub"><span class="yl-genre" data-count="' + esc(count) + '">' + esc(count) + '</span></div>' +
       '</div>' +
       '<button class="card-menu yl-more" type="button" tabindex="0" aria-label="更多操作：' + esc(name) + '">' + YL_MORE_SVG + '</button>' +
     '</div>';
@@ -15564,6 +15514,17 @@ function setupHeroSwipe() {
     if (btn.classList.contains('btn-play')) playVideo(v.path, v.name);
     else openDetail(v.path, v.name);
   });
+  /* iPhone Duo 折起竖拿只有卡片态（见 updateHeroMorph），卡上的「播放 / 详情」跟别处的卡片态一样收起了：
+     点中间那张就开它的详情页（播放在详情页里），点露在两边的邻卡就翻到那张。别的设备的卡片态只是往下滚时路过的一态，不加。
+     横拖尾随的 click 已被上面捕获阶段那条吞掉，拖着翻页不会顺手打开详情 */
+  deck.addEventListener('click', e => {
+    if (!document.documentElement.classList.contains('rail-float') || !deck.classList.contains('morphed') || guard(e.target)) return;
+    const card = e.target.closest && e.target.closest('.hcard'), v = card && card._video;
+    if (!v) return;                                               /* 骨架卡：还没有内容 */
+    if (card.classList.contains('is-center')) { openDetail(v.path, v.name); return; }
+    const i = state.heroVideos.indexOf(v);
+    if (i >= 0 && i !== state.heroIdx) goToHero(i);
+  });
 
   /* 末段割线，不用瞬时差分：单帧 dx 受采样抖动影响太大，甩出去的力道会
      忽大忽小。取最近 ~90ms 的平均，既跟得上又不抖。
@@ -15748,6 +15709,9 @@ function updateHeroMorph(sc, el) {
   if (!heroEl) { heroMorphP = -1; return; }
   const run = heroRunHeight();
   let p = run > 0 ? Math.min(1, Math.max(0, (sc == null ? window.scrollY : sc) / run)) : 0;
+  /* iPhone Duo 折起竖拿：一打开就是卡片态（左右露出邻卡、卡下一排圆点），不要先铺满整屏再往下滚收成卡。
+     行程（.hero-run）在那里收成 0，没有吸顶空转那一截；卡片态照旧不自动轮播，左右滑 / 点圆点换片 */
+  if (document.documentElement.classList.contains('rail-float')) p = 1;
 
   /* 缓动，但不是动画 —— 是重参数化。
      位置对位置、不含时间常数，所以仍然逐像素跟手：手指停它就停、手指回它
@@ -16719,7 +16683,6 @@ function tvFillYearRows(list) {
 
 function tvCardHTML(s) {
   const name = s.title || s.folder;
-  const footSub = [s.seasonLabel, s.res, s.hdr === 'DV' ? '杜比视界' : s.hdr].filter(Boolean).join(' · ');
   return '<article class="tv-card tv-loading" data-tv-path="' + esc(s.path) + '" data-tv-id="' + esc(s.id) + '" tabindex="0" role="button" aria-label="' + esc(name) + '，' + esc(tvCountLabel(s)) + '">' +
     '<div class="tv-art" data-tv-art="' + esc(s.id) + '" data-tv-id="' + esc(s.tmdbId || '') + '" data-tv-q="' + esc(s.en || s.zh || name) + '" data-tv-y="' + esc(s.year || '') + '" data-tv-land="1">' +
       '<div class="tv-haze"></div>' +
@@ -16735,8 +16698,7 @@ function tvCardHTML(s) {
     '<div class="tv-foot">' +
       '<div class="tv-foot-ico"><span class="ico-ini">' + esc((name || '?').trim().charAt(0)) + '</span></div>' +
       '<div class="tv-foot-copy">' +
-        '<div class="tv-foot-n tv-sk">' + esc(s.en && s.zh ? s.en : name) + '</div>' +
-        '<div class="tv-foot-s tv-sk">' + esc(footSub || tvCountLabel(s)) + '</div>' +
+        '<div class="tv-foot-n tv-sk">' + esc(s.en && s.zh ? s.en : name) + '</div>' +   /* 底部只留名字：季数 / 4K / 杜比视界那行小字不出 */
       '</div>' +
       /* 点它 = 点整张卡：不拦冒泡，交给 article 上的 openSeries */
       '<button class="tv-play tv-sk" type="button" tabindex="-1">详情</button>' +
@@ -17736,6 +17698,13 @@ function buildComingSoon(card, data, mode){
       const v = document.createElement('video');
       v.className = 'cs-video'; v.muted = true; v.playsInline = true; v.loop = true; v.preload = 'none';
       if (d.poster) v.poster = d.poster;
+      /* 预告片一律静音（谁打开了就关回去）、从第 10 秒进 —— 跳过片头厂标；loop 回卷到 0 时再跳一次。
+         长过 25 秒的才跳，短片段从头放 */
+      const toStart = () => { const dur = v.duration; if (Number.isFinite(dur) && dur > 25 && v.currentTime < 10) { try { v.currentTime = 10; } catch (_) {} } };
+      let last = 0;
+      v.addEventListener('loadedmetadata', toStart);
+      v.addEventListener('timeupdate', () => { const t = v.currentTime; if (t + 1 < last) toStart(); last = t; });
+      v.addEventListener('volumechange', () => { if (!v.muted) v.muted = true; });
       v.src = d.video;
       art.appendChild(v);
     } else {                           /* 院线模式：<picture> 窄屏竖版海报 / ≥700px 横版背景图 */
@@ -18277,7 +18246,9 @@ const SC = (() => {
   const STAGGER = 110;             /* 同一轮里两章之间隔多久进场（ms） */
   const RING    = 106.814;         /* 2πr，r = 17 —— 与 CSS 里那个圆同源 */
   const G_RESP  = .35;             /* 剧照弹簧的 response（秒）；阻尼比取 1.0 */
-  const START_AT = 3;              /* 预告片从第几秒进 */
+  const START_AT = 10;             /* 预告片从第几秒进：跳过片头的厂标、分级卡，一露面就是正片画面 */
+  /* 太短的片子（花絮、片段）从头放，别把大半条都跳过去：长过 25 秒的才从第 10 秒进 */
+  const startOf = d => Number.isFinite(d) && d > START_AT + 15 ? START_AT : 0;
 
   /* ── 设备分档 ────────────────────────────────────────────────────
      Safari 不给 deviceMemory，所以不能只认它；三个信号任意一个成立就按紧的
@@ -18320,7 +18291,7 @@ const SC = (() => {
   let active = null;               /* 当前持有 src 的那一章 */
   let current = null;              /* 眼前占大半屏的那一章（不管它此刻能不能播） */
   let userPaused = false;          /* 用户手动摁的暂停：跨章保持 */
-  /* 静音不在这儿 —— 它是一章一个，存在各自的 _sc.muted 里 */
+  /* 预告片一律静音（<video muted>、YouTube mute=1），没有开声音的入口 */
   let raf = 0, stickyH = 0, mounted = false, lastW = 0;
   let pumping = false, pumpLeft = 0, pumpTimer = 0;
   let visIO = null, dataIO = null, tierIO = null, liveIO = null, guardMO = null;
@@ -18592,7 +18563,7 @@ const SC = (() => {
        跑的 —— 中间这一帧，视口那几章还是空壳。rAF 里手动补一刀，那时滚动位置
        已经落定，补的正好是眼前这几章。fill 幂等，随后 IO 再来一遍也不冲突。 */
     requestAnimationFrame(() => { if (mounted) primeLive(); });
-    navSync();                       /* Duo 折起：播放 / 静音并进导航胶囊 */
+    navSync();                       /* Duo 折起：播放钮并进导航胶囊 */
   }
 
   /* 按当前滚动位置，把视口附近的空壳直接填上，不等 IO */
@@ -18652,10 +18623,8 @@ const SC = (() => {
       poster:  ch.querySelector('.sc-poster'),
       content: ch.querySelector('.sc-content'),
       ctl:     ch.querySelector('.sc-mediactl'),
-      mute:    ch.querySelector('.sc-mutectl'),
       ring:    ch.querySelector('.sc-ring-value'),
       last:    0,
-      muted:   true,                          /* 一章一个；默认静音 */
       src: null, key: null, wantPlay: false, covered: false, gRaf: 0,
       gSpring: 0, gVel: 0, gTarget: 0,
       cold: false, k: -1,
@@ -18665,7 +18634,6 @@ const SC = (() => {
     if (dataIO) dataIO.observe(ch);
     if (tierIO) tierIO.observe(ch);
     bindChapter(ch);
-    syncMuteBtn(ch);
   }
 
   /* 拆内容：先把量到的高度钉成 min-height，再清空。盒子还在原处占着位，
@@ -18806,20 +18774,6 @@ const SC = (() => {
             '<span class="sc-ico-pause" aria-hidden="true"></span>' +
             '<span class="sc-ico-play" aria-hidden="true"></span>' +
           '</button>' +
-          '<button class="sc-mutectl" type="button" data-muted="1" hidden aria-label="取消静音">' +
-            /* 与播放钮同一圈描边：同一个 .sc-ring，同样的 r=17 / 2.5 描边。
-               这里只要底环 —— 静音没有进度可走，多一条弧就是骗人。 */
-            '<svg class="sc-ring" viewBox="0 0 40 40" aria-hidden="true">' +
-              '<circle class="sc-ring-track" cx="20" cy="20" r="17"></circle>' +
-            '</svg>' +
-            '<svg class="sc-spk" viewBox="0 0 24 24" aria-hidden="true">' +
-              '<path class="sc-spk-body" d="M11 4.6 6.9 8H4.2a1.2 1.2 0 0 0-1.2 1.2v5.6A1.2 1.2 0 0 0 4.2 16h2.7l4.1 3.4a.55.55 0 0 0 .9-.42V5.02a.55.55 0 0 0-.9-.42z"></path>' +
-              '<path class="sc-spk-wave" d="M15.4 9.4a3.7 3.7 0 0 1 0 5.2"></path>' +
-              '<path class="sc-spk-wave" d="M18 6.8a7.4 7.4 0 0 1 0 10.4"></path>' +
-              '<path class="sc-spk-slash" d="m15.4 9.6 5 4.8"></path>' +
-              '<path class="sc-spk-slash" d="m20.4 9.6-5 4.8"></path>' +
-            '</svg>' +
-          '</button>' +
         '</div>' +
       '</div>' +
       '<div class="sc-content">' +
@@ -18872,7 +18826,6 @@ const SC = (() => {
     if (src) {
       ch._sc.src = src;
       ch._sc.ctl.hidden = false;
-      if (ch._sc.mute) ch._sc.mute.hidden = false;
       if (navOn) navSync();
       const thumb = (data.video && data.video.thumb) || (data.yt ? 'https://i.ytimg.com/vi/' + data.yt.key + '/maxresdefault.jpg' : '');
       if (!ch._sc.poster.getAttribute('src') && !ch._sc.poster.dataset.src && thumb) setPoster(ch, thumb);
@@ -18988,11 +18941,8 @@ const SC = (() => {
 
     q('.sc-overview').textContent = meta?.overview || '这部影片暂时没有简介。';
 
-    const tags = fileTags;
+    /* 介绍下面那排小胶囊：4K / 1080p、杜比视界 / HDR 这类规格小标签不出，只留评分 */
     const facts = [];
-    if (tags.includes('4K')) facts.push('4K'); else if (tags.includes('HD')) facts.push('1080p');
-    const top = topTag(tags);
-    if (top) facts.push(top === 'DV' ? '杜比视界' : 'HDR');
     if (meta?.rating) facts.push('评分 ' + Number(meta.rating).toFixed(1));
     q('.sc-facts').innerHTML = facts.map(f => '<span class="sc-fact">' + esc(f) + '</span>').join('');
 
@@ -19073,7 +19023,7 @@ const SC = (() => {
     const fire = type => et.dispatchEvent(new Event(type));
     let key = '';                     /* 当前的 YouTube 视频；空 = 原生 <video> */
     let player = null, box = null, gen = 0, poll = 0, guard = 0;
-    let want = false, muted = true, state = -1, cur = 0, dur = NaN, meta = false, unmuteAt = 0;
+    let want = false, state = -1, cur = 0, dur = NaN, meta = false;
     let clean = false, revealT = 0, pauseT = 0, bufT = 0;
 
     /* 画面露不露：只在 YouTube 自己的界面全都退掉时露 */
@@ -19119,21 +19069,21 @@ const SC = (() => {
         if (d > 0) { dur = d; if (!meta) { meta = true; fire('loadedmetadata'); } }
         /* 自己回卷：赶在片尾画面（订阅 / 推荐视频）出来之前，先隐去再跳回去，重新播满一阵才露 */
         const tail = dur > START_AT + 40 ? YT_TAIL_S : 1.5;
-        if (want && dur > 0 && cur > START_AT + 2 && dur - cur < tail) {
+        if (want && dur > 0 && cur > startOf(dur) + 2 && dur - cur < tail) {
           hide();
-          player.seekTo(dur > START_AT + 10 ? START_AT : 0, true);
-          cur = dur > START_AT + 10 ? START_AT : 0;
+          cur = startOf(dur);
+          player.seekTo(cur, true);
           armReveal();                                   /* 跳到已缓冲的地方时 YouTube 未必回报「缓冲 → 播放」 */
         }
       } catch {}
       fire('timeupdate');
     }
 
-    /* 想要的状态 → 播放器：静音与否、播与停 */
+    /* 想要的状态 → 播放器：播与停。预告片一律静音，没有开声音这回事 */
     function apply() {
       if (!player || typeof player.playVideo !== 'function') return;
       try {
-        if (muted) player.mute(); else player.unMute();
+        player.mute();
         if (want) { clearTimeout(pauseT); pauseT = 0; player.playVideo(); }
         else stop();
       } catch {}
@@ -19164,15 +19114,8 @@ const SC = (() => {
         if (clean && !bufT) bufT = setTimeout(() => { bufT = 0; if (state === 3) setClean(false); }, 700);
       } else hide();                                     /* 暂停 / 结束 / 待播：YouTube 的界面马上要铺出来 */
       if (s !== 3) { clearInterval(poll); poll = 0; }   /* 缓冲中接着量时间 */
-      if (s === 2 && want) {
-        if (!muted && Date.now() - unmuteAt < 1500) {
-          /* 带声起播被浏览器挡回来：退回静音接着放，并让外面知道 —— 静音钮得说真话 */
-          muted = true; apply(); fire('volumechange');
-        } else {
-          want = false;                                  /* 被系统停下（切到后台等）：与 <video> 一样算作暂停 */
-        }
-      }
-      if (s === 0 && want) { try { player.seekTo(START_AT, true); player.playVideo(); } catch {} }   /* loop 偶尔不灵：自己回卷 */
+      if (s === 2 && want) want = false;                 /* 被系统停下（切到后台等）：与 <video> 一样算作暂停 */
+      if (s === 0 && want) { try { player.seekTo(startOf(dur), true); player.playVideo(); } catch {} }   /* loop 偶尔不灵：自己回卷 */
     }
 
     function build() {
@@ -19210,13 +19153,9 @@ const SC = (() => {
 
     return {
       get paused() { return key ? !want : video.paused; },
-      get muted() { return key ? muted : video.muted; },
-      set muted(v) {
-        if (!key) { video.muted = v; return; }
-        if (muted && !v) unmuteAt = Date.now();
-        muted = !!v;
-        apply();
-      },
+      /* 预告片一律静音：开声音的请求一概不认 */
+      get muted() { return key ? true : video.muted; },
+      set muted(v) { if (!key) video.muted = true; else apply(); },
       get defaultMuted() { return video.defaultMuted; },
       set defaultMuted(v) { video.defaultMuted = v; },
       get currentTime() { return key ? cur : video.currentTime; },
@@ -19255,7 +19194,6 @@ const SC = (() => {
         if (m) {
           if (key === m[1]) return;
           if (!key) {
-            muted = video.muted;
             try { video.pause(); video.removeAttribute('src'); video.load(); } catch {}
           }
           teardown();
@@ -19291,9 +19229,9 @@ const SC = (() => {
     active = ch;
     ch.dataset.tier = 'hot';
     if (s.video.getAttribute('src') !== s.src) {
-      s.video.muted = s.muted;
-      s.video.defaultMuted = s.muted;
-      /* 预告片开头那两三秒基本都是发行方厂标 —— 从 3 秒进，一上来就是画面。
+      s.video.muted = true;                    /* 预告片一律静音 */
+      s.video.defaultMuted = true;
+      /* 预告片开头那几秒基本都是发行方厂标、分级卡 —— 从第 10 秒进，一上来就是画面。
          preload="none"，所以得等 metadata 到了才知道时长、才敢 seek。 */
       s.video.addEventListener('loadedmetadata', () => seekStart(s.video), { once: true });
       s.video.setAttribute('src', s.src);
@@ -19304,44 +19242,26 @@ const SC = (() => {
     syncPlayback();
   }
 
-  /* 太短的片子（预告花絮、片段）从头放，别把大半条都跳过去 */
+  /* 起播点见 startOf：长片从第 10 秒进，短片从头 */
   function seekStart(v) {
-    const d = v.duration;
-    if (!Number.isFinite(d) || d <= START_AT + 1) return;
-    try { v.currentTime = START_AT; } catch {}
+    const t = startOf(v.duration);
+    if (!t) return;
+    try { v.currentTime = t; } catch {}
   }
 
-  /* 只改本章这一条 —— 静音是一章一个，隔壁章不跟 */
-  function applyMute(ch) {
-    const s = ch && ch._sc;
-    if (!s) return;
-    s.video.muted = s.muted;
-    s.video.defaultMuted = s.muted;
-    syncMuteBtn(ch);
-  }
-
-  function syncMuteBtn(ch) {
-    const s = ch._sc;
-    if (!s || !s.mute) return;
-    s.mute.dataset.muted = s.muted ? '1' : '0';
-    s.mute.setAttribute('aria-label', s.muted ? '取消静音' : '静音');
-    if (navOn) navSync();
-  }
-
-  /* ── 导航胶囊里的播放 / 静音（iPhone Duo 折起）─────────────────────
-     Duo 折起时画面右上角那两个钮不出（CSS 藏掉），改由导航胶囊里「资料库」下面那两格代劳。
-     那两格只是传话：显示眼前那一章（current；没有就退到持有片源的 active）的状态，
-     点下去在同一个 click 调用栈里转给那一章自己的钮 —— 解除静音的手势 Safari 才认。
-     html.sc-nav：在资料库、展映挂着 → 胶囊长出这两格（样式只在 Duo 折起时有，别处挂着也无妨）；
-     sc-nav-anim 只挂在长出 / 收回的那一下，让胶囊的 top 跟着补间 */
+  /* ── 导航胶囊里的播放 / 暂停（iPhone Duo 折起）─────────────────────
+     Duo 折起时画面右上角那个钮不出（CSS 藏掉），改由导航胶囊里顶替「资料库」的那一格代劳。
+     它只是传话：显示眼前那一章（current；没有就退到持有片源的 active）的状态，
+     点下去在同一个 click 调用栈里转给那一章自己的钮。预告片一律静音，没有声音钮。
+     html.sc-nav：在资料库、展映挂着 → 胶囊里换上这一格（样式只在 Duo 折起时有，别处挂着也无妨）；
+     sc-nav-anim 只挂在换上 / 换回的那一下 */
   let navEls = null, navOn = false, navAnimT = 0;
   function navBtns() {
     if (navEls) return navEls;
-    const play = document.getElementById('navScPlay'), mute = document.getElementById('navScMute');
-    if (!play || !mute) return null;
-    navEls = { play, mute, ring: play.querySelector('.sc-ring-value') };
+    const play = document.getElementById('navScPlay');
+    if (!play) return null;
+    navEls = { play, ring: play.querySelector('.sc-ring-value') };
     play.addEventListener('click', () => { const ch = navTarget(); if (ch) ch._sc.ctl.click(); });
-    mute.addEventListener('click', () => { const ch = navTarget(); if (ch && ch._sc.mute) ch._sc.mute.click(); });
     return navEls;
   }
   function navTarget() {
@@ -19361,16 +19281,12 @@ const SC = (() => {
     const b = navBtns();
     if (!b) return;
     const ch = on ? navTarget() : null, s = ch && ch._sc;
-    /* 介绍面板把画面盖住时，画面上那两个钮本来就淡掉了（预告片也停了）：这里跟着变灰、不接点 */
+    /* 介绍面板把画面盖住时，画面上那个钮本来就淡掉了（预告片也停了）：这里跟着变灰、不接点 */
     const live = !!s && s.ctlOn !== false;
     b.play.disabled = !live;
-    b.mute.disabled = !live || !s.mute || s.mute.hidden;
     const playing = live && s.ctl.dataset.state === 'playing';
     b.play.dataset.state = playing ? 'playing' : 'paused';
     b.play.setAttribute('aria-label', playing ? '暂停预告片' : '播放预告片');
-    const muted = !s || s.muted;
-    b.mute.dataset.muted = muted ? '1' : '0';
-    b.mute.setAttribute('aria-label', muted ? '取消静音' : '静音');
     if (b.ring) b.ring.style.strokeDashoffset = s && s.ring && s.ring.style.strokeDashoffset ? s.ring.style.strokeDashoffset : String(RING);
   }
 
@@ -19409,22 +19325,9 @@ const SC = (() => {
       if (s.video.paused) {
         const p = s.video.play();
         if (p && p.catch) {
+          /* 预告片一律静音起播；连静音自动播放都被挡（省电模式等）就停在剧照上 */
           p.then(() => s.media.classList.add('is-playing'))
-           .catch(err => {
-             /* 带声起播会被策略挡回来（NotAllowedError）—— 用户在这一章上没有
-                新手势，Safari 就不放行。退回静音再试一次：宁可没声，也不要
-                停在一张静止图上。同时把这一章的状态改回静音 —— 按钮得说真话，
-                不能显示「有声」而实际上一声不出。 */
-             if (err && err.name === 'NotAllowedError' && !s.muted) {
-               s.muted = true;
-               applyMute(ch);
-               s.video.play()
-                 .then(() => s.media.classList.add('is-playing'))
-                 .catch(() => s.media.classList.add('is-still'));
-               return;
-             }
-             s.media.classList.add('is-still');
-           });
+           .catch(() => s.media.classList.add('is-still'));
         }
       }
     } else if (!s.video.paused) {
@@ -19450,7 +19353,7 @@ const SC = (() => {
           if (active === ch) unmountVideo(ch);
         }
       });
-      if (navOn) navSync();                      /* 眼前换了一章：胶囊里那两格跟着换主人 */
+      if (navOn) navSync();                      /* 眼前换了一章：胶囊里那一格跟着换主人 */
     }, { threshold: [0, .2, .62, .9] });
 
     /* 提前一屏半开始要数据：等滚到眼前再发请求，看到的就是一屏空标题。
@@ -19548,7 +19451,7 @@ const SC = (() => {
       st.setProperty('--sc-veil', (.42 * (1 - cp)).toFixed(3));
       const co = 1 - clamp((localY - h * .62) / (h * .28));
       st.setProperty('--sc-ctl-opacity', String(co));
-      /* 胶囊里那两格（Duo 折起）跟着画面上的钮一起「在 / 不在」：过阈值才通知，平时一帧不多花 */
+      /* 胶囊里那一格（Duo 折起）跟着画面上的钮一起「在 / 不在」：过阈值才通知，平时一帧不多花 */
       const ctlOn = co > .35;
       if (ctlOn !== s.ctlOn) { s.ctlOn = ctlOn; if (navOn) navSync(); }
 
@@ -19598,18 +19501,8 @@ const SC = (() => {
     });
 
     s.video.addEventListener('playing', () => s.media.classList.add('is-playing'));
-    /* 播放器自己改了静音（带声起播被挡回静音）：按钮跟着说真话 */
-    s.video.addEventListener('volumechange', () => {
-      if (s.video.muted !== s.muted) { s.muted = s.video.muted; syncMuteBtn(ch); }
-    });
-
-    /* 解除静音只有在这个 click 的调用栈里做才作数 —— 这是 Safari 唯一认的
-       那一下手势。所以先改元素、再落盘，不绕任何异步。 */
-    s.mute.addEventListener('click', () => {
-      s.muted = !s.muted;
-      applyMute(ch);
-      tap();
-    });
+    /* 预告片一律静音，不许开声音：谁把它打开了（系统的媒体控制之类）就立刻关回去 */
+    s.video.addEventListener('volumechange', () => { if (!s.video.muted) s.video.muted = true; });
 
     s.video.addEventListener('timeupdate', () => {
       const v = s.video;
@@ -19621,7 +19514,7 @@ const SC = (() => {
       s.last = t;
       /* 环按「起播点 → 结尾」归一：从 3 秒进的话，环也该从 0 走起，
          而不是一上来就已经走掉一小截 */
-      const base = Number.isFinite(d) && d > START_AT + 1 ? START_AT : 0;
+      const base = startOf(d);
       const span = Number.isFinite(d) && d > base ? d - base : 0;
       const ratio = span > 0 ? clamp((t - base) / span) : 0;
       s.ring.style.strokeDashoffset = String(RING * (1 - ratio));
@@ -19634,7 +19527,6 @@ const SC = (() => {
       s.media.classList.remove('is-playing');
       s.media.classList.add('is-still');
       s.ctl.hidden = true;
-      if (s.mute) s.mute.hidden = true;
       if (s.key) trailerCache.delete(s.key);
       if (navOn) navSync();
     });
@@ -19790,7 +19682,7 @@ async function renderLibrary() {
     return;
   }
   SC.teardown();
-  SC.navSync();                     /* 年份列表：胶囊里那两格收回去 */
+  SC.navSync();                     /* 年份列表：胶囊里那一格换回「资料库」 */
 
   const selectedYear = Number(state.libraryYear);
   PageBack.show(state.yearLibraryOrigin === 'home' ? '返回主页' : '返回资料库', closeYearLibrary);
@@ -22502,7 +22394,7 @@ function navTo(tab) {
   inEl.classList.add('active');
 
   state.currentTab = tab;
-  try { SC.navSync(); } catch (_) {}   /* 离开 / 回到资料库：Duo 折起时胶囊里的播放 / 静音跟着收回 / 长出 */
+  try { SC.navSync(); } catch (_) {}   /* 离开 / 回到资料库：Duo 折起时胶囊里的播放钮跟着换回 / 换上 */
   /* 先渲染再定位：position:fixed 的退场视图已不占高度，此时若入场视图还
      没内容，页面高度为 0，scrollTo 会被浏览器夹回 0 —— 位置就丢了。
      renderHome 是同步的；renderLibrary 命中缓存时首个 await 之后才填充，
