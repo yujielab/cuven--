@@ -81,6 +81,39 @@ console.log('\n■ 管线提效：杜比视界转换复用、分片出口不再�
     `HLS 令牌验过一次就记住：同一个令牌照常放行（${r4.status}）；改了签名的（${r2.status}）、过期的（${r3.status}）照样拒`);
 }
 
+console.log('\n■ 备选音轨顺路：视频那一遍把正在听的备选音轨一起切好，同一段字节只读一遍');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const f = '/Movies/hdr10_multi.mkv';
+  const base = `/hls/${H.token(f)}/`;
+  const get = async u => Buffer.from(await (await H.call(base + u)).arrayBuffer());
+  await settle(); caches.default.m.clear();
+  const m = await (await H.call(base + 'master.m3u8')).text();
+  const idh = /\n([^/\n]+)\/v\.m3u8/.exec(m)[1];
+  const n = ((await (await H.call(`${base}${idh}/v.m3u8`)).text()).match(/\.m4s/g) || []).length;
+  // 参照：不走缓存（HLS_PREFETCH=0）时的老路径 —— 这条音轨自己把每段字节读一遍
+  H.env.HLS_PREFETCH = '0';
+  const ref = [];
+  const b0 = H.stats.bytes;
+  for (let k = 0; k < n; k++) ref.push(await get(`${idh}/a1/${k}.m4s`));
+  for (let k = 0; k < n; k++) await get(`${idh}/v/${k}.m4s`);
+  const solo = H.stats.bytes - b0;
+  delete H.env.HLS_PREFETCH;
+  await settle(); caches.default.m.clear();
+  // 像播放器那样：视频段与这条备选音轨的同一段一起要
+  const b1 = H.stats.bytes;
+  const got = [];
+  for (let k = 0; k < n; k++) {
+    const [, a] = await Promise.all([get(`${idh}/v/${k}.m4s`), get(`${idh}/a1/${k}.m4s`)]);
+    got.push(a);
+  }
+  await settle();
+  const both = H.stats.bytes - b1;
+  ok(got.length === n && got.every((b, k) => b.equals(ref[k])), `备选音轨 ${n} 段：顺路切出来的与这条音轨自己读出来的逐字节一致`);
+  ok(both < solo * 0.75, `同样一路视频 + 备选音轨，从 Dropbox 读的字节 ${(solo / 1048576).toFixed(1)} MB → ${(both / 1048576).toFixed(1)} MB`);
+  await settle(); caches.default.m.clear();
+}
+
 console.log('\n■ HEVC HDR10 + 全套音轨 / 字幕');
 {
   const r = await H.dump('/Movies/hdr10_multi.mkv', path.join(OUT, 'multi'));

@@ -27,6 +27,7 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 | 杜比视界 | P5 → `dvh1`+`dvcC`；P8.1 / 8.4 → `hvc1`+`dvvC`+`SUPPLEMENTAL-CODECS`（`db1p` / `db4h`）；**P7（UHD 蓝光双层）逐帧丢弃增强层并把 RPU 改写为 8.1** |
 | HDR | 依 MKV Colour、HEVC / H.264 的 SPS VUI、AV1 的序列头写 `VIDEO-RANGE` 与 `colr` / `mdcv` / `clli`（MKV 没写 Colour 的 HDR 片不会被当成 SDR） |
 | 音频直通 | AAC、AC-3、E-AC-3（含 Atmos：`CHANNELS="16/JOC"`）、FLAC、ALAC。默认音轨复用在视频分段里，其余为备选音轨 |
+| 备选音轨顺路 | MKV 里音视频交错存放：换到别的音轨后，这条音轨的每一段原来都要把这段字节从 Dropbox 再读一遍、再解析一遍（视频那一遍已经读过），而且从不进缓存。现在有人在听某条备选音轨，就记下来（90 秒没人再要就作罢），之后视频那一遍（直出 / 预取）把它的块一起收下、按原来同一套规则切好写进缓存，音轨请求先等它；视频段已经在缓存里时不等，自己读一遍切好也进缓存。真实 workerd 里 3 分钟多音轨 HEVC 换音轨看一遍：Dropbox 读 237 MB → 122 MB，再看一遍 0 MB；切出来的音轨分段与原来逐字节一致 |
 | 音频转码（可选） | DTS、TrueHD、Opus、Vorbis、MP2/MP3、PCM → AC-3 5.1（640 kbps），需要 `audio-tx` Worker |
 | 字幕 | 内封 SRT / ASS（含 zlib 压缩）、同目录外挂 `.srt/.ass/.vtt` → 分段 WebVTT（带 `X-TIMESTAMP-MAP`），中文（简体优先）默认开启。没有字幕 Cues 的文件：字幕块在转视频那一遍顺手收下，不再为字幕把整段视频重读一遍 |
 | 提效（2026-11） | 用 `tests/bench.mjs` 把样片的每一段都切一遍、量 CPU 后改的几处热点：① 解析 MKV 块时数据已经在队列里就同步往下走（一个元素头原来要 await 三四次，一段几千个块，微任务的来回比解析本身还贵），SimpleBlock 的块头在第一次看的 16 字节里就认出来，不再取第二次；② 杜比视界 P7 的 RPU 改写：同一个镜头里相邻帧的 RPU 往往逐字节相同，同样的输入直接用上一次的输出（比一遍字节，省掉整套位级解析、改写、重算 CRC）；③ 出口不再把每个分片整块拼成一个大缓冲再交给响应流：≥ 16 KB 的切片原样交出，零碎的攒到 64 KB 再拷，4K 片源每段少拷几十 MB、峰值内存少一整个分片；④ HLS 令牌验过一次就在 isolate 里记到过期，同一次播放的几百个请求不再各算一遍 HMAC。测试台上 Worker 自己的 CPU 合计降了一半多（3 分钟多音轨 HEVC + 96 秒杜比视界 P7 + 两部短片：1.7 s → 0.78 s；杜比视界那部 −59%，样片里相邻帧的 RPU 重复得多），真实 workerd 里每一段输出与改动前逐字节一致 |
@@ -339,7 +340,7 @@ service = "cuven-audio-tx"
 
 ```bash
 tests/make-samples.sh     # 用 ffmpeg / mkvmerge 生成样片（约 30 秒）
-node tests/run.mjs        # Worker：158 项回归，约 1 分钟
+node tests/run.mjs        # Worker：160 项回归，约 1 分钟
 node tests/web.mjs        # 前端：163 项，需要 Playwright + Chromium（PLAYWRIGHT_PATH 可指定其 index.js），约 8 分钟
 node tests/bench.mjs [样片…]  # 性能基准：每一段都切一遍，量 Worker 的 CPU（BENCH_REPEAT=3 取最好的一遍）
 ```

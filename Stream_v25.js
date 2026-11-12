@@ -9712,6 +9712,12 @@ async function* hlsSegmentParts(cx, idx, k, sel, opts = {}) {
   }
   const pass = opts.pass || null;
   if (pass && subGrab.size) pass.subs = 1;
+  // 备选音轨顺路：最近有人在听某条备选音轨（HLS_ALT），视频这一遍把它的块也收下，按「只出这条音轨」
+  // 那条路径同一套规则切成分片（hlsAltMux），整段写进缓存 —— 音轨请求从缓存出，同一段字节不再为了
+  // 音轨从 Dropbox 再读一遍、再解析一遍
+  const B = sel.video && opts.alt >= 0 ? idx.audio[opts.alt] : null;
+  const alt = B && B !== A && B.mode === 'copy' ? hlsAltMux(B, k) : null;
+  if (alt) { want.add(B.num); if (pass) pass.alt = { i: opts.alt, st: 1 }; }
   const raw = hlsByteSource(cx, plan.start, plan.fetchEnd);
   // 进度打点：等这一遍的请求（同一段的视频 / 字幕）据此判断它是不是还在动
   const src = !pass ? raw : {
@@ -9831,6 +9837,9 @@ async function* hlsSegmentParts(cx, idx, k, sel, opts = {}) {
         });
       } else if (subGrab.has(blk.track)) {
         subGrab.get(blk.track).blocks.push({ ts: blk.ts, dur: blk.dur, frame: hlsConcat(blk.frames[0]) });
+      } else if (alt && blk.track === B.num) {
+        alt.push(blk, ns);
+        continue;
       }
       const due = sel.video ? (readyVideoSec() >= HLS_FRAG_SEC || bytes >= HLS_FRAG_BYTES)
         : (aRun && (aRun.end - aRun.base) >= 2 * A.ts) || aRuns.length > 0 || bytes >= HLS_FRAG_BYTES;
@@ -9838,6 +9847,7 @@ async function* hlsSegmentParts(cx, idx, k, sel, opts = {}) {
     }
     // 这一段的字幕块已经收齐：先在后台把 VTT 写进缓存（字幕请求可能正等着），再交最后一个片段
     if (subGrab.size) hlsSubsWrite(cx, idx, k, subGrab, pass);
+    if (alt) hlsAltWrite(cx, idx, k, opts.alt, alt.finish(), pass);
     yield* flush(true);
     if (stats.rpuFail) console.error(`hls: ${stats.rpuFail} RPU 转换失败（${cx.filePath} #${k}）`);
     if (pass) pass.ok = true;
@@ -9846,6 +9856,7 @@ async function* hlsSegmentParts(cx, idx, k, sel, opts = {}) {
     if (pass) {
       pass.ended = Date.now();
       if (pass.subs === 1) pass.subs = -1;          // 半路停了：字幕没收齐
+      if (pass.alt && pass.alt.st === 1) pass.alt.st = -1;
       hlsPassDone(pass);
     }
   }
@@ -10654,7 +10665,7 @@ async function hlsSegResponse(cx, idx, k, sel, type, request) {
   if (request.signal?.aborted) fwd(); else request.signal?.addEventListener('abort', fwd, { once: true });
   // 登记这一遍：同一段的字幕请求等它顺手写好的 VTT（缓存不生效时没有意义，就不收）
   const pass = main ? hlsPassBegin(idx, k) : null;
-  const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, sel, { subs: main, pass });
+  const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, sel, { subs: main, pass, alt: main ? hlsAltFor(idx) : -1 });
   let queue = [], finished = false;
   // 整段取完、连接都放掉了，再在后台取下一段 —— 不跟眼前这一段抢那 6 条连接
   const finish = () => { finished = true; if (main) hlsAhead(cx, idx, k); };
@@ -10737,7 +10748,7 @@ function hlsPassBegin(idx, k) {
 }
 /** 生成器结束、字幕也落定了，就从登记里摘掉 */
 function hlsPassDone(p) {
-  if (!p.ended || p.subs === 1 || p.subs === 2) return;
+  if (!p.ended || p.subs === 1 || p.subs === 2 || (p.alt && (p.alt.st === 1 || p.alt.st === 2))) return;
   const set = HLS_PASSES.get(p.id);
   if (set && set.delete(p) && !set.size) HLS_PASSES.delete(p.id);
 }
@@ -10777,7 +10788,7 @@ function hlsFlight(cx, idx, k) {
     const have = await hlsSegCached(key, 'video/mp4');
     if (have) { await have.body.cancel().catch(() => {}); return true; }
     const at = `${key}/${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-    const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, hlsMainSel(idx), { subs: true, pass });
+    const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, hlsMainSel(idx), { subs: true, pass, alt: hlsAltFor(idx) });
     let complete = false;
     const body = new ReadableStream({
       async pull(c) {
@@ -10863,6 +10874,137 @@ async function hlsSubAwait(idx, k, ck, signal) {
     if (h) return h.text();
     if (!live || signal?.aborted || Date.now() > until) return null;
     await hlsSleep(HLS_POLL_MS);
+  }
+}
+
+// ── 备选音轨顺路 ──
+//  默认音轨复用在视频分段里；换成别的音轨时，播放器除了视频分段，还要这条音轨自己的分段。
+//  MKV 里音视频交错存放，音轨分段只能把这一段的字节整个再读一遍、再解析一遍，挑出这条音轨的块 ——
+//  等于这一段从 Dropbox 读两遍。现在：有人在听某条备选音轨，就记下来（HLS_ALT，90 秒不再有人要就作罢），
+//  之后视频那一遍（直出 / 预取）把这条音轨的块一起收下，切好写进缓存；音轨请求先等它，等不到才自己读。
+const HLS_ALT = new Map();          // idh → { i, at }：这部片最近在听的备选音轨
+const HLS_ALT_TTL = 90000;
+const hlsAltKey = (idx, i, k) => `${HLS_SUB_CACHE}seg2/${idx.idh}/a${i}/${k}`;
+function hlsAltFor(idx) {
+  const a = HLS_ALT.get(idx.idh);
+  if (!a) return -1;
+  if (Date.now() - a.at > HLS_ALT_TTL) { HLS_ALT.delete(idx.idh); return -1; }
+  return a.i;
+}
+
+/** 备选音轨 B 在第 k 段里的分片：与「只出这条音轨」那条路径（hlsSegmentParts，sel.video = false）同一套规则 ——
+ *  同样的时间戳吸附、断档另起、2 秒 / 6MB 一个分片、同样的轨道号与序号，切出来的字节一模一样 */
+function hlsAltMux(B, k) {
+  const T0 = HLS_T0 * B.ts, strip = B.strip ? hlsUnB64(B.strip) : null;
+  const laceNs = B.fs ? B.fs * 1e9 / B.ts : 0;
+  const snap = (ns, fs) => { const u = Math.round(ns * B.ts / 1e9); return fs > 0 ? B.anchor + Math.round((u - B.anchor) / fs) * fs : u; };
+  let run = null, bytes = 0, seq = k * 10000 + 1;
+  const runs = [], out = [];
+  const flush = () => {
+    if (run) { runs.push(run); run = null; }
+    bytes = 0;
+    for (const r of runs) out.push(mp4Fragment(seq++, [{ id: 1, video: false, base: r.base + T0, samples: r.samples }]));
+    runs.length = 0;
+  };
+  return {
+    push(blk, ns) {
+      blk.frames.forEach((fr, i) => {
+        let pieces = fr, size = fr.reduce((a, x) => a + x.length, 0);
+        if (strip) { pieces = [strip, ...pieces]; size += strip.length; }
+        let fs = B.fs;
+        if (!fs && B.codec === 'flac') fs = flacFrameSamples(fr.length === 1 ? fr[0] : hlsConcat(fr)) || 4096;
+        const t = snap(ns + i * (laceNs || (fs * 1e9 / B.ts)), fs);
+        if (run) {
+          if (Math.abs(t - run.end) <= fs / 2) { /* 连续 */ }
+          else if (t < run.end) return;
+          else { runs.push(run); run = null; }
+        }
+        if (!run) run = { base: t, end: t, samples: [] };
+        run.samples.push({ dur: fs, size, pieces });
+        run.end += fs;
+        bytes += size;
+      });
+      if ((run && (run.end - run.base) >= 2 * B.ts) || runs.length > 0 || bytes >= HLS_FRAG_BYTES) flush();
+    },
+    finish() { flush(); return out; },
+  };
+}
+
+/** 后台把顺路切好的那条音轨分段写进缓存（与字幕一样：不拖住视频分段收尾），结果记在这一遍上 */
+function hlsAltWrite(cx, idx, k, i, frags, pass) {
+  if (pass && pass.alt) pass.alt.st = 2;
+  const parts = [];
+  for (const f of frags) parts.push(...f);
+  const body = hlsConcat(parts);
+  const p = caches.default.put(new Request(hlsAltKey(idx, i, k)), hlsOut(body, 'audio/mp4')).then(() => true, e => {
+    console.error('hls alt audio:', cx.filePath, k, e && e.message);
+    return false;
+  }).then(ok => { if (pass && pass.alt) { pass.alt.st = ok ? 3 : -1; hlsPassDone(pass); } });
+  cx.ctx?.waitUntil?.(p);
+}
+
+/** 缓存里有没有第 k 段视频（只看指针，不读数据） */
+async function hlsSegHas(idx, k) {
+  const ptr = await caches.default.match(new Request(hlsSegKey(idx, k))).catch(() => null);
+  if (!ptr) return false;
+  await ptr.body?.cancel().catch(() => {});
+  return true;
+}
+/** 第 k 段有没有一遍正在过（在动）；alt = i 时只算顺路收着备选音轨 i 的那几遍 */
+function hlsPassLive(idx, k, alt) {
+  const set = HLS_PASSES.get(`${idx.idh}|${k}`);
+  if (!set) return false;
+  for (const p of set) {
+    if (alt == null ? hlsPassAlive(p) : (p.alt && p.alt.i === alt && (p.alt.st === 2 || (p.alt.st === 1 && hlsPassAlive(p))))) return true;
+  }
+  return false;
+}
+
+/** 缓存里有备选音轨 i 的第 k 段就出；有一遍正顺路收它（而且在动）就轮询缓存等它；都没有 / 停住 / 超时 → null。
+ *  没人在收时立刻返回，不空等 */
+async function hlsAltAwait(idx, k, i, signal) {
+  const ck = new Request(hlsAltKey(idx, i, k));
+  const until = Date.now() + HLS_SUB_WAIT_MS;
+  for (;;) {
+    const live = hlsPassLive(idx, k, i);
+    const h = await caches.default.match(ck).catch(() => null);
+    if (h && h.body) return new Response(h.body, { headers: hlsHeaders('audio/mp4', HLS_LONG) });
+    if (!live || signal?.aborted || Date.now() > until) return null;
+    await hlsSleep(HLS_POLL_MS);
+  }
+}
+
+/** 备选音轨第 k 段：
+ *   · 记下「有人在听」，之后的视频遍（直出 / 预取）都顺路收它；
+ *   · 缓存里有就直接出；有一遍正顺路收它就等它；
+ *   · 视频这一段还没进缓存、也没人在过：现在就起一路预取（视频段顺带进缓存、这条音轨顺路切好），等它 ——
+ *     播放器紧接着要的视频段会等这一路，不会再读一遍；
+ *   · 视频这一段已经在缓存里（看过 / 换音轨之前就预取好了）或者有一遍不带它在过：不再等，
+ *     自己把这段字节读一遍切出来（原路径），切好的也进缓存，拖回来再看不用再读 */
+async function hlsAltSegResponse(cx, idx, k, i, request) {
+  if (!(k >= 0 && k < idx.segs.length)) return hlsFail(404, 'no such segment');
+  if (request.method === 'HEAD') return new Response(null, { headers: hlsHeaders('audio/mp4', HLS_LONG) });
+  const A = idx.audio[i];
+  if (!(hlsCacheOn(cx) && A && A.mode === 'copy' && i !== idx.muxed)) {
+    return hlsSegResponse(cx, idx, k, { video: false, audio: i }, 'audio/mp4', request);
+  }
+  HLS_ALT.set(idx.idh, { i, at: Date.now() });
+  if (HLS_ALT.size > 32) HLS_ALT.delete(HLS_ALT.keys().next().value);
+  let r = await hlsAltAwait(idx, k, i, request.signal);
+  if (r) return r;
+  if (!hlsPassLive(idx, k) && !(await hlsSegHas(idx, k)) && hlsFlight(cx, idx, k)) {
+    r = await hlsAltAwait(idx, k, i, request.signal);
+    if (r) return r;
+  }
+  try {
+    const parts = [];
+    for await (const p of hlsSegmentParts({ ...cx, signal: request.signal }, idx, k, { video: false, audio: i })) parts.push(...p);
+    const res = hlsOut(hlsConcat(parts), 'audio/mp4');
+    cx.ctx?.waitUntil?.(caches.default.put(new Request(hlsAltKey(idx, i, k)), res.clone()).catch(() => {}));
+    return res;
+  } catch (e) {
+    console.error('hls alt audio:', cx.filePath, k, e && e.message);
+    return hlsFail(e?.name === 'AbortError' ? 499 : 502, 'segment unavailable');
   }
 }
 
@@ -11008,7 +11150,7 @@ async function handleHls(url, request, env, ctx) {
     if (!a || a.mode !== 'copy') return hlsFail(404, 'no such audio track');
     if (m[2] === '.m3u8') return hlsOut(hlsMediaPl(idx, `a${i}.mp4`, k => `a${i}/${k}.m4s`, target), HLS_M3U8);
     if (m[2] === '.mp4') return hlsOut(mp4Init([{ id: 1, kind: 'a', cfg: a }], false), 'audio/mp4');
-    if (seg && seg[2] === 'm4s') return hlsSegResponse(cx, idx, +seg[1], { video: false, audio: i }, 'audio/mp4', request);
+    if (seg && seg[2] === 'm4s') return hlsAltSegResponse(cx, idx, +seg[1], i, request);
   }
   if ((m = /^t(\d+)(\.m3u8|\.mp4)?$/.exec(name))) {
     const i = +m[1], a = idx.audio[i];
