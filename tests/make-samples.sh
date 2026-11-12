@@ -74,6 +74,26 @@ q -i pcm51.wav -t 20 -c:a dca -strict -2 -b:a 1509k dts_20.dts
 mkvmerge -q -o avc_zsub.mkv avc_raw.mp4 ac3_20.ac3 --compression 0:zlib --language 0:chi subs_zh.ass
 mkvmerge -q -o nocues.mkv --no-cues avc_raw.mp4
 mkvmerge -q -o subscan.mkv avc_raw.mp4 --cues 0:none --language 0:eng subs_en.srt
+# ASS 转出来的 SRT：\h、\N、{\an8} 还留在文字里，开头两条是署名与广告（内封的文本字幕轨也要洗干净）
+cat > subs_left.srt <<'S'
+1
+00:00:01,000 --> 00:00:04,000
+翻\h译
+blossomoon\h\h\h大头小波\h\h一只小蜜蜂啊\h\h不求富贵只求大鱼大肉
+
+2
+00:00:05,000 --> 00:00:08,000
+片头推广合作洽谈\h请联系普罗米修斯邮箱\hPLMXS2016@GmaiL.com
+
+3
+00:00:09,000 --> 00:00:11,000
+{\an8}你好\h世界\N第二行
+
+4
+00:00:12,000 --> 00:00:14,000
+我们出发吧
+S
+mkvmerge -q -o srt_left.mkv avc_raw.mp4 --language 0:chi subs_left.srt
 mkvmerge -q -o dts_only.mkv -A avc_raw.mp4 --language 0:eng dts_20.dts
 q -f lavfi -i "testsrc2=size=1280x720:rate=30000/1001" -f lavfi -i "sine=frequency=700:sample_rate=48000" -t 12 \
   -c:v libsvtav1 -preset 12 -g 60 -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc \

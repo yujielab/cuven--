@@ -935,6 +935,84 @@ console.log('\n■ 增强型字幕清洗（c2）：水印、署名块、全角�
   ok(pa.join('|') === '你好', 'ASS 的矢量绘图（{\\p1} m 0 0 l …）不进字幕');
 }
 
+console.log('\n■ 字幕清洗 c3：SRT 里残留的 ASS 写法、排开的职位、广告合作与联系方式、博彩 / 盗版站');
+{
+  const X = await H.internals();
+  const D = 6000, mid = 3000;
+  const cue = (s, text, d = 2) => ({ s, e: s + d, text, settings: '' });
+  const has = (out, t) => out.some(c => c.text === t);
+  const leak = (out, list) => list.filter(t => out.some(c => t.split('\n').some(l => l.length > 1 && c.text.includes(l))));
+  const pad = Array.from({ length: 8 }, (_, i) => cue(mid + 1000 + i * 5, `第${i}句`));      // 垫在后面：最后 6 条算片尾
+  const shot1 = '翻\\h译\nblossomoon\\h\\h\\h大头小波\\h\\h一只小蜜蜂啊\\h\\h不求富贵只求大鱼大肉';
+  const shot2 = '片头推广合作洽谈\\h请联系普罗米修斯邮箱\\hPLMXS2016@GmaiL.com';
+
+  // ① ASS 转出来的 SRT：\h、\N、{\an8} 留在文字里
+  const tc = s => `00:${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')},000`;
+  const srt = [[60, '{\\an8}你好\\h世界\\N第二行'], [70, '{\\fad(200,200)\\c&HFFFFFF&}再见'], [80, '{\\p1}m 0 0 l 100 0 100 100{\\p0}'], [90, '我们出发吧']]
+    .map(([s, t], i) => `${i + 1}\n${tc(s)} --> ${tc(s + 2)}\n${t}\n`).join('\n');
+  const pc = X.hlsParseSubFile(srt, '.srt');
+  ok(pc.length === 3 && pc[0].text === '你好 世界\n第二行' && pc[0].settings === ' line:8%' && pc[1].text === '再见' && pc[1].settings === '' && pc[2].text === '我们出发吧',
+    `SRT 里的 \\h → 空格、\\N → 换行、{\\an8} → 顶部、别的标签去掉、{\\p1} 画的图形不要（${JSON.stringify(pc.map(c => c.text))}）`);
+  const fr = X.hlsSubFrameText('srt', new TextEncoder().encode('{\\an8}你好\\h世界\\N第二行'));
+  ok(fr.text === '你好 世界\n第二行' && fr.settings === ' line:8%', 'MKV 里的文本字幕轨（S_TEXT/UTF8）同样处理');
+  const old = X.subClean([cue(mid, '你好\\h世界'), cue(mid + 5, '好的')], D);
+  ok(old.length === 2 && old[0].text === '你好 世界' && old[1].text === '好的', '早先存下的字幕条里还带着 \\h：清洗时兜一遍');
+
+  // ② 截图里的两条：片头、正片中间、HLS 分段都删干净
+  const o2 = X.subClean([cue(20, shot1, 5), cue(30, shot2, 5), cue(60, '我们出发吧'), cue(mid, shot1, 5), cue(mid + 10, shot2, 5), cue(mid + 20, '好的')], D);
+  ok(o2.length === 2 && has(o2, '我们出发吧') && has(o2, '好的'), `「翻\\h译 + 一串名字」「片头推广合作洽谈…请联系…邮箱」在片头与正片中间都整条删掉（剩 ${JSON.stringify(o2.map(c => c.text))}）`);
+  const v2 = X.hlsVtt([cue(mid, shot1, 5), cue(mid + 10, shot2, 5), cue(mid + 20, '你好\\h世界')], D);
+  ok(!/\\h|blossomoon|大头小波|PLMXS|推广合作/.test(v2) && v2.includes('你好 世界'), 'HLS 分段（内封字幕逐段洗）同样删掉，留下的台词里 \\h 变成空格');
+
+  // ③ 职位：只有职位的一行 + 下面的名字；一串没有冒号的职位行；名字另起一条、时间一样
+  const c3 = [cue(5, '校 对\n张三  李四', 4), cue(10, '翻译 王五'), cue(13, '时间轴 赵六'), cue(16, '后期 钱七'),
+    cue(30, '特效', 5), cue(30, '小明  小红', 5), cue(30, '快跑！', 5),
+    cue(50, '制作\n某某某', 3), cue(100, '后期 再说'), cue(120, '我们出发吧'),
+    cue(mid, '翻译'), cue(mid + 5, '== sync, corrected by elderman ==\n@elder_man'), cue(mid + 10, '后期 再说'), cue(mid + 15, '制作'), ...pad];
+  const o3 = X.subClean(c3, D).filter(c => !pad.includes(c));
+  const want3 = ['快跑！', '后期 再说', '我们出发吧', '翻译', '后期 再说', '制作'];
+  ok(o3.map(c => c.text).join('|') === want3.join('|'),
+    `「校 对 / 张三 李四」、连着三条「翻译 王五」、和「特效」同时出现的名字都删；同时的对白「快跑！」、单独一句「后期 再说」、正片里一句「翻译」留着（剩 ${JSON.stringify(o3.map(c => c.text))}）`);
+
+  // 认不出的职位（「海 报」）：排开写的小标题只算弱信号，挨着署名卡才删（连同下面的名字）；台词里强调语气的「不 可 能」留着
+  const o3b = X.subClean([cue(5, '翻 译\n张三', 4), cue(10, '海 报\n李四', 4), cue(15, '鸣 谢\n王五  赵六', 4), cue(60, '不 可 能'), cue(63, '我 不 信\n真的'), cue(mid, '不 可 能'), ...pad], D)
+    .filter(c => !pad.includes(c));
+  ok(o3b.map(c => c.text).join('|') === '不 可 能|我 不 信\n真的|不 可 能', `署名卡后面紧跟着的「海 报 / 李四」「鸣 谢 / 王五 赵六」一起删；「不 可 能」「我 不 信」留着（剩 ${JSON.stringify(o3b.map(c => c.text))}）`);
+
+  // ④ 新认得的广告：正片中间也删
+  const dropAny = ['广告合作请联系QQ：12345678', '商务合作：abc@qq.com', '澳门金沙娱乐城 注册送彩金', '性感荷官 在线发牌', '澳门娱乐城 真人荷官', '最新电影下载 电影天堂 dytt8', '更多高清电影 www 。abc 。com',
+    '微信：abc12345', '本字幕严禁用于商业用途', '请勿转载', 'Downloaded from\nYTS.MX', 'Official YIFY movies site:\nYTS.MX',
+    'Watch Movies, TV Series and Live Sports\nSignup Here -> WWW.ADMITME.APP', 'AmericasCardroom.com brings poker back\nMillion Dollar Sunday Tournament every Sunday',
+    'Fixed & Synced by bozxphd'];
+  const dropEdge = ['片头广告位招租', '关注B站账号：某某字幕', 'PLMXS2016@GmaiL.com', '在线观看 高清下载', '简体中文', 'abc点com'];
+  const o4 = X.subClean([...dropEdge.map((t, i) => cue(20 + i * 20, t)), ...dropAny.map((t, i) => cue(mid + i * 20, t)), cue(mid + 500, '好的')], D);
+  const left = leak(o4, [...dropAny, ...dropEdge]);
+  ok(!left.length && has(o4, '好的'), `推广 / 商务合作、联系方式、QQ / 微信号、博彩、盗版站、躲过滤的网址、YTS、「请勿转载」等 ${dropAny.length + dropEdge.length} 条都删掉${left.length ? '；漏了：' + left.join(' | ') : ''}`);
+
+  // ⑤ 不误删：片头的台词里提到合作、邮箱、微信、B 站；正片里像广告字眼的台词；接着上一行说的「corrected by」
+  const keepEdge = ['我们来谈谈商务合作吧', '请联系我的律师', '把你的邮箱给我', '我中了六合彩', '加我微信吧', '他在B站有个频道', '翻译一下这句话', '特效做得真好',
+    '这是我的邮箱 abc@163.com', '一 二 三', '你的QQ号是多少？', 'The essay was\ncorrected by the teacher.', '中文字幕 第一句',
+    '在线观看的人数破了纪录', '免费下载的东西别乱点', '提取码是多少', '商务合作的事明天再谈', 'YouTube频道订阅破百万了', '购买正版软件', 'Sign up here.'];
+  const keepMid = ['他玩时时彩输光了', '那个美女荷官是谁', '任何人不得盗用公款', '注册送货地址', '这里有企鹅20000只', '电报：速归', '电影天堂', '我们有业务合作', '去娱乐城玩两把', '请留下联系电话'];
+  const o5 = X.subClean([...keepEdge.map((t, i) => cue(20 + i * 15, t)), ...keepMid.map((t, i) => cue(mid + i * 15, t)),
+    cue(mid + 300, 'His homework was'), cue(mid + 302, 'corrected by the teacher.'), ...pad], D);
+  const lost = [...keepEdge, ...keepMid, 'His homework was', 'corrected by the teacher.'].filter(t => !has(o5, t));
+  ok(!lost.length, `${keepEdge.length + keepMid.length + 2} 条台词一条不误删（商务合作、邮箱、微信、六合彩、跨行 / 跨条的 corrected by…）${lost.length ? '；误删：' + lost.join(' | ') : ''}`);
+
+  // ⑥ 端到端：内封的文本字幕轨（ASS 转出来的 SRT）经 HLS 出来
+  const f = '/Movies/srt_left.mkv';
+  if (fs.existsSync(S('srt_left.mkv'))) {
+    const m = await (await H.call(`/hls/${H.token(f)}/master.m3u8`)).text();
+    const idh = /\n([^/\n]+)\/v\.m3u8/.exec(m)[1];
+    const pl = await (await H.call(`/hls/${H.token(f)}/${idh}/s0.m3u8`)).text();
+    const n = (pl.match(/\.vtt/g) || []).length;
+    let all = '';
+    for (let k = 0; k < n; k++) all += await (await H.call(`/hls/${H.token(f)}/${idh}/s0/${k}.vtt`)).text();
+    ok(n > 0 && all.includes('你好 世界\n第二行') && / line:8%\n你好/.test(all) && all.includes('我们出发吧') && !/\\h|\\N|\{|翻|blossomoon|推广|PLMXS/.test(all),
+      `内封文本字幕轨 ${n} 段：署名与广告两条不出现，台词里没有 \\h / \\N / {\\an8}`);
+  } else ok(false, '缺样片 srt_left.mkv：重跑一次 tests/make-samples.sh');
+}
+
 // ⑦ 外挂字幕的 HLS 分段：整份洗一次再按段取 —— 水印（每段只露一次）也认得出
 console.log('\n■ 外挂字幕 HLS 分段走整份清洗');
 {
