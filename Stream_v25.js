@@ -9907,7 +9907,9 @@ function hlsSubFrameText(fmt, bytes) {
     if (parts.length >= 9 && (SUB_STAFF_STYLE.test((parts[2] || '').trim()) || SUB_STAFF_STYLE.test((parts[3] || '').trim()))) return { text: '', settings: '' };
     return hlsAssText(parts.length >= 9 ? parts.slice(8).join(',') : s);
   }
-  return { text: hlsVttEscape(s), settings: '' };
+  // 文本字幕轨（S_TEXT/UTF8）：ASS 转出来的常带着 \h、\N、{\an8}
+  const u = subUnAss(s);
+  return { text: hlsVttEscape(u.text), settings: u.top ? ' line:8%' : '' };
 }
 
 // ── 字幕清洗：字幕组署名、发布 / 来源声明、网址、广告、水印 ──
@@ -9930,33 +9932,77 @@ function hlsSubFrameText(fmt, bytes) {
 //  · partial（HLS 分段，内封字幕逐段读，只拿得到这一段的几条）：只按时间认片头片尾，不认名次、不认水印。
 //    c1 在这里按「这几条里的前 6 / 后 6 条」认片头片尾 —— 每一段几乎每条都落进去，正片台词按片头的
 //    门槛（3 分）在删
+//  c3 起：
+//  · SRT / VTT 里残留的 ASS 写法先收拾掉（ASS 转出来的 SRT、MKV 里的文本字幕轨常见）：\h → 空格、\N → 换行、
+//    {\an8} 这类标签去掉（\an7-9 仍然放到顶部）。原来只有 ASS 轨处理这些，SRT 里的 \h 原样上了屏
+//  · 一个字一个空格排开的汉字（「翻 译」「时 间 轴」）打分前并回去；这种排法本身就是署名卡的样子，多算一分
+//  · 只有职位的一行（「翻译」「校 对」，名字在下一行）：片头片尾删，同一条里它下面的名字一起删；
+//    名字另起一条、时间一模一样的（ASS 里分开排版的署名卡）也删
+//  · 认不出的职位（「海 报」这种排开写的小标题）只算弱信号：挨着已经删掉的署名卡才删（连同下面的名字）；
+//    台词里强调语气的「不 可 能」留着
+//  · 没有冒号的职位行（「翻译 张三」）只算弱信号：前后挨着的另一条也是职位行，或者后面跟了一串名字 / 英文 ID，才删
+//  · 同一条里删了署名 / 广告，剩下带署名味道的行（≥ 2 分：@账号、邮箱、鸣谢）不留
+//  · 新认得的广告：推广 / 商务 / 广告合作与「请联系……邮箱」、QQ 号 / 微信号、视频站账号、盗版片源站、博彩广告
+//    （「注册送彩金」）、躲过滤的网址（www 。xx 。com、xx点com）、「严禁商用 / 请勿转载」。
+//    台词里也会说的只算弱信号，凑到一起才删：邮箱地址、「在线观看」「免费下载」「提取码」「六合彩」「支持正版」
+//  · 行首的英文署名（corrected by / encoded by …）只认一句话的开头：上一行没说完、接下来的那半句
+//    （「The essay was / corrected by the teacher.」）不算，哪怕跨了两条字幕
 const SUB_EDGE_S = 240;
 const SUB_EDGE_N = 6;
 const SUB_LONG_S = 8;
 const SUB_BLOCK_S = 12;
-const SUB_CLEAN_V = 'c2';             // 清洗规则的版本：进缓存键，规则改了旧的 VTT 不会再被端上来
+const SUB_CLEAN_V = 'c3';             // 清洗规则的版本：进缓存键，规则改了旧的 VTT 不会再被端上来
+const SUB_TLD = 'com|net|org|cn|cc|tv|la|io|info|xyz|top|vip|club|site|link|ru|tw|hk|me|mx|ag|lt|sx|ws|pw|app|biz|uk|jp|kr|eu|nz|vn|gg|tk|icu|cyou|asia|mobi|wang|ltd|online|store';
+// 每条：[正则, 分数, 只认一句话的开头]。第三项为 true 的是行首的英文署名：这一行若是上一行没说完接下来的，不算
 const SUB_RULES = [
   // 网址：带协议 / www 的一定是；裸域名只认常见后缀（e.g. / Mr.Smith 这类不会命中）
   [/(?:https?:\/\/|www\.)[^\s]+/i, 4],
-  [/(?:^|[^\w@.\-])[a-z0-9][\w-]{1,62}\.(?:com|net|org|cn|cc|tv|la|io|info|xyz|top|vip|club|site|link|ru|tw|hk|me)(?:\/[^\s]*)?(?![\w.])/i, 3],
+  [new RegExp(`(?:^|[^\\w@.\\-])[a-z0-9][\\w-]{1,62}\\.(?:${SUB_TLD})(?:\\/[^\\s]*)?(?![\\w.])`, 'i'), 3],
+  // 躲过滤的网址：www 后面拿空格 / 逗号 / 句号 /「点」隔开；「xx点com」
+  [/www\s*[.,。·点]\s*[a-z0-9-]{2,}\s*[.,。·点]\s*[a-z]{2,6}(?![a-z])/i, 4],
+  [/[a-z0-9-]{2,40}\s?(?:[。·点]|\(dot\)|\[dot\])\s?(?:com|net|org|cn|cc|tv)(?![a-z])/i, 3],
   // 字幕组 / 压制组 / 翻译组
   [/字幕[组組社团團坊侠俠]|翻[译譯][组組]|[压壓]制[组組]|(?:^|[^a-z])(?:fansub|sub(?:s|titles?)?\s*team)(?:[^a-z]|$)/i, 4],
   // 认得出名字的字幕站 / 字幕组（这些词不会出现在台词里）
-  [/人人影[视視]|YYeTs|破[烂爛]熊|射手[网網]|字幕[库庫吧]|SubHD|zimuku|assrt|天天美[剧劇]|美[剧劇]天堂|澄空[学學][园園]|[圣聖]城家[园園]|FRDS|CMCT|HDChina|OurBits|SweetSub|A4Sub|[凤鳳][凰凰]天使|TSKS|[诸諸]神字幕|追新番|[韩韓][剧劇]TV/i, 4],
+  [/人人影[视視]|YYeTs|破[烂爛]熊|射手[网網]|字幕(?:[库庫吧网網]|天堂)|SubHD|zimuku|assrt|天天美[剧劇]|美[剧劇]天堂|澄空[学學][园園]|[圣聖]城家[园園]|FRDS|CMCT|HDChina|OurBits|SweetSub|A4Sub|[凤鳳][凰凰]天使|TSKS|[诸諸]神字幕|追新番|[韩韓][剧劇]TV/i, 4],
+  // 盗版片源站：不会出现在台词里的名字 4 分；说得通是台词的（「电影天堂」）3 分，只在片头片尾删
+  [/dytt|dygod|ygdy8|btbtt|rarbg|1337x|\bEZTV\b|\bYIFY\b|\bYTS\b|BT天堂|高清MP4吧|6v[电電]影|66影[视視]|80s手[机機]|比特大雄|音范[丝絲]|哔嘀影[视視]|低端影[视視]|奈[飞飛]工[厂廠]|茶杯狐|3E帝[国國]|[飘飄]花[电電]影/i, 4],
+  [/[电電]影天堂|[阳陽]光[电電]影(?![节節院])|[迅訊]雷[电電]影|高清之家|[蓝藍]光[网網]/, 3],
   // 英文字幕站与 OpenSubtitles 自己插的广告（这些说法不会出现在台词里）
-  [/open[\s-]*subtitles|osdb\.link|subscene|addic7ed|podnapisi|\bsubdl\b|yifysubtitles|tvsubtitles|advertise your product|become (?:a )?vip member|rate this subtitle|help other users to choose|get (?:the )?(?:latest|more) subtitles|best subtitles? (?:at|on|from)|subtitles for any video|free browser extension|watch any video online|nord\s*vpn|implement rest api|remove all ads from/i, 4],
-  // 英文署名：只认行首（台词里也会有「corrected by the teacher」）
-  [/^[\s\-=~*#\[(]*(?:(?:re-?)?sync(?:ed|hronized)?(?: (?:and|&) correct(?:ed|ions?))? by|corrected by|ripped by|encoded by|re-?sync(?:ed)? for\b|(?:subtitles?|subs|captions?) (?:by|from|ripped|synced|corrected|edited|translated|improved|adapted)\b|captioned by|closed captions? (?:provided )?by|captioning (?:sponsored|made possible|provided|performed) by)/i, 4],
-  [/^[\s\-=~*#\[(]*(?:downloaded from|transcri(?:pt|bed) by|(?:improved|adapted|tweaked|reviewed|polished|fixed) by)\b/i, 3],
-  // 声明：学习交流 / 禁止商用 / 下载后删除（「仅供参考」「未经授权」是台词里的常用语，不算）
-  [/仅供(?:学习|交流|研究)|僅供(?:學習|交流|研究)|禁止(?:用于|用於)?(?:任何)?(?:商业|商業)(?:用途)?|(?:请|請)(?:于|於)下[载載]|24\s*小[时時]内?(?:删除|刪除)/, 4],
+  [/open[\s-]*subtitles|osdb\.link|subscene|addic7ed|podnapisi|\bsubdl\b|yifysubtitles|tvsubtitles|advertise your product|become (?:a )?vip member|rate this subtitle|help other users to choose|get (?:the )?(?:latest|more) subtitles|best subtitles? (?:at|on|from)|subtitles for any video|free browser extension|watch any video online|nord\s*vpn|implement rest api|remove all ads from|americas\s*cardroom|million dollar sunday|(?:movies|tv series|tv shows),? (?:and|&) live sports/i, 4],
+  // 英文署名：只认行首（台词里也会有「corrected by the teacher」）。几个动词连着写的也认：sync, corrected by / Fixed & Synced by
+  [/^[\s\-=~*#\[(]*(?:(?:[a-z]+(?:\s*[,&+\/]\s*|\s+and\s+))*(?:(?:re-?)?sync(?:ed|hronized|hronised)?|corrected|ripp?ed|encoded)(?:(?:\s*[,&+\/]\s*|\s+and\s+)[a-z-]+)* by\b|re-?sync(?:ed)? for\b|(?:(?:english|chinese|spanish|french|german|italian|portuguese|dutch|arabic) )?(?:subtitles?|subs|captions?) (?:by|from|ripped|synced|corrected|edited|translated|improved|adapted|downloaded)\b|captioned by|closed captions? (?:provided )?by|captioning (?:sponsored|made possible|provided|performed) by)/i, 4, true],
+  [/^[\s\-=~*#\[(]*(?:downloaded from|transcri(?:pt|bed) by|provided by|(?:improved|adapted|tweaked|reviewed|polished|fixed|extracted|uploaded|converted) by)\b/i, 3, true],
+  // 声明：学习交流 / 禁止商用 / 下载后删除 / 请勿转载（「仅供参考」「未经授权」「不得入内」是台词里的常用语，不算）
+  [/仅供(?:学习|交流|研究|[试試]看)|僅供(?:學習|交流|研究|試看)|(?:禁止|[严嚴]禁|不得|[请請]勿|切勿)(?:用于|用於|作)?(?:任何)?(?:商业|商業)(?:用途)?|(?:请|請)(?:于|於)下[载載]|24\s*小[时時]内?(?:删除|刪除)|(?:禁止|[严嚴]禁|[请請]勿|[谢謝][绝絕]|不得)(?:任何形式的?|私自|擅自)?(?:[转轉][载載]|二次上[传傳]|二[传傳])/, 4],
   [/版[权權](?:归|歸)|[转轉][载載](?:请|請)[注註]明|(?:本|此)(?:资源|資源|视频|視頻|影片)(?:来自|來自|由|首[发發]|仅|僅)|(?:资源|資源)(?:来自|來自)/, 3],
   [/[扫掃][码碼](?:关注|關注|加入|进群|進群)/, 4],
-  // 引流：QQ 群 / 群号最像广告；公众号、微博、淘宝、招人在台词里也会出现，只在片头片尾删
-  [/(?:QQ|Q)\s*群|群[号號]\s*[:：]?\s*\d|t\.me\//i, 4],
+  [/二[维維][码碼]|(?:[购購][买買]|支持)正版/, 2],
+  // 引流：QQ 群 / 群号 / QQ 号 / 微信号最像广告；公众号、微博、淘宝、招人在台词里也会出现，只在片头片尾删
+  [/(?:QQ|Q)\s*群|群[号號]\s*[:：]?\s*\d|t\.me\/|(?:QQ|扣扣)\s*[号號]?\s*[:：]?\s*\d{5,12}|(?:微信|V信|VX|薇信|威信|wechat|weixin)\s*(?:[号號]|ID)?\s*[:：]\s*[\w\-]{4,}|(?:\bTG|telegram)\s*(?:群|[频頻]道)|(?:\bTG|telegram)\s*[:：]?\s*@\w/i, 4],
   [/微信\s*(?:公众号|公眾號|号|號)|公众号|公眾號|微博\s*[@：:]|新浪微博|[电電][报報]群/, 3],
   [/更多(?:中文|精彩|好看|高清|影[视視]|美[剧劇]|[电電]影|资源|資源)*(?:字幕|资源|資源|影片|[电電]影|美[剧劇])?\s*(?:请|請)?\s*(?:访问|訪問|关注|關注|搜索|下[载載]|登[录錄])|(?:欢迎|歡迎)(?:关注|關注|订阅|訂閱)/, 3],
+  // 视频站 / 社交账号：带冒号、@、ID、账号的是在报账号；「YouTube 频道」「B 站主页」台词里也说，弱信号
+  [/(?:B站|bilibili|哔哩哔哩|嗶哩嗶哩|抖音|快手|小[红紅][书書]|西瓜[视視][频頻]|[头頭][条條][号號]|知乎|豆瓣|YouTube|油管|Twitter|推特|Instagram|Facebook|Patreon|[爱愛][发發][电電])\s*(?:U?ID|[账賬帳][号號]|搜索?|[关關]注|[:：@])/i, 3],
+  [/(?:B站|bilibili|哔哩哔哩|嗶哩嗶哩|抖音|快手|小[红紅][书書]|西瓜[视視][频頻]|YouTube|油管|Patreon|[爱愛][发發][电電])\s*(?:UP主?|[频頻]道|主[页頁]|[订訂][阅閱])/i, 2],
   [/淘[宝寶]|招募|招聘|招新|[诚誠][聘招]|加入我[们們]/, 2],
+  // 推广 / 商务 / 广告合作、广告位招租（后面接「的 / 得 / 人 / 了」的是在说事：「商务合作的事明天再谈」）
+  [/(?:推[广廣]|[广廣]告|商[务務]|[赞贊]助)\s*(?:合作|洽[谈談]|投放|招商|[联聯][系繫絡络]|[咨諮][询詢]|[热熱][线線])(?![的得人了吗嗎呢])|(?:合作|[广廣]告|推[广廣])洽[谈談](?![的得了吗嗎呢])|洽[谈談]合作(?![的得了吗嗎呢])|[广廣]告位\s*(?:招租|出租|招商|合作)/, 3],
+  // 联系方式：「请联系……邮箱 / QQ / 微信」「邮箱：」「联系方式：」
+  [/(?:[请請]|[欢歡]迎|可)(?:[联聯][系繫絡络]|[咨諮][询詢]|致[电電])[^,.!?。，！？]{0,16}(?:[邮郵]箱|信箱|e-?mail|QQ|微信|[电電][话話]|客服)/i, 3],
+  [/(?:[邮郵]箱|信箱|e-?mail|[联聯][系繫](?:方式|[电電][话話]|QQ|微信|[邮郵]箱)|投稿|客服(?:QQ|微信|[电電][话話])?)\s*[:：]/i, 3],
+  // 邮箱地址：台词里也会念邮箱，弱信号；整行就是一个邮箱再加一分
+  [/[\w.+\-]+@[\w\-]+(?:\.[\w\-]+)+/, 2],
+  [/^[\s\-=~*#★☆◆◇■□●○【\[(（<《]*[\w.+\-]+@[\w\-]+(?:\.[\w\-]+)+[\s\-=~*#★☆◆◇■□●○】\])）>》]*$/, 1],
+  // 看片 / 下载引流：这些词台词里也说（「免费下载的东西别乱点」），各算弱信号；广告多半两样都提，或者带着网址 / 站名
+  [/在[线線](?:[观觀]看|播放|看片)|免[费費](?:[观觀]看|在[线線]|看片)|手[机機]看片|看片神器/, 2],
+  [/(?:高清|免[费費]|[迅訊]雷|BT|[种種]子|磁力|[网網][盘盤])\s*下[载載]|磁力[链鏈]|[网網][盘盤](?:[链鏈]接|提取|[资資]源)|提取[码碼]|下[载載]地址|最新(?:[电電]影|影片|大片|美[剧劇]|[剧劇]集)(?:下[载載]|[资資]源|在[线線]|免[费費]|[抢搶]先)/i, 2],
+  // 博彩广告（盗版片源的字幕里最常见的一类）：「注册送彩金」「在线发牌」这类说法不会是台词；
+  // 场子 / 玩法的名字（「六合彩」「娱乐城」）与招徕的字眼（「彩金」「美女荷官」）赌片里也说，各算弱信号，凑到一起才删
+  [/(?:注[册冊]|[开開][户戶]|首存|充值)\s*(?:就|即|立|免[费費])?(?:送(?![货貨达達到])|返(?![回还還]))|送彩金|在[线線][发發]牌|官方直[营營]|(?:最新|唯一|永久)(?:[网網]址|官[网網]|域名)/, 4],
+  [/六合彩|[娱娛][乐樂]城|博彩|棋牌|百家[乐樂]|[时時]{2}彩|北京[赛賽][车車]/, 2],
+  [/彩金|[体體]育投注|(?:真人|性感|美女)荷官/, 2],
+  [/(?:官[网網]|[网網]址|[网網]站|主[页頁])\s*[:：]/, 3],
   // 翻译说明：机翻 / 人工翻译 / 如有错误欢迎指正（片头片尾才删）
   [/机器翻[译譯]|機器翻[譯译]|[机機]翻|AI\s*翻[译譯]|人工(?:翻[译譯]|听[译譯]|聽[譯译])|(?:如有|若有)(?:错误|錯誤|不[当當]|疏漏)|(?:欢迎|歡迎)指正/i, 3],
   // 鸣谢 / 感谢观看：弱信号，靠「挂得久」或「挨着署名块」才删
@@ -9966,9 +10012,7 @@ const SUB_RULES = [
   // 文件名 / 片源规格（一行里出现两个以上才算）
   [/(?:\b(?:480p|720p|1080[pi]|2160p|4K|BluRay|Blu-ray|BDRip|WEB-?DL|WEBRip|HDTV|x26[45]|H\.?26[45]|HEVC|AVC|REMUX|DTS(?:-HD)?|TrueHD|Atmos|DDP?5\.1|AAC)\b.*){2}/i, 4],
   // 英文署名「Translated by」：台词里也可能出现，只在片头片尾删
-  [/^[\s\-=~*#\[(]*(?:translated|translation|transcribed|timed|typeset|edited|proofread|subtitled|captioned) by\b/i, 3],
-  // 职位 + 冒号开头：翻译：/ 校对：/ 时间轴：/ Translated: / Timing:
-  [/^[\s\-=~*#★☆◆◇■□●○【\[(（]*(?:翻[译譯]|校[对對订訂]|[时時][间間]?轴|[时時][间間]?軸|[调調][轴軸]|[压壓]制|后期|後期|特效|片源|字幕|[总總][监監]|[监監]制|美工|策[划劃]|[听聽][译譯翻]|[终終][审審]|[审審]核|整理|制作|製作|出品|[发發]布|首[发發]|翻校|校[译譯]|分割|上[传傳]|Translat(?:ion|ed|ors?)|Subtitles?|Timing|Typeset(?:ting)?|Encod(?:e|ing|er)|QC|Editor|Edit(?:ing)?|Proofread(?:ing|er)?|Sync)\s*[:：]/i, 3],
+  [/^[\s\-=~*#\[(]*(?:translated|translation|transcribed|timed|typeset|edited|proofread|subtitled|captioned) by\b/i, 3, true],
   // 「×× 出品 / 发布 / 首发 / 压制 / 荣誉出品」结尾
   [/(?:出品|[发發]布|首[发發]|[压壓]制|[荣榮]誉出品|[倾傾]情奉[献獻]|[独獨]家(?:首[发發]|[发發]布)?|呈[现現]|presents?|releases?d?)\s*$/i, 2],
   // 署名常用的机构字眼 / 英文缩写
@@ -9978,8 +10022,23 @@ const SUB_RULES = [
   // 整行只是装饰包着的一小段：【……】、==……==、★……★
   [/^[\s\-=~*#★☆◆◇■□●○【\[]{1,}.{1,40}[\s\-=~*#★☆◆◇■□●○】\]]{1,}$/, 1],
 ];
-// 整行就是一个发布组名
-const SUB_GROUP_LINE = /^(?:TLF|SPARKS|GECKOS|FGT|NTb|FLUX|CMRG|EVO|ION10|PSA|YTS(?:\.\w+)?|YIFY|RARBG|ETRG|TGx|QxR|Tigole|UTR|BeyondHD|ADWeb|HHWEB|M-?Team|WiKi|TTG|CHD|HDSky|FFans|PTer|BtsTV|LeagueWEB|NGB|原[创創]翻[译譯]|中英(?:双语|雙語)?字幕|(?:双语|雙語)字幕|特效字幕|精校版?|校[对對]版|中文字幕|英文字幕)$/i;
+// 职位。字幕组自己的（翻译、校对、时间轴……）没有冒号也认；片子的职员表里也有的（监制、制作、出品……）与「字幕」
+// 要带冒号，或者整行只有它（名字在下一行）
+const SUB_ROLE_FAN = '翻[译譯]|校[对對订訂]|[时時][间間]?[轴軸]|[调調打校][轴軸]|[轴軸]校|[压壓]制|后期|後期|特效|片源|[听聽][译譯翻写寫]|[终終][审審校]|[总總]校|主[翻校]|翻校|校[译譯]|初翻|[润潤]色|繁化|嵌字';
+const SUB_ROLE_ALL = SUB_ROLE_FAN + '|字幕|[总總][监監]|[监監]制|美工|策[划劃]|[审審]核|整理|制作|製作|出品|[发發]布|首[发發]|分割|上[传傳]|[协協][调調]|[统統][筹籌]|海[报報]';
+const subRole = set => `(?:字幕|本[片集剧劇]|中文|[总總]|主|[责責]任|后期|後期)?(?:${set})(?:人[员員]|[组組]|者)?`;
+const subRoles = (set, sep) => `${subRole(set)}(?:\\s*[${sep}]\\s*${subRole(set)})*`;
+const SUB_LEAD = '[\\s\\-=~*#★☆◆◇■□●○【\\[(（]*';
+const SUB_TRAIL = '[\\s\\-=~*#★☆◆◇■□●○】\\])）]*';
+// 职位 + 冒号开头：翻译：/ 校对：/ 时间轴：/ Translated: / Timing:
+const SUB_ROLE_COLON = new RegExp(`^${SUB_LEAD}(?:${subRoles(SUB_ROLE_ALL, '\\/&、·+,|\\s')}|Translat(?:ion|ed|ors?)|Subtitles?|Timing|Typeset(?:ting)?|Encod(?:e|ing|er)|QC|Editor|Edit(?:ing)?|Proofread(?:ing|er)?|Sync)\\s*[:：]`, 'i');
+// 整行只有职位（名字在下一行）：翻译 / 校对 / 翻译&校对 / 时间轴：
+const SUB_ROLE_HEAD = new RegExp(`^${SUB_LEAD}${subRoles(SUB_ROLE_ALL, '\\/&、·+,|\\s')}\\s*[:：]?${SUB_TRAIL}$`);
+// 职位 + 空格 + 名字（没有冒号）；GAP3 = 后面跟了两个以上的名字，或者一个英文 ID
+const SUB_ROLE_GAP = new RegExp(`^${SUB_LEAD}${subRoles(SUB_ROLE_FAN, '\\/&、·+|')} \\S`);
+const SUB_ROLE_GAP3 = new RegExp(`^${SUB_LEAD}${subRoles(SUB_ROLE_FAN, '\\/&、·+|')} (?:\\S+ \\S|.*[a-z][\\w.\\-]{2,})`, 'i');
+// 整行就是一个发布组名 / 字幕规格
+const SUB_GROUP_LINE = /^(?:TLF|SPARKS|GECKOS|FGT|NTb|FLUX|CMRG|EVO|ION10|PSA|YTS(?:\.\w+)?|YIFY|RARBG|ETRG|TGx|QxR|Tigole|UTR|BeyondHD|ADWeb|HHWEB|M-?Team|WiKi|TTG|CHD|HDSky|FFans|PTer|BtsTV|LeagueWEB|NGB|原[创創]翻[译譯]|中英(?:双语|雙語)?字幕|(?:双语|雙語)字幕|特效字幕|精校版?|校[对對]版|中文字幕|英文字幕|(?:[简簡繁][体體]|官方|[国國][语語]|[粤粵][语語]|[简簡繁][英日韩韓])(?:中文|中字|双语|雙語|字幕|特效)+)$/i;
 const SUB_DECOR = /^[\s\-=~*#★☆◆◇■□●○【】\[\]()（）<>《》|_.·•…!！?？,，、:：;；'"“”‘’]*$/;
 // ASS 矢量绘图（{\p1} 之后的路径指令）：m/n/l/b/s/p 加一串数，可能以 c 收尾
 const SUB_DRAW = /^(?:[mnlbsp](?:\s+-?\d+(?:\.\d+)?)+\s*)+c?$/i;
@@ -9987,26 +10046,62 @@ const SUB_DRAW = /^(?:[mnlbsp](?:\s+-?\d+(?:\.\d+)?)+\s*)+c?$/i;
 const SUB_TALK = /[我你您他她咱俺]|[吗嗎呢吧啊呀嘛哦哇啦咯][?!。，,…~]*\s*$|[?!]\s*$|^[-–—]\s|\b(?:I|I'm|I'll|you|we|he|she|they|me|my|your|our|don't|can't|let's|yeah|okay)\b/i;
 // 长得像水印：包在括号 / 装饰符里、带 @、像网址、一串大写缩写
 const SUB_MARK_SHAPE = /^[\s\[【(（<《「『★☆◆◇■□●○=\-~*#|]|[\]】)）>》」』★☆◆◇■□●○=\-~*#|]\s*$|@\S|www\.|\.(?:com|net|org|cn|tv|cc|la|me)\b|\b[A-Z]{3,}\b/;
+// 一个字一个空格排开的汉字：翻 译 / 时 间 轴
+const SUB_SPACED = /(?<![一-鿿])[一-鿿](?: [一-鿿](?![一-鿿]))+/g;
+// 整行只有排开的两到四个字（「海 报」「鸣 谢」）：多半是署名卡的小标题；强调语气也会这么写（「不 可 能」），只算弱信号
+const SUB_SPACED_ONLY = /^[一-鿿](?: [一-鿿]){1,3}$/;
+// 一句话说完了：句末标点收尾（打分用的文字里全角已经折成半角）
+const SUB_STOP = /[.!?…。:;"”’)\]♪]\s*$/;
+// 明摆着是对白：问号 / 叹号 / 句号收尾、对白横杠
+const SUB_SAY = /[?!。]\s*$|^[-–—]\s/;
+// SRT / VTT 里残留的 ASS 写法：\h（硬空格）、\N（换行）、{\an8} 这类标签
+const SUB_ASS_LEFT = /\\[hNn]|\{[^}]*\\[^}]*\}/;
 
-/** 打分用的那一份文字：去标签 / 实体，全角折半角，空白收成一个 */
-function subNorm(line) {
+/** 非 ASS 的字幕文字里残留的 ASS 写法 → { text, top }：标签去掉（\an7-9 = 顶部，记下来），\h → 空格，\N → 换行；
+ *  {\p1} 画的图形整条不要 */
+function subUnAss(s) {
+  s = String(s);
+  if (!SUB_ASS_LEFT.test(s)) return { text: s, top: false };
+  if (/\{[^}]*\\p[1-9]/.test(s)) return { text: '', top: false };
+  const top = /\{[^}]*\\an?[789]\b[^}]*\}/.test(s);
+  return { text: s.replace(/\{[^}]*\\[^}]*\}/g, '').replace(/\\N/gi, '\n').replace(/\\h/g, ' ').replace(/[ \t]*\n[ \t]*/g, '\n').trim(), top };
+}
+
+/** 打分用的那一份文字：去标签 / 实体 / 零宽字符，全角折半角，空白收成一个；排开的汉字（「翻 译」）并回去 */
+function subNorm0(line) {
   return String(line).replace(/<[^>]*>/g, '').replace(/&(?:amp|lt|gt|nbsp);/g, ' ')
+    .replace(/[\u200B-\u200F\u2060\uFEFF]/g, '')
     .replace(/[！-～]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
     .replace(/[　\s]+/g, ' ').trim();
 }
-/** 一行的分数。≥ 9 = 不是给人看的字（绘图指令、乱码），任何位置都删 */
-function subLineScore(line) {
-  const t = subNorm(line);
-  if (!t) return 0;
-  if (SUB_DRAW.test(t)) return 9;
+const subJoin = t => t.replace(SUB_SPACED, m => m.replace(/ /g, ''));
+const subNorm = line => subJoin(subNorm0(line));
+/** 一行 → { t（打分用的文字）, n（分数）, role（职位行：翻译 / 校对……）, head（整行只有职位，名字在下一行）}。
+ *  head 的行删掉时，同一条里它下面的行（名字）跟着删。n ≥ 9 = 不是给人看的字（绘图指令、乱码），任何位置都删。
+ *  cont = 这一行是上一行没说完接下来的（小写开头、上一行没有句末标点）：行首的英文署名规则不算 */
+function subLineInfo(line, cont) {
+  const t0 = subNorm0(line), t = subJoin(t0);
+  const x = { t, n: 0, role: false, head: false };
+  if (!t) return x;
+  if (SUB_DRAW.test(t)) { x.n = 9; return x; }
   const bad = (t.match(/�/g) || []).length;
-  if (bad && bad * 3 >= t.length) return 9;
+  if (bad && bad * 3 >= t.length) { x.n = 9; return x; }
   let n = 0, strong = false;
-  for (const [re, w] of SUB_RULES) if (re.test(t)) { n += w; if (w >= 4) strong = true; }
+  for (const [re, w, lead] of SUB_RULES) if (!(lead && cont) && re.test(t)) { n += w; if (w >= 4) strong = true; }
   if (SUB_GROUP_LINE.test(t.replace(/^[\s\-=~*#★☆◆◇■□●○【\[(（]+|[\s\-=~*#★☆◆◇■□●○】\])）]+$/g, ''))) { n += 3; strong = true; }
+  // 职位行：带冒号 3 分；整行只有职位 3 分；职位 + 空格 + 名字 2 分（跟了一串名字 / 英文 ID 3 分）。
+  // 字是排开写的（翻 译）再加一分 —— 台词不会这么排
+  x.head = SUB_ROLE_HEAD.test(t);
+  if (SUB_ROLE_COLON.test(t)) { n += 3; x.role = true; }
+  else if (x.head) { n += 3; x.role = true; }
+  else if (SUB_ROLE_GAP.test(t)) { n += SUB_ROLE_GAP3.test(t) ? 3 : 2; x.role = true; }
+  else if (SUB_SPACED_ONLY.test(t0)) { n += 2; x.head = true; }      // 认不出的职位（「海 报」）：挨着署名块才删，见 subClean
+  if (x.role && t0 !== t) { n += 1; strong = true; }
   if (n > 0 && !strong && SUB_TALK.test(t)) n -= 1;
-  return n;
+  x.n = n;
+  return x;
 }
+function subLineScore(line, cont) { return subLineInfo(line, cont).n; }
 const subMarkKey = t => t.toLowerCase().replace(/[\s\-=~*#★☆◆◇■□●○【】\[\]()<>《》「」『』|_.·•…!?,、:;'"“”‘’]/g, '');
 
 /** [{ s, e, text, settings }] → 清洗过的（不改原数组）。dur = 片长（秒），不知道就按最后一条字幕的结束时间算。
@@ -10014,11 +10109,33 @@ const subMarkKey = t => t.toLowerCase().replace(/[\s\-=~*#★☆◆◇■□●�
 function subClean(cues, dur, opt) {
   if (!cues || !cues.length) return cues || [];
   const partial = !!(opt && opt.partial);
+  // 残留的 ASS 写法（\h、\N、{\an8}）：解析时已经收拾过，这里再兜一遍 —— 早先存下的在线字幕记录里还带着
+  if (cues.some(c => c && c.text && SUB_ASS_LEFT.test(c.text))) {
+    cues = cues.map(c => {
+      if (!c || !c.text || !SUB_ASS_LEFT.test(c.text)) return c;
+      const u = subUnAss(c.text);
+      return { ...c, text: hlsVttEscape(u.text), settings: c.settings || (u.top ? ' line:8%' : '') };
+    });
+  }
   const end = dur > 0 ? dur : partial ? 0 : cues.reduce((m, c) => Math.max(m, (c && c.e) || 0), 0);
   const order = cues.map((c, i) => i).filter(i => cues[i] && cues[i].text).sort((a, b) => cues[a].s - cues[b].s);
   const rank = new Array(cues.length);
   order.forEach((i, r) => { rank[i] = r; });
-  const lines = cues.map(c => (c && c.text) ? c.text.split('\n').map(l => ({ l, t: subNorm(l), n: subLineScore(l) })) : null);
+  // 逐行打分。before = 这一行前面那句话的最后一行（同一条里的上一行，或紧挨着的上一条）：没有句末标点、
+  // 这一行又是小写开头，就是没说完接下来的半句，行首的英文署名规则不算
+  const lines = new Array(cues.length).fill(null);
+  let prevEnd = -Infinity, prevLast = '';
+  for (const i of order) {
+    const c = cues[i];
+    let before = c.s - prevEnd <= 1 ? prevLast : '';
+    lines[i] = c.text.split('\n').map(l => {
+      const x = subLineInfo(l, !!before && /^[a-z]/.test(l.replace(/<[^>]*>/g, '').trimStart()) && !SUB_STOP.test(before));
+      x.l = l;
+      if (x.t) before = x.t;
+      return x;
+    });
+    prevEnd = c.e; prevLast = before;
+  }
   // 水印：整份字幕里反复出现、带点署名味道的同一行
   let marks = null;
   if (!partial && order.length >= 20) {
@@ -10042,11 +10159,50 @@ function subClean(cues, dur, opt) {
   const bar = i => isEdge(i) ? ((cues[i].e - cues[i].s) >= SUB_LONG_S ? 2 : 3) : 4;
   const kill = new Array(cues.length);            // 每条：要删的行（下标集合）
   const gone = new Array(cues.length);            // 每条：整条删干净了
+  const allGone = i => kill[i].size > 0 && lines[i].every((x, j) => kill[i].has(j) || !x.t || SUB_DECOR.test(x.t));
+  // 一条里有行要删：剩下带署名味道的行（≥ 2 分：@账号、邮箱、鸣谢）也不留；整行只有职位的那一行（「翻 译」）删了，
+  // 名字在它下面，同一条里往下都删。返回这一条是不是删干净了
+  const spread = i => {
+    const k = kill[i], L = lines[i];
+    if (!k.size) return false;
+    L.forEach((x, j) => { if (x.n >= 2) k.add(j); });
+    const h = L.findIndex((x, j) => x.head && k.has(j));
+    if (h >= 0) for (let j = h + 1; j < L.length; j++) k.add(j);
+    return allGone(i);
+  };
   for (const i of order) {
-    const b = bar(i), k = new Set();
-    lines[i].forEach((x, j) => { if (x.n >= 9 || x.n >= b || (marks && x.t && marks.has(subMarkKey(x.t)))) k.add(j); });
+    const b = bar(i), k = new Set(), L = lines[i];
+    L.forEach((x, j) => { if (x.n >= 9 || x.n >= b || (marks && x.t && marks.has(subMarkKey(x.t)))) k.add(j); });
     kill[i] = k;
-    gone[i] = k.size > 0 && lines[i].every((x, j) => k.has(j) || !x.t || SUB_DECOR.test(x.t));
+    gone[i] = spread(i);
+  }
+  // 一串职位行（「翻译 张三」「校对 李四」：没有冒号，各自只有 2 分）：片头片尾前后挨着的互相作证，一起删
+  const roleAt = (r, s) => { const j = order[r]; return j != null && Math.abs(cues[j].s - s) <= SUB_BLOCK_S && lines[j].some(x => x.role && x.n >= 2); };
+  const run = [];
+  for (let r = 0; r < order.length; r++) {
+    const i = order[r];
+    if (!gone[i] && isEdge(i) && lines[i].some((x, j) => x.role && x.n >= 2 && !kill[i].has(j)) && (roleAt(r - 1, cues[i].s) || roleAt(r + 1, cues[i].s))) run.push(i);
+  }
+  for (const i of run) {
+    lines[i].forEach((x, j) => { if (x.role && x.n >= 2) kill[i].add(j); });
+    gone[i] = spread(i);
+  }
+  // 只有职位的一条（整条删了，最后一行是职位、名字不在这一条里），名字另起一条、时间一模一样
+  // （ASS 里分开排版的署名卡）：一起删。明摆着是对白的（问号 / 句号收尾、对白横杠）不动
+  for (let r = 0; r < order.length; r++) {
+    const i = order[r];
+    if (!gone[i]) continue;
+    const said = lines[i].filter(x => x.t);
+    if (!said.length || !said[said.length - 1].head) continue;
+    for (const d of [-1, 1]) {
+      for (let q = r + d; order[q] != null; q += d) {
+        const j = order[q];
+        if (Math.abs(cues[j].s - cues[i].s) > 0.1) break;
+        if (gone[j] || Math.abs(cues[j].e - cues[i].e) > 0.1 || lines[j].some(x => SUB_SAY.test(x.t))) continue;
+        lines[j].forEach((x, n) => kill[j].add(n));
+        gone[j] = true;
+      }
+    }
   }
   // 署名块：片头片尾，挨着一条删干净的（前后 SUB_BLOCK_S 秒内），≥ 2 分的行一起删；连着的一串要传两轮
   for (let pass = 0; pass < 2; pass++) {
@@ -10057,7 +10213,7 @@ function subClean(cues, dur, opt) {
       if (!near(order[r - 1]) && !near(order[r + 1])) continue;
       let hit = false;
       lines[i].forEach((x, j) => { if (x.n >= 2 && !kill[i].has(j)) { kill[i].add(j); hit = true; } });
-      if (hit) gone[i] = lines[i].every((x, j) => kill[i].has(j) || !x.t || SUB_DECOR.test(x.t));
+      if (hit) gone[i] = spread(i);
     }
   }
   const out = [];
@@ -10311,8 +10467,9 @@ function hlsParseSubFile(text, ext) {
     const m = /(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[,.](\d{1,3})\s*-->\s*(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[,.](\d{1,3})/.exec(ls[at]);
     if (!m) continue;
     const s = t2s(m[1] || 0, m[2], m[3], m[4]), e = t2s(m[5] || 0, m[6], m[7], m[8]);
-    const text = hlsVttEscape(ls.slice(at + 1).join('\n'));
-    if (text && e > s) cues.push({ s, e, text, settings: '' });
+    const u = subUnAss(ls.slice(at + 1).join('\n'));
+    const text = hlsVttEscape(u.text);
+    if (text && e > s) cues.push({ s, e, text, settings: u.top ? ' line:8%' : '' });
   }
   return cues;
 }
