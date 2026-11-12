@@ -5826,7 +5826,7 @@ html.rail .net-banner { left: calc(50% + (var(--rail-space) - env(safe-area-inse
 /* ══════════ 浮动侧边导航（只在 iPhone Duo 折起竖拿）══════════
    折起竖拿的外屏（Safari 里 382 宽，主屏幕 App 里 466 宽）比普通 iPhone 宽、比它矮，底部那条胶囊
    横跨整个底边，正压在大图的下半截。这一种改成贴右缘浮着的竖向导航：头像、主页、资料库竖排在同一枚
-   液态玻璃胶囊里，叠在右下角的搜索圆钮上面 —— 右手拇指一伸就到。它浮在内容上，内容不让位
+   液态玻璃胶囊里，挂在右缘、屏幕中线偏下一点 —— 右手拇指一伸就到。它浮在内容上，内容不让位
    （屏幕本来就窄，再让出一条 80 像素太亏）。
    · 只认 iPhone Duo：看屏幕本身（外屏 466 宽，别的 iPhone 最宽 440），不看视口（Safari 页面缩放会改视口）。
      由 <head> 里的脚本在 html.rail 之外再打 html.rail-float；展开、横拿仍是上一节贴左缘、内容让位的导航条。
@@ -5836,18 +5836,26 @@ html.rail .net-banner { left: calc(50% + (var(--rail-space) - env(safe-area-inse
      压在内容上。没有这一列时离右缘 10px。要躲开导航的内容一律按 --float-space 让，不再另加安全区。
    · 提示条放在搜索圆钮左边那块的正中，不压到右侧这一列。 */
 html.rail.rail-float {
-  --rail-w: 64px;
+  /* 胶囊收窄：64 → 54（按钮仍是 44，够得上 Apple 的最小点按尺寸），竖向挪到屏幕中线偏下一点（--fl-y）。
+     胶囊高度由下面这几个数算出来（--fl-h），定位只改 top —— 不能用 transform 居中：搜索态的搜索场是
+     position: fixed 挂在 .dock 里的，祖先一有 transform，它就改成相对 .dock 定位、跑出顶部那一栏 */
+  --rail-w: 54px;
+  --fl-item: 44px; --fl-av: 36px; --fl-gap: 4px; --fl-avm: 6px; --fl-pt: 7px; --fl-pb: 8px;
+  --fl-h: calc(var(--fl-pt) + 3 * var(--fl-item) + 3 * var(--fl-gap) + var(--fl-avm) + var(--fl-av) + var(--fl-pb));
+  --fl-y: 55%;
   --rail-space: 0px;
   --app-w: 100vw;
   --float-r: max(10px, calc((env(safe-area-inset-right, 0px) - var(--rail-w)) / 2));   /* 导航离右缘多远 */
   --float-space: calc(var(--float-r) + var(--rail-w) + 8px);                           /* 内容右侧要让出的宽度 */
 }
-html.rail.rail-float body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }   /* 最后一排还能滚到右下角的搜索钮上面 */
+html.rail.rail-float body { padding-bottom: calc(var(--safe-b) + 24px); }   /* 导航不在底边了：底部只留 Home 指示条的距离 */
 html.rail.rail-float #appStage { padding-left: 0; padding-right: 0; }
 html.rail.rail-float .dock {
-  top: auto; bottom: var(--dock-gap); left: auto; right: var(--float-r);
-  justify-content: flex-end; gap: var(--dock-sep);
+  top: calc(var(--fl-y) - var(--fl-h) / 2); bottom: auto; left: auto; right: var(--float-r);
+  justify-content: flex-start; gap: var(--dock-sep);
 }
+/* 搜索态：胶囊收成头像圆钮，留在胶囊最底下那一格（头像原来的位置），不跳到别处 */
+html.rail.rail-float .dock.searching { top: calc(var(--fl-y) + var(--fl-h) / 2 - var(--rail-w)); }
 html.rail.rail-float .dock.searching #navSearch {
   left: calc(env(safe-area-inset-left, 0px) + 16px); right: calc(env(safe-area-inset-right, 0px) + 16px); max-width: none;
 }
@@ -5867,7 +5875,7 @@ html.rail.rail-float .net-banner { left: 50%; max-width: calc(100% - 2 * env(saf
    折射玻璃（WebGL）也不挂：胶囊整枚是一层 CSS 毛玻璃，透出底下的画面。
    进搜索态时一切照旧（搜索场到顶部，胶囊收成头像圆钮），所以下面每条都只管「不在搜索」的时候。 */
 html.rail.rail-float .dock:not(.searching) {
-  width: var(--rail-w); padding: 9px 0 10px; gap: 6px;
+  width: var(--rail-w); padding: var(--fl-pt) 0 var(--fl-pb); gap: var(--fl-gap);
   justify-content: flex-start; align-items: center;
   border-radius: 999px; pointer-events: auto;
   background:
@@ -5880,7 +5888,7 @@ html.rail.rail-float .dock:not(.searching) {
 html.rail.rail-float .dock:not(.searching) .nav-container { display: contents; }
 html.rail.rail-float .dock:not(.searching) #navPill { display: none; }
 html.rail.rail-float .dock:not(.searching) .nav-item {
-  flex: 0 0 auto; width: 48px; height: 48px; padding: 0; margin: 0; gap: 0;
+  flex: 0 0 auto; width: var(--fl-item); height: var(--fl-item); padding: 0; margin: 0; gap: 0;
   display: grid; place-items: center; border-radius: 50%;
   color: rgba(235,235,245,.52);
   background: transparent; border: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
@@ -5893,18 +5901,18 @@ html.rail.rail-float .dock:not(.searching) #navSearch {
   order: 3; overflow: hidden;
   background: transparent; border: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
 }
-html.rail.rail-float .dock:not(.searching) #headerAvatar { order: 4; width: 40px; height: 40px; margin: 6px 0 0; border-radius: 12px; }
+html.rail.rail-float .dock:not(.searching) #headerAvatar { order: 4; width: var(--fl-av); height: var(--fl-av); margin: var(--fl-avm) 0 0; border-radius: 11px; }
 html.rail.rail-float .dock:not(.searching) .nav-item.active {
   color: #fff; background: rgba(255,255,255,.13);
   box-shadow: inset 0 0 0 .5px rgba(255,255,255,.14), inset 0 1px 0 rgba(255,255,255,.10);
 }
 html.rail.rail-float .dock:not(.searching) .nav-item.active .nav-icon { transform: none; }
-html.rail.rail-float .dock:not(.searching) .nav-svg { width: 25px; height: 25px; }
+html.rail.rail-float .dock:not(.searching) .nav-svg { width: 23px; height: 23px; }
 html.rail.rail-float .dock:not(.searching) .nav-text {
   position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
 }
 html.rail.rail-float .dock:not(.searching) #navSearch .ns-icon { inset: 0; width: auto; height: auto; }
-html.rail.rail-float .dock:not(.searching) #navSearch .ns-glyph { width: 24px; height: 24px; }
+html.rail.rail-float .dock:not(.searching) #navSearch .ns-glyph { width: 22px; height: 22px; }
 html.rail.rail-float .dock:not(.searching) .nav-lg-canvas,
 html.rail.rail-float .dock:not(.searching) #navSearch .ns-field,
 html.rail.rail-float .dock:not(.searching) #navSearch .ns-mic,
