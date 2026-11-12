@@ -66,7 +66,7 @@ const up = await (async () => { for (let i = 0; i < 240; i++) { if (/Ready on/.t
 const base = `http://127.0.0.1:${WP}`;
 const get = (p, init) => fetch(base + p, init);
 try {
-  ok(up, 'wrangler dev 起来了（真 workerd）' + (up ? '' : '：' + log.slice(-400)));
+  ok(up, 'wrangler dev 起来了（真 workerd）' + (up ? '' : '：' + log.slice(-1500)));
   if (up) {
     const page = await get('/');
     const html = await page.text();
@@ -88,6 +88,13 @@ try {
     const im = await (await get('/api/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items: [{ tmdb_id: 300 }, { tmdb_id: 302, res: '1080p' }, { title: '没有这部', year: 2025 }] }) })).json();
     ok(im.items && im.items[0].status === 'owned' && im.items[1].status === 'add' && im.items[1].res === '1080p' && im.items[2].status === 'notfound',
       '导入清单：库里已有的跳过、没有的按 res 挑好版本（' + (im.items ? im.items.map(x => x.status).join(' ') : im.error) + '）');
+    /* [v6.7] 论坛搜索：302 到 searchid、GBK 搜索词、同一个词 30 分钟内走 Cache API 不重搜 */
+    W.forum.searchOnly = [{ tid: 9901, fid: 44, title: '只在搜索里的片 Search.Only.Film.2025.2160p.WEB-DL.HEVC 20GB' }, { tid: 9902, fid: 44, title: '只在搜索里的片 Search.Only.Film.2025.1080p.WEB-DL 8GB' }];
+    W.forum.searchLog = [];
+    const fsq = () => get('/api/fsearch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ item: { title: '只在搜索里的片', year: 2025 } }) }).then(r => r.json());
+    const fs1 = await fsq(), fs2 = await fsq();
+    ok(fs1.status === 'add' && fs1.ext === 1 && fs1.res === '2160p' && fs1.id === -9901 && fs2.status === 'add' && W.forum.searchLog.length === 1 && W.forum.searchLog[0].kw === '只在搜索里的片',
+      '论坛搜索：302 跟到结果页、GBK 搜索词、挑 2160p；第二次走缓存不重搜（论坛收到 ' + W.forum.searchLog.length + ' 次搜索，' + (fs1.error || fs1.status) + '）');
     const bk = await (await get('/api/repair?do=backup')).json();
     ok(bk.ok && bk.files === 3, '手动备份：' + (bk.msg || bk.error));
     const dg = await (await get('/api/diagnose')).json();
