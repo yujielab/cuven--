@@ -1315,6 +1315,56 @@ print(json.dumps({'bad':bad,'n':len(z.namelist()),'h':[hashlib.md5(z.read(n)).he
   ok(Buffer.from(ctx.unb64(b64)).equals(buf) && Buffer.from(ctx.unb64(Buffer.from('ab').toString('base64'))).toString() === 'ab', 'base64 解码与 Node 一致（含补位）');
 }
 
+console.log('\n■ 打包的目录：一个根文件夹，里面每 20 部一个子文件夹');
+{
+  const src = fs.readFileSync(H.SRC_FILE, 'utf8');
+  const ws = /<script id="wsrc" type="text\/plain">([\s\S]*?)<\/script>/.exec(src)[1];
+  const ps = /\/\*<pack>\*\/([\s\S]*?)\/\*<\/pack>\*\//.exec(src)[1];
+  const ctx = vm.createContext({ TextEncoder, Uint8Array, Uint32Array, Math, String, Date, postMessage: () => {} });
+  vm.runInContext(ws + '\n' + ps, ctx);
+  /* 47 部：第 5、30 部只有磁力，第 12、33 部取件失败，第 7 / 8 部同名 */
+  const items = [], byTid = {}, fail = {};
+  for (let i = 1; i <= 47; i++) {
+    const tid = 700000 + i, name = i === 8 ? '第7部 同名 (2024) 1080p' : `第${i}部 影片 (2024) 2160p`;
+    items.push({ tid, name });
+    if (i === 12 || i === 33) { fail[tid] = '帖子已删除'; continue; }
+    byTid[tid] = (i === 5 || i === 30) ? { tid, name, kind: 'magnet', magnet: 'magnet:?xt=urn:btih:' + String(i).padStart(40, '0') }
+                                       : { tid, name, kind: 'torrent', data: new Uint8Array(crypto.randomBytes(200 + i)) };
+  }
+  items[7].name = items[6].name; byTid[items[7].tid].name = items[6].name;
+  const root = 'Cuven索引库-20261112';
+  const L = ctx.packLayout(items, byTid, fail, root, 20, new Date(2026, 10, 12, 9, 30));
+  const z = ctx.zip(L.files);
+  fs.mkdirSync('/tmp/idx-test', { recursive: true });
+  fs.writeFileSync('/tmp/idx-test/pack.zip', z);
+  const out = '/tmp/idx-test/pack-out';
+  fs.rmSync(out, { recursive: true, force: true });
+  const py = JSON.parse(execFileSync('python3', ['-c', `
+import zipfile,os,json
+z=zipfile.ZipFile('/tmp/idx-test/pack.zip')
+bad=z.testzip()
+z.extractall('${out}')
+top=sorted(os.listdir('${out}'))
+r=os.path.join('${out}',top[0])
+subs=sorted(d for d in os.listdir(r) if os.path.isdir(os.path.join(r,d)))
+cnt={d:sorted(os.listdir(os.path.join(r,d))) for d in subs}
+dirs=[i.filename for i in z.infolist() if i.is_dir()]
+attr=[i.external_attr for i in z.infolist() if i.is_dir()]
+print(json.dumps({'bad':bad,'top':top,'root':sorted(os.listdir(r)),'subs':subs,'cnt':cnt,'dirs':dirs,'attr':attr,
+  'list':open(os.path.join(r,'_清单.txt'),encoding='utf-8').read()}, ensure_ascii=False))`]).toString());
+  const res = (d) => py.cnt[d].filter(n => n.endsWith('.torrent')).length + (py.cnt[d].includes('_磁力链接.txt') ? 1 : 0);
+  ok(py.bad === null && py.top.length === 1 && py.top[0] === root, '解压出来只有一个根文件夹「' + py.top[0] + '」（Python zipfile 校验通过）');
+  ok(JSON.stringify(py.subs) === JSON.stringify(['001-020', '021-040', '041-045']) && py.root.includes('_清单.txt'),
+    '根文件夹里：' + py.subs.join(' / ') + ' 三个子文件夹 + _清单.txt（45 部取到了、2 部失败不占位置）');
+  ok(py.cnt['001-020'].filter(n => n.endsWith('.torrent')).length === 19 && py.cnt['001-020'].includes('_磁力链接.txt') && py.cnt['021-040'].includes('_磁力链接.txt') && !py.cnt['041-045'].includes('_磁力链接.txt'),
+    '每个子文件夹 20 部：001-020 里 19 个种子 + 1 部磁力（写进这个文件夹的 _磁力链接.txt），最后一个文件夹 5 部');
+  ok(py.cnt['001-020'].some(n => / \(2\)\.torrent$/.test(n)), '同名的两部不会互相覆盖（第二个加「(2)」）');
+  ok(/001-020\//.test(py.list) && /失败：帖子已删除/.test(py.list) && /每 20 部一个子文件夹（共 3 个）/.test(py.list), '清单写明每一部在哪个子文件夹，失败的也列出来');
+  ok(py.dirs.length === 4 && py.attr.every(a => (a & 0x10) === 0x10), '根文件夹和子文件夹都有目录条目（带目录属性），各种解压工具都会建成文件夹');
+  const L2 = ctx.packLayout(items.slice(0, 3), byTid, {}, root, 20);
+  ok(L2.dirs === 1 && L2.files.some(f => f.name === root + '/001-003/'), '不到 20 部：也是一个子文件夹（001-003）');
+}
+
 console.log('\n■ 页面里的脚本都能解析');
 {
   const { env, W } = H.makeEnv();

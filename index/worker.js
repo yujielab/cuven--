@@ -1,5 +1,9 @@
 /**
- * Cuven ᴿ 索引库 · v6.7 —— 导入清单：剧集只要整季包；索引里没有的自动去论坛搜
+ * Cuven ᴿ 索引库 · v6.8 —— 打包：解压出来一个根文件夹，里面每 20 部一个子文件夹
+ * ══════════════════════════════════════════════════════════════════
+ *   Cuven索引库-日期/ _清单.txt · 001-020/ · 021-040/ …（磁力跟着进它那一段的子文件夹）。见页面里的 packLayout。
+ * ══════════════════════════════════════════════════════════════════
+ * v6.7 —— 导入清单：剧集只要整季包；索引里没有的自动去论坛搜
  * ══════════════════════════════════════════════════════════════════
  *   · 剧集只认「全 N 集 / 全集 / 完结」，挑画质最好的一版并锁定；只有单集 / 一段的标「未完结」，给按钮手动加；
  *   · 索引里没有的（剧集版块只收已完结、电影只收近几年）：POST /api/fsearch 去论坛搜索页按片名搜，
@@ -7613,7 +7617,8 @@ function zip(files){
     w2(out, p+10, 0); w2(out, p+12, dt); w2(out, p+14, dd);
     w4(out, p+16, crcs[i]); w4(out, p+20, f2.data.length); w4(out, p+24, f2.data.length);
     w2(out, p+28, nm2.length); w2(out, p+30, 0); w2(out, p+32, 0);
-    w2(out, p+34, 0); w2(out, p+36, 0); w4(out, p+38, 0); w4(out, p+42, offs[i]);
+    /* 外部属性：以「/」结尾的是目录条目，标上 MS-DOS 目录位（0x10），解压工具一律建成文件夹 */
+    w2(out, p+34, 0); w2(out, p+36, 0); w4(out, p+38, /\/$/.test(f2.name) ? 0x10 : 0); w4(out, p+42, offs[i]);
     out.set(nm2, p+46); p += 46 + nm2.length;
   }
   w4(out, p, 0x06054b50); w2(out, p+4, 0); w2(out, p+6, 0);
@@ -8031,6 +8036,50 @@ var kAll = function(st){ return tx(st,'readonly',function(s){ return s.getAll();
      ② 全部齐了，本地压成「一个」包 —— CRC 与组装交给 GPU / 独立线程。
    任务按片单指纹认领：同一份片单回来还是同一个任务，接着取缺的那几部。
    ══════════════════════════════════════════════════════════════════ */
+/*<pack>*/
+/* [v6.8] 压缩包的目录：
+     Cuven索引库-日期/            ← 根文件夹：不管用什么工具、解压到哪儿，先得到的都是这一个文件夹
+       _清单.txt                  ← 每一部在哪个子文件夹（失败的也列出来）
+       001-020/                   ← 每 20 部一个子文件夹，按片单顺序
+         xxx.torrent …
+         _磁力链接.txt             ← 这一段里只有磁力的几部（没有就不放）
+       021-040/ …
+   「部」只算取到了的（种子或磁力）；失败的不占位置，所以每个子文件夹都是满的 20 部，只有最后一个可能不满。 */
+var PACK_PER = 20;
+function packLayout(items, byTid, fail, root, per, now){
+  per = per > 0 ? per : PACK_PER;
+  var E = new TextEncoder(), files = [], used = {}, where = {}, mags = {}, order = [], last = '';
+  var got = items.filter(function(it){ var p = byTid[it.tid]; return p && ((p.kind === 'torrent' && p.data) || p.magnet); });
+  var w = Math.max(3, String(got.length).length);
+  var pad = function(n){ n = String(n); while (n.length < w) n = '0' + n; return n; };
+  var dirOf = function(i){ var a = Math.floor(i / per) * per + 1; return pad(a) + '-' + pad(Math.min(got.length, a + per - 1)); };
+  files.push({ name: root + '/', data: new Uint8Array(0), crc: 0 });
+  got.forEach(function(it, i){
+    var p = byTid[it.tid], sub = dirOf(i), d = root + '/' + sub + '/';
+    if (sub !== last){ last = sub; order.push(d); files.push({ name: d, data: new Uint8Array(0), crc: 0 }); }
+    where[it.tid] = sub;
+    if (p.kind === 'torrent' && p.data){
+      var nm = d + p.name + '.torrent', c = 2;
+      while (used[nm]) nm = d + p.name + ' (' + (c++) + ').torrent';
+      used[nm] = 1;
+      files.push({ name: nm, data: new Uint8Array(p.data) });
+    } else (mags[d] = mags[d] || []).push('# ' + p.name + '\n' + p.magnet);
+    /* 这个子文件夹的最后一部：把它的磁力清单也放进去 */
+    if ((i + 1) % per === 0 || i === got.length - 1)
+      if (mags[d]) files.push({ name: d + '_磁力链接.txt', data: E.encode(mags[d].join('\n\n') + '\n') });
+  });
+  var fails = items.filter(function(it){ return !where[it.tid]; });
+  var head = 'Cuven ᴿ 索引库 · 打包清单\n生成时间 ' + (now || new Date()).toLocaleString('zh-CN') +
+    '\n共 ' + items.length + ' 项，成功 ' + got.length + '，失败 ' + fails.length +
+    '\n每 ' + per + ' 部一个子文件夹（共 ' + order.length + ' 个），按片单顺序\n\n';
+  var body = items.map(function(it){
+    var f = where[it.tid];
+    return it.name + '  ·  #' + it.tid + '  ·  ' + (f ? f + '/' : '失败：' + ((fail && fail[it.tid]) || '没取到'));
+  }).join('\n');
+  files.splice(1, 0, { name: root + '/_清单.txt', data: E.encode(head + body + '\n') });
+  return { files: files, ok: got.length, dirs: order.length };
+}
+/*</pack>*/
 var DL = {
   job:null, run:false, stop:false, phase:'', got:0, bytes:0, t0:0, err:'', tick:null,
 
@@ -8161,41 +8210,25 @@ var DL = {
     mine.forEach(function(p){ if (p) byTid[p.tid] = p; });
     mine = this.job.items.map(function(it){ return byTid[it.tid]; }).filter(Boolean);
 
-    var files = [], mags = [], used = {}, ok = 0;
-    for (var k = 0; k < mine.length; k++){
-      var p = mine[k];
-      if (!p) continue;
-      if (p.kind === 'torrent' && p.data){
-        var nm = p.name + '.torrent', c = 2;
-        while (used[nm]) nm = p.name + ' (' + (c++) + ').torrent';
-        used[nm] = 1;
-        files.push({ name:nm, data:new Uint8Array(p.data) });
-        ok++;
-      } else if (p.magnet){ mags.push('# ' + p.name + '\n' + p.magnet); ok++; }
-    }
-    var E = new TextEncoder();
-    if (mags.length) files.push({ name:'_磁力链接.txt', data:E.encode(mags.join('\n\n') + '\n') });
-    var fails = Object.keys(this.job.fail);
-    var head = 'Cuven ᴿ 索引库 · 打包清单\n生成时间 ' + new Date().toLocaleString('zh-CN') +
-      '\n共 ' + this.job.total + ' 项，成功 ' + ok + '，失败 ' + fails.length + '\n\n';
-    var body = this.job.items.map(function(it){
-      var f = DL.job.fail[it.tid];
-      return it.name + '  ·  #' + it.tid + '  ·  ' + (f ? '失败：' + f : '已收录');
-    }).join('\n');
-    files.push({ name:'_清单.txt', data:E.encode(head + body + '\n') });
+    /* [v6.8] 解压出来是一个根文件夹，里面每 20 部一个子文件夹（见 packLayout） */
+    var stamp = new Date().toISOString().slice(0,10).replace(/-/g,'');
+    var root = 'Cuven索引库-' + stamp;
+    var L = packLayout(this.job.items, byTid, this.job.fail, root, PACK_PER);
+    var files = L.files, ok = L.ok;
 
     var total = files.reduce(function(a, f){ return a + f.data.length; }, 0);
     var how = PERF.route(total, files.length);
-    /* GPU 路径：所有条目拼成一段连续内存，一片一线程并行算 CRC */
+    /* GPU 路径：所有条目拼成一段连续内存，一片一线程并行算 CRC（目录条目是空的，CRC 本来就是 0，不送进去） */
     if (how === 'gpu'){
       try {
-        var cat = new Uint8Array(total), segs = [], o = 0;
+        var cat = new Uint8Array(total), segs = [], idx = [], o = 0;
         for (var z = 0; z < files.length; z++){
-          cat.set(files[z].data, o); segs.push([o, files[z].data.length]); o += files[z].data.length;
+          if (!files[z].data.length) continue;
+          cat.set(files[z].data, o); segs.push([o, files[z].data.length]); idx.push(z); o += files[z].data.length;
         }
         var crcs = await PERF.crcGPU(cat, segs);
-        for (var y = 0; y < files.length; y++) files[y].crc = crcs[y];
-      } catch(e){ how = 'worker'; }
+        for (var y = 0; y < idx.length; y++) files[idx[y]].crc = crcs[y];
+      } catch(e){ how = 'worker'; for (var q2 = 0; q2 < files.length; q2++) if (files[q2].data.length) delete files[q2].crc; }
     }
     this.how = how;
     var zbuf;
@@ -8206,16 +8239,15 @@ var DL = {
     } catch(e){ this.err = '本地打包失败：' + (e.message || e); this.paint(); return; }
 
     var blob = new Blob([zbuf], { type:'application/zip' });
-    var stamp = new Date().toISOString().slice(0,10).replace(/-/g,'');
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'Cuven索引库-' + stamp + '.zip';
+    a.download = root + '.zip';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function(){ URL.revokeObjectURL(a.href); }, 90000);
     this.phase = 'done'; this.okCount = ok; this.zipSize = blob.size;
     this.paint();
     haptic('done');
-    toast('已打包 ' + ok + ' 部 · ' + fmtSize(blob.size));
+    toast('已打包 ' + ok + ' 部（' + L.dirs + ' 个文件夹，每个 ' + PACK_PER + ' 部）· ' + fmtSize(blob.size));
   },
   /* 进行中每一批都会来一次：阶段没变就只打补丁（数字 / 进度 / 行状态），
      阶段变了（取件 → 打包 → 完成）按钮组要换，才整页重画 */
@@ -9743,7 +9775,8 @@ function renderDL(){
       + '<button class="btn" id="dclr2">清空片单</button></div>';
   }
   h += '</div>';
-  h += '<p class="fine" style="margin:4px 2px 0">取件按批落进本机数据库，刷新、断网、关页都不丢，回来只补缺的那几部。</p>';
+  h += '<p class="fine" style="margin:4px 2px 0">取件按批落进本机数据库，刷新、断网、关页都不丢，回来只补缺的那几部。'
+    + '压缩包解压出来是一个文件夹，里面每 ' + PACK_PER + ' 部一个子文件夹（001-020、021-040…），按片单顺序，附一份清单。</p>';
 
   var oldQ = out.querySelector('.qlist'), oldI = out.querySelector('.ilist');
   var keep = oldQ ? oldQ.scrollTop : 0, keepI = oldI ? oldI.scrollTop : 0;

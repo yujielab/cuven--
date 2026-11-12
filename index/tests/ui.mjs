@@ -37,6 +37,8 @@ W.forum.searchOnly = [
   { tid: 90002, fid: 2, title: '夫妻的博弈[第25集][中文字幕].Mrs.Revenge.S01E25.2026.2160p.WEB-DL.H265.DV-BlackTV 5.1GB' },
   { tid: 90003, fid: 2, title: '风，带有香气[第123集][中文字幕].Kaze.Kaoru.S01.1080p.LINETV.WEB-DL.AAC2.0.H.264-BlackTV 0.34GB' },
 ];
+/* 每个帖子一个种子附件：「开始下载」→ 取件 → 本机打包这条链路能走通 */
+for (let t = 40000; t < tid; t++) W.forum.threads[t] = { attach: [{ aid: 'A' + t, name: 't' + t + '.torrent', bytes: H.torrent({ name: 'f' + t + '.mkv', length: 9, 'piece length': 16384, pieces: Buffer.alloc(20) }).bytes }] };
 const I = H.isolate(env, W);
 for (let i = 0; i < 30; i++) { const r = await (await I.call('/api/build')).json(); if (r.done || r.error) break; }
 await I.call('/api/lib?refresh=1'); await I.settle();
@@ -213,8 +215,28 @@ for (const [label, opt] of [['导入清单 · 手机', { ...devices['iPhone 14']
   const fo = await p.evaluate(() => ({ cart: CART.ord.slice(), st: IMP.rows[1] && IMP.rows[1].st, why: IMP.rows[1] && IMP.rows[1].it.reason }));
   ok(fo.cart.length === 1 && fo.cart[0] === 700002 && fo.st === 'add' && /库里已有/.test(fo.why || ''), '库中已有的那条点「仍然加入」：照样加进片单，并提醒「' + fo.why + '」');
   if (!label.includes('手机')) {
+    /* [v6.8] 打包：解压出来一个根文件夹，里面每 20 部一个子文件夹 */
+    await p.evaluate(() => { IMP.rows = null; CART = { ord: [], o: {} }; cartSave(); paintDock(); });
+    await p.click('#nav button[data-v="lib"]'); await settle(p);
+    for (const k of [0, 1, 2]) { await p.locator('.grid .art').nth(k).click(); await p.waitForTimeout(150); }
+    await p.click('#nav button[data-v="dl"]'); await settle(p);
+    const dlp = p.waitForEvent('download', { timeout: 30000 });
+    await p.click('#dstart');
+    const dl = await dlp;
+    const zp = '/tmp/idx-test/ui-pack.zip';
+    await dl.saveAs(zp);
+    const { execFileSync } = await import('node:child_process');
+    const pz = JSON.parse(execFileSync('python3', ['-c', `
+import zipfile,json
+z=zipfile.ZipFile('${zp}')
+print(json.dumps({'bad':z.testzip(),'names':z.namelist()}, ensure_ascii=False))`]).toString());
+    const root = (pz.names[0] || '').replace(/\/$/, '');
+    const tor = pz.names.filter(n => n.endsWith('.torrent'));
+    ok(pz.bad === null && /^Cuven索引库-\d{8}$/.test(root) && pz.names.every(n => n.startsWith(root + '/')) && pz.names.includes(root + '/001-003/') && pz.names.includes(root + '/_清单.txt') && tor.length === 3 && tor.every(n => n.startsWith(root + '/001-003/')),
+      '点「开始下载」：取件、本机打包，下载的包解开是一个根文件夹「' + root + '」，3 部种子在「001-003」子文件夹里，清单在根文件夹');
+    await p.evaluate(() => DL.clear());
     /* 剧集：索引里没有 → 自动去论坛搜索页搜；论坛限频时倒计时等；只要全集，单集的标「未完结」可手动加 */
-    await p.click('#impclr'); await p.evaluate(() => { CART = { ord: [], o: {} }; cartSave(); try { localStorage.removeItem('cvcart:tv'); } catch (e) {} });
+    await p.evaluate(() => { IMP.rows = null; IMP.added = []; IMP.sq = []; CART = { ord: [], o: {} }; cartSave(); try { localStorage.removeItem('cvcart:tv'); } catch (e) {} renderDL(); });
     W.forum.searchGap = 2; W.forum.lastSearch = 0; W.forum.searchLog = [];
     await p.fill('#imptx', 'tmdb_id(1):520001/title:夫妻的博弈/type:tv\ntmdb_id(2):520002/title:风，带有香气/type:tv');
     await p.click('#impgo');
