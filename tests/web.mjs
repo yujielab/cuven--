@@ -98,8 +98,9 @@ async function context(opts = {}, apple = false, probe = false) {
 }
 /* 已登录用户进站先看到欢迎页（全屏，盖在一切之上），点「确认并继续」才进入应用 */
 /* wait：欢迎页退场的时限。XDR 这种 6016×3140 物理像素的视口上，无头环境用软件渲染画 WebGL 极光，
-   退场动画要慢得多 —— 真机上没有这回事 */
-async function enter(ctx, q = '', wait = 5000) {
+   退场动画要慢得多 —— 真机上没有这回事。默认 15 秒：机器忙的时候（软件渲染的 GPU 进程吃满几个核），
+   1280×800 上退场那 0.5 秒的计时器也会被拖过 5 秒；这只是进站的准备步骤，不是要测的东西 */
+async function enter(ctx, q = '', wait = 15000) {
   const pg = await ctx.newPage();
   pg.on('pageerror', e => errors.push(e.message));
   await pg.goto(ORIGIN + q);
@@ -131,6 +132,9 @@ const loader = pg => pg.evaluate(() => {
     webgl: !!c && c.width > 0 && c.height > 0, when: window.__fsWhen || null };
 });
 const until = (pg, fn, arg, ms = 20000) => pg.waitForFunction(fn, arg, { timeout: ms });
+/* Esc 之后等播放器真的关掉再往下走：元素全屏要等退出全屏落定（fullscreenchange）才关，机器一忙这一下能拖过半秒，
+   固定睡 400ms 的话下一节会撞上还没关完的上一部（同一个文件被当成「回到同一部」接着放、或晚到的关闭把新开的那部关掉） */
+const closed = pg => until(pg, () => !document.querySelector('#nativePlayer.on'), null, 10000).catch(() => {});
 const reset = pg => pg.evaluate(() => { window.__plays = []; window.__loads = []; window.__fsIn = 0; window.__fsWhen = null; });
 /* 盯着加载画面的文案：每换一句记下时刻、文字与当时的进度（截图很慢，不能靠 sleep 卡时间） */
 const watchTips = pg => pg.evaluate(() => {
@@ -181,7 +185,7 @@ await until(page, s => document.querySelector(s).currentTime > 90, vid);
 s = await st(page);
 ok(s.t > 90 && s.fs, `再次播放从上次的位置接着放（t=${s.t.toFixed(1)}s）`);
 await page.keyboard.press('Escape');
-await page.waitForTimeout(600);
+await closed(page);
 s = await st(page);
 ok(!s.on && s.detail, 'Esc：退出全屏并关掉播放器，详情页还在');
 await page.click('#detailPlay');
@@ -190,6 +194,32 @@ await page.goBack();
 await page.waitForTimeout(600);
 s = await st(page);
 ok(!s.on && !s.src && s.detail, '返回键：关掉播放器，详情页还在');
+/* 点「播放」后马上按返回：全屏请求晚到（关的时候还不在全屏里，没得退），或退出请求被浏览器吞了 —— 原来整页会留在
+   藏起来的播放层的全屏里：黑底，点哪都没反应（命中的是 <html>），只能按 Esc。两种都人为做出来，不靠撞时机 */
+const strayAt = () => page.evaluate(() => { const b = document.getElementById('detailPlay').getBoundingClientRect();
+  const e = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+  return { fs: !!document.fullscreenElement, on: !!document.querySelector('#nativePlayer.on'), hit: !!(e && e.closest('#detailPlay')) }; });
+await page.evaluate(() => { const rq = window.__rfs0 = Element.prototype.requestFullscreen;
+  Element.prototype.requestFullscreen = function () { return new Promise(r => setTimeout(r, 400)).then(() => rq.call(this)); }; });
+await page.click('#detailPlay');
+await page.evaluate(() => history.back());
+await page.waitForTimeout(2000);
+const strayA = await strayAt();
+/* 卡住了（修之前）就先手动退掉，别把后面几节一起拖下水 */
+const unstick = () => page.evaluate(() => document.fullscreenElement && document.exitFullscreen().catch(() => {})).then(() => page.waitForTimeout(600));
+await page.evaluate(() => { Element.prototype.requestFullscreen = window.__rfs0; });
+await unstick();
+await page.evaluate(() => { const ex = window.__xfs0 = Document.prototype.exitFullscreen; let n = 0;
+  Document.prototype.exitFullscreen = function () { return n++ ? ex.call(this) : new Promise(() => {}); }; });
+await page.click('#detailPlay');
+await until(page, () => !!document.fullscreenElement, null, 8000).catch(() => {});
+await page.evaluate(() => history.back());
+await page.waitForTimeout(2500);
+const strayB = await strayAt();
+await page.evaluate(() => { Document.prototype.exitFullscreen = window.__xfs0; });
+await unstick();
+ok(!strayA.fs && !strayA.on && strayA.hit && !strayB.fs && !strayB.on && strayB.hit,
+  `点「播放」马上返回：全屏请求晚到、退出请求被吞，都会退干净，详情页的按钮点得到（${JSON.stringify({ 晚到: strayA, 被吞: strayB })}）`);
 
 console.log('\n■ 加载画面 · 桌面（点下去就整块全屏，加载画面在全屏里）');
 await detail(page, '/Movies/long_ep2.mp4', 'Other.Movie.2023.1080p.mp4');
@@ -206,7 +236,7 @@ L = await loader(page);
 ok(!L.shown && !(await st(page)).paused, '开播后加载画面淡出，视频在全屏里播放');
 streamDelay = 0;
 await page.keyboard.press('Escape');
-await page.waitForTimeout(500);
+await closed(page);
 await page.evaluate(() => closeDetail());
 await page.waitForTimeout(400);
 
@@ -233,7 +263,7 @@ await until(page, s => document.querySelector(s).textTracks.length >= 2, vid);
 s = await st(page);
 ok(s.tracks.includes('中文:showing') && s.tracks.includes('English:disabled'), `外挂字幕：${s.tracks.join(' / ')}`);
 await page.keyboard.press('Escape');
-await page.waitForTimeout(400);
+await closed(page);
 
 console.log('\n■ 剧集：播完直接接下一集');
 await page.evaluate(() => {
@@ -247,7 +277,7 @@ s = await st(page);
 ok(s.on && /long_ep2/.test(s.src), '片尾就地切到第 2 集接着放，不回详情页');
 ok(!s.prog['/Movies/long.mp4'], '看完的第 1 集清掉了续播位置');
 await page.keyboard.press('Escape');
-await page.waitForTimeout(400);
+await closed(page);
 
 console.log('\n■ Chrome：MKV 走直连（它的原生 HLS 遇到解不了的 CODECS 会整条拒播）');
 await page.evaluate(() => playVideo('/Movies/avc_zsub.mkv', 'Some.Movie.2021.1080p.mkv'));
@@ -256,7 +286,7 @@ s = await st(page);
 ok(/\/stream\/Cuven%20.*\?path=%2FMovies%2Favc_zsub\.mkv$/.test(s.src) || s.err, 'MKV 交给 /stream 直连（不带 safari=1）');
 ok(s.t > 0.5 || /浏览器解不了/.test(s.msg), s.t > 0.5 ? `Chromium 直接播放 MKV（t=${s.t.toFixed(1)}s）` : `给出格式说明：${s.msg}`);
 await page.keyboard.press('Escape');
-await page.waitForTimeout(400);
+await closed(page);
 
 console.log('\n■ 文件弹层');
 await page.evaluate(() => openSheetForFile('/Movies/long.mp4', 'Long.Test.2024.1080p.mp4'));
@@ -488,7 +518,7 @@ console.log('\n■ 悬浮返回钮 · 返回手势 · 正在播放');
   await mp.waitForTimeout(200);
   ok(await mp.evaluate(() => navigator.mediaSession.playbackState === 'paused'), '暂停：状态跟着变成 paused');
   await mp.keyboard.press('Escape');
-  await mp.waitForTimeout(400);
+  await closed(mp);
   const m3 = await mp.evaluate(() => ({ meta: navigator.mediaSession.metadata, st: navigator.mediaSession.playbackState }));
   ok(m3.meta === null && m3.st === 'none', '关掉播放器：「正在播放」整块撤掉');
   await mc.close();
@@ -636,16 +666,56 @@ for (const [w, h, label, mode, sai] of [[382, 580, '折起竖拿', 'float'], [46
   ok(g.mode === mode && g.vertical === (mode !== 'bottom') && g.clear && g.pillOk && g.sw === g.vw,
     `${label} ${w}×${h}：${DESC[mode]}，${mode === 'float' ? '选中项有柔光圆底' : '选中指示器对齐'}，主视觉的按钮与轮播点不被导航挡住${mode === 'float' ? '、居中到导航左边那块，大图铺满整屏，文案是片名 → 年份胶囊 → 按钮' : ''}，没有横向溢出${g.mode === mode ? '' : `（实际：${g.mode}）`}`);
 }
-/* 往下一滚、大图收成卡片：卡与卡下的进度胶囊落在导航左边那块，两者同宽，不钻到导航底下（实机的右侧安全区） */
+/* 往下一滚、大图收成卡片：卡落在导航左边那块，不钻到导航底下（实机的右侧安全区）。卡下不是与卡同宽的进度条，
+   而是 iOS 页码控件那样的圆点胶囊：紧凑、居中在卡下，一张一颗点，当前那颗纯白、略大，其余半透明 */
 await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: { top: 0, right: 84, bottom: 20, left: 0 } });
 await pd.setViewportSize({ width: 466, height: 678 });
 await pd.waitForTimeout(600);
 await pd.evaluate(() => scrollTo(0, 300));
 await pd.waitForTimeout(900);
-const mo = await pd.evaluate(() => { const r = e => e && e.getBoundingClientRect(); const c = r(document.querySelector('.hcard.is-center')), q = r(document.querySelector('.aap-host .all-access-pass')), n = r(document.getElementById('dock'));
-  return { morphed: document.querySelector('.hero-deck').classList.contains('morphed'), card: [Math.round(c.left), Math.round(c.right)], pill: [Math.round(q.left), Math.round(q.right)], nav: Math.round(n.left) }; });
-ok(mo.morphed && mo.card[1] <= mo.nav - 8 && Math.abs(mo.pill[0] - mo.card[0]) <= 2 && Math.abs(mo.pill[1] - mo.card[1]) <= 2,
-  `折起竖拿 · 大图收成卡片：卡 ${mo.card.join('–')}、进度胶囊 ${mo.pill.join('–')} 同宽，停在导航（${mo.nav}）左边`);
+const dotsOf = () => pd.evaluate(() => {
+  const r = e => e.getBoundingClientRect(), ul = document.getElementById('heroDots');
+  const c = r(document.querySelector('.hcard.is-center')), q = r(ul), n = r(document.getElementById('dock'));
+  const dots = [...ul.querySelectorAll('.dotnav-item')].filter(li => getComputedStyle(li).display !== 'none').map(li => {
+    const a = li.querySelector('.dotnav-link'), b = r(a);
+    return { w: Math.round(b.width * 10) / 10, bg: getComputedStyle(a).backgroundColor, cur: a.classList.contains('current') };
+  });
+  return { morphed: document.querySelector('.hero-deck').classList.contains('morphed'), card: [Math.round(c.left), Math.round(c.right), Math.round(c.bottom)],
+    cap: [Math.round(q.left), Math.round(q.right), Math.round(q.top), Math.round(q.height)], nav: Math.round(n.left),
+    bar: getComputedStyle(ul, '::after').content, dots, n: state.heroVideos.length, idx: state.heroIdx, playing: AAP.playing };
+});
+const mo = await dotsOf();
+const cur0 = mo.dots.find(d => d.cur), rest0 = mo.dots.filter(d => !d.cur);
+ok(mo.morphed && mo.card[1] <= mo.nav - 8 && Math.abs((mo.cap[0] + mo.cap[1]) / 2 - (mo.card[0] + mo.card[1]) / 2) <= 2
+  && mo.cap[1] - mo.cap[0] < (mo.card[1] - mo.card[0]) * 0.6 && mo.cap[3] >= 28 && mo.cap[3] <= 32 && mo.cap[2] >= mo.card[2] + 8
+  && mo.bar === 'none' && mo.n > 1 && mo.dots.length === mo.n && !!cur0 && cur0.bg === 'rgb(255, 255, 255)'
+  && rest0.every(d => d.bg === 'rgba(255, 255, 255, 0.5)' && cur0.w > d.w * 1.1),
+  `折起竖拿 · 大图收成卡片：卡 ${mo.card[0]}–${mo.card[1]} 停在导航（${mo.nav}）左边；卡下是居中的圆点胶囊（${mo.cap[0]}–${mo.cap[1]}，${mo.cap[3]} 高），` +
+  `${mo.dots.length} 张 ${mo.dots.length} 颗点，当前那颗纯白、略大（${cur0 && cur0.w} / ${rest0[0] && rest0[0].w}），不再是进度条`);
+/* 点最后一颗：跳到那一张；卡片态照旧不自动轮播（原来直接走 _jumpAap 会把轮播开起来） */
+await pd.click(`#heroDots .dotnav-item:nth-child(${mo.n}) .dotnav-link`);
+await pd.waitForTimeout(900);
+const mo2 = await dotsOf();
+ok(mo2.idx === mo.n - 1 && !!mo2.dots[mo.n - 1] && mo2.dots[mo.n - 1].cur && !mo2.playing,
+  `折起竖拿 · 卡片态点圆点就跳到那一张（第 ${mo2.idx + 1} / ${mo.n} 张），不开始自动轮播`);
+/* 片单超过 8 张（注入 11 张）：只排 8 颗、跟着当前那张挪，还有更多的那一端最外两颗渐小，当前那颗不缩 */
+const many = {};
+for (const k of [2, 5, 10]) {
+  await pd.evaluate(k => {
+    window.__hv = window.__hv || state.heroVideos.slice();
+    state.heroVideos = Array.from({ length: 11 }, (_, i) => window.__hv[i % window.__hv.length]);
+    renderDots(); AAP.setCurrent(k);
+  }, k);
+  await pd.waitForTimeout(450);
+  many[k] = (await dotsOf()).dots;
+}
+await pd.evaluate(() => { state.heroVideos = window.__hv; renderDots(); });
+const small = d => d.w < 6, full = d => d.w >= 6.8;
+const pat = (ds, l, r) => ds.length === 8 && (l ? small(ds[0]) && small(ds[1]) && ds[0].w < ds[1].w : full(ds[0]) && full(ds[1]))
+  && (r ? small(ds[7]) && small(ds[6]) && ds[7].w < ds[6].w : full(ds[7]) && full(ds[6])) && ds.filter(d => d.cur).length === 1 && full(ds.find(d => d.cur));
+ok(pat(many[2], false, true) && many[2][2].cur && pat(many[5], true, true) && many[5][4].cur && pat(many[10], true, false) && many[10][7].cur,
+  `折起竖拿 · 片单超过 8 张：只排 8 颗，第 3 张时右端两颗渐小（${many[2].map(d => d.w).join(' ')}），` +
+  `居中时两端渐小（${many[5].map(d => d.w).join(' ')}），到末尾左端渐小（${many[10].map(d => d.w).join(' ')}）`);
 await pd.evaluate(() => scrollTo(0, 0));
 await pd.waitForTimeout(500);
 await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: NO_SAI });
@@ -711,7 +781,17 @@ for (const [label, opts] of [['普通 iPhone（393 宽）', devices['iPhone 15 P
     const tags = getComputedStyle(card.querySelector('.hero-tags')).display !== 'none';
     return { off: !c.contains('rail') && !c.contains('rail-float'), bottom: n.bottom >= innerHeight - 90 && n.width > n.height, deck: Math.round(d.height), vh: innerHeight,
       same: tags && st.bottom <= lg.top + 1 }; });
-  ok(b.off && b.bottom && b.deck < b.vh - 40 && b.same, `${label}：不当成 iPhone Duo，照旧底部胶囊；大图照旧不铺满（${b.deck} / ${b.vh}），文案照旧（年份胶囊在片名上面，类型那行还在）`);
+  /* 收成卡片后卡下照旧是那条与卡同宽的浏览进度条（圆点胶囊只给 Duo 折起） */
+  await pa.evaluate(() => scrollTo(0, 400));
+  await pa.waitForTimeout(900);
+  const bar = await pa.evaluate(() => {
+    const ul = document.getElementById('heroDots'), li = ul.querySelector('.dotnav-item'), af = getComputedStyle(ul, '::after');
+    const c = document.querySelector('.hcard.is-center').getBoundingClientRect(), q = document.querySelector('.aap-host .all-access-pass').getBoundingClientRect();
+    return document.querySelector('.hero-deck').classList.contains('morphed') && af.content !== 'none' && parseFloat(af.width) > 0
+      && (!li || getComputedStyle(li).display === 'none') && Math.abs(q.left - c.left) <= 2 && Math.abs(q.right - c.right) <= 2;
+  });
+  ok(b.off && b.bottom && b.deck < b.vh - 40 && b.same && bar,
+    `${label}：不当成 iPhone Duo，照旧底部胶囊；大图照旧不铺满（${b.deck} / ${b.vh}），文案照旧（年份胶囊在片名上面，类型那行还在），收成卡片后卡下照旧是与卡同宽的进度条`);
   await ac.close();
 }
 await pd.setViewportSize({ width: 951, height: 543 });

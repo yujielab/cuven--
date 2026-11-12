@@ -5955,6 +5955,44 @@ html.rail.rail-float .hero-content > .hero-tags { display: none; }
 html.rail.rail-float .hero-content > .hero-logo-wrap { order: 1; transition-delay: 0s; }
 html.rail.rail-float .hero-content > .hero-status { order: 2; transition-delay: .08s; }
 html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay: .16s; }
+/* 收成卡片后卡下那一条：别的设备是与卡同宽的浏览进度条，这里换成 iOS 页码控件的样子 —— 一枚紧凑的玻璃胶囊
+   居中在卡下，一张一颗圆点：当前那颗纯白、略大，其余半透明，点哪颗跳到哪张。片单超过 8 张时只排 8 颗、跟着当前那张挪，
+   还有更多的那一端最外两颗渐小（class 由 AAP.setCurrent 打）。胶囊 30 高，外面那层透明的 56 高不变，
+   中线还在原来那条进度条的中线上。全出血时的暂停钮 + 轮播点不变 */
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery.all-access-pass {
+  width: auto; padding-inline: 0;
+  background-color: transparent; box-shadow: none;
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+}
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background:not(.play-pause-button-wrapper) { flex: 0 0 auto; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .tablist-wrapper { flex: 0 0 auto; width: auto; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav { flex: 0 0 auto; width: auto; padding: 0; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items {
+  display: inline-flex; align-items: center;
+  width: auto; min-width: 0; height: 30px; padding: 0 5.5px; overflow: visible;
+  border-radius: 99px;
+  background-color: rgba(255, 255, 255, 0.10);
+  -webkit-backdrop-filter: blur(24px) saturate(160%); backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
+}
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items::after { content: none; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item {
+  display: block; width: 7px; height: 7px; margin-inline: 6.25px;      /* 圆点 7、点距 19.5：图 2 的比例 */
+}
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item .dotnav-link {
+  width: 7px; height: 7px; min-width: 0; max-width: none;
+  border-radius: 50%;
+  background-color: rgba(255, 255, 255, 0.5);
+  transform: scale(var(--pc-s, 1));
+  transition: background-color .25s linear, transform .3s var(--ease-out);
+}
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item .dotnav-link.current {
+  --pc-s: 1.2; background-color: #fff; overflow: visible;
+}
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item .dotnav-link.current::after { content: none; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item.pc-off { display: none; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item.pc-s1 .dotnav-link { --pc-s: .74; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item.pc-s2 .dotnav-link { --pc-s: .5; }
 
 /* 没有封面的片子不显示之后，一排可能整排都没了：那一段（连同标题）一起藏起来 */
 .section:has(> .scroll-row:empty):not(:has(.year-tv.on)) { display: none; }   /* 年份轨道：同年份的剧集还在就不藏 */
@@ -15121,6 +15159,16 @@ const AAP = {
     /* 浏览进度：看到第几张 / 共几张。卡片态那条进度条直接吃这个值 */
     const total = items.length || 1;
     this.root.style.setProperty('--aap-pct', (((idx + 1) / total) * 100).toFixed(2) + '%');
+    /* iPhone Duo 折起的卡片态是 iOS 的页码点：超过 8 张只排 8 颗，跟着当前那张挪；还有更多的那一端，
+       最外两颗渐小。class 只在那一处有样式，别处不起作用 */
+    const MAX = 8, n = items.length;
+    const start = n > MAX ? Math.max(0, Math.min(idx - (MAX >> 1), n - MAX)) : 0, end = n > MAX ? start + MAX : n;
+    items.forEach((li, i) => {
+      const k = i - start, moreL = start > 0, moreR = end < n;
+      li.classList.toggle('pc-off', i < start || i >= end);
+      li.classList.toggle('pc-s2', (moreL && k === 0) || (moreR && k === MAX - 1));
+      li.classList.toggle('pc-s1', (moreL && k === 1) || (moreR && k === MAX - 2));
+    });
   },
 
   play() {
@@ -15246,11 +15294,12 @@ function renderDots() {
     }
     ul.innerHTML = html;
     ul.style.setProperty('--dotnav-count', n);
+    /* 走 goToHero：全出血时与直接 _jumpAap 一样；卡片态（iPhone Duo 折起时卡下就是这排点，点得到）
+       跳完立刻摁住轮播 —— 卡片态不自动轮播 */
     ul.querySelectorAll('.dotnav-link').forEach((link, i) => {
       link.addEventListener('click', e => {
         e.preventDefault();
-        _jumpAap(i);
-        haptic.light();
+        goToHero(i);
       });
     });
     AAP.setCurrent(state.heroIdx);
@@ -21780,8 +21829,30 @@ const Player = (() => {
     if (keep && cur) cur.keep = true;
     try {
       if (el.video.webkitDisplayingFullscreen) el.video.webkitExitFullscreen();
-      else if (fsEl()) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      else if (fsEl()) exitDocFs();
     } catch (_) {}
+  }
+  let fsExitAt = 0;                                          /* 最近一次发出「退出元素全屏」的时刻 */
+  function exitDocFs() {
+    fsExitAt = Date.now();
+    try { const r = (document.exitFullscreen || document.webkitExitFullscreen).call(document); if (r && r.catch) r.catch(() => {}); } catch (_) {}
+  }
+  /* 播放器已经关了，却还挂在播放层的全屏里 —— 黑底，点哪都没反应，只能按 Esc。两种来路：
+     · 点「播放」后、全屏请求还没落定就关了（返回键 / 返回手势）：关的时候还不在全屏里，没得退，请求随后照样生效
+       （机器忙的时候能晚到一秒多）；
+     · 退出请求落在进入全屏的过渡里，被浏览器吞了，一直不回。
+     所以关掉以后盯一阵（strayWatch：每 400ms 看一眼，约 6 秒，播放器重新打开就停），看到卡住就退；
+     上一次退出请求发出不到 0.9 秒就先不重发（还在飞，连发会互相打架），过了还没退成就再发一次 */
+  function strayFs() {
+    if (FS === 'element' && el && !isOpen() && fsEl() === el.root && Date.now() - fsExitAt > 900) exitDocFs();
+  }
+  let strayT = 0;
+  function strayWatch() {
+    if (FS !== 'element') return;
+    clearTimeout(strayT);
+    let n = 0;
+    const tick = () => { if (isOpen()) return; strayFs(); if (++n < 15) strayT = setTimeout(tick, 400); };
+    strayT = setTimeout(tick, 400);
   }
 
   /* ── 打开 / 关闭 ── */
@@ -21880,6 +21951,7 @@ const Player = (() => {
     hide(fromPopstate);
     release();
     notify();
+    strayWatch();                                              /* 全屏晚到 / 退出被吞：盯一阵（见 strayFs） */
   }
   function stop() {
     if (!el || !cur) return;
@@ -22125,7 +22197,11 @@ const Player = (() => {
     v.addEventListener('webkitendfullscreen', onFsEnd);
     v.addEventListener('webkitpresentationmodechanged', onPipChange);
     v.addEventListener('leavepictureinpicture', onPipChange);
-    const onDocFs = () => { if (FS === 'element' && cur && !fsEl()) onFsEnd(); };
+    const onDocFs = () => {
+      if (FS !== 'element') return;
+      if (!isOpen() && el && fsEl() === el.root) { setTimeout(strayFs, 120); strayWatch(); return; }   /* 关了以后全屏才落定：退掉（见 strayFs） */
+      if (cur && !fsEl()) onFsEnd();
+    };
     document.addEventListener('fullscreenchange', onDocFs);
     document.addEventListener('webkitfullscreenchange', onDocFs);
     /* 在场时，别的 <video> 一开播就按住（展厅 / 轮播会按自己的节奏重启预告片） */
