@@ -301,6 +301,11 @@ const tv = await until(page, () => {
   return v && v.getAttribute('src') && v.currentTime > 0.3 ? true : false;
 }, null, 40000).then(() => true).catch(() => false);
 ok(tv, '第一章的预告片地址晚到也会自己挂上开播（不用先滚走再滚回来）');
+/* 从第 10 秒进（跳过片头厂标），一律静音：没有开声音的钮，谁把它打开了就立刻关回去 */
+const t10 = await page.evaluate(() => { const v = document.querySelector('.sc-chapter video'); const t = v.currentTime; v.muted = false; return { t, btn: !!document.querySelector('.sc-chapter .sc-mutectl') }; });
+await page.waitForTimeout(150);
+t10.muted = await page.evaluate(() => document.querySelector('.sc-chapter video').muted);
+ok(t10.t >= 10 && t10.muted && !t10.btn, `预告片从第 10 秒进（t=${t10.t.toFixed(1)}s），一律静音：没有开声音的钮，被打开也立刻关回去`);
 const trailerPlaying = () => page.evaluate(() => { const v = document.querySelector('.sc-chapter video'); return !!(v && v.getAttribute('src') && !v.paused); });
 await page.evaluate(() => playVideo('/Movies/long.mp4', 'Long.Test.2024.1080p.mp4'));
 await until(page, s => document.querySelector(s).currentTime > 0.3, vid);
@@ -339,7 +344,7 @@ console.log('\n■ 展厅预告片 · YouTube 官方预告（IMDb 不给直链�
         if (this.state === 1 || this.state === 3) this.emit(2);
       }
       unloadModule(m) { (window.__ytUnload = window.__ytUnload || []).push(m); }
-      mute() { this.muted = true; } unMute() { this.muted = false; } isMuted() { return this.muted; }
+      mute() { this.muted = true; } unMute() { this.muted = false; window.__ytUnmuted = (window.__ytUnmuted || 0) + 1; } isMuted() { return this.muted; }
       seekTo(t) { this.t = t; }
       getCurrentTime() { if (this.state === 1) this.t += 0.25; return this.t; }
       getDuration() { return 150; }
@@ -354,8 +359,8 @@ console.log('\n■ 展厅预告片 · YouTube 官方预告（IMDb 不给直链�
   }, null, 40000).then(() => true).catch(() => false);
   const o = await yp.evaluate(() => ({ v: window.__ytOpts && window.__ytOpts.playerVars, host: window.__ytOpts && window.__ytOpts.host,
     vsrc: document.querySelector('.sc-chapter video').getAttribute('src'), muted: window.__yt && window.__yt.muted }));
-  ok(up && o.muted && !o.vsrc && o.v && o.v.mute === 1 && o.v.controls === 0 && o.v.playsinline === 1 && o.v.start === 3 && /nocookie/.test(o.host),
-    'IMDb 没给直链：第一章挂上 YouTube 官方预告并静音自动开播（无控件、内联、从第 3 秒进，原生 <video> 让位）');
+  ok(up && o.muted && !o.vsrc && o.v && o.v.mute === 1 && o.v.controls === 0 && o.v.playsinline === 1 && o.v.start === 10 && /nocookie/.test(o.host),
+    'IMDb 没给直链：第一章挂上 YouTube 官方预告并静音自动开播（无控件、内联、从第 10 秒进，原生 <video> 让位）');
   /* YouTube 自己的界面一样都不露：开播那几秒（片名条、上一个 / 暂停 / 下一个）画面不露，底下是剧照 */
   const c0 = await yp.evaluate(() => { const b = document.querySelector('.sc-chapter .sc-yt'); return { clean: b.classList.contains('clean'), op: getComputedStyle(b).opacity }; });
   const c1 = await until(yp, () => { const b = document.querySelector('.sc-chapter .sc-yt'); return !!b && b.classList.contains('clean') && getComputedStyle(b).opacity === '1'; }, null, 7000)
@@ -365,13 +370,13 @@ console.log('\n■ 展厅预告片 · YouTube 官方预告（IMDb 不给直链�
   const ring = await until(yp, () => parseFloat(document.querySelector('.sc-chapter .sc-ring-value').style.strokeDashoffset) < 106.8, null, 5000)
     .then(() => true).catch(() => false);
   ok(ring, '进度环跟着 YouTube 播放器走');
-  /* 片尾画面（订阅、推荐视频）出来之前：先隐去，回卷到第 3 秒，播稳了再露 */
+  /* 片尾画面（订阅、推荐视频）出来之前：先隐去，回卷到第 10 秒，播稳了再露 */
   await yp.evaluate(() => { window.__yt.t = 140; });
-  const looped = await until(yp, () => window.__yt.t < 10 && !document.querySelector('.sc-chapter .sc-yt.clean'), null, 3000).then(() => true).catch(() => false);
+  const looped = await until(yp, () => window.__yt.t >= 10 && window.__yt.t < 20 && !document.querySelector('.sc-chapter .sc-yt.clean'), null, 3000).then(() => true).catch(() => false);
   const again = await until(yp, () => !!document.querySelector('.sc-chapter .sc-yt.clean'), null, 6000).then(() => true).catch(() => false);
-  ok(looped && again, '片尾画面出来之前先隐去、回卷到第 3 秒，播稳了再露出来');
-  const un = await yp.evaluate(() => { const b = document.querySelector('.sc-chapter .sc-mutectl'); b.click(); return { yt: window.__yt.muted, btn: b.dataset.muted }; });
-  ok(un.yt === false && un.btn === '0', '点「取消静音」：播放器 unMute，按钮同步');
+  ok(looped && again, '片尾画面出来之前先隐去、回卷到第 10 秒，播稳了再露出来');
+  const un = await yp.evaluate(() => ({ btn: !!document.querySelector('.sc-chapter .sc-mutectl'), yt: window.__yt.muted, unmuted: window.__ytUnmuted || 0 }));
+  ok(!un.btn && un.yt === true && un.unmuted === 0, `预告片一律静音：没有开声音的钮，YouTube 播放器从没被 unMute（${JSON.stringify(un)}）`);
   await yp.evaluate(() => playVideo('/Movies/long.mp4', 'Long.Test.2024.1080p.mp4'));
   await until(yp, s => document.querySelector(s).currentTime > 0.3, vid);
   await yp.waitForTimeout(300);
@@ -719,7 +724,7 @@ ok(pat(many[2], false, true) && many[2][2].cur && pat(many[5], true, true) && ma
 await pd.evaluate(() => scrollTo(0, 0));
 await pd.waitForTimeout(500);
 /* 资料库展映：背景视频、片名都收在右侧那一列（状态栏 + 导航）以左，那一列底下是黑的；
-   画面右上角的播放 / 静音不出，进资料库时并进导航胶囊（「资料库」下面长出两格），离开就收回 */
+   画面右上角的播放钮不出，进资料库时顶替「资料库」那一格并进导航胶囊，离开就换回；预告片一律静音，没有声音钮 */
 const navBox = () => pd.evaluate(() => { const r = e => e.getBoundingClientRect(), d = r(document.getElementById('dock')), m = r(document.getElementById('navMedia'));
   return { on: document.documentElement.classList.contains('sc-nav'), top: Math.round(d.top), h: Math.round(d.height), at55: Math.abs((d.top + d.bottom) / 2 - innerHeight * .55) <= 6, grp: Math.round(m.height), op: +getComputedStyle(document.getElementById('navMedia')).opacity,
     selOp: +getComputedStyle(document.querySelector('#dock .nav-sel')).opacity, homeGlass: getComputedStyle(document.getElementById('navHome')).backgroundColor !== 'rgba(0, 0, 0, 0)',
@@ -737,33 +742,32 @@ for (const [w, h, sai, col, tag] of [[466, 678, { top: 0, right: 84, bottom: 20,
     const r = e => e && e.getBoundingClientRect(), edge = innerWidth - col;
     const view = r(document.getElementById('view-library')), st = r(document.querySelector('.sc-chapter .sc-sticky')), cp = r(document.querySelector('.sc-chapter .sc-copy'));
     const d = r(document.getElementById('dock')), m = r(document.getElementById('navMedia')), lib = r(document.getElementById('navLib')), srch = r(document.getElementById('navSearch'));
-    const play = document.getElementById('navScPlay'), mute = document.getElementById('navScMute');
+    const play = document.getElementById('navScPlay');
     return { edge, view: Math.round(view.right), sticky: Math.round(st.right), copyMid: Math.round((cp.left + cp.right) / 2),
       fenced: Math.round(view.right) <= edge && Math.round(st.right) <= edge && Math.abs((cp.left + cp.right) / 2 - edge / 2) <= 3 && document.documentElement.scrollWidth === innerWidth,
-      merged: document.documentElement.classList.contains('sc-nav') && m.height >= 88 && m.top >= lib.bottom - 1 && m.bottom <= srch.top + 1 && m.left >= d.left && m.right <= d.right
-        && Math.abs((d.top + d.bottom) / 2 - innerHeight * .55) <= 6 && !play.disabled && play.dataset.state === 'playing' && mute.dataset.muted === '1'
+      merged: document.documentElement.classList.contains('sc-nav') && m.height >= 40 && m.height <= 48 && m.top >= lib.bottom - 1 && m.bottom <= srch.top + 1 && m.left >= d.left && m.right <= d.right
+        && Math.abs((d.top + d.bottom) / 2 - innerHeight * .55) <= 6 && !play.disabled && play.dataset.state === 'playing' && !document.getElementById('navScMute')
         && [...document.querySelectorAll('.sc-chapter .sc-mediactl, .sc-chapter .sc-mutectl')].every(b => getComputedStyle(b).display === 'none'),
       /* 标题那一条：画面从屏幕最上沿铺起，标题浮在上面；底下四层渐进模糊（模糊一层比一层重、遮罩一层比一层往上收）+ 由暗到透明 */
       under: (() => { const hd = r(document.querySelector('#view-library > .library-header')), layers = [...document.querySelectorAll('.library-veil > i')].map(i => getComputedStyle(i));
         const px = layers.map(c => parseFloat(((c.backdropFilter || c.webkitBackdropFilter || '').match(/blur\(([\d.]+)px\)/) || [])[1] || 0));
         return Math.abs(st.top) <= 1 && hd.top <= 1 && hd.bottom >= 100 && cp.top > hd.bottom && layers.length === 4 && px.every((v, i) => v > 0 && (!i || v > px[i - 1]))
           && layers.every(c => /gradient/.test(c.maskImage || c.webkitMaskImage || '')); })(),
-      /* 「资料库」那一格让位（收成 0 高、看不见），播放钮顶上它的位置；选中项的玻璃从播放上沿包到静音下沿 */
-      sel: (() => { const pill = document.querySelector('#dock .nav-sel'), pr = r(pill), lbEl = document.getElementById('navLib'), lb = r(lbEl), pl = r(play), mt = r(mute);
-        return +getComputedStyle(pill).opacity === 1 && Math.abs(pr.top - pl.top) <= 2 && Math.abs(pr.bottom - mt.bottom) <= 2 && Math.abs(pr.left - pl.left) <= 2 && Math.abs(pr.right - pl.right) <= 2
+      capH: Math.round(d.height),
+      /* 「资料库」那一格让位（收成 0 高、看不见），播放钮顶上它的位置；选中项的玻璃包住播放钮 */
+      sel: (() => { const pill = document.querySelector('#dock .nav-sel'), pr = r(pill), lbEl = document.getElementById('navLib'), lb = r(lbEl), pl = r(play);
+        return +getComputedStyle(pill).opacity === 1 && Math.abs(pr.top - pl.top) <= 2 && Math.abs(pr.bottom - pl.bottom) <= 2 && Math.abs(pr.left - pl.left) <= 2 && Math.abs(pr.right - pl.right) <= 2
           && lb.height <= 1 && getComputedStyle(lbEl).visibility === 'hidden' && pl.top >= r(document.getElementById('navHome')).bottom; })(),
       round: (() => { const av = document.getElementById('headerAvatar'), w = av.getBoundingClientRect().width, rad = getComputedStyle(av).borderTopLeftRadius;
         return rad === '50%' || Math.abs(parseFloat(rad) - w / 2) <= 1; })() };
   }, col);
   if (tag.startsWith('主屏幕')) {
-    /* 点胶囊里那两格：转给眼前那一章自己的钮 —— 暂停 / 接着放、解除静音 / 再静音 */
+    /* 点胶囊里那一格：转给眼前那一章自己的钮 —— 暂停 / 接着放；预告片始终静音 */
     const vstate = () => pd.evaluate(() => { const v = document.querySelector('.sc-chapter .sc-media video');
-      return { paused: v.paused, muted: v.muted, nav: document.getElementById('navScPlay').dataset.state, navMuted: document.getElementById('navScMute').dataset.muted }; });
+      return { paused: v.paused, muted: v.muted, nav: document.getElementById('navScPlay').dataset.state }; });
     await pd.click('#navScPlay'); await pd.waitForTimeout(400); const a = await vstate();
     await pd.click('#navScPlay'); await pd.waitForTimeout(600); const b = await vstate();
-    await pd.click('#navScMute'); await pd.waitForTimeout(300); const c2 = await vstate();
-    await pd.click('#navScMute'); await pd.waitForTimeout(300); const d2 = await vstate();
-    libRes.ctl = { a, b, c: c2, d: d2, ok: a.paused && a.nav === 'paused' && !b.paused && b.nav === 'playing' && !c2.muted && c2.navMuted === '0' && d2.muted && d2.navMuted === '1' };
+    libRes.ctl = { a, b, ok: a.paused && a.nav === 'paused' && !b.paused && b.nav === 'playing' && a.muted && b.muted };
   }
   await pd.evaluate(() => navTo('home'));
   await pd.waitForTimeout(1000);
@@ -776,11 +780,12 @@ ok(la.fenced && ls.fenced,
 ok(la.under && ls.under,
   '折起竖拿 · 资料库：标题那一条不是黑底硬边 —— 画面从屏幕最上沿铺起，标题浮在上面，底下四层渐进模糊（越往上越糊）+ 由暗到透明');
 ok(la.sel && ls.sel && la.round && ls.round,
-  '折起竖拿 · 资料库：「资料库」那一格让位（图标收掉），播放 / 静音顶上它的位置，选中项的玻璃包住这两格；底部头像是圆形');
-ok(la.merged && ls.merged && libRes.ctl.ok,
-  `折起竖拿 · 资料库：播放 / 静音并进导航胶囊（「资料库」下面两格，胶囊中心仍在 55% 高处，画面上不再有那两个钮）；点它们转给眼前这一章：暂停 / 接着放、解除静音 / 再静音（${JSON.stringify(libRes.ctl)}）`);
+  '折起竖拿 · 资料库：「资料库」那一格让位（图标收掉），播放钮顶上它的位置，选中项的玻璃包住它；底部头像是圆形');
+ok(la.merged && ls.merged && libRes.ctl.ok && la.capH === home0.h && ls.capH === home0.h,
+  `折起竖拿 · 资料库：播放 / 暂停并进导航胶囊（顶替「资料库」那一格，胶囊不长不缩（${la.capH}），中心仍在 55% 高处，画面上不再有那个钮，没有声音钮）；` +
+  `点它转给眼前这一章：暂停 / 接着放，预告片始终静音（${JSON.stringify(libRes.ctl)}）`);
 ok(!home0.on && home0.grp === 0 && !home1.on && home1.grp === 0 && home1.op === 0 && Math.abs(home1.h - home0.h) <= 1 && home0.at55 && home1.at55 && home1.selOp === 0 && home1.homeGlass && home1.libBack,
-  `折起竖拿 · 离开资料库：那两格和包住它们的玻璃一起收回，「资料库」图标长回来，胶囊回到原来的高（${home0.h} → ${home1.h}），选中的圆底回到「主页」`);
+  `折起竖拿 · 离开资料库：播放钮和包住它的玻璃一起收回，「资料库」图标长回来，胶囊仍是原来的高（${home0.h} → ${home1.h}），选中的圆底回到「主页」`);
 await pd.evaluate(() => scrollTo(0, 0));
 await pd.waitForTimeout(300);
 await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: NO_SAI });
@@ -862,13 +867,14 @@ for (const [label, opts] of [['普通 iPhone（393 宽）', devices['iPhone 15 P
     `${label}：不当成 iPhone Duo，照旧底部胶囊；大图照旧不铺满（${b.deck} / ${b.vh}），文案照旧（年份胶囊在片名上面，类型那行还在），` +
     `收成卡片后卡下照旧是与卡同宽的进度条（卡 ${bar.card.join('–')}，进度条 ${bar.bar.join('–')}）${b.off && b.bottom && b.same ? '' : JSON.stringify(b)}`);
   if (label.startsWith('普通 iPhone')) {
-    /* 资料库照旧：展映铺满整宽，播放 / 静音还在画面右上角，导航里没有多出那两格 */
+    /* 资料库照旧：展映铺满整宽，播放钮还在画面右上角（没有声音钮），导航里没有多出那一格 */
     await pa.evaluate(() => navTo('library'));
     await until(pa, () => { const c = document.querySelector('.sc-chapter .sc-mediactl'); return !!(c && !c.hidden); }, null, 40000).catch(() => {});
     await pa.waitForTimeout(600);
     const lb = await pa.evaluate(() => ({ full: Math.round(document.getElementById('view-library').getBoundingClientRect().width) === innerWidth,
-      ctl: getComputedStyle(document.querySelector('.sc-chapter .sc-mediactl')).display !== 'none', nav: getComputedStyle(document.getElementById('navMedia')).display === 'none' }));
-    ok(lb.full && lb.ctl && lb.nav, `${label} · 资料库：展映照旧铺满整宽，播放 / 静音照旧在画面右上角，导航里不多出两格（${JSON.stringify(lb)}）`);
+      ctl: getComputedStyle(document.querySelector('.sc-chapter .sc-mediactl')).display !== 'none' && !document.querySelector('.sc-chapter .sc-mutectl'),
+      nav: getComputedStyle(document.getElementById('navMedia')).display === 'none' }));
+    ok(lb.full && lb.ctl && lb.nav, `${label} · 资料库：展映照旧铺满整宽，播放钮照旧在画面右上角（没有声音钮），导航里不多出一格（${JSON.stringify(lb)}）`);
   }
   await ac.close();
 }
