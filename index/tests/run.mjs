@@ -19,6 +19,15 @@ if (!process.env.IDX_OLD_WORKER) {
     process.env.IDX_OLD_WORKER = '/tmp/idx-test/worker-v54.js';
   } catch {}
 }
+/* v6.3 原版：「剧集版块是 UTF-8」那项用它造一份乱码索引 */
+if (!process.env.IDX_V63_WORKER) {
+  try {
+    const src = execFileSync('git', ['show', '4d11bdc:index/worker.js'], { cwd: new URL('..', import.meta.url).pathname, maxBuffer: 1 << 26 }).toString();
+    fs.mkdirSync('/tmp/idx-test', { recursive: true });
+    fs.writeFileSync('/tmp/idx-test/worker-v63.js', src);
+    process.env.IDX_V63_WORKER = '/tmp/idx-test/worker-v63.js';
+  } catch {}
+}
 /* v6.1 原版（合并前的 main）：「补回旧版漏掉的帖子」那项用 */
 if (!process.env.IDX_V61_WORKER) {
   try {
@@ -157,7 +166,8 @@ async function turboAll(I, opt = {}) {
     if (isTm) { tm++; act++; maxAct = Math.max(maxAct, act); }
     try {
       if (isTm && opt.tmFail) { const f = opt.tmFail(); if (f) throw f; }
-      const res = await I.call(u, { method: o.method || 'GET', headers: o.body ? { 'content-type': 'application/json' } : {}, ...(o.body ? { body: o.body } : {}) });
+      const uu = opt.src ? u + (u.includes('?') ? '&' : '?') + 'src=' + opt.src : u;
+      const res = await I.call(uu, { method: o.method || 'GET', headers: o.body ? { 'content-type': 'application/json' } : {}, ...(o.body ? { body: o.body } : {}) });
       const j = await res.json().catch(() => null);
       if (!res.ok) { const e = new Error((j && j.error) || ('HTTP ' + res.status)); e.status = res.status; e.data = j || {}; throw e; }
       if (isTm && j) maxSub = Math.max(maxSub, j.sub || 0);
@@ -489,6 +499,107 @@ console.log('\n■ 片库对照：实时清单走 Stream 接口（STREAM_KEY）�
   const tc = await (await T.call('/api/catalog?min=0&own=all&src=tv')).json();
   const tom = new Map(tc.items.map(x => [x.id, x.own]));
   ok(tom.get(94997) === 2 && tom.get(1399) === 2 && !tom.get(100088), '剧集：v25 剧集表里认好的两部判为确定已有，没有的那部显示缺片');
+}
+
+console.log('\n■ 剧集版块是 UTF-8：按真实编码解码，旧版存下的乱码一键重建');
+{
+  const OLD = process.env.IDX_V63_WORKER;
+  const TVS = [['余生有你', 'Here We Meet Again'], ['我的人间烟火', 'Fireworks of My Heart'], ['繁花', 'Blossoms Shanghai'],
+               ['漫长的季节', 'The Long Season'], ['狂飙', 'The Knockout'], ['三体', 'Three Body']];
+  const mk = (enc) => {
+    const e = H.makeEnv();
+    makeForumU(e.W, 4);                       // 电影版块（GBK）：重建剧集时它一点不能动
+    let tid = 60000;
+    const rows = [];
+    TVS.forEach(([cn, en], i) => {
+      e.W.tmdb.tv.push({ id: 310000 + i, name: cn, original_name: en, first_air_date: '2025-0' + (1 + i) + '-10', vote_count: 900, vote_average: 7.8, poster_path: '/t' + i + '.jpg', popularity: 50 });
+      /* 后三部只有中文名：旧版解成乱码之后一个字都对不上，只能进「未匹配」 */
+      for (const r of ['2160p.WEB-DL.HEVC 40GB', '1080p.WEB-DL.H264 12GB'])
+        rows.push({ tid: tid++, title: i < 3 ? `${cn}[全${18 + i}集][中文字幕].${en.replace(/ /g, '.')}.S01.2025.${r}` : `${cn}[全${18 + i}集][中文字幕].S01.2025.${r}`, film: 310000 + i });
+    });
+    e.W.forum.boards['2'] = { 'tv_shangyingshijian_3=22': rows };
+    e.W.forum.encByFid['2'] = enc;
+    return e;
+  };
+  if (!OLD || !fs.existsSync(OLD)) ok(false, '缺 v6.3 原版（IDX_V63_WORKER）：run.mjs 开头会从 git 取');
+  else {
+    const { env, r2, W } = mk('utf8');
+    const O = H.isolate(env, W, { file: OLD });
+    for (let i = 0; i < 40; i++) { const q = await (await O.call('/api/build')).json(); if (q.done || q.error) break; }
+    for (let i = 0; i < 40; i++) { const q = await (await O.call('/api/build?src=tv')).json(); if (q.done || q.error) break; }
+    await O.settle();
+    const movie0 = r2.m.get(NS + 'movies.json').body;
+    const N = H.isolate(env, W, { expose: ['mojibake', 'decodeHTML'] });
+    const pd = r2.json('idx/tv/pending.json') || { q: {} };
+    const samples = Object.values(pd.q).map(e => e.t);
+    const st = await (await N.call('/api/state?src=tv')).json();
+    const dg = await (await N.call('/api/diagnose?src=tv')).json();
+    ok(samples.length >= 3 && samples.every(t => N.k.mojibake(t)) && st.pend && st.pend.garbled * 2 >= st.pend.gchk && dg.checks.some(c => c.id === 'idx.garbled' && c.fix === 'rebuildSource'),
+      `旧版把 UTF-8 的剧集页当 GBK 解：留底里 ${samples.length} 条全是乱码（例如「${String(samples[0]).slice(0, 12)}…」），新版认得出来，体检给「重建本源索引」`);
+    const real = ['跟踪者的猎物2 Stalkers.Prey.2.2020.1080p', '亚历克斯·费尔南德斯:全球最佳喜剧演员', '[全18集][中文字幕]', '余生有你'];
+    ok(real.every(t => !N.k.mojibake(t)), '正常的中文标题不会被当成乱码（' + real.length + ' 条）');
+    const rb = await (await N.call('/api/repair?do=rebuildSource&src=tv')).json();
+    const tvm = r2.json('idx/tv/movies.json');
+    ok(rb.ok && r2.keys('bak/tv/').some(k => k.endsWith('movies.json')) && Object.keys(tvm.m).length === 0 && !Object.keys((r2.json('idx/tv/pending.json') || { q: {} }).q).length,
+      `重建：先备份（bak/tv/），再清空剧集索引（清掉 ${rb.dropped} 部）`);
+    const t = await turboAll(N, { src: 'tv' });
+    const tv2 = r2.json('idx/tv/movies.json');
+    const d = await (await N.call('/api/detail?id=310000&src=tv')).json();
+    const pd2 = r2.json('idx/tv/pending.json') || { q: {} };
+    ok(Object.keys(tv2.m).length === TVS.length && d.items && d.items.some(x => /余生有你/.test(x.title)) && !Object.values(pd2.q).some(e => N.k.mojibake(e.t)),
+      `重新抓（${t.msg}）：${Object.keys(tv2.m).length} 部剧全认出来，详情里的片源标题是「${d.items && d.items[0] && d.items[0].title.slice(0, 14)}…」，留底里一条乱码都没有`);
+    ok(r2.m.get(NS + 'movies.json').body === movie0, '电影索引一个字节没动');
+  }
+  /* 响应头不声明编码的 UTF-8 页：靠「能不能按 UTF-8 严格解开」认出来 */
+  const b = mk('utf8-bare');
+  const B = H.isolate(b.env, b.W);
+  await turboAll(B, { src: 'tv' });
+  const tv3 = b.r2.json('idx/tv/movies.json');
+  const d3 = await (await B.call('/api/detail?id=310002&src=tv')).json();
+  ok(Object.keys(tv3.m).length === TVS.length && d3.items && d3.items.some(x => /繁花/.test(x.title)), '响应头不声明编码的 UTF-8 页面也按 UTF-8 解：6 部全认出、标题正常');
+}
+
+console.log('\n■ 认定管线 v3：英文、别名、去副标题；配额不够不下结论；「重试匹配」走认定工');
+{
+  const { env, r2, W } = H.makeEnv();
+  makeForumU(W, 3);
+  const SP = [
+    { id: 880001, title: '在里乔的阳光下', orig: 'Sotto il sole di Riccione', en: 'Under the Riccione Sun', y: 2025, noZh: true,
+      t: '在里乔的阳光下 Under.the.Riccione.Sun.2025.ITALIAN.1080p.WEB-DL 3.1GB', how: '没有中文译名：英文再搜一次' },
+    { id: 880002, title: '没人知道我在这', orig: 'Nadie sabe que estoy aquí', en: "Nobody Knows I'm Here", y: 2025, strict: true,
+      t: '没人知道我在这/歌手的秘密 Nobody.Knows.Im.Here.2025.1080p.WEB-DL 2.5GB', how: '「A/B」两个译名' },
+    { id: 880003, title: '亚历克斯·费尔南德斯：全球最佳喜剧演员', orig: 'Alex Fernández: El mejor cómico del mundo', en: 'Alex Fernández: The Best Comedian in the World', y: 2025, noZh: true,
+      t: '亚历克斯·费尔南德斯:全球最佳喜剧演员 Alex.Fernandez.The.Best.Comedian.in.the.World.2025.1080p 1.2GB', how: '西班牙语原名、英文带重音' },
+  ];
+  let tid = 77000;
+  for (const x of SP) {
+    W.tmdb.movie.push({ id: x.id, title: x.title, original_title: x.orig, en: x.en, release_date: x.y + '-04-01', poster_path: '/s.jpg', popularity: 20, vote_average: 6.8, vote_count: 300, noZh: x.noZh, strict: x.strict });
+    W.forum.boards['44']['movie_nianfen=32'].unshift({ tid: tid++, title: x.t, film: x.id });
+  }
+  /* 还没上架的片：先认不出，TMDB 补了条目之后「重试匹配」认回来；查无此片的那条重试一次记一次 */
+  W.forum.boards['44']['movie_nianfen=32'].unshift({ tid: tid++, title: '迟到的片 Late.Arrival.2025.1080p.WEB-DL 2GB', film: 880009 });
+  W.forum.boards['44']['movie_nianfen=32'].unshift({ tid: tid++, title: '查无此片甲 Nowhere.Film.Alpha.2025.1080p 1GB', film: null });
+  const I = H.isolate(env, W);
+  await turboAll(I);
+  const mv = r2.json(NS + 'movies.json');
+  for (const x of SP) ok(!!mv.m[x.id] && /[\u4e00-\u9fff]/.test(mv.m[x.id][0]), `${x.how}：「${x.t.split(' ')[0]}」认下（片名「${mv.m[x.id] && mv.m[x.id][0]}」）`);
+  ok(mv.pv === 3, '认定规则升到 v3：以前「认不出」的结论作废、留底条目的重试次数归零');
+  /* 配额只够 3 个请求：一组都不判「认不出」，全按「没下结论」交回 */
+  I.c.__set('TURBO_FREE.sub', 3);
+  const g = Array.from({ length: 12 }, (_, i) => ({ k: 'b' + i + '|x', cn: '没有这部片' + '甲乙丙丁戊己庚辛壬癸子丑'[i], la: 'No Such Film ' + i, ys: ['2025'], y: 2025, t: '没有这部片 No.Such.Film.2025' }));
+  const tj = await (await I.call('/api/tm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ g }) })).json();
+  I.c.__set('TURBO_FREE.sub', 46);
+  ok(tj.sub <= 3 && Object.values(tj.r).every(v => v === 0), `配额只够 ${tj.sub} 个请求：12 组一组都不判「认不出」（以前会把没轮到的判成认不出、帖子只留 12 条）`);
+  /* TMDB 补上「迟到的片」→ 重试匹配（排队 + 认定工） */
+  W.tmdb.movie.push({ id: 880009, title: '迟到的片', original_title: 'Late Arrival', release_date: '2025-06-01', poster_path: '/l.jpg', popularity: 10, vote_average: 6, vote_count: 100 });
+  const rq = await (await I.call('/api/repair?do=requeueUnmatched')).json();
+  const t2 = await turboAll(I);
+  const mv2 = r2.json(NS + 'movies.json'), pd = r2.json('idx/v5/pending.json'), st2 = r2.json(NS + 'state.json');
+  const done = new Set(st2.pdone || []);
+  const nowhere = Object.entries(pd.q).find(([k, e]) => !done.has(k) && /查无此片甲/.test(e.t));
+  ok(rq.queued >= 2 && mv2.m[880009] && nowhere && nowhere[1].n === 1 && nowhere[1].w === 'nohit',
+    `重试匹配：${rq.queued} 组排进队列交给认定工（${t2.msg}）—— TMDB 补了条目的「迟到的片」认回来；查无此片的记一次重试（${nowhere && nowhere[1].n} 次）`);
+  verify(I.c, r2, W, '认定管线 v3 之后的不变量');
 }
 
 console.log('\n■ 并发与锁');
