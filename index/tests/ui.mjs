@@ -143,6 +143,70 @@ for (const [label, opt] of [['手机', { ...devices['iPhone 14'] }], ['手机 ·
   ok(!errs.length, '页面零报错' + (errs.length ? '：' + errs.slice(0, 3).join(' | ') : ''));
   await ctx.close();
 }
+
+/* [v6.6] 导入清单：贴一张表 → 库里没有的进片单，库里有的跳过；什么都不会自己开始下载 */
+for (const [label, opt] of [['导入清单 · 手机', { ...devices['iPhone 14'] }], ['导入清单 · 桌面', { viewport: { width: 1280, height: 860 } }]]) {
+  console.log('\n■ ' + label);
+  const { p, ctx, errs } = await page(opt);
+  await p.click('#nav button[data-v="dl"]');
+  await settle(p);
+  await p.click('#impopen2');
+  await p.waitForSelector('#imptx');
+  /* 几种格式都认 */
+  const parsed = await p.evaluate(() => ({
+    json: impParse('[{"tmdb_id":1,"title":"a"}]').items.length,
+    wrap: impParse('{"items":[{"title":"a"},{"title":"b"}]}').items.length,
+    jsonl: impParse('{"title":"a"}\n{"title":"b"}\n{"title":"c"}').items.length,
+    csv: impParse('tmdb_id,title,year\n911430,"F1：狂飙飞车",2025\n,沙丘2,2024').items,
+    line: impParse('tmbd_id(1):911430/title:F1：狂飙飞车/year:2025\ntmdb_id(2):693134/title:沙丘2/res:2160p').items,
+    plain: impParse('奥本海默 2023\n2. 芭比\n94997').items,
+  }));
+  ok(parsed.json === 1 && parsed.wrap === 2 && parsed.jsonl === 3, '认得 JSON 数组、{"items":[…]}、每行一个 JSON 对象');
+  ok(parsed.csv.length === 2 && parsed.csv[0].title === 'F1：狂飙飞车' && parsed.csv[0].tmdb_id === '911430' && parsed.csv[1].title === '沙丘2' && !parsed.csv[1].tmdb_id, 'CSV（带表头、引号里的全角冒号不乱切）');
+  ok(parsed.line.length === 2 && parsed.line[0]['tmdb_id'] === '911430' && parsed.line[0].title === 'F1：狂飙飞车' && parsed.line[0].year === '2025' && parsed.line[1].res === '2160p',
+    '「tmbd_id(1):xxxx/title:xxx/year:…」一行一条（拼错的 tmbd、带序号的键、片名里的全角冒号都没问题）');
+  ok(parsed.plain[0].title === '奥本海默' && parsed.plain[0].year === '2023' && parsed.plain[1].title === '芭比' && parsed.plain[2].tmdb_id === '94997', '每行一个片名（末尾年份拆出来、去掉「2.」序号）或一个 TMDB 编号');
+  const list = [
+    { tmdb_id: 700001, title: '奥本海默' },
+    { title: '芭比', year: 2024 },
+    { title: '满江红', year: 2024, res: '1080p', note: '周末看' },
+    { title: '孤注一掷', year: 2025 },
+    { tmdb_id: 700001 },
+    { title: '根本没有这部片', year: 2025 },
+    { tmdb_id: 94997, type: 'tv', title: '某部剧' },
+    { year: 2024 },
+  ];
+  await p.fill('#imptx', JSON.stringify(list, null, 2));
+  await p.click('#impgo');
+  await p.waitForFunction(() => !IMP.busy && IMP.rows && IMP.rows.length, null, { timeout: 15000 });
+  await settle(p);
+  const r = await p.evaluate(() => ({
+    st: IMP.rows.map(x => x && x.st),
+    cart: CART.ord.slice(), pick: CART.o[700004] && CART.o[700004].pickLabel, res: CART.o[700004] && CART.o[700004].res,
+    job: !!document.getElementById('dlprog'), start: (document.getElementById('dstart') || {}).textContent || '',
+    pills: [].map.call(document.querySelectorAll('.imp-sum .pill'), e => e.textContent.replace(/\s+/g, ' ')).join(' / '),
+    tvRow: (document.querySelectorAll('.irow')[6] || {}).textContent || '',
+    over: document.documentElement.scrollWidth - innerWidth,
+    cnt: document.getElementById('ncart').textContent,
+  }));
+  ok(r.st.join(' ') === 'add owned add add dup notfound notfound invalid', '每条的结果：' + r.st.join(' '));
+  ok(r.cart.length === 3 && r.cart.includes(700001) && r.cart.includes(700004) && r.cart.includes(700007) && r.cnt === '3', '库里没有的 3 部进了片单（坞上的数字 ' + r.cnt + '），库里已有的「芭比」没进');
+  ok(r.res === '1080p' && /1080p/.test(r.pick || ''), '写了 res: 1080p 的那条挑的是 1080p 版（片单里标「已指定：' + r.pick + '」）');
+  ok(!r.job && /开始下载 3 部/.test(r.start), '只是放进片单：没有开始任何下载，等人点「' + r.start + '」');
+  ok(/加入片单 3/.test(r.pills) && /库中已有 1/.test(r.pills) && /论坛暂无 2/.test(r.pills), '结果汇总：' + r.pills);
+  ok(/剧集/.test(r.tvRow), '剧集那条走剧集源去查、标着「剧集」');
+  ok(r.over <= 0, '结果列表不撑出横向滚动（多出 ' + r.over + 'px）');
+  await p.click('#impundo');
+  await settle(p);
+  const u = await p.evaluate(() => ({ n: CART.ord.length, st: IMP.rows.filter(x => x && x.st === 'undone').length }));
+  ok(u.n === 0 && u.st === 3, '「撤回这次加入的」：3 部从片单里拿掉');
+  await p.click('.irow[data-st="owned"] [data-icand]');
+  await settle(p);
+  const fo = await p.evaluate(() => ({ cart: CART.ord.slice(), st: IMP.rows[1] && IMP.rows[1].st, why: IMP.rows[1] && IMP.rows[1].it.reason }));
+  ok(fo.cart.length === 1 && fo.cart[0] === 700002 && fo.st === 'add' && /库里已有/.test(fo.why || ''), '库中已有的那条点「仍然加入」：照样加进片单，并提醒「' + fo.why + '」');
+  ok(!errs.length, '页面零报错' + (errs.length ? '：' + errs.slice(0, 3).join(' | ') : ''));
+  await ctx.close();
+}
 await b.close();
 srv.close();
 console.log(`\n${fail ? '✗' : '✓'} ${pass} 通过，${fail} 失败`);

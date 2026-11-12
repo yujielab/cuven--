@@ -84,6 +84,10 @@ try {
     ok(det.items && det.items.length === 2, '详情：两个版本');
     const fx = await (await get('/api/fetch', { method: 'POST', body: JSON.stringify({ items: [{ tid: 7000, name: 'a' }] }) })).json();
     ok(fx.items && fx.items[0].ok && fx.items[0].kind === 'torrent', '取件：GBK 帖子页解析 + 种子校验');
+    /* [v6.6] 导入清单：真运行时里 POST + 读分片挑版本 */
+    const im = await (await get('/api/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items: [{ tmdb_id: 300 }, { tmdb_id: 302, res: '1080p' }, { title: '没有这部', year: 2025 }] }) })).json();
+    ok(im.items && im.items[0].status === 'owned' && im.items[1].status === 'add' && im.items[1].res === '1080p' && im.items[2].status === 'notfound',
+      '导入清单：库里已有的跳过、没有的按 res 挑好版本（' + (im.items ? im.items.map(x => x.status).join(' ') : im.error) + '）');
     const bk = await (await get('/api/repair?do=backup')).json();
     ok(bk.ok && bk.files === 3, '手动备份：' + (bk.msg || bk.error));
     const dg = await (await get('/api/diagnose')).json();

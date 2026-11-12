@@ -988,6 +988,97 @@ console.log('\n■ 影片表只增不减、旧对象延迟清理');
   void b0;
 }
 
+console.log('\n■ 导入清单：库里没有的自动查好版本、放进片单（等人确认再下）');
+{
+  const { env, r2, W } = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+  makeForumU(W, 6);
+  const FX = [
+    /* 多版本：挑分辨率 / 杜比视界 / 体积上限 */
+    { id: 960001, cn: '群星闪耀时', en: 'Stars Align', y: 2025, rel: ['2160p.DV.HDR.REMUX.HEVC 78.5GB', '2160p.HDR10.WEB-DL.HEVC 22.1GB', '1080p.BluRay.x264 14.2GB', '720p.WEB-DL.x264 3.1GB'] },
+    /* TMDB 上另有别名：清单里写的是别名，索引里认不出，问 TMDB 拿编号 */
+    { id: 960002, cn: '远方来信', en: 'Letters From Afar', y: 2025, aka: ['天涯尺素'], rel: ['1080p.WEB-DL.x264 6.2GB'] },
+    /* 外语片：清单只写英文名，索引里存的是中文名和韩文原名 */
+    { id: 960003, cn: '雨夜迷踪', orig: '비 오는 밤', en: 'Rainy Night Trail', y: 2024, rel: ['1080p.BluRay.x264 9.5GB'] },
+    /* 同名两部（不同年）：不写年份 → 说不准；写了年份 → 认准那一部 */
+    { id: 960004, cn: '无声告白录', en: 'Silent Letter', y: 2024, rel: ['1080p.WEB-DL.x264 4GB'] },
+    { id: 960005, cn: '无声告白录', en: 'Silent Confession', y: 2025, rel: ['2160p.WEB-DL.HEVC 15GB'] },
+    /* 库里已有 */
+    { id: 960006, cn: '旧梦重温', en: 'Old Dreams Again', y: 2024, rel: ['1080p.BluRay.x264 8GB'] },
+  ];
+  let tid = 61000;
+  for (const f of FX) {
+    W.tmdb.movie.push({ id: f.id, title: f.cn, original_title: f.orig || f.en, en: f.en, aka: f.aka, release_date: f.y + '-03-01', poster_path: '/i' + f.id + '.jpg', popularity: 30, vote_average: 7, vote_count: 400 });
+    const b = W.forum.boards['44']['movie_nianfen=' + (f.y === 2025 ? 32 : 31)];
+    for (const r of f.rel) b.unshift({ tid: tid++, title: `${f.cn} ${f.en.replace(/ /g, '.')}.${f.y}.${r}`, film: f.id });
+  }
+  /* TMDB 有、论坛没有的片 */
+  W.tmdb.movie.push({ id: 960099, title: '尚未发布', original_title: 'Not Yet Posted', release_date: '2025-08-01', poster_path: '/n.jpg', popularity: 5, vote_average: 6, vote_count: 50 });
+  const I = H.isolate(env, W);
+  await turboAll(I);
+  const mv = r2.json(NS + 'movies.json');
+  ok(FX.every(f => mv.m[f.id]), '准备：' + FX.length + ' 部测试片都进了索引');
+  /* 片库：只有「旧梦重温」 */
+  W.recv.files = { root: '/ram', _gen: 'g1', _ts: Date.now() - 60000, videos: [{ name: '旧梦重温.Old.Dreams.Again.2024.1080p.BluRay.x264.mkv', path: '/ram/旧梦重温.Old.Dreams.Again.2024.1080p.BluRay.x264.mkv' }] };
+  W.recv.ptr = { g: 'g1' };
+  await I.call('/api/lib?refresh=1'); await I.settle();
+  for (let i = 0; i < 10; i++) { const r = await (await I.call('/api/lib?resolve=1')).json(); if (!r.left) break; }
+  const someId = Object.keys(mv.m).map(Number).find(id => id >= 700000 && id < 710000);
+  const post = async (items, src) => (await I.call('/api/import' + (src ? '?src=' + src : ''), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items }) })).json();
+  const t0 = W.tmdb.calls || 0;
+  const r = await post([
+    { 'tmbd_id(1)': String(someId), title: mv.m[someId][0] },                 // 0 手误的键名 + 编号是字符串
+    { tmdb_id: 960006, title: '旧梦重温' },                                   // 1 库里已有
+    { title: '群星闪耀时', year: 2025, res: '1080p' },                          // 2 只写片名 + 偏好 1080p
+    { tmdb_id: 960001, hdr: 'dv', note: '收藏版' },                            // 3 同一部再来一次 → dup
+    { title: '天涯尺素', year: 2025 },                                          // 4 别名：问 TMDB
+    { title: 'Rainy Night Trail', year: 2024 },                                 // 5 只有英文名
+    { title: '无声告白录' },                                                    // 6 同名两部，没写年份 → 说不准
+    { title: '无声告白录', year: 2025 },                                        // 7 写了年份 → 认准
+    { tmdb_id: 960099, title: '尚未发布' },                                     // 8 论坛没有
+    { title: '世上根本没有这部片', year: 2025 },                                // 9 哪儿都没有
+    { year: 2024 },                                                             // 10 缺 id 和片名
+    { tmdb_id: 'abc', title: 'x' },                                             // 11 编号不是数字
+    { tmdb_id: 94997, type: 'tv', title: '某部剧' },                            // 12 剧集放到电影这边
+  ]);
+  const S = r.items.map(x => x.status);
+  ok(r.items.length === 13 && r.lib === 1, '13 条全有结果，片库在线（' + S.join(' ') + '）');
+  ok(S[0] === 'add' && r.items[0].id === someId && r.items[0].sid === mv.m[someId][12], '「tmbd_id(1)」这种带序号、拼错的键名照认；没写偏好 → 默认版本（与片单「加入」时一样）');
+  ok(S[1] === 'owned' && r.items[1].own === 2, '库里已有的跳过（' + r.items[1].reason + '）');
+  ok(S[2] === 'add' && r.items[2].id === 960001 && r.items[2].res === '1080p' && /14\.2/.test(r.items[2].size || ''), '只写片名 + 年份 + res: 1080p → 认出「群星闪耀时」，挑 1080p 的那版（' + r.items[2].size + '，' + r.items[2].label + '）');
+  ok(S[3] === 'dup', '同一部在清单里出现两次：第二次标「重复」，不重复加');
+  ok(S[4] === 'add' && r.items[4].id === 960002 && r.items[4].via, '清单写的是别名「天涯尺素」：索引里没有这个名字，问 TMDB 认出是「远方来信」（' + r.items[4].via + '）');
+  ok(S[5] === 'add' && r.items[5].id === 960003, '只写英文名「Rainy Night Trail」：认出「' + r.items[5].title + '」');
+  ok(S[6] === 'ambiguous' && r.items[6].cands.length === 2 && r.items[6].cands.every(c => [960004, 960005].includes(c.id)), '同名两部、没写年份：不乱挑，列出 2 个候选让人点');
+  ok(S[7] === 'add' && r.items[7].id === 960005, '写了年份 2025：认准 2025 年那部');
+  ok(S[8] === 'notfound' && r.items[8].tmdb === 960099 && !r.items[8].retry, 'TMDB 有、论坛没有：标「论坛暂无」（' + r.items[8].reason + '）');
+  ok(S[9] === 'notfound' && /都没找到/.test(r.items[9].reason), '哪儿都没有的片名：「' + r.items[9].reason + '」');
+  ok(S[10] === 'invalid' && S[11] === 'invalid' && S[12] === 'invalid', '格式不对的三条各说原因：' + [10, 11, 12].map(i => r.items[i].reason).join(' / '));
+  ok(r.tmdb <= 30 && r.tmdb >= 1, `TMDB 只为索引里找不到的片名问（这次 ${r.tmdb} 个请求，上限 30）`);
+  /* 偏好：杜比视界、体积上限、找不到时退而求其次 */
+  const r2b = await post([
+    { tmdb_id: 960001, hdr: 'dv' },
+  ]);
+  const r3 = await post([{ tmdb_id: 960001, max_gb: 10 }]);
+  const r4 = await post([{ tmdb_id: 960001, res: '2160p', max_gb: 30 }]);
+  const r5 = await post([{ tmdb_id: 960002, res: '2160p' }]);
+  const r6 = await post([{ tmdb_id: 960002, max_gb: 1 }]);
+  ok(r2b.items[0].hb === 7 && /78\.5/.test(r2b.items[0].size), 'hdr: dv → 杜比视界那版（' + r2b.items[0].size + '）');
+  ok(/3\.1/.test(r3.items[0].size) && !r3.items[0].reason, 'max_gb: 10 → 10GB 以内最好的那版（' + r3.items[0].size + ' ' + r3.items[0].res + '）');
+  ok(r4.items[0].res === '2160p' && /22\.1/.test(r4.items[0].size), 'res: 2160p + max_gb: 30 → 30GB 以内的 2160p（' + r4.items[0].size + '）');
+  ok(r5.items[0].status === 'add' && r5.items[0].res === '1080p' && /最接近/.test(r5.items[0].reason), '要 2160p 但只有 1080p：照样加、说明「' + r5.items[0].reason + '」');
+  ok(r6.items[0].status === 'add' && /GB 以内/.test(r6.items[0].reason), '体积上限谁都满足不了：取最小的、说明「' + r6.items[0].reason + '」');
+  /* 编号是人给的：索引里没有这个编号、片名倒对上一部 —— 不自动加，交给人确认 */
+  const r7 = await post([{ tmdb_id: 123456789, title: '群星闪耀时', year: 2025 }]);
+  ok(r7.items[0].status === 'ambiguous' && r7.items[0].cands.length === 1 && r7.items[0].cands[0].id === 960001,
+    'tmdb_id 不在索引里、片名对上一部：不自动加，列出来让人确认（' + r7.items[0].reason + '）');
+  /* 接口：GET 不行、正文不对 400、超过一批的上限只处理前 30 条 */
+  const g = await I.call('/api/import');
+  const b = await I.call('/api/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"x":1}' });
+  const big = await post(Array.from({ length: 35 }, (_, i) => ({ tmdb_id: 990000 + i })));
+  ok(g.status === 405 && b.status === 400 && big.items.length === 30 && big.more === 5, '接口：GET 405、正文不对 400、一次最多 30 条（多出的 ' + big.more + ' 条交回让前端下一批再发）');
+  ok(!r2.keys('').some(k => /import/i.test(k)), '导入只读：R2 里没有多出任何东西');
+}
+
 console.log('\n■ 从 v5.4 的线上数据升级');
 {
   const { env, r2, W } = H.makeEnv();

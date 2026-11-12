@@ -1,5 +1,12 @@
 /**
- * Cuven ᴿ 索引库 · v6.5 —— 新进库的片几分钟内自己认出来 · 片名以字母开头的不再丢
+ * Cuven ᴿ 索引库 · v6.6 —— 导入清单：库里没有的自动查好版本、放进片单，确认后再下
+ * ══════════════════════════════════════════════════════════════════
+ * 片单页「导入清单」：贴一张表（JSON / CSV / 每行「tmdb_id:…/title:…」/ 每行一个片名），POST /api/import 逐条查：
+ *   · 库里已有的跳过；论坛有的按 res / hdr / max_gb / prefer / season 挑好版本，放进片单（电影、剧集各进各的）；
+ *   · 只有 title 时先在索引里按片名 + 年份找，找不到再问 TMDB（别名 / 港台译名 / 只有英文名），同名几部交给人挑；
+ *   · 只读，不写 R2；放进片单之后要人点「开始下载」才下。
+ * ══════════════════════════════════════════════════════════════════
+ * v6.5 —— 新进库的片几分钟内自己认出来 · 片名以字母开头的不再丢
  * ══════════════════════════════════════════════════════════════════
  * 「F1：狂飙飞车明明有，缺片里还在」：片库里的文件是「F1 The Movie 2025 …」，只有英文名、还多一截，
  * 按片名比不上，只能等 TMDB 认定 —— 而认定只在每天的定时任务或点「认定」时跑；各 isolate 的片库缓存
@@ -5504,6 +5511,200 @@ function decorate(r){
   return out;
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   [v6.6] 导入清单 —— 一张表进来，库里没有的自动查好、挑好版本、放进片单
+   ──────────────────────────────────────────────────────────────────
+   一条（JSON 对象，或 CSV / TSV 的一行，表头同名）：
+     tmdb_id   TMDB 编号（首选；电影 / 剧集各一套，见 type）
+     title     片名（没有 tmdb_id 时按片名 + 年份在索引里找，找不到再问 TMDB）
+     year      年份（同名消歧）            type     movie / tv（默认 movie）
+     season    剧集：只要某一季            res      想要的分辨率：2160p / 1080p / 720p
+     hdr       dv / hdr / sdr（默认不挑）  max_gb   体积上限（GB）
+     prefer    remux / bluray / web        note     备注（原样带回）
+   每条的结果：add（库里没有、论坛有 → 放进片单，等确认后下载）· owned（库里已有，跳过）·
+   notfound（论坛还没有）· ambiguous（片名对上不止一部，给出候选让人挑）· invalid · dup。
+   只读索引、不写 R2；TMDB 只在「片名在索引里找不到」时问，用自带的小配额。
+   ══════════════════════════════════════════════════════════════════ */
+const IMPORT_MAX = 30;            // 一次调用最多处理几条（前端按 12 条一批发）
+const RES_WANT = { '4320p': 6, '8k': 6, '2160p': 5, '4k': 5, 'uhd': 5, '1080p': 4, '1080': 4, '1080i': 3, '720p': 2, '720': 2, '480p': 1 };
+const SRC_WANT = { remux: 7, bluray: 6, 'blu-ray': 6, web: 5, 'web-dl': 5, webrip: 3 };
+/** 表头 / 键名宽松：大小写、「tmdb_id(1)」这种带序号的、tmbd 这种手误都认 */
+function importKeys(x){
+  const o = {};
+  for (const k0 of Object.keys(x)){
+    const k = String(k0).trim().toLowerCase().replace(/\s*[(（]\s*\d+\s*[)）]\s*$/, '').replace(/^tmbd/, 'tmdb').replace(/[\s-]+/g, '_');
+    if (!(k in o)) o[k] = x[k0];
+  }
+  return o;
+}
+function importIn(x0, i){
+  if (!x0 || typeof x0 !== 'object' || Array.isArray(x0)) return { i, bad: '这一条不是「键: 值」的对象' };
+  const x = importKeys(x0);
+  const pick = (...ks) => { for (const k of ks){ const v = x[k]; if (v != null && typeof v !== 'object' && String(v).trim() !== '') return v; } return null; };
+  const idRaw = pick('tmdb_id', 'tmdb', 'tmdbid', 'id');
+  const idS = idRaw == null ? '' : String(idRaw).trim().replace(/^(?:movie|tv)\//i, '');
+  const id = /^\d{1,9}$/.test(idS) ? Number(idS) : 0;
+  if (idS && !id) return { i, bad: 'tmdb_id「' + idS.slice(0, 20) + '」不是数字' };
+  const en = String(pick('en', 'original_title', 'original', 'orig', 'english', '英文名', '原名') || '').trim().slice(0, 160);
+  const title = String(pick('title', 'name', '片名', '中文名', 'cn') || en).trim().slice(0, 160);
+  const ty = String(pick('type', 'kind', '类型') || '').trim();
+  /* 没写 type 就跟着这次调用的源走；写了才拿来核对 */
+  const type = !ty ? '' : /^(tv|series|show|剧集|电视剧|剧)$/i.test(ty) ? 'tv' : 'movie';
+  const sn = Number(pick('season', '季'));
+  const res = RES_WANT[String(pick('res', 'resolution', 'quality', '分辨率') || '').trim().toLowerCase()] || 0;
+  const hdrS = String(pick('hdr', 'dr', '动态范围') || '').trim().toLowerCase();
+  const hdr = /^(dv|dovi|dolby\s*vision|杜比视界)$/.test(hdrS) ? 'dv' : /^hdr/.test(hdrS) ? 'hdr' : hdrS === 'sdr' ? 'sdr' : '';
+  const mg = Number(pick('max_gb', 'maxgb', 'max_size', 'size_gb', '体积上限'));
+  const prefer = SRC_WANT[String(pick('prefer', 'source', 'src', '来源') || '').trim().toLowerCase()] || 0;
+  const note = String(pick('note', 'notes', '备注') || '').slice(0, 200);
+  if (!id && !title) return { i, bad: '缺 tmdb_id 和 title（至少要有一个）' };
+  return { i, id, title, en: en !== title ? en : '', year: yearOf(pick('year', '年份', 'release_year')) || 0, type,
+           season: sn > 0 && sn < 100 ? Math.floor(sn) : 0, res, hdr, maxMb: mg > 0 ? mg * 1024 : 0, prefer, note };
+}
+/** 按偏好挑版本。rows 已按「最好」排好；全都不满足时退而求其次（并说明） */
+function importPick(rows, q){
+  let cand = rows.filter(r => !q.season || (r.sn || 0) === q.season);
+  if (!cand.length) return { r: null, why: q.season ? '没有第 ' + q.season + ' 季的片源' : '没有片源' };
+  const fit = cand.filter(r => !q.maxMb || !r.mb || r.mb <= q.maxMb);
+  let why = '';
+  if (!fit.length){ why = '没有 ' + Math.round(q.maxMb / 1024) + 'GB 以内的，取最小的'; cand = cand.slice().sort((a, b) => (a.mb || 9e9) - (b.mb || 9e9)).slice(0, 1); }
+  else cand = fit;
+  const sc = (r) => {
+    const res = r.spec & 15, src = (r.spec >> 4) & 15, hdr = (r.spec >> 8) & 15;
+    let s = r.score || 0;
+    if (q.res) s += res === q.res ? 60 : (res > q.res ? 10 - (res - q.res) * 8 : -30 * (q.res - res));
+    if (q.hdr === 'dv') s += hdr === 7 ? 40 : (hdr >= 3 ? 10 : -10);
+    else if (q.hdr === 'hdr') s += hdr >= 3 ? 30 : -10;
+    else if (q.hdr === 'sdr') s += hdr < 3 ? 30 : -20;
+    if (q.prefer) s += src === q.prefer ? 25 : (Math.abs(src - q.prefer) <= 1 ? 8 : 0);
+    return s;
+  };
+  const best = cand.slice().sort((a, b) => sc(b) - sc(a) || betterRow(a, b))[0];
+  if (q.res && (best.spec & 15) !== q.res && !why) why = '没有 ' + SPEC.res[q.res] + '，取最接近的';
+  else if (q.hdr === 'dv' && ((best.spec >> 8) & 15) !== 7 && !why) why = '没有杜比视界版';
+  return { r: best, why };
+}
+let IMPORT_IDX = { ver: -1, src: '', map: null };
+/** 索引里按片名找：canon 键全等 + 年份契合。唯一最好 → 这部；并列 → 说不准（交给人挑） */
+function importByTitle(rows, q, tv){
+  const keys = canonKeys([q.title, q.en].filter(Boolean));
+  const cnt = new Map();
+  for (const k of keys) for (const i of IMPORT_IDX.map.get(k) || []) cnt.set(i, (cnt.get(i) || 0) + 1);
+  const c = [];
+  for (const [i, n] of cnt){
+    const yf = yearFit(q.year, rows[i].y, tv, false);
+    if (q.year && yf < 2) continue;                   // 写了年份就得对得上（差一年以内）
+    /* 没写年份时，太短太泛的片名（「英雄」）不单独认 —— 交给 TMDB 去挑 */
+    if (!q.year && !keys.some(k => keyWeight(k) >= 6)) continue;
+    c.push({ i, s: n * 10 + Math.max(0, yf) });
+  }
+  if (!c.length) return null;
+  c.sort((a, b) => b.s - a.s || (rows[b.i].c || 0) - (rows[a.i].c || 0));
+  const top = c.filter(x => x.s === c[0].s);
+  if (top.length > 1) return { amb: top.slice(0, 5).map(x => rows[x.i]) };
+  return { row: rows[c[0].i] };
+}
+async function importItems(env, list, ctx){
+  const t0 = Date.now();
+  const { movies, state } = await loadIndex(env);
+  const ver = state.ver || 0;
+  const lib = await libLoad(env, ctx).catch(() => null);
+  const rows = catRows(movies, ver), tv = isTV(), kind = tv ? 'tv' : 'movie';
+  if (IMPORT_IDX.ver !== ver || IMPORT_IDX.src !== SRC.id || !IMPORT_IDX.map){
+    const map = new Map();
+    for (let i = 0; i < rows.length; i++) for (const k of rowKeys(rows[i]).keys){ const a = map.get(k); if (a) a.push(i); else map.set(k, [i]); }
+    IMPORT_IDX = { ver, src: SRC.id, map };
+  }
+  const arr = Array.isArray(list) ? list : [];
+  const items = arr.slice(0, IMPORT_MAX).map((x, i) => importIn(x, i));
+  const out = [], seen = new Set(), ask = [];
+  const C = { env, movies, ver, state, lib, seen, t0 };
+  for (const q of items){
+    if (q.bad){ out.push({ k: q.i, status: 'invalid', reason: q.bad }); continue; }
+    if (q.type && q.type !== kind){ out.push({ k: q.i, status: 'invalid', title: q.title, reason: '这条是' + (q.type === 'tv' ? '剧集' : '电影') + '，要在「' + (q.type === 'tv' ? '剧集' : '电影') + '」那边导入' }); continue; }
+    let id = q.id && movies.m[q.id] ? q.id : 0;
+    if (!id && q.title){
+      const r = importByTitle(rows, q, tv);
+      /* 片名对上好几部 → 交给人挑。给了 tmdb_id 却不在索引里、片名倒对上一部：
+         编号是人给的、更可信，可能是论坛还没有这部（同名的另一部）、也可能是索引认错了 —— 也交给人确认，不自动加 */
+      const amb = r && (r.amb || (q.id ? [r.row] : null));
+      if (amb){
+        out.push({ k: q.i, status: 'ambiguous', title: q.title, year: q.year || '', note: q.note,
+          reason: r.amb ? '片名对上 ' + amb.length + ' 部，挑一部' : '索引里没有 TMDB ' + q.id + '，但片名对上了这部 —— 是同一部就点它',
+          cands: amb.map(x => ({ id: x.id, title: x.m[F.N], year: x.m[F.Y], poster: x.m[F.P], own: lib ? libHasId(movies, ver, lib, x.id) : 0 })) });
+        continue;
+      }
+      if (r) id = r.row.id;
+    }
+    if (!id){
+      if (q.title && !q.id){ ask.push(q); continue; }     // 索引里按名字找不到：问 TMDB 拿编号再查一次
+      out.push({ k: q.i, status: 'notfound', title: q.title, year: q.year || '', note: q.note, tmdb: q.id, reason: '论坛还没有这部（索引里没有 TMDB ' + q.id + '）' });
+      continue;
+    }
+    out.push(await importOne(C, q, id));
+  }
+  let tmdbN = 0;
+  if (ask.length){
+    const envT = Object.assign(Object.create(env), { __sub: { n: 0, max: 30 }, __r429: 0 });
+    const lat = (q) => q.en || (/[\u3400-\u9fff]/.test(q.title) ? '' : q.title);
+    const groups = ask.map(q => ({ key: 'imp' + q.i, cn: q.title, latin: lat(q), years: q.year ? [String(q.year)] : [], hint: q.year || 0, title: q.title }));
+    let res = new Map();
+    try { res = await matchBatch(envT, groups, { soft: true }); }
+    catch (e){ trace('tmdb', '导入清单：TMDB 没查成（' + (e.message || e) + '）', { lvl: 'err', ch: 'match' }); }
+    for (const q of ask){
+      let r = res.get('imp' + q.i);
+      /* 认定规则要求「片名对得上」—— 清单里写的却常是别名 / 港台译名（TMDB 按别名搜得到，返回的标题却是另一个）。
+         人已经明说了要哪部：直接拿搜索结果里「论坛有的」那几部来对，只有一部就是它，好几部就交给人挑 */
+      if (r && r.miss && envT.__sub.max - envT.__sub.n > 0){
+        const p = { query: q.title, include_adult: 'false' };
+        if (q.year && !tv) p[SRC.yparam] = q.year;
+        const j = await tmdb(envT, '/search/' + SRC.kind, p).catch(() => null);
+        const got = ((j && j.results) || []).filter(h => movies.m[h.id] && (!q.year || yearFit(q.year, yearOf(h.release_date || h.first_air_date), tv, false) >= 2));
+        if (got.length === 1) r = { hit: got[0], via: 'TMDB 按别名搜到' };
+        else if (got.length > 1){
+          out.push({ k: q.i, status: 'ambiguous', title: q.title, year: q.year || '', note: q.note, reason: 'TMDB 按这个名字搜到 ' + got.length + ' 部论坛有的，挑一部',
+            cands: got.slice(0, 5).map(h => { const m = movies.m[h.id]; return { id: h.id, title: m[F.N], year: m[F.Y], poster: m[F.P], own: lib ? libHasId(movies, ver, lib, h.id) : 0 }; }) });
+          continue;
+        }
+      }
+      const id = r && r.hit ? r.hit.id : 0;
+      if (id && movies.m[id]){ out.push(await importOne(C, q, id, r.via)); continue; }
+      out.push({ k: q.i, status: 'notfound', title: q.title, year: q.year || '', note: q.note, tmdb: id || 0,
+        retry: !id && r == null ? 1 : 0,
+        reason: id ? '论坛还没有这部（TMDB 认出来是 ' + id + (r.hit.title || r.hit.name ? '「' + (r.hit.title || r.hit.name) + '」' : '') + '）'
+                   : (r == null ? 'TMDB 这次没查成，稍后再导一次' : '索引和 TMDB 里都没找到这个片名') });
+    }
+    tmdbN = envT.__sub.n;
+  }
+  out.sort((a, b) => a.k - b.k);
+  return { items: out, src: SRC.id, n: items.length, more: Math.max(0, arr.length - items.length), max: IMPORT_MAX,
+           lib: lib ? 1 : 0, tmdb: tmdbN, ms: Date.now() - t0 };
+}
+async function importOne(C, q, id, via){
+  const m = C.movies.m[id];
+  const base = { k: q.i, id, title: m[F.N], year: m[F.Y], poster: m[F.P], note: q.note };
+  if (via) base.via = via;
+  if (C.seen.has(id)) return { ...base, status: 'dup', reason: '清单里前面已经有这部' };
+  C.seen.add(id);
+  if (C.lib){
+    const w = libWhy(C.movies, C.ver, C.lib, id);
+    if (w && w.own) return { ...base, status: 'owned', own: w.own, file: w.file || '', reason: w.own === 2 ? '库中已有' : '库里很可能已有（片名年份对上）' };
+  }
+  let sid = m[F.BT], res = m[F.Q], size = m[F.Z], hb = m[F.HB] || 0, rb = m[F.RB] || resLevel(m[F.Q]), label = '', why = '';
+  if (q.season || q.res || q.hdr || q.maxMb || q.prefer){
+    if (Date.now() - C.t0 > 15000) why = '这一批太大，没来得及按偏好挑，先放默认版本';
+    else {
+      const p = importPick((await movieRows(C.env, C.movies, id, C.ver, C.state)).map(decorate), q);
+      if (!p.r) return { ...base, status: 'notfound', reason: p.why };
+      const r = p.r;
+      sid = r.sid; res = specRes(r.spec); size = r.size; hb = (r.spec >> 8) & 15; rb = r.spec & 15;
+      label = r.labels.slice(0, 4).join(' · '); why = p.why;
+    }
+  }
+  if (!sid) return { ...base, status: 'notfound', reason: '这部片没有可用的片源' };
+  return { ...base, status: 'add', sid, res, size, hb, rb, label, reason: why };
+}
+
 /* ══════════ 主题 / 种子 ══════════ */
 async function threadDetail(env, tid, ctx){
   const k = kkey(env,'t:'+tid);
@@ -6054,6 +6255,14 @@ export default {
           solo: !!(body && body.solo),
           flush: turbo && Q.get('pages') === '0',
         }));
+      }
+      /* [v6.6] 导入清单：只读，不写 R2；库里没有的查好版本交回，浏览器放进片单、等人确认再下 */
+      if (p==='/api/import'){
+        if (request.method !== 'POST') return json({ error:'请用 POST，正文是 { items: [...] }' }, 405);
+        const body = await request.json().catch(() => null);
+        const list = Array.isArray(body) ? body : (body && Array.isArray(body.items) ? body.items : null);
+        if (!list) return json({ error:'正文要是 JSON 数组，或 { items: [...] }' }, 400);
+        return json(await importItems(env, list, cx));
       }
       /* [v6.2] 认定工：不持锁、不写 R2，自带一整份子请求配额 */
       if (p==='/api/tm'){
@@ -6769,6 +6978,25 @@ html[data-theme="dark"] .filters.stuck{background:rgba(14,14,16,.72)}
   width:22px;height:22px;display:grid;place-items:center;line-height:1;position:relative;
   transition:color var(--t-s) var(--e-soft)}
 .citem .cx::before{content:'';position:absolute;inset:-11px}   /* 22 + 11×2 = 44 */
+/* [v6.6] 导入清单 */
+.imp textarea{display:block;width:100%;min-height:150px;resize:vertical;background:var(--sf2);color:var(--t1);border:0;
+  box-shadow:inset 0 0 0 1px var(--line);border-radius:var(--r-m);padding:12px 14px;font-family:var(--mono);
+  font-size:.75rem;line-height:1.6;transition:box-shadow .16s ease}
+.imp textarea:focus-visible{outline:0;box-shadow:inset 0 0 0 1px var(--ac),0 0 0 3px var(--acb)}
+.imp textarea[disabled]{opacity:.6}
+.imp p.fine{margin:10px 2px 14px}
+.imp label.btn[aria-disabled]{opacity:.42;pointer-events:none}
+.imp-sum{display:flex;flex-wrap:wrap;gap:6px;margin:16px 0 10px}
+.ilist{max-height:440px;overflow:auto;margin-top:8px;border-top:1px solid var(--line)}
+.irow{display:flex;gap:11px;align-items:flex-start;padding:11px 2px;border-bottom:1px solid var(--line);font-size:.8125rem}
+.irow:last-child{border-bottom:0}
+.irow > .dot{margin-top:6px}
+.irow .ib{flex:1;min-width:0}
+.irow .ib b{font-weight:var(--fw-m)}
+.irow .ib .num{color:var(--t3);font-size:.75rem}
+.irow .ib em{display:block;font-style:normal;color:var(--t3);font-size:.71875rem;margin-top:3px;line-height:1.5;overflow-wrap:anywhere}
+.irow > .pill{flex:none}
+.irow .cands{display:flex;flex-wrap:wrap;gap:8px;margin-top:9px}
 
 /* ── 索引管线可视化 ─────────────────────────────────────────────── */
 .flow{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding:4px 0 10px;
@@ -8821,11 +9049,293 @@ function qrowHTML(it, j){
    顺序按"接下来要做什么"排：正在进行的任务（有才显示）→ 片单 → 开始下载。
    任务进行中每一批都会来一次 paint：只原地改数字、进度条与行状态
    （patchDL），不整页重画 —— 海报不重闪，列表滚动位置也不丢。 */
+/* ══════════ [v6.6] 导入清单 ══════════
+   一张表 → 服务端逐条查：库里已有的跳过，论坛有的按偏好挑好版本放进片单（电影、剧集各进各的片单）。
+   只是放进片单 —— 真正下载要等人在片单里看过、点「开始下载」。
+   认得的格式：JSON 数组 / {"items":[…]} / 每行一个 JSON 对象；CSV、TSV（第一行是表头）；
+   每行「tmdb_id:123/title:沙丘/year:2024」；每行一个片名（末尾的年份拆出来）或一个 TMDB 编号。 */
+var IMP = { open:false, text:'', busy:false, done:0, total:0, rows:null, jobs:null, added:[], failed:[], note:'', nolib:0 };
+var IMP_BATCH = 12, IMP_CAP = 1000;
+var IMP_KEYS = /^(tmdb_id|tmdb|tmdbid|id|title|name|片名|中文名|cn|en|original_title|original|orig|english|英文名|原名|year|年份|release_year|type|kind|类型|season|季|res|resolution|quality|分辨率|hdr|dr|动态范围|max_gb|maxgb|max_size|size_gb|体积上限|prefer|source|src|来源|note|notes|备注)$/;
+var IMP_SAMPLE = '[\n  {"tmdb_id": 911430, "title": "F1：狂飙飞车", "year": 2025},\n'
+  + '  {"title": "沙丘2", "year": 2024, "res": "2160p", "hdr": "dv"},\n'
+  + '  {"title": "奥本海默", "year": 2023, "res": "1080p", "max_gb": 20, "note": "给爸妈"},\n'
+  + '  {"tmdb_id": 94997, "type": "tv", "title": "龙之家族", "season": 2}\n]';
+var IMP_ST = { add:['ok', '加入片单'], incart:['ok', '片单里已有'], owned:['', '库中已有'], dup:['', '清单里重复'],
+  notfound:['warn', '论坛暂无'], ambiguous:['warn', '要你挑'], invalid:['bad', '格式不对'], full:['bad', '片单满了'], error:['bad', '没查成'] };
+function impKey(k){ return String(k).trim().toLowerCase().replace(/\s*[(（]\s*\d+\s*[)）]\s*$/, '').replace(/^tmbd/, 'tmdb').replace(/[\s-]+/g, '_'); }
+function impCSV(l, sep){
+  var out = [], cur = '', q = false;
+  for (var i = 0; i < l.length; i++){
+    var c = l.charAt(i);
+    if (q){ if (c === '"'){ if (l.charAt(i + 1) === '"'){ cur += '"'; i++; } else q = false; } else cur += c; }
+    else if (c === '"' && !cur.trim()) q = true;
+    else if (c === sep){ out.push(cur.trim()); cur = ''; }
+    else cur += c;
+  }
+  out.push(cur.trim());
+  return out;
+}
+/** 一行「键:值/键:值」；没有认得的键就整行当片名（末尾的年份拆出来），纯数字当 TMDB 编号 */
+function impLine(l){
+  l = l.trim();
+  var re = /(^|[\/|;，；\t]\s*)([A-Za-z_一-龥]+(?:\s*[(（]\s*\d+\s*[)）])?)\s*[:：=]\s*/g, m, marks = [];
+  while ((m = re.exec(l))){ var k = impKey(m[2]); if (IMP_KEYS.test(k)) marks.push({ k: k, at: m.index, end: re.lastIndex }); }
+  var o = {};
+  if (marks.length){
+    var pre = l.slice(0, marks[0].at).trim();
+    if (pre) o.title = pre;
+    marks.forEach(function(mk, i){
+      var v = l.slice(mk.end, i + 1 < marks.length ? marks[i + 1].at : l.length).trim();
+      if (v && !(mk.k in o)) o[mk.k] = v;
+    });
+    return o;
+  }
+  l = l.replace(/^(?:[-*•·]|\d{1,4}[.)、])\s+/, '');
+  if (/^\d{1,9}$/.test(l)) return { tmdb_id: l };
+  var y = /^(.*?)[\s(（\[【]+((?:18|19|20)\d{2})[)）\]】]*$/.exec(l);
+  return y && y[1].trim() ? { title: y[1].trim(), year: y[2] } : { title: l };
+}
+function impParse(t){
+  t = String(t || '').replace(/^﻿/, '').trim();
+  if (!t) return { items: [], err: '先贴一份清单，或选一个文件' };
+  if (/^[\[{]/.test(t)){
+    var j = null, e1 = null;
+    try { j = JSON.parse(t); } catch(e){ e1 = e; }
+    if (j == null && t.charAt(0) === '{'){
+      try { j = t.split(/\r?\n/).filter(function(l){ return l.trim(); }).map(function(l){ return JSON.parse(l.trim().replace(/,$/, '')); }); }
+      catch(e){ j = null; }
+    }
+    if (j == null) return { items: [], err: 'JSON 解析不了：' + (e1 && e1.message || '格式不对') };
+    if (Array.isArray(j)) return { items: j };
+    if (j && typeof j === 'object'){
+      var inner = j.items || j.list || j.movies || j.films || j.data;
+      if (Array.isArray(inner)) return { items: inner };
+      var vals = Object.keys(j).map(function(k){ return j[k]; });
+      if (vals.length > 1 && vals.every(function(v){ return v && typeof v === 'object' && !Array.isArray(v); })) return { items: vals };
+      return { items: [j] };
+    }
+    return { items: [], err: 'JSON 里没有清单（要数组，或 {"items": [...]}）' };
+  }
+  var lines = t.split(/\r?\n/).filter(function(l){ return l.trim(); });
+  var head = lines[0], sep = head.indexOf('\t') >= 0 ? '\t' : (head.indexOf(',') >= 0 ? ',' : '');
+  if (sep && !/[:：=]/.test(head)){
+    var hs = impCSV(head, sep).map(impKey);
+    if (hs.filter(function(h){ return IMP_KEYS.test(h); }).length * 2 >= hs.length){
+      return { items: lines.slice(1).map(function(l){
+        var c = impCSV(l, sep), o = {};
+        hs.forEach(function(h, i){ if (h && c[i] != null && c[i] !== '' && !(h in o)) o[h] = c[i]; });
+        return o;
+      }) };
+    }
+  }
+  return { items: lines.map(impLine) };
+}
+function impType(x){
+  if (!x || typeof x !== 'object') return 'movie';
+  var o = {};
+  Object.keys(x).forEach(function(k){ var kk = impKey(k); if (!(kk in o)) o[kk] = x[k]; });
+  return /^(tv|series|show|剧集|电视剧|剧)$/i.test(String(o.type || o.kind || o['类型'] || '').trim()) ? 'tv' : 'movie';
+}
+function cartKeyOf(src){ return src === 'movie' ? 'cvcart' : 'cvcart:' + src; }
+/** 加进某个源的片单（不一定是当前源）：1 = 加了，0 = 本来就有，-1 = 满了 */
+function cartAddTo(src, m, label){
+  var rec = { id:m.id, title:m.title, year:m.year, poster:m.poster, res:m.res, size:m.size, sid:m.sid, own:m.own || 0, hb:m.hb, rb:m.rb };
+  if (label) rec.pickLabel = label;
+  if (src === S.src){
+    if (CART.o[m.id]) return 0;
+    if (CART.ord.length >= MAX) return -1;
+    if (!cartAdd(m)) return -1;
+    if (label){ CART.o[m.id].pickLabel = label; cartSave(); }
+    return 1;
+  }
+  var c = null;
+  try { c = JSON.parse(localStorage.getItem(cartKeyOf(src)) || 'null'); } catch(e){}
+  if (!c || !c.ord) c = { ord: [], o: {} };
+  if (c.o[m.id]) return 0;
+  if (c.ord.length >= MAX) return -1;
+  c.ord.push(m.id); c.o[m.id] = rec;
+  try { localStorage.setItem(cartKeyOf(src), JSON.stringify(c)); } catch(e){ return -1; }
+  return 1;
+}
+function cartDropFrom(src, ids){
+  if (src === S.src){
+    ids.forEach(function(id){ if (CART.o[id]){ delete CART.o[id]; markTile(id, false); } });
+    CART.ord = CART.ord.filter(function(x){ return CART.o[x]; });
+    cartSave(); paintDock(); return;
+  }
+  try {
+    var c = JSON.parse(localStorage.getItem(cartKeyOf(src)) || 'null');
+    if (!c || !c.ord) return;
+    ids.forEach(function(id){ delete c.o[id]; });
+    c.ord = c.ord.filter(function(x){ return c.o[x]; });
+    localStorage.setItem(cartKeyOf(src), JSON.stringify(c));
+  } catch(e){}
+}
+function impTake(j, it, src){
+  var row = { src: src, it: it, st: it.status, x: j.x };
+  if (it.status === 'add'){
+    var r = cartAddTo(src, it, it.label || '');
+    row.st = r === 1 ? 'add' : r === 0 ? 'incart' : 'full';
+    if (r === 1) IMP.added.push({ src: src, id: it.id });
+  }
+  if (it.status === 'notfound' && it.retry) IMP.failed.push(j);     // TMDB 这次没查成：可以重试
+  IMP.rows[j.i] = row;
+}
+function impStart(){
+  if (IMP.busy) return;
+  var ta = document.getElementById('imptx');
+  if (ta) IMP.text = ta.value;
+  var P = impParse(IMP.text);
+  IMP.note = P.err || (!P.items.length ? '清单是空的' : '');
+  if (IMP.note){ renderDL(); return; }
+  if (P.items.length > IMP_CAP) IMP.note = '清单有 ' + P.items.length + ' 条，这次先查前 ' + IMP_CAP + ' 条';
+  IMP.rows = []; IMP.added = []; IMP.nolib = 0;
+  IMP.jobs = P.items.slice(0, IMP_CAP).map(function(x, i){ return { i: i, x: x, t: impType(x) }; });
+  impRun(IMP.jobs);
+}
+function impRun(jobs){
+  IMP.busy = true; IMP.done = 0; IMP.total = jobs.length; IMP.failed = [];
+  var batches = [];
+  ['movie', 'tv'].forEach(function(t){
+    var g = jobs.filter(function(j){ return j.t === t; });
+    for (var k = 0; k < g.length; k += IMP_BATCH) batches.push({ t: t, jobs: g.slice(k, k + IMP_BATCH) });
+  });
+  renderDL();
+  var step = function(bi){
+    if (bi >= batches.length) return impFinish();
+    var b = batches[bi];
+    api('/api/import', { method: 'POST', body: JSON.stringify({ items: b.jobs.map(function(j){ return j.x; }) }), src: b.t, timeout: 45000 })
+      .then(function(r){
+        (r.items || []).forEach(function(it){ var j = b.jobs[it.k]; if (j) impTake(j, it, b.t); });
+        var n = Math.min(r.n || 0, b.jobs.length);
+        if (n < b.jobs.length) batches.splice(bi + 1, 0, { t: b.t, jobs: b.jobs.slice(n) });   // 服务端一次收不下：剩下的下一批再发
+        if (!r.lib) IMP.nolib = 1;
+        IMP.done += n;
+      }, function(e){
+        b.jobs.forEach(function(j){ IMP.failed.push(j); IMP.rows[j.i] = { src: b.t, x: j.x, st: 'error', it: { status: 'error', reason: e.message || String(e) } }; });
+        IMP.done += b.jobs.length;
+      })
+      .then(function(){ if (S.view === 'dl') renderDL(); step(bi + 1); });
+  };
+  step(0);
+}
+function impFinish(){
+  IMP.busy = false;
+  var n = IMP.added.length, tv = IMP.added.filter(function(a){ return a.src !== S.src; }).length;
+  if (S.view === 'dl') renderDL();
+  toast(n ? '加进片单 ' + n + ' 部' + (tv ? '（' + tv + ' 部在另一边的片单）' : '') + '，看过再点「开始下载」' : '没有新加进片单的');
+}
+function impUndo(){
+  var by = {};
+  IMP.added.forEach(function(a){ (by[a.src] = by[a.src] || []).push(a.id); });
+  Object.keys(by).forEach(function(src){ cartDropFrom(src, by[src]); });
+  (IMP.rows || []).forEach(function(r){ if (r && r.st === 'add') r.st = 'undone'; });
+  toast('撤回了这次加进片单的 ' + IMP.added.length + ' 部');
+  IMP.added = [];
+  renderDL();
+}
+function impPick(i, id){
+  var row = IMP.rows && IMP.rows[i];
+  if (!row || IMP.busy) return;
+  api('/api/cart?ids=' + id, { src: row.src }).then(function(r){
+    var m = r.items && r.items[0];
+    if (!m || m.missing) throw new Error('索引里没有这部了');
+    var rr = cartAddTo(row.src, m, '');
+    row.it = { status: 'add', id: m.id, title: m.title, year: m.year, poster: m.poster, res: m.res, size: m.size, hb: m.hb, note: row.it.note, reason: '你挑的' };
+    row.st = rr === 1 ? 'add' : rr === 0 ? 'incart' : 'full';
+    if (rr === 1) IMP.added.push({ src: row.src, id: m.id });
+    if (m.own) row.it.reason = '你挑的 · 注意：库里' + (m.own === 2 ? '已有' : '可能已有');
+    renderDL();
+  }).catch(function(e){ toast(e.message || String(e)); });
+}
+function impRowHTML(row, i){
+  if (!row) return '';
+  var it = row.it || {}, st = IMP_ST[row.st] || ['', row.st === 'undone' ? '已撤回' : row.st];
+  var name = it.title || (row.x && typeof row.x === 'object' ? (row.x.title || row.x.name || '') : '') || ('第 ' + (i + 1) + ' 条');
+  var bits = [];
+  if (row.st === 'add' || row.st === 'incart'){
+    bits.push(it.res, it.size, it.hb === 7 ? '杜比视界' : it.hb >= 3 ? 'HDR' : '', it.label, it.reason, it.via ? '经' + it.via : '');
+  } else if (row.st === 'owned') bits.push(it.reason, it.file);
+  else if (row.st === 'invalid' && row.x != null && !it.title) bits.push(it.reason, String(typeof row.x === 'object' ? JSON.stringify(row.x) : row.x).slice(0, 80));
+  else bits.push(it.reason);
+  if (it.note) bits.push('备注：' + it.note);
+  var h = '<div class="irow" data-st="' + esc(row.st) + '"><span class="dot ' + st[0] + '"></span><div class="ib"><b>' + esc(name) + '</b>'
+    + (it.year ? ' <span class="num">' + esc(it.year) + '</span>' : '')
+    + (row.src !== S.src ? ' <span class="pill">' + (row.src === 'tv' ? '剧集' : '电影') + '</span>' : '')
+    + '<em>' + esc(bits.filter(Boolean).join('  ·  ') || '—') + '</em>';
+  if (row.st === 'owned' && it.id)
+    h += '<div class="cands"><button class="btn sm" data-icand="' + i + ':' + it.id + '">仍然加入（换个版本）</button></div>';
+  if (row.st === 'ambiguous' && it.cands)
+    h += '<div class="cands">' + it.cands.map(function(c){
+      return '<button class="btn sm" data-icand="' + i + ':' + c.id + '">' + esc(c.title + (c.year ? ' (' + c.year + ')' : '')) + (c.own ? ' · 库' + (c.own === 2 ? '中已有' : '里可能有') : '') + '</button>';
+    }).join('') + '</div>';
+  return h + '</div><span class="pill ' + st[0] + '">' + esc(st[1]) + '</span></div>';
+}
+function impHTML(){
+  if (!IMP.open) return '';
+  var h = '<div class="card imp" id="impcard"><div class="hd"><h2 class="sec">导入清单</h2><span class="sub">JSON · CSV · 每行一条</span></div>'
+    + '<textarea id="imptx" spellcheck="false" autocomplete="off" aria-label="清单" placeholder="' + esc(IMP_SAMPLE) + '"' + (IMP.busy ? ' disabled' : '') + '>' + esc(IMP.text) + '</textarea>'
+    + '<p class="fine">每条至少有 <b>tmdb_id</b> 或 <b>title</b>；还可以写 year、type（movie / tv）、season、res（2160p / 1080p / 720p）、hdr（dv / hdr / sdr）、max_gb、prefer（remux / bluray / web）、note。'
+    + '库里已有的自动跳过；论坛有的按偏好挑好版本放进片单 —— 只是放进去，点「开始下载」之前什么都不会下。</p>'
+    + '<div class="row"><button class="btn on fixed" id="impgo"' + (IMP.busy ? ' disabled' : '') + '>' + (IMP.busy ? '查询中 ' + IMP.done + ' / ' + IMP.total : '查询并加入片单') + '</button>'
+    + '<label class="btn" for="impfile"' + (IMP.busy ? ' aria-disabled="true"' : '') + '>选文件</label>'
+    + '<input type="file" id="impfile" accept=".json,.csv,.tsv,.txt,application/json,text/csv,text/plain" hidden>'
+    + '<button class="btn" id="impeg"' + (IMP.busy ? ' disabled' : '') + '>填入示例</button>'
+    + '<span class="grow"></span><button class="btn sm" id="impx"' + (IMP.busy ? ' disabled' : '') + '>收起</button></div>';
+  if (IMP.busy) h += '<div class="bar2" style="margin-top:14px"><i style="transform:scaleX(' + Math.max(.02, IMP.total ? IMP.done / IMP.total : 0) + ')"></i></div>';
+  if (IMP.note) h += '<div class="warnbox">' + esc(IMP.note) + '</div>';
+  if (IMP.rows && IMP.rows.length){
+    var cnt = {}, rows = IMP.rows;
+    rows.forEach(function(r){ if (r) cnt[r.st] = (cnt[r.st] || 0) + 1; });
+    h += '<div class="imp-sum">' + Object.keys(IMP_ST).concat(['undone']).filter(function(k){ return cnt[k]; }).map(function(k){
+      return '<span class="pill ' + (IMP_ST[k] ? IMP_ST[k][0] : '') + '">' + (IMP_ST[k] ? IMP_ST[k][1] : '已撤回') + ' <b class="num">' + cnt[k] + '</b></span>';
+    }).join('') + '</div>';
+    if (!IMP.busy){
+      var other = IMP.added.filter(function(a){ return a.src !== S.src; }).length;
+      h += '<p class="fine">' + (IMP.added.length ? '这次加进片单 ' + IMP.added.length + ' 部' + (other ? '（其中 ' + other + ' 部在' + (S.src === 'tv' ? '电影' : '剧集') + '的片单里，切过去就能看到）' : '') + '。看一眼下面的片单，没问题再点「开始下载」。' : '这次没有新加进片单的。')
+        + (IMP.nolib ? ' 片库这次没连上，没法排除库里已有的 —— 下载前留意一下。' : '') + '</p>';
+      h += '<div class="row" style="margin-bottom:6px">'
+        + (IMP.added.length ? '<button class="btn sm" id="impundo">撤回这次加入的 ' + IMP.added.length + ' 部</button>' : '')
+        + (IMP.failed.length ? '<button class="btn sm" id="impretry">重试没查成的 ' + IMP.failed.length + ' 条</button>' : '')
+        + '<button class="btn sm" id="impclr">清掉结果</button></div>';
+    }
+    h += '<div class="ilist">' + rows.map(impRowHTML).join('') + '</div>';
+  }
+  return h + '</div>';
+}
+function impBind(){
+  var g = function(id){ return document.getElementById(id); };
+  var on = function(id, fn){ var e = g(id); if (e) e.onclick = fn; };
+  var ta = g('imptx');
+  if (ta) ta.oninput = function(){ IMP.text = ta.value; };
+  on('impopen', function(){ IMP.open = true; renderDL(); var t = g('imptx'); if (t) t.focus(); });
+  on('impopen2', function(){ IMP.open = true; renderDL(); var t = g('imptx'); if (t) t.focus(); });
+  on('impx', function(){ if (!IMP.busy){ IMP.open = false; renderDL(); } });
+  on('impgo', impStart);
+  on('impeg', function(){ IMP.text = IMP_SAMPLE; IMP.note = ''; renderDL(); });
+  on('impundo', impUndo);
+  on('impretry', function(){ var f = IMP.failed.slice(); if (f.length && !IMP.busy){ IMP.note = ''; impRun(f); } });
+  on('impclr', function(){ IMP.rows = null; IMP.added = []; IMP.failed = []; IMP.note = ''; renderDL(); });
+  var f = g('impfile');
+  if (f) f.onchange = function(){
+    var file = f.files && f.files[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024){ toast('文件太大（超过 2MB）'); return; }
+    var rd = new FileReader();
+    rd.onload = function(){ IMP.text = String(rd.result || ''); IMP.note = '读进来了：' + file.name + '（' + impParse(IMP.text).items.length + ' 条），点「查询并加入片单」'; renderDL(); };
+    rd.onerror = function(){ toast('文件读不出来'); };
+    rd.readAsText(file);
+  };
+  [].forEach.call(document.querySelectorAll('[data-icand]'), function(b){
+    b.onclick = function(){ var p = b.dataset.icand.split(':'); impPick(+p[0], +p[1]); };
+  });
+}
 function renderDL(){
   S.view = 'dl'; backEl.classList.remove('on'); setNav('dl');
   if (io) io.disconnect();
   var n = cartCount(), j = DL.job;
-  var h = '<h1>片单</h1><p class="lede">点海报加进来，一次最多 ' + MAX + ' 部；取齐之后在本机压成一个包</p>';
+  var h = '<h1>片单</h1><p class="lede">点海报加进来，或导入一张清单；一次最多 ' + MAX + ' 部，取齐之后在本机压成一个包</p>';
 
   if (j){
     var pct = j.total ? Math.round(DL.got / j.total * 100) : 0;
@@ -8854,11 +9364,14 @@ function renderDL(){
     h += '<div class="qlist">' + j.items.map(function(it){ return qrowHTML(it, j); }).join('') + '</div></div>';
   }
 
+  h += impHTML();
   h += '<div class="card"><div class="hd"><h2 class="sec">片单</h2>'
-    + '<span class="sub">' + n + ' / ' + MAX + '</span></div>';
+    + '<div class="row" style="column-gap:12px"><span class="sub">' + n + ' / ' + MAX + '</span>'
+    + (IMP.open ? '' : '<button class="btn sm" id="impopen">导入清单</button>') + '</div></div>';
   if (!n) h += '<div class="empty" style="--empty-h:190px"><h3>片单是空的</h3>'
     + '<p>在片库点海报就能加进来。全部取齐之后会在本机压成一个包。</p>'
-    + '<div class="row"><button class="btn on" id="tolib">去片库挑片</button></div></div>';
+    + '<div class="row"><button class="btn on" id="tolib">去片库挑片</button>'
+    + (IMP.open ? '' : '<button class="btn" id="impopen2">导入清单</button>') + '</div></div>';
   else {
     h += CART.ord.map(function(id){
       var m = CART.o[id]; if (!m) return '';
@@ -8896,6 +9409,7 @@ function renderDL(){
   bind('ddrop', function(){ DL.clear().then(function(){ renderDL(); toast('任务已清除'); }); });
   bind('dclr2', clearCart);
   bind('tolib', function(){ view('lib'); });
+  impBind();
   [].forEach.call(out.querySelectorAll('[data-del]'), function(b){
     b.onclick = function(){ cartDel(+b.dataset.del); };
   });
