@@ -5869,7 +5869,7 @@ html.rail.rail-float .toast {
 /* 顶上居中那枚提示：两边都按右侧安全区收，免得压到右上角竖排的状态栏 */
 html.rail.rail-float .net-banner { left: 50%; max-width: calc(100% - 2 * env(safe-area-inset-right, 0px) - 16px); }
 /* ── 全新导航栏（只在 iPhone Duo 折起竖拿）─────────────────────────────
-   一枚高的竖向玻璃胶囊，只放图标，自上而下：主页、资料库、搜索，头像（圆角方块）垫在最底 ——
+   一枚高的竖向玻璃胶囊，只放图标，自上而下：主页、资料库、搜索，头像（圆形）垫在最底 ——
    搜索不再是胶囊外另一枚圆钮。选中那一项是白色图标 + 一圈柔光圆底，其余是灰色；文字收起（读屏照读）。
    结构不动：.dock 自己当胶囊，.nav-container 用 display: contents 把头像、主页、资料库摊进同一列，
    再用 order 排好（头像在 DOM 里排第一）。原来那枚会滑的选中指示器在这里不用，选中靠每一项自己的圆底。
@@ -5902,7 +5902,7 @@ html.rail.rail-float .dock:not(.searching) #navSearch {
   order: 4; overflow: hidden;
   background: transparent; border: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
 }
-html.rail.rail-float .dock:not(.searching) #headerAvatar { order: 5; width: var(--fl-av); height: var(--fl-av); margin: var(--fl-avm) 0 0; border-radius: 11px; }
+html.rail.rail-float .dock:not(.searching) #headerAvatar { order: 5; width: var(--fl-av); height: var(--fl-av); margin: var(--fl-avm) 0 0; border-radius: 50%; }
 html.rail.rail-float .dock:not(.searching) .nav-item.active {
   color: #fff; background: rgba(255,255,255,.13);
   box-shadow: inset 0 0 0 .5px rgba(255,255,255,.14), inset 0 1px 0 rgba(255,255,255,.10);
@@ -6019,7 +6019,7 @@ html.rail.rail-float.sc-nav-anim .dock:not(.searching) {
 }
 .nav-media { display: none; }
 html.rail.rail-float .dock:not(.searching) .nav-media {
-  order: 3; display: grid; grid-template-rows: 0fr; justify-items: center;
+  order: 3; display: grid; grid-template-rows: 0fr; justify-items: center; position: relative; z-index: 1;
   margin-top: calc(-1 * var(--fl-gap));
   opacity: 0; transform: scale(.7); pointer-events: none;
   visibility: hidden;                                   /* 收起后读屏、Tab 都够不着；收的过程里照常画 */
@@ -6052,6 +6052,58 @@ html.rail.rail-float.sc-nav .dock:not(.searching) .nav-media {
 @media (prefers-reduced-motion: reduce) {
   html.rail.rail-float .dock:not(.searching) .nav-media { transition: opacity .2s linear; transform: none; }
   html.rail.rail-float.sc-nav-anim .dock:not(.searching) { transition: opacity .35s var(--ease-smooth); }
+}
+/* 选中项的玻璃把「资料库」和长出来的那两格一起包住：一枚竖着的玻璃胶囊，从「资料库」那一格的上沿
+   一直到静音那一格的下沿 —— 一眼看得出这两格是资料库自己的。它跟着那两格一起长（高 = 一格 + --fl-media，
+   同一条曲线、同一个时长），收回时淡掉；这时「资料库」自己那圈圆底让给它，免得叠两层 */
+.nav-sel { display: none; }
+html.rail.rail-float .dock:not(.searching) .nav-sel {
+  display: block; position: absolute; z-index: 0; pointer-events: none;
+  left: 50%; top: calc(var(--fl-pt) + var(--fl-item) + var(--fl-gap));
+  width: var(--fl-item); margin-left: calc(var(--fl-item) / -2);
+  height: calc(var(--fl-item) + var(--fl-media, 0px));
+  border-radius: calc(var(--fl-item) / 2);
+  background: rgba(255,255,255,.13);
+  box-shadow: inset 0 0 0 .5px rgba(255,255,255,.14), inset 0 1px 0 rgba(255,255,255,.10);
+  opacity: 0;
+  transition: height .46s var(--ease-out), opacity .28s var(--ease-out);
+}
+html.rail.rail-float.sc-nav .dock:not(.searching) .nav-sel { opacity: 1; transition: height .46s var(--ease-out), opacity 0s; }
+html.rail.rail-float.sc-nav .dock:not(.searching) #navLib.active {
+  background: transparent; box-shadow: none;
+  transition: color .25s var(--ease-out), transform var(--press-out);
+}
+@media (prefers-reduced-motion: reduce) {
+  html.rail.rail-float .dock:not(.searching) .nav-sel { transition: opacity .2s linear; }
+}
+
+/* 资料库的标题那一条（折起竖拿）：不再是一条黑底压在画面上沿、中间一道硬边 —— 画面一直铺到屏幕最上沿，
+   标题浮在画面上，底下是一层渐进模糊：越往上越糊、越暗，往下一点点淡掉，没有边。
+   做法是四层 backdrop 模糊叠起来，每层模糊加一档、遮罩往上收一截（叠在一起就是上沿最糊），再垫一层由暗到透明的渐变保住字。
+   标题高度钉死（104 + 顶部安全区），用等量的负下边距把展映提到它底下；只在展映形态 */
+html.rail.rail-float #view-library:has(.lib-showcase) { --lh-h: calc(var(--safe-t) + 104px); }
+html.rail.rail-float #view-library:has(.lib-showcase) > .library-header {
+  position: relative; z-index: 8; box-sizing: border-box;
+  height: var(--lh-h); margin-bottom: calc(-1 * var(--lh-h));
+  pointer-events: none;
+}
+.library-veil { display: none; }
+html.rail.rail-float #view-library:has(.lib-showcase) .library-veil {
+  display: block; position: absolute; z-index: -1; left: 0; right: 0; top: 0;
+  height: calc(100% + 64px); pointer-events: none;
+}
+.library-veil > i { position: absolute; inset: 0; }
+.library-veil > i:nth-child(1) { -webkit-backdrop-filter: blur(1.5px); backdrop-filter: blur(1.5px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 56%, transparent 100%); mask-image: linear-gradient(to bottom, #000 0%, #000 56%, transparent 100%); }
+.library-veil > i:nth-child(2) { -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 42%, transparent 82%); mask-image: linear-gradient(to bottom, #000 0%, #000 42%, transparent 82%); }
+.library-veil > i:nth-child(3) { -webkit-backdrop-filter: blur(9px); backdrop-filter: blur(9px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 28%, transparent 64%); mask-image: linear-gradient(to bottom, #000 0%, #000 28%, transparent 64%); }
+.library-veil > i:nth-child(4) { -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 14%, transparent 46%); mask-image: linear-gradient(to bottom, #000 0%, #000 14%, transparent 46%); }
+.library-veil::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(to bottom, rgba(0,0,0,.66) 0%, rgba(0,0,0,.5) 30%, rgba(0,0,0,.26) 60%, rgba(0,0,0,.08) 84%, rgba(0,0,0,0) 100%);
 }
 
 /* 没有封面的片子不显示之后，一排可能整排都没了：那一段（连同标题）一起藏起来 */
@@ -6256,6 +6308,7 @@ html.rail.rail-float.sc-nav .dock:not(.searching) .nav-media {
 
 <!-- 底部悬浮导航：[头像 · 主页 / 资料库]（深色滑动胶囊 + 蓝色激活项）+ 分离的圆形搜索钮 -->
 <div class="dock" id="dock" aria-label="主导航">
+  <span class="nav-sel" aria-hidden="true"></span>
   <nav class="nav-container" id="navContainer">
     <button class="tv-avatar" id="headerAvatar" aria-label="个人资料"><svg class="sf-icon" viewBox="77 -45 874 874" fill="currentColor" style="width:1em;height:1em;transform:scaleY(-1)"><path d="M514 -45Q469 -45 426.5 -36.5Q384 -28 344 -11Q305 6 270.0 29.5Q235 53 205 83Q175 113 151.5 147.5Q128 182 111 222Q94 262 85.5 304.0Q77 346 77 392Q77 437 85.5 479.5Q94 522 111 561Q128 601 151.5 636.0Q175 671 205 701Q235 731 270.0 754.5Q305 778 344 795Q384 812 426.5 820.5Q469 829 514 829Q559 829 601.5 820.5Q644 812 684 795Q723 778 758.0 754.5Q793 731 823 701Q853 671 876.5 636.0Q900 601 917 561Q934 522 942.5 479.5Q951 437 951 392Q951 346 942.5 304.0Q934 262 917 222Q900 182 876.5 147.5Q853 113 823 83Q793 53 758.0 29.5Q723 6 684 -11Q644 -28 601.5 -36.5Q559 -45 514 -45ZM514 27Q552 27 587.0 34.5Q622 42 655 56Q688 70 717.0 89.5Q746 109 771 134Q797 159 816.5 188.0Q836 217 850 250Q864 283 871.0 318.5Q878 354 878 392Q878 429 871.0 464.5Q864 500 850 533Q836 566 816.5 595.0Q797 624 771 649Q746 674 717.0 694.0Q688 714 655 728Q622 742 587.0 749.0Q552 756 514 756Q476 756 440.5 749.0Q405 742 372 728Q339 714 310.0 694.0Q281 674 256 649Q231 624 211.5 595.0Q192 566 178 533Q164 500 157.0 464.5Q150 429 150 392Q150 354 157.0 318.5Q164 283 178 250Q192 217 211.5 188.0Q231 159 256 134Q281 109 310.0 89.5Q339 70 372 56Q405 42 440.5 34.5Q476 27 514 27ZM807 109Q788 90 765.0 74.0Q742 58 715 44Q689 31 662.5 20.5Q636 10 609 3Q583 -4 559.0 -8.0Q535 -12 514 -12Q493 -12 469.0 -8.0Q445 -4 418 3Q392 10 365.0 20.5Q338 31 312 44Q286 58 263.0 74.0Q240 90 221 109L222 114Q227 130 239.5 145.5Q252 161 272 176Q292 191 317.0 203.5Q342 216 373 226Q404 236 439.5 241.0Q475 246 514 246Q553 246 588.5 241.0Q624 236 654 226Q686 216 711.0 203.5Q736 191 756 176Q775 161 787.5 145.5Q800 130 806 114L807 109ZM514 319Q493 319 474.5 324.5Q456 330 439 340Q423 351 409.5 365.5Q396 380 387 398Q377 416 372.0 437.0Q367 458 367 480Q367 502 371.5 522.0Q376 542 386 560Q396 578 409.5 592.0Q423 606 439 617Q456 628 474.5 633.5Q493 639 514 639Q534 639 552.5 633.5Q571 628 588 617Q605 606 618.0 592.0Q631 578 641 560Q651 542 656.0 522.0Q661 502 661 480Q661 458 656.0 437.0Q651 416 641 398Q632 379 618.5 364.5Q605 350 588 339Q572 329 553.0 324.0Q534 319 514 319Z"/></svg></button>
     <div class="nav-pill" id="navPill"></div>
@@ -18494,6 +18547,7 @@ const SC = (() => {
 
     view.innerHTML =
       '<div class="library-header">' +
+        '<div class="library-veil" aria-hidden="true"><i></i><i></i><i></i><i></i></div>' +
         '<div class="library-title">资料库</div>' +
         '<div class="library-sub">Cuven 为你提供严格品质的影片</div>' +
       '</div>' +

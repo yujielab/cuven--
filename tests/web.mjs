@@ -721,7 +721,8 @@ await pd.waitForTimeout(500);
 /* 资料库展映：背景视频、片名都收在右侧那一列（状态栏 + 导航）以左，那一列底下是黑的；
    画面右上角的播放 / 静音不出，进资料库时并进导航胶囊（「资料库」下面长出两格），离开就收回 */
 const navBox = () => pd.evaluate(() => { const r = e => e.getBoundingClientRect(), d = r(document.getElementById('dock')), m = r(document.getElementById('navMedia'));
-  return { on: document.documentElement.classList.contains('sc-nav'), top: Math.round(d.top), h: Math.round(d.height), at55: Math.abs((d.top + d.bottom) / 2 - innerHeight * .55) <= 6, grp: Math.round(m.height), op: +getComputedStyle(document.getElementById('navMedia')).opacity }; });
+  return { on: document.documentElement.classList.contains('sc-nav'), top: Math.round(d.top), h: Math.round(d.height), at55: Math.abs((d.top + d.bottom) / 2 - innerHeight * .55) <= 6, grp: Math.round(m.height), op: +getComputedStyle(document.getElementById('navMedia')).opacity,
+    selOp: +getComputedStyle(document.querySelector('#dock .nav-sel')).opacity, homeGlass: getComputedStyle(document.getElementById('navHome')).backgroundColor !== 'rgba(0, 0, 0, 0)' }; });
 const home0 = await navBox();
 const libRes = {};
 for (const [w, h, sai, col, tag] of [[466, 678, { top: 0, right: 84, bottom: 20, left: 0 }, 84, '主屏幕 App（右侧 84px 那一列）'], [382, 580, NO_SAI, 72, 'Safari（导航自己那一条 72px）']]) {
@@ -740,7 +741,18 @@ for (const [w, h, sai, col, tag] of [[466, 678, { top: 0, right: 84, bottom: 20,
       fenced: Math.round(view.right) <= edge && Math.round(st.right) <= edge && Math.abs((cp.left + cp.right) / 2 - edge / 2) <= 3 && document.documentElement.scrollWidth === innerWidth,
       merged: document.documentElement.classList.contains('sc-nav') && m.height >= 88 && m.top >= lib.bottom - 1 && m.bottom <= srch.top + 1 && m.left >= d.left && m.right <= d.right
         && Math.abs((d.top + d.bottom) / 2 - innerHeight * .55) <= 6 && !play.disabled && play.dataset.state === 'playing' && mute.dataset.muted === '1'
-        && [...document.querySelectorAll('.sc-chapter .sc-mediactl, .sc-chapter .sc-mutectl')].every(b => getComputedStyle(b).display === 'none') };
+        && [...document.querySelectorAll('.sc-chapter .sc-mediactl, .sc-chapter .sc-mutectl')].every(b => getComputedStyle(b).display === 'none'),
+      /* 标题那一条：画面从屏幕最上沿铺起，标题浮在上面；底下四层渐进模糊（模糊一层比一层重、遮罩一层比一层往上收）+ 由暗到透明 */
+      under: (() => { const hd = r(document.querySelector('#view-library > .library-header')), layers = [...document.querySelectorAll('.library-veil > i')].map(i => getComputedStyle(i));
+        const px = layers.map(c => parseFloat(((c.backdropFilter || c.webkitBackdropFilter || '').match(/blur\(([\d.]+)px\)/) || [])[1] || 0));
+        return Math.abs(st.top) <= 1 && hd.top <= 1 && hd.bottom >= 100 && cp.top > hd.bottom && layers.length === 4 && px.every((v, i) => v > 0 && (!i || v > px[i - 1]))
+          && layers.every(c => /gradient/.test(c.maskImage || c.webkitMaskImage || '')); })(),
+      /* 选中项的玻璃：一枚竖胶囊从「资料库」上沿包到静音下沿；「资料库」自己那圈圆底让给它 */
+      sel: (() => { const pill = document.querySelector('#dock .nav-sel'), pr = r(pill), lb = r(document.getElementById('navLib')), mt = r(mute);
+        return +getComputedStyle(pill).opacity === 1 && Math.abs(pr.top - lb.top) <= 2 && Math.abs(pr.bottom - mt.bottom) <= 2 && Math.abs(pr.left - lb.left) <= 2 && Math.abs(pr.right - lb.right) <= 2
+          && getComputedStyle(document.getElementById('navLib')).backgroundColor === 'rgba(0, 0, 0, 0)'; })(),
+      round: (() => { const av = document.getElementById('headerAvatar'), w = av.getBoundingClientRect().width, rad = getComputedStyle(av).borderTopLeftRadius;
+        return rad === '50%' || Math.abs(parseFloat(rad) - w / 2) <= 1; })() };
   }, col);
   if (tag.startsWith('主屏幕')) {
     /* 点胶囊里那两格：转给眼前那一章自己的钮 —— 暂停 / 接着放、解除静音 / 再静音 */
@@ -760,10 +772,14 @@ const [la, ls] = [libRes['主屏幕 App（右侧 84px 那一列）'], libRes['Sa
 ok(la.fenced && ls.fenced,
   `折起竖拿 · 资料库：背景视频与片名收在右侧那一列以左（主屏幕 App：视图 / 画面到 ${la.view} / ${la.sticky}，列缘 ${la.edge}，片名居中 ${la.copyMid}；` +
   `Safari：到 ${ls.view} / ${ls.sticky}，列缘 ${ls.edge}），没有横向溢出`);
+ok(la.under && ls.under,
+  '折起竖拿 · 资料库：标题那一条不是黑底硬边 —— 画面从屏幕最上沿铺起，标题浮在上面，底下四层渐进模糊（越往上越糊）+ 由暗到透明');
+ok(la.sel && ls.sel && la.round && ls.round,
+  '折起竖拿 · 资料库：选中项的玻璃把「资料库」和长出来的播放 / 静音一起包成一枚竖胶囊；底部头像是圆形');
 ok(la.merged && ls.merged && libRes.ctl.ok,
   `折起竖拿 · 资料库：播放 / 静音并进导航胶囊（「资料库」下面两格，胶囊中心仍在 55% 高处，画面上不再有那两个钮）；点它们转给眼前这一章：暂停 / 接着放、解除静音 / 再静音（${JSON.stringify(libRes.ctl)}）`);
-ok(!home0.on && home0.grp === 0 && !home1.on && home1.grp === 0 && home1.op === 0 && Math.abs(home1.h - home0.h) <= 1 && home0.at55 && home1.at55,
-  `折起竖拿 · 离开资料库：那两格收回，胶囊回到原来的高（${home0.h} → ${home1.h}）`);
+ok(!home0.on && home0.grp === 0 && !home1.on && home1.grp === 0 && home1.op === 0 && Math.abs(home1.h - home0.h) <= 1 && home0.at55 && home1.at55 && home1.selOp === 0 && home1.homeGlass,
+  `折起竖拿 · 离开资料库：那两格和包住它们的玻璃一起收回，胶囊回到原来的高（${home0.h} → ${home1.h}），选中的圆底回到「主页」`);
 await pd.evaluate(() => scrollTo(0, 0));
 await pd.waitForTimeout(300);
 await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: NO_SAI });
@@ -829,17 +845,21 @@ for (const [label, opts] of [['普通 iPhone（393 宽）', devices['iPhone 15 P
     const tags = getComputedStyle(card.querySelector('.hero-tags')).display !== 'none';
     return { off: !c.contains('rail') && !c.contains('rail-float'), bottom: n.bottom >= innerHeight - 90 && n.width > n.height, deck: Math.round(d.height), vh: innerHeight,
       same: tags && st.bottom <= lg.top + 1 }; });
-  /* 收成卡片后卡下照旧是那条与卡同宽的浏览进度条（圆点胶囊只给 Duo 折起） */
+  /* 收成卡片后卡下照旧是那条与卡同宽的浏览进度条（圆点胶囊只给 Duo 折起）。等它真的收成卡（机器忙时滚动后的那一帧会晚到），
+     再等合并那 .4 秒的宽度过渡走完 */
   await pa.evaluate(() => scrollTo(0, 400));
-  await pa.waitForTimeout(900);
+  await until(pa, () => document.querySelector('.hero-deck').classList.contains('morphed'), null, 8000).catch(() => {});
+  await pa.waitForTimeout(700);
   const bar = await pa.evaluate(() => {
     const ul = document.getElementById('heroDots'), li = ul.querySelector('.dotnav-item'), af = getComputedStyle(ul, '::after');
     const c = document.querySelector('.hcard.is-center').getBoundingClientRect(), q = document.querySelector('.aap-host .all-access-pass').getBoundingClientRect();
-    return document.querySelector('.hero-deck').classList.contains('morphed') && af.content !== 'none' && parseFloat(af.width) > 0
-      && (!li || getComputedStyle(li).display === 'none') && Math.abs(q.left - c.left) <= 2 && Math.abs(q.right - c.right) <= 2;
+    return { ok: document.querySelector('.hero-deck').classList.contains('morphed') && af.content !== 'none' && parseFloat(af.width) > 0
+      && (!li || getComputedStyle(li).display === 'none') && Math.abs(q.left - c.left) <= 2 && Math.abs(q.right - c.right) <= 2,
+      card: [Math.round(c.left), Math.round(c.right)], bar: [Math.round(q.left), Math.round(q.right)], fill: af.width };
   });
-  ok(b.off && b.bottom && b.deck < b.vh - 40 && b.same && bar,
-    `${label}：不当成 iPhone Duo，照旧底部胶囊；大图照旧不铺满（${b.deck} / ${b.vh}），文案照旧（年份胶囊在片名上面，类型那行还在），收成卡片后卡下照旧是与卡同宽的进度条`);
+  ok(b.off && b.bottom && b.deck < b.vh - 40 && b.same && bar.ok,
+    `${label}：不当成 iPhone Duo，照旧底部胶囊；大图照旧不铺满（${b.deck} / ${b.vh}），文案照旧（年份胶囊在片名上面，类型那行还在），` +
+    `收成卡片后卡下照旧是与卡同宽的进度条（卡 ${bar.card.join('–')}，进度条 ${bar.bar.join('–')}）${b.off && b.bottom && b.same ? '' : JSON.stringify(b)}`);
   if (label.startsWith('普通 iPhone')) {
     /* 资料库照旧：展映铺满整宽，播放 / 静音还在画面右上角，导航里没有多出那两格 */
     await pa.evaluate(() => navTo('library'));
