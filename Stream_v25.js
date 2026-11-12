@@ -1931,15 +1931,14 @@ function timingSafeEqualStr(a, b) {
   const ea = new TextEncoder().encode(String(a));
   const eb = new TextEncoder().encode(String(b));
   if (ea.byteLength !== eb.byteLength) return false;
-  try {
-    // CF Workers 非标扩展；等长前提下不会 throw
-    return crypto.subtle.timingSafeEqual(ea, eb);
-  } catch {
-    // 兜底：非 CF 运行环境（本地单测等）无此扩展 → 手写恒时比较
-    let diff = 0;
-    for (let i = 0; i < ea.length; i++) diff |= ea[i] ^ eb[i];
-    return diff === 0;
+  // CF Workers 非标扩展；等长前提下不会 throw。没有这个扩展（本地单测等）走手写恒时比较 ——
+  // 先判断再分流，不靠每次抛一个异常（抛接异常比比较本身贵得多）
+  if (typeof crypto.subtle.timingSafeEqual === 'function') {
+    try { return crypto.subtle.timingSafeEqual(ea, eb); } catch {}
   }
+  let diff = 0;
+  for (let i = 0; i < ea.length; i++) diff |= ea[i] ^ eb[i];
+  return diff === 0;
 }
 
 // ── 会话 Cookie ──
@@ -7079,6 +7078,29 @@ function hlsUnB64url(s) {
   while (t.length % 4) t += '=';
   return new TextDecoder().decode(hlsUnB64(t));
 }
+/* 一个分片（moof 头 + 一串帧切片）→ 交给响应流的块。原来整个分片先拼成一个大缓冲再交出去：
+   4K 片源一段几十 MB，等于每个字节多拷一遍、峰值内存多一整个分片。现在 ≥ 16KB 的切片原样交出
+   （网络块上的子视图；workerd 里把视图交给响应流不会摘走底下的缓冲，实测过），零碎的小切片
+   （音频帧、moof、NAL 长度头）攒到 64KB 再拷成一块，块数不至于太碎。 */
+const HLS_OUT_DIRECT = 16384, HLS_OUT_CHUNK = 65536;
+function hlsChunks(parts) {
+  const out = [];
+  let run = [], runLen = 0;
+  const flush = () => {
+    if (!runLen) return;
+    out.push(run.length === 1 ? run[0] : hlsConcat(run));
+    run = []; runLen = 0;
+  };
+  for (const p of parts) {
+    if (!p.length) continue;
+    if (p.length >= HLS_OUT_DIRECT) { flush(); out.push(p); continue; }
+    run.push(p); runLen += p.length;
+    if (runLen >= HLS_OUT_CHUNK) flush();
+  }
+  flush();
+  return out;
+}
+
 function hlsConcat(parts) {
   let n = 0;
   for (const p of parts) n += p.length;
@@ -9508,9 +9530,11 @@ async function* hlsBlocks(src, plan, idx, want) {
   for (;;) {
     const X = q.pos;
     if (endBlock >= 0 && X >= endBlock) return;
-    if (!(await need(2))) return;
-    await need(12);
-    const h = q.peek(12);
+    // 数据多半已经在队列里（一块 64KB 能装下几十个元素头）：够了就同步往下走，不够才 await ——
+    // 每个元素头原来要 await 三四次，一段几千个块，微任务的来回比解析本身还贵
+    if (q.len < 2 && !(await need(2))) return;
+    if (q.len < 16) await need(16);
+    const h = q.peek(16);
     const id = ebmlId(h, 0, h.length);
     const sz = id && ebmlSize(h, id[1], h.length);
     if (!id || !sz) return;
@@ -9528,7 +9552,7 @@ async function* hlsBlocks(src, plan, idx, want) {
     if (MKV_TOP.has(eid)) return;
     if (esz < 0) throw new Error('unknown-size element in cluster');
     if (eid === MKV.Timestamp) {
-      if (!(await need(hl + esz))) return;
+      if (q.len < hl + esz && !(await need(hl + esz))) return;
       clusterTs = ebmlUint(q.peek(hl + esz), hl, esz);
       q.skip(hl + esz);
       continue;
@@ -9539,11 +9563,18 @@ async function* hlsBlocks(src, plan, idx, want) {
       skipping = false;
     }
 
-    // 先看块头里的轨道号，决定要不要把负载留下来
-    await need(Math.min(hl + esz, hl + 48));
-    const hb = q.peek(Math.min(hl + esz, hl + 48));
+    // 先看块头里的轨道号，决定要不要把负载留下来。SimpleBlock 的块头（轨道号 + 时间 + 标志，通常 4 字节）
+    // 多半已经在刚才那 16 字节里了，不必再取一次
     let bh = null;
-    if (eid === MKV.SimpleBlock) bh = mkvBlockHead(hb, hl, hb.length);
+    if (eid === MKV.SimpleBlock && hl + 4 <= Math.min(h.length, hl + esz)) bh = mkvBlockHead(h, hl, Math.min(h.length, hl + esz));
+    const hn = Math.min(hl + esz, hl + 48);
+    let hb = h;
+    if (!bh) {
+      if (q.len < hn) await need(hn);
+      hb = q.peek(hn);
+    }
+    if (bh) { /* 上面已经认出来了 */ }
+    else if (eid === MKV.SimpleBlock) bh = mkvBlockHead(hb, hl, hb.length);
     else {
       for (let p = hl; p < hb.length;) {
         const ci = ebmlId(hb, p, hb.length), cs = ci && ebmlSize(hb, p + ci[1], hb.length);
@@ -9568,7 +9599,7 @@ async function* hlsBlocks(src, plan, idx, want) {
       continue;
     }
 
-    if (!(await need(hl + esz))) return;
+    if (q.len < hl + esz && !(await need(hl + esz))) return;
     const P = new HlsPieces(q.take(hl + esz));
     let key, dur = -1, bstart, bend, flags = bh.flags;
     if (eid === MKV.SimpleBlock) {
@@ -9611,6 +9642,22 @@ async function* hlsBlocks(src, plan, idx, want) {
   }
 }
 
+/* 杜比视界的 RPU 按镜头给 L1 亮度元数据：同一个镜头里相邻帧的 RPU 往往逐字节相同。
+   转换是输入字节的纯函数（解析 → 改成 8.1 → 重算 CRC → 加防竞争字节），同样的输入直接用上一次的输出 ——
+   比一遍字节省掉整套位级解析与重写。输出只读、只会被拷进分片，多帧共用同一份没有问题。 */
+let DV_MEMO_IN = null, DV_MEMO_OUT = null;
+function dvRpuMemo(raw) {
+  const a = DV_MEMO_IN, n = raw.length;
+  if (a && a.length === n) {
+    let i = 0;
+    while (i < n && a[i] === raw[i]) i++;
+    if (i === n) return DV_MEMO_OUT;
+  }
+  const out = dvConvertRpuNal(raw);
+  DV_MEMO_IN = raw; DV_MEMO_OUT = out;
+  return out;
+}
+
 /** P7：丢增强层 NAL（63），RPU（62）改写为 8.1；dvStrip：两者都丢，按 HDR10 输出 */
 function hlsRewriteHevc(pieces, nalLen, mode, stats) {
   const P = new HlsPieces(pieces);
@@ -9625,8 +9672,9 @@ function hlsRewriteHevc(pieces, nalLen, mode, stats) {
     if (type === 63 || (type === 62 && mode === 'strip')) { changed = true; }
     else if (type === 62) {
       let nal;
-      try { nal = dvConvertRpuNal(P.bytes(s, len)); stats.rpu++; }
-      catch { nal = P.bytes(s, len); stats.rpuFail++; }
+      const raw = P.bytes(s, len);
+      try { nal = dvRpuMemo(raw); stats.rpu++; }
+      catch { nal = raw; stats.rpuFail++; }
       const lenb = new Uint8Array(nalLen);
       for (let i = 0; i < nalLen; i++) lenb[i] = (nal.length >>> (8 * (nalLen - 1 - i))) & 255;
       out.push(lenb, nal);
@@ -10419,11 +10467,23 @@ function hlsParseToken(seg) {
   if (!m) return null;
   try { return { exp: +m[1], sig: m[2], path: hlsUnB64url(m[3]) }; } catch { return null; }
 }
+/* 验过的令牌记在这个 isolate 里，直到它过期：同一次播放的几百个分段 / 字幕请求带的是同一个令牌，
+   不必每个请求重算一遍 HMAC。只有验证通过的才进来，伪造的永远进不来；换了密钥就换一张表 */
+const HLS_TOK_OK = new Map();
+let HLS_TOK_KEY = '';
 async function hlsVerifyPath(pathname, env) {
   try {
-    const tok = hlsParseToken(pathname.split('/')[2]);
+    const raw = pathname.split('/')[2];
+    const tok = hlsParseToken(raw);
     if (!tok || !tok.path || tok.exp * 1000 < Date.now()) return false;
-    return timingSafeEqualStr(tok.sig, await hmacHex(env.AUTH_SECRET, `${tok.path}|${tok.exp}`));
+    if (HLS_TOK_KEY !== env.AUTH_SECRET) { HLS_TOK_OK.clear(); HLS_TOK_KEY = env.AUTH_SECRET; }
+    if (HLS_TOK_OK.get(raw) === tok.exp) return true;
+    const ok = timingSafeEqualStr(tok.sig, await hmacHex(env.AUTH_SECRET, `${tok.path}|${tok.exp}`));
+    if (ok) {
+      if (HLS_TOK_OK.size >= 256) HLS_TOK_OK.delete(HLS_TOK_OK.keys().next().value);
+      HLS_TOK_OK.set(raw, tok.exp);
+    }
+    return ok;
   } catch { return false; }
 }
 /** 只有 MKV 走 HLS；MP4/MOV 仍由 /stream 直出（v24 的 FourCC 热修补照旧生效） */
@@ -10600,7 +10660,7 @@ async function hlsSegResponse(cx, idx, k, sel, type, request) {
   const finish = () => { finished = true; if (main) hlsAhead(cx, idx, k); };
   try {
     const r = await it.next();
-    if (r.done) finish(); else queue = [hlsConcat(r.value)];
+    if (r.done) finish(); else queue = hlsChunks(r.value);
   } catch (e) {
     ac.abort(e);
     console.error('hls segment:', cx.filePath, k, e && e.message);
@@ -10612,7 +10672,7 @@ async function hlsSegResponse(cx, idx, k, sel, type, request) {
         while (!queue.length) {
           if (finished) { c.close(); return; }
           const r = await it.next();
-          if (r.done) finish(); else queue = [hlsConcat(r.value)];
+          if (r.done) finish(); else queue = hlsChunks(r.value);
         }
         c.enqueue(queue.shift());
       } catch (e) {
@@ -10723,7 +10783,7 @@ function hlsFlight(cx, idx, k) {
       async pull(c) {
         try {
           const r = await it.next();
-          if (r.done) { complete = true; c.close(); } else c.enqueue(hlsConcat(r.value));
+          if (r.done) { complete = true; c.close(); } else for (const ch of hlsChunks(r.value)) c.enqueue(ch);
         } catch (e) { c.error(e); }
       },
       cancel(reason) { ac.abort(reason); it.return().catch(() => {}); },

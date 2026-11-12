@@ -49,6 +49,38 @@ console.log('\n■ 杜比视界 RPU（dovi_tool 测试向量）');
   ok(eq(X.nalEscape(X.dvRpuWrite(R)), rd('fel_to_81.bin')), 'FEL → 8.1（保留映射）与 dovi_tool 输出逐字节一致');
 }
 
+console.log('\n■ 管线提效：杜比视界转换复用、分片出口不再整段拷贝、令牌复核');
+{
+  const X = await H.internals();
+  const rd = f => new Uint8Array(fs.readFileSync(S('dovi/' + f))).subarray(4);
+  const nal = f => { const p = rd(f), n = new Uint8Array(p.length + 2); n[0] = 0x7C; n[1] = 0x01; n.set(p, 2); return n; };
+  const eq = (x, y) => x.length === y.length && x.every((v, i) => v === y[i]);
+  const fel = nal('fel_orig.bin'), mel = nal('mel_orig.bin');
+  const a = X.dvRpuMemo(fel), b = X.dvRpuMemo(new Uint8Array(fel)), c = X.dvRpuMemo(mel), d = X.dvRpuMemo(fel);
+  ok(a === b && eq(a, X.dvConvertRpuNal(fel)) && eq(c, X.dvConvertRpuNal(mel)) && !eq(a, c) && eq(d, a),
+    '杜比视界：相邻帧同一份 RPU 直接复用上一次的转换结果；换了 RPU 就重新转；结果与逐帧转换逐字节一致');
+  const big = new Uint8Array(40000).fill(7), mid = new Uint8Array(9000).fill(3);
+  const small = [1, 2, 3].map(n => new Uint8Array(500).fill(n));
+  const parts = [small[0], big, small[1], small[2], mid, mid, mid, mid, mid, mid, mid, mid, big];
+  const ch = X.hlsChunks(parts);
+  ok(eq(X.hlsConcat(ch), X.hlsConcat(parts)) && ch.filter(x => x === big).length === 2 && ch.length < parts.length,
+    `分片出口：拼回来逐字节一致；≥ 16KB 的切片原样交出（不拷贝），零碎的攒成块（${parts.length} 片 → ${ch.length} 块）`);
+}
+{
+  const f = '/Movies/avc_zsub.mkv';
+  const good = H.token(f);
+  const r1 = await H.call(`/hls/${good}/master.m3u8`);
+  const [e0, s0, p0] = good.split('.');
+  const forged = `${e0}.${(s0[0] === 'a' ? 'b' : 'a') + s0.slice(1)}.${p0}`;
+  const r2 = await H.call(`/hls/${forged}/master.m3u8`);
+  const exp = Math.floor(Date.now() / 1000) - 10;
+  const old = `${exp}.${crypto.createHmac('sha256', H.SECRET).update(`${f}|${exp}`).digest('hex')}.${Buffer.from(f).toString('base64url')}`;
+  const r3 = await H.call(`/hls/${old}/master.m3u8`);
+  const r4 = await H.call(`/hls/${good}/master.m3u8`);
+  ok(r1.status === 200 && r4.status === 200 && r2.status === 401 && r3.status === 401,
+    `HLS 令牌验过一次就记住：同一个令牌照常放行（${r4.status}）；改了签名的（${r2.status}）、过期的（${r3.status}）照样拒`);
+}
+
 console.log('\n■ HEVC HDR10 + 全套音轨 / 字幕');
 {
   const r = await H.dump('/Movies/hdr10_multi.mkv', path.join(OUT, 'multi'));

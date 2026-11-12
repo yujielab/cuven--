@@ -29,6 +29,7 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 | 音频直通 | AAC、AC-3、E-AC-3（含 Atmos：`CHANNELS="16/JOC"`）、FLAC、ALAC。默认音轨复用在视频分段里，其余为备选音轨 |
 | 音频转码（可选） | DTS、TrueHD、Opus、Vorbis、MP2/MP3、PCM → AC-3 5.1（640 kbps），需要 `audio-tx` Worker |
 | 字幕 | 内封 SRT / ASS（含 zlib 压缩）、同目录外挂 `.srt/.ass/.vtt` → 分段 WebVTT（带 `X-TIMESTAMP-MAP`），中文（简体优先）默认开启。没有字幕 Cues 的文件：字幕块在转视频那一遍顺手收下，不再为字幕把整段视频重读一遍 |
+| 提效（2026-11） | 用 `tests/bench.mjs` 把样片的每一段都切一遍、量 CPU 后改的几处热点：① 解析 MKV 块时数据已经在队列里就同步往下走（一个元素头原来要 await 三四次，一段几千个块，微任务的来回比解析本身还贵），SimpleBlock 的块头在第一次看的 16 字节里就认出来，不再取第二次；② 杜比视界 P7 的 RPU 改写：同一个镜头里相邻帧的 RPU 往往逐字节相同，同样的输入直接用上一次的输出（比一遍字节，省掉整套位级解析、改写、重算 CRC）；③ 出口不再把每个分片整块拼成一个大缓冲再交给响应流：≥ 16 KB 的切片原样交出，零碎的攒到 64 KB 再拷，4K 片源每段少拷几十 MB、峰值内存少一整个分片；④ HLS 令牌验过一次就在 isolate 里记到过期，同一次播放的几百个请求不再各算一遍 HMAC。测试台上 Worker 自己的 CPU 合计降了一半多（3 分钟多音轨 HEVC + 96 秒杜比视界 P7 + 两部短片：1.7 s → 0.78 s；杜比视界那部 −59%，样片里相邻帧的 RPU 重复得多），真实 workerd 里每一段输出与改动前逐字节一致 |
 
 播放页（`/watch`）、首页弹窗和前端站内播放器在 Apple 的原生播放器（macOS Safari，以及 iOS / iPadOS
 上的所有浏览器）里打开 MKV 时自动走这条链路。徽章按码流实测显示（Dolby Vision / HDR10 / HLG）。
@@ -338,8 +339,9 @@ service = "cuven-audio-tx"
 
 ```bash
 tests/make-samples.sh     # 用 ffmpeg / mkvmerge 生成样片（约 30 秒）
-node tests/run.mjs        # Worker：155 项回归，约 1 分钟
+node tests/run.mjs        # Worker：158 项回归，约 1 分钟
 node tests/web.mjs        # 前端：163 项，需要 Playwright + Chromium（PLAYWRIGHT_PATH 可指定其 index.js），约 8 分钟
+node tests/bench.mjs [样片…]  # 性能基准：每一段都切一遍，量 Worker 的 CPU（BENCH_REPEAT=3 取最好的一遍）
 ```
 
 测试台直接运行 `Stream_v25.js` 的真实代码，并模拟 Dropbox（OAuth、临时链接、目录列表、带 Range 的下载，可放慢、可半路断流）
