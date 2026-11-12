@@ -351,7 +351,7 @@ service = "cuven-audio-tx"
 
 ```bash
 tests/make-samples.sh     # 用 ffmpeg / mkvmerge 生成样片（约 30 秒）
-node tests/run.mjs        # Worker：160 项回归，约 1 分钟
+node tests/run.mjs        # Worker：170 项回归，约 1 分钟
 node tests/web.mjs        # 前端：161 项，需要 Playwright + Chromium（PLAYWRIGHT_PATH 可指定其 index.js），约 8 分钟
 node tests/bench.mjs [样片…]  # 性能基准：每一段都切一遍，量 Worker 的 CPU（BENCH_REPEAT=3 取最好的一遍）
 ```
