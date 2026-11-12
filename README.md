@@ -9,6 +9,7 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 | `Stream_v25.js` | 主 Worker：Dropbox 代理、`/stream` 直连、MKV → HLS、自带的首页与 `/watch` 播放页 |
 | `web/index.html` | 前端（Stream · Cinematic Edition，单文件 SPA），站内播放器，不再依赖 Infuse |
 | `audio-tx/` | 可选的 DTS / TrueHD → AC-3 转码 Worker |
+| `index/` | Cuven ᴿ 索引库 Worker（论坛 → TMDB → R2 索引，对照片库标出缺片），说明与测试见 [`index/README.md`](index/README.md) |
 | `tests/` | 回归测试：Worker（`run.mjs`）与前端（`web.mjs`） |
 
 ## MKV → HLS 链路
