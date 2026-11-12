@@ -154,6 +154,44 @@ function forumPage(W, u) {
     if (enc === 'utf8-bare') return new Response(new TextEncoder().encode(pad(html)), { headers: { 'content-type': 'text/html' } });
     return new Response(gbk(pad(html)));
   }
+  /* 论坛搜索（Discuz search.php）：srchtxt 是 GBK 百分号编码；空格 = AND；限频；302 到 searchid 结果页；每页 F.searchPer 条 */
+  if (u.pathname.endsWith('search.php')) {
+    F.searches = F.searches || {}; F.searchLog = F.searchLog || [];
+    const per = F.searchPer || 20;
+    if (q.get('searchid')) {
+      const S = F.searches[q.get('searchid')];
+      if (!S) return new Response(gbk(pad('<div id="messagetext"><p>指定的搜索不存在或已过期</p></div>')));
+      const pg = Number(q.get('page') || 1), last = Math.max(1, Math.ceil(S.list.length / per));
+      const hl = (t) => { const k = S.tok[0]; const i = k ? t.toLowerCase().indexOf(k.toLowerCase()) : -1; return i < 0 ? t : t.slice(0, i) + '<strong><font color="#ff0000">' + t.slice(i, i + k.length) + '</font></strong>' + t.slice(i + k.length); };
+      let html = `<div class="tl"><div class="sttl mbn"><h2>结果: <em>找到 “<span class="emfont">${S.kw}</span>” 相关内容 ${S.list.length} 个</em></h2></div><div class="slst mtw" id="threadlist"><ul>`;
+      if (!S.list.length) html += '<p class="emp xg2 xs2">对不起，没有找到匹配结果。</p>';
+      for (const t of S.list.slice((pg - 1) * per, pg * per))
+        html += `<li class="pbw" id="${t.tid}"><h3 class="xs3"><a href="forum.php?mod=viewthread&amp;tid=${t.tid}&amp;highlight=x" target="_blank" ><font color="#FF0000">${hl(t.title)}</font></a></h3><p class="xg1">0 个回复 - 679 次查看</p><p>◎标　　题　${t.title.slice(0, 8)} ◎年　　代　2026</p><p><span>2026-9-16 12:34</span> - <span><a href="home.php?mod=space&amp;uid=2" target="_blank">HDTV</a></span> - <span><a href="forum.php?mod=forumdisplay&amp;fid=${t.fid}" target="_blank" class="xi1">高清剧集网</a></span></p></li>`;
+      html += '</ul></div><div class="pgs cl mbm"><div class="pg">';
+      for (let i = 1; i <= last; i++) html += `<a href="search.php?mod=forum&amp;searchid=${q.get('searchid')}&amp;orderby=lastpost&amp;ascdesc=desc&amp;searchsubmit=yes&amp;page=${i}">${i}</a>`;
+      return new Response(gbk(pad(html + '</div></div></div>')));
+    }
+    const raw = (/[?&]srchtxt=([^&]*)/.exec(u.search) || [])[1];
+    if (raw != null && q.get('searchsubmit')) {
+      const bytes = []; for (let i = 0; i < raw.length; i++) { if (raw[i] === '%') { bytes.push(parseInt(raw.slice(i + 1, i + 3), 16)); i += 2; } else bytes.push(raw.charCodeAt(i) === 43 ? 32 : raw.charCodeAt(i)); }
+      const kw = new TextDecoder('gbk').decode(new Uint8Array(bytes));
+      const now = Date.now();
+      if (F.searchGap && now - (F.lastSearch || 0) < F.searchGap * 1000) {
+        F.searchLog.push({ kw, blocked: 1 });
+        return new Response(gbk(pad(`<div id="messagetext" class="alert_error"><p>抱歉，您在 ${F.searchGap} 秒内只能进行一次搜索</p></div>`)));
+      }
+      F.lastSearch = now; F.searchLog.push({ kw });
+      const tok = kw.split(/\s+/).filter(Boolean);
+      const all = [];
+      for (const [fid, b] of Object.entries(F.boards)) for (const list of Object.values(b)) for (const t of list) all.push({ ...t, fid: Number(fid) });
+      for (const t of F.searchOnly || []) all.push(t);
+      const list = all.filter(t => tok.every(k => t.title.toLowerCase().includes(k.toLowerCase()))).sort((a, b) => b.tid - a.tid);
+      const id = (F.sid = (F.sid || 24730) + 1);
+      F.searches[id] = { kw, tok, list };
+      return new Response('', { status: 302, headers: { location: 'search.php?mod=forum&searchid=' + id + '&orderby=lastpost&ascdesc=desc&searchsubmit=yes&kw=' + encodeURIComponent(kw) } });
+    }
+    return new Response(gbk(pad('<form id="scform">搜索</form>')));
+  }
   if (q.get('mod') === 'viewthread') {
     const t = F.threads[q.get('tid')] || { attach: [], magnets: [] };
     let html = '<div class="t_f">◎文件大小 10 GB<br>';

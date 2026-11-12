@@ -29,6 +29,14 @@ const fn = (i, y) => `${NAMES[i][0]}.${NAMES[i][1].replace(/ /g, '.')}.${y}.2160
 W.recv.files = { root: '/ram', _gen: 'u1', _ts: Date.now() - 120000, videos: [{ name: 'x.mkv', path: '/ram/x.mkv' }, { name: fn(2, 2024), path: '/ram/' + fn(2, 2024) }] };
 W.recv.ptr = { g: 'u1' };
 W.recv.doc.items[0].path = '/ram/x.mkv';
+/* [v6.7] 只在论坛搜索里有的剧（剧集索引是空的）：一部有全集，一部只有单集 */
+W.tmdb.tv.push({ id: 520001, name: '夫妻的博弈', original_name: 'Mrs Revenge', first_air_date: '2026-03-01', poster_path: '/s1.jpg', popularity: 9, vote_average: 7, vote_count: 50 });
+W.tmdb.tv.push({ id: 520002, name: '风，带有香气', original_name: 'Kaze Kaoru', first_air_date: '2026-03-01', poster_path: '/s2.jpg', popularity: 9, vote_average: 7, vote_count: 50 });
+W.forum.searchOnly = [
+  { tid: 90001, fid: 2, title: '夫妻的博弈[高码版][全25集][国粤多音轨/中文字幕].Mrs.Revenge.S01.2026.2160p.HQ.WEB-DL.H265.AAC.2Audio-BlackTV 123.42GB' },
+  { tid: 90002, fid: 2, title: '夫妻的博弈[第25集][中文字幕].Mrs.Revenge.S01E25.2026.2160p.WEB-DL.H265.DV-BlackTV 5.1GB' },
+  { tid: 90003, fid: 2, title: '风，带有香气[第123集][中文字幕].Kaze.Kaoru.S01.1080p.LINETV.WEB-DL.AAC2.0.H.264-BlackTV 0.34GB' },
+];
 const I = H.isolate(env, W);
 for (let i = 0; i < 30; i++) { const r = await (await I.call('/api/build')).json(); if (r.done || r.error) break; }
 await I.call('/api/lib?refresh=1'); await I.settle();
@@ -204,6 +212,41 @@ for (const [label, opt] of [['导入清单 · 手机', { ...devices['iPhone 14']
   await settle(p);
   const fo = await p.evaluate(() => ({ cart: CART.ord.slice(), st: IMP.rows[1] && IMP.rows[1].st, why: IMP.rows[1] && IMP.rows[1].it.reason }));
   ok(fo.cart.length === 1 && fo.cart[0] === 700002 && fo.st === 'add' && /库里已有/.test(fo.why || ''), '库中已有的那条点「仍然加入」：照样加进片单，并提醒「' + fo.why + '」');
+  if (!label.includes('手机')) {
+    /* 剧集：索引里没有 → 自动去论坛搜索页搜；论坛限频时倒计时等；只要全集，单集的标「未完结」可手动加 */
+    await p.click('#impclr'); await p.evaluate(() => { CART = { ord: [], o: {} }; cartSave(); try { localStorage.removeItem('cvcart:tv'); } catch (e) {} });
+    W.forum.searchGap = 2; W.forum.lastSearch = 0; W.forum.searchLog = [];
+    await p.fill('#imptx', 'tmdb_id(1):520001/title:夫妻的博弈/type:tv\ntmdb_id(2):520002/title:风，带有香气/type:tv');
+    await p.click('#impgo');
+    await p.waitForFunction(() => IMP.phase === 'search', null, { timeout: 15000 });
+    let sawWait = '';
+    for (let i = 0; i < 80; i++) {
+      const t = await p.evaluate(() => ({ busy: IMP.busy, prog: (document.getElementById('impprog') || {}).textContent || '' }));
+      if (/秒后搜下一条/.test(t.prog)) sawWait = t.prog;
+      if (!t.busy) break;
+      await p.waitForTimeout(250);
+    }
+    await settle(p);
+    const tvr = await p.evaluate(() => {
+      let tvc = null; try { tvc = JSON.parse(localStorage.getItem('cvcart:tv') || 'null'); } catch (e) {}
+      return { st: IMP.rows.map(x => x && x.st), tv: tvc, irec: !!document.querySelector('[data-irec]'), blocked: 0 };
+    });
+    const blocked = W.forum.searchLog.filter(x => x.blocked).length;
+    ok(tvr.st.join(' ') === 'add incomplete', '剧集两条：索引里没有，自动去论坛搜 —— 有全集的加入、只有单集的标「未完结」（' + tvr.st.join(' ') + '）');
+    const rec = tvr.tv && tvr.tv.o && tvr.tv.o[520001];
+    ok(rec && rec.ext === 1 && rec.res === '2160p' && /全25集/.test(rec.pickLabel || ''), '加进剧集片单的是全 25 集的 2160p，版本锁定（「已指定：' + (rec && rec.pickLabel) + '」）');
+    ok(/秒后搜下一条/.test(sawWait) && W.forum.searchLog.filter(x => !x.blocked).length >= 2, '论坛限频（2 秒一次）：进度里倒计时「' + sawWait.replace(/停止搜索|正在停…/, '').slice(0, 40) + '…」，等够了接着搜（被挡 ' + blocked + ' 次）');
+    await p.click('[data-irec]');
+    await settle(p);
+    const after = await p.evaluate(() => { let c = null; try { c = JSON.parse(localStorage.getItem('cvcart:tv') || 'null'); } catch (e) {} return { st: IMP.rows[1].st, n: c ? c.ord.length : 0 }; });
+    ok(after.st === 'add' && after.n === 2, '「未完结」那条点「仍然加入最新的」：照样加进片单（剧集片单 ' + after.n + ' 部）');
+    await p.click('#srcNav button[data-s="tv"]');
+    await settle(p);
+    await p.click('#nav button[data-v="dl"]');
+    await settle(p);
+    const ext = await p.evaluate(() => { const it = document.querySelector('.citem[data-id="520001"]'); return it ? { open: !!it.querySelector('[data-open]'), txt: it.textContent } : null; });
+    ok(ext && !ext.open && /论坛搜索/.test(ext.txt), '片单里论坛搜来的那部：标着「论坛搜索」，没有「换版本」（索引里没有它的详情页）');
+  }
   ok(!errs.length, '页面零报错' + (errs.length ? '：' + errs.slice(0, 3).join(' | ') : ''));
   await ctx.close();
 }

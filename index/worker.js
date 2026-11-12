@@ -1,5 +1,11 @@
 /**
- * Cuven ᴿ 索引库 · v6.6 —— 导入清单：库里没有的自动查好版本、放进片单，确认后再下
+ * Cuven ᴿ 索引库 · v6.7 —— 导入清单：剧集只要整季包；索引里没有的自动去论坛搜
+ * ══════════════════════════════════════════════════════════════════
+ *   · 剧集只认「全 N 集 / 全集 / 完结」，挑画质最好的一版并锁定；只有单集 / 一段的标「未完结」，给按钮手动加；
+ *   · 索引里没有的（剧集版块只收已完结、电影只收近几年）：POST /api/fsearch 去论坛搜索页按片名搜，
+ *     片名年份核对过才用；论坛限频时把秒数交回，浏览器倒计时等够了再搜；同一个词 30 分钟内不重搜。
+ * ══════════════════════════════════════════════════════════════════
+ * v6.6 —— 导入清单：库里没有的自动查好版本、放进片单，确认后再下
  * ══════════════════════════════════════════════════════════════════
  * 片单页「导入清单」：贴一张表（JSON / CSV / 每行「tmdb_id:…/title:…」/ 每行一个片名），POST /api/import 逐条查：
  *   · 库里已有的跳过；论坛有的按 res / hdr / max_gb / prefer / season 挑好版本，放进片单（电影、剧集各进各的）；
@@ -5638,7 +5644,7 @@ async function importItems(env, list, ctx){
     }
     if (!id){
       if (q.title && !q.id){ ask.push(q); continue; }     // 索引里按名字找不到：问 TMDB 拿编号再查一次
-      out.push({ k: q.i, status: 'notfound', title: q.title, year: q.year || '', note: q.note, tmdb: q.id, reason: '论坛还没有这部（索引里没有 TMDB ' + q.id + '）' });
+      out.push({ k: q.i, status: 'notfound', fs: 1, title: q.title, year: q.year || '', note: q.note, tmdb: q.id, reason: '索引里没有 TMDB ' + q.id + '（' + (tv ? '剧集版块只收已完结的' : '电影只收近几年') + '），去论坛搜索' });
       continue;
     }
     out.push(await importOne(C, q, id));
@@ -5669,7 +5675,7 @@ async function importItems(env, list, ctx){
       }
       const id = r && r.hit ? r.hit.id : 0;
       if (id && movies.m[id]){ out.push(await importOne(C, q, id, r.via)); continue; }
-      out.push({ k: q.i, status: 'notfound', title: q.title, year: q.year || '', note: q.note, tmdb: id || 0,
+      out.push({ k: q.i, status: 'notfound', fs: 1, title: q.title, year: q.year || '', note: q.note, tmdb: id || 0,
         retry: !id && r == null ? 1 : 0,
         reason: id ? '论坛还没有这部（TMDB 认出来是 ' + id + (r.hit.title || r.hit.name ? '「' + (r.hit.title || r.hit.name) + '」' : '') + '）'
                    : (r == null ? 'TMDB 这次没查成，稍后再导一次' : '索引和 TMDB 里都没找到这个片名') });
@@ -5679,6 +5685,70 @@ async function importItems(env, list, ctx){
   out.sort((a, b) => a.k - b.k);
   return { items: out, src: SRC.id, n: items.length, more: Math.max(0, arr.length - items.length), max: IMPORT_MAX,
            lib: lib ? 1 : 0, tmdb: tmdbN, ms: Date.now() - t0 };
+}
+/* ══════════ [v6.7] 剧集只要整季：全 N 集 / 全集 / 完结，不要单集、不要「第 123-127 集」 ══════════ */
+const PACK_FULL = /全\s*[0-9一二三四五六七八九十百零两]+\s*[集话話期回]|全集|全季|完结|完結|\bCOMPLETE\b/i;
+const PACK_PART = /第\s*\d+\s*[-~～至到]\s*\d+\s*[集话話期回]|第\s*\d+\s*[集话話期回]|第\s*\d{6,}|S\d{1,2}E\d{1,3}|\bEP?\d{1,3}\b/i;
+/** 一条剧集帖：full = 整季（全 N 集 / 全集 / 完结）· part = 单集 / 一段 / 连载中 · unk = 标题里没写 */
+function packOf(t){
+  t = String(t || '');
+  if (/更新至|更至|连载中|未完结|未完結/.test(t)) return 'part';
+  if (PACK_FULL.test(t)) return 'full';
+  if (PACK_PART.test(t)) return 'part';
+  return /共\s*\d+\s*[集话話]/.test(t) ? 'full' : 'unk';
+}
+const packLabel = (t) => ((String(t).match(/全\s*[0-9一二三四五六七八九十百]+\s*[集话話期回]|全集|完结/) || [])[0] || '').replace(/\s+/g, '');
+/** 单集 / 一段的集数范围（「第 123-127 集」→ 123..127，「更新至第 12 集」→ 12..12） */
+function epRange(t){
+  t = String(t || '');
+  let m = t.match(/第\s*(\d+)\s*[-~～至到]\s*(\d+)\s*[集话話期回]/);
+  if (m) return { a: +m[1], b: +m[2] };
+  m = t.match(/S\d{1,2}E(\d{1,3})(?:\s*-\s*E?(\d{1,3}))?/i);
+  if (m) return { a: +m[1], b: +(m[2] || m[1]) };
+  m = t.match(/第\s*(\d{1,4})\s*[集话話期回]/);
+  if (m) return { a: +m[1], b: +m[1] };
+  return { a: 0, b: 0 };
+}
+/**
+ * 剧集挑版本：只在同一季里挑；整季包（全 N 集）优先，其次标题没写集数的；只剩单集 / 一段时不加，交回「未完结」
+ * 没指定季就挑论坛上最新的那一季。rows 是 decorate 过的行（带 title / sn / spec / mb / labels）
+ */
+function tvPick(rows, q){
+  const R = rows.map(r => ({ r, pk: packOf(r.title), sn: r.sn || 1 }));
+  if (!R.length) return { st: 'none', why: '没有片源' };
+  const seasons = [...new Set(R.map(x => x.sn))].sort((a, b) => b - a);
+  const want = q.season || seasons[0];
+  const inS = R.filter(x => x.sn === want);
+  const sTag = (seasons.length > 1 || want > 1) ? '第 ' + want + ' 季' : '';
+  if (!inS.length) return { st: 'none', why: '没有第 ' + want + ' 季的片源' };
+  const best = (lst) => importPick(lst.map(x => x.r).sort(betterRow), { ...q, season: 0 });
+  const full = inS.filter(x => x.pk === 'full'), unk = inS.filter(x => x.pk === 'unk');
+  if (full.length || unk.length){
+    const p = best(full.length ? full : unk);
+    return { st: 'add', r: p.r, season: want, pack: packLabel(p.r.title) || '整季',
+             why: [sTag, p.why, full.length ? '' : '标题没写「全集」，按整季包算'].filter(Boolean).join('；') };
+  }
+  const part = inS.map(x => ({ ...x, e: epRange(x.r.title) }))
+    .sort((a, b) => (b.e.b - a.e.b) || ((b.e.b - b.e.a) - (a.e.b - a.e.a)) || betterRow(a.r, b.r));
+  const top = part[0].e;
+  const latest = best(part.filter(x => x.e.b === top.b && x.e.a === top.a)).r;
+  const olderS = seasons.find(n => n < want && R.some(x => x.sn === n && x.pk === 'full'));
+  const older = olderS ? { season: olderS, r: best(R.filter(x => x.sn === olderS && x.pk === 'full')).r } : null;
+  return { st: 'incomplete', season: want, latest, older, ep: top,
+           why: (sTag ? sTag : '') + '论坛还没有全集，最新到' + (top.b ? '第 ' + (top.a && top.a !== top.b ? top.a + '-' : '') + top.b + ' 集' : '单集') };
+}
+/** 挑中的一行 → 片单记录（锁定这个版本） */
+function recOf(r, extra){
+  const pk = isTV() ? packLabel(r.title) : '';
+  return { sid: r.sid, res: specRes(r.spec), size: r.size, hb: (r.spec >> 8) & 15, rb: r.spec & 15,
+           label: r.labels.slice(0, 4).concat(pk ? [pk] : []).join(' · '), ...extra };
+}
+/** 剧集「未完结」时给人挑的两个按钮：最新的那一段 / 上一季的全集 */
+function partCands(p, base){
+  const c = [];
+  if (p.latest) c.push({ label: '仍然加入最新的（' + (p.ep && p.ep.b ? '第 ' + (p.ep.a && p.ep.a !== p.ep.b ? p.ep.a + '-' : '') + p.ep.b + ' 集' : '单集') + '）', rec: { ...base, ...recOf(p.latest) } });
+  if (p.older) c.push({ label: '加入第 ' + p.older.season + ' 季全集', rec: { ...base, ...recOf(p.older.r) } });
+  return c;
 }
 async function importOne(C, q, id, via){
   const m = C.movies.m[id];
@@ -5690,8 +5760,17 @@ async function importOne(C, q, id, via){
     const w = libWhy(C.movies, C.ver, C.lib, id);
     if (w && w.own) return { ...base, status: 'owned', own: w.own, file: w.file || '', reason: w.own === 2 ? '库中已有' : '库里很可能已有（片名年份对上）' };
   }
+  /* 剧集：不管有没有写偏好，都要在全部片源里挑整季包（默认最佳片源可能是单集） */
+  if (isTV()){
+    if (Date.now() - C.t0 > 20000) return { ...base, status: 'notfound', retry: 1, reason: '这一批太大，没来得及挑版本，重试一次' };
+    const p = tvPick((await movieRows(C.env, C.movies, id, C.ver, C.state)).map(decorate), q);
+    if (p.st === 'none') return { ...base, status: 'notfound', reason: p.why };
+    const card = { id, title: m[F.N], year: m[F.Y], poster: m[F.P] };
+    if (p.st === 'incomplete') return { ...base, status: 'incomplete', reason: p.why, cands: partCands(p, card) };
+    return { ...base, status: 'add', ...recOf(p.r), reason: p.why };
+  }
   let sid = m[F.BT], res = m[F.Q], size = m[F.Z], hb = m[F.HB] || 0, rb = m[F.RB] || resLevel(m[F.Q]), label = '', why = '';
-  if (q.season || q.res || q.hdr || q.maxMb || q.prefer){
+  if (q.res || q.hdr || q.maxMb || q.prefer){
     if (Date.now() - C.t0 > 15000) why = '这一批太大，没来得及按偏好挑，先放默认版本';
     else {
       const p = importPick((await movieRows(C.env, C.movies, id, C.ver, C.state)).map(decorate), q);
@@ -5703,6 +5782,146 @@ async function importOne(C, q, id, via){
   }
   if (!sid) return { ...base, status: 'notfound', reason: '这部片没有可用的片源' };
   return { ...base, status: 'add', sid, res, size, hb, rb, label, reason: why };
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   [v6.7] 论坛搜索：索引里没有的（剧集版块只收「已完结」、电影只收近几年），直接去论坛的搜索页按片名搜
+   ──────────────────────────────────────────────────────────────────
+   search.php?mod=forum&srchtxt=<GBK>&searchsubmit=yes → 302 到 searchid=… 的结果页。空格在 Discuz 里是 AND，
+   所以片名里的标点一律换成空格（「降世神通：七净土」→「降世神通 七净土」，论坛写成全角半角都搜得到）。
+   论坛限制搜索频率（「您在 N 秒内只能进行一次搜索」）：认出来就把秒数交回，浏览器等够了再搜下一条。
+   搜到的帖子：片名（中文名 / 原名 / TMDB 译名）要对得上、年份不能早于首播，剧集只要整季包。
+   同一个关键词 30 分钟内不重搜（Cache API）。
+   ══════════════════════════════════════════════════════════════════ */
+const FS_TTL = 1800, FS_PAGES = 3;
+function fsKw(name){
+  return String(name || '').replace(/[：:·・,，.。!！?？\-—–_/\\()（）\[\]【】「」『』"'“”‘’~～;；]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+}
+/** 论坛的「搜太快了」：返回要等的秒数，没有就 0 */
+function fsWait(html){
+  const m = html.match(/(\d+)\s*秒内只能进行一次搜索/);
+  if (m) return Math.min(180, Math.max(1, +m[1]));
+  if (/最多响应搜索请求/.test(html)) return 30;
+  return 0;
+}
+/** 搜索结果页 → [{ tid, title, fid }]（Discuz 的 li.pbw；结构对不上时退回扫所有帖子链接） */
+function parseSearch(html){
+  const out = [], seen = new Set();
+  const push = (tid, raw, fid) => {
+    tid = Number(tid);
+    if (!tid || seen.has(tid)) return;
+    const title = strip(raw);
+    if (title.length < 2) return;
+    seen.add(tid); out.push({ tid, title, fid: Number(fid) || 0 });
+  };
+  for (const b0 of html.split(/<li[^>]*class="pbw"/i).slice(1)){
+    const b = b0.split(/<\/li>/i)[0];
+    const a = b.match(/<h3[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+    if (!a) continue;
+    const tid = (a[1].match(/tid=(\d+)/) || a[1].match(/thread-(\d+)-/) || b0.match(/^[^>]*id="(\d+)"/) || [])[1];
+    const fid = (b.match(/forumdisplay&(?:amp;)?fid=(\d+)/) || b.match(/forum-(\d+)-\d+\.html/) || [])[1];
+    push(tid, a[2], fid);
+  }
+  if (!out.length && /searchid=|相关内容/.test(html)){
+    const re = /<a[^>]+href="[^"]*(?:viewthread&(?:amp;)?tid=|thread-)(\d+)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+    let m;
+    while ((m = re.exec(html))) push(m[1], m[2], 0);
+  }
+  return out;
+}
+const fsPath = (env, loc) => /^https?:/i.test(loc) ? loc : String(loc).replace(/^\/+/, '');
+async function forumSearch(env, kw){
+  const ck = 'https://fsearch.cuven/' + SRC.id + '/' + encodeURIComponent(kw);
+  try { const hit = await caches.default.match(ck); if (hit) return { ...(await hit.json()), cached: 1 }; } catch {}
+  let r = await authed(env, 'search.php?mod=forum&srchtxt=' + gbkEncode(kw) + '&searchsubmit=yes');
+  for (let hop = 0; r.status >= 300 && r.status < 400 && hop < 3; hop++){
+    const loc = r.headers.get('location') || '';
+    if (!loc || /action=login/.test(loc)) break;
+    r = await authed(env, fsPath(env, loc));
+  }
+  const html = decodeHTML(await r.arrayBuffer(), r);
+  const wait = fsWait(html);
+  if (wait){ const e = new Error('论坛限制搜索频率：' + wait + ' 秒一次'); e.wait = wait; throw e; }
+  if (loginWall(html) && !/searchid=|相关内容/.test(html)) throw new Error('论坛搜索要登录或没有权限');
+  if (/搜索(功能)?已关闭|未开启搜索/.test(html)) throw new Error('论坛关闭了搜索');
+  const list = parseSearch(html);
+  const total = Number((html.match(/相关内容\s*(\d+)\s*个/) || [])[1]) || list.length;
+  const sidm = html.match(/searchid=(\d+)/);
+  /* 翻页看的是同一次搜索的缓存结果，不算新的搜索、不受频率限制 */
+  for (let pg = 2; pg <= FS_PAGES && sidm && list.length < total; pg++){
+    const r2 = await authed(env, 'search.php?mod=forum&searchid=' + sidm[1] + '&orderby=lastpost&ascdesc=desc&searchsubmit=yes&page=' + pg);
+    const more = parseSearch(decodeHTML(await r2.arrayBuffer(), r2));
+    let add = 0;
+    for (const x of more) if (!list.some(y => y.tid === x.tid)){ list.push(x); add++; }
+    if (!add) break;
+  }
+  const out = { kw, total, list };
+  try { await caches.default.put(ck, new Response(JSON.stringify(out), { headers: { 'content-type': 'application/json', 'cache-control': 'max-age=' + FS_TTL } })); } catch {}
+  return out;
+}
+/** 搜到的帖子里挑「就是这部」的：片名键全等，或够长的一个几乎包含另一个；年份不能早于首播（电影差一年以内） */
+function fsMatch(list, names, year){
+  const tv = isTV(), other = tv ? SRC_MOVIE.fid : SRC_TV.fid;
+  const want = canonKeys(names.filter(Boolean));
+  const out = [];
+  for (const x of list){
+    if (x.fid && x.fid === other) continue;
+    const pt = parseTitle(x.title);
+    const ks = canonKeys([pt.cn, pt.latin].filter(Boolean));
+    let ok = false;
+    for (const a of ks) for (const b of want){
+      if (a === b){ ok = true; continue; }
+      /* 一个包含另一个：短的够长（三个汉字 / 六个字母），长的最多多出两个汉字（「篇」「剧场版」）或三个字母 ——
+         「夜曲」≠「夜曲之歌」，「Nocturne」≠「Nocturne Song」 */
+      const sh = a.length < b.length ? a : b, lo = a.length < b.length ? b : a;
+      if (keyWeight(sh) >= 6 && lo.includes(sh) && lo.length - sh.length <= (keyKind(sh) === 'cjk' ? 2 : 3)) ok = true;
+    }
+    if (!ok) continue;
+    const ys = (pt.years || []).map(Number).filter(Boolean);
+    if (year && ys.length && !(tv ? ys.some(y => y >= year - 1) : ys.some(y => Math.abs(y - year) <= 1))) continue;
+    out.push(x);
+  }
+  return out;
+}
+async function fsearchItem(env, item, kwOver, ctx){
+  const q = importIn(item, 0);
+  if (q.bad) return { status: 'invalid', reason: q.bad };
+  const lib = await libLoad(env, ctx).catch(() => null);
+  if (q.id && lib && lib.ids && lib.ids.has(q.id)) return { status: 'owned', id: q.id, title: q.title, own: 2, reason: '库中已有（TMDB 编号相同）' };
+  /* TMDB 拿译名、原名、首播年、海报：片名对不上时多一个名字可比，年份用来排除同名的老片 */
+  let d = null;
+  if (q.id){
+    const envT = Object.assign(Object.create(env), { __sub: { n: 0, max: 6 }, __r429: 0 });
+    d = await tmdb(envT, '/' + SRC.kind + '/' + q.id, {}).catch(() => null);
+  }
+  const zh = d ? (d.name || d.title || '') : '', orig = d ? (d.original_name || d.original_title || '') : '';
+  const year = yearOf(d && (d.first_air_date || d.release_date)) || q.year || 0;
+  const cjk = (x) => /[㐀-鿿]/.test(x || '');
+  const names = [q.title, zh, orig, q.en].filter(Boolean);
+  const kws = [...new Set([q.title, zh].filter(cjk).concat([q.title, zh, q.en, orig].filter(Boolean)).map(fsKw).filter(k => k.length >= 2))];
+  const kw = kwOver && kws.includes(kwOver) ? kwOver : kws[0];
+  if (!kw) return { status: 'notfound', reason: '没有能拿去搜的片名' };
+  const card = { id: q.id || 0, title: zh && cjk(zh) ? zh : (q.title || zh), year: year || '', poster: d ? (d.poster_path || '') : '', note: q.note };
+  const S = await forumSearch(env, kw);
+  const hit = fsMatch(S.list, names, year);
+  const next = kws[kws.indexOf(kw) + 1];
+  if (!hit.length){
+    if (next) return { status: 'again', again: next, searched: S.cached ? 0 : 1, reason: '「' + kw + '」没搜到对得上的，换「' + next + '」再搜' };
+    return { ...card, status: 'notfound', searched: S.cached ? 0 : 1,
+      reason: S.list.length ? '论坛搜「' + kw + '」有 ' + S.total + ' 条，片名年份都对不上' : '论坛搜「' + kw + '」没有结果' };
+  }
+  const rows = hit.map(x => decorate(toRow(x.tid, x.title))).sort(betterRow);
+  const ext = { ext: 1, via: '论坛搜索「' + kw + '」' };
+  const cid = q.id || -rows[0].tid;              // 没有 TMDB 编号：拿帖子号当片单里的编号（负数，不会撞上 TMDB 编号）
+  if (isTV()){
+    const p = tvPick(rows, q);
+    if (p.st === 'incomplete') return { ...card, id: cid, ...ext, status: 'incomplete', searched: S.cached ? 0 : 1, reason: p.why, cands: partCands(p, { ...card, id: cid, ext: 1 }) };
+    if (p.st !== 'add') return { ...card, status: 'notfound', searched: S.cached ? 0 : 1, reason: p.why };
+    return { ...card, id: cid, ...ext, status: 'add', searched: S.cached ? 0 : 1, ...recOf(p.r), reason: p.why };
+  }
+  const p = importPick(rows, q);
+  if (!p.r) return { ...card, status: 'notfound', searched: S.cached ? 0 : 1, reason: p.why };
+  return { ...card, id: cid, ...ext, status: 'add', searched: S.cached ? 0 : 1, ...recOf(p.r), reason: p.why };
 }
 
 /* ══════════ 主题 / 种子 ══════════ */
@@ -6263,6 +6482,14 @@ export default {
         const list = Array.isArray(body) ? body : (body && Array.isArray(body.items) ? body.items : null);
         if (!list) return json({ error:'正文要是 JSON 数组，或 { items: [...] }' }, 400);
         return json(await importItems(env, list, cx));
+      }
+      /* [v6.7] 导入清单里索引没有的：去论坛搜索页搜一条。论坛限频时回 { wait: 秒 }，浏览器等够了再来 */
+      if (p==='/api/fsearch'){
+        if (request.method !== 'POST') return json({ error:'请用 POST，正文是 { item: {...} }' }, 405);
+        const body = await request.json().catch(() => null);
+        if (!body || !body.item || typeof body.item !== 'object') return json({ error:'正文要是 { item: {...} }' }, 400);
+        try { return json(await fsearchItem(env, body.item, body.kw ? String(body.kw) : '', cx)); }
+        catch (e){ if (e.wait) return json({ status:'wait', wait: e.wait, reason: e.message }); throw e; }
       }
       /* [v6.2] 认定工：不持锁、不写 R2，自带一整份子请求配额 */
       if (p==='/api/tm'){
@@ -6997,6 +7224,8 @@ html[data-theme="dark"] .filters.stuck{background:rgba(14,14,16,.72)}
 .irow .ib em{display:block;font-style:normal;color:var(--t3);font-size:.71875rem;margin-top:3px;line-height:1.5;overflow-wrap:anywhere}
 .irow > .pill{flex:none}
 .irow .cands{display:flex;flex-wrap:wrap;gap:8px;margin-top:9px}
+.imp-prog{margin-top:10px;font-size:.75rem;color:var(--t3);justify-content:space-between}
+.imp-prog span{flex:1;min-width:0;line-height:1.5}
 
 /* ── 索引管线可视化 ─────────────────────────────────────────────── */
 .flow{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding:4px 0 10px;
@@ -8441,6 +8670,7 @@ function cartAdd(m){
   CART.ord.push(m.id);
   CART.o[m.id] = { id:m.id, title:m.title, year:m.year, poster:m.poster, res:m.res,
                    size:m.size, sid:m.sid, own:m.own, hb:m.hb, rb:m.rb };
+  if (m.ext) CART.o[m.id].ext = 1;          // [v6.7] 论坛搜索搜来的：索引里没有这部，没有详情页可换版本
   cartSave(); paintDock(); markTile(m.id, true); return true;
 }
 function cartDel(id){
@@ -9054,7 +9284,8 @@ function qrowHTML(it, j){
    只是放进片单 —— 真正下载要等人在片单里看过、点「开始下载」。
    认得的格式：JSON 数组 / {"items":[…]} / 每行一个 JSON 对象；CSV、TSV（第一行是表头）；
    每行「tmdb_id:123/title:沙丘/year:2024」；每行一个片名（末尾的年份拆出来）或一个 TMDB 编号。 */
-var IMP = { open:false, text:'', busy:false, done:0, total:0, rows:null, jobs:null, added:[], failed:[], note:'', nolib:0 };
+var IMP = { open:false, text:'', busy:false, done:0, total:0, rows:null, jobs:null, added:[], failed:[], note:'', nolib:0,
+            sq:[], sdone:0, stotal:0, swait:0, gap:0, stop:false, phase:'' };
 var IMP_BATCH = 12, IMP_CAP = 1000;
 var IMP_KEYS = /^(tmdb_id|tmdb|tmdbid|id|title|name|片名|中文名|cn|en|original_title|original|orig|english|英文名|原名|year|年份|release_year|type|kind|类型|season|季|res|resolution|quality|分辨率|hdr|dr|动态范围|max_gb|maxgb|max_size|size_gb|体积上限|prefer|source|src|来源|note|notes|备注)$/;
 var IMP_SAMPLE = '[\n  {"tmdb_id": 911430, "title": "F1：狂飙飞车", "year": 2025},\n'
@@ -9062,7 +9293,8 @@ var IMP_SAMPLE = '[\n  {"tmdb_id": 911430, "title": "F1：狂飙飞车", "year":
   + '  {"title": "奥本海默", "year": 2023, "res": "1080p", "max_gb": 20, "note": "给爸妈"},\n'
   + '  {"tmdb_id": 94997, "type": "tv", "title": "龙之家族", "season": 2}\n]';
 var IMP_ST = { add:['ok', '加入片单'], incart:['ok', '片单里已有'], owned:['', '库中已有'], dup:['', '清单里重复'],
-  notfound:['warn', '论坛暂无'], ambiguous:['warn', '要你挑'], invalid:['bad', '格式不对'], full:['bad', '片单满了'], error:['bad', '没查成'] };
+  notfound:['warn', '论坛暂无'], ambiguous:['warn', '要你挑'], incomplete:['warn', '未完结'], queued:['', '排队搜索'], searching:['', '搜索中'],
+  invalid:['bad', '格式不对'], full:['bad', '片单满了'], error:['bad', '没查成'] };
 function impKey(k){ return String(k).trim().toLowerCase().replace(/\s*[(（]\s*\d+\s*[)）]\s*$/, '').replace(/^tmbd/, 'tmdb').replace(/[\s-]+/g, '_'); }
 function impCSV(l, sep){
   var out = [], cur = '', q = false;
@@ -9142,6 +9374,7 @@ function cartKeyOf(src){ return src === 'movie' ? 'cvcart' : 'cvcart:' + src; }
 function cartAddTo(src, m, label){
   var rec = { id:m.id, title:m.title, year:m.year, poster:m.poster, res:m.res, size:m.size, sid:m.sid, own:m.own || 0, hb:m.hb, rb:m.rb };
   if (label) rec.pickLabel = label;
+  if (m.ext) rec.ext = 1;
   if (src === S.src){
     if (CART.o[m.id]) return 0;
     if (CART.ord.length >= MAX) return -1;
@@ -9179,7 +9412,12 @@ function impTake(j, it, src){
     row.st = r === 1 ? 'add' : r === 0 ? 'incart' : 'full';
     if (r === 1) IMP.added.push({ src: src, id: it.id });
   }
-  if (it.status === 'notfound' && it.retry) IMP.failed.push(j);     // TMDB 这次没查成：可以重试
+  /* [v6.7] 索引里没有的：排队去论坛搜索页搜（TMDB 认出来的编号一起带上，搜的时候能多一个译名可比） */
+  if (it.status === 'notfound' && it.fs){
+    row.st = 'queued'; j.src = src; j.kw = ''; j.waits = 0;
+    if (it.tmdb) j.tmdb = it.tmdb;
+    IMP.sq.push(j);
+  } else if (it.status === 'notfound' && it.retry) IMP.failed.push(j);     // TMDB 这次没查成：可以重试
   IMP.rows[j.i] = row;
 }
 function impStart(){
@@ -9190,12 +9428,12 @@ function impStart(){
   IMP.note = P.err || (!P.items.length ? '清单是空的' : '');
   if (IMP.note){ renderDL(); return; }
   if (P.items.length > IMP_CAP) IMP.note = '清单有 ' + P.items.length + ' 条，这次先查前 ' + IMP_CAP + ' 条';
-  IMP.rows = []; IMP.added = []; IMP.nolib = 0;
+  IMP.rows = []; IMP.added = []; IMP.nolib = 0; IMP.gap = 0;
   IMP.jobs = P.items.slice(0, IMP_CAP).map(function(x, i){ return { i: i, x: x, t: impType(x) }; });
   impRun(IMP.jobs);
 }
 function impRun(jobs){
-  IMP.busy = true; IMP.done = 0; IMP.total = jobs.length; IMP.failed = [];
+  IMP.busy = true; IMP.done = 0; IMP.total = jobs.length; IMP.failed = []; IMP.sq = []; IMP.stop = false; IMP.phase = 'index';
   var batches = [];
   ['movie', 'tv'].forEach(function(t){
     var g = jobs.filter(function(j){ return j.t === t; });
@@ -9203,7 +9441,7 @@ function impRun(jobs){
   });
   renderDL();
   var step = function(bi){
-    if (bi >= batches.length) return impFinish();
+    if (bi >= batches.length) return IMP.sq.length && !IMP.stop ? impSearch() : impFinish();
     var b = batches[bi];
     api('/api/import', { method: 'POST', body: JSON.stringify({ items: b.jobs.map(function(j){ return j.x; }) }), src: b.t, timeout: 45000 })
       .then(function(r){
@@ -9220,11 +9458,95 @@ function impRun(jobs){
   };
   step(0);
 }
-function impFinish(){
-  IMP.busy = false;
-  var n = IMP.added.length, tv = IMP.added.filter(function(a){ return a.src !== S.src; }).length;
+/* [v6.7] 论坛搜索：一条一条搜。论坛限频（N 秒一次）时等够了再搜，等的秒数记下来，之后每条搜完都先等这么久 */
+function impSearch(){
+  IMP.busy = true; IMP.phase = 'search'; IMP.stop = false; IMP.sdone = 0; IMP.stotal = IMP.sq.length;
+  IMP.sq.forEach(function(j){ var r = IMP.rows[j.i]; if (r) r.st = 'queued'; });
   if (S.view === 'dl') renderDL();
-  toast(n ? '加进片单 ' + n + ' 部' + (tv ? '（' + tv + ' 部在另一边的片单）' : '') + '，看过再点「开始下载」' : '没有新加进片单的');
+  var next = function(){
+    if (IMP.stop || !IMP.sq.length) return impFinish();
+    var j = IMP.sq[0], row = IMP.rows[j.i] || (IMP.rows[j.i] = { src: j.src, x: j.x, st: 'queued', it: {} });
+    var go = function(){
+      if (IMP.stop) return impFinish();
+      row.st = 'searching'; impPaint();
+      var item = (j.x && typeof j.x === 'object' && !Array.isArray(j.x)) ? Object.assign({}, j.x) : {};
+      if (j.tmdb && item.tmdb_id == null && item.tmdb == null && item.id == null) item.tmdb_id = j.tmdb;
+      api('/api/fsearch', { method: 'POST', body: JSON.stringify(j.kw ? { item: item, kw: j.kw } : { item: item }), src: j.src, timeout: 45000 })
+        .then(function(r){
+          if (r.status === 'wait'){
+            IMP.gap = Math.max(IMP.gap, r.wait || 10);
+            row.st = 'queued';
+            if (++j.waits > 6){
+              IMP.sq.shift(); IMP.sdone++; IMP.failed.push(j);
+              row.st = 'error'; row.it = Object.assign({}, row.it, { status: 'error', reason: '论坛一直限频，这条没搜成' });
+              return impWait(IMP.gap, next);
+            }
+            return impWait((r.wait || 10) + 1, go);
+          }
+          if (r.status === 'again'){
+            j.kw = r.again; row.st = 'queued'; row.it = Object.assign({}, row.it, { reason: r.reason });
+            return impWait(r.searched ? IMP.gap : 0, go);
+          }
+          IMP.sq.shift(); IMP.sdone++;
+          if (!r.note && row.it && row.it.note) r.note = row.it.note;
+          impTake(j, r, j.src);
+          impWait(r.searched ? IMP.gap : 0, next);
+        }, function(e){
+          IMP.sq.shift(); IMP.sdone++; IMP.failed.push(j);
+          row.st = 'error'; row.it = Object.assign({}, row.it, { status: 'error', reason: '论坛搜索失败：' + (e.message || e) });
+          impWait(IMP.gap, next);
+        });
+    };
+    go();
+  };
+  next();
+}
+function impWait(sec, fn){
+  if (S.view === 'dl') renderDL();
+  if (!(sec > 0)) return fn();
+  IMP.swait = Math.ceil(sec); impPaint();
+  var t = setInterval(function(){
+    IMP.swait--;
+    if (IMP.stop || IMP.swait <= 0){ clearInterval(t); IMP.swait = 0; fn(); return; }
+    impPaint();
+  }, 1000);
+}
+function impBusyText(){
+  return IMP.phase === 'search' ? '论坛搜索 ' + IMP.sdone + ' / ' + IMP.stotal : '查询中 ' + IMP.done + ' / ' + IMP.total;
+}
+function impProgHTML(){
+  if (IMP.phase !== 'search') return '';
+  var left = IMP.stotal - IMP.sdone, per = Math.max(IMP.gap, 2), min = Math.ceil(left * per / 60);
+  return '<span>索引里没有的 ' + IMP.stotal + ' 部，正在论坛搜索页一条条搜'
+    + (IMP.swait ? ' · 论坛限制搜索频率，' + IMP.swait + ' 秒后搜下一条' : '')
+    + (left > 1 && IMP.gap ? ' · 大约还要 ' + min + ' 分钟' : '') + '</span>'
+    + '<button class="btn sm" id="impstop">' + (IMP.stop ? '正在停…' : '停止搜索') + '</button>';
+}
+/** 搜索进行中：只改进度、按钮字和状态变了的那几行，不整页重画（列表不跳、输入框不丢焦点） */
+function impPaint(){
+  if (S.view !== 'dl') return;
+  var b = document.getElementById('impgo'); if (b && IMP.busy) b.textContent = impBusyText();
+  var p = document.getElementById('impprog'); if (p) p.innerHTML = impProgHTML();
+  var bar = document.querySelector('#impcard .bar2 i');
+  if (bar){
+    var f = IMP.phase === 'search' ? (IMP.stotal ? IMP.sdone / IMP.stotal : 0) : (IMP.total ? IMP.done / IMP.total : 0);
+    bar.style.transform = 'scaleX(' + Math.max(.02, f) + ')';
+  }
+  (IMP.rows || []).forEach(function(r, i){
+    var e = document.getElementById('ir' + i);
+    if (e && r && e.getAttribute('data-st') !== r.st) e.outerHTML = impRowHTML(r, i);
+  });
+  impBindRows();
+}
+function impFinish(){
+  IMP.busy = false; IMP.phase = ''; IMP.swait = 0;
+  /* 停下了：还没搜的留着，「继续论坛搜索」接着搜 */
+  IMP.sq.forEach(function(j){ var r = IMP.rows[j.i]; if (r){ r.st = 'notfound'; r.it = Object.assign({}, r.it, { reason: '还没去论坛搜（停下了）' }); } });
+  var n = IMP.added.length, tv = IMP.added.filter(function(a){ return a.src !== S.src; }).length;
+  var inc = (IMP.rows || []).filter(function(r){ return r && r.st === 'incomplete'; }).length;
+  if (S.view === 'dl') renderDL();
+  toast((n ? '加进片单 ' + n + ' 部' + (tv ? '（' + tv + ' 部在另一边的片单）' : '') : '没有新加进片单的')
+    + (inc ? '，' + inc + ' 部还没完结' : '') + (n ? '，看过再点「开始下载」' : ''));
 }
 function impUndo(){
   var by = {};
@@ -9235,9 +9557,20 @@ function impUndo(){
   IMP.added = [];
   renderDL();
 }
+/** 「未完结」那行的按钮：服务端已经把版本挑好（rec），直接放进片单 */
+function impPickRec(i, k){
+  var row = IMP.rows && IMP.rows[i];
+  var c = row && row.it && row.it.cands && row.it.cands[k];
+  if (!c || !c.rec) return;
+  var rec = c.rec, rr = cartAddTo(row.src, rec, rec.label || '');
+  row.it = Object.assign({}, rec, { status: 'add', note: row.it.note, reason: '你挑的：' + c.label.replace(/^(仍然)?加入/, '') });
+  row.st = rr === 1 ? 'add' : rr === 0 ? 'incart' : 'full';
+  if (rr === 1) IMP.added.push({ src: row.src, id: rec.id });
+  renderDL();
+}
 function impPick(i, id){
   var row = IMP.rows && IMP.rows[i];
-  if (!row || IMP.busy) return;
+  if (!row || IMP.phase === 'index') return;
   api('/api/cart?ids=' + id, { src: row.src }).then(function(r){
     var m = r.items && r.items[0];
     if (!m || m.missing) throw new Error('索引里没有这部了');
@@ -9255,17 +9588,22 @@ function impRowHTML(row, i){
   var name = it.title || (row.x && typeof row.x === 'object' ? (row.x.title || row.x.name || '') : '') || ('第 ' + (i + 1) + ' 条');
   var bits = [];
   if (row.st === 'add' || row.st === 'incart'){
-    bits.push(it.res, it.size, it.hb === 7 ? '杜比视界' : it.hb >= 3 ? 'HDR' : '', it.label, it.reason, it.via ? '经' + it.via : '');
+    /* 锁定了版本的（label 里已经有分辨率、HDR）就不再重复写 */
+    bits.push(it.label ? '' : it.res, it.size, it.label ? '' : (it.hb === 7 ? '杜比视界' : it.hb >= 3 ? 'HDR' : ''), it.label, it.reason, it.via ? '经' + it.via : '');
   } else if (row.st === 'owned') bits.push(it.reason, it.file);
   else if (row.st === 'invalid' && row.x != null && !it.title) bits.push(it.reason, String(typeof row.x === 'object' ? JSON.stringify(row.x) : row.x).slice(0, 80));
   else bits.push(it.reason);
   if (it.note) bits.push('备注：' + it.note);
-  var h = '<div class="irow" data-st="' + esc(row.st) + '"><span class="dot ' + st[0] + '"></span><div class="ib"><b>' + esc(name) + '</b>'
+  var h = '<div class="irow" id="ir' + i + '" data-st="' + esc(row.st) + '"><span class="dot ' + st[0] + (row.st === 'searching' ? ' live' : '') + '"></span><div class="ib"><b>' + esc(name) + '</b>'
     + (it.year ? ' <span class="num">' + esc(it.year) + '</span>' : '')
     + (row.src !== S.src ? ' <span class="pill">' + (row.src === 'tv' ? '剧集' : '电影') + '</span>' : '')
     + '<em>' + esc(bits.filter(Boolean).join('  ·  ') || '—') + '</em>';
   if (row.st === 'owned' && it.id)
     h += '<div class="cands"><button class="btn sm" data-icand="' + i + ':' + it.id + '">仍然加入（换个版本）</button></div>';
+  if (row.st === 'incomplete' && it.cands && it.cands.length)
+    h += '<div class="cands">' + it.cands.map(function(c, k){
+      return '<button class="btn sm" data-irec="' + i + ':' + k + '">' + esc(c.label) + '</button>';
+    }).join('') + '</div>';
   if (row.st === 'ambiguous' && it.cands)
     h += '<div class="cands">' + it.cands.map(function(c){
       return '<button class="btn sm" data-icand="' + i + ':' + c.id + '">' + esc(c.title + (c.year ? ' (' + c.year + ')' : '')) + (c.own ? ' · 库' + (c.own === 2 ? '中已有' : '里可能有') : '') + '</button>';
@@ -9277,13 +9615,18 @@ function impHTML(){
   var h = '<div class="card imp" id="impcard"><div class="hd"><h2 class="sec">导入清单</h2><span class="sub">JSON · CSV · 每行一条</span></div>'
     + '<textarea id="imptx" spellcheck="false" autocomplete="off" aria-label="清单" placeholder="' + esc(IMP_SAMPLE) + '"' + (IMP.busy ? ' disabled' : '') + '>' + esc(IMP.text) + '</textarea>'
     + '<p class="fine">每条至少有 <b>tmdb_id</b> 或 <b>title</b>；还可以写 year、type（movie / tv）、season、res（2160p / 1080p / 720p）、hdr（dv / hdr / sdr）、max_gb、prefer（remux / bluray / web）、note。'
-    + '库里已有的自动跳过；论坛有的按偏好挑好版本放进片单 —— 只是放进去，点「开始下载」之前什么都不会下。</p>'
-    + '<div class="row"><button class="btn on fixed" id="impgo"' + (IMP.busy ? ' disabled' : '') + '>' + (IMP.busy ? '查询中 ' + IMP.done + ' / ' + IMP.total : '查询并加入片单') + '</button>'
+    + '库里已有的自动跳过；论坛有的按偏好挑好版本放进片单，剧集只要整季包（全 N 集），单集和没完结的不加；索引里没有的自动去论坛搜索页搜。'
+    + '只是放进片单，点「开始下载」之前什么都不会下。</p>'
+    + '<div class="row"><button class="btn on fixed" id="impgo"' + (IMP.busy ? ' disabled' : '') + '>' + (IMP.busy ? impBusyText() : '查询并加入片单') + '</button>'
     + '<label class="btn" for="impfile"' + (IMP.busy ? ' aria-disabled="true"' : '') + '>选文件</label>'
     + '<input type="file" id="impfile" accept=".json,.csv,.tsv,.txt,application/json,text/csv,text/plain" hidden>'
     + '<button class="btn" id="impeg"' + (IMP.busy ? ' disabled' : '') + '>填入示例</button>'
     + '<span class="grow"></span><button class="btn sm" id="impx"' + (IMP.busy ? ' disabled' : '') + '>收起</button></div>';
-  if (IMP.busy) h += '<div class="bar2" style="margin-top:14px"><i style="transform:scaleX(' + Math.max(.02, IMP.total ? IMP.done / IMP.total : 0) + ')"></i></div>';
+  if (IMP.busy){
+    var frac = IMP.phase === 'search' ? (IMP.stotal ? IMP.sdone / IMP.stotal : 0) : (IMP.total ? IMP.done / IMP.total : 0);
+    h += '<div class="bar2" style="margin-top:14px"><i style="transform:scaleX(' + Math.max(.02, frac) + ')"></i></div>'
+      + '<div class="row imp-prog" id="impprog">' + impProgHTML() + '</div>';
+  }
   if (IMP.note) h += '<div class="warnbox">' + esc(IMP.note) + '</div>';
   if (IMP.rows && IMP.rows.length){
     var cnt = {}, rows = IMP.rows;
@@ -9297,6 +9640,7 @@ function impHTML(){
         + (IMP.nolib ? ' 片库这次没连上，没法排除库里已有的 —— 下载前留意一下。' : '') + '</p>';
       h += '<div class="row" style="margin-bottom:6px">'
         + (IMP.added.length ? '<button class="btn sm" id="impundo">撤回这次加入的 ' + IMP.added.length + ' 部</button>' : '')
+        + (IMP.sq.length ? '<button class="btn sm" id="impmore">继续论坛搜索（剩 ' + IMP.sq.length + ' 条）</button>' : '')
         + (IMP.failed.length ? '<button class="btn sm" id="impretry">重试没查成的 ' + IMP.failed.length + ' 条</button>' : '')
         + '<button class="btn sm" id="impclr">清掉结果</button></div>';
     }
@@ -9316,7 +9660,9 @@ function impBind(){
   on('impeg', function(){ IMP.text = IMP_SAMPLE; IMP.note = ''; renderDL(); });
   on('impundo', impUndo);
   on('impretry', function(){ var f = IMP.failed.slice(); if (f.length && !IMP.busy){ IMP.note = ''; impRun(f); } });
-  on('impclr', function(){ IMP.rows = null; IMP.added = []; IMP.failed = []; IMP.note = ''; renderDL(); });
+  on('impclr', function(){ IMP.rows = null; IMP.added = []; IMP.failed = []; IMP.sq = []; IMP.note = ''; renderDL(); });
+  on('impmore', function(){ if (!IMP.busy && IMP.sq.length) impSearch(); });
+  impBindRows();
   var f = g('impfile');
   if (f) f.onchange = function(){
     var file = f.files && f.files[0];
@@ -9327,8 +9673,15 @@ function impBind(){
     rd.onerror = function(){ toast('文件读不出来'); };
     rd.readAsText(file);
   };
+}
+function impBindRows(){
+  var st = document.getElementById('impstop');
+  if (st) st.onclick = function(){ IMP.stop = true; st.textContent = '正在停…'; };
   [].forEach.call(document.querySelectorAll('[data-icand]'), function(b){
     b.onclick = function(){ var p = b.dataset.icand.split(':'); impPick(+p[0], +p[1]); };
+  });
+  [].forEach.call(document.querySelectorAll('[data-irec]'), function(b){
+    b.onclick = function(){ var p = b.dataset.irec.split(':'); impPickRec(+p[0], +p[1]); };
   });
 }
 function renderDL(){
@@ -9377,12 +9730,12 @@ function renderDL(){
       var m = CART.o[id]; if (!m) return '';
       var line = [m.own === 2 ? '库中已有' : m.own === 1 ? '疑似已有' : '', m.res, m.size,
         m.hb === 7 ? '杜比视界' : m.hb >= 3 ? 'HDR' : '',
-        m.pickLabel ? '已指定：' + m.pickLabel : ''].filter(Boolean).join('  ·  ') || '默认最佳片源';
+        m.pickLabel ? '已指定：' + m.pickLabel : '', m.ext ? '论坛搜索' : ''].filter(Boolean).join('  ·  ') || '默认最佳片源';
       return '<div class="citem" data-id="' + id + '"><div class="cth">'
         + (m.poster ? '<img loading="lazy" decoding="async" src="' + img(m.poster) + '" alt="">' : '') + '</div>'
         + '<div class="cb"><b>' + esc(m.title) + '</b><em>'
         + esc([m.year, line].filter(Boolean).join('  ·  ')) + '</em></div>'
-        + '<button class="btn sm" data-open="' + id + '">换版本</button>'
+        + (m.ext ? '' : '<button class="btn sm" data-open="' + id + '">换版本</button>')
         + '<button class="cx" data-del="' + id + '" aria-label="移除">✕</button></div>';
     }).join('');
     h += '<div class="row" style="margin-top:16px">'
@@ -9392,12 +9745,14 @@ function renderDL(){
   h += '</div>';
   h += '<p class="fine" style="margin:4px 2px 0">取件按批落进本机数据库，刷新、断网、关页都不丢，回来只补缺的那几部。</p>';
 
-  var oldQ = out.querySelector('.qlist');
-  var keep = oldQ ? oldQ.scrollTop : 0;
+  var oldQ = out.querySelector('.qlist'), oldI = out.querySelector('.ilist');
+  var keep = oldQ ? oldQ.scrollTop : 0, keepI = oldI ? oldI.scrollTop : 0;
   out.innerHTML = h;
   DL._pp = DL.phase;
   var newQ = out.querySelector('.qlist');
   if (newQ && keep) newQ.scrollTop = keep;
+  var newI = out.querySelector('.ilist');
+  if (newI && keepI) newI.scrollTop = keepI;
   if (!DL.run) paint();
   var bind = function(id, fn){ var e = document.getElementById(id); if (e) e.onclick = fn; };
   bind('dstart', function(){

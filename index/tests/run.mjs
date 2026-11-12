@@ -1079,6 +1079,87 @@ console.log('\n■ 导入清单：库里没有的自动查好版本、放进片�
   ok(!r2.keys('').some(k => /import/i.test(k)), '导入只读：R2 里没有多出任何东西');
 }
 
+console.log('\n■ 导入清单 · 剧集：只要整季包（全 N 集），索引里没有的去论坛搜索页搜');
+{
+  const { env, r2, W } = H.makeEnv();
+  makeForumU(W, 2);
+  const TV = [
+    { id: 410001, name: '长夜将尽', en: 'Long Night', y: 2026, rel: [
+      ['[全12集][中文字幕].Long.Night.S01.2026.1080p.WEB-DL.H264', '30.5GB'],
+      ['[全12集][高码版][中文字幕].Long.Night.S01.2026.2160p.WEB-DL.H265.HDR', '88.1GB'],
+      ['[第12集][中文字幕].Long.Night.S01E12.2026.2160p.WEB-DL.H265.DV', '9.9GB']] },
+    { id: 410002, name: '山海回声', en: 'Echoes', y: 2025, rel: [
+      ['[全10集].Echoes.S01.2025.1080p.WEB-DL.H264', '20GB'],
+      [' 第二季[第3-4集].Echoes.S02.2026.2160p.WEB-DL.H265', '10GB'],
+      [' 第二季[第5集].Echoes.S02.2026.2160p.WEB-DL.H265', '5GB']] },
+  ];
+  let tid = 81000;
+  W.forum.boards['2'] = { 'tv_shangyingshijian_3=23': [], 'tv_shangyingshijian_3=22': [] };
+  for (const s of TV) {
+    W.tmdb.tv.push({ id: s.id, name: s.name, original_name: s.en, first_air_date: s.y + '-02-01', poster_path: '/tv' + s.id + '.jpg', popularity: 30, vote_average: 7.5, vote_count: 300 });
+    for (const [r, sz] of s.rel) W.forum.boards['2']['tv_shangyingshijian_3=' + (/2026/.test(r) ? 23 : 22)].unshift({ tid: tid++, title: s.name + r + ' ' + sz });
+  }
+  /* 只在论坛搜索里出现的帖子（连载中 / 新剧：剧集版块的「已完结」筛选收不进索引） */
+  const SO = [
+    [420001, '夫妻的博弈', 'Mrs Revenge', 2026, ['夫妻的博弈[高码版][全25集][国粤多音轨/中文字幕].Mrs.Revenge.S01.2026.2160p.HQ.WEB-DL.H265.AAC.2Audio-BlackTV 123.42GB',
+      '夫妻的博弈[全25集][中文字幕].Mrs.Revenge.S01.2026.1080p.WEB-DL.H264-BlackTV 40.2GB', '夫妻的博弈[第25集][中文字幕].Mrs.Revenge.S01E25.2026.2160p.WEB-DL.H265.DV-BlackTV 5.1GB']],
+    [420002, '风，带有香气', 'Kaze Kaoru', 2026, ['风，带有香气[第123集][中文字幕].Kaze.Kaoru.S01.1080p.LINETV.WEB-DL.AAC2.0.H.264-BlackTV 0.34GB',
+      '风，带有香气[第122集][中文字幕].Kaze.Kaoru.S01.1080p.LINETV.WEB-DL.AAC2.0.H.264-BlackTV 0.33GB']],
+    [420003, '降世神通：七净土', 'Avatar Seven Havens', 2026, ['降世神通：七净土[全8集][中文字幕].Avatar.Seven.Havens.S01.2026.2160p.WEB-DL.H265 30GB']],
+    [420004, '夜曲', 'Nocturne', 2026, ['夜曲之歌[全10集][中文字幕].Nocturne.Song.S01.2026.1080p.WEB-DL 10GB']],
+    [420005, '金银岛', 'Treasure Island', 2026, ['金银岛[全6集][中文字幕].Treasure.Island.1999.1080p.BluRay 12GB']],
+    [420006, '视界任务', 'Vision Quest', 2026, ['视界任务[全8集][中文字幕].Vision.Quest.S01.2026.2160p.WEB-DL.H265 40GB']],
+  ];
+  W.forum.searchOnly = [];
+  for (const [id, name, en, y, titles] of SO) {
+    W.tmdb.tv.push({ id, name, original_name: en, first_air_date: y + '-03-01', poster_path: '/so' + id + '.jpg', popularity: 20, vote_average: 7, vote_count: 100 });
+    for (const t of titles) W.forum.searchOnly.push({ tid: tid++, title: t, fid: 2 });
+  }
+  /* 电影版块里同名的帖子：剧集搜索不能把它算进来 */
+  W.forum.searchOnly.push({ tid: tid++, title: '夫妻的博弈[全25集].Mrs.Revenge.2026.2160p.REMUX 300GB', fid: 44 });
+  const I = H.isolate(env, W);
+  await turboAll(I, { src: 'tv' });
+  const tvm = r2.json('idx/tv/v3.movies.json') || r2.json('idx/tv/movies.json') || { m: {} };
+  ok(tvm.m[410001] && tvm.m[410002], '准备：两部剧进了剧集索引');
+  const post = async (path, body) => (await I.call(path + '?src=tv', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json();
+  const r = await post('/api/import', { items: [{ tmdb_id: 410001, title: '长夜将尽' }, { title: '山海回声' }, { tmdb_id: 420001, title: '夫妻的博弈' }] });
+  const [a, b, c] = r.items;
+  ok(a.status === 'add' && a.res === '2160p' && /88\.1/.test(a.size) && /全12集/.test(a.label),
+    '索引里有的剧：不拿默认最佳（那是「第12集」的单集 DV 版），挑全 12 集里画质最好的 2160p（' + a.size + '，锁定「' + a.label + '」）');
+  ok(b.status === 'incomplete' && /第 2 季/.test(b.reason) && /第 5 集/.test(b.reason) && b.cands.length === 2 && /第 5 集/.test(b.cands[0].label) && /第 1 季全集/.test(b.cands[1].label),
+    '第二季只有单集 / 一段：不加，标「未完结」（' + b.reason + '），给两个按钮：' + b.cands.map(x => x.label).join(' / '));
+  ok(c.status === 'notfound' && c.fs === 1, '索引里没有的：标出来交给论坛搜索（' + c.reason + '）');
+  const fs = (item, kw) => post('/api/fsearch', kw ? { item, kw } : { item });
+  /* 跟着「换个名字再搜」走到底（浏览器也是这么做的） */
+  const fsAll = async (item) => { let x = await fs(item), n = 0; const kws = [x.again]; while (x.status === 'again' && n++ < 4){ x = await fs(item, x.again); kws.push(x.again); } x.kws = kws.filter(Boolean); return x; };
+  W.forum.searchLog = [];
+  const f1 = await fs({ tmdb_id: 420001, type: 'tv', title: '夫妻的博弈' });
+  ok(f1.status === 'add' && f1.ext === 1 && f1.id === 420001 && f1.res === '2160p' && /123\.42/.test(f1.size) && /全25集/.test(f1.label) && f1.sid && f1.poster === '/so420001.jpg',
+    '论坛搜索「夫妻的博弈」：搜到 4 条，去掉单集和电影版块那条，挑全 25 集里最好的 2160p（' + f1.size + '，' + f1.label + '）');
+  ok(W.forum.searchLog.length === 1 && W.forum.searchLog[0].kw === '夫妻的博弈', '搜索词按 GBK 编码发给论坛（论坛收到「' + (W.forum.searchLog[0] || {}).kw + '」）');
+  W.forum.searchGap = 30;
+  const f2 = await fs({ tmdb_id: 420002, type: 'tv', title: '风，带有香气' });
+  ok(f2.status === 'wait' && f2.wait === 30, '论坛限频（「30 秒内只能进行一次搜索」）：把秒数交回，浏览器等够了再搜（wait ' + f2.wait + '）');
+  W.forum.searchGap = 0;
+  const f3 = await fs({ tmdb_id: 420002, type: 'tv', title: '风，带有香气' });
+  ok(f3.status === 'incomplete' && /第 123 集/.test(f3.reason) && f3.cands.length === 1 && f3.cands[0].rec.sid,
+    '只有单集（第 122、123 集）：不加，标「未完结」（' + f3.reason + '），可以手动「' + (f3.cands[0] || {}).label + '」');
+  const f4 = await fs({ tmdb_id: 420003, type: 'tv', title: '降世神通：七净土' });
+  ok(f4.status === 'add' && /全8集/.test(f4.label) && W.forum.searchLog.slice(-1)[0].kw === '降世神通 七净土', '片名里的全角冒号换成空格再搜（论坛的空格是 AND）：「降世神通 七净土」搜到全 8 集');
+  const f5 = await fsAll({ tmdb_id: 420004, type: 'tv', title: '夜曲' });
+  ok(f5.status === 'notfound' && f5.kws.join() === 'Nocturne', '「夜曲」搜到「夜曲之歌」：片名对不上；换英文原名「Nocturne」再搜一次还是对不上，不加（' + f5.reason + '）');
+  const f6 = await fsAll({ tmdb_id: 420005, type: 'tv', title: '金银岛' });
+  ok(f6.status === 'notfound', '「金银岛」搜到 1999 年的那部：早于首播年，不加（' + f6.reason + '）');
+  const f7 = await fs({ tmdb_id: 420006, type: 'tv', title: '幻视任务' });
+  const f8 = f7.again ? await fs({ tmdb_id: 420006, type: 'tv', title: '幻视任务' }, f7.again) : null;
+  ok(f7.status === 'again' && f7.again === '视界任务' && f8 && f8.status === 'add' && f8.title === '视界任务',
+    '清单里的译名「幻视任务」论坛搜不到：换 TMDB 的中文名「视界任务」再搜一次，搜到全 8 集');
+  const f9 = await fs({ title: '风，带有香气', type: 'tv' });
+  ok(f9.status === 'incomplete' && f9.cands[0].rec.id < 0, '没有 tmdb_id 也能搜：片单里用帖子号（负数）当编号，不会撞上 TMDB 编号');
+  const bad = await I.call('/api/fsearch?src=tv');
+  ok(bad.status === 405 && !r2.keys('').some(k => /fsearch|search/i.test(k)), '接口只收 POST；搜索只读，R2 里没多出东西');
+}
+
 console.log('\n■ 从 v5.4 的线上数据升级');
 {
   const { env, r2, W } = H.makeEnv();
