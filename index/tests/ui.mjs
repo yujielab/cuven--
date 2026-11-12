@@ -24,6 +24,11 @@ NAMES.forEach(([cn, en], i) => {
 W.forum.boards['44'] = { 'movie_nianfen=32': boards[2025], 'movie_nianfen=31': boards[2024] };
 W.recv.meta = { gen: 'u1' };
 W.recv.doc = { gen: 'u1', items: [{ key: 'a', kind: 'movie', name: 'x.mkv', tmdb: 700000, type: 'movie', title: NAMES[0][0], orig: NAMES[0][1], year: '2024' }] };
+/* Stream v25 的实时清单：两部在库里（一部总账也认得，一部只有文件名） */
+const fn = (i, y) => `${NAMES[i][0]}.${NAMES[i][1].replace(/ /g, '.')}.${y}.2160p.WEB-DL.x265.mkv`;
+W.recv.files = { root: '/ram', _gen: 'u1', _ts: Date.now() - 120000, videos: [{ name: 'x.mkv', path: '/ram/x.mkv' }, { name: fn(2, 2024), path: '/ram/' + fn(2, 2024) }] };
+W.recv.ptr = { g: 'u1' };
+W.recv.doc.items[0].path = '/ram/x.mkv';
 const I = H.isolate(env, W);
 for (let i = 0; i < 30; i++) { const r = await (await I.call('/api/build')).json(); if (r.done || r.error) break; }
 await I.call('/api/lib?refresh=1'); await I.settle();
@@ -106,6 +111,8 @@ for (const [label, opt] of [['手机', { ...devices['iPhone 14'] }], ['手机 ·
   const sw1 = await p.evaluate(() => ({ on: document.getElementById('turbo').getAttribute('aria-checked'), ls: localStorage.getItem('cvturbo'), d: document.getElementById('tdesc').textContent, plan: document.getElementById('k-plan') ? document.getElementById('k-plan').textContent : '' }));
   await p.click('#turbo'); await p.waitForTimeout(700);
   const sw2 = await p.evaluate(() => ({ on: document.getElementById('turbo').getAttribute('aria-checked'), ls: localStorage.getItem('cvturbo'), lens: getComputedStyle(document.querySelector('#turbo .lens')).transform }));
+  const libp = await p.evaluate(() => { const d = document.querySelector('details[data-x="lib"]'); return d ? d.textContent : ''; });
+  ok(/实时清单/.test(libp) && /重新同步片库/.test(libp), '片库对照面板：以 Stream v25 的实时清单为准（来源、清单时间、同步按钮）');
   ok(sw0 && sw0.on === 'true' && !sw0.dis && sw0.w >= 50 && sw1.on === 'false' && sw1.ls === '0' && sw1.d !== sw0.d && /3 页/.test(sw1.plan) && sw2.on === 'true' && sw2.ls === '1',
     '极限模式开关：默认开；点一下关掉并记在本机、描述与管线里的单轮配置跟着变；再点回来');
   if (!phone && opt.viewport && opt.viewport.width >= 1000) {

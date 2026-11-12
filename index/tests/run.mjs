@@ -337,6 +337,160 @@ console.log('\n■ R2 读失败：绝不拿空表覆盖');
   void b;
 }
 
+console.log('\n■ 片库对照：总账停在 Stream v22，以 v25 的实时清单为准');
+{
+  const { env, r2, W } = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+  makeForumU(W, 20);
+  /* 外语片：论坛标题有中文名，片库里的文件只有英文名（TMDB 中文结果里只有中文名和韩文原名） */
+  const FOREIGN = [['寄生虫', '기생충', 'Parasite'], ['燃烧', '버닝', 'Burning'], ['小偷家族', '万引き家族', 'Shoplifters']];
+  FOREIGN.forEach(([cn, orig, en], i) => {
+    const id = 790000 + i;
+    W.tmdb.movie.push({ id, title: cn, original_title: orig, en, release_date: '2024-03-01', poster_path: '/f' + i + '.jpg', popularity: 60, vote_average: 8, vote_count: 9000 });
+    W.forum.boards['44']['movie_nianfen=31'].unshift({ tid: 39000 + i, title: `${cn} ${en}.2024.1080p.BluRay.x264 9.5GB`, film: id });
+  });
+  const I = H.isolate(env, W);
+  await turboAll(I);
+  const films = W.tmdb.movie.map(m => ({ id: m.id, cn: m.title, en: m.en || m.original_title, y: m.release_date.slice(0, 4) }));
+  const fname = (m, en) => en ? `${m.en.replace(/ /g, '.')}.${m.y}.1080p.BluRay.x264.mkv` : `${m.cn}.${m.en.replace(/ /g, '.')}.${m.y}.2160p.WEB-DL.x265.mkv`;
+  /* 片库：拥有前 30 部 + 三部外语片；v22 的总账只认得前 10 部 */
+  const owned = films.slice(0, 30).concat(films.slice(-3));
+  const notOwned = films.slice(30, films.length - 3);
+  W.recv.meta = { gen: 'v22-7' };
+  W.recv.doc = { gen: 'v22-7', ts: Date.now() - 40 * 86400e3, items: owned.slice(0, 10).map((m, i) => ({
+    key: 'k' + i, kind: 'movie', name: fname(m), path: '/ram/' + fname(m), tmdb: m.id, type: 'movie', title: m.cn, orig: m.en, year: m.y,
+    guess: m.cn, guessZh: m.cn, guessEn: m.en, guessYear: m.y })) };
+  const ownMap = async () => {
+    const all = [];
+    for (let pg = 1; pg < 20; pg++) { const c = await (await I.call('/api/catalog?min=0&own=all&page=' + pg)).json(); all.push(...c.items); if (pg >= c.pages) break; }
+    return new Map(all.map(x => [x.id, x.own]));
+  };
+  await I.call('/api/lib?refresh=1'); await I.settle();
+  let om = await ownMap();
+  const lostBefore = owned.filter(m => !om.get(m.id)).length;
+  ok(lostBefore === owned.length - 10, `修之前（只有总账）：库里有的 ${owned.length} 部里 ${lostBefore} 部被判成缺片 —— 就是这次的问题`);
+
+  /* Stream v25 的实时清单：前 20 部用论坛那种发布名，21–30 部换个规格，外语片只有英文名 */
+  const vids = owned.map((m, i) => ({ name: fname(m, i >= 30), path: '/ram/' + (i >= 20 && i < 30 ? m.cn + ' (' + m.y + ')/' + fname(m).replace('2160p.WEB-DL.x265', '1080p.BluRay.x264') : fname(m, i >= 30)) }));
+  W.recv.files = { root: '/ram', _gen: 'g1', _ts: Date.now() - 60000, videos: vids };
+  W.recv.ptr = { g: 'g1' };
+  /* 先让 TMDB 那头不通：看「索引片名键」一个 TMDB 请求不花能认出多少 */
+  W.tmdb.fail = (u) => /search/.test(u.pathname) ? new Response('{}', { status: 500 }) : null;
+  await I.call('/api/lib?refresh=1'); await I.settle();
+  const st0 = await (await I.call('/api/lib')).json();
+  om = await ownMap();
+  const keyHit = owned.slice(10, 30).filter(m => om.get(m.id) === 2).length;
+  ok(st0.src === 'live' && st0.match && st0.match.key >= 18 && keyHit >= 18,
+    `TMDB 不通也照样认：文件名与论坛发布名同一个片名键，直接对上 ${st0.match && st0.match.key} 部（总账之外的 20 部里 ${keyHit} 部判为确定已有）`);
+  W.tmdb.fail = null;
+  for (let i = 0; i < 20; i++) { const r = await (await I.call('/api/lib?resolve=1')).json(); if (!r.left) break; }
+  om = await ownMap();
+  const miss = owned.filter(m => !om.get(m.id)), fp = notOwned.filter(m => om.get(m.id));
+  const st = await (await I.call('/api/lib')).json();
+  ok(!miss.length && !fp.length && st.src === 'live',
+    `实时清单：库里的 ${owned.length} 部全判为已有（漏判 ${miss.length}${miss.length ? '：' + miss.map(m => m.cn).join('、') : ''}），没有的 ${notOwned.length} 部一部没藏（误藏 ${fp.length}）`);
+  ok(st.viaLedger === 10 && st.viaTmdb === owned.length - 10,
+    `来源：总账里同一个文件的 id ${st.viaLedger} 部 · 这边按文件名认定 ${st.viaTmdb} 部（含只有英文名的三部外语片：中文结果对不上就用英文再搜一次）`);
+  const cat = await (await I.call('/api/catalog?min=0')).json();
+  ok(cat.items.every(x => !owned.some(m => m.id === x.id)) && cat.total === notOwned.length, `目录（默认只看缺片）：${cat.total} 部，全是库里没有的`);
+
+  /* 指纹没变：不下清单正文；新进库一部：指纹一变就认出来；删掉一部：重新显示为缺片 */
+  const h0 = W.recv.hits['/file-list-v2.json'] || 0, d0 = W.recv.hits['/Received.json'] || 0;
+  await I.call('/api/lib?refresh=1'); await I.settle();
+  ok((W.recv.hits['/file-list-v2.json'] || 0) === h0 && (W.recv.hits['/Received.json'] || 0) === d0, '库快照指纹（lib-ptr.json）没变：清单正文、总账都不重下');
+  const add = notOwned[0], gone = owned[15];
+  W.recv.files = { root: '/ram', _gen: 'g2', _ts: Date.now(), videos: vids.filter(v => !v.name.startsWith(gone.cn + '.')).concat([{ name: fname(add), path: '/ram/' + fname(add) }]) };
+  W.recv.ptr = { g: 'g2' };
+  await I.call('/api/lib?refresh=1'); await I.settle();
+  om = await ownMap();
+  ok(om.get(add.id) && !om.get(gone.id) && (W.recv.hits['/Received.json'] || 0) === d0,
+    `新进库「${add.cn}」立刻判为已有；删掉的「${gone.cn}」重新显示为缺片；总账（不会再变）没有重下`);
+  /* 清单突然只剩一点点：多半是 Dropbox 列到一半，不拿它盖掉 */
+  W.recv.files = { root: '/ram', _gen: 'g3', _ts: Date.now(), videos: vids.slice(0, 3) };
+  W.recv.ptr = { g: 'g3' };
+  await I.call('/api/lib?refresh=1'); await I.settle();
+  om = await ownMap();
+  ok(om.get(owned[25].id) && om.get(add.id), '清单突然只剩 3 个文件（上次 33 个）：判为列到一半出错，不用它，判定照旧');
+}
+
+console.log('\n■ 片库对照：实时清单走 Stream 接口（STREAM_KEY）、切片名分批、同名两年的片不认错、剧集');
+{
+  /* 公开桶里没有实时清单（FILE_CACHE 没挂公开域名）：走 STREAM_BASE + STREAM_KEY */
+  const { env, r2, W } = H.makeEnv({ RECV_BASE: 'https://recv.test', STREAM_BASE: 'https://stream.test', STREAM_KEY: 'stream-secret' });
+  makeForumU(W, 12);
+  const I = H.isolate(env, W, { expose: ['LIVE_PARSE_MAX'] });
+  await turboAll(I);
+  const films = W.tmdb.movie;
+  const vids = films.slice(0, 16).map(m => { const n = `${m.title}.${m.original_title.replace(/ /g, '.')}.${m.release_date.slice(0, 4)}.2160p.WEB-DL.x265.mkv`; return { name: n, path: '/ram/' + n }; });
+  W.stream.files = { root: '/ram', videos: vids };
+  W.stream.gen = 'sg1';
+  I.c.__set('LIVE_PARSE_MAX', 5);
+  let r, n = 0;
+  for (; n < 10; n++) { r = await (await I.call('/api/lib?scan=1')).json(); if (!r.part) break; }
+  I.c.__set('LIVE_PARSE_MAX', 800);
+  const st = await (await I.call('/api/lib')).json();
+  const cat = await (await I.call('/api/catalog?min=0&own=only')).json();
+  ok(st.src === 'live' && st.via === 'stream' && W.stream.logins === 1 && n >= 3 && cat.total === 16,
+    `走 Stream 接口：登录 ${W.stream.logins} 次（cookie 留着复用）；一次只切 5 个文件名，分 ${n + 1} 次同步切完；库里的 16 部全判为已有`);
+  const l0 = W.stream.logins, c0 = W.stream.calls;
+  await I.call('/api/lib?refresh=1'); await I.settle();
+  ok(W.stream.logins === l0 && W.stream.calls - c0 <= 2, `指纹（/api/gen）没变：只问了 ${W.stream.calls - c0} 次，没重新登录、没下清单`);
+  /* 口令不对：退回总账，并在面板上明说总账停在哪天 */
+  const e2 = H.makeEnv({ RECV_BASE: 'https://recv.test', STREAM_BASE: 'https://stream.test', STREAM_KEY: 'wrong' });
+  makeForumU(e2.W, 6);
+  e2.W.stream.files = { root: '/ram', videos: vids };
+  e2.W.recv.meta = { gen: 'v22' }; e2.W.recv.doc = { gen: 'v22', ts: Date.now() - 30 * 86400e3, items: [] };
+  e2.W.recv.doc.items.push({ key: 'a', kind: 'movie', name: 'x.mkv', tmdb: 700000, type: 'movie', title: e2.W.tmdb.movie[0].title, orig: e2.W.tmdb.movie[0].original_title, year: '2025' });
+  const J = H.isolate(e2.env, e2.W);
+  await buildAll(J);
+  await J.call('/api/lib?refresh=1'); await J.settle();
+  const st2 = await (await J.call('/api/lib')).json();
+  ok(st2.src === 'received' && st2.recvTs && Date.now() - st2.recvTs > 20 * 86400e3, '口令不对、实时清单拿不到：退回总账，面板拿到总账的时间（停了 30 天，会提示「之后进库的片会显示成缺片」）');
+
+  /* 只配了 STREAM_BASE、没配口令：片库整个拿不到 —— 面板要说清楚为什么、该配什么（以前只是悄悄不过滤） */
+  const e5 = H.makeEnv({ STREAM_BASE: 'https://stream.test' });
+  makeForumU(e5.W, 4);
+  e5.W.stream.files = { root: '/ram', videos: vids.slice(0, 2) };
+  const Q = H.isolate(e5.env, e5.W);
+  await buildAll(Q);
+  await Q.call('/api/lib?refresh=1').catch(() => null); await Q.settle();
+  const st5 = await (await Q.call('/api/lib')).json();
+  ok(!st5.on && /STREAM_KEY/.test(st5.err || ''), '只配了 STREAM_BASE、Stream 设了口令：片库面板直说「拿不到片库」和该配 STREAM_KEY（' + String(st5.err || '').slice(0, 30) + '…）');
+
+  /* 同名同原名、年份不同的另一部（重拍 / 老片）：索引里只有 2025 那部，库里那个文件写着 1999 */
+  const e3 = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+  makeForumU(e3.W, 6);
+  const K = H.isolate(e3.env, e3.W);
+  await buildAll(K);
+  const A = e3.W.tmdb.movie[0], B = e3.W.tmdb.movie[1];
+  const nA = `${A.title}.${A.original_title.replace(/ /g, '.')}.1999.1080p.BluRay.x264.mkv`;
+  const nB = `${B.title}.${B.original_title.replace(/ /g, '.')}.${B.release_date.slice(0, 4)}.1080p.BluRay.x264.mkv`;
+  e3.W.recv.files = { root: '/ram', _gen: 'x1', _ts: Date.now(), videos: [{ name: nA, path: '/ram/' + nA }, { name: nB, path: '/ram/' + nB }] };
+  e3.W.recv.ptr = { g: 'x1' };
+  await K.call('/api/lib?refresh=1'); await K.settle();
+  for (let i = 0; i < 5; i++) { const q = await (await K.call('/api/lib?resolve=1')).json(); if (!q.left) break; }
+  const o3 = await (await K.call('/api/catalog?min=0&own=only')).json();
+  ok(o3.total === 1 && o3.items[0].id === B.id, `库里的「${A.title} 1999」不是索引里的「${A.title} ${A.release_date.slice(0, 4)}」：不认（片名键要求同年、TMDB 认定差一年以上不认）；「${B.title}」照认`);
+
+  /* 剧集：v25 剧集表自带 tmdbId */
+  const e4 = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+  e4.W.tmdb.tv.push({ id: 1399, name: '权力的游戏', original_name: 'Game of Thrones', first_air_date: '2011-04-17', vote_count: 9000, vote_average: 8.4, poster_path: '/g.jpg', popularity: 80 },
+                    { id: 94997, name: '龙之家族', original_name: 'House of the Dragon', first_air_date: '2022-08-21', vote_count: 4000, vote_average: 8.4, poster_path: '/h.jpg', popularity: 80 },
+                    { id: 100088, name: '最后生还者', original_name: 'The Last of Us', first_air_date: '2023-01-15', vote_count: 5000, vote_average: 8.6, poster_path: '/l.jpg', popularity: 80 });
+  e4.W.forum.boards['2'] = { 'tv_shangyingshijian_3=22': [
+    { tid: 20001, title: '龙之家族 第二季 House.of.the.Dragon.S02.2024.2160p.WEB-DL.DDP5.1.HEVC 40GB' },
+    { tid: 20003, title: '权力的游戏 第八季 Game.of.Thrones.S08.2019.1080p.BluRay.x264 30GB' },
+    { tid: 20004, title: '最后生还者 第二季 The.Last.of.Us.S02.2024.2160p.WEB-DL 30GB' } ] };
+  e4.W.recv.tv = { at: Date.now(), series: [
+    { id: 'tv-1', path: '/ram2/House of the Dragon/Season 2', zh: '龙之家族', en: 'House of the Dragon', title: '龙之家族', season: 2, year: '2024', tmdbId: 94997, total: 8 },
+    { id: 'tv-2', path: '/ram2/权力的游戏', zh: '权力的游戏', en: 'Game of Thrones', title: '权力的游戏', season: 8, year: '2019', tmdbId: 1399 } ] };
+  const T = H.isolate(e4.env, e4.W);
+  for (let i = 0; i < 20; i++) { const q = await (await T.call('/api/build?src=tv')).json(); if (q.done || q.error) break; }
+  await T.call('/api/lib?refresh=1&src=tv'); await T.settle();
+  const tc = await (await T.call('/api/catalog?min=0&own=all&src=tv')).json();
+  const tom = new Map(tc.items.map(x => [x.id, x.own]));
+  ok(tom.get(94997) === 2 && tom.get(1399) === 2 && !tom.get(100088), '剧集：v25 剧集表里认好的两部判为确定已有，没有的那部显示缺片');
+}
+
 console.log('\n■ 并发与锁');
 {
   const { env, r2, W } = H.makeEnv();
