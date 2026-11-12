@@ -718,6 +718,54 @@ ok(pat(many[2], false, true) && many[2][2].cur && pat(many[5], true, true) && ma
   `居中时两端渐小（${many[5].map(d => d.w).join(' ')}），到末尾左端渐小（${many[10].map(d => d.w).join(' ')}）`);
 await pd.evaluate(() => scrollTo(0, 0));
 await pd.waitForTimeout(500);
+/* 资料库展映：背景视频、片名都收在右侧那一列（状态栏 + 导航）以左，那一列底下是黑的；
+   画面右上角的播放 / 静音不出，进资料库时并进导航胶囊（「资料库」下面长出两格），离开就收回 */
+const navBox = () => pd.evaluate(() => { const r = e => e.getBoundingClientRect(), d = r(document.getElementById('dock')), m = r(document.getElementById('navMedia'));
+  return { on: document.documentElement.classList.contains('sc-nav'), top: Math.round(d.top), h: Math.round(d.height), at55: Math.abs((d.top + d.bottom) / 2 - innerHeight * .55) <= 6, grp: Math.round(m.height), op: +getComputedStyle(document.getElementById('navMedia')).opacity }; });
+const home0 = await navBox();
+const libRes = {};
+for (const [w, h, sai, col, tag] of [[466, 678, { top: 0, right: 84, bottom: 20, left: 0 }, 84, '主屏幕 App（右侧 84px 那一列）'], [382, 580, NO_SAI, 72, 'Safari（导航自己那一条 72px）']]) {
+  await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: sai });
+  await pd.setViewportSize({ width: w, height: h });
+  await pd.waitForTimeout(500);
+  await pd.evaluate(() => navTo('library'));
+  await until(pd, () => { const m = document.querySelector('.sc-chapter .sc-media'); return !!(m && m.classList.contains('is-playing')); }, null, 40000).catch(() => {});
+  await pd.waitForTimeout(900);
+  libRes[tag] = await pd.evaluate(col => {
+    const r = e => e && e.getBoundingClientRect(), edge = innerWidth - col;
+    const view = r(document.getElementById('view-library')), st = r(document.querySelector('.sc-chapter .sc-sticky')), cp = r(document.querySelector('.sc-chapter .sc-copy'));
+    const d = r(document.getElementById('dock')), m = r(document.getElementById('navMedia')), lib = r(document.getElementById('navLib')), srch = r(document.getElementById('navSearch'));
+    const play = document.getElementById('navScPlay'), mute = document.getElementById('navScMute');
+    return { edge, view: Math.round(view.right), sticky: Math.round(st.right), copyMid: Math.round((cp.left + cp.right) / 2),
+      fenced: Math.round(view.right) <= edge && Math.round(st.right) <= edge && Math.abs((cp.left + cp.right) / 2 - edge / 2) <= 3 && document.documentElement.scrollWidth === innerWidth,
+      merged: document.documentElement.classList.contains('sc-nav') && m.height >= 88 && m.top >= lib.bottom - 1 && m.bottom <= srch.top + 1 && m.left >= d.left && m.right <= d.right
+        && Math.abs((d.top + d.bottom) / 2 - innerHeight * .55) <= 6 && !play.disabled && play.dataset.state === 'playing' && mute.dataset.muted === '1'
+        && [...document.querySelectorAll('.sc-chapter .sc-mediactl, .sc-chapter .sc-mutectl')].every(b => getComputedStyle(b).display === 'none') };
+  }, col);
+  if (tag.startsWith('主屏幕')) {
+    /* 点胶囊里那两格：转给眼前那一章自己的钮 —— 暂停 / 接着放、解除静音 / 再静音 */
+    const vstate = () => pd.evaluate(() => { const v = document.querySelector('.sc-chapter .sc-media video');
+      return { paused: v.paused, muted: v.muted, nav: document.getElementById('navScPlay').dataset.state, navMuted: document.getElementById('navScMute').dataset.muted }; });
+    await pd.click('#navScPlay'); await pd.waitForTimeout(400); const a = await vstate();
+    await pd.click('#navScPlay'); await pd.waitForTimeout(600); const b = await vstate();
+    await pd.click('#navScMute'); await pd.waitForTimeout(300); const c2 = await vstate();
+    await pd.click('#navScMute'); await pd.waitForTimeout(300); const d2 = await vstate();
+    libRes.ctl = { a, b, c: c2, d: d2, ok: a.paused && a.nav === 'paused' && !b.paused && b.nav === 'playing' && !c2.muted && c2.navMuted === '0' && d2.muted && d2.navMuted === '1' };
+  }
+  await pd.evaluate(() => navTo('home'));
+  await pd.waitForTimeout(1000);
+}
+const home1 = await navBox();
+const [la, ls] = [libRes['主屏幕 App（右侧 84px 那一列）'], libRes['Safari（导航自己那一条 72px）']];
+ok(la.fenced && ls.fenced,
+  `折起竖拿 · 资料库：背景视频与片名收在右侧那一列以左（主屏幕 App：视图 / 画面到 ${la.view} / ${la.sticky}，列缘 ${la.edge}，片名居中 ${la.copyMid}；` +
+  `Safari：到 ${ls.view} / ${ls.sticky}，列缘 ${ls.edge}），没有横向溢出`);
+ok(la.merged && ls.merged && libRes.ctl.ok,
+  `折起竖拿 · 资料库：播放 / 静音并进导航胶囊（「资料库」下面两格，胶囊中心仍在 55% 高处，画面上不再有那两个钮）；点它们转给眼前这一章：暂停 / 接着放、解除静音 / 再静音（${JSON.stringify(libRes.ctl)}）`);
+ok(!home0.on && home0.grp === 0 && !home1.on && home1.grp === 0 && home1.op === 0 && Math.abs(home1.h - home0.h) <= 1 && home0.at55 && home1.at55,
+  `折起竖拿 · 离开资料库：那两格收回，胶囊回到原来的高（${home0.h} → ${home1.h}）`);
+await pd.evaluate(() => scrollTo(0, 0));
+await pd.waitForTimeout(300);
 await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: NO_SAI });
 /* 实机上翻开 / 合上时，视口与屏幕尺寸不一定同一刻更新：合上那一下视口先变、screen 晚一拍还是内屏的尺寸，
    当场认不出外屏。屏幕尺寸跟上来之后（视口不再变、没有媒体查询事件），补查要把导航换回 Duo 的那种 */
@@ -792,6 +840,15 @@ for (const [label, opts] of [['普通 iPhone（393 宽）', devices['iPhone 15 P
   });
   ok(b.off && b.bottom && b.deck < b.vh - 40 && b.same && bar,
     `${label}：不当成 iPhone Duo，照旧底部胶囊；大图照旧不铺满（${b.deck} / ${b.vh}），文案照旧（年份胶囊在片名上面，类型那行还在），收成卡片后卡下照旧是与卡同宽的进度条`);
+  if (label.startsWith('普通 iPhone')) {
+    /* 资料库照旧：展映铺满整宽，播放 / 静音还在画面右上角，导航里没有多出那两格 */
+    await pa.evaluate(() => navTo('library'));
+    await until(pa, () => { const c = document.querySelector('.sc-chapter .sc-mediactl'); return !!(c && !c.hidden); }, null, 40000).catch(() => {});
+    await pa.waitForTimeout(600);
+    const lb = await pa.evaluate(() => ({ full: Math.round(document.getElementById('view-library').getBoundingClientRect().width) === innerWidth,
+      ctl: getComputedStyle(document.querySelector('.sc-chapter .sc-mediactl')).display !== 'none', nav: getComputedStyle(document.getElementById('navMedia')).display === 'none' }));
+    ok(lb.full && lb.ctl && lb.nav, `${label} · 资料库：展映照旧铺满整宽，播放 / 静音照旧在画面右上角，导航里不多出两格（${JSON.stringify(lb)}）`);
+  }
   await ac.close();
 }
 await pd.setViewportSize({ width: 951, height: 543 });
