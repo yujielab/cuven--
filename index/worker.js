@@ -1,4 +1,28 @@
 /**
+ * Cuven ᴿ 索引库 · v6.2 —— 极限模式（默认开）
+ * ══════════════════════════════════════════════════════════════════
+ * 普通模式一轮的天花板是「一次调用 50 个子请求」：3 页列表 + 最多 20 组 TMDB 认定，
+ * 认不完就把游标往回拨、下一轮重抓同几页。极限模式把一轮拆成三个角色（见「极限模式」一节）：
+ *   · 扫描轮 /api/build?turbo=1（持锁）：只抓列表，一轮 12 页、同时 4 条（请求起点由限速治理器
+ *     错开，下限 120ms，挨打照旧翻倍）；认识的片直接挂上，不认识的连同帖子行进留底队列（wait），
+ *     游标一口气推到底；顺手把浏览器交回来的认定结果写进分片；
+ *   · 认定工 /api/tm（不持锁、不写 R2）：浏览器同时开 3–6 路（AIMD），每路是一次独立调用、
+ *     自带一整份子请求配额，只做 TMDB 认定；
+ *   · 浏览器调度（页面里的 turboRun，测试跑的就是这一份）：排队、并发、退避、背压、停止时收尾。
+ * 不变量：帖子行任何时候都只在「已提交的分片」或「留底队列」两处之一，掐在哪一步都不丢；
+ * 已写进分片的留底条目不当场删，记进 state.pdone 跟着提交，下一次写队列时才删（pendSync）。
+ * 浏览器交回来的结果逐字段核对，形状不对的拒收；冷却期只挡论坛，结果照写；排队太长先停抓、
+ * 扫描轮自己认；留底队列快满就退回当场认。env.TURBO=0 一个变量退回普通模式。
+ * 顺手修掉（普通模式同样受益）：
+ *   · 第二轮（原名）搜索断网被判成「认不出」，帖子行只留 12 条 → 现在按网络失败、下轮再认；
+ *   · 普通模式会丢片：一轮认不完的组只把游标往回拨 ceil(n/28) 页，一页不到 28 组时前面页里没认完的
+ *     就再也抓不回来（测速样本里 v6.1 漏了 300 部里的 56 部）→ 现在没认完的连同帖子行进队列；
+ *     已经漏掉的，升级后点一次「重扫未匹配」补回；
+ *   · 同名同原名的两部片（重拍）共用一个键，留底条目把两年的帖子并在一起、重试时全写进一年，
+ *     另一年的增量再挂一遍就重复了 → 每行带上自己的年份；
+ *   · 锁只核对、锁龄超过 8 秒才续写（每轮少写一次 state.json，R2 10058 少撞）；
+ *     冷启动并发抓页只登录一次；限速治理器先占位再睡，并发请求不会同一刻冲出去。
+ * ══════════════════════════════════════════════════════════════════
  * Cuven ᴿ 索引库 · v6 —— 缺片检测重做 · 原子提交 · 多重兜底
  * ══════════════════════════════════════════════════════════════════
  * 一、缺片检测（libOwn，见「缺片检测」一节；标准答案与压测在 tests/）
@@ -179,6 +203,7 @@
  * 变量:    TMDB_BASE（TMDB 走自己的反代时填，可选，默认 https://api.themoviedb.org/3）
  * 变量:    RECV_BASE（片库总账 Received.json 的公开 R2 域名，首选）
  *          STREAM_BASE（片库对照的回退路径，可选）  PLAN=paid（放宽配额，可选）
+ *          TURBO=0（关掉极限模式、退回普通模式，可选；默认开）
  *          TV_BASE（剧集版块若不在同一域名，单独指过去，可选）
  *          TV_FILTER（剧集版块的附加筛选，默认 tv_zhuangtai_3=2&ortid=1；
  *                     置空 = 连载中的一起收）  MOVIE_FILTER（同理，默认空）
@@ -323,6 +348,7 @@ function srcLeave(){
 
 const BUDGET_MS = 15000;    // 单轮时间预算，到点提前落盘
 const LOCK_MS   = 40000;
+const LOCK_RENEW = 8000;     // 锁龄超过这个才续写（只核对不写可以省掉一次 state.json 写入）
 const CART_MAX  = 200;      // 打包上限（现在压在浏览器里，可以放宽）
 const GRAB_MAX  = 8;        // 单次 /api/fetch 取几部：每部 2 个子请求
 const ROWS_PER_MOVIE = 120;
@@ -355,6 +381,30 @@ const PLAN_FREE = { sub: 42, hard: 50, tmdb: 20, pages: 3, lib: 20, name: 'free'
 const PLAN_PAID = { sub: 900, hard: 10000, tmdb: 180, pages: 8, lib: 60, name: 'paid' };  // 2026-02 起 Paid 默认 10000/次；sub 仍保守，R2 写入频率才是真瓶颈
 let PLAN = PLAN_FREE;
 const planOf = (env) => (String(env && env.PLAN || '').toLowerCase() === 'paid' ? PLAN_PAID : PLAN_FREE);
+
+/* ══════════════════════════════════════════════════════════════════
+   [v6.2] 极限模式
+   ──────────────────────────────────────────────────────────────────
+   普通模式一轮的天花板是「一次调用 50 个子请求」：3 页列表 + 最多 20 组
+   TMDB 认定。一页二三十个帖子、一轮只认得完 20 组，剩下的只好把游标
+   往回拨、下一轮把同几页再抓一遍 —— 片越多，越是在原地打转。
+   极限模式把一轮拆成三个角色，各用各的那份配额：
+     · 扫描轮（/api/build?turbo=1，持锁）：只抓列表、只挂已认识的片，
+       不认识的连同帖子行进留底队列（标 wait），游标一口气推到底，不回拨；
+       顺手把浏览器交回来的认定结果写进分片；
+     · 认定工（/api/tm，不持锁、不写 R2）：浏览器同时开几路，每路是一次
+       独立调用、自带一整份子请求配额，只做 TMDB 认定、把结果交回浏览器；
+     · 浏览器：排队、并发、退避（AIMD），把结果攒着交给下一轮扫描。
+   帖子行任何时候都只在两处之一：已提交的分片，或留底队列 —— 掐在哪一步
+   都不丢。已写进分片的留底条目不当场删，记进 state.pdone 跟着提交走，
+   下一次写留底队列时才真正删掉（见 pendSync）。
+   env.TURBO=0 是总开关：一个变量就能退回普通模式，不用改代码。 */
+const TURBO_FREE = { pages: 12, conc: 4, group: 20, high: 360, need: 240, hits: 240, years: 3, sub: 46 };
+const TURBO_PAID = { pages: 30, conc: 5, group: 60, high: 1200, need: 600, hits: 600, years: 4, sub: 400 };
+const turboOn = (env) => String((env && env.TURBO) == null ? '' : env.TURBO).trim() !== '0';
+const turboCfg = () => (PLAN.name === 'paid' ? TURBO_PAID : TURBO_FREE);
+const TURBO_GAP = 120;           // 极限模式下论坛请求间隔的下限（普通模式 240）
+const TURBO_GAP_START = 160;     // 没挨过打的 isolate 从这个间隔起步
 
 const SUB = { n: 0, max: PLAN_FREE.sub, peak: 0 };
 /* [v5.3] 预算是「按调用」算的，计数器却是 isolate 全局的 —— 以前每个请求进门
@@ -413,9 +463,20 @@ function subTake(n){
 /** 唯一的出站入口：所有 fetch 都必须从这儿走，预算才算得准。
     [v6] 默认带超时（20 秒）：没有超时的 fetch 一旦挂起，整轮任务就挂到平台掐进程为止 */
 const FETCH_MS = 20000;
+/** [v6.2] 自带配额的调用（认定工）：计数记在调用自己身上，不碰 isolate 全局的 SUB ——
+    同一个 isolate 里同时在跑的扫描轮与认定工是两次调用，各有各的 50 */
+function subTakeLocal(lb){
+  if (lb.n + 1 > lb.max){
+    const e = new Error('本次认定的子请求预算已用完（' + lb.n + '/' + lb.max + '）');
+    e.budget = 1; e.sub = lb.n;
+    throw e;
+  }
+  lb.n++;
+}
 async function sfetch(u, init){
-  subTake(1);
+  if (init && init.sub) subTakeLocal(init.sub); else subTake(1);
   const o = init ? { ...init } : {};
+  delete o.sub;
   if (!o.signal && typeof AbortSignal !== 'undefined' && AbortSignal.timeout) o.signal = AbortSignal.timeout(o.timeoutMs || FETCH_MS);
   delete o.timeoutMs;
   try { return await fetch(u, o); }
@@ -910,7 +971,7 @@ const RETRYABLE = new Set(['net','server','rate']);
  * 每次失败都进 TRACE，自诊断面板能看到到底卡在哪一层。
  */
 async function autoRetry(label, fn, opt = {}){
-  const { tries = 4, gap = 500, cap = 8000, onRetry = null } = opt;
+  const { tries = 4, gap = 500, cap = 8000, onRetry = null, left = null } = opt;
   let last;
   for (let i = 0; i < tries; i++){
     try { return await fn(i, last ? classify(last) : null); }
@@ -921,7 +982,7 @@ async function autoRetry(label, fn, opt = {}){
       trace(cls, label + ': ' + (e.message||e), { try: i+1 });
       if (i === tries - 1 || !RETRYABLE.has(cls)) break;
       /* 重试也要花子请求：剩不下就不必再等了 */
-      if (subLeft() < 1) break;
+      if ((left ? left() : subLeft()) < 1) break;
       let wait = Math.min(cap, gap * Math.pow(2, i)) * (0.7 + Math.random()*0.6);
       if (e.retryAfter) wait = Math.max(wait, e.retryAfter * 1000);
       if (cls === 'rate') wait = Math.max(wait, 1500 * (i+1));
@@ -939,6 +1000,13 @@ async function autoRetry(label, fn, opt = {}){
    和 cron 一起忍着，别接着打。
    ══════════════════════════════════════════════════════════════════ */
 const GOV = { gap: 260, last: 0, strikes: 0, wins: 0, until: 0, why: '' };
+/* [v6.2] 间隔下限随模式变：极限模式 120ms、普通模式 240ms。加速只在「连续 3 次干净」之后，
+   挨一次打照旧翻倍（≥ 600ms）—— 下限放低，退避一点没放松 */
+let GOV_FLOOR = 240;
+function govMode(turbo){
+  GOV_FLOOR = turbo ? TURBO_GAP : 240;
+  if (turbo && !GOV.strikes && GOV.gap > TURBO_GAP_START) GOV.gap = TURBO_GAP_START;
+}
 
 function govPenalize(why){
   GOV.strikes++; GOV.wins = 0;
@@ -952,7 +1020,7 @@ function govPenalize(why){
 function govReward(){
   GOV.wins++;
   if (GOV.wins >= 3){                       // 连续 3 次干净的响应才算真的缓过来了
-    GOV.gap = Math.max(240, Math.round(GOV.gap * 0.75));
+    GOV.gap = Math.max(GOV_FLOOR, Math.round(GOV.gap * 0.75));
     if (GOV.strikes) GOV.strikes--;
     GOV.wins = 0;
   }
@@ -965,9 +1033,12 @@ async function govGate(){
     e.cooling = Math.ceil(left/1000);
     throw e;
   }
-  const wait = GOV.last + GOV.gap - Date.now();
-  if (wait > 0) await sleep(wait);
-  GOV.last = Date.now();
+  /* [v6.2] 先占位再睡：几个请求同时进门时各自排到前一个之后 gap 毫秒，
+     而不是算出同一个等待时长、睡醒一起冲出去 */
+  const now = Date.now();
+  const at = Math.max(now, GOV.last + GOV.gap);
+  GOV.last = at;
+  if (at > now) await sleep(at - now);
 }
 /** 冷却状态跨 isolate 共享 */
 function govLoad(state){
@@ -1069,8 +1140,17 @@ async function reqHTML(env, path, o = {}){
   return { r, html, bytes: buf.byteLength };
 }
 
+/* [v6.2] 登录合流：极限模式一轮里几页同时抓，冷启动的 isolate 没有会话时，
+   不能让每一页各登录一次（白花子请求，也最像机器人） */
+let SESS_JOB = null;
 async function session(env, force){
   if (!force){ const hit = await jget(env, kkey(env,'sess')); if (hit?.cookie) return hit; }
+  if (SESS_JOB) return SESS_JOB;
+  SESS_JOB = login(env);
+  try { return await SESS_JOB; }
+  finally { SESS_JOB = null; }
+}
+async function login(env){
   if (!env.SITE_USER || !env.SITE_PASS) throw new Error('缺少 SITE_USER / SITE_PASS');
   const B = base(env);
   const first = await reqHTML(env, 'member.php?mod=logging&action=login');
@@ -1396,13 +1476,15 @@ async function tmdb(env, path, params = {}){
   u.searchParams.set('api_key', env.TMDB_KEY);
   u.searchParams.set('language','zh-CN');
   for (const [k,v] of Object.entries(params)) u.searchParams.set(k,v);
+  /* [v6.2] 认定工的调用自带配额（env.__sub）：重试也从这份里扣，429 记个数交给浏览器做退避 */
+  const lb = env.__sub || null;
   const r = await autoRetry('tmdb '+path, async () => {
-    const x = await sfetch(u.toString(), { headers:{Accept:'application/json'}, cf:{ cacheEverything:true, cacheTtl:21600 }, timeoutMs: 12000 });
-    if (x.status === 429){ const e=new Error('HTTP 429'); e.retryAfter=Number(x.headers.get('retry-after'))||3; throw e; }
+    const x = await sfetch(u.toString(), { headers:{Accept:'application/json'}, cf:{ cacheEverything:true, cacheTtl:21600 }, timeoutMs: 12000, sub: lb });
+    if (x.status === 429){ if (lb) env.__r429 = (env.__r429 || 0) + 1; const e=new Error('HTTP 429'); e.retryAfter=Number(x.headers.get('retry-after'))||3; throw e; }
     if (x.status >= 500) throw new Error('HTTP '+x.status);
     if (!x.ok) throw new Error('HTTP '+x.status+'（检查 TMDB_KEY）');
     return x;
-  }, { tries: 3, gap: 500 });
+  }, { tries: 3, gap: 500, left: lb ? () => lb.max - lb.n : null });
   return r.json();
 }
 /* ══════════════════════════════════════════════════════════════════
@@ -1529,7 +1611,7 @@ function pickTMDB(results, cn, latin, years, opt = {}){
  * 两轮的候选合起来再评一次 —— 单轮里排在后面的，合并之后可能才是最优。
  * 返回 Map：{hit} 认下来了 / {miss,why} 认不出 / null 网络失败（不下结论）。
  */
-async function matchBatch(env, groups){
+async function matchBatch(env, groups, opt = {}){
   const out = new Map(), pool = new Map(), rest = [];
   for (const g of groups){
     const nm = notMovie(g.title || g.cn);
@@ -1544,7 +1626,9 @@ async function matchBatch(env, groups){
     return tmdb(env, '/search/' + SRC.kind, p)
       .then(j => ({ g, j, locked: !!yr }))
       .catch(e => {
-        if (e.budget) throw e;
+        /* soft（认定工）：配额用完的那几组按「网络失败」交回去，已经认下的照样带回，不整批作废 */
+        if (e.budget && !opt.soft) throw e;
+        if (e.budget) return { g, j: null };
         /* [v5.2 修复 5] 以前这里静悄悄地吞掉：出网失败和"认不出"在界面上
            长得一模一样（都是入库 0），只是前者连 calls 都不加一。
            现在原样记进「匹配」频道，带上查询串，一眼看得出是哪一类。 */
@@ -1578,7 +1662,9 @@ async function matchBatch(env, groups){
   };
   const plans = round2.map(g => ({ g, a: alt(g) })).filter(x => x.a);
   const r2 = await Promise.all(plans.map(x => ask(x.g, x.a.q, x.a.y)));
+  const r2fail = new Set();
   for (const { g, j } of r2){
+    if (!j) r2fail.add(g.key);
     const merged = (pool.get(g.key) || []).concat(j ? (j.results||[]).slice(0,8) : []);
     const h = pickTMDB(merged, g.cn, g.latin, g.years||[], { tv: isTV() });
     if (h) out.set(g.key, { hit:h, via: g.latin ? '原名' : '合并候选' });
@@ -1587,7 +1673,9 @@ async function matchBatch(env, groups){
     if (out.has(g.key)) continue;
     /* 只搜过一轮、且第二轮没得搜的，用第一轮的候选再宽松评一次 */
     const h = pickTMDB(pool.get(g.key) || [], g.cn, g.latin, g.years||[], { tv: isTV() });
-    out.set(g.key, h ? { hit:h, via:'候选复评' } : { miss:1, why:'nohit' });
+    /* [v6.2] 第二轮是网络失败（或配额用完）而不是真的没搜到：不下「认不出」的结论，
+       按网络失败交回去，下轮再认 —— 以前这里直接判 miss，帖子行只留 12 条，其余就丢了 */
+    out.set(g.key, h ? { hit:h, via:'候选复评' } : (r2fail.has(g.key) ? null : { miss:1, why:'nohit' }));
   }
   return out;
 }
@@ -1884,6 +1972,9 @@ async function withIndexLock(env, fn){
       const cur = await r2getE(env, IDX.state);
       const l = cur.val && cur.val.lock;
       if (!l || l.id !== id) throw lockErr('索引锁已被接管（这一轮跑得太久），本轮作废、不提交');
+      /* [v6.2] 锁还新（LOCK_RENEW 内拿到 / 续过）就只核对、不续写：离别人能接管还有半分钟以上，
+         省下的这一次 state.json 写入正是 R2「同一对象写得太密」的来源 */
+      if (Date.now() - (l.at || 0) < LOCK_RENEW) return cur.val;
       l.at = Date.now();
       if (!await r2putIf(env, IDX.state, cur.val, cur.etag)) throw lockErr('索引锁续期时被别的任务抢先，本轮作废、不提交');
       return cur.val;
@@ -2238,15 +2329,188 @@ async function fetchList(env, year, pg){
   }, { tries: 3, gap: 800, onRetry: async (cls) => { if (cls === 'auth') await dropSession(env); } });
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   [v6.2] 极限模式：认定结果的进出口
+   ──────────────────────────────────────────────────────────────────
+   认定工把结果交回浏览器，浏览器再交给扫描轮 —— 中间过一道浏览器，
+   所以写进索引之前逐字段核对形状：不合格的整条不要，当成没认过，下次重认。
+   ══════════════════════════════════════════════════════════════════ */
+const keyOk = (k) => typeof k === 'string' && k.length > 0 && k.length <= 200;
+const strCap = (v, n) => typeof v === 'string' ? v.slice(0, n) : '';
+/** 认下来的那一条 → 交给浏览器：只带建影片记录要用的那几样 */
+const hitOut = (h) => [h.id, h.title || '', h.original_title || '', h.release_date || '', h.poster_path || '',
+  h.vote_average || 0, h.vote_count || 0, Array.isArray(h.genre_ids) ? h.genre_ids.slice(0, 12) : []];
+function hitIn(a){
+  if (!Array.isArray(a) || a.length < 8) return null;
+  const id = Number(a[0]);
+  if (!Number.isInteger(id) || id <= 0 || id > 2e9) return null;
+  const title = strCap(a[1], 200), orig = strCap(a[2], 200);
+  if (!title && !orig) return null;
+  const date = strCap(a[3], 10);
+  if (date && !/^\d{4}(-\d{2}(-\d{2})?)?$/.test(date)) return null;
+  const poster = strCap(a[4], 120);
+  const va = Number(a[5]), vc = Number(a[6]);
+  return { id, title, original_title: orig, release_date: date,
+    poster_path: /^\/[\w.-]{1,100}\.(jpe?g|png|webp)$/i.test(poster) ? poster : '',
+    vote_average: Number.isFinite(va) && va >= 0 && va <= 10 ? va : 0,
+    vote_count: Number.isInteger(vc) && vc >= 0 ? Math.min(vc, 1e8) : 0,
+    genre_ids: Array.isArray(a[7]) ? a[7].filter(x => Number.isInteger(x) && x > 0 && x < 1e7).slice(0, 12) : [] };
+}
+/** 浏览器交回来的一条结果 → { miss } | { hit, nk } | null（形状不对） */
+function resIn(v){
+  if (!v || typeof v !== 'object') return null;
+  if (typeof v.m === 'string') return { miss: PEND_WHY.has(v.m) ? v.m : 'nohit' };
+  const hit = hitIn(v.h);
+  if (!hit) return null;
+  return { hit, nk: keyOk(v.nk) ? v.nk : '' };
+}
+/** 交给认定工的一组：只带认定要用的字段（不带帖子行 —— 帖子行一直留在 R2 的留底队列里） */
+const needOut = (k, e) => ({ k, cn: e.cn || '', la: e.la || '', ys: (e.ys || []).slice(0, 4), y: e.y, t: e.t || '' });
+function needIn(x){
+  if (!x || typeof x !== 'object' || !keyOk(x.k)) return null;
+  const y = Number(x.y);
+  return { k: x.k, cn: strCap(x.cn, 120), la: strCap(x.la, 160),
+    ys: Array.isArray(x.ys) ? x.ys.map(String).filter(v => /^\d{4}$/.test(v)).slice(0, 4) : [],
+    y: Number.isInteger(y) && y > 1900 && y < 2200 ? y : 0, t: strCap(x.t, 200) };
+}
+/** 排队等认定的条目，按「当前在建的年份优先、再按年份从新到旧」排 */
+function waitKeys(pend, doneNow, skip, target){
+  const q = pend.q, ks = [];
+  for (const k in q){
+    const e = q[k];
+    if (e.w !== 'wait' || doneNow.has(k) || (skip && skip.has(k))) continue;
+    ks.push(k);
+  }
+  const rank = (k) => (q[k].y === target ? 0 : 1);
+  return ks.sort((a, b) => (rank(a) - rank(b)) || ((Number(q[b].y) || 0) - (Number(q[a].y) || 0)));
+}
+
+/**
+ * 一条认定结果落进索引（浏览器交回来的、扫描轮自己认的，都走这一个口子）。
+ * X：{ movies, pend, ps, doneNow, years:Set, maxYears, dirty() }
+ * 返回：'gone'（队列里已经没有这条，或这一轮已经写过）· 'defer'（这一轮开的年份够多了，下轮再写）·
+ *       'miss' · 写进分片的行数（number，0 = 这些帖子早就在分片里了）
+ * 写进分片的条目不从队列里删，只记进 doneNow —— 提交时变成 state.pdone（见 pendSync）。
+ */
+async function pendApply(X, k, r){
+  const e = X.pend.q[k];
+  if (!e || X.doneNow.has(k)) return 'gone';
+  if (r.miss){
+    if (e.w !== 'wait') return 'gone';             // 已经有结论的不覆盖（重试次数、跳过原因都留着）
+    e.w = r.miss;
+    if (e.r.length > PEND.rows) e.r = e.r.slice(0, PEND.rows);
+    X.movies.u[k] = Date.now();
+    X.dirty();
+    return 'miss';
+  }
+  const by = pendRowsByYear(e);
+  if (!by.size) return 'gone';                     // 年份都不属于这个源（不该出现）：不往乱七八糟的键上写
+  const fresh = [...by.keys()].filter(y => !X.years.has(y));
+  if (X.years.size + fresh.length > X.maxYears && X.years.size) return 'defer';
+  for (const y of fresh) X.years.add(y);
+  const id = r.hit.id;
+  X.movies.k[k] = id;
+  if (r.nk && r.nk !== k) X.movies.k[r.nk] = id;
+  if (!X.movies.m[id]) X.movies.m[id] = newMovie(r.hit, Number(e.y) || [...by.keys()][0]);
+  let n = 0;
+  for (const [y, rows] of by) n += await X.ps.push(y, X.movies, id, rows);
+  X.doneNow.add(k);
+  delete X.movies.u[k];
+  if (r.nk) delete X.movies.u[r.nk];
+  return n;
+}
+
+/**
+ * 持锁的任务自己认一批排队的条目。
+ *   · 极限模式：这一轮不抓列表（冷却 / 排队太长 / 全部年份已完成），或者浏览器那边没有认定工可用；
+ *   · 普通模式：用这一轮剩下的 TMDB 额度 —— 上次极限模式没认完就关了页面，排队的由普通模式和定时任务接着认。
+ * skip：浏览器那边正在认、或刚交回来的键，别重复花子请求。
+ */
+async function drainWait(env, X, { max, over, skip, target }){
+  const q = X.pend.q;
+  const all = waitKeys(X.pend, X.doneNow, skip, target);
+  if (!all.length || max < 1) return null;
+  /* 只认这一轮已经开着的年份，最多再开到 maxYears 个：写分片的编码量跟开了几个年份成正比 */
+  const ys = new Set(X.years), pick = [];
+  for (const k of all){
+    const fresh = [...pendRowsByYear(q[k]).keys()].filter(y => !ys.has(y));
+    if (ys.size + fresh.length > X.maxYears && ys.size) continue;
+    for (const y of fresh) ys.add(y);
+    pick.push(k);
+    if (pick.length >= max) break;
+  }
+  let fixed = 0, still = 0, net = 0, rows = 0, calls = 0, budgetHit = 0;
+  for (let i = 0; i < pick.length && calls < max && !over(); ){
+    const room = Math.min(5, max - calls, Math.floor((subLeft() - 8) / 2));
+    if (room < 1){ budgetHit = 1; break; }
+    const groups = pick.slice(i, i + room).map(k => pendGroup(k, q[k]));
+    i += groups.length;
+    pipe('match', 'i', groups.length);
+    let res;
+    try { res = await matchBatch(env, groups); }
+    catch (e){ if (e.budget){ budgetHit = 1; break; } throw e; }
+    let dead = 0;
+    for (const g of groups){
+      const r = res.get(g.key);
+      if (r == null){ net++; dead++; pipe('match', 'e'); continue; }
+      calls++;
+      const v = await pendApply(X, g.key, r.miss ? { miss: r.why || 'nohit' } : { hit: r.hit, nk: g.nkey });
+      if (v === 'miss'){ still++; pipe('match', 'e'); }
+      else if (typeof v === 'number'){ fixed++; rows += v; pipe('match', 'o'); pipe('store', 'o', v); }
+    }
+    if (dead === groups.length) break;              // 整批没回来：TMDB 那头不通，别把预算白烧掉
+  }
+  return { fixed, still, net, rows, calls, budgetHit };
+}
+
+/**
+ * 认定工（/api/tm）：认一批、把结果交回浏览器。不持锁、不读写 R2。
+ * 自带一整份子请求配额（这是一次独立调用），配额用完的那几组按「网络失败」交回 —— 已认下的照样带回。
+ */
+async function turboMatch(env, list){
+  const t0 = Date.now(), TC = turboCfg();
+  const out = {}, groups = [];
+  for (const x of (Array.isArray(list) ? list.slice(0, TC.group) : [])){
+    const e = needIn(x);
+    if (!e || out[e.k] !== undefined) continue;
+    out[e.k] = 0;                                    // 0 = 这一次没下结论（网络失败 / 配额用完），浏览器稍后重认
+    const g = pendGroup(e.k, e);
+    if (g.cn || g.latin) groups.push(g);
+  }
+  const envT = Object.assign(Object.create(env), { __sub: { n: 0, max: TC.sub }, __r429: 0 });
+  let res = new Map();
+  if (groups.length){
+    try { res = await matchBatch(envT, groups, { soft: true }); }
+    catch (e){ trace('tmdb', '认定工这一批没认成：' + (e.message || e), { lvl: 'err', ch: 'match' }); }
+  }
+  let hit = 0, miss = 0;
+  for (const g of groups){
+    const r = res.get(g.key);
+    if (r == null) continue;
+    if (r.miss){ out[g.key] = { m: r.why || 'nohit' }; miss++; continue; }
+    out[g.key] = g.nkey !== g.key ? { h: hitOut(r.hit), v: r.via || '', nk: g.nkey } : { h: hitOut(r.hit), v: r.via || '' };
+    hit++;
+  }
+  return { r: out, n: groups.length, hit, miss, n429: envT.__r429 || 0, sub: envT.__sub.n, g: TC.group, ms: Date.now() - t0 };
+}
+
 async function buildChunk(env, opt = {}){ return withIndexLock(env, (d, lk) => buildInner(env, opt, d, lk)); }
 
-async function buildInner(env, { pages = 0, tmdbMax = 0, year = null } = {}, deaths = 0, lk = null){
+async function buildInner(env, opt = {}, deaths = 0, lk = null){
   const t0 = Date.now();
   pipeReset();
+  let { pages = 0, tmdbMax = 0, year = null } = opt;
+  const turbo = !!opt.turbo;
+  const TC = turbo ? turboCfg() : null;
+  govMode(turbo);
   /* 一轮的规模由计划决定，不再写死：Free 计划一次调用只有 50 个子请求，
-     v4 默认 8 页 + 180 次 TMDB ≈ 188 个，必然越线。 */
-  pages   = Math.min(pages || PLAN.pages, PLAN.pages * 2);
-  tmdbMax = Math.min(tmdbMax || PLAN.tmdb, PLAN.tmdb * 2);
+     v4 默认 8 页 + 180 次 TMDB ≈ 188 个，必然越线。
+     极限模式：TMDB 交给认定工，这一轮的子请求几乎全给列表页。 */
+  if (turbo){ pages = TC.pages; tmdbMax = PLAN.tmdb; }
+  else {
+    pages   = Math.min(pages || PLAN.pages, PLAN.pages * 2);
+    tmdbMax = Math.min(tmdbMax || PLAN.tmdb, PLAN.tmdb * 2);
+  }
   /* 上一轮被掐过就自动降级，直到能跑完一轮为止 */
   const shift = Math.min(4, deaths);
   pages   = Math.max(1, pages >> shift);
@@ -2259,13 +2523,16 @@ async function buildInner(env, { pages = 0, tmdbMax = 0, year = null } = {}, dea
 
   const [{ movies, state, m0 }, pend] = await Promise.all([ loadForWrite(env), pendLoad(env) ]);
   let pendDirty = parserMigrate(movies, pend);
+  if (pendSync(pend, state)) pendDirty = 1;      // 上几轮已经写进分片的留底条目，这次真正从队列里删掉
+  const doneNow = new Set();                      // 这一轮写进分片的留底条目：提交时记进 state.pdone
   govLoad(state);
   await graveSweep(env, state);
   movieKeysFill(movies);
 
-  /* 冷却期直接返回：不碰网络，也不白占着锁；顺手把冷却写进 R2 让其它 isolate 一起忍 */
+  /* 冷却期：普通模式直接返回 —— 不碰网络，也不白占着锁；顺手把冷却写进 R2 让其它 isolate 一起忍。
+     极限模式照样往下走：冷却只挡论坛，认定结果的写入与 TMDB 认定不受影响 */
   const cool0 = govCoolLeft();
-  if (cool0 > 0){
+  if (cool0 > 0 && !turbo){
     govSave(state);
     await commitIndex(env, lk, null, state).catch(()=>{});
     return { cooling: Math.ceil(cool0/1000), why: GOV.why, degraded: deaths,
@@ -2279,72 +2546,139 @@ async function buildInner(env, { pages = 0, tmdbMax = 0, year = null } = {}, dea
     const st = state.years[y] || (state.years[y] = newYear());
     if (!st.done || year){ target = y; break; }
   }
-  if (!target) return { done:true, msg:'全部年份已完成', movies: state.movies||0, rels: state.rels||0 };
+  const waitLeft = () => { let n = 0; for (const k in pend.q) if (pend.q[k].w === 'wait' && !doneNow.has(k)) n++; return n; };
+  const hitsIn = turbo && Array.isArray(opt.hits) ? opt.hits.slice(0, TC.hits) : [];
+  if (!target && !hitsIn.length && !waitLeft())
+    return { done:true, msg:'全部年份已完成', movies: state.movies||0, rels: state.rels||0, waitN: 0,
+             turbo: turbo ? 1 : 0, ack: [], rej: [], defer: [], need: [] };
 
-  const st = state.years[target];
-  st.bad = st.bad || [];
-  if (year) st.done = false;
+  const st = target ? state.years[target] : null;
+  if (st){ st.bad = st.bad || []; if (year) st.done = false; }
 
   /* 降级等级直接压小分片：被掐一次，下一轮的编码量减半，能真正收敛 */
   const ps = partSet(env, state, { cap: Math.max(300, PART_ROWS >> Math.min(3, deaths)) });
-  const seen = await ps.seen(target);          // 该年份已收录的 tid（全年，跨片）
-  const queued = new Set();                    // 本轮已排队的，避免同轮重复
+  const X = { movies, pend, ps, doneNow, years: new Set(target ? [target] : []),
+              maxYears: turbo ? TC.years : 2, dirty(){ pendDirty = 1; } };
+
+  /* ── 极限模式 ①：浏览器交回来的认定结果先写进去（不碰网络） ── */
+  const ack = [], rej = [], defer = [], reqKeys = new Set();
+  let applied = 0, appliedRows = 0, appliedMiss = 0;
+  for (const it of hitsIn){
+    if (!Array.isArray(it) || !keyOk(it[0]) || reqKeys.has(it[0])) continue;
+    const k = it[0];
+    reqKeys.add(k);
+    const r = resIn(it[1]);
+    if (!r){ rej.push(k); continue; }
+    const v = await pendApply(X, k, r);
+    if (v === 'defer'){ defer.push(k); continue; }
+    ack.push(k);
+    if (v === 'miss'){ appliedMiss++; pipe('match', 'e'); }
+    else if (typeof v === 'number'){ applied++; appliedRows += v; pipe('match', 'o'); pipe('store', 'o', v); }
+  }
+
+  /* ── 这一轮抓几页 ──
+     极限模式：冷却中 / 停止前的收尾轮不抓；排队的条目太多（认定工跟不上）先停抓、让认定追上来；
+     留底队列快满了就退回普通模式那套（当场认），免得帖子进不了队列 */
+  let pagesPlan = target ? pages : 0, backlog = 0, full = 0;
+  if (turbo && target){
+    if (opt.flush || govCoolLeft()) pagesPlan = 0;
+    else if (Object.keys(pend.q).length >= PEND.cap - 400){ full = 1; pagesPlan = Math.max(1, PLAN.pages >> shift); }
+    else if (waitLeft() >= TC.high){ pagesPlan = 0; backlog = 1; }
+  }
+  const queueMode = turbo && !full;               // 不认识的片：进队列（极限）还是当场认（普通）
 
   /* ── 拉列表：先重试上轮失败的页，再往前推进 ── */
   const fresh = [];
-  const queue = st.bad.slice(0, 3);
-  /* [修复 7] queue.length 在循环里边读边涨 —— 结果 pg 恒等于 st.page，
-     每一轮把同一页抓 pages 遍、只推进一页。既拖慢建索引，又是白白
-     多打论坛 8 倍请求、招来限速的元凶。基准长度必须先固定下来。 */
-  const retryN = queue.length;
-  for (let i = retryN; i < pages; i++){
-    const pg = st.page + (i - retryN);
-    if (st.last && pg > st.last) break;
-    queue.push(pg);
-  }
-
   let advanced = 0, failed = 0, emptyRun = 0, rateHit = 0;
-  const stillBad = new Set(st.bad);
-  for (const pg of queue){
-    if (over() || govCoolLeft()){ if (govCoolLeft()) rateHit++; break; }
-    /* 留够收尾用的子请求：拉列表最多重试 3 次，TMDB 那一段还要用 */
-    if (subLeft() < 10){ budgetHit = 1; break; }
-    let res;
-    pipe('list', 'i');
-    try { res = await fetchList(env, target, pg); stillBad.delete(pg); pipe('list', 'o'); }
-    catch (e){
-      const cls = classify(e);
-      pipe('list', 'e');
-      if (cls === 'budget'){ budgetHit = 1; stillBad.add(pg); break; }
-      failed++; stillBad.add(pg);
-      trace(cls, '第 '+pg+' 页拉取失败: '+e.message, { year: target, page: pg });
-      if (cls === 'rate'){ rateHit++; break; }  // [修复 5] 被限速就收工，别把状况搞更糟
-      if (cls === 'auth') break;                // 登录不通也别硬刷
-      continue;
+  if (st && pagesPlan > 0){
+    const seen = await ps.seen(target);          // 该年份已收录的 tid（全年，跨片）
+    const queued = new Set();                    // 本轮已排队的，避免同轮重复
+    const queue = st.bad.slice(0, 3);
+    /* [修复 7] queue.length 在循环里边读边涨 —— 结果 pg 恒等于 st.page，
+       每一轮把同一页抓 pages 遍、只推进一页。基准长度必须先固定下来。 */
+    const retryN = queue.length;
+    for (let i = retryN; i < pagesPlan; i++){
+      const pg = st.page + (i - retryN);
+      if (st.last && pg > st.last) break;
+      queue.push(pg);
     }
-    if (!st.last && res.last) st.last = res.last;
-    if (!res.rows.length){
-      /* [修复 2] 页面正常但没帖 —— 只有确认过总页数、或连续两页空，才敢收尾 */
-      if (!res.board){
+    const stillBad = new Set(st.bad);
+    const conc = queueMode ? TC.conc : 1;
+    /* [v6.2] 抓页是一条连续的并发池：极限模式同时开 conc 条（请求的起点仍由限速治理器按间隔错开），
+       谁先回来谁让出位置，不再「一批等齐了才发下一批」；结果按页码顺序处理（游标、空页收尾都依赖顺序），
+       处理到收尾那一页就不再派新的。还不知道总页数时只开一条探路。普通模式 conc=1，与以前逐页抓完全一样 */
+    const nextPg = () => {
+      while (qi < queue.length){
+        const pg = queue[qi++];
+        if (st.last && pg > st.last && !stillBad.has(pg)) continue;   // 已知总页数：最后一页之后的不抓（失败重试的页除外）
+        return pg;
+      }
+      return null;
+    };
+    const handle = (pg, x) => {
+      if (x.e){
+        const e = x.e, cls = classify(e);
+        pipe('list', 'e');
+        if (cls === 'budget'){ budgetHit = 1; stillBad.add(pg); stop = true; return; }
         failed++; stillBad.add(pg);
-        trace('parse', '第 '+pg+' 页不像版块页，跳过', { year: target });
-        continue;
+        trace(cls, '第 '+pg+' 页拉取失败: '+e.message, { year: target, page: pg });
+        if (cls === 'rate'){ rateHit++; stop = true; }   // [修复 5] 被限速就收工，别把状况搞更糟
+        else if (cls === 'auth') stop = true;           // 登录不通也别硬刷
+        return;
       }
-      emptyRun++;
-      if (st.last && pg >= st.last) st.done = true;
-      else if (emptyRun >= 2 && pg > 1) st.done = true;
-    } else {
-      emptyRun = 0;
-      for (const row of res.rows){
-        const tid = Number(row.tid);
-        if (seen.has(tid) || queued.has(tid)) continue;
-        queued.add(tid); fresh.push(row);
+      const res = x.res;
+      stillBad.delete(pg); pipe('list', 'o');
+      if (!st.last && res.last) st.last = res.last;
+      if (!res.rows.length){
+        /* [修复 2] 页面正常但没帖 —— 只有确认过总页数、或连续两页空，才敢收尾 */
+        if (!res.board){
+          failed++; stillBad.add(pg);
+          trace('parse', '第 '+pg+' 页不像版块页，跳过', { year: target });
+          return;
+        }
+        emptyRun++;
+        if (st.last && pg >= st.last) st.done = true;
+        else if (emptyRun >= 2 && pg > 1) st.done = true;
+      } else {
+        emptyRun = 0;
+        for (const row of res.rows){
+          const tid = Number(row.tid);
+          if (seen.has(tid) || queued.has(tid)) continue;
+          queued.add(tid); fresh.push(row);
+        }
       }
-    }
-    if (pg >= st.page) advanced = Math.max(advanced, pg - st.page + 1);
-    if (st.done) break;
+      if (pg >= st.page) advanced = Math.max(advanced, pg - st.page + 1);
+    };
+    let qi = 0, stop = false;
+    await new Promise((resolve, reject) => {
+      const sent = [], got = new Map();
+      let pi = 0, active = 0, finished = false;
+      const pump = () => { try { step(); } catch (e){ finished = true; reject(e); } };
+      const step = () => {
+        if (finished) return;
+        /* 按派出的顺序处理已经回来的那一段；收尾页之后回来的结果不要 */
+        while (pi < sent.length && got.has(sent[pi])){
+          const pg = sent[pi++];
+          if (!st.done) handle(pg, got.get(pg));
+        }
+        if (st.done) stop = true;
+        while (!stop && active < (st.last ? conc : 1)){
+          if (over() || govCoolLeft()){ if (govCoolLeft()) rateHit++; stop = true; break; }
+          /* 留够收尾用的子请求：在路上的每一页最多还要重试两次；普通模式另要给 TMDB 那一段留着 */
+          if (subLeft() < (queueMode ? 6 : 10) + active * 2){ budgetHit = 1; stop = true; break; }
+          const pg = nextPg();
+          if (pg == null) break;
+          sent.push(pg); active++;
+          pipe('list', 'i');
+          fetchList(env, target, pg).then(res => ({ res }), e => ({ e }))
+            .then(x => { got.set(pg, x); active--; pump(); });
+        }
+        if (!active){ finished = true; resolve(); }
+      };
+      pump();
+    });
+    st.bad = [...stillBad].slice(0, 24);
   }
-  st.bad = [...stillBad].slice(0, 24);
 
   /* ── 按片名归并，压缩 TMDB 调用 ── */
   const byName = new Map();
@@ -2358,7 +2692,7 @@ async function buildInner(env, { pages = 0, tmdbMax = 0, year = null } = {}, dea
     pipe('parse', 'o');
   }
 
-  let attached = 0, matchedNew = 0, cached = 0, skipped = 0, calls = 0;
+  let attached = 0, matchedNew = 0, cached = 0, skipped = 0, calls = 0, queuedN = 0;
   const todo = [];
   for (const g of byName.values()){
     const known = movies.k[g.key];
@@ -2373,101 +2707,155 @@ async function buildInner(env, { pages = 0, tmdbMax = 0, year = null } = {}, dea
   }
 
   let processed = 0, netFail = 0;
-  for (let i = 0; i < todo.length && calls < tmdbMax && !over(); ){
-    /* matchBatch 每组最多两个子请求，所以一批的大小按剩余预算的一半算，
-       另外留 8 个给落盘与收尾 */
-    const room = Math.min(5, tmdbMax - calls, Math.floor((subLeft() - 8) / 2));
-    if (room < 1){ budgetHit = 1; break; }
-    const batch = todo.slice(i, i + room);
-    if (!batch.length) break;
-    i += batch.length;
-    pipe('match', 'i', batch.length);
-    let res;
-    try { res = await matchBatch(env, batch.map(g =>
-      ({ ...g, hint: target, title: g.rows?.[0]?.title || g.cn }))); }
-    catch (e){ if (e.budget){ budgetHit = 1; break; } throw e; }
-    let dead = 0;
-    for (const g of batch){
-      const r = res.get(g.key);
-      if (r == null){ netFail++; dead++; pipe('match', 'e'); continue; } // 网络失败不算"认不出"，留待下轮
-      calls++; processed++;
-      if (r.miss){
-        /* v4 在这里直接丢掉 g.rows。v5 连行一起留底，重试就不用重爬列表页 */
-        movies.u[g.key] = Date.now();
-        pendAdd(pend, g, target, r.why || 'nohit');
-        pendDirty = 1; skipped++; pipe('match', 'e');
+  if (queueMode){
+    /* ── 极限模式 ②：不认识的连同帖子行进留底队列（wait），交给认定工；明摆着不是电影的当场判掉 ── */
+    for (const g of todo){
+      const nm = notMovie(g.rows?.[0]?.title || g.cn);
+      if (nm){
+        if (pendAdd(pend, g, target, nm)){ movies.u[g.key] = Date.now(); processed++; skipped++; pendDirty = 1; }
         continue;
       }
-      const hit = r.hit;
-      movies.k[g.key] = hit.id;
-      if (!movies.m[hit.id]) movies.m[hit.id] = newMovie(hit, target);
-      const n = await ps.push(target, movies, hit.id, g.rows);
-      attached += n; pipe('store', 'o', n);
-      matchedNew++; pipe('match', 'o');
+      if (pendAdd(pend, g, target, 'wait')){ processed++; queuedN++; pendDirty = 1; }
     }
-    /* 整批都没回来 = TMDB 那头不通（key 失效 / 被限流 / 出网被挡）。
-       接着往下认只是把剩下的子请求预算白烧掉，不如把预算留给拉列表，
-       并且把话说明白。 */
-    if (dead === batch.length && batch.length){
-      trace('tmdb', '整批 ' + batch.length + ' 组 TMDB 请求全部失败，本轮不再认定 —— '
-        + '先查 TMDB_KEY 是否有效、以及 Worker 出网是否被挡', { lvl:'err', ch:'match' });
-      break;
-    }
-    if (budgetHit) break;
-  }
-
-  /* ── [修复 3] pending 独立计数，回退到真正没处理完的那一页 ── */
-  const pending = todo.length - processed;
-  if ((pending > 0 || rateHit) && advanced > 0){
-    const back = rateHit ? advanced : Math.min(advanced, Math.max(1, Math.ceil(pending / 28)));
-    st.page = Math.max(1, st.page + advanced - back);
-    st.done = false;
+    if (queuedN) pipe('match', 'i', queuedN);
   } else {
-    st.page = Math.max(1, st.page + advanced);
+    const handled = new Set();
+    for (let i = 0; i < todo.length && calls < tmdbMax && !over(); ){
+      /* matchBatch 每组最多两个子请求，所以一批的大小按剩余预算的一半算，
+         另外留 8 个给落盘与收尾 */
+      const room = Math.min(5, tmdbMax - calls, Math.floor((subLeft() - 8) / 2));
+      if (room < 1){ budgetHit = 1; break; }
+      const batch = todo.slice(i, i + room);
+      if (!batch.length) break;
+      i += batch.length;
+      pipe('match', 'i', batch.length);
+      let res;
+      try { res = await matchBatch(env, batch.map(g =>
+        ({ ...g, hint: target, title: g.rows?.[0]?.title || g.cn }))); }
+      catch (e){ if (e.budget){ budgetHit = 1; break; } throw e; }
+      let dead = 0;
+      for (const g of batch){
+        const r = res.get(g.key);
+        if (r == null){ netFail++; dead++; pipe('match', 'e'); continue; } // 网络失败不算"认不出"，留待下轮
+        calls++; processed++; handled.add(g.key);
+        if (r.miss){
+          /* v4 在这里直接丢掉 g.rows。v5 连行一起留底，重试就不用重爬列表页 */
+          movies.u[g.key] = Date.now();
+          pendAdd(pend, g, target, r.why || 'nohit');
+          pendDirty = 1; skipped++; pipe('match', 'e');
+          continue;
+        }
+        const hit = r.hit;
+        movies.k[g.key] = hit.id;
+        if (!movies.m[hit.id]) movies.m[hit.id] = newMovie(hit, target);
+        const n = await ps.push(target, movies, hit.id, g.rows);
+        attached += n; pipe('store', 'o', n);
+        matchedNew++; pipe('match', 'o');
+      }
+      /* 整批都没回来 = TMDB 那头不通（key 失效 / 被限流 / 出网被挡）。
+         接着往下认只是把剩下的子请求预算白烧掉，不如把预算留给拉列表，
+         并且把话说明白。 */
+      if (dead === batch.length && batch.length){
+        trace('tmdb', '整批 ' + batch.length + ' 组 TMDB 请求全部失败，本轮不再认定 —— '
+          + '先查 TMDB_KEY 是否有效、以及 Worker 出网是否被挡', { lvl:'err', ch:'match' });
+        break;
+      }
+      if (budgetHit) break;
+    }
+    /* [v6.2] 这一轮没认完的（预算 / 时间用完、网络失败）连同帖子行进留底队列（wait），下一轮先认它们。
+       以前只把游标往回拨 ceil(待认/28) 页：网络失败的那一组只要不在最后那几页，帖子就再也抓不回来了 */
+    for (const g of todo){
+      if (handled.has(g.key)) continue;
+      if (pendAdd(pend, g, target, 'wait')){ processed++; queuedN++; pendDirty = 1; }
+    }
   }
-  if (st.last && st.page > st.last) st.done = true;
 
-  /* ── 落盘：只写当前那一片 + tid 表，成本与年份总量无关 ── */
-  pipe('encode', 'i', attached);
+  /* ── 认排队的条目 ──
+     极限模式：这一轮没抓列表（冷却 / 排队太长 / 全部年份已完成），或者浏览器没有认定工可用（solo），
+     这一轮的子请求就闲着 —— 拿来认一批；浏览器那边正在认的跳过。普通模式：用剩下的 TMDB 额度。 */
+  const fly = new Set(reqKeys);
+  if (turbo && Array.isArray(opt.fly)) for (const k of opt.fly.slice(0, 3000)) if (keyOk(k)) fly.add(k);
+  let drained = null;
+  if (queueMode){
+    if (!opt.flush && (opt.solo || pagesPlan === 0))
+      drained = await drainWait(env, X, { max: TC.group, over, skip: fly, target });
+  } else if (!budgetHit && !over() && calls < tmdbMax){
+    drained = await drainWait(env, X, { max: tmdbMax - calls, over, skip: turbo ? fly : null, target });
+  }
+  if (drained && drained.budgetHit) budgetHit = 1;
+
+  /* ── 游标：只为真正没进队列的那几组往回拨（极限模式下只有队列满了才会发生） ── */
+  const pending = todo.length - processed;
+  if (st){
+    if ((pending > 0 || (rateHit && !queueMode)) && advanced > 0){
+      const back = (rateHit && !queueMode) ? advanced : Math.min(advanced, Math.max(1, Math.ceil(pending / 28)));
+      st.page = Math.max(1, st.page + advanced - back);
+      st.done = false;
+    } else {
+      st.page = Math.max(1, st.page + advanced);
+    }
+    if (st.last && st.page > st.last) st.done = true;
+  }
+
+  /* ── 落盘：只写各年份的当前那一片 + tid 表，成本与年份总量无关 ── */
+  const rowsIn = attached + appliedRows + (drained ? drained.rows : 0);
+  pipe('encode', 'i', rowsIn);
   const flushed = await ps.flush();
-  pipe('encode', 'o', attached);
+  pipe('encode', 'o', rowsIn);
   state.movies = Object.keys(movies.m).length;
   state.deaths = 0;                        // 跑完整一轮 → 降级归零
-  pipeSave(state, 'build', Date.now() - t0);
-  /* [v5.2 修复 5] 摘要自己把「入库 0」解释掉。
-     v5.1 的这一行只报新帖 / 入库 / 新片，认定那一段单开一条 trace，而且
-     calls 和 skipped 都是 0 时那条根本不打 —— 于是屏幕上只剩
-     「新帖 150 · 入库 0 · 新片 0」，看不出到底是没认出来、还是网络断了、
-     还是被跳过表挡住了。三个数一起摆出来，下次一眼就能定位。 */
-  const sum = target + ' 年 · 第 ' + st.page + ' 页 · 新帖 ' + fresh.length + ' · 入库 ' + attached +
-    ' · 新片 ' + matchedNew + ' · 认定 ' + calls + '/' + (todo.length + cached + skipped) + ' 组' +
-    (cached ? ' · 缓存 ' + cached : '') + (skipped ? ' · 认不出 ' + skipped : '') +
+  pipeSave(state, turbo ? 'turbo' : 'build', Date.now() - t0);
+  const waitN = waitLeft();
+  const fixedAll = matchedNew + applied + (drained ? drained.fixed : 0);
+  const missAll = skipped + appliedMiss + (drained ? drained.still : 0);
+  /* [v5.2 修复 5] 摘要自己把「入库 0」解释掉：新帖 / 入库 / 新片 / 认定 / 缓存 / 认不出 / 网络失败一起摆出来 */
+  const sum = (target ? target + ' 年 · 第 ' + st.page + ' 页 · ' : '排队认定 · ') + '新帖 ' + fresh.length + ' · 入库 ' + rowsIn +
+    ' · 新片 ' + fixedAll + (turbo ? ' · 极限（认回 ' + applied + ' · 排队 ' + waitN + '）' : ' · 认定 ' + calls + '/' + (todo.length + cached + skipped) + ' 组') +
+    (cached ? ' · 缓存 ' + cached : '') + (missAll ? ' · 认不出 ' + missAll : '') +
     (netFail ? ' · 网络失败 ' + netFail : '') + (pending > 0 ? ' · 待认 ' + pending : '') +
+    (backlog ? ' · 排队太长，先停抓' : '') + (full ? ' · 留底队列快满，改为当场认' : '') +
     ' · 子请求 ' + SUB.n + '/' + SUB.max +
     ' · ' + ((Date.now() - t0) / 1000).toFixed(1) + 's';
-  trace('index', sum, { lvl: rateHit || budgetHit || (fresh.length && !attached) ? 'warn' : 'info' });
-  if (calls || skipped || netFail)
-    trace('match', 'TMDB 认定 ' + calls + ' 组 · 认下 ' + matchedNew + ' 部 · 认不出 ' + skipped +
-      ' 组（已留底，可重试）· 命中缓存 ' + cached + (netFail ? ' · 网络失败 ' + netFail + ' 组' : ''),
+  trace('index', sum, { lvl: rateHit || budgetHit || (fresh.length && !rowsIn && !queuedN) ? 'warn' : 'info' });
+  if (calls || netFail || (drained && drained.calls))
+    trace('match', 'TMDB 认定 ' + (calls + (drained ? drained.calls : 0)) + ' 组 · 认下 ' + (matchedNew + (drained ? drained.fixed : 0)) +
+      ' 部 · 认不出 ' + (skipped + (drained ? drained.still : 0)) + ' 组（已留底，可重试）· 命中缓存 ' + cached +
+      (netFail ? ' · 网络失败 ' + netFail + ' 组（已排队，下轮再认）' : ''),
       { lvl: skipped > matchedNew || netFail ? 'warn' : 'info' });
-  /* 留底队列只增不减：先于提交写（掐在提交前，下一轮重爬时再并进去，不丢）。
+  /* 留底队列：新进来的条目必须先于提交写（掐在提交前，帖子行还在队列里，不丢）；
+     本轮写进分片的条目不在这里删（doneNow → state.pdone，下一轮才删）。
      写之前先核对锁：锁已经被接管的一轮不能拿自己那份旧队列盖掉别人刚写的 */
-  if (pendDirty){ if (lk) await lk.check(); await pendSave(env, pend, state); }
+  if (pendDirty){ if (lk) await lk.check(); await pendSave(env, pend, state, doneNow); }
+  else state.pend = pendStat(pend, doneNow);
+  pdoneSet(state, doneNow, !!pendDirty);
   eventsFlush(state, [{ at: Date.now(), ch: 'pipe', lvl: 'info', msg: sum }]);
   govSave(state);
   await commitIndex(env, lk, movies, state, { m0 });
 
-  return {
-    done: year ? !!st.done : BUILD_ORDER.every(y => state.years[y]?.done),
-    year: target, page: st.page, last: st.last, advanced,
-    fresh: fresh.length, attached, matchedNew, cached, skipped, pending,
-    tmdbCalls: calls, failed, rateHit, bad: st.bad.length,
+  const yearsDone = year ? !!(st && st.done) : BUILD_ORDER.every(y => state.years[y]?.done);
+  const out = {
+    /* 普通模式：排队的条目也认完才算完；极限模式由浏览器看 waitN 自己判断 */
+    done: turbo ? yearsDone : (yearsDone && !waitN),
+    year: target, page: st ? st.page : 0, last: st ? st.last : 0, advanced,
+    fresh: fresh.length, attached: rowsIn, matchedNew: fixedAll, cached, skipped: missAll, pending,
+    tmdbCalls: calls + (drained ? drained.calls : 0), failed, rateHit, bad: st ? st.bad.length : 0,
     sub: SUB.n, subMax: SUB.max, budgetHit, plan: PLAN.name,
     degraded: deaths, gap: GOV.gap, cooling: Math.ceil(govCoolLeft()/1000),
     ms: Date.now()-t0, movies: state.movies, rels: state.rels,
     parts: (flushed[0]||{}).parts || 0, part: (flushed[0]||{}).part || 0,
     retrained: flushed.filter(f=>f.retrain).map(f=>f.year),
+    turbo: turbo ? 1 : 0, waitN, queued: queuedN, drained: drained ? drained.fixed : 0,
   };
+  if (turbo){
+    out.ack = ack; out.rej = rej; out.defer = defer;
+    out.applied = applied; out.appliedMiss = appliedMiss;
+    out.need = waitKeys(pend, doneNow, fly, target).slice(0, TC.need).map(k => needOut(k, pend.q[k]));
+    out.pages = pagesPlan; out.backlog = backlog; out.full = full;
+    out.g = TC.group; out.h = TC.hits;
+    /* R2 对同一个对象的写入频率有硬限制：两轮的提交至少隔开一秒 */
+    out.wait = Math.max(0, 1000 - (Date.now() - t0));
+  }
+  return out;
 }
 
 /** 每日增量：只扫近三年前几页 */
@@ -3050,9 +3438,10 @@ async function diagnose(env){
        多少已经留底可以直接重试、多少是 v4 留下的、没有行的老账。 */
     const un = Object.keys(movies.u||{}).length;
     const pd = await pendLoad(env).catch(() => blankPend());
-    const ps2 = pendStat(pd);
-    const legacy = Math.max(0, un - ps2.n);
+    const ps2 = pendStat(pd, new Set(Array.isArray(state.pdone) ? state.pdone : []));
+    const legacy = Math.max(0, un - (ps2.n - ps2.wait));
     const bits = [];
+    if (ps2.wait) bits.push('极限模式排队待认 '+ps2.wait+' 组（帖子行已留底，下次建索引或定时任务会认完）');
     if (ps2.retry) bits.push('可直接重试 '+ps2.retry+' 组（帖子行已留底，不用重爬）');
     if (ps2.tv || ps2.pack) bits.push('剧集 / 合集等非电影 '+(ps2.tv+ps2.pack)+' 组（跳过是对的）');
     if (ps2.dead) bits.push('试满 '+PEND.tries+' 次仍认不出 '+ps2.dead+' 组');
@@ -3133,6 +3522,7 @@ async function repair(env, action, arg){
       const t0 = Date.now();
       const [{ movies, state, m0 }, pend] = await Promise.all([ loadForWrite(env), pendLoad(env) ]);
       parserMigrate(movies, pend);          // 解析器变了就把重试次数归零，别把老账判死
+      pendSync(pend, state);                // 已经写进分片、只是还没从队列里删的，不再认一遍（state.pdone 留着，下一轮建索引会清）
       const live = Object.keys(pend.q).filter(k =>
         !PEND_SKIP.has(pend.q[k].w) && (pend.q[k].n||0) < PEND.tries);
 
@@ -3157,16 +3547,7 @@ async function repair(env, action, arg){
          照抄一遍等于把同样的错再犯一次。拿原始标题用新解析器重切，
          切不出来才退回旧值；顺手把新键也记下来，认回来之后一并写进
          movies.k，下一轮建索引就能直接命中缓存，不用再认一次。 */
-      const groups = take.map(k => {
-        const e = pend.q[k];
-        const pt = e.t ? parseTitle(e.t) : null;
-        return { key: k,
-          cn: (pt && pt.cn) || e.cn,
-          latin: (pt && pt.latin) || e.la,
-          years: (pt && pt.years && pt.years.length) ? pt.years : (e.ys || []),
-          hint: e.y, title: e.t,
-          nkey: (pt && pt.cn) ? groupKey(pt) : k };
-      });
+      const groups = take.map(k => pendGroup(k, pend.q[k]));
 
       let res;
       try { res = await matchBatch(env, groups); }
@@ -3185,12 +3566,12 @@ async function repair(env, action, arg){
       for (const g of groups){
         const e = pend.q[g.key], r = res.get(g.key);
         if (r == null){ net++; continue; }                    // 网络失败：原样留着
-        if (r.miss){ e.n = (e.n||0) + 1; e.w = r.why || 'nohit'; still++; continue; }
+        if (r.miss){ e.n = (e.n||0) + 1; e.w = r.why || 'nohit'; if (e.r.length > PEND.rows) e.r = e.r.slice(0, PEND.rows); still++; continue; }
         const id = r.hit.id;
         movies.k[g.key] = id;
         if (g.nkey && g.nkey !== g.key) movies.k[g.nkey] = id;
         if (!movies.m[id]) movies.m[id] = newMovie(r.hit, e.y);
-        rows += await ps.push(e.y, movies, id, e.r.map(x => ({ tid:x[0], title:x[1] })));
+        for (const [yy, rr] of pendRowsByYear(e)) rows += await ps.push(yy, movies, id, rr);
         delete pend.q[g.key]; delete movies.u[g.key];
         if (g.nkey) delete movies.u[g.nkey];
         if (won.length < 5) won.push((r.hit.title || e.t || '').slice(0, 26) + '←' + (r.via||''));
@@ -3634,43 +4015,100 @@ const pendLoad = async (env) => {
   catch (e){ if (!e.corrupt) throw e; trace('sys', '留底队列损坏，按空队列处理', { lvl:'err' }); }
   return (d && d.q && typeof d.q === 'object') ? d : blankPend();
 };
+/**
+ * 进留底队列。返回 false = 队列已满、没放进去（调用方要知道：极限模式靠它决定游标能不能往前推）。
+ * [v6.2] why='wait' 是极限模式「还没认、等认定工」的条目：帖子行要全留（上限与一部片的行数上限相同），
+ * 认下来要整组写进分片；认不出的条目照旧只留 PEND.rows 行。
+ */
 function pendAdd(doc, g, y, why){
-  const n = Object.keys(doc.q).length;
   let e = doc.q[g.key];
   if (!e){
-    if (n >= PEND.cap) return;
+    if (Object.keys(doc.q).length >= PEND.cap) return false;
     e = doc.q[g.key] = { cn:g.cn, la:g.latin||'', ys:g.years||[], y, t:'', r:[], n:0, w:why };
   }
   e.w = why; e.y = y;
   if (!e.t) e.t = String((g.rows && g.rows[0] && g.rows[0].title) || g.cn || '').slice(0, 90);
+  const cap = why === 'wait' ? ROWS_PER_MOVIE : PEND.rows;
   const have = new Set(e.r.map(x => x[0]));
   for (const row of (g.rows || [])){
     const tid = Number(row.tid);
-    if (!tid || have.has(tid) || e.r.length >= PEND.rows) continue;
-    e.r.push([tid, String(row.title||'').slice(0, 160)]);
+    if (!tid || have.has(tid) || e.r.length >= cap) continue;
+    /* [v6.2] 每行带上自己的年份：同名同原名的两部片（重拍）共用一个键，两年的帖子会并进同一条，
+       写回分片时必须各回各的年份 —— 否则另一年的增量扫描看不到它、再挂一遍，就重复了 */
+    e.r.push([tid, String(row.title||'').slice(0, 160), y]);
     have.add(tid);
   }
+  return true;
 }
-/** 队列摘要写进 state，前端和体检就不用每次再读一遍 R2 */
-function pendStat(doc){
+/** 留底条目的帖子行按年份分组（老条目没有逐行年份，算在条目的年份上）。年份不属于这个源的丢掉 */
+function pendRowsByYear(e){
+  const out = new Map();
+  for (const x of e.r || []){
+    const y = Number(x[2] || e.y);
+    if (!YEARS[y]) continue;
+    if (!out.has(y)) out.set(y, []);
+    out.get(y).push({ tid: x[0], title: x[1] });
+  }
+  return out;
+}
+/** 队列摘要写进 state，前端和体检就不用每次再读一遍 R2。skip：这一轮已经写进分片、只是还没删的键 */
+function pendStat(doc, skip){
   const ks = Object.keys(doc.q);
-  let tv = 0, pack = 0, dead = 0, retry = 0;
+  let tv = 0, pack = 0, dead = 0, retry = 0, wait = 0, n = 0;
   const sample = [];
   for (const k of ks){
+    if (skip && skip.has(k)) continue;
+    n++;
     const e = doc.q[k];
-    if (e.w === 'tv' || e.w === 'other') tv++;    // 本来就不属于这个源
+    if (e.w === 'wait') wait++;                   // 极限模式排队等认定，不算「认不出」
+    else if (e.w === 'tv' || e.w === 'other') tv++;    // 本来就不属于这个源
     else if (e.w === 'pack') pack++;
     else if ((e.n||0) >= PEND.tries) dead++;
     else { retry++; if (sample.length < 8 && e.t) sample.push(e.t); }
   }
-  return { n: ks.length, tv, pack, dead, retry, sample, at: Date.now() };
+  return { n, tv, pack, dead, retry, wait, sample, at: Date.now() };
 }
-async function pendSave(env, doc, state){
+async function pendSave(env, doc, state, skip){
   doc.at = Date.now();
-  const st = pendStat(doc);
+  const st = pendStat(doc, skip);
   if (state) state.pend = st;
   await r2put(env, PEND.key, doc);
   return st;
+}
+/**
+ * [v6.2] 留底条目的「延迟删除」。
+ * 认下来的条目写进分片之后不能当场从队列里删：队列先于提交写，掐在两次写之间，
+ * 这些帖子就既不在队列里、也不在索引里。所以只记进 state.pdone，跟着 state.json 一起提交；
+ * 下一个读到这份 state 的持锁任务把它们从队列里删掉 —— 那次写队列成功之后 pdone 才清空。
+ * 返回 true = 删掉了东西（调用方要把队列写回去）。
+ */
+function pendSync(pend, state){
+  const d = state && Array.isArray(state.pdone) ? state.pdone : null;
+  if (!d || !d.length) return false;
+  let n = 0;
+  for (const k of d) if (pend.q[k]){ delete pend.q[k]; n++; }
+  return n > 0 || d.length > 0;
+}
+/** 提交前定 state.pdone：这一轮写过队列（已经不含旧的 pdone）就只留本轮的；没写过就并起来 */
+function pdoneSet(state, doneNow, pendWritten){
+  const cur = pendWritten ? [] : (Array.isArray(state.pdone) ? state.pdone : []);
+  const all = [...new Set(cur.concat([...doneNow]))];
+  if (all.length) state.pdone = all; else delete state.pdone;
+}
+/* 认不出的原因只认这几种（浏览器交回来的结果要过这道） */
+const PEND_WHY = new Set(['nohit', 'tv', 'pack', 'other']);
+/**
+ * 留底条目 → 认定用的一组。留底里的 cn / latin 是当初那个解析器切出来的 ——
+ * 拿原始标题用新解析器重切，切不出来才退回旧值；nkey 是新解析器下的键，认回来之后一并记进 movies.k。
+ */
+function pendGroup(k, e){
+  const pt = e.t ? parseTitle(e.t) : null;
+  return { key: k,
+    cn: (pt && pt.cn) || e.cn,
+    latin: (pt && pt.latin) || e.la || '',
+    years: (pt && pt.years && pt.years.length) ? pt.years : (e.ys || []),
+    hint: e.y, title: e.t,
+    nkey: (pt && pt.cn) ? groupKey(pt) : k };
 }
 
 /** 读成品；A/list.json 还没有时，用 v4 的模糊键表垫一下，不至于突然不过滤 */
@@ -4643,7 +5081,11 @@ async function cronOne(env){
   const allDone = BUILD_ORDER.every(y => st.years?.[y]?.done);
   /* 一步失败不连累后面：增量 / 补建出错（锁忙、限速）照样做片库对照与日常维护 */
   try {
-    if (allDone) await incremental(env);
+    if (allDone){
+      await incremental(env);
+      /* [v6.2] 极限模式没认完就关了页面：排队的条目由定时任务接着认（普通模式那一轮会先认它们） */
+      if ((st.pend && st.pend.wait) && subLeft() > 16) await buildChunk(env);
+    }
     else { await incremental(env, 2); await buildChunk(env); }
   } catch (e){ trace('cron', SRC.name + ' 增量 / 补建：' + (e.message || e), { lvl: e.busy ? 'info' : 'warn' }); }
   /* 片库对照放在最后，用剩下的预算。总账模式下这一步是两个子请求
@@ -4907,6 +5349,8 @@ export default {
           resync: st.resync ? st.resync.at : 0,
           partSize: PART_ROWS,
           plan: { name: pl.name, sub: pl.sub, hard: pl.hard, pages: pl.pages, tmdb: pl.tmdb },
+          turbo: (() => { const tc = pl.name === 'paid' ? TURBO_PAID : TURBO_FREE;
+            return { on: turboOn(env), pages: tc.pages, conc: tc.conc, group: tc.group }; })(),
           pend: st.pend || null,
           pipe: st.pipe || null, pipes: st.pipes || [],
           stageNames: PIPE_NAME,
@@ -4924,11 +5368,29 @@ export default {
         });
       }
       if (p==='/api/build'){
+        /* [v6.2] 极限模式：POST 带上浏览器攒下的认定结果（hits）、正在认的键（fly）。
+           服务端 TURBO=0 时照普通模式跑一轮，回 turbo:0，前端据此退回普通模式 */
+        const turbo = Q.get('turbo') === '1' && turboOn(env);
+        let body = null;
+        if (turbo && request.method === 'POST') body = await request.json().catch(() => null);
         return json(await buildChunk(env, {
           pages: Number(Q.get('pages')||0) || 0,
           tmdbMax: Number(Q.get('tmdb')||0) || 0,
           year: Q.get('year')||null,
+          turbo,
+          hits: body && Array.isArray(body.hits) ? body.hits : null,
+          fly: body && Array.isArray(body.fly) ? body.fly : null,
+          solo: !!(body && body.solo),
+          flush: turbo && Q.get('pages') === '0',
         }));
+      }
+      /* [v6.2] 认定工：不持锁、不写 R2，自带一整份子请求配额 */
+      if (p==='/api/tm'){
+        if (!turboOn(env)) return json({ error:'极限模式已在服务端关闭（TURBO=0）', off:1 }, 403);
+        if (request.method !== 'POST') return json({ error:'请用 POST' }, 405);
+        const body = await request.json().catch(() => null);
+        if (!body || !Array.isArray(body.g)) return json({ error:'没有要认定的条目' }, 400);
+        return json(await turboMatch(env, body.g));
       }
       if (p==='/api/incremental') return json(await incremental(env, Number(Q.get('pages')||0)));
       if (p==='/api/diagnose')    return json(await diagnose(env));
@@ -5852,6 +6314,45 @@ body:has(#dock.up) #toast{bottom:calc(env(safe-area-inset-bottom) + 92px)}
   #nav,#dock{box-shadow:0 8px 26px rgba(18,18,28,.10),inset 0 0 0 1px rgba(20,20,30,.4)}
   .card,.chips button,.btn,.field,.icb,.ftog{--line:oklch(0.822 0.008 286.2)}
 }
+/* ── 极限模式开关：Transfer 的 Liquid Glass 开关（几何全由 --tw / --th 推导，只改这两个值） ──
+   thumb 在过渡中液化成透镜：膨胀 → 背景模糊上来、白色填充退去 → 折射环与高光浮现，落定后固化回实心。
+   开态的轨道从左侧生长成墨色（交互重点色），边界始终藏在透镜下面。深色模式下墨色是近白，
+   thumb 跟着反成深色（与 .btn.on 的反相一致）。 */
+.trow{display:flex;align-items:center;gap:14px;margin-top:16px;padding:12px 14px 12px 16px;
+  border-radius:var(--r-in);background:var(--sf2)}
+.trow .tl{flex:1;min-width:0}
+.trow .tl b{display:block;font-size:.9375rem;font-weight:var(--fw-s);letter-spacing:var(--tr-b);color:var(--t1)}
+.trow .tl em{display:block;font-style:normal;font-size:.78125rem;letter-spacing:var(--tr-s);color:var(--t2);
+  margin-top:3px;line-height:var(--lh-h)}
+.trow .tl em.live{color:var(--act);font-variant-numeric:tabular-nums}
+.lg{--tw:58px;--th:32px;
+  --inset:calc(var(--th) * .094);--thw:calc(var(--tw) * .536);--thh:calc(var(--th) - var(--inset) * 2);
+  --gp:0px;--b:0px;--a:1;--sh:0;
+  --gray:oklch(0.945 0.002 286.3);--g-vivid:var(--ink);--g-soft:oklch(0.62 0.006 286.1);--knob:255,255,255;
+  position:relative;flex:none;width:var(--tw);height:var(--th);border:0;padding:0;background:none;cursor:pointer;
+  border-radius:999px;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+.lg::before{content:'';position:absolute;inset:-6px -4px}           /* 命中区撑到 44 */
+.lg .track{position:absolute;inset:0;border-radius:999px;box-shadow:inset 0 0 0 1px rgba(20,20,30,.075);
+  background:linear-gradient(90deg,var(--g-vivid) 0px,var(--g-vivid) calc(var(--gp) - 15px),
+    var(--g-soft) calc(var(--gp) - 3px),var(--gray) calc(var(--gp) + 9px),var(--gray) 100%)}
+.lg .lens{position:absolute;left:0;top:0;z-index:1;width:var(--thw);height:var(--thh);border-radius:999px;
+  background:rgba(var(--knob),var(--a));
+  -webkit-backdrop-filter:blur(var(--b)) saturate(calc(1 + .55 * var(--sh))) brightness(calc(1 + .04 * var(--sh)));
+  backdrop-filter:blur(var(--b)) saturate(calc(1 + .55 * var(--sh))) brightness(calc(1 + .04 * var(--sh)));
+  box-shadow:0 calc(1px + 11px * var(--sh)) calc(3px + 26px * var(--sh)) rgba(20,20,26,calc(.09 + .17 * var(--sh))),
+    inset 0 0 0 1px rgba(0,0,0,calc(.075 - .055 * var(--sh)))}
+.lg .lens::before{content:'';position:absolute;inset:0;border-radius:inherit;opacity:var(--sh);
+  background:linear-gradient(180deg,rgba(255,255,255,.80) 0%,rgba(255,255,255,.16) 26%,
+    rgba(255,255,255,0) 52%,rgba(255,255,255,.10) 82%,rgba(255,255,255,.42) 100%)}
+.lg .lens::after{content:'';position:absolute;inset:0;border-radius:inherit;opacity:var(--sh);
+  box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.78),inset 0 0 0 2.5px rgba(150,170,200,.16),
+    inset 0 0 calc(7px + 13px * var(--sh)) rgba(255,255,255,.40)}
+.lg:disabled{cursor:default;opacity:.42}
+.lg:focus-visible{outline:2px solid var(--ac);outline-offset:3px}
+@media (prefers-color-scheme:dark){ html:not([data-theme="light"]) .lg{--gray:rgba(255,255,255,.16);--g-soft:rgba(255,255,255,.55);--knob:28,28,31} }
+html[data-theme="dark"] .lg{--gray:rgba(255,255,255,.16);--g-soft:rgba(255,255,255,.55);--knob:28,28,31}
+@media (prefers-reduced-transparency:reduce){ .lg .lens{-webkit-backdrop-filter:none;backdrop-filter:none} }
+@media (prefers-contrast:more){ .lg .track{box-shadow:inset 0 0 0 1px rgba(20,20,30,.4)} }
 .fade{animation:fi var(--t-l) var(--e-out) both}
 @keyframes fi{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
 /* ── 无障碍：三个彼此独立的信号，分别处理 ──
@@ -6894,7 +7395,7 @@ function api(u, opt){
   var h = { 'x-gate': GATE };
   if (opt.body) h['content-type'] = 'application/json';
   var url = u + (u.indexOf('?') < 0 ? '?' : '&') + 'gate=' + encodeURIComponent(GATE)
-          + '&src=' + encodeURIComponent(S.src);
+          + '&src=' + encodeURIComponent(opt.src || S.src);
   var ac = (typeof AbortController !== 'undefined') ? new AbortController() : null;
   var ms = opt.timeout || (HEAVY_API.test(u) ? API_T.heavy : API_T.light);
   var timer = ac ? setTimeout(function(){ ac.abort(); }, ms) : null;
@@ -7852,9 +8353,12 @@ function sparkHTML(st){
 }
 /* 一句话状态：正在跑 / 冷却 / 待建 / 已建完 */
 function sysLine(st){
-  if (RUN.on) return '<span class="dot live"></span><b>' + (RUN.mode === 'inc' ? '正在抓取新片' : '正在建立索引') + '</b>';
+  if (RUN.on) return '<span class="dot live"></span><b>' + (RUN.mode === 'inc' ? '正在抓取新片' : '正在建立索引') + '</b>'
+    + (RUN.mode === 'turbo' ? ' · 极限模式' : '');
   if (st.cooling) return '<span class="dot warn"></span><b>论坛限速冷却中</b>，还需 ' + st.cooling + ' 秒';
   if (st.busy) return '<span class="dot warn"></span><b>后台任务运行中</b>，约 ' + st.lockLeft + ' 秒后空闲';
+  var wn = (st.pend && st.pend.wait) || 0;
+  if (st.done && wn) return '<span class="dot"></span><b>列表已抓完</b>，还有 ' + wn + ' 组在排队认定，点「继续建立索引」认完';
   if (st.done) return '<span class="dot ok"></span><b>索引已建完</b>' + (st.at ? '，更新于 ' + since(st.at) : '');
   var left = st.years.filter(function(y){ return !y.done; }).length;
   return '<span class="dot"></span><b>还有 ' + left + ' 个年份没建完</b>，任务会分轮进行，可以随时停';
@@ -7893,9 +8397,16 @@ function renderIndex(){
   if (st.deaths)
     h += '<div class="warnbox" id="warndeath">上一轮任务被中断 ' + st.deaths + ' 次，已自动把每轮批量降到 1/'
       + Math.pow(2, Math.min(4, st.deaths)) + '。跑完一轮会自动恢复。</div>';
+  /* 极限模式开关：默认开；跑任务时锁住（一次任务只用一种模式），服务端 TURBO=0 时灰掉 */
+  var tOn = turboWanted(), tSrv = turboServerOn();
+  h += '<div class="trow"><div class="tl"><b>极限模式</b><em id="tdesc"' + (RUN.on && TURBO_LIVE ? ' class="live"' : '') + '>'
+    + esc(RUN.on && TURBO_LIVE ? turboLiveText(TURBO_LIVE) : turboDesc()) + '</em></div>'
+    + '<button class="lg" type="button" id="turbo" role="switch" aria-checked="' + (tOn ? 'true' : 'false') + '" aria-label="极限模式"'
+    + (RUN.on || !tSrv ? ' disabled' : '') + '><span class="track"></span><span class="lens"></span></button></div>';
+  var allDone = st.done && !((st.pend && st.pend.wait) || 0);
   h += '<div class="row" style="margin-top:16px">'
     + (RUN.on ? '<button class="btn fixed" id="stop">停止</button>'
-      : (st.done
+      : (allDone
           ? '<button class="btn on" id="inc">抓取新片</button>'
           : '<button class="btn on" id="cont">继续建立索引</button><button class="btn" id="inc">抓取新片</button>'))
     + '</div>';
@@ -7906,7 +8417,7 @@ function renderIndex(){
 
   /* ② 管线 */
   h += dxHTML('pipe', '管线',
-    '<span class="sub">' + (p.at ? (p.kind === 'incremental' ? '增量' : '建索引') + ' · ' + since(p.at)
+    '<span class="sub">' + (p.at ? (p.kind === 'incremental' ? '增量' : (p.kind === 'turbo' ? '极限' : '建索引')) + ' · ' + since(p.at)
         + ' · ' + ((p.ms || 0) / 1000).toFixed(1) + 's' : '还没跑过') + '</span>',
     flowHTML(st)
     + '<div class="quota"><span>子请求</span><div class="bar2" id="q-bar"><i class="'
@@ -7916,7 +8427,7 @@ function renderIndex(){
     + sparkHTML(st)
     + '<div class="dl-meta" style="margin-top:12px">'
       + '<span>计划 <i>' + esc(st.plan.name) + '</i></span>'
-      + '<span>单轮 <i class="num">' + st.plan.pages + '</i> 页 / <i class="num">' + st.plan.tmdb + '</i> 次 TMDB</span>'
+      + '<span id="k-plan">' + planMetaHTML(st) + '</span>'
       + '<span>单片 <i class="num">' + st.partSize + '</i> 行</span>'
       + '<span>请求间隔 <i class="num" id="k-gap">' + (st.gap || 0) + '</i> ms</span>'
       + '<span>本机 <i>' + esc(PERF.label()) + '</i></span></div>');
@@ -7929,6 +8440,14 @@ function renderIndex(){
   h += unmatchedHTML(st);
   h += libPanelHTML();
   ip.innerHTML = h;
+  var tg = document.getElementById('turbo');
+  if (tg) makeToggle(tg, function(on){
+    TURBO_ON = on;
+    try { localStorage.setItem('cvturbo', on ? '1' : '0'); } catch(e){}
+    turboTick(null);
+    var km = document.getElementById('k-plan');
+    if (km) km.innerHTML = planMetaHTML(S.st);     // 只改这一处文字：整卡重画会把正在走的开关动画打断
+  }).set(tOn, true);
 
   [].forEach.call(ip.querySelectorAll('.yr'), function(d){
     d.onclick = function(){ if (RUN.on){ toast('有任务在跑，先停止'); return; } runBuild(+d.dataset.y); };
@@ -8010,15 +8529,23 @@ function patchIndex(){
   if (ysub) ysub.textContent = yd + ' / ' + st.years.length + ' 完成';
   return true;
 }
+function planMetaHTML(st){
+  return turboWanted() && st.turbo
+    ? '极限 <i class="num">' + st.turbo.pages + '</i> 页 / 轮 · 认定工 <i class="num">' + st.turbo.group + '</i> 组 / 路'
+    : '单轮 <i class="num">' + st.plan.pages + '</i> 页 / <i class="num">' + st.plan.tmdb + '</i> 次 TMDB';
+}
 /* 未匹配片名：把一个数字拆成"能修的 / 不用修的 / 修不了的" */
 function unmatchedHTML(st){
   var p = st.pend;
   if (!p || !p.n) return '';
+  var wn = p.wait || 0;
   var body = '<div class="kpi">'
     + '<div><b class="num">' + p.retry + '</b><em>可重试</em></div>'
     + '<div><b class="num">' + (p.tv + p.pack) + '</b><em>非电影</em></div>'
     + '<div><b class="num">' + p.dead + '</b><em>反复认不出</em></div>'
-    + '<div><b class="num">' + p.n + '</b><em>留底总数</em></div></div>'
+    + '<div><b class="num">' + (wn ? wn : p.n) + '</b><em>' + (wn ? '排队待认' : '留底总数') + '</em></div></div>'
+    + (wn ? '<p class="fine" style="margin-top:12px">排队待认的 ' + wn + ' 组是极限模式抓下来、还没轮到认定的，'
+        + '帖子行都在留底里；接着建索引（或每天的定时任务）会认完，不算认不出。</p>' : '')
     + '<p class="fine" style="margin-top:12px">'
     + '认不出来的那一组，帖子行也一起留着了 —— 重试是直接从留底里认，不用把列表页重爬一遍。'
     + '剧集 / 合集本来就不在 TMDB 电影库里，跳过是对的。</p>';
@@ -8031,8 +8558,9 @@ function unmatchedHTML(st){
     + '重试匹配' + (p.retry ? ' ' + p.retry + ' 组' : '') + '</button>'
     + '<button class="btn fixed" id="urescan">重扫未匹配</button></div>'
     + '<p class="fine" style="margin-top:8px">'
-    + '「重扫未匹配」是给 v4 时期留下的老账用的：那会儿认不出来的帖子行没留底，'
-    + '得把年份游标倒回第 1 页重走一遍。已入库的帖子会被跳过，不会重复抓。</p>';
+    + '「重扫未匹配」把年份游标倒回第 1 页重走一遍，已入库的帖子会被跳过、不会重复抓，只补漏掉的：'
+    + 'v4 时期认不出来、没留底的老账，以及 v6.1 及更早版本一轮认不完时漏掉的帖子。'
+    + '升级到 v6.2 之后建议跑一次（极限模式下几分钟就走完）。</p>';
   return dxHTML('pend', '未匹配片名',
     (p.retry ? '<span class="pill warn">' + p.retry + ' 组可重试</span>' : '<span class="sub">' + p.n + ' 条留底</span>'),
     body);
@@ -8239,6 +8767,304 @@ function applyProgress(r){
   S.st.at = Date.now();
   if (!patchIndex()) renderIndex();
 }
+/*<turbo>*/
+/* ══════════════════════════════════════════════════════════════════
+   极限模式调度（浏览器这一侧）
+   ──────────────────────────────────────────────────────────────────
+   一条扫描线（/api/build?turbo=1：持锁、一轮接一轮、只抓列表）+ 几路认定工
+   （/api/tm：并发、不持锁、各自一整份子请求配额）。认定工的结果先攒在这里，
+   随下一轮扫描交上去写进分片。
+     · 并发 AIMD：连着两批顺利就 +1（上限 6 路）；挨了 429、或一批里三成以上没回来，
+       就减半并歇 2.5 秒；
+     · 没回来的键 15 秒内不再派（服务端下一轮还会把它列进 need，不会漏）；
+     · 列表抓完（或排队太长先停抓）之后，扫描线等认定结果攒够了才发下一轮 ——
+       没东西可写的轮次只是白写一遍 R2；
+     · 停止：不再派新活，等手上的认定工回来（最多 8 秒），把攒着的结果交上去
+       （pages=0 的收尾轮）再停。没交上去的也不丢：条目一直在服务端的留底队列里。
+   这一段不碰 DOM，依赖全部从 o 传进来 —— 测试里拿真 Worker 跑的就是这一份代码。
+   ══════════════════════════════════════════════════════════════════ */
+function turboRun(o){
+  var T = { K: 3, KMAX: 6, G: 20, H: 240, act: 0, q: [], inQ: {}, fly: {}, nfly: 0, hits: {}, nhits: 0,
+            later: {}, pause: 0, okRun: 0, rounds: 0, idle: 0, off: false, ended: false, stopping: false,
+            stopAt: 0, flushN: 0, matched: 0, missed: 0, waitN: 0, roundOn: false, waitHits: false, since: 0,
+            busyN: 0, errN: 0, autoReset: 0 };
+  var now = o.now || function(){ return Date.now(); };
+  var say = o.say || function(){};
+  function stat(){
+    return { K: T.K, act: T.act, fly: T.nfly, queue: T.q.length, hits: T.nhits, matched: T.matched,
+             missed: T.missed, rounds: T.rounds, waitN: T.waitN, off: T.off };
+  }
+  function tick(){ if (o.tick) o.tick(stat()); }
+  function end(msg, bad){ if (T.ended) return; T.ended = true; T.waitHits = false; o.done(msg, bad, stat()); }
+  function stopped(){ return !!(o.stopped && o.stopped()); }
+
+  function enqueue(list){
+    if (T.off) return;                   // 没有认定工可用：键不在这边扣着，服务端的扫描轮自己认
+    var t = now();
+    for (var i = 0; i < (list || []).length; i++){
+      var g = list[i];
+      if (!g || typeof g.k !== 'string') continue;
+      var k = g.k;
+      if (T.inQ[k] || T.fly[k] || T.hits[k] || (T.later[k] && T.later[k] > t)) continue;
+      T.inQ[k] = 1; T.q.push(g);
+    }
+  }
+  function pump(){
+    if (T.off || T.stopping || T.ended || stopped()) return;
+    var t = now();
+    if (t < T.pause){ o.later(pump, T.pause - t + 5); return; }
+    while (T.act < T.K && T.q.length) fire(T.q.splice(0, T.G));
+  }
+  function fire(batch){
+    for (var i = 0; i < batch.length; i++){ delete T.inQ[batch[i].k]; T.fly[batch[i].k] = 1; T.nfly++; }
+    T.act++;
+    o.api('/api/tm', { method: 'POST', body: JSON.stringify({ g: batch }) }).then(function(r){
+      var t = now(), nul = 0;
+      for (var i = 0; i < batch.length; i++){
+        var k = batch[i].k, v = r && r.r ? r.r[k] : null;
+        if (T.fly[k]){ delete T.fly[k]; T.nfly--; }
+        if (v && (v.h || typeof v.m === 'string')){
+          if (!T.hits[k]){ T.hits[k] = v; T.nhits++; }
+          if (v.h) T.matched++; else T.missed++;
+        } else { nul++; T.later[k] = t + 15000; }
+      }
+      if (r && r.g) T.G = r.g;
+      if ((r && r.n429) || nul * 3 > batch.length){ T.K = Math.max(1, T.K >> 1); T.pause = t + 2500; T.okRun = 0; }
+      else if (++T.okRun >= 2){ T.K = Math.min(T.KMAX, T.K + 1); T.okRun = 0; }
+    }, function(e){
+      var t = now();
+      for (var i = 0; i < batch.length; i++){
+        var k = batch[i].k;
+        if (T.fly[k]){ delete T.fly[k]; T.nfly--; }
+        T.later[k] = t + 10000;
+      }
+      if (e && e.status === 403 && e.data && e.data.off){
+        if (!T.off) say('服务端关掉了认定工（TURBO=0），改由扫描轮自己认');
+        T.off = true;
+        for (var j = 0; j < T.q.length; j++) delete T.inQ[T.q[j].k];
+        T.q.length = 0;
+      } else { T.K = Math.max(1, T.K >> 1); T.pause = t + 3000; T.okRun = 0; }
+    }).then(fin, fin);
+    function fin(){ T.act--; tick(); kick(); pump(); }
+  }
+
+  /* 扫描线的节拍：needHits = 这一轮没抓列表，下一轮等认定结果攒够（40 条）、或手上没活了、或 4 秒到了再发 */
+  function ready(){
+    return stopped() || T.nhits >= Math.min(T.H, 40) || (!T.nfly && !T.q.length && !T.act) || now() - T.since > 4000;
+  }
+  function next(ms, needHits){
+    if (T.ended) return;
+    if (!needHits){ o.later(round, ms || 0); return; }
+    T.waitHits = true; T.since = now();
+    o.later(poll, Math.max(250, ms || 0));
+  }
+  function poll(){
+    if (!T.waitHits || T.ended) return;
+    if (ready()){ T.waitHits = false; round(); } else o.later(poll, 250);
+  }
+  function kick(){ if (T.waitHits && !T.ended && ready()){ T.waitHits = false; round(); } }
+
+  function round(){
+    if (T.ended || T.roundOn) return;
+    if (stopped() && !T.stopping){ T.stopping = true; T.stopAt = now(); }
+    if (T.stopping){
+      if (T.nfly && now() - T.stopAt < 8000){ o.later(round, 300); return; }
+      if (!T.nhits) return end('已停止，进度已保存');
+    }
+    T.roundOn = true;
+    var hk = Object.keys(T.hits).slice(0, T.H), hits = [];
+    for (var i = 0; i < hk.length; i++) hits.push([hk[i], T.hits[hk[i]]]);
+    var fly = Object.keys(T.fly).concat(Object.keys(T.inQ));
+    if (fly.length > 3000) fly.length = 3000;
+    var url = '/api/build?turbo=1' + (o.year ? '&year=' + o.year : '') + (T.stopping ? '&pages=0' : '');
+    o.api(url, { method: 'POST', body: JSON.stringify({ hits: hits, fly: fly, solo: T.off ? 1 : 0 }) }).then(function(r){
+      T.roundOn = false;
+      try { onRound(r); } catch (x){ end('调度出错：' + (x && x.message || x), 1); }
+    }, function(e){ T.roundOn = false; onErr(e); });
+  }
+  function onRound(r){
+      T.rounds++; T.busyN = 0; T.errN = 0;
+      if (r.turbo === 0){ T.ended = true; if (o.fallback) o.fallback(r); else o.done('服务端关闭了极限模式', 1, stat()); return; }
+      var gone = (r.ack || []).concat(r.rej || []);
+      for (var i = 0; i < gone.length; i++) if (T.hits[gone[i]]){ delete T.hits[gone[i]]; T.nhits--; }
+      for (i = 0; i < (r.rej || []).length; i++) T.later[r.rej[i]] = now() + 15000;
+      if (r.g) T.G = r.g;
+      if (r.h) T.H = r.h;
+      T.waitN = r.waitN || 0;
+      enqueue(r.need);
+      pump();
+      if (o.progress) o.progress(r, stat());
+      if (T.stopping){
+        if (T.nhits && ++T.flushN < 3) return next(r.wait || 600, false);
+        return end('已停止，进度已保存');
+      }
+      var moved = (r.attached || 0) + (r.applied || 0) + (r.appliedMiss || 0) + (r.queued || 0) + (r.advanced || 0) + (r.drained || 0);
+      if (moved || T.nfly || T.nhits || T.q.length || T.act || r.cooling || r.rateHit || r.budgetHit) T.idle = 0;
+      else if (++T.idle >= 4) return end('连续 4 轮没有进展，先停下' + (T.waitN ? '（还有 ' + T.waitN + ' 组在排队，下次会接着认）' : ''), T.waitN > 0);
+      if (r.done && !T.waitN && !T.nhits && !T.nfly && !T.q.length && !T.act) return end('完成');
+      if (r.cooling && !T.nhits && !T.nfly && !T.q.length && !T.act)
+        return next(Math.max(r.wait || 0, r.cooling * 1000 + 800), false);
+      next(r.wait || 0, !!(r.done || r.backlog || !r.pages));
+  }
+
+  /* 出错的那一轮交上去的结果没被确认，留在手上下一轮再交（服务端写入是幂等的） */
+  function onErr(e){
+    var d = (e && e.data) || {};
+    if (d.busy){
+      if (++T.busyN > 20){ say('等待超时，自动重置任务锁后再试', 1); return resetGo(); }
+      say('后台任务运行中，' + (d.wait || 3) + ' 秒后重试（第 ' + T.busyN + ' 次）');
+      return next((d.wait || 3) * 1000 + 700, false);
+    }
+    if (d.budget){ say('本轮子请求配额用尽，已保存进度，继续下一轮'); return next(600, false); }
+    if (d.cooling || e.status === 429){
+      var sec = d.cooling || 10;
+      say('被论坛限速，冷却 ' + sec + ' 秒'); return next(sec * 1000 + 800, false);
+    }
+    if (e.timeout || e.status === 524 || e.status === 504 || e.status === 503){
+      if (++T.errN > 6) return end('连续超时 6 次，先停下。稍后再点「继续建立索引」。', 1);
+      say('本轮超时（第 ' + T.errN + ' 次），服务端会自动降批量后重试');
+      return next(3000, false);
+    }
+    if (e.status === 0){
+      if (++T.errN > 6) return end('网络持续不可用，先停下。', 1);
+      say('网络不可用，5 秒后重试（第 ' + T.errN + ' 次）'); return next(5000, false);
+    }
+    if (!T.autoReset && /空响应|限速|拦截|不是 JSON/.test(e.message || '')){ T.autoReset = 1; return resetGo(); }
+    end(e.message || String(e), 1);
+  }
+  function resetGo(){
+    o.api('/api/repair?do=resetTask').then(function(){
+      say('已自动重置任务锁与降级计数，10 秒后继续'); T.busyN = 0; next(10000, false);
+    }, function(err){ end('自动重置失败：' + (err && err.message || err), 1); });
+  }
+
+  round();
+  return { stat: stat };
+}
+/*</turbo>*/
+
+/* ── 极限模式开关：Transfer 的 Liquid Glass 开关 ──
+   位置走几何弹簧（k=150 c=17.5 m=.85 → ζ≈0.78，过冲约 2%），材质走独立的 520ms 时钟。
+   弹簧定步长子迭代：60fps 直接积分时 ω0·dt≈0.22，欧拉法的数值阻尼会把这 2% 吃干净。 */
+function makeToggle(el, onchange){
+  var lens = el.querySelector('.lens');
+  function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+  function smooth(x){ x = clamp(x, 0, 1); return x * x * (3 - 2 * x); }
+  function smoothstep(a, b, x){ return smooth((x - a) / (b - a)); }
+  function easeOut(x){ return 1 - Math.pow(1 - clamp(x, 0, 1), 3); }
+  var PEAK = .26, K = 150, C = 17.5, M = .85, H = 1 / 240, DUR = 520;
+  /* 膨胀脉冲：起手极快涨满，中段撑住，末段才塌回去 */
+  function bulge(t){ return t < PEAK ? smooth(t / PEAK) : smooth(1 - Math.pow((t - PEAK) / (1 - PEAK), 1.7)); }
+  var s0 = 0, v = 0, target = 0, t0 = 0, raf = 0, last = 0, acc = 0, settled = true;
+  var TW = 0, TH, INSET, THW, THH, MAXW, cOff, cOn;
+  function measure(){
+    var cs = getComputedStyle(el);
+    TW = parseFloat(cs.width); TH = parseFloat(cs.height);
+    if (!TW) return false;
+    INSET = TH * .094; THW = TW * .536; THH = TH - INSET * 2;
+    MAXW = TW * .93; cOff = INSET + THW / 2; cOn = TW - INSET - THW / 2;
+    return true;
+  }
+  function render(){
+    if (!TW && !measure()) return;
+    var prog = easeOut(clamp((performance.now() - t0) / DUR, 0, 1));
+    var b = settled ? 0 : bulge(prog);
+    var cx = cOff + s0 * (cOn - cOff), lw = THW + b * (MAXW - THW), lh = THH * (1 + .36 * b);
+    lens.style.width = lw.toFixed(2) + 'px';
+    lens.style.height = lh.toFixed(2) + 'px';
+    lens.style.transform = 'translate3d(' + (cx - lw / 2).toFixed(2) + 'px,' + (INSET - (lh - THH) / 2).toFixed(2) + 'px,0)';
+    el.style.setProperty('--b', (b * 13).toFixed(2) + 'px');
+    el.style.setProperty('--a', (1 - b * .74).toFixed(3));
+    el.style.setProperty('--sh', b.toFixed(3));
+    el.style.setProperty('--gp', (-16 + smoothstep(.02, .62, s0) * (TW + 32)).toFixed(2) + 'px');
+  }
+  function frame(t){
+    acc += Math.min(.032, (t - last) / 1000); last = t;
+    while (acc >= H){ v += (-K * (s0 - target) - C * v) / M * H; s0 += v * H; acc -= H; }
+    render();
+    if (Math.abs(s0 - target) < .0015 && Math.abs(v) < .02 && t - t0 >= DUR){
+      s0 = target; v = 0; raf = 0; settled = true; render(); return;
+    }
+    raf = requestAnimationFrame(frame);
+  }
+  function apply(on, quiet){
+    target = on ? 1 : 0;
+    el.setAttribute('aria-checked', on ? 'true' : 'false');
+    if (quiet || PERF.reduce){                         // 初值 / 减少动效：直接落位，不跑弹簧
+      if (raf){ cancelAnimationFrame(raf); raf = 0; }
+      s0 = target; v = 0; settled = true; render(); return;
+    }
+    t0 = performance.now(); settled = false;
+    if (!raf){ last = performance.now(); acc = 0; raf = requestAnimationFrame(frame); }
+  }
+  el.addEventListener('click', function(){
+    if (el.disabled) return;
+    apply(target !== 1);
+    if (onchange) onchange(target === 1);
+  });
+  measure(); render();
+  return { set: function(on, quiet){ apply(on, quiet); } };
+}
+
+/* ── 极限模式：开关状态（本机记住）与运行时的那一行 ── */
+var TURBO_ON = (function(){ try { return localStorage.getItem('cvturbo') !== '0'; } catch(e){ return true; } })();
+var TURBO_LIVE = null;
+function turboServerOn(){ return !(S.st && S.st.turbo && S.st.turbo.on === false); }
+function turboWanted(){ return TURBO_ON && turboServerOn(); }
+function turboDesc(){
+  if (!turboServerOn()) return '服务端已关闭（TURBO=0），用普通模式';
+  var t = S.st && S.st.turbo;
+  return TURBO_ON
+    ? '单轮 ' + (t ? t.pages : 12) + ' 页并发抓 · 认定工最多 6 路并行 · 轮间不歇；被限速自动放慢'
+    : '已关闭：每轮 3 页、当场认定，轮间歇 0.26 秒';
+}
+function turboLiveText(t){
+  return '认定工 ' + t.K + ' 路 · 在认 ' + t.fly + ' · 待派 ' + t.queue + ' · 待写入 ' + t.hits
+    + ' · 已认下 ' + t.matched.toLocaleString() + ' 部' + (t.waitN ? ' · 服务端排队 ' + t.waitN : '');
+}
+function turboTick(t){
+  TURBO_LIVE = t;
+  var e = document.getElementById('tdesc');
+  if (!e) return;
+  var txt = t ? turboLiveText(t) : turboDesc();
+  if (e.textContent !== txt) e.textContent = txt;
+  e.classList.toggle('live', !!t);
+}
+function turboLine(r, t){
+  return (r.year ? r.year + ' 年 · 第 ' + r.page + '/' + (r.last || '?') + ' 页' : '认排队的条目')
+    + ' · 新帖 ' + (r.fresh || 0) + ' · 入库 ' + (r.attached || 0) + ' · 新片 ' + (r.matchedNew || 0)
+    + (r.applied ? ' · 认回 ' + r.applied : '')
+    + ' · 排队 ' + (r.waitN || 0)
+    + (r.backlog ? ' · 排队太长，先停抓' : '') + (r.full ? ' · 留底队列快满，改为当场认' : '')
+    + (r.cooling ? ' · 论坛冷却 ' + r.cooling + 's' : '')
+    + (r.rateHit ? ' · 被限速' : '') + (r.failed ? ' · 失败 ' + r.failed : '')
+    + ' · 认定工 ' + t.K + ' 路'
+    + ' · 子请求 ' + r.sub + '/' + r.subMax
+    + ' · ' + ((r.ms || 0) / 1000).toFixed(1) + 's';
+}
+function runTurbo(year){
+  RUN.on = true; RUN.stop = false; RUN.mode = 'turbo'; RUN.log = [];
+  S.logch = 'run'; DX.pipe = true; dxSave();
+  say((year ? '开始建立 ' + year + ' 年' : '开始继续建立索引') + '（极限模式）…');
+  renderIndex(); renderLogs();
+  var src0 = S.src;
+  turboRun({
+    year: year,
+    api: function(u, opt){ opt = opt || {}; opt.src = src0; return api(u, opt); },   // 钉住源：中途换源也不会把结果写进另一套索引
+    later: function(fn, ms){ return setTimeout(fn, ms); },
+    stopped: function(){ return RUN.stop || S.src !== src0; },
+    say: say,
+    tick: turboTick,
+    progress: function(r, t){ say(turboLine(r, t)); applyProgress(r); turboTick(t); },
+    fallback: function(){
+      say('服务端关闭了极限模式（TURBO=0），改用普通模式接着建');
+      if (S.st && S.st.turbo) S.st.turbo.on = false;
+      RUN.on = false; runBuild(year);
+    },
+    done: function(msg, bad){ say(msg, bad); TURBO_LIVE = null; finish(); },
+  });
+}
+
 function finish(){
   RUN.on = false; RUN.stop = false; RUN.mode = null;
   pageCache = {}; pre = {};
@@ -8254,6 +9080,7 @@ function finish(){
  */
 function runBuild(year){
   if (RUN.on) return;
+  if (turboWanted()) return runTurbo(year);
   RUN.on = true; RUN.stop = false; RUN.mode = 'build'; RUN.log = [];
   S.logch = 'run'; DX.pipe = true; dxSave();
   say(year ? ('开始建立 ' + year + ' 年…') : '开始继续建立索引…');
@@ -8278,7 +9105,7 @@ function runBuild(year){
           applyProgress(r); loop(r.cooling * 1000 + 800); return;
         }
         if (r.msg && !r.year){ say(r.msg); finish(); return; }
-        say(r.year + ' 年 · 第 ' + r.page + '/' + (r.last || '?') + ' 页'
+        say((r.year ? r.year + ' 年 · 第 ' + r.page + '/' + (r.last || '?') + ' 页' : '认排队的条目（还剩 ' + (r.waitN || 0) + ' 组）')
           + ' · 新帖 ' + r.fresh + ' · 入库 ' + r.attached + ' · 新片 ' + r.matchedNew + ' · 命中 ' + r.cached
           + (r.pending ? ' · 待重试 ' + r.pending : '')
           + (r.budgetHit ? ' · 配额收工' : '')

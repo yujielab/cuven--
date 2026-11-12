@@ -96,6 +96,39 @@ for (const [label, opt] of [['手机', { ...devices['iPhone 14'] }], ['手机 ·
     return { oneRow: Math.max(...els) - Math.min(...els) < 12, titleBelow: tr ? tr.top >= h.bottom - 1 : false };
   });
   ok(hd.oneRow && hd.titleBelow, '详情页：返回键、商标、源开关、外观钮在同一行，片名不被顶栏盖住');
+  /* 极限模式开关：默认开、点一下关并记在本机、再点回来；描述跟着变 */
+  await p.click('#back').catch(() => {});
+  await p.click('#nav button[data-v="idx"]');
+  await p.waitForSelector('#turbo', { timeout: 5000 }).catch(() => {});
+  await settle(p);
+  const sw0 = await p.evaluate(() => { const b = document.getElementById('turbo'); if (!b) return null; const r = b.getBoundingClientRect(); return { on: b.getAttribute('aria-checked'), w: r.width, h: r.height, d: document.getElementById('tdesc').textContent, dis: b.disabled }; });
+  await p.click('#turbo'); await p.waitForTimeout(700);
+  const sw1 = await p.evaluate(() => ({ on: document.getElementById('turbo').getAttribute('aria-checked'), ls: localStorage.getItem('cvturbo'), d: document.getElementById('tdesc').textContent, plan: document.getElementById('k-plan') ? document.getElementById('k-plan').textContent : '' }));
+  await p.click('#turbo'); await p.waitForTimeout(700);
+  const sw2 = await p.evaluate(() => ({ on: document.getElementById('turbo').getAttribute('aria-checked'), ls: localStorage.getItem('cvturbo'), lens: getComputedStyle(document.querySelector('#turbo .lens')).transform }));
+  ok(sw0 && sw0.on === 'true' && !sw0.dis && sw0.w >= 50 && sw1.on === 'false' && sw1.ls === '0' && sw1.d !== sw0.d && /3 页/.test(sw1.plan) && sw2.on === 'true' && sw2.ls === '1',
+    '极限模式开关：默认开；点一下关掉并记在本机、描述与管线里的单轮配置跟着变；再点回来');
+  if (!phone && opt.viewport && opt.viewport.width >= 1000) {
+    /* 点一个年份：用极限模式把这一年重走一遍（帖子都已入库，几轮就收尾），跑的时候开关锁住、描述变成实时状态 */
+    await p.evaluate(() => { const d = document.querySelector('details[data-x="years"]'); if (d) d.open = true; });
+    await p.waitForTimeout(200);
+    /* 跑得很快（帖子都已入库），所以在页面里每帧记一次运行中的样子 */
+    await p.evaluate(() => { window.__run = { dis: false, line: '' }; window.__iv = setInterval(() => {
+      if (!document.getElementById('stop')) return;
+      const t = document.getElementById('turbo'), l = document.getElementById('sysline');
+      if (t && t.disabled) window.__run.dis = true;
+      if (l && /极限模式/.test(l.textContent)) window.__run.line = l.textContent;
+    }, 10); });
+    await p.click('.yr[data-y="2025"]');
+    let doneTxt = '';
+    for (let i = 0; i < 60; i++) {
+      await p.waitForTimeout(250);
+      doneTxt = await p.evaluate(() => document.getElementById('stop') ? '' : [].map.call(document.querySelectorAll('#logrows .lm'), e => e.textContent).join(' | '));
+      if (doneTxt) break;
+    }
+    const running = await p.evaluate(() => { clearInterval(window.__iv); return window.__run; });
+    ok(running.dis && /极限模式/.test(running.line) && /完成/.test(doneTxt), '极限模式跑一年：跑的时候开关锁住、状态句写着「极限模式」，几轮就收尾（' + (doneTxt.split(' | ')[0] || '没收尾') + '）');
+  }
   await p.click('#theme');
   await p.waitForTimeout(200);
   const th = await p.evaluate(() => document.documentElement.getAttribute('data-theme'));

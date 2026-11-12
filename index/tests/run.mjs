@@ -19,6 +19,15 @@ if (!process.env.IDX_OLD_WORKER) {
     process.env.IDX_OLD_WORKER = '/tmp/idx-test/worker-v54.js';
   } catch {}
 }
+/* v6.1 原版（合并前的 main）：「补回旧版漏掉的帖子」那项用 */
+if (!process.env.IDX_V61_WORKER) {
+  try {
+    const src = execFileSync('git', ['show', '182e7b4:index/worker.js'], { cwd: new URL('..', import.meta.url).pathname, maxBuffer: 1 << 26 }).toString();
+    fs.mkdirSync('/tmp/idx-test', { recursive: true });
+    fs.writeFileSync('/tmp/idx-test/worker-v61.js', src);
+    process.env.IDX_V61_WORKER = '/tmp/idx-test/worker-v61.js';
+  } catch {}
+}
 const ok = (cond, msg) => { if (cond) { pass++; console.log('  ✓', msg); } else { fail++; console.log('  ✗', msg); } };
 const NS = 'idx/v4/';
 const LOCK_MS = 40000;
@@ -48,6 +57,23 @@ function makeForum(W, opt = {}) {
     W.forum.boards['44']['movie_nianfen=' + yid] = list.reverse();
   }
   return films;
+}
+/* 片名互不相同的论坛（makeForum 里两年的片同名同原名、共用一个键，数「部数」时用这个） */
+function makeForumU(W, perYear) {
+  const HAN = '星海山河风云月光夜雨雪花火林城桥塔湖岛龙虎鹰狼梦影歌舞剑侠春秋金银铁石'.split('');
+  const EN = ['Alpha', 'Bravo', 'Cedar', 'Delta', 'Ember', 'Falcon', 'Garnet', 'Harbor', 'Ivory', 'Juniper', 'Kestrel', 'Lumen', 'Marble', 'Nimbus', 'Onyx', 'Prairie', 'Quartz', 'Raven', 'Summit', 'Tundra'];
+  let tid = 30000, id = 700000, n = 0;
+  for (const [y, yid] of [[2025, 32], [2024, 31]]) {
+    const list = [];
+    for (let f = 0; f < perYear; f++, n++, id++) {
+      const cn = HAN[n % HAN.length] + HAN[Math.floor(n / HAN.length) % HAN.length] + HAN[(n * 7 + 3) % HAN.length];
+      const en = EN[n % EN.length] + ' ' + EN[Math.floor(n / EN.length) % EN.length] + ' ' + EN[(n * 3 + 1) % EN.length];
+      W.tmdb.movie.push({ id, title: cn, original_title: en, release_date: y + '-05-01', poster_path: '/p' + id + '.jpg', popularity: 40, vote_average: 7, vote_count: 500 });
+      for (let v = 0; v < 1 + (f % 4); v++) list.push({ tid: tid++, title: `${cn} ${en.replace(/ /g, '.')}.${y}.${RES[v % 3]}.${SRCS[v % 3]}.x265 ${8 + v}.5GB`, film: id });
+    }
+    W.forum.boards['44'] = W.forum.boards['44'] || {};
+    W.forum.boards['44']['movie_nianfen=' + yid] = list.reverse();
+  }
 }
 const allPosts = (W) => Object.values(W.forum.boards['44'] || {}).flat();
 
@@ -112,6 +138,42 @@ async function buildAll(I, max = 400) {
   }
   await I.settle();
   return { r, n };
+}
+
+// 极限模式：从 worker.js 的页面里抽出浏览器端的调度代码（<turbo> 标记之间那一段），对着真 Worker 跑
+let TURBO_SRC = null;
+function turboRunFn() {
+  if (!TURBO_SRC) TURBO_SRC = /\/\*<turbo>\*\/([\s\S]*?)\/\*<\/turbo>\*\//.exec(fs.readFileSync(H.SRC_FILE, 'utf8'))[1];
+  const c = vm.createContext({ JSON, Object, Math, Array, String, Number });
+  vm.runInContext(TURBO_SRC + '\n;globalThis.__turboRun = turboRun;', c);
+  return c.__turboRun;
+}
+async function turboAll(I, opt = {}) {
+  const run = turboRunFn();
+  let act = 0, maxAct = 0, tm = 0, maxSub = 0;
+  const rounds = [];
+  const api = async (u, o = {}) => {
+    const isTm = u.startsWith('/api/tm');
+    if (isTm) { tm++; act++; maxAct = Math.max(maxAct, act); }
+    try {
+      if (isTm && opt.tmFail) { const f = opt.tmFail(); if (f) throw f; }
+      const res = await I.call(u, { method: o.method || 'GET', headers: o.body ? { 'content-type': 'application/json' } : {}, ...(o.body ? { body: o.body } : {}) });
+      const j = await res.json().catch(() => null);
+      if (!res.ok) { const e = new Error((j && j.error) || ('HTTP ' + res.status)); e.status = res.status; e.data = j || {}; throw e; }
+      if (isTm && j) maxSub = Math.max(maxSub, j.sub || 0);
+      return j;
+    } finally { if (isTm) act--; }
+  };
+  const out = await new Promise((resolve) => {
+    run({
+      api, now: () => Date.now(), later: (fn, ms) => setTimeout(fn, Math.min(ms || 0, opt.maxDelay ?? 2)),
+      stopped: opt.stopped || (() => false), say: () => {},
+      progress: (r) => { rounds.push(r); if (opt.snap) opt.snap(r); },
+      done: (msg, bad, st) => resolve({ msg, bad, st, rounds, tm, maxAct, maxSub }),
+    });
+  });
+  await I.settle();
+  return out;
 }
 
 console.log('\n■ MFX 编解码：随机标题逐字节还原');
@@ -314,6 +376,260 @@ console.log('\n■ 并发与锁');
   verify(H.isolate(e2.env, e2.W).c, e2.r2, e2.W, '接管之后接着跑完');
 }
 function BUILD_DONE(st) { return [2026, 2025, 2024, 2023, 2022, 2021, 2020].every(y => st.years && st.years[y] && st.years[y].done); }
+
+console.log('\n■ 极限模式：扫描轮 + 并行认定工（跑的是页面里那一份调度代码）');
+let snapTurbo = null;
+{
+  /* 普通模式建一遍，当参照 */
+  const ref = H.makeEnv();
+  makeForum(ref.W, { films: 30 });
+  const R = H.isolate(ref.env, ref.W);
+  const rb = await buildAll(R);
+  const refMovies = Object.keys(ref.r2.json(NS + 'movies.json').m).sort().join(',');
+  const refList = ref.W.forum.calls;
+
+  const { env, r2, W } = H.makeEnv();
+  makeForum(W, { films: 30 });
+  const I = H.isolate(env, W);
+  const t = await turboAll(I);
+  ok(t.msg === '完成' && !t.bad, `极限模式跑完：${t.msg}（${t.rounds.length} 轮扫描 · ${t.tm} 次认定工调用 · 认定工最多并发 ${t.maxAct} 路）`);
+  verify(I.c, r2, W, '极限模式建完以后的不变量');
+  const mv = r2.json(NS + 'movies.json'), st = r2.json(NS + 'state.json'), pd = r2.json('idx/v5/pending.json') || { q: {} };
+  const pdone = new Set(st.pdone || []);
+  const waits = Object.entries(pd.q).filter(([k, e]) => e.w === 'wait' && !pdone.has(k));
+  ok(Object.keys(mv.m).sort().join(',') === refMovies, `与普通模式建出来的影片表一模一样（${Object.keys(mv.m).length} 部）`);
+  ok(!waits.length && st.pend && st.pend.wait === 0, '排队的条目全部认完，state 里的排队数是 0');
+  ok(t.rounds.length < rb.n, `扫描轮数比普通模式少：${t.rounds.length} 轮 vs ${rb.n} 轮`);
+  ok(W.forum.calls <= refList, `论坛请求不比普通模式多：${W.forum.calls} 次 vs 普通模式 ${refList} 次（普通模式认不完会把游标往回拨、重抓同几页）`);
+  ok(t.maxAct >= 2 && t.maxSub <= 46, `认定工真的并行（最多 ${t.maxAct} 路同时在认），每路子请求不超过 46（最多 ${t.maxSub}）`);
+  const cat = await (await I.call('/api/catalog?min=0')).json();
+  ok(cat.total === Object.keys(mv.m).length, `目录列出全部 ${cat.total} 部`);
+}
+
+console.log('\n■ 极限模式：掐进程（交回认定结果的那一轮，每一次写之后都掐一次）');
+{
+  /* 中途快照：第一轮扫完 2025 年（只排队不认），认定工认一批交给第二轮（写进分片 + 扫 2024 年）——
+     于是快照里既有已写进分片、还没从队列删掉的条目（state.pdone），也有排队等认的 2024 年条目 */
+  {
+    const { env, r2, W } = H.makeEnv();
+    makeForum(W, { films: 30 });
+    const I = H.isolate(env, W);
+    const post = (u, body) => I.call(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+    let r = await post('/api/build?turbo=1&year=2025', { hits: [], fly: [] });
+    const tm = await post('/api/tm', { g: r.need.slice(0, 20) });
+    r = await post('/api/build?turbo=1&year=2024', { hits: Object.entries(tm.r).filter(([, v]) => v), fly: [] });
+    if ((r2.json(NS + 'state.json').pdone || []).length && r.waitN > 5) snapTurbo = r2.snapshot();
+  }
+  if (!snapTurbo) ok(false, '没拿到极限模式的中途快照');
+  else {
+    let allGood = true, tried = 0, died = 0;
+    for (let k = 1; k <= 12; k++) {
+      const { env, r2, W } = H.makeEnv();
+      makeForum(W, { films: 30 });
+      r2.m = new Map([...snapTurbo].map(([a, b]) => [a, { ...b }]));
+      const A = H.isolate(env, W);
+      /* 先拿认定工把排队的认一遍（不写 R2），再把结果交给一轮扫描 —— 这一轮的第 k 次写之后掐掉 */
+      const pd = r2.json('idx/v5/pending.json'), st = r2.json(NS + 'state.json');
+      const pdone = new Set(st.pdone || []);
+      const g = Object.entries(pd.q).filter(([kk, e]) => e.w === 'wait' && !pdone.has(kk)).slice(0, 20).map(([kk, e]) => ({ k: kk, cn: e.cn, la: e.la, ys: e.ys, y: e.y, t: e.t }));
+      const tm = await (await A.call('/api/tm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ g }) })).json();
+      const hits = Object.entries(tm.r).filter(([, v]) => v);
+      r2.f.dieAfter = r2.writes + k;
+      await A.call('/api/build?turbo=1', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hits, fly: [] }) }).then(r => r.json()).catch(() => null);
+      await A.settle().catch(() => {});
+      if (r2.dead) died++;
+      r2.dead = false; r2.f.dieAfter = null;
+      const B = H.isolate(env, W);
+      B.clock.off = LOCK_MS + 5000;
+      const t = await turboAll(B);
+      await B.cron().catch(() => {});                     // 掐在 movies.json 与 state.json 之间：定时任务自动「重算汇总」对齐计数（同普通模式）
+      tried++;
+      const bf = fail;
+      verify(B.c, r2, W, `第 ${k} 次写之后掐掉${r2.writes ? '' : ''}，换个 isolate 用极限模式接着跑（${t.msg}，交回 ${hits.length} 条结果）`);
+      if (fail > bf) allGood = false;
+    }
+    ok(allGood && died >= 6, `${tried} 种掐法（真掐着 ${died} 次）之后都能自己恢复：不丢帖子、不重复、计数对齐`);
+  }
+}
+
+console.log('\n■ 极限模式：留底条目的延迟删除、坏结果、总开关、冷却、背压');
+{
+  const { env, r2, W } = H.makeEnv();
+  makeForum(W, { films: 30 });
+  const I = H.isolate(env, W);
+  const post = (u, body) => I.call(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+  /* 只扫不认：两轮扫描、不交结果 */
+  let r1 = await post('/api/build?turbo=1', { hits: [], fly: [] });
+  r1 = await post('/api/build?turbo=1', { hits: [], fly: [] });
+  const pend0 = r2.json('idx/v5/pending.json');
+  const waits0 = Object.entries(pend0.q).filter(([, e]) => e.w === 'wait');
+  ok(waits0.length > 5 && r1.need.length > 0 && r1.queued >= 0 && waits0.every(([, e]) => e.r.length >= 1), `扫描轮只抓不认：${waits0.length} 组连同帖子行进了留底队列（wait），need 交出 ${r1.need.length} 组`);
+  const tm = await post('/api/tm', { g: r1.need.slice(0, 20) });
+  const hits = Object.entries(tm.r).filter(([, v]) => v && v.h);
+  ok(tm.hit === hits.length && hits.length > 0 && tm.sub <= 46, `认定工认下 ${tm.hit} 组（子请求 ${tm.sub}）`);
+  const r2a = await post('/api/build?turbo=1&pages=0', { hits, fly: [] });
+  const st1 = r2.json(NS + 'state.json'), pend1 = r2.json('idx/v5/pending.json');
+  ok(r2a.applied === hits.length && st1.pdone && st1.pdone.length === hits.length && hits.every(([k]) => pend1.q[k]),
+    `交回 ${hits.length} 条：写进分片，记进 state.pdone，留底条目这一轮先不删（掐在两次写之间也不丢）`);
+  const again = await post('/api/build?turbo=1&pages=0', { hits, fly: [] });
+  const st2 = r2.json(NS + 'state.json'), pend2 = r2.json('idx/v5/pending.json');
+  ok(again.applied === 0 && again.ack.length === hits.length && hits.every(([k]) => !pend2.q[k]) && !(st2.pdone || []).length,
+    '同一批结果再交一遍：一条都不重写（ack 掉）；下一轮写队列时才把它们真正删掉，pdone 清空');
+  verify(I.c, r2, W, '重复交结果之后的不变量', { partial: true });
+
+  /* 坏结果：未知键、负 id、缺字段、年份乱写 */
+  const live = Object.entries(pend2.q).filter(([, e]) => e.w === 'wait' && !/无此片/.test(e.t)).map(([k]) => k);
+  const m0 = Object.keys(r2.json(NS + 'movies.json').m).length;
+  const junk = Object.entries(pend2.q).filter(([, e]) => e.w === 'wait' && /无此片/.test(e.t)).map(([k]) => k);
+  const bad = await post('/api/build?turbo=1&pages=0', { hits: [
+    ['不存在的键|x', { h: [123, '假片', 'Fake', '2025-01-01', '', 7, 10, []] }],
+    [live[0], { h: [-5, '负数', '', '', '', 0, 0, []] }],
+    [live[1], { h: [77, '', '', '2025', '', 0, 0, []] }],
+    [live[2], { h: 'not-an-array' }],
+    [junk[0], { m: 'drop table' }],
+  ], fly: [] });
+  const pend3 = r2.json('idx/v5/pending.json');
+  ok(bad.rej.length === 3 && bad.ack.includes('不存在的键|x') && Object.keys(r2.json(NS + 'movies.json').m).length === m0
+    && pend3.q[live[0]].w === 'wait' && pend3.q[junk[0]].w === 'nohit',
+    `坏结果：形状不对的 ${bad.rej.length} 条拒收（条目原样留着下次重认），未知键直接确认掉，乱写的「认不出」原因按 nohit 记；影片表一部没多`);
+
+  /* 总开关 */
+  const off = H.makeEnv({ TURBO: '0' });
+  makeForum(off.W, { films: 6 });
+  const O = H.isolate(off.env, off.W);
+  const tmOff = await O.call('/api/tm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ g: [] }) });
+  const bOff = await (await O.call('/api/build?turbo=1', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"hits":[]}' })).json();
+  const tOff = await turboAll(O);
+  ok(tmOff.status === 403 && bOff.turbo === 0 && !bOff.need && /关闭/.test(tOff.msg), `TURBO=0：认定工回 403、扫描轮按普通模式跑（turbo:0），浏览器那边退回普通模式（${tOff.msg}）`);
+
+  /* 冷却：论坛那头不碰，认定结果照样写进去 */
+  const cur = r2.json(NS + 'state.json');
+  cur.cool = { until: Date.now() + 120000, why: '测试冷却', strikes: 4, gap: 1200 };
+  r2.m.set(NS + 'state.json', { body: JSON.stringify(cur), etag: 'c1' });
+  const live2 = Object.entries(r2.json('idx/v5/pending.json').q).filter(([, e]) => e.w === 'wait').map(([k, e]) => ({ k, cn: e.cn, la: e.la, ys: e.ys, y: e.y, t: e.t }));
+  const tm2 = await post('/api/tm', { g: live2.slice(0, 20) });
+  const h2 = Object.entries(tm2.r).filter(([, v]) => v && v.h);
+  const f0 = W.forum.calls;
+  const rc = await post('/api/build?turbo=1', { hits: h2, fly: [] });
+  ok(rc.cooling > 0 && rc.pages === 0 && W.forum.calls === f0 && rc.applied === h2.length,
+    `论坛冷却中：一页不抓（论坛请求 +${W.forum.calls - f0}），交回的 ${rc.applied} 条照样写进分片`);
+  await I.call('/api/repair?do=cooldown');
+
+  /* 背压：排队太多先停抓，扫描轮自己认一批 */
+  await post('/api/build?turbo=1', { hits: [], fly: [] });      // 先扫一轮（2024 年），让队列里有排队的
+  const wq = r2wait(r2);
+  I.c.__set('TURBO_FREE.high', 1);
+  const f1 = W.forum.calls;
+  const bp = await post('/api/build?turbo=1', { hits: [], fly: [] });
+  I.c.__set('TURBO_FREE.high', 360);
+  ok(wq > 0 && bp.backlog === 1 && bp.pages === 0 && W.forum.calls === f1 && bp.tmdbCalls > 0 && bp.waitN < wq,
+    `排队超过上限：这一轮不抓列表，用闲着的子请求自己认了 ${bp.tmdbCalls} 组（排队 ${wq} → ${bp.waitN}）`);
+  const tEnd = await turboAll(I);
+  verify(I.c, r2, W, '冷却、背压、坏结果之后接着跑完（' + tEnd.msg + '）');
+}
+
+console.log('\n■ 极限模式：认定工用不了（403 / 一直报错），扫描轮自己认');
+{
+  for (const [label, mk] of [['认定工回 403（服务端关掉了认定工）', () => Object.assign(new Error('off'), { status: 403, data: { off: 1 } })],
+                             ['认定工一直 500', () => Object.assign(new Error('HTTP 500'), { status: 500, data: {} })]]) {
+    const { env, r2, W } = H.makeEnv();
+    makeForum(W, { films: 30 });
+    const I = H.isolate(env, W);
+    const t = await turboAll(I, { tmFail: mk });
+    verify(I.c, r2, W, `${label}：${t.msg}（${t.rounds.length} 轮，排队 ${r2wait(r2)}）`);
+  }
+}
+
+console.log('\n■ 从 v6.1 升级：补回旧版漏掉的帖子');
+{
+  /* v6.1 及更早：一轮认不完的组只把游标往回拨 ceil(n/28) 页，一页不到 28 组时前面页里没认完的就再也抓不回来 */
+  const OLD = process.env.IDX_V61_WORKER;
+  if (!OLD || !fs.existsSync(OLD)) ok(false, '缺 v6.1 原版（IDX_V61_WORKER）：run.mjs 开头会从 git 取');
+  else {
+    const { env, r2, W } = H.makeEnv();
+    W.forum.perPage = 30;
+    makeForumU(W, 40);
+    const O = H.isolate(env, W, { file: OLD });
+    for (let i = 0; i < 200; i++) { const r = await (await O.call('/api/build')).json(); if (r.done || r.error) break; }
+    await O.settle();
+    const films = new Set(allPosts(W).filter(p => p.film).map(p => p.film));
+    const n0 = Object.keys(r2.json(NS + 'movies.json').m).length;
+    const N = H.isolate(env, W);
+    const rs = await (await N.call('/api/repair?do=rescanUnmatched')).json();
+    const t = await turboAll(N);
+    await N.cron();
+    const n1 = Object.keys(r2.json(NS + 'movies.json').m).length;
+    ok(n0 < films.size && n1 === films.size && rs.ok, `v6.1 建出来 ${n0} 部（应有 ${films.size} 部）；升级后点一次「重扫未匹配」、用极限模式重走一遍：${n1} 部（${t.msg}）`);
+    verify(N.c, r2, W, '补回之后的不变量');
+  }
+}
+
+console.log('\n■ 极限模式：中途关掉页面，普通模式 / 定时任务接着认');
+{
+  /* 只扫不认，扫到全部年份完成 */
+  const mk = () => { const e = H.makeEnv(); makeForum(e.W, { films: 30 }); return e; };
+  const a = mk();
+  const A = H.isolate(a.env, a.W);
+  for (let i = 0; i < 40; i++) {
+    const r = await (await A.call('/api/build?turbo=1', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"hits":[],"fly":[]}' })).json();
+    if (r.done) break;
+  }
+  const w0 = r2wait(a.r2);
+  const n = await buildAll(H.isolate(a.env, a.W));
+  ok(w0 > 10 && r2wait(a.r2) === 0, `列表抓完、${w0} 组还在排队：普通模式「继续建立索引」把它们认完（${n.n} 轮）`);
+  verify(A.c, a.r2, a.W, '普通模式认完排队之后的不变量');
+
+  const b = mk();
+  const B = H.isolate(b.env, b.W);
+  for (let i = 0; i < 40; i++) {
+    const r = await (await B.call('/api/build?turbo=1', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"hits":[],"fly":[]}' })).json();
+    if (r.done) break;
+  }
+  const w1 = r2wait(b.r2);
+  let crons = 0;
+  for (; crons < 12 && r2wait(b.r2) > 0; crons++) { B.clock.off += 60000; await B.cron(); }
+  ok(w1 > 10 && r2wait(b.r2) === 0, `${w1} 组在排队、页面关了：每天的定时任务接着认完（${crons} 次）`);
+  verify(B.c, b.r2, b.W, '定时任务认完排队之后的不变量');
+}
+function r2wait(r2) {
+  const st = r2.json(NS + 'state.json') || {}, pd = r2.json('idx/v5/pending.json') || { q: {} };
+  const done = new Set(st.pdone || []);
+  return Object.entries(pd.q).filter(([k, e]) => e.w === 'wait' && !done.has(k)).length;
+}
+
+console.log('\n■ 极限模式：认定工的配额、TMDB 限流、第二轮网络失败、并发抓页的间隔与登录');
+{
+  const { env, W } = H.makeEnv();
+  makeForum(W, { films: 30 });
+  const I = H.isolate(env, W);
+  W.tmdb.fail = () => new Response('{}', { status: 429, headers: { 'retry-after': '0' } });
+  const t0 = W.tmdb.calls;
+  const g = W.tmdb.movie.slice(0, 20).map((m, i) => ({ k: 'k' + i + '|x', cn: m.title, la: m.original_title, ys: ['2025'], y: 2025, t: m.title + ' ' + m.original_title + '.2025.1080p' }));
+  const res = await I.call('/api/tm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ g }) });
+  const j = await res.json();
+  ok(res.status === 200 && j.sub <= 46 && W.tmdb.calls - t0 <= 46 && j.n429 > 0 && Object.values(j.r).every(v => v === 0),
+    `TMDB 一直回 429：认定工照样回 200，子请求 ${j.sub}（≤ 46，不会被平台掐），${j.n429} 次 429 交给浏览器退避，20 组都按「没下结论」交回`);
+  W.tmdb.fail = null;
+  /* 第二轮（原名）网络失败：不再判成「认不出」 */
+  W.tmdb.movie.push({ id: 990001, title: 'Zyxland', original_title: 'Zyxland', release_date: '2025-02-02', poster_path: '/z.jpg', popularity: 20, vote_average: 7, vote_count: 100 });
+  W.tmdb.fail = (u) => /Zyxland/i.test(u.searchParams.get('query') || '') ? new TypeError('fetch failed') : null;
+  const j2 = await (await I.call('/api/tm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ g: [{ k: 'zz|zyxland', cn: '某某之地', la: 'Zyxland', ys: ['2025'], y: 2025, t: '某某之地 Zyxland.2025.1080p.WEB-DL' }] }) })).json();
+  W.tmdb.fail = null;
+  const j3 = await (await I.call('/api/tm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ g: [{ k: 'zz|zyxland', cn: '某某之地', la: 'Zyxland', ys: ['2025'], y: 2025, t: '某某之地 Zyxland.2025.1080p.WEB-DL' }] }) })).json();
+  ok(j2.r['zz|zyxland'] === 0 && j3.r['zz|zyxland'] && j3.r['zz|zyxland'].h && j3.r['zz|zyxland'].h[0] === 990001,
+    '中文名没搜到、换原名那一轮又断网：交回「没下结论」而不是「认不出」；网好了再认就认下了（以前这里直接判 miss，帖子行只留 12 条）');
+
+  /* 并发抓页：请求起点按间隔错开；冷启动只登录一次 */
+  const e2 = H.makeEnv();
+  makeForum(e2.W, { films: 30 });
+  const stamps = []; let logins = 0;
+  e2.W.forum.fail = (u) => { if (/forumdisplay/.test(u.search)) stamps.push(Date.now()); if (/loginsubmit=yes/.test(u.search)) logins++; return new Promise(r => setTimeout(() => r(null), 30)); };
+  const J = H.isolate(e2.env, e2.W, { realTime: true });
+  const rr = await (await J.call('/api/build?turbo=1&year=2025', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"hits":[],"fly":[]}' })).json();
+  const gaps = stamps.slice(1).map((x, i) => x - stamps[i]);
+  ok(stamps.length >= 3 && Math.min(...gaps) >= 100 && logins === 1 && !rr.error,
+    `一轮并发抓 ${stamps.length} 页：请求起点最少隔 ${Math.min(...gaps)}ms（下限 120ms，挨过打会翻倍），冷启动只登录 ${logins} 次`);
+}
 
 console.log('\n■ 影片表只增不减、旧对象延迟清理');
 {
