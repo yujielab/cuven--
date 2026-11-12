@@ -5767,7 +5767,8 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
    在展开竖拿的 Duo（669 宽，像一台小平板）上又离拇指太远。这几种形态改成贴左缘的
    竖向导航条（iPadOS 的侧边栏、Material 的 navigation rail）：头像、主页、资料库竖排在
    同一枚液态玻璃胶囊里，搜索圆钮在它下方；内容区整体右移让出这一条，底部不再为导航留空。
-   · 何时用：横拿且高 ≤ 600（折起 / 展开横拿、手机横拿），或竖拿宽 600–720（展开的 Duo）。
+   · 何时用：横拿且高 ≤ 600（折起 / 展开横拿、手机横拿），或竖拿宽 600–720；展开的 Duo 认屏幕（内屏短边 669），
+     不论横竖、视口多高都用（主屏幕 App 横拿 669 高、Safari 横拿工具栏收起后也长过 600，只看视口会跳到底部）。
      折起竖拿（382 / 466 宽）是下一节贴右缘浮着的那种（html.rail-float）。由 <head> 里的脚本打 html.rail。
    · 安全区：横拿时左右两侧可能是灵动岛 / 摄像头 —— 导航条贴 safe-area-inset-left 之内，
      内容区右侧让出 safe-area-inset-right；底部只留 Home 指示条的距离。
@@ -5841,7 +5842,7 @@ html.rail.rail-float {
      position: fixed 挂在 .dock 里的，祖先一有 transform，它就改成相对 .dock 定位、跑出顶部那一栏 */
   --rail-w: 54px;
   --fl-item: 44px; --fl-av: 36px; --fl-gap: 4px; --fl-avm: 6px; --fl-pt: 7px; --fl-pb: 8px;
-  --fl-h: calc(var(--fl-pt) + 3 * var(--fl-item) + 3 * var(--fl-gap) + var(--fl-avm) + var(--fl-av) + var(--fl-pb));
+  --fl-h: calc(var(--fl-pt) + 3 * var(--fl-item) + 3 * var(--fl-gap) + var(--fl-avm) + var(--fl-av) + var(--fl-pb) + var(--fl-media, 0px));
   --fl-y: 55%;
   --rail-space: 0px;
   --app-w: 100vw;
@@ -5868,7 +5869,7 @@ html.rail.rail-float .toast {
 /* 顶上居中那枚提示：两边都按右侧安全区收，免得压到右上角竖排的状态栏 */
 html.rail.rail-float .net-banner { left: 50%; max-width: calc(100% - 2 * env(safe-area-inset-right, 0px) - 16px); }
 /* ── 全新导航栏（只在 iPhone Duo 折起竖拿）─────────────────────────────
-   一枚高的竖向玻璃胶囊，只放图标，自上而下：主页、资料库、搜索，头像（圆角方块）垫在最底 ——
+   一枚高的竖向玻璃胶囊，只放图标，自上而下：主页、资料库、搜索，头像（圆形）垫在最底 ——
    搜索不再是胶囊外另一枚圆钮。选中那一项是白色图标 + 一圈柔光圆底，其余是灰色；文字收起（读屏照读）。
    结构不动：.dock 自己当胶囊，.nav-container 用 display: contents 把头像、主页、资料库摊进同一列，
    再用 order 排好（头像在 DOM 里排第一）。原来那枚会滑的选中指示器在这里不用，选中靠每一项自己的圆底。
@@ -5898,10 +5899,10 @@ html.rail.rail-float .dock:not(.searching) #navHome { order: 1; }
 html.rail.rail-float .dock:not(.searching) #navLib { order: 2; }
 /* #navSearch 的玻璃底是一条 ID 规则（#navContainer, #navSearch）给的，这里也得带 ID 才盖得过 */
 html.rail.rail-float .dock:not(.searching) #navSearch {
-  order: 3; overflow: hidden;
+  order: 4; overflow: hidden;
   background: transparent; border: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
 }
-html.rail.rail-float .dock:not(.searching) #headerAvatar { order: 4; width: var(--fl-av); height: var(--fl-av); margin: var(--fl-avm) 0 0; border-radius: 11px; }
+html.rail.rail-float .dock:not(.searching) #headerAvatar { order: 5; width: var(--fl-av); height: var(--fl-av); margin: var(--fl-avm) 0 0; border-radius: 50%; }
 html.rail.rail-float .dock:not(.searching) .nav-item.active {
   color: #fff; background: rgba(255,255,255,.13);
   box-shadow: inset 0 0 0 .5px rgba(255,255,255,.14), inset 0 1px 0 rgba(255,255,255,.10);
@@ -5954,6 +5955,156 @@ html.rail.rail-float .hero-content > .hero-tags { display: none; }
 html.rail.rail-float .hero-content > .hero-logo-wrap { order: 1; transition-delay: 0s; }
 html.rail.rail-float .hero-content > .hero-status { order: 2; transition-delay: .08s; }
 html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay: .16s; }
+/* 收成卡片后卡下那一条：别的设备是与卡同宽的浏览进度条，这里换成 iOS 页码控件的样子 —— 一枚紧凑的玻璃胶囊
+   居中在卡下，一张一颗圆点：当前那颗纯白、略大，其余半透明，点哪颗跳到哪张。片单超过 8 张时只排 8 颗、跟着当前那张挪，
+   还有更多的那一端最外两颗渐小（class 由 AAP.setCurrent 打）。胶囊 30 高，外面那层透明的 56 高不变，
+   中线还在原来那条进度条的中线上。全出血时的暂停钮 + 轮播点不变 */
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery.all-access-pass {
+  width: auto; padding-inline: 0;
+  background-color: transparent; box-shadow: none;
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+}
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background:not(.play-pause-button-wrapper) { flex: 0 0 auto; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .tablist-wrapper { flex: 0 0 auto; width: auto; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav { flex: 0 0 auto; width: auto; padding: 0; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items {
+  display: inline-flex; align-items: center;
+  width: auto; min-width: 0; height: 30px; padding: 0 5.5px; overflow: visible;
+  border-radius: 99px;
+  background-color: rgba(255, 255, 255, 0.10);
+  -webkit-backdrop-filter: blur(24px) saturate(160%); backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
+}
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items::after { content: none; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item {
+  display: block; width: 7px; height: 7px; margin-inline: 6.25px;      /* 圆点 7、点距 19.5：图 2 的比例 */
+}
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item .dotnav-link {
+  width: 7px; height: 7px; min-width: 0; max-width: none;
+  border-radius: 50%;
+  background-color: rgba(255, 255, 255, 0.5);
+  transform: scale(var(--pc-s, 1));
+  transition: background-color .25s linear, transform .3s var(--ease-out);
+}
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item .dotnav-link.current {
+  --pc-s: 1.2; background-color: #fff; overflow: visible;
+}
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item .dotnav-link.current::after { content: none; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item.pc-off { display: none; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item.pc-s1 .dotnav-link { --pc-s: .74; }
+html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items .dotnav-item.pc-s2 .dotnav-link { --pc-s: .5; }
+
+/* ── 资料库展映（折起竖拿）：一切收在右侧那一列以左 ──────────────────────
+   右侧那一列归状态栏与导航：主屏幕 App 里是那一整列安全区（实机约 84px），Safari 里是导航自己那一条（--float-space）。
+   背景视频、剧照、压暗层、片名、介绍面板、剧照条都不越过它的左缘，那一列底下是黑的 —— 整个视图让出这一列，
+   展映的几何（--app-w、满屏倍数按视图宽度量）跟着收窄，不用逐个元素去躲。只在展映形态；年份列表自己已经按 --float-space 让过。
+   画面右上角那两个钮（播放 / 暂停、静音）不在画面上了：进资料库时并进导航胶囊（见下一节） */
+html.rail.rail-float #view-library:has(.lib-showcase) {
+  --float-col: max(var(--float-space), env(safe-area-inset-right, 0px));
+  --app-w: calc(100vw - var(--float-col));
+  width: calc(100% - var(--float-col));
+}
+html.rail.rail-float .lib-showcase .sc-note { right: 20px; }
+html.rail.rail-float .lib-showcase .sc-mediactl,
+html.rail.rail-float .lib-showcase .sc-mutectl { display: none; }
+
+/* ── 导航胶囊里的播放 / 静音（折起竖拿 · 资料库）─────────────────────────
+   进资料库，胶囊在「资料库」那一格下面长出两格：播放 / 暂停（带预告片进度环）、静音；离开就收回去。
+   长出来的那两格由 0 高展开（grid 0fr → 1fr），胶囊的高（--fl-media）跟着加，中心仍钉在 55% 高处 ——
+   上下各长半截，top 在这一下补间（sc-nav-anim 只挂在切换那一刻，不去影响搜索态的形变）。
+   钮只是传话：状态照抄眼前那一章，点下去转给那一章自己的钮（解除静音得在这一下手势里，Safari 只认它） */
+html.rail.rail-float.sc-nav { --fl-media: calc(2 * var(--fl-item) + 2 * var(--fl-gap)); }
+html.rail.rail-float.sc-nav-anim .dock:not(.searching) {
+  transition: transform .55s var(--ease-spring-soft), opacity .35s var(--ease-smooth), top .46s var(--ease-out);
+}
+.nav-media { display: none; }
+html.rail.rail-float .dock:not(.searching) .nav-media {
+  order: 3; display: grid; grid-template-rows: 0fr; justify-items: center; position: relative; z-index: 1;
+  margin-top: calc(-1 * var(--fl-gap));
+  opacity: 0; transform: scale(.7); pointer-events: none;
+  visibility: hidden;                                   /* 收起后读屏、Tab 都够不着；收的过程里照常画 */
+  transition: grid-template-rows .46s var(--ease-out), margin-top .46s var(--ease-out),
+              opacity .28s var(--ease-out), transform .46s var(--ease-out), visibility 0s linear .46s;
+}
+html.rail.rail-float.sc-nav .dock:not(.searching) .nav-media {
+  grid-template-rows: 1fr; margin-top: 0; opacity: 1; transform: none; pointer-events: auto;
+  visibility: visible; transition-delay: 0s;
+}
+.nav-media-in { min-height: 0; overflow: hidden; display: flex; flex-direction: column; align-items: center; gap: var(--fl-gap); }
+.nm-btn {
+  position: relative; flex: 0 0 auto; width: var(--fl-item, 44px); height: var(--fl-item, 44px);
+  display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; outline: 0;
+  color: #fff; background: transparent; cursor: pointer; -webkit-tap-highlight-color: transparent;
+  transition: opacity .25s linear, transform var(--press-out);
+}
+.nm-btn:active { transform: scale(.9); transition: transform var(--press-in); }
+.nm-btn:disabled { opacity: .32; cursor: default; }
+.nm-btn:focus-visible { outline: 3px solid rgba(10, 132, 255, .6); outline-offset: 1px; }
+.nm-btn .sc-ring { top: 4px; left: 4px; width: 36px; height: 36px; }
+.nm-btn > .sc-ico-pause, .nm-btn > .sc-ico-play { grid-area: 1 / 1; }
+.nm-play[data-state="paused"] .sc-ico-pause { display: none; }
+.nm-play[data-state="paused"] .sc-ico-play { display: block; }
+.nm-btn .sc-spk { position: relative; z-index: 1; width: 21px; height: 21px; overflow: visible; }
+.nm-btn .sc-spk path { fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.nm-btn .sc-spk-body { fill: currentColor; stroke-width: 1.4; }
+.nm-mute[data-muted="1"] .sc-spk-wave { display: none; }
+.nm-mute[data-muted="0"] .sc-spk-slash { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  html.rail.rail-float .dock:not(.searching) .nav-media { transition: opacity .2s linear; transform: none; }
+  html.rail.rail-float.sc-nav-anim .dock:not(.searching) { transition: opacity .35s var(--ease-smooth); }
+}
+/* 选中项的玻璃把「资料库」和长出来的那两格一起包住：一枚竖着的玻璃胶囊，从「资料库」那一格的上沿
+   一直到静音那一格的下沿 —— 一眼看得出这两格是资料库自己的。它跟着那两格一起长（高 = 一格 + --fl-media，
+   同一条曲线、同一个时长），收回时淡掉；这时「资料库」自己那圈圆底让给它，免得叠两层 */
+.nav-sel { display: none; }
+html.rail.rail-float .dock:not(.searching) .nav-sel {
+  display: block; position: absolute; z-index: 0; pointer-events: none;
+  left: 50%; top: calc(var(--fl-pt) + var(--fl-item) + var(--fl-gap));
+  width: var(--fl-item); margin-left: calc(var(--fl-item) / -2);
+  height: calc(var(--fl-item) + var(--fl-media, 0px));
+  border-radius: calc(var(--fl-item) / 2);
+  background: rgba(255,255,255,.13);
+  box-shadow: inset 0 0 0 .5px rgba(255,255,255,.14), inset 0 1px 0 rgba(255,255,255,.10);
+  opacity: 0;
+  transition: height .46s var(--ease-out), opacity .28s var(--ease-out);
+}
+html.rail.rail-float.sc-nav .dock:not(.searching) .nav-sel { opacity: 1; transition: height .46s var(--ease-out), opacity 0s; }
+html.rail.rail-float.sc-nav .dock:not(.searching) #navLib.active {
+  background: transparent; box-shadow: none;
+  transition: color .25s var(--ease-out), transform var(--press-out);
+}
+@media (prefers-reduced-motion: reduce) {
+  html.rail.rail-float .dock:not(.searching) .nav-sel { transition: opacity .2s linear; }
+}
+
+/* 资料库的标题那一条（折起竖拿）：不再是一条黑底压在画面上沿、中间一道硬边 —— 画面一直铺到屏幕最上沿，
+   标题浮在画面上，底下是一层渐进模糊：越往上越糊、越暗，往下一点点淡掉，没有边。
+   做法是四层 backdrop 模糊叠起来，每层模糊加一档、遮罩往上收一截（叠在一起就是上沿最糊），再垫一层由暗到透明的渐变保住字。
+   标题高度钉死（104 + 顶部安全区），用等量的负下边距把展映提到它底下；只在展映形态 */
+html.rail.rail-float #view-library:has(.lib-showcase) { --lh-h: calc(var(--safe-t) + 104px); }
+html.rail.rail-float #view-library:has(.lib-showcase) > .library-header {
+  position: relative; z-index: 8; box-sizing: border-box;
+  height: var(--lh-h); margin-bottom: calc(-1 * var(--lh-h));
+  pointer-events: none;
+}
+.library-veil { display: none; }
+html.rail.rail-float #view-library:has(.lib-showcase) .library-veil {
+  display: block; position: absolute; z-index: -1; left: 0; right: 0; top: 0;
+  height: calc(100% + 64px); pointer-events: none;
+}
+.library-veil > i { position: absolute; inset: 0; }
+.library-veil > i:nth-child(1) { -webkit-backdrop-filter: blur(1.5px); backdrop-filter: blur(1.5px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 56%, transparent 100%); mask-image: linear-gradient(to bottom, #000 0%, #000 56%, transparent 100%); }
+.library-veil > i:nth-child(2) { -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 42%, transparent 82%); mask-image: linear-gradient(to bottom, #000 0%, #000 42%, transparent 82%); }
+.library-veil > i:nth-child(3) { -webkit-backdrop-filter: blur(9px); backdrop-filter: blur(9px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 28%, transparent 64%); mask-image: linear-gradient(to bottom, #000 0%, #000 28%, transparent 64%); }
+.library-veil > i:nth-child(4) { -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 14%, transparent 46%); mask-image: linear-gradient(to bottom, #000 0%, #000 14%, transparent 46%); }
+.library-veil::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(to bottom, rgba(0,0,0,.66) 0%, rgba(0,0,0,.5) 30%, rgba(0,0,0,.26) 60%, rgba(0,0,0,.08) 84%, rgba(0,0,0,0) 100%);
+}
 
 /* 没有封面的片子不显示之后，一排可能整排都没了：那一段（连同标题）一起藏起来 */
 .section:has(> .scroll-row:empty):not(:has(.year-tv.on)) { display: none; }   /* 年份轨道：同年份的剧集还在就不藏 */
@@ -6065,7 +6216,7 @@ html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay:
            (window.matchMedia && window.matchMedia('(display-mode: fullscreen)').matches);
   if (sa) document.documentElement.classList.add('standalone');
 })();
-/* 侧边导航条：横拿且矮（折起 / 展开横拿、手机横拿）或竖拿宽 600–720（展开的 iPhone Duo）。
+/* 侧边导航条：横拿且矮（折起 / 展开横拿、手机横拿）或竖拿宽 600–720；展开的 iPhone Duo 不论横竖、视口多高一律用它。
    iPhone Duo 折起竖拿（Safari 382 宽 / 主屏幕 App 466 宽）是贴右缘浮着的那种：rail + rail-float。
    与 CSS 的 html.rail / html.rail-float 一一对应；尽早打标，首帧就是对的形态，不会先闪一下底部胶囊 */
 (function () {
@@ -6082,9 +6233,16 @@ html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay:
     var w = Math.min(screen.width, screen.height);
     return (w > 440 && w < 600 && p1.matches) || (w >= 376 && w <= 389 && p2.matches);
   };
+  /* 展开的 Duo：内屏短边 669，别的 iPhone 最多 440。只看视口的话，主屏幕 App 横拿时视口有 669 高、
+     Safari 横拿一滚动工具栏收起视口也会长过 600 —— 导航就从侧边跳到底部。认屏幕：展开着就一直在侧边 */
+  var open = function () {
+    if (!iphone || !window.screen) return false;
+    var w = Math.min(screen.width, screen.height);
+    return w >= 600 && w < 760;
+  };
   var root = document.documentElement, t = 0;
   var set = function () {
-    var fl = duo(), on = q.matches || fl;
+    var fl = duo(), on = q.matches || fl || open();
     if (root.classList.contains('rail') === on && root.classList.contains('rail-float') === fl) return;
     /* 翻开 / 合上 / 转屏那一下直接换形态：胶囊条的宽度补间不跑（否则指示器量到的是半途的宽度） */
     root.classList.add('rail-switching');
@@ -6150,6 +6308,7 @@ html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay:
 
 <!-- 底部悬浮导航：[头像 · 主页 / 资料库]（深色滑动胶囊 + 蓝色激活项）+ 分离的圆形搜索钮 -->
 <div class="dock" id="dock" aria-label="主导航">
+  <span class="nav-sel" aria-hidden="true"></span>
   <nav class="nav-container" id="navContainer">
     <button class="tv-avatar" id="headerAvatar" aria-label="个人资料"><svg class="sf-icon" viewBox="77 -45 874 874" fill="currentColor" style="width:1em;height:1em;transform:scaleY(-1)"><path d="M514 -45Q469 -45 426.5 -36.5Q384 -28 344 -11Q305 6 270.0 29.5Q235 53 205 83Q175 113 151.5 147.5Q128 182 111 222Q94 262 85.5 304.0Q77 346 77 392Q77 437 85.5 479.5Q94 522 111 561Q128 601 151.5 636.0Q175 671 205 701Q235 731 270.0 754.5Q305 778 344 795Q384 812 426.5 820.5Q469 829 514 829Q559 829 601.5 820.5Q644 812 684 795Q723 778 758.0 754.5Q793 731 823 701Q853 671 876.5 636.0Q900 601 917 561Q934 522 942.5 479.5Q951 437 951 392Q951 346 942.5 304.0Q934 262 917 222Q900 182 876.5 147.5Q853 113 823 83Q793 53 758.0 29.5Q723 6 684 -11Q644 -28 601.5 -36.5Q559 -45 514 -45ZM514 27Q552 27 587.0 34.5Q622 42 655 56Q688 70 717.0 89.5Q746 109 771 134Q797 159 816.5 188.0Q836 217 850 250Q864 283 871.0 318.5Q878 354 878 392Q878 429 871.0 464.5Q864 500 850 533Q836 566 816.5 595.0Q797 624 771 649Q746 674 717.0 694.0Q688 714 655 728Q622 742 587.0 749.0Q552 756 514 756Q476 756 440.5 749.0Q405 742 372 728Q339 714 310.0 694.0Q281 674 256 649Q231 624 211.5 595.0Q192 566 178 533Q164 500 157.0 464.5Q150 429 150 392Q150 354 157.0 318.5Q164 283 178 250Q192 217 211.5 188.0Q231 159 256 134Q281 109 310.0 89.5Q339 70 372 56Q405 42 440.5 34.5Q476 27 514 27ZM807 109Q788 90 765.0 74.0Q742 58 715 44Q689 31 662.5 20.5Q636 10 609 3Q583 -4 559.0 -8.0Q535 -12 514 -12Q493 -12 469.0 -8.0Q445 -4 418 3Q392 10 365.0 20.5Q338 31 312 44Q286 58 263.0 74.0Q240 90 221 109L222 114Q227 130 239.5 145.5Q252 161 272 176Q292 191 317.0 203.5Q342 216 373 226Q404 236 439.5 241.0Q475 246 514 246Q553 246 588.5 241.0Q624 236 654 226Q686 216 711.0 203.5Q736 191 756 176Q775 161 787.5 145.5Q800 130 806 114L807 109ZM514 319Q493 319 474.5 324.5Q456 330 439 340Q423 351 409.5 365.5Q396 380 387 398Q377 416 372.0 437.0Q367 458 367 480Q367 502 371.5 522.0Q376 542 386 560Q396 578 409.5 592.0Q423 606 439 617Q456 628 474.5 633.5Q493 639 514 639Q534 639 552.5 633.5Q571 628 588 617Q605 606 618.0 592.0Q631 578 641 560Q651 542 656.0 522.0Q661 502 661 480Q661 458 656.0 437.0Q651 416 641 398Q632 379 618.5 364.5Q605 350 588 339Q572 329 553.0 324.0Q534 319 514 319Z"/></svg></button>
     <div class="nav-pill" id="navPill"></div>
@@ -6178,6 +6337,31 @@ html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay:
       <span class="nav-text">资料库</span>
     </a>
   </nav>
+
+  <!-- 资料库展映的播放 / 静音：只在 iPhone Duo 折起时、进了资料库才并进这枚胶囊（「资料库」下面那两格），
+       别处一律不显示。状态与点击都转给眼前那一章自己的钮（见 SC 的 navSync） -->
+  <div class="nav-media" id="navMedia" role="group" aria-label="预告片">
+    <div class="nav-media-in">
+      <button class="nm-btn nm-play" id="navScPlay" type="button" data-state="paused" aria-label="播放预告片" disabled>
+        <svg class="sc-ring" viewBox="0 0 40 40" aria-hidden="true">
+          <circle class="sc-ring-track" cx="20" cy="20" r="17"></circle>
+          <circle class="sc-ring-value" cx="20" cy="20" r="17" stroke-dasharray="106.814" stroke-dashoffset="106.814"></circle>
+        </svg>
+        <span class="sc-ico-pause" aria-hidden="true"></span>
+        <span class="sc-ico-play" aria-hidden="true"></span>
+      </button>
+      <button class="nm-btn nm-mute" id="navScMute" type="button" data-muted="1" aria-label="取消静音" disabled>
+        <svg class="sc-ring" viewBox="0 0 40 40" aria-hidden="true"><circle class="sc-ring-track" cx="20" cy="20" r="17"></circle></svg>
+        <svg class="sc-spk" viewBox="0 0 24 24" aria-hidden="true">
+          <path class="sc-spk-body" d="M11 4.6 6.9 8H4.2a1.2 1.2 0 0 0-1.2 1.2v5.6A1.2 1.2 0 0 0 4.2 16h2.7l4.1 3.4a.55.55 0 0 0 .9-.42V5.02a.55.55 0 0 0-.9-.42z"></path>
+          <path class="sc-spk-wave" d="M15.4 9.4a3.7 3.7 0 0 1 0 5.2"></path>
+          <path class="sc-spk-wave" d="M18 6.8a7.4 7.4 0 0 1 0 10.4"></path>
+          <path class="sc-spk-slash" d="m15.4 9.6 5 4.8"></path>
+          <path class="sc-spk-slash" d="m20.4 9.6-5 4.8"></path>
+        </svg>
+      </button>
+    </div>
+  </div>
 
   <!-- 分离出来的搜索按钮：独立圆钮，不参与胶囊滑动。
        点击后就地拉长成搜索场 —— 右端锚点钉死在钮的右缘（形变全程不动），
@@ -15113,6 +15297,16 @@ const AAP = {
     /* 浏览进度：看到第几张 / 共几张。卡片态那条进度条直接吃这个值 */
     const total = items.length || 1;
     this.root.style.setProperty('--aap-pct', (((idx + 1) / total) * 100).toFixed(2) + '%');
+    /* iPhone Duo 折起的卡片态是 iOS 的页码点：超过 8 张只排 8 颗，跟着当前那张挪；还有更多的那一端，
+       最外两颗渐小。class 只在那一处有样式，别处不起作用 */
+    const MAX = 8, n = items.length;
+    const start = n > MAX ? Math.max(0, Math.min(idx - (MAX >> 1), n - MAX)) : 0, end = n > MAX ? start + MAX : n;
+    items.forEach((li, i) => {
+      const k = i - start, moreL = start > 0, moreR = end < n;
+      li.classList.toggle('pc-off', i < start || i >= end);
+      li.classList.toggle('pc-s2', (moreL && k === 0) || (moreR && k === MAX - 1));
+      li.classList.toggle('pc-s1', (moreL && k === 1) || (moreR && k === MAX - 2));
+    });
   },
 
   play() {
@@ -15238,11 +15432,12 @@ function renderDots() {
     }
     ul.innerHTML = html;
     ul.style.setProperty('--dotnav-count', n);
+    /* 走 goToHero：全出血时与直接 _jumpAap 一样；卡片态（iPhone Duo 折起时卡下就是这排点，点得到）
+       跳完立刻摁住轮播 —— 卡片态不自动轮播 */
     ul.querySelectorAll('.dotnav-link').forEach((link, i) => {
       link.addEventListener('click', e => {
         e.preventDefault();
-        _jumpAap(i);
-        haptic.light();
+        goToHero(i);
       });
     });
     AAP.setCurrent(state.heroIdx);
@@ -18346,11 +18541,13 @@ const SC = (() => {
         '<div class="library-header"><div class="library-title">资料库</div></div>' +
         '<div class="empty"><i class="ph ph-film-slate"></i><div class="empty-title">资料库是空的</div></div>';
       mounted = false;
+      navSync();
       return;
     }
 
     view.innerHTML =
       '<div class="library-header">' +
+        '<div class="library-veil" aria-hidden="true"><i></i><i></i><i></i><i></i></div>' +
         '<div class="library-title">资料库</div>' +
         '<div class="library-sub">Cuven 为你提供严格品质的影片</div>' +
       '</div>' +
@@ -18395,6 +18592,7 @@ const SC = (() => {
        跑的 —— 中间这一帧，视口那几章还是空壳。rAF 里手动补一刀，那时滚动位置
        已经落定，补的正好是眼前这几章。fill 幂等，随后 IO 再来一遍也不冲突。 */
     requestAnimationFrame(() => { if (mounted) primeLive(); });
+    navSync();                       /* Duo 折起：播放 / 静音并进导航胶囊 */
   }
 
   /* 按当前滚动位置，把视口附近的空壳直接填上，不等 IO */
@@ -18675,6 +18873,7 @@ const SC = (() => {
       ch._sc.src = src;
       ch._sc.ctl.hidden = false;
       if (ch._sc.mute) ch._sc.mute.hidden = false;
+      if (navOn) navSync();
       const thumb = (data.video && data.video.thumb) || (data.yt ? 'https://i.ytimg.com/vi/' + data.yt.key + '/maxresdefault.jpg' : '');
       if (!ch._sc.poster.getAttribute('src') && !ch._sc.poster.dataset.src && thumb) setPoster(ch, thumb);
       /* 预告片地址常常比「滚到眼前」晚到（TMDB + IMDb 两跳）—— 那一下 mountVideo
@@ -19126,6 +19325,53 @@ const SC = (() => {
     if (!s || !s.mute) return;
     s.mute.dataset.muted = s.muted ? '1' : '0';
     s.mute.setAttribute('aria-label', s.muted ? '取消静音' : '静音');
+    if (navOn) navSync();
+  }
+
+  /* ── 导航胶囊里的播放 / 静音（iPhone Duo 折起）─────────────────────
+     Duo 折起时画面右上角那两个钮不出（CSS 藏掉），改由导航胶囊里「资料库」下面那两格代劳。
+     那两格只是传话：显示眼前那一章（current；没有就退到持有片源的 active）的状态，
+     点下去在同一个 click 调用栈里转给那一章自己的钮 —— 解除静音的手势 Safari 才认。
+     html.sc-nav：在资料库、展映挂着 → 胶囊长出这两格（样式只在 Duo 折起时有，别处挂着也无妨）；
+     sc-nav-anim 只挂在长出 / 收回的那一下，让胶囊的 top 跟着补间 */
+  let navEls = null, navOn = false, navAnimT = 0;
+  function navBtns() {
+    if (navEls) return navEls;
+    const play = document.getElementById('navScPlay'), mute = document.getElementById('navScMute');
+    if (!play || !mute) return null;
+    navEls = { play, mute, ring: play.querySelector('.sc-ring-value') };
+    play.addEventListener('click', () => { const ch = navTarget(); if (ch) ch._sc.ctl.click(); });
+    mute.addEventListener('click', () => { const ch = navTarget(); if (ch && ch._sc.mute) ch._sc.mute.click(); });
+    return navEls;
+  }
+  function navTarget() {
+    const ch = current && current._sc ? current : active && active._sc ? active : null;
+    return ch && ch._sc.ctl && !ch._sc.ctl.hidden ? ch : null;
+  }
+  function navSync() {
+    const on = mounted && state.currentTab === 'library' && !!rootView && rootView.classList.contains('active');
+    if (on !== navOn) {
+      navOn = on;
+      const root = document.documentElement;
+      root.classList.add('sc-nav-anim');
+      root.classList.toggle('sc-nav', on);
+      clearTimeout(navAnimT);
+      navAnimT = setTimeout(() => root.classList.remove('sc-nav-anim'), 650);
+    }
+    const b = navBtns();
+    if (!b) return;
+    const ch = on ? navTarget() : null, s = ch && ch._sc;
+    /* 介绍面板把画面盖住时，画面上那两个钮本来就淡掉了（预告片也停了）：这里跟着变灰、不接点 */
+    const live = !!s && s.ctlOn !== false;
+    b.play.disabled = !live;
+    b.mute.disabled = !live || !s.mute || s.mute.hidden;
+    const playing = live && s.ctl.dataset.state === 'playing';
+    b.play.dataset.state = playing ? 'playing' : 'paused';
+    b.play.setAttribute('aria-label', playing ? '暂停预告片' : '播放预告片');
+    const muted = !s || s.muted;
+    b.mute.dataset.muted = muted ? '1' : '0';
+    b.mute.setAttribute('aria-label', muted ? '取消静音' : '静音');
+    if (b.ring) b.ring.style.strokeDashoffset = s && s.ring && s.ring.style.strokeDashoffset ? s.ring.style.strokeDashoffset : String(RING);
   }
 
   function unmountVideo(ch) {
@@ -19186,6 +19432,7 @@ const SC = (() => {
     }
     s.ctl.dataset.state = should ? 'playing' : 'paused';
     s.ctl.setAttribute('aria-label', should ? '暂停预告片' : '播放预告片');
+    if (navOn) navSync();
   }
 
   /* ── 观察器 ────────────────────────────────────────────────────── */
@@ -19203,6 +19450,7 @@ const SC = (() => {
           if (active === ch) unmountVideo(ch);
         }
       });
+      if (navOn) navSync();                      /* 眼前换了一章：胶囊里那两格跟着换主人 */
     }, { threshold: [0, .2, .62, .9] });
 
     /* 提前一屏半开始要数据：等滚到眼前再发请求，看到的就是一屏空标题。
@@ -19298,7 +19546,11 @@ const SC = (() => {
       st.setProperty('--sc-note-opacity', String(1 - np));
       st.setProperty('--sc-note-shift', (-12 * np).toFixed(2) + 'px');
       st.setProperty('--sc-veil', (.42 * (1 - cp)).toFixed(3));
-      st.setProperty('--sc-ctl-opacity', String(1 - clamp((localY - h * .62) / (h * .28))));
+      const co = 1 - clamp((localY - h * .62) / (h * .28));
+      st.setProperty('--sc-ctl-opacity', String(co));
+      /* 胶囊里那两格（Duo 折起）跟着画面上的钮一起「在 / 不在」：过阈值才通知，平时一帧不多花 */
+      const ctlOn = co > .35;
+      if (ctlOn !== s.ctlOn) { s.ctlOn = ctlOn; if (navOn) navSync(); }
 
       /* ── 画幅 ──────────────────────────────────────────────────
          盒底边永远咬着介绍面板的上沿：gap 就是「此刻允许画幅有多高」，
@@ -19373,6 +19625,7 @@ const SC = (() => {
       const span = Number.isFinite(d) && d > base ? d - base : 0;
       const ratio = span > 0 ? clamp((t - base) / span) : 0;
       s.ring.style.strokeDashoffset = String(RING * (1 - ratio));
+      if (navOn && navEls && navEls.ring && navTarget() === ch) navEls.ring.style.strokeDashoffset = s.ring.style.strokeDashoffset;
     });
 
     /* 签名地址过期（IMDb 给 24 小时）或网络断了：退回剧照，并把这条缓存
@@ -19383,6 +19636,7 @@ const SC = (() => {
       s.ctl.hidden = true;
       if (s.mute) s.mute.hidden = true;
       if (s.key) trailerCache.delete(s.key);
+      if (navOn) navSync();
     });
 
     const scroller = ch.querySelector('.sc-scroller');
@@ -19506,7 +19760,7 @@ const SC = (() => {
     applyTiers();
   }
 
-  return { render, teardown, trim };
+  return { render, teardown, trim, navSync };
 })();
 
 
@@ -19536,6 +19790,7 @@ async function renderLibrary() {
     return;
   }
   SC.teardown();
+  SC.navSync();                     /* 年份列表：胶囊里那两格收回去 */
 
   const selectedYear = Number(state.libraryYear);
   PageBack.show(state.yearLibraryOrigin === 'home' ? '返回主页' : '返回资料库', closeYearLibrary);
@@ -21772,8 +22027,30 @@ const Player = (() => {
     if (keep && cur) cur.keep = true;
     try {
       if (el.video.webkitDisplayingFullscreen) el.video.webkitExitFullscreen();
-      else if (fsEl()) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      else if (fsEl()) exitDocFs();
     } catch (_) {}
+  }
+  let fsExitAt = 0;                                          /* 最近一次发出「退出元素全屏」的时刻 */
+  function exitDocFs() {
+    fsExitAt = Date.now();
+    try { const r = (document.exitFullscreen || document.webkitExitFullscreen).call(document); if (r && r.catch) r.catch(() => {}); } catch (_) {}
+  }
+  /* 播放器已经关了，却还挂在播放层的全屏里 —— 黑底，点哪都没反应，只能按 Esc。两种来路：
+     · 点「播放」后、全屏请求还没落定就关了（返回键 / 返回手势）：关的时候还不在全屏里，没得退，请求随后照样生效
+       （机器忙的时候能晚到一秒多）；
+     · 退出请求落在进入全屏的过渡里，被浏览器吞了，一直不回。
+     所以关掉以后盯一阵（strayWatch：每 400ms 看一眼，约 6 秒，播放器重新打开就停），看到卡住就退；
+     上一次退出请求发出不到 0.9 秒就先不重发（还在飞，连发会互相打架），过了还没退成就再发一次 */
+  function strayFs() {
+    if (FS === 'element' && el && !isOpen() && fsEl() === el.root && Date.now() - fsExitAt > 900) exitDocFs();
+  }
+  let strayT = 0;
+  function strayWatch() {
+    if (FS !== 'element') return;
+    clearTimeout(strayT);
+    let n = 0;
+    const tick = () => { if (isOpen()) return; strayFs(); if (++n < 15) strayT = setTimeout(tick, 400); };
+    strayT = setTimeout(tick, 400);
   }
 
   /* ── 打开 / 关闭 ── */
@@ -21872,6 +22149,7 @@ const Player = (() => {
     hide(fromPopstate);
     release();
     notify();
+    strayWatch();                                              /* 全屏晚到 / 退出被吞：盯一阵（见 strayFs） */
   }
   function stop() {
     if (!el || !cur) return;
@@ -22117,7 +22395,11 @@ const Player = (() => {
     v.addEventListener('webkitendfullscreen', onFsEnd);
     v.addEventListener('webkitpresentationmodechanged', onPipChange);
     v.addEventListener('leavepictureinpicture', onPipChange);
-    const onDocFs = () => { if (FS === 'element' && cur && !fsEl()) onFsEnd(); };
+    const onDocFs = () => {
+      if (FS !== 'element') return;
+      if (!isOpen() && el && fsEl() === el.root) { setTimeout(strayFs, 120); strayWatch(); return; }   /* 关了以后全屏才落定：退掉（见 strayFs） */
+      if (cur && !fsEl()) onFsEnd();
+    };
     document.addEventListener('fullscreenchange', onDocFs);
     document.addEventListener('webkitfullscreenchange', onDocFs);
     /* 在场时，别的 <video> 一开播就按住（展厅 / 轮播会按自己的节奏重启预告片） */
@@ -22220,6 +22502,7 @@ function navTo(tab) {
   inEl.classList.add('active');
 
   state.currentTab = tab;
+  try { SC.navSync(); } catch (_) {}   /* 离开 / 回到资料库：Duo 折起时胶囊里的播放 / 静音跟着收回 / 长出 */
   /* 先渲染再定位：position:fixed 的退场视图已不占高度，此时若入场视图还
      没内容，页面高度为 0，scrollTo 会被浏览器夹回 0 —— 位置就丢了。
      renderHome 是同步的；renderLibrary 命中缓存时首个 await 之后才填充，
