@@ -111,14 +111,19 @@ class MemCache {
    recv：{ base, meta, doc } */
 export function world() {
   return {
-    forum: { base: 'https://forum.test/', boards: {}, threads: {}, perPage: 20, calls: 0, fail: null, slow: 0 },
+    /* encByFid：某个版块的页面编码（'utf8' = UTF-8 并在响应头里声明；'utf8-bare' = UTF-8 但不声明；默认 GBK） */
+    forum: { base: 'https://forum.test/', boards: {}, threads: {}, perPage: 20, calls: 0, fail: null, slow: 0, encByFid: {} },
     tmdb: { movie: [], tv: [], calls: 0, fail: null },
-    recv: { base: 'https://recv.test', meta: null, doc: null, calls: 0, fail: null },
+    /* recv：公开 R2 域名。总账（Stream v22）+ v25 的实时清单（files = file-list-v2.json、tv = tv/list-v1.json、ptr = lib-ptr.json）
+       hits：按路径记的请求次数 */
+    recv: { base: 'https://recv.test', meta: null, doc: null, files: null, tv: null, ptr: null, calls: 0, hits: {}, fail: null },
+    /* stream：Stream v25 的接口（登录门后面）。key = AUTH_SECRET；files / tv / gen 同上 */
+    stream: { base: 'https://stream.test', key: 'stream-secret', files: null, tv: null, gen: null, calls: 0, logins: 0, fail: null },
     img: { calls: 0, fail: false },
   };
 }
 
-const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9一-龥]/g, '');
+const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9一-龥]/g, '');
 const pad = html => html + '<!--' + 'x'.repeat(1200) + '-->';
 
 function forumPage(W, u) {
@@ -144,6 +149,9 @@ function forumPage(W, u) {
     for (const r of rows) html += `<a href="${r.tid}_1.html" title="${r.title.replace(/"/g, '&quot;')}">x</a>\n`;
     html += `<a href="list_${fid}_${last}.html" class="last">... ${last}</a></div>`;
     void ykey;
+    const enc = F.encByFid && F.encByFid[fid];
+    if (enc === 'utf8') return new Response(new TextEncoder().encode(pad(html)), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+    if (enc === 'utf8-bare') return new Response(new TextEncoder().encode(pad(html)), { headers: { 'content-type': 'text/html' } });
     return new Response(gbk(pad(html)));
   }
   if (q.get('mod') === 'viewthread') {
@@ -173,20 +181,49 @@ function tmdbApi(W, u) {
   const q = norm(u.searchParams.get('query'));
   const yk = kind === 'movie' ? 'primary_release_year' : 'first_air_date_year';
   const yr = u.searchParams.get(yk);
+  const en = /^en/.test(u.searchParams.get('language') || '');
   const res = db.filter(x => {
-    const names = [x.title, x.original_title, x.name, x.original_name, ...(x.aka || [])].map(norm).filter(Boolean);
-    if (!names.some(n => n.includes(q) || (q.includes(n) && n.length >= 2))) return false;
+    /* noZh：TMDB 上没有中文译名 —— 中文名搜不到它，中文结果里的标题是原名 */
+    const names = (x.noZh ? [x.original_title, x.original_name, x.en, ...(x.aka || [])] : [x.title, x.original_title, x.name, x.original_name, x.en, ...(x.aka || [])]).map(norm).filter(Boolean);
+    /* strict：只认「查询串是某个名字的一部分」（真 TMDB 按词搜，「A/B」两个译名连在一起的查询搜不到） */
+    if (!names.some(n => n.includes(q) || (!x.strict && q.includes(n) && n.length >= 2))) return false;
     if (yr) { const d = x.release_date || x.first_air_date || ''; if (d.slice(0, 4) !== yr) return false; }
     return true;
   });
-  return Response.json({ results: res.slice(0, 20) });
+  return Response.json({ results: res.slice(0, 20).map(x => (en && x.en) ? { ...x, title: x.en, name: x.en }
+    : (!en && x.noZh) ? { ...x, title: x.original_title || x.title, name: x.original_name || x.name } : x) });
+}
+/** 公开 R2 域名上的对象（总账 + v25 实时清单） */
+function recvObj(W, url) {
+  const R = W.recv, p = url.pathname;
+  R.hits[p] = (R.hits[p] || 0) + 1;
+  const pick = p.endsWith('/lib-ptr.json') ? R.ptr : p.endsWith('/file-list-v2.json') ? R.files : p.endsWith('/tv/list-v1.json') ? R.tv
+    : p.endsWith('Received.meta.json') || p.endsWith('/meta.json') ? R.meta : p.endsWith('Received.json') ? R.doc : null;
+  return pick ? Response.json(pick) : new Response('nf', { status: 404 });
+}
+/** Stream v25：POST /auth 换 cookie，接口要 cookie */
+function streamApiMock(W, url, init) {
+  const S = W.stream;
+  if (url.pathname === '/auth') {
+    const body = String((init && init.body) || '');
+    const key = new URLSearchParams(body).get('key');
+    if (key === S.key) { S.logins++; return new Response(null, { status: 302, headers: { location: '/', 'set-cookie': 'auth=tok-' + S.logins + '; Path=/; HttpOnly' } }); }
+    return new Response('bad key', { status: 401 });
+  }
+  const ck = String((init && init.headers && (init.headers.cookie || init.headers.Cookie)) || '');
+  if (!/auth=tok-\d+/.test(ck)) return new Response('<html>login</html>', { status: 401, headers: { 'content-type': 'text/html' } });
+  if (url.pathname === '/api/all') return S.files ? Response.json({ root: S.files.root, videos: S.files.videos, folders: [] }) : new Response('{}', { status: 503 });
+  if (url.pathname === '/api/tv') return S.tv ? Response.json({ root: '/ram2', at: S.tv.at, series: S.tv.series }) : new Response('{}', { status: 503 });
+  if (url.pathname === '/api/gen') return Response.json({ gen: S.gen || '', count: S.files ? S.files.videos.length : 0, ts: Date.now() });
+  return new Response('nf', { status: 404 });
 }
 
 /** 模拟的外部世界（给真 workerd 测试用的本地 HTTP 服务也走这里）。返回 Response 或 null（不认识的主机） */
 export async function worldFetch(W, url) {
   if (url.pathname.startsWith('/3/')) return tmdbApi(W, url);
-  if (url.pathname.endsWith('Received.meta.json')) return W.recv.meta ? Response.json(W.recv.meta) : new Response('nf', { status: 404 });
-  if (url.pathname.endsWith('Received.json')) return W.recv.doc ? Response.json(W.recv.doc) : new Response('nf', { status: 404 });
+  /* workerd 测试里论坛与总账挂在同一个本地端口上：先按论坛的路径前缀分 */
+  if (url.href.startsWith(W.forum.base)) return forumPage(W, url);
+  if (url.host === new URL(W.recv.base).host) return recvObj(W, url);
   if (url.host === new URL(W.forum.base).host) return forumPage(W, url);
   return null;
 }
@@ -215,9 +252,12 @@ export function isolate(env, W, opt = {}) {
     if (url.host === new URL(W.recv.base).host) {
       W.recv.calls++;
       if (W.recv.fail) { let r = W.recv.fail(url); if (r && typeof r.then === 'function') r = await r; if (r) { if (r instanceof Response) return r; throw r; } }
-      if (url.pathname.endsWith('meta.json')) return W.recv.meta ? Response.json(W.recv.meta) : new Response('nf', { status: 404 });
-      if (url.pathname.endsWith('Received.json')) return W.recv.doc ? Response.json(W.recv.doc) : new Response('nf', { status: 404 });
-      return new Response('nf', { status: 404 });
+      return recvObj(W, url);
+    }
+    if (url.host === new URL(W.stream.base).host) {
+      W.stream.calls++;
+      if (W.stream.fail) { let r = W.stream.fail(url); if (r && typeof r.then === 'function') r = await r; if (r) { if (r instanceof Response) return r; throw r; } }
+      return streamApiMock(W, url, init);
     }
     if (url.host === 'image.tmdb.org') {
       W.img.calls++;

@@ -88,6 +88,23 @@ try {
     ok(bk.ok && bk.files === 3, '手动备份：' + (bk.msg || bk.error));
     const dg = await (await get('/api/diagnose')).json();
     ok(dg.checks && !dg.checks.some(c => c.level === 'fail'), `体检：${dg.verdict}`);
+    /* 极限模式：重置 2025 年，用页面里那一份调度代码（<turbo> 标记之间）在真 workerd 里重建 ——
+       认定工的 Object.create(env)、POST 正文、并发的 /api/tm 都在真运行时里走一遍 */
+    const rs = await (await get('/api/reset?year=2025')).json();
+    const src = /\/\*<turbo>\*\/([\s\S]*?)\/\*<\/turbo>\*\//.exec(fs.readFileSync(H.SRC_FILE, 'utf8'))[1];
+    const turboRun = new Function(src + '\n;return turboRun;')();
+    let tmN = 0;
+    const api = async (u, o = {}) => {
+      if (u.startsWith('/api/tm')) tmN++;
+      const res = await get(u, { method: o.method || 'GET', headers: o.body ? { 'content-type': 'application/json' } : {}, body: o.body });
+      const j = await res.json().catch(() => null);
+      if (!res.ok) { const e = new Error((j && j.error) || 'HTTP ' + res.status); e.status = res.status; e.data = j || {}; throw e; }
+      return j;
+    };
+    const t = await new Promise(resolve => turboRun({ api, later: (fn, ms) => setTimeout(fn, Math.min(ms, 300)), stopped: () => false, done: (msg, bad) => resolve({ msg, bad }) }));
+    const st2 = await (await get('/api/state')).json();
+    ok(rs.dropped === 12 && t.msg === '完成' && st2.movies === 12 && tmN > 0 && st2.pend && !st2.pend.wait,
+      `极限模式在真 workerd 里重建 2025 年：${t.msg} · ${st2.movies} 部 · 认定工调用 ${tmN} 次 · 排队 ${st2.pend ? st2.pend.wait : '?'}`);
     const sc = await get('/__scheduled?cron=0+20+*+*+*');
     ok(sc.status === 200, '定时任务入口跑通');
   }
