@@ -5044,9 +5044,13 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   opacity: 0;
   pointer-events: none;
   transform: translateZ(0);
-  transition: opacity .8s var(--sc-ease-apple);
+  transition: opacity .12s linear;          /* 隐去要快：赶在 YouTube 的暂停层画出来之前 */
 }
-.sc-media.is-playing .sc-yt { opacity: 1; }
+/* YouTube 自己的界面（片名条、上一个 / 暂停 / 下一个、「More videos」、YouTube 标志、字幕）不能露出来：
+   移动端的嵌入播放器不认 controls=0 —— 一开播、一恢复播放，那层控件要亮两三秒；一暂停就铺满
+   「More videos」和标志。所以 iframe 只在连续播了一阵、控件自己退掉以后（.clean）才淡入，
+   暂停 / 缓冲太久 / 回卷之前先瞬间隐去，底下是这一章的剧照，背景始终是干净的画面 */
+.sc-media.is-playing .sc-yt.clean { opacity: 1; transition: opacity .8s var(--sc-ease-apple); }
 .sc-yt > iframe,
 .sc-yt > div {
   position: absolute;
@@ -18852,12 +18856,34 @@ const SC = (() => {
     return ytApi;
   }
 
+  /* YouTube 的控件层在开播 / 恢复播放后约 3 秒自己退掉：连续播满这么久才让画面露出来 */
+  const YT_REVEAL_MS = 3000;
+  /* 片尾那十几秒常挂着上传者的片尾画面（订阅、推荐视频）：长片提前这么多秒回卷，短片只留 1.5 秒 */
+  const YT_TAIL_S = 12;
+
   function trailerMedia(video, media) {
     const et = new EventTarget();
     const fire = type => et.dispatchEvent(new Event(type));
     let key = '';                     /* 当前的 YouTube 视频；空 = 原生 <video> */
     let player = null, box = null, gen = 0, poll = 0, guard = 0;
     let want = false, muted = true, state = -1, cur = 0, dur = NaN, meta = false, unmuteAt = 0;
+    let clean = false, revealT = 0, pauseT = 0, bufT = 0;
+
+    /* 画面露不露：只在 YouTube 自己的界面全都退掉时露 */
+    function setClean(on) {
+      clean = !!on;
+      if (box) box.classList.toggle('clean', clean);
+    }
+    function hide() { clearTimeout(revealT); revealT = 0; clearTimeout(bufT); bufT = 0; setClean(false); }
+    /* 播稳了再露：从现在起连续播满 YT_REVEAL_MS（中途缓冲 / 暂停会把它清掉，回到播放时重新计时） */
+    function armReveal() {
+      clearTimeout(revealT);
+      revealT = setTimeout(() => { revealT = 0; if (state === 1 && want) setClean(true); }, YT_REVEAL_MS);
+    }
+    /* 字幕：YouTube 会按系统语言自动打开（cc_load_policy=0 关不掉自动字幕），把字幕模块整个卸掉 */
+    function noCaptions() {
+      try { if (player && typeof player.unloadModule === 'function') { player.unloadModule('captions'); player.unloadModule('cc'); } } catch {}
+    }
     let waiters = [];                 /* play() 还没兑现的 promise */
 
     ['loadedmetadata', 'playing', 'timeupdate', 'error', 'volumechange'].forEach(type =>
@@ -18870,6 +18896,7 @@ const SC = (() => {
       gen++;
       clearInterval(poll); poll = 0;
       clearTimeout(guard);
+      hide(); clearTimeout(pauseT); pauseT = 0;
       waiters = [];                   /* 被换下的那次 play() 不兑现也不报错 —— 与它有关的那一章已经不在乎了 */
       try { if (player) player.destroy(); } catch {}
       player = null;
@@ -18883,6 +18910,14 @@ const SC = (() => {
         cur = player.getCurrentTime() || 0;
         const d = player.getDuration();
         if (d > 0) { dur = d; if (!meta) { meta = true; fire('loadedmetadata'); } }
+        /* 自己回卷：赶在片尾画面（订阅 / 推荐视频）出来之前，先隐去再跳回去，重新播满一阵才露 */
+        const tail = dur > START_AT + 40 ? YT_TAIL_S : 1.5;
+        if (want && dur > 0 && cur > START_AT + 2 && dur - cur < tail) {
+          hide();
+          player.seekTo(dur > START_AT + 10 ? START_AT : 0, true);
+          cur = dur > START_AT + 10 ? START_AT : 0;
+          armReveal();                                   /* 跳到已缓冲的地方时 YouTube 未必回报「缓冲 → 播放」 */
+        }
       } catch {}
       fire('timeupdate');
     }
@@ -18892,8 +18927,17 @@ const SC = (() => {
       if (!player || typeof player.playVideo !== 'function') return;
       try {
         if (muted) player.mute(); else player.unMute();
-        if (want) player.playVideo(); else player.pauseVideo();
+        if (want) { clearTimeout(pauseT); pauseT = 0; player.playVideo(); }
+        else stop();
       } catch {}
+    }
+    /* 暂停：先把画面隐去，等它淡完再让 YouTube 停 —— 停下那一刻它会铺满「More videos」和标志 */
+    function stop() {
+      const shown = clean;
+      hide();
+      clearTimeout(pauseT);
+      const go = () => { pauseT = 0; if (!want) try { if (player && player.pauseVideo) player.pauseVideo(); } catch {} };
+      if (shown) pauseT = setTimeout(go, 160); else go();
     }
 
     function onState(s) {
@@ -18901,10 +18945,17 @@ const SC = (() => {
       if (s === 1) {                                     /* PLAYING */
         if (!poll) poll = setInterval(tick, 250);
         tick();
+        noCaptions();
+        clearTimeout(bufT); bufT = 0;
+        if (!clean && !revealT) armReveal();
         resolveAll();
         fire('playing');
         return;
       }
+      if (s === 3) {                                     /* 缓冲：一下子就过去的不动；卡久了转圈会露出来，先隐去 */
+        clearTimeout(revealT); revealT = 0;
+        if (clean && !bufT) bufT = setTimeout(() => { bufT = 0; if (state === 3) setClean(false); }, 700);
+      } else hide();                                     /* 暂停 / 结束 / 待播：YouTube 的界面马上要铺出来 */
       if (s !== 3) { clearInterval(poll); poll = 0; }   /* 缓冲中接着量时间 */
       if (s === 2 && want) {
         if (!muted && Date.now() - unmuteAt < 1500) {
@@ -18965,7 +19016,9 @@ const SC = (() => {
       set currentTime(v) {
         if (!key) { video.currentTime = v; return; }
         cur = v;
+        hide();                                          /* 跳转时 YouTube 会亮一下控件：先隐去，播稳了再露 */
         try { if (player && player.seekTo) player.seekTo(v, true); } catch {}
+        if (state === 1 && want) armReveal();
       },
       get duration() { return key ? dur : video.duration; },
       play() {
@@ -18985,7 +19038,7 @@ const SC = (() => {
         if (!key) { video.pause(); return; }
         want = false;
         clearTimeout(guard);
-        try { if (player && player.pauseVideo) player.pauseVideo(); } catch {}
+        stop();
       },
       load() { if (key) { if (!box) build(); } else video.load(); },
       getAttribute(n) { return n === 'src' && key ? 'yt:' + key : video.getAttribute(n); },

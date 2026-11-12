@@ -303,7 +303,12 @@ console.log('\n■ 展厅预告片 · YouTube 官方预告（IMDb 不给直链�
       emit(s) { this.state = s; this.o.events.onStateChange({ data: s, target: this }); }
       getIframe() { return this.f; }
       playVideo() { if (this.state === 1 || this.state === 3) return; this.emit(3); setTimeout(() => this.state === 3 && this.emit(1), 80); }
-      pauseVideo() { if (this.state === 1 || this.state === 3) this.emit(2); }
+      pauseVideo() {
+        /* 停下那一刻画面还露着，就会看到 YouTube 的暂停层（More videos、标志）：记下来 */
+        window.__ytPauseShown = !!(this.f.parentElement && this.f.parentElement.classList.contains('clean'));
+        if (this.state === 1 || this.state === 3) this.emit(2);
+      }
+      unloadModule(m) { (window.__ytUnload = window.__ytUnload || []).push(m); }
       mute() { this.muted = true; } unMute() { this.muted = false; } isMuted() { return this.muted; }
       seekTo(t) { this.t = t; }
       getCurrentTime() { if (this.state === 1) this.t += 0.25; return this.t; }
@@ -321,15 +326,27 @@ console.log('\n■ 展厅预告片 · YouTube 官方预告（IMDb 不给直链�
     vsrc: document.querySelector('.sc-chapter video').getAttribute('src'), muted: window.__yt && window.__yt.muted }));
   ok(up && o.muted && !o.vsrc && o.v && o.v.mute === 1 && o.v.controls === 0 && o.v.playsinline === 1 && o.v.start === 3 && /nocookie/.test(o.host),
     'IMDb 没给直链：第一章挂上 YouTube 官方预告并静音自动开播（无控件、内联、从第 3 秒进，原生 <video> 让位）');
+  /* YouTube 自己的界面一样都不露：开播那几秒（片名条、上一个 / 暂停 / 下一个）画面不露，底下是剧照 */
+  const c0 = await yp.evaluate(() => { const b = document.querySelector('.sc-chapter .sc-yt'); return { clean: b.classList.contains('clean'), op: getComputedStyle(b).opacity }; });
+  const c1 = await until(yp, () => { const b = document.querySelector('.sc-chapter .sc-yt'); return !!b && b.classList.contains('clean') && getComputedStyle(b).opacity === '1'; }, null, 7000)
+    .then(() => true).catch(() => false);
+  const cc = await yp.evaluate(() => (window.__ytUnload || []).includes('captions'));
+  ok(!c0.clean && c0.op === '0' && c1 && cc, 'YouTube 的控件层不露：开播先不露（底下是剧照），连续播满 3 秒、控件自己退掉后才淡入；字幕模块卸掉');
   const ring = await until(yp, () => parseFloat(document.querySelector('.sc-chapter .sc-ring-value').style.strokeDashoffset) < 106.8, null, 5000)
     .then(() => true).catch(() => false);
   ok(ring, '进度环跟着 YouTube 播放器走');
+  /* 片尾画面（订阅、推荐视频）出来之前：先隐去，回卷到第 3 秒，播稳了再露 */
+  await yp.evaluate(() => { window.__yt.t = 140; });
+  const looped = await until(yp, () => window.__yt.t < 10 && !document.querySelector('.sc-chapter .sc-yt.clean'), null, 3000).then(() => true).catch(() => false);
+  const again = await until(yp, () => !!document.querySelector('.sc-chapter .sc-yt.clean'), null, 6000).then(() => true).catch(() => false);
+  ok(looped && again, '片尾画面出来之前先隐去、回卷到第 3 秒，播稳了再露出来');
   const un = await yp.evaluate(() => { const b = document.querySelector('.sc-chapter .sc-mutectl'); b.click(); return { yt: window.__yt.muted, btn: b.dataset.muted }; });
   ok(un.yt === false && un.btn === '0', '点「取消静音」：播放器 unMute，按钮同步');
   await yp.evaluate(() => playVideo('/Movies/long.mp4', 'Long.Test.2024.1080p.mp4'));
   await until(yp, s => document.querySelector(s).currentTime > 0.3, vid);
   await yp.waitForTimeout(300);
-  ok(await yp.evaluate(() => window.__yt.state === 2), '正片开播：YouTube 预告也让路（暂停）');
+  ok(await yp.evaluate(() => window.__yt.state === 2 && window.__ytPauseShown === false && !document.querySelector('.sc-chapter .sc-yt.clean')),
+    '正片开播：YouTube 预告也让路（暂停）—— 先隐去画面再停，暂停层（More videos、标志）露不出来');
   await yp.keyboard.press('Escape');
   const back = await until(yp, () => window.__yt && window.__yt.state === 1, null, 8000).then(() => true).catch(() => false);
   ok(back, '关掉播放器：YouTube 预告接着放');
