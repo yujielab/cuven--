@@ -722,7 +722,8 @@ await pd.waitForTimeout(500);
    画面右上角的播放 / 静音不出，进资料库时并进导航胶囊（「资料库」下面长出两格），离开就收回 */
 const navBox = () => pd.evaluate(() => { const r = e => e.getBoundingClientRect(), d = r(document.getElementById('dock')), m = r(document.getElementById('navMedia'));
   return { on: document.documentElement.classList.contains('sc-nav'), top: Math.round(d.top), h: Math.round(d.height), at55: Math.abs((d.top + d.bottom) / 2 - innerHeight * .55) <= 6, grp: Math.round(m.height), op: +getComputedStyle(document.getElementById('navMedia')).opacity,
-    selOp: +getComputedStyle(document.querySelector('#dock .nav-sel')).opacity, homeGlass: getComputedStyle(document.getElementById('navHome')).backgroundColor !== 'rgba(0, 0, 0, 0)' }; });
+    selOp: +getComputedStyle(document.querySelector('#dock .nav-sel')).opacity, homeGlass: getComputedStyle(document.getElementById('navHome')).backgroundColor !== 'rgba(0, 0, 0, 0)',
+    libBack: (() => { const lb = document.getElementById('navLib'), c = getComputedStyle(lb); return Math.abs(lb.getBoundingClientRect().height - 44) <= 1 && +c.opacity === 1 && c.visibility === 'visible'; })() }; });
 const home0 = await navBox();
 const libRes = {};
 for (const [w, h, sai, col, tag] of [[466, 678, { top: 0, right: 84, bottom: 20, left: 0 }, 84, '主屏幕 App（右侧 84px 那一列）'], [382, 580, NO_SAI, 72, 'Safari（导航自己那一条 72px）']]) {
@@ -747,10 +748,10 @@ for (const [w, h, sai, col, tag] of [[466, 678, { top: 0, right: 84, bottom: 20,
         const px = layers.map(c => parseFloat(((c.backdropFilter || c.webkitBackdropFilter || '').match(/blur\(([\d.]+)px\)/) || [])[1] || 0));
         return Math.abs(st.top) <= 1 && hd.top <= 1 && hd.bottom >= 100 && cp.top > hd.bottom && layers.length === 4 && px.every((v, i) => v > 0 && (!i || v > px[i - 1]))
           && layers.every(c => /gradient/.test(c.maskImage || c.webkitMaskImage || '')); })(),
-      /* 选中项的玻璃：一枚竖胶囊从「资料库」上沿包到静音下沿；「资料库」自己那圈圆底让给它 */
-      sel: (() => { const pill = document.querySelector('#dock .nav-sel'), pr = r(pill), lb = r(document.getElementById('navLib')), mt = r(mute);
-        return +getComputedStyle(pill).opacity === 1 && Math.abs(pr.top - lb.top) <= 2 && Math.abs(pr.bottom - mt.bottom) <= 2 && Math.abs(pr.left - lb.left) <= 2 && Math.abs(pr.right - lb.right) <= 2
-          && getComputedStyle(document.getElementById('navLib')).backgroundColor === 'rgba(0, 0, 0, 0)'; })(),
+      /* 「资料库」那一格让位（收成 0 高、看不见），播放钮顶上它的位置；选中项的玻璃从播放上沿包到静音下沿 */
+      sel: (() => { const pill = document.querySelector('#dock .nav-sel'), pr = r(pill), lbEl = document.getElementById('navLib'), lb = r(lbEl), pl = r(play), mt = r(mute);
+        return +getComputedStyle(pill).opacity === 1 && Math.abs(pr.top - pl.top) <= 2 && Math.abs(pr.bottom - mt.bottom) <= 2 && Math.abs(pr.left - pl.left) <= 2 && Math.abs(pr.right - pl.right) <= 2
+          && lb.height <= 1 && getComputedStyle(lbEl).visibility === 'hidden' && pl.top >= r(document.getElementById('navHome')).bottom; })(),
       round: (() => { const av = document.getElementById('headerAvatar'), w = av.getBoundingClientRect().width, rad = getComputedStyle(av).borderTopLeftRadius;
         return rad === '50%' || Math.abs(parseFloat(rad) - w / 2) <= 1; })() };
   }, col);
@@ -775,11 +776,11 @@ ok(la.fenced && ls.fenced,
 ok(la.under && ls.under,
   '折起竖拿 · 资料库：标题那一条不是黑底硬边 —— 画面从屏幕最上沿铺起，标题浮在上面，底下四层渐进模糊（越往上越糊）+ 由暗到透明');
 ok(la.sel && ls.sel && la.round && ls.round,
-  '折起竖拿 · 资料库：选中项的玻璃把「资料库」和长出来的播放 / 静音一起包成一枚竖胶囊；底部头像是圆形');
+  '折起竖拿 · 资料库：「资料库」那一格让位（图标收掉），播放 / 静音顶上它的位置，选中项的玻璃包住这两格；底部头像是圆形');
 ok(la.merged && ls.merged && libRes.ctl.ok,
   `折起竖拿 · 资料库：播放 / 静音并进导航胶囊（「资料库」下面两格，胶囊中心仍在 55% 高处，画面上不再有那两个钮）；点它们转给眼前这一章：暂停 / 接着放、解除静音 / 再静音（${JSON.stringify(libRes.ctl)}）`);
-ok(!home0.on && home0.grp === 0 && !home1.on && home1.grp === 0 && home1.op === 0 && Math.abs(home1.h - home0.h) <= 1 && home0.at55 && home1.at55 && home1.selOp === 0 && home1.homeGlass,
-  `折起竖拿 · 离开资料库：那两格和包住它们的玻璃一起收回，胶囊回到原来的高（${home0.h} → ${home1.h}），选中的圆底回到「主页」`);
+ok(!home0.on && home0.grp === 0 && !home1.on && home1.grp === 0 && home1.op === 0 && Math.abs(home1.h - home0.h) <= 1 && home0.at55 && home1.at55 && home1.selOp === 0 && home1.homeGlass && home1.libBack,
+  `折起竖拿 · 离开资料库：那两格和包住它们的玻璃一起收回，「资料库」图标长回来，胶囊回到原来的高（${home0.h} → ${home1.h}），选中的圆底回到「主页」`);
 await pd.evaluate(() => scrollTo(0, 0));
 await pd.waitForTimeout(300);
 await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: NO_SAI });

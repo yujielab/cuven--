@@ -6009,11 +6009,11 @@ html.rail.rail-float .lib-showcase .sc-mediactl,
 html.rail.rail-float .lib-showcase .sc-mutectl { display: none; }
 
 /* ── 导航胶囊里的播放 / 静音（折起竖拿 · 资料库）─────────────────────────
-   进资料库，胶囊在「资料库」那一格下面长出两格：播放 / 暂停（带预告片进度环）、静音；离开就收回去。
-   长出来的那两格由 0 高展开（grid 0fr → 1fr），胶囊的高（--fl-media）跟着加，中心仍钉在 55% 高处 ——
+   进资料库，「资料库」那一格让位（图标淡掉、格子并拢），播放 / 暂停（带预告片进度环）顶上它的位置，静音长在它下面；
+   离开就倒回来。那两格由 0 高展开（grid 0fr → 1fr），「资料库」那格同时收成 0 高，胶囊净长一格（--fl-media），中心仍钉在 55% 高处 ——
    上下各长半截，top 在这一下补间（sc-nav-anim 只挂在切换那一刻，不去影响搜索态的形变）。
    钮只是传话：状态照抄眼前那一章，点下去转给那一章自己的钮（解除静音得在这一下手势里，Safari 只认它） */
-html.rail.rail-float.sc-nav { --fl-media: calc(2 * var(--fl-item) + 2 * var(--fl-gap)); }
+html.rail.rail-float.sc-nav { --fl-media: calc(var(--fl-item) + var(--fl-gap)); }
 html.rail.rail-float.sc-nav-anim .dock:not(.searching) {
   transition: transform .55s var(--ease-spring-soft), opacity .35s var(--ease-smooth), top .46s var(--ease-out);
 }
@@ -6053,9 +6053,9 @@ html.rail.rail-float.sc-nav .dock:not(.searching) .nav-media {
   html.rail.rail-float .dock:not(.searching) .nav-media { transition: opacity .2s linear; transform: none; }
   html.rail.rail-float.sc-nav-anim .dock:not(.searching) { transition: opacity .35s var(--ease-smooth); }
 }
-/* 选中项的玻璃把「资料库」和长出来的那两格一起包住：一枚竖着的玻璃胶囊，从「资料库」那一格的上沿
-   一直到静音那一格的下沿 —— 一眼看得出这两格是资料库自己的。它跟着那两格一起长（高 = 一格 + --fl-media，
-   同一条曲线、同一个时长），收回时淡掉；这时「资料库」自己那圈圆底让给它，免得叠两层 */
+/* 选中项的玻璃包住顶替了「资料库」的那两格：一枚竖着的玻璃胶囊，从「资料库」原来那一格的上沿
+   一直到静音那一格的下沿 —— 选中的还是资料库，只是它此刻长成了播放 / 静音。它跟着那两格一起长
+   （高 = 一格 + --fl-media，同一条曲线、同一个时长），收回时淡掉 */
 .nav-sel { display: none; }
 html.rail.rail-float .dock:not(.searching) .nav-sel {
   display: block; position: absolute; z-index: 0; pointer-events: none;
@@ -6069,12 +6069,24 @@ html.rail.rail-float .dock:not(.searching) .nav-sel {
   transition: height .46s var(--ease-out), opacity .28s var(--ease-out);
 }
 html.rail.rail-float.sc-nav .dock:not(.searching) .nav-sel { opacity: 1; transition: height .46s var(--ease-out), opacity 0s; }
-html.rail.rail-float.sc-nav .dock:not(.searching) #navLib.active {
+/* 「资料库」那一格：在资料库里收成 0 高、图标淡掉（读屏 / Tab 也够不着 —— 眼下就在这一页），把位置让给播放钮；
+   离开时长回来，图标晚一拍淡入（格子先撑开一点，图标不会挤在一条缝里） */
+html.rail.rail-float .dock:not(.searching) #navLib {
+  overflow: hidden;
+  transition: background-color .25s var(--ease-out), color .25s var(--ease-out), transform var(--press-out),
+              height .46s var(--ease-out), margin-top .46s var(--ease-out), opacity .3s var(--ease-out) .12s;
+}
+html.rail.rail-float.sc-nav .dock:not(.searching) #navLib {
+  height: 0; margin-top: calc(-1 * var(--fl-gap)); opacity: 0;
+  visibility: hidden; pointer-events: none;
   background: transparent; box-shadow: none;
-  transition: color .25s var(--ease-out), transform var(--press-out);
+  transition: height .46s var(--ease-out), margin-top .46s var(--ease-out), opacity .16s var(--ease-out),
+              color .25s var(--ease-out), visibility 0s linear .46s;
 }
 @media (prefers-reduced-motion: reduce) {
   html.rail.rail-float .dock:not(.searching) .nav-sel { transition: opacity .2s linear; }
+  html.rail.rail-float .dock:not(.searching) #navLib,
+  html.rail.rail-float.sc-nav .dock:not(.searching) #navLib { transition: background-color .25s linear, color .25s linear; }
 }
 
 /* 资料库的标题那一条（折起竖拿）：不再是一条黑底压在画面上沿、中间一道硬边 —— 画面一直铺到屏幕最上沿，
