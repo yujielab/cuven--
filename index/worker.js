@@ -1,0 +1,7565 @@
+/**
+ * Cuven ᴿ 索引库 · v5.4 —— 片库对照改吃总账
+ * ══════════════════════════════════════════════════════════════════
+ * v5.4 只动片库对照这一块，索引管线与界面一行未改。
+ *
+ * 起因：Stream v22 把「库里有什么 + 每条对应哪个 TMDB 编号」在它那边
+ * 算好了，落成 R2 上的 Received.json。这里那套「扫描 → 送 TMDB 认定 →
+ * 记 id」于是整段变成多余的 —— 而它恰好是这个 Worker 最大的一笔开销：
+ * 一个上千部的片库要上千次 TMDB 搜索，只能靠 todo 队列一批批磨，
+ * 磨完要好几轮 cron，期间每一轮都在跟建索引抢子请求预算。
+ *
+ *   1) 新增总账直读。配了 RECV_BASE（或 Stream 那边放行 /api/received）
+ *      就走这条路：取回总账、按源分拣、抄 id。零 TMDB 请求，一次调用
+ *      做完，todo 永远是空的。「认定」那个按钮在这个模式下不再出现。
+ *
+ *   2) 顺带修掉一个一直存在的错配。老管线不分源，两个源都去拉 /api/all
+ *      —— 那是电影目录。剧集源于是拿电影文件名去 TMDB 搜剧，认出来的
+ *      id 属于另一套编号，比对结果基本是噪声。总账里电影和剧集在同一份
+ *      里、各自带 type，按 type 分拣之后剧集源才第一次真的比到了剧集库。
+ *
+ *   3) gen 没变就不下正文，也不写 R2。先问 120 字节的指针；相同就收工。
+ *      片库一天不动，这条链路一天只花两个子请求。
+ *
+ *   4) 老管线原样保留。后端还没升到 v22（404）、总账还在建（空）、
+ *      或者两个地址都没配 —— 全部自动落回 v5.3 的行为，一个分支都没删。
+ *
+ *   新增变量  RECV_BASE  公开 R2 自定义域，如 https://data.cuven.online
+ *            首选它 —— 绕开 Stream 的 AUTH_SECRET，不必配任何口令。
+ * ══════════════════════════════════════════════════════════════════
+ * v5.3 —— HIERARCHY / STABILITY / EFFICIENCY
+ * ══════════════════════════════════════════════════════════════════
+ * v5.3 不动索引管线的算法，只做三件事：层级、稳定、效率。
+ *
+ * 【稳定】
+ *   1) 子请求预算的并发隔离（服务端最要紧的一处）。预算是「按调用」算的，
+ *      计数器却是 isolate 全局的：以前每个请求进门都 subReset —— 正在跑
+ *      的建索引会被任何一个并发请求（哪怕一张海报）把计数清零，接着越过
+ *      平台 50 次硬线被掐，锁留在 R2 里。现在只有重活登记预算，轻请求与
+ *      海报代理只计数不清零；重活之间接着现有计数（宁可算多提前收工）。
+ *   2) 前端 api() 带超时与可中止：目录请求换筛选就掐掉上一个，不再有
+ *      「S.busy 永远为真、无限滚动死掉」的挂起；分页失败给出重试。
+ *   3) 详情与目录各用各的请求戳，开详情不再作废正在加载的目录。
+ *   4) 详情开着切标签时改用 replaceState，历史不再错位；关详情回到它
+ *      真正盖着的那一页（片单里点开的，关掉回片单）。
+ *   5) IndexedDB 打开失败不再钉死；后台线程崩溃会把挂着的活全部报错并
+ *      重建；本地计算的超时计时器用完即清。
+ *   6) 页面响应加 Referrer-Policy: no-referrer —— 带口令的地址不再随
+ *      IMDb / 论坛外链泄露；海报 404 不再被浏览器缓存三十天。
+ *
+ * 【效率】
+ *   1) 页面按 ETag 协商，没变就 304，不再每次重传整页。
+ *   2) 片库页的壳（标题 / 筛选台 / 汇总）只搭一次，换筛选只换网格，
+ *      筛选台原地改选中态 —— 年份条不再跳回开头、不再整页重排。
+ *   3) 海报卡片改事件委托：整页一套监听，不再每张卡挂六个。
+ *   4) 下载进行中只原地改数字、进度与行状态，不再每批整页重画（海报
+ *      不再重闪、滚动位置不丢）；系统页进度也是原地补丁。
+ *   5) 帧率监控只在交互后的 2.5 秒窗口与动画进行中运行，空闲时不再
+ *      常驻 rAF 烧电。
+ *
+ * 【层级】
+ *   1) 配色按全局约定：白底，第一重点色白云蓝（主行动 / 选中 / 聚焦 /
+ *      进度 / 实时数据），第二重点色黑（商标、性价比之选、提示）。
+ *      白底之后卡片改靠 1px 描边 + 轻阴影分层，令牌集中在 :root 顶部。
+ *   2) 标签改成 片库 / 片单 / 系统。片库筛选台分两层：排序 + 年份常驻，
+ *      评分 / 动态范围 / 画质 / 已有 收进「筛选」，有非默认项时亮起并计数。
+ *   3) 系统页只留：四个数字、一句状态、一个主动作；管线 / 年份进度 /
+ *      未匹配 / 片库对照 / 日志 / 维护 全部收进可展开区，展开状态跨
+ *      刷新保留。片库汇总行不再显示性能调度信息（挪到管线区）。
+ * ══════════════════════════════════════════════════════════════════
+ * v5.2 只修一件事：剧集源「新帖 150 · 入库 0 · 新片 0」。
+ *
+ * 病灶在 parseTitle。它靠"第一个拉丁字母 / 第一个年份"来划片名的边界
+ * —— 电影标题里几乎总带年份，这条线一直是准的；剧集不写年份，只写
+ * S01 / 全12集，于是整串规格被算进了片名：
+ *
+ *   恐怖角[全10集].Cape.Fear.S01.2160p.Apple.TV/.WEB-DL…
+ *     v5.1 → latin = "Cape Fear 2160p Apple TV/"
+ *     TMDB 的 name 是 "Cape Fear"：从「完全相同 5 分」掉成「包含 2 分」。
+ *     剧集没有年份加分（电影锁年份 +4），门槛却是 5 分，
+ *     2 + 海报 1 + 热度 1.5 = 4.5 —— 差半分，整版块全灭。
+ *
+ *   魔法姐妹露露与莉莉[全12集].1080p.CATCHPLAY…
+ *     v5.1 → cn = "魔法姐妹露露与莉莉 .1080"（"1080p" 的 p 是第一个
+ *     拉丁字母），拿它去 TMDB 搜，一条都搜不中。
+ *
+ * 五处改动：
+ *   1) parseTitle 认规格词表（分辨率 / 片源 / 编码 / 音轨 / 平台），
+ *      把它当作第三条切割线，cn 与 latin 都到此为止。
+ *      MAX / STAN / IT / CAM 这类"正经片名里的词"故意没收进表里。
+ *   2) pickTMDB 加词集重合度：译名差一两个虚词（Ace of the Diamond act
+ *      对 Ace of Diamond Act II）也认得出来。
+ *   3) movies.u（认不出→永久跳过）盖解析器版本戳：解析器一改就整表作废，
+ *      留底队列重试次数归零，下一轮自动重认，不用人工点「重扫未匹配」；
+ *      跳过标记另加七天保质期，TMDB 补了条目能自己捡回来。
+ *   4) 「重试匹配」拿原始标题用新解析器重切，不再照抄留底里的旧 cn/latin。
+ *   5) 一轮摘要把认定 / 认不出 / 网络失败 / 待认一起报出来；TMDB 请求
+ *      失败原样记进「匹配」频道；整批失败就收工，不再空烧预算。
+ *      体检加「片名认定抽查」，真的走一遍认定，这类故障一眼可见。
+ * ══════════════════════════════════════════════════════════════════
+ * v4.2 能跑，但有四件事一直别扭：下载要分好几个 zip、日志和进度混成
+ * 一锅、片库比对靠字符串猜、以及每一轮任务都在贴着平台配额跳舞。
+ * v5 把这四件事分别收口。
+ *
+ * 1) 下载：Worker 不再打包，改由浏览器攒
+ *    /api/pack（服务端拼 zip）整个删掉 —— 它是 CPU 和内存的头号消耗者，
+ *    也是"一次下载分出好几个 zip"的根因。现在：
+ *      · /api/fetch 一次取 8 部（每部 2 个子请求），只回种子字节
+ *      · 浏览器把每一部写进 IndexedDB，刷新 / 断网 / 关标签页都不丢
+ *      · 全部取齐之后，在本地一次性压成「一个」zip 交给用户
+ *      · 断点续传：任务按片单指纹认领，回来直接从缺的那几部接着取
+ *
+ * 2) 索引：日志分频道，管线看得见
+ *    以前所有事都往一个 TRACE 里倒。现在分成 管线 / 网络 / 匹配 /
+ *    片库 / 系统 五个频道，各自独立翻阅；重要事件另写进 state.events，
+ *    isolate 重启也还在。管线面板画成一条真的流水线：拉取 → 解析 →
+ *    匹配 → 编码 → 落盘 → 比对，每一节点带吞吐、错误与耗时。
+ *
+ * 3) 片库比对：先认 TMDB，再比 id
+ *    v4 拿文件名归一化成「片名|年份」去猜，遇到译名、副标题、发布组
+ *    命名就露馅。v5 改成：拉片库 → 每个候选送 TMDB 认一次 → 把认下来的
+ *    「TMDB id + 片名 + 年份」抄进 A/list.json。索引本身就是以 TMDB id
+ *    为主键的，于是热路径退化成一次整数 Set 查询：既准（id 相等，没有
+ *    误伤）又快（不再做四次字符串归一化）。认不出来的留在 weak/loose
+ *    里当兜底，界面上区分「库中已有」和「疑似已有」。
+ *    解析结果进 KV 缓存 30 天，第二次同步几乎不花子请求。
+ *
+ * 4) 配额：每条管线都知道自己还剩多少
+ *    Workers Free 的硬线是「单次调用 50 个子请求 / 10ms CPU / 128MB」，
+ *    超了平台直接掐进程（1102），代码里 catch 不到。v5 给每一次调用配
+ *    一个子请求预算（默认 42），所有出站请求都从这个预算里扣；跑到边界
+ *    就收工、把游标写回 R2，下一次调用接着跑。编码侧同步瘦身：单片
+ *    3200 → 1400 行，码本采样 6000 → 1600 条，服务端 zip 彻底移除。
+ *
+ * 5) 界面：Cuven 极简 + 丝柔缓动
+ *    统一的 Silk 缓动令牌（时长 × 曲线 × 尺度）；一套本地性能调度器
+ *    按设备能力把 CRC32、zip 组装、大列表筛选分派给 WebGPU / Web Worker /
+ *    主线程，掉帧时自动降级动效尺度。新增「动态范围」（杜比视界 / HDR）
+ *    与「画质」（4K+ / 1080p 低质量）两组筛选。
+ *
+ * 6) 两个源：电影版块 + 剧集版块
+ *    同一个论坛下的 fid=44（电影）与 fid=2（电视剧）。除了年份筛选参数、
+ *    TMDB 查 movie 还是 tv、以及各自的 R2 命名空间，整条链路是同一套。
+ *      · 电影的键与 v5.0 逐字节一致 —— 老索引不迁移，升上来接着读
+ *      · 剧集另占 idx/tv/ 与 A/list.tv.json，两边互不覆盖
+ *      · 剧集认定前先削掉"第二季 / S02 / 全36集"，季号另记；年份不锁死
+ *        （版块年份是这一季播出的年，TMDB 记的是首播年）
+ *      · 一个 isolate 同一时刻只允许一个源在跑，见 srcEnter / srcLeave
+ *
+ * Secrets: SITE_USER / SITE_PASS / TMDB_KEY / GATE
+ * 变量:    RECV_BASE（片库总账 Received.json 的公开 R2 域名，首选）
+ *          STREAM_BASE（片库对照的回退路径，可选）  PLAN=paid（放宽配额，可选）
+ *          TV_BASE（剧集版块若不在同一域名，单独指过去，可选）
+ *          TV_FILTER（剧集版块的附加筛选，默认 tv_zhuangtai_3=2&ortid=1；
+ *                     置空 = 连载中的一起收）  MOVIE_FILTER（同理，默认空）
+ * 绑定:    KV（会话 / 种子 / TMDB 解析缓存）  R2（索引 + A/list*.json）
+ * Cron:    每日 04:00 两个源轮流跑：增量 + 片库解析一批
+ * ══════════════════════════════════════════════════════════════════
+ */
+
+const DEFAULT_BASE = 'https://10001.baidubaidu.win/';
+const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15';
+/* ══════════════════════════════════════════════════════════════════
+   两个源 —— 电影版块 / 剧集版块
+   ──────────────────────────────────────────────────────────────────
+   同一个论坛下的两个版块。除了 fid、年份筛选参数、以及 TMDB 该查
+   movie 还是 tv，整条链路（抓列表 → 切片名 → 认定 → 编码 → 落盘 →
+   下载）完全是同一套，所以这里只把"不一样的那几样"列出来，其余代码
+   一行不改：
+     · 电影  fid=44  movie_nianfen=NN
+     · 剧集  fid=2   tv_shangyingshijian_3=NN（另带一个"状态"筛选）
+   两套索引各占一个 R2 命名空间，互不覆盖。电影这一套的键与 v5.0
+   逐字节一致 —— 老索引不用迁移，升上来接着读。
+   ══════════════════════════════════════════════════════════════════ */
+const TTL = { session: 1500, thread: 3600, magnet: 86400, tmdbMeta: 604800, tmdbFind: 2592000 };
+
+const idxKeys = (ns, v3) => ({
+  movies: ns + 'movies.json',
+  state:  ns + 'state.json',
+  /* 分片链：电影的 p0 沿用 v4.0 的旧路径，老索引零迁移就能继续读 */
+  part:   (y, i) => ns + 'y' + y + (i ? '.p' + i : '') + '.json',
+  tids:   (y) => ns + 'y' + y + '.t.json',
+  v3,
+});
+/* ── 片库对照（Stream / Dropbox）──
+   v4 是「文件名 → 归一化字符串 → 猜」，遇到译名和发布组命名就露馅。
+   v5 是「文件名 → TMDB 认一次 → 记 id」：索引本来就以 TMDB id 为主键，
+   认下来之后热路径就是一次整数 Set 查询，既准又快。认下来的片名 + 年份
+   抄进成品表，它就是这套东西唯一的产出；认不出来的退回模糊键兜底。
+   只需要一个变量 STREAM_BASE，不配则整套自动关闭。两个源各存一份成品，
+   因为 TMDB 的 movie id 和 tv id 是两套编号，混在一起会互相误判。 */
+const LIB_BASE = {
+  ttl:   30 * 60_000,       // 30 分钟内直接用，过期后台刷新（SWR，不挡浏览）
+  retry: 60_000,            // 拉失败后的静默期
+  cap:   60000,             // 键上限
+  batch: 20,                // 单次调用最多解析多少个候选（还会被子请求预算再压一次）
+};
+const PEND_BASE = { cap:6000, rows:12, batch:10, tries:3 };
+
+const SRC_MOVIE = {
+  id:'movie', name:'电影', unit:'部', kind:'movie',
+  fid:44, ykey:'movie_nianfen', extra:'', yparam:'primary_release_year',
+  baseVar:'SITE_BASE', filterVar:'MOVIE_FILTER', metaPre:'tm:',
+  /* 论坛分类映射（实测抓取，年份 ID 非等差，必须硬编码） */
+  years: {
+    2026: 33, 2025: 32, 2024: 31, 2023: 30, 2022: 29, 2021: 28, 2020: 26,
+    2019: 25, 2018: 16, 2017: 15, 2016: 13, 2015: 1, 2014: 2, 2013: 3,
+    2012: 4, 2011: 5, 2010: 6, 2009: 7, 2008: 8, 2007: 9, 2006: 10,
+  },
+  order: [2026, 2025, 2024, 2023, 2022, 2021, 2020],
+  idx: idxKeys('idx/v4/', { movies:'idx/movies.json', state:'idx/state.json',
+                            rels:(y)=>'idx/rels/'+y+'.json' }),
+  lib:  { ...LIB_BASE, legacy:'idx/lib.json', list:'A/list.json' },
+  pend: { ...PEND_BASE, key:'idx/v5/pending.json' },
+};
+const SRC_TV = {
+  id:'tv', name:'剧集', unit:'部', kind:'tv',
+  fid:2, ykey:'tv_shangyingshijian_3',
+  /* 版块自带的"状态"筛选。想连载中的一起收就把 TV_FILTER 设成空 */
+  extra:'&tv_zhuangtai_3=2&ortid=1', yparam:'first_air_date_year',
+  baseVar:'TV_BASE', filterVar:'TV_FILTER', metaPre:'tmtv:',
+  years: { 2026:23, 2025:22, 2024:21, 2023:20, 2022:19, 2021:18, 2020:17 },
+  order: [2026, 2025, 2024, 2023, 2022, 2021, 2020],
+  /* v3 这一栏剧集没有历史包袱，指向永远不存在的键即可 —— 迁移那条路
+     照样能跑，只是每次都会诚实地回答"没有可迁移的旧数据" */
+  idx: idxKeys('idx/tv/', { movies:'idx/tv/v3.movies.json', state:'idx/tv/v3.state.json',
+                            rels:(y)=>'idx/tv/v3.rels.'+y+'.json' }),
+  lib:  { ...LIB_BASE, legacy:'idx/tv/lib.json', list:'A/list.tv.json' },
+  pend: { ...PEND_BASE, key:'idx/tv/pending.json' },
+};
+const SOURCES = { movie: SRC_MOVIE, tv: SRC_TV };
+const srcOf = (v) => (SOURCES[String(v||'').toLowerCase()] ? String(v).toLowerCase() : 'movie');
+
+/* 下面这五个绑定是全局的：换源只重新绑定，从不改动对象本身 ——
+   于是任何"进函数时抓了一份引用"的地方，读到的都还是同一套键。 */
+let SRC = SRC_MOVIE;
+let FID = SRC.fid, YEARS = SRC.years, BUILD_ORDER = SRC.order;
+let IDX = SRC.idx, LIB = SRC.lib, PEND = SRC.pend;
+const isTV = () => SRC.kind === 'tv';
+
+function useSrc(id){
+  const s = SOURCES[id] || SRC_MOVIE;
+  if (s === SRC) return SRC;
+  SRC = s; FID = s.fid; YEARS = s.years; BUILD_ORDER = s.order;
+  IDX = s.idx; LIB = s.lib; PEND = s.pend;
+  /* isolate 上挂着的成品缓存一律作废：它们都不带源标识，留着就是串味 */
+  idxCache = null; partCache.clear();
+  catCache = { ver:-1, rows:null, ord:null };
+  libMem = null; libFail = 0;
+  return SRC;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   源闸门
+   ──────────────────────────────────────────────────────────────────
+   一个 isolate 会同时处理好几个请求，而"当前源"是全局的。如果一边正在
+   建剧集索引、另一边来了个电影请求把源翻过去，剧集的数据就会写进电影的
+   键里 —— 这是整套改动里唯一真正危险的地方。
+   所以同一时刻只让一个源在跑：同源的请求随便并发，异源的排队等前一批
+   走完。等太久就回 409，让前端自己重试，而不是硬闯。
+   后台任务（ctx.waitUntil）也算在这一批里，否则它会跨到下一批去写键。
+   ══════════════════════════════════════════════════════════════════ */
+let GSRC = null, GN = 0, GWAIT = null, GDONE = null;
+async function srcEnter(id, waitMs = 25000){
+  const t0 = Date.now();
+  while (GN > 0 && GSRC !== id){
+    if (Date.now() - t0 > waitMs){
+      const e = new Error('另一个源（' + (SOURCES[GSRC] || {}).name + '）正在运行，稍后再试');
+      e.busy = 1; e.wait = 5; throw e;
+    }
+    await Promise.race([GWAIT, sleep(900)]).catch(()=>{});
+  }
+  if (GN === 0){ GSRC = id; GWAIT = new Promise(r => { GDONE = r; }); }
+  GN++;
+  useSrc(id);
+  return SRC;
+}
+function srcLeave(){
+  if (--GN > 0) return;
+  GN = 0;
+  const d = GDONE; GDONE = null; GWAIT = null;
+  if (d) d();
+}
+
+const BUDGET_MS = 15000;    // 单轮时间预算，到点提前落盘
+const LOCK_MS   = 40000;
+const CART_MAX  = 200;      // 打包上限（现在压在浏览器里，可以放宽）
+const GRAB_MAX  = 8;        // 单次 /api/fetch 取几部：每部 2 个子请求
+const ROWS_PER_MOVIE = 120;
+const MIN_BODY  = 900;      // 小于这个字节数的列表页一律视为被限速/拦截
+
+/* ── 资源上限相关 ──
+   Worker 的硬线是子请求数 / CPU 时间 / 128MB 内存，超了平台直接掐进程，
+   返回 503 "Worker exceeded resource limits"，代码里 catch 不到。
+   所以每一轮任务的编解码工作量必须与"年份总量"解耦，只与一片有关；
+   而出站请求数必须与"这一次调用"解耦，由下面的 SUB 预算统一管。
+   v5 把三个编码常数按 Free 计划重新标定：单片行数减一半以上，码本采样
+   减到 1600 条，服务端 zip 整个移除。 */
+const PART_ROWS  = 1400;    // 单片行数上限，写满就封片，新行进下一片
+const PART_CACHE = 3;       // 常驻内存的分片数上限（LRU）
+const SPLIT_MAX  = 60000;   // 拆分单片时能接受的最大行数
+const TRAIN_MAX  = 1600;    // 码本训练最多看多少条标题
+const HEAVY_ROWS = 1400;    // 超过这个行数就不做"两种编码取小"的对照
+
+/* ══════════════════════════════════════════════════════════════════
+   Free 计划配额治理
+   ──────────────────────────────────────────────────────────────────
+   Workers Free 每次调用最多 50 个出站子请求。以前 buildInner 一轮要打
+   8 个列表页 + 180 次 TMDB —— 一百八十几个子请求，远远越线；平台掐进程
+   的时候锁还留在 R2 里，于是"跑一会儿就停、要人工点继续"。
+   v5 的做法是：所有出站请求统一从一份预算里扣，管线自己随时能问
+   "还剩几个"，剩得不够就当场收工、把游标写回去 —— 边界由代码守，
+   不交给平台。PLAN=paid 时预算放开到 900。
+   ══════════════════════════════════════════════════════════════════ */
+const PLAN_FREE = { sub: 42, hard: 50, tmdb: 20, pages: 3, lib: 20, name: 'free' };
+const PLAN_PAID = { sub: 900, hard: 10000, tmdb: 180, pages: 8, lib: 60, name: 'paid' };  // 2026-02 起 Paid 默认 10000/次；sub 仍保守，R2 写入频率才是真瓶颈
+let PLAN = PLAN_FREE;
+const planOf = (env) => (String(env && env.PLAN || '').toLowerCase() === 'paid' ? PLAN_PAID : PLAN_FREE);
+
+const SUB = { n: 0, max: PLAN_FREE.sub, peak: 0 };
+/* [v5.3] 预算是「按调用」算的，计数器却是 isolate 全局的 —— 以前每个请求进门
+   都 subReset，于是正在跑的建索引会被任何一个并发请求（哪怕是一张海报）
+   把计数清零，接着越过平台硬线被掐，锁留在 R2 里：这是「跑一会儿就停、
+   要人工点继续」的病灶之一。
+   现在只有「重活」（建索引 / 增量 / 取件 / 认定 / 修复 / cron）参与预算：
+     · 第一个重活进门时清零；有别的重活在跑就接着现有计数 —— 宁可算多
+       提前收工，也不能算少被平台掐；
+     · 轻请求（目录 / 详情 / 帖子 / 磁力 / 状态）只计数不清零；没有重活在
+       跑时它们各自是独立调用，撞不到硬线，subTake 也就不设上限；
+     · 海报代理不进预算（见路由）。
+   重活被平台掐掉时 finally 不会执行，所以登记带时间戳，太久的自动作废。 */
+const HEAVY_RE = /^\/api\/(build|incremental|fetch|repair|diagnose|unlock|migrate|optimize|split|reset)$/;
+const HEAVY = new Map();           // token → 进门时刻
+const HEAVY_STALE = 150000;        // 超过这个时长还没离场的重活视为已被平台掐掉
+let HEAVY_SEQ = 0;
+function heavyLive(){
+  const now = Date.now();
+  for (const [k, t] of HEAVY) if (now - t > HEAVY_STALE) HEAVY.delete(k);
+  return HEAVY.size;
+}
+/** 进门登记。重活返回 token，离场时交回；轻活返回 0。 */
+function subEnter(env, heavy){
+  PLAN = planOf(env); SUB.max = PLAN.sub;
+  const live = heavyLive();
+  if (!heavy){
+    if (!live){ SUB.n = 0; SUB.peak = 0; }   // 没有重活时旧计数没有意义，顺手归零
+    return 0;
+  }
+  if (!live){ SUB.n = 0; SUB.peak = 0; }
+  const tok = ++HEAVY_SEQ;
+  HEAVY.set(tok, Date.now());
+  return tok;
+}
+function subLeave(tok){
+  if (tok) HEAVY.delete(tok);
+  if (!heavyLive()){ SUB.n = 0; SUB.peak = 0; }
+}
+/* 旧名字留给内部调用方：语义等于「一个重活进门」 */
+function subReset(env){ return subEnter(env, true); }
+const subLeft = () => Math.max(0, SUB.max - SUB.n);
+/** 领子请求配额。领不到就抛 budget 错 —— 它不可重试，调用方应当收工。 */
+function subTake(n){
+  n = n || 1;
+  /* 只有重活在跑时才有硬线可撞；纯轻请求各自是独立调用，撞不到 50 */
+  if (heavyLive() && SUB.n + n > SUB.max){
+    const e = new Error('子请求预算已用尽（' + PLAN.name + ' 计划单次调用 ' +
+      SUB.max + '/' + PLAN.hard + '），本轮到此为止，进度已保存');
+    e.budget = 1; e.sub = SUB.n;
+    throw e;
+  }
+  SUB.n += n;
+  if (SUB.n > SUB.peak) SUB.peak = SUB.n;
+}
+/** 唯一的出站入口：所有 fetch 都必须从这儿走，预算才算得准 */
+async function sfetch(u, init){ subTake(1); return fetch(u, init); }
+
+/* ══════════════════════════════════════════════════════════════════
+   管线计数
+   六个节点，每个节点记 进 / 出 / 错 / 耗时。一轮跑完连同子请求峰值一起
+   写进 state.pipe，前端就能把它画成一条真的流水线，而不是一串日志。
+   ══════════════════════════════════════════════════════════════════ */
+const PIPE_STAGES = ['list', 'parse', 'match', 'encode', 'store', 'lib'];
+const PIPE_NAME = { list:'拉取', parse:'解析', match:'匹配', encode:'编码', store:'落盘', lib:'比对' };
+const PIPE = {};
+function pipeReset(){ for (const k of PIPE_STAGES) PIPE[k] = { i:0, o:0, e:0, ms:0 }; }
+pipeReset();
+function pipe(stage, field, n){
+  const s = PIPE[stage];
+  if (s) s[field] = (s[field] || 0) + (n == null ? 1 : n);
+}
+function pipeSnap(kind, ms){
+  const st = {};
+  for (const k of PIPE_STAGES) st[k] = { ...PIPE[k] };
+  return { at: Date.now(), kind: kind || 'build', ms: ms || 0,
+           sub: SUB.peak, subMax: SUB.max, stages: st };
+}
+/** 把这一轮的管线快照写进 state，并留 12 轮历史给前端画趋势 */
+function pipeSave(state, kind, ms){
+  const snap = pipeSnap(kind, ms);
+  state.pipe = snap;
+  state.pipes = [{ at: snap.at, kind: snap.kind, ms: snap.ms, sub: snap.sub,
+                   o: PIPE.store.o, m: PIPE.match.o, e: PIPE.list.e + PIPE.match.e }]
+    .concat(state.pipes || []).slice(0, 12);
+  return snap;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   MFX-1 编解码
+   ══════════════════════════════════════════════════════════════════ */
+
+const A64 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_';
+const I64 = (() => { const m = Object.create(null); for (let i=0;i<64;i++) m[A64[i]] = i; return m; })();
+const ESC = 63;
+
+/** 码本下标 → 变长字符串。前 63 个词元只花一个字符，所以码本必须按频次排。 */
+function mfxCode(n){
+  if (n < ESC) return A64[n];
+  n -= ESC;
+  if (n < 4096) return A64[ESC] + A64[(n>>6)&63] + A64[n&63];
+  n -= 4096;
+  return A64[ESC] + A64[ESC] + A64[(n>>12)&63] + A64[(n>>6)&63] + A64[n&63];
+}
+function mfxDecode(s, dict){
+  let out = '', i = 0;
+  const L = s.length;
+  while (i < L){
+    const c = I64[s[i++]];
+    if (c === undefined) break;
+    if (c !== ESC){ out += dict[c] || ''; continue; }
+    if (I64[s[i]] === ESC){
+      i++;
+      out += dict[ESC + 4096 + ((I64[s[i]]<<12)|(I64[s[i+1]]<<6)|I64[s[i+2]])] || '';
+      i += 3;
+    } else {
+      out += dict[ESC + ((I64[s[i]]<<6)|I64[s[i+1]])] || '';
+      i += 2;
+    }
+  }
+  return out;
+}
+
+/* 汉字/假名串、拉丁串、数字串、其余（分隔符）串 —— 拼回去必须逐字节等于原文 */
+const MFX_TOK = /[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\uff00-\uffef]+|[A-Za-z]+|\d+|[^\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\uff00-\uffefA-Za-z0-9]+/g;
+const mfxTokens = (s) => String(s == null ? '' : s).match(MFX_TOK) || [];
+
+/**
+ * 码本训练：词元级 BPE。
+ * 发布名里 ".2160p" "UHD.BluRay.REMUX" "DTS-HD.MA" 这类组合出现上万次，
+ * 合成一个词元后，一条 80 字的标题能压到 20 出头。
+ * 合并只改码本内容，解码器完全不用动 —— 合成词元就是一条更长的字典项。
+ */
+function trainCodebook(titles, opt = {}){
+  const { rounds = 5, perRound = 200, minFreq = 8, budgetMs = 1500 } = opt;
+  const t0 = Date.now();
+  /* 训练只是为了找高频组合，全量和采样的结果几乎一样，而 CPU 差一个数量级。
+     v4.0 这里给了 6 秒纯 CPU 预算，是 1102 的主要贡献者之一。 */
+  const src = titles.length > TRAIN_MAX
+    ? titles.filter((_, i) => i % Math.ceil(titles.length / TRAIN_MAX) === 0)
+    : titles;
+  let seqs = src.map(mfxTokens);
+  for (let r = 0; r < rounds; r++){
+    if (Date.now() - t0 > budgetMs) break;
+    const pair = new Map();
+    for (const s of seqs)
+      for (let i = 0; i + 1 < s.length; i++){
+        const k = s[i] + '\u0000' + s[i+1];
+        pair.set(k, (pair.get(k)||0) + 1);
+      }
+    const top = [];
+    for (const e of pair) if (e[1] >= minFreq) top.push(e);
+    if (!top.length) break;
+    top.sort((a,b)=>b[1]-a[1]);
+    const merge = new Set(top.slice(0, perRound).map(e=>e[0]));
+    if (!merge.size) break;
+    seqs = seqs.map(s => {
+      const o = []; let i = 0;
+      while (i < s.length){
+        if (i+1 < s.length && merge.has(s[i]+'\u0000'+s[i+1])){ o.push(s[i]+s[i+1]); i += 2; }
+        else o.push(s[i++]);
+      }
+      return o;
+    });
+  }
+  const freq = new Map();
+  for (const s of seqs) for (const k of s) freq.set(k, (freq.get(k)||0) + 1);
+  return [...freq.entries()]
+    .sort((a,b) => b[1]-a[1] || a[0].length-b[0].length || (a[0] < b[0] ? -1 : 1))
+    .map(e => e[0]);
+}
+
+/** 可增量生长的码本：新词元直接追加到尾部（拿长码，但不用重训） */
+function codebook(dict){
+  const pos = new Map(), span = new Map();
+  const add = (k, i) => {
+    pos.set(k, i);
+    const t = mfxTokens(k);
+    if (t.length > 1){ const f = t[0]; if ((span.get(f)||1) < t.length) span.set(f, t.length); }
+  };
+  dict = dict || [];
+  for (let i = 0; i < dict.length; i++) add(dict[i], i);
+  return {
+    dict, pos, span, grown: 0,
+    encode(title){
+      const s = mfxTokens(title);
+      let out = '', i = 0;
+      while (i < s.length){
+        const wide = Math.min(this.span.get(s[i]) || 1, s.length - i);
+        let hit = -1, len = 1;
+        for (let n = wide; n >= 1; n--){
+          const cand = n === 1 ? s[i] : s.slice(i, i+n).join('');
+          const p = this.pos.get(cand);
+          if (p != null){ hit = p; len = n; break; }
+        }
+        if (hit < 0){ hit = this.dict.length; this.dict.push(s[i]); add(s[i], hit); this.grown++; }
+        out += mfxCode(hit); i += len;
+      }
+      return out;
+    },
+    decode(codeStr){ return mfxDecode(codeStr, this.dict); },
+  };
+}
+
+/* ── 规格位域 ── */
+const SPEC = {
+  res:   ['','480p','720p','1080i','1080p','2160p','4320p'],
+  src:   ['','HDTV','BDRip','WEBRip','WEB','WEB-DL','BluRay','REMUX'],
+  hdr:   ['','SDR','HLG','HDR','HDR10','HDRVivid','HDR10+','杜比视界'],
+  aud:   ['','AAC','AC3','DDP','DTS','FLAC','DTS-HD','TrueHD','Atmos'],
+  cdc:   ['','H.264','H.265','AV1','VC-1'],
+};
+const L_GUO = 1<<19, L_YUE = 1<<20, L_SUB = 1<<21, L_FX = 1<<22, L_MULTI = 1<<23;
+
+function packSpec(pr){
+  const lb = pr.tags.map(t=>t.label).join(' ');
+  const g = (k, re) => pr.tags.some(t => t.kind===k && re.test(t.label));
+  let res = 0;
+  if (g('res',/4320|8K/i)) res = 6; else if (g('res',/2160|4K/i)) res = 5;
+  else if (g('res',/1080p/i)) res = 4; else if (g('res',/1080i/i)) res = 3;
+  else if (g('res',/720/i)) res = 2;
+  let src = 0;
+  if (g('src',/REMUX/i)) src = 7; else if (g('src',/BluRay|Blu-ray|UHD/i)) src = 6;
+  else if (g('src',/WEB-DL/i)) src = 5; else if (g('src',/^WEB$/i)) src = 4;
+  else if (g('src',/WEBRip/i)) src = 3; else if (g('src',/BDRip/i)) src = 2;
+  else if (g('src',/HDTV|HDRip|DVDRip/i)) src = 1;
+  let hdr = 0;
+  if (g('hdr',/杜比视界|DoVi|Dolby|^DV$/i)) hdr = 7; else if (g('hdr',/HDR10\+/i)) hdr = 6;
+  else if (g('hdr',/HDRVivid/i)) hdr = 5; else if (g('hdr',/HDR10/i)) hdr = 4;
+  else if (g('hdr',/\bHDR\b/i)) hdr = 3; else if (g('hdr',/HLG/i)) hdr = 2;
+  else if (g('hdr',/SDR/i)) hdr = 1;
+  let aud = 0;
+  if (g('audio',/Atmos/i)) aud = 8; else if (g('audio',/TrueHD/i)) aud = 7;
+  else if (g('audio',/DTS-HD|DTS-?X/i)) aud = 6; else if (g('audio',/FLAC|LPCM/i)) aud = 5;
+  else if (g('audio',/DTS/i)) aud = 4; else if (g('audio',/DDP|DD\+|E-?AC-?3/i)) aud = 3;
+  else if (g('audio',/AC3/i)) aud = 2; else if (g('audio',/AAC/i)) aud = 1;
+  let cdc = 0;
+  if (g('codec',/AV1/i)) cdc = 3; else if (g('codec',/x265|HEVC|H\.?265/i)) cdc = 2;
+  else if (g('codec',/x264|AVC|H\.?264/i)) cdc = 1; else if (g('codec',/VC-1/i)) cdc = 4;
+  let v = res | (src<<4) | (hdr<<8) | (aud<<12) | (cdc<<16);
+  if (/国语|国英|国粤/.test(lb)) v |= L_GUO;
+  if (/粤语|国粤/.test(lb)) v |= L_YUE;
+  if (/中文字幕|中英|简英|内封|外挂|特效/.test(lb)) v |= L_SUB;
+  if (/特效/.test(lb)) v |= L_FX;
+  if (/多音轨|双语/.test(lb)) v |= L_MULTI;
+  return v;
+}
+const specRes = (v) => SPEC.res[v & 15] || null;
+function specLabels(v){
+  const o = [];
+  if (SPEC.res[v & 15]) o.push(SPEC.res[v & 15]);
+  if (SPEC.src[(v>>4) & 15]) o.push(SPEC.src[(v>>4) & 15]);
+  if (SPEC.hdr[(v>>8) & 15]) o.push(SPEC.hdr[(v>>8) & 15]);
+  if (SPEC.aud[(v>>12) & 15]) o.push(SPEC.aud[(v>>12) & 15]);
+  if (SPEC.cdc[(v>>16) & 7]) o.push(SPEC.cdc[(v>>16) & 7]);
+  if (v & L_GUO) o.push('国语');
+  else if (v & L_YUE) o.push('粤语');
+  if (v & L_FX) o.push('特效字幕'); else if (v & L_SUB) o.push('中字');
+  return o;
+}
+/** 位域直接算分，不用再碰标题 */
+function specScore(v, mb){
+  const res=v&15, src=(v>>4)&15, hdr=(v>>8)&15, aud=(v>>12)&15, cdc=(v>>16)&7;
+  let s = [0,4,8,18,22,40,50][res] || 0;
+  s += [0,2,7,7,12,12,16,22][src] || 0;
+  s += [0,0,4,7,7,8,10,14][hdr] || 0;
+  s += [0,1,2,2,4,4,7,8,12][aud] || 0;
+  s += [0,0,3,3,1][cdc] || 0;
+  if (v & L_GUO) s += 8;
+  if (v & L_FX) s += 4; else if (v & L_SUB) s += 3;
+  if (mb){ const gb = mb/1024;
+    if (gb>=50) s+=6; else if (gb>=20) s+=5; else if (gb>=8) s+=3; else if (gb<2) s-=6; }
+  return s;
+}
+
+const b36 = (n) => Math.max(0, Math.round(n)).toString(36);
+const un36 = (s) => parseInt(s, 36) || 0;
+/** 详情页短地址：全站唯一、稳定，/t/<sid> 可直达 */
+const sidOf = (tid) => Number(tid).toString(36);
+const tidOf = (sid) => { const v = parseInt(String(sid||''), 36); return Number.isFinite(v) && v > 0 ? v : 0; };
+const sizeText = (mb) => !mb ? null : (mb >= 1024 ? (mb/1024).toFixed(1)+' GB' : mb+' MB');
+
+/**
+ * 分片：列式 + 码本。groups 形如 { tmdbId: [ {tid,title,spec,mb,score}, ... ] }
+ * 存量码本传进来可复用（增量写不重训），传 null 则重训。
+ */
+function encodeShard(year, groups, dictIn){
+  const ids = Object.keys(groups).map(Number)
+    .filter(id => groups[id] && groups[id].length).sort((a,b)=>a-b);
+  const flat = [];
+  for (const id of ids) for (const r of groups[id]) flat.push(r);
+  if (!flat.length) return { v:4, y:year, b:0, d:[], i:[], c:[], t:'', n:[], s:[], z:[], q:[], rows:0 };
+
+  let dict = dictIn;
+  if (!dict) dict = trainCodebook(flat.map(r=>r.title));
+  const cb = codebook(dict.slice());
+
+  let bmin = Infinity;
+  for (const r of flat){ const t = Number(r.tid); if (t < bmin) bmin = t; }
+
+  const tids = [], names = [], specs = [], mbs = [], scs = [];
+  for (const r of flat){
+    tids.push(b36(Number(r.tid) - bmin));
+    names.push(cb.encode(r.title));
+    specs.push(r.spec|0);
+    mbs.push(r.mb|0);
+    scs.push(r.score|0);
+  }
+  return {
+    v: 4, y: year, b: bmin, d: cb.dict,
+    i: ids, c: ids.map(id => groups[id].length),
+    t: tids.join('.'), n: names, s: specs, z: mbs, q: scs, rows: flat.length,
+  };
+}
+/**
+ * 重训码本不一定更小 —— BPE 合出来的长词元要占 d 数组，行数少的时候
+ * 反而可能亏。所以两种都编一遍取小的，保证"优化"永远是单调的。
+ * 行数太多时跳过对照（省 CPU），直接按重训走。
+ */
+function encodeBest(year, groups, oldDict, rowCap = HEAVY_ROWS){
+  const rows = Object.values(groups).reduce((a,x)=>a+x.length, 0);
+  const fresh = encodeShard(year, groups, null);
+  if (!oldDict || oldDict.length < 32 || rows > rowCap) return { sh: fresh, retrain: true };
+  const kept = encodeShard(year, groups, oldDict.slice());
+  return JSON.stringify(kept).length <= JSON.stringify(fresh).length
+    ? { sh: kept, retrain: false } : { sh: fresh, retrain: true };
+}
+
+function decodeShard(sh){
+  const out = {};
+  if (!sh || !sh.i || !sh.i.length) return out;
+  const dict = sh.d || [];
+  const tids = sh.t ? sh.t.split('.') : [];
+  let p = 0;
+  for (let k = 0; k < sh.i.length; k++){
+    const id = sh.i[k], n = sh.c[k], rows = [];
+    for (let j = 0; j < n; j++, p++){
+      rows.push({
+        tid: sh.b + un36(tids[p]),
+        title: mfxDecode(sh.n[p] || '', dict),
+        spec: sh.s[p]|0, mb: sh.z[p]|0, score: sh.q[p]|0,
+      });
+    }
+    out[id] = rows;
+  }
+  return out;
+}
+/** 只解一部片，避免为看一部片解开整个分片 */
+function shardRows(sh, id){
+  if (!sh || !sh.i) return [];
+  const k = sh.i.indexOf(Number(id));
+  if (k < 0) return [];
+  let off = 0;
+  for (let j = 0; j < k; j++) off += sh.c[j];
+  const dict = sh.d || [], tids = sh.t ? sh.t.split('.') : [], rows = [];
+  for (let j = 0; j < sh.c[k]; j++){
+    const p = off + j;
+    rows.push({
+      tid: sh.b + un36(tids[p]),
+      title: mfxDecode(sh.n[p] || '', dict),
+      spec: sh.s[p]|0, mb: sh.z[p]|0, score: sh.q[p]|0,
+    });
+  }
+  return rows;
+}
+
+/* 影片记录压成数组，省掉一整份键名 */
+/* HB / RB 是 v5 加的两个聚合位：全部片源里出现过的最高动态范围与最高
+   分辨率。以前只有"最佳片源"的分辨率字符串，于是"这部片有没有杜比视界版"
+   这种问题必须解开分片才答得出 —— 筛选就没法做。放两个小整数在影片记录
+   上，筛选退化成一次整数比较。老索引读出来是 undefined，按 0 处理，
+   跑一次「重算汇总」就补齐。 */
+const F = { N:0, O:1, Y:2, P:3, T:4, C:5, G:6, YS:7, R:8, B:9, Q:10, Z:11, BT:12,
+             SP:13, BM:14, HB:15, RB:16 };
+const newMovie = (hit, y) => ([
+  hit.title || '', hit.original_title || '', (hit.release_date||'').slice(0,4),
+  hit.poster_path || '', hit.vote_average ? +hit.vote_average.toFixed(1) : 0,
+  hit.vote_count || 0, hit.genre_ids || [], [y], 0, 0, null, null, null,
+  null, 0, 0, 0,
+]);
+const newYear = () => ({ page:1, last:0, done:false, bad:[] });
+
+/** SP：{ 年份: [分片号...] } —— 详情只读真正装着这部片的那几片 */
+function markPart(mv, y, pi){
+  const sp = mv[F.SP] && typeof mv[F.SP] === 'object' ? mv[F.SP] : (mv[F.SP] = {});
+  const a = sp[y] || (sp[y] = []);
+  if (!a.includes(pi)) a.push(pi);
+}
+/** 动态范围 / 分辨率取全片源最大值 —— 与"最佳片源"是两回事：
+    一部片可能最佳是 REMUX SDR，另有一个体积小的杜比视界版，两个都要认。 */
+function bumpSpec(mv, r){
+  const res = r.spec & 15, hdr = (r.spec >> 8) & 15;
+  if (res > (mv[F.RB] || 0)) mv[F.RB] = res;
+  if (hdr > (mv[F.HB] || 0)) mv[F.HB] = hdr;
+}
+/** 最佳片源增量维护：分数优先，同分取体积大的（不再重排整部片的片源） */
+function bumpBest(mv, r){
+  const bs = mv[F.B] || 0, bm = mv[F.BM] || 0;
+  if (r.score > bs || (r.score === bs && (r.mb||0) > bm)){
+    mv[F.B] = r.score; mv[F.BM] = r.mb || 0; mv[F.Q] = specRes(r.spec);
+    mv[F.BT] = sidOf(r.tid); mv[F.Z] = sizeText(r.mb);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   基础设施
+   ══════════════════════════════════════════════════════════════════ */
+
+const memCache = new Map();
+const MEM_MAX = 300;        // 未绑定 KV 时的兜底缓存上限：无界会 OOM
+const mem = {
+  async get(k){ const v = memCache.get(k); if(!v||v.exp<Date.now()){memCache.delete(k);return null;} return v.val; },
+  async put(k,v,o){
+    if (memCache.size >= MEM_MAX){
+      const now = Date.now();
+      for (const [key, val] of memCache) if (val.exp < now) memCache.delete(key);
+      while (memCache.size >= MEM_MAX) memCache.delete(memCache.keys().next().value);
+    }
+    memCache.set(k,{val:v,exp:Date.now()+((o?.expirationTtl||600)*1000)});
+  },
+  async delete(k){ memCache.delete(k); },
+};
+const kv = (env) => env.KV || mem;
+/* 站点地址按源取：剧集若不在同一域名，配 TV_BASE 单独指过去；
+   不配就跟电影同站（两个版块本来就在一个论坛里）。 */
+const base = (env) => String(env[SRC.baseVar] || env.SITE_BASE || DEFAULT_BASE).replace(/\/?$/, '/');
+const hostOf = (u) => { try { return new URL(u).host; } catch { return ''; } };
+/* 会话 / 种子 / 磁力这三样是"跟着站点走"的缓存：同站沿用旧键（升级不用
+   重登），换了站才另起一份，免得两个站的 tid 撞在同一个键上。 */
+const kkey = (env, k) => {
+  const h = hostOf(base(env));
+  return (!h || h === hostOf(String(env.SITE_BASE || DEFAULT_BASE))) ? k : h.split('.')[0] + '/' + k;
+};
+const jget = async (env,k) => { const v = await kv(env).get(k); try { return v?JSON.parse(v):null; } catch { return null; } };
+const jput = (env,k,v,t) => kv(env).put(k, JSON.stringify(v), { expirationTtl: t });
+const json = (o,st=200) => new Response(JSON.stringify(o), { status: st,
+  headers: { 'content-type':'application/json; charset=utf-8', 'cache-control':'no-store' } });
+const sleep = (ms) => new Promise(r=>setTimeout(r,ms));
+
+/* ══════════════════════════════════════════════════════════════════
+   日志 —— 分频道
+   ──────────────────────────────────────────────────────────────────
+   v4 把限速、解析失败、片库同步、锁竞争全倒进同一个环形数组，出事的时候
+   得在里面拿眼睛筛。v5 分五个频道各自成列，前端可以只看一列；
+   err/warn 另外抄一份进 state.events，写 R2 时一起落盘，isolate 重启
+   之后仍然查得到"上次到底是怎么断的"。
+   ══════════════════════════════════════════════════════════════════ */
+const LOG_CH = { pipe:'管线', net:'网络', match:'匹配', lib:'片库', sys:'系统' };
+const CH_OF = {
+  net:'net', server:'net', rate:'net', client:'net', auth:'net', timeout:'net', budget:'net',
+  parse:'pipe', index:'pipe', build:'pipe', cron:'pipe', encode:'pipe',
+  tmdb:'match', match:'match',
+  lib:'lib',
+};
+const LVL_OF = {
+  rate:'warn', budget:'warn', auth:'warn',
+  net:'err', server:'err', client:'err', parse:'err', timeout:'err',
+};
+const TRACE = [];
+const TRACE_MAX = 240;
+function trace(kind, msg, extra){
+  const e = extra || {};
+  TRACE.unshift({
+    at: Date.now(), kind,
+    ch: e.ch || CH_OF[kind] || 'sys',
+    lvl: e.lvl || LVL_OF[kind] || 'info',
+    msg: String(msg == null ? '' : msg).slice(0, 220),
+    ...e,
+  });
+  if (TRACE.length > TRACE_MAX) TRACE.length = TRACE_MAX;
+}
+/** 只读频道视图，/api/logs 用 */
+function traceView(ch, n){
+  const list = ch && ch !== 'all' ? TRACE.filter(x => x.ch === ch) : TRACE;
+  return list.slice(0, Math.max(1, Math.min(200, n || 60)));
+}
+/** 重要事件抄进 state：跟着 R2 一起落盘，重启不丢 */
+function eventsFlush(state, extra){
+  const keep = TRACE.filter(x => x.lvl !== 'info')
+    .slice(0, 12)
+    .map(x => ({ at:x.at, ch:x.ch, lvl:x.lvl, msg:x.msg }));
+  const add = (extra || []).concat(keep);
+  if (!add.length) return;
+  const seen = new Set();
+  state.events = add.concat(state.events || [])
+    .filter(x => { const k = x.at + '|' + x.msg; if (seen.has(k)) return false; seen.add(k); return true; })
+    .slice(0, 80);
+}
+
+/** 错误分级 —— 决定"重试 / 换会话 / 放弃" */
+function classify(e){
+  if (e && e.budget) return 'budget';
+  const m = String(e && e.message || e);
+  /* 'rate' 是关键的一类：论坛被打太急时不返回 429，而是回一个几百字节的
+     空壳页 —— v3 把它当成"没有帖子"或"登录墙"，于是年份被标完成、
+     或者反复重登把状况搞得更糟。 */
+  if (/子请求预算/.test(m)) return 'budget';
+  if (/限速|空响应|响应过短|拦截|冷却中|HTTP 429|HTTP 503|HTTP 403|Too Many/i.test(m)) return 'rate';
+  if (/登录墙|登录态|需要登录|验证码|账号或密码/i.test(m)) return 'auth';
+  if (/HTTP 5\d\d/.test(m)) return 'server';
+  if (/HTTP 4\d\d/.test(m)) return 'client';
+  if (/GBK|解析失败|bencode/i.test(m)) return 'parse';
+  return 'net';
+}
+/* budget 不在里面：预算用尽再重试只会更快撞平台的硬线 */
+const RETRYABLE = new Set(['net','server','rate']);
+
+/**
+ * 自动重试：指数退避 + 抖动，尊重 Retry-After，按错误类型决定要不要再来一次。
+ * 每次失败都进 TRACE，自诊断面板能看到到底卡在哪一层。
+ */
+async function autoRetry(label, fn, opt = {}){
+  const { tries = 4, gap = 500, cap = 8000, onRetry = null } = opt;
+  let last;
+  for (let i = 0; i < tries; i++){
+    try { return await fn(i, last ? classify(last) : null); }
+    catch (e){
+      last = e;
+      const cls = classify(e);
+      if (cls === 'budget') throw e;                       // 预算用尽：立刻收工
+      trace(cls, label + ': ' + (e.message||e), { try: i+1 });
+      if (i === tries - 1 || !RETRYABLE.has(cls)) break;
+      /* 重试也要花子请求：剩不下就不必再等了 */
+      if (subLeft() < 1) break;
+      let wait = Math.min(cap, gap * Math.pow(2, i)) * (0.7 + Math.random()*0.6);
+      if (e.retryAfter) wait = Math.max(wait, e.retryAfter * 1000);
+      if (cls === 'rate') wait = Math.max(wait, 1500 * (i+1));
+      if (onRetry) { try { await onRetry(cls, i); } catch {} }
+      await sleep(wait);
+    }
+  }
+  throw last;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   自适应限速治理器
+   论坛限速是这套东西最常见的故障源。策略：成功就慢慢加速，被限速就
+   指数减速；连续挨打就打开断路器冷却，冷却状态写进 R2，让其它 isolate
+   和 cron 一起忍着，别接着打。
+   ══════════════════════════════════════════════════════════════════ */
+const GOV = { gap: 260, last: 0, strikes: 0, wins: 0, until: 0, why: '' };
+
+function govPenalize(why){
+  GOV.strikes++; GOV.wins = 0;
+  GOV.gap = Math.min(9000, Math.max(600, GOV.gap * 2));
+  if (GOV.strikes >= 4){
+    GOV.until = Date.now() + Math.min(15*60000, 60000 * Math.pow(2, GOV.strikes - 4));
+    GOV.why = why || '连续被限速';
+    trace('rate', '断路器打开，冷却 ' + Math.round((GOV.until-Date.now())/1000) + 's（' + GOV.why + '）');
+  }
+}
+function govReward(){
+  GOV.wins++;
+  if (GOV.wins >= 3){                       // 连续 3 次干净的响应才算真的缓过来了
+    GOV.gap = Math.max(240, Math.round(GOV.gap * 0.75));
+    if (GOV.strikes) GOV.strikes--;
+    GOV.wins = 0;
+  }
+}
+const govCoolLeft = () => Math.max(0, GOV.until - Date.now());
+async function govGate(){
+  const left = govCoolLeft();
+  if (left > 0){
+    const e = new Error('论坛限速冷却中，还需 ' + Math.ceil(left/1000) + ' 秒');
+    e.cooling = Math.ceil(left/1000);
+    throw e;
+  }
+  const wait = GOV.last + GOV.gap - Date.now();
+  if (wait > 0) await sleep(wait);
+  GOV.last = Date.now();
+}
+/** 冷却状态跨 isolate 共享 */
+function govLoad(state){
+  const c = state && state.cool;
+  if (c && c.until > Date.now() && c.until > GOV.until){
+    GOV.until = c.until; GOV.why = c.why || '';
+    GOV.strikes = Math.max(GOV.strikes, c.strikes || 4);
+    GOV.gap = Math.max(GOV.gap, c.gap || GOV.gap);
+  }
+}
+function govSave(state){
+  if (govCoolLeft() > 0) state.cool = { until: GOV.until, why: GOV.why, strikes: GOV.strikes, gap: GOV.gap };
+  else if (state.cool) delete state.cool;
+}
+
+/* ══════════ GBK ══════════ */
+let dec = null;
+function decodeGBK(b){
+  if(!dec){ try{ dec = new TextDecoder('gbk'); }catch{ throw new Error('运行时不支持 GBK，请把 compatibility_date 提到 2023-08-01 之后'); } }
+  return dec.decode(b);
+}
+let gtab = null;
+function gbkEncode(s){
+  let out = '', tab = null;
+  for (const ch of s){
+    const c = ch.codePointAt(0);
+    if (c < 0x80){ out += /[A-Za-z0-9\-_.~]/.test(ch) ? ch : '%'+c.toString(16).toUpperCase().padStart(2,'0'); continue; }
+    if (!tab){
+      if (!gtab){
+        const d = new TextDecoder('gbk'); gtab = new Map();
+        for (let l=0x81;l<=0xfe;l++){
+          const by=[],pr=[];
+          for (let t=0x40;t<=0xfe;t++){ if(t===0x7f) continue; by.push(l,t); pr.push([l,t]); }
+          const cs = Array.from(d.decode(new Uint8Array(by)));
+          if (cs.length !== pr.length) continue;
+          for (let i=0;i<cs.length;i++) if (cs[i]!=='\uFFFD' && !gtab.has(cs[i])) gtab.set(cs[i], pr[i]);
+        }
+      }
+      tab = gtab;
+    }
+    const p = tab.get(ch);
+    out += p ? '%'+p[0].toString(16).toUpperCase()+'%'+p[1].toString(16).toUpperCase() : encodeURIComponent(ch);
+  }
+  return out;
+}
+
+/* ══════════ 会话 ══════════ */
+function setCookies(r){
+  const jar = {};
+  const list = typeof r.headers.getSetCookie === 'function' ? r.headers.getSetCookie()
+    : (r.headers.get('set-cookie') ? [r.headers.get('set-cookie')] : []);
+  for (const line of list){ const kvp = line.split(';')[0], i = kvp.indexOf('=');
+    if (i>0) jar[kvp.slice(0,i).trim()] = kvp.slice(i+1).trim(); }
+  return jar;
+}
+const jarStr = (j) => Object.entries(j).map(([k,v])=>k+'='+v).join('; ');
+
+/** 单次请求，走限速闸门；HTTP 异常抬成带分类的错误 */
+async function rawReq(env, path, o = {}){
+  const url = /^https?:/.test(path) ? path : base(env)+path.replace(/^\//,'');
+  const h = { 'User-Agent':UA, 'Accept':'text/html,*/*;q=0.8', 'Accept-Language':'zh-CN,zh;q=0.9' };
+  if (o.cookie) h.Cookie = o.cookie;
+  if (o.referer) h.Referer = o.referer;
+  if (o.body != null) h['Content-Type'] = 'application/x-www-form-urlencoded';
+  if (!o.noGate) await govGate();
+  let r;
+  try { r = await sfetch(url, { method:o.method||'GET', headers:h, body:o.body||null, redirect:'manual' }); }
+  catch (e){
+    if (e.budget) throw e;
+    govPenalize('连接失败'); throw new Error('连接论坛失败：' + (e.message||e));
+  }
+  if (r.status === 429 || r.status === 403 || r.status === 503){
+    govPenalize('HTTP ' + r.status);
+    const e = new Error('HTTP ' + r.status + '（被限速或拦截）');
+    e.retryAfter = Number(r.headers.get('retry-after')) || 0;
+    throw e;
+  }
+  if (r.status >= 500){ govPenalize('HTTP ' + r.status); throw new Error('HTTP ' + r.status); }
+  return r;
+}
+const req = (env, path, o = {}) => autoRetry('fetch '+String(path).slice(0,60), () => rawReq(env, path, o));
+
+/**
+ * 取正文，并把"空/过短"识别成限速 —— 这正是线上看到
+ * 「论坛可达 1199ms · 响应为空或过短」之后一路崩下去的起点。
+ */
+async function reqHTML(env, path, o = {}){
+  const r = await rawReq(env, path, o);
+  const buf = await r.arrayBuffer();
+  const html = decodeGBK(buf);
+  if (buf.byteLength < MIN_BODY){
+    govPenalize('响应过短');
+    const e = new Error('论坛返回空响应（HTTP ' + r.status + '，仅 ' + buf.byteLength +
+      ' 字节）—— 基本可以确定被限速或 WAF 拦截');
+    e.preview = strip(html).slice(0, 90);
+    throw e;
+  }
+  govReward();
+  return { r, html, bytes: buf.byteLength };
+}
+
+async function session(env, force){
+  if (!force){ const hit = await jget(env, kkey(env,'sess')); if (hit?.cookie) return hit; }
+  if (!env.SITE_USER || !env.SITE_PASS) throw new Error('缺少 SITE_USER / SITE_PASS');
+  const B = base(env);
+  const first = await reqHTML(env, 'member.php?mod=logging&action=login');
+  const jar0 = setCookies(first.r), page = first.html;
+  const fh = page.match(/name="formhash" value="(\w+)"/)?.[1];
+  const lh = page.match(/loginhash=(\w+)"/)?.[1];
+  if (!fh || !lh) throw new Error('登录表单解析失败（论坛改版或被挡）');
+  if (/seccodeverify|seccode_/i.test(page)) throw new Error('登录页出现验证码，请先在浏览器手动登录一次');
+
+  const r = await req(env,'member.php?mod=logging&action=login&loginsubmit=yes&loginhash='+lh+'&inajax=1', {
+    method:'POST', cookie: jarStr(jar0), referer: B+'member.php?mod=logging&action=login',
+    body: 'formhash='+fh+'&referer='+encodeURIComponent(B)+'&loginfield=username'
+        + '&username='+gbkEncode(env.SITE_USER)
+        + '&password='+encodeURIComponent(env.SITE_PASS)
+        + '&questionid=0&answer=&cookietime=2592000&loginsubmit=true',
+  });
+  const jar = { ...jar0, ...setCookies(r) };
+  const reply = decodeGBK(await r.arrayBuffer());
+  if (!/欢迎您回来|succeedhandle_/.test(reply)){
+    const why = (reply.match(/<!\[CDATA\[([\s\S]{0,220})/)?.[1]||'').replace(/<[^>]+>/g,'').trim();
+    throw new Error('论坛登录失败：'+(why||'账号或密码不正确'));
+  }
+  const cookie = jarStr(jar);
+  if (!cookie)
+    throw new Error('登录成功但没拿到 Cookie —— 缓存不了会话，每个请求都会重登并很快被限速');
+  const s = { cookie, at: Date.now() };
+  await jput(env, kkey(env,'sess'), s, TTL.session);
+  return s;
+}
+async function dropSession(env){
+  const k = kkey(env,'sess');
+  memCache.delete(k);
+  await kv(env).delete(k).catch(()=>{});
+}
+
+async function authed(env, path, o = {}, again = true){
+  const s = await session(env);
+  const r = await req(env, path, { ...o, cookie: s.cookie });
+  if (r.status>=300 && r.status<400 && /action=login/.test(r.headers.get('location')||'')){
+    if (!again) throw new Error('登录态失效');
+    await dropSession(env);
+    return authed(env, path, o, false);
+  }
+  return r;
+}
+
+/* ══════════ 解析 ══════════ */
+const ents = (s) => String(s).replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>')
+  .replace(/&quot;/g,'"').replace(/&#0?39;|&apos;/g,"'").replace(/&nbsp;|\u3000/g,' ')
+  .replace(/&#(\d+);/g,(m,d)=>String.fromCodePoint(+d));
+const strip = (s) => ents(String(s||'').replace(/<[^>]+>/g,'')).replace(/\s+/g,' ').trim();
+
+/** [修复 2] 只判"登录/权限"；长度问题已经在 reqHTML 里按限速处理了 */
+function loginWall(html){
+  if (!html) return true;
+  if (/action=login/.test(html) && /(需要先登录|请先登录|登录后才能|您需要登录|提示信息)/.test(html)) return true;
+  if (/您没有权限|无权访问|抱歉，本版块|本主题需要/.test(html)) return true;
+  return false;
+}
+
+/** 版块列表页 → [{tid,title}]；两套选择器互为兜底 */
+function parseBoard(html){
+  const seen = new Set(), out = [];
+  const push = (tid, rawTitle) => {
+    if (seen.has(tid)) return;
+    const title = ents(rawTitle).trim();
+    if (!title) return;
+    const rel = parseRelease(title);
+    /* 无体积、无分辨率 = 公告贴。但剧集那边有一批帖只写"全 36 集"不写规格，
+       所以再给一条出路：认得出季或集的照收。 */
+    if (!rel.size && !rel.tags.some(t=>t.kind==='res') && !(isTV() && EP_RE.test(title))) return;
+    seen.add(tid); out.push({ tid, title });
+  };
+  let m;
+  const a = /<a href="(\d+)_\d+\.html" title="([^"]+)"/g;
+  while ((m = a.exec(html))) push(m[1], m[2]);
+  const b = /<a href="[^"]*?mod=viewthread(?:&amp;|&)tid=(\d+)[^"]*"[^>]*\sclass="s xst"[^>]*>([\s\S]{2,300}?)<\/a>/g;
+  while ((m = b.exec(html))) push(m[1], m[2].replace(/<[^>]+>/g,''));
+  return out;
+}
+/** 页面是不是长得像正常列表页 —— 用来区分"真的没帖"和"页面不对" */
+const looksLikeBoard = (html) => /forumdisplay|list_\d+_\d+\.html|class="th"|threadlist/i.test(html);
+const lastPage = (html) => Number(html.match(new RegExp('list_' + FID + '_(\\d+)\\.html" class="last"'))?.[1]
+  || html.match(/class="last"[^>]*>[^<]*?(\d+)/)?.[1]
+  || html.match(/>\.{2,}\s*(\d+)</)?.[1] || 0);
+
+/* ══════════════════════════════════════════════════════════════════
+   剧集标题
+   ──────────────────────────────────────────────────────────────────
+   「庆余年 第二季 Joy of Life S02 2024 全36集 2160p ...」这样的标题里，
+   季与集是噪声：TMDB 的条目是"一部剧"，不是"某一季"，带着"第二季"去搜
+   基本搜不中。所以认定之前先把季 / 集削掉，季号单独记下来，展示的时候
+   再挂回去 —— 于是同一部剧的每一季都落到同一个 TMDB 条目上，详情页里
+   按季分开列。
+   ══════════════════════════════════════════════════════════════════ */
+const SEASON_CN = { 一:1, 二:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9, 十:10, 两:2, 零:0 };
+const EP_RE = /(第\s*[一二三四五六七八九十百零两\d]+\s*季|\bS\d{1,2}\b|全\s?\d+\s?集|\d+\s?集全|更新?至)/i;
+const TV_TRIM = /(第\s*[一二三四五六七八九十百零两\d]+\s*季|最終?[终終]?季|最終?[终終]?章|完结季|\bS(?:eason)?\s?\d{1,2}(?:\s?[-–]\s?S?\d{1,2})?(?:E\d{1,3})?\b|全\s?\d+\s?集|\d+\s?集全|更新?至\s?\d+\s?集?|第\s?\d+\s?[-–]\s?\d+\s?集|完结篇?|大结局|抢先版|连载中|連載中)/ig;
+const trimTV = (s) => String(s||'').replace(TV_TRIM, ' ').replace(/\s+/g, ' ').trim();
+/** 标题里的季号；认不出来按 0（当作"整部剧"或第一季） */
+function seasonOf(raw){
+  const t = String(raw || '');
+  const m = t.match(/第\s*([一二三四五六七八九十百零两\d]+)\s*季/);
+  if (m){
+    const v = m[1];
+    if (/^\d+$/.test(v)) return +v;
+    if (v.length === 1) return SEASON_CN[v] || 0;
+    if (v[0] === '十') return 10 + (SEASON_CN[v[1]] || 0);
+    if (v[1] === '十') return (SEASON_CN[v[0]] || 0) * 10 + (SEASON_CN[v[2]] || 0);
+    return SEASON_CN[v[0]] || 0;
+  }
+  const m2 = t.match(/\bS(?:eason)?\s?(\d{1,2})\b/i);
+  return m2 ? +m2[1] : 0;
+}
+
+const SEPY = /(^|[.\s(（\-])((?:19|20)\d{2})(?=[.\s)）\-]|$)/;
+
+/* ══════════════════════════════════════════════════════════════════
+   [v5.2 修复 1] 规格 / 平台 / 编码词表 —— 片名到这儿为止
+   ──────────────────────────────────────────────────────────────────
+   电影标题里几乎总带年份，年份天然就是「片名到此结束」的那条线，所以
+   v5.1 只认年份和第一个拉丁字母。剧集这边不写年份，只写 S01 / 全12集，
+   于是整串规格被当成了片名的一部分，两种走法都塌了：
+
+     · 有英文名：Cape.Fear.S01.2160p.Apple.TV/.WEB-DL…
+         latin = "Cape Fear 2160p Apple TV/"
+         TMDB 的 name 是 "Cape Fear" —— 从「完全相同 5 分」掉成
+         「互相包含 2 分」。剧集没有年份加分（电影有 +4），门槛又是 5，
+         2 + 海报 1 + 热度 1.5 = 4.5，差半分，全军覆没。
+         这就是「新帖 150 · 入库 0 · 新片 0」的根因。
+     · 没英文名：魔法姐妹露露与莉莉[全12集][中文字幕].1080p.CATCHPLAY…
+         "1080p" 的 p 成了第一个拉丁字母，中文名被切成
+         「魔法姐妹露露与莉莉 .1080」—— 拿它去搜，一条都搜不中。
+
+   把这些词认出来当第三条切割线，两种走法就都恢复了。
+   ══════════════════════════════════════════════════════════════════ */
+const TECH_WORDS = [
+  /* 分辨率 / 画质 */
+  '\\d{3,4}[ip]', '4320p', '2160p', '1080[ip]', '720p', '576p', '480p', '[248]K', 'UHD', 'FHD',
+  /* 动态范围 */
+  'HDR10\\+?', 'HDRVivid', 'HDR', 'DoVi', 'Dolby\\.?Vision', 'DV', 'HLG', 'SDR', 'HFR', 'IMAX',
+  /* 片源 */
+  'WEB-?DL', 'WEB-?Rip', 'WEBDL', 'WEB', 'BluRay', 'Blu-?ray', 'REMUX', 'BDRip', 'BDRemux',
+  'DVDRip', 'DVDScr', 'DVD', 'HDRip', 'HDTV', 'TVRip', 'HDTC',
+  /* 编码 */
+  'x26[45]', 'H\\.?26[45]', 'HEVC', 'AVC', 'AV1', 'VC-1', 'MPEG-?\\d?', 'XviD', 'DivX',
+  /* 音轨 */
+  'DDP?\\+?[\\d.]*', 'DD\\+', 'TrueHD[\\d.]*', 'Atmos', 'DTS-?HD(?:\\.?MA)?[\\d.]*', 'DTS-?X',
+  'DTS[\\d.]*', 'E-?AC-?3', 'AC-?3', 'FLAC[\\d.]*', 'LPCM', 'PCM', 'AAC[\\d.]*', 'OPUS',
+  /* 平台 —— 剧集这边最常见的一档噪声 */
+  /* 只收不会跟真片名撞的：MAX / STAN / IT / CAM 都是正经片名里的词，
+     放进来会把「Mad.Max.Fury.Road」切成「Mad」，得不偿失 */
+  'AMZN', 'NF', 'Netflix', 'DSNP', 'HMAX', 'ATVP', 'AppleTVPlus', 'Apple\\.?TV\\+?',
+  'CATCHPLAY', 'NowPlayer', 'MyTVSuper', 'ViuTV', 'Viu', 'KKTV', 'LineTV', 'FriDay',
+  'Bahamut', 'Baha', 'B-?Global', 'Bilibili', 'iQIYI', 'Youku', 'MGTV', 'HULU', 'PCOK',
+  'CRAV', 'iTunes', 'ColorWEB',
+];
+/* 前后都得靠着分隔符，免得吃掉真片名里的词（DVDRip 不会被当成 DVD） */
+const TECH_RE = new RegExp('(?:^|[\\s.\\[(（|/·_-])(?:' + TECH_WORDS.join('|') +
+  ')(?=$|[\\s.\\[)）|/·_-])', 'i');
+/** 第一个规格词的下标（不含前导分隔符）；没有就 -1 */
+function techAt(s){
+  const m = TECH_RE.exec(String(s || ''));
+  if (!m) return -1;
+  return m.index + (/^[\s.\[(（|/·_-]/.test(m[0]) ? 1 : 0);
+}
+
+function parseTitle(raw){
+  let t = String(raw).trim().replace(/\s*\d+(?:\.\d+)?\s*(?:TB|GB|MB)\s*$/i,'');
+  if (isTV()) t = trimTV(t);
+  const years = [...new Set(t.match(/(?:19|20)\d{2}/g)||[])];
+  const s = t.replace(/\[[^\]]*\]/g,' ').replace(/【[^】]*】/g,' ').replace(/\s+/g,' ').trim();
+  const iLat = s.search(/[A-Za-z]/);
+  const my = s.match(SEPY);
+  const iYr = my ? my.index + my[1].length : -1;
+  const iTech = techAt(s);
+  const cuts = [iLat, iYr, iTech].filter(i => i >= 0);
+  const cut = cuts.length ? Math.min(...cuts) : -1;
+  let cn = cut>0 ? s.slice(0,cut) : (cut===0 ? '' : s);
+  cn = cn.split(/[\/｜|]/)[0].replace(/[\s.·:：\-—]+$/,'').replace(/^[\s.]+/,'').trim();
+  let latin = null;
+  /* 拉丁名只有排在规格词前面才算数：排在后面的那串是发布组的规格，不是片名 */
+  if (iLat >= 0 && (iTech < 0 || iLat < iTech)){
+    const tail = s.slice(iLat);
+    const m2 = tail.match(SEPY), t2 = techAt(tail);
+    const ends = [m2 ? m2.index : -1, t2].filter(i => i >= 0);
+    let seg = (ends.length ? tail.slice(0, Math.min(...ends)) : tail)
+      .replace(/\./g,' ').replace(/\s+/g,' ').trim()
+      .replace(/\b(BluRay|WEB|REMUX|UHD|HDTV|Trilogy|Collection|CC|Extended|Repack|V2|USA|FRENCH|Hybrid|BDRip)\b.*$/i,'')
+      .replace(/[\s.·:：\-—/|]+$/,'').trim();
+    if (seg.length>=3 && /[A-Za-z]{3}/.test(seg)) latin = seg;
+  }
+  if (!cn && latin) cn = latin;
+  return { cn, latin, years };
+}
+const norm = (s) => String(s||'').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g,'');
+/* 剧集按"剧"归组：第一季和第二季必须落到同一个 TMDB 条目上，所以键里
+   不带年份 —— 版块年份在剧集这边是"这一季播出的年"，不是这部剧的年。 */
+const groupKey = (pt) => isTV()
+  ? norm(pt.cn) + '|' + norm(pt.latin)
+  : norm(pt.cn) + '|' + (norm(pt.latin) || pt.years[0] || '');
+
+const RULES = [
+  ['res', /\b(4320p|2160p|1080p|1080i|720p|8K|4K)\b/ig],
+  ['src', /\b(REMUX|BluRay|Blu-ray|UHD|WEB-DL|WEBRip|WEB|HDTV|BDRip|DVDRip|HDRip)\b/ig],
+  /* \bDV\b 是发布组最常用的杜比视界写法（Dune.2024.2160p.DV.HDR.REMUX）。
+     v4 的表里没有它，于是"杜比视界"这一档几乎永远是空的。\b 保证不会
+     误吃 DVDRip / DVD。DoVi.P8 / DV.P7 这类后缀也一并认掉。 */
+  ['hdr', /(杜比视界|DoVi|Dolby ?Vision|\bDV\b|HDR10\+|HDR10|HDRVivid|HLG|\bHDR\b|\bSDR\b)/ig],
+  ['audio', /(Atmos|TrueHD ?\d\.\d|TrueHD|DTS-HD ?MA|DTS-?X|DTS|E-?AC-?3|DDP\d?\.?\d?|DD\+|AC3|FLAC|LPCM|AAC)/ig],
+  ['codec', /\b(x265|x264|H\.?265|H\.?264|HEVC|AVC|AV1|VC-1)\b/ig],
+  ['lang', /(国英多音轨|国粤英|国粤|国语|粤语|多音轨|双语|特效中文字幕|特效字幕|中文字幕|简英|中英|内封|外挂)/g],
+];
+function parseRelease(title){
+  const tags = [], seen = new Set();
+  for (const [kind,re] of RULES){
+    re.lastIndex = 0; let m;
+    while ((m = re.exec(title))){
+      const label = m[1].replace(/\s+/g,''), k = kind+'|'+label.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k); tags.push({ kind, label });
+    }
+  }
+  if (tags.some(t=>/^HDR10/i.test(t.label)))
+    for (let i=tags.length-1;i>=0;i--) if (/^HDR$/i.test(tags[i].label)) tags.splice(i,1);
+  const sm = title.match(/(\d+(?:\.\d+)?)\s*(TB|GB|MB)\b/i);
+  const gb = sm ? parseFloat(sm[1])*({TB:1024,GB:1,MB:1/1024}[sm[2].toUpperCase()]) : null;
+  return {
+    tags, size: sm ? sm[1]+' '+sm[2].toUpperCase() : null, gb,
+    mb: gb==null ? 0 : Math.round(gb*1024),
+    group: title.match(/-([A-Za-z0-9@._]{2,20})(?:\s|$|\s*\d+(?:\.\d+)?\s*(?:TB|GB|MB))/i)?.[1] || null,
+  };
+}
+/** 一条帖 → 索引行（规格与分数在建索引时算实，运行时不再解析） */
+function toRow(tid, title){
+  const pr = parseRelease(title);
+  const spec = packSpec(pr);
+  return { tid: Number(tid), title, spec, mb: pr.mb, score: specScore(spec, pr.mb) };
+}
+/** [修复 4] 最好的片源：分数优先，同分按体积大的优先 */
+const betterRow = (a,b) => (b.score - a.score) || ((b.mb||0) - (a.mb||0)) || (b.tid - a.tid);
+const pickBest = (rows) => rows && rows.length ? rows.slice().sort(betterRow)[0] : null;
+
+const WR_MIN = 200, WR_MEAN = 6.4;
+function weighted(m){
+  const v = m[F.C]||0, R = m[F.T]||0;
+  if (!v) return 0;
+  return (v/(v+WR_MIN))*R + (WR_MIN/(v+WR_MIN))*WR_MEAN;
+}
+
+/* ══════════ TMDB ══════════ */
+async function tmdb(env, path, params = {}){
+  if (!env.TMDB_KEY) throw new Error('缺少 TMDB_KEY');
+  const u = new URL('https://api.themoviedb.org/3'+path);
+  u.searchParams.set('api_key', env.TMDB_KEY);
+  u.searchParams.set('language','zh-CN');
+  for (const [k,v] of Object.entries(params)) u.searchParams.set(k,v);
+  const r = await autoRetry('tmdb '+path, async () => {
+    const x = await sfetch(u.toString(), { headers:{Accept:'application/json'}, cf:{ cacheEverything:true, cacheTtl:21600 } });
+    if (x.status === 429){ const e=new Error('HTTP 429'); e.retryAfter=Number(x.headers.get('retry-after'))||3; throw e; }
+    if (x.status >= 500) throw new Error('HTTP '+x.status);
+    if (!x.ok) throw new Error('HTTP '+x.status+'（检查 TMDB_KEY）');
+    return x;
+  }, { tries: 3, gap: 500 });
+  return r.json();
+}
+/* ══════════════════════════════════════════════════════════════════
+   TMDB 认定
+   ──────────────────────────────────────────────────────────────────
+   v4 的做法是：拿中文名搜一次，搜不到就记进 movies.u 永久跳过，
+   顺手把这一组的帖子行直接扔掉。于是「868 个片名匹配不上」有三重问题：
+     ① 只用中文名搜，不带年份，也从不试原名 —— TMDB 的中文索引本来就
+        比原名弱得多，一次搜不中的概率很高；
+     ② 版本后缀（加长版 / 4K修复 / 剧场版）原样进搜索串，必然搜不中；
+     ③ 认不出来 = 数据丢失。重试只是清掉标记，行早就没了，
+        非得把列表页重爬一遍不可。
+   v5 分三件事收口：认定改成多策略、非电影内容先认出来别浪费请求、
+   认不出的连同帖子行一起留底（见 PEND），重试时不用重爬。
+   ══════════════════════════════════════════════════════════════════ */
+
+/* 版本 / 发行后缀：留在搜索串里就是噪声 */
+const CN_NOISE = /(加长版|导演剪辑版?|导演版|未删减版?|完整版|重制版|重製版|修复版|修復版|重映版|纪念版|终极版|特别版|国际版|数字修复|4K修复|蓝光原盘|收藏版|典藏版|双语|国语|粤语|中字|高清|超清|杜比视界|双碟|三碟)/g;
+/* 一帖多片：TMDB 没有对应条目，认不出来是正常的 */
+const PACK_RE = /(合集|全集|系列|三部曲|四部曲|五部曲|套装|合辑|\d\s*[-–~]\s*\d\s*部)/;
+/* 根本不是电影：剧集 / 综艺 / 演唱会 / 纪录短片，别浪费子请求去搜 */
+const TV_RE = /(第[一二三四五六七八九十百\d]+季|\bS\d{1,2}(?:E\d{1,3})?\b|全\d+集|连续剧|電視劇|电视剧|剧集|劇集|综艺|綜藝|真人秀|演唱会|演唱會|\bMV\b|\bLive\b|纪录片|紀錄片|访谈|訪談)/i;
+
+const cleanCN = (cn) => String(cn||'')
+  .replace(/[（(][^)）]{0,20}[)）]/g, ' ')
+  .replace(CN_NOISE, ' ')
+  .replace(/\s+/g, ' ').trim();
+
+/**
+ * 从标题里挑出真正的发行年份。
+ * 「银翼杀手2049」「流浪地球2」这类片名自带数字，parseTitle 会把 2049
+ * 也当成年份 —— 拿它去锁 primary_release_year 就是白花一个子请求。
+ * 版块本身是按年份筛的，所以 hint（当前在建的年份）是很强的先验：
+ * 取候选里离 hint 最近、且落在合理区间内的那个；都不合理就直接用 hint。
+ */
+function pickYear(years, hint){
+  const now = new Date().getFullYear() + 1;
+  const ok = (years||[]).map(Number).filter(y => y >= 1900 && y <= now);
+  /* 标题里的年份最可信；hint 只用来在多个候选之间挑一个，
+     以及在标题压根没写年份时兜底。反过来让 hint 压过标题会更糟：
+     版块年份筛的是"收录年份"，重映 / 补档的片子对不上。 */
+  if (!ok.length) return hint ? String(hint) : '';
+  if (ok.length === 1 || !hint) return String(ok[0]);
+  ok.sort((a, b) => Math.abs(a - hint) - Math.abs(b - hint));
+  return String(ok[0]);
+}
+
+/* 剧集源里 TMDB 没有条目的：演唱会 / 写真 / 片花这一类 */
+const NOT_TV_RE = /(演唱会|演唱會|写真|寫真|片花|预告片|預告|花絮|直播回放|MV合集)/i;
+/** 这一组值不值得送去认。返回 null = 送，否则给出跳过的原因。
+    注意剧集源里"全 36 集""第二季"正是常态，那套排除法在这边整个关掉，
+    否则一条都留不下来。 */
+function notMovie(title){
+  const t = String(title || '');
+  if (isTV()) return NOT_TV_RE.test(t) ? 'other' : null;
+  if (TV_RE.test(t)) return 'tv';
+  if (PACK_RE.test(t)) return 'pack';
+  return null;
+}
+
+/**
+ * 候选评分。
+ * 关键约束：片名毫无重叠的候选一律不要 —— 这是把门槛放低之后仍然不会
+ * 乱认的根据。yearLocked 表示这次搜索已经用年份锁过，TMDB 那边先筛了
+ * 一道，所以片名只要沾边就足够可信，门槛可以降下来。
+ */
+/* TMDB 的 tv 条目用 name / original_name / first_air_date，movie 用
+   title / original_title / release_date。在这里统一成一种形状，后面建
+   索引、抄片库、写详情就都不必再关心手上这条是哪一种。 */
+const asItem = (r) => (!r || r.title != null || r.release_date != null) ? r
+  : { ...r, title: r.name || '', original_title: r.original_name || '',
+      release_date: r.first_air_date || '' };
+
+/* [v5.2 修复 2] 词集重合度。
+   剧集的译名常常差一两个虚词：「Ace of the Diamond act」对
+   「Ace of Diamond Act II」，includes 判不出来（0 分），词集重合度
+   判得出来（1.0）。剧集没有年份可加分，全靠片名扛，所以这一档必须有。 */
+const tokSet = (s) => new Set(String(s||'').toLowerCase().match(/[a-z0-9\u4e00-\u9fa5]+/g) || []);
+function simTok(a, b){
+  const A = tokSet(a), B = tokSet(b);
+  if (!A.size || !B.size) return 0;
+  let n = 0; for (const x of A) if (B.has(x)) n++;
+  return n / Math.min(A.size, B.size);
+}
+
+function pickTMDB(results, cn, latin, years, opt = {}){
+  let best = null, top = 0;
+  const tv = !!opt.tv;
+  const ccn = cleanCN(cn);
+  const nc = norm(cn), nl = norm(latin), nc2 = norm(ccn);
+  const hit = (a, b) => (!a || !b) ? 0 : (a === b ? 5 : (a.includes(b) || b.includes(a)) ? 2 : 0);
+  for (const raw of (results||[]).slice(0, 10)){
+    const r = asItem(raw);
+    if (!r || r.adult) continue;
+    const ry = (r.release_date||'').slice(0,4);
+    const nt = norm(r.title), no = norm(r.original_title);
+    const ts = Math.max(hit(nt,nc), hit(no,nc), hit(nt,nc2), hit(no,nc2))
+             + Math.max(hit(no,nl), hit(nt,nl));
+    const ss = Math.max(simTok(r.title, latin), simTok(r.original_title, latin),
+                        simTok(r.title, ccn), simTok(r.original_title, ccn));
+    if (!ts && ss < 0.7) continue;                      // 片名对不上就不是它
+    let s = ts + (ss >= 0.95 ? 2.5 : ss >= 0.7 ? 1.5 : 0);
+    if (ry && years.includes(ry)) s += tv ? 3 : 4;
+    /* 引进版和原产地常差一年，差一年给一半的分 */
+    else if (ry && years.length && years.some(y => Math.abs(+y - +ry) === 1)) s += 2;
+    /* 剧集：版块年份是"这一季播出的年"，TMDB 记的是首播年 —— 第二季对不上
+       首播年是常态，所以只要这部剧开播不晚于这一季，就给一点分 */
+    else if (tv && ry && years.length && years.every(y => +y >= +ry)) s += 1.5;
+    if (r.poster_path) s += 1;
+    s += Math.min(1.5, (r.popularity||0)/60);
+    if (s > top){ top = s; best = r; }
+  }
+  /* 剧集这边年份帮不上忙，门槛靠片名扛，所以定在"片名沾边 + 一点旁证" */
+  return top >= (tv ? 5 : (opt.yearLocked ? 4.5 : 6)) ? best : null;
+}
+
+/**
+ * 一批片名一起认。两轮并发，每组最多花 2 个子请求：
+ *   ① 中文名 + 年份 —— 年份锁死之后片名沾边就够
+ *   ② 没认下来的换个说法：有原名就用原名，没有就去掉年份 / 去掉版本后缀
+ * 两轮的候选合起来再评一次 —— 单轮里排在后面的，合并之后可能才是最优。
+ * 返回 Map：{hit} 认下来了 / {miss,why} 认不出 / null 网络失败（不下结论）。
+ */
+async function matchBatch(env, groups){
+  const out = new Map(), pool = new Map(), rest = [];
+  for (const g of groups){
+    const nm = notMovie(g.title || g.cn);
+    if (nm){ out.set(g.key, { miss:1, why:nm }); continue; }   // 一个子请求都不花
+    rest.push(g);
+  }
+  if (!rest.length) return out;
+
+  const ask = (g, q, yr) => {
+    const p = { query: q, include_adult:'false' };
+    if (yr) p[SRC.yparam] = yr;
+    return tmdb(env, '/search/' + SRC.kind, p)
+      .then(j => ({ g, j, locked: !!yr }))
+      .catch(e => {
+        if (e.budget) throw e;
+        /* [v5.2 修复 5] 以前这里静悄悄地吞掉：出网失败和"认不出"在界面上
+           长得一模一样（都是入库 0），只是前者连 calls 都不加一。
+           现在原样记进「匹配」频道，带上查询串，一眼看得出是哪一类。 */
+        trace('tmdb', 'TMDB 搜索失败（' + SRC.kind + '「' + String(q).slice(0, 24) + '」）：' +
+          (e.message || e), { lvl: 'err', ch: 'match' });
+        return { g, j: null };
+      });
+  };
+
+  /* 第一轮就用洗过的中文名：版本后缀留在搜索串里几乎必然搜不中，
+     而洗掉之后中文名的命中率高得多。评分仍然拿原始片名去比。 */
+  const q1 = (g) => { const c = cleanCN(g.cn); return (c && c.length >= 2) ? c : g.cn; };
+  const round2 = [];
+  /* 剧集不锁年份：版块的年份是这一季的，TMDB 的是首播年，锁下去只会把
+     真正对的那条筛掉 */
+  const r1 = await Promise.all(rest.map(g => ask(g, q1(g), isTV() ? '' : pickYear(g.years, g.hint))));
+  for (const { g, j, locked } of r1){
+    if (!j){ out.set(g.key, null); continue; }           // 网络失败，留待下轮
+    pool.set(g.key, (j.results||[]).slice(0, 8));
+    const h = pickTMDB(j.results, g.cn, g.latin, g.years||[], { yearLocked: locked, tv: isTV() });
+    if (h) out.set(g.key, { hit:h, via: locked ? '中文名+年份' : '中文名' });
+    else round2.push(g);
+  }
+
+  /* 第二轮换说法：原名最管用，其次是去掉年份限制，最后是洗过的中文名 */
+  const alt = (g) => {
+    if (g.latin && norm(g.latin) !== norm(g.cn)) return { q:g.latin, y:'' };
+    if (norm(q1(g)) !== norm(g.cn)) return { q:g.cn, y:'' };   // 洗过的没中，用原名再试
+    if ((g.years||[]).length) return { q:g.cn, y:'' };         // 去掉年份限制再试
+    return null;
+  };
+  const plans = round2.map(g => ({ g, a: alt(g) })).filter(x => x.a);
+  const r2 = await Promise.all(plans.map(x => ask(x.g, x.a.q, x.a.y)));
+  for (const { g, j } of r2){
+    const merged = (pool.get(g.key) || []).concat(j ? (j.results||[]).slice(0,8) : []);
+    const h = pickTMDB(merged, g.cn, g.latin, g.years||[], { tv: isTV() });
+    if (h) out.set(g.key, { hit:h, via: g.latin ? '原名' : '合并候选' });
+  }
+  for (const g of round2){
+    if (out.has(g.key)) continue;
+    /* 只搜过一轮、且第二轮没得搜的，用第一轮的候选再宽松评一次 */
+    const h = pickTMDB(pool.get(g.key) || [], g.cn, g.latin, g.years||[], { tv: isTV() });
+    out.set(g.key, h ? { hit:h, via:'候选复评' } : { miss:1, why:'nohit' });
+  }
+  return out;
+}
+async function tmdbMeta(env, id, ctx){
+  /* 电影和剧集是两套 id，缓存键必须分开，否则 tv/1399 会读到 movie/1399 */
+  const k = SRC.metaPre + id;
+  const hit = await jget(env, k);
+  if (hit) return hit;
+  const d = await tmdb(env,'/'+SRC.kind+'/'+id,{append_to_response:'external_ids'}).catch(()=>null);
+  if (!d) return null;
+  const out = { overview: d.overview||'',
+    runtime: d.runtime || (Array.isArray(d.episode_run_time) ? d.episode_run_time[0] : 0) || null,
+    seasons: d.number_of_seasons || 0, eps: d.number_of_episodes || 0,
+    genres: (d.genres||[]).map(g=>g.name), imdb: d.imdb_id||d.external_ids?.imdb_id||null };
+  const w = jput(env, k, out, TTL.tmdbMeta).catch(()=>{});
+  ctx ? ctx.waitUntil(w) : await w;
+  return out;
+}
+
+/* ══════════ R2 ══════════ */
+async function r2get(env, key, dflt){
+  if (!env.R2) throw new Error('未绑定 R2，无法读写索引');
+  const o = await env.R2.get(key);
+  if (!o) return dflt;
+  try { return await o.json(); } catch { return dflt; }
+}
+/* ══════════════════════════════════════════════════════════════════
+   R2 写入
+   ──────────────────────────────────────────────────────────────────
+   R2 对「同一个对象」的写入频率有硬限制，太密会回
+   "Reduce your concurrent request rate for the same object. (10058)"。
+   索引这类工作天然是一轮一写、轮次又挨得很近，撞上是迟早的事。
+   这里做两件事：
+     · 同一个 isolate 内按 key 串行化，自己不跟自己抢；
+     · 撞上限流就退避重试 —— 它是暂时的，不该让整轮任务失败。
+   ══════════════════════════════════════════════════════════════════ */
+const R2LOCK = new Map();
+const isRate10058 = (e) => /10058|concurrent request rate|reduce your|too many requests|429/i
+  .test(String(e && e.message || e));
+async function r2put(env, key, val, opt){
+  const body = JSON.stringify(val);
+  const run = async () => {
+    let last;
+    for (let i = 0; i < 5; i++){
+      try {
+        return await env.R2.put(key, body, { httpMetadata:{ contentType:'application/json' } });
+      } catch (e){
+        last = e;
+        if (!isRate10058(e)) throw e;
+        if (i === 4) break;
+        /* 300 / 700 / 1500 / 3000 ms，带抖动，避开多个 isolate 同步重试 */
+        const wait = [250, 600, 1200, 2200][i] * (0.7 + Math.random() * 0.6);
+        trace('sys', 'R2 同对象写入限流，' + Math.round(wait) + 'ms 后重试 ' + key,
+          { lvl:'warn', ch:'sys' });
+        await sleep(wait);
+      }
+    }
+    throw new Error('写入 ' + key + ' 反复被 R2 限流（同一对象写得太密）：' +
+      (last && last.message || last));
+  };
+  /* 按 key 排队：同一次调用里两处同时写同一个对象也不会互相踩。
+     前一个是成是败都不影响后一个，所以两个分支都接 run。 */
+  const prev = R2LOCK.get(key) || Promise.resolve();
+  const job = prev.then(run, run);
+  const tail = job.catch(() => {});
+  R2LOCK.set(key, tail);
+  tail.then(() => { if (R2LOCK.get(key) === tail) R2LOCK.delete(key); });
+  return job;
+}
+const blankState = () => ({ v:4, years:{}, at:0, ver:0, deaths:0 });
+const blankMovies = () => ({ v:4, m:{}, k:{}, u:{}, pv:0 });
+
+/* ══════════════════════════════════════════════════════════════════
+   [v5.2 修复 3] 解析器版本戳
+   ──────────────────────────────────────────────────────────────────
+   movies.u 是「认不出，永久跳过」表。解析器一改，那张表里的每一条结论
+   都作废了 —— 可它不会自己失效，于是新解析器一辈子也碰不到那些帖子：
+   界面上永远是「新帖 150 · 入库 0」，点多少次「继续建立索引」都一样。
+   所以给索引盖一个解析器版本戳：对不上就清跳过表、把留底队列的重试
+   次数归零，下一轮自动重认一遍，不用人工去点「重扫未匹配」。
+   另外给跳过标记加了保质期：七天之后自然再试一次，认不出的片子等
+   TMDB 补了条目就能自己捡回来。
+   ══════════════════════════════════════════════════════════════════ */
+const PARSER_V = 2;
+const U_TTL = 7 * 86400_000;
+
+function parserMigrate(movies, pend){
+  if ((movies.pv|0) === PARSER_V) return 0;
+  const n = Object.keys(movies.u || {}).length;
+  movies.u = {}; movies.pv = PARSER_V;
+  const q = (pend && pend.q) || {};
+  for (const k of Object.keys(q)) q[k].n = 0;
+  trace('match', '解析器升级到 v' + PARSER_V + '：清掉 ' + n + ' 条跳过标记，'
+    + '留底队列 ' + Object.keys(q).length + ' 条全部恢复可重试', { lvl:'info' });
+  return 1;
+}
+/** 跳过标记还作数吗 —— 过了保质期就再给一次机会 */
+function uSkip(movies, key){
+  const at = movies.u[key];
+  if (!at) return false;
+  if (Date.now() - at < U_TTL) return true;
+  delete movies.u[key];
+  return false;
+}
+
+let idxCache = null;
+async function loadIndex(env, force){
+  if (!force && idxCache && idxCache.exp > Date.now()) return idxCache.v;
+  const [movies, state] = await Promise.all([
+    r2get(env, IDX.movies, blankMovies()),
+    r2get(env, IDX.state, blankState()),
+  ]);
+  movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+  const v = { movies, state };
+  idxCache = { v, exp: Date.now()+45000 };
+  return v;
+}
+
+const lockAt = (l) => !l ? 0 : (typeof l === 'number' ? l : (l.at||0));
+
+/**
+ * 带"死亡计数"的锁。
+ * 任务被平台掐掉时 finally 不会执行，锁就留在 R2 里。以前前端只能反复重抢
+ * —— 抢到又被掐、再写一个新锁，于是必须人工解锁。现在接管一个残留锁时
+ * deaths 自增，任务按 deaths 把批量、时间预算、分片大小逐级减半，
+ * 跑完一整轮就清零。自己会收敛，不用人管。
+ */
+async function withIndexLock(env, fn){
+  const st = await r2get(env, IDX.state, blankState());
+  govLoad(st);
+  const now = Date.now();
+  const at = lockAt(st.lock);
+  if (at && now - at < LOCK_MS){
+    const wait = Math.ceil((LOCK_MS - (now - at))/1000);
+    const e = new Error('另一个索引任务正在运行，约 '+wait+' 秒后释放');
+    e.busy = 1; e.wait = wait; e.stale = false; throw e;
+  }
+  let deaths = st.deaths || 0;
+  if (at){                                  // 接管残留锁 = 上一轮没善终
+    deaths = Math.min(6, deaths + 1);
+    st.deaths = deaths;
+    trace('kill', '接管残留锁（'+Math.round((now-at)/1000)+'s 前留下），降级等级 '+deaths);
+  }
+  st.lock = { at: now, deaths };
+  await r2put(env, IDX.state, st);
+  try { return await fn(deaths); }
+  finally {
+    const cur = await r2get(env, IDX.state, null).catch(()=>null);
+    if (cur && lockAt(cur.lock) === now){ delete cur.lock; await r2put(env, IDX.state, cur).catch(()=>{}); }
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   分片链（v4.1）
+
+   v4.0 一个年份 = 一个大分片。每一轮任务都要把整年解开、改几行、
+   再整年编回去 —— CPU 与内存成本正比于该年份的总行数。年份越满，
+   每轮越贵，最终必然撞上 Worker 的资源上限，平台直接掐进程返回
+   503 "Worker exceeded resource limits"（错误码 1102），代码里
+   catch 不到，锁也留在 R2 里。更糟的是降级只砍抓取页数，砍不到
+   编解码这块，所以一旦撞线就永远撞线，只能人工干预。
+
+   v4.1 改成只追加的分片链：一片写满 PART_ROWS 行就封片，新行只
+   进最后那一片。每轮的解码/编码工作量被钉死在一片的大小上，与
+   年份总量无关 —— 索引再大，单轮成本也是常数。
+     · p0 沿用旧路径，老索引不用迁移，直接当作"已封的第一片"
+     · 去重靠单独的 tid 表（只存 base36 增量，解析成本近似于零）
+     · 影片记 SP={年:[片号]}，详情只读装着它的那几片
+   ══════════════════════════════════════════════════════════════════ */
+
+/** 分片 LRU：单片最多 PART_ROWS 行，最多常驻 PART_CACHE 片 */
+const partCache = new Map();
+async function loadPart(env, year, pi, ver){
+  const k = year+'/'+pi+'@'+ver;
+  const hit = partCache.get(k);
+  if (hit && hit.exp > Date.now()){ partCache.delete(k); partCache.set(k, hit); return hit.v; }
+  const v = await r2get(env, IDX.part(year, pi), null);
+  while (partCache.size >= PART_CACHE) partCache.delete(partCache.keys().next().value);
+  partCache.set(k, { v, exp: Date.now()+45000 });
+  return v;
+}
+const dropCaches = () => { idxCache = null; partCache.clear(); };
+
+/** 该年份每片的行数表。老索引（单个大分片）自动视作 [总行数] */
+function partRows(state, y){
+  const pn = state?.years?.[y]?.pn;
+  if (Array.isArray(pn) && pn.length) return pn;
+  const legacy = (state?.relsByYear||{})[y] || 0;
+  return legacy ? [legacy] : [];
+}
+const partCount = (state, y) => partRows(state, y).length;
+const yearRows  = (state, y) => partRows(state, y).reduce((a,x)=>a+x, 0);
+
+/** tid 表：只存 base36 增量，40000 条约 100KB，解析 ~10ms */
+function tidsBlob(set){
+  const arr = [...set].sort((a,b)=>a-b);
+  const b = arr.length ? arr[0] : 0;
+  let prev = b; const out = [];
+  for (const t of arr){ out.push(b36(t - prev)); prev = t; }
+  return { v:4, b, n: arr.length, t: out.join('.') };
+}
+function tidsParse(o){
+  const s = new Set();
+  if (!o || typeof o.t !== 'string') return s;
+  let cur = o.b|0;
+  if (o.t) for (const d of o.t.split('.')){ cur += un36(d); s.add(cur); }
+  return s;
+}
+/** 没有 tid 表就现场引导：只读各片的 t 字段，不解标题（便宜得多） */
+async function loadTids(env, y, state){
+  const o = await r2get(env, IDX.tids(y), null);
+  if (o && typeof o.t === 'string') return tidsParse(o);
+  const s = new Set();
+  const n = partCount(state, y);
+  for (let i = 0; i < n; i++){
+    const sh = await r2get(env, IDX.part(y, i), null);
+    if (!sh || !sh.t) continue;
+    const b = sh.b|0;
+    for (const d of sh.t.split('.')) s.add(b + un36(d));
+  }
+  return s;
+}
+
+/**
+ * 分片工作集：一次任务里只会碰"每个年份的最后一片"。
+ * cap 由调用方按降级等级压低 —— 上一轮被平台掐过，下一轮就用更小的
+ * 片，编码量随之减半。这条路径能真正收敛，v4.0 的降级不能。
+ */
+function partSet(env, state, opt = {}){
+  const cap = Math.max(300, opt.cap || PART_ROWS);
+  const Y = new Map();
+
+  async function open(y){
+    if (Y.has(y)) return Y.get(y);
+    const pn = partRows(state, y).slice();
+    let pi = Math.max(0, pn.length - 1);
+    let groups = {}, dict = null, rows = 0;
+    if (pn.length){
+      if (pn[pi] < cap){
+        const sh = await r2get(env, IDX.part(y, pi), null);
+        if (sh){ groups = decodeShard(sh); dict = sh.d || null; rows = pn[pi]; }
+      } else {
+        pi = pn.length;                       // 最后一片已满 → 直接开新片，不解码
+      }
+    }
+    const e = { y, pi, pn, groups, dict, rows, dictLen: 0, retrain: false,
+                tids: await loadTids(env, y, state), dirty: false, wrote: [] };
+    Y.set(y, e);
+    return e;
+  }
+
+  async function flushOne(e){
+    const rows = Object.values(e.groups).reduce((a,x)=>a+x.length, 0);
+    if (!rows){ e.dirty = false; return; }
+    const old = e.dict;
+    let sh, retrain = false;
+    if (rows <= HEAVY_ROWS){ const b = encodeBest(e.y, e.groups, old); sh = b.sh; retrain = b.retrain; }
+    else sh = old && old.length >= 32 ? encodeShard(e.y, e.groups, old.slice())
+                                      : encodeShard(e.y, e.groups, null);
+    await r2put(env, IDX.part(e.y, e.pi), sh);
+    e.pn[e.pi] = rows; e.dict = sh.d; e.dictLen = sh.d.length;
+    e.retrain = e.retrain || retrain;
+    e.wrote.push(e.pi); e.dirty = false;
+  }
+
+  /** 封片换新：本片写盘后，后续行进下一片 */
+  async function rotate(e){
+    await flushOne(e);
+    e.pi = e.pn.length > e.pi ? e.pn.length : e.pi + 1;
+    e.groups = {}; e.dict = null; e.rows = 0; e.dirty = false;
+  }
+
+  return {
+    open,
+    /** 该年份已收录的 tid 集合（去重用） */
+    async seen(y){ return (await open(y)).tids; },
+    /** 当前开着的那片还能装多少行 */
+    async room(y){ const e = await open(y); return Math.max(0, cap - e.rows); },
+    /**
+     * 把一批帖挂到影片上。只写当前片，成本正比于新增行数。
+     * 单片上限、最佳片源、SP 都在这里增量维护，不再回头重排整部片。
+     */
+    async push(y, movies, id, rowsIn){
+      let e = await open(y);
+      if (e.rows >= cap){ await rotate(e); }
+      const mv = movies.m[id];
+      let added = 0;
+      for (const row of rowsIn){
+        const tid = Number(row.tid);
+        if (!tid || e.tids.has(tid)) continue;
+        if (mv && (mv[F.R]||0) >= ROWS_PER_MOVIE) break;
+        e.tids.add(tid);
+        const r = toRow(tid, row.title);
+        (e.groups[id] || (e.groups[id] = [])).push(r);
+        e.rows++; added++; e.dirty = true;
+        if (mv){ mv[F.R] = (mv[F.R]||0) + 1; bumpBest(mv, r); bumpSpec(mv, r); }
+      }
+      if (mv && added){
+        const ys = mv[F.YS] || (mv[F.YS] = []);
+        if (!ys.includes(y)) ys.push(y);
+        markPart(mv, y, e.pi);
+      }
+      return added;
+    },
+    /** 落盘：写当前片 + tid 表，并把片表写回 state */
+    async flush(){
+      const out = [];
+      for (const e of Y.values()){
+        if (e.dirty) await flushOne(e);
+        await r2put(env, IDX.tids(e.y), tidsBlob(e.tids));
+        const st = state.years[e.y] || (state.years[e.y] = newYear());
+        st.pn = e.pn;
+        const rows = e.pn.reduce((a,x)=>a+x, 0);
+        (state.relsByYear = state.relsByYear || {})[e.y] = rows;
+        (state.dictByYear = state.dictByYear || {})[e.y] = e.dictLen || (state.dictByYear||{})[e.y] || 0;
+        out.push({ year: e.y, rows, parts: e.pn.length, part: e.pi,
+                   dict: e.dictLen, retrain: e.retrain, wrote: e.wrote.slice() });
+      }
+      state.rels = Object.values(state.relsByYear||{}).reduce((a,x)=>a+x, 0);
+      return out;
+    },
+  };
+}
+
+/* 版块自带的附加筛选（剧集那边的"状态"）。想改成"不限"就把 TV_FILTER
+   设成空字符串；想另外加条件也从这里进，不用动代码。 */
+const srcFilter = (env) => {
+  const v = env[SRC.filterVar];
+  const t = String(v == null ? SRC.extra : v).trim();
+  return !t ? '' : (t[0] === '&' ? t : '&' + t);
+};
+const listURL = (env, year, pg) => base(env)+'forum.php?mod=forumdisplay&fid='+FID
+  + '&filter=sortid&sortid=1&searchsort=1&' + SRC.ykey + '=' + YEARS[year]
+  + srcFilter(env) + (pg>1?'&page='+pg:'');
+
+/** 拉一页列表：限速 / 跳转 / 登录墙 分开处理，只有 auth 才重登 */
+async function fetchList(env, year, pg){
+  return autoRetry('list '+year+'p'+pg, async (i, prevCls) => {
+    const s = await session(env, prevCls === 'auth');
+    const { r, html, bytes } = await reqHTML(env, listURL(env, year, pg), { cookie:s.cookie, referer: base(env) });
+    if (r.status >= 300 && r.status < 400) throw new Error('列表页被跳转（登录墙）');
+    if (loginWall(html)) throw new Error('列表页需要登录（登录墙）');
+    return { html, bytes, rows: parseBoard(html), last: lastPage(html), board: looksLikeBoard(html) };
+  }, { tries: 3, gap: 800, onRetry: async (cls) => { if (cls === 'auth') await dropSession(env); } });
+}
+
+async function buildChunk(env, opt = {}){ return withIndexLock(env, (d) => buildInner(env, opt, d)); }
+
+async function buildInner(env, { pages = 0, tmdbMax = 0, year = null } = {}, deaths = 0){
+  const t0 = Date.now();
+  pipeReset();
+  /* 一轮的规模由计划决定，不再写死：Free 计划一次调用只有 50 个子请求，
+     v4 默认 8 页 + 180 次 TMDB ≈ 188 个，必然越线。 */
+  pages   = Math.min(pages || PLAN.pages, PLAN.pages * 2);
+  tmdbMax = Math.min(tmdbMax || PLAN.tmdb, PLAN.tmdb * 2);
+  /* 上一轮被掐过就自动降级，直到能跑完一轮为止 */
+  const shift = Math.min(4, deaths);
+  pages   = Math.max(1, pages >> shift);
+  tmdbMax = Math.max(6, tmdbMax >> shift);
+  let budgetHit = 0;
+  /* 落盘（编码 + 写 R2）要预留时间，否则抓到最后一刻才开始编码，
+     很容易在编码中途被平台掐掉 —— 那正是 v4.0 留下残留锁的场景。 */
+  const budget = Math.max(7000, BUDGET_MS - deaths * 3000) - 2500;
+  const over = () => Date.now() - t0 > budget;
+
+  const [movies, state, pend] = await Promise.all([
+    r2get(env, IDX.movies, blankMovies()),
+    r2get(env, IDX.state, blankState()),
+    pendLoad(env),
+  ]);
+  movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+  let pendDirty = parserMigrate(movies, pend);
+  govLoad(state);
+
+  /* 冷却期直接返回：不碰网络，也不白占着锁；顺手把冷却写进 R2 让其它 isolate 一起忍 */
+  const cool0 = govCoolLeft();
+  if (cool0 > 0){
+    govSave(state); delete state.lock;
+    await r2put(env, IDX.state, state).catch(()=>{});
+    dropCaches();
+    return { cooling: Math.ceil(cool0/1000), why: GOV.why, degraded: deaths,
+      msg: '论坛限速冷却中，'+Math.ceil(cool0/1000)+' 秒后自动继续（'+(GOV.why||'限速')+'）',
+      movies: state.movies||0, rels: state.rels||0 };
+  }
+
+  const order = year ? [Number(year)] : BUILD_ORDER;
+  let target = null;
+  for (const y of order){
+    const st = state.years[y] || (state.years[y] = newYear());
+    if (!st.done || year){ target = y; break; }
+  }
+  if (!target) return { done:true, msg:'全部年份已完成', movies: state.movies||0, rels: state.rels||0 };
+
+  const st = state.years[target];
+  st.bad = st.bad || [];
+  if (year) st.done = false;
+
+  /* 降级等级直接压小分片：被掐一次，下一轮的编码量减半，能真正收敛 */
+  const ps = partSet(env, state, { cap: Math.max(300, PART_ROWS >> Math.min(3, deaths)) });
+  const seen = await ps.seen(target);          // 该年份已收录的 tid（全年，跨片）
+  const queued = new Set();                    // 本轮已排队的，避免同轮重复
+
+  /* ── 拉列表：先重试上轮失败的页，再往前推进 ── */
+  const fresh = [];
+  const queue = st.bad.slice(0, 3);
+  /* [修复 7] queue.length 在循环里边读边涨 —— 结果 pg 恒等于 st.page，
+     每一轮把同一页抓 pages 遍、只推进一页。既拖慢建索引，又是白白
+     多打论坛 8 倍请求、招来限速的元凶。基准长度必须先固定下来。 */
+  const retryN = queue.length;
+  for (let i = retryN; i < pages; i++){
+    const pg = st.page + (i - retryN);
+    if (st.last && pg > st.last) break;
+    queue.push(pg);
+  }
+
+  let advanced = 0, failed = 0, emptyRun = 0, rateHit = 0;
+  const stillBad = new Set(st.bad);
+  for (const pg of queue){
+    if (over() || govCoolLeft()){ if (govCoolLeft()) rateHit++; break; }
+    /* 留够收尾用的子请求：拉列表最多重试 3 次，TMDB 那一段还要用 */
+    if (subLeft() < 10){ budgetHit = 1; break; }
+    let res;
+    pipe('list', 'i');
+    try { res = await fetchList(env, target, pg); stillBad.delete(pg); pipe('list', 'o'); }
+    catch (e){
+      const cls = classify(e);
+      pipe('list', 'e');
+      if (cls === 'budget'){ budgetHit = 1; stillBad.add(pg); break; }
+      failed++; stillBad.add(pg);
+      trace(cls, '第 '+pg+' 页拉取失败: '+e.message, { year: target, page: pg });
+      if (cls === 'rate'){ rateHit++; break; }  // [修复 5] 被限速就收工，别把状况搞更糟
+      if (cls === 'auth') break;                // 登录不通也别硬刷
+      continue;
+    }
+    if (!st.last && res.last) st.last = res.last;
+    if (!res.rows.length){
+      /* [修复 2] 页面正常但没帖 —— 只有确认过总页数、或连续两页空，才敢收尾 */
+      if (!res.board){
+        failed++; stillBad.add(pg);
+        trace('parse', '第 '+pg+' 页不像版块页，跳过', { year: target });
+        continue;
+      }
+      emptyRun++;
+      if (st.last && pg >= st.last) st.done = true;
+      else if (emptyRun >= 2 && pg > 1) st.done = true;
+    } else {
+      emptyRun = 0;
+      for (const row of res.rows){
+        const tid = Number(row.tid);
+        if (seen.has(tid) || queued.has(tid)) continue;
+        queued.add(tid); fresh.push(row);
+      }
+    }
+    if (pg >= st.page) advanced = Math.max(advanced, pg - st.page + 1);
+    if (st.done) break;
+  }
+  st.bad = [...stillBad].slice(0, 24);
+
+  /* ── 按片名归并，压缩 TMDB 调用 ── */
+  const byName = new Map();
+  for (const row of fresh){
+    pipe('parse', 'i');
+    const pt = parseTitle(row.title);
+    if (!pt.cn){ pipe('parse', 'e'); continue; }
+    const key = groupKey(pt);
+    if (!byName.has(key)) byName.set(key, { key, ...pt, rows: [] });
+    byName.get(key).rows.push(row);
+    pipe('parse', 'o');
+  }
+
+  let attached = 0, matchedNew = 0, cached = 0, skipped = 0, calls = 0;
+  const todo = [];
+  for (const g of byName.values()){
+    const known = movies.k[g.key];
+    if (known != null && movies.m[known]){
+      const n = await ps.push(target, movies, known, g.rows);
+      attached += n; pipe('store', 'o', n);
+      cached++; continue;
+    }
+    if (known != null) delete movies.k[g.key];
+    if (uSkip(movies, g.key)){ skipped++; continue; }
+    todo.push(g);
+  }
+
+  let processed = 0, netFail = 0;
+  for (let i = 0; i < todo.length && calls < tmdbMax && !over(); ){
+    /* matchBatch 每组最多两个子请求，所以一批的大小按剩余预算的一半算，
+       另外留 8 个给落盘与收尾 */
+    const room = Math.min(5, tmdbMax - calls, Math.floor((subLeft() - 8) / 2));
+    if (room < 1){ budgetHit = 1; break; }
+    const batch = todo.slice(i, i + room);
+    if (!batch.length) break;
+    i += batch.length;
+    pipe('match', 'i', batch.length);
+    let res;
+    try { res = await matchBatch(env, batch.map(g =>
+      ({ ...g, hint: target, title: g.rows?.[0]?.title || g.cn }))); }
+    catch (e){ if (e.budget){ budgetHit = 1; break; } throw e; }
+    let dead = 0;
+    for (const g of batch){
+      const r = res.get(g.key);
+      if (r == null){ netFail++; dead++; pipe('match', 'e'); continue; } // 网络失败不算"认不出"，留待下轮
+      calls++; processed++;
+      if (r.miss){
+        /* v4 在这里直接丢掉 g.rows。v5 连行一起留底，重试就不用重爬列表页 */
+        movies.u[g.key] = Date.now();
+        pendAdd(pend, g, target, r.why || 'nohit');
+        pendDirty = 1; skipped++; pipe('match', 'e');
+        continue;
+      }
+      const hit = r.hit;
+      movies.k[g.key] = hit.id;
+      if (!movies.m[hit.id]) movies.m[hit.id] = newMovie(hit, target);
+      const n = await ps.push(target, movies, hit.id, g.rows);
+      attached += n; pipe('store', 'o', n);
+      matchedNew++; pipe('match', 'o');
+    }
+    /* 整批都没回来 = TMDB 那头不通（key 失效 / 被限流 / 出网被挡）。
+       接着往下认只是把剩下的子请求预算白烧掉，不如把预算留给拉列表，
+       并且把话说明白。 */
+    if (dead === batch.length && batch.length){
+      trace('tmdb', '整批 ' + batch.length + ' 组 TMDB 请求全部失败，本轮不再认定 —— '
+        + '先查 TMDB_KEY 是否有效、以及 Worker 出网是否被挡', { lvl:'err', ch:'match' });
+      break;
+    }
+    if (budgetHit) break;
+  }
+
+  /* ── [修复 3] pending 独立计数，回退到真正没处理完的那一页 ── */
+  const pending = todo.length - processed;
+  if ((pending > 0 || rateHit) && advanced > 0){
+    const back = rateHit ? advanced : Math.min(advanced, Math.max(1, Math.ceil(pending / 28)));
+    st.page = Math.max(1, st.page + advanced - back);
+    st.done = false;
+  } else {
+    st.page = Math.max(1, st.page + advanced);
+  }
+  if (st.last && st.page > st.last) st.done = true;
+
+  /* ── 落盘：只写当前那一片 + tid 表，成本与年份总量无关 ── */
+  pipe('encode', 'i', attached);
+  const flushed = await ps.flush();
+  pipe('encode', 'o', attached);
+  state.movies = Object.keys(movies.m).length;
+  state.deaths = 0;                        // 跑完整一轮 → 降级归零
+  pipeSave(state, 'build', Date.now() - t0);
+  /* [v5.2 修复 5] 摘要自己把「入库 0」解释掉。
+     v5.1 的这一行只报新帖 / 入库 / 新片，认定那一段单开一条 trace，而且
+     calls 和 skipped 都是 0 时那条根本不打 —— 于是屏幕上只剩
+     「新帖 150 · 入库 0 · 新片 0」，看不出到底是没认出来、还是网络断了、
+     还是被跳过表挡住了。三个数一起摆出来，下次一眼就能定位。 */
+  const sum = target + ' 年 · 第 ' + st.page + ' 页 · 新帖 ' + fresh.length + ' · 入库 ' + attached +
+    ' · 新片 ' + matchedNew + ' · 认定 ' + calls + '/' + (todo.length + cached + skipped) + ' 组' +
+    (cached ? ' · 缓存 ' + cached : '') + (skipped ? ' · 认不出 ' + skipped : '') +
+    (netFail ? ' · 网络失败 ' + netFail : '') + (pending > 0 ? ' · 待认 ' + pending : '') +
+    ' · 子请求 ' + SUB.n + '/' + SUB.max +
+    ' · ' + ((Date.now() - t0) / 1000).toFixed(1) + 's';
+  trace('index', sum, { lvl: rateHit || budgetHit || (fresh.length && !attached) ? 'warn' : 'info' });
+  if (calls || skipped || netFail)
+    trace('match', 'TMDB 认定 ' + calls + ' 组 · 认下 ' + matchedNew + ' 部 · 认不出 ' + skipped +
+      ' 组（已留底，可重试）· 命中缓存 ' + cached + (netFail ? ' · 网络失败 ' + netFail + ' 组' : ''),
+      { lvl: skipped > matchedNew || netFail ? 'warn' : 'info' });
+  if (pendDirty) await pendSave(env, pend, state);
+  eventsFlush(state, [{ at: Date.now(), ch: 'pipe', lvl: 'info', msg: sum }]);
+  govSave(state);
+  delete state.lock;
+  state.at = Date.now();
+  state.ver = (state.ver||0) + 1;
+  await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
+  dropCaches();
+
+  return {
+    done: year ? !!st.done : BUILD_ORDER.every(y => state.years[y]?.done),
+    year: target, page: st.page, last: st.last, advanced,
+    fresh: fresh.length, attached, matchedNew, cached, skipped, pending,
+    tmdbCalls: calls, failed, rateHit, bad: st.bad.length,
+    sub: SUB.n, subMax: SUB.max, budgetHit, plan: PLAN.name,
+    degraded: deaths, gap: GOV.gap, cooling: Math.ceil(govCoolLeft()/1000),
+    ms: Date.now()-t0, movies: state.movies, rels: state.rels,
+    parts: (flushed[0]||{}).parts || 0, part: (flushed[0]||{}).part || 0,
+    retrained: flushed.filter(f=>f.retrain).map(f=>f.year),
+  };
+}
+
+/** 每日增量：只扫近三年前几页 */
+async function incremental(env, headPages = 0){
+  return withIndexLock(env, async (deaths) => {
+    const t0 = Date.now();
+    pipeReset();
+    const budget = Math.max(7000, BUDGET_MS - deaths*3000);
+    headPages = Math.min(headPages || PLAN.pages, PLAN.pages * 2);
+    headPages = Math.max(1, headPages >> Math.min(3, deaths));
+    let budgetHit = 0;
+    const [movies, state, pend] = await Promise.all([
+      r2get(env, IDX.movies, blankMovies()),
+      r2get(env, IDX.state, blankState()),
+      pendLoad(env),
+    ]);
+    movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+    let pendDirty = parserMigrate(movies, pend);
+    govLoad(state);
+    const cool0 = govCoolLeft();
+    if (cool0 > 0){
+      govSave(state); delete state.lock;
+      await r2put(env, IDX.state, state).catch(()=>{});
+      dropCaches();
+      return { cooling: Math.ceil(cool0/1000), added:0, calls:0,
+        msg: '论坛限速冷却中，'+Math.ceil(cool0/1000)+' 秒后再试' };
+    }
+
+    const ps = partSet(env, state, { cap: Math.max(300, PART_ROWS >> Math.min(3, deaths)) });
+    let added = 0, calls = 0, failed = 0;
+
+    for (const y of BUILD_ORDER.slice(0,3)){
+      if (Date.now()-t0 > budget || govCoolLeft()) break;
+      const seen = await ps.seen(y);
+
+      for (let pg = 1; pg <= headPages; pg++){
+        if (Date.now()-t0 > budget) break;
+        if (subLeft() < 10){ budgetHit = 1; break; }
+        let res;
+        pipe('list', 'i');
+        try { res = await fetchList(env, y, pg); pipe('list', 'o'); }
+        catch (e){
+          pipe('list', 'e');
+          if (e.budget){ budgetHit = 1; break; }
+          failed++; trace(classify(e), '增量 '+y+' 第 '+pg+' 页: '+e.message); break;
+        }
+        const rows = res.rows.filter(x => !seen.has(Number(x.tid)));
+        if (!rows.length) break;                     // 这页全旧 → 后面更旧
+
+        const byName = new Map();
+        const dedupe = new Set();
+        for (const row of rows){
+          const tid = Number(row.tid);
+          if (dedupe.has(tid)) continue;
+          dedupe.add(tid);
+          pipe('parse', 'i');
+          const pt = parseTitle(row.title);
+          if (!pt.cn){ pipe('parse', 'e'); continue; }
+          const key = groupKey(pt);
+          if (!byName.has(key)) byName.set(key, { key, ...pt, rows: [] });
+          byName.get(key).rows.push(row);
+          pipe('parse', 'o');
+        }
+        /* 已经认过的先入库，认不出来的攒到一起走 matchBatch */
+        const need = [];
+        for (const g of byName.values()){
+          const id = movies.k[g.key];
+          if (id != null && movies.m[id]){
+            const n = await ps.push(y, movies, id, g.rows);
+            added += n; pipe('store', 'o', n);
+          } else if (!uSkip(movies, g.key)) need.push(g);
+        }
+        for (let i = 0; i < need.length && calls < PLAN.tmdb; ){
+          const room = Math.min(5, Math.floor((subLeft() - 8) / 2));
+          if (room < 1){ budgetHit = 1; break; }
+          const batch = need.slice(i, i + room); i += batch.length;
+          pipe('match', 'i', batch.length);
+          let res;
+          try { res = await matchBatch(env, batch.map(g =>
+            ({ ...g, hint: y, title: g.rows?.[0]?.title || g.cn }))); }
+          catch (e){ if (e.budget){ budgetHit = 1; break; } throw e; }
+          for (const g of batch){
+            const r = res.get(g.key);
+            if (r == null){ pipe('match', 'e'); continue; }
+            calls++;
+            if (r.miss){
+              movies.u[g.key] = Date.now();
+              pendAdd(pend, g, y, r.why || 'nohit');
+              pendDirty = 1; pipe('match', 'e'); continue;
+            }
+            const id2 = movies.k[g.key] = r.hit.id;
+            if (!movies.m[id2]) movies.m[id2] = newMovie(r.hit, y);
+            pipe('match', 'o');
+            const n = await ps.push(y, movies, id2, g.rows);
+            added += n; pipe('store', 'o', n);
+          }
+          if (budgetHit) break;
+        }
+        if (budgetHit) break;
+      }
+    }
+
+    pipe('encode', 'i', added); await ps.flush(); pipe('encode', 'o', added);
+    state.movies = Object.keys(movies.m).length;
+    state.deaths = 0;
+    pipeSave(state, 'incremental', Date.now() - t0);
+    if (pendDirty) await pendSave(env, pend, state);
+    const isum = '增量扫描：新增片源 ' + added + ' · TMDB ' + calls + ' · 子请求 ' +
+      SUB.n + '/' + SUB.max + ' · ' + ((Date.now() - t0) / 1000).toFixed(1) + 's';
+    trace('index', isum, { lvl: budgetHit ? 'warn' : 'info' });
+    if (added) eventsFlush(state, [{ at: Date.now(), ch:'pipe', lvl:'info', msg: isum }]);
+    govSave(state);
+    delete state.lock;
+    state.at = Date.now();
+    state.ver = (state.ver||0) + 1;
+    state.lastIncremental = { at: Date.now(), added, calls, failed, ms: Date.now()-t0 };
+    await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
+    dropCaches();
+    return { added, calls, failed, degraded: deaths, movies: state.movies, rels: state.rels,
+             sub: SUB.n, subMax: SUB.max, budgetHit, plan: PLAN.name, ms: Date.now()-t0 };
+  });
+}
+
+/** 单独重建某一年：清掉该年分片 + 从所有影片的 ys 里摘掉这一年 */
+async function resetYear(env, year){
+  return withIndexLock(env, async () => {
+    year = Number(year);
+    if (!YEARS[year]) throw new Error('未知年份 '+year);
+    const [movies, state] = await Promise.all([
+      r2get(env, IDX.movies, blankMovies()),
+      r2get(env, IDX.state, blankState()),
+    ]);
+    movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+    let touched = 0, dropped = 0;
+    for (const id of Object.keys(movies.m)){
+      const mv = movies.m[id], ys = mv[F.YS]||[];
+      if (mv[F.SP] && mv[F.SP][year]) delete mv[F.SP][year];
+      if (!ys.includes(year)) continue;
+      mv[F.YS] = ys.filter(y => y !== year); touched++;
+      if (!mv[F.YS].length){ delete movies.m[id]; dropped++; }
+    }
+    for (const k of Object.keys(movies.k)) if (!movies.m[movies.k[k]]) delete movies.k[k];
+    movies.u = {};
+    const np = partCount(state, year);
+    for (let i = 0; i < Math.max(1, np); i++) await env.R2.delete(IDX.part(year, i)).catch(()=>{});
+    await env.R2.delete(IDX.tids(year)).catch(()=>{});
+    state.years[year] = newYear();
+    state.years[year].pn = [];
+    (state.relsByYear = state.relsByYear||{})[year] = 0;
+    state.rels = Object.values(state.relsByYear).reduce((a,x)=>a+x,0);
+    state.movies = Object.keys(movies.m).length;
+    state.deaths = 0;
+    delete state.lock;
+    state.at = Date.now(); state.ver = (state.ver||0)+1;
+    await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
+    dropCaches();
+    return { year, touched, dropped, movies: state.movies };
+  });
+}
+
+/**
+ * v3 → v4 迁移：一次搬一年，可重复调用。
+ * v4.1 起按分片链写入，并且单次只搬 MIG_ROWS 行，剩下的记游标下次接着搬 ——
+ * 老库里一个年份可能有几万行，一次搬完必然超资源上限。
+ */
+const MIG_ROWS = 9000;
+async function migrateYear(env, year){
+  return withIndexLock(env, async () => {
+    const old = await r2get(env, IDX.v3.movies, null);
+    if (!old) throw new Error('没有找到 v3 索引（idx/movies.json）');
+    const oldState = await r2get(env, IDX.v3.state, { years:{} });
+    const [movies, state] = await Promise.all([
+      r2get(env, IDX.movies, blankMovies()),
+      r2get(env, IDX.state, blankState()),
+    ]);
+    movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+    state.migrated = state.migrated || {};
+    state.migAt = state.migAt || {};
+
+    const pending = BUILD_ORDER.filter(y => !state.migrated[y]);
+    const y = year ? Number(year) : pending[0];
+    if (!y) return { done:true, msg:'迁移已完成', movies: state.movies||0 };
+
+    const rels = await r2get(env, IDX.v3.rels(y), {});
+    const ids = Object.keys(rels).sort((a,b)=>Number(a)-Number(b));
+    let cursor = state.migAt[y] || 0;
+    if (cursor >= ids.length){ cursor = 0; }
+
+    /* 先按游标切出这一批，训练一套码本给这一批的所有分片复用 */
+    const batch = [];
+    let rows = 0, i = cursor;
+    for (; i < ids.length && rows < MIG_ROWS; i++){
+      const id = ids[i];
+      const om = old.m?.[id];
+      if (!om) continue;
+      let list = (rels[id]||[]).map(([tid,title]) => toRow(tid, title));
+      if (list.length > ROWS_PER_MOVIE){ list.sort(betterRow); list.length = ROWS_PER_MOVIE; }
+      if (!list.length) continue;
+      if (!movies.m[id]) movies.m[id] = [ om.n||'', om.o||'', om.y||'', om.p||'', om.t||0,
+        om.c||0, om.g||[], [], 0, 0, null, null, null, null, 0 ];
+      const mv = movies.m[id];
+      if (!(mv[F.YS]||[]).includes(y)) (mv[F.YS] = mv[F.YS]||[]).push(y);
+      batch.push([id, list]);
+      rows += list.length;
+    }
+    const done = i >= ids.length;
+
+    const pn = partRows(state, y).slice();
+    let pi = pn.length ? pn.length - 1 : 0;
+    let acc = {}, accRows = pn.length ? pn[pi] : 0;
+    if (accRows >= PART_ROWS){ pi = pn.length; accRows = 0; }
+    else if (pn.length){                       // 续写未满的那一片
+      const sh = await r2get(env, IDX.part(y, pi), null);
+      if (sh) acc = decodeShard(sh);
+    }
+    const dict = trainCodebook(batch.flatMap(([,l]) => l.map(r=>r.title)));
+    const writePart = async () => {
+      if (!accRows) return;
+      const sh = encodeShard(y, acc, dict.slice());
+      await r2put(env, IDX.part(y, pi), sh);
+      pn[pi] = Object.values(acc).reduce((a,x)=>a+x.length,0);
+      (state.dictByYear = state.dictByYear||{})[y] = sh.d.length;
+      acc = {}; accRows = 0; pi = pn.length > pi ? pn.length : pi + 1;
+    };
+    const tids = await loadTids(env, y, state);
+    for (const [id, list] of batch){
+      const mv = movies.m[id];
+      const keep = list.filter(r => !tids.has(Number(r.tid)));
+      if (!keep.length) continue;
+      for (const r of keep){ tids.add(Number(r.tid)); bumpBest(mv, r); }
+      mv[F.R] = (mv[F.R]||0) + keep.length;
+      (acc[id] || (acc[id] = [])).push(...keep);
+      markPart(mv, y, pi);
+      accRows += keep.length;
+      if (accRows >= PART_ROWS) await writePart();
+    }
+    await writePart();
+    await r2put(env, IDX.tids(y), tidsBlob(tids));
+
+    for (const k of Object.keys(old.k||{})) if (movies.m[old.k[k]]) movies.k[k] = old.k[k];
+
+    const st = state.years[y] = { ...newYear(), ...(oldState.years?.[y] || {}), bad: [] };
+    st.pn = pn;
+    state.migAt[y] = done ? 0 : i;
+    if (done) state.migrated[y] = true;
+    const total = pn.reduce((a,x)=>a+x,0);
+    (state.relsByYear = state.relsByYear||{})[y] = total;
+    state.rels = Object.values(state.relsByYear).reduce((a,x)=>a+x,0);
+    state.movies = Object.keys(movies.m).length;
+    state.deaths = 0;
+    delete state.lock;
+    state.at = Date.now(); state.ver = (state.ver||0)+1;
+    await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
+    dropCaches();
+    const left = BUILD_ORDER.filter(x => !state.migrated[x]);
+    return { year:y, rows, parts: pn.length, total, movies: state.movies,
+      yearDone: done, left: left.length, done: !left.length,
+      msg: done ? y+' 年迁移完成' : y+' 年还剩 '+(ids.length-i)+' 部，继续调用即可' };
+  });
+}
+
+/**
+ * 码本重训：一次只压一片。整年重编在大年份上必然超资源上限，
+ * 所以改成按片来，前端顺着 parts 依次调用即可。
+ */
+async function optimizeYear(env, year, part){
+  return withIndexLock(env, async () => {
+    year = Number(year);
+    const state0 = await r2get(env, IDX.state, blankState());
+    const pn = partRows(state0, year);
+    if (!pn.length) return { year, skipped:true, parts:0, msg:'该年份没有分片' };
+    const pi = part == null || part === '' ? pn.length - 1 : Number(part);
+    if (!(pi >= 0 && pi < pn.length)) return { year, skipped:true, parts:pn.length, msg:'没有第 '+pi+' 片' };
+    const raw = await r2get(env, IDX.part(year, pi), null);
+    if (!raw || !raw.i?.length) return { year, part:pi, parts:pn.length, skipped:true, msg:'第 '+pi+' 片是空的' };
+    const rows = raw.rows || raw.n?.length || 0;
+    if (rows > SPLIT_MAX) return { year, part:pi, parts:pn.length, skipped:true, rows,
+      msg:'第 '+pi+' 片有 '+rows+' 行，先用「拆分大片」再压实' };
+    const before = JSON.stringify(raw).length;
+    const { sh, retrain } = encodeBest(year, decodeShard(raw), raw.d);
+    const after = JSON.stringify(sh).length;
+    if (after < before) await r2put(env, IDX.part(year, pi), sh);
+    const state = await r2get(env, IDX.state, blankState());
+    (state.dictByYear = state.dictByYear||{})[year] = sh.d.length;
+    state.ver = (state.ver||0)+1; state.at = Date.now(); delete state.lock;
+    await r2put(env, IDX.state, state);
+    dropCaches();
+    return { year, part:pi, parts:pn.length, before, after: Math.min(before, after),
+      saved: Math.max(0, before-after),
+      ratio: +(before/Math.max(1,Math.min(before,after))).toFixed(2),
+      retrained: retrain && after < before, dict: sh.d.length, rows,
+      next: pi > 0 ? pi-1 : null,
+      msg: after < before ? year+' 年第 '+pi+' 片已压实' : year+' 年第 '+pi+' 片已经是更优编码' };
+  });
+}
+
+/**
+ * 拆分大片：把 v4.0 留下的整年大分片切成 PART_ROWS 一片。
+ * 分片之间没有顺序含义，所以切出来的新片直接追加到链尾，
+ * 只需要把受影响影片的 SP 改掉。一次切一片，返回 left 让前端接着调。
+ */
+async function splitYear(env, year){
+  return withIndexLock(env, async () => {
+    year = Number(year);
+    const [movies, state] = await Promise.all([
+      r2get(env, IDX.movies, blankMovies()),
+      r2get(env, IDX.state, blankState()),
+    ]);
+    movies.m = movies.m||{};
+    const pn = partRows(state, year).slice();
+    const big = pn.findIndex(n => n > PART_ROWS * 1.5);
+    if (big < 0) return { year, parts: pn.length, left: 0, msg:'没有需要拆分的大片' };
+    if (pn[big] > SPLIT_MAX) throw new Error(year+' 年第 '+big+' 片有 '+pn[big]+' 行，超出可拆上限，请对该年份「重建」');
+
+    const raw = await r2get(env, IDX.part(year, big), null);
+    if (!raw){ pn[big] = 0; state.years[year].pn = pn; await r2put(env, IDX.state, state);
+      return { year, parts: pn.length, left: 0, msg:'第 '+big+' 片不存在，已修正片表' }; }
+    const groups = decodeShard(raw);
+    const ids = Object.keys(groups);
+    const dict = raw.d && raw.d.length >= 32 ? raw.d : trainCodebook(ids.flatMap(id => groups[id].map(r=>r.title)));
+
+    /* 第一刀留在原位，其余追加到链尾 */
+    const slices = [];
+    let cur = {}, curRows = 0;
+    for (const id of ids){
+      if (curRows && curRows + groups[id].length > PART_ROWS){ slices.push(cur); cur = {}; curRows = 0; }
+      cur[id] = groups[id]; curRows += groups[id].length;
+    }
+    if (curRows) slices.push(cur);
+
+    const targets = [big];
+    for (let k = 1; k < slices.length; k++) targets.push(pn.length + k - 1);
+    for (let k = 0; k < slices.length; k++){
+      const sh = encodeShard(year, slices[k], dict.slice());
+      await r2put(env, IDX.part(year, targets[k]), sh);
+      pn[targets[k]] = Object.values(slices[k]).reduce((a,x)=>a+x.length,0);
+      for (const id of Object.keys(slices[k])){
+        const mv = movies.m[id];
+        if (!mv) continue;
+        const sp = mv[F.SP] && typeof mv[F.SP] === 'object' ? mv[F.SP] : (mv[F.SP] = {});
+        sp[year] = (sp[year] || []).filter(x => x !== big);
+        markPart(mv, year, targets[k]);
+      }
+    }
+    for (let k = 0; k < pn.length; k++) if (pn[k] == null) pn[k] = 0;
+    (state.years[year] = state.years[year] || newYear()).pn = pn;
+    (state.relsByYear = state.relsByYear||{})[year] = pn.reduce((a,x)=>a+x,0);
+    state.rels = Object.values(state.relsByYear).reduce((a,x)=>a+x,0);
+    delete state.lock;
+    state.at = Date.now(); state.ver = (state.ver||0)+1;
+    await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
+    dropCaches();
+    const left = pn.filter(n => n > PART_ROWS * 1.5).length;
+    return { year, from: big, into: targets, parts: pn.length, left,
+      msg: year+' 年第 '+big+' 片已拆成 '+slices.length+' 片' + (left ? '，还剩 '+left+' 片要拆' : '') };
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   自诊断
+   ══════════════════════════════════════════════════════════════════ */
+async function diagnose(env){
+  const checks = [];
+  const add = (id, name, level, detail, fix, arg) =>
+    checks.push({ id, name, level, detail, fix: fix||null, arg: arg==null?null:String(arg) });
+  const timed = async (id, name, fn, fix) => {
+    const t = Date.now();
+    try { const d = await fn(); add(id, name, d?.level||'ok', (d?.detail||'正常') + ' · ' + (Date.now()-t) + 'ms', d?.fix||fix); }
+    catch (e){
+      /* 被限速不是"故障"，是"现在别打" —— 分开报，给的修复动作也不同 */
+      const cls = classify(e);
+      add(id, name, cls === 'rate' ? 'warn' : 'fail',
+        e.message + (e.preview ? ' · 预览：'+e.preview : '') + ' · ' + (Date.now()-t) + 'ms',
+        cls === 'rate' ? 'cooldown' : (cls === 'auth' ? 'relogin' : fix));
+    }
+  };
+
+  /* 1. 环境 */
+  add('bind.r2','R2 绑定', env.R2 ? 'ok':'fail', env.R2 ? '已绑定':'未绑定，索引无法读写');
+  add('bind.kv','KV 绑定', env.KV ? 'ok':'warn', env.KV ? '已绑定':'未绑定，会话与种子缓存退化为单实例内存');
+  add('sec.site','论坛账号', (env.SITE_USER&&env.SITE_PASS)?'ok':'fail', (env.SITE_USER&&env.SITE_PASS)?'已配置':'缺少 SITE_USER / SITE_PASS');
+  add('sec.tmdb','TMDB_KEY', env.TMDB_KEY?'ok':'fail', env.TMDB_KEY?'已配置':'缺少 TMDB_KEY，无法匹配影片');
+  add('sec.gate','访问口令', env.GATE?'ok':'warn', env.GATE?'已开启':'未设置 GATE，接口对外公开');
+  add('lib.cfg','片库对照', recvBase(env)?'ok':'warn',
+    (() => {
+      const u = recvBase(env);
+      if (!u) return '未配置 RECV_BASE / STREAM_BASE，不会过滤库中已有';
+      return String(u.host).replace(/^https?:\/\//,'') +
+        (u.via === 'r2' ? ' · 总账直读（公开 R2）' : ' · 经 Stream 取总账，取不到则回落文件名认定');
+    })());
+
+  /* 2. 限速状态 —— 放在网络检查前面，先说清楚现在能不能打 */
+  const cool = govCoolLeft();
+  add('net.rate','限速状态', cool ? 'warn' : (GOV.gap > 1200 ? 'warn' : 'ok'),
+    cool ? '断路器已打开，还需冷却 '+Math.ceil(cool/1000)+' 秒（'+(GOV.why||'限速')+'）'
+         : '请求间隔 '+GOV.gap+'ms · 累计惩罚 '+GOV.strikes,
+    cool ? 'cooldown' : null);
+
+  /* 3. 外部依赖。带上现有会话去探活：匿名请求更容易被 WAF 挡下来，
+        以前那句"响应为空或过短"多半就是这么来的。 */
+  let sess = null;
+  await timed('net.forum','论坛可达', async () => {
+    sess = await jget(env, kkey(env,'sess')).catch(()=>null);
+    const { r, html, bytes } = await reqHTML(env, 'forum.php?mod=forumdisplay&fid='+FID,
+      { cookie: sess?.cookie, noGate: true });
+    if (!/[\u4e00-\u9fa5]/.test(html)) return { level:'warn', detail:'GBK 解码可能不正确' };
+    return { detail:'HTTP '+r.status+' · '+(bytes/1024|0)+'KB' };
+  });
+  await timed('net.login','论坛登录', async () => {
+    /* 有会话就别重登 —— 每点一次体检都强制登录，本身就是在触发限速 */
+    if (sess?.cookie){
+      const age = sess.at ? Math.round((Date.now()-sess.at)/1000) : null;
+      return { detail:'已有有效会话' + (age!=null ? '（'+age+'s 前建立）' : '') + '，未重新登录以免触发限速' };
+    }
+    const s2 = await session(env, true);
+    return { detail:'重新登录成功，Cookie ' + (s2.cookie||'').split(';').length + ' 项' };
+  }, 'relogin');
+  /* [v5.2] 把切出来的片名亮出来。v5.1 只报一个"解析率 100%"，可
+     「魔法姐妹露露与莉莉 .1080」也算解析成功 —— 数字好看，实际搜不中。 */
+  let boardRows = [];
+  await timed('net.board','列表解析', async () => {
+    const res = await fetchList(env, BUILD_ORDER[0], 1);
+    boardRows = res.rows || [];
+    if (!res.rows.length) return { level: res.board ? 'warn':'fail',
+      detail: res.board ? '页面正常但没解析出帖子（可能这一页真的空）'
+                        : '页面不像版块页，选择器可能已失效' };
+    const named = res.rows.filter(r => parseTitle(r.title).cn).length;
+    const rate = Math.round(named/res.rows.length*100);
+    const sample = res.rows.slice(0, 3).map(r => {
+      const p = parseTitle(r.title);
+      return (p.cn || '?') + (p.latin ? ' / ' + p.latin : '');
+    }).join('、');
+    return { level: rate < 85 ? 'warn':'ok',
+      detail: res.rows.length+' 条 · 片名解析率 '+rate+'% · 共 '+(res.last||'?')+' 页 · 切出来是：'+sample };
+  });
+  await timed('net.tmdb','TMDB 接口', async () => {
+    const j = await tmdb(env,'/search/'+SRC.kind,{query: isTV() ? '权力的游戏' : '沙丘'});
+    return { detail:'返回 '+(j.results?.length||0)+' 条' };
+  });
+  /* [v5.2] 端到端抽查：拿刚才那一页的前几条真的走一遍认定。
+     「新帖 150 · 入库 0」这类故障，前面每一项都会显示正常 —— 论坛能连、
+     TMDB 能连、解析率 100% —— 只有真的认一次才看得出来。 */
+  await timed('idx.match','片名认定抽查', async () => {
+    if (!env.TMDB_KEY) return { level:'warn', detail:'缺少 TMDB_KEY，跳过' };
+    if (subLeft() < 10) return { level:'warn', detail:'本次调用子请求预算不足，跳过' };
+    const gs = [];
+    for (const row of boardRows){
+      const pt = parseTitle(row.title);
+      if (!pt.cn) continue;
+      const key = groupKey(pt);
+      if (gs.some(g => g.key === key)) continue;
+      gs.push({ key, ...pt, hint: BUILD_ORDER[0], title: row.title, rows: [row] });
+      if (gs.length >= 3) break;
+    }
+    if (!gs.length) return { level:'warn', detail:'这一页没有可抽查的帖子' };
+    const r = await matchBatch(env, gs);
+    const ok = [], bad = [];
+    for (const g of gs){
+      const v = r.get(g.key), nm = g.cn || g.latin || g.key;
+      if (v && v.hit) ok.push(nm + ' → ' + (v.hit.title || v.hit.id) + '（' + (v.via||'') + '）');
+      else bad.push(nm + '（' + (v ? (v.why || '认不出') : '请求失败') + '）');
+    }
+    return { level: ok.length ? (bad.length ? 'warn' : 'ok') : 'fail',
+      detail: '抽查 ' + gs.length + ' 组 · 认下 ' + ok.length +
+        (ok.length ? ' · ' + ok.join('、') : '') +
+        (bad.length ? ' · 没认下：' + bad.join('、') : ''),
+      fix: ok.length ? null : 'retryUnmatched' };
+  });
+  if (recvBase(env)) await timed('net.lib','片库可达', async () => {
+    /* 先探总账 —— 它是现在的主路径，且只要 120 字节 */
+    const m = await recvGet(env, 'meta', 6000).catch(e => ({ err: e.message || String(e) }));
+    if (m && m.gen)
+      return { level: m.pending ? 'warn' : 'ok',
+        detail: '总账 gen=' + m.gen + ' · ' + (m.count||0) + ' 部（电影 ' + (m.movies||0) +
+          ' · 剧集 ' + (m.series||0) + '）' +
+          (m.pending ? ' · Stream 那边还有 ' + m.pending + ' 部待匹配 TMDB' : '') +
+          (m.unmatched ? ' · TMDB 查无 ' + m.unmatched : '') };
+    if (m && m.err) return { level:'warn', detail:'总账取不到（' + m.err + '），本次走文件名认定' };
+    if (!env.STREAM_BASE) return { level:'warn', detail:'总账还没有（Stream 未升到 v22 或尚未建账），且未配 STREAM_BASE 回退' };
+    const s = libScan(await libFetch(env, 1));
+    return { level: s.files ? 'ok' : 'warn',
+      detail: '（总账不可用，回落文件名认定）' + (s.files ? s.files+' 个文件 · '+s.cands+' 个候选片名'
+                      : '连上了，但一个视频文件都没有（ROOT_FOLDER 对吗）') };
+  });
+  await timed('lib.list','片库对照成品 A/list.json', async () => {
+    if (!recvBase(env)) return { level:'warn', detail:'未配置 RECV_BASE / STREAM_BASE，未启用' };
+    const d = await r2get(env, LIB.list, null);
+    if (d && d.v === 6){
+      return { level: d.ids && d.ids.length ? 'ok' : 'warn',
+        detail: '总账直读 · gen=' + (d.gen||'?') + ' · 本源 ' + (d.mine||0) + ' 部，其中 ' +
+          (d.ids||[]).length + ' 部带 TMDB id（精确比对）' +
+          (d.missed ? ' · ' + d.missed + ' 部总账里也没认出来，退模糊兜底' : '') +
+          ' · 片库共 ' + (d.files||0) + ' 个文件' };
+    }
+    if (!d || d.v !== 5) return { level:'warn', detail:'还没有成品，去片库面板点「重新同步」生成' };
+    const left = (d.todo||[]).length;
+    return { level: left ? 'warn' : 'ok',
+      detail: (d.ids||[]).length+' 部已认定 TMDB · 认过但 TMDB 没有 '+((d.miss||[]).length||0)+
+        ' · 模糊兜底键 '+(((d.weak||[]).length)+((d.loose||[]).length))+
+        (left ? ' · 还有 '+left+' 个待认定（继续点「认定」即可）'
+              : (d.scan ? ' · 已全部认定' : ' · 还没被 v5 扫描过，去片库面板点「重新扫描片库」')) };
+  });
+  add('plan.quota','平台配额', 'ok',
+    planOf(env).name+' 计划 · 单次调用子请求预算 '+planOf(env).sub+'/'+planOf(env).hard+
+    ' · 单轮 '+planOf(env).pages+' 页 / '+planOf(env).tmdb+' 次 TMDB · 单片 '+PART_ROWS+' 行');
+
+  /* 3. 索引本身 */
+  let movies = null, state = null;
+  try {
+    movies = await r2get(env, IDX.movies, null);
+    state  = await r2get(env, IDX.state, null);
+  } catch (e){ add('idx.read','索引可读','fail', e.message); }
+
+  if (!movies || !state){
+    add('idx.exist','索引存在','warn','还没有 v4 索引',
+      (await r2get(env, IDX.v3.movies, null).catch(()=>null)) ? 'migrate' : 'build');
+  } else {
+    const ids = Object.keys(movies.m||{});
+    add('idx.exist','索引存在', ids.length?'ok':'warn', ids.length+' 部影片 · '+(state.rels||0)+' 个片源');
+
+    const orphan = Object.keys(movies.k||{}).filter(k => !movies.m[movies.k[k]]).length;
+    add('idx.orphan','归并键完整', orphan?'warn':'ok',
+      orphan ? orphan+' 个片名键指向不存在的影片' : '无悬挂键', orphan?'prune':null);
+
+    const zero = ids.filter(id => !(movies.m[id][F.R]>0)).length;
+    add('idx.zero','影片有片源', zero?'warn':'ok',
+      zero ? zero+' 部影片片源数为 0' : '全部影片都有片源', zero?'prune':null);
+
+    const missShard = [];
+    const refYears = new Set();
+    for (const id of ids) for (const y of (movies.m[id][F.YS]||[])) refYears.add(y);
+    for (const y of refYears) if (!partCount(state, y) || !await loadPart(env, y, 0, state.ver||0)) missShard.push(y);
+    add('idx.shard','分片齐全', missShard.length?'fail':'ok',
+      missShard.length ? '缺少分片：'+missShard.join(', ')
+        : refYears.size+' 个年份 · '+BUILD_ORDER.reduce((a,y)=>a+partCount(state,y),0)+' 片在位',
+      missShard.length?'resync':null);
+
+    /* 超大分片 = 每轮任务都要整片解编，撞资源上限的直接原因 */
+    const big = [];
+    for (const y of BUILD_ORDER)
+      for (const [i, n] of partRows(state, y).entries())
+        if (n > PART_ROWS * 1.5) big.push(y+'#'+i+'('+n+' 行)');
+    const bigYear = big.length ? big[0].split('#')[0] : null;
+    add('idx.part','分片粒度', big.length?'warn':'ok',
+      big.length ? '偏大的分片：'+big.slice(0,6).join(' ')
+        +'　每轮任务都要整片解编，容易触发 Worker 资源上限，建议拆分'
+        : '单片行数都在 '+PART_ROWS+' 以内，单轮开销恒定',
+      big.length?'split':null, bigYear);
+
+    const drift = Math.abs((state.movies||0) - ids.length);
+    add('idx.count','计数一致', drift?'warn':'ok',
+      drift ? 'state 记 '+(state.movies||0)+'，实际 '+ids.length : '一致', drift?'resync':null);
+
+    const at = lockAt(state.lock), age = at ? Date.now()-at : 0;
+    add('idx.lock','任务锁', !at ? 'ok' : (age>LOCK_MS?'warn':'ok'),
+      !at ? '空闲' : (age>LOCK_MS ? '残留锁（'+Math.round(age/1000)+'s 前留下，下次任务会自动接管）' : '有任务在跑'),
+      (at && age>LOCK_MS) ? 'unlock' : null);
+
+    add('idx.deaths','任务中断计数', !(state.deaths||0) ? 'ok' : (state.deaths>=3?'warn':'ok'),
+      !(state.deaths||0) ? '上一轮正常收尾'
+        : '连续中断 '+state.deaths+' 次，已自动把每轮批量降到 1/'
+          +Math.pow(2, Math.min(4,state.deaths))+'；跑完一轮会自动归零',
+      (state.deaths>=3) ? 'resetTask' : null);
+
+    const stuck = BUILD_ORDER.filter(y => (state.years?.[y]?.bad||[]).length);
+    add('idx.pages','失败页队列', stuck.length?'warn':'ok',
+      stuck.length ? stuck.map(y=>y+'('+state.years[y].bad.length+' 页)').join(' ')+'，下次任务优先重试'
+                   : '没有待重试的页');
+
+    /* 「N 个片名匹配不上」本身没有信息量 —— 得说清楚里面有多少根本不是电影、
+       多少已经留底可以直接重试、多少是 v4 留下的、没有行的老账。 */
+    const un = Object.keys(movies.u||{}).length;
+    const pd = await pendLoad(env).catch(() => blankPend());
+    const ps2 = pendStat(pd);
+    const legacy = Math.max(0, un - ps2.n);
+    const bits = [];
+    if (ps2.retry) bits.push('可直接重试 '+ps2.retry+' 组（帖子行已留底，不用重爬）');
+    if (ps2.tv || ps2.pack) bits.push('剧集 / 合集等非电影 '+(ps2.tv+ps2.pack)+' 组（跳过是对的）');
+    if (ps2.dead) bits.push('试满 '+PEND.tries+' 次仍认不出 '+ps2.dead+' 组');
+    if (legacy) bits.push('v4 老账 '+legacy+' 条（没留行，需重扫）');
+    add('idx.unmatched','未匹配片名', ps2.retry ? 'warn' : (un ? 'ok' : 'ok'),
+      (un || ps2.n) ? (un + ' 个片名没认出 TMDB · ' + (bits.join(' · ') || '暂无细分')
+        + (ps2.sample.length ? ' · 例如：' + ps2.sample.slice(0,3).join(' / ') : ''))
+        : '全部片名都已认下',
+      ps2.retry ? 'retryUnmatched' : null);
+    if (legacy > 20)
+      add('idx.unmatched.legacy','v4 老账未匹配', 'warn',
+        legacy + ' 条是 v4 时期跳过的，当时没留下帖子行。倒回年份游标重走一遍列表页即可捡回来 —— '
+        + '已入库的帖子会被 tid 表跳过，不会重复抓',
+        'rescanUnmatched');
+
+    /* 码本健康度：编码后平均长度掉到 30 以下才算健康 */
+    const y0 = BUILD_ORDER.find(y => (state.relsByYear||{})[y]);
+    if (y0){
+      const sh = await loadPart(env, y0, Math.max(0, partCount(state, y0)-1), state.ver||0);
+      if (sh?.n?.length){
+        const avg = sh.n.reduce((a,x)=>a+x.length,0)/sh.n.length;
+        add('idx.codec','码本效率', avg>34?'warn':'ok',
+          y0+' 年末片：'+sh.n.length+' 行 · 码本 '+sh.d.length+' 词元 · 平均 '+avg.toFixed(1)+' 字符/条',
+          avg>34?'optimize':null, y0);
+      }
+    }
+    const notMig = BUILD_ORDER.filter(y => !(state.migrated||{})[y] && !(state.relsByYear||{})[y]);
+    if (notMig.length && await r2get(env, IDX.v3.movies, null).catch(()=>null))
+      add('idx.migrate','v3 遗留数据','warn','还有 '+notMig.length+' 年没从 v3 迁过来','migrate');
+  }
+
+  const fails = checks.filter(c=>c.level==='fail').length;
+  const warns = checks.filter(c=>c.level==='warn').length;
+  return {
+    at: Date.now(), fails, warns, ok: checks.length-fails-warns,
+    verdict: fails ? '有故障，先修 fail 项' : warns ? '能跑，但有 '+warns+' 项建议处理' : '一切正常',
+    gap: GOV.gap, cooling: Math.ceil(cool/1000),
+    checks, recent: TRACE.slice(0, 20),
+  };
+}
+
+async function repair(env, action, arg){
+  if (action === 'unlock'){
+    const st = await r2get(env, IDX.state, blankState());
+    const had = !!lockAt(st.lock);
+    delete st.lock;
+    await r2put(env, IDX.state, st); dropCaches();
+    return { ok:true, had };
+  }
+  /* 解锁 + 清降级计数：以前得人工点「强制解锁」再点「继续建立索引」，
+     现在前端在卡死时会自己调这个。 */
+  if (action === 'resetTask'){
+    const st = await r2get(env, IDX.state, blankState());
+    const was = st.deaths || 0;
+    delete st.lock; st.deaths = 0;
+    await r2put(env, IDX.state, st); dropCaches();
+    return { ok:true, deaths: was };
+  }
+  if (action === 'cooldown'){
+    GOV.until = 0; GOV.strikes = 0; GOV.wins = 0; GOV.gap = 260; GOV.why = '';
+    const st = await r2get(env, IDX.state, blankState());
+    if (st.cool){ delete st.cool; await r2put(env, IDX.state, st); }
+    dropCaches();
+    return { ok:true, msg:'已清除限速冷却，请求间隔重置为 260ms' };
+  }
+  if (action === 'relogin'){ await dropSession(env); await session(env, true); return { ok:true }; }
+  /**
+   * 重试匹配。
+   * v4 只是把 movies.u 清空 —— 可那时候认不出来的帖子行早就丢了，
+   * 清完标记也得把列表页重爬一遍才可能捡回来，所以 868 永远是 868。
+   * v5 从留底队列里取，行就在手边：认下来直接写进当年的分片，不碰论坛。
+   * 分批做，一批的大小按剩余子请求预算算，返回 left>0 就再调一次。
+   */
+  if (action === 'retryUnmatched'){
+    return withIndexLock(env, async () => {
+      const t0 = Date.now();
+      const [movies, state, pend] = await Promise.all([
+        r2get(env, IDX.movies, blankMovies()),
+        r2get(env, IDX.state, blankState()),
+        pendLoad(env),
+      ]);
+      movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+      parserMigrate(movies, pend);          // 解析器变了就把重试次数归零，别把老账判死
+      const live = Object.keys(pend.q).filter(k =>
+        !PEND_SKIP.has(pend.q[k].w) && (pend.q[k].n||0) < PEND.tries);
+
+      if (!live.length){
+        const legacy = Object.keys(movies.u).length;
+        const st = pendStat(pend); state.pend = st;
+        delete state.lock; state.at = Date.now();
+        await r2put(env, IDX.state, state); dropCaches();
+        return { ok:true, done:true, left:0, fixed:0, legacy, ...st,
+          msg: legacy
+            ? '留底队列里没有可重试的了。另有 ' + legacy + ' 条是 v4 时期的老账 —— '
+              + '那会儿认不出来的帖子行没有留底，只能用「重扫未匹配」把年份游标倒回去，'
+              + '重走一遍列表页才捡得回来。'
+            : '没有需要重试的条目' };
+      }
+
+      /* 同一年的排在一起：一次调用只解一年的分片，编码量才是常数 */
+      live.sort((a, b) => (pend.q[b].y||0) - (pend.q[a].y||0));
+      const room = Math.max(1, Math.min(PEND.batch, Math.floor((subLeft() - 12) / 2)));
+      const y0 = pend.q[live[0]].y;
+      const take = live.filter(k => pend.q[k].y === y0).slice(0, room);
+      /* [v5.2 修复 4] 留底里的 cn / latin 是当初那个解析器切出来的 ——
+         照抄一遍等于把同样的错再犯一次。拿原始标题用新解析器重切，
+         切不出来才退回旧值；顺手把新键也记下来，认回来之后一并写进
+         movies.k，下一轮建索引就能直接命中缓存，不用再认一次。 */
+      const groups = take.map(k => {
+        const e = pend.q[k];
+        const pt = e.t ? parseTitle(e.t) : null;
+        return { key: k,
+          cn: (pt && pt.cn) || e.cn,
+          latin: (pt && pt.latin) || e.la,
+          years: (pt && pt.years && pt.years.length) ? pt.years : (e.ys || []),
+          hint: e.y, title: e.t,
+          nkey: (pt && pt.cn) ? groupKey(pt) : k };
+      });
+
+      let res;
+      try { res = await matchBatch(env, groups); }
+      catch (e){
+        if (!e.budget) throw e;
+        const st = pendStat(pend); state.pend = st;
+        delete state.lock; await r2put(env, IDX.state, state);
+        return { ok:true, left: st.retry, fixed:0, budget:1, ...st,
+          msg:'本轮子请求预算用尽，进度已保存，继续调用即可' };
+      }
+
+      const ps = partSet(env, state);
+      let fixed = 0, rows = 0, still = 0, net = 0;
+      const won = [];
+      for (const g of groups){
+        const e = pend.q[g.key], r = res.get(g.key);
+        if (r == null){ net++; continue; }                    // 网络失败：原样留着
+        if (r.miss){ e.n = (e.n||0) + 1; e.w = r.why || 'nohit'; still++; continue; }
+        const id = r.hit.id;
+        movies.k[g.key] = id;
+        if (g.nkey && g.nkey !== g.key) movies.k[g.nkey] = id;
+        if (!movies.m[id]) movies.m[id] = newMovie(r.hit, e.y);
+        rows += await ps.push(e.y, movies, id, e.r.map(x => ({ tid:x[0], title:x[1] })));
+        delete pend.q[g.key]; delete movies.u[g.key];
+        if (g.nkey) delete movies.u[g.nkey];
+        if (won.length < 5) won.push((r.hit.title || e.t || '').slice(0, 26) + '←' + (r.via||''));
+        fixed++;
+      }
+      await ps.flush();
+      state.movies = Object.keys(movies.m).length;
+      state.deaths = 0;
+      const st = await pendSave(env, pend, state);
+      delete state.lock; state.at = Date.now(); state.ver = (state.ver||0) + 1;
+      await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
+      dropCaches();
+      trace('match', '重试匹配：认回 ' + fixed + ' 部 / ' + rows + ' 个片源，仍认不出 ' + still +
+        '，还剩 ' + st.retry, { lvl: 'info' });
+      const spent2 = Date.now() - t0;
+      return { ok:true, year:y0, tried: groups.length, fixed, rows, still, net,
+        left: st.retry, ...st, sub: SUB.n, ms: spent2,
+        wait: Math.max(0, 1200 - spent2),
+        msg: y0 + ' 年 · 认回 ' + fixed + ' 部（' + rows + ' 个片源）· 仍认不出 ' + still +
+             (net ? ' · 网络失败 ' + net : '') + ' · 还剩 ' + st.retry +
+             (won.length ? ' · 例如 ' + won.join('、') : '') };
+    });
+  }
+  /**
+   * 重扫未匹配 —— 专门收拾 v4 留下的老账。
+   * 那时候认不出来的帖子行没有留底，只能把年份游标倒回第 1 页重走一遍。
+   * 重走不贵：已经入库的 tid 会被 tid 表原地跳过，只有当初被跳过的那些
+   * 才会真的去认一次，而且这次用的是 v5 的多策略认定。
+   */
+  if (action === 'rescanUnmatched'){
+    return withIndexLock(env, async () => {
+      const [movies, state] = await Promise.all([
+        r2get(env, IDX.movies, blankMovies()), r2get(env, IDX.state, blankState()),
+      ]);
+      const n = Object.keys(movies.u||{}).length;
+      movies.u = {};
+      let ys = 0;
+      for (const y of BUILD_ORDER){
+        const st = state.years?.[y];
+        if (!st) continue;
+        if (st.done || (st.page||1) > 1){ st.page = 1; st.done = false; ys++; }
+      }
+      delete state.lock; state.at = Date.now(); state.ver = (state.ver||0) + 1;
+      await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
+      dropCaches();
+      return { ok:true, cleared:n, years:ys,
+        msg: '已清掉 ' + n + ' 条跳过标记，并把 ' + ys + ' 个年份的游标倒回第 1 页。'
+           + '现在点「继续建立索引」会重走一遍列表页 —— 已入库的帖子由 tid 表直接跳过，'
+           + '只补当初认不出来的那些，这次用的是新的多策略认定。' };
+    });
+  }
+  /**
+   * 重算汇总 / 清理孤儿。
+   * v4.0 是"遍历所有影片 × 解开所有年份分片"，索引一大就必然超资源上限
+   * —— 修复动作自己变成故障源。v4.1 改成按分片分批：一次只解几片，
+   * 游标存在 state 里，返回 left>0 就再调一次。
+   */
+  if (action === 'prune' || action === 'resync'){
+    return withIndexLock(env, async () => {
+      const [movies, state] = await Promise.all([
+        r2get(env, IDX.movies, blankMovies()), r2get(env, IDX.state, blankState()),
+      ]);
+      movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+
+      const list = [];
+      for (const y of BUILD_ORDER)
+        for (let i = 0; i < partCount(state, y); i++) list.push([y, i]);
+
+      const cur = state.resync && state.resync.act === action ? state.resync : null;
+      let at = cur ? cur.at : 0;
+      const pnBy = cur ? cur.pn : {};
+      if (!at){                                  // 第一批：先清零，再从头扫
+        for (const id of Object.keys(movies.m)){
+          const mv = movies.m[id];
+          mv[F.R] = 0; mv[F.B] = 0; mv[F.BM] = 0;
+          mv[F.Q] = null; mv[F.BT] = null; mv[F.Z] = null;
+          mv[F.SP] = {}; mv[F.YS] = [];
+          mv[F.HB] = 0; mv[F.RB] = 0;
+        }
+      }
+
+      const t0 = Date.now();
+      let scanned = 0;
+      while (at < list.length && Date.now() - t0 < 8000){
+        const [y, pi] = list[at];
+        const sh = await r2get(env, IDX.part(y, pi), null);
+        const g = sh ? decodeShard(sh) : {};
+        let rows = 0;
+        for (const id of Object.keys(g)){
+          rows += g[id].length;
+          const mv = movies.m[id];
+          if (!mv) continue;
+          markPart(mv, y, pi);
+          const ys = mv[F.YS] || (mv[F.YS] = []);
+          if (!ys.includes(y)) ys.push(y);
+          mv[F.R] = (mv[F.R]||0) + g[id].length;
+          for (const r of g[id]){ bumpBest(mv, r); bumpSpec(mv, r); }
+        }
+        (pnBy[y] = pnBy[y] || [])[pi] = rows;
+        at++; scanned++;
+      }
+
+      const done = at >= list.length;
+      let dropped = 0, keys = 0;
+      if (done){
+        for (const y of Object.keys(pnBy)){
+          const pn = pnBy[y].map(n => n||0);
+          (state.years[y] = state.years[y] || newYear()).pn = pn;
+          (state.relsByYear = state.relsByYear||{})[y] = pn.reduce((a,x)=>a+x,0);
+        }
+        for (const y of BUILD_ORDER) if (!pnBy[y]) (state.relsByYear = state.relsByYear||{})[y] = 0;
+        if (action === 'prune'){
+          for (const id of Object.keys(movies.m))
+            if (!(movies.m[id][F.R] > 0)){ delete movies.m[id]; dropped++; }
+        }
+        for (const k of Object.keys(movies.k)) if (!movies.m[movies.k[k]]){ delete movies.k[k]; keys++; }
+        state.rels = Object.values(state.relsByYear||{}).reduce((a,x)=>a+x,0);
+        delete state.resync;
+      } else {
+        state.resync = { act: action, at, pn: pnBy };
+      }
+      state.movies = Object.keys(movies.m).length;
+      state.deaths = 0;
+      delete state.lock; state.at = Date.now(); state.ver = (state.ver||0)+1;
+      await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
+      dropCaches();
+      return { ok:true, done, scanned, left: Math.max(0, list.length - at),
+        dropped, keys, movies: state.movies, rels: state.rels,
+        msg: done ? '已重算 '+list.length+' 片' : '已扫 '+at+'/'+list.length+' 片，继续调用即可' };
+    });
+  }
+  if (action === 'split'){
+    if (!arg) throw new Error('缺少 year');
+    return splitYear(env, arg);
+  }
+  if (action === 'optimize') return optimizeYear(env, arg || BUILD_ORDER[0], null);
+  if (action === 'migrate')  return migrateYear(env, arg || null);
+  if (action === 'resetYear'){
+    if (!arg) throw new Error('缺少 year');
+    return resetYear(env, arg);
+  }
+  throw new Error('未知修复动作：'+action);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   片库对照 v5 —— 先认 TMDB，再比 id
+   ──────────────────────────────────────────────────────────────────
+   速查是用来"找还没有的片"的，库里已经躺着的应该直接消失。
+   v4 的做法是把文件名归一化成「片名|年份」，再拿索引里的中文名 / 原名
+   去撞。碰上译名不同、带副标题、发布组把片名写成 "Dune.Part.Two" 这类，
+   要么漏、要么误伤。
+   v5 换成两段式：
+     ① 扫描 —— 拉一次 /api/all，把文件名 / 带年份的目录名切成候选，去重。
+     ② 认定 —— 每个候选送 TMDB 认一次，把认下来的「TMDB id + 片名 + 年份」
+        抄进 A/list.json。索引本身就是以 TMDB id 为主键的，于是比对退化成
+        一次整数 Set 查询：既准（id 相等，没有误伤）又快（不做字符串归一）。
+   认不出来的落进 weak（有年份）/ loose（没年份）当兜底，界面上区分
+   「库中已有」与「疑似已有」。每个候选的认定结果进 KV 缓存 30 天，
+   第二次同步几乎不花子请求。
+   认定是分批的：一批用掉多少子请求由预算决定，剩下的写回 todo，
+   下一次调用接着认 —— 所以片库再大也不会撞平台的硬线。
+   ══════════════════════════════════════════════════════════════════ */
+
+/* 文件名里的集数 / 分盘噪声：先削掉，parseTitle 才能干净地切出片名 */
+const LIB_NOISE = /\b(?:S\d{1,2}E\d{1,3}|Season\s?\d{1,2}|CD\d|Disc\s?\d|Part\s?\d(?=\s*$))\b/ig;
+const LIB_EXT   = /\.(?:mp4|mkv|webm|mov|avi|m4v|ts|m2ts|iso|rmvb|wmv|flv|mpe?g)$/i;
+/* 一片一目录时文件常叫 movie.mkv / 正片.mkv —— 这种名字不能拿去认，
+   更不能进"只按片名认"的宽键集合，否则会误伤一大票同名影片 */
+const LIB_GENERIC = new Set(['movie','video','film','main','index','output','untitled',
+  'sample','disc','bdmv','playlist','fullmovie','影片','视频','正片','未命名','电影']);
+
+/** 一个文件名 / 目录名 → 一个候选 { k, cn, latin, ys } */
+function libCand(raw){
+  const n = String(raw || '').replace(LIB_EXT, '').replace(LIB_NOISE, ' ')
+    .replace(/[_]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!n) return null;
+  const pt = parseTitle(n);
+  const cn = pt.cn || '', latin = pt.latin || '';
+  const nk = norm(cn) || norm(latin);
+  if (!nk || nk.length < 2 || LIB_GENERIC.has(nk)) return null;
+  const ys = (pt.years || []).filter(y => +y >= 1900 && +y <= 2100).map(String);
+  return { k: nk + '|' + (ys[0] || ''), cn, latin, ys, nk, nk2: candAlt(nk, latin) };
+}
+/* 原名要单独留一条键。索引那边比对时中文名和原名都会拿来撞，片库这边
+   只留一个（有中文名就把原名扔了），于是「沙丘2」对不上「沙丘：第二部」
+   的时候，明明两边的 Dune Part Two 一模一样，也照样判成缺片。 */
+function candAlt(nk, latin){
+  const a = norm(latin);
+  return (a && a !== nk && a.length >= 2 && !LIB_GENERIC.has(a)) ? a : '';
+}
+/* 一个候选贡献的全部模糊键。有年份的进 weak（片名 + 年份，安全），
+   没年份的才进 loose（只按片名，宽） */
+function candKeys(c, weak, loose){
+  for (const k of [c.nk, c.nk2]){
+    if (!k) continue;
+    if (c.ys.length) for (const y of c.ys) weak.add(k + '|' + y);
+    else loose.add(k);
+  }
+}
+/* 候选在 R2 里压成定长数组，省掉一整份键名 */
+const candPack = (c) => [c.k, c.cn, c.latin, c.ys.join(',')];
+const candOpen = (a) => { const nk = String(a[0]).split('|')[0];
+  return { k:a[0], cn:a[1], latin:a[2],
+    ys: a[3] ? String(a[3]).split(',').filter(Boolean) : [], nk, nk2: candAlt(nk, a[2]) }; };
+
+/** /api/all 响应 → 去重后的候选表 */
+function libScan(payload){
+  const map = new Map();
+  const vids = Array.isArray(payload.videos) ? payload.videos : [];
+  const rootLen = String(payload.root || '').length;
+  for (const v of vids){
+    /* 一片一目录、且目录名带年份时，目录名比文件名可靠得多（文件名往往是
+       发布组的整串规格）—— 优先用目录名，认不出来再退回文件名 */
+    const seg = String(v.path || '').slice(rootLen).split('/').filter(Boolean);
+    seg.pop();
+    const dir = seg[seg.length - 1];
+    const dated = !!(dir && /(?:19|20)\d{2}/.test(dir));
+    const cd = dated ? libCand(dir) : null;
+    const cf = libCand(v.name);
+    /* 目录名更干净（文件名往往是发布组的整串规格），但原名通常只写在
+       文件名里。两个都要：目录名定片名，文件名补原名和年份。 */
+    let c = cd || cf;
+    if (cd && cf){
+      if (!cd.latin && cf.latin){
+        c = { ...cd, latin: cf.latin, nk2: candAlt(cd.nk, cf.latin) };
+      }
+      if (!c.ys.length && cf.ys.length) c = { ...c, ys: cf.ys, k: c.nk + '|' + cf.ys[0] };
+    }
+    if (!c) continue;
+    if (!map.has(c.k)) map.set(c.k, c);
+    if (map.size >= LIB.cap) break;
+  }
+  return { files: vids.length, cands: [...map.values()] };
+}
+
+async function libFetch(env, tries){
+  const b = String(env.STREAM_BASE || '').replace(/\/+$/, '');
+  if (!b) throw new Error('未配置 STREAM_BASE，片库对照未开启');
+  const r = await autoRetry('lib ' + b, async () => {
+    const x = await sfetch(b + '/api/all?depth=5', {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (x.status === 401 || x.status === 403)
+      throw new Error('片库拒绝访问 HTTP ' + x.status + '（Stream 那边设了 AUTH_SECRET）');
+    if (!x.ok) throw new Error('HTTP ' + x.status);
+    return x;
+  }, { tries: tries || 2, gap: 700 });
+  const j = await r.json().catch(() => null);
+  if (!j || !Array.isArray(j.videos)) throw new Error('片库响应不是预期的 JSON（/api/all）');
+  return j;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   总账直读 —— Received.json（Stream v22 起）        【v5.4】
+   ──────────────────────────────────────────────────────────────────
+   上面那套「扫描 → 认定」是在 Stream 只提供 /api/all（一串文件名）的
+   前提下写的：文件名切片名、片名送 TMDB、认下来记 id。整条链路真正
+   花钱的是中间那一步 —— 一个上千部的片库要上千次 TMDB 搜索，只能靠
+   todo 队列一批批磨，磨完要好几轮 cron。
+
+   Stream v22 之后这一步在它那边已经做完了：Received.json 里每一条
+   自带 tmdb 编号。于是这里退化成「取回来、按源分拣、抄 id」——
+   零 TMDB 请求，一次调用做完，todo 队列直接空着。
+
+   ★ 顺带修掉一个一直存在的错配
+     老管线不分源，两个源都去拉 /api/all —— 那是电影目录。剧集源于是
+     拿电影文件名去 TMDB 搜剧，认出来的 id 属于另一套编号，比对结果
+     基本是噪声。总账里电影和剧集在同一份里、各自带 type，按 type 分拣
+     之后剧集源才第一次真的比到了剧集库。
+
+   ★ 认不出来的仍然走模糊兜底
+     总账里 state=9（TMDB 确实没有）的那些，这里照旧按片名 + 年份建
+     weak / loose 键 —— libHas 先比 id，比不中才看这里，行为一字未改。
+
+   ★ gen 没变就不下正文
+     先问 120 字节的指针；gen 与上一份成品相同就什么都不做。
+     片库一天不动，这条链路一天只花两个子请求。
+
+   变量
+     RECV_BASE   公开 R2 自定义域（如 https://data.cuven.online）。
+                 首选 —— 它绕开 Stream 的 AUTH_SECRET，不必配任何口令。
+     不配就退回 STREAM_BASE + /api/received（需要 Stream 那边放行）；
+     两条都拿不到（后端还没升到 v22 → 404）就自动落回老管线，行为如旧。
+   ══════════════════════════════════════════════════════════════════ */
+
+function recvBase(env){
+  const r = String(env.RECV_BASE || '').replace(/\/+$/, '');
+  if (r) return { doc: r + '/Received.json', meta: r + '/Received.meta.json', via: 'r2', host: r };
+  const b = String(env.STREAM_BASE || '').replace(/\/+$/, '');
+  if (b) return { doc: b + '/api/received', meta: b + '/api/received/meta', via: 'worker', host: b };
+  return null;
+}
+
+/** 取总账的一份。404 = 后端还没升到 v22 → 回 null，调用方落回老管线 */
+async function recvGet(env, which, timeout){
+  const u = recvBase(env);
+  if (!u) return null;
+  const x = await sfetch(u[which], {
+    headers: { accept: 'application/json' },
+    signal: AbortSignal.timeout(timeout || 10000),
+  });
+  if (x.status === 404 || x.status === 503){ try { await x.body?.cancel(); } catch {} return null; }
+  if (x.status === 401 || x.status === 403)
+    throw new Error('总账拒绝访问 HTTP ' + x.status +
+      '（把 RECV_BASE 指到公开 R2 域名，或让 Stream 放行 /api/received）');
+  if (!x.ok) throw new Error('HTTP ' + x.status);
+  return x.json().catch(() => null);
+}
+
+/** 总账 → 本源的成品。一次 TMDB 请求都不发 —— Stream 那边已经认过了 */
+function recvBuild(doc){
+  const kind = SRC.kind;                        // movie / tv
+  const items = Array.isArray(doc.items) ? doc.items : [];
+  const ids = [], weak = new Set(), loose = new Set(), dedup = new Set();
+  let files = 0, mine = 0, missed = 0;
+
+  for (const it of items){
+    /* 「文件数」按剧集展开：一部 12 集的剧在片库里就是 12 个文件，
+       报成 1 会让系统页的数字对不上 Stream 那边 */
+    files += (it.kind === 'series') ? (it.episodes || 1) : 1;
+
+    /* TMDB 的 movie id 与 tv id 是两套编号，混进同一个 Set 会互相误判。
+       认下来的按 type 分拣；没认下来的只能按目录形态猜（剧集目录 → tv）。 */
+    const ty = it.tmdb
+      ? (it.type || (it.kind === 'series' ? 'tv' : 'movie'))
+      : (it.kind === 'series' ? 'tv' : 'movie');
+    if (ty !== kind) continue;
+    mine++;
+
+    const y = String(it.year || it.guessYear || '');
+    /* 模糊兜底键照旧建：libHas 先比 id，比不中才看这里。
+       认下来的多留一条键没坏处，认不下来的全靠它。 */
+    for (const nm of [it.title, it.orig, it.guess, it.guessZh, it.guessEn]){
+      const k = norm(nm);
+      if (!k || k.length < 2 || LIB_GENERIC.has(k)) continue;
+      if (y) weak.add(k + '|' + y); else loose.add(k);
+    }
+
+    if (!it.tmdb){ missed++; continue; }
+    if (dedup.has(+it.tmdb)) continue;          // 同一部片在库里有几份拷贝
+    dedup.add(+it.tmdb);
+    const nm = it.title || it.guess || '';
+    ids.push([+it.tmdb, nm, y, norm(nm) + '|' + y]);
+  }
+
+  return { ids, weak: [...weak].slice(0, LIB.cap), loose: [...loose].slice(0, LIB.cap),
+           files, mine, missed };
+}
+
+/**
+ * 同步一次总账。
+ * force=false 且 gen 与上一份成品相同 → 什么都不做（两个子请求，不写 R2）。
+ * 后端没有总账（404）或总账还是空的（正在建）→ 回 null，调用方落回老管线。
+ */
+async function libSyncRecv(env, force){
+  const meta = await recvGet(env, 'meta', 6000);
+  if (!meta || !meta.gen) return null;
+
+  const cur = await libDoc(env);
+  if (!force && cur.v === 6 && cur.gen === meta.gen){
+    /* 未变更不写 R2 —— 一份成品十几万字节，为一个时间戳重写不划算。
+       新鲜度由调用方在内存里补（见 libRefresh）。 */
+    return { mode:'received', unchanged:1, gen: meta.gen, files: cur.files || 0,
+             cands: cur.mine || 0, ids: (cur.ids || []).length,
+             missed: cur.missed || 0, left: 0, done: true };
+  }
+
+  const doc = await recvGet(env, 'doc', 25000);
+  if (!doc || !Array.isArray(doc.items)) throw new Error('总账响应不是预期的 JSON（Received.json）');
+  /* 总账刚建、还没有任何条目：不能拿它去盖掉一份能用的老成品 */
+  if (!doc.items.length) return null;
+
+  const b = recvBuild(doc);
+  const out = {
+    v: 6, src: 'received', gen: meta.gen, via: recvBase(env).via,
+    recvTs: doc.ts || 0, recvCount: doc.count || doc.items.length,
+    pending: doc.pending || 0, unmatched: doc.unmatched || 0,
+    scan: Date.now(), at: Date.now(),
+    files: b.files, mine: b.mine, missed: b.missed,
+    ids: b.ids, weak: b.weak, loose: b.loose,
+    miss: [], seen: [], todo: [],               // 认定队列在这条路上永远是空的
+  };
+  await r2put(env, LIB.list, out);
+  libMem = null;
+  trace('lib', '总账同步：片库 ' + b.files + ' 个文件 → 本源 ' + b.mine + ' 部（' +
+    b.ids.length + ' 部带 TMDB id' +
+    (b.missed ? '，' + b.missed + ' 部总账里也没认出来' : '') + '）· gen=' + meta.gen,
+    { lvl: 'info' });
+  return { mode:'received', gen: meta.gen, files: b.files, cands: b.mine,
+           ids: b.ids.length, missed: b.missed, left: 0, done: true };
+}
+
+/* miss 是「v5 送去 TMDB 认过、确实认不出来」的候选键。
+   它和 weak / loose 是两回事：后者只是比对时的模糊兜底，里面还混着
+   v4 遗留下来的整库键 —— 拿它们当"已处理"就等于一上来全跳过。 */
+const blankLib = () => ({ v:5, scan:0, at:0, files:0, ids:[], weak:[], loose:[], miss:[], seen:[], todo:[] });
+
+/* ══════════════════════════════════════════════════════════════════
+   待认队列 idx/v5/pending.json
+   TMDB 认不出来的那一组，连同它的帖子行一起留在这里。于是「重试匹配」
+   是真的能把片源找回来的 —— 不用把列表页重爬一遍。
+   v4 在这里直接 continue，行就永远丢了。
+   ══════════════════════════════════════════════════════════════════ */
+/* PEND 的键按源取，见文件头部的 SRC_MOVIE / SRC_TV */
+const PEND_SKIP = new Set(['tv','pack','other']);  // 本来就不是这个源的东西，不该反复重试
+const blankPend = () => ({ v:5, at:0, q:{} });
+const pendLoad = async (env) => {
+  const d = await r2get(env, PEND.key, null).catch(() => null);
+  return (d && d.q) ? d : blankPend();
+};
+function pendAdd(doc, g, y, why){
+  const n = Object.keys(doc.q).length;
+  let e = doc.q[g.key];
+  if (!e){
+    if (n >= PEND.cap) return;
+    e = doc.q[g.key] = { cn:g.cn, la:g.latin||'', ys:g.years||[], y, t:'', r:[], n:0, w:why };
+  }
+  e.w = why; e.y = y;
+  if (!e.t) e.t = String((g.rows && g.rows[0] && g.rows[0].title) || g.cn || '').slice(0, 90);
+  const have = new Set(e.r.map(x => x[0]));
+  for (const row of (g.rows || [])){
+    const tid = Number(row.tid);
+    if (!tid || have.has(tid) || e.r.length >= PEND.rows) continue;
+    e.r.push([tid, String(row.title||'').slice(0, 160)]);
+    have.add(tid);
+  }
+}
+/** 队列摘要写进 state，前端和体检就不用每次再读一遍 R2 */
+function pendStat(doc){
+  const ks = Object.keys(doc.q);
+  let tv = 0, pack = 0, dead = 0, retry = 0;
+  const sample = [];
+  for (const k of ks){
+    const e = doc.q[k];
+    if (e.w === 'tv' || e.w === 'other') tv++;    // 本来就不属于这个源
+    else if (e.w === 'pack') pack++;
+    else if ((e.n||0) >= PEND.tries) dead++;
+    else { retry++; if (sample.length < 8 && e.t) sample.push(e.t); }
+  }
+  return { n: ks.length, tv, pack, dead, retry, sample, at: Date.now() };
+}
+async function pendSave(env, doc, state){
+  doc.at = Date.now();
+  const st = pendStat(doc);
+  if (state) state.pend = st;
+  await r2put(env, PEND.key, doc);
+  return st;
+}
+
+/** 读成品；A/list.json 还没有时，用 v4 的模糊键表垫一下，不至于突然不过滤 */
+async function libDoc(env){
+  const d = await r2get(env, LIB.list, null).catch(() => null);
+  if (d && (d.v === 6 || d.v === 5)) return d;   /* v6 = 总账直读；v5 = 老管线的成品 */
+  const old = await r2get(env, LIB.legacy, null).catch(() => null);
+  const b = blankLib();
+  if (old){
+    /* v4 的模糊键搬过来只当兜底用，scan 保持 0 —— 表示"还没被 v5 认过一遍"。
+       这些键一个都不能算作已处理，否则扫描时会把整库候选全判成 known，
+       待认定永远是 0，TMDB 认定这一步就永远启动不了。 */
+    b.files = old.files || 0; b.at = old.at || 0;
+    b.weak = (old.ty || []).slice(0, LIB.cap);
+    b.loose = (old.t || []).slice(0, LIB.cap);
+  }
+  return b;
+}
+
+/**
+ * ① 扫描：拉一次片库，重算候选，并让成品跟着片库增删走。
+ *
+ * v5.2 这里有两处让「已有」判不出来的毛病：
+ *   · 「处理过」是从 doc.ids 的候选键推出来的，而 ids 按 TMDB id 去过重 ——
+ *     同一部片在库里有两份不同命名的拷贝（4K + 1080p、国配 + 原版），
+ *     两个候选键认到同一个 id，去重只留一个，另一个键就此消失。下次扫描
+ *     它又是「没认过」，又排队、又认、又被去掉……永远循环。cron 每轮那点
+ *     预算全喂给了这些早就认过的片，排在后面真正的新片一直轮不到，看着
+ *     就是「有些没识别到」。现在单独记一份 seen（认过的候选键，命中与否
+ *     都记），跟 ids 的去重彻底脱钩。
+ *   · 成品只增不减：片库里删掉的片，id 还赖在 ids 里，一直显示「库中已有」。
+ *     现在拿这一次扫描到的候选键当权威，不在库里的键连同它的 id 一起清掉。
+ * 另外，模糊兜底键改成每次扫描按当前候选重算 —— 不再是「只有 TMDB 认不
+ * 出来的才留一条」。新加进片库的片在扫描之后立刻就能标「疑似已有」，不用
+ * 等 cron 把它认下来；删掉的片也不会留下一条永远命中的旧键。
+ */
+async function libScanStep(env, opt){
+  /* 总账在位就走那条路：一次取回、按源分拣、抄 id，没有待认定队列。
+     拿不到（后端没升级 / 总账还在建）才落回下面这套文件名认定。
+     skipRecv：调用方刚试过总账且失败了，别再白问一次指针。 */
+  if (!(opt && opt.skipRecv) && recvBase(env)){
+    const r = await libSyncRecv(env, true).catch(e => { trace('lib', e.message || String(e)); return null; });
+    if (r) return { files: r.files, cands: r.cands, skipped: 0, dropped: 0,
+                    left: 0, ok: r.ids, tried: r.missed, mode: 'received', gen: r.gen };
+  }
+  const doc = await libDoc(env);
+  const { files, cands } = libScan(await libFetch(env, 2));
+  const live = new Set(cands.map(c => c.k));
+
+  /* 认过的候选键。seen 是权威；ids/miss 只在 seen 还没建起来时兜底（老文档） */
+  const known = new Set(Array.isArray(doc.seen) ? doc.seen : []);
+  for (const it of doc.ids || []) if (it[3]) known.add(it[3]);
+  for (const k of doc.miss || []) known.add(k);
+
+  /* 片库里已经没有的，成品里也不该留着 */
+  const ids0 = doc.ids || [], miss0 = Array.isArray(doc.miss) ? doc.miss : [];
+  doc.ids  = ids0.filter(it => !it[3] || live.has(it[3]));       // 老条目没有键，留着
+  doc.miss = miss0.filter(k => live.has(k));
+  doc.seen = [...known].filter(k => live.has(k));
+  const dropped = (ids0.length - doc.ids.length) + (miss0.length - doc.miss.length);
+  const gone = new Set(doc.seen);
+
+  /* 模糊兜底键按当前候选重算：片名 + 年份进 weak，没年份的进 loose */
+  const weak = new Set(), loose = new Set();
+  const todo = [];
+  for (const c of cands){
+    candKeys(c, weak, loose);
+    if (!gone.has(c.k)) todo.push(candPack(c));
+  }
+  doc.weak = [...weak].slice(0, LIB.cap);
+  doc.loose = [...loose].slice(0, LIB.cap);
+  doc.files = files; doc.scan = Date.now(); doc.at = Date.now();
+  doc.todo = todo;
+  await r2put(env, LIB.list, doc);
+  libMem = null;
+  const skipped = Math.max(0, files - cands.length);
+  trace('lib', '片库扫描：' + files + ' 个文件 → ' + cands.length + ' 部片，待认定 ' + todo.length +
+    '（已认下 ' + doc.ids.length + '，认过但没有 ' + doc.miss.length +
+    (dropped ? '，清掉已不在库里的 ' + dropped : '') + '）', { lvl:'info' });
+  return { files, cands: cands.length, skipped, dropped, left: todo.length,
+           ok: doc.ids.length, tried: doc.miss.length };
+}
+
+/** 单个候选送 TMDB 认一次；结果进 KV 缓存 30 天，重复同步几乎不花子请求 */
+async function libResolveOne(env, c){
+  /* v5.0 在这里往 KV 写了一份 30 天缓存 —— 一个上千部的片库第一遍就是
+     上千次 KV 写入，而 Free 计划一天只有 1000 次写。写爆之后连会话 cookie
+     都存不下，整站开始反复登录。而且这份缓存本来就是多余的：认定结果
+     已经落在 A/list.json 的 ids / miss 里，扫描时会跳过，不会重复认。 */
+  /* v5.2 这里的口径比建索引那边弱一大截，于是同一部片索引认得出、片库认
+     不出，最后落到只按片名撞的模糊兜底上 —— 译名差一个字就判成缺片。
+     现在跟 matchBatch 用同一套：洗过的中文名先搜、年份锁住时门槛放低、
+     第二轮换原名、两轮候选合起来再评一次。 */
+  const raw = c.cn || c.latin;
+  if (!raw) return { miss: 1 };
+  const q1 = (() => { const x = cleanCN(c.cn); return (x && x.length >= 2) ? x : raw; })();
+  /* 剧集不锁年份：版块年份是这一季的，TMDB 记的是首播年 */
+  const yr = (!isTV() && c.ys.length === 1) ? c.ys[0] : '';
+  const ask = async (q, y) => {
+    const p = { query: q, include_adult: 'false' };
+    if (y) p[SRC.yparam] = y;
+    const j = await tmdb(env, '/search/' + SRC.kind, p)
+      .catch(e => { if (e.budget) throw e; return null; });
+    return j ? (j.results || []).slice(0, 8) : null;
+  };
+  let pool = await ask(q1, yr);
+  if (pool === null) return null;                        // 网络失败：这次不下结论，留待下轮
+  /* 年份锁住就等于 TMDB 先替我们筛了一道，片名沾边即可 —— 和索引侧同一个门槛 */
+  let m = pickTMDB(pool, c.cn, c.latin, c.ys, { tv: isTV(), yearLocked: !!yr });
+  if (!m && subLeft() > 3){
+    /* 换个说法再试：原名最管用，其次是洗之前的原始片名，最后是去掉年份 */
+    const alt = (c.latin && norm(c.latin) !== norm(c.cn)) ? { q: c.latin, y: '' }
+              : (norm(q1) !== norm(raw) ? { q: raw, y: '' }
+              : (yr ? { q: q1, y: '' } : null));
+    if (alt){
+      const more = await ask(alt.q, alt.y);
+      if (more) pool = pool.concat(more);
+    }
+    if (pool.length) m = pickTMDB(pool, c.cn, c.latin, c.ys, { tv: isTV() });
+  }
+  return m
+    ? { id: m.id, t: m.title || m.original_title || c.cn, y: (m.release_date || '').slice(0, 4) }
+    : { miss: 1 };
+}
+
+/** ② 认定：跑一批，剩下的写回 todo。返回 left>0 就再调一次。 */
+async function libResolveStep(env){
+  const t0 = Date.now();
+  const doc = await libDoc(env);
+  /* 总账模式下没有「待认定」这回事 —— id 是 Stream 那边给的 */
+  if (doc.src === 'received')
+    return { left: 0, done: true, mode: 'received', ok: (doc.ids || []).length,
+             added: 0, missed: 0, ms: 0 };
+  const todo = doc.todo || [];
+  if (!todo.length) return { left: 0, done: true, ok: (doc.ids||[]).length, added: 0, ms: 0 };
+  /* 一轮做多少，由三个条件里最先到的那个决定：条数上限、子请求预算、
+     时间预算。一轮做得越多，写 A/list.json 的次数就越少 —— R2 对同一个
+     对象的写入频率有硬限制，写得密了会直接被拒（10058）。 */
+  const cap = Math.min(LIB.batch, todo.length);
+  const deadline = t0 + 8000;
+  const ids = doc.ids || (doc.ids = []);
+  const miss = new Set(Array.isArray(doc.miss) ? doc.miss : []);
+  /* 认过的候选键单独记一份。ids 会按 TMDB id 去重（同一部片在库里有几份
+     拷贝就有几个候选键），拿它反推「认过没有」必然漏，漏掉的下轮又排队。 */
+  const seen = new Set(Array.isArray(doc.seen) ? doc.seen : []);
+  let added = 0, missed = 0, retry = 0, n = 0;
+
+  const again = [];                                     // 网络原因没认成的，挪到队尾下轮再认
+  for (; n < todo.length && n < cap; n++){
+    if (subLeft() < 6 || Date.now() > deadline) break;
+    const c = candOpen(todo[n]);
+    pipe('lib', 'i');
+    let r;
+    try { r = await libResolveOne(env, c); }
+    catch (e){
+      if (e.budget) break;
+      pipe('lib', 'e'); r = null;
+    }
+    if (r === null){ retry++; again.push(todo[n]); continue; }
+    seen.add(c.k);                                      // 认过了，下次扫描别再排队
+    if (r.miss){
+      missed++; pipe('lib', 'o');
+      miss.add(c.k);
+      continue;                                         // 模糊键在扫描时按现状统一算
+    }
+    /* 「抄送」：认下来的片名 + 年份 + id 一起存，A/list.json 就是成品 */
+    ids.push([r.id, r.t, r.y || (c.ys[0] || ''), c.k]);
+    added++; pipe('lib', 'o');
+  }
+
+  /* 认失败（网络）的挪到队尾，别把队头堵死；没轮到的原样保留 */
+  doc.todo = todo.slice(n).concat(again);
+  /* 满了要切掉的是最旧的那批，不是刚认出来的这批 */
+  doc.miss = [...miss].slice(-LIB.cap);
+  doc.seen = [...seen].slice(-LIB.cap);
+  doc.at = Date.now();
+  /* id 去重：同一部片可能有多个文件。注意这里丢掉的是候选键，所以
+     「认过没有」只能问 doc.seen，不能反过来从 doc.ids 推。 */
+  const dedup = new Set(); const uniq = [];
+  for (const it of ids){ if (dedup.has(it[0])) continue; dedup.add(it[0]); uniq.push(it); }
+  doc.ids = uniq;
+  await r2put(env, LIB.list, doc);
+  libMem = null;
+  const left = doc.todo.length;
+  trace('lib', '认定 ' + n + ' 个：命中 ' + added + ' · 认不出 ' + missed +
+    (retry ? ' · 待重试 ' + retry : '') + ' · 还剩 ' + left, { lvl: 'info' });
+  /* 告诉前端下一轮该等多久：R2 同对象大约每秒只受得住一次写入，
+     这一轮本身花掉的时间可以抵扣掉一部分。 */
+  const spent = Date.now() - t0;
+  return { left, done: left === 0, ok: uniq.length, added, missed, retry,
+           wait: Math.max(0, 1200 - spent), ms: spent, sub: SUB.n };
+}
+
+let libMem = null;   // 热路径用的成品（Set 化）
+let libJob = null;   // 并发合流：同一 isolate 只回源一次
+let libFail = 0;     // 上次失败时刻 —— 静默期内不再重试
+
+/* 海报 / 列表的缓存版本号。总账模式下 gen 本身就是内容指纹 —— 比
+   「分钟 + 条数」精确得多：条数不变而内容变了的那一类改动也能翻转。 */
+const libVer = (l) => !l ? '0'
+  : (l.gen ? 'r' + l.gen : Math.floor(l.at / 60000) + '.' + l.ids.size + '.' + l.fuzzy);
+
+function libHydrate(doc){
+  if (!doc) return null;
+  const ids = new Set();
+  const names = [];
+  for (const it of doc.ids || []){ ids.add(+it[0]); if (names.length < 4) names.push(it[1]); }
+  const weak = new Set(doc.weak || []), loose = new Set(doc.loose || []);
+  return { at: doc.at || 0, scan: doc.scan || 0, files: doc.files || 0,
+           ids, weak, loose, fuzzy: weak.size + loose.size,
+           tried: (Array.isArray(doc.miss) ? doc.miss : []).length,
+           todo: (doc.todo || []).length, sample: names, n: ids.size + weak.size + loose.size,
+           /* 总账直读专有：模式、内容指纹、本源部数、总账里也没认出来的部数 */
+           src: doc.src || 'scan', gen: doc.gen || '', via: doc.via || '',
+           mine: doc.mine || 0, missed: doc.missed || 0, pending: doc.pending || 0 };
+}
+
+async function libRefresh(env, alsoResolve){
+  if (libJob) return libJob;
+  libJob = (async () => {
+    let via = null;
+    if (recvBase(env))
+      via = await libSyncRecv(env, false).catch(e => { trace('lib', e.message || String(e)); return null; });
+    if (!via){
+      /* 走到这里只有两种情况：没配总账地址，或刚刚试过、总账不可用。
+         两种都不该让 libScanStep 再问一次指针。 */
+      await libScanStep(env, { skipRecv: true });
+      if (alsoResolve !== false) await libResolveStep(env).catch(() => {});
+    }
+    libMem = libHydrate(await libDoc(env));
+    /* gen 未变那一支不写 R2（省一次十几万字节的重写），所以成品里的 at
+       还是旧的 —— 这一轮确实对过账了，在内存里把新鲜度补上，否则
+       SWR 窗口永远是过期的，每个请求都要再问一次指针。 */
+    if (libMem && via && via.unchanged) libMem.at = Date.now();
+    libFail = 0;
+    return libMem;
+  })().catch(e => { libFail = Date.now(); throw e; })
+     .finally(() => { libJob = null; });
+  return libJob;
+}
+
+/** 热路径：吃内存 / R2 成品，过期了后台刷新，永远不因为片库拿不到而挡住浏览 */
+async function libLoad(env, ctx){
+  if (!recvBase(env)) return null;          /* RECV_BASE 或 STREAM_BASE，有一个就够 */
+  if (!libMem){
+    const doc = await r2get(env, LIB.list, null).catch(() => null);
+    if (doc) libMem = libHydrate(doc);
+    else {
+      const old = await r2get(env, LIB.legacy, null).catch(() => null);
+      if (old) libMem = libHydrate({ at: old.at, files: old.files, ids: [], weak: old.ty, loose: old.t, todo: [] });
+    }
+  }
+  if (!libMem){
+    if (Date.now() - libFail < LIB.retry) return null;
+    /* 冷启动这一次不等：后台去扫，本次请求先不过滤，别让片库故障挡住浏览 */
+    const job = libRefresh(env, false).catch(e => trace('lib', e.message || String(e)));
+    if (ctx && ctx.waitUntil) ctx.waitUntil(job); else libFail = Date.now();
+    return null;
+  }
+  /* scan===0 说明这份成品是从 v4 的模糊键表搬过来的，还没被 v5 认过一遍 —— 
+     后台补一次扫描，用户不用知道要去点哪个按钮。 */
+  const due = !libMem.scan || Date.now() - libMem.at > LIB.ttl;
+  if (due && Date.now() - libFail > LIB.retry && ctx && ctx.waitUntil)
+    ctx.waitUntil(libRefresh(env, false).catch(e => trace('lib', e.message || String(e))));
+  return libMem;
+}
+
+/**
+ * 这部片我是不是已经有了。
+ * 返回 2 = TMDB id 相等（确定）；1 = 只有模糊键命中（疑似）；0 = 没有。
+ * nn / no / y 由调用方预先算好 —— 热路径上不再做字符串归一化。
+ */
+function libHas(lib, id, nn, no, y){
+  if (!lib) return 0;
+  if (lib.ids.has(+id)) return 2;
+  if (!lib.fuzzy) return 0;
+  for (const k of [nn, no]){
+    if (!k || k.length < 2) continue;
+    if (lib.loose.has(k)) return 1;
+    if (!y) continue;
+    /* 引进版和原产地常差一年，前后各让一年 */
+    if (lib.weak.has(k + '|' + y) || lib.weak.has(k + '|' + (y-1)) || lib.weak.has(k + '|' + (y+1)))
+      return 1;
+  }
+  return 0;
+}
+/** 只有一条影片记录在手时的便利包装（详情 / 购物车） */
+const libHasM = (lib, id, m) => !lib || !m ? 0
+  : libHas(lib, id, norm(m[F.N]), norm(m[F.O]), Number(m[F.Y]) || 0);
+
+const libStat = (env, l) => ({
+  on: l ? 1 : 0,
+  /* 总账模式报总账的来源地址，否则报 Stream —— 界面上「连的是谁」不能含糊 */
+  host: (() => {
+    const u = recvBase(env);
+    const h = (l && l.src === 'received' && u) ? u.host : (env.STREAM_BASE || (u && u.host) || '');
+    return String(h).replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  })(),
+  src: l ? (l.src || 'scan') : (recvBase(env) ? 'received' : 'scan'),
+  gen: l ? (l.gen || '') : '',
+  via: l ? (l.via || '') : '',
+  mine: l ? (l.mine || 0) : 0,
+  missed: l ? (l.missed || 0) : 0,
+  pending: l ? (l.pending || 0) : 0,
+  files: l ? l.files : 0,
+  ids: l ? l.ids.size : 0,
+  fuzzy: l ? l.fuzzy : 0,
+  tried: l ? l.tried : 0,
+  todo: l ? l.todo : 0,
+  /* scan=0 = 还没被 v5 认过一遍（多半是从 v4 搬过来的），界面要提示去扫一次 */
+  fresh: l ? (l.scan ? 0 : 1) : 1,
+  at: l ? l.at : 0, scan: l ? l.scan : 0,
+  sample: l ? l.sample : [],
+  hint: (env.RECV_BASE || env.STREAM_BASE) ? ''
+        : '未配置 RECV_BASE / STREAM_BASE，不过滤库中已有',
+});
+
+/* ══════════════════════════════════════════════════════════════════
+   查询
+   ══════════════════════════════════════════════════════════════════ */
+const RES_LV = { '480p':1, '720p':2, '1080i':3, '1080p':4, '2160p':5, '4320p':6 };
+const resLevel = (q) => RES_LV[q] || 0;
+const newest = (m) => { let x = 0; for (const y of (m[F.YS]||[])) if (y > x) x = y; return x || Number(m[F.Y]) || 0; };
+
+/* ══════════════════════════════════════════════════════════════════
+   预备表：每个索引版本只算一次
+   ──────────────────────────────────────────────────────────────────
+   v4 每来一个请求就把整张影片表遍历一遍，顺手对每部片做两次 norm()、
+   一次加权评分，再对结果整排一次。三万部片的时候这就是纯 CPU 的大头，
+   而 Free 计划给一次调用的 CPU 只有 10ms。
+   v5 把"和查询无关的部分"提前算好挂在 isolate 上：归一化片名、加权分、
+   最新年份、动态范围与分辨率等级各存一个数；四种排序各存一份下标数组。
+   索引版本一变就整体作废，不会读到旧数据。此后每个请求只剩一次线性扫描
+   加一次切片，不再排序。
+   ══════════════════════════════════════════════════════════════════ */
+let catCache = { ver: -1, rows: null, ord: null };
+function catRows(movies, ver){
+  if (catCache.ver === ver && catCache.rows) return catCache.rows;
+  const rows = [];
+  for (const id of Object.keys(movies.m || {})){
+    const m = movies.m[id];
+    rows.push({
+      id: +id, m,
+      n: null, o: null,                                 // 归一化按需算，见 rowNorm
+      w: weighted(m), nw: newest(m),
+      c: m[F.C] || 0, b: m[F.B] || 0,
+      hb: m[F.HB] || 0,
+      rb: m[F.RB] || resLevel(m[F.Q]),
+      ys: m[F.YS] || [], y: Number(m[F.Y]) || 0,
+      g: m[F.G] || [],
+    });
+  }
+  catCache = { ver, rows, ord: {} };
+  return rows;
+}
+/* 片名归一化只在真正要用的时候做：搜索，或者片库里还有认不出来的条目。
+   三万部片做六万次正则替换是纯 CPU，而 Free 计划一次调用只有 10ms —
+   浏览路径上一次都不该发生。算过的挂在行上，同一个索引版本内复用。 */
+function rowNorm(r){
+  if (r.n === null){ r.n = norm(r.m[F.N]); r.o = norm(r.m[F.O]); }
+  return r;
+}
+const CAT_CMP = {
+  new:  (a,b) => b.nw - a.nw || b.id - a.id,
+  vote: (a,b) => b.w - a.w || b.c - a.c,
+  spec: (a,b) => b.b - a.b || b.w - a.w,
+  hot:  (a,b) => b.c - a.c || b.w - a.w,
+};
+function catOrder(movies, ver, sort){
+  const rows = catRows(movies, ver);
+  const ord = catCache.ord || (catCache.ord = {});
+  if (ord[sort]) return ord[sort];
+  const cmp = CAT_CMP[sort] || CAT_CMP.new;
+  const ix = rows.map((_, i) => i);
+  ix.sort((a, b) => cmp(rows[a], rows[b]));
+  ord[sort] = ix;
+  return ix;
+}
+function relevance(r, nt){
+  if (r.n === nt || r.o === nt) return 100;
+  if (r.n.startsWith(nt)) return 82;
+  if (r.o.startsWith(nt)) return 74;
+  if (r.n.includes(nt)) return 58;
+  if (r.o.includes(nt)) return 46;
+  return 0;
+}
+
+/**
+ * 目录查询。
+ * dr  动态范围： '' 全部 / dv 杜比视界 / hdr HDR 及以上 / sdr 仅 SDR
+ * qual 画质：    '' 全部 / uhd 4K 及以上 / hd 1080p 及以下（低质量）
+ */
+function queryCatalog(movies, q){
+  const { text='', year='', genre='', min=6, sort='new', page=1, size=42,
+          lib=null, own='hide', dr='', qual='' } = q;
+  const nt = norm(text);
+  const rows = catRows(movies, q.ver);
+  const ix = nt ? rows.map((_, i) => i) : catOrder(movies, q.ver, sort);
+  const yr = year ? Number(year) : 0;
+  const gn = genre ? Number(genre) : 0;
+
+  const keep = [];
+  let hidden = 0, dvN = 0, hdrN = 0, lowN = 0;
+  for (let k = 0; k < ix.length; k++){
+    const r = rows[ix[k]];
+    if (min > 0 && (r.c < 50 || r.w < min)) continue;
+    if (yr && !r.ys.includes(yr) && r.y !== yr) continue;
+    if (gn && !r.g.includes(gn)) continue;
+    /* 统计三个角标用的总数在筛选之前算 —— 界面上的数字才不会随筛选跳动 */
+    if (r.hb === 7) dvN++;
+    if (r.hb >= 3) hdrN++;                              // 与筛选口径一致：HDR 档含杜比视界
+    if (r.rb && r.rb <= 4) lowN++;
+    if (dr === 'dv'  && r.hb !== 7) continue;
+    if (dr === 'hdr' && r.hb < 3) continue;
+    if (dr === 'sdr' && r.hb >= 3) continue;
+    if (qual === 'uhd' && r.rb < 5) continue;
+    if (qual === 'hd'  && !(r.rb && r.rb <= 4)) continue;
+    let rel = 0;
+    if (nt){ rel = relevance(rowNorm(r), nt); if (!rel) continue; }
+    /* 片库过滤放在最后一道：hidden 才等于"因为已经有了而被藏起来的数量"，
+       前端拿它显示「已隐藏 N 部」，不至于让人以为索引丢片。
+       id 命中就够了，只有还要走模糊兜底时才需要归一化片名。 */
+    let has = 0;
+    if (lib){
+      has = lib.ids.has(r.id) ? 2 : 0;
+      if (!has && lib.fuzzy){ rowNorm(r); has = libHas(lib, r.id, r.n, r.o, r.y); }
+    }
+    if (has && own === 'hide'){ hidden++; continue; }
+    if (!has && own === 'only') continue;
+    keep.push(rel ? [ix[k], rel, has] : [ix[k], 0, has]);
+  }
+  if (nt) keep.sort((a,b) => b[1]-a[1] || rows[b[0]].w - rows[a[0]].w);
+
+  const total = keep.length, off = (page-1)*size;
+  return {
+    total, hidden, page, pages: Math.ceil(total/size),
+    counts: { dv: dvN, hdr: hdrN, low: lowN },
+    items: keep.slice(off, off+size).map(([i,,has]) => {
+      const r = rows[i], m = r.m;
+      return { id:r.id, title:m[F.N], year:m[F.Y], poster:m[F.P],
+        vote:m[F.T], votes:m[F.C], rels:m[F.R], res:m[F.Q], size:m[F.Z], sid:m[F.BT],
+        hb:r.hb, rb:r.rb, own: has };
+    }),
+  };
+}
+/** 折叠近重复片源 */
+function collapse(list){
+  const out = [], byKey = new Map();
+  for (const r of list){
+    /* 剧集把季号也算进签名：不同季的规格常常一模一样，不带季号就会被
+       折叠成一条，第一季直接从详情页消失 */
+    const sig = (r.sn||0) + '|' + (r.group||'?') + '|' + r.spec + '|' + (r.mb ? Math.round(r.mb/512) : '?');
+    const prev = byKey.get(sig);
+    if (prev){ prev.dupes = (prev.dupes||1) + 1; continue; }
+    byKey.set(sig, r); out.push(r);
+  }
+  return out;
+}
+function valuePick(items){
+  const best = items[0];
+  if (!best || !best.mb) return null;
+  /* 剧集只在同一季里比：季与季的集数不同，体积本来就差一截，跨季比出来的
+     "省 60%" 是假的 */
+  const cand = items.filter(r => r !== best && r.mb && (best.sn||0) === (r.sn||0)
+    && r.mb <= best.mb*0.5 && r.score >= best.score-24);
+  if (!cand.length) return null;
+  const v = cand.sort((a,b)=> b.score-a.score || a.mb-b.mb)[0];
+  return { tid:v.tid, sid:v.sid, title:v.title, size:v.size, tags:v.tags,
+    saved: Math.round((1 - v.mb/best.mb)*100) };
+}
+/** 读一部片的全部片源：只读 SP 记着的那几片，没记就退化为扫全年 */
+async function movieRows(env, movies, id, ver, state){
+  const mv = movies.m[id];
+  if (!mv) return [];
+  const all = [];
+  for (const y of (mv[F.YS]||[])){
+    const sp = mv[F.SP] && mv[F.SP][y];
+    const list = Array.isArray(sp) && sp.length
+      ? sp.slice(0, 16)
+      : partRows(state, y).map((_, i) => i).slice(0, 16);
+    for (const pi of list){
+      const sh = await loadPart(env, y, pi, ver);
+      for (const r of shardRows(sh, id)) all.push(r);
+    }
+  }
+  const seen = new Set(), uniq = [];
+  for (const r of all){ if (seen.has(r.tid)) continue; seen.add(r.tid); uniq.push(r); }
+  return uniq.sort(betterRow);
+}
+/** 补上展示层需要的原始标签（只对一部片解析，很便宜） */
+function decorate(r){
+  const pr = parseRelease(r.title);
+  const out = { tid:r.tid, sid:sidOf(r.tid), title:r.title, score:r.score, spec:r.spec, mb:r.mb,
+    size:pr.size, group:pr.group, tags:pr.tags, labels:specLabels(r.spec) };
+  if (isTV()){ const sn = seasonOf(r.title); if (sn) out.sn = sn; }
+  return out;
+}
+
+/* ══════════ 主题 / 种子 ══════════ */
+async function threadDetail(env, tid, ctx){
+  const k = kkey(env,'t:'+tid);
+  const hit = await jget(env,k);
+  if (hit) return hit;
+  const r = await authed(env,'forum.php?mod=viewthread&tid='+encodeURIComponent(tid));
+  const buf = await r.arrayBuffer();
+  if (buf.byteLength < 600){ govPenalize('帖子页空响应'); throw new Error('帖子页返回空响应（可能被限速）'); }
+  const html = decodeGBK(buf);
+  if (loginWall(html)) throw new Error('帖子需要登录或权限不足（登录墙）');
+  govReward();
+  const attachments = [];
+  const re = /<a href="forum\.php\?mod=attachment&amp;aid=([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+  let m;
+  while ((m = re.exec(html))){
+    const raw = strip(m[2]);
+    attachments.push({ aid:m[1],
+      filename: raw.replace(/\s*\([\d.]+\s*[KMG]B\)\s*$/i,'').trim(),
+      filesize: raw.match(/\(([\d.]+\s*[KMG]B)\)\s*$/i)?.[1]||null,
+      isTorrent: /\.torrent\b/i.test(raw) });
+  }
+  const text = ents(html.replace(/<br\s*\/?>/gi,'\n').replace(/<[^>]+>/g,' '));
+  const pick = (rx)=>text.match(rx)?.[1]?.trim()||null;
+  const out = { tid: Number(tid), sid: sidOf(tid),
+    imdb: pick(/imdb\.com\/title\/(tt\d{6,})/i),
+    doubanScore: pick(/豆瓣评分\s*([\d.]+\/10)/),
+    fileSize: pick(/◎文件大小\s*([^\n]{2,40})/),
+    attachments,
+    magnets: [...new Set(text.match(/magnet:\?xt=urn:btih:[0-9a-zA-Z]{32,40}/g)||[])].slice(0,10) };
+  const w = jput(env,k,out,TTL.thread).catch(()=>{});
+  ctx ? ctx.waitUntil(w) : await w;
+  return out;
+}
+
+function infoBounds(b){
+  const key=[0x34,0x3a,0x69,0x6e,0x66,0x6f]; let st=-1;
+  outer: for (let i=0;i+6<b.length;i++){
+    for (let j=0;j<6;j++) if (b[i+j]!==key[j]) continue outer;
+    st=i+6; break;
+  }
+  if (st<0) throw new Error('种子中未找到 info 字典');
+  const skip=(p)=>{
+    const c=b[p];
+    if (c===0x64||c===0x6c){ p++; while(b[p]!==0x65) p=skip(p); return p+1; }
+    if (c===0x69){ while(b[p]!==0x65) p++; return p+1; }
+    let n=0; while(b[p]>=0x30&&b[p]<=0x39){ n=n*10+(b[p]-0x30); p++; }
+    if (b[p]!==0x3a) throw new Error('bencode 解析失败');
+    return p+1+n;
+  };
+  return [st, skip(st)];
+}
+function bstr(b,key){
+  const k=new TextEncoder().encode(key.length+':'+key);
+  outer: for (let i=0;i+k.length<b.length;i++){
+    for (let j=0;j<k.length;j++) if (b[i+j]!==k[j]) continue outer;
+    let p=i+k.length,n=0;
+    while(b[p]>=0x30&&b[p]<=0x39){ n=n*10+(b[p]-0x30); p++; }
+    if (b[p]!==0x3a) return null;
+    return new TextDecoder().decode(b.slice(p+1,p+1+n));
+  }
+  return null;
+}
+async function torrentBytes(env, aid){
+  const r = await authed(env,'forum.php?mod=attachment&aid='+aid);
+  if (r.status>=300 && r.status<400) throw new Error('附件不可直接下载');
+  const buf = new Uint8Array(await r.arrayBuffer());
+  if (buf[0]!==0x64)
+    throw new Error('返回的不是种子（可能需要积分或权限）：'+strip(decodeGBK(buf.slice(0,300))).slice(0,60));
+  return buf;
+}
+async function magnetOf(env, aid, ctx){
+  const k = kkey(env,'m:'+aid);
+  const hit = await jget(env,k);
+  if (hit) return hit;
+  const buf = await torrentBytes(env, aid);
+  const [s,e] = infoBounds(buf);
+  const d = await crypto.subtle.digest('SHA-1', buf.slice(s,e));
+  const btih = [...new Uint8Array(d)].map(x=>x.toString(16).padStart(2,'0')).join('');
+  const name = bstr(buf,'name');
+  const trackers = [...new Set(new TextDecoder('utf-8',{fatal:false}).decode(buf)
+    .match(/(?:https?|udp):\/\/[^\s\x00-\x1f"']{6,90}\/announce/g)||[])].slice(0,8);
+  let magnet = 'magnet:?xt=urn:btih:'+btih;
+  if (name) magnet += '&dn='+encodeURIComponent(name);
+  for (const t of trackers) magnet += '&tr='+encodeURIComponent(t);
+  const out = { btih, name, trackers, magnet };
+  const w = jput(env,k,out,TTL.magnet).catch(()=>{});
+  ctx ? ctx.waitUntil(w) : await w;
+  return out;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   分片直取 —— Worker 不再打包
+   ──────────────────────────────────────────────────────────────────
+   v4 是 /api/pack：服务端把一批种子拼成 zip 再吐出来。三个后果：
+     · CRC32 + 拼包全是纯 CPU，Free 计划一次调用只有 10ms，撞线就 1102；
+     · 整个 zip 要同时留在内存里，128MB 那条线也在旁边看着；
+     · 因为一次装不下，前端只好分批发 —— 于是用户拿到好几个 zip。
+   v5 把打包整个搬到浏览器：这里只负责「按 tid 取种子字节」，一次 8 部
+   （每部 2 个子请求）。浏览器攒齐了自己压成一个包，断了从缺口接着取。
+   服务端因此变得非常轻：没有 CPU 峰值，没有内存峰值，也没有分包。
+   ══════════════════════════════════════════════════════════════════ */
+
+const safeName = (s) => String(s||'未命名').replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').replace(/\s+/g,' ').trim().slice(0,110);
+
+/** 并发跑一批，单个失败不影响其它 */
+async function pool(items, n, fn){
+  const out = new Array(items.length);
+  let i = 0;
+  const workers = new Array(Math.min(n, items.length)).fill(0).map(async () => {
+    for (;;){
+      const k = i++;
+      if (k >= items.length) return;
+      try { out[k] = { ok:true, value: await fn(items[k], k) }; }
+      catch (e){ out[k] = { ok:false, error: e.message||String(e), budget: !!e.budget }; }
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+/** Uint8Array → base64。分块转换，避免 apply 的参数个数上限 */
+function b64of(u8){
+  let s = '';
+  const N = 0x8000;
+  for (let i = 0; i < u8.length; i += N) s += String.fromCharCode.apply(null, u8.subarray(i, i + N));
+  return btoa(s);
+}
+
+/**
+ * 取一批片源。入参 [{tid, name}]，出参每部一条：
+ *   { tid, ok, kind:'torrent'|'magnet', b64|magnet, bytes, err }
+ * 预算不够就把剩下的标成 retry，浏览器下一轮再来 —— 不报错、不丢进度。
+ */
+async function grabItems(env, items){
+  const t0 = Date.now();
+  const res = await pool(items, 3, async (it) => {
+    if (subLeft() < 4){ const e = new Error('本轮子请求预算已尽'); e.budget = 1; throw e; }
+    const d = await threadDetail(env, it.tid);
+    const att = (d.attachments || []).filter(a => a.isTorrent);
+    if (att.length){
+      const buf = await torrentBytes(env, att[0].aid);
+      return { kind:'torrent', b64: b64of(buf), bytes: buf.length, src: att[0].filename };
+    }
+    if ((d.magnets || []).length) return { kind:'magnet', magnet: d.magnets[0] };
+    throw new Error('该帖没有种子附件，也没有磁力链接');
+  });
+
+  const out = [];
+  let ok = 0, retry = 0;
+  for (let i = 0; i < items.length; i++){
+    const it = items[i], r = res[i];
+    if (r && r.ok){
+      ok++;
+      out.push({ tid: it.tid, ok: 1, name: safeName(it.name || ('影片-' + it.tid)), ...r.value });
+    } else if (r && r.budget){
+      retry++;
+      out.push({ tid: it.tid, ok: 0, retry: 1, err: '预算已尽，稍后自动重取' });
+    } else {
+      out.push({ tid: it.tid, ok: 0, name: safeName(it.name || ('影片-' + it.tid)),
+                 err: (r && r.error) || '未知错误' });
+    }
+  }
+  return { items: out, ok, retry, ms: Date.now() - t0, sub: SUB.n, subMax: SUB.max };
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   路由
+   子请求预算是「按调用」算的，但计数器是 isolate 全局的：v5.3 起只有
+   重活进门才登记预算（subEnter），轻请求与海报代理不再把它清零 ——
+   否则正在跑的建索引会越过平台硬线被掐（见「Free 计划配额治理」）。
+   ══════════════════════════════════════════════════════════════════ */
+/** 一个源的日常：增量 → 补建 → 顺手认一批片库 */
+async function cronOne(env){
+  const st = await r2get(env, IDX.state, blankState());
+  govLoad(st);
+  if (govCoolLeft()){ trace('rate','cron 跳过：仍在限速冷却'); return; }
+  const allDone = BUILD_ORDER.every(y => st.years?.[y]?.done);
+  if (allDone) await incremental(env);
+  else { await incremental(env, 2); await buildChunk(env); }
+  /* 片库对照放在最后，用剩下的预算。总账模式下这一步是两个子请求
+     （指针 + 变了才下正文）；老管线则是「有待认定就认一批」。 */
+  if (recvBase(env) && subLeft() > 4){
+    const r = await libSyncRecv(env, false).catch(e => { trace('lib', e.message || String(e)); return null; });
+    if (r) return;                          // 总账这条路走通了，老管线不必再跑
+  }
+  if (env.STREAM_BASE && subLeft() > 8){
+    const d = await libDoc(env).catch(() => null);
+    if (d && (d.todo || []).length) await libResolveStep(env).catch(() => {});
+    else if (!d || Date.now() - (d.scan || 0) > 6 * 3600_000)
+      await libScanStep(env).catch(e => trace('lib', e.message || String(e)));
+  }
+}
+
+export default {
+  async scheduled(event, env, ctx){
+    const tok = subEnter(env, true);
+    ctx.waitUntil((async () => {
+      /* 两个源轮流来，共用同一份子请求预算：先跑的先吃，剩得不够就收工，
+         下一次 cron 从另一头接着跑（顺序每次都一样，但增量本来就是幂等的）。 */
+      for (const id of Object.keys(SOURCES)){
+        if (subLeft() < 10){ trace('cron', '子请求预算见底，'+id+' 留到下一次'); break; }
+        await srcEnter(id, 60000);
+        try { await cronOne(env); }
+        catch (e){ trace('cron', SRC.name + '：' + (e.message || e)); }
+        finally { srcLeave(); }
+      }
+    })().catch(e => { trace('cron', e.message); console.error('cron 失败:', e.message); })
+      .then(() => subLeave(tok), () => subLeave(tok)));
+  },
+
+  async fetch(request, env, ctx){
+    const url = new URL(request.url), p = url.pathname;
+    if (p==='/'||p==='/index.html'){
+      /* [v5.3] 页面按 ETag 协商：没变就回 304，不再每次重传整页。
+         Referrer-Policy 把带口令的页面地址挡在外链（IMDb / 论坛原帖）之外。 */
+      const h = { 'content-type':'text/html; charset=utf-8', 'etag': PAGE_TAG,
+                  'cache-control':'private, max-age=0, must-revalidate',
+                  'x-content-type-options':'nosniff', 'referrer-policy':'no-referrer' };
+      if (request.headers.get('if-none-match') === PAGE_TAG)
+        return new Response(null, { status:304, headers:h });
+      return new Response(PAGE, { headers:h });
+    }
+
+    const sid = srcOf(url.searchParams.get('src'));
+
+    /* 详情页短地址：/t/<base36>[?src=tv]
+       只要算一次站点地址，不碰索引，所以不必进闸门。 */
+    if (p.startsWith('/t/')){
+      const tid = tidOf(p.slice(3));
+      if (!tid) return new Response('bad short link', { status:400 });
+      const S0 = SOURCES[sid];
+      const b = String(env[S0.baseVar] || env.SITE_BASE || DEFAULT_BASE).replace(/\/?$/, '/');
+      try { return Response.redirect(b+'forum.php?mod=viewthread&tid='+tid, 302); }
+      catch { return new Response('bad SITE_BASE', { status:500 }); }
+    }
+
+    if (p==='/img'){
+      const f = url.searchParams.get('p')||'';
+      if (!/^\/[\w./-]+\.(jpg|png|webp)$/i.test(f)) return new Response('bad',{status:400});
+      const size = { s:'w185', m:'w342', l:'w500' }[url.searchParams.get('s')] || 'w342';
+      /* 海报代理各自是独立调用、每次只发一个子请求，不进共享预算 ——
+         一屏几十张海报同时进来，不该把正在跑的建索引算成「预算用尽」。
+         非 200 不许缓存：一次 404 不能在浏览器里钉三十天。 */
+      const r = await fetch('https://image.tmdb.org/t/p/'+size+f, { cf:{cacheEverything:true,cacheTtl:604800} });
+      return new Response(r.body, { status:r.status, headers:{
+        'content-type': r.headers.get('content-type')||'image/jpeg',
+        'cache-control': r.ok ? 'public, max-age=2592000, immutable' : 'no-store' } });
+    }
+
+    if (!p.startsWith('/api/')) return new Response('Not found',{status:404});
+    if (env.GATE && (url.searchParams.get('gate')||request.headers.get('x-gate'))!==env.GATE)
+      return json({ error:'口令不正确' },401);
+
+    const Q = url.searchParams;
+    /* [v5.3] 重活 / 轻活分流：只有重活参与子请求预算（见 subEnter）。 */
+    const heavy = HEAVY_RE.test(p) || (p==='/api/lib' && !!(Q.get('scan')||Q.get('resolve')||Q.get('refresh')));
+    const tok = subEnter(env, heavy);
+
+    /* 换源就是换一整套 R2 键，所以先过闸门：同源随便并发，异源排队等。
+       ctx 也包一层 —— 后台任务必须算进这一批，否则它会跨到下一批里去写
+       另一个源的键。 */
+    try { await srcEnter(sid); }
+    catch (e){ subLeave(tok); return json({ error: e.message, kind:'busy', busy:1, wait: e.wait||5 }, 409); }
+    const bg = [];
+    const cx = {
+      waitUntil(pr){ bg.push(Promise.resolve(pr).catch(()=>{})); return ctx.waitUntil(pr); },
+      passThroughOnException(){ return ctx.passThroughOnException && ctx.passThroughOnException(); },
+    };
+    const leave = () => { srcLeave(); subLeave(tok); };
+
+    try {
+      /* ── 分片直取（POST）──
+         浏览器一次要 8 部，取到就往 IndexedDB 里塞；服务端不再有 zip。 */
+      if (p==='/api/fetch'){
+        if (request.method !== 'POST') return json({ error:'请用 POST' },405);
+        const body = await request.json().catch(()=>null);
+        const raw = (body && body.items) || [];
+        if (!raw.length) return json({ error:'没有要取的片源' },400);
+        const items = raw.slice(0, GRAB_MAX).map(x => ({
+          tid: /^\d+$/.test(String(x.tid)) ? Number(x.tid) : tidOf(x.sid||''),
+          name: String(x.name||'').slice(0,120),
+        })).filter(x => x.tid > 0);
+        if (!items.length) return json({ error:'没有有效的片源' },400);
+        const r = await grabItems(env, items);
+        return json({ ...r, max: GRAB_MAX });
+      }
+      /* v4 的服务端打包已移除：它是 CPU / 内存峰值的来源，也是"一次下载
+         分出好几个 zip"的根因。老前端如果还在打这个地址，明确告诉它。 */
+      if (p==='/api/pack')
+        return json({ error:'服务端打包已下线，请刷新页面使用新的分片下载' },410);
+
+      if (p==='/api/catalog' || p==='/api/detail' || p==='/api/cart'){
+        const { movies, state } = await loadIndex(env);
+        const ver = state.ver||0;
+        const lib = await libLoad(env, cx).catch(()=>null);
+        /* 边缘缓存键带索引版本号 + 片库版本号：片库一变（下了新片），
+           旧的"已过滤"结果自然作废，不用手动清缓存。
+           构造失败就跳过缓存，绝不因此让请求失败 */
+        let cache = null, ck = null;
+        try {
+          ck = new Request(new URL(url.pathname + '?' + [...Q.entries()]
+            .filter(([k])=>k!=='gate').map(([k,v])=>k+'='+encodeURIComponent(v)).sort().join('&')
+            + '&v=' + ver + '&l=' + libVer(lib), url.origin).toString());
+          cache = caches.default;
+          const hitc = await cache.match(ck);
+          if (hitc) return hitc;
+        } catch { cache = null; ck = null; }
+
+        let body;
+        if (p==='/api/catalog'){
+          /* own: hide（默认，藏掉库里已有的）/ all（都显示，只打标）/ only（只看已有） */
+          const own = ({ hide:'hide', all:'all', only:'only' })[Q.get('own')] || 'hide';
+          const r = queryCatalog(movies, {
+            ver,
+            text: (Q.get('q')||'').trim(), year: Q.get('year')||'', genre: Q.get('genre')||'',
+            min: Q.get('min')==null ? 6 : Number(Q.get('min')),
+            sort: Q.get('sort')||'new', page: Math.max(1,Number(Q.get('page')||1)),
+            dr: Q.get('dr')||'', qual: Q.get('qual')||'',
+            lib, own,
+          });
+          body = { ...r, src: SRC.id, indexed: state.movies||0, at: state.at||0,
+            building: !BUILD_ORDER.every(y=>state.years?.[y]?.done),
+            lib: { on: lib?1:0, files: lib?lib.files:0, ids: lib?lib.ids.size:0,
+                   todo: lib?lib.todo:0, at: lib?lib.at:0, own } };
+        } else if (p==='/api/cart'){
+          /* 购物车批量取默认片源：只读影片表，不解分片 */
+          const ids = (Q.get('ids')||'').split(',').map(Number).filter(Boolean).slice(0, CART_MAX);
+          body = { items: ids.map(id => {
+            const m = movies.m[id];
+            if (!m) return { id, missing:true };
+            return { id, title:m[F.N], year:m[F.Y], poster:m[F.P], res:m[F.Q],
+                     size:m[F.Z], sid:m[F.BT], rels:m[F.R], score:m[F.B],
+                     hb:m[F.HB]||0, rb:m[F.RB]||resLevel(m[F.Q]),
+                     own: libHasM(lib, id, m) };
+          }) };
+        } else {
+          const id = Q.get('id');
+          const m = movies.m?.[id];
+          if (!m) return json({ error:'索引里没有这部影片' },404);
+          const items = collapse((await movieRows(env, movies, id, ver, state)).map(decorate));
+          const meta = await tmdbMeta(env, id, cx).catch(()=>null);
+          body = {
+            movie: { id:+id, title:m[F.N], original:m[F.O], year:m[F.Y], poster:m[F.P],
+              own: libHasM(lib, id, m),
+              vote:m[F.T], votes:m[F.C], wr:+weighted(m).toFixed(1), res:m[F.Q], size:m[F.Z], sid:m[F.BT],
+              hb:m[F.HB]||0, rb:m[F.RB]||resLevel(m[F.Q]),
+              overview: meta?.overview||'', runtime: meta?.runtime||null,
+              genres: meta?.genres||[], imdb: meta?.imdb||null },
+            items, value: valuePick(items),
+          };
+        }
+        const res = json(body);
+        res.headers.set('cache-control','public, max-age=60, s-maxage=600');
+        if (cache && ck) cx.waitUntil(cache.put(ck, res.clone()));
+        return res;
+      }
+
+      if (p==='/api/thread'){
+        const tid = Q.get('tid') || tidOf(Q.get('sid'));
+        if (!tid) return json({error:'缺少 tid'},400);
+        return json(await threadDetail(env, tid, cx));
+      }
+      if (p==='/api/magnet'){
+        const aid = Q.get('aid');
+        if (!aid) return json({error:'缺少 aid'},400);
+        return json(await magnetOf(env, aid, cx));
+      }
+      if (p==='/api/torrent'){
+        const aid = Q.get('aid');
+        if (!aid) return json({error:'缺少 aid'},400);
+        const name = safeName(Q.get('name')||'download').replace(/"/g,'');
+        const buf = await torrentBytes(env, aid);
+        return new Response(buf, { headers:{
+          'content-type':'application/x-bittorrent',
+          'content-disposition':'attachment; filename="'+name+'.torrent"' } });
+      }
+
+      /* ── 片库对照：扫描 / 认定 / 状态 ── */
+      if (p==='/api/lib'){
+        if (!recvBase(env)) return json({ ...libStat(env, null), source: SRC.id });
+        if (Q.get('scan')){
+          const r = await libScanStep(env);
+          return json({ ...r, ...libStat(env, libHydrate(await libDoc(env))) });
+        }
+        if (Q.get('resolve')){
+          const r = await libResolveStep(env);
+          return json({ ...r, ...libStat(env, libHydrate(await libDoc(env))) });
+        }
+        if (Q.get('refresh')){
+          libMem = null; libFail = 0;
+          await libRefresh(env, true);
+          return json(libStat(env, libMem));
+        }
+        return json(libStat(env, await libLoad(env, cx)));
+      }
+
+      /* ── 日志：按频道取 ── */
+      if (p==='/api/logs'){
+        const st = Q.get('saved') ? await r2get(env, IDX.state, blankState()) : null;
+        return json({
+          ch: Object.entries(LOG_CH).map(([k,v]) => ({ k, name:v,
+            n: TRACE.filter(x=>x.ch===k).length })),
+          live: traceView(Q.get('ch')||'all', Number(Q.get('n')||60)),
+          saved: st ? (st.events||[]) : undefined,
+        });
+      }
+
+      if (p==='/api/state'){
+        const st = await r2get(env, IDX.state, blankState());
+        govLoad(st);
+        const at = lockAt(st.lock), age = at ? Date.now()-at : 0;
+        const busy = age > 0 && age < LOCK_MS;
+        const pl = planOf(env);
+        return json({
+          v: 5, at: st.at||0, ver: st.ver||0,
+          src: SRC.id, srcName: SRC.name,
+          sources: Object.values(SOURCES).map(x => ({ id:x.id, name:x.name, years:x.order })),
+          site: hostOf(base(env)), fid: FID,
+          movies: st.movies||0, rels: st.rels||0,
+          relsByYear: st.relsByYear||{}, dictByYear: st.dictByYear||{},
+          lastIncremental: st.lastIncremental||null,
+          migrated: st.migrated||{},
+          deaths: st.deaths||0,
+          gap: GOV.gap, cooling: Math.ceil(govCoolLeft()/1000), coolWhy: GOV.why||'',
+          staleLock: age >= LOCK_MS,
+          resync: st.resync ? st.resync.at : 0,
+          partSize: PART_ROWS,
+          plan: { name: pl.name, sub: pl.sub, hard: pl.hard, pages: pl.pages, tmdb: pl.tmdb },
+          pend: st.pend || null,
+          pipe: st.pipe || null, pipes: st.pipes || [],
+          stageNames: PIPE_NAME,
+          events: (st.events||[]).slice(0, 30),
+          grabMax: GRAB_MAX, cartMax: CART_MAX,
+          years: BUILD_ORDER.map(y => {
+            const v = st.years?.[y] || {};
+            const pn = partRows(st, y);
+            return { year:y, page:v.page||1, last:v.last||0, done:!!v.done,
+                     bad:(v.bad||[]).length, rels:(st.relsByYear||{})[y]||0,
+                     parts: pn.length, big: pn.filter(n => n > PART_ROWS*1.5).length };
+          }),
+          done: BUILD_ORDER.every(y=>st.years?.[y]?.done),
+          busy, lockLeft: busy ? Math.ceil((LOCK_MS-age)/1000) : 0,
+        });
+      }
+      if (p==='/api/build'){
+        return json(await buildChunk(env, {
+          pages: Number(Q.get('pages')||0) || 0,
+          tmdbMax: Number(Q.get('tmdb')||0) || 0,
+          year: Q.get('year')||null,
+        }));
+      }
+      if (p==='/api/incremental') return json(await incremental(env, Number(Q.get('pages')||0)));
+      if (p==='/api/diagnose')    return json(await diagnose(env));
+      if (p==='/api/repair')      return json(await repair(env, Q.get('do')||'', Q.get('year')||null));
+      if (p==='/api/unlock')      return json(await repair(env, 'unlock'));
+      if (p==='/api/migrate')     return json(await migrateYear(env, Q.get('year')||null));
+      if (p==='/api/optimize')    return json(await optimizeYear(env, Q.get('year')||BUILD_ORDER[0], Q.get('part')));
+      if (p==='/api/split')       return json(await splitYear(env, Q.get('year')));
+      if (p==='/api/reset')       return json(await resetYear(env, Q.get('year')));
+
+      return json({ error:'未知接口' },404);
+    } catch (e) {
+      const cls = classify(e);
+      trace(cls, (p||'') + ': ' + (e.message||e));
+      /* busy / cooling / budget 都带结构化字段，前端才能精确等待而不是瞎猜 */
+      return json({
+        error: e.message||String(e), kind: cls,
+        busy: e.busy?1:0, wait: e.wait||0, stale: !!e.stale,
+        budget: e.budget?1:0, sub: SUB.n, subMax: SUB.max,
+        cooling: e.cooling || Math.ceil(govCoolLeft()/1000) || 0,
+      }, e.busy ? 409 : (cls === 'rate' ? 429 : (cls === 'budget' ? 503 : 500)));
+    } finally {
+      /* 后台任务还在花子请求，预算和源闸门都要等它们跑完再放 */
+      if (bg.length) ctx.waitUntil(Promise.all(bg).then(leave, leave));
+      else leave();
+    }
+  },
+};
+
+/* ═══════════════════════════════════════════════════════════════════
+   前端 —— 白底，白云蓝为第一重点色、黑为第二；海报仍是唯一的大面积颜色
+   ═══════════════════════════════════════════════════════════════════ */
+const PAGE = String.raw`<!DOCTYPE html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0B0B0C" media="(prefers-color-scheme: dark)">
+<title>Cuven ᴿ 索引库</title>
+<script>
+/* 在第一次绘制之前把主题读出来。放在样式表前面、同步执行 ——
+   晚一步就会先闪一帧浅色再切深色。noanim 让首帧的一切过渡与动画噤声，
+   等两帧之后再摘掉，于是"刷新回来"看到的是结果，不是补动画。 */
+(function(){
+  var t = 'auto';
+  try { t = (JSON.parse(localStorage.getItem('cvr') || '{}').theme) || 'auto'; } catch(e){}
+  var d = document.documentElement;
+  d.setAttribute('data-theme', t);
+  d.className = 'noanim';
+})();
+</script>
+<style>
+/* ══════════════════════════════════════════════════════════════════
+   令牌 —— 所有动效、字号、字重、字距、层级、命中区都只从这里取值
+   ──────────────────────────────────────────────────────────────────
+   把这些收进变量不是为了好看，是为了「快慢」「轻重」「疏密」各自
+   是一个可调的整体，而不是三十处各写各的。
+   --silk 由性能调度器实时改写：掉帧就整体收紧，省下的帧还给滚动。
+   ══════════════════════════════════════════════════════════════════ */
+:root{
+  --silk:1;
+  --e-std:cubic-bezier(.32,.72,0,1);     /* 位移 / 展开：起步快、收尾长 */
+  --e-soft:cubic-bezier(.4,0,.2,1);      /* 渐显 / 变色 */
+  --e-out:cubic-bezier(.22,1,.36,1);     /* 进入 */
+  --e-pop:cubic-bezier(.34,1.26,.64,1);  /* 极轻回弹，只留给「确认」这一个时刻 */
+  /* 时长按用途分档，UI 一律压在 300ms 以内 —— 超过这个数，界面就开始
+     "等动画"而不是"响应操作"。抽屉类单独一档，它允许慢一点。 */
+  --t-xs:calc(.1s*var(--silk));      /* 颜色 / 文字色 */
+  --t-s:calc(.16s*var(--silk));      /* hover、背景 */
+  --t-m:calc(.24s*var(--silk));      /* 下拉、卡片、图片淡入 */
+  --t-l:calc(.3s*var(--silk));       /* 最大的普通 UI，卡在预算上沿 */
+  --t-fast:calc(.14s*var(--silk));   /* 高频重放的入场，越短越好 */
+  --t-sheet:calc(.44s*var(--silk));  /* 底部动作坞这类抽屉 */
+  /* 按压反馈不参与 --silk 缩放：它是"直接性"的地基，任何时候都必须即时。 */
+  --t-press:90ms;
+
+  /* ── 字重 ──
+     只在这里定义。任何状态（选中 / hover / 焦点）都不准改字重 ——
+     改一次字重就要重排一次文字，一排药丸按钮会跟着抖一下。
+     状态一律用颜色和底色去说。 */
+  --fw-r:400;   /* 正文 */
+  --fw-m:510;   /* 控件、标签、片名 */
+  --fw-s:580;   /* 强调、卡片标题 */
+  --fw-b:660;   /* 大标题、KPI 数字 */
+  --fw-x:700;   /* 商标 */
+
+  /* ── 字距随字号走 ──
+     字号一大，字与字看起来就散，要收；小字要略放才认得清。
+     一个固定的 letter-spacing 必然在某个字号上是错的。 */
+  --tr-xs:.014em;    /* ≤ 11px */
+  --tr-s:.004em;     /* 12 – 13px */
+  --tr-b:-.011em;    /* 14 – 16px 正文 */
+  --tr-l:-.02em;     /* 19 – 22px */
+  --tr-xl:-.028em;   /* 24 – 28px */
+  --tr-2xl:-.034em;  /* 30px 以上 */
+  /* ── 行高与字号反向：大字收紧，小字放开 ── */
+  --lh-t:1.14; --lh-h:1.3; --lh-b:1.5; --lh-r:1.62;
+
+  /* ── 层级刻度 ──
+     没有 9999。只有下面这七个台阶，新东西必须落在其中一阶上。
+     顺序是有含义的：推入层压在顶栏「下面」（顶栏是材质，内容从它下面
+     滑过去，返回键始终可点），边缘手势条又必须在顶栏之上。 */
+  --z-sticky:100;   /* 筛选台 */
+  --z-scrim:200;    /* 推入层的压暗 */
+  --z-push:210;     /* 推入层 */
+  --z-header:300;   /* 顶栏 */
+  --z-edge:310;     /* 左边缘手势条 */
+  --z-dock:400;     /* 底部动作坞 */
+  --z-toast:500;    /* 提示 */
+
+  /* ── 命中区 ──
+     触屏 44，精细指针 40。视觉尺寸可以比这小，靠伪元素把可点范围撑开。 */
+  --hit:44px; --hit-d:40px;
+
+  --r-s:10px; --r-m:14px; --r-l:20px; --r-xl:26px;
+  --pad:max(20px,env(safe-area-inset-left));
+  --padr:max(20px,env(safe-area-inset-right));
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;
+
+  /* ── 色彩 ──
+     全局约定：白底；第一重点色白云蓝 —— 主行动 / 选中 / 聚焦环 / 进度 /
+     实时数据；第二重点色黑 —— 商标、性价比之选、提示。海报仍是页面上唯一
+     的大面积颜色。白底之后卡片不能再靠"白压灰"分层，改靠 1px 描边 +
+     轻阴影（--sh 里带着那一圈描边）。要换主题色只改下面这六个。 */
+  --ac:#3D8FE4; --acf:#FFF;          /* 白云蓝：填充，及其上的文字 */
+  --act:#0C72CB;                     /* 白云蓝的文字档：深一级才够对比度 */
+  --acb:rgba(61,143,228,.13);        /* 白云蓝的薄染 */
+  --ink:#111214; --inkf:#FFF;        /* 黑：第二重点色 */
+
+  --bg:#FFF; --sf:#FFF; --sf2:#F6F6F8; --sf3:#EEEEF1; --sf4:#E2E2E7;
+  --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.14);
+  --t1:#111214; --t2:rgba(60,60,67,.62); --t3:rgba(60,60,67,.36);
+  --ok:#22A94E; --okb:rgba(34,169,78,.12);
+  --warn:#C98600; --warnb:rgba(201,134,0,.12);
+  --bad:#DC3B40; --badb:rgba(220,59,64,.1);
+  --glass:rgba(255,255,255,.8);
+  --sel:rgba(61,143,228,.22);        /* 选区：一层薄染，不是反白 */
+  --sbar:rgba(0,0,0,.2);             /* 局部滚动条，只用在小容器里 */
+  --sh:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.04),0 10px 28px -14px rgba(0,0,0,.12);
+  --sh-s:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.05);
+  --sh-l:0 0 0 1px var(--line),0 2px 6px rgba(0,0,0,.05),0 24px 60px -20px rgba(0,0,0,.2);
+  --poster:#EAEAEE;
+}
+/* 深色只写一份：跟随系统且系统是深色、或手动指定深色，都吃它。
+   蓝色提亮一档，其上的文字改成墨色，对比度才够。 */
+@media (prefers-color-scheme:dark){
+  html:not([data-theme="light"]){
+    --ac:#67AAED; --acf:#0A0A0B; --act:#85BCF5; --acb:rgba(103,170,237,.17);
+    --ink:#F5F5F7; --inkf:#0A0A0B;
+    --bg:#0A0A0B; --sf:#161618; --sf2:#1C1C1F; --sf3:#26262A; --sf4:#33333A;
+    --line:rgba(255,255,255,.09); --line2:rgba(255,255,255,.15);
+    --t1:#F5F5F7; --t2:rgba(235,235,245,.58); --t3:rgba(235,235,245,.3);
+    --ok:#32D74B; --okb:rgba(50,215,75,.14);
+    --warn:#FFD426; --warnb:rgba(255,212,38,.13);
+    --bad:#FF6B5E; --badb:rgba(255,107,94,.13);
+    --glass:rgba(18,18,20,.74);
+    --sel:rgba(103,170,237,.3);
+    --sbar:rgba(255,255,255,.22);
+    --sh:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.4),0 12px 34px -14px rgba(0,0,0,.8);
+    --sh-s:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.35);
+    --sh-l:0 0 0 1px var(--line),0 2px 8px rgba(0,0,0,.45),0 28px 70px -24px rgba(0,0,0,.9);
+    --poster:#222226;
+  }
+}
+html[data-theme="dark"]{
+  --ac:#67AAED; --acf:#0A0A0B; --act:#85BCF5; --acb:rgba(103,170,237,.17);
+  --ink:#F5F5F7; --inkf:#0A0A0B;
+  --bg:#0A0A0B; --sf:#161618; --sf2:#1C1C1F; --sf3:#26262A; --sf4:#33333A;
+  --line:rgba(255,255,255,.09); --line2:rgba(255,255,255,.15);
+  --t1:#F5F5F7; --t2:rgba(235,235,245,.58); --t3:rgba(235,235,245,.3);
+  --ok:#32D74B; --okb:rgba(50,215,75,.14);
+  --warn:#FFD426; --warnb:rgba(255,212,38,.13);
+  --bad:#FF6B5E; --badb:rgba(255,107,94,.13);
+  --glass:rgba(18,18,20,.74);
+  --sel:rgba(103,170,237,.3);
+  --sbar:rgba(255,255,255,.22);
+  --sh:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.4),0 12px 34px -14px rgba(0,0,0,.8);
+  --sh-s:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.35);
+  --sh-l:0 0 0 1px var(--line),0 2px 8px rgba(0,0,0,.45),0 28px 70px -24px rgba(0,0,0,.9);
+  --poster:#222226;
+}
+html[data-theme="light"]{color-scheme:light}
+html[data-theme="dark"]{color-scheme:dark}
+
+/* 首帧不许动。刷新回来时主题、动作坞、片单数量都要"本来就是那样"，
+   而不是先画一个默认态再动画着改过去 —— 那一下闪烁比动画本身显眼得多。 */
+html.noanim *,html.noanim *::before,html.noanim *::after{
+  transition:none!important;animation:none!important}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html{-webkit-text-size-adjust:100%}
+/* 系统字体自带光学字号、字距表和易读性调校，不再外挂字体文件 ——
+   于是"字体子集化"这一项天然满足：一个字节都没有多下发。 */
+body{background:var(--bg);color:var(--t1);font-family:var(--sans);font-size:1rem;
+  line-height:var(--lh-b);letter-spacing:var(--tr-b);
+  -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
+  overflow-x:hidden;padding-bottom:calc(104px + env(safe-area-inset-bottom))}
+button,input,select{font:inherit;color:inherit;letter-spacing:inherit}
+.wrap{max-width:1180px;margin:0 auto;padding-left:var(--pad);padding-right:var(--padr)}
+/* 焦点环保持中性色，且只画环 —— 不改元素自身的圆角，否则一聚焦形状就变了 */
+:focus-visible{outline:2px solid var(--ac);outline-offset:3px}
+::selection{background:var(--sel)}
+b,strong{font-weight:var(--fw-s)}
+/* 会变的数字一律等宽，否则每刷新一次就抖一下 */
+.num,.kpi,.dl-head,.dl-meta,.fsum,.quota,.dbar,.spec,.hash,.node .nv,.node .ns,
+.seg button em,.chips button,.pills button i,.yr,.qs,.pill,.dg .dt{
+  font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
+/* 纯装饰的东西不许挡住真控件，也不许被选中 */
+.badge,.tick,.dot,.spark,.spark i,.link2,.link2 i,.bar2,.bar2 i,.shimmer,.skn,.mark{
+  pointer-events:none;-webkit-user-select:none;user-select:none}
+/* 锚点滚动要给悬浮顶栏留出位置 */
+[id]{scroll-margin-top:calc(var(--hh,56px) + 12px)}
+
+/* 局部滚动条：只在小容器里定制，页面主滚动条永远是系统原生的 */
+.qlist::-webkit-scrollbar,.logs::-webkit-scrollbar{width:8px;height:8px}
+.qlist::-webkit-scrollbar-thumb,.logs::-webkit-scrollbar-thumb{
+  background:var(--sbar);border-radius:4px}
+.qlist::-webkit-scrollbar-track,.logs::-webkit-scrollbar-track{background:transparent}
+.qlist,.logs{scrollbar-width:thin;scrollbar-color:var(--sbar) transparent}
+
+/* 掉帧时性能调度器打上这个类：毛玻璃与大阴影先让路 */
+html.lite header,html.lite #dock{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;background:var(--sf)!important}
+html.lite .card,html.lite .art{box-shadow:var(--sh-s)!important}
+html.lite .shimmer{animation:none!important}
+
+/* ── 顶栏 ───────────────────────────────────────────────────────── */
+header{position:sticky;top:0;z-index:var(--z-header);isolation:isolate;
+  background:var(--glass);
+  backdrop-filter:saturate(180%) blur(22px);-webkit-backdrop-filter:saturate(180%) blur(22px)}
+/* 悬浮层压住内容的地方用一小段渐隐收口，而不是画一条 1px 的硬线 ——
+   材质是"内容从下面滑过去"，硬线会把它变回一个占位的横条。 */
+header::after{content:'';position:absolute;left:0;right:0;top:100%;height:18px;pointer-events:none;
+  background:linear-gradient(var(--bg),transparent);opacity:0;
+  transition:opacity var(--t-m) var(--e-soft)}
+header.stuck::after{opacity:.9}
+/* 白底之上"内容从下面滑过去"的渐隐看不出来了，吸住时补一道 1px 描边 */
+header.stuck{box-shadow:0 1px 0 var(--line)}
+.bar{display:flex;align-items:center;gap:12px;height:56px}
+.brand{display:flex;align-items:center;gap:9px;flex:none;background:none;border:0;cursor:pointer;
+  padding:0;position:relative}
+.brand::before{content:'';position:absolute;inset:-9px -4px}   /* 26 + 9x2 = 44 高；两侧各 4px，与返回键的 4px 正好填满 8px 间距 */
+.mark{width:26px;height:26px;border-radius:8px;background:var(--ink);color:var(--inkf);flex:none;
+  display:grid;place-items:center;font-size:.8125rem;font-weight:var(--fw-x);
+  letter-spacing:-.04em;line-height:1;
+  transition:transform var(--t-press) ease-out}
+.brand:active .mark{transform:scale(.96)}
+.bname{font-size:.9375rem;font-weight:var(--fw-s);letter-spacing:var(--tr-l);white-space:nowrap}
+.bname sup{font-size:.5625rem;font-weight:var(--fw-m);vertical-align:super;opacity:.5;margin-left:1px}
+nav.pills{display:flex;gap:2px;background:var(--sf3);border-radius:999px;padding:3px;margin:0 auto}
+/* 状态只改颜色和底色，绝不改字重 —— 改字重会让整排药丸重排一次 */
+nav.pills button{border:0;background:none;color:var(--t2);font-size:.8125rem;
+  font-weight:var(--fw-m);min-height:32px;padding:0 16px;border-radius:999px;cursor:pointer;
+  white-space:nowrap;position:relative;
+  transition:color var(--t-s) var(--e-soft),background var(--t-s) var(--e-soft),transform var(--t-press) ease-out}
+nav.pills button::before{content:'';position:absolute;inset:-6px 0}   /* 32 + 6 + 6 = 44 */
+nav.pills button.on{background:var(--sf);color:var(--t1);box-shadow:var(--sh-s)}
+nav.pills button:active{transform:scale(.96)}
+/* 徽标的宽度是常驻的：数字从无到有、从 9 到 10，导航都不会跟着挪 */
+nav.pills button i{font-style:normal;font-size:.6875rem;opacity:.5;margin-left:5px;
+  display:inline-block;min-width:1.9em;text-align:right}
+nav.pills button i:empty{min-width:0;margin-left:0}
+/* 源开关（电影 / 剧集）：与主导航同一套药丸，尺寸收一档，坐在工具区最左。
+   它换的是"看哪一个库"，和换标签页不是一回事，所以不跟 nav 混在一起。 */
+.pills.mini{display:flex;gap:2px;background:var(--sf3);border-radius:999px;padding:3px;flex:none}
+.pills.mini button{border:0;background:none;color:var(--t2);font-size:.78125rem;height:30px;
+  padding:0 11px;border-radius:999px;cursor:pointer;position:relative;white-space:nowrap;
+  font-weight:var(--fw-m);letter-spacing:var(--tr-xs);
+  transition:background var(--t-s) var(--e-soft),color var(--t-s) var(--e-soft),
+             transform var(--t-press) ease-out}
+.pills.mini button::before{content:'';position:absolute;inset:-7px 0}  /* 30 + 7x2 = 44 */
+.pills.mini button.on{background:var(--sf);color:var(--t1);box-shadow:var(--sh-s)}
+.pills.mini button:active{transform:scale(.97)}
+.tools{display:flex;align-items:center;gap:8px;flex:none}
+/* 宽度不参与动画：它是布局属性，而且 / 快捷键也会触发聚焦 ——
+   键盘发起的动作不该有动画。聚焦的状态指示交给底色和阴影。 */
+.field{display:flex;align-items:center;gap:7px;background:var(--sf3);border-radius:999px;
+  padding:0 13px;width:240px;min-height:36px;
+  transition:background var(--t-s) var(--e-soft),box-shadow var(--t-s) var(--e-soft)}
+.field:focus-within{background:var(--sf);box-shadow:var(--sh-s)}
+.field svg{flex:none;color:var(--t3)}
+#q{flex:1;min-width:0;background:none;border:0;font-size:.875rem;align-self:stretch}
+#q:focus-visible{outline:0}
+.field:has(#q:focus-visible){outline:2px solid var(--ac);outline-offset:3px}
+/* 没有 :has() 的老浏览器：把环还给输入框本身，宁可位置将就，也不能没有 */
+@supports not (selector(:has(*))){ #q:focus-visible{outline:2px solid var(--ac);outline-offset:-1px} }
+#q::placeholder{color:var(--t3)}
+/* 清空键用 visibility 收起，不用 display —— 后者会让输入框在打字的第一个
+   字符处宽度一跳。位置常驻，出现与否不影响布局。 */
+#clr{border:0;background:var(--sf4);color:var(--t2);width:20px;height:20px;
+  border-radius:50%;font-size:.6875rem;line-height:1;cursor:pointer;flex:none;
+  display:grid;place-items:center;position:relative;visibility:hidden;
+  transition:opacity var(--t-s) var(--e-soft);opacity:0}
+/* 左边紧挨着输入框，只能撑到 7px（正好是那道间距），再多就抢输入框的点击；
+   右边一直撑到搜索框内壁。这是不与邻居打架的前提下能给到的最大命中区。 */
+#clr::before{content:'';position:absolute;inset:-12px -13px -12px -7px}
+#clr.on{visibility:visible;opacity:1}
+.icb{border:0;background:var(--sf3);color:var(--t1);width:36px;height:36px;border-radius:50%;
+  display:grid;place-items:center;cursor:pointer;flex:none;position:relative;
+  transition:background var(--t-s) var(--e-soft),transform var(--t-press) ease-out}
+.icb::before{content:'';position:absolute;inset:-4px -5px}  /* 46×44；左右各 5px 都落在与邻居之间的空隙里 */
+.icb:active{transform:scale(.96)}
+/* 左向人字是偏心的：视觉重量在右、尖角在左，往尖角方向挪 1px 才看着居中 */
+#back svg{transform:translateX(-1px)}
+#back{display:none}
+#back.on{display:grid}
+/* 外观键的字形由 CSS 出，于是首帧就是对的，不用等脚本跑完再补一次 */
+#theme{font-size:.9375rem;line-height:1}
+#theme::before{content:'◐'}
+html[data-theme="light"] #theme::before{content:'☀'}
+html[data-theme="dark"] #theme::before{content:'☾'}
+@media(max-width:900px){
+  .bname{display:none}
+  .field{width:170px}
+  nav.pills button{padding:0 12px;font-size:.78125rem}
+}
+@media(max-width:600px){
+  /* 两行：第一行 商标 · 页签 · 外观，第二行 内容源 · 搜索。
+     .tools 用 display:contents 拆开，它的三个孩子直接参与顶栏换行。
+     10px = 返回键的 5px + 商标的 4px，还余 1px */
+  .bar{gap:10px;flex-wrap:wrap;height:auto;padding:8px 0}
+  .tools{display:contents}
+  nav.pills{order:1;flex:1;min-width:0;margin:0;justify-content:center}
+  #srcNav{order:2}
+  #theme{order:3}
+  .field{order:4;flex:1;width:auto;min-width:200px}
+  .pills.mini button{padding:0 9px}
+}
+
+/* ── 通用件 ─────────────────────────────────────────────────────── */
+/* 大标题让浏览器去平衡断行，避免最后一行只剩两个字 */
+h1{font-size:1.875rem;font-weight:var(--fw-b);letter-spacing:var(--tr-2xl);
+  margin:24px 0 3px;line-height:var(--lh-t);text-wrap:balance}
+.lede{color:var(--t2);font-size:.90625rem;margin-bottom:2px;letter-spacing:var(--tr-b)}
+h2.sec{font-size:1.1875rem;font-weight:var(--fw-s);letter-spacing:var(--tr-l);margin:0;
+  line-height:var(--lh-h);text-wrap:balance}
+h3{font-size:1rem;font-weight:var(--fw-s);letter-spacing:var(--tr-b);line-height:var(--lh-h);
+  text-wrap:balance}
+.card{background:var(--sf);border-radius:var(--r-l);box-shadow:var(--sh);padding:18px 20px;
+  margin:16px 0;isolation:isolate;transition:box-shadow var(--t-m) var(--e-soft)}
+.card.tight{padding:14px 16px}
+.hd{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+.hd .sub{font-size:.75rem;color:var(--t3);font-family:var(--mono)}
+/* 主按钮直接给足真实高度（精细指针 40，触屏 44），不靠伪元素撑 ——
+   它周围有 9px 的行间距，撑出去反而会和邻居打架。 */
+.btn{background:var(--sf3);color:var(--t1);border:0;border-radius:var(--r-s);
+  padding:0 16px;min-height:var(--hit-d);display:inline-flex;align-items:center;
+  justify-content:center;font-size:.84375rem;font-weight:var(--fw-m);cursor:pointer;
+  text-decoration:none;letter-spacing:var(--tr-b);
+  transition:transform var(--t-press) ease-out,background var(--t-s) var(--e-soft),opacity var(--t-s)}
+.btn:active{transform:scale(.96)}
+.btn.on{background:var(--ac);color:var(--acf)}
+.btn.ink{background:var(--ink);color:var(--inkf)}
+.btn[disabled]{opacity:.42;cursor:default;transform:none}
+/* 文案会在忙碌时换成"处理中…"，宽度先占住，行内的兄弟按钮就不会左右滑 */
+.btn.fixed{min-width:8.5em}
+.btn.sm.fixed{min-width:6.5em}
+.btn.sm{padding:0 12px;font-size:.78125rem;border-radius:9px;min-height:32px;position:relative}
+.btn.sm::before{content:'';position:absolute;inset:-6px 0}   /* 32 + 6×2 = 44 */
+.link{background:none;border:0;color:var(--t2);font-size:.78125rem;cursor:pointer;padding:0;
+  text-decoration:underline;text-underline-offset:3px;position:relative;
+  transition:color var(--t-xs) var(--e-soft)}
+.link::before{content:'';position:absolute;inset:-11px -7px}
+@media(pointer:coarse){ .btn{min-height:var(--hit)} }
+/* 触屏上点一下会留下"假 hover"，一直粘到点别处为止 —— 按钮看起来像还选中着。
+   所以 hover 只在真有精细指针的设备上生效；:active 不受此限，触屏必须有按压反馈。 */
+@media (hover:hover) and (pointer:fine){
+  .icb:hover{background:var(--sf4)}
+  .btn:hover{background:var(--sf4)}
+  .btn.on:hover{opacity:.86;background:var(--ac)}
+  .link:hover{color:var(--t1)}
+  .citem .cx:hover{color:var(--bad)}
+  .art:hover{transform:translateY(-3px);box-shadow:var(--sh-l)}
+}
+/* 换行时的行距给到 12px：小按钮的命中区上下各撑 6px，正好接上不重叠 */
+.row{display:flex;column-gap:9px;row-gap:12px;flex-wrap:wrap;align-items:center}
+.grow{flex:1}
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:.6875rem;
+  font-weight:var(--fw-s);padding:3px 9px;border-radius:999px;background:var(--sf3);
+  color:var(--t2);letter-spacing:var(--tr-xs)}
+.pill.ok{background:var(--okb);color:var(--ok)}
+.pill.warn{background:var(--warnb);color:var(--warn)}
+.pill.bad{background:var(--badb);color:var(--bad)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--t3);flex:none}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
+.dot.live{background:var(--ok);animation:pulse 1.9s var(--e-soft) infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.75)}}
+.err{color:var(--bad);font-size:.875rem;background:var(--badb);border-radius:var(--r-m);padding:13px 16px;margin:16px 0}
+.warnbox{color:var(--warn);font-size:.8125rem;background:var(--warnb);border-radius:var(--r-m);
+  padding:12px 15px;margin:12px 0;line-height:var(--lh-r)}
+/* ── 空状态 ──
+   空列表是这一屏的第一次见面，不是出错。所以它要说清三件事：
+   这里本来该有什么、为什么现在没有、按哪儿能让它有。
+   高度按"装满时"的尺寸预留，填上内容不会把下面的东西顶走。 */
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  text-align:center;gap:7px;min-height:var(--empty-h,220px);padding:32px 20px}
+.empty h3{color:var(--t1)}
+.empty p{color:var(--t3);font-size:.8125rem;line-height:var(--lh-r);max-width:34em;
+  letter-spacing:var(--tr-s)}
+.empty .row{justify-content:center;margin-top:7px}
+.bar2{height:4px;background:var(--sf3);border-radius:999px;overflow:hidden}
+/* 进度用 scaleX 而不是 width：width 每变一次都要重排，而下载页一次会变几十次 */
+.bar2 i{display:block;height:100%;width:100%;background:var(--ac);border-radius:999px;
+  transform:scaleX(0);transform-origin:left center;
+  transition:transform var(--t-l) var(--e-std)}
+.bar2 i.ok{background:var(--ok)}
+.bar2 i.bad{background:var(--bad)}
+
+/* ── 筛选台 ─────────────────────────────────────────────────────── */
+/* 吸顶高度跟着实测的顶栏走，顶栏在手机上换行也不会错位 */
+.filters{position:sticky;top:var(--hh,56px);z-index:var(--z-sticky);background:var(--bg);
+  padding:10px var(--padr) 6px var(--pad);transition:box-shadow var(--t-m) var(--e-soft);
+  margin-left:calc(var(--pad)*-1);margin-right:calc(var(--padr)*-1)}
+/* 吸住的时候补一道描边：白底上没有它，就看不出下面还有内容在滑 */
+.filters.stuck{box-shadow:0 1px 0 var(--line),0 8px 16px -12px rgba(0,0,0,.12)}
+@media(max-width:600px){.filters{top:0;position:relative}}
+/* 行距 14px：上下两行的命中区各撑 6px，正好不重叠 */
+.fgroup{display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.fgroup>span.lb{font-size:.71875rem;color:var(--t3);font-weight:var(--fw-s);
+  letter-spacing:var(--tr-xs);width:52px;flex:none}
+.seg{display:inline-flex;background:var(--sf3);border-radius:999px;padding:3px;gap:2px}
+.seg button{border:0;background:none;color:var(--t2);font-size:.78125rem;
+  font-weight:var(--fw-m);min-height:30px;padding:0 13px;border-radius:999px;cursor:pointer;
+  white-space:nowrap;position:relative;
+  transition:color var(--t-s) var(--e-soft),background var(--t-s) var(--e-soft),transform var(--t-press) ease-out}
+/* 只往上下撑：左右紧挨着邻居，横向撑出去会互相抢点击 */
+.seg button::before{content:'';position:absolute;inset:-7px 0}
+.seg button.on{background:var(--sf);color:var(--t1);box-shadow:var(--sh-s)}
+.seg button:active{transform:scale(.96)}
+.seg button em{font-style:normal;opacity:.45;font-size:.65625rem;margin-left:4px}
+.chips{display:flex;gap:6px;overflow-x:auto;overscroll-behavior-x:contain;flex:1;min-width:0;
+  padding:6px 0 8px;scrollbar-width:none;-webkit-overflow-scrolling:touch;scroll-snap-type:x proximity}
+.chips::-webkit-scrollbar{display:none}
+.chips button{flex:none;border:0;background:var(--sf3);color:var(--t2);font-size:.78125rem;
+  font-weight:var(--fw-m);min-height:32px;padding:0 13px;border-radius:999px;cursor:pointer;
+  scroll-snap-align:center;position:relative;
+  transition:color var(--t-s) var(--e-soft),background var(--t-s) var(--e-soft),transform var(--t-press) ease-out}
+/* 伸到容器的内边距边缘为止 —— 再往外就会被滚动容器裁掉，白撑 */
+.chips button::before{content:'';position:absolute;inset:-6px 0}
+.chips button.on{background:var(--ac);color:var(--acf)}
+.chips button:active{transform:scale(.96)}
+.fsum{display:flex;align-items:center;gap:10px;font-size:.75rem;color:var(--t3);
+  padding:2px 0 8px;flex-wrap:wrap}
+.fsum .sp{opacity:.4}
+
+/* ── 海报网格 ───────────────────────────────────────────────────── */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:26px 16px;margin:6px 0 8px}
+@media(max-width:600px){.grid{grid-template-columns:repeat(3,1fr);gap:20px 11px}}
+@media(max-width:380px){.grid{grid-template-columns:repeat(2,1fr)}}
+/* 网格每换一次筛选就整体重建，属于"一天几十次"那一档：位移是噪声，
+   只留一次极轻的淡入，把内容替换的硬跳圆掉即可。 */
+.tile{position:relative;isolation:isolate;animation:rise var(--t-fast) var(--e-out) backwards}
+@keyframes rise{from{opacity:0}to{opacity:1}}
+.art{position:relative;aspect-ratio:2/3;border-radius:var(--r-m);overflow:hidden;
+  background:var(--poster);box-shadow:var(--sh);border:0;padding:0;width:100%;
+  cursor:pointer;display:block;
+  transition:transform var(--t-press) ease-out,box-shadow var(--t-m) var(--e-soft)}
+/* 按下的那一刻就给反馈，不等抬手 */
+.art:active{transform:scale(.96)}
+.art.cancel:active{transform:none}
+.art img{width:100%;height:100%;object-fit:cover;display:block;opacity:0;
+  transition:opacity var(--t-l) var(--e-soft),filter var(--t-m) var(--e-soft)}
+.art img.in{opacity:1}
+.art img.err{display:none}
+.badge{position:absolute;font-size:.625rem;font-weight:var(--fw-s);line-height:1.55;
+  border-radius:6px;padding:2px 6px;letter-spacing:var(--tr-xs);
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+.b-vote{left:6px;bottom:6px;background:rgba(0,0,0,.62);color:#fff;font-family:var(--mono)}
+.b-n{top:6px;right:6px;background:rgba(0,0,0,.62);color:rgba(255,255,255,.8);font-family:var(--mono)}
+.b-dv{left:6px;top:6px;background:linear-gradient(100deg,#1B1B1F,#3A3A44);color:#fff;letter-spacing:.04em}
+.b-hdr{left:6px;top:6px;background:rgba(0,0,0,.62);color:#FFD98A;letter-spacing:.04em}
+.b-own{right:6px;bottom:6px;background:rgba(255,255,255,.94);color:#000;box-shadow:0 1px 6px rgba(0,0,0,.3)}
+.b-own.weak{background:rgba(255,255,255,.72);color:rgba(0,0,0,.66)}
+.tick{position:absolute;inset:0;background:rgba(0,0,0,.42);opacity:0;
+  transition:opacity var(--t-m) var(--e-soft);display:flex;align-items:flex-start;justify-content:flex-end;padding:7px}
+.tick span{width:23px;height:23px;border-radius:50%;background:#fff;color:#000;font-size:.875rem;
+  display:grid;place-items:center;line-height:1;font-weight:var(--fw-x);
+  transform:scale(.86);opacity:0;
+  transition:transform var(--t-m) var(--e-pop),opacity var(--t-s) var(--e-soft)}
+.tile.in .tick{opacity:1}
+.tile.in .tick span{transform:scale(1);opacity:1}
+.tile.in .art{box-shadow:0 0 0 2.5px var(--ac),var(--sh)}
+.tile.own .art img.in{opacity:.34;filter:grayscale(.55)}
+.tile.own .tname b{color:var(--t2)}
+.tname{display:block;width:100%;text-align:left;background:none;border:0;padding:9px 2px 0;cursor:pointer}
+/* 标题固定占两行的高度：片名长短不一时整行卡片不会参差，骨架屏换成
+   真内容那一下也不会把下面的整片网格顶下去。 */
+.tname b{display:-webkit-box;font-size:.8125rem;font-weight:var(--fw-m);line-height:1.34;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+  min-height:calc(.8125rem * 1.34 * 2)}
+.tname em{font-style:normal;font-size:.71875rem;color:var(--t3);display:block;margin-top:2px;
+  min-height:calc(.71875rem * 1.5);letter-spacing:var(--tr-s)}
+/* 骨架屏与真卡片逐像素同高：海报是 2:3，标题两行，副标题一行 */
+.skn{padding:9px 2px 0}
+.skn span{display:block;height:calc(.8125rem * 1.34 * 2);border-radius:6px}
+.skn span+span{height:calc(.71875rem * 1.5);width:56%;margin-top:2px;border-radius:5px}
+.shimmer{background:linear-gradient(100deg,var(--sf3) 28%,var(--sf2) 48%,var(--sf3) 68%);
+  background-size:220% 100%;animation:sh 1.4s linear infinite;border-radius:var(--r-m)}
+@keyframes sh{to{background-position:-120% 0}}
+#sent{height:1px}
+.tail{display:flex;justify-content:center;align-items:center;height:68px;color:var(--t3);font-size:.8125rem}
+.tail.hide{display:none}
+.spin{width:18px;height:18px;border:2px solid var(--sf4);border-top-color:var(--t2);
+  border-radius:50%;animation:sp .7s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+
+/* ── 详情 ───────────────────────────────────────────────────────── */
+.hero{display:flex;gap:22px;padding:20px 0 4px;align-items:flex-start}
+.hero .art{width:132px;flex:none;cursor:default}
+.hero .art:hover{transform:none;box-shadow:var(--sh)}
+.hero h2{font-size:1.625rem;font-weight:var(--fw-b);letter-spacing:var(--tr-xl);
+  line-height:var(--lh-t);text-wrap:balance}
+.hero .fine{color:var(--t2);font-size:.8125rem;margin:8px 0 10px;
+  font-variant-numeric:tabular-nums;letter-spacing:var(--tr-s)}
+.hero p{color:var(--t2);font-size:.875rem;line-height:1.6;
+  display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden}
+@media(max-width:600px){.hero{gap:16px}.hero .art{width:98px}.hero h2{font-size:1.3125rem;letter-spacing:var(--tr-l)}.hero p{-webkit-line-clamp:3}}
+.pick{background:var(--ink);color:var(--inkf);border-radius:var(--r-l);padding:18px 20px;margin:16px 0 12px}
+.pick .k{font-size:.65625rem;font-weight:var(--fw-x);letter-spacing:.09em;text-transform:uppercase;opacity:.5}
+.pick h4{font-size:.96875rem;font-weight:var(--fw-s);line-height:1.45;margin:7px 0 10px;
+  letter-spacing:var(--tr-b);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pick .why{font-family:var(--mono);font-size:.71875rem;opacity:.62;margin-bottom:14px;line-height:1.55}
+.pick .acts{display:flex;gap:8px}
+.pick .acts button{flex:1;background:var(--inkf);color:var(--ink);border:0;border-radius:var(--r-s);
+  min-height:var(--hit-d);font-size:.875rem;font-weight:var(--fw-m);cursor:pointer;
+  transition:transform var(--t-press) ease-out}
+.pick .acts .ghost{background:rgba(127,127,127,.22);color:var(--inkf)}
+.pick .acts button:active{transform:scale(.96)}
+@media(pointer:coarse){.pick .acts button{min-height:var(--hit)}}
+.rel{border-bottom:1px solid var(--line);padding:14px 2px;cursor:pointer;transition:opacity var(--t-s)}
+.rel:last-child{border-bottom:0}
+.rel:active{opacity:.55}
+.rel .t{font-size:.875rem;font-weight:var(--fw-m);line-height:1.45;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.spec{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;font-family:var(--mono);font-size:.6875rem;
+  color:var(--t3);align-items:center}
+.spec i{font-style:normal}
+.spec i.hi{color:var(--t1);font-weight:var(--fw-s)}
+.spec i.sep{opacity:.35}
+.att{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
+.att:last-child{border-bottom:0}
+.att .fn{flex:1;min-width:170px;font-family:var(--mono);font-size:.71875rem;color:var(--t2);word-break:break-all}
+.hash{margin-top:9px;font-family:var(--mono);font-size:.6875rem;color:var(--t3);word-break:break-all;line-height:1.65}
+.slot:empty{display:none}
+.panel{margin:12px 0 4px;background:var(--sf2);border-radius:var(--r-m);padding:14px 16px;border:1px solid var(--line)}
+</style>
+<style>
+/* ── 下载台 ─────────────────────────────────────────────────────── */
+.kpi{display:flex;gap:28px;flex-wrap:wrap}
+.kpi div b{display:block;font-size:1.625rem;font-weight:var(--fw-b);letter-spacing:var(--tr-xl);
+  line-height:var(--lh-t)}
+.kpi div em{font-style:normal;font-size:.71875rem;color:var(--t3);letter-spacing:var(--tr-xs)}
+.dl-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.dl-head b{font-size:2.125rem;font-weight:var(--fw-b);letter-spacing:var(--tr-2xl);
+  line-height:var(--lh-t)}
+.dl-head span{font-size:.8125rem;color:var(--t2)}
+.dl-meta{display:flex;gap:16px;flex-wrap:wrap;font-size:.75rem;color:var(--t3);margin-top:11px}
+.dl-meta i{font-style:normal;color:var(--t2);font-weight:var(--fw-m)}
+.qlist{margin-top:14px;max-height:340px;overflow:auto;border-radius:var(--r-m);background:var(--sf2);border:1px solid var(--line)}
+.qrow{display:flex;align-items:center;gap:10px;padding:9px 13px;border-bottom:1px solid var(--line);
+  font-size:.78125rem;min-height:38px;transition:background var(--t-s) var(--e-soft)}
+.qrow:last-child{border-bottom:0}
+.qrow .qn{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--t2)}
+.qrow.done .qn{color:var(--t1)}
+/* 状态字的宽度先占住：一行从"等待"变成"已取"时，片名不会跟着左右滑 */
+.qrow .qs{flex:none;font-family:var(--mono);font-size:.65625rem;color:var(--t3);
+  min-width:4.4em;text-align:right}
+.qrow.done .qs{color:var(--ok)}
+.qrow.fail .qs{color:var(--bad)}
+.citem{display:flex;gap:13px;align-items:center;padding:12px 2px;border-bottom:1px solid var(--line)}
+.citem:last-of-type{border-bottom:0}
+.citem .cth{width:44px;flex:none;aspect-ratio:2/3;border-radius:7px;overflow:hidden;background:var(--poster)}
+.citem .cth img{width:100%;height:100%;object-fit:cover;display:block}
+.citem .cb{flex:1;min-width:0}
+.citem .cb b{display:block;font-size:.875rem;font-weight:var(--fw-m);line-height:1.4;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.citem .cb em{font-style:normal;font-family:var(--mono);font-size:.6875rem;color:var(--t3);
+  display:block;margin-top:3px}
+.citem .cx{flex:none;background:none;border:0;color:var(--t3);font-size:1.125rem;cursor:pointer;
+  width:22px;height:22px;display:grid;place-items:center;line-height:1;position:relative;
+  transition:color var(--t-s) var(--e-soft)}
+.citem .cx::before{content:'';position:absolute;inset:-11px}   /* 22 + 11×2 = 44 */
+
+/* ── 索引管线可视化 ─────────────────────────────────────────────── */
+.flow{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding:4px 0 10px;
+  scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.flow::-webkit-scrollbar{display:none}
+.node{flex:1;min-width:104px;background:var(--sf2);border-radius:var(--r-m);padding:12px 13px;border:1px solid var(--line);
+  position:relative;transition:background var(--t-m) var(--e-soft),transform var(--t-m) var(--e-std)}
+.node.act{background:var(--sf3)}
+.node.err{background:var(--badb)}
+.node .nn{font-size:.71875rem;color:var(--t3);font-weight:var(--fw-s);letter-spacing:var(--tr-xs);
+  display:flex;align-items:center;gap:5px}
+.node .nv{font-size:1.375rem;font-weight:var(--fw-b);letter-spacing:var(--tr-l);margin-top:5px;
+  line-height:1.1}
+.node .ns{font-size:.65625rem;color:var(--t3);font-family:var(--mono);margin-top:3px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.node .ns b{color:var(--bad);font-weight:var(--fw-s)}
+.link2{flex:none;width:22px;position:relative;align-self:center;height:2px;background:var(--line2);
+  border-radius:2px;overflow:hidden}
+.link2 i{position:absolute;top:0;left:-40%;width:40%;height:100%;background:var(--ac);border-radius:2px;opacity:0}
+/* 序号由模板写进 --i。原来用 nth-of-type 是错的：节点和连接线都是 div、
+   又是交错排列，nth-of-type 数的是元素类型，五条里只命中得了两条。 */
+.flow.run .link2 i{opacity:.85;
+  animation:flowdot 1.5s var(--e-soft) infinite;
+  animation-delay:calc(var(--i, 0) * 70ms)}
+@keyframes flowdot{0%{left:-40%}70%,100%{left:110%}}
+@media(max-width:700px){.node{min-width:92px;padding:10px}.node .nv{font-size:1.125rem}.link2{width:12px}}
+
+.spark{display:flex;align-items:flex-end;gap:3px;height:34px;margin-top:12px}
+.spark i{flex:1;max-width:22px;height:100%;background:var(--sf4);border-radius:2px;
+  transform:scaleY(.06);transform-origin:bottom center;
+  transition:transform var(--t-l) var(--e-std),background var(--t-m) var(--e-soft)}
+.spark i.hot{background:var(--ac)}
+.quota{display:flex;align-items:center;gap:10px;margin-top:12px}
+.quota .bar2{flex:1}
+.quota span{font-size:.6875rem;color:var(--t3);font-family:var(--mono);flex:none}
+
+.yr{display:flex;align-items:center;gap:12px;padding:0 2px;min-height:var(--hit-d);
+  border-bottom:1px solid var(--line);cursor:pointer;transition:opacity var(--t-s)}
+.yr:last-of-type{border-bottom:0}
+.yr:active{opacity:.5}
+.yr b{font-family:var(--mono);font-size:.78125rem;font-weight:var(--fw-m);width:42px;flex:none}
+.yr .bar2{flex:1}
+.yr em{font-style:normal;font-family:var(--mono);font-size:.65625rem;color:var(--t3);
+  width:126px;text-align:right;flex:none}
+@media(pointer:coarse){.yr{min-height:var(--hit)}}
+@media(max-width:600px){.yr em{width:96px}}
+
+/* ── 日志（分频道）─────────────────────────────────────────────── */
+.logtabs{display:flex;gap:2px;background:var(--sf3);border-radius:999px;padding:7px 3px;
+  overflow-x:auto;scrollbar-width:none}
+.logtabs::-webkit-scrollbar{display:none}
+.logtabs button{flex:none;border:0;background:none;color:var(--t2);font-size:.75rem;
+  font-weight:var(--fw-m);min-height:30px;padding:0 13px;border-radius:999px;cursor:pointer;
+  white-space:nowrap;position:relative;
+  transition:background var(--t-s) var(--e-soft),color var(--t-s) var(--e-soft)}
+/* 同上：这一条也在横向滚动容器里，靠容器的 7px 内边距把 44 让出来 */
+.logtabs button::before{content:'';position:absolute;inset:-7px 0}
+.logtabs button.on{background:var(--sf);color:var(--t1);box-shadow:var(--sh-s)}
+.logtabs button i{font-style:normal;font-size:.625rem;opacity:.5;margin-left:4px;
+  font-variant-numeric:tabular-nums}
+.logs{margin-top:12px;max-height:300px;overflow:auto;font-family:var(--mono);font-size:.6875rem;line-height:1.6}
+.lrow{display:flex;gap:9px;padding:5px 2px;border-bottom:1px solid var(--line);align-items:flex-start}
+.lrow:last-child{border-bottom:0}
+.lrow .lt{color:var(--t3);flex:none;width:52px;font-variant-numeric:tabular-nums}
+.lrow .lm{flex:1;min-width:0;word-break:break-word;color:var(--t2)}
+.lrow.warn .lm{color:var(--warn)}
+.lrow.err .lm{color:var(--bad)}
+.lrow .lc{flex:none;font-size:.59375rem;color:var(--t3);background:var(--sf3);border-radius:4px;padding:1px 5px}
+
+.dg{display:flex;gap:11px;align-items:flex-start;padding:11px 2px;border-bottom:1px solid var(--line)}
+.dg:last-child{border-bottom:0}
+.dg .dot{margin-top:7px}
+.dot.fail{background:var(--bad)}
+.grid.preview{opacity:.55;pointer-events:none}
+.dg .nm{font-size:.875rem;font-weight:var(--fw-m)}
+.dg .dt{font-family:var(--mono);font-size:.6875rem;color:var(--t3);margin-top:3px;line-height:1.55;word-break:break-word}
+.dg .fx{flex:none;align-self:center}
+
+/* ── 筛选台的两层 ──
+   第一层：排序 + 年份，常驻。第二层：评分 / 已有 / 动态范围 / 画质，
+   收在「筛选」里；有非默认项时按钮染成白云蓝并计数 —— 收起来也知道
+   列表正被什么过滤着。 */
+.fgroup.prime{margin-bottom:10px}
+.lb.auto{width:auto;margin-left:6px}
+.ftog{border:0;background:var(--sf3);color:var(--t2);min-height:32px;padding:0 11px 0 13px;border-radius:999px;
+  font-size:.78125rem;font-weight:var(--fw-m);cursor:pointer;display:inline-flex;align-items:center;gap:6px;
+  flex:none;position:relative;letter-spacing:var(--tr-s);
+  transition:background var(--t-s) var(--e-soft),color var(--t-s) var(--e-soft),transform var(--t-press) ease-out}
+.ftog::before{content:'';position:absolute;inset:-6px 0}
+.ftog::after{content:'';width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;
+  transform:translateY(-1px) rotate(45deg);transition:transform var(--t-s) var(--e-soft);margin-left:1px;opacity:.7}
+.ftog.open::after{transform:translateY(2px) rotate(-135deg)}
+.ftog:active{transform:scale(.96)}
+.ftog i{font-style:normal;font-size:.65625rem;font-family:var(--mono);min-width:1.45em;height:1.45em;
+  border-radius:999px;display:none;place-items:center;background:var(--ac);color:var(--acf);padding:0 4px;line-height:1}
+.ftog.has{background:var(--acb);color:var(--act)}
+.ftog.has i{display:grid}
+.ftog.open{box-shadow:var(--sh-s);background:var(--sf);color:var(--t1)}
+.ftog.open.has{color:var(--act)}
+.fadv{padding-top:2px}
+.fadv[hidden]{display:none}
+[hidden]{display:none!important}
+@media (hover:hover) and (pointer:fine){ .ftog:hover{background:var(--sf4)} .ftog.has:hover{background:var(--acb)} }
+
+/* ── 可展开区（系统页）──
+   一张卡就是一个区：标题行是开关，其余折在里面。展开状态跨重画、跨刷新
+   都保留。不用 9999 的箭头，只有一个跟着转的人字。 */
+details.dx{padding:0}
+details.dx>summary{list-style:none;display:flex;align-items:center;gap:10px;padding:15px 20px;cursor:pointer;
+  font-size:1.0625rem;font-weight:var(--fw-s);letter-spacing:var(--tr-b);line-height:var(--lh-h);
+  -webkit-user-select:none;user-select:none;border-radius:var(--r-l);position:relative;
+  transition:background var(--t-s) var(--e-soft)}
+details.dx>summary::-webkit-details-marker{display:none}
+details.dx>summary::marker{content:''}
+details.dx>summary::after{content:'';width:7px;height:7px;border-right:1.6px solid var(--t3);border-bottom:1.6px solid var(--t3);
+  transform:translateY(-2px) rotate(45deg);flex:none;margin-left:4px;
+  transition:transform var(--t-s) var(--e-soft)}
+details.dx[open]>summary::after{transform:translateY(2px) rotate(-135deg)}
+details.dx>summary .dxr{margin-left:auto;display:flex;align-items:center;gap:8px;min-width:0}
+details.dx>summary .sub{font-size:.75rem;color:var(--t3);font-family:var(--mono);font-weight:var(--fw-r);letter-spacing:0;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+details.dx>summary:focus-visible{outline-offset:-3px}
+details.dx>.dxb{padding:0 20px 18px}
+details.dx>.dxb>.tail{height:52px}
+@media (hover:hover) and (pointer:fine){ details.dx>summary:hover{background:var(--sf2)} }
+@media(pointer:coarse){ details.dx>summary{min-height:var(--hit)} }
+@media(max-width:600px){ details.dx>summary{padding:14px 16px} details.dx>.dxb{padding:0 16px 16px} }
+
+/* ── 系统页的一句状态 ── */
+.sysline{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:.84375rem;color:var(--t2);
+  letter-spacing:var(--tr-b);line-height:var(--lh-h)}
+.sysline b{color:var(--t1);font-weight:var(--fw-m)}
+/* 说明性的小字：一律这一档，别再各处自写 style */
+p.fine{color:var(--t3);font-size:.78125rem;letter-spacing:var(--tr-s);line-height:var(--lh-r);margin:0}
+/* 分页失败：转圈让位给一个重试 */
+.tail.err .spin{display:none}
+.tail #tailrt{font-size:.8125rem;color:var(--bad)}
+.tail #tailrt[hidden]{display:none!important}
+
+
+/* ── 底部动作坞 ─────────────────────────────────────────────────── */
+#dock{position:fixed;left:0;right:0;bottom:0;z-index:var(--z-dock);
+  padding:10px var(--padr) calc(10px + env(safe-area-inset-bottom)) var(--pad);
+  background:var(--glass);backdrop-filter:saturate(180%) blur(22px);
+  -webkit-backdrop-filter:saturate(180%) blur(22px);border-top:1px solid var(--line);
+  transform:translateY(130%);transition:transform var(--t-sheet) var(--e-std);pointer-events:none}
+#dock.up{transform:none;pointer-events:auto}
+.dbar{max-width:1180px;margin:0 auto;display:flex;align-items:center;gap:10px}
+.dbar .dn{flex:1;font-size:.84375rem;color:var(--t2);min-width:0}
+.dbar .dn b{color:var(--t1);font-weight:var(--fw-b)}
+/* 副标题行常驻高度：下载开始/结束时动作坞自己不会长高或缩短 */
+.dbar .dn small{display:block;font-size:.6875rem;color:var(--t3);margin-top:1px;
+  min-height:1.05em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* ══════════════════════════════════════════════════════════════════
+   推入层 —— 详情页
+   详情不再顶掉目录，而是盖在它上面。于是「进」和「出」走同一条路径，
+   底下那一层还活着（滚动位置、已加载的分页全在），可以随时被拖回来。
+   ══════════════════════════════════════════════════════════════════ */
+/* 层级：推入层压在顶栏「下面」。顶栏是半透明材质，内容从它下面滑过去 ——
+   既保住了返回键始终可点，也正是这层材质该有的样子。 */
+#push{position:fixed;inset:0;z-index:var(--z-push);background:var(--bg);overflow-y:auto;
+  overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;visibility:hidden;
+  transform:translate3d(100%,0,0);box-shadow:-14px 0 40px -18px rgba(0,0,0,.4);
+  padding:calc(var(--hh,56px) + 6px) var(--padr) calc(40px + env(safe-area-inset-bottom)) var(--pad)}
+#push.on{visibility:visible}
+#pushIn{max-width:1180px;margin:0 auto}
+/* 底下那一层跟着让开一点：iOS 式的视差，让"上面还有一层"这件事看得见 */
+#stack{transition:none}
+#scrim{position:fixed;inset:0;z-index:var(--z-scrim);background:#000;opacity:0;
+  pointer-events:none;visibility:hidden}
+#scrim.on{visibility:visible}
+/* 从左边缘往右拖就能把它推回去。边缘条从顶栏下方才开始 ——
+   否则它会盖住左上角的返回键。 */
+#edge{position:fixed;left:0;top:var(--hh,56px);bottom:0;width:26px;z-index:var(--z-edge);
+  display:none;touch-action:pan-y}
+#push.on ~ #edge{display:block}
+#toast{position:fixed;left:50%;bottom:calc(96px + env(safe-area-inset-bottom));
+  transform:translate(-50%,14px) scale(.96);opacity:0;background:var(--ink);color:var(--inkf);
+  border-radius:var(--r-m);padding:11px 20px;font-size:.84375rem;pointer-events:none;
+  z-index:var(--z-toast);
+  transition:opacity var(--t-m) var(--e-soft),transform var(--t-m) var(--e-std);max-width:86vw;text-align:center;
+  box-shadow:var(--sh-l)}
+#toast.on{opacity:1;transform:translate(-50%,0) scale(1)}
+.fade{animation:fi var(--t-l) var(--e-out) both}
+@keyframes fi{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
+/* ── 无障碍：三个彼此独立的信号，分别处理 ──
+   减少动效不等于没有反馈，而是换成不引发前庭反应的等价物：
+   位移/弹簧/视差换成短促的透明度交叉淡入，去掉回弹，保留有助于理解的
+   颜色与透明度变化。 */
+@media (prefers-reduced-motion:reduce){
+  .tile,.fade{animation:none}
+  .art,.btn,.seg button,.chips button,nav.pills button,.pills.mini button,.icb{transition:opacity var(--t-s) linear,background var(--t-s) linear}
+  .art:active,.btn:active,.icb:active{transform:none;opacity:.62}
+  .art:hover{transform:none}
+  .tick span{transition:opacity var(--t-s) linear;transform:none}
+  #dock{transition:opacity var(--t-s) linear}
+  #dock:not(.up){opacity:0}
+  #push{transition:opacity var(--t-s) linear}
+  .spin{animation-duration:1.6s}
+  .dot.live,.shimmer,.flow.run .link2 i{animation:none}
+}
+/* 半透明会影响可读性时，把材质做实：提高底色不透明度，去掉模糊 */
+@media (prefers-reduced-transparency:reduce){
+  header,#dock{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;
+    background:var(--sf)!important}
+  header{border-bottom:1px solid var(--line)}
+  header::after{display:none}
+  .badge{backdrop-filter:none;-webkit-backdrop-filter:none}
+}
+/* 高对比：接近实色的底 + 明确的描边 */
+@media (prefers-contrast:more){
+  :root{--line:rgba(0,0,0,.32);--line2:rgba(0,0,0,.5);--t2:rgba(28,28,30,.9);--t3:rgba(28,28,30,.7);
+    --sel:rgba(17,18,20,.24)}
+  .card{border:1px solid var(--line)}
+  .seg button.on,nav.pills button.on,.pills.mini button.on{outline:1.5px solid var(--t1);outline-offset:-1.5px}
+  header,#dock,#toast{background:var(--sf)!important;backdrop-filter:none!important}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap bar">
+    <button id="back" class="icb" aria-label="返回"><svg width="10" height="16" viewBox="0 0 11 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 1.5 2 9l7.5 7.5"/></svg></button>
+    <button class="brand" id="home" aria-label="Cuven 索引库">
+      <span class="mark">C</span>
+      <span class="bname">Cuven<sup>ᴿ</sup> 索引库</span>
+    </button>
+    <nav class="pills" id="nav">
+      <button data-v="lib">片库</button>
+      <button data-v="dl">片单<i id="ncart"></i></button>
+      <button data-v="idx">系统</button>
+    </nav>
+    <div class="tools">
+      <div class="pills mini" id="srcNav" role="group" aria-label="内容源">
+        <button data-s="movie">电影</button><button data-s="tv">剧集</button>
+      </div>
+      <div class="field">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="7" cy="7" r="4.6"/><path d="M10.6 10.6 14 14" stroke-linecap="round"/></svg>
+        <input id="q" placeholder="搜索" autocomplete="off" autocapitalize="off" enterkeyhint="search">
+        <button id="clr" aria-label="清空">✕</button>
+      </div>
+      <button class="icb" id="theme" aria-label="切换主题" title="切换外观"></button>
+    </div>
+  </div>
+</header>
+<div id="stack"><main id="out" class="wrap"></main></div>
+<div id="scrim"></div>
+<div id="push"><div id="pushIn"></div></div>
+<div id="edge"></div>
+<div id="dock"><div class="dbar">
+  <span class="dn"><b id="dnum">0</b> 部已选<small id="dsub"></small></span>
+  <button class="btn sm" id="dclr">清空</button>
+  <button class="btn sm" id="dopen">查看</button>
+  <button class="btn on" id="dgo">下载</button>
+</div></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<!-- ══════════════════════════════════════════════════════════════════
+     本地 CPU 管线 —— 独立线程
+     打包（CRC32 + zip 组装）、base64 解码、大列表筛选都在这里跑。
+     主线程只负责画界面，所以下载一百多部片的时候滚动依然是满帧的。
+     用 type="text/plain" 装源码，避免第二次转义。
+     ══════════════════════════════════════════════════════════════ -->
+<script id="wsrc" type="text/plain">
+var T = (function(){
+  var t = new Uint32Array(256), c, n, k;
+  for (n = 0; n < 256; n++){
+    c = n;
+    for (k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(u8){
+  var c = 0xFFFFFFFF, i;
+  for (i = 0; i < u8.length; i++) c = (c >>> 8) ^ T[(c ^ u8[i]) & 255];
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+var ENC = new TextEncoder();
+function w2(a, o, v){ a[o] = v & 255; a[o+1] = (v >>> 8) & 255; }
+function w4(a, o, v){ a[o] = v & 255; a[o+1] = (v >>> 8) & 255; a[o+2] = (v >>> 16) & 255; a[o+3] = (v >>> 24) & 255; }
+
+/* ZIP —— STORE。种子和文本都不值得再压一遍，省下的 CPU 留给界面。
+   0x0800 标志位声明文件名是 UTF-8，中文片名在 Finder / 资源管理器里才不乱码。 */
+function zip(files){
+  var i, n = files.length, names = [], total = 0, cd = 0;
+  for (i = 0; i < n; i++){
+    names.push(ENC.encode(files[i].name));
+    total += 30 + names[i].length + files[i].data.length;
+    cd += 46 + names[i].length;
+  }
+  var out = new Uint8Array(total + cd + 22), p = 0, offs = [], crcs = [];
+  var d = new Date(), dt = ((d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1)) >>> 0;
+  var dd = (((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate()) >>> 0;
+  for (i = 0; i < n; i++){
+    var f = files[i], nm = names[i];
+    var crc = f.crc != null ? f.crc : crc32(f.data);
+    crcs.push(crc); offs.push(p);
+    w4(out, p, 0x04034b50); w2(out, p+4, 20); w2(out, p+6, 0x0800); w2(out, p+8, 0);
+    w2(out, p+10, dt); w2(out, p+12, dd);
+    w4(out, p+14, crc); w4(out, p+18, f.data.length); w4(out, p+22, f.data.length);
+    w2(out, p+26, nm.length); w2(out, p+28, 0);
+    out.set(nm, p+30); p += 30 + nm.length;
+    out.set(f.data, p); p += f.data.length;
+  }
+  var cdStart = p;
+  for (i = 0; i < n; i++){
+    var f2 = files[i], nm2 = names[i];
+    w4(out, p, 0x02014b50); w2(out, p+4, 20); w2(out, p+6, 20); w2(out, p+8, 0x0800);
+    w2(out, p+10, 0); w2(out, p+12, dt); w2(out, p+14, dd);
+    w4(out, p+16, crcs[i]); w4(out, p+20, f2.data.length); w4(out, p+24, f2.data.length);
+    w2(out, p+28, nm2.length); w2(out, p+30, 0); w2(out, p+32, 0);
+    w2(out, p+34, 0); w2(out, p+36, 0); w4(out, p+38, 0); w4(out, p+42, offs[i]);
+    out.set(nm2, p+46); p += 46 + nm2.length;
+  }
+  w4(out, p, 0x06054b50); w2(out, p+4, 0); w2(out, p+6, 0);
+  w2(out, p+8, n); w2(out, p+10, n);
+  w4(out, p+12, p - cdStart); w4(out, p+16, cdStart); w2(out, p+20, 0);
+  return out;
+}
+
+var B64 = (function(){
+  var s = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  var m = new Uint8Array(256), i;
+  for (i = 0; i < 64; i++) m[s.charCodeAt(i)] = i;
+  return m;
+})();
+function unb64(str){
+  var len = str.length, pad = 0;
+  while (len > 0 && str.charCodeAt(len-1) === 61){ len--; pad++; }
+  var n = (len * 3) >> 2, out = new Uint8Array(n), o = 0, i = 0, a, b, c, dd2;
+  for (; i + 3 < len; i += 4){
+    a = B64[str.charCodeAt(i)]; b = B64[str.charCodeAt(i+1)];
+    c = B64[str.charCodeAt(i+2)]; dd2 = B64[str.charCodeAt(i+3)];
+    out[o++] = (a << 2) | (b >> 4);
+    out[o++] = ((b & 15) << 4) | (c >> 2);
+    out[o++] = ((c & 3) << 6) | dd2;
+  }
+  if (i < len){
+    a = B64[str.charCodeAt(i)]; b = B64[str.charCodeAt(i+1)];
+    out[o++] = (a << 2) | (b >> 4);
+    if (i + 2 < len){ c = B64[str.charCodeAt(i+2)]; out[o++] = ((b & 15) << 4) | (c >> 2); }
+  }
+  return out.subarray(0, o);
+}
+
+/* 大列表本地筛选：影片一多，主线程做这个就会掉帧 */
+function sift(items, f){
+  var out = [], i, m;
+  for (i = 0; i < items.length; i++){
+    m = items[i];
+    if (f.dr === 'dv' && m.hb !== 7) continue;
+    if (f.dr === 'hdr' && (m.hb || 0) < 3) continue;
+    if (f.dr === 'sdr' && (m.hb || 0) >= 3) continue;
+    if (f.qual === 'uhd' && (m.rb || 0) < 5) continue;
+    if (f.qual === 'hd' && !(m.rb && m.rb <= 4)) continue;
+    if (f.own === 'hide' && m.own) continue;
+    if (f.own === 'only' && !m.own) continue;
+    out.push(m);
+  }
+  return out;
+}
+
+onmessage = function(ev){
+  var d = ev.data, id = d.id, r, tr = [];
+  try {
+    if (d.op === 'zip'){
+      r = zip(d.files);
+      tr.push(r.buffer);
+      postMessage({ id: id, ok: 1, buf: r.buffer, size: r.length }, tr);
+      return;
+    }
+    if (d.op === 'unb64'){
+      var arr = d.list.map(function(s){ return unb64(s); });
+      var bufs = arr.map(function(u){ return u.buffer; });
+      postMessage({ id: id, ok: 1, list: arr }, bufs);
+      return;
+    }
+    if (d.op === 'crc'){
+      var cs = new Uint32Array(d.segs.length);
+      for (var i = 0; i < d.segs.length; i++)
+        cs[i] = crc32(new Uint8Array(d.buf, d.segs[i][0], d.segs[i][1]));
+      postMessage({ id: id, ok: 1, crcs: cs, buf: d.buf }, [cs.buffer, d.buf]);
+      return;
+    }
+    if (d.op === 'sift'){
+      postMessage({ id: id, ok: 1, items: sift(d.items, d.f) });
+      return;
+    }
+    postMessage({ id: id, ok: 0, err: 'unknown op' });
+  } catch (e){
+    postMessage({ id: id, ok: 0, err: String(e && e.message || e) });
+  }
+};
+</script>
+<script>
+var GATE = new URLSearchParams(location.search).get('gate') || '';
+var out = document.getElementById('out'),
+    qEl = document.getElementById('q'),
+    clrEl = document.getElementById('clr'),
+    backEl = document.getElementById('back'),
+    navEl = document.getElementById('nav'),
+    hdr = document.querySelector('header'),
+    dock = document.getElementById('dock');
+
+var PREF = (function(){ try { return JSON.parse(localStorage.getItem('cvr') || '{}'); } catch(e){ return {}; } })();
+function savePref(){
+  try { localStorage.setItem('cvr', JSON.stringify({
+    sort:S.sort, min:S.min, year:S.year, own:S.own, dr:S.dr, qual:S.qual,
+    theme:S.theme, src:S.src })); } catch(e){}
+}
+/* ══════════════════════════════════════════════════════════════════
+   两个源
+   ──────────────────────────────────────────────────────────────────
+   电影和剧集是两套互不相干的索引：各自的年份、片单、片库比对结果。
+   前端这边只做一件事 —— 每个请求都带上 src，然后在切换的时候把所有
+   本地缓存清干净。年份表按源分开，因为剧集版块只有 2020 往后。
+   ══════════════════════════════════════════════════════════════════ */
+var SRCS = {
+  movie: { id:'movie', name:'电影', head:'电影库', unit:'部',
+           lede:'点海报加入片单，点片名看片源',
+           years:[2026,2025,2024,2023,2022,2021,2020,2019,2018,2017,2016,2015,2014,2013,2012,2011,2010] },
+  tv:    { id:'tv', name:'剧集', head:'剧集库', unit:'部',
+           lede:'点海报加入片单，点片名按季看片源',
+           years:[2026,2025,2024,2023,2022,2021,2020] }
+};
+var SRC0 = SRCS[PREF.src] ? PREF.src : 'movie';
+var S = {
+  src: SRC0,
+  view:'lib', q:'', year:PREF.year||'', genre:'',
+  min: PREF.min == null ? 6 : PREF.min,
+  sort: PREF.sort || 'new', own: PREF.own || 'hide',
+  dr: PREF.dr || '', qual: PREF.qual || '',
+  theme: PREF.theme || 'auto',
+  lib:null, hidden:0, counts:{}, indexed:0, building:false,
+  page:1, pages:1, items:[], busy:false, scroll:0,
+  movie:null, st:null, libst:null, logch:'pipe', logs:null,
+  under:'lib', fopen:false, hdKey:null, libStamp:0, mvStamp:0
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   PERF —— 统一状态与性能调度
+   ──────────────────────────────────────────────────────────────────
+   一个地方回答三个问题：这台设备有多少力气、现在掉帧了没有、这件活该
+   交给谁做。三档（high / balanced / low）同时决定两件事：
+     · 动效尺度 --silk —— 掉帧就整体收紧，省下的帧还给滚动；
+     · 重活的去处 —— GPU（WebGPU 并行算 CRC32）/ 独立线程（打包、
+       解码、大列表筛选）/ 主线程（量小的时候，省掉一次线程往返）。
+   GPU 路径上线前先跑一次自检：拿一段随机数据在 GPU 和 CPU 各算一遍，
+   不完全相等就永久禁用 —— 宁可慢一点，也不能给出一个坏掉的压缩包。
+   ══════════════════════════════════════════════════════════════════ */
+var PERF = {
+  tier:'high', fps:60, cores:4, mem:4, gpu:null, gpuOK:false, worker:null,
+  jobs:{}, seq:0, lowSince:0, silk:1,
+
+  init:function(){
+    this.cores = navigator.hardwareConcurrency || 4;
+    this.mem = navigator.deviceMemory || 4;
+    var c = navigator.connection || {};
+    this.save = !!c.saveData;
+    this.reduce = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+    this.tier = (this.cores >= 8 && this.mem >= 6) ? 'high'
+              : (this.cores >= 4 && this.mem >= 3) ? 'balanced' : 'low';
+    if (this.save) this.tier = 'low';
+    this.apply();
+    this.watch();
+    if (navigator.gpu) this.bootGPU();
+  },
+  apply:function(){
+    var s = this.reduce ? 0.001 : (this.tier === 'high' ? 1 : this.tier === 'balanced' ? 0.78 : 0.5);
+    if (Math.abs(s - this.silk) > 0.01){
+      this.silk = s;
+      document.documentElement.style.setProperty('--silk', String(s));
+    }
+    document.documentElement.classList.toggle('lite', this.tier === 'low');
+  },
+  /* 帧率监控：连续两秒低于 46 帧就降一档，稳定回到 56 帧以上再升回来。
+     用滑动平均，避免一次滚动抖动就把整站的动效改掉。
+     只在有事发生时看：交互后 2.5 秒的窗口、以及弹簧还在动的时候。
+     页面静着的时候不常驻 rAF —— 常驻一条 60Hz 的空循环在手机上就是烧电。 */
+  watch:function(){
+    var self = this, last = 0, acc = 0, n = 0, until = 0, running = false;
+    function tick(t){
+      if (!running) return;
+      if (last){
+        var dt = t - last;
+        if (dt > 0 && dt < 400){ acc += 1000 / dt; n++; }
+      }
+      last = t;
+      if (n >= 30){
+        self.fps = self.fps * 0.5 + (acc / n) * 0.5;
+        acc = 0; n = 0;
+        if (self.fps < 46){
+          if (!self.lowSince) self.lowSince = t;
+          else if (t - self.lowSince > 1800 && self.tier !== 'low'){
+            self.tier = self.tier === 'high' ? 'balanced' : 'low';
+            self.lowSince = 0; self.apply();
+          }
+        } else {
+          self.lowSince = 0;
+          if (self.fps > 56 && self.tier === 'balanced' && self.cores >= 8){
+            self.tier = 'high'; self.apply();
+          }
+        }
+      }
+      if (t < until || (typeof Silk !== 'undefined' && Silk.on)) requestAnimationFrame(tick);
+      else { running = false; last = 0; acc = 0; n = 0; }
+    }
+    function poke(){
+      until = performance.now() + 2500;
+      if (!running && !document.hidden){ running = true; last = 0; requestAnimationFrame(tick); }
+    }
+    self.poke = poke;
+    ['scroll','pointerdown','pointermove','wheel','keydown','touchmove'].forEach(function(ev){
+      addEventListener(ev, poke, { passive:true });
+    });
+    document.addEventListener('visibilitychange', function(){ if (!document.hidden) poke(); });
+    poke();
+  },
+
+  /* ── 独立线程 ── */
+  wk:function(){
+    if (this.worker) return this.worker;
+    try {
+      var src = document.getElementById('wsrc').textContent;
+      var url = URL.createObjectURL(new Blob([src], { type:'text/javascript' }));
+      var w = new Worker(url);
+      var self = this;
+      w.onmessage = function(ev){
+        var j = self.jobs[ev.data.id];
+        if (!j) return;
+        delete self.jobs[ev.data.id];
+        ev.data.ok ? j.res(ev.data) : j.rej(new Error(ev.data.err || '本地计算失败'));
+      };
+      /* 线程崩了：挂着的活全部报错（不是干等 120 秒超时），线程丢掉，
+         下一次调用重建一条 */
+      w.onerror = function(ev){
+        var jobs = self.jobs; self.jobs = {};
+        if (self.worker === w) self.worker = null;
+        try { w.terminate(); } catch(e){}
+        Object.keys(jobs).forEach(function(k){
+          jobs[k].rej(new Error('后台线程出错' + (ev && ev.message ? '：' + ev.message : '')));
+        });
+      };
+      this.worker = w;
+    } catch(e){ this.worker = null; }
+    return this.worker;
+  },
+  call:function(msg, transfer){
+    var w = this.wk();
+    if (!w) return Promise.reject(new Error('本机不支持后台线程'));
+    var id = ++this.seq, self = this;
+    msg.id = id;
+    return new Promise(function(res, rej){
+      /* 超时计时器用完即清，别让每次调用都留一个 120 秒的定时器在那儿 */
+      var tm = setTimeout(function(){
+        if (self.jobs[id]){ delete self.jobs[id]; rej(new Error('本地计算超时')); }
+      }, 120000);
+      self.jobs[id] = { res:function(v){ clearTimeout(tm); res(v); },
+                        rej:function(e){ clearTimeout(tm); rej(e); } };
+      try { w.postMessage(msg, transfer || []); }
+      catch(e){ clearTimeout(tm); delete self.jobs[id]; rej(e); }
+    });
+  },
+
+  /* ── WebGPU：一个线程算一部片的 CRC32 ──
+     zip 每个条目都要一份 CRC。条目之间彼此独立，正好一片一线程；
+     二百部片就是二百条并行，GPU 上一次派发的事，CPU 要串着算二百遍。 */
+  bootGPU:async function(){
+    try {
+      var ad = await navigator.gpu.requestAdapter();
+      if (!ad) return;
+      var dev = await ad.requestDevice();
+      dev.lost.then(function(){ PERF.gpu = null; PERF.gpuOK = false; });
+      var mod = dev.createShaderModule({ code: [
+        'struct N { c: u32, p1: u32, p2: u32, p3: u32 };',
+        '@group(0) @binding(0) var<storage, read> data: array<u32>;',
+        '@group(0) @binding(1) var<storage, read> seg: array<u32>;',
+        '@group(0) @binding(2) var<storage, read_write> res: array<u32>;',
+        '@group(0) @binding(3) var<uniform> n: N;',
+        '@compute @workgroup_size(64)',
+        'fn main(@builtin(global_invocation_id) g: vec3<u32>) {',
+        '  let i = g.x;',
+        '  if (i >= n.c) { return; }',
+        '  let off = seg[i * 2u];',
+        '  let len = seg[i * 2u + 1u];',
+        '  var c: u32 = 0xFFFFFFFFu;',
+        '  var k: u32 = 0u;',
+        '  loop {',
+        '    if (k >= len) { break; }',
+        '    let p = off + k;',
+        '    let w = data[p >> 2u];',
+        '    let b = (w >> ((p & 3u) * 8u)) & 0xFFu;',
+        '    var x = (c ^ b) & 0xFFu;',
+        '    var j: u32 = 0u;',
+        '    loop {',
+        '      if (j >= 8u) { break; }',
+        '      if ((x & 1u) != 0u) { x = (x >> 1u) ^ 0xEDB88320u; } else { x = x >> 1u; }',
+        '      j = j + 1u;',
+        '    }',
+        '    c = x ^ (c >> 8u);',
+        '    k = k + 1u;',
+        '  }',
+        '  res[i] = c ^ 0xFFFFFFFFu;',
+        '}'
+      ].join('\n') });
+      this.pipe = dev.createComputePipeline({ layout:'auto', compute:{ module:mod, entryPoint:'main' } });
+      this.gpu = dev;
+      this.gpuOK = await this.verify();
+      if (!this.gpuOK) this.gpu = null;
+    } catch(e){ this.gpu = null; this.gpuOK = false; }
+  },
+  /* 自检：随机数据 + 长短不一的分段，GPU 与 CPU 必须逐位相同 */
+  verify:async function(){
+    try {
+      var n = 40000, buf = new Uint8Array(n), i;
+      for (i = 0; i < n; i++) buf[i] = (i * 131 + (i >> 3) * 17 + 7) & 255;
+      var segs = [[0, 9999], [9999, 1], [10000, 20003], [30003, n - 30003]];
+      var g = await this.crcGPU(buf, segs);
+      var cpu = await this.call({ op:'crc', buf: buf.buffer.slice(0), segs: segs });
+      var c2 = new Uint32Array(cpu.crcs);
+      for (i = 0; i < segs.length; i++) if (g[i] !== c2[i]) return false;
+      return true;
+    } catch(e){ return false; }
+  },
+  crcGPU:async function(u8, segs){
+    var dev = this.gpu, i;
+    /* writeBuffer 的长度必须是 4 的倍数，尾部不齐就补一段零 */
+    var pad = (u8.length + 3) & ~3;
+    var src = u8;
+    if (pad !== u8.length || u8.byteOffset % 4){ src = new Uint8Array(pad); src.set(u8); }
+    var db = dev.createBuffer({ size: Math.max(4, pad), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    dev.queue.writeBuffer(db, 0, src.buffer, src.byteOffset, pad);
+    var sa = new Uint32Array(segs.length * 2);
+    for (i = 0; i < segs.length; i++){ sa[i*2] = segs[i][0]; sa[i*2+1] = segs[i][1]; }
+    var sb = dev.createBuffer({ size: Math.max(4, sa.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    dev.queue.writeBuffer(sb, 0, sa);
+    var rb = dev.createBuffer({ size: Math.max(4, segs.length * 4),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    var ub = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    dev.queue.writeBuffer(ub, 0, new Uint32Array([segs.length, 0, 0, 0]));
+    var bg = dev.createBindGroup({ layout: this.pipe.getBindGroupLayout(0), entries:[
+      { binding:0, resource:{ buffer:db } }, { binding:1, resource:{ buffer:sb } },
+      { binding:2, resource:{ buffer:rb } }, { binding:3, resource:{ buffer:ub } } ] });
+    var out2 = dev.createBuffer({ size: Math.max(4, segs.length * 4),
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    var enc = dev.createCommandEncoder();
+    var pass = enc.beginComputePass();
+    pass.setPipeline(this.pipe); pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.ceil(segs.length / 64));
+    pass.end();
+    enc.copyBufferToBuffer(rb, 0, out2, 0, Math.max(4, segs.length * 4));
+    dev.queue.submit([enc.finish()]);
+    await out2.mapAsync(GPUMapMode.READ);
+    var res = new Uint32Array(out2.getMappedRange().slice(0, segs.length * 4));
+    out2.unmap();
+    db.destroy(); sb.destroy(); rb.destroy(); ub.destroy(); out2.destroy();
+    return res;
+  },
+
+  /* 调度决策：量小就别过线程，量大就上 GPU */
+  /* 组装始终在独立线程（要出一段可转移的内存）；这里只决定 CRC 走不走 GPU。
+     条目少或数据小的时候派发一次 GPU 的开销比省下的还多，就别折腾。 */
+  route:function(bytes, n){
+    return (this.gpuOK && n >= 20 && bytes >= (1 << 21)) ? 'gpu' : 'worker';
+  },
+  label:function(){
+    return (this.tier === 'high' ? '高性能' : this.tier === 'balanced' ? '均衡' : '节能')
+      + ' · ' + this.cores + ' 核' + (this.gpuOK ? ' · GPU 就绪' : '')
+      + ' · ' + Math.round(this.fps) + ' fps';
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   IndexedDB —— 下载的落脚点
+   取回来的种子先写这里，再谈压包。于是刷新、断网、误关标签页都不丢，
+   回来只补缺的那几部。
+   ══════════════════════════════════════════════════════════════════ */
+var DBP = null;
+/* 打开失败不能把失败钉死：以前 DBP 一旦拒绝就永远拒绝，下载直到刷新都不能用。
+   现在失败就把 DBP 清掉，下一次调用重新打开；被别的标签页升级顶掉也一样。 */
+function db(){
+  if (DBP) return DBP;
+  DBP = new Promise(function(res, rej){
+    var r;
+    try { r = indexedDB.open('cuven-r', 1); }
+    catch(e){ rej(e); return; }
+    r.onupgradeneeded = function(){
+      var d = r.result;
+      if (!d.objectStoreNames.contains('parts')) d.createObjectStore('parts');
+      if (!d.objectStoreNames.contains('job')) d.createObjectStore('job');
+    };
+    r.onsuccess = function(){
+      var d = r.result;
+      d.onversionchange = function(){ try { d.close(); } catch(e){} DBP = null; };
+      d.onclose = function(){ DBP = null; };
+      res(d);
+    };
+    r.onerror = function(){ rej(r.error || new Error('本机数据库打不开')); };
+    r.onblocked = function(){ rej(new Error('本机数据库被别的标签页占用，关掉它再试')); };
+  });
+  DBP.catch(function(){ DBP = null; });
+  return DBP;
+}
+function tx(store, mode, fn){
+  return db().then(function(d){
+    return new Promise(function(res, rej){
+      var t = d.transaction(store, mode), s = t.objectStore(store), rq = fn(s);
+      t.oncomplete = function(){ res(rq ? rq.result : null); };
+      t.onerror = function(){ rej(t.error); };
+    });
+  });
+}
+var kPut = function(st,k,v){ return tx(st,'readwrite',function(s){ return s.put(v,k); }); };
+var kGet = function(st,k){ return tx(st,'readonly',function(s){ return s.get(k); }); };
+var kDel = function(st,k){ return tx(st,'readwrite',function(s){ return s.delete(k); }); };
+var kKeys = function(st){ return tx(st,'readonly',function(s){ return s.getAllKeys(); }); };
+var kAll = function(st){ return tx(st,'readonly',function(s){ return s.getAll(); }); };
+
+/* ══════════════════════════════════════════════════════════════════
+   下载管理器
+   ──────────────────────────────────────────────────────────────────
+   v4 是「前端切 25 部一批 → 服务端拼 zip → 浏览器存盘」，于是 99 部片
+   会掉下来四个压缩包，中途断了还得从头再来。
+   v5 只做两件事：
+     ① 分片取：每次向服务端要 8 部的种子字节，落进 IndexedDB；
+        服务端说预算到了（503 budget）就歇一下再要，不算失败。
+     ② 全部齐了，本地压成「一个」包 —— CRC 与组装交给 GPU / 独立线程。
+   任务按片单指纹认领：同一份片单回来还是同一个任务，接着取缺的那几部。
+   ══════════════════════════════════════════════════════════════════ */
+var DL = {
+  job:null, run:false, stop:false, phase:'', got:0, bytes:0, t0:0, err:'', tick:null,
+
+  sig:function(items){
+    var s = items.map(function(x){ return x.tid; }).sort().join(',') + '|' + items.length;
+    var h = 5381, i;
+    for (i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+    return 'j' + h.toString(36) + items.length.toString(36);
+  },
+  load:function(){
+    var self = this;
+    return kGet('job','cur').then(function(j){
+      if (!j) return null;
+      self.job = j;
+      return tx('parts','readonly',function(s){ return s.count(self.range()); }).then(function(n){
+        self.got = n || 0;
+        return j;
+      });
+    }).catch(function(){ return null; });
+  },
+  begin:function(items){
+    var self = this, id = this.sig(items);
+    if (this.job && this.job.id === id) return this.resume();
+    this.stop = false;
+    var job = { id:id, at:Date.now(), items:items, fail:{}, total:items.length };
+    return kGet('job','cur').then(function(old){
+      if (old && old.id !== id) return self.purge(old.id);
+    }).then(function(){
+      self.job = job; self.got = 0; self.bytes = 0; self.doneSet = {}; self.err = '';
+      return kPut('job','cur',job);
+    }).then(function(){ return self.resume(); });
+  },
+  purge:function(id){
+    var r = this.range(id);
+    return tx('parts','readwrite',function(s){ return s.delete(r); }).catch(function(){});
+  },
+  clear:function(){
+    var self = this, id = this.job && this.job.id;
+    this.job = null; this.got = 0; this.run = false; this.phase = ''; this.doneSet = {}; this.err = '';
+    return Promise.all([ kDel('job','cur'), id ? this.purge(id) : null ]);
+  },
+  range:function(id){ var p = (id || this.job.id) + ':'; return IDBKeyRange.bound(p, p + '\uffff'); },
+  pending:function(){
+    var self = this;
+    return tx('parts','readonly',function(s){ return s.getAllKeys(self.range()); }).then(function(ks){
+      var have = {}, cut = self.job.id.length + 1;
+      ks.forEach(function(k){ have[String(k).slice(cut)] = 1; });
+      self.got = ks.length;
+      return self.job.items.filter(function(it){ return !have[String(it.tid)]; });
+    });
+  },
+  resume:async function(){
+    if (this.run) return;
+    this.run = true; this.stop = false; this.err = ''; this.t0 = Date.now();
+    this.phase = 'fetch';
+    var soft = 0;
+    try {
+      for (;;){
+        if (this.stop){ this.phase = 'paused'; break; }
+        var left = await this.pending();
+        if (!left.length) break;
+        var take = left.filter(function(x){ return !DL.job.fail[x.tid]; }).slice(0, GRAB);
+        if (!take.length) break;                                  // 剩下的都是硬失败
+        this.paint();
+        var r;
+        try { r = await api('/api/fetch', { method:'POST', body: JSON.stringify({ items: take }) }); }
+        catch (e){
+          var dt = e.data || {};
+          if (dt.budget || e.status === 503 || e.status === 429){
+            soft++; this.phase = 'wait'; this.paint();
+            await sleep(Math.min(6000, 900 * soft));
+            this.phase = 'fetch'; continue;
+          }
+          if (e.status === 409){ await sleep(2500); continue; }
+          if (++soft > 6){ this.err = e.message; break; }
+          await sleep(1200 * soft); continue;
+        }
+        soft = 0;
+        var wr = [];
+        for (var i = 0; i < r.items.length; i++){
+          var it = r.items[i];
+          if (it.retry) continue;                                  // 服务端预算到了，下一轮再取
+          if (!it.ok){ this.job.fail[it.tid] = it.err || '取不到'; continue; }
+          wr.push(it);
+        }
+        if (wr.length){
+          var dec = await PERF.call({ op:'unb64', list: wr.map(function(x){ return x.kind === 'torrent' ? x.b64 : ''; }) })
+            .catch(function(){ return null; });
+          for (var j = 0; j < wr.length; j++){
+            var w = wr[j];
+            var bytes = (dec && w.kind === 'torrent') ? dec.list[j] : null;
+            if (w.kind === 'torrent' && !bytes) bytes = b64main(w.b64);
+            await kPut('parts', this.job.id + ':' + w.tid,
+              { tid:w.tid, name:w.name, kind:w.kind, data:bytes || null, magnet:w.magnet || '' });
+            if (!this.doneSet) this.doneSet = {};
+            this.doneSet[w.tid] = 1;
+            if (bytes) this.bytes += bytes.length;
+          }
+        }
+        await kPut('job','cur',this.job);
+        this.paint();
+      }
+      if (!this.stop && !this.err) await this.pack();
+    } catch (e){ this.err = e.message || String(e); }
+    this.run = false;
+    if (!this.err && this.phase !== 'paused' && this.phase !== 'done') this.phase = 'idle';
+    this.paint();
+  },
+  /* 全部到齐 → 压成一个包。CRC 与组装按设备能力分派。 */
+  pack:async function(){
+    this.phase = 'pack'; this.paint();
+    var r0 = this.range();
+    var mine = await tx('parts','readonly',function(s){ return s.getAll(r0); });
+    /* 按片单原顺序出包：用户看到的顺序和压缩包里的顺序是一致的 */
+    var byTid = {};
+    mine.forEach(function(p){ if (p) byTid[p.tid] = p; });
+    mine = this.job.items.map(function(it){ return byTid[it.tid]; }).filter(Boolean);
+
+    var files = [], mags = [], used = {}, ok = 0;
+    for (var k = 0; k < mine.length; k++){
+      var p = mine[k];
+      if (!p) continue;
+      if (p.kind === 'torrent' && p.data){
+        var nm = p.name + '.torrent', c = 2;
+        while (used[nm]) nm = p.name + ' (' + (c++) + ').torrent';
+        used[nm] = 1;
+        files.push({ name:nm, data:new Uint8Array(p.data) });
+        ok++;
+      } else if (p.magnet){ mags.push('# ' + p.name + '\n' + p.magnet); ok++; }
+    }
+    var E = new TextEncoder();
+    if (mags.length) files.push({ name:'_磁力链接.txt', data:E.encode(mags.join('\n\n') + '\n') });
+    var fails = Object.keys(this.job.fail);
+    var head = 'Cuven ᴿ 索引库 · 打包清单\n生成时间 ' + new Date().toLocaleString('zh-CN') +
+      '\n共 ' + this.job.total + ' 项，成功 ' + ok + '，失败 ' + fails.length + '\n\n';
+    var body = this.job.items.map(function(it){
+      var f = DL.job.fail[it.tid];
+      return it.name + '  ·  #' + it.tid + '  ·  ' + (f ? '失败：' + f : '已收录');
+    }).join('\n');
+    files.push({ name:'_清单.txt', data:E.encode(head + body + '\n') });
+
+    var total = files.reduce(function(a, f){ return a + f.data.length; }, 0);
+    var how = PERF.route(total, files.length);
+    /* GPU 路径：所有条目拼成一段连续内存，一片一线程并行算 CRC */
+    if (how === 'gpu'){
+      try {
+        var cat = new Uint8Array(total), segs = [], o = 0;
+        for (var z = 0; z < files.length; z++){
+          cat.set(files[z].data, o); segs.push([o, files[z].data.length]); o += files[z].data.length;
+        }
+        var crcs = await PERF.crcGPU(cat, segs);
+        for (var y = 0; y < files.length; y++) files[y].crc = crcs[y];
+      } catch(e){ how = 'worker'; }
+    }
+    this.how = how;
+    var zbuf;
+    try {
+      var res = await PERF.call({ op:'zip', files: files },
+        files.map(function(f){ return f.data.buffer; }));
+      zbuf = res.buf;
+    } catch(e){ this.err = '本地打包失败：' + (e.message || e); this.paint(); return; }
+
+    var blob = new Blob([zbuf], { type:'application/zip' });
+    var stamp = new Date().toISOString().slice(0,10).replace(/-/g,'');
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'Cuven索引库-' + stamp + '.zip';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 90000);
+    this.phase = 'done'; this.okCount = ok; this.zipSize = blob.size;
+    this.paint();
+    haptic('done');
+    toast('已打包 ' + ok + ' 部 · ' + fmtSize(blob.size));
+  },
+  /* 进行中每一批都会来一次：阶段没变就只打补丁（数字 / 进度 / 行状态），
+     阶段变了（取件 → 打包 → 完成）按钮组要换，才整页重画 */
+  paint:function(){
+    if (S.view === 'dl' && !(this._pp === this.phase && patchDL())) renderDL();
+    paintDock();
+  }
+};
+
+function b64main(s){
+  var bin = atob(s), n = bin.length, u = new Uint8Array(n), i;
+  for (i = 0; i < n; i++) u[i] = bin.charCodeAt(i);
+  return u;
+}
+var GRAB = 8;
+function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+</script>
+<script>
+/* ══════════════════════════════════════════════════════════════════
+   Silk · 弹簧
+   ──────────────────────────────────────────────────────────────────
+   缓动曲线有个绕不过去的毛病：它的时长是写死的，中途来了新输入就没法
+   接。手势驱动的东西必须能在任意一帧被抓住、被反向，所以这里改用弹簧 ——
+   它天然从"当前值"起算，也天然带着速度。
+   参数用 Apple 那两个：
+     damping  阻尼比。1.0 = 临界阻尼，不过冲；<1 会回弹，越小越弹。
+     response 响应时间（秒）。不是"时长" —— 弹簧没有固定时长，
+              停下来的时刻是从参数里长出来的。
+   默认一律 damping 1.0。只有当这一下动作本身带着动量（甩、抛、拖完松手）
+   才给回弹 —— 一个只是淡入的菜单要是也过冲，就很怪。
+   所有弹簧共用一条 rAF，帧预算才好控制。
+   ══════════════════════════════════════════════════════════════════ */
+var Silk = {
+  live: [], on: false, last: -1,
+
+  /* Apple 出厂值：移动/复位 1.0/0.4，旋转 0.8/0.4，抽屉 0.8/0.3 */
+  MOVE:  { damping:1.0, response:0.40 },
+  SHEET: { damping:0.8, response:0.30 },
+  SNAP:  { damping:1.0, response:0.28 },
+
+  spring: function(o){
+    var s = {
+      x: o.from || 0, v: o.velocity || 0, to: o.to || 0,
+      damping: o.damping == null ? 1 : o.damping,
+      response: o.response || 0.4,
+      onFrame: o.onFrame, onRest: o.onRest, eps: o.eps || 0.4,
+      dead: false,
+      /* 重新指定目标时不清零速度 —— 反向的那一下如果把速度砍掉，
+         手感上就是一堵墙。带着速度过去，才是连续的。 */
+      retarget: function(to, opt){
+        this.to = to;
+        if (opt && opt.damping != null) this.damping = opt.damping;
+        if (opt && opt.response) this.response = opt.response;
+        if (opt && opt.velocity != null) this.v = opt.velocity;
+        Silk.wake(this);
+        return this;
+      },
+      stop: function(){ this.dead = true; return this; },
+    };
+    /* 减少动效：直接落到终点，但保留"到位"回调，交互逻辑不受影响 */
+    if (PERF.reduce){
+      s.x = s.to; if (s.onFrame) s.onFrame(s.x, 0); if (s.onRest) s.onRest();
+      s.dead = true; return s;
+    }
+    this.wake(s);
+    return s;
+  },
+  wake: function(s){
+    if (this.live.indexOf(s) < 0) this.live.push(s);
+    if (this.on) return;
+    this.on = true;
+    /* 起始时刻交给第一帧的时间戳去定，不在这里采样 performance.now()：
+       rAF 回调拿到的是"这一帧开始"的时间，它可能早于你刚刚采到的
+       performance.now()。差出来的负 dt 会让积分倒着跑 —— 弹簧不是慢下来，
+       是直接发散，一帧就飞到几万像素外。 */
+    this.last = -1;
+    requestAnimationFrame(this.tick);
+  },
+  tick: function(t){
+    var dt = (t - Silk.last) / 1000;
+    /* 首帧、时钟倒挂：按一帧算。切后台回来、掉帧：封顶，
+       否则一次就要积分掉好几百毫秒，同样会跳。 */
+    if (!(dt > 0)) dt = 1 / 60;
+    else if (dt > 0.064) dt = 0.064;
+    Silk.last = t;
+    for (var i = Silk.live.length - 1; i >= 0; i--){
+      var s = Silk.live[i];
+      if (s.dead){ Silk.live.splice(i, 1); continue; }
+      /* 半隐式欧拉 + 定步长子步：dt 再大也不会发散 */
+      var w = 6.283185307179586 / s.response, z = s.damping;
+      var n = Math.max(1, Math.ceil(dt / 0.004)), h = dt / n, k;
+      for (k = 0; k < n; k++){
+        var a = -w * w * (s.x - s.to) - 2 * z * w * s.v;
+        s.v += a * h;
+        s.x += s.v * h;
+      }
+      if (Math.abs(s.x - s.to) < s.eps && Math.abs(s.v) < s.eps * 6){
+        s.x = s.to; s.v = 0; s.dead = true;
+        if (s.onFrame) s.onFrame(s.x, 0);
+        Silk.live.splice(i, 1);
+        if (s.onRest) s.onRest();
+        continue;
+      }
+      if (s.onFrame) s.onFrame(s.x, s.v);
+    }
+    if (Silk.live.length) requestAnimationFrame(Silk.tick);
+    else { Silk.on = false; Silk.last = -1; }
+  },
+
+  /* 动量投射：不是从松手那一点找最近的落点，而是先算"这一甩会飘到哪"，
+     再拿那个落点去选目标。小输入换大输出，甩出去才像真的被抛出去了。
+     用的是 Apple 示例代码里的指数衰减式，不是课本上的 v²/2a。 */
+  project: function(v, rate){
+    rate = rate == null ? 0.998 : rate;
+    return (v / 1000) * rate / (1 - rate);
+  },
+  /* 橡皮筋：越过边界之后越拖越跟不动。硬停是"卡住了"，
+     渐进阻力才是"还在响应，只是没有更多了"。 */
+  rubber: function(over, dim, c){
+    c = c || 0.55;
+    return (over * dim * c) / (dim + c * Math.abs(over));
+  },
+};
+
+/* ── 触感：只在"确实发生了一件事"的时刻给，且和视觉同帧 ──
+   到处都震，人就会学会忽略所有震动。 */
+function haptic(kind){
+  if (!navigator.vibrate || PERF.reduce) return;
+  try { navigator.vibrate({ tap:8, commit:[0,10], done:[0,14,60,22], warn:[0,26] }[kind] || 8); } catch(e){}
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   推入层 —— 详情页可以被拖回去
+   ──────────────────────────────────────────────────────────────────
+   之前详情是"把目录整段换掉"，返回要重新渲染一遍，滚动位置只能靠猜；
+   进和出也不同路。现在详情盖在目录上面，进出走同一条路径，底下那一层
+   原样活着。左边缘往右拖就能 1:1 把它推回去，松手按速度决定是回去还是
+   弹回来 —— 中途随时能反向，因为驱动它的是弹簧不是 transition。
+   ══════════════════════════════════════════════════════════════════ */
+var PUSH = {
+  el:null, inner:null, scrim:null, stack:null, edge:null,
+  open:false, x:100, sp:null, drag:null, onClose:null,
+
+  init:function(){
+    this.el = document.getElementById('push');
+    this.inner = document.getElementById('pushIn');
+    this.scrim = document.getElementById('scrim');
+    this.stack = document.getElementById('stack');
+    this.edge = document.getElementById('edge');
+    this.paint(100);
+    this.bind();
+    /* 顶栏在手机上会换行，高度不是常数 —— 量出来给推入层和边缘条用 */
+    var hd = document.querySelector('header');
+    var sync = function(){
+      document.documentElement.style.setProperty('--hh', (hd.offsetHeight || 56) + 'px');
+    };
+    sync();
+    addEventListener('resize', sync);
+    addEventListener('orientationchange', function(){ setTimeout(sync, 260); });
+  },
+  /* x = 0 完全推入，100 完全退出。所有位置变化都只经过这里，
+     于是"当前呈现值"永远是可信的 —— 中断时从它起算就不会跳。 */
+  paint:function(x){
+    this.x = x;
+    var p = 1 - x / 100;
+    this.el.style.transform = 'translate3d(' + x + '%,0,0)';
+    /* 底下那层往左让 22%，并压暗一点：上面还压着一层，这件事要看得见 */
+    this.stack.style.transform = 'translate3d(' + (-22 * p) + '%,0,0)';
+    this.scrim.style.opacity = String(0.18 * p);
+    var on = x < 99.9;
+    this.el.classList.toggle('on', on);
+    this.scrim.classList.toggle('on', on);
+  },
+  show:function(html, onClose){
+    this.onClose = onClose || null;
+    this.inner.innerHTML = html;
+    this.el.scrollTop = 0;
+    this.open = true;
+    this.el.classList.add('on'); this.scrim.classList.add('on');
+    document.body.style.overflow = 'hidden';
+    this.el.style.willChange = 'transform';
+    this.stack.style.willChange = 'transform';
+    this.to(0);
+  },
+  hide:function(vel){
+    if (!this.open) return;
+    this.open = false;
+    this.to(100, vel, function(){
+      PUSH.inner.innerHTML = '';
+      PUSH.el.classList.remove('on'); PUSH.scrim.classList.remove('on');
+      document.body.style.overflow = '';
+      PUSH.el.style.willChange = ''; PUSH.stack.style.willChange = '';
+      if (PUSH.onClose){ var f = PUSH.onClose; PUSH.onClose = null; f(); }
+    });
+  },
+  /* 弹到目标。已经在动就直接改目标、速度接着用，不重开一条动画。 */
+  to:function(target, vel, done){
+    var self = this;
+    var o = { damping:1.0, response: target === 0 ? 0.42 : 0.34 };
+    if (this.sp && !this.sp.dead){
+      this.sp.onRest = done || null;
+      this.sp.retarget(target, { velocity: vel == null ? this.sp.v : vel,
+                                 damping:o.damping, response:o.response });
+      return;
+    }
+    this.sp = Silk.spring({
+      from:this.x, to:target, velocity: vel || 0,
+      damping:o.damping, response:o.response, eps:0.12,
+      onFrame:function(x){ self.paint(x); },
+      onRest: done || null,
+    });
+  },
+
+  bind:function(){
+    var self = this;
+    var start = null;
+    var W = function(){ return Math.max(1, innerWidth); };
+
+    function down(e){
+      if (!self.open || e.button > 0) return;
+      /* 只认从左边缘起手的这一下。中途随时可以抓住正在动的层， */
+      /* 所以这里不管弹簧在不在跑，直接接管。 */
+      var t = e.currentTarget;
+      /* 指针捕获让手指移出元素边界之后仍然跟得住。个别浏览器/指针类型会抛，
+         抛了也不该把整个手势废掉 —— 退化成普通事件照样能用。 */
+      try { t.setPointerCapture(e.pointerId); } catch (err){}
+      if (self.sp) self.sp.stop();
+      start = { id:e.pointerId, x0:e.clientX, y0:e.clientY,
+                base:self.x, moved:false, hist:[{ x:e.clientX, t:performance.now() }] };
+      self.el.style.willChange = 'transform';
+    }
+    function move(e){
+      if (!start || e.pointerId !== start.id) return;
+      var dx = e.clientX - start.x0, dy = e.clientY - start.y0;
+      if (!start.moved){
+        /* 先看意图：横向明显压过纵向才认成"推回去"，否则让给滚动 */
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+        if (Math.abs(dy) > Math.abs(dx)){ start = null; return; }
+        start.moved = true;
+      }
+      start.hist.push({ x:e.clientX, t:performance.now() });
+      if (start.hist.length > 8) start.hist.shift();
+      var pct = start.base + dx / W() * 100;
+      /* 往回推过头了就上橡皮筋，而不是硬顶在 0 */
+      if (pct < 0) pct = -Silk.rubber(-pct, 100, 0.55);
+      if (pct > 100) pct = 100;
+      self.paint(pct);
+      e.preventDefault();
+    }
+    function up(e){
+      if (!start || e.pointerId !== start.id) return;
+      var moved = start.moved, hist = start.hist;
+      start = null;
+      if (!moved) return;
+      /* 速度取最近一小段的平均，不是只看最后两个点 —— 单帧噪声会把它带飞。
+         几个 pointermove 被合并在同一帧时，时间跨度可能是 0：这种情况下
+         算不出可信的速度，就当它是静止的，别凭空造一个几千 px/s 出来。 */
+      var b = hist[hist.length - 1], vpx = 0, i;
+      for (i = hist.length - 2; i >= 0; i--){
+        var span = b.t - hist[i].t;
+        if (span >= 30){ vpx = (b.x - hist[i].x) / span * 1000; break; }
+      }
+      if (i < 0){
+        var d0 = b.t - hist[0].t;
+        vpx = d0 >= 12 ? (b.x - hist[0].x) / d0 * 1000 : 0;
+      }
+      var vpct = vpx / W() * 100;                      // %/s
+      /* 先把这一甩会飘到哪算出来，再拿落点去选目标 —— 而不是从松手点找最近的 */
+      var land = self.x + Silk.project(vpct, 0.995);
+      var close = land > 50;
+      /* 速度足够明确时，方向说了算，不看位置 */
+      if (vpct > 45) close = true;
+      else if (vpct < -45) close = false;
+      if (close){ haptic('tap'); self.hide(vpct); }
+      else self.to(0, vpct);
+    }
+
+    [this.edge, this.el].forEach(function(t, i){
+      /* 边缘条随时可拖；层本身只在指针落在最左 26px 时才接管，
+         其余区域留给正常的滚动和点击 */
+      t.addEventListener('pointerdown', function(e){
+        if (i === 1 && e.clientX > 26) return;
+        down.call(this, e);
+      });
+      t.addEventListener('pointermove', move);
+      t.addEventListener('pointerup', up);
+      t.addEventListener('pointercancel', up);
+    });
+  },
+};
+</script>
+<script>
+/* ══════════════════════════════════════════════════════════════════
+   基础件
+   ══════════════════════════════════════════════════════════════════ */
+/* ── api：带超时、可中止 ──
+   没有超时的 fetch 一旦挂起，S.busy 就永远是真，无限滚动跟着死掉。
+   目录 / 详情这类轻接口 40s；建索引 / 取件 / 认定这类重活服务端自己按
+   预算收工，通常 15s 内回来，给 110s 是留给网关。 */
+var API_T = { light:40000, heavy:110000 };
+var HEAVY_API = /^\/api\/(build|incremental|fetch|repair|diagnose|unlock|migrate|optimize|split|reset)(\?|$)|^\/api\/lib\?(scan|resolve|refresh)/;
+function api(u, opt){
+  opt = opt || {};
+  var h = { 'x-gate': GATE };
+  if (opt.body) h['content-type'] = 'application/json';
+  var url = u + (u.indexOf('?') < 0 ? '?' : '&') + 'gate=' + encodeURIComponent(GATE)
+          + '&src=' + encodeURIComponent(S.src);
+  var ac = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  var ms = opt.timeout || (HEAVY_API.test(u) ? API_T.heavy : API_T.light);
+  var timer = ac ? setTimeout(function(){ ac.abort(); }, ms) : null;
+  if (ac && opt.signal){
+    if (opt.signal.aborted) ac.abort();
+    else opt.signal.addEventListener('abort', function(){ ac.abort(); }, { once:true });
+  }
+  return fetch(url, { method: opt.method || 'GET', headers: h, body: opt.body || null,
+                      signal: ac ? ac.signal : undefined })
+    .then(function(r){
+      /* 网关超时会回 HTML，直接 r.json() 在 Safari 上只会得到一句
+         "The string did not match the expected pattern" —— 先读文本再解析，
+         报错里带上状态码和响应开头，出事时至少知道是哪一层。 */
+      return r.text().then(function(t){
+        var j = null;
+        try { j = JSON.parse(t); } catch(e){}
+        if (!r.ok){
+          var e2 = new Error((j && j.error) ||
+            ('HTTP ' + r.status + (t ? '：' + t.slice(0, 110) : '（响应为空，可能网关超时）')));
+          e2.status = r.status; e2.data = j || {};
+          throw e2;
+        }
+        if (!j) throw new Error('响应不是 JSON（HTTP ' + r.status + '）');
+        return j;
+      });
+    }, function(e){
+      /* 主动取消与超时分开报：取消的调用方自己知道，不该当成错误画到页面上 */
+      var e3;
+      if (e && e.name === 'AbortError'){
+        var canceled = !!(opt.signal && opt.signal.aborted);
+        e3 = new Error(canceled ? '已取消' : '请求超时（' + Math.round(ms / 1000) + 's 没有响应）');
+        e3.aborted = canceled; e3.timeout = !canceled;
+      } else e3 = new Error('网络不可用：' + (e && e.message || e));
+      e3.status = 0; e3.data = {};
+      throw e3;
+    })
+    .finally(function(){ if (timer) clearTimeout(timer); });
+}
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
+  return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]; }); }
+function img(p, s){ return p ? '/img?p=' + encodeURIComponent(p) + '&s=' + (s || 's') : ''; }
+function toast(m){
+  var t = document.getElementById('toast');
+  t.textContent = m; t.classList.add('on');
+  clearTimeout(t._t); t._t = setTimeout(function(){ t.classList.remove('on'); }, 2200);
+}
+function copy(x){
+  var d = function(){ toast('已复制磁力链接'); };
+  if (navigator.clipboard) navigator.clipboard.writeText(x).then(d, fb); else fb();
+  function fb(){ var a = document.createElement('textarea'); a.value = x;
+    a.style.position = 'fixed'; a.style.opacity = 0; document.body.appendChild(a);
+    a.select(); document.execCommand('copy'); a.remove(); d(); }
+}
+function since(ts){
+  if (!ts) return '—';
+  var s = Math.max(0, (Date.now() - ts) / 1000);
+  if (s < 60) return '刚刚';
+  if (s < 3600) return Math.floor(s/60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s/3600) + ' 小时前';
+  if (s < 2592000) return Math.floor(s/86400) + ' 天前';
+  return new Date(ts).toLocaleDateString('zh-CN');
+}
+function fmtSize(b){
+  if (!b) return '0 B';
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(0) + ' KB';
+  if (b < 1073741824) return (b/1048576).toFixed(1) + ' MB';
+  return (b/1073741824).toFixed(2) + ' GB';
+}
+/* 只淡入换掉的那一块，不动壳子（片库页的标题和筛选台是常驻的） */
+function paint(el){ el = el || out; el.classList.remove('fade'); void el.offsetWidth; el.classList.add('fade'); }
+function lazyImgs(root){
+  [].forEach.call((root || out).querySelectorAll('.art img:not(.in):not(.err)'), function(m){
+    if (m.complete && m.naturalWidth) m.classList.add('in');
+    else {
+      m.onload = function(){ m.classList.add('in'); };
+      /* 取不到的海报别留一个破图标：藏掉，底下的灰底就是占位 */
+      m.onerror = function(){ m.classList.add('err'); };
+    }
+  });
+}
+var io = null, pre = {}, pageCache = {};
+/* 预取失败不能把结果钉死在缓存里，否则这部片直到刷新都点不开 */
+function detailOf(id){
+  if (pre[id]) return pre[id];
+  var p = api('/api/detail?id=' + id);
+  p.catch(function(){ if (pre[id] === p) delete pre[id]; });
+  return (pre[id] = p);
+}
+function prefetch(id){ if (id && !pre[id]) detailOf(id).catch(function(){}); }
+function watchTail(fn){
+  if (io){ io.disconnect(); io = null; }
+  var s = document.getElementById('sent');
+  if (!s || typeof IntersectionObserver === 'undefined') return;
+  io = new IntersectionObserver(function(e){ if (e[0].isIntersecting && !S.busy) fn(); }, { rootMargin:'800px 0px' });
+  io.observe(s);
+}
+/* 尾巴：转圈 + 一个只在失败时露面的重试。失败之后哨兵还停在视口里，
+   IntersectionObserver 不会再触发 —— 没有这个按钮，无限滚动就此死掉。 */
+function tailHTML(more){
+  return '<div class="tail' + (more ? '' : ' hide') + '" id="tail"><div class="spin"></div>'
+    + '<button class="link" id="tailrt" hidden>加载失败 · 重试</button></div><div id="sent"></div>';
+}
+function tailShow(on){ var t = document.getElementById('tail'); if (t) t.classList.toggle('hide', !on); }
+function tailErr(on, msg){
+  var t = document.getElementById('tail'); if (!t) return;
+  t.classList.toggle('err', !!on);
+  var b = t.querySelector('#tailrt');
+  if (b){ b.hidden = !on; if (on){ b.title = msg || ''; } }
+}
+
+/* ── 外观 ── */
+var THEMES = ['auto','light','dark'];
+/* 图标由 CSS 按 data-theme 出，脚本只管改属性 —— 于是首帧就是对的，
+   不存在"先画一个默认图标、脚本跑完再换掉"的那一下跳变。 */
+function applyTheme(){
+  document.documentElement.setAttribute('data-theme', S.theme);
+}
+document.getElementById('theme').onclick = function(){
+  S.theme = THEMES[(THEMES.indexOf(S.theme) + 1) % 3];
+  applyTheme(); savePref();
+  toast('外观：' + ({ auto:'跟随系统', light:'浅色', dark:'深色' })[S.theme]);
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   片单（购物车）
+   ══════════════════════════════════════════════════════════════════ */
+var MAX = 200;
+/* 片单按源分开：两个源的 id 是两套编号，混在一个片单里取不出片源。
+   电影沿用旧键，升级上来原来的片单还在。 */
+function cartKey(){ return S.src === 'movie' ? 'cvcart' : 'cvcart:' + S.src; }
+function loadCart(){
+  try { var c = JSON.parse(localStorage.getItem(cartKey()) || 'null'); return (c && c.ord) ? c : { ord:[], o:{} }; }
+  catch(e){ return { ord:[], o:{} }; }
+}
+var CART = loadCart();
+function cartSave(){ try { localStorage.setItem(cartKey(), JSON.stringify(CART)); } catch(e){} }
+function inCart(id){ return !!CART.o[id]; }
+function cartCount(){ return CART.ord.length; }
+function cartAdd(m){
+  if (CART.o[m.id]) return false;
+  if (CART.ord.length >= MAX){ toast('片单最多 ' + MAX + ' 部'); return false; }
+  CART.ord.push(m.id);
+  CART.o[m.id] = { id:m.id, title:m.title, year:m.year, poster:m.poster, res:m.res,
+                   size:m.size, sid:m.sid, own:m.own, hb:m.hb, rb:m.rb };
+  cartSave(); paintDock(); markTile(m.id, true); return true;
+}
+function cartDel(id){
+  if (!CART.o[id]) return;
+  delete CART.o[id];
+  CART.ord = CART.ord.filter(function(x){ return x !== id; });
+  cartSave(); paintDock(); markTile(id, false);
+  if (S.view === 'dl') renderDL();
+}
+function cartToggle(m){ if (inCart(m.id)){ cartDel(m.id); return false; } return cartAdd(m); }
+function cartSetRel(id, sid, label){
+  var m = CART.o[id]; if (!m) return;
+  m.sid = sid; m.pickLabel = label; cartSave();
+  if (S.view === 'dl') renderDL();
+}
+function clearCart(){
+  if (!cartCount()) return;
+  CART = { ord:[], o:{} }; cartSave(); paintDock(); markTiles();
+  if (S.view === 'dl') renderDL();
+  toast('片单已清空');
+}
+function relName(m){
+  var bits = [m.title]; if (m.year) bits.push('(' + m.year + ')');
+  if (m.res) bits.push(m.res);
+  if (m.hb === 7) bits.push('DV'); else if (m.hb >= 3) bits.push('HDR');
+  return bits.join(' ');
+}
+function markTiles(){
+  [].forEach.call(out.querySelectorAll('.tile'), function(t){
+    t.classList.toggle('in', inCart(+t.dataset.id));
+  });
+  document.getElementById('ncart').textContent = cartCount() || '';
+}
+/* 只改动到的那一张：加一部片不必扫整片网格 */
+function markTile(id, on){
+  var t = out.querySelector('.tile[data-id="' + id + '"]');
+  if (t) t.classList.toggle('in', !!on);
+  document.getElementById('ncart').textContent = cartCount() || '';
+}
+function paintDock(){
+  var n = cartCount();
+  document.getElementById('dnum').textContent = n;
+  document.getElementById('ncart').textContent = n || '';
+  var sub = '';
+  if (DL.job && DL.run) sub = dlPhase() + ' ' + DL.got + '/' + DL.job.total;
+  else if (DL.job && DL.got < DL.job.total) sub = '有未完成的下载 · 已取 ' + DL.got + '/' + DL.job.total;
+  document.getElementById('dsub').textContent = sub;
+  dock.classList.toggle('up', n > 0 || !!(DL.job && DL.got < DL.job.total));
+}
+function dlPhase(){
+  return { fetch:'取件中', wait:'等配额', pack:'打包中', done:'已完成', paused:'已暂停' }[DL.phase] || '';
+}
+document.getElementById('dclr').onclick = clearCart;
+document.getElementById('dopen').onclick = function(){ view('dl'); };
+document.getElementById('dgo').onclick = function(){ view('dl'); setTimeout(startDL, 120); };
+
+/* ══════════════════════════════════════════════════════════════════
+   片库
+   ══════════════════════════════════════════════════════════════════ */
+function yearList(){ return SRCS[S.src].years; }
+var SORTS = [['new','最新'],['vote','评分'],['spec','规格'],['hot','热门']];
+var MINS  = [[6,'6分+'],[7,'7分+'],[8,'8分+'],[0,'不限']];
+var OWNS  = [['all','全部'],['hide','缺片'],['only','已有']];
+/* 动态范围：把杜比视界与 HDR 从一锅片源里分出来 */
+var DRS   = [['','全部'],['dv','杜比视界'],['hdr','HDR'],['sdr','SDR']];
+/* 画质：1080p 及以下单列成「低质量」 */
+var QUALS = [['','全部'],['uhd','4K 及以上'],['hd','1080p 低质量']];
+
+function segHTML(list, cur, attr, counts){
+  return '<div class="seg" data-seg="' + attr + '">' + list.map(function(x){
+    var c = counts && counts[x[0]] != null ? '<em>' + counts[x[0]] + '</em>' : '<em></em>';
+    return '<button data-' + attr + '="' + x[0] + '"' +
+      (String(x[0]) === String(cur) ? ' class="on"' : '') + '>' + x[1] + c + '</button>';
+  }).join('') + '</div>';
+}
+/* ── 筛选台分两层 ──
+   排序和年份是天天用的，常驻；评分 / 动态范围 / 画质 / 已有 是偶尔调一次
+   的，收进「筛选」。有非默认项时那个按钮亮起并计数 —— 收起来了也知道
+   列表正被什么过滤着。 */
+function advCount(){
+  var n = 0;
+  if (S.min !== 6) n++;
+  if (S.dr) n++;
+  if (S.qual) n++;
+  if (S.lib && S.lib.on && S.own !== 'hide') n++;
+  return n;
+}
+function yearChips(){
+  return '<button data-y=""' + (S.year === '' ? ' class="on"' : '') + '>全部</button>'
+    + yearList().map(function(y){ return '<button data-y="' + y + '"' +
+        (String(S.year) === String(y) ? ' class="on"' : '') + '>' + y + '</button>'; }).join('');
+}
+function ctlHTML(){
+  var cc = S.counts || {}, adv = advCount();
+  return '<div class="filters" id="filters">'
+    + '<div class="fgroup prime">' + segHTML(SORTS, S.sort, 's')
+      + '<span class="grow"></span>'
+      + '<button class="ftog' + (adv ? ' has' : '') + (S.fopen ? ' open' : '') + '" id="ftog"'
+      + ' aria-expanded="' + (S.fopen ? 'true' : 'false') + '" aria-controls="fadv">筛选<i>' + (adv || '') + '</i></button></div>'
+    + '<div class="fgroup"><div class="chips" id="years">' + yearChips() + '</div></div>'
+    + '<div class="fadv" id="fadv"' + (S.fopen ? '' : ' hidden') + '>'
+      + '<div class="fgroup"><span class="lb">评分</span>' + segHTML(MINS, S.min, 'm')
+      + '<span class="lb auto" id="ownlb"' + ((S.lib && S.lib.on) ? '' : ' hidden') + '>已有</span>'
+      + '<span id="ownseg"' + ((S.lib && S.lib.on) ? '' : ' hidden') + '>' + segHTML(OWNS, S.own, 'o') + '</span></div>'
+      + '<div class="fgroup"><span class="lb">动态范围</span>' + segHTML(DRS, S.dr, 'r', { dv: cc.dv, hdr: cc.hdr })
+      + '<span class="lb auto">画质</span>' + segHTML(QUALS, S.qual, 'u', { hd: cc.low })
+      + '<span class="grow"></span><button class="link" id="freset"' + (adv ? '' : ' hidden') + '>恢复默认</button></div>'
+    + '</div></div>';
+}
+function titleHTML(){
+  var K = SRCS[S.src];
+  var t = S.q ? '“' + esc(S.q) + '”'
+        : (S.qual === 'hd' ? '低质量片单' : S.dr === 'dv' ? '杜比视界' : S.dr === 'hdr' ? 'HDR 片单' : K.head);
+  var l = S.q ? '搜索结果 · ' + K.name : (S.qual === 'hd' ? '1080p 及以下，单独列出来方便挑要不要换 4K'
+        : S.dr === 'dv' ? '带杜比视界的版本' : S.dr === 'hdr' ? 'HDR10 / HLG / HDR10+ 及杜比视界'
+        : K.lede);
+  return '<h1>' + t + '</h1><p class="lede">' + l + '</p>';
+}
+/* 壳子已经在了，只把选中态和计数改到位 —— 不重画，年份条就不会跳回开头 */
+function syncCtl(){
+  var hd = document.getElementById('libhd'); if (!hd) return;
+  var tt = document.getElementById('libtitle'); if (tt) tt.innerHTML = titleHTML();
+  var cur = { s:S.sort, m:S.min, o:S.own, r:S.dr, u:S.qual, y:S.year };
+  [].forEach.call(hd.querySelectorAll('[data-s],[data-m],[data-o],[data-r],[data-u],[data-y]'), function(b){
+    var k = ['s','m','o','r','u','y'].filter(function(a){ return b.dataset[a] != null; })[0];
+    b.classList.toggle('on', String(b.dataset[k]) === String(cur[k]));
+  });
+  var cc = S.counts || {}, cnt = { r: { dv: cc.dv, hdr: cc.hdr }, u: { hd: cc.low } };
+  ['r','u'].forEach(function(a){
+    [].forEach.call(hd.querySelectorAll('[data-' + a + ']'), function(b){
+      var em = b.querySelector('em'), v = cnt[a][b.dataset[a]];
+      if (em) em.textContent = v != null ? v : '';
+    });
+  });
+  var on = !!(S.lib && S.lib.on);
+  var ol = document.getElementById('ownlb'), os = document.getElementById('ownseg');
+  if (ol) ol.hidden = !on; if (os) os.hidden = !on;
+  var adv = advCount(), ft = document.getElementById('ftog');
+  if (ft){
+    ft.classList.toggle('has', adv > 0); ft.classList.toggle('open', !!S.fopen);
+    ft.setAttribute('aria-expanded', S.fopen ? 'true' : 'false');
+    ft.querySelector('i').textContent = adv || '';
+  }
+  var fa = document.getElementById('fadv'); if (fa) fa.hidden = !S.fopen;
+  var fr = document.getElementById('freset'); if (fr) fr.hidden = !adv;
+}
+function tileHTML(m, i){
+  var dr = m.hb === 7 ? '<span class="badge b-dv">DOLBY VISION</span>'
+         : (m.hb >= 3 ? '<span class="badge b-hdr">HDR</span>' : '');
+  var own = m.own === 2 ? '<span class="badge b-own">库中已有</span>'
+          : (m.own === 1 ? '<span class="badge b-own weak">疑似已有</span>' : '');
+  return '<div class="tile' + (inCart(m.id) ? ' in' : '') + (m.own ? ' own' : '') + '"'
+    + ' data-i="' + i + '" data-id="' + m.id + '">'
+    + '<button class="art" aria-label="' + (m.own ? '库中已有：' : '加入片单：') + esc(m.title) + '">'
+    + (m.poster ? '<img loading="lazy" decoding="async" src="' + img(m.poster) + '" alt="">' : '')
+    + (m.vote ? '<span class="badge b-vote">★ ' + m.vote + '</span>' : '')
+    + (m.rels > 1 ? '<span class="badge b-n">' + m.rels + '</span>' : '')
+    + dr + own
+    + '<span class="tick"><span>✓</span></span></button>'
+    + '<button class="tname"><b>' + esc(m.title) + '</b><em>'
+    + esc([m.year, m.res].filter(Boolean).join(' · ')) + '</em></button></div>';
+}
+function tiles(items, off){
+  /* 序号是全局的：卡片事件靠它回到 S.items 里取这张卡片对应的影片 */
+  return '<div class="grid">' + items.map(function(m, i){ return tileHTML(m, (off||0) + i); }).join('') + '</div>';
+}
+/* 骨架屏必须和装好内容之后一模一样高：海报是 2:3，片名两行，副标题一行。
+   少画一行，真数据回来的那一刻整片网格就会往下顿一下。 */
+function skeleton(n){
+  var h = '<div class="grid">';
+  for (var i = 0; i < (n||12); i++)
+    h += '<div class="tile"><div class="art shimmer"></div>'
+       + '<div class="skn"><span class="shimmer"></span><span class="shimmer"></span></div></div>';
+  return h + '</div>';
+}
+function qs(page){
+  return '/api/catalog?page=' + page + '&sort=' + S.sort + '&min=' + S.min + '&own=' + S.own
+    + '&dr=' + S.dr + '&qual=' + S.qual
+    + '&year=' + encodeURIComponent(S.year) + '&q=' + encodeURIComponent(S.q);
+}
+/* ── 片库页的壳 ──
+   标题、筛选台、网格容器、汇总行只搭一次。之后换筛选只换网格：筛选台原地
+   改选中态，年份条的横向滚动位置、按钮的焦点都原样留着。
+   壳上的点击全走一个委托监听 —— 按钮是重画的也不用重新绑。 */
+function libShell(){
+  var sh = document.getElementById('libshell');
+  if (sh) return sh;
+  out.innerHTML = '<div id="libshell"><div id="libhd"><div id="libtitle"></div></div>'
+    + '<div id="libbody"></div><div id="libsum"></div></div>';
+  sh = document.getElementById('libshell');
+  sh.addEventListener('click', libClick);
+  S.hdKey = null;
+  return sh;
+}
+function hdKey(){ return S.src; }
+function libHead(){
+  var hd = document.getElementById('libhd');
+  if (S.hdKey !== hdKey()){
+    hd.innerHTML = '<div id="libtitle">' + titleHTML() + '</div>' + ctlHTML();
+    S.hdKey = hdKey();
+  } else syncCtl();
+}
+/* 换源 = 换一整套索引：本地缓存、片单、面板状态全部重来一遍。
+   年份也要清 —— 剧集版块没有 2010，留着旧值会直接筛出个空页。 */
+function setSrc(id, initial){
+  if (!SRCS[id]) return;
+  if (!initial && id === S.src) return;
+  S.src = id; savePref();
+  [].forEach.call(document.querySelectorAll('#srcNav button'), function(b){
+    b.classList.toggle('on', b.dataset.s === id);
+  });
+  try { document.title = 'Cuven ᴿ ' + SRCS[id].head; } catch(e){}
+  if (initial) return;
+  if (LIBX){ LIBX.abort(); LIBX = null; }
+  pageCache = {}; pre = {};
+  CART = loadCart();
+  S.items = []; S.page = 1; S.pages = 1; S.scroll = 0; S.hdKey = null;
+  S.counts = {}; S.lib = null; S.hidden = 0;
+  S.st = null; S.libst = null; S.logs = null;
+  if (yearList().indexOf(+S.year) < 0) S.year = '';
+  RUN.on = false; RUN.stop = true;
+  paintDock(); markTiles();
+  haptic('tap');
+  if (S.view === 'idx') openIndex();
+  else if (S.view === 'dl') renderDL();
+  else { S.view = ''; view('lib', false); }
+}
+function sumHTML(j){
+  var bits = [];
+  if (j && j.total != null) bits.push('<span class="num">' + j.total + '</span> 部');
+  if (j && j.at) bits.push('更新于 ' + since(j.at));
+  if (j && j.building) bits.push('索引仍在扩充，已收录 ' + j.indexed);
+  var h = '<div class="fsum">' + bits.join('<span class="sp">·</span>');
+  if (S.hidden) h += '<span class="sp">·</span>已隐藏 ' + S.hidden +
+    ' 部库中已有 <button class="link" id="sown">显示</button>';
+  return h + '</div>';
+}
+var LIBX = null;   // 正在飞的目录请求：新的来了就把它掐掉，不白等也不乱序
+function lib(reset){
+  S.view = 'lib'; backEl.classList.remove('on'); setNav('lib');
+  if (reset !== false){ S.page = 1; S.items = []; }
+  libShell(); libHead();
+  var body = document.getElementById('libbody'), sum = document.getElementById('libsum');
+  var ck = qs(1), cached = pageCache[ck];
+  var stamp = S.libStamp = (S.libStamp || 0) + 1;
+  if (LIBX){ LIBX.abort(); LIBX = null; }
+  if (cached){
+    S.busy = false;
+    S.items = cached.items; S.pages = cached.pages; S.page = cached.page;
+    S.lib = cached.lib || S.lib; S.hidden = cached.hidden || 0; S.counts = cached.counts || {};
+    body.innerHTML = tiles(S.items) + tailHTML(S.pages > 1);
+    sum.innerHTML = sumHTML(cached);
+    syncCtl(); lazyImgs(); markTiles();
+    if (S.pages > 1) watchTail(moreLib);
+    scrollTo({ top: S.q ? 0 : (S.scroll || 0) });
+    return;
+  }
+  /* 已经加载过的那一批先本地筛一遍顶上去 —— 点筛选按钮的瞬间就有反馈，
+     服务端的权威结果回来再替换。大列表交给独立线程筛，主线程不掉帧。 */
+  var prev = S.items.slice();
+  body.innerHTML = prev.length ? tiles(prev) : skeleton(12);
+  sum.innerHTML = '';
+  if (prev.length > 60){
+    PERF.call({ op:'sift', items: prev, f:{ dr:S.dr, qual:S.qual, own:S.own } })
+      .then(function(r){
+        /* 只在权威结果还没回来时顶一下；晚到了就丢掉，别盖掉真结果 */
+        if (S.libStamp !== stamp || !S.busy) return;
+        var g = body.querySelector('.grid');
+        /* 只是给个即时反馈，别让人点到还没对齐下标的卡片 */
+        if (g && r.items.length){
+          g.classList.add('preview');
+          g.innerHTML = r.items.map(function(m,i){ return tileHTML(m,i); }).join('');
+        }
+      }).catch(function(){});
+  }
+  S.busy = true;
+  var ac = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  LIBX = ac;
+  /* 两个参数的 then：渲染阶段自己抛的错不会掉进"网络失败"分支。 */
+  api(ck, { signal: ac ? ac.signal : null }).then(function(j){
+    if (S.libStamp !== stamp) return;
+    if (LIBX === ac) LIBX = null;
+    pageCache[ck] = { items:j.items, page:1, pages:j.pages, at:j.at, lib:j.lib,
+                      hidden:j.hidden, counts:j.counts, total:j.total,
+                      building:j.building, indexed:j.indexed };
+    S.busy = false; S.items = j.items; S.pages = j.pages; S.page = 1;
+    S.indexed = j.indexed; S.building = j.building;
+    S.lib = j.lib || null; S.hidden = j.hidden || 0; S.counts = j.counts || {};
+    if (!j.indexed && !S.q){ body.innerHTML = setupHTML(); sum.innerHTML = ''; syncCtl(); return; }
+    body.innerHTML = j.items.length ? tiles(j.items) + tailHTML(j.pages > 1) : emptyHTML(j);
+    sum.innerHTML = sumHTML(j);
+    syncCtl(); lazyImgs(); markTiles(); paint(body);
+    if (j.pages > 1) watchTail(moreLib);
+    if (!S.q) scrollTo({ top: S.scroll || 0 });
+  }, function(e){
+    if (S.libStamp !== stamp || e.aborted) return;
+    S.busy = false; if (LIBX === ac) LIBX = null;
+    body.innerHTML = '<div class="err">' + esc(e.message) + '</div>'
+      + '<div class="row" style="margin-top:14px"><button class="btn on" id="rt2">重试</button>'
+      + '<button class="btn" id="mgr2">去系统页</button></div>';
+    sum.innerHTML = '';
+    syncCtl();
+  });
+}
+/* 空列表要说清三件事：这里本来该有什么、为什么现在没有、按哪儿能让它有。
+   高度按"装满时"预留，所以点完那个按钮，页面不会整个往下抖一次。 */
+function emptyHTML(j){
+  var head, body, act;
+  if (S.own === 'hide' && j.hidden){
+    head = '这一档全在库里了';
+    body = '符合条件的 ' + j.hidden + ' 部影片都已经下载过，默认不再显示。';
+    act  = '<button class="btn on" id="sown2">连已有的一起看</button>';
+  } else if (S.dr || S.qual){
+    head = '这一档还没有影片';
+    body = '动态范围与画质是从片源规格里汇总出来的。v4 时期建的索引没有这两位，'
+         + '要在「系统 → 维护 → 体检 → 重算汇总」里跑一次才会补齐。';
+    act  = '<button class="btn on" id="clrf">清除动态范围与画质</button>'
+         + '<button class="btn" id="toidx">去系统页</button>';
+  } else if (S.q){
+    head = '没有找到「' + esc(S.q) + '」';
+    body = '搜索只查本地索引，认的是片名与原名。换个说法，或者清空搜索回片库看看。';
+    act  = '<button class="btn on" id="clrq2">清空搜索</button>';
+  } else {
+    head = '没有匹配的影片';
+    body = S.min > 0 ? '当前评分门槛是 ' + S.min + ' 分。把它调到「不限」通常就有了。'
+                     : '换一个年份或者排序方式再看看。';
+    act  = S.min > 0 ? '<button class="btn on" id="nomin">评分不限</button>' : '';
+  }
+  return '<div class="empty" style="--empty-h:360px"><h3>' + head + '</h3>'
+    + '<p>' + body + '</p>' + (act ? '<div class="row">' + act + '</div>' : '') + '</div>';
+}
+function moreLib(){
+  if (S.busy || S.page >= S.pages) return;
+  S.busy = true; tailShow(true); tailErr(false);
+  var stamp = S.libStamp;
+  api(qs(S.page + 1)).then(function(j){
+    S.busy = false;
+    if (S.libStamp !== stamp) return;
+    var off = S.items.length;
+    S.items = S.items.concat(j.items); S.page = j.page; S.pages = j.pages;
+    var g = out.querySelector('#libbody .grid');
+    if (g) g.insertAdjacentHTML('beforeend', j.items.map(function(m,i){ return tileHTML(m, off+i); }).join(''));
+    lazyImgs(); markTiles(); tailShow(S.page < S.pages);
+    if (S.page >= S.pages && io) io.disconnect();
+  }).catch(function(e){
+    S.busy = false;
+    if (S.libStamp !== stamp || e.aborted) return;
+    tailShow(true); tailErr(true, e.message);
+  });
+}
+/* 片库页上所有按钮的去处：一个监听管全部（壳子常驻，网格和空态随便换） */
+function libClick(e){
+  var t = e.target.closest ? e.target.closest('button') : null;
+  if (!t) return;
+  var d = t.dataset, go = function(fn){ fn(); S.scroll = 0; savePref(); lib(); };
+  if (d.s != null){ go(function(){ S.sort = d.s; }); return; }
+  if (d.m != null){ go(function(){ S.min = +d.m; }); return; }
+  if (d.o != null){ go(function(){ S.own = d.o; }); return; }
+  if (d.r != null){ go(function(){ S.dr = d.r; }); return; }
+  if (d.u != null){ go(function(){ S.qual = d.u; }); return; }
+  if (d.y != null){
+    go(function(){ S.year = d.y; });
+    t.scrollIntoView({ behavior: PERF.reduce ? 'auto' : 'smooth', block:'nearest', inline:'center' });
+    return;
+  }
+  switch (t.id){
+    case 'ftog': S.fopen = !S.fopen; syncCtl(); return;
+    case 'freset': go(function(){ S.min = 6; S.dr = ''; S.qual = ''; S.own = 'hide'; }); return;
+    case 'sown': case 'sown2': go(function(){ S.own = 'all'; }); return;
+    case 'clrf': go(function(){ S.dr = ''; S.qual = ''; }); return;
+    case 'nomin': go(function(){ S.min = 0; }); return;
+    case 'clrq2': qEl.value = ''; S.q = ''; clrEl.classList.remove('on'); lib(); return;
+    case 'toidx': case 'mgr2': view('idx'); return;
+    case 'rt2': lib(); return;
+    case 'tailrt': moreLib(); return;
+    case 'go1': view('idx'); setTimeout(function(){ runBuild(null); }, 200); return;
+    case 'go2': view('idx'); return;
+  }
+}
+function setupHTML(){
+  return '<div class="card"><h2 class="sec">索引还是空的</h2>'
+    + '<p class="lede" style="margin:8px 0 14px">先把论坛片单抄一份到 R2，之后搜索和浏览都只读这份副本，'
+    + '不会再打论坛。第一次大概要跑一阵，中途可以关掉页面，进度存在服务端。</p>'
+    + '<div class="row"><button class="btn on" id="go1">开始建立索引</button>'
+    + '<button class="btn" id="go2">先去系统页</button></div></div>';
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   影片详情
+   ══════════════════════════════════════════════════════════════════ */
+/* 详情盖在目录上面推进来，而不是把目录换掉：进出同一条路径，
+   底下那层的滚动位置和已加载的分页原样留着，随时能被拖回来。 */
+function openMovie(m, push){
+  /* 记住底下是哪一页：片单里点开的，关掉要回片单，不是回片库 */
+  if (S.view !== 'movie' && S.view) S.under = S.view;
+  S.view = 'movie'; S.card = m;
+  backEl.classList.add('on'); setNav('');
+  if (push !== false) history.pushState({ v:'m', id:m.id, under:S.under }, '');
+  /* 骨架屏同步写。交给 startViewTransition 去写会晚一帧 —— 预取命中时
+     详情已经渲染完了，回调再把骨架屏盖回去，Chromium 上就永远停在转圈。 */
+  PUSH.show(heroHTML(m, null) + '<div class="card"><div class="tail"><div class="spin"></div></div></div>',
+    function(){ if (S.view === 'movie'){ S.view = S.under || 'lib'; backEl.classList.remove('on'); setNav(S.view); } });
+  lazyImgs(PUSH.inner);
+  /* 详情有自己的请求戳，和目录的分开：开详情不再作废正在加载的目录 */
+  var stamp = S.mvStamp = (S.mvStamp || 0) + 1;
+  detailOf(m.id).then(function(j){
+    if (S.view !== 'movie' || S.mvStamp !== stamp) return;
+    if (!j) throw new Error('拿不到详情');
+    S.movie = j; renderMovie(j);
+  }, function(e){
+    if (S.view !== 'movie' || S.mvStamp !== stamp) return;
+    PUSH.inner.innerHTML = heroHTML(m, null) + '<div class="err">' + esc(e.message) + '</div>'
+      + '<div class="row" style="margin-top:12px"><button class="btn" id="mrt">重试</button></div>';
+    var r = PUSH.inner.querySelector('#mrt');
+    if (r) r.onclick = function(){ delete pre[m.id]; openMovie(m, false); };
+  });
+}
+/* 关掉详情。手势关的时候历史也要跟着退一格，否则前进/后退就对不上了。 */
+function closeDetail(vel){
+  if (!PUSH.open) return;
+  PUSH.skipPop = 1;
+  PUSH.hide(vel);
+  history.back();
+}
+function heroHTML(m, d){
+  var mv = d ? d.movie : m;
+  var line = [mv.year, mv.runtime ? mv.runtime + ' 分钟' : '',
+    (mv.genres || []).slice(0,3).join(' / '),
+    mv.vote ? '★ ' + mv.vote + (mv.votes ? '（' + mv.votes + '）' : '') : ''].filter(Boolean).join('  ·  ');
+  var tags = '';
+  if (mv.hb === 7) tags += '<span class="pill">杜比视界</span>';
+  else if (mv.hb >= 3) tags += '<span class="pill">HDR</span>';
+  if (mv.rb >= 5) tags += '<span class="pill">4K</span>';
+  else if (mv.rb && mv.rb <= 4) tags += '<span class="pill">1080p 及以下</span>';
+  if (mv.own === 2) tags += '<span class="pill ok">库中已有</span>';
+  else if (mv.own === 1) tags += '<span class="pill warn">疑似已有</span>';
+  return '<div class="hero"><div class="art">'
+    + (mv.poster ? '<img src="' + img(mv.poster,'m') + '" alt="">' : '') + '</div>'
+    + '<div style="flex:1;min-width:0"><h2>' + esc(mv.title) + '</h2>'
+    + (mv.original && mv.original !== mv.title ? '<p class="lede" style="margin-top:3px">' + esc(mv.original) + '</p>' : '')
+    + '<div class="fine">' + esc(line) + '</div>'
+    + (tags ? '<div class="row" style="margin-bottom:10px">' + tags + '</div>' : '')
+    + (d && d.movie.overview ? '<p>' + esc(d.movie.overview) + '</p>' : '')
+    + '</div></div>';
+}
+function renderMovie(d){
+  var mv = d.movie, items = d.items || [];
+  var h = heroHTML(null, d);
+  h += '<div class="row" style="margin:16px 0 4px">'
+    + '<button class="btn' + (inCart(mv.id) ? '' : ' on') + '" id="addc">'
+    + (inCart(mv.id) ? '已在片单中 · 移除' : '加入片单') + '</button>'
+    + (mv.imdb ? '<a class="btn" target="_blank" rel="noopener noreferrer" href="https://www.imdb.com/title/' + mv.imdb + '/">IMDb</a>' : '')
+    + (mv.sid ? '<a class="btn" target="_blank" rel="noopener noreferrer" href="/t/' + mv.sid
+        + '?src=' + S.src + '">论坛原帖</a>' : '')
+    + '</div>';
+  if (d.value)
+    h += '<div class="pick"><div class="k">性价比之选</div><h4>' + esc(d.value.title) + '</h4>'
+      + '<div class="why">体积只有最佳片源的 ' + (100 - d.value.saved) + '%，规格几乎不差 · ' + esc(d.value.size || '') + '</div>'
+      + '<div class="acts"><button data-sid="' + d.value.sid + '" class="usev">用这一版</button>'
+      + '<button class="ghost" data-jump="' + d.value.tid + '">看附件</button></div></div>';
+  h += '<div class="card"><div class="hd"><h2 class="sec">全部片源</h2><span class="sub">' + items.length + ' 条</span></div>'
+    + (items.length ? items.map(relHTML).join('')
+        : '<div class="empty" style="--empty-h:150px"><h3>还没有收录片源</h3>'
+          + '<p>索引里有这部影片，但论坛上还没抓到对应的帖子。抓取新片之后会补上。</p></div>')
+    + '</div>';
+  var mv2 = PUSH.inner;
+  mv2.innerHTML = h;
+  lazyImgs(mv2);
+  var ad = mv2.querySelector('#addc');
+  if (ad) ad.onclick = function(){
+    var mm = { id:mv.id, title:mv.title, year:mv.year, poster:mv.poster, res:mv.res,
+               size:mv.size, sid:mv.sid, own:mv.own, hb:mv.hb, rb:mv.rb };
+    if (cartToggle(mm)){ haptic('commit'); toast('已加入片单'); } else toast('已从片单移除');
+    ad.textContent = inCart(mv.id) ? '已在片单中 · 移除' : '加入片单';
+    ad.classList.toggle('on', !inCart(mv.id));
+  };
+  [].forEach.call(mv2.querySelectorAll('.usev'), function(b){
+    b.onclick = function(){
+      if (!inCart(mv.id)) cartAdd({ id:mv.id, title:mv.title, year:mv.year, poster:mv.poster,
+        res:mv.res, size:mv.size, sid:b.dataset.sid, own:mv.own, hb:mv.hb, rb:mv.rb });
+      cartSetRel(mv.id, b.dataset.sid, '性价比之选');
+      toast('片单里这部片已换成性价比之选');
+    };
+  });
+  [].forEach.call(mv2.querySelectorAll('.rel'), function(r){
+    r.onclick = function(){ openThread(r, r.dataset.tid); };
+  });
+  [].forEach.call(mv2.querySelectorAll('[data-jump]'), function(b){
+    b.onclick = function(){
+      var t = mv2.querySelector('.rel[data-tid="' + b.dataset.jump + '"]');
+      if (!t) return;
+      t.scrollIntoView({ behavior:'smooth', block:'center' });
+      openThread(t, b.dataset.jump);
+    };
+  });
+  [].forEach.call(mv2.querySelectorAll('[data-use]'), function(b){
+    b.onclick = function(ev){
+      ev.stopPropagation();
+      if (!inCart(mv.id)) cartAdd({ id:mv.id, title:mv.title, year:mv.year, poster:mv.poster,
+        res:mv.res, size:mv.size, sid:b.dataset.use, own:mv.own, hb:mv.hb, rb:mv.rb });
+      cartSetRel(mv.id, b.dataset.use, b.dataset.lb || '');
+      toast('片单里这部片已换版本');
+    };
+  });
+}
+function relHTML(r){
+  var labs = (r.labels || []).map(function(x, i){
+    return (i ? '<i class="sep">·</i>' : '') + '<i class="' + (i < 2 ? 'hi' : '') + '">' + esc(x) + '</i>';
+  }).join('');
+  return '<div class="rel" data-tid="' + r.tid + '"><div class="t">' + esc(r.title) + '</div>'
+    + '<div class="spec">'
+    + (r.sn ? '<i class="hi">第 ' + r.sn + ' 季</i><i class="sep">·</i>' : '') + labs
+    + (r.size ? '<i class="sep">·</i><i>' + esc(r.size) + '</i>' : '')
+    + (r.group ? '<i class="sep">·</i><i>' + esc(r.group) + '</i>' : '')
+    + (r.dupes ? '<i class="sep">·</i><i>同规格 ' + r.dupes + ' 版</i>' : '') + '</div>'
+    + '<div class="row" style="margin-top:10px">'
+    + '<button class="btn sm" data-use="' + r.sid + '" data-lb="' + esc((r.labels||[]).slice(0,2).join(' ')) + '">用这一版</button>'
+    + '<span class="grow"></span><span class="pill">点开看附件</span></div>'
+    + '<div class="slot"></div></div>';
+}
+function openThread(el, tid){
+  var slot = el.querySelector('.slot');
+  if (!slot) return;
+  if (slot.innerHTML){ slot.innerHTML = ''; return; }
+  slot.innerHTML = '<div class="panel"><div class="tail"><div class="spin"></div></div></div>';
+  api('/api/thread?tid=' + tid).then(function(j){
+    var h = '<div class="panel">';
+    (j.attachments || []).forEach(function(a){
+      h += '<div class="att"><span class="fn">' + esc(a.filename) + '</span>'
+        + (a.isTorrent ? '<button class="btn sm fixed mg" data-aid="' + a.aid + '">磁力</button>' : '')
+        + '<a class="btn sm" href="/api/torrent?aid=' + a.aid + '&name=' + encodeURIComponent(a.filename)
+        + '&gate=' + encodeURIComponent(GATE) + '&src=' + S.src + '">下载种子</a></div>';
+    });
+    (j.magnets || []).forEach(function(m){
+      h += '<div class="att"><span class="fn">' + esc(m.slice(0, 78)) + '…</span>'
+        + '<button class="btn sm cp" data-m="' + esc(m) + '">复制</button></div>';
+    });
+    if (!(j.attachments || []).length && !(j.magnets || []).length)
+      h += '<p class="lede">这一帖没有种子附件，也没有磁力链接。</p>';
+    slot.innerHTML = h + '</div>';
+    [].forEach.call(slot.querySelectorAll('.cp'), function(b){
+      b.onclick = function(ev){ ev.stopPropagation(); copy(b.dataset.m); };
+    });
+    [].forEach.call(slot.querySelectorAll('.mg'), function(b){
+      b.onclick = function(ev){
+        ev.stopPropagation(); b.textContent = '取中…'; b.disabled = true;
+        api('/api/magnet?aid=' + b.dataset.aid).then(function(m){
+          b.outerHTML = '<button class="btn sm fixed cp2">复制磁力</button>';
+          var nb = slot.querySelector('.cp2');
+          nb.onclick = function(ev2){ ev2.stopPropagation(); copy(m.magnet); };
+          nb.parentNode.insertAdjacentHTML('beforeend', '<div class="hash">' + esc(m.btih) + '</div>');
+        }).catch(function(e){ b.textContent = '重试磁力'; b.disabled = false; toast(e.message); });
+      };
+    });
+  }).catch(function(e){
+    slot.innerHTML = '<div class="panel"><div class="err" style="margin:0">' + esc(e.message) + '</div></div>';
+  });
+}
+</script>
+<script>
+/* ══════════════════════════════════════════════════════════════════
+   片单 / 下载台
+   ══════════════════════════════════════════════════════════════════ */
+function startDL(){
+  if (DL.run) return;
+  if (DL.job && DL.got < DL.job.total && sameJob()) { DL.resume(); return; }
+  var items = CART.ord.map(function(id){
+    var m = CART.o[id];
+    return (m && m.sid) ? { tid: parseInt(m.sid, 36), name: relName(m) } : null;
+  }).filter(function(x){ return x && x.tid > 0; });
+  if (!items.length){ toast('片单里的影片都还没有可用片源'); return; }
+  DL.begin(items);
+}
+function sameJob(){
+  if (!DL.job) return false;
+  var items = CART.ord.map(function(id){
+    var m = CART.o[id];
+    return (m && m.sid) ? { tid: parseInt(m.sid, 36) } : null;
+  }).filter(function(x){ return x && x.tid > 0; });
+  return items.length ? DL.sig(items) === DL.job.id : true;
+}
+function dlStatusText(j){
+  var done = DL.phase === 'done';
+  return done ? '已打成一个包 · ' + fmtSize(DL.zipSize || 0)
+       : DL.run ? dlPhase() + ' · 已取 ' + DL.got + '/' + j.total
+       : DL.got >= j.total ? '取件完成，等待打包' : '已暂停 · 已取 ' + DL.got + '/' + j.total;
+}
+function qrowHTML(it, j){
+  var f = (j.fail || {})[it.tid];
+  var okd = !f && DL.doneSet && DL.doneSet[it.tid];
+  return '<div class="qrow' + (f ? ' fail' : okd ? ' done' : '') + '" data-tid="' + it.tid + '">'
+    + '<span class="dot ' + (f ? 'bad' : okd ? 'ok' : '') + '"></span>'
+    + '<span class="qn">' + esc(it.name) + '</span>'
+    + '<span class="qs">' + (f ? esc(String(f).slice(0, 22)) : okd ? '已取' : '等待') + '</span></div>';
+}
+/* ── 片单页 ──
+   顺序按"接下来要做什么"排：正在进行的任务（有才显示）→ 片单 → 开始下载。
+   任务进行中每一批都会来一次 paint：只原地改数字、进度条与行状态
+   （patchDL），不整页重画 —— 海报不重闪，列表滚动位置也不丢。 */
+function renderDL(){
+  S.view = 'dl'; backEl.classList.remove('on'); setNav('dl');
+  if (io) io.disconnect();
+  var n = cartCount(), j = DL.job;
+  var h = '<h1>片单</h1><p class="lede">点海报加进来，一次最多 ' + MAX + ' 部；取齐之后在本机压成一个包</p>';
+
+  if (j){
+    var pct = j.total ? Math.round(DL.got / j.total * 100) : 0;
+    var fails = Object.keys(j.fail || {}).length;
+    var done = DL.phase === 'done';
+    h += '<div class="card" id="dlprog"><div class="dl-head">'
+      + '<b class="num" id="dlpct">' + (done ? '100' : pct) + '%</b>'
+      + '<span id="dltxt">' + dlStatusText(j) + '</span>'
+      + '<span class="grow"></span><span id="dlpill">'
+      + (DL.run ? '<span class="pill ok"><span class="dot live"></span>进行中</span>'
+                : done ? '<span class="pill ok">完成</span>' : '<span class="pill">待续</span>')
+      + '</span></div>'
+      + '<div class="bar2" id="dlbar"><i class="' + (done ? 'ok' : '')
+      + '" style="transform:scaleX(' + (Math.max(2, pct) / 100) + ')"></i></div>'
+      + '<div class="dl-meta">'
+      + '<span>已落盘 <i class="num" id="dlbytes">' + fmtSize(DL.bytes) + '</i></span>'
+      + '<span>失败 <i class="num" id="dlfail">' + fails + '</i></span>'
+      + '<span>每批 <i class="num">' + GRAB + '</i> 部</span>'
+      + '<span>打包 <i>' + (DL.how === 'gpu' ? 'GPU 并行' : '独立线程') + '</i></span></div>';
+    h += '<div id="dlerr">' + (DL.err ? '<div class="err" style="margin:14px 0 0">' + esc(DL.err) + '</div>' : '') + '</div>';
+    h += '<div class="row" style="margin-top:15px">'
+      + (DL.run ? '<button class="btn" id="dpause">暂停</button>'
+                : (DL.got >= j.total ? '<button class="btn on" id="drepack">' + (done ? '再存一份' : '现在打包') + '</button>'
+                                     : '<button class="btn on" id="dgo2">继续取件</button>'))
+      + '<button class="btn" id="ddrop">清除任务</button></div>';
+    h += '<div class="qlist">' + j.items.map(function(it){ return qrowHTML(it, j); }).join('') + '</div></div>';
+  }
+
+  h += '<div class="card"><div class="hd"><h2 class="sec">片单</h2>'
+    + '<span class="sub">' + n + ' / ' + MAX + '</span></div>';
+  if (!n) h += '<div class="empty" style="--empty-h:190px"><h3>片单是空的</h3>'
+    + '<p>在片库点海报就能加进来。全部取齐之后会在本机压成一个包。</p>'
+    + '<div class="row"><button class="btn on" id="tolib">去片库挑片</button></div></div>';
+  else {
+    h += CART.ord.map(function(id){
+      var m = CART.o[id]; if (!m) return '';
+      var line = [m.own === 2 ? '库中已有' : m.own === 1 ? '疑似已有' : '', m.res, m.size,
+        m.hb === 7 ? '杜比视界' : m.hb >= 3 ? 'HDR' : '',
+        m.pickLabel ? '已指定：' + m.pickLabel : ''].filter(Boolean).join('  ·  ') || '默认最佳片源';
+      return '<div class="citem" data-id="' + id + '"><div class="cth">'
+        + (m.poster ? '<img loading="lazy" decoding="async" src="' + img(m.poster) + '" alt="">' : '') + '</div>'
+        + '<div class="cb"><b>' + esc(m.title) + '</b><em>'
+        + esc([m.year, line].filter(Boolean).join('  ·  ')) + '</em></div>'
+        + '<button class="btn sm" data-open="' + id + '">换版本</button>'
+        + '<button class="cx" data-del="' + id + '" aria-label="移除">✕</button></div>';
+    }).join('');
+    h += '<div class="row" style="margin-top:16px">'
+      + '<button class="btn on" id="dstart">' + (j && !sameJob() ? '按当前片单重新下载' : '开始下载 ' + n + ' 部') + '</button>'
+      + '<button class="btn" id="dclr2">清空片单</button></div>';
+  }
+  h += '</div>';
+  h += '<p class="fine" style="margin:4px 2px 0">取件按批落进本机数据库，刷新、断网、关页都不丢，回来只补缺的那几部。</p>';
+
+  var oldQ = out.querySelector('.qlist');
+  var keep = oldQ ? oldQ.scrollTop : 0;
+  out.innerHTML = h;
+  DL._pp = DL.phase;
+  var newQ = out.querySelector('.qlist');
+  if (newQ && keep) newQ.scrollTop = keep;
+  if (!DL.run) paint();
+  var bind = function(id, fn){ var e = document.getElementById(id); if (e) e.onclick = fn; };
+  bind('dstart', function(){
+    if (DL.job && !sameJob()) DL.clear().then(startDL); else startDL();
+  });
+  bind('dgo2', function(){ DL.resume(); });
+  bind('dpause', function(){ DL.stop = true; toast('取件将在本批结束后暂停'); });
+  bind('drepack', function(){ DL.pack(); });
+  bind('ddrop', function(){ DL.clear().then(function(){ renderDL(); toast('任务已清除'); }); });
+  bind('dclr2', clearCart);
+  bind('tolib', function(){ view('lib'); });
+  [].forEach.call(out.querySelectorAll('[data-del]'), function(b){
+    b.onclick = function(){ cartDel(+b.dataset.del); };
+  });
+  [].forEach.call(out.querySelectorAll('[data-open]'), function(b){
+    b.onclick = function(){ var m = CART.o[+b.dataset.open]; if (m) openMovie(m); };
+  });
+  refreshDone();
+}
+/* 进行中的原地补丁：数字、进度条、状态字、行状态。结构没变就不重画。 */
+function patchDL(){
+  var j = DL.job, box = document.getElementById('dlprog');
+  if (!j || !box) return false;
+  var pct = j.total ? Math.round(DL.got / j.total * 100) : 0;
+  var done = DL.phase === 'done';
+  var set = function(id, v){ var e = document.getElementById(id); if (e && e.textContent !== v) e.textContent = v; };
+  set('dlpct', (done ? 100 : pct) + '%');
+  set('dltxt', dlStatusText(j));
+  set('dlbytes', fmtSize(DL.bytes));
+  set('dlfail', String(Object.keys(j.fail || {}).length));
+  var bar = box.querySelector('#dlbar i');
+  if (bar){ bar.style.transform = 'scaleX(' + (Math.max(2, pct) / 100) + ')'; bar.classList.toggle('ok', done); }
+  var er = document.getElementById('dlerr');
+  if (er){
+    var want = DL.err ? '<div class="err" style="margin:14px 0 0">' + esc(DL.err) + '</div>' : '';
+    if (er.innerHTML !== want) er.innerHTML = want;
+  }
+  var ds = DL.doneSet || {}, fl = j.fail || {};
+  [].forEach.call(box.querySelectorAll('.qrow'), function(r){
+    var tid = r.dataset.tid, f = fl[tid];
+    var cls = f ? 'fail' : ds[tid] ? 'done' : '';
+    if ((r.dataset.st || '') === cls) return;
+    r.dataset.st = cls;
+    r.classList.toggle('fail', cls === 'fail'); r.classList.toggle('done', cls === 'done');
+    var dot = r.querySelector('.dot');
+    dot.className = 'dot' + (cls === 'fail' ? ' bad' : cls === 'done' ? ' ok' : '');
+    r.querySelector('.qs').textContent = f ? String(f).slice(0, 22) : cls === 'done' ? '已取' : '等待';
+  });
+  return true;
+}
+/* 队列里哪几部已经落盘：只查键，不读数据 */
+function refreshDone(){
+  if (!DL.job) return;
+  tx('parts','readonly',function(s){ return s.getAllKeys(DL.range()); }).then(function(ks){
+    var cut = DL.job.id.length + 1, map = {};
+    ks.forEach(function(k){ map[String(k).slice(cut)] = 1; });
+    DL.doneSet = map;
+    if (S.view === 'dl') patchDL();
+  }).catch(function(){});
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   系统 —— 状态 / 管线 / 年份 / 未匹配 / 片库对照 / 日志 / 维护
+   外面只留四个数字、一句状态、一个主动作；其余收进可展开区。
+   ══════════════════════════════════════════════════════════════════ */
+var RUN = { on:false, stop:false, mode:null, log:[] };
+var STAGES = ['list','parse','match','encode','store','lib'];
+var STAGE_HINT = { list:'论坛列表页', parse:'标题切片名', match:'TMDB 认定', encode:'MFX 编码', store:'写入 R2', lib:'片库认定' };
+/* 可展开区的开合状态：跨重画保留，跨刷新也保留（存 localStorage）。
+   系统页外面只留四个数字、一句状态和一个主动作；其余都在这些区里。 */
+var DX = (function(){ try { return JSON.parse(localStorage.getItem('cvdx') || '{}') || {}; } catch(e){ return {}; } })();
+function dxSave(){ try { localStorage.setItem('cvdx', JSON.stringify(DX)); } catch(e){} }
+function dxHTML(key, title, sub, body, cls){
+  return '<details class="dx card' + (cls ? ' ' + cls : '') + '" data-x="' + key + '"' + (DX[key] ? ' open' : '') + '>'
+    + '<summary><span class="dxt">' + title + '</span><span class="dxr">' + (sub || '') + '</span></summary>'
+    + '<div class="dxb">' + body + '</div></details>';
+}
+/* toggle 不冒泡，用捕获在根上收一次就够了 */
+out.addEventListener('toggle', function(e){
+  var d = e.target;
+  if (d && d.tagName === 'DETAILS' && d.dataset.x){ DX[d.dataset.x] = d.open; dxSave(); }
+}, true);
+
+function openIndex(){
+  S.view = 'idx'; backEl.classList.remove('on'); setNav('idx');
+  if (io) io.disconnect();
+  out.innerHTML = '<h1>系统 · ' + SRCS[S.src].name + '</h1>'
+    + '<p class="lede">论坛' + SRCS[S.src].name + '版块的本地副本，搜索和浏览都只读它；顶栏可以换源。</p>'
+    + '<div id="ip"><div class="card"><div class="tail"><div class="spin"></div></div></div></div>'
+    + '<div id="lg"></div>'
+    + dxHTML('tools', '维护', '<span class="sub">体检 · 重置</span>',
+        '<div class="row" id="toolrow"></div>'
+        + '<p class="fine" style="margin-top:10px">体检会逐项检查会话、索引、R2 与 TMDB，能修的给出一键修复。'
+        + '「重置任务」清掉残留的任务锁与降级计数，任务卡住不动时用。</p>'
+        + '<div id="dgbox"></div>');
+  bindTools();
+  paint(); loadState(); loadLogs();
+}
+function bindTools(){
+  var row = document.getElementById('toolrow'); if (!row) return;
+  row.innerHTML = '<button class="btn fixed" id="dg">体检</button>'
+    + '<button class="btn fixed" id="unlock">重置任务</button>';
+  var bind = function(id, fn){ var e = document.getElementById(id); if (e) e.onclick = fn; };
+  bind('dg', function(){ runDiagnose(document.getElementById('dg')); });
+  bind('unlock', function(){
+    var u = document.getElementById('unlock'); u.textContent = '重置中…'; u.disabled = true;
+    api('/api/repair?do=resetTask').then(function(r){
+      say('已解锁并清零降级计数（原 deaths=' + r.deaths + '）'); loadState();
+    }).catch(function(e){ say(e.message, 1); })
+      .finally(function(){ u.textContent = '重置任务'; u.disabled = false; });
+  });
+}
+function loadState(){
+  api('/api/lib').then(function(l){ S.libst = l; if (S.view === 'idx' && S.st) renderIndex(); }, function(){});
+  api('/api/state').then(function(st){
+    if (S.view !== 'idx') return;
+    S.st = st; GRAB = st.grabMax || GRAB; MAX = st.cartMax || MAX;
+    renderIndex();
+  }).catch(function(e){
+    var ip = document.getElementById('ip');
+    if (ip) ip.innerHTML = '<div class="err">' + esc(e.message) + '</div>';
+  });
+}
+function flowHTML(st){
+  var p = st.pipe, sg = (p && p.stages) || {};
+  var h = '<div class="flow' + (RUN.on ? ' run' : '') + '">';
+  STAGES.forEach(function(k, i){
+    var s = sg[k] || { i:0, o:0, e:0 };
+    if (i) h += '<div class="link2" style="--i:' + (i - 1) + '"><i></i></div>';
+    h += '<div class="node' + (s.e ? ' err' : (RUN.on && s.i ? ' act' : '')) + '" title="' + esc(STAGE_HINT[k] || '') + '">'
+      + '<div class="nn">' + (st.stageNames ? st.stageNames[k] : k) + '</div>'
+      + '<div class="nv num">' + (s.o || 0) + '</div>'
+      + '<div class="ns">' + (s.i || 0) + ' 进'
+      + (s.e ? ' · <b>' + s.e + ' 错</b>' : '') + '</div></div>';
+  });
+  return h + '</div>';
+}
+function sparkHTML(st){
+  var arr = (st.pipes || []).slice().reverse();
+  if (!arr.length) return '';
+  var max = Math.max.apply(null, arr.map(function(x){ return x.o || 0; })) || 1;
+  return '<div class="spark">' + arr.map(function(x){
+    var hgt = Math.max(0.06, (x.o || 0) / max);
+    return '<i class="' + (x.e ? '' : 'hot') + '" style="transform:scaleY(' + hgt.toFixed(3) + ')" title="'
+      + esc((x.kind || '') + ' · 入库 ' + (x.o||0) + ' · 子请求 ' + (x.sub||0)) + '"></i>';
+  }).join('') + '</div>';
+}
+/* 一句话状态：正在跑 / 冷却 / 待建 / 已建完 */
+function sysLine(st){
+  if (RUN.on) return '<span class="dot live"></span><b>' + (RUN.mode === 'inc' ? '正在抓取新片' : '正在建立索引') + '</b>';
+  if (st.cooling) return '<span class="dot warn"></span><b>论坛限速冷却中</b>，还需 ' + st.cooling + ' 秒';
+  if (st.busy) return '<span class="dot warn"></span><b>后台任务运行中</b>，约 ' + st.lockLeft + ' 秒后空闲';
+  if (st.done) return '<span class="dot ok"></span><b>索引已建完</b>' + (st.at ? '，更新于 ' + since(st.at) : '');
+  var left = st.years.filter(function(y){ return !y.done; }).length;
+  return '<span class="dot"></span><b>还有 ' + left + ' 个年份没建完</b>，任务会分轮进行，可以随时停';
+}
+function yearRow(y){
+  var pct = y.last ? Math.min(100, Math.round(y.page / y.last * 100)) : (y.done ? 100 : 0);
+  return '<div class="yr" data-y="' + y.year + '"><b>' + y.year + '</b>'
+    + '<div class="bar2"><i class="' + (y.done ? 'ok' : '')
+    + '" style="transform:scaleX(' + (pct / 100) + ')"></i></div>'
+    + '<em>' + yearText(y) + '</em></div>';
+}
+function yearText(y){
+  return (y.done ? '完成 · ' + y.rels : (y.last ? y.page + '/' + y.last + ' 页' : '未开始'))
+    + (y.parts ? ' · ' + y.parts + ' 片' : '')
+    + (y.bad ? ' · 补 ' + y.bad : '');
+}
+function renderIndex(){
+  var st = S.st, ip = document.getElementById('ip');
+  if (!ip || !st) return;
+  var p = st.pipe || {};
+  var subPct = p.subMax ? Math.round((p.sub || 0) / p.subMax * 100) : 0;
+  var yd = st.years.filter(function(y){ return y.done; }).length;
+
+  /* ① 主卡：四个数字、一句状态、一个主动作 */
+  var h = '<div class="card" id="sysmain"><div class="kpi">'
+    + '<div><b class="num" id="k-movies">' + (st.movies || 0).toLocaleString() + '</b><em>'
+      + (S.src === 'tv' ? '剧集' : '影片') + '</em></div>'
+    + '<div><b class="num" id="k-rels">' + (st.rels || 0).toLocaleString() + '</b><em>片源</em></div>'
+    + '<div><b id="k-at">' + (st.at ? since(st.at) : '—') + '</b><em>最后更新</em></div>'
+    + '<div><b class="num" id="k-years">' + yd + '/' + st.years.length + '</b><em>年份完成</em></div></div>'
+    + '<div class="sysline" id="sysline">' + sysLine(st) + '</div>';
+  if (st.cooling)
+    h += '<div class="warnbox" id="warncool">论坛限速冷却中，还需 ' + st.cooling + ' 秒'
+      + (st.coolWhy ? '（' + esc(st.coolWhy) + '）' : '') + '。任务会自己等，也可以'
+      + '<button class="link" id="cool">立即清除冷却</button>。</div>';
+  if (st.deaths)
+    h += '<div class="warnbox" id="warndeath">上一轮任务被中断 ' + st.deaths + ' 次，已自动把每轮批量降到 1/'
+      + Math.pow(2, Math.min(4, st.deaths)) + '。跑完一轮会自动恢复。</div>';
+  h += '<div class="row" style="margin-top:16px">'
+    + (RUN.on ? '<button class="btn fixed" id="stop">停止</button>'
+      : (st.done
+          ? '<button class="btn on" id="inc">抓取新片</button>'
+          : '<button class="btn on" id="cont">继续建立索引</button><button class="btn" id="inc">抓取新片</button>'))
+    + '</div>';
+  if (st.lastIncremental)
+    h += '<p class="fine" style="margin-top:12px">上次抓新片：' + since(st.lastIncremental.at)
+      + ' · 新增 ' + st.lastIncremental.added + ' 个片源</p>';
+  h += '</div>';
+
+  /* ② 管线 */
+  h += dxHTML('pipe', '管线',
+    '<span class="sub">' + (p.at ? (p.kind === 'incremental' ? '增量' : '建索引') + ' · ' + since(p.at)
+        + ' · ' + ((p.ms || 0) / 1000).toFixed(1) + 's' : '还没跑过') + '</span>',
+    flowHTML(st)
+    + '<div class="quota"><span>子请求</span><div class="bar2" id="q-bar"><i class="'
+      + (subPct > 88 ? 'bad' : '') + '" style="transform:scaleX('
+      + (Math.max(2, subPct) / 100) + ')"></i></div>'
+      + '<span class="num" id="q-num">' + (p.sub || 0) + ' / ' + (p.subMax || st.plan.sub) + '</span></div>'
+    + sparkHTML(st)
+    + '<div class="dl-meta" style="margin-top:12px">'
+      + '<span>计划 <i>' + esc(st.plan.name) + '</i></span>'
+      + '<span>单轮 <i class="num">' + st.plan.pages + '</i> 页 / <i class="num">' + st.plan.tmdb + '</i> 次 TMDB</span>'
+      + '<span>单片 <i class="num">' + st.partSize + '</i> 行</span>'
+      + '<span>请求间隔 <i class="num" id="k-gap">' + (st.gap || 0) + '</i> ms</span>'
+      + '<span>本机 <i>' + esc(PERF.label()) + '</i></span></div>');
+
+  /* ③ 年份进度 */
+  h += dxHTML('years', '年份进度', '<span class="sub">' + yd + ' / ' + st.years.length + ' 完成</span>',
+    '<div id="yrs">' + st.years.map(yearRow).join('') + '</div>'
+    + '<p class="fine" style="margin-top:10px">点一个年份可以单独从它开始建；有任务在跑时先停止。</p>');
+
+  h += unmatchedHTML(st);
+  h += libPanelHTML();
+  ip.innerHTML = h;
+
+  [].forEach.call(ip.querySelectorAll('.yr'), function(d){
+    d.onclick = function(){ if (RUN.on){ toast('有任务在跑，先停止'); return; } runBuild(+d.dataset.y); };
+  });
+  var bind = function(id, fn){ var e = document.getElementById(id); if (e) e.onclick = fn; };
+  bind('cont', function(){ runBuild(null); });
+  bind('inc', runIncremental);
+  bind('stop', function(){ RUN.stop = true; var s = document.getElementById('stop');
+    s.textContent = '停止中…'; s.disabled = true; });
+  bind('cool', function(){ api('/api/repair?do=cooldown')
+    .then(function(){ toast('已清除冷却'); loadState(); }).catch(function(e){ toast(e.message); }); });
+  bind('lscan', libScanRun);
+  bind('lres', libResolveRun);
+  bind('uretry', function(){
+    var b = document.getElementById('uretry');
+    b.disabled = true; b.textContent = '重试中…';
+    S.logch = 'run'; renderLogs();
+    runFix('retryUnmatched', null, function(r, n){
+      if (r.msg) say(r.msg);
+      b.textContent = '重试中 ' + n + (r.left ? '（剩 ' + r.left + '）' : '');
+    }, function(err, r){
+      if (err){ b.disabled = false; b.textContent = '重试匹配'; say('重试中断：' + err.message, 1); return; }
+      say('重试完成' + (r.msg ? ' · ' + r.msg : ''));
+      toast('重试完成');
+      pageCache = {}; pre = {};
+      loadState();
+    });
+  });
+  bind('urescan', function(){
+    var b = document.getElementById('urescan');
+    if (b.dataset.sure !== '1'){
+      b.dataset.sure = '1';
+      b.textContent = '确定要倒回游标？再点一次';
+      b.classList.add('on');
+      setTimeout(function(){ if (b){ b.dataset.sure = ''; b.textContent = '重扫未匹配'; b.classList.remove('on'); } }, 6000);
+      return;
+    }
+    b.disabled = true; b.textContent = '处理中…';
+    api('/api/repair?do=rescanUnmatched').then(function(r){
+      S.logch = 'run'; say(r.msg); renderLogs();
+      toast('已倒回游标，去点「继续建立索引」');
+      loadState();
+    }).catch(function(e){ b.disabled = false; b.textContent = '重扫未匹配'; say(e.message, 1); });
+  });
+}
+/* 进度补丁：每轮任务回来只改数字、年份行、配额与状态句。
+   结构变了（冷却出现 / 消失、按钮该换了）就退回整体重画。 */
+function patchIndex(){
+  var st = S.st, ip = document.getElementById('ip');
+  if (!st || !ip || !document.getElementById('sysmain')) return false;
+  if (!!st.cooling !== !!document.getElementById('warncool')) return false;
+  if (!!st.deaths !== !!document.getElementById('warndeath')) return false;
+  var set = function(id, v){ var e = document.getElementById(id); if (e && e.textContent !== v) e.textContent = v; };
+  set('k-movies', (st.movies || 0).toLocaleString());
+  set('k-rels', (st.rels || 0).toLocaleString());
+  set('k-at', st.at ? since(st.at) : '—');
+  var yd = st.years.filter(function(y){ return y.done; }).length;
+  set('k-years', yd + '/' + st.years.length);
+  set('k-gap', String(st.gap || 0));
+  var sl = document.getElementById('sysline'); if (sl) sl.innerHTML = sysLine(st);
+  var wc = document.getElementById('warncool');
+  if (wc && st.cooling){
+    var want = '论坛限速冷却中，还需 ' + st.cooling + ' 秒' + (st.coolWhy ? '（' + st.coolWhy + '）' : '') + '。任务会自己等，也可以';
+    var tn = wc.firstChild; if (tn && tn.nodeType === 3 && tn.textContent !== want) tn.textContent = want;
+  }
+  var p = st.pipe || {}, subPct = p.subMax ? Math.round((p.sub || 0) / p.subMax * 100) : 0;
+  var qb = document.querySelector('#q-bar i');
+  if (qb){ qb.style.transform = 'scaleX(' + (Math.max(2, subPct) / 100) + ')'; qb.classList.toggle('bad', subPct > 88); }
+  set('q-num', (p.sub || 0) + ' / ' + (p.subMax || st.plan.sub));
+  st.years.forEach(function(y){
+    var r = ip.querySelector('.yr[data-y="' + y.year + '"]'); if (!r) return;
+    var pct = y.last ? Math.min(100, Math.round(y.page / y.last * 100)) : (y.done ? 100 : 0);
+    var bar = r.querySelector('.bar2 i');
+    bar.style.transform = 'scaleX(' + (pct / 100) + ')'; bar.classList.toggle('ok', !!y.done);
+    var em = r.querySelector('em'), tx2 = yearText(y);
+    if (em.textContent !== tx2) em.textContent = tx2;
+  });
+  var ysub = ip.querySelector('details[data-x="years"] summary .sub');
+  if (ysub) ysub.textContent = yd + ' / ' + st.years.length + ' 完成';
+  return true;
+}
+/* 未匹配片名：把一个数字拆成"能修的 / 不用修的 / 修不了的" */
+function unmatchedHTML(st){
+  var p = st.pend;
+  if (!p || !p.n) return '';
+  var body = '<div class="kpi">'
+    + '<div><b class="num">' + p.retry + '</b><em>可重试</em></div>'
+    + '<div><b class="num">' + (p.tv + p.pack) + '</b><em>非电影</em></div>'
+    + '<div><b class="num">' + p.dead + '</b><em>反复认不出</em></div>'
+    + '<div><b class="num">' + p.n + '</b><em>留底总数</em></div></div>'
+    + '<p class="fine" style="margin-top:12px">'
+    + '认不出来的那一组，帖子行也一起留着了 —— 重试是直接从留底里认，不用把列表页重爬一遍。'
+    + '剧集 / 合集本来就不在 TMDB 电影库里，跳过是对的。</p>';
+  if (p.sample && p.sample.length)
+    body += '<div class="qlist" style="max-height:160px">' + p.sample.map(function(t){
+      return '<div class="qrow"><span class="dot warn"></span><span class="qn">' + esc(t) + '</span></div>';
+    }).join('') + '</div>';
+  body += '<div class="row" style="margin-top:14px">'
+    + '<button class="btn fixed' + (p.retry ? ' on' : '') + '" id="uretry"' + (p.retry ? '' : ' disabled') + '>'
+    + '重试匹配' + (p.retry ? ' ' + p.retry + ' 组' : '') + '</button>'
+    + '<button class="btn fixed" id="urescan">重扫未匹配</button></div>'
+    + '<p class="fine" style="margin-top:8px">'
+    + '「重扫未匹配」是给 v4 时期留下的老账用的：那会儿认不出来的帖子行没留底，'
+    + '得把年份游标倒回第 1 页重走一遍。已入库的帖子会被跳过，不会重复抓。</p>';
+  return dxHTML('pend', '未匹配片名',
+    (p.retry ? '<span class="pill warn">' + p.retry + ' 组可重试</span>' : '<span class="sub">' + p.n + ' 条留底</span>'),
+    body);
+}
+function libPanelHTML(){
+  var L = S.libst;
+  if (!L) return dxHTML('lib', '片库对照', '<span class="sub">A/list.json</span>', '<div class="tail"><div class="spin"></div></div>');
+  if (!L.host) return dxHTML('lib', '片库对照', '<span class="sub">未配置</span>', '<p class="lede">' + esc(L.hint || '未配置 RECV_BASE / STREAM_BASE') + '</p>');
+  if (L.src === 'received') return libRecvPanelHTML(L);
+  var done = (L.ids || 0) + (L.tried || 0);
+  var total = done + (L.todo || 0);
+  var pct = total ? Math.round(done / total * 100) : (L.ids ? 100 : 0);
+  var body = '<div class="kpi">'
+    + '<div><b class="num">' + (L.files || 0).toLocaleString() + '</b><em>片库文件</em></div>'
+    + '<div><b class="num">' + (L.ids || 0).toLocaleString() + '</b><em>已认定 TMDB</em></div>'
+    + '<div><b class="num">' + (L.tried || 0).toLocaleString() + '</b><em>认过但没有</em></div>'
+    + '<div><b class="num">' + (L.todo || 0).toLocaleString() + '</b><em>待认定</em></div></div>'
+    + '<div class="bar2" style="margin-top:14px"><i class="' + (L.todo ? '' : 'ok')
+    + '" style="transform:scaleX(' + (Math.max(2, pct) / 100) + ')"></i></div>';
+  /* 从 v4 搬过来的库：模糊键表还在，但一次 TMDB 都没认过 —— 得说清楚 */
+  if (L.fresh)
+    body += '<div class="warnbox">这份片库还没被 v5 认过一遍。现在只有 '
+      + (L.fuzzy || 0).toLocaleString() + ' 条模糊键（按片名 + 年份猜），'
+      + '所以海报上只会标「疑似已有」。点下面的<b>重新扫描片库</b>，'
+      + '再跑一遍认定，就会升级成按 TMDB id 精确比对。</div>';
+  body += '<p class="fine" style="margin-top:10px">'
+    + esc(L.host) + ' · 扫描于 ' + (L.scan ? since(L.scan) : '从未') + ' · 认定于 ' + since(L.at) + '。'
+    + '认定过的用 TMDB id 精确比对（标「库中已有」）；还没认到 id 的退回片名 + 年份'
+    + '（中文名和原名都算），标「疑似已有」。'
+    + (L.fuzzy ? '当前模糊兜底键 ' + (L.fuzzy || 0).toLocaleString() + ' 条，每次扫描按片库现状重算。' : '') + '</p>'
+    + (L.sample && L.sample.length
+        ? '<p class="fine">例如：' + esc(L.sample.join('、')) + '…</p>' : '')
+    + '<div class="row" style="margin-top:14px">'
+    + '<button class="btn fixed' + (L.fresh || !L.scan ? ' on' : '') + '" id="lscan">重新扫描片库</button>'
+    + '<button class="btn fixed' + (L.todo ? ' on' : '') + '" id="lres"'
+      + (L.todo ? '' : ' disabled') + '>'
+      + (L.todo ? '认定待处理 ' + L.todo + ' 个' : (L.scan ? '已全部认定' : '先扫描一次')) + '</button></div>';
+  return dxHTML('lib', '片库对照',
+    (L.todo ? '<span class="pill warn">待认定 ' + L.todo + '</span>'
+            : '<span class="sub">' + (L.ids || 0).toLocaleString() + ' 已认定</span>'), body);
+}
+/* 总账直读模式的面板。没有「待认定」这一栏 —— id 是 Stream 那边给的，
+   这边一次 TMDB 都不发，所以那个按钮和那根进度条都不该出现。 */
+function libRecvPanelHTML(L){
+  var exact = L.ids || 0, mine = L.mine || exact, fuzzy = L.missed || 0;
+  var body = '<div class="kpi">'
+    + '<div><b class="num">' + (L.files || 0).toLocaleString() + '</b><em>片库文件</em></div>'
+    + '<div><b class="num">' + mine.toLocaleString() + '</b><em>本源作品</em></div>'
+    + '<div><b class="num">' + exact.toLocaleString() + '</b><em>带 TMDB id</em></div>'
+    + '<div><b class="num">' + fuzzy.toLocaleString() + '</b><em>只能模糊比</em></div></div>';
+  if (L.pending)
+    body += '<div class="warnbox">Stream 那边还有 ' + L.pending.toLocaleString()
+      + ' 部没轮到匹配 TMDB。它们这会儿只能按片名 + 年份猜（标「疑似已有」），'
+      + '等那边跑完，这里下次同步自动升级成精确比对 —— 这边不用做任何事。</div>';
+  body += '<p class="fine" style="margin-top:10px">'
+    + esc(L.host) + (L.via === 'r2' ? '（公开 R2 直读）' : '（经 Stream）')
+    + ' · 同步于 ' + since(L.at) + ' · 内容指纹 <code>' + esc(L.gen || '—') + '</code>。'
+    + 'TMDB 编号由 Stream 在写入时算好，这边取回来直接比 id —— 一次 TMDB 请求都不发。'
+    + '总账里也没认出来的那些退回片名 + 年份（中文名和原名都算），标「疑似已有」。</p>'
+    + (L.sample && L.sample.length
+        ? '<p class="fine">例如：' + esc(L.sample.join('、')) + '…</p>' : '')
+    + '<div class="row" style="margin-top:14px">'
+    + '<button class="btn fixed" id="lscan">重新同步总账</button></div>';
+  return dxHTML('lib', '片库对照',
+    '<span class="sub">' + exact.toLocaleString() + ' 部精确比对</span>', body);
+}
+function libScanRun(){
+  var b = document.getElementById('lscan');
+  var recv = S.libst && S.libst.src === 'received';
+  if (b){ b.disabled = true; b.textContent = recv ? '同步中…' : '扫描中…'; }
+  api('/api/lib?scan=1').then(function(r){
+    S.libst = r; pageCache = {};
+    if (r.mode === 'received'){
+      say('总账同步：片库 ' + r.files + ' 个文件 → 本源 ' + r.cands + ' 部 · '
+        + (r.ok || 0) + ' 部带 TMDB id' + (r.tried ? ' · ' + r.tried + ' 部只能模糊比' : ''));
+      renderIndex();
+      toast('片库对照已同步');
+      return;                                  /* 没有认定这一步 */
+    }
+    say('片库扫描：' + r.files + ' 个文件 → ' + r.cands + ' 部片'
+      + (r.dropped ? ' · 清掉已不在库里的 ' + r.dropped : '') + ' · 待认定 ' + r.left);
+    renderIndex();
+    if (r.left) libResolveRun();
+  }).catch(function(e){ say((recv ? '总账同步失败：' : '片库扫描失败：') + e.message, 1); renderIndex(); });
+}
+/* 认定是分批的：一批用掉多少子请求由服务端预算决定，left>0 就接着调 */
+function libResolveRun(){
+  var b = document.getElementById('lres');
+  if (b){ b.disabled = true; b.textContent = '认定中…'; }
+  var rounds = 0;
+  (function step(){
+    api('/api/lib?resolve=1').then(function(r){
+      rounds++;
+      S.libst = r;
+      say('认定第 ' + rounds + ' 批 · 命中 ' + (r.added || 0)
+        + (r.missed ? ' · 认不出 ' + r.missed : '') + ' · 还剩 ' + r.left);
+      renderIndex();
+      /* R2 对同一个对象的写入频率有硬限制，催太急会直接被拒。
+         每一轮服务端会给出建议间隔，照做即可。 */
+      if (r.left > 0 && rounds < 400){ setTimeout(step, Math.max(400, r.wait || 900)); return; }
+      pageCache = {};
+      say('片库认定完成：' + (r.ids || 0) + ' 部已用 TMDB id 精确比对');
+      toast('片库认定完成');
+    }).catch(function(e){
+      var m = e.message || String(e);
+      if (/10058|concurrent request rate|限流/i.test(m)){
+        /* 写得太密被 R2 挡了一下。不是错误，等一等接着认就是了。 */
+        say('R2 提示写入太密，等 3 秒接着认…');
+        setTimeout(step, 3000); return;
+      }
+      say('认定中断：' + m, 1); renderIndex();
+    });
+  })();
+}
+
+/* ── 日志（分频道） ── */
+var LOGCH = [['run','运行'],['pipe','管线'],['net','网络'],['match','匹配'],['lib','片库'],['sys','系统']];
+function loadLogs(){
+  api('/api/logs?ch=all&n=140&saved=1').then(function(j){
+    S.logs = j; if (S.view === 'idx') renderLogs();
+  }).catch(function(){ if (S.view === 'idx') renderLogs(); });
+}
+function runRowHTML(x){
+  return '<div class="lrow' + (x.bad ? ' err' : '') + '"><span class="lt">'
+    + new Date(x.at).toTimeString().slice(0,8) + '</span>'
+    + '<span class="lm">' + esc(x.m) + '</span></div>';
+}
+function renderLogs(){
+  var box = document.getElementById('lg'); if (!box) return;
+  var j = S.logs || { live:[], ch:[] };
+  var cnt = {}; (j.ch || []).forEach(function(c){ cnt[c.k] = c.n; });
+  cnt.run = RUN.log.length;
+  var rows;
+  if (S.logch === 'run'){
+    rows = RUN.log.map(runRowHTML);
+  } else {
+    var live = (j.live || []).filter(function(x){ return x.ch === S.logch; });
+    rows = live.map(function(x){
+      return '<div class="lrow ' + esc(x.lvl) + '"><span class="lt">'
+        + new Date(x.at).toTimeString().slice(0,8) + '</span>'
+        + '<span class="lm">' + esc(x.msg) + '</span>'
+        + '<span class="lc">' + esc(x.kind) + '</span></div>';
+    });
+  }
+  var body = '<div class="logtabs">' + LOGCH.map(function(c){
+        return '<button data-c="' + c[0] + '"' + (S.logch === c[0] ? ' class="on"' : '') + '>'
+          + c[1] + '<i>' + (cnt[c[0]] || '') + '</i></button>';
+      }).join('') + '</div>'
+    + '<div class="logs" id="logrows">' + (rows.length ? rows.join('')
+        : '<p class="lede" style="padding:22px 0;text-align:center">这一频道暂时没有记录</p>') + '</div>';
+  if (S.logch !== 'run' && j.saved && j.saved.length)
+    body += '<div class="hd" style="margin:18px 0 8px"><h2 class="sec" style="font-size:15px">留档事件</h2>'
+      + '<span class="sub">重启也还在</span></div><div class="logs" style="max-height:180px">'
+      + j.saved.map(function(x){
+          return '<div class="lrow ' + esc(x.lvl) + '"><span class="lt">'
+            + new Date(x.at).toTimeString().slice(0,8) + '</span>'
+            + '<span class="lm">' + esc(x.msg) + '</span></div>';
+        }).join('') + '</div>';
+  /* 展开状态跟着 details 走；正在跑任务时自动展开，别让人找 */
+  if (RUN.on && !DX.logs){ DX.logs = true; dxSave(); }
+  box.innerHTML = dxHTML('logs', '日志',
+    '<button class="link" id="lgr">刷新</button>' + (S.logch === 'run' && RUN.on ? '<span class="pill ok"><span class="dot live"></span>运行中</span>' : ''), body);
+  [].forEach.call(box.querySelectorAll('[data-c]'), function(b){
+    b.onclick = function(){ S.logch = b.dataset.c; renderLogs(); };
+  });
+  var r = document.getElementById('lgr');
+  if (r) r.onclick = function(ev){ ev.preventDefault(); ev.stopPropagation(); r.textContent = '刷新中…'; loadLogs(); };
+}
+/* 运行频道的日志逐条前插，不整段重画：一轮一条，几百轮也不卡 */
+function say(msg, bad){
+  var x = { m:msg, bad:bad, at:Date.now() };
+  RUN.log.unshift(x);
+  if (RUN.log.length > 120) RUN.log.length = 120;
+  if (S.view !== 'idx' || S.logch !== 'run') return;
+  var rows = document.getElementById('logrows');
+  if (!rows || !document.querySelector('#lg [data-c="run"]')){ renderLogs(); return; }
+  var ph = rows.querySelector('p'); if (ph) ph.remove();
+  rows.insertAdjacentHTML('afterbegin', runRowHTML(x));
+  while (rows.children.length > 120) rows.lastElementChild.remove();
+  var tab = document.querySelector('#lg [data-c="run"] i'); if (tab) tab.textContent = RUN.log.length;
+}
+function applyProgress(r){
+  if (!S.st) return;
+  var y = S.st.years.filter(function(x){ return x.year === r.year; })[0];
+  if (y){ y.page = r.page; y.last = r.last || y.last; y.done = !!r.done; y.bad = r.bad || 0; }
+  if (r.movies != null) S.st.movies = r.movies;
+  if (r.rels != null) S.st.rels = r.rels;
+  if (r.gap != null) S.st.gap = r.gap;
+  if (r.cooling != null) S.st.cooling = r.cooling;
+  if (r.degraded != null) S.st.deaths = r.degraded;
+  if (r.sub != null){
+    if (!S.st.pipe) S.st.pipe = {};
+    S.st.pipe.sub = r.sub; S.st.pipe.subMax = r.subMax;
+  }
+  S.st.at = Date.now();
+  if (!patchIndex()) renderIndex();
+}
+function finish(){
+  RUN.on = false; RUN.stop = false; RUN.mode = null;
+  pageCache = {}; pre = {};
+  loadState(); loadLogs();
+}
+/**
+ * 建索引循环。会卡住要人工干预的地方全在这儿收口：
+ *   · 409 忙   → 按服务端给的 lockLeft 精确等
+ *   · 残留锁   → 自动 resetTask
+ *   · 429 冷却 → 按 cooling 秒数睡，睡醒接着跑
+ *   · 503 预算 → 这一轮的子请求配额用完了，属于正常收工，立刻起下一轮
+ *   · 超时     → 服务端会自动降批量，前端隔几秒再来；连着六次才停
+ */
+function runBuild(year){
+  if (RUN.on) return;
+  RUN.on = true; RUN.stop = false; RUN.mode = 'build'; RUN.log = [];
+  S.logch = 'run'; DX.pipe = true; dxSave();
+  say(year ? ('开始建立 ' + year + ' 年…') : '开始继续建立索引…');
+  renderIndex(); renderLogs();
+  var idle = 0, waits = 0, timeouts = 0, autoReset = 0, src0 = S.src;
+
+  function resetAndGo(loop){
+    api('/api/repair?do=resetTask').then(function(){
+      say('已自动重置任务锁与降级计数，10 秒后继续');
+      waits = 0; loop(10000);
+    }).catch(function(err){ say('自动重置失败：' + err.message, 1); finish(); });
+  }
+
+  (function loop(delay){
+    if (RUN.stop || S.src !== src0){ say('已停止，进度已保存'); finish(); return; }
+    setTimeout(function(){
+      if (RUN.stop || S.src !== src0){ say('已停止，进度已保存'); finish(); return; }
+      api('/api/build' + (year ? '?year=' + year : '')).then(function(r){
+        waits = 0; timeouts = 0;
+        if (r.cooling){
+          say('论坛限速冷却，等 ' + r.cooling + ' 秒后继续');
+          applyProgress(r); loop(r.cooling * 1000 + 800); return;
+        }
+        if (r.msg && !r.year){ say(r.msg); finish(); return; }
+        say(r.year + ' 年 · 第 ' + r.page + '/' + (r.last || '?') + ' 页'
+          + ' · 新帖 ' + r.fresh + ' · 入库 ' + r.attached + ' · 新片 ' + r.matchedNew + ' · 命中 ' + r.cached
+          + (r.pending ? ' · 待重试 ' + r.pending : '')
+          + (r.budgetHit ? ' · 配额收工' : '')
+          + (r.rateHit ? ' · 被限速' : '')
+          + (r.failed ? ' · 失败 ' + r.failed : '')
+          + ' · 子请求 ' + r.sub + '/' + r.subMax
+          + ' · ' + (r.ms / 1000).toFixed(1) + 's');
+        applyProgress(r);
+        if (r.fresh === 0 && r.attached === 0 && !r.rateHit && !r.budgetHit){
+          if (++idle >= 3){ say('连续 3 轮无新增，停止'); finish(); return; }
+        } else idle = 0;
+        if (r.done){ say('完成'); finish(); return; }
+        loop(r.rateHit ? 4000 : 260);
+      }).catch(function(e){
+        var d = e.data || {};
+        if (d.busy){
+          if (++waits > 20){ say('等待超时，自动重置任务锁后再试', 1); resetAndGo(loop); return; }
+          say('后台任务运行中，' + (d.wait || 3) + ' 秒后重试（第 ' + waits + ' 次）');
+          loop((d.wait || 3) * 1000 + 700); return;
+        }
+        if (d.budget){ say('本轮子请求配额用尽，已保存进度，继续下一轮'); loop(600); return; }
+        if (d.cooling || e.status === 429){
+          var sec = d.cooling || 10;
+          say('被论坛限速，冷却 ' + sec + ' 秒'); loop(sec * 1000 + 800); return;
+        }
+        if (e.timeout || e.status === 524 || e.status === 504 || e.status === 503){
+          if (++timeouts > 6){ say('连续超时 6 次，先停下。稍后再点「继续建立索引」。', 1); finish(); return; }
+          say('本轮超时（第 ' + timeouts + ' 次），服务端会自动降批量后重试');
+          loop(3000); return;
+        }
+        if (e.status === 0){
+          /* 网络断了：等一等再试，不算失败 */
+          if (++timeouts > 6){ say('网络持续不可用，先停下。', 1); finish(); return; }
+          say('网络不可用，5 秒后重试（第 ' + timeouts + ' 次）'); loop(5000); return;
+        }
+        say(e.message, 1);
+        if (!autoReset && /空响应|限速|拦截|不是 JSON/.test(e.message)){
+          autoReset = 1; resetAndGo(loop); return;
+        }
+        finish();
+      });
+    }, delay || 0);
+  })(0);
+}
+function runIncremental(){
+  if (RUN.on) return;
+  RUN.on = true; RUN.stop = false; RUN.mode = 'inc'; RUN.log = []; S.logch = 'run';
+  say('正在扫描近三年新帖…');
+  renderIndex(); renderLogs();
+  api('/api/incremental').then(function(r){
+    if (r.cooling){ say('论坛限速冷却中，' + r.cooling + ' 秒后再试', 1); finish(); return; }
+    say('完成 · 新增片源 ' + r.added + ' · TMDB 调用 ' + r.calls
+      + (r.failed ? ' · 失败 ' + r.failed : '')
+      + (r.budgetHit ? ' · 配额收工（再点一次可继续）' : '')
+      + ' · 子请求 ' + r.sub + '/' + r.subMax
+      + ' · 累计 ' + r.movies + ' 部 · ' + (r.ms / 1000).toFixed(1) + 's');
+    if (!r.added) say('没有发现新帖');
+    finish();
+  }).catch(function(e){
+    var d = e.data || {};
+    say(d.busy ? ('后台任务运行中，' + (d.wait || 3) + ' 秒后再试') : e.message, 1);
+    finish();
+  });
+}
+
+/* ── 体检 ── */
+var FIXNAME = { unlock:'强制解锁', resetTask:'重置任务', cooldown:'清除冷却', relogin:'重新登录',
+  prune:'清理孤儿', resync:'重算汇总', retryUnmatched:'重试匹配', rescanUnmatched:'重扫未匹配',
+  optimize:'重训码本', migrate:'从 v3 迁移', build:'去建索引', split:'拆分大片', libscan:'重新扫描片库' };
+function runFix(act, arg, onStep, done){
+  var url = '/api/repair?do=' + encodeURIComponent(act) + (arg ? '&year=' + encodeURIComponent(arg) : '');
+  var n = 0;
+  (function step(){
+    api(url).then(function(r){
+      n++; if (onStep) onStep(r, n);
+      var more = (r.left > 0) || (r.done === false && r.left !== 0);
+      if (more && n < 200){ setTimeout(step, Math.max(300, r.wait || 600)); return; }
+      done(null, r, n);
+    }).catch(function(e){ done(e); });
+  })();
+}
+function runDiagnose(btn){
+  var box = document.getElementById('dgbox');
+  if (btn){ btn.disabled = true; btn.textContent = '体检中…'; }
+  if (box) box.innerHTML = '<div class="tail"><div class="spin"></div></div>';
+  api('/api/diagnose').then(function(d){
+    if (btn){ btn.disabled = false; btn.textContent = '体检'; }
+    if (!box) return;
+    var h = '<div class="hd" style="margin:16px 0 6px"><h2 class="sec" style="font-size:15px">体检结果</h2><span class="sub">'
+      + d.checks.length + ' 项 · ' + since(d.at) + '</span></div>';
+    h += d.checks.map(function(c){
+      return '<div class="dg"><span class="dot ' + esc(c.level) + '"></span>'
+        + '<div style="flex:1;min-width:0"><div class="nm">' + esc(c.name) + '</div>'
+        + '<div class="dt">' + esc(c.detail || '') + '</div></div>'
+        + (c.fix ? '<button class="btn sm fixed fx" data-fix="' + esc(c.fix) + '"'
+            + (c.arg ? ' data-arg="' + esc(c.arg) + '"' : '') + '>'
+            + esc(FIXNAME[c.fix] || c.fix) + '</button>' : '') + '</div>';
+    }).join('');
+    box.innerHTML = h;
+    [].forEach.call(box.querySelectorAll('.fx'), function(b){
+      b.onclick = function(){
+        var act = b.dataset.fix;
+        if (act === 'build'){ runBuild(null); return; }
+        if (act === 'libscan'){ libScanRun(); return; }
+        b.disabled = true; b.textContent = '处理中…';
+        runFix(act, b.dataset.arg, function(r, n){
+          if (r.left) b.textContent = '处理中 ' + n + '（剩 ' + r.left + '）';
+        }, function(err, r){
+          if (err){ b.textContent = '失败'; b.disabled = false; toast(err.message); return; }
+          b.textContent = '已完成';
+          say((FIXNAME[act] || act) + '：' + (r.msg || '完成'));
+          if (act === 'retryUnmatched' || act === 'resync'){ pageCache = {}; pre = {}; }
+          loadState();
+        });
+      };
+    });
+  }).catch(function(e){
+    if (btn){ btn.disabled = false; btn.textContent = '体检'; }
+    if (box) box.innerHTML = '<div class="err">' + esc(e.message) + '</div>';
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   路由与启动
+   ══════════════════════════════════════════════════════════════════ */
+function setNav(v){
+  [].forEach.call(navEl.querySelectorAll('button'), function(b){
+    b.classList.toggle('on', b.dataset.v === v);
+  });
+}
+function view(v, push){
+  /* 详情开着的时候切标签：先把它推回去；这一条历史直接「换」成新标签页，
+     不再 back()+push —— 那样当前历史项会停在详情上，前进 / 后退就错位。 */
+  if (PUSH.open){
+    PUSH.hide();
+    if (push !== false){ history.replaceState({ v:v }, ''); push = false; }
+    S.view = '';
+  }
+  if (v === S.view && v !== 'lib') return;
+  if (push !== false) history.pushState({ v:v }, '');
+  if (v === 'lib') lib();
+  else if (v === 'dl') renderDL();
+  else if (v === 'idx') openIndex();
+}
+[].forEach.call(navEl.querySelectorAll('button'), function(b){
+  b.onclick = function(){ view(b.dataset.v); };
+});
+document.getElementById('home').onclick = function(){ S.q = ''; qEl.value = ''; clrEl.classList.remove('on'); view('lib'); };
+backEl.onclick = function(){ if (PUSH.open) closeDetail(); else history.back(); };
+addEventListener('popstate', function(e){
+  /* 手势关详情时我们自己调过 history.back()，那一次 popstate 不用再处理 */
+  if (PUSH.skipPop){ PUSH.skipPop = 0; return; }
+  var st = e.state || {};
+  var v = st.v || 'lib';
+  if (PUSH.open && v !== 'm'){ PUSH.hide(); return; }   // 返回：推回去，底下那层不动
+  if (v === 'm'){
+    var m = CART.o[st.id] || S.items.filter(function(x){ return x.id === st.id; })[0];
+    if (m){ S.under = st.under || S.under || 'lib'; S.view = ''; openMovie(m, false); return; }
+    v = 'lib';
+  }
+  S.view = ''; view(v, false);
+});
+addEventListener('scroll', function(){
+  hdr.classList.toggle('stuck', scrollY > 4);
+  if (S.view === 'lib') S.scroll = scrollY;
+}, { passive:true });
+
+/* ── 海报卡片：整页只挂一套监听（事件委托） ──
+   一千张卡也只有这几个函数，网格随便重画都不用重新绑。
+   按住 480ms 开详情；移开 10px 撤销这一次按压（多半是在滚动）。 */
+(function(){
+  var cur = null, hold = null, held = false, away = false, px = 0, py = 0;
+  function artOf(e){
+    var t = e.target && e.target.closest ? e.target.closest('.art') : null;
+    if (!t || !t.closest('.tile') || t.closest('.grid.preview') || t.closest('.hero')) return null;
+    return t;
+  }
+  function movieOf(a){ var t = a.closest('.tile'); return t ? S.items[+t.dataset.i] : null; }
+  function drop(){ clearTimeout(hold); hold = null; if (cur) cur.classList.remove('cancel'); cur = null; }
+  out.addEventListener('pointerover', function(e){
+    var a = artOf(e); if (!a) return;
+    var x = movieOf(a); if (x) prefetch(x.id);
+  });
+  out.addEventListener('pointerdown', function(e){
+    var a = artOf(e); if (!a || e.button > 0) return;
+    var x = movieOf(a); if (x) prefetch(x.id);
+    cur = a; held = false; away = false; px = e.clientX; py = e.clientY;
+    a.classList.remove('cancel'); clearTimeout(hold);
+    hold = setTimeout(function(){ held = true; haptic('tap'); if (x) openMovie(x); }, 480);
+  });
+  out.addEventListener('pointermove', function(e){
+    if (!cur) return;
+    var far = Math.abs(e.clientX - px) > 10 || Math.abs(e.clientY - py) > 10;
+    if (far !== away){
+      away = far; cur.classList.toggle('cancel', far);
+      if (far) clearTimeout(hold);
+    }
+  });
+  out.addEventListener('pointerout', function(e){
+    if (cur && !(e.relatedTarget && cur.contains(e.relatedTarget))) clearTimeout(hold);
+  });
+  out.addEventListener('pointerup', drop);
+  out.addEventListener('pointercancel', drop);
+  out.addEventListener('click', function(e){
+    var a = artOf(e);
+    if (a){
+      if (held){ held = false; return; }
+      if (away){ away = false; return; }
+      var x = movieOf(a); if (!x) return;
+      if (cartToggle(x)){ haptic('commit'); toast('已加入 · ' + relName(x)); }
+      return;
+    }
+    var nm = e.target && e.target.closest ? e.target.closest('.tname') : null;
+    if (nm && nm.closest('.tile') && !nm.closest('.grid.preview')){
+      var m = movieOf(nm); if (m) openMovie(m);
+    }
+  });
+})();
+
+var qT = null;
+qEl.addEventListener('input', function(){
+  clrEl.classList.toggle('on', !!qEl.value);
+  clearTimeout(qT);
+  qT = setTimeout(function(){
+    var q = qEl.value.trim();
+    if (q === S.q && S.view === 'lib') return;
+    S.q = q; S.page = 1; S.scroll = 0;
+    if (S.view !== 'lib'){ S.view = 'lib'; }
+    lib();
+  }, 260);
+});
+qEl.addEventListener('keydown', function(e){ if (e.key === 'Enter'){ qEl.blur(); } });
+clrEl.onclick = function(){ qEl.value = ''; if (S.q === '' && S.view === 'lib'){ clrEl.classList.remove('on'); return; } S.q = ''; clrEl.classList.remove('on'); lib(); };
+addEventListener('keydown', function(e){
+  if (e.key === '/' && document.activeElement !== qEl){ e.preventDefault(); qEl.focus(); }
+  if (e.key === 'Escape' && document.activeElement === qEl) qEl.blur();
+});
+
+applyTheme();
+setSrc(S.src, true);
+[].forEach.call(document.querySelectorAll('#srcNav button'), function(b){
+  b.onclick = function(){ setSrc(b.dataset.s); };
+});
+PERF.init();
+PUSH.init();
+history.replaceState({ v:'lib' }, '');
+/* 片单是同步从 localStorage 读出来的，所以动作坞的最终状态现在就知道 ——
+   先同步画一次，别等 IndexedDB 那个异步回来之后再让它从屏幕外滑上来。 */
+paintDock();
+DL.load().then(paintDock, paintDock);
+lib();
+/* 两帧之后解除首帧禁令：第一帧落定初始状态，第二帧确保它已经上屏。 */
+var unfreeze = function(){ document.documentElement.classList.remove('noanim'); };
+requestAnimationFrame(function(){ requestAnimationFrame(unfreeze); });
+setTimeout(unfreeze, 400);   /* 后台标签页里 rAF 不跑，兜一手 */
+</script>
+</body>
+</html>
+`;
+/* 页面指纹：模块加载时算一次（FNV-1a），/ 用它做 ETag 协商 */
+const PAGE_TAG = (() => {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < PAGE.length; i++){ h ^= PAGE.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return '"' + h.toString(16) + '-' + PAGE.length.toString(36) + '"';
+})();
