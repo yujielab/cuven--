@@ -49,6 +49,71 @@ console.log('\n■ 杜比视界 RPU（dovi_tool 测试向量）');
   ok(eq(X.nalEscape(X.dvRpuWrite(R)), rd('fel_to_81.bin')), 'FEL → 8.1（保留映射）与 dovi_tool 输出逐字节一致');
 }
 
+console.log('\n■ 管线提效：杜比视界转换复用、分片出口不再整段拷贝、令牌复核');
+{
+  const X = await H.internals();
+  const rd = f => new Uint8Array(fs.readFileSync(S('dovi/' + f))).subarray(4);
+  const nal = f => { const p = rd(f), n = new Uint8Array(p.length + 2); n[0] = 0x7C; n[1] = 0x01; n.set(p, 2); return n; };
+  const eq = (x, y) => x.length === y.length && x.every((v, i) => v === y[i]);
+  const fel = nal('fel_orig.bin'), mel = nal('mel_orig.bin');
+  const a = X.dvRpuMemo(fel), b = X.dvRpuMemo(new Uint8Array(fel)), c = X.dvRpuMemo(mel), d = X.dvRpuMemo(fel);
+  ok(a === b && eq(a, X.dvConvertRpuNal(fel)) && eq(c, X.dvConvertRpuNal(mel)) && !eq(a, c) && eq(d, a),
+    '杜比视界：相邻帧同一份 RPU 直接复用上一次的转换结果；换了 RPU 就重新转；结果与逐帧转换逐字节一致');
+  const big = new Uint8Array(40000).fill(7), mid = new Uint8Array(9000).fill(3);
+  const small = [1, 2, 3].map(n => new Uint8Array(500).fill(n));
+  const parts = [small[0], big, small[1], small[2], mid, mid, mid, mid, mid, mid, mid, mid, big];
+  const ch = X.hlsChunks(parts);
+  ok(eq(X.hlsConcat(ch), X.hlsConcat(parts)) && ch.filter(x => x === big).length === 2 && ch.length < parts.length,
+    `分片出口：拼回来逐字节一致；≥ 16KB 的切片原样交出（不拷贝），零碎的攒成块（${parts.length} 片 → ${ch.length} 块）`);
+}
+{
+  const f = '/Movies/avc_zsub.mkv';
+  const good = H.token(f);
+  const r1 = await H.call(`/hls/${good}/master.m3u8`);
+  const [e0, s0, p0] = good.split('.');
+  const forged = `${e0}.${(s0[0] === 'a' ? 'b' : 'a') + s0.slice(1)}.${p0}`;
+  const r2 = await H.call(`/hls/${forged}/master.m3u8`);
+  const exp = Math.floor(Date.now() / 1000) - 10;
+  const old = `${exp}.${crypto.createHmac('sha256', H.SECRET).update(`${f}|${exp}`).digest('hex')}.${Buffer.from(f).toString('base64url')}`;
+  const r3 = await H.call(`/hls/${old}/master.m3u8`);
+  const r4 = await H.call(`/hls/${good}/master.m3u8`);
+  ok(r1.status === 200 && r4.status === 200 && r2.status === 401 && r3.status === 401,
+    `HLS 令牌验过一次就记住：同一个令牌照常放行（${r4.status}）；改了签名的（${r2.status}）、过期的（${r3.status}）照样拒`);
+}
+
+console.log('\n■ 备选音轨顺路：视频那一遍把正在听的备选音轨一起切好，同一段字节只读一遍');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const f = '/Movies/hdr10_multi.mkv';
+  const base = `/hls/${H.token(f)}/`;
+  const get = async u => Buffer.from(await (await H.call(base + u)).arrayBuffer());
+  await settle(); caches.default.m.clear();
+  const m = await (await H.call(base + 'master.m3u8')).text();
+  const idh = /\n([^/\n]+)\/v\.m3u8/.exec(m)[1];
+  const n = ((await (await H.call(`${base}${idh}/v.m3u8`)).text()).match(/\.m4s/g) || []).length;
+  // 参照：不走缓存（HLS_PREFETCH=0）时的老路径 —— 这条音轨自己把每段字节读一遍
+  H.env.HLS_PREFETCH = '0';
+  const ref = [];
+  const b0 = H.stats.bytes;
+  for (let k = 0; k < n; k++) ref.push(await get(`${idh}/a1/${k}.m4s`));
+  for (let k = 0; k < n; k++) await get(`${idh}/v/${k}.m4s`);
+  const solo = H.stats.bytes - b0;
+  delete H.env.HLS_PREFETCH;
+  await settle(); caches.default.m.clear();
+  // 像播放器那样：视频段与这条备选音轨的同一段一起要
+  const b1 = H.stats.bytes;
+  const got = [];
+  for (let k = 0; k < n; k++) {
+    const [, a] = await Promise.all([get(`${idh}/v/${k}.m4s`), get(`${idh}/a1/${k}.m4s`)]);
+    got.push(a);
+  }
+  await settle();
+  const both = H.stats.bytes - b1;
+  ok(got.length === n && got.every((b, k) => b.equals(ref[k])), `备选音轨 ${n} 段：顺路切出来的与这条音轨自己读出来的逐字节一致`);
+  ok(both < solo * 0.75, `同样一路视频 + 备选音轨，从 Dropbox 读的字节 ${(solo / 1048576).toFixed(1)} MB → ${(both / 1048576).toFixed(1)} MB`);
+  await settle(); caches.default.m.clear();
+}
+
 console.log('\n■ HEVC HDR10 + 全套音轨 / 字幕');
 {
   const r = await H.dump('/Movies/hdr10_multi.mkv', path.join(OUT, 'multi'));
@@ -811,6 +876,85 @@ console.log('\n■ 字幕清洗：字幕组、发布 / 来源声明、网址、�
   const v = await (await H.call('/api/subs/vtt?path=' + encodeURIComponent('/Movies/clean_case.zh.srt'), 'GET', { Cookie: cookie })).text();
   fs.unlinkSync(S('clean_case.zh.srt'));
   ok(/^WEBVTT/.test(v) && v.includes('你好') && v.includes('再见') && !/字幕组|example-subs/.test(v), '直连的外挂字幕（/api/subs/vtt）也清洗过');
+}
+
+console.log('\n■ 增强型字幕清洗（c2）：水印、署名块、全角网址、绘图指令、分段不误删');
+{
+  const X = await H.internals();
+  const D = 6000;
+  const cue = (s, text, d = 2) => ({ s, e: s + d, text, settings: '' });
+  const keepT = (out, t) => out.some(c => c.text === t);
+  // ① 新认得的：全角网址、新版 OpenSubtitles 广告、资源来源、机翻声明、ASS 绘图指令、乱码
+  const dropAny = ['更多美剧请访问 ＷＷＷ．ＹＹＥＴＳ．ＣＯＭ', 'Do you want subtitles for any video?\n-=[ ai.OpenSubtitles.com ]=-',
+    'OpenSubtitles recommends using Nord VPN\nfrom 3.49 USD/month ----> osdb.link/vpn', 'Watch any video online with Open-SUBTITLES\nFree Browser extension: osdb.link/ext',
+    'm 0 0 l 100 0 100 100 0 100', '��� ��', '【@影视工厂】'];
+  const dropEdge = ['Resync for WEB-DL by Fenrir', 'Subtitles improved by Lu', '本资源来自XX论坛', '机翻，如有错误欢迎指正', '转载请注明出处', '扫码关注我们'];
+  const mid = 3000;
+  const c1 = [...dropAny.map((t, i) => cue(mid + i * 5, t)), ...dropEdge.map((t, i) => cue(30 + i * 20, t)), cue(mid + 200, '我们出发吧')];
+  const o1 = X.subClean(c1, D);
+  const left = [...dropAny, ...dropEdge].filter(t => o1.some(c => t.split('\n').some(l => c.text.includes(l))));
+  ok(!left.length && keepT(o1, '我们出发吧'), `全角网址、新版 OpenSubtitles 广告、资源来源、机翻声明、ASS 绘图指令、乱码都删掉${left.length ? '；漏了：' + left.join(' | ') : ''}`);
+
+  // ② 水印：同一行跟着整部片反复出现（第二行），全片都删；高频台词一条不动
+  const c2 = [];
+  for (let i = 0; i < 40; i++) c2.push(cue(300 + i * 130, `第${i}句台词`));
+  for (let i = 0; i < 8; i++) c2[i * 5].text += '\n★影视工厂★';
+  for (let i = 0; i < 10; i++) c2.push(cue(320 + i * 500, '好的'));
+  for (let i = 0; i < 6; i++) c2.push(cue(340 + i * 800, 'Thank you.'));
+  for (let i = 0; i < 4; i++) c2.push(cue(360 + i * 1200, '我是这家工作室的老板'));
+  const o2 = X.subClean(c2, D);
+  ok(!o2.some(c => c.text.includes('影视工厂')) && o2.filter(c => /^第\d+句台词$/.test(c.text)).length === 40,
+    '水印（「★影视工厂★」跟着 8 条台词贯穿全片）：全片删掉，那 8 条台词本身留着');
+  ok(o2.filter(c => c.text === '好的').length === 10 && o2.filter(c => c.text === 'Thank you.').length === 6 && o2.filter(c => c.text === '我是这家工作室的老板').length === 4,
+    '高频台词（好的 ×10、Thank you. ×6、「我是这家工作室的老板」×4）不会被当成水印');
+
+  // ③ 署名块：片头一串署名里夹着的弱信号一起删；紧跟在后面的对白不动。挂得久的片尾鸣谢删，久的开场旁白留着
+  const c3 = [cue(2, '翻译：张三'), cue(5, '感谢所有成员的辛勤付出'), cue(8, '时间轴：王五'), cue(40, '我们出发吧'),
+    cue(D - 30, '感谢收看', 15), cue(10, '很久很久以前，在一个遥远的地方', 12), cue(mid, '感谢大家的支持')];
+  const o3 = X.subClean(c3, D);
+  ok(!keepT(o3, '感谢所有成员的辛勤付出') && !keepT(o3, '翻译：张三') && keepT(o3, '我们出发吧'), '片头署名块里夹着的「感谢所有成员的辛勤付出」随整块删掉；后面的对白留着');
+  ok(!keepT(o3, '感谢收看') && keepT(o3, '很久很久以前，在一个遥远的地方') && keepT(o3, '感谢大家的支持'),
+    '片尾挂了 15 秒的「感谢收看」删掉；开场 12 秒的旁白、正片里的「感谢大家的支持」都留着');
+
+  // ④ 像台词的行只靠弱信号：减一分，片头也不删
+  const o4 = X.subClean([cue(20, '你愿意加入我们吗？'), cue(26, '关注我的公众号吧'), cue(32, 'Email me at john@example.com')], D);
+  ok(o4.length === 3, '片头的「你愿意加入我们吗？」「关注我的公众号吧」、邮箱：像台词，不删');
+
+  // ⑤ HLS 分段（partial）：c1 曾把每一段的前 6 / 后 6 条当片头片尾（门槛 3 分），正片台词被误删
+  const win = [cue(mid, '你好'), cue(mid + 2, '这家工作室出品的片子'), cue(mid + 4, '好看吗'), cue(mid + 6, '还行')];
+  const v5 = X.hlsVtt(win, D);
+  ok(v5.includes('这家工作室出品的片子'), 'HLS 分段只按时间认片头片尾：正片中间「这家工作室出品的片子」（3 分）不再被误删');
+  const v5b = X.hlsVtt([cue(20, '这家工作室出品'), cue(22, '你好')], D);
+  ok(!v5b.includes('这家工作室出品') && v5b.includes('你好'), '片头那一段照旧按片头的门槛删');
+
+  // ⑥ ASS 里 {\p1} 画的矢量图形：解析后只剩一串路径指令 → 删
+  const ass = '[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n' +
+    'Dialogue: 0,0:10:00.00,0:10:05.00,Default,,0,0,0,,{\\p1}m 0 0 l 100 0 100 100 0 100{\\p0}\n' +
+    'Dialogue: 0,0:10:06.00,0:10:08.00,Default,,0,0,0,,你好\n';
+  const pa = X.subClean(X.hlsParseSubFile(ass, '.ass'), D).map(c => c.text);
+  ok(pa.join('|') === '你好', 'ASS 的矢量绘图（{\\p1} m 0 0 l …）不进字幕');
+}
+
+// ⑦ 外挂字幕的 HLS 分段：整份洗一次再按段取 —— 水印（每段只露一次）也认得出
+console.log('\n■ 外挂字幕 HLS 分段走整份清洗');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  await settle(); caches.default.m.clear();
+  const tc = s => { const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${x.toFixed(3).padStart(6, '0').replace('.', ',')}`; };
+  const lines = [];
+  for (let i = 0; i < 30; i++) lines.push([5 + i * 5.8, `第${i}句` + (i % 6 === 0 ? '\n【@字幕工厂】' : '')]);
+  fs.writeFileSync(S('sync_nosub.zh.srt'), lines.map(([a, t], i) => `${i + 1}\n${tc(a)} --> ${tc(a + 2)}\n${t}\n`).join('\n'));
+  try {
+    const f = '/Movies/sync_nosub.mkv';
+    const m = await (await H.call(`/hls/${H.token(f)}/master.m3u8`)).text();
+    const idh = /\n([^/\n]+)\/v\.m3u8/.exec(m)[1];
+    const pl = await (await H.call(`/hls/${H.token(f)}/${idh}/x0.m3u8`)).text();
+    const n = (pl.match(/\.vtt/g) || []).length;
+    let all = '';
+    for (let k = 0; k < n; k++) all += await (await H.call(`/hls/${H.token(f)}/${idh}/x0/${k}.vtt`)).text();
+    const said = new Set(all.match(/第\d+句/g) || []).size;          // 跨段的那条两段都有，按句数
+    ok(n > 3 && said === 30 && !all.includes('字幕工厂'), `外挂字幕 ${n} 段：30 句台词都在，跟着台词出现 5 次的「【@字幕工厂】」一条不剩`);
+  } finally { fs.unlinkSync(S('sync_nosub.zh.srt')); await settle(); caches.default.m.clear(); }
 }
 
 console.log('\n■ ffmpeg 作为 HLS 客户端（HTTP）');

@@ -2868,18 +2868,49 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
    16px 标题会顶满整行；② 名次徽标按同一比例缩，44px 的方块压在 136px 的卡上
    要吃掉三分之一宽度。 */
 .rank-section { contain-intrinsic-size: auto 420px; }
-.rank-section .card-portrait { width: calc(var(--card-w-p) * 0.858); }
-.rank-section .card-rank {
-  min-width: 30px; height: 30px; padding: 0 7px; border-radius: 10px;
-  font-size: 17px; top: 8px; left: 8px;
-}
 @media (min-width: 768px) {
   .rank-section { contain-intrinsic-size: auto 460px; }
-  .rank-section .card-rank { min-width: 34px; height: 34px; font-size: 19px; border-radius: 11px; top: 10px; left: 10px; }
 }
 @media (min-width: 1280px) {
   .rank-section { contain-intrinsic-size: auto 500px; }
 }
+
+/* ══ 今日推荐：大号描边名次 ══════════════════════════════════════
+   每一张是「名次 + 海报」：海报左边一枚大号描边数字（只描边、不填色），海报盖住数字的右缘；
+   名次两位数（10 起）时数字那一格放宽。海报下面不再写片名（海报自己印着片名，读屏照读 aria-label），
+   最近 14 天入库的在海报底部居中挂一枚红色「最近添加」。
+   --rk-pw 是海报宽（与原来的名次卡同宽），--rk-w 是数字那一格。 */
+.rank-section { --rk-pw: calc(var(--card-w-p) * 0.858); }
+.rank-section .card.rank-card {
+  --rk-w: calc(var(--rk-pw) * .5);
+  width: calc(var(--rk-pw) + var(--rk-w)); padding-left: var(--rk-w);
+  border-radius: 0; contain: layout;
+}
+.rank-section .card.rank-card.rk2 { --rk-w: calc(var(--rk-pw) * .84); }
+.rank-section .rank-card .card-poster { border-radius: var(--r-card); z-index: 2; }
+.rank-section .rank-card .card-info { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); margin: 0; }
+.rank-section .rank-card .card-rank {
+  /* 数字那一格往海报底下伸一截，海报（z-index 2）盖住它的右缘 */
+  position: absolute; z-index: 1; left: 0; right: auto; top: auto; bottom: 0;
+  width: calc(var(--rk-w) + var(--rk-pw) * .14); height: auto; min-width: 0; padding: 0;
+  display: block; text-align: right; white-space: nowrap;
+  background: none; border: 0; border-radius: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+  font-family: "SF Pro Display", "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
+  font-size: calc(var(--rk-pw) * 1.12); font-weight: 800; line-height: .74; letter-spacing: -.07em;
+  font-variant-numeric: normal; color: transparent;
+  -webkit-text-stroke: max(2px, calc(var(--rk-pw) * .016)) rgba(255,255,255,.92);
+  text-shadow: none; paint-order: stroke;
+  transform: translateY(calc(var(--rk-pw) * -.04));     /* 数字底边落在海报底边稍上 */
+}
+/* 「最近添加」：海报底边居中的一枚红标 */
+.card-new {
+  position: absolute; z-index: 4; left: 50%; bottom: 0; transform: translateX(-50%);
+  padding: 4px 9px 3px; border-radius: 5px 5px 0 0;
+  background: #d81f26; color: #fff; white-space: nowrap; pointer-events: none;
+  font-size: 12px; font-weight: 700; letter-spacing: .02em; line-height: 1.25;
+  box-shadow: 0 -2px 10px rgba(0,0,0,.25);
+}
+@media (min-width: 768px) { .card-new { font-size: 13px; padding: 5px 11px 4px; } }
 
 /* 今日推荐 · 时段轮换与 TMDB 评分仅在内部驱动选片 / 排序，不渲染任何徽标或 ★ 评分 */
 
@@ -5824,10 +5855,93 @@ html.rail.rail-float .toast {
 }
 /* 顶上居中那枚提示：两边都按右侧安全区收，免得压到右上角竖排的状态栏 */
 html.rail.rail-float .net-banner { left: 50%; max-width: calc(100% - 2 * env(safe-area-inset-right, 0px) - 16px); }
-/* 大图底部的暂停钮 + 轮播点：居中到导航这一列左边那块（Safari 里只有 382 宽，原样居中会伸到导航胶囊底下）——
-   右侧让出这一列，左边那个给暂停钮配平的占位也收掉。收成卡以后照旧与卡同宽 */
+/* ── 全新导航栏（只在 iPhone Duo 折起竖拿）─────────────────────────────
+   一枚高的竖向玻璃胶囊，只放图标，自上而下：主页、资料库、搜索，头像（圆角方块）垫在最底 ——
+   搜索不再是胶囊外另一枚圆钮。选中那一项是白色图标 + 一圈柔光圆底，其余是灰色；文字收起（读屏照读）。
+   结构不动：.dock 自己当胶囊，.nav-container 用 display: contents 把头像、主页、资料库摊进同一列，
+   再用 order 排好（头像在 DOM 里排第一）。原来那枚会滑的选中指示器在这里不用，选中靠每一项自己的圆底。
+   折射玻璃（WebGL）也不挂：胶囊整枚是一层 CSS 毛玻璃，透出底下的画面。
+   进搜索态时一切照旧（搜索场到顶部，胶囊收成头像圆钮），所以下面每条都只管「不在搜索」的时候。 */
+html.rail.rail-float .dock:not(.searching) {
+  width: var(--rail-w); padding: 9px 0 10px; gap: 6px;
+  justify-content: flex-start; align-items: center;
+  border-radius: 999px; pointer-events: auto;
+  background:
+    linear-gradient(to bottom, rgba(255,255,255,.10) 0%, rgba(255,255,255,.02) 38%, rgba(255,255,255,0) 60%),
+    rgba(24,24,26,.44);
+  backdrop-filter: blur(26px) saturate(180%); -webkit-backdrop-filter: blur(26px) saturate(180%);
+  border: var(--hairline) solid rgba(255,255,255,.16);
+  box-shadow: 0 18px 44px rgba(0,0,0,.45), inset 0 1px .5px rgba(255,255,255,.30), inset 0 -1px .5px rgba(0,0,0,.35);
+}
+html.rail.rail-float .dock:not(.searching) .nav-container { display: contents; }
+html.rail.rail-float .dock:not(.searching) #navPill { display: none; }
+html.rail.rail-float .dock:not(.searching) .nav-item {
+  flex: 0 0 auto; width: 48px; height: 48px; padding: 0; margin: 0; gap: 0;
+  display: grid; place-items: center; border-radius: 50%;
+  color: rgba(235,235,245,.52);
+  background: transparent; border: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+  transition: background-color .25s var(--ease-out), color .25s var(--ease-out), transform var(--press-out);
+}
+html.rail.rail-float .dock:not(.searching) #navHome { order: 1; }
+html.rail.rail-float .dock:not(.searching) #navLib { order: 2; }
+/* #navSearch 的玻璃底是一条 ID 规则（#navContainer, #navSearch）给的，这里也得带 ID 才盖得过 */
+html.rail.rail-float .dock:not(.searching) #navSearch {
+  order: 3; overflow: hidden;
+  background: transparent; border: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+html.rail.rail-float .dock:not(.searching) #headerAvatar { order: 4; width: 40px; height: 40px; margin: 6px 0 0; border-radius: 12px; }
+html.rail.rail-float .dock:not(.searching) .nav-item.active {
+  color: #fff; background: rgba(255,255,255,.13);
+  box-shadow: inset 0 0 0 .5px rgba(255,255,255,.14), inset 0 1px 0 rgba(255,255,255,.10);
+}
+html.rail.rail-float .dock:not(.searching) .nav-item.active .nav-icon { transform: none; }
+html.rail.rail-float .dock:not(.searching) .nav-svg { width: 25px; height: 25px; }
+html.rail.rail-float .dock:not(.searching) .nav-text {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+html.rail.rail-float .dock:not(.searching) #navSearch .ns-icon { inset: 0; width: auto; height: auto; }
+html.rail.rail-float .dock:not(.searching) #navSearch .ns-glyph { width: 24px; height: 24px; }
+html.rail.rail-float .dock:not(.searching) .nav-lg-canvas,
+html.rail.rail-float .dock:not(.searching) #navSearch .ns-field,
+html.rail.rail-float .dock:not(.searching) #navSearch .ns-mic,
+html.rail.rail-float .dock:not(.searching) #navSearch .ns-cancel { display: none; }
+html.rail.rail-float .dock:not(.searching) .nav-item:active,
+html.rail.rail-float .dock:not(.searching) #headerAvatar:active { transform: scale(.9); transition: transform var(--press-in); }
+@media (hover: hover) and (pointer: fine) {
+  html.rail.rail-float .dock:not(.searching) .nav-item:not(.active):hover { color: rgba(255,255,255,.85); background: rgba(255,255,255,.06); }
+}
+
+/* ── 首页大图（hero）：按这块屏专门排 ──────────────────────────────────
+   能放内容的是右侧那一列（状态栏 + 导航）以左的那一块 —— Safari 的视口本来就只有这么宽（466 − 84 = 382）。
+   · 全出血时：画面照旧铺满整屏（右边那一列也是画面），但标签、片名、按钮、暂停钮与轮播点都居中到左边那块，
+     彼此对齐，谁也不伸进右边那一列；左边那个给暂停钮配平的占位也收掉；
+   · 收成卡片时：卡落在左边那块里（左右边距收窄一档，卡不至于太窄），右邻那张从导航底下露一条边，
+     卡下面那条进度胶囊与卡同宽，同样不钻到导航底下。
+   步距、卡宽都还是那几条带 --m 的 calc，只是右边多减一个 --float-space；JS 的拖拽步距是从 DOM 量的，跟着变。 */
+html.rail.rail-float .hero-deck {
+  --gap-x: clamp(22px, 7vw, 40px);
+  --pitch: calc(100% - var(--m) * (var(--gap-x) * 2 + var(--float-space)) + var(--gutter));
+}
+html.rail.rail-float .hcard {
+  width: calc(100% - var(--m) * (var(--gap-x) * 2 + var(--float-space)));
+  padding-right: calc(5% + (1 - var(--m)) * var(--float-space));
+}
 html.rail.rail-float .hero-deck:not(.morphed) .aap-host { padding-right: var(--float-space); }
 html.rail.rail-float .hero-deck:not(.morphed) .aap-host .aap-media-card-gallery.all-access-pass::before { width: 0; }
+html.rail.rail-float .hero-deck.morphed .aap-host { padding-right: calc(var(--m, 0) * var(--gap-x, 0px) + var(--float-space)); }
+/* 沉浸：大图铺满一整屏（别的手机是 85%）。状态栏在右边那一列，顶上没有要躲的 —— 画面从屏幕最上沿铺到最下沿，
+   主屏幕 App 里也不给顶上的安全区让位；片名与按钮跟着落到下半屏，暂停钮与轮播点抬到 Home 指示条之上。
+   往下一滚照旧收成卡片（形变的行程是 .hero-run 那一截，与大图多高无关） */
+html.rail.rail-float .hero-deck,
+html.rail.rail-float.standalone .hero-deck { top: 0; height: 100svh; min-height: 0; max-height: none; }
+html.rail.rail-float.standalone .hero-stage { padding-top: 0; }
+html.rail.rail-float .hero-deck .aap-host { bottom: calc((1 - var(--m, 0)) * (var(--safe-b) + 16px) + var(--m, 0) * var(--gap-y, 0px)); }
+/* 文案只留三行：片名 → 「年份 · 类型」胶囊 → 按钮。片名下那行（类型 · 片长 / 严选标）不要，
+   原来在片名上面的年份胶囊挪到它那个位置。只改视觉顺序（order），DOM 不动；入场的先后跟着视觉顺序走 */
+html.rail.rail-float .hero-content > .hero-tags { display: none; }
+html.rail.rail-float .hero-content > .hero-logo-wrap { order: 1; transition-delay: 0s; }
+html.rail.rail-float .hero-content > .hero-status { order: 2; transition-delay: .08s; }
+html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay: .16s; }
 
 /* 没有封面的片子不显示之后，一排可能整排都没了：那一段（连同标题）一起藏起来 */
 .section:has(> .scroll-row:empty):not(:has(.year-tv.on)) { display: none; }   /* 年份轨道：同年份的剧集还在就不藏 */
@@ -5967,8 +6081,22 @@ html.rail.rail-float .hero-deck:not(.morphed) .aap-host .aap-media-card-gallery.
     clearTimeout(t);
     t = setTimeout(function () { root.classList.remove('rail-switching'); try { window.dispatchEvent(new Event('railchange')); } catch (_) {} }, 120);
   };
+  /* 翻开 / 合上时视口与屏幕尺寸不一定同一刻更新：媒体查询先变、screen 晚一拍的话，
+     合上那一下会读到展开时的屏幕宽度、认不出这是 Duo 的外屏，导航就卡在错的形态上，直到下一次转屏。
+     所以除了媒体查询的 change，resize / 转屏 / visualViewport 也都重判，每次变化后再补查两次（250ms、900ms）。
+     set() 只比对 class，重复调用没有代价 */
+  var again = 0;
+  var check = function () {
+    set();
+    clearTimeout(again);
+    again = setTimeout(function () { set(); again = setTimeout(set, 650); }, 250);
+  };
   set();
-  [q, p1, p2].forEach(function (m) { if (m.addEventListener) m.addEventListener('change', set); else if (m.addListener) m.addListener(set); });
+  [q, p1, p2].forEach(function (m) { if (m.addEventListener) m.addEventListener('change', check); else if (m.addListener) m.addListener(check); });
+  window.addEventListener('resize', check, { passive: true });
+  window.addEventListener('orientationchange', check);
+  try { if (screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener('change', check); } catch (_) {}
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', check, { passive: true });
 })();
 </script>
 </head>
@@ -12902,7 +13030,8 @@ function upgradeCardTitle(el, d) {
   });
   const al = card.getAttribute('aria-label') || '';
   const old = name ? (parse(name).title || name) : '';
-  if (old && al.startsWith(old)) card.setAttribute('aria-label', d.title + al.slice(old.length));
+  const pre = (/^第 \d+ 名，/.exec(al) || [''])[0];         /* 今日推荐的名次卡：读屏先报名次 */
+  if (old && al.slice(pre.length).startsWith(old)) card.setAttribute('aria-label', pre + d.title + al.slice(pre.length + old.length));
 }
 
 /* 中文查询 → 英文原名的映射。同一个词只问一次，落盘复用。 */
@@ -12939,7 +13068,7 @@ const ArtGate = (() => {
      年份轨道里电影、剧集各一排：剧集那排空了只收剧集那块，两排都空了才藏整段 */
   function tidy(row) {
     if (!row || !row.isConnected) return;
-    if (row.id === 'todayRecsRow') row.querySelectorAll('.card .card-rank').forEach((b, i) => { b.textContent = i + 1; });
+    if (row.id === 'todayRecsRow') row.querySelectorAll('.card.rank-card').forEach((c, i) => setCardRank(c, i + 1));
     if (row.querySelector('.card, [data-tv-path]')) return;
     const slot = row.closest('.year-tv');
     if (slot) {
@@ -13611,10 +13740,15 @@ function videoCardHTML(v, opts) {
   const subParts = []; if (year) subParts.push(year); if (opts.showRelTime && v.ts) subParts.push(fmtRelTime(v.ts)); const sub = subParts.join(' · ');
   
   const playingBadge = opts.removable ? '<span class="card-playing-badge"><i class="ph-fill ph-play"></i>正在观看</span>' : '';
+  /* 今日推荐：名次是海报左边那枚大号描边数字（在海报外面，所以不放进 .card-poster） */
   const rankBadge = opts.rank ? '<span class="card-rank" aria-hidden="true">' + opts.rank + '</span>' : '';
+  const isNew = opts.rank && addedTs(v) && Date.now() - addedTs(v) < RANK_NEW_MS;
+  const newBadge = isNew ? '<span class="card-new">最近添加</span>' : '';
   const menuBtn = opts.removable ? '<button class="card-menu" tabindex="-1" aria-label="更多操作"><svg class="sf-icon" viewBox="77 -45 874 874" fill="currentColor" style="width:1em;height:1em"><path d="M514 -45Q469 -45 426.5 -36.5Q384 -28 344 -11Q305 6 270.0 29.5Q235 53 205 83Q175 113 151.5 147.5Q128 182 111 222Q94 262 85.5 304.0Q77 346 77 392Q77 437 85.5 479.5Q94 522 111 561Q128 601 151.5 636.0Q175 671 205 701Q235 731 270.0 754.5Q305 778 344 795Q384 812 426.5 820.5Q469 829 514 829Q559 829 601.5 820.5Q644 812 684 795Q723 778 758.0 754.5Q793 731 823 701Q853 671 876.5 636.0Q900 601 917 561Q934 522 942.5 479.5Q951 437 951 392Q951 346 942.5 304.0Q934 262 917 222Q900 182 876.5 147.5Q853 113 823 83Q793 53 758.0 29.5Q723 6 684 -11Q644 -28 601.5 -36.5Q559 -45 514 -45ZM514 27Q552 27 587.0 34.5Q622 42 655 56Q688 70 717.0 89.5Q746 109 771 134Q797 159 816.5 188.0Q836 217 850 250Q864 283 871.0 318.5Q878 354 878 392Q878 429 871.0 464.5Q864 500 850 533Q836 566 816.5 595.0Q797 624 771 649Q746 674 717.0 694.0Q688 714 655 728Q622 742 587.0 749.0Q552 756 514 756Q476 756 440.5 749.0Q405 742 372 728Q339 714 310.0 694.0Q281 674 256 649Q231 624 211.5 595.0Q192 566 178 533Q164 500 157.0 464.5Q150 429 150 392Q150 354 157.0 318.5Q164 283 178 250Q192 217 211.5 188.0Q231 159 256 134Q281 109 310.0 89.5Q339 70 372 56Q405 42 440.5 34.5Q476 27 514 27ZM329 392Q322 392 316.5 394.0Q311 396 307 401Q303 405 300.5 410.5Q298 416 298 423V572Q298 581 300.5 588.0Q303 595 307 599Q312 603 318.5 605.0Q325 607 333 607H482Q488 607 493.5 604.5Q499 602 503 598Q508 594 510.0 588.5Q512 583 512 577Q512 571 510.0 565.5Q508 560 503 555Q499 551 493.5 548.5Q488 546 482 546L461 547L396 551L492 459Q497 454 499.0 448.5Q501 443 501 436Q502 429 499.5 423.5Q497 418 492 413Q488 408 482.0 406.0Q476 404 470 404Q463 404 457.5 406.5Q452 409 447 414L354 511L359 443V423Q359 416 356.5 410.5Q354 405 350 401Q345 396 340.0 394.0Q335 392 329 392ZM545 176Q539 176 533.5 178.0Q528 180 524 185Q519 189 517.0 194.5Q515 200 515 206Q515 212 517.0 217.5Q519 223 524 228Q528 232 533.5 234.5Q539 237 545 237L566 236L632 232L535 324Q531 329 528.5 334.5Q526 340 525 347Q525 354 527.5 359.5Q530 365 535 370Q540 375 545.5 377.0Q551 379 558 379Q564 379 570.0 376.5Q576 374 580 369L673 272L669 340V360Q669 367 671.0 372.5Q673 378 677 382Q682 386 687.0 388.5Q692 391 699 391Q705 391 710.5 388.5Q716 386 720 382Q724 378 726.5 372.5Q729 367 729 360V211Q729 202 726.5 195.0Q724 188 720 184Q715 180 708.5 178.0Q702 176 693 176H545Z"/></svg></button>' : '';
-  return '<div class="card card-portrait stagger-in" data-path="' + esc(v.path) + '" data-name="' + esc(v.name) + '" data-removable="' + (opts.removable ? '1' : '0') + '" tabindex="0" role="button" aria-label="' + esc(title || v.name) + '">' +
-    '<div class="card-poster" data-fn="' + esc(v.name) + '"><div class="fallback"><i class="ph ph-film-strip"></i></div>' + playingBadge + rankBadge + menuBtn + (opts.removable ? cardProgressHTML(v.path) : '') + '</div>' +
+  const rankCls = opts.rank ? ' rank-card' + (opts.rank >= 10 ? ' rk2' : '') : '';
+  return '<div class="card card-portrait' + rankCls + ' stagger-in" data-path="' + esc(v.path) + '" data-name="' + esc(v.name) + '" data-removable="' + (opts.removable ? '1' : '0') + '" tabindex="0" role="button" aria-label="' + esc((opts.rank ? '第 ' + opts.rank + ' 名，' : '') + (title || v.name)) + '">' +
+    rankBadge +
+    '<div class="card-poster" data-fn="' + esc(v.name) + '"><div class="fallback"><i class="ph ph-film-strip"></i></div>' + playingBadge + newBadge + menuBtn + (opts.removable ? cardProgressHTML(v.path) : '') + '</div>' +
     '<div class="card-info"><div class="card-title">' + esc(title || v.name) + '</div><div class="card-meta">' + sub + tagH + '</div></div></div>';
 }
 
@@ -15584,6 +15718,10 @@ window.addEventListener('railchange', () => {
   _navPillBaseLeft = null;
   updateNavPill(false);
   try { window.NavGlass && window.NavGlass.refresh(); } catch (_) {}
+  /* 翻开 / 合上换了形态：大图的形变进度、行程、瀑布流列数都按新版面重算一遍 ——
+     这次换形态不一定伴着 resize（补查那一下就没有），不能指望 resize 那几个监听 */
+  try { _heroRunVH = -1; heroMorphP = -1; updateHeroMorph(); } catch (_) {}
+  try { masRelayout(); } catch (_) {}
 });
 
 
@@ -15924,6 +16062,15 @@ function closeYearLibrary() {
    · 排序：TMDB 评分降序 → 年份降序 → 片名；评分缓存未命中先记 0，异步补齐后 FLIP 平滑重排
    · 注意：时段与评分仅作内部选片 / 排序依据，不向用户展示（无时段徽标、无 ★ 评分） */
 const REC_COUNT = 15;
+const RANK_NEW_MS = 14 * 86400000;              /* 「最近添加」：两周内入库的 */
+/* 名次卡改名次：数字、两位数那一格放宽、读屏的「第 N 名」一起改 */
+function setCardRank(card, n) {
+  const rk = card.querySelector('.card-rank');
+  if (rk && rk.textContent !== String(n)) rk.textContent = n;
+  card.classList.toggle('rk2', n >= 10);
+  const al = card.getAttribute('aria-label') || '';
+  card.setAttribute('aria-label', al.replace(/^第 \d+ 名，/, '第 ' + n + ' 名，'));
+}
 const REC_SLOTS = ['上午', '下午', '晚上'];
 
 function recSlotNow(){
@@ -16011,7 +16158,7 @@ async function initTodayRecs(picks){
   sorted.forEach((v, i) => {
     const c = cards[v.path]; if (!c) return;
     row.appendChild(c);
-    const rk = c.querySelector('.card-rank'); if (rk) rk.textContent = i + 1;
+    setCardRank(c, i + 1);
   });
   /* 这一排开着 scroll-snap：原先吸在最左的那张卡被挪走时，浏览器会跟着它把整排滚过去
     （吸附目标跟随）—— 评分一到、重排完，整排就停在了末尾，第一名反而看不见。
@@ -23570,7 +23717,9 @@ if (DEV) {
       return r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw;   // must be on-screen
     }
     function eligible(ctx) { return contexts.indexOf(ctx) >= 0; }
-    function hostRect() { var el = resolve(); return (el && visible(el)) ? el.getBoundingClientRect() : null; }
+    /* 画布自己被 CSS 藏起来了（iPhone Duo 折起时的新导航整枚是一层 CSS 玻璃）：宿主看得见也不画，白耗电 */
+    function canvasHidden() { try { return !!canvas && getComputedStyle(canvas).display === "none"; } catch (e) { return false; } }
+    function hostRect() { var el = resolve(); return (el && visible(el) && !canvasHidden()) ? el.getBoundingClientRect() : null; }
     function fitTo(nr) {
       var w = nr.width, h = nr.height; DPR = computeDPR(w, h);
       var cw = Math.max(1, Math.round(w * DPR)), ch = Math.max(1, Math.round(h * DPR));

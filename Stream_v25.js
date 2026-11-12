@@ -1931,15 +1931,14 @@ function timingSafeEqualStr(a, b) {
   const ea = new TextEncoder().encode(String(a));
   const eb = new TextEncoder().encode(String(b));
   if (ea.byteLength !== eb.byteLength) return false;
-  try {
-    // CF Workers 非标扩展；等长前提下不会 throw
-    return crypto.subtle.timingSafeEqual(ea, eb);
-  } catch {
-    // 兜底：非 CF 运行环境（本地单测等）无此扩展 → 手写恒时比较
-    let diff = 0;
-    for (let i = 0; i < ea.length; i++) diff |= ea[i] ^ eb[i];
-    return diff === 0;
+  // CF Workers 非标扩展；等长前提下不会 throw。没有这个扩展（本地单测等）走手写恒时比较 ——
+  // 先判断再分流，不靠每次抛一个异常（抛接异常比比较本身贵得多）
+  if (typeof crypto.subtle.timingSafeEqual === 'function') {
+    try { return crypto.subtle.timingSafeEqual(ea, eb); } catch {}
   }
+  let diff = 0;
+  for (let i = 0; i < ea.length; i++) diff |= ea[i] ^ eb[i];
+  return diff === 0;
 }
 
 // ── 会话 Cookie ──
@@ -7079,6 +7078,29 @@ function hlsUnB64url(s) {
   while (t.length % 4) t += '=';
   return new TextDecoder().decode(hlsUnB64(t));
 }
+/* 一个分片（moof 头 + 一串帧切片）→ 交给响应流的块。原来整个分片先拼成一个大缓冲再交出去：
+   4K 片源一段几十 MB，等于每个字节多拷一遍、峰值内存多一整个分片。现在 ≥ 16KB 的切片原样交出
+   （网络块上的子视图；workerd 里把视图交给响应流不会摘走底下的缓冲，实测过），零碎的小切片
+   （音频帧、moof、NAL 长度头）攒到 64KB 再拷成一块，块数不至于太碎。 */
+const HLS_OUT_DIRECT = 16384, HLS_OUT_CHUNK = 65536;
+function hlsChunks(parts) {
+  const out = [];
+  let run = [], runLen = 0;
+  const flush = () => {
+    if (!runLen) return;
+    out.push(run.length === 1 ? run[0] : hlsConcat(run));
+    run = []; runLen = 0;
+  };
+  for (const p of parts) {
+    if (!p.length) continue;
+    if (p.length >= HLS_OUT_DIRECT) { flush(); out.push(p); continue; }
+    run.push(p); runLen += p.length;
+    if (runLen >= HLS_OUT_CHUNK) flush();
+  }
+  flush();
+  return out;
+}
+
 function hlsConcat(parts) {
   let n = 0;
   for (const p of parts) n += p.length;
@@ -9508,9 +9530,11 @@ async function* hlsBlocks(src, plan, idx, want) {
   for (;;) {
     const X = q.pos;
     if (endBlock >= 0 && X >= endBlock) return;
-    if (!(await need(2))) return;
-    await need(12);
-    const h = q.peek(12);
+    // 数据多半已经在队列里（一块 64KB 能装下几十个元素头）：够了就同步往下走，不够才 await ——
+    // 每个元素头原来要 await 三四次，一段几千个块，微任务的来回比解析本身还贵
+    if (q.len < 2 && !(await need(2))) return;
+    if (q.len < 16) await need(16);
+    const h = q.peek(16);
     const id = ebmlId(h, 0, h.length);
     const sz = id && ebmlSize(h, id[1], h.length);
     if (!id || !sz) return;
@@ -9528,7 +9552,7 @@ async function* hlsBlocks(src, plan, idx, want) {
     if (MKV_TOP.has(eid)) return;
     if (esz < 0) throw new Error('unknown-size element in cluster');
     if (eid === MKV.Timestamp) {
-      if (!(await need(hl + esz))) return;
+      if (q.len < hl + esz && !(await need(hl + esz))) return;
       clusterTs = ebmlUint(q.peek(hl + esz), hl, esz);
       q.skip(hl + esz);
       continue;
@@ -9539,11 +9563,18 @@ async function* hlsBlocks(src, plan, idx, want) {
       skipping = false;
     }
 
-    // 先看块头里的轨道号，决定要不要把负载留下来
-    await need(Math.min(hl + esz, hl + 48));
-    const hb = q.peek(Math.min(hl + esz, hl + 48));
+    // 先看块头里的轨道号，决定要不要把负载留下来。SimpleBlock 的块头（轨道号 + 时间 + 标志，通常 4 字节）
+    // 多半已经在刚才那 16 字节里了，不必再取一次
     let bh = null;
-    if (eid === MKV.SimpleBlock) bh = mkvBlockHead(hb, hl, hb.length);
+    if (eid === MKV.SimpleBlock && hl + 4 <= Math.min(h.length, hl + esz)) bh = mkvBlockHead(h, hl, Math.min(h.length, hl + esz));
+    const hn = Math.min(hl + esz, hl + 48);
+    let hb = h;
+    if (!bh) {
+      if (q.len < hn) await need(hn);
+      hb = q.peek(hn);
+    }
+    if (bh) { /* 上面已经认出来了 */ }
+    else if (eid === MKV.SimpleBlock) bh = mkvBlockHead(hb, hl, hb.length);
     else {
       for (let p = hl; p < hb.length;) {
         const ci = ebmlId(hb, p, hb.length), cs = ci && ebmlSize(hb, p + ci[1], hb.length);
@@ -9568,7 +9599,7 @@ async function* hlsBlocks(src, plan, idx, want) {
       continue;
     }
 
-    if (!(await need(hl + esz))) return;
+    if (q.len < hl + esz && !(await need(hl + esz))) return;
     const P = new HlsPieces(q.take(hl + esz));
     let key, dur = -1, bstart, bend, flags = bh.flags;
     if (eid === MKV.SimpleBlock) {
@@ -9611,6 +9642,22 @@ async function* hlsBlocks(src, plan, idx, want) {
   }
 }
 
+/* 杜比视界的 RPU 按镜头给 L1 亮度元数据：同一个镜头里相邻帧的 RPU 往往逐字节相同。
+   转换是输入字节的纯函数（解析 → 改成 8.1 → 重算 CRC → 加防竞争字节），同样的输入直接用上一次的输出 ——
+   比一遍字节省掉整套位级解析与重写。输出只读、只会被拷进分片，多帧共用同一份没有问题。 */
+let DV_MEMO_IN = null, DV_MEMO_OUT = null;
+function dvRpuMemo(raw) {
+  const a = DV_MEMO_IN, n = raw.length;
+  if (a && a.length === n) {
+    let i = 0;
+    while (i < n && a[i] === raw[i]) i++;
+    if (i === n) return DV_MEMO_OUT;
+  }
+  const out = dvConvertRpuNal(raw);
+  DV_MEMO_IN = raw; DV_MEMO_OUT = out;
+  return out;
+}
+
 /** P7：丢增强层 NAL（63），RPU（62）改写为 8.1；dvStrip：两者都丢，按 HDR10 输出 */
 function hlsRewriteHevc(pieces, nalLen, mode, stats) {
   const P = new HlsPieces(pieces);
@@ -9625,8 +9672,9 @@ function hlsRewriteHevc(pieces, nalLen, mode, stats) {
     if (type === 63 || (type === 62 && mode === 'strip')) { changed = true; }
     else if (type === 62) {
       let nal;
-      try { nal = dvConvertRpuNal(P.bytes(s, len)); stats.rpu++; }
-      catch { nal = P.bytes(s, len); stats.rpuFail++; }
+      const raw = P.bytes(s, len);
+      try { nal = dvRpuMemo(raw); stats.rpu++; }
+      catch { nal = raw; stats.rpuFail++; }
       const lenb = new Uint8Array(nalLen);
       for (let i = 0; i < nalLen; i++) lenb[i] = (nal.length >>> (8 * (nalLen - 1 - i))) & 255;
       out.push(lenb, nal);
@@ -9664,6 +9712,12 @@ async function* hlsSegmentParts(cx, idx, k, sel, opts = {}) {
   }
   const pass = opts.pass || null;
   if (pass && subGrab.size) pass.subs = 1;
+  // 备选音轨顺路：最近有人在听某条备选音轨（HLS_ALT），视频这一遍把它的块也收下，按「只出这条音轨」
+  // 那条路径同一套规则切成分片（hlsAltMux），整段写进缓存 —— 音轨请求从缓存出，同一段字节不再为了
+  // 音轨从 Dropbox 再读一遍、再解析一遍
+  const B = sel.video && opts.alt >= 0 ? idx.audio[opts.alt] : null;
+  const alt = B && B !== A && B.mode === 'copy' ? hlsAltMux(B, k) : null;
+  if (alt) { want.add(B.num); if (pass) pass.alt = { i: opts.alt, st: 1 }; }
   const raw = hlsByteSource(cx, plan.start, plan.fetchEnd);
   // 进度打点：等这一遍的请求（同一段的视频 / 字幕）据此判断它是不是还在动
   const src = !pass ? raw : {
@@ -9783,6 +9837,9 @@ async function* hlsSegmentParts(cx, idx, k, sel, opts = {}) {
         });
       } else if (subGrab.has(blk.track)) {
         subGrab.get(blk.track).blocks.push({ ts: blk.ts, dur: blk.dur, frame: hlsConcat(blk.frames[0]) });
+      } else if (alt && blk.track === B.num) {
+        alt.push(blk, ns);
+        continue;
       }
       const due = sel.video ? (readyVideoSec() >= HLS_FRAG_SEC || bytes >= HLS_FRAG_BYTES)
         : (aRun && (aRun.end - aRun.base) >= 2 * A.ts) || aRuns.length > 0 || bytes >= HLS_FRAG_BYTES;
@@ -9790,6 +9847,7 @@ async function* hlsSegmentParts(cx, idx, k, sel, opts = {}) {
     }
     // 这一段的字幕块已经收齐：先在后台把 VTT 写进缓存（字幕请求可能正等着），再交最后一个片段
     if (subGrab.size) hlsSubsWrite(cx, idx, k, subGrab, pass);
+    if (alt) hlsAltWrite(cx, idx, k, opts.alt, alt.finish(), pass);
     yield* flush(true);
     if (stats.rpuFail) console.error(`hls: ${stats.rpuFail} RPU 转换失败（${cx.filePath} #${k}）`);
     if (pass) pass.ok = true;
@@ -9798,6 +9856,7 @@ async function* hlsSegmentParts(cx, idx, k, sel, opts = {}) {
     if (pass) {
       pass.ended = Date.now();
       if (pass.subs === 1) pass.subs = -1;          // 半路停了：字幕没收齐
+      if (pass.alt && pass.alt.st === 1) pass.alt.st = -1;
       hlsPassDone(pass);
     }
   }
@@ -9854,32 +9913,54 @@ function hlsSubFrameText(fmt, bytes) {
 // ── 字幕清洗：字幕组署名、发布 / 来源声明、网址、广告、水印 ──
 //  内封、外挂、在线找来的字幕，输出 WebVTT 之前都过这一遍。按行打分，过线就删那一行；
 //  一条字幕的行删光了（或只剩装饰符号）就整条不要。
-//  · 片头 / 片尾各 SUB_EDGE_S 秒（以及最前 / 最后 SUB_EDGE_N 条）是署名与广告的重灾区：过 3 分就删
+//  · 片头 / 片尾各 SUB_EDGE_S 秒（以及最前 / 最后 SUB_EDGE_N 条）是署名与广告的重灾区：过 3 分就删；
+//    那里挂得特别久的一条（≥ SUB_LONG_S 秒 —— 署名卡、片尾鸣谢）过 2 分就删
 //  · 正片中间只删「几乎不可能是台词」的东西（网址、字幕组、OpenSubtitles 的广告、「仅供学习交流」
 //    这类声明）：过 4 分才删 —— 台词里提到「翻译」「出品」「伊甸园」不会被误删
+//  c2 起（增强型）：
+//  · 打分前先把全角折成半角（ＷＷＷ．ＸＸ．ＣＯＭ 是专门躲过滤的写法）、去掉标签
+//  · 像台词的行（你我他、语气词、问号叹号结尾、对白横杠）只靠弱信号（没有一条 ≥ 4 分的规则命中）
+//    时减 1 分：「你愿意加入我们吗？」「关注我的公众号」不会因为一个字眼被删
+//  · ASS 的矢量绘图指令（\p1 之后的 m 0 0 l 100 0 …）、整行乱码（U+FFFD）直接删 —— 不是给人看的字
+//  · 署名块：片头片尾一条被删干净了，前后 SUB_BLOCK_S 秒内紧挨着它、还剩 ≥ 2 分行的那几条
+//    （「鸣谢」「感谢观看」这类弱信号）一起删，连着的一串署名不会只删掉一半
+//  · 水印（只在拿得到整份字幕时：外挂、在线、直连整份）：同一行在全片反复出现（≥ 3 条、首尾相隔
+//    ≥ 10 分钟或片长的两成），自己又带一点署名味道（≥ 2 分，或 ≥ 1 分且长得像水印：包在括号 /
+//    装饰符里、带 @、像网址、一串大写缩写）→ 全片都删。「好的」「什么？」这种高频台词 0 分，不受影响
+//  · partial（HLS 分段，内封字幕逐段读，只拿得到这一段的几条）：只按时间认片头片尾，不认名次、不认水印。
+//    c1 在这里按「这几条里的前 6 / 后 6 条」认片头片尾 —— 每一段几乎每条都落进去，正片台词按片头的
+//    门槛（3 分）在删
 const SUB_EDGE_S = 240;
 const SUB_EDGE_N = 6;
-const SUB_CLEAN_V = 'c1';             // 清洗规则的版本：进缓存键，规则改了旧的 VTT 不会再被端上来
+const SUB_LONG_S = 8;
+const SUB_BLOCK_S = 12;
+const SUB_CLEAN_V = 'c2';             // 清洗规则的版本：进缓存键，规则改了旧的 VTT 不会再被端上来
 const SUB_RULES = [
   // 网址：带协议 / www 的一定是；裸域名只认常见后缀（e.g. / Mr.Smith 这类不会命中）
   [/(?:https?:\/\/|www\.)[^\s]+/i, 4],
-  [/(?:^|[^\w@.\-])[a-z0-9][\w-]{1,62}\.(?:com|net|org|cn|cc|tv|la|io|info|xyz|top|vip|club|site|link|ru|tw|hk)(?:\/[^\s]*)?(?![\w.])/i, 3],
+  [/(?:^|[^\w@.\-])[a-z0-9][\w-]{1,62}\.(?:com|net|org|cn|cc|tv|la|io|info|xyz|top|vip|club|site|link|ru|tw|hk|me)(?:\/[^\s]*)?(?![\w.])/i, 3],
   // 字幕组 / 压制组 / 翻译组
-  [/字幕[组組社团團坊]|翻[译譯][组組]|[压壓]制[组組]|(?:^|[^a-z])(?:fansub|sub(?:s|titles?)?\s*team)(?:[^a-z]|$)/i, 4],
+  [/字幕[组組社团團坊侠俠]|翻[译譯][组組]|[压壓]制[组組]|(?:^|[^a-z])(?:fansub|sub(?:s|titles?)?\s*team)(?:[^a-z]|$)/i, 4],
   // 认得出名字的字幕站 / 字幕组（这些词不会出现在台词里）
-  [/人人影[视視]|YYeTs|破[烂爛]熊|射手[网網]|字幕[库庫吧]|SubHD|zimuku|assrt|天天美[剧劇]|美[剧劇]天堂|澄空[学學][园園]|[圣聖]城家[园園]|FRDS|CMCT|HDChina|OurBits|SweetSub|A4Sub/i, 4],
+  [/人人影[视視]|YYeTs|破[烂爛]熊|射手[网網]|字幕[库庫吧]|SubHD|zimuku|assrt|天天美[剧劇]|美[剧劇]天堂|澄空[学學][园園]|[圣聖]城家[园園]|FRDS|CMCT|HDChina|OurBits|SweetSub|A4Sub|[凤鳳][凰凰]天使|TSKS|[诸諸]神字幕|追新番|[韩韓][剧劇]TV/i, 4],
   // 英文字幕站与 OpenSubtitles 自己插的广告（这些说法不会出现在台词里）
-  [/open\s*subtitles|osdb\.link|subscene|addic7ed|podnapisi|\bsubdl\b|yifysubtitles|advertise your product|become (?:a )?vip member|rate this subtitle|help other users to choose|get (?:the )?(?:latest|more) subtitles|best subtitles? (?:at|on|from)/i, 4],
+  [/open[\s-]*subtitles|osdb\.link|subscene|addic7ed|podnapisi|\bsubdl\b|yifysubtitles|tvsubtitles|advertise your product|become (?:a )?vip member|rate this subtitle|help other users to choose|get (?:the )?(?:latest|more) subtitles|best subtitles? (?:at|on|from)|subtitles for any video|free browser extension|watch any video online|nord\s*vpn|implement rest api|remove all ads from/i, 4],
   // 英文署名：只认行首（台词里也会有「corrected by the teacher」）
-  [/^[\s\-=~*#\[(]*(?:(?:re-?)?sync(?:ed|hronized)?(?: (?:and|&) corrected)? by|corrected by|ripped by|encoded by|(?:subtitles?|subs|captions?) (?:by|from|ripped|synced|corrected|edited|translated)\b|captioned by|closed captions? (?:provided )?by|captioning (?:sponsored|made possible|provided|performed) by)/i, 4],
-  [/^[\s\-=~*#\[(]*(?:downloaded from|transcri(?:pt|bed) by)\b/i, 3],
+  [/^[\s\-=~*#\[(]*(?:(?:re-?)?sync(?:ed|hronized)?(?: (?:and|&) correct(?:ed|ions?))? by|corrected by|ripped by|encoded by|re-?sync(?:ed)? for\b|(?:subtitles?|subs|captions?) (?:by|from|ripped|synced|corrected|edited|translated|improved|adapted)\b|captioned by|closed captions? (?:provided )?by|captioning (?:sponsored|made possible|provided|performed) by)/i, 4],
+  [/^[\s\-=~*#\[(]*(?:downloaded from|transcri(?:pt|bed) by|(?:improved|adapted|tweaked|reviewed|polished|fixed) by)\b/i, 3],
   // 声明：学习交流 / 禁止商用 / 下载后删除（「仅供参考」「未经授权」是台词里的常用语，不算）
   [/仅供(?:学习|交流|研究)|僅供(?:學習|交流|研究)|禁止(?:用于|用於)?(?:任何)?(?:商业|商業)(?:用途)?|(?:请|請)(?:于|於)下[载載]|24\s*小[时時]内?(?:删除|刪除)/, 4],
-  [/版[权權](?:归|歸)/, 3],
+  [/版[权權](?:归|歸)|[转轉][载載](?:请|請)[注註]明|(?:本|此)(?:资源|資源|视频|視頻|影片)(?:来自|來自|由|首[发發]|仅|僅)|(?:资源|資源)(?:来自|來自)/, 3],
+  [/[扫掃][码碼](?:关注|關注|加入|进群|進群)/, 4],
   // 引流：QQ 群 / 群号最像广告；公众号、微博、淘宝、招人在台词里也会出现，只在片头片尾删
   [/(?:QQ|Q)\s*群|群[号號]\s*[:：]?\s*\d|t\.me\//i, 4],
   [/微信\s*(?:公众号|公眾號|号|號)|公众号|公眾號|微博\s*[@：:]|新浪微博|[电電][报報]群/, 3],
-  [/淘[宝寶]|招募|招聘|[诚誠]聘|加入我[们們]/, 2],
+  [/更多(?:中文|精彩|好看|高清|影[视視]|美[剧劇]|[电電]影|资源|資源)*(?:字幕|资源|資源|影片|[电電]影|美[剧劇])?\s*(?:请|請)?\s*(?:访问|訪問|关注|關注|搜索|下[载載]|登[录錄])|(?:欢迎|歡迎)(?:关注|關注|订阅|訂閱)/, 3],
+  [/淘[宝寶]|招募|招聘|招新|[诚誠][聘招]|加入我[们們]/, 2],
+  // 翻译说明：机翻 / 人工翻译 / 如有错误欢迎指正（片头片尾才删）
+  [/机器翻[译譯]|機器翻[譯译]|[机機]翻|AI\s*翻[译譯]|人工(?:翻[译譯]|听[译譯]|聽[譯译])|(?:如有|若有)(?:错误|錯誤|不[当當]|疏漏)|(?:欢迎|歡迎)指正/i, 3],
+  // 鸣谢 / 感谢观看：弱信号，靠「挂得久」或「挨着署名块」才删
+  [/感[谢謝](?:观看|觀看|收看|大家|所有|各位|以下)|(?:谢谢|謝謝)(?:观看|觀看|收看)|[鸣鳴][谢謝]|特[别別]感[谢謝]|thanks? for watching/i, 2],
   // 「本字幕由……」
   [/^(?:本|此)?字幕(?:由|仅|僅|来自|來自|出自|提供|制作|製作|翻[译譯])/, 4],
   // 文件名 / 片源规格（一行里出现两个以上才算）
@@ -9893,53 +9974,127 @@ const SUB_RULES = [
   // 署名常用的机构字眼 / 英文缩写
   [/影[视視]|字幕|[论論][坛壇]|社[区區]|[网網]站|工作室|部落|[联聯]盟|小[组組]|家[园園]|\bTV\b|\bSub\b|\bTeam\b|\bHD\b/i, 1],
   // @账号 水印
-  [/(?:^|\s)@[\w一-鿿]{2,}/, 2],
+  [/(?:^|[\s【\[(（「『])@[\w一-鿿]{2,}/, 2],
   // 整行只是装饰包着的一小段：【……】、==……==、★……★
   [/^[\s\-=~*#★☆◆◇■□●○【\[]{1,}.{1,40}[\s\-=~*#★☆◆◇■□●○】\]]{1,}$/, 1],
 ];
 // 整行就是一个发布组名
 const SUB_GROUP_LINE = /^(?:TLF|SPARKS|GECKOS|FGT|NTb|FLUX|CMRG|EVO|ION10|PSA|YTS(?:\.\w+)?|YIFY|RARBG|ETRG|TGx|QxR|Tigole|UTR|BeyondHD|ADWeb|HHWEB|M-?Team|WiKi|TTG|CHD|HDSky|FFans|PTer|BtsTV|LeagueWEB|NGB|原[创創]翻[译譯]|中英(?:双语|雙語)?字幕|(?:双语|雙語)字幕|特效字幕|精校版?|校[对對]版|中文字幕|英文字幕)$/i;
 const SUB_DECOR = /^[\s\-=~*#★☆◆◇■□●○【】\[\]()（）<>《》|_.·•…!！?？,，、:：;；'"“”‘’]*$/;
+// ASS 矢量绘图（{\p1} 之后的路径指令）：m/n/l/b/s/p 加一串数，可能以 c 收尾
+const SUB_DRAW = /^(?:[mnlbsp](?:\s+-?\d+(?:\.\d+)?)+\s*)+c?$/i;
+// 像一句台词：人称、语气词结尾、问号叹号结尾、对白横杠、英文的人称与口语
+const SUB_TALK = /[我你您他她咱俺]|[吗嗎呢吧啊呀嘛哦哇啦咯][?!。，,…~]*\s*$|[?!]\s*$|^[-–—]\s|\b(?:I|I'm|I'll|you|we|he|she|they|me|my|your|our|don't|can't|let's|yeah|okay)\b/i;
+// 长得像水印：包在括号 / 装饰符里、带 @、像网址、一串大写缩写
+const SUB_MARK_SHAPE = /^[\s\[【(（<《「『★☆◆◇■□●○=\-~*#|]|[\]】)）>》」』★☆◆◇■□●○=\-~*#|]\s*$|@\S|www\.|\.(?:com|net|org|cn|tv|cc|la|me)\b|\b[A-Z]{3,}\b/;
 
+/** 打分用的那一份文字：去标签 / 实体，全角折半角，空白收成一个 */
+function subNorm(line) {
+  return String(line).replace(/<[^>]*>/g, '').replace(/&(?:amp|lt|gt|nbsp);/g, ' ')
+    .replace(/[！-～]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    .replace(/[　\s]+/g, ' ').trim();
+}
+/** 一行的分数。≥ 9 = 不是给人看的字（绘图指令、乱码），任何位置都删 */
 function subLineScore(line) {
-  const t = String(line).replace(/<[^>]*>/g, '').replace(/&(?:amp|lt|gt|nbsp);/g, ' ').trim();
+  const t = subNorm(line);
   if (!t) return 0;
-  let n = 0;
-  for (const [re, w] of SUB_RULES) if (re.test(t)) n += w;
-  if (SUB_GROUP_LINE.test(t.replace(/^[\s\-=~*#★☆◆◇■□●○【\[(（]+|[\s\-=~*#★☆◆◇■□●○】\])）]+$/g, ''))) n += 3;
+  if (SUB_DRAW.test(t)) return 9;
+  const bad = (t.match(/�/g) || []).length;
+  if (bad && bad * 3 >= t.length) return 9;
+  let n = 0, strong = false;
+  for (const [re, w] of SUB_RULES) if (re.test(t)) { n += w; if (w >= 4) strong = true; }
+  if (SUB_GROUP_LINE.test(t.replace(/^[\s\-=~*#★☆◆◇■□●○【\[(（]+|[\s\-=~*#★☆◆◇■□●○】\])）]+$/g, ''))) { n += 3; strong = true; }
+  if (n > 0 && !strong && SUB_TALK.test(t)) n -= 1;
   return n;
 }
+const subMarkKey = t => t.toLowerCase().replace(/[\s\-=~*#★☆◆◇■□●○【】\[\]()<>《》「」『』|_.·•…!?,、:;'"“”‘’]/g, '');
 
-/** [{ s, e, text, settings }] → 清洗过的（不改原数组）。dur = 片长（秒），不知道就按最后一条字幕的结束时间算 */
-function subClean(cues, dur) {
+/** [{ s, e, text, settings }] → 清洗过的（不改原数组）。dur = 片长（秒），不知道就按最后一条字幕的结束时间算。
+ *  opt.partial：cues 只是一段窗口里的那几条（HLS 分段），只按时间认片头片尾、不认水印 */
+function subClean(cues, dur, opt) {
   if (!cues || !cues.length) return cues || [];
-  const end = dur > 0 ? dur : cues.reduce((m, c) => Math.max(m, c.e || 0), 0);
-  const sorted = cues.map((c, i) => [c.s, i]).sort((a, b) => a[0] - b[0]);
+  const partial = !!(opt && opt.partial);
+  const end = dur > 0 ? dur : partial ? 0 : cues.reduce((m, c) => Math.max(m, (c && c.e) || 0), 0);
+  const order = cues.map((c, i) => i).filter(i => cues[i] && cues[i].text).sort((a, b) => cues[a].s - cues[b].s);
   const rank = new Array(cues.length);
-  sorted.forEach(([, i], r) => { rank[i] = r; });
+  order.forEach((i, r) => { rank[i] = r; });
+  const lines = cues.map(c => (c && c.text) ? c.text.split('\n').map(l => ({ l, t: subNorm(l), n: subLineScore(l) })) : null);
+  // 水印：整份字幕里反复出现、带点署名味道的同一行
+  let marks = null;
+  if (!partial && order.length >= 20) {
+    const seen = new Map();
+    for (const i of order) {
+      const once = new Set();
+      for (const x of lines[i]) {
+        const k = subMarkKey(x.t);
+        if (k.length < 2 || once.has(k)) continue;
+        once.add(k);
+        const e = seen.get(k);
+        if (e) { e.c++; e.last = cues[i].s; } else seen.set(k, { c: 1, first: cues[i].s, last: cues[i].s, n: x.n, t: x.t });
+      }
+    }
+    const span = Math.min(600, Math.max(60, end * 0.2));
+    for (const [k, e] of seen) {
+      if (e.c >= 3 && e.last - e.first >= span && (e.n >= 2 || (e.n >= 1 && SUB_MARK_SHAPE.test(e.t)))) (marks || (marks = new Set())).add(k);
+    }
+  }
+  const isEdge = i => { const c = cues[i]; return c.s < SUB_EDGE_S || (end > 0 && c.e > end - SUB_EDGE_S) || (!partial && (rank[i] < SUB_EDGE_N || rank[i] >= order.length - SUB_EDGE_N)); };
+  const bar = i => isEdge(i) ? ((cues[i].e - cues[i].s) >= SUB_LONG_S ? 2 : 3) : 4;
+  const kill = new Array(cues.length);            // 每条：要删的行（下标集合）
+  const gone = new Array(cues.length);            // 每条：整条删干净了
+  for (const i of order) {
+    const b = bar(i), k = new Set();
+    lines[i].forEach((x, j) => { if (x.n >= 9 || x.n >= b || (marks && x.t && marks.has(subMarkKey(x.t)))) k.add(j); });
+    kill[i] = k;
+    gone[i] = k.size > 0 && lines[i].every((x, j) => k.has(j) || !x.t || SUB_DECOR.test(x.t));
+  }
+  // 署名块：片头片尾，挨着一条删干净的（前后 SUB_BLOCK_S 秒内），≥ 2 分的行一起删；连着的一串要传两轮
+  for (let pass = 0; pass < 2; pass++) {
+    for (let r = 0; r < order.length; r++) {
+      const i = order[r];
+      if (gone[i] || !isEdge(i)) continue;
+      const near = j => j != null && gone[j] && Math.abs(cues[j].s - cues[i].s) <= SUB_BLOCK_S;
+      if (!near(order[r - 1]) && !near(order[r + 1])) continue;
+      let hit = false;
+      lines[i].forEach((x, j) => { if (x.n >= 2 && !kill[i].has(j)) { kill[i].add(j); hit = true; } });
+      if (hit) gone[i] = lines[i].every((x, j) => kill[i].has(j) || !x.t || SUB_DECOR.test(x.t));
+    }
+  }
   const out = [];
   for (let i = 0; i < cues.length; i++) {
     const c = cues[i];
     if (!c || !c.text) continue;
-    const edge = c.s < SUB_EDGE_S || (end > 0 && c.e > end - SUB_EDGE_S) || rank[i] < SUB_EDGE_N || rank[i] >= cues.length - SUB_EDGE_N;
-    const bar = edge ? 3 : 4;
-    const lines = c.text.split('\n');
-    const keep = lines.filter(l => subLineScore(l) < bar);
-    if (keep.length === lines.length) { out.push(c); continue; }
-    const text = keep.join('\n').trim();
+    if (!kill[i] || !kill[i].size) { out.push(c); continue; }
+    if (gone[i]) continue;
+    const text = lines[i].filter((x, j) => !kill[i].has(j)).map(x => x.l).join('\n').trim();
     if (!text || SUB_DECOR.test(text.replace(/<[^>]*>/g, ''))) continue;
     out.push({ ...c, text: hlsVttEscape(text) });
   }
   return out;
 }
+
+/* 整份字幕洗一次、留在这个 isolate 里：外挂 / 在线字幕的 HLS 分段每段只取自己那一截，
+   不必每一段都把整份读出来再洗一遍（水印也只有看得到整份才认得出） */
+const SUB_MEMO = new Map();
+function subMemo(key, make) {
+  const hit = SUB_MEMO.get(key);
+  if (hit) { SUB_MEMO.delete(key); SUB_MEMO.set(key, hit); return hit; }
+  return Promise.resolve(make()).then(v => {
+    SUB_MEMO.set(key, v);
+    while (SUB_MEMO.size > 8) SUB_MEMO.delete(SUB_MEMO.keys().next().value);
+    return v;
+  });
+}
 // ASS 里专门放署名 / 广告的样式（Staff、Credit、字幕组……）：整条不要。注释（Note / 注释）与内容有关，留着
 const SUB_STAFF_STYLE = /^(?:staff\w*|credits?|ads?|advert\w*|promo\w*|制作人?[员員]?|製作人?[員员]?|字幕[组組]|广告|廣告|声明|聲明|信息|資訊|资讯|info)$/i;
 
-/** 分段 WebVTT。dur = 片长（秒）：清洗时分片头片尾用 */
-function hlsVtt(cues, dur) {
+/** 分段 WebVTT。dur = 片长（秒）：清洗时分片头片尾用。
+ *  cues 是这一段窗口里的那几条 → 按 partial 洗；opt.cleaned = 已经整份洗过（外挂 / 在线字幕），不再洗 */
+function hlsVtt(cues, dur, opt) {
   const out = ['WEBVTT', `X-TIMESTAMP-MAP=MPEGTS:${HLS_T0 * 90000},LOCAL:00:00:00.000`, ''];
   const seen = new Set();
-  for (const c of subClean(cues, dur).sort((a, b) => a.s - b.s || a.e - b.e)) {
+  const list = opt && opt.cleaned ? cues.slice() : subClean(cues, dur, { partial: true });
+  for (const c of list.sort((a, b) => a.s - b.s || a.e - b.e)) {
     if (!c.text || !(c.e > c.s)) continue;
     const key = `${c.s}|${c.e}|${c.text}`;
     if (seen.has(key)) continue;          // ASS 多图层常有完全相同的对白
@@ -10323,11 +10478,23 @@ function hlsParseToken(seg) {
   if (!m) return null;
   try { return { exp: +m[1], sig: m[2], path: hlsUnB64url(m[3]) }; } catch { return null; }
 }
+/* 验过的令牌记在这个 isolate 里，直到它过期：同一次播放的几百个分段 / 字幕请求带的是同一个令牌，
+   不必每个请求重算一遍 HMAC。只有验证通过的才进来，伪造的永远进不来；换了密钥就换一张表 */
+const HLS_TOK_OK = new Map();
+let HLS_TOK_KEY = '';
 async function hlsVerifyPath(pathname, env) {
   try {
-    const tok = hlsParseToken(pathname.split('/')[2]);
+    const raw = pathname.split('/')[2];
+    const tok = hlsParseToken(raw);
     if (!tok || !tok.path || tok.exp * 1000 < Date.now()) return false;
-    return timingSafeEqualStr(tok.sig, await hmacHex(env.AUTH_SECRET, `${tok.path}|${tok.exp}`));
+    if (HLS_TOK_KEY !== env.AUTH_SECRET) { HLS_TOK_OK.clear(); HLS_TOK_KEY = env.AUTH_SECRET; }
+    if (HLS_TOK_OK.get(raw) === tok.exp) return true;
+    const ok = timingSafeEqualStr(tok.sig, await hmacHex(env.AUTH_SECRET, `${tok.path}|${tok.exp}`));
+    if (ok) {
+      if (HLS_TOK_OK.size >= 256) HLS_TOK_OK.delete(HLS_TOK_OK.keys().next().value);
+      HLS_TOK_OK.set(raw, tok.exp);
+    }
+    return ok;
   } catch { return false; }
 }
 /** 只有 MKV 走 HLS；MP4/MOV 仍由 /stream 直出（v24 的 FourCC 热修补照旧生效） */
@@ -10498,13 +10665,13 @@ async function hlsSegResponse(cx, idx, k, sel, type, request) {
   if (request.signal?.aborted) fwd(); else request.signal?.addEventListener('abort', fwd, { once: true });
   // 登记这一遍：同一段的字幕请求等它顺手写好的 VTT（缓存不生效时没有意义，就不收）
   const pass = main ? hlsPassBegin(idx, k) : null;
-  const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, sel, { subs: main, pass });
+  const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, sel, { subs: main, pass, alt: main ? hlsAltFor(idx) : -1 });
   let queue = [], finished = false;
   // 整段取完、连接都放掉了，再在后台取下一段 —— 不跟眼前这一段抢那 6 条连接
   const finish = () => { finished = true; if (main) hlsAhead(cx, idx, k); };
   try {
     const r = await it.next();
-    if (r.done) finish(); else queue = [hlsConcat(r.value)];
+    if (r.done) finish(); else queue = hlsChunks(r.value);
   } catch (e) {
     ac.abort(e);
     console.error('hls segment:', cx.filePath, k, e && e.message);
@@ -10516,7 +10683,7 @@ async function hlsSegResponse(cx, idx, k, sel, type, request) {
         while (!queue.length) {
           if (finished) { c.close(); return; }
           const r = await it.next();
-          if (r.done) finish(); else queue = [hlsConcat(r.value)];
+          if (r.done) finish(); else queue = hlsChunks(r.value);
         }
         c.enqueue(queue.shift());
       } catch (e) {
@@ -10581,7 +10748,7 @@ function hlsPassBegin(idx, k) {
 }
 /** 生成器结束、字幕也落定了，就从登记里摘掉 */
 function hlsPassDone(p) {
-  if (!p.ended || p.subs === 1 || p.subs === 2) return;
+  if (!p.ended || p.subs === 1 || p.subs === 2 || (p.alt && (p.alt.st === 1 || p.alt.st === 2))) return;
   const set = HLS_PASSES.get(p.id);
   if (set && set.delete(p) && !set.size) HLS_PASSES.delete(p.id);
 }
@@ -10621,13 +10788,13 @@ function hlsFlight(cx, idx, k) {
     const have = await hlsSegCached(key, 'video/mp4');
     if (have) { await have.body.cancel().catch(() => {}); return true; }
     const at = `${key}/${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-    const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, hlsMainSel(idx), { subs: true, pass });
+    const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, hlsMainSel(idx), { subs: true, pass, alt: hlsAltFor(idx) });
     let complete = false;
     const body = new ReadableStream({
       async pull(c) {
         try {
           const r = await it.next();
-          if (r.done) { complete = true; c.close(); } else c.enqueue(hlsConcat(r.value));
+          if (r.done) { complete = true; c.close(); } else for (const ch of hlsChunks(r.value)) c.enqueue(ch);
         } catch (e) { c.error(e); }
       },
       cancel(reason) { ac.abort(reason); it.return().catch(() => {}); },
@@ -10708,6 +10875,167 @@ async function hlsSubAwait(idx, k, ck, signal) {
     if (!live || signal?.aborted || Date.now() > until) return null;
     await hlsSleep(HLS_POLL_MS);
   }
+}
+
+// ── 备选音轨顺路 ──
+//  默认音轨复用在视频分段里；换成别的音轨时，播放器除了视频分段，还要这条音轨自己的分段。
+//  MKV 里音视频交错存放，音轨分段只能把这一段的字节整个再读一遍、再解析一遍，挑出这条音轨的块 ——
+//  等于这一段从 Dropbox 读两遍。现在：有人在听某条备选音轨，就记下来（HLS_ALT，90 秒不再有人要就作罢），
+//  之后视频那一遍（直出 / 预取）把这条音轨的块一起收下，切好写进缓存；音轨请求先等它，等不到才自己读。
+const HLS_ALT = new Map();          // idh → { i, at }：这部片最近在听的备选音轨
+const HLS_ALT_TTL = 90000;
+const hlsAltKey = (idx, i, k) => `${HLS_SUB_CACHE}seg2/${idx.idh}/a${i}/${k}`;
+function hlsAltFor(idx) {
+  const a = HLS_ALT.get(idx.idh);
+  if (!a) return -1;
+  if (Date.now() - a.at > HLS_ALT_TTL) { HLS_ALT.delete(idx.idh); return -1; }
+  return a.i;
+}
+
+/** 备选音轨 B 在第 k 段里的分片：与「只出这条音轨」那条路径（hlsSegmentParts，sel.video = false）同一套规则 ——
+ *  同样的时间戳吸附、断档另起、2 秒 / 6MB 一个分片、同样的轨道号与序号，切出来的字节一模一样 */
+function hlsAltMux(B, k) {
+  const T0 = HLS_T0 * B.ts, strip = B.strip ? hlsUnB64(B.strip) : null;
+  const laceNs = B.fs ? B.fs * 1e9 / B.ts : 0;
+  const snap = (ns, fs) => { const u = Math.round(ns * B.ts / 1e9); return fs > 0 ? B.anchor + Math.round((u - B.anchor) / fs) * fs : u; };
+  let run = null, bytes = 0, seq = k * 10000 + 1;
+  const runs = [], out = [];
+  const flush = () => {
+    if (run) { runs.push(run); run = null; }
+    bytes = 0;
+    for (const r of runs) out.push(mp4Fragment(seq++, [{ id: 1, video: false, base: r.base + T0, samples: r.samples }]));
+    runs.length = 0;
+  };
+  return {
+    push(blk, ns) {
+      blk.frames.forEach((fr, i) => {
+        let pieces = fr, size = fr.reduce((a, x) => a + x.length, 0);
+        if (strip) { pieces = [strip, ...pieces]; size += strip.length; }
+        let fs = B.fs;
+        if (!fs && B.codec === 'flac') fs = flacFrameSamples(fr.length === 1 ? fr[0] : hlsConcat(fr)) || 4096;
+        const t = snap(ns + i * (laceNs || (fs * 1e9 / B.ts)), fs);
+        if (run) {
+          if (Math.abs(t - run.end) <= fs / 2) { /* 连续 */ }
+          else if (t < run.end) return;
+          else { runs.push(run); run = null; }
+        }
+        if (!run) run = { base: t, end: t, samples: [] };
+        run.samples.push({ dur: fs, size, pieces });
+        run.end += fs;
+        bytes += size;
+      });
+      if ((run && (run.end - run.base) >= 2 * B.ts) || runs.length > 0 || bytes >= HLS_FRAG_BYTES) flush();
+    },
+    finish() { flush(); return out; },
+  };
+}
+
+/** 后台把顺路切好的那条音轨分段写进缓存（与字幕一样：不拖住视频分段收尾），结果记在这一遍上 */
+function hlsAltWrite(cx, idx, k, i, frags, pass) {
+  if (pass && pass.alt) pass.alt.st = 2;
+  const parts = [];
+  for (const f of frags) parts.push(...f);
+  const body = hlsConcat(parts);
+  const p = caches.default.put(new Request(hlsAltKey(idx, i, k)), hlsOut(body, 'audio/mp4')).then(() => true, e => {
+    console.error('hls alt audio:', cx.filePath, k, e && e.message);
+    return false;
+  }).then(ok => { if (pass && pass.alt) { pass.alt.st = ok ? 3 : -1; hlsPassDone(pass); } });
+  cx.ctx?.waitUntil?.(p);
+}
+
+/** 缓存里有没有第 k 段视频（只看指针，不读数据） */
+async function hlsSegHas(idx, k) {
+  const ptr = await caches.default.match(new Request(hlsSegKey(idx, k))).catch(() => null);
+  if (!ptr) return false;
+  await ptr.body?.cancel().catch(() => {});
+  return true;
+}
+/** 第 k 段有没有一遍正在过（在动）；alt = i 时只算顺路收着备选音轨 i 的那几遍 */
+function hlsPassLive(idx, k, alt) {
+  const set = HLS_PASSES.get(`${idx.idh}|${k}`);
+  if (!set) return false;
+  for (const p of set) {
+    if (alt == null ? hlsPassAlive(p) : (p.alt && p.alt.i === alt && (p.alt.st === 2 || (p.alt.st === 1 && hlsPassAlive(p))))) return true;
+  }
+  return false;
+}
+
+/** 缓存里有备选音轨 i 的第 k 段就出；有一遍正顺路收它（而且在动）就轮询缓存等它；都没有 / 停住 / 超时 → null。
+ *  没人在收时立刻返回，不空等 */
+async function hlsAltAwait(idx, k, i, signal) {
+  const ck = new Request(hlsAltKey(idx, i, k));
+  const until = Date.now() + HLS_SUB_WAIT_MS;
+  for (;;) {
+    const live = hlsPassLive(idx, k, i);
+    const h = await caches.default.match(ck).catch(() => null);
+    if (h && h.body) return new Response(h.body, { headers: hlsHeaders('audio/mp4', HLS_LONG) });
+    if (!live || signal?.aborted || Date.now() > until) return null;
+    await hlsSleep(HLS_POLL_MS);
+  }
+}
+
+/** 备选音轨第 k 段：
+ *   · 记下「有人在听」，之后的视频遍（直出 / 预取）都顺路收它；
+ *   · 缓存里有就直接出；有一遍正顺路收它就等它；
+ *   · 视频这一段还没进缓存、也没人在过：现在就起一路预取（视频段顺带进缓存、这条音轨顺路切好），等它 ——
+ *     播放器紧接着要的视频段会等这一路，不会再读一遍；
+ *   · 视频这一段已经在缓存里（看过 / 换音轨之前就预取好了）或者有一遍不带它在过：不再等，
+ *     自己把这段字节读一遍切出来（原路径），切好的也进缓存，拖回来再看不用再读 */
+async function hlsAltSegResponse(cx, idx, k, i, request) {
+  if (!(k >= 0 && k < idx.segs.length)) return hlsFail(404, 'no such segment');
+  if (request.method === 'HEAD') return new Response(null, { headers: hlsHeaders('audio/mp4', HLS_LONG) });
+  const A = idx.audio[i];
+  if (!(hlsCacheOn(cx) && A && A.mode === 'copy' && i !== idx.muxed)) {
+    return hlsSegResponse(cx, idx, k, { video: false, audio: i }, 'audio/mp4', request);
+  }
+  HLS_ALT.set(idx.idh, { i, at: Date.now() });
+  if (HLS_ALT.size > 32) HLS_ALT.delete(HLS_ALT.keys().next().value);
+  let r = await hlsAltAwait(idx, k, i, request.signal);
+  if (r) return r;
+  if (!hlsPassLive(idx, k) && !(await hlsSegHas(idx, k)) && hlsFlight(cx, idx, k)) {
+    r = await hlsAltAwait(idx, k, i, request.signal);
+    if (r) return r;
+  }
+  // 自己读：照旧边切边交（首字节不等整段），同时留一份，整段正常切完再写进缓存
+  const ac = new AbortController();
+  const fwd = () => ac.abort(request.signal.reason);
+  if (request.signal?.aborted) fwd(); else request.signal?.addEventListener('abort', fwd, { once: true });
+  const it = hlsSegmentParts({ ...cx, signal: ac.signal }, idx, k, { video: false, audio: i });
+  const kept = [];
+  let queue = [], finished = false;
+  const done = () => {
+    finished = true;
+    cx.ctx?.waitUntil?.(caches.default.put(new Request(hlsAltKey(idx, i, k)), hlsOut(hlsConcat(kept), 'audio/mp4')).catch(() => {}));
+  };
+  const take = parts => { const ch = hlsChunks(parts); for (const x of ch) kept.push(x); return ch; };
+  try {
+    const r = await it.next();
+    if (r.done) done(); else queue = take(r.value);
+  } catch (e) {
+    ac.abort(e);
+    console.error('hls alt audio:', cx.filePath, k, e && e.message);
+    return hlsFail(e?.name === 'AbortError' ? 499 : 502, 'segment unavailable');
+  }
+  const body = new ReadableStream({
+    async pull(c) {
+      try {
+        while (!queue.length) {
+          if (finished) { c.close(); return; }
+          const r = await it.next();
+          if (r.done) done(); else queue = take(r.value);
+        }
+        c.enqueue(queue.shift());
+      } catch (e) {
+        ac.abort(e);
+        c.error(e);
+      }
+    },
+    cancel(reason) {
+      ac.abort(reason);
+      it.return().catch(() => {});
+    },
+  });
+  return new Response(body, { headers: hlsHeaders('audio/mp4', HLS_LONG) });
 }
 
 /**
@@ -10852,7 +11180,7 @@ async function handleHls(url, request, env, ctx) {
     if (!a || a.mode !== 'copy') return hlsFail(404, 'no such audio track');
     if (m[2] === '.m3u8') return hlsOut(hlsMediaPl(idx, `a${i}.mp4`, k => `a${i}/${k}.m4s`, target), HLS_M3U8);
     if (m[2] === '.mp4') return hlsOut(mp4Init([{ id: 1, kind: 'a', cfg: a }], false), 'audio/mp4');
-    if (seg && seg[2] === 'm4s') return hlsSegResponse(cx, idx, +seg[1], { video: false, audio: i }, 'audio/mp4', request);
+    if (seg && seg[2] === 'm4s') return hlsAltSegResponse(cx, idx, +seg[1], i, request);
   }
   if ((m = /^t(\d+)(\.m3u8|\.mp4)?$/.exec(name))) {
     const i = +m[1], a = idx.audio[i];
@@ -10881,7 +11209,8 @@ async function handleHls(url, request, env, ctx) {
         if (!x) return hlsFail(404, 'no such subtitle');
         return await hlsVttResponse(`x${SUB_CLEAN_V}/${idx.idh}/${encodeURIComponent(x.path)}/${x.rev}/${k}`, ctx, async () => {
           const [T1, T2] = hlsSegWindow(idx, k);
-          return hlsVtt((await hlsSidecarCues(x, env, ctx)).filter(c => c.s < T2 && c.e > T1), idx.dur);
+          const all = await subMemo(`x|${x.path}|${x.rev}|${Math.round(idx.dur)}`, async () => subClean(await hlsSidecarCues(x, env, ctx), idx.dur));
+          return hlsVtt(all.filter(c => c.s < T2 && c.e > T1), idx.dur, { cleaned: true });
         });
       } catch (e) { console.error('hls sidecar:', e && e.message); return hlsFail(502, 'subtitle unavailable'); }
     }
@@ -10896,7 +11225,8 @@ async function handleHls(url, request, env, ctx) {
       if (!rec || rec.status !== 'ok') return hlsOut(hlsVtt([]), 'text/vtt; charset=utf-8', 'no-store');
       return await hlsVttResponse(`o${SUB_CLEAN_V}/${idx.idh}/${rec.src.file}/${syncId(rec.sync)}/${k}`, ctx, async () => {
         const [T1, T2] = hlsSegWindow(idx, k);
-        return hlsVtt(osCuesOut(rec).filter(c => c.s < T2 && c.e > T1), idx.dur);
+        const all = await subMemo(`o|${rec.src.file}|${syncId(rec.sync)}|${Math.round(idx.dur)}`, () => subClean(osCuesOut(rec), idx.dur));
+        return hlsVtt(all.filter(c => c.s < T2 && c.e > T1), idx.dur, { cleaned: true });
       });
     }
   }

@@ -570,7 +570,7 @@ const pd = await enter(duo);
 await pd.waitForTimeout(1500);
 /* 折起竖拿（Safari 382 宽 / 主屏幕 App 466 宽）：贴右缘浮着的竖向导航；展开、横拿：贴左缘、内容让位的导航条；
    普通 iPhone（393 宽）照旧底部胶囊 */
-const DESC = { float: '右缘浮动侧边导航（竖排、叠在搜索钮上面、内容不让位）', rail: '侧边导航条（竖排）', bottom: '底部导航胶囊' };
+const DESC = { float: '右缘浮动的全新导航栏（一枚竖向玻璃胶囊：主页 / 资料库 / 搜索 / 头像在底，只有图标，内容不让位）', rail: '侧边导航条（竖排）', bottom: '底部导航胶囊' };
 /* 实机上折起的外屏右侧有一整列安全区（状态栏竖着排在右上角，safe-area-inset-right ≈ 84px）：用 CDP 模拟同样的安全区 */
 const duoCdp = await duo.newCDPSession(pd);
 const NO_SAI = { top: 0, right: 0, bottom: 0, left: 0 };
@@ -584,23 +584,70 @@ for (const [w, h, label, mode, sai] of [[382, 580, '折起竖拿', 'float'], [46
     const card = document.querySelector('.hcard.is-center') || document.querySelector('.hcard');
     const r = e => e && e.getBoundingClientRect();
     const cls = document.documentElement.classList, rail = cls.contains('rail'), float = cls.contains('rail-float');
-    const nav = r(document.getElementById('navContainer')), pill = r(document.getElementById('navPill')), act = r(document.querySelector('#navContainer .nav-item.active'));
+    /* Duo 折起竖拿的新导航：整枚胶囊就是 #dock（.nav-container 摊平了）；别的形态照旧量 .nav-container */
+    const nav = r(document.getElementById(float ? 'dock' : 'navContainer')), pill = r(document.getElementById('navPill')), act = r(document.querySelector('#navContainer .nav-item.active'));
     const srch = r(document.getElementById('navSearch'));
     const play = r(card && card.querySelector('.btn-play')), circ = r(card && card.querySelector('.btn-circle')), dots = r(document.querySelector('.aap-host .all-access-pass'));
     const apart = (a, b) => !a || !b || a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top;
     const shift = parseFloat(getComputedStyle(document.getElementById('appStage')).paddingLeft) || 0;
+    /* 浮动导航下大图专门排过：标签 / 片名 / 按钮 / 暂停钮与轮播点同一条中线（居中到导航左边那块） */
+    const midX = b => b ? (b.left + b.right) / 2 : NaN;
+    const btns = r(card && card.querySelector('.hero-buttons')), ttl = r(card && (card.querySelector('.hero-logo-img') || card.querySelector('.hero-logo-text')));
+    const aligned = Math.abs(midX(btns) - midX(dots)) <= 4 && (!ttl || Math.abs(midX(ttl) - midX(dots)) <= 4);
+    /* 沉浸：大图铺满一整屏，暂停钮与轮播点在 Home 指示条之上 */
+    const deck = r(document.querySelector('.hero-deck'));
+    const immersive = !!deck && Math.abs(deck.top) <= 1 && Math.abs(deck.height - innerHeight) <= 1 && dots.bottom <= innerHeight - 14;
+    /* 文案三行：片名 → 年份胶囊 → 按钮；片名下那行（类型 · 片长 / 严选标）不出 */
+    const st = r(card && card.querySelector('.hero-status')), tg = card && card.querySelector('.hero-tags');
+    const order3 = !!(st && ttl && btns) && ttl.bottom <= st.top + 1 && st.bottom <= btns.top + 1 && (!tg || getComputedStyle(tg).display === 'none');
+    /* 新导航：四项自上而下（主页、资料库、搜索、头像）都在胶囊里；只有图标（文字只留给读屏）；选中项有柔光圆底；滑动指示器不出 */
+    const items = ['navHome', 'navLib', 'navSearch', 'headerAvatar'].map(id => r(document.getElementById(id)));
+    const inside = !!nav && items.every(b => b && b.width > 20 && b.left >= nav.left - 1 && b.right <= nav.right + 1 && b.top >= nav.top - 1 && b.bottom <= nav.bottom + 1);
+    const ordered = items.every((b, i) => i === 0 || (b && items[i - 1] && items[i - 1].bottom <= b.top + 1));
+    const actEl = document.querySelector('#navContainer .nav-item.active'), actBg = actEl ? getComputedStyle(actEl).backgroundColor : '';
+    const iconOnly = [...document.querySelectorAll('#dock .nav-text')].every(t => t.getBoundingClientRect().width <= 1);
+    const newNav = inside && ordered && !!actBg && actBg !== 'rgba(0, 0, 0, 0)' && iconOnly && getComputedStyle(document.getElementById('navPill')).display === 'none';
     const clear = !!(nav && play && dots) && play.top >= 0 && (float
-      ? apart(play, nav) && apart(circ, nav) && apart(dots, nav) && apart(dots, srch) && nav.left > innerWidth / 2 && nav.right >= innerWidth - 24
-        && srch.top >= nav.bottom && Math.abs((srch.left + srch.right) / 2 - (nav.left + nav.right) / 2) <= 4 && shift === 0
+      ? apart(play, nav) && apart(circ, nav) && apart(dots, nav) && nav.left > innerWidth / 2 && nav.right >= innerWidth - 24
+        && newNav && shift === 0 && aligned && immersive && order3
       : rail ? apart(play, nav) && apart(dots, nav) && play.left >= nav.right
       : play.bottom <= nav.top && dots.bottom <= nav.top);
-    const pillOk = !!(pill && act) && Math.abs(pill.left - act.left) <= 2 && Math.abs(pill.top - act.top) <= 2 && Math.abs(pill.width - act.width) <= 2 && Math.abs(pill.height - act.height) <= 2;
+    const pillOk = float ? newNav : !!(pill && act) && Math.abs(pill.left - act.left) <= 2 && Math.abs(pill.top - act.top) <= 2 && Math.abs(pill.width - act.width) <= 2 && Math.abs(pill.height - act.height) <= 2;
     return { mode: float ? 'float' : rail ? 'rail' : 'bottom', vertical: nav ? nav.height > nav.width : false, clear, pillOk, sw: document.documentElement.scrollWidth, vw: innerWidth };
   });
   ok(g.mode === mode && g.vertical === (mode !== 'bottom') && g.clear && g.pillOk && g.sw === g.vw,
-    `${label} ${w}×${h}：${DESC[mode]}，选中指示器对齐，主视觉的按钮与轮播点不被导航挡住，没有横向溢出${g.mode === mode ? '' : `（实际：${g.mode}）`}`);
+    `${label} ${w}×${h}：${DESC[mode]}，${mode === 'float' ? '选中项有柔光圆底' : '选中指示器对齐'}，主视觉的按钮与轮播点不被导航挡住${mode === 'float' ? '、居中到导航左边那块，大图铺满整屏，文案是片名 → 年份胶囊 → 按钮' : ''}，没有横向溢出${g.mode === mode ? '' : `（实际：${g.mode}）`}`);
 }
+/* 往下一滚、大图收成卡片：卡与卡下的进度胶囊落在导航左边那块，两者同宽，不钻到导航底下（实机的右侧安全区） */
+await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: { top: 0, right: 84, bottom: 20, left: 0 } });
+await pd.setViewportSize({ width: 466, height: 678 });
+await pd.waitForTimeout(600);
+await pd.evaluate(() => scrollTo(0, 300));
+await pd.waitForTimeout(900);
+const mo = await pd.evaluate(() => { const r = e => e && e.getBoundingClientRect(); const c = r(document.querySelector('.hcard.is-center')), q = r(document.querySelector('.aap-host .all-access-pass')), n = r(document.getElementById('dock'));
+  return { morphed: document.querySelector('.hero-deck').classList.contains('morphed'), card: [Math.round(c.left), Math.round(c.right)], pill: [Math.round(q.left), Math.round(q.right)], nav: Math.round(n.left) }; });
+ok(mo.morphed && mo.card[1] <= mo.nav - 8 && Math.abs(mo.pill[0] - mo.card[0]) <= 2 && Math.abs(mo.pill[1] - mo.card[1]) <= 2,
+  `折起竖拿 · 大图收成卡片：卡 ${mo.card.join('–')}、进度胶囊 ${mo.pill.join('–')} 同宽，停在导航（${mo.nav}）左边`);
+await pd.evaluate(() => scrollTo(0, 0));
+await pd.waitForTimeout(500);
 await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: NO_SAI });
+/* 实机上翻开 / 合上时，视口与屏幕尺寸不一定同一刻更新：合上那一下视口先变、screen 晚一拍还是内屏的尺寸，
+   当场认不出外屏。屏幕尺寸跟上来之后（视口不再变、没有媒体查询事件），补查要把导航换回 Duo 的那种 */
+const metrics = (w, h, sw, sh) => duoCdp.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: true, screenWidth: sw, screenHeight: sh });
+await metrics(669, 825, 669, 880);
+await pd.waitForTimeout(700);
+const fold0 = await pd.evaluate(() => document.documentElement.className);
+await metrics(466, 678, 669, 880);              /* 视口已是外屏，screen 还是内屏 */
+await pd.waitForTimeout(400);
+const stale = await pd.evaluate(() => document.documentElement.classList.contains('rail-float'));
+await metrics(466, 678, 466, 678);              /* screen 跟上来（视口不变，没有媒体查询事件） */
+await pd.waitForTimeout(1300);
+const fold1 = await pd.evaluate(() => { const c = document.documentElement.classList, d = document.getElementById('dock').getBoundingClientRect();
+  return { float: c.contains('rail') && c.contains('rail-float') && !c.contains('rail-switching'), atRight: d.right >= innerWidth - 24 && d.height > d.width * 2.5 }; });
+ok(/\brail\b/.test(fold0) && !/rail-float/.test(fold0) && !stale && fold1.float && fold1.atRight,
+  '翻开再合上、屏幕尺寸晚一拍才更新：补查把导航换回右缘那枚胶囊（不卡在展开时的形态）');
+await pd.setViewportSize({ width: 466, height: 678 });
+await pd.waitForTimeout(500);
 /* 浮动侧边导航下搜索：搜索场到顶部、几乎通栏；头像圆钮留在右下角 */
 await pd.setViewportSize({ width: 466, height: 678 });
 await pd.waitForTimeout(600);
@@ -612,6 +659,9 @@ ok(fs0.top < 80 && fs0.left <= 24 && fs0.w >= fs0.vw - 48 && fs0.ax >= fs0.vw - 
   `折起竖拿 · 搜索：搜索场在顶部通栏展开（${Math.round(fs0.w)} 宽），头像圆钮留在右下角`);
 await pd.evaluate(() => closeSearch());
 await pd.waitForTimeout(600);
+const back = await pd.evaluate(() => { const d = document.getElementById('dock').getBoundingClientRect(), s = document.getElementById('navSearch').getBoundingClientRect();
+  return { cap: d.height > d.width * 2.5, inside: s.top >= d.top && s.bottom <= d.bottom && s.left >= d.left && s.right <= d.right }; });
+ok(back.cap && back.inside, '折起竖拿 · 收起搜索：搜索回到胶囊里，胶囊照旧是一整枚');
 /* 别的手机照旧底部胶囊：普通 iPhone；Safari 放大到 115% 的 Pro Max（视口只剩 383 宽，但屏幕还是 430）；同样 382 宽的安卓机 */
 for (const [label, opts] of [['普通 iPhone（393 宽）', devices['iPhone 15 Pro']],
   ['Safari 页面放大 115% 的 iPhone Pro Max（视口 383 宽）', { ...devices['iPhone 15 Pro Max'], viewport: { width: 383, height: 700 } }],
@@ -621,8 +671,13 @@ for (const [label, opts] of [['普通 iPhone（393 宽）', devices['iPhone 15 P
   const pa = await enter(ac);
   await pa.waitForTimeout(800);
   const b = await pa.evaluate(() => { const n = document.getElementById('navContainer').getBoundingClientRect(), c = document.documentElement.classList;
-    return { off: !c.contains('rail') && !c.contains('rail-float'), bottom: n.bottom >= innerHeight - 90 && n.width > n.height }; });
-  ok(b.off && b.bottom, `${label}：不当成 iPhone Duo，照旧底部胶囊`);
+    const d = document.querySelector('.hero-deck').getBoundingClientRect();
+    const card = document.querySelector('.hcard.is-center') || document.querySelector('.hcard');
+    const st = card.querySelector('.hero-status').getBoundingClientRect(), lg = card.querySelector('.hero-logo-wrap').getBoundingClientRect();
+    const tags = getComputedStyle(card.querySelector('.hero-tags')).display !== 'none';
+    return { off: !c.contains('rail') && !c.contains('rail-float'), bottom: n.bottom >= innerHeight - 90 && n.width > n.height, deck: Math.round(d.height), vh: innerHeight,
+      same: tags && st.bottom <= lg.top + 1 }; });
+  ok(b.off && b.bottom && b.deck < b.vh - 40 && b.same, `${label}：不当成 iPhone Duo，照旧底部胶囊；大图照旧不铺满（${b.deck} / ${b.vh}），文案照旧（年份胶囊在片名上面，类型那行还在）`);
   await ac.close();
 }
 await pd.setViewportSize({ width: 951, height: 543 });
@@ -1018,7 +1073,7 @@ console.log('\n■ 年份页：一行一部的列表（竖版小海报 + 中文�
     await dp.evaluate(() => openYearLibrary(2024));
     await until(dp, () => document.querySelectorAll('#yearList .yl-row').length >= 3, null, 12000);
     const F = await dp.evaluate(() => ({ more: Math.max(...[...document.querySelectorAll('.yl-more')].map(b => b.getBoundingClientRect().right)),
-      nav: document.getElementById('navContainer').getBoundingClientRect().left, float: document.documentElement.classList.contains('rail-float') }));
+      nav: document.getElementById('dock').getBoundingClientRect().left, float: document.documentElement.classList.contains('rail-float') }));
     ok(F.float && F.more <= F.nav - 8 && F.nav >= 466 - 84, `折起竖拿（实机的右侧安全区）：导航在右缘那一列里（${Math.round(F.nav)}），「…」停在它左边（${Math.round(F.more)}），不钻到导航底下`);
     await dc.close();
   } finally {
@@ -1029,6 +1084,47 @@ console.log('\n■ 年份页：一行一部的列表（竖版小海报 + 中文�
     delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
     caches.default.m.clear();
   }
+}
+
+console.log('\n■ 今日推荐：大号描边名次 + 海报压在数字右缘 + 「最近添加」');
+{
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  caches.default.m.clear();
+  const q = f => f.replace(/\.[^.]+$/, '').replace(/[._]/g, ' ').toLowerCase().replace(/ hdr$/, '');
+  const files = fs.readdirSync(path.join(HERE, 'samples')).filter(f => /\.(mkv|mp4)$/.test(f) && !/^long/.test(f));
+  H.tmdb.movies = [{ id: 9001, query: 'long', title: '漫长的测试', date: '2024-05-01' }, ...files.map((f, i) => ({ id: 9200 + i, query: q(f), title: '样片' + i, date: '2020-05-01' }))];
+  const img = r => r.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>' });
+  const rc = await context({ ...devices['iPhone 15 Pro'] });
+  await rc.route('https://image.tmdb.org/**', img);
+  const rp = await enter(rc);
+  await until(rp, () => document.querySelectorAll('#todayRecsRow .card.rank-card').length >= 10, null, 20000);
+  await rp.evaluate(() => document.getElementById('todayRecsSection').scrollIntoView({ block: 'center' }));
+  await rp.waitForTimeout(1500);
+  const R = await rp.evaluate(() => {
+    const cards = [...document.querySelectorAll('#todayRecsRow .card.rank-card')];
+    return cards.map((c, i) => {
+      const k = c.querySelector(':scope > .card-rank'), q = c.querySelector('.card-poster'), kr = k && k.getBoundingClientRect(), qr = q.getBoundingClientRect(), cs = k && getComputedStyle(k);
+      const info = c.querySelector('.card-info');
+      return { n: k ? +k.textContent : 0, outside: !!k && !q.contains(k), stroke: cs ? parseFloat(cs.webkitTextStrokeWidth) || 0 : 0, fill: cs ? cs.color : '',
+        left: kr ? Math.round(kr.left) : 0, right: kr ? Math.round(kr.right) : 0, pl: Math.round(qr.left), pb: Math.round(qr.bottom), kb: kr ? Math.round(kr.bottom) : 0,
+        big: kr ? kr.height > qr.height * 0.55 : false, rk2: c.classList.contains('rk2'), title: info ? info.getBoundingClientRect().width <= 1 : true, label: c.getAttribute('aria-label') || '' };
+    });
+  });
+  ok(R.length >= 10 && R.every((x, i) => x.n === i + 1 && x.outside && x.big && x.stroke >= 2 && /rgba\(0, 0, 0, 0\)|transparent/.test(x.fill)),
+    `名次是海报左边的大号描边数字（只描边不填色，${R.length} 张，1 → ${R.length} 连续）`);
+  ok(R.every(x => x.left < x.pl && x.right > x.pl && Math.abs(x.kb - x.pb) <= 30), '数字在海报左边、右缘被海报盖住，底边与海报底边对齐');
+  ok(R.every((x, i) => x.rk2 === (i + 1 >= 10)) && R.every(x => x.title) && R.every((x, i) => x.label.startsWith('第 ' + (i + 1) + ' 名，')),
+    '两位数（10 起）那一格放宽；海报下不再写片名（读屏照读「第 N 名，片名」）');
+  /* 「最近添加」：两周内入库的才挂 */
+  const NB = await rp.evaluate(() => {
+    const mk = days => videoCardHTML({ name: 'Probe.2024.1080p.mkv', path: '/Movies/probe.mkv', added: new Date(Date.now() - days * 86400000).toISOString() }, { rank: 3 });
+    const plain = videoCardHTML({ name: 'Probe.2024.1080p.mkv', path: '/Movies/probe.mkv', added: new Date().toISOString() }, {});
+    return { fresh: /card-new[^>]*>最近添加/.test(mk(3)), old: /card-new/.test(mk(40)), plain: /card-new/.test(plain) };
+  });
+  ok(NB.fresh && !NB.old && !NB.plain, '「最近添加」只挂在两周内入库的名次卡上（40 天前的不挂，别的排也不挂）');
+  await rc.close();
+  delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
+  caches.default.m.clear();
 }
 
 console.log('\n■ 登录页：品牌区（流体底图 + Cuven max 字标 + 蓝色脉冲）+ 白色面板');
