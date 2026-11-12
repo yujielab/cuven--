@@ -2731,6 +2731,10 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 
 .card { position: relative; flex-shrink: 0; cursor: pointer; border-radius: var(--r-card); scroll-snap-align: start; contain: layout paint; }
 .card-portrait  { width: var(--card-w-p); } .card-landscape { width: var(--card-w-l); }
+/* 卡自己带圆角（海报 inherit 它），又挂着 contain: paint —— 绘制按带圆角的卡框裁。卡框的下沿就是最后那行字（年份）的下沿，
+   左下角那一截圆弧正好压在年份的头一个字上（「2026」的 2 被切掉一角）。卡框往下多撑一个圆角半径、再用等量的负外边距收回：
+   圆弧落到字下面的空白里，版面一像素不动。名次卡没有圆角、也不裁，它的大号数字又是贴卡框下沿摆的，不动它 */
+.card-portrait:not(.rank-card), .card-landscape { padding-bottom: var(--r-card); margin-bottom: calc(-1 * var(--r-card)); }
 @media (min-width: 768px)  { :root { --card-w-p: 196px; --card-w-l: 360px; } }
 @media (min-width: 1280px) { :root { --card-w-p: 216px; --card-w-l: 400px; } }
 @media (min-width: 1680px) { :root { --card-w-p: 236px; --card-w-l: 440px; } }

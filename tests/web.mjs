@@ -433,6 +433,22 @@ console.log('\n■ 片名一律中文（卡片、搜索、播放器 / 正在播�
       tvFoot: !box.querySelector('.tv-foot-s') && !/4K|杜比视界|第 1 季/.test(foot) && /Shogun/.test(foot) };
   });
   ok(!nb.html && nb.dom === 0 && nb.tvFoot, `卡片上不出 DV / 8K+ / 高动态这类规格小标签（文件名写满规格的卡，底下只写「${nb.meta}」；首页与搜索结果里的卡：${nb.dom} 枚）；剧集卡底部只留名字`);
+  /* 年份那行字不被卡的圆角裁到：卡自己带圆角又挂着 contain: paint，原来卡框下沿就是年份的下沿，左下角的圆弧切掉「2026」的 2 一角。
+     现在卡框往下多出一个圆角半径（再用等量负外边距收回，版面不动） */
+  const corner = await zp.evaluate(() => {
+    /* 一张卡一行：同一行里矮的那张会被拉高到和高的一样（flex 默认 stretch），量不出它自己的下沿 */
+    return [videoCardHTML({ name: 'Gatta.Kusthi.2.2026.mkv', path: '/Movies/g.mkv' }), videoCardHTML({ name: 'Wide.Film.2026.mkv', path: '/Movies/w.mkv' }, { landscape: true })].map(html => {
+      const row = document.createElement('div'); row.className = 'scroll-row'; row.style.cssText = 'position:fixed;left:0;top:0;';
+      row.innerHTML = html;
+      document.body.appendChild(row);
+      const c = row.querySelector('.card'), m = c.querySelector('.card-meta').getBoundingClientRect(), r = c.getBoundingClientRect(), cs = getComputedStyle(c);
+      const res = { gap: Math.round((r.bottom - m.bottom) * 10) / 10, radius: parseFloat(cs.borderBottomLeftRadius), flush: Math.abs(r.bottom + parseFloat(cs.marginBottom) - m.bottom) <= .5 };
+      row.remove();
+      return res;
+    });
+  });
+  ok(corner.length === 2 && corner.every(c => c.gap >= c.radius - .5 && c.flush),
+    `卡片底下那行年份不被卡的圆角裁到：字下面留出 ${corner.map(c => c.gap).join(' / ')}px（≥ 圆角半径），版面不动`);
   const again = await zp.evaluate(() => videoCardHTML({ name: 'long.mp4', path: '/Movies/long.mp4' }).includes('漫长的测试'));
   ok(again, '记进中文名索引：之后新排的卡一出来就是中文');
   const hit = await zp.evaluate(() => { runSearch('漫长'); return !!document.querySelector('#searchBody .card[data-name="long.mp4"]'); });
