@@ -664,6 +664,21 @@ const fold1 = await pd.evaluate(() => { const c = document.documentElement.class
   return { float: c.contains('rail') && c.contains('rail-float') && !c.contains('rail-switching'), atRight: d.right >= innerWidth - 24 && d.height > d.width * 2.5 }; });
 ok(/\brail\b/.test(fold0) && !/rail-float/.test(fold0) && !stale && fold1.float && fold1.atRight,
   '翻开再合上、屏幕尺寸晚一拍才更新：补查把导航换回右缘那枚胶囊（不卡在展开时的形态）');
+/* 展开的 Duo：不论横竖、视口多高，导航都在侧边。只看视口的话，主屏幕 App 横拿（669 高）、Safari 横拿滚动后工具栏收起
+   （视口长过 600）都会跳到底部胶囊 */
+const openRes = [];
+for (const [w, h, sw, sh, label] of [[960, 669, 960, 669, '主屏幕 App 横拿 960×669'], [951, 620, 960, 669, 'Safari 横拿、工具栏收起 951×620'],
+  [669, 960, 669, 960, '主屏幕 App 竖拿 669×960'], [951, 543, 960, 669, 'Safari 横拿 951×543']]) {
+  await metrics(w, h, sw, sh);
+  await pd.waitForTimeout(1300);
+  openRes.push(await pd.evaluate(label => {
+    const c = document.documentElement.classList, n = document.getElementById('navContainer').getBoundingClientRect();
+    return { label, ok: c.contains('rail') && !c.contains('rail-float') && n.left < 120 && n.height > n.width && document.documentElement.scrollWidth === innerWidth };
+  }, label));
+}
+ok(openRes.every(r => r.ok), `展开的 Duo 导航一律在侧边（不随视口高度跳到底部）：${openRes.map(r => r.label + (r.ok ? ' ✓' : ' ✗')).join('、')}`);
+await metrics(466, 678, 466, 678);
+await pd.waitForTimeout(900);
 await pd.setViewportSize({ width: 466, height: 678 });
 await pd.waitForTimeout(500);
 /* 浮动侧边导航下搜索：搜索场到顶部、几乎通栏；胶囊收成头像圆钮，留在胶囊最底下那一格（头像原来的位置） */

@@ -5767,7 +5767,8 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
    在展开竖拿的 Duo（669 宽，像一台小平板）上又离拇指太远。这几种形态改成贴左缘的
    竖向导航条（iPadOS 的侧边栏、Material 的 navigation rail）：头像、主页、资料库竖排在
    同一枚液态玻璃胶囊里，搜索圆钮在它下方；内容区整体右移让出这一条，底部不再为导航留空。
-   · 何时用：横拿且高 ≤ 600（折起 / 展开横拿、手机横拿），或竖拿宽 600–720（展开的 Duo）。
+   · 何时用：横拿且高 ≤ 600（折起 / 展开横拿、手机横拿），或竖拿宽 600–720；展开的 Duo 认屏幕（内屏短边 669），
+     不论横竖、视口多高都用（主屏幕 App 横拿 669 高、Safari 横拿工具栏收起后也长过 600，只看视口会跳到底部）。
      折起竖拿（382 / 466 宽）是下一节贴右缘浮着的那种（html.rail-float）。由 <head> 里的脚本打 html.rail。
    · 安全区：横拿时左右两侧可能是灵动岛 / 摄像头 —— 导航条贴 safe-area-inset-left 之内，
      内容区右侧让出 safe-area-inset-right；底部只留 Home 指示条的距离。
@@ -6065,7 +6066,7 @@ html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay:
            (window.matchMedia && window.matchMedia('(display-mode: fullscreen)').matches);
   if (sa) document.documentElement.classList.add('standalone');
 })();
-/* 侧边导航条：横拿且矮（折起 / 展开横拿、手机横拿）或竖拿宽 600–720（展开的 iPhone Duo）。
+/* 侧边导航条：横拿且矮（折起 / 展开横拿、手机横拿）或竖拿宽 600–720；展开的 iPhone Duo 不论横竖、视口多高一律用它。
    iPhone Duo 折起竖拿（Safari 382 宽 / 主屏幕 App 466 宽）是贴右缘浮着的那种：rail + rail-float。
    与 CSS 的 html.rail / html.rail-float 一一对应；尽早打标，首帧就是对的形态，不会先闪一下底部胶囊 */
 (function () {
@@ -6082,9 +6083,16 @@ html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay:
     var w = Math.min(screen.width, screen.height);
     return (w > 440 && w < 600 && p1.matches) || (w >= 376 && w <= 389 && p2.matches);
   };
+  /* 展开的 Duo：内屏短边 669，别的 iPhone 最多 440。只看视口的话，主屏幕 App 横拿时视口有 669 高、
+     Safari 横拿一滚动工具栏收起视口也会长过 600 —— 导航就从侧边跳到底部。认屏幕：展开着就一直在侧边 */
+  var open = function () {
+    if (!iphone || !window.screen) return false;
+    var w = Math.min(screen.width, screen.height);
+    return w >= 600 && w < 760;
+  };
   var root = document.documentElement, t = 0;
   var set = function () {
-    var fl = duo(), on = q.matches || fl;
+    var fl = duo(), on = q.matches || fl || open();
     if (root.classList.contains('rail') === on && root.classList.contains('rail-float') === fl) return;
     /* 翻开 / 合上 / 转屏那一下直接换形态：胶囊条的宽度补间不跑（否则指示器量到的是半途的宽度） */
     root.classList.add('rail-switching');
