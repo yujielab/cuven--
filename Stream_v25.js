@@ -9854,32 +9854,54 @@ function hlsSubFrameText(fmt, bytes) {
 // ── 字幕清洗：字幕组署名、发布 / 来源声明、网址、广告、水印 ──
 //  内封、外挂、在线找来的字幕，输出 WebVTT 之前都过这一遍。按行打分，过线就删那一行；
 //  一条字幕的行删光了（或只剩装饰符号）就整条不要。
-//  · 片头 / 片尾各 SUB_EDGE_S 秒（以及最前 / 最后 SUB_EDGE_N 条）是署名与广告的重灾区：过 3 分就删
+//  · 片头 / 片尾各 SUB_EDGE_S 秒（以及最前 / 最后 SUB_EDGE_N 条）是署名与广告的重灾区：过 3 分就删；
+//    那里挂得特别久的一条（≥ SUB_LONG_S 秒 —— 署名卡、片尾鸣谢）过 2 分就删
 //  · 正片中间只删「几乎不可能是台词」的东西（网址、字幕组、OpenSubtitles 的广告、「仅供学习交流」
 //    这类声明）：过 4 分才删 —— 台词里提到「翻译」「出品」「伊甸园」不会被误删
+//  c2 起（增强型）：
+//  · 打分前先把全角折成半角（ＷＷＷ．ＸＸ．ＣＯＭ 是专门躲过滤的写法）、去掉标签
+//  · 像台词的行（你我他、语气词、问号叹号结尾、对白横杠）只靠弱信号（没有一条 ≥ 4 分的规则命中）
+//    时减 1 分：「你愿意加入我们吗？」「关注我的公众号」不会因为一个字眼被删
+//  · ASS 的矢量绘图指令（\p1 之后的 m 0 0 l 100 0 …）、整行乱码（U+FFFD）直接删 —— 不是给人看的字
+//  · 署名块：片头片尾一条被删干净了，前后 SUB_BLOCK_S 秒内紧挨着它、还剩 ≥ 2 分行的那几条
+//    （「鸣谢」「感谢观看」这类弱信号）一起删，连着的一串署名不会只删掉一半
+//  · 水印（只在拿得到整份字幕时：外挂、在线、直连整份）：同一行在全片反复出现（≥ 3 条、首尾相隔
+//    ≥ 10 分钟或片长的两成），自己又带一点署名味道（≥ 2 分，或 ≥ 1 分且长得像水印：包在括号 /
+//    装饰符里、带 @、像网址、一串大写缩写）→ 全片都删。「好的」「什么？」这种高频台词 0 分，不受影响
+//  · partial（HLS 分段，内封字幕逐段读，只拿得到这一段的几条）：只按时间认片头片尾，不认名次、不认水印。
+//    c1 在这里按「这几条里的前 6 / 后 6 条」认片头片尾 —— 每一段几乎每条都落进去，正片台词按片头的
+//    门槛（3 分）在删
 const SUB_EDGE_S = 240;
 const SUB_EDGE_N = 6;
-const SUB_CLEAN_V = 'c1';             // 清洗规则的版本：进缓存键，规则改了旧的 VTT 不会再被端上来
+const SUB_LONG_S = 8;
+const SUB_BLOCK_S = 12;
+const SUB_CLEAN_V = 'c2';             // 清洗规则的版本：进缓存键，规则改了旧的 VTT 不会再被端上来
 const SUB_RULES = [
   // 网址：带协议 / www 的一定是；裸域名只认常见后缀（e.g. / Mr.Smith 这类不会命中）
   [/(?:https?:\/\/|www\.)[^\s]+/i, 4],
-  [/(?:^|[^\w@.\-])[a-z0-9][\w-]{1,62}\.(?:com|net|org|cn|cc|tv|la|io|info|xyz|top|vip|club|site|link|ru|tw|hk)(?:\/[^\s]*)?(?![\w.])/i, 3],
+  [/(?:^|[^\w@.\-])[a-z0-9][\w-]{1,62}\.(?:com|net|org|cn|cc|tv|la|io|info|xyz|top|vip|club|site|link|ru|tw|hk|me)(?:\/[^\s]*)?(?![\w.])/i, 3],
   // 字幕组 / 压制组 / 翻译组
-  [/字幕[组組社团團坊]|翻[译譯][组組]|[压壓]制[组組]|(?:^|[^a-z])(?:fansub|sub(?:s|titles?)?\s*team)(?:[^a-z]|$)/i, 4],
+  [/字幕[组組社团團坊侠俠]|翻[译譯][组組]|[压壓]制[组組]|(?:^|[^a-z])(?:fansub|sub(?:s|titles?)?\s*team)(?:[^a-z]|$)/i, 4],
   // 认得出名字的字幕站 / 字幕组（这些词不会出现在台词里）
-  [/人人影[视視]|YYeTs|破[烂爛]熊|射手[网網]|字幕[库庫吧]|SubHD|zimuku|assrt|天天美[剧劇]|美[剧劇]天堂|澄空[学學][园園]|[圣聖]城家[园園]|FRDS|CMCT|HDChina|OurBits|SweetSub|A4Sub/i, 4],
+  [/人人影[视視]|YYeTs|破[烂爛]熊|射手[网網]|字幕[库庫吧]|SubHD|zimuku|assrt|天天美[剧劇]|美[剧劇]天堂|澄空[学學][园園]|[圣聖]城家[园園]|FRDS|CMCT|HDChina|OurBits|SweetSub|A4Sub|[凤鳳][凰凰]天使|TSKS|[诸諸]神字幕|追新番|[韩韓][剧劇]TV/i, 4],
   // 英文字幕站与 OpenSubtitles 自己插的广告（这些说法不会出现在台词里）
-  [/open\s*subtitles|osdb\.link|subscene|addic7ed|podnapisi|\bsubdl\b|yifysubtitles|advertise your product|become (?:a )?vip member|rate this subtitle|help other users to choose|get (?:the )?(?:latest|more) subtitles|best subtitles? (?:at|on|from)/i, 4],
+  [/open[\s-]*subtitles|osdb\.link|subscene|addic7ed|podnapisi|\bsubdl\b|yifysubtitles|tvsubtitles|advertise your product|become (?:a )?vip member|rate this subtitle|help other users to choose|get (?:the )?(?:latest|more) subtitles|best subtitles? (?:at|on|from)|subtitles for any video|free browser extension|watch any video online|nord\s*vpn|implement rest api|remove all ads from/i, 4],
   // 英文署名：只认行首（台词里也会有「corrected by the teacher」）
-  [/^[\s\-=~*#\[(]*(?:(?:re-?)?sync(?:ed|hronized)?(?: (?:and|&) corrected)? by|corrected by|ripped by|encoded by|(?:subtitles?|subs|captions?) (?:by|from|ripped|synced|corrected|edited|translated)\b|captioned by|closed captions? (?:provided )?by|captioning (?:sponsored|made possible|provided|performed) by)/i, 4],
-  [/^[\s\-=~*#\[(]*(?:downloaded from|transcri(?:pt|bed) by)\b/i, 3],
+  [/^[\s\-=~*#\[(]*(?:(?:re-?)?sync(?:ed|hronized)?(?: (?:and|&) correct(?:ed|ions?))? by|corrected by|ripped by|encoded by|re-?sync(?:ed)? for\b|(?:subtitles?|subs|captions?) (?:by|from|ripped|synced|corrected|edited|translated|improved|adapted)\b|captioned by|closed captions? (?:provided )?by|captioning (?:sponsored|made possible|provided|performed) by)/i, 4],
+  [/^[\s\-=~*#\[(]*(?:downloaded from|transcri(?:pt|bed) by|(?:improved|adapted|tweaked|reviewed|polished|fixed) by)\b/i, 3],
   // 声明：学习交流 / 禁止商用 / 下载后删除（「仅供参考」「未经授权」是台词里的常用语，不算）
   [/仅供(?:学习|交流|研究)|僅供(?:學習|交流|研究)|禁止(?:用于|用於)?(?:任何)?(?:商业|商業)(?:用途)?|(?:请|請)(?:于|於)下[载載]|24\s*小[时時]内?(?:删除|刪除)/, 4],
-  [/版[权權](?:归|歸)/, 3],
+  [/版[权權](?:归|歸)|[转轉][载載](?:请|請)[注註]明|(?:本|此)(?:资源|資源|视频|視頻|影片)(?:来自|來自|由|首[发發]|仅|僅)|(?:资源|資源)(?:来自|來自)/, 3],
+  [/[扫掃][码碼](?:关注|關注|加入|进群|進群)/, 4],
   // 引流：QQ 群 / 群号最像广告；公众号、微博、淘宝、招人在台词里也会出现，只在片头片尾删
   [/(?:QQ|Q)\s*群|群[号號]\s*[:：]?\s*\d|t\.me\//i, 4],
   [/微信\s*(?:公众号|公眾號|号|號)|公众号|公眾號|微博\s*[@：:]|新浪微博|[电電][报報]群/, 3],
-  [/淘[宝寶]|招募|招聘|[诚誠]聘|加入我[们們]/, 2],
+  [/更多(?:中文|精彩|好看|高清|影[视視]|美[剧劇]|[电電]影|资源|資源)*(?:字幕|资源|資源|影片|[电電]影|美[剧劇])?\s*(?:请|請)?\s*(?:访问|訪問|关注|關注|搜索|下[载載]|登[录錄])|(?:欢迎|歡迎)(?:关注|關注|订阅|訂閱)/, 3],
+  [/淘[宝寶]|招募|招聘|招新|[诚誠][聘招]|加入我[们們]/, 2],
+  // 翻译说明：机翻 / 人工翻译 / 如有错误欢迎指正（片头片尾才删）
+  [/机器翻[译譯]|機器翻[譯译]|[机機]翻|AI\s*翻[译譯]|人工(?:翻[译譯]|听[译譯]|聽[譯译])|(?:如有|若有)(?:错误|錯誤|不[当當]|疏漏)|(?:欢迎|歡迎)指正/i, 3],
+  // 鸣谢 / 感谢观看：弱信号，靠「挂得久」或「挨着署名块」才删
+  [/感[谢謝](?:观看|觀看|收看|大家|所有|各位|以下)|(?:谢谢|謝謝)(?:观看|觀看|收看)|[鸣鳴][谢謝]|特[别別]感[谢謝]|thanks? for watching/i, 2],
   // 「本字幕由……」
   [/^(?:本|此)?字幕(?:由|仅|僅|来自|來自|出自|提供|制作|製作|翻[译譯])/, 4],
   // 文件名 / 片源规格（一行里出现两个以上才算）
@@ -9893,53 +9915,127 @@ const SUB_RULES = [
   // 署名常用的机构字眼 / 英文缩写
   [/影[视視]|字幕|[论論][坛壇]|社[区區]|[网網]站|工作室|部落|[联聯]盟|小[组組]|家[园園]|\bTV\b|\bSub\b|\bTeam\b|\bHD\b/i, 1],
   // @账号 水印
-  [/(?:^|\s)@[\w一-鿿]{2,}/, 2],
+  [/(?:^|[\s【\[(（「『])@[\w一-鿿]{2,}/, 2],
   // 整行只是装饰包着的一小段：【……】、==……==、★……★
   [/^[\s\-=~*#★☆◆◇■□●○【\[]{1,}.{1,40}[\s\-=~*#★☆◆◇■□●○】\]]{1,}$/, 1],
 ];
 // 整行就是一个发布组名
 const SUB_GROUP_LINE = /^(?:TLF|SPARKS|GECKOS|FGT|NTb|FLUX|CMRG|EVO|ION10|PSA|YTS(?:\.\w+)?|YIFY|RARBG|ETRG|TGx|QxR|Tigole|UTR|BeyondHD|ADWeb|HHWEB|M-?Team|WiKi|TTG|CHD|HDSky|FFans|PTer|BtsTV|LeagueWEB|NGB|原[创創]翻[译譯]|中英(?:双语|雙語)?字幕|(?:双语|雙語)字幕|特效字幕|精校版?|校[对對]版|中文字幕|英文字幕)$/i;
 const SUB_DECOR = /^[\s\-=~*#★☆◆◇■□●○【】\[\]()（）<>《》|_.·•…!！?？,，、:：;；'"“”‘’]*$/;
+// ASS 矢量绘图（{\p1} 之后的路径指令）：m/n/l/b/s/p 加一串数，可能以 c 收尾
+const SUB_DRAW = /^(?:[mnlbsp](?:\s+-?\d+(?:\.\d+)?)+\s*)+c?$/i;
+// 像一句台词：人称、语气词结尾、问号叹号结尾、对白横杠、英文的人称与口语
+const SUB_TALK = /[我你您他她咱俺]|[吗嗎呢吧啊呀嘛哦哇啦咯][?!。，,…~]*\s*$|[?!]\s*$|^[-–—]\s|\b(?:I|I'm|I'll|you|we|he|she|they|me|my|your|our|don't|can't|let's|yeah|okay)\b/i;
+// 长得像水印：包在括号 / 装饰符里、带 @、像网址、一串大写缩写
+const SUB_MARK_SHAPE = /^[\s\[【(（<《「『★☆◆◇■□●○=\-~*#|]|[\]】)）>》」』★☆◆◇■□●○=\-~*#|]\s*$|@\S|www\.|\.(?:com|net|org|cn|tv|cc|la|me)\b|\b[A-Z]{3,}\b/;
 
+/** 打分用的那一份文字：去标签 / 实体，全角折半角，空白收成一个 */
+function subNorm(line) {
+  return String(line).replace(/<[^>]*>/g, '').replace(/&(?:amp|lt|gt|nbsp);/g, ' ')
+    .replace(/[！-～]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    .replace(/[　\s]+/g, ' ').trim();
+}
+/** 一行的分数。≥ 9 = 不是给人看的字（绘图指令、乱码），任何位置都删 */
 function subLineScore(line) {
-  const t = String(line).replace(/<[^>]*>/g, '').replace(/&(?:amp|lt|gt|nbsp);/g, ' ').trim();
+  const t = subNorm(line);
   if (!t) return 0;
-  let n = 0;
-  for (const [re, w] of SUB_RULES) if (re.test(t)) n += w;
-  if (SUB_GROUP_LINE.test(t.replace(/^[\s\-=~*#★☆◆◇■□●○【\[(（]+|[\s\-=~*#★☆◆◇■□●○】\])）]+$/g, ''))) n += 3;
+  if (SUB_DRAW.test(t)) return 9;
+  const bad = (t.match(/�/g) || []).length;
+  if (bad && bad * 3 >= t.length) return 9;
+  let n = 0, strong = false;
+  for (const [re, w] of SUB_RULES) if (re.test(t)) { n += w; if (w >= 4) strong = true; }
+  if (SUB_GROUP_LINE.test(t.replace(/^[\s\-=~*#★☆◆◇■□●○【\[(（]+|[\s\-=~*#★☆◆◇■□●○】\])）]+$/g, ''))) { n += 3; strong = true; }
+  if (n > 0 && !strong && SUB_TALK.test(t)) n -= 1;
   return n;
 }
+const subMarkKey = t => t.toLowerCase().replace(/[\s\-=~*#★☆◆◇■□●○【】\[\]()<>《》「」『』|_.·•…!?,、:;'"“”‘’]/g, '');
 
-/** [{ s, e, text, settings }] → 清洗过的（不改原数组）。dur = 片长（秒），不知道就按最后一条字幕的结束时间算 */
-function subClean(cues, dur) {
+/** [{ s, e, text, settings }] → 清洗过的（不改原数组）。dur = 片长（秒），不知道就按最后一条字幕的结束时间算。
+ *  opt.partial：cues 只是一段窗口里的那几条（HLS 分段），只按时间认片头片尾、不认水印 */
+function subClean(cues, dur, opt) {
   if (!cues || !cues.length) return cues || [];
-  const end = dur > 0 ? dur : cues.reduce((m, c) => Math.max(m, c.e || 0), 0);
-  const sorted = cues.map((c, i) => [c.s, i]).sort((a, b) => a[0] - b[0]);
+  const partial = !!(opt && opt.partial);
+  const end = dur > 0 ? dur : partial ? 0 : cues.reduce((m, c) => Math.max(m, (c && c.e) || 0), 0);
+  const order = cues.map((c, i) => i).filter(i => cues[i] && cues[i].text).sort((a, b) => cues[a].s - cues[b].s);
   const rank = new Array(cues.length);
-  sorted.forEach(([, i], r) => { rank[i] = r; });
+  order.forEach((i, r) => { rank[i] = r; });
+  const lines = cues.map(c => (c && c.text) ? c.text.split('\n').map(l => ({ l, t: subNorm(l), n: subLineScore(l) })) : null);
+  // 水印：整份字幕里反复出现、带点署名味道的同一行
+  let marks = null;
+  if (!partial && order.length >= 20) {
+    const seen = new Map();
+    for (const i of order) {
+      const once = new Set();
+      for (const x of lines[i]) {
+        const k = subMarkKey(x.t);
+        if (k.length < 2 || once.has(k)) continue;
+        once.add(k);
+        const e = seen.get(k);
+        if (e) { e.c++; e.last = cues[i].s; } else seen.set(k, { c: 1, first: cues[i].s, last: cues[i].s, n: x.n, t: x.t });
+      }
+    }
+    const span = Math.min(600, Math.max(60, end * 0.2));
+    for (const [k, e] of seen) {
+      if (e.c >= 3 && e.last - e.first >= span && (e.n >= 2 || (e.n >= 1 && SUB_MARK_SHAPE.test(e.t)))) (marks || (marks = new Set())).add(k);
+    }
+  }
+  const isEdge = i => { const c = cues[i]; return c.s < SUB_EDGE_S || (end > 0 && c.e > end - SUB_EDGE_S) || (!partial && (rank[i] < SUB_EDGE_N || rank[i] >= order.length - SUB_EDGE_N)); };
+  const bar = i => isEdge(i) ? ((cues[i].e - cues[i].s) >= SUB_LONG_S ? 2 : 3) : 4;
+  const kill = new Array(cues.length);            // 每条：要删的行（下标集合）
+  const gone = new Array(cues.length);            // 每条：整条删干净了
+  for (const i of order) {
+    const b = bar(i), k = new Set();
+    lines[i].forEach((x, j) => { if (x.n >= 9 || x.n >= b || (marks && x.t && marks.has(subMarkKey(x.t)))) k.add(j); });
+    kill[i] = k;
+    gone[i] = k.size > 0 && lines[i].every((x, j) => k.has(j) || !x.t || SUB_DECOR.test(x.t));
+  }
+  // 署名块：片头片尾，挨着一条删干净的（前后 SUB_BLOCK_S 秒内），≥ 2 分的行一起删；连着的一串要传两轮
+  for (let pass = 0; pass < 2; pass++) {
+    for (let r = 0; r < order.length; r++) {
+      const i = order[r];
+      if (gone[i] || !isEdge(i)) continue;
+      const near = j => j != null && gone[j] && Math.abs(cues[j].s - cues[i].s) <= SUB_BLOCK_S;
+      if (!near(order[r - 1]) && !near(order[r + 1])) continue;
+      let hit = false;
+      lines[i].forEach((x, j) => { if (x.n >= 2 && !kill[i].has(j)) { kill[i].add(j); hit = true; } });
+      if (hit) gone[i] = lines[i].every((x, j) => kill[i].has(j) || !x.t || SUB_DECOR.test(x.t));
+    }
+  }
   const out = [];
   for (let i = 0; i < cues.length; i++) {
     const c = cues[i];
     if (!c || !c.text) continue;
-    const edge = c.s < SUB_EDGE_S || (end > 0 && c.e > end - SUB_EDGE_S) || rank[i] < SUB_EDGE_N || rank[i] >= cues.length - SUB_EDGE_N;
-    const bar = edge ? 3 : 4;
-    const lines = c.text.split('\n');
-    const keep = lines.filter(l => subLineScore(l) < bar);
-    if (keep.length === lines.length) { out.push(c); continue; }
-    const text = keep.join('\n').trim();
+    if (!kill[i] || !kill[i].size) { out.push(c); continue; }
+    if (gone[i]) continue;
+    const text = lines[i].filter((x, j) => !kill[i].has(j)).map(x => x.l).join('\n').trim();
     if (!text || SUB_DECOR.test(text.replace(/<[^>]*>/g, ''))) continue;
     out.push({ ...c, text: hlsVttEscape(text) });
   }
   return out;
 }
+
+/* 整份字幕洗一次、留在这个 isolate 里：外挂 / 在线字幕的 HLS 分段每段只取自己那一截，
+   不必每一段都把整份读出来再洗一遍（水印也只有看得到整份才认得出） */
+const SUB_MEMO = new Map();
+function subMemo(key, make) {
+  const hit = SUB_MEMO.get(key);
+  if (hit) { SUB_MEMO.delete(key); SUB_MEMO.set(key, hit); return hit; }
+  return Promise.resolve(make()).then(v => {
+    SUB_MEMO.set(key, v);
+    while (SUB_MEMO.size > 8) SUB_MEMO.delete(SUB_MEMO.keys().next().value);
+    return v;
+  });
+}
 // ASS 里专门放署名 / 广告的样式（Staff、Credit、字幕组……）：整条不要。注释（Note / 注释）与内容有关，留着
 const SUB_STAFF_STYLE = /^(?:staff\w*|credits?|ads?|advert\w*|promo\w*|制作人?[员員]?|製作人?[員员]?|字幕[组組]|广告|廣告|声明|聲明|信息|資訊|资讯|info)$/i;
 
-/** 分段 WebVTT。dur = 片长（秒）：清洗时分片头片尾用 */
-function hlsVtt(cues, dur) {
+/** 分段 WebVTT。dur = 片长（秒）：清洗时分片头片尾用。
+ *  cues 是这一段窗口里的那几条 → 按 partial 洗；opt.cleaned = 已经整份洗过（外挂 / 在线字幕），不再洗 */
+function hlsVtt(cues, dur, opt) {
   const out = ['WEBVTT', `X-TIMESTAMP-MAP=MPEGTS:${HLS_T0 * 90000},LOCAL:00:00:00.000`, ''];
   const seen = new Set();
-  for (const c of subClean(cues, dur).sort((a, b) => a.s - b.s || a.e - b.e)) {
+  const list = opt && opt.cleaned ? cues.slice() : subClean(cues, dur, { partial: true });
+  for (const c of list.sort((a, b) => a.s - b.s || a.e - b.e)) {
     if (!c.text || !(c.e > c.s)) continue;
     const key = `${c.s}|${c.e}|${c.text}`;
     if (seen.has(key)) continue;          // ASS 多图层常有完全相同的对白
@@ -10881,7 +10977,8 @@ async function handleHls(url, request, env, ctx) {
         if (!x) return hlsFail(404, 'no such subtitle');
         return await hlsVttResponse(`x${SUB_CLEAN_V}/${idx.idh}/${encodeURIComponent(x.path)}/${x.rev}/${k}`, ctx, async () => {
           const [T1, T2] = hlsSegWindow(idx, k);
-          return hlsVtt((await hlsSidecarCues(x, env, ctx)).filter(c => c.s < T2 && c.e > T1), idx.dur);
+          const all = await subMemo(`x|${x.path}|${x.rev}|${Math.round(idx.dur)}`, async () => subClean(await hlsSidecarCues(x, env, ctx), idx.dur));
+          return hlsVtt(all.filter(c => c.s < T2 && c.e > T1), idx.dur, { cleaned: true });
         });
       } catch (e) { console.error('hls sidecar:', e && e.message); return hlsFail(502, 'subtitle unavailable'); }
     }
@@ -10896,7 +10993,8 @@ async function handleHls(url, request, env, ctx) {
       if (!rec || rec.status !== 'ok') return hlsOut(hlsVtt([]), 'text/vtt; charset=utf-8', 'no-store');
       return await hlsVttResponse(`o${SUB_CLEAN_V}/${idx.idh}/${rec.src.file}/${syncId(rec.sync)}/${k}`, ctx, async () => {
         const [T1, T2] = hlsSegWindow(idx, k);
-        return hlsVtt(osCuesOut(rec).filter(c => c.s < T2 && c.e > T1), idx.dur);
+        const all = await subMemo(`o|${rec.src.file}|${syncId(rec.sync)}|${Math.round(idx.dur)}`, () => subClean(osCuesOut(rec), idx.dur));
+        return hlsVtt(all.filter(c => c.s < T2 && c.e > T1), idx.dur, { cleaned: true });
       });
     }
   }
