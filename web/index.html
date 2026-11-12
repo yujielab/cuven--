@@ -6,15 +6,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<!-- 浅色界面：主屏 App 的状态栏要深色字。black-translucent 的字永远是白的，压在白底上就看不见了；
-     default 是白底深字，网页从状态栏下面开始 -->
-<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Stream">
-<meta name="theme-color" content="#ffffff">
+<meta name="theme-color" content="#000000">
 
 <meta name="format-detection" content="telephone=no, address=no, email=no">
 
-<meta name="color-scheme" content="light">
+<meta name="color-scheme" content="dark">
 <title>Stream · Cinematic Edition</title>
 
 <!-- ── 主屏 / 标签页图标 ──────────────────────────
@@ -43,7 +41,7 @@
     start_url: '.', scope: '.',
     display: 'standalone', display_override: ['standalone'],
     orientation: 'portrait',
-    background_color: '#ffffff', theme_color: '#ffffff',
+    background_color: '#000000', theme_color: '#000000',
     icons: [
       { src: ICON, sizes: '1254x1254', type: 'image/png', purpose: 'any' },
       { src: ICON_MSK, sizes: '1254x1254', type: 'image/png', purpose: 'maskable' }
@@ -130,32 +128,30 @@
 .ph-fill.ph-film-slate{--ph:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256' fill='%23000'%3E%3Cpath d='M216,104H102.09L210,75.51a8,8,0,0,0,5.68-9.84l-8.16-30a15.93,15.93,0,0,0-19.42-11.13L35.81,64.74a15.75,15.75,0,0,0-9.7,7.4,15.51,15.51,0,0,0-1.55,12L32,111.56c0,.14,0,.29,0,.44v88a16,16,0,0,0,16,16H208a16,16,0,0,0,16-16V112A8,8,0,0,0,216,104ZM192.16,40l6,22.07L164.57,71,136.44,54.72ZM77.55,70.27l28.12,16.24-59.6,15.73-6-22.08Z'/%3E%3C/svg%3E")}
 
 :root {
-  /* 浅色界面（2026-11 起）。页面是白的；画面之上的内容（首页大图、详情页头部、
-     剧集大卡、预告片、播放器）仍是深底浅字，见下方「深色岛」。 */
-  --bg: #FFFFFF;
-  --surface: #F2F2F7;
-  --surface-2: #E9E9EE;
-  --surface-3: #D8D8DE;
+  --bg: #000000;
+  --surface: #1C1C1E;
+  --surface-2: #2C2C2E;
+  --surface-3: #3A3A3C;
 
-  --text: #1D1D1F;
-  --text-2: rgba(29, 29, 31, 0.64);
-  --text-3: rgba(29, 29, 31, 0.46);
+  --text: #FFFFFF;
+  --text-2: rgba(255, 255, 255, 0.65);
+  --text-3: rgba(255, 255, 255, 0.40);
 
-  /* iOS 浅色模式的系统色：暗色那一套（#0A84FF 等）是为黑底提亮过的，放在白底上发虚 */
-  --yellow: #FFCC00; --orange: #FF9500; --green: #34C759; --red: #FF3B30; --pink: #FF2D55; --blue: #007AFF;
+  --yellow: #FFD60A; --orange: #FF9F0A; --green: #32D74B; --red: #FF453A; --pink: #FF375F; --blue: #0A84FF;
 
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
   --r-card: 14px;
   --r-pill: 999px;
 
   /* ── 表面令牌 ────────────────────────────────────────────────────
-     白底上「抬起」靠的是投影加一圈极淡的黑环：投影给出高度，黑环给出
-     边界 —— 浅灰的卡、浅色的海报贴在白底上，没有那圈环边就化进去了。
-     深色岛里（见下）换回原来的白环：黑投投在黑底上等于没投。 */
+     这是一套只有深色的界面，所以「抬起」的画法和浅色底完全不同 ——
+     黑色投影投在黑色底上等于没投，堆多少层都读不出边界。真正能读出来的
+     只有一圈极淡的白环。黑投只在一个场合仍然有用：浮层压在海报、剧照
+     这类亮画面上时，那点分离是真的。所以两者分工，而不是二选一。 */
   --hairline: 1px;                                  /* 见下方 DPI 查询 */
-  --ring-1: 0 0 0 var(--hairline) rgba(0, 0, 0, .07);
-  --ring-2: 0 0 0 var(--hairline) rgba(0, 0, 0, .11);
-  --img-edge: rgba(0, 0, 0, .08);                   /* 实拍图的内描边 */
+  --ring-1: 0 0 0 var(--hairline) rgba(255, 255, 255, .09);
+  --ring-2: 0 0 0 var(--hairline) rgba(255, 255, 255, .14);
+  --img-edge: rgba(255, 255, 255, .10);             /* 实拍图的内描边 */
 
   /* 卡片宽度令牌：所有竖版 / 横版卡（含文件夹卡）由此派生，改一处全局生效 */
   /* 卡宽随屏宽走，为的是让年份轨道里「露出的下一张」上下对齐：
@@ -286,7 +282,7 @@
   --safe-b: env(safe-area-inset-bottom, 20px);
   --safe-l: env(safe-area-inset-left, 0px);
 
-  --focus-ring: 0 0 0 2px rgba(255,255,255,0.95), 0 0 0 4px rgba(0,122,255,0.85);
+  --focus-ring: 0 0 0 2px rgba(255,255,255,0.85), 0 0 0 4px rgba(0,0,0,0.4);
 
 
   /* ══ 毛玻璃材质 ══════════════════════════════════════════════════════
@@ -304,13 +300,12 @@
   --glass-chip: blur(20px) saturate(150%);   /* 遮罩：把整个世界推远 */
   /* 半像素高光走 inset box-shadow 而不是 border：border 会挤压内容盒，
      而且直角接缝在 28px 圆角上会露馅 —— inset 阴影天然贴着圆角走 */
-  /* 浅色玻璃：上缘一道白高光，外圈一圈极淡的黑环 —— 白玻璃放在白底上，没有那圈环就没有边 */
-  --glass-edge:  inset 0 0.5px 0 rgba(255,255,255,.75), inset 0 0 0 0.5px rgba(0,0,0,.07);
+  --glass-edge:  inset 0 0.5px 0 rgba(255,255,255,.20), inset 0 0 0 0.5px rgba(255,255,255,.07);
 
-  --dock-bg: rgba(250, 250, 252, 0.72);
+  --dock-bg: rgba(28, 28, 30, 0.6);
   --dock-blur: blur(60px) saturate(200%);
-  --dock-border: var(--hairline) solid rgba(0, 0, 0, 0.08);
-  --dock-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+  --dock-border: var(--hairline) solid rgba(255, 255, 255, 0.12);
+  --dock-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
   --dock-h: 58px;   /* 底部胶囊条高度 = 搜索圆钮直径，改一处全局生效 */
   /* 距屏幕底边的间距：贴底，只避开 Home 指示条。桌面 env() 为 0 → 回落到 8px */
   --dock-gap: max(8px, calc(var(--safe-b) - 14px));
@@ -333,33 +328,6 @@
 @media only screen and (-webkit-min-device-pixel-ratio: 2),
        only screen and (min-resolution: 192dpi) {
   :root { --hairline: .5px; }
-}
-
-/* ══ 深色岛 ══════════════════════════════════════════════════════════
-   页面是白的，但压在画面上的东西不是：首页大图、详情页头部（背景图 + 片名 +
-   按钮 + 简介）、剧集大卡、即将加入的预告卡、资料库预告片那一屏、播放器、
-   欢迎页、登录层、语音浮层。这些容器把令牌换回深色那一套，里面所有
-   var(--text) / var(--surface) / 环边照旧是深底浅字，不必逐条改。
-   卡里的东西掉到白底上的（首页大图收成卡后、卡下面那条进度条），在各自
-   的规则里单独改回浅色。 */
-.hero-deck, .detail-hero-info, .detail-nav-bar, .tv-hero, .tv-card, .cs-card, .lib-card,
-.sc-sticky, .np, #wc-root, .tv-auth-layer, #voiceLayer {
-  --bg: #000000;
-  --surface: #1C1C1E;
-  --surface-2: #2C2C2E;
-  --surface-3: #3A3A3C;
-  --text: #FFFFFF;
-  --text-2: rgba(255, 255, 255, 0.65);
-  --text-3: rgba(255, 255, 255, 0.40);
-  --ring-1: 0 0 0 var(--hairline) rgba(255, 255, 255, .09);
-  --ring-2: 0 0 0 var(--hairline) rgba(255, 255, 255, .14);
-  --img-edge: rgba(255, 255, 255, .10);
-  --glass-edge: inset 0 0.5px 0 rgba(255,255,255,.20), inset 0 0 0 0.5px rgba(255,255,255,.07);
-  --focus-ring: 0 0 0 2px rgba(255,255,255,0.85), 0 0 0 4px rgba(0,0,0,0.4);
-  --skel-mid: rgba(255,255,255,.04); --skel-hi: rgba(255,255,255,.08);
-  /* 只换变量不够：没写 color 的字继承的是 body 上已经算好的深色，要在岛上重新落一次 */
-  color: var(--text);
-  color-scheme: dark;
 }
 
 /* 弹簧真身。linear() 可用时（Safari 17.4+ / Chrome 113+）用采样出来的解析解；
@@ -490,7 +458,7 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
 .skel::after {
   content: ''; position: absolute; inset: 0;
   transform: translateX(-100%);
-  background: linear-gradient(90deg, transparent 0%, var(--skel-mid, rgba(255,255,255,.38)) 40%, var(--skel-hi, rgba(255,255,255,.7)) 50%, var(--skel-mid, rgba(255,255,255,.38)) 60%, transparent 100%);
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.04) 40%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.04) 60%, transparent 100%);
   animation: shimmer 1.6s infinite;
   /* 摘：骨架屏一屏能有几十个。而且 shimmer 本来就一直在跑 —— 跑着的
      transform 动画浏览器必然已经提了层，这行纯属重复预约。 */
@@ -583,7 +551,7 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
 
 .nav-pill {
   position: absolute; top: 6px; left: 6px; width: 78px; height: calc(var(--dock-h) - 12px);
-  background: rgba(120, 120, 128, 0.16);
+  background: rgba(0, 0, 0, 0.36);
   border-radius: var(--r-pill);
   /* 指示器属「小元素」档 → snap（259ms / 0.6% 过冲）。
      width/height 由 updateNavPill 逐帧量入，两个标签等宽故切换时不变；
@@ -592,7 +560,7 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
   transition: transform var(--silk-snap-ms) var(--silk-snap),
               opacity var(--silk-in-ms) var(--silk-in);
   pointer-events: none; z-index: 0;
-  box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.04);
+  box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.07);
 }
 /* 选中指示：位移途中做一次「模糊渐入 → 渐隐」脉冲，落定即锐化（液态玻璃质感）*/
 @keyframes navPillMorph {
@@ -610,7 +578,7 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
   height: calc(var(--dock-h) - 12px); padding: 0 12px;
   border-radius: var(--r-pill); cursor: pointer;
-  color: rgba(29,29,31,.86);
+  color: rgba(255,255,255,.92);
   transition: color .3s var(--ease-out), opacity .26s var(--ease-out),
               transform .42s var(--ease-spring-soft), padding .5s var(--ease-spring-soft);
   position: relative; z-index: 1; text-decoration: none; white-space: nowrap;
@@ -623,7 +591,7 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
 .nav-item.active { color: var(--blue); }
 .nav-item.active .nav-text { font-weight: 700; }
 .nav-item.active .nav-icon { transform: scale(1.06); }
-.nav-item:hover:not(.active) { color: #000; }
+.nav-item:hover:not(.active) { color: #fff; }
 /* iconPop 自己已经是「涨到 1.25 再回落」的过冲轨迹，再套一条带 3.9% 过冲的
    pop 就是双重过冲 —— 读起来是「弹两下」。关键帧负责形状，曲线只负责节奏，
    所以这里换成零过冲的 nudge，并把时长收到它自己的物理。 */
@@ -701,9 +669,9 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
   height: calc(var(--dock-h) - 18px);
   padding: 0 16px;
   display: inline-flex; align-items: center; justify-content: center;
-  border: var(--hairline) solid rgba(0,0,0,.06);
+  border: var(--hairline) solid rgba(255,255,255,.16);
   border-radius: var(--r-pill);
-  background: rgba(120,120,128,.14);
+  background: rgba(255,255,255,.10);
   color: var(--text); font-family: inherit; font-size: 14px; font-weight: 600;
   letter-spacing: 0; white-space: nowrap; cursor: pointer;
   opacity: 0; transform: translateY(-50%) scale(.5);
@@ -712,7 +680,7 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
   will-change: transform, opacity;
 }
 .dock.searching .ns-cancel { opacity: 1; transform: translateY(-50%) scale(1); pointer-events: auto; }
-@media (hover: hover) and (pointer: fine) { .dock.searching .ns-cancel:hover { background: rgba(120,120,128,.22); } }
+@media (hover: hover) and (pointer: fine) { .dock.searching .ns-cancel:hover { background: rgba(255,255,255,.17); } }
 .dock.searching .ns-cancel:active { transform: translateY(-50%) scale(.92); transition: transform var(--press-in), opacity .26s var(--ease-out), background .2s; }
 
 /* ── 麦克风钮：搜索态在「取消」胶囊左侧原位弹入 → 轻点唤起语音小球 ──
@@ -817,10 +785,10 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
      768 断点下是 0.5 + 7 + 2.5 = 10 = (64 - 44) / 2
      → 胶囊条收成圆钮时，头像不用挪一个像素就正好落在圆心上 */
   margin: 0 4px 0 2.5px;
-  background: rgba(120,120,128,0.16);
+  background: rgba(255,255,255,0.12);
   background-size: cover; background-position: center; background-repeat: no-repeat;
-  border: var(--hairline) solid rgba(0,0,0,0.06);
-  color: var(--text-2); font-size: 19px; font-family: inherit;
+  border: var(--hairline) solid rgba(255,255,255,0.18);
+  color: var(--text); font-size: 19px; font-family: inherit;
   display: flex; align-items: center; justify-content: center;
   cursor: pointer; pointer-events: auto; overflow: hidden;
   position: relative; z-index: 1;
@@ -828,7 +796,7 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
   transform: translateZ(0); will-change: transform;
 }
 .tv-avatar i, .tv-avatar .sf-icon { transition: transform .35s var(--ease-spring), opacity .3s; }
-.tv-avatar.has-image { background-color: transparent; border-color: rgba(0,0,0,0.10); }
+.tv-avatar.has-image { background-color: transparent; border-color: rgba(255,255,255,0.25); }
 .tv-avatar.has-image i, .tv-avatar.has-image .sf-icon { opacity: 0; transform: scale(0.6); }
 @media (hover: hover) and (pointer: fine) {
   .tv-avatar:hover { transform: scale(1.08) translateZ(0); border-color: rgba(255,255,255,.35); }
@@ -1035,8 +1003,8 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
   position: relative; flex: 0 0 auto; width: var(--hero-w); scroll-snap-align: center;
   height: 600px; border-radius: 28px; overflow: hidden;
   background: linear-gradient(158deg, #2c2c2e 0%, #1e1e20 55%, #151517 100%);
-  outline: 1px solid rgba(255,255,255,.08); outline-offset: -1px;   /* 卡里的暗部贴着圆角时，这条内边让轮廓不糊 */
-  box-shadow: 0 20px 48px rgba(0,0,0,.22);
+  outline: 1px solid rgba(255,255,255,.08); outline-offset: -1px;   /* 深色卡压在深色底上，没这条边就糊在一起 */
+  box-shadow: 0 24px 60px rgba(0,0,0,.5);
   border: none; padding: 0; color: var(--text); font-family: inherit; text-align: center; cursor: pointer;
   /* 非当前卡缩一档：缩的是 transform，不动布局盒子 —— 吸附点、间距、
      露边全都不受影响，只有观感上中间那张更「近」一点 */
@@ -1112,7 +1080,7 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
    写死 1px 会粗一倍）。两端仍沿用那条淡出 mask，线不会戛然而止。 */
 .year-split {
   height: var(--hairline); margin: 8px 5% 40px;
-  background: rgba(0,0,0,.12);
+  background: rgba(255,255,255,.13);
   -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 9%, #000 91%, transparent 100%);
           mask-image: linear-gradient(90deg, transparent 0, #000 9%, #000 91%, transparent 100%);
 }
@@ -1150,7 +1118,7 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
   position: relative; flex: 0 0 auto; width: min(86vw, 560px); aspect-ratio: 15 / 13;   /* 高:宽 = 13:15（比 16:12 再矮 35%）*/
   scroll-snap-align: center; display: flex; flex-direction: column; justify-content: flex-end;
   border-radius: 26px; overflow: hidden; background: linear-gradient(158deg, #2c2c2e, #17171a);
-  box-shadow: 0 18px 44px rgba(0,0,0,.22), var(--ring-1);
+  box-shadow: 0 22px 54px rgba(0,0,0,.5), var(--ring-1);
   transform: translateZ(0); cursor: pointer;
   transition: transform var(--press-out);
   -webkit-mask-image: -webkit-radial-gradient(white, black);   /* 圆角裁住内部图片 */
@@ -1332,7 +1300,7 @@ img.res-parked { opacity: 0 !important; }
 /* 没有剧照的那几集：留一个大号集号，别让卡面空着（也别一直转 shimmer） */
 .ep-fallback {
   position: absolute; inset: 0; display: grid; place-items: center;
-  font-size: 46px; font-weight: 800; letter-spacing: -.03em; color: rgba(0,0,0,.14);
+  font-size: 46px; font-weight: 800; letter-spacing: -.03em; color: rgba(255,255,255,.14);
   font-variant-numeric: tabular-nums;
 }
 .ep-tile.done .stills-media-block { opacity: .52; transition: opacity .3s var(--ease-out); }
@@ -1364,9 +1332,9 @@ img.res-parked { opacity: 0 !important; }
      没有回退时整条声明作废，按钮会掉回静态位置（贴到行首去） */
   position: absolute; right: var(--caption-padding-sides, 4px); bottom: 0;
   display: none; align-items: center; height: 20px; padding: 0 9px; border-radius: var(--r-pill);
-  border: var(--hairline) solid rgba(0,0,0,.08); background: rgba(242,242,247,.94);
+  border: var(--hairline) solid rgba(255,255,255,.14); background: rgba(66,66,70,.86);
   backdrop-filter: blur(20px) saturate(170%); -webkit-backdrop-filter: blur(20px) saturate(170%);
-  color: var(--text); font-family: inherit; font-size: 11.5px; font-weight: 600; letter-spacing: -.006em;
+  color: #fff; font-family: inherit; font-size: 11.5px; font-weight: 600; letter-spacing: -.006em;
   cursor: pointer; transform: translateZ(0); transition: transform var(--press-out), background .2s;
 }
 /* 「更多」左侧的收尾带：文字不是撞上按钮才停，而是先失焦、再淡掉。
@@ -1376,7 +1344,7 @@ img.res-parked { opacity: 0 !important; }
 .ep-more::before {
   content: ''; position: absolute; right: 100%; top: -4px; bottom: -4px; width: 56px;
   pointer-events: none;
-  background: linear-gradient(to right, rgba(255,255,255,0) 0%, var(--bg) 82%);
+  background: linear-gradient(to right, rgba(0,0,0,0) 0%, var(--bg) 82%);
   backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
   -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 72%);
           mask-image: linear-gradient(to right, transparent 0%, #000 72%);
@@ -1619,10 +1587,7 @@ img.res-parked { opacity: 0 !important; }
    系统模糊层无法移除 → 不再对抗它，而是给它「喂」内容：状态栏区域放一层
    海报的放大镜像 + 重模糊，再叠三路色散光晕（RGB 微偏移，模拟棱镜色差）
    与一束斜向丁达尔光。系统模糊叠加在其上，反而强化了体积光的层次。
-   仅 standalone 生效。
-   浅色界面（2026-11）：状态栏改成 default（白底深字），这一层只剩一条白底 ——
-   镜像、色散、丁达尔是给 black-translucent 的白字垫的深色，白底上是一道脏边。
-   万一系统仍报了顶部安全区，白条保证状态栏下面不透出滚动的内容。     */
+   仅 standalone 生效。                                                */
 .sb-field {
   position: fixed; top: 0; left: 0; right: 0;
   height: var(--safe-t);
@@ -1685,7 +1650,6 @@ html.immersive .sb-field { opacity: 0; }
   content: ''; position: absolute; inset: 0;
   background: linear-gradient(180deg, transparent 45%, rgba(0,0,0,.55) 100%);
 }
-.sb-mirror, .sb-disperse, .sb-tyndall, .sb-field::after { display: none; }
 
 @keyframes sbDrift {
   from { transform: translate3d(-4%, 0, 0) scale(1.05); }
@@ -1794,7 +1758,7 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
      模糊半径改成定值、只让 alpha 跟着 --m 走：半径逐帧变会让投影的绘制包围盒
      逐帧变，失效矩形跟着涨，等于每帧多刷一圈 64px 的边。定半径下包围盒从第一帧
      起就是稳定的。观感上也更对 —— 卡是「浮起来」，不是「影子从硬边慢慢糊开」。 */
-  box-shadow: 0 26px 64px rgba(0, 0, 0, calc(var(--m) * 0.30));
+  box-shadow: 0 26px 64px rgba(0, 0, 0, calc(var(--m) * 0.55));
   opacity: 0; visibility: hidden;
   transform: translateZ(0);
   /* 卡的尺寸完全由上面这几条 calc 决定，与内容无关 —— 把这件事告诉引擎。
@@ -1922,11 +1886,8 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
 /* hero · 「Cuven TV 严选影片」源标识：白色极简线性徽记，细描边 + 微字距，优雅克制 */
 .hero-brand-tag { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; letter-spacing: 0.05em; color: rgba(255,255,255,.92); }
 .hero-brand-tag .cuven-pick-mark { width: 17px; height: 17px; flex: none; opacity: .95; filter: drop-shadow(0 1px 4px rgba(0,0,0,.35)); }
-.tag-border { padding: 3px 8px; font-size: 11px; font-weight: 800; background: rgba(120,120,128,.12); backdrop-filter: blur(10px); border: var(--hairline) solid rgba(0,0,0,.1); border-radius: 6px; }
-.tag-border.hd { background: rgba(255, 149, 0, 0.12); border-color: rgba(255, 149, 0, 0.38); color: #A85F00; }
-/* 压在画面上的（首页大图、剧集大卡的标签行）照旧白玻璃 + 金色 */
-:where(.hero-deck, .detail-hero-info, .tv-hero, .tv-card, .cs-card) .tag-border { background: rgba(255,255,255,.1); border-color: rgba(255,255,255,.2); }
-:where(.hero-deck, .detail-hero-info, .tv-hero, .tv-card, .cs-card) .tag-border.hd { background: rgba(255, 180, 50, 0.16); border-color: rgba(255, 190, 70, 0.4); color: #ffd28a; }
+.tag-border { padding: 3px 8px; font-size: 11px; font-weight: 800; background: rgba(255,255,255,.1); backdrop-filter: blur(10px); border: var(--hairline) solid rgba(255,255,255,.2); border-radius: 6px; }
+.tag-border.hd { background: rgba(255, 180, 50, 0.16); border-color: rgba(255, 190, 70, 0.4); color: #ffd28a; }
 
 .hero-buttons { display: flex; gap: 16px; margin-top: 8px; flex-wrap: wrap; justify-content: center; }
 .btn-play, .btn-circle { height: 50px; border: none; cursor: pointer; font-size: 16px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-family: inherit; }
@@ -2062,20 +2023,13 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
 /* 卡片态不自动轮播，播放/暂停按钮就没有意义了 */
 .hero-deck.morphed .aap-host .aap-media-card-gallery .play-pause-button-wrapper { display: none; }
 
-/* 卡片态这条已经落在白底上（深色岛里唯一掉出画面的东西）：浅色玻璃 + 深色进度 */
-.hero-deck.morphed .aap-host {
-  --aap-active-fill-color: #1D1D1F;
-  --aap-inactive-fill-color: rgba(0, 0, 0, 0.22);
-  --aap-text-color: #1D1D1F;
-  --aap-icon-color: #1D1D1F;
-}
 .hero-deck.morphed .aap-host .aap-media-card-gallery.all-access-pass {
   width: 100%;
-  background-color: rgba(250, 250, 252, 0.78);
+  background-color: rgba(255, 255, 255, 0.10);
   backdrop-filter: blur(30px) saturate(150%);
   -webkit-backdrop-filter: blur(30px) saturate(150%);
   /* 描边走 inset 阴影而不是 border：不占布局，合并时不会挤动内容 */
-  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 6px 22px rgba(0, 0, 0, 0.10);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.14), 0 8px 28px rgba(0, 0, 0, 0.28);
   /* 按钮已隐藏，不再需要右侧配平，两边等宽即可 */
   padding-inline: 16px;
 }
@@ -2277,7 +2231,7 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
   display: block; flex: 1 1 auto; width: 100%; min-width: 0;
   position: relative; height: 8px; overflow: hidden;
   border-radius: 99px;
-  background-color: rgba(0, 0, 0, 0.10);
+  background-color: rgba(255, 255, 255, 0.22);
 }
 .hero-deck.morphed .aap-host .aap-media-card-gallery .all-access-pass__background .dotnav .dotnav-items::after {
   content: ''; position: absolute; inset: 0 auto 0 0;
@@ -2335,11 +2289,11 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
   display: inline-flex; align-items: center;
   padding: 8px 18px;
   border-radius: var(--r-pill);
-  background: rgba(242, 242, 247, 0.86);
+  background: rgba(28, 28, 30, 0.5);
   backdrop-filter: blur(32px) saturate(180%);
   -webkit-backdrop-filter: blur(32px) saturate(180%);
-  border: var(--hairline) solid rgba(0, 0, 0, 0.05);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+  border: var(--hairline) solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.22);
 }
 
 /* ══ 年份入口 · Apple 式分段胶囊 ════════════════════════════════════
@@ -2404,11 +2358,11 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
   inset: 0;
   overflow: hidden;
   border-radius: var(--r-pill);
-  background: rgba(242, 242, 247, 0.9);
-  border: var(--hairline) solid rgba(0,0,0,.05);
+  background: rgba(66, 66, 69, 0.72);
+  border: var(--hairline) solid rgba(255,255,255,.12);
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.8),
-    0 6px 20px rgba(0,0,0,.07);
+    inset 0 0 1px rgba(232,232,237,.15),
+    0 10px 28px rgba(0,0,0,.28);
   backdrop-filter: blur(18px) saturate(155%);
   -webkit-backdrop-filter: blur(18px) saturate(155%);
   transform: scale(.01);
@@ -2421,7 +2375,7 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
   height: 100%;
   display: inline-flex;
   align-items: center;
-  color: var(--text);
+  color: rgb(245,245,247);
   font-size: 17px;
   font-weight: 700;
   line-height: 1;
@@ -2444,9 +2398,9 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
   display: flex;
   align-items: center;
   gap: 4px;
-  color: #fff;
+  color: rgba(255,255,255,.95);
   background: var(--blue);                   /* 上一轮换成纯文字时把这层蓝底丢了 */
-  box-shadow: 0 4px 14px rgba(0,122,255,.28);
+  box-shadow: 0 4px 14px rgba(10,132,255,.3);
   transform: translateY(-50%) scale(0);
   transform-origin: right center;
 }
@@ -2603,12 +2557,12 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
 
 @media (hover: hover) and (pointer: fine) {
   .year-pill.is-entered:not(.is-exiting):hover .year-pill-surface {
-    background: rgba(232, 232, 237, 0.95);
-    border-color: rgba(0,0,0,.08);
+    background: rgba(78,78,82,.78);
+    border-color: rgba(255,255,255,.2);
   }
   .year-pill.is-entered:not(.is-exiting):hover .year-pill-icon {
     color: #fff;
-    box-shadow: 0 5px 18px rgba(0,122,255,.4);
+    box-shadow: 0 5px 18px rgba(10,132,255,.46);
   }
 }
 .year-pill.is-entered:not(.is-exiting):active {
@@ -2616,7 +2570,7 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
   transition: transform 120ms var(--ease-out);
 }
 .year-pill:focus-visible {
-  outline: 3px solid rgba(0,122,255,.82);
+  outline: 3px solid rgba(10,132,255,.82);
   outline-offset: 4px;
   box-shadow: none;
 }
@@ -2637,13 +2591,13 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
 .year-library-back {
   flex: 0 0 auto;
   width: 44px; height: 44px;
-  border: var(--hairline) solid rgba(0,0,0,.06);
+  border: var(--hairline) solid rgba(255,255,255,.15);
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--text);
-  background: rgba(242,242,247,.86);
+  background: rgba(44,44,46,.7);
   backdrop-filter: blur(24px) saturate(150%);
   -webkit-backdrop-filter: blur(24px) saturate(150%);
   cursor: pointer;
@@ -2666,10 +2620,10 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
   width: 44px; height: 44px; padding: 0; border-radius: 50%;
   display: inline-flex; align-items: center; justify-content: center;
   color: var(--text); cursor: pointer;
-  background: rgba(250,250,252,.78);
+  background: rgba(44,44,46,.62);
   backdrop-filter: blur(24px) saturate(150%); -webkit-backdrop-filter: blur(24px) saturate(150%);
-  border: var(--hairline) solid rgba(0,0,0,.07);
-  box-shadow: 0 6px 18px rgba(0,0,0,.12), inset 0 1px 0 rgba(255,255,255,.9);
+  border: var(--hairline) solid rgba(255,255,255,.16);
+  box-shadow: 0 8px 24px rgba(0,0,0,.35);
   opacity: 0; transform: scale(.86) translateZ(0); pointer-events: none;
   transition: opacity .28s var(--ease-out), transform .42s var(--ease-spring);
   -webkit-tap-highlight-color: transparent;
@@ -2709,11 +2663,11 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
 }
 .yl-row::before {
   content: ''; position: absolute; top: 0; right: 0; left: calc(var(--yl-w) + var(--yl-gap));
-  height: var(--hairline); background: rgba(0,0,0,.12); pointer-events: none;
+  height: var(--hairline); background: rgba(255,255,255,.13); pointer-events: none;
 }
 .yl-row .card-poster.yl-thumb {
   flex: 0 0 var(--yl-w); width: var(--yl-w); height: auto; aspect-ratio: 2/3;
-  border-radius: 8px; box-shadow: 0 3px 10px rgba(0,0,0,.14);
+  border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,.32);
 }
 .yl-row .card-poster.tv-art { position: relative; inset: auto; }
 .yl-thumb .fallback { font-size: 20px; }
@@ -2736,12 +2690,12 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
   opacity: 1; pointer-events: auto; transform: none;
 }
 .yl-row .yl-more.card-menu svg { width: 22px; height: 22px; display: block; }
-.yl-row .yl-more.card-menu:active { background: rgba(0,0,0,.06); transform: scale(.92); }
+.yl-row .yl-more.card-menu:active { background: rgba(255,255,255,.1); transform: scale(.92); }
 @media (hover: hover) and (pointer: fine) {
-  /* 列表里放大海报会撞上下两行：只加深描边与投影 */
-  .yl-row.card:hover .card-poster { transform: none; box-shadow: 0 8px 20px rgba(0,0,0,.2); outline-color: rgba(0,0,0,.14); }
-  .yl-row.card:hover .card-title { color: #000; }
-  .yl-row .yl-more.card-menu:hover { background: rgba(0,0,0,.05); color: var(--text); }
+  /* 列表里放大海报会撞上下两行：只提亮描边与投影 */
+  .yl-row.card:hover .card-poster { transform: none; box-shadow: 0 8px 20px rgba(0,0,0,.5); outline-color: rgba(255,255,255,.3); }
+  .yl-row.card:hover .card-title { color: #fff; }
+  .yl-row .yl-more.card-menu:hover { background: rgba(255,255,255,.08); color: var(--text); }
 }
 /* 右缘浮动导航（iPhone Duo 折起竖拿）：列表右端让出那一列，「…」不钻到导航底下 */
 html.rail.rail-float .yl-group { padding-right: var(--float-space); }
@@ -2789,7 +2743,7 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 .card-poster {
   width: 100%; aspect-ratio: 2/3; border-radius: inherit; background: var(--surface-2); position: relative; z-index: 2; overflow: hidden;
   outline: var(--hairline) solid var(--img-edge); outline-offset: calc(0px - var(--hairline));
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
   transition: transform .4s var(--ease-spring-soft), box-shadow .4s var(--ease-spring-soft), outline-color .4s;
 }
 .card-landscape .card-poster { aspect-ratio: 16/9; }
@@ -2805,7 +2759,7 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 .cw-end-in i { font-size: 26px; opacity: .7; }
 
 /* ── 实拍图的边 ────────────────────────────────────────────────────
-   每张实拍图带一圈 1px 内描边：白底上是纯黑 8%（深色岛里是纯白 10%），不带任何色相。
+   每张实拍图带一圈 1px 内描边：纯白 10%，不带任何色相。
    带色相的线（slate / zinc / 主题色）会把身后那块表面的颜色吃进去，
    边上看着像积了灰，而不是一条干净的界。
    用 outline + 负 offset 画，不用 border —— outline 不占布局，
@@ -2821,16 +2775,16 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 .card-poster .fallback { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 32px; color: var(--text-3); }
 
 @media (hover: hover) and (pointer: fine) {
-  .card:hover .card-poster { outline-color: rgba(0, 0, 0, 0.12); box-shadow: 0 14px 32px rgba(0, 0, 0, 0.22); z-index: 10; transform: scale(1.05) translateZ(0); }
+  .card:hover .card-poster { outline-color: rgba(255, 255, 255, 0.3); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6); z-index: 10; transform: scale(1.05) translateZ(0); }
   .card:hover .card-info { transform: translateY(4px) translateZ(0); }
-  .card:hover .card-title { color: #000; }
+  .card:hover .card-title { color: rgba(255,255,255,1); }
 }
 @media (hover: none) and (pointer: coarse) {
   /* 简写里的时长会把 box-shadow / border-color 一起压到按下的时长 —— 拆开写 */
-  .card:active .card-poster { transform: scale(.94) translateZ(0) !important; transition: transform var(--press-in), box-shadow .2s var(--silk-in), outline-color .2s var(--silk-in); box-shadow: 0 2px 8px rgba(0,0,0,.16); outline-color: transparent; }
+  .card:active .card-poster { transform: scale(.94) translateZ(0) !important; transition: transform var(--press-in), box-shadow .2s var(--silk-in), outline-color .2s var(--silk-in); box-shadow: 0 2px 8px rgba(0,0,0,.5); outline-color: transparent; }
 }
 
-.card-poster img.main-img { position: relative; z-index: 1; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; opacity: 0; transform: scale(1.08) translateZ(0); filter: blur(16px) brightness(.8); transition: opacity .55s var(--ease-dissolve), transform 1s var(--ease-smooth), filter 1s var(--ease-smooth); }
+.card-poster img.main-img { position: relative; z-index: 1; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; opacity: 0; transform: scale(1.08) translateZ(0); filter: blur(16px) brightness(.5); transition: opacity .55s var(--ease-dissolve), transform 1s var(--ease-smooth), filter 1s var(--ease-smooth); }
 .card-poster img.main-img:not(.loaded) { will-change: transform, opacity, filter; }
 .card-poster img.main-img.loaded { opacity: 1; transform: scale(1) translateZ(0); filter: blur(0) brightness(1); }
 
@@ -2838,7 +2792,7 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 .card-overlay-title { font-size: 16px; font-weight: 700; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,.9); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .card-info { margin-top: 12px; transition: transform .35s var(--ease-smooth), color .3s; position: relative; z-index: 2; }
-.card-title { font-size: 15px; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; color: var(--text); letter-spacing: -0.01em; transition: color .3s; }
+.card-title { font-size: 15px; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; color: rgba(255,255,255,0.92); letter-spacing: -0.01em; transition: color .3s; }
 .card-meta { font-size: 12.5px; color: var(--text-3); margin-top: 4px; display: flex; align-items: center; gap: 8px; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
 
 .card-menu {
@@ -2846,7 +2800,7 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
   width: 28px; height: 28px; border-radius: 50%;
   background: rgba(0,0,0,.5);
   backdrop-filter: var(--glass-chip); -webkit-backdrop-filter: var(--glass-chip);
-  color: #fff; box-shadow: inset 0 0.5px 0 rgba(255,255,255,.20), inset 0 0 0 0.5px rgba(255,255,255,.07);
+  color: #fff; box-shadow: var(--glass-edge);
   display: flex; align-items: center; justify-content: center;
   font-size: 14px; cursor: pointer;
   
@@ -2944,7 +2898,7 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
   font-family: "SF Pro Display", "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
   font-size: calc(var(--rk-pw) * 1.12); font-weight: 800; line-height: .74; letter-spacing: -.07em;
   font-variant-numeric: normal; color: transparent;
-  -webkit-text-stroke: max(2px, calc(var(--rk-pw) * .016)) rgba(29,29,31,.86);
+  -webkit-text-stroke: max(2px, calc(var(--rk-pw) * .016)) rgba(255,255,255,.92);
   text-shadow: none; paint-order: stroke;
   transform: translateY(calc(var(--rk-pw) * -.04));     /* 数字底边落在海报底边稍上 */
 }
@@ -3015,8 +2969,6 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 .detail-seal-row { display: flex; justify-content: center; margin: -6px 0 22px; }
 .detail-seal-row .cuven-seal { font-size: 12.5px; padding: 0 12px; }
 .detail-row .cuven-seal { margin-left: 8px; font-size: 11px; padding: 0 9px; vertical-align: middle; }
-/* 评分行在白底那一截：印章换浅色，其余位置（海报、大图、片名下）都压在画面上，照旧深色玻璃 */
-.detail-row .cuven-seal { background: rgba(120,120,128,.12); border-color: rgba(0,0,0,.08); color: var(--text); text-shadow: none; box-shadow: none; }
 
 /* 首页大卡标签行 */
 .hero-tags .cuven-seal { font-size: 12px; }
@@ -3035,8 +2987,8 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 .library-header + .section { margin-top: 16px; }
 .library-title { font-size: 32px; font-weight: 800; letter-spacing: -0.02em; }
 .library-sub { font-size: 14px; color: var(--text-3); margin-top: 6px; font-weight: 500; }
-.search-input-wrap { display: flex; align-items: center; padding: 0 20px; height: 50px; background: rgba(120,120,128,.12); border-radius: var(--r-pill); border: var(--hairline) solid rgba(0,0,0,.06); backdrop-filter: blur(25px); -webkit-backdrop-filter: blur(25px); box-shadow: inset 0 1px 2px rgba(0,0,0,.06); transition: border-color .3s, background .3s, box-shadow .3s; position: relative; overflow: hidden; transform: translateZ(0); }
-.search-input-wrap:focus-within { border-color: rgba(0,122,255,.5); background: rgba(120,120,128,.08); box-shadow: 0 0 0 3px rgba(0,122,255,0.12), inset 0 1px 2px rgba(0,0,0,.06); }
+.search-input-wrap { display: flex; align-items: center; padding: 0 20px; height: 50px; background: rgba(255,255,255,.08); border-radius: var(--r-pill); border: var(--hairline) solid rgba(255,255,255,.15); backdrop-filter: blur(25px); -webkit-backdrop-filter: blur(25px); box-shadow: inset 0 1px 2px rgba(0,0,0,.3); transition: border-color .3s, background .3s, box-shadow .3s; position: relative; overflow: hidden; transform: translateZ(0); }
+.search-input-wrap:focus-within { border-color: rgba(255,255,255,.5); background: rgba(255,255,255,.13); box-shadow: 0 0 0 3px rgba(255,255,255,0.06), inset 0 1px 2px rgba(0,0,0,.3); }
 .search-input-wrap input { flex: 1; min-width: 0; height: 100%; background: none; border: none; color: var(--text); font-size: 16px; margin-left: 12px; font-weight: 500; font-family: inherit; }
 
 .search-input-wrap input[type="search"] {
@@ -3112,15 +3064,15 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 .mas-card {
   position: relative; width: 100%; aspect-ratio: 1 / var(--r, 1.2);
   border-radius: 9px; overflow: hidden; isolation: isolate;
-  background: var(--surface-2); cursor: pointer;
-  box-shadow: 0 0 0 .5px rgba(0,0,0,.07);            /* 白底上卡片的轮廓：浅色占位不能化进背景 */
+  background: #0e0e10; cursor: pointer;
+  box-shadow: 0 0 0 .5px rgba(255,255,255,.07);      /* 深底上卡片的轮廓：暗色卡不能糊进背景 */
   transform: translateZ(0);
   transition: transform var(--press-out), box-shadow .3s var(--silk-in);
 }
 .mas-card:active { transform: scale(.972) translateZ(0); transition: transform var(--press-in); }
 .mas-card:focus-visible { outline: 2.5px solid var(--blue); outline-offset: 3px; }
 @media (hover: hover) and (pointer: fine) {
-  .mas-card:hover { box-shadow: 0 0 0 .8px rgba(0,0,0,.12), 0 14px 32px rgba(0,0,0,.2); }
+  .mas-card:hover { box-shadow: 0 0 0 .8px rgba(255,255,255,.18), 0 18px 40px rgba(0,0,0,.55); }
 }
 
 /* 海报仍走既有那条管线（.card-poster[data-fn] + loadPosterElement），
@@ -3382,13 +3334,10 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 .detail-nav-bar > * { pointer-events: auto; }
 .detail-btn-circle { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #fff; background: rgba(0,0,0,.4); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: var(--hairline) solid rgba(255,255,255,.15); cursor: pointer; }
 
-/* 浅色界面下详情页分两截（Apple TV 的做法）：上面一截是背景图 + 片名、按钮、简介、
-   演员，深底浅字；往下的剧集 / 剧照 / 影片信息在白底上。背景图原来靠 mask 淡进
-   页面底色，底色一白它就淡成了白，片名和白色按钮全没了 —— 所以去掉 mask，
-   由 .detail-hero-info::before 那块全宽的深色衬底在图的下缘把它接住。 */
 .detail-hero {
   width: 100%; height: 75vh; min-height: 540px; position: relative;
-  background: #000;
+  -webkit-mask-image: linear-gradient(to bottom, black 50%, transparent 100%);
+  mask-image: linear-gradient(to bottom, black 50%, transparent 100%);
   pointer-events: none;
   overflow: hidden;
 }
@@ -3399,7 +3348,7 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
      把「已经在手里的一张图」揭出来：轻微放大 + 去模糊，一次收敛。        */
 .detail-backdrop {
   position: absolute; inset: -5%;
-  background: #1C1C1E;
+  background: var(--surface-2);
   background-size: cover; background-position: center;
   opacity: 0;
   filter: blur(18px);
@@ -3415,16 +3364,7 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 .detail-vignette { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,.55) 0%, transparent 25%); transform: translateZ(0); }
 
 .detail-body { position: relative; z-index: 10; padding: 0 5% 80px; margin-top: -35vh; max-width: 900px; margin-left: auto; margin-right: auto; }
-.detail-hero-info { display: flex; flex-direction: column; align-items: center; text-align: center; margin-bottom: 8px; position: relative; min-height: 35vh; }
-/* 深色衬底：铺满整个视口宽，从片名那一行（还压在背景图上）起由透明渐黑，
-   正好在背景图的下缘（.detail-body 往上提的那 35vh）变成纯黑，再一直垫到
-   这一块的底下。z-index:-1 落在 .detail-body 自己的层里：盖得住背景图，
-   盖不住片名和按钮。下沿是一条直边 —— 黑渐到白只会是一截脏灰。 */
-.detail-hero-info::before {
-  content: ''; position: absolute; z-index: -1; pointer-events: none;
-  top: 0; bottom: -36px; left: 50%; width: 100vw; transform: translateX(-50%);
-  background: linear-gradient(180deg, rgba(0,0,0,0) 0, rgba(0,0,0,.55) 18vh, #000 35vh);
-}
+.detail-hero-info { display: flex; flex-direction: column; align-items: center; text-align: center; margin-bottom: 8px; }
 
 /* 内容错峰入场。
    旧写法用 transition 做：可 .detail-hero-info 是连同 .show 一起被 innerHTML
@@ -3624,12 +3564,6 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 }
 .cast-avatar-small.no-photo-initial { font-size: 38px; }
 .cast-row-avatar.no-photo-initial   { font-size: 18px; }
-/* 完整名单在白色 sheet 里：首字头像换浅灰 */
-.cast-row-avatar.no-photo-initial {
-  background: linear-gradient(135deg, #E9E9EE 0%, #D8D8DE 100%);
-  color: rgba(60,60,67,.6);
-  border-color: rgba(0,0,0,.06);
-}
 @media (hover: hover) and (pointer: fine) {
   .cast-card-small:hover .cast-avatar-small {
     transform: scale(1.05) translateZ(0);
@@ -3672,8 +3606,8 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
   width: 140px; height: 140px;
   border-radius: 50%;
   background: var(--surface-2) center/cover no-repeat;
-  border: var(--hairline) solid rgba(0,0,0,0.08);
-  box-shadow: 0 12px 30px rgba(0,0,0,0.16);
+  border: var(--hairline) solid rgba(255,255,255,0.12);
+  box-shadow: 0 16px 40px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.08);
   display: flex; align-items: center; justify-content: center;
   color: var(--text-2); font-size: 56px;
   position: relative; overflow: hidden;
@@ -3718,15 +3652,15 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
   color: var(--text);
   transition: background .2s, transform .2s var(--ease-spring);
 }
-.cast-row:active { background: rgba(0,0,0,.06); transform: scale(0.985); transition: transform var(--press-in), background var(--silk-nudge-ms) var(--silk-nudge); }
-@media (hover: hover) and (pointer: fine) { .cast-row:hover { background: rgba(0,0,0,.035); } }
+.cast-row:active { background: rgba(255,255,255,.1); transform: scale(0.985); transition: transform var(--press-in), background var(--silk-nudge-ms) var(--silk-nudge); }
+@media (hover: hover) and (pointer: fine) { .cast-row:hover { background: rgba(255,255,255,.05); } }
 .cast-row-avatar {
   width: 52px; height: 52px;
   border-radius: 50%;
   flex-shrink: 0;
   object-fit: cover;
   background: var(--surface-3);
-  border: var(--hairline) solid rgba(0,0,0,.06);
+  border: var(--hairline) solid rgba(255,255,255,.06);
 }
 .cast-row-avatar.no-photo { opacity: .2; padding: 14px; object-fit: contain; background: var(--surface-2); }
 .cast-row-text { flex: 1; min-width: 0; }
@@ -3744,28 +3678,30 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 }
 
 
-.detail-section { margin-top: 40px; padding-top: 28px; border-top: var(--hairline) solid rgba(0,0,0,0.08); }
+.detail-section { margin-top: 40px; padding-top: 28px; border-top: var(--hairline) solid rgba(255,255,255,0.08); }
 .detail-section h3 {
   font-size: 18px; font-weight: 700; margin-bottom: 16px; letter-spacing: -0.01em;
+  
+  text-shadow: 0 2px 6px rgba(0,0,0,.7), 0 1px 2px rgba(0,0,0,.6);
 }
-.detail-row { display: flex; justify-content: space-between; align-items: baseline; padding: 12px 0; border-bottom: var(--hairline) solid rgba(0,0,0,.07); font-size: 14px; gap: 16px; }
+.detail-row { display: flex; justify-content: space-between; align-items: baseline; padding: 12px 0; border-bottom: var(--hairline) solid rgba(255,255,255,.05); font-size: 14px; gap: 16px; }
 .detail-row .label { color: var(--text-3); font-weight: 500; flex-shrink: 0; }
 .detail-row .value { color: var(--text); font-weight: 600; text-align: right; word-break: break-word; }
 .detail-info-extra { margin-top: 32px; }
-.detail-info-section-title { font-size: 13px; font-weight: 600; color: rgba(60,60,67,.6); text-transform: uppercase; letter-spacing: 0.5px; margin: 28px 0 8px 0; }
+.detail-info-section-title { font-size: 13px; font-weight: 600; color: rgba(235,235,245,.55); text-transform: uppercase; letter-spacing: 0.5px; margin: 28px 0 8px 0; }
 .detail-info-extra .detail-info-section-title:first-child { margin-top: 0; }
-.detail-info-glass { background: var(--surface); border: 1px solid rgba(0,0,0,.04); border-radius: 20px; backdrop-filter: blur(40px) saturate(180%); -webkit-backdrop-filter: blur(40px) saturate(180%); box-shadow: none; overflow: hidden; padding: 4px 0; }
+.detail-info-glass { background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08); border-radius: 20px; backdrop-filter: blur(40px) saturate(180%); -webkit-backdrop-filter: blur(40px) saturate(180%); box-shadow: inset 0 1px 0 0 rgba(255,255,255,.12), 0 8px 32px 0 rgba(0,0,0,.2); overflow: hidden; padding: 4px 0; }
 .detail-info-tech-group { padding: 18px 20px; position: relative; }
-.detail-info-tech-group:not(:last-child)::after { content: ''; position: absolute; bottom: 0; left: 20px; right: 20px; height: 0.5px; background: rgba(0,0,0,.1); }
-.detail-info-badge { display: inline-flex; align-items: center; justify-content: center; background: #fff; border: var(--hairline) solid rgba(0,0,0,.14); border-radius: 6px; padding: 3px 8px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text); margin-bottom: 8px; box-shadow: none; }
-.detail-info-badge-desc { color: rgba(60,60,67,.72); font-size: 14px; line-height: 1.5; letter-spacing: 0.2px; }
+.detail-info-tech-group:not(:last-child)::after { content: ''; position: absolute; bottom: 0; left: 20px; right: 20px; height: 0.5px; background: rgba(255,255,255,.05); }
+.detail-info-badge { display: inline-flex; align-items: center; justify-content: center; background: rgba(255,255,255,.1); border: var(--hairline) solid rgba(255,255,255,.15); border-radius: 6px; padding: 3px 8px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: rgba(255,255,255,.95); margin-bottom: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+.detail-info-badge-desc { color: rgba(235,235,245,.6); font-size: 14px; line-height: 1.5; letter-spacing: 0.2px; }
 .detail-info-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; position: relative; }
-.detail-info-item:not(:last-child)::after { content: ''; position: absolute; bottom: 0; left: 20px; right: 20px; height: 0.5px; background: rgba(0,0,0,.1); }
+.detail-info-item:not(:last-child)::after { content: ''; position: absolute; bottom: 0; left: 20px; right: 20px; height: 0.5px; background: rgba(255,255,255,.05); }
 .detail-info-item.stacked { flex-direction: column; align-items: flex-start; padding: 14px 20px; gap: 6px; }
-.detail-info-label { color: rgba(60,60,67,.55); font-size: 15px; font-weight: 400; letter-spacing: 0.2px; line-height: 1.4; }
-.detail-info-value { color: var(--text); font-size: 15px; font-weight: 400; line-height: 1.4; word-break: break-word; }
+.detail-info-label { color: rgba(235,235,245,.45); font-size: 15px; font-weight: 400; letter-spacing: 0.2px; line-height: 1.4; }
+.detail-info-value { color: rgba(255,255,255,.95); font-size: 15px; font-weight: 400; line-height: 1.4; word-break: break-word; }
 .detail-info-item.stacked .detail-info-value { text-align: left; width: 100%; }
-.detail-info-copyright { color: rgba(60,60,67,.4); font-size: 13px; margin: 32px 0 0; text-align: center; letter-spacing: 0.2px; }
+.detail-info-copyright { color: rgba(235,235,245,.3); font-size: 13px; margin: 32px 0 0; text-align: center; letter-spacing: 0.2px; }
 
 
 
@@ -3775,7 +3711,7 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
   margin: 40px calc(50% - 50vw) 0;
   width: 100vw;
   padding-top: 28px;
-  border-top: var(--hairline) solid rgba(0,0,0,0.08);
+  border-top: var(--hairline) solid rgba(255,255,255,0.08);
   
   position: relative;
 }
@@ -3786,17 +3722,18 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 .stills-section-header h3 {
   font-size: 18px; font-weight: 700; letter-spacing: -0.01em;
   color: var(--text);
+  text-shadow: 0 2px 6px rgba(0,0,0,.7), 0 1px 2px rgba(0,0,0,.6);
 }
 
 
 .stills-gallery {
   
-  --sk-body-text-color: #1D1D1F;
-  --sk-glyph-gray: #1D1D1F;
-  --sk-glyph-gray-secondary: rgba(60, 60, 67, 0.72);
-  --sk-glyph-gray-alpha: rgba(0, 0, 0, 0.8);
+  --sk-body-text-color: rgb(245, 245, 247);
+  --sk-glyph-gray: rgb(245, 245, 247);
+  --sk-glyph-gray-secondary: rgba(235, 235, 245, 0.6);
+  --sk-glyph-gray-alpha: rgba(255, 255, 255, 0.88);
   --sk-tile-border-radius: 18px;
-  --sk-focus-color: #007aff;
+  --sk-focus-color: #0a84ff;
   --sk-focus-offset-container: 3px;
   --sk-link-disabled-opacity: 0.42;
   --ltr: 1;
@@ -3908,12 +3845,12 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
   order: 1;
   height: var(--card-height);
   
-  background-color: var(--surface);
-  border: var(--hairline) solid rgba(0, 0, 0, 0.05);
+  background-color: rgba(255, 255, 255, 0.04);
+  border: var(--hairline) solid rgba(255, 255, 255, 0.06);
   position: relative;
   overflow: hidden;
   border-radius: var(--sk-tile-border-radius);
-  box-shadow: 0 6px 18px rgba(0,0,0,.10);
+  box-shadow: 0 8px 24px rgba(0,0,0,.3);
 }
 @media (max-width: 1068px) {
   .stills-tile .stills-card {
@@ -4033,7 +3970,7 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 
 
 .stills-tile .stills-card.loading {
-  background: linear-gradient(90deg, #EFEFF4, #F8F8FA, #EFEFF4);
+  background: linear-gradient(90deg, rgba(255,255,255,.03), rgba(255,255,255,.08), rgba(255,255,255,.03));
   background-size: 200% 100%;
   animation: stillShimmer 1.6s ease-in-out infinite;
 }
@@ -4046,12 +3983,12 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 .stills-paddlenav {
   --sk-paddlenav-diameter: 36px;
   
-  --sk-paddlenav-arrow-color: rgba(0, 0, 0, 0.56);
-  --sk-paddlenav-arrow-color-hover: rgba(0, 0, 0, 0.8);
-  --sk-paddlenav-arrow-color-active: rgba(0, 0, 0, 0.8);
-  --sk-paddlenav-background: rgba(120, 120, 128, 0.12);
-  --sk-paddlenav-background-hover: rgba(120, 120, 128, 0.2);
-  --sk-paddlenav-background-active: rgba(120, 120, 128, 0.26);
+  --sk-paddlenav-arrow-color: rgba(255, 255, 255, 0.72);
+  --sk-paddlenav-arrow-color-hover: rgba(255, 255, 255, 0.92);
+  --sk-paddlenav-arrow-color-active: rgba(255, 255, 255, 0.92);
+  --sk-paddlenav-background: rgba(255, 255, 255, 0.08);
+  --sk-paddlenav-background-hover: rgba(255, 255, 255, 0.16);
+  --sk-paddlenav-background-active: rgba(255, 255, 255, 0.22);
 }
 
 .stills-paddlenav,
@@ -4073,7 +4010,7 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
   width: var(--sk-paddlenav-diameter);
   height: var(--sk-paddlenav-diameter);
   border-radius: var(--sk-paddlenav-diameter);
-  border: var(--hairline) solid rgba(0, 0, 0, 0.06);
+  border: var(--hairline) solid rgba(255, 255, 255, 0.12);
   cursor: pointer;
   padding: 0;
   font-style: normal;
@@ -4191,7 +4128,7 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
    用的是同一个写法。 */
 .sheet-overlay {
   position: fixed; inset: 0; z-index: 300;
-  background: rgba(0,0,0,.32);
+  background: rgba(0,0,0,.58);
   backdrop-filter: var(--glass-scrim);
   -webkit-backdrop-filter: var(--glass-scrim);
   opacity: 0;
@@ -4211,12 +4148,12 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
    见文末 Liquid Glass 注册表里被摘掉的那一行。 */
 .sheet {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 301;
-  background: rgba(242,242,247,.84);
+  background: rgba(26,26,28,.66);
   backdrop-filter: var(--glass-thick);
   -webkit-backdrop-filter: var(--glass-thick);
   border-radius: 28px 28px 0 0;
   padding: 12px 24px calc(var(--safe-b) + 24px);
-  box-shadow: var(--glass-edge), 0 -14px 40px rgba(0,0,0,.14);
+  box-shadow: var(--glass-edge), 0 -24px 60px rgba(0,0,0,.5);
   transition: transform var(--silk-dismiss-ms) var(--silk-dismiss);
   max-width: 520px; margin: 0 auto;
   overflow: hidden;
@@ -4231,26 +4168,26 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
   transition: transform var(--silk-present-ms) var(--silk-present);
 }
 .sheet-handle-area { padding: 10px 0 6px; display: flex; justify-content: center; cursor: grab; touch-action: none; }
-.sheet-handle { width: 40px; height: 5px; border-radius: var(--r-pill); background: rgba(0,0,0,.18); transition: background .25s var(--silk-in), width var(--silk-snap-ms) var(--silk-snap); }
-.sheet-handle-area:active .sheet-handle { background: rgba(0,0,0,.32); width: 56px; }
+.sheet-handle { width: 40px; height: 5px; border-radius: var(--r-pill); background: rgba(255,255,255,.3); transition: background .25s var(--silk-in), width var(--silk-snap-ms) var(--silk-snap); }
+.sheet-handle-area:active .sheet-handle { background: rgba(255,255,255,.55); width: 56px; }
 .sheet-title { font-size: 17px; font-weight: 700; text-align: center; margin: 8px 0 24px; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.sheet-btn { width: 100%; padding: 12px 24px 12px 12px; margin-bottom: 12px; display: flex; align-items: center; gap: 16px; text-align: left; cursor: pointer; border: var(--hairline) solid rgba(0,0,0,.05); border-radius: 16px; background: rgba(255,255,255,.92); transition: background .2s, transform .25s var(--ease-spring), border-color .2s; color: var(--text); font-family: inherit; transform: translateZ(0); }
-@media (hover: hover) and (pointer: fine) { .sheet-btn:hover { background: #fff; transform: scale(1.02) translateZ(0); border-color: rgba(0,0,0,.1); } }
-@media (hover: none) and (pointer: coarse) { .sheet-btn:active { transform: scale(.96) translateZ(0); background: rgba(229,229,234,.95); transition: transform var(--press-in), background var(--silk-nudge-ms) var(--silk-nudge); } }
-.sheet-btn .si { width: 44px; height: 44px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0; background: rgba(120,120,128,.12); }
+.sheet-btn { width: 100%; padding: 12px 24px 12px 12px; margin-bottom: 12px; display: flex; align-items: center; gap: 16px; text-align: left; cursor: pointer; border: var(--hairline) solid rgba(255,255,255,.1); border-radius: 16px; background: rgba(255,255,255,.04); transition: background .2s, transform .25s var(--ease-spring), border-color .2s; color: var(--text); font-family: inherit; transform: translateZ(0); }
+@media (hover: hover) and (pointer: fine) { .sheet-btn:hover { background: rgba(255,255,255,.09); transform: scale(1.02) translateZ(0); border-color: rgba(255,255,255,.2); } }
+@media (hover: none) and (pointer: coarse) { .sheet-btn:active { transform: scale(.96) translateZ(0); background: rgba(255,255,255,.12); transition: transform var(--press-in), background var(--silk-nudge-ms) var(--silk-nudge); } }
+.sheet-btn .si { width: 44px; height: 44px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0; background: rgba(255,255,255,.08); }
 .sheet-btn .sl { font-size: 16px; font-weight: 600; }
 .sheet-btn .sd { font-size: 13px; color: var(--text-3); margin-top: 2px; }
-.sheet-cancel { width: 100%; padding: 14px; text-align: center; cursor: pointer; background: rgba(255,255,255,.92); border: var(--hairline) solid rgba(0,0,0,.05); border-radius: var(--r-pill); color: var(--text); font-size: 16px; font-weight: 600; margin-top: 12px; font-family: inherit; transform: translateZ(0); transition: background .2s, transform .2s var(--ease-spring); }
-.sheet-cancel:active { transform: scale(0.97); background: rgba(229,229,234,.95); }
+.sheet-cancel { width: 100%; padding: 14px; text-align: center; cursor: pointer; background: rgba(255,255,255,.06); border: var(--hairline) solid rgba(255,255,255,.08); border-radius: var(--r-pill); color: var(--text); font-size: 16px; font-weight: 600; margin-top: 12px; font-family: inherit; transform: translateZ(0); transition: background .2s, transform .2s var(--ease-spring); }
+.sheet-cancel:active { transform: scale(0.97); background: rgba(255,255,255,.1); }
 
 
 .profile-block { display: flex; flex-direction: column; align-items: center; padding: 8px 0 20px; gap: 14px; }
 .profile-avatar-lg {
   width: 88px; height: 88px; border-radius: 50%;
   background: var(--surface-2) center/cover no-repeat;
-  border: 1px solid rgba(0,0,0,0.06);
-  box-shadow: 0 8px 22px rgba(0,0,0,0.14);
+  border: 1px solid rgba(255,255,255,0.18);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.08);
   display: flex; align-items: center; justify-content: center;
   color: var(--text-2); font-size: 36px;
   position: relative; overflow: hidden;
@@ -4297,12 +4234,12 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
   height: 42px; padding: 0 11px 0 15px;
   border-radius: var(--r-pill);
   background:
-    linear-gradient(to bottom, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0.16) 46%, rgba(255,255,255,0) 64%),
+    linear-gradient(to bottom, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0.02) 46%, rgba(255,255,255,0) 64%),
     var(--dock-bg);
   backdrop-filter: blur(30px) saturate(190%);
   -webkit-backdrop-filter: blur(30px) saturate(190%);
-  border: var(--hairline) solid rgba(0,0,0,0.08);
-  box-shadow: 0 8px 22px rgba(0,0,0,0.12), inset 0 1px 0.5px rgba(255,255,255,0.95);
+  border: var(--hairline) solid rgba(255,255,255,0.18);
+  box-shadow: 0 10px 28px rgba(0,0,0,0.38), inset 0 1px 0.5px rgba(255,255,255,0.32);
   color: var(--text); font-family: inherit; font-size: 15px; font-weight: 500; letter-spacing: -0.01em;
   cursor: pointer; user-select: none; -webkit-user-select: none;
   opacity: 0; transform: translateY(14px) scale(.92);
@@ -4315,7 +4252,7 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 /* 入场完成后由 JS 落 .settled：卸下 animation（fill:forwards 会压住 :active 的按压形变） */
 .sc-chip.settled { animation: none; opacity: 1; transform: none; }
 @media (hover: hover) and (pointer: fine) {
-  .sc-chip:hover { background: linear-gradient(to bottom, rgba(255,255,255,0.7) 0%, rgba(255,255,255,0.3) 46%, rgba(255,255,255,0) 64%), rgba(255,255,255,.9); border-color: rgba(0,0,0,0.12); }
+  .sc-chip:hover { background: linear-gradient(to bottom, rgba(255,255,255,0.15) 0%, rgba(255,255,255,0.04) 46%, rgba(255,255,255,0) 64%), rgba(44,44,46,.68); border-color: rgba(255,255,255,0.28); }
 }
 /* 排在 .settled 之后：同权重下靠源顺序赢，按压才有反馈 */
 .sc-chip:active { transform: scale(.95); transition: transform var(--press-in), background .2s; }
@@ -4325,19 +4262,19 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
   flex-shrink: 0; width: 22px; height: 22px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
   border: none; border-radius: 50%;
-  background: rgba(120,120,128,.14); color: var(--text-3);
+  background: rgba(255,255,255,.10); color: var(--text-3);
   cursor: pointer; font-family: inherit;
   transition: background .2s, color .2s, transform .2s var(--ease-spring);
 }
 .sc-x svg { width: 9px; height: 9px; display: block; }
-@media (hover: hover) and (pointer: fine) { .sc-x:hover { background: rgba(120,120,128,.24); color: var(--text); } }
+@media (hover: hover) and (pointer: fine) { .sc-x:hover { background: rgba(255,255,255,.22); color: var(--text); } }
 .sc-x:active { transform: scale(.82); }
 .sc-clear {
   height: 32px; padding: 0 13px; gap: 6px;
   font-size: 12.5px; font-weight: 600; color: var(--text-2);
-  background: rgba(242,242,247,.86);
-  border-color: rgba(0,0,0,.07);
-  box-shadow: 0 6px 16px rgba(0,0,0,.10), inset 0 1px 0.5px rgba(255,255,255,.9);
+  background: rgba(28,28,30,.55);
+  border-color: rgba(255,255,255,.12);
+  box-shadow: 0 8px 20px rgba(0,0,0,.30), inset 0 1px 0.5px rgba(255,255,255,.18);
 }
 .sc-clear .sc-glyph { font-size: 13px; }
 @media (prefers-reduced-motion: reduce) { .sc-chip { animation: none; opacity: 1; transform: none; } }
@@ -4346,23 +4283,23 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 /* 提示条：原先 rgba(40,40,42,.95) —— 名义上是玻璃，实际不透光，跟一块深灰
    塑料没区别。改成真材质。transition 也从 all 收回来：all 会把 backdrop-filter
    一起卷进去过渡，等于每帧重建模糊，代价全在看不见的地方。 */
-.toast { position: fixed; bottom: calc(var(--dock-gap) + var(--dock-h) + 14px); left: 50%; transform: translateX(-50%) translateY(20px) translateZ(0); background: rgba(250,250,252,.84); backdrop-filter: var(--glass-thin); -webkit-backdrop-filter: var(--glass-thin); color: var(--text); padding: 12px 28px; border-radius: var(--r-pill); font-size: 15px; font-weight: 600; opacity: 0; pointer-events: none; transition: opacity var(--silk-out-ms) var(--silk-out), transform var(--silk-settle-ms) var(--silk-settle); z-index: 400; box-shadow: var(--glass-edge), 0 10px 28px rgba(0,0,0,.16); will-change: transform, opacity; max-width: calc(100% - 40px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.toast { position: fixed; bottom: calc(var(--dock-gap) + var(--dock-h) + 14px); left: 50%; transform: translateX(-50%) translateY(20px) translateZ(0); background: rgba(44,44,46,.62); backdrop-filter: var(--glass-thin); -webkit-backdrop-filter: var(--glass-thin); color: var(--text); padding: 12px 28px; border-radius: var(--r-pill); font-size: 15px; font-weight: 600; opacity: 0; pointer-events: none; transition: opacity var(--silk-out-ms) var(--silk-out), transform var(--silk-settle-ms) var(--silk-settle); z-index: 400; box-shadow: var(--glass-edge), 0 12px 32px rgba(0,0,0,.45); will-change: transform, opacity; max-width: calc(100% - 40px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0) translateZ(0); transition: opacity var(--silk-in-ms) var(--silk-in), transform var(--silk-snap-ms) var(--silk-snap); }
 /* 网络提示：顶部居中的一枚胶囊，避开状态栏与灵动岛；断网常驻，其余几秒后收起 */
-.net-banner { position: fixed; top: calc(env(safe-area-inset-top, 0px) + 10px); left: 50%; transform: translateX(-50%) translateY(-14px) translateZ(0); z-index: 450; padding: 9px 18px 9px 34px; border-radius: var(--r-pill); font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; color: var(--text); background: rgba(250,250,252,.86); backdrop-filter: var(--glass-thin); -webkit-backdrop-filter: var(--glass-thin); box-shadow: var(--glass-edge), 0 8px 24px rgba(0,0,0,.14); opacity: 0; pointer-events: none; white-space: nowrap; max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis; transition: opacity var(--silk-out-ms) var(--silk-out), transform var(--silk-settle-ms) var(--silk-settle); }
-.net-banner::before { content: ''; position: absolute; left: 15px; top: 50%; width: 8px; height: 8px; margin-top: -4px; border-radius: 50%; background: #FF9500; box-shadow: 0 0 10px currentColor; }
-.net-banner[data-kind="off"]::before { background: #FF3B30; }
-.net-banner[data-kind="ok"]::before { background: #34C759; }
+.net-banner { position: fixed; top: calc(env(safe-area-inset-top, 0px) + 10px); left: 50%; transform: translateX(-50%) translateY(-14px) translateZ(0); z-index: 450; padding: 9px 18px 9px 34px; border-radius: var(--r-pill); font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; color: var(--text); background: rgba(44,44,46,.66); backdrop-filter: var(--glass-thin); -webkit-backdrop-filter: var(--glass-thin); box-shadow: var(--glass-edge), 0 10px 28px rgba(0,0,0,.4); opacity: 0; pointer-events: none; white-space: nowrap; max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis; transition: opacity var(--silk-out-ms) var(--silk-out), transform var(--silk-settle-ms) var(--silk-settle); }
+.net-banner::before { content: ''; position: absolute; left: 15px; top: 50%; width: 8px; height: 8px; margin-top: -4px; border-radius: 50%; background: #FF9F0A; box-shadow: 0 0 10px currentColor; }
+.net-banner[data-kind="off"]::before { background: #FF453A; }
+.net-banner[data-kind="ok"]::before { background: #30D158; }
 .net-banner.show { opacity: 1; transform: translateX(-50%) translateY(0) translateZ(0); transition: opacity var(--silk-in-ms) var(--silk-in), transform var(--silk-snap-ms) var(--silk-snap); }
 .empty { text-align: center; padding: 100px 5%; color: var(--text-2); }
 .empty i { font-size: 56px; color: var(--text-3); margin-bottom: 24px; display: block; }
 .empty-title { font-size: 18px; font-weight: 700; color: var(--text); margin-bottom: 8px; letter-spacing: -0.02em; }
-.empty button { margin-top: 24px; padding: 10px 24px; border-radius: var(--r-pill); background: rgba(120,120,128,.12); color: var(--text); border: var(--hairline) solid rgba(0,0,0,.06); font-size: 14px; font-weight: 600; cursor: pointer; font-family: inherit; transform: translateZ(0); transition: transform var(--press-out), background .2s var(--silk-in); }
-.empty button:hover { background: rgba(120,120,128,.2); }
+.empty button { margin-top: 24px; padding: 10px 24px; border-radius: var(--r-pill); background: rgba(255,255,255,.1); color: var(--text); border: var(--hairline) solid rgba(255,255,255,.15); font-size: 14px; font-weight: 600; cursor: pointer; font-family: inherit; transform: translateZ(0); transition: transform var(--press-out), background .2s var(--silk-in); }
+.empty button:hover { background: rgba(255,255,255,.16); }
 .empty button:active { transform: scale(.94); }
 
 .loading-full { position: relative; min-height: 50vh; display: flex; align-items: center; justify-content: center; }
-.loader { width: 32px; height: 32px; border-radius: 50%; border: 3px solid rgba(0,0,0,.08); border-top-color: rgba(0,0,0,.55); animation: spin .8s linear infinite; }
+.loader { width: 32px; height: 32px; border-radius: 50%; border: 3px solid rgba(255,255,255,.1); border-top-color: rgba(255,255,255,.8); animation: spin .8s linear infinite; }
 
 /* ══ 按压兜底层 · Silk Press Fallback ═════════════════════════════════
    上面把已有的按压逐条统一到了 --press-in / --press-out。但仍有一批按钮
@@ -4396,13 +4333,9 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 /* 键盘焦点环：Apple 的做法是只对键盘可见（:focus-visible），指针操作永不出现。
    纯增益 —— 触摸和鼠标用户看不到它，键盘用户第一次有了落点。 */
 :where(button, [role="button"], a, input, [tabindex]):focus-visible {
-  outline: 2px solid rgba(0, 122, 255, .9);
+  outline: 2px solid rgba(255, 255, 255, .9);
   outline-offset: 3px;
   border-radius: inherit;
-}
-:where(.hero-deck, .detail-hero-info, .detail-nav-bar, .tv-hero, .tv-card, .cs-card, .sc-sticky, .np, #wc-root, .tv-auth-layer, #voiceLayer)
-  :where(button, [role="button"], a, input, [tabindex]):focus-visible {
-  outline-color: rgba(255, 255, 255, .9);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -4760,25 +4693,23 @@ body.tv-auth-open { overflow: hidden; }
   position: relative;
   background:
     linear-gradient(to bottom,
-      rgba(255,255,255,0.55) 0%,
-      rgba(255,255,255,0.16) 42%,
+      rgba(255,255,255,0.12) 0%,
+      rgba(255,255,255,0.03) 42%,
       rgba(255,255,255,0.00) 62%),
     var(--dock-bg);
   backdrop-filter: blur(30px) saturate(190%);
   -webkit-backdrop-filter: blur(30px) saturate(190%);
-  /* 浅色玻璃的边：白底上靠一圈极淡的黑环和一道柔投影立住，内高光是上缘那一线白 */
-  border: var(--hairline) solid rgba(0,0,0,0.08);
+  border: var(--hairline) solid rgba(255,255,255,0.22);
   box-shadow:
-    0 10px 30px rgba(0,0,0,0.12),
-    0 1px 3px rgba(0,0,0,0.05),
-    inset 0 1px 0.5px rgba(255,255,255,0.95),
-    inset 0 -1px 0.5px rgba(0,0,0,0.04);
+    0 18px 44px rgba(0,0,0,0.44),
+    inset 0 1px 0.5px rgba(255,255,255,0.50),
+    inset 0 -1px 0.5px rgba(0,0,0,0.38);
 }
 #navPill {
   box-shadow:
-    inset 0 0.5px 0 rgba(255,255,255,0.60),
-    inset 0 0 0 0.5px rgba(0,0,0,0.05),
-    0 1px 4px rgba(0,0,0,0.08);
+    inset 0 0.5px 0 rgba(255,255,255,0.30),
+    inset 0 0 0 0.5px rgba(255,255,255,0.09),
+    0 2px 8px rgba(0,0,0,0.28);
 }
 
 /* the WebGL glass surface itself — sits under the pill/labels/avatar */
@@ -4798,7 +4729,7 @@ body.tv-auth-open { overflow: hidden; }
    全屏盖住主页，必须"同意 + 开启通知"才放行。 */
 .pg-scrim {
   position: fixed; inset: 0; z-index: 400;
-  background: rgba(0,0,0,0.32);
+  background: rgba(0,0,0,0.55);
   backdrop-filter: var(--glass-chip); -webkit-backdrop-filter: var(--glass-chip);
   opacity: 0; pointer-events: none;
   transition: opacity var(--silk-dismiss-ms) var(--silk-dismiss);
@@ -4810,10 +4741,10 @@ body.tv-auth-open { overflow: hidden; }
   max-width: 520px; margin: 0 auto;
   height: 92dvh; max-height: 92dvh;
   display: flex; flex-direction: column;
-  background: rgba(242,242,247,.9);
+  background: rgba(26,26,28,.72);
   backdrop-filter: var(--glass-thick); -webkit-backdrop-filter: var(--glass-thick);
   border-radius: 28px 28px 0 0;
-  box-shadow: var(--glass-edge), 0 -14px 40px rgba(0,0,0,.14);
+  box-shadow: var(--glass-edge), 0 -24px 60px rgba(0,0,0,.5);
   transform: translateY(101%) translateZ(0);
   will-change: transform; backface-visibility: hidden;
   transition: transform var(--silk-dismiss-ms) var(--silk-dismiss);
@@ -4822,7 +4753,7 @@ body.tv-auth-open { overflow: hidden; }
 @media (min-width: 520px) { .pg-sheet { border-radius: 28px; height: min(90dvh, 780px); } }
 
 .pg-handle { flex: none; height: 22px; display: grid; place-items: center; padding-top: 8px; }
-.pg-handle::before { content: ""; width: 36px; height: 5px; border-radius: 3px; background: rgba(0,0,0,0.18); }
+.pg-handle::before { content: ""; width: 36px; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.24); }
 
 .pg-scroll { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 0 24px; }
 .pg-scroll::-webkit-scrollbar { width: 0; }
@@ -4844,17 +4775,17 @@ body.tv-auth-open { overflow: hidden; }
 .pg-points { margin: 40px 0 0; list-style: none; padding: 0; }
 .pg-point { padding: 16px 2px; font-size: 16px; font-weight: 500; letter-spacing: -0.012em; color: var(--text);
   animation: pgRise var(--silk-settle-ms) var(--silk-settle) both; }
-.pg-point + .pg-point { border-top: 1px solid rgba(0,0,0,0.08); }
+.pg-point + .pg-point { border-top: 1px solid rgba(255,255,255,0.08); }
 .pg-point:nth-child(1){animation-delay:.56s}.pg-point:nth-child(2){animation-delay:.62s}
 .pg-point:nth-child(3){animation-delay:.68s}.pg-point:nth-child(4){animation-delay:.74s}
 
 /* 展开完整说明 */
 .pg-details { margin: 24px 0 0; }
 .pg-disclose { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 16px; cursor: pointer; background: #fff; border: 0; border-radius: 14px;
+  padding: 16px; cursor: pointer; background: rgba(255,255,255,0.05); border: 0; border-radius: 14px;
   font-family: inherit; color: var(--text); font-size: 15px; font-weight: 500; letter-spacing: -0.01em; text-align: left;
   box-shadow: var(--glass-edge); transition: background var(--silk-settle-ms) var(--silk-settle); }
-.pg-disclose:active { background: rgba(229,229,234,.95); transition: background var(--silk-nudge-ms) var(--silk-nudge); }
+.pg-disclose:active { background: rgba(255,255,255,0.09); transition: background var(--silk-nudge-ms) var(--silk-nudge); }
 .pg-chev { flex: none; width: 18px; height: 18px; color: var(--text-3);
   transition: transform var(--silk-settle-ms) var(--silk-settle), color var(--silk-in-ms) var(--silk-in); }
 .pg-disclose[aria-expanded="true"] .pg-chev { transform: rotate(90deg); color: var(--blue); }
@@ -4871,7 +4802,7 @@ body.tv-auth-open { overflow: hidden; }
 /* 跨境接收方 */
 .pg-recipients { margin: 10px 0 0; display: grid; gap: 8px; }
 .pg-recipient { display: flex; align-items: baseline; gap: 12px; padding: 13px 15px;
-  background: #fff; border-radius: 12px; box-shadow: var(--glass-edge); }
+  background: rgba(255,255,255,0.05); border-radius: 12px; box-shadow: var(--glass-edge); }
 .pg-recipient b { flex: 1; color: var(--text); font-size: 14.5px; font-weight: 500; }
 .pg-recipient span { flex: none; font-size: 12.5px; color: var(--text-3); }
 .pg-inline-logo { display: inline-block; width: 1.2em; height: 1.2em; vertical-align: -0.26em; margin: 0 0.1em; object-fit: contain; }
@@ -4881,11 +4812,11 @@ body.tv-auth-open { overflow: hidden; }
 .pg-choices > h2 { margin: 0 0 4px; font-size: 21px; font-weight: 700; letter-spacing: -0.018em; color: var(--text); }
 .pg-choices > p { margin: 0 0 16px; font-size: 13px; line-height: 1.5; color: var(--text-2); }
 .pg-glabel { margin: 24px 0 8px; padding: 0 4px; font-size: 12px; font-weight: 500; letter-spacing: 0.02em; color: var(--text-3); }
-.pg-group { list-style: none; margin: 0; padding: 0; background: #fff; border-radius: 14px; overflow: hidden; box-shadow: var(--glass-edge); }
-.pg-row + .pg-row::before { content: ""; display: block; height: 1px; margin-left: 54px; background: rgba(0,0,0,0.08); }
+.pg-group { list-style: none; margin: 0; padding: 0; background: rgba(255,255,255,0.05); border-radius: 14px; overflow: hidden; box-shadow: var(--glass-edge); }
+.pg-row + .pg-row::before { content: ""; display: block; height: 1px; margin-left: 54px; background: rgba(255,255,255,0.08); }
 .pg-row > label { display: flex; gap: 14px; align-items: center; min-height: 56px; padding: 13px 16px; cursor: pointer;
   transition: background var(--silk-settle-ms) var(--silk-settle); }
-.pg-row > label:active { background: rgba(0,0,0,0.04); transition: background var(--silk-nudge-ms) var(--silk-nudge); }
+.pg-row > label:active { background: rgba(255,255,255,0.06); transition: background var(--silk-nudge-ms) var(--silk-nudge); }
 .pg-row input { position: absolute; opacity: 0; width: 0; height: 0; }
 .pg-rtext { flex: 1; min-width: 0; }
 .pg-rt { display: block; font-size: 16px; line-height: 1.4; letter-spacing: -0.012em; color: var(--text); }
@@ -4905,13 +4836,13 @@ body.tv-auth-open { overflow: hidden; }
 .pg-sw { flex: none; position: relative; width: 51px; height: 31px; border-radius: 999px; background: rgba(120,120,128,0.32);
   transition: background var(--silk-in-ms) var(--silk-in); }
 .pg-sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; border-radius: 50%;
-  background: #fff; box-shadow: 0 3px 8px rgba(0,0,0,0.15), 0 0 0 0.5px rgba(0,0,0,0.04); transition: transform var(--silk-settle-ms) var(--silk-settle); }
+  background: #fff; box-shadow: 0 3px 8px rgba(0,0,0,0.4); transition: transform var(--silk-settle-ms) var(--silk-settle); }
 .pg-row input:checked + .pg-sw { background: var(--green); }
 .pg-row input:checked + .pg-sw::after { transform: translateX(20px); }
 
 /* 底部操作区 */
 .pg-footer { flex: none; padding: 14px 24px calc(14px + var(--safe-b));
-  background: linear-gradient(to top, rgba(242,242,247,.94) 60%, rgba(242,242,247,0)); }
+  background: linear-gradient(to top, rgba(26,26,28,.72) 60%, rgba(26,26,28,0)); }
 .pg-hint { min-height: 16px; margin: 0 0 11px; font-size: 12px; line-height: 16px; text-align: center; color: var(--text-3);
   transition: color var(--silk-in-ms) var(--silk-in); }
 .pg-hint.ok { color: var(--green); }
@@ -4921,8 +4852,8 @@ body.tv-auth-open { overflow: hidden; }
   transition: transform var(--silk-settle-ms) var(--silk-settle), background var(--silk-in-ms) var(--silk-in), opacity var(--silk-in-ms) var(--silk-in); }
 .pg-btn:active { transform: scale(0.975); transition: transform var(--silk-nudge-ms) var(--silk-nudge); }
 .pg-btn-primary { background: var(--blue); color: #fff; }
-.pg-btn-primary:disabled { background: rgba(120,120,128,0.16); color: var(--text-3); cursor: not-allowed; box-shadow: none; }
-.pg-btn-primary.done { background: var(--green); color: #fff; cursor: default; animation: pgPulse var(--silk-present-ms) var(--silk-present); }
+.pg-btn-primary:disabled { background: rgba(255,255,255,0.10); color: var(--text-3); cursor: not-allowed; box-shadow: none; }
+.pg-btn-primary.done { background: var(--green); color: #05240e; cursor: default; animation: pgPulse var(--silk-present-ms) var(--silk-present); }
 @keyframes pgPulse { 0%{transform:scale(1)} 40%{transform:scale(1.025)} 100%{transform:scale(1)} }
 
 @media (prefers-reduced-motion: reduce) {
@@ -4937,10 +4868,10 @@ body.tv-auth-open { overflow: hidden; }
    一部片一章，三段式：预告片 hero → 影片介绍 → 剧照画廊。
    骨架照搬参考稿（Apple Vision Pro 那套 sticky portal），只做两处改写 ——
 
-   ① 底色。参考稿是白底页面：白面板压上来，视频「收成一张宽卡」这件事
-      是靠白与画面的明暗差读出来的。app 还是纯黑的那段时间这里改成了黑面板；
-      2026-11 全站换成浅色，正好回到参考稿：白底、白面板，画幅收成一块
-      16:9 嵌在白里。画幅里（预告片、片名、播放 / 静音钮）照旧是深底浅字。
+   ① 换成深色。参考稿是白底页面：白面板压上来，视频「收成一张宽卡」这件事
+      是靠白与画面的明暗差读出来的。在纯黑 app 里白面板不能要，于是改用
+      iOS sheet 的写法：黑面板带 28px 圆角顶边压上去。角上透出的正是身后
+      那帧还钉着的画面 —— 对比度由画面自己提供，不靠面板颜色。
 
    ② 参考稿一页一部片，这里要串很多章。所以 sticky 的参照系必须是每一章
       自己的 .sc-portal，绝不能是页面；同时任何时刻只允许一个 <video> 持有
@@ -4952,8 +4883,8 @@ body.tv-auth-open { overflow: hidden; }
   --sc-gutter: max(20px, env(safe-area-inset-left));
   --sc-content-w: 980px;
   --sc-copy-w: 820px;
-  --sc-dim: rgba(29, 29, 31, .62);
-  --sc-hairline: rgba(0, 0, 0, .12);
+  --sc-dim: rgba(255, 255, 255, .62);
+  --sc-hairline: rgba(255, 255, 255, .12);
   --sc-ease-apple: cubic-bezier(.28, .11, .32, 1);
   --sc-ease-out: cubic-bezier(.16, 1, .3, 1);
 
@@ -4984,7 +4915,7 @@ body.tv-auth-open { overflow: hidden; }
    浏览器里 .sb-field 是透明的，不让，画面照旧顶到最上缘。 */
 html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 
-.lib-showcase { position: relative; background: #fff; }
+.lib-showcase { position: relative; background: #000; }
 
 /* 量尺：一份不参与显示的同规格画幅盒。原先是量第一章的 .sc-media 拿布局尺寸，
    现在第一章随时可能是被拆过 DOM 的空壳，里头根本没有 .sc-media。
@@ -5011,7 +4942,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   position: relative;
   height: calc(100svh + var(--sc-overlap) + var(--sc-hold));
   min-height: 680px;
-  background: #fff;
+  background: #000;
 }
 
 @supports (height: 100dvh) {
@@ -5026,7 +4957,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   min-height: 460px;
   overflow: hidden;
   isolation: isolate;
-  background: #fff;
+  background: #000;
 }
 
 @supports (height: 100dvh) {
@@ -5425,7 +5356,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 .sc-mediactl[data-state="paused"] .sc-ico-pause { display: none; }
 .sc-mediactl[data-state="paused"] .sc-ico-play  { display: block; }
 
-/* ── 介绍面板：白色 sheet，平口顶边压上来 ─────────────────────────── */
+/* ── 介绍面板：黑色 sheet，平口顶边压上来 ─────────────────────────── */
 /* 圆角是上一版的产物：那时画面满屏 cover，面板压上来要靠两个角上透出的画面
    才读得出「盖住」这层关系。现在画幅自己会收成一块完整 16:9，面板顶边与画幅
    底边严丝合缝 —— 再留圆角，缺口后面是黑的，两个角就成了咬进画面的豁口。
@@ -5436,7 +5367,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   z-index: 10;
   margin-top: calc(0px - var(--sc-overlap));
   padding-bottom: 68px;
-  background: #fff;
+  background: #000;
 }
 
 /* 接缝处不留任何圆角 —— 单列一条，权重压过一切来路不明的继承。
@@ -5467,7 +5398,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   letter-spacing: .011em;
 }
 
-.sc-overview b { color: var(--text); font-weight: 600; }
+.sc-overview b { color: #fff; font-weight: 600; }
 
 .sc-facts {
   display: flex;
@@ -5480,7 +5411,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   padding: 5px 12px;
   border: var(--hairline) solid var(--sc-hairline);
   border-radius: 999px;
-  color: rgba(29, 29, 31, .74);
+  color: rgba(255, 255, 255, .74);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: .02em;
@@ -5490,7 +5421,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 .sc-credits {
   width: min(100%, var(--sc-copy-w));
   margin: 20px 0 0;
-  color: rgba(29, 29, 31, .46);
+  color: rgba(255, 255, 255, .42);
   font-size: 14px;
   font-weight: 600;
   line-height: 1.45;
@@ -5516,8 +5447,8 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 }
 
 .sc-btn:active { transform: scale(.96); }
-.sc-btn-play { color: #fff; background: #1D1D1F; }
-.sc-btn-ghost { color: var(--text); border-color: var(--sc-hairline); background: rgba(120, 120, 128, .12); }
+.sc-btn-play { color: #000; background: #fff; }
+.sc-btn-ghost { color: #fff; border-color: var(--sc-hairline); background: rgba(255, 255, 255, .08); }
 .sc-btn svg { width: 15px; height: 15px; fill: currentColor; }
 
 /* ── 剧照画廊 ─────────────────────────────────────────────────────── */
@@ -5538,7 +5469,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 .sc-gtitle {
   width: min(calc(100% - (var(--sc-gutter) * 2)), var(--sc-content-w));
   margin: 0 auto 20px;
-  color: rgba(60, 60, 67, .6);
+  color: rgba(255, 255, 255, .42);
   font-size: 13px;
   font-weight: 700;
   letter-spacing: .06em;
@@ -5577,7 +5508,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   aspect-ratio: 16 / 9;
   overflow: hidden;
   border-radius: 20px;
-  background: var(--surface-2);
+  background: #111114;
   transform: translateZ(0);
 }
 
@@ -5594,7 +5525,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 .sc-shot-cap {
   width: 88%;
   margin: 18px 0 0;
-  color: rgba(60, 60, 67, .6);
+  color: rgba(255, 255, 255, .42);
   font-size: 14px;
   font-weight: 600;
   line-height: 1.36;
@@ -5618,8 +5549,8 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   place-items: center;
   border: 0;
   border-radius: 50%;
-  color: var(--text);
-  background: rgba(120, 120, 128, .12);
+  color: #fff;
+  background: rgba(255, 255, 255, .12);
   cursor: pointer;
   transition: opacity .25s ease, background-color .25s ease, transform .25s var(--sc-ease-apple);
 }
@@ -5648,10 +5579,10 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   height: 1px;
   margin: 56px auto 0;
   background: linear-gradient(to right,
-    rgba(0, 0, 0, 0) 0,
+    rgba(255, 255, 255, 0) 0,
     var(--sc-hairline) 20%,
     var(--sc-hairline) 80%,
-    rgba(0, 0, 0, 0) 100%);
+    rgba(255, 255, 255, 0) 100%);
 }
 
 .sc-sentinel {
@@ -5661,7 +5592,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
 }
 
 .sc-count {
-  color: rgba(60, 60, 67, .45);
+  color: rgba(255, 255, 255, .3);
   font-size: 13px;
   font-weight: 600;
   letter-spacing: .02em;
@@ -5926,7 +5857,7 @@ html.rail.rail-float .toast {
 html.rail.rail-float .net-banner { left: 50%; max-width: calc(100% - 2 * env(safe-area-inset-right, 0px) - 16px); }
 /* ── 全新导航栏（只在 iPhone Duo 折起竖拿）─────────────────────────────
    一枚高的竖向玻璃胶囊，只放图标，自上而下：主页、资料库、搜索，头像（圆角方块）垫在最底 ——
-   搜索不再是胶囊外另一枚圆钮。选中那一项是深色图标 + 一圈浅灰圆底，其余是灰色；文字收起（读屏照读）。
+   搜索不再是胶囊外另一枚圆钮。选中那一项是白色图标 + 一圈柔光圆底，其余是灰色；文字收起（读屏照读）。
    结构不动：.dock 自己当胶囊，.nav-container 用 display: contents 把头像、主页、资料库摊进同一列，
    再用 order 排好（头像在 DOM 里排第一）。原来那枚会滑的选中指示器在这里不用，选中靠每一项自己的圆底。
    折射玻璃（WebGL）也不挂：胶囊整枚是一层 CSS 毛玻璃，透出底下的画面。
@@ -5936,18 +5867,18 @@ html.rail.rail-float .dock:not(.searching) {
   justify-content: flex-start; align-items: center;
   border-radius: 999px; pointer-events: auto;
   background:
-    linear-gradient(to bottom, rgba(255,255,255,.55) 0%, rgba(255,255,255,.16) 38%, rgba(255,255,255,0) 60%),
-    rgba(250,250,252,.68);
+    linear-gradient(to bottom, rgba(255,255,255,.10) 0%, rgba(255,255,255,.02) 38%, rgba(255,255,255,0) 60%),
+    rgba(24,24,26,.44);
   backdrop-filter: blur(26px) saturate(180%); -webkit-backdrop-filter: blur(26px) saturate(180%);
-  border: var(--hairline) solid rgba(0,0,0,.08);
-  box-shadow: 0 10px 30px rgba(0,0,0,.14), 0 1px 3px rgba(0,0,0,.05), inset 0 1px .5px rgba(255,255,255,.95), inset 0 -1px .5px rgba(0,0,0,.04);
+  border: var(--hairline) solid rgba(255,255,255,.16);
+  box-shadow: 0 18px 44px rgba(0,0,0,.45), inset 0 1px .5px rgba(255,255,255,.30), inset 0 -1px .5px rgba(0,0,0,.35);
 }
 html.rail.rail-float .dock:not(.searching) .nav-container { display: contents; }
 html.rail.rail-float .dock:not(.searching) #navPill { display: none; }
 html.rail.rail-float .dock:not(.searching) .nav-item {
   flex: 0 0 auto; width: 48px; height: 48px; padding: 0; margin: 0; gap: 0;
   display: grid; place-items: center; border-radius: 50%;
-  color: rgba(60,60,67,.56);
+  color: rgba(235,235,245,.52);
   background: transparent; border: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
   transition: background-color .25s var(--ease-out), color .25s var(--ease-out), transform var(--press-out);
 }
@@ -5960,8 +5891,8 @@ html.rail.rail-float .dock:not(.searching) #navSearch {
 }
 html.rail.rail-float .dock:not(.searching) #headerAvatar { order: 4; width: 40px; height: 40px; margin: 6px 0 0; border-radius: 12px; }
 html.rail.rail-float .dock:not(.searching) .nav-item.active {
-  color: var(--text); background: rgba(120,120,128,.16);
-  box-shadow: inset 0 0 0 .5px rgba(0,0,0,.04), inset 0 1px 0 rgba(255,255,255,.6);
+  color: #fff; background: rgba(255,255,255,.13);
+  box-shadow: inset 0 0 0 .5px rgba(255,255,255,.14), inset 0 1px 0 rgba(255,255,255,.10);
 }
 html.rail.rail-float .dock:not(.searching) .nav-item.active .nav-icon { transform: none; }
 html.rail.rail-float .dock:not(.searching) .nav-svg { width: 25px; height: 25px; }
@@ -5977,7 +5908,7 @@ html.rail.rail-float .dock:not(.searching) #navSearch .ns-cancel { display: none
 html.rail.rail-float .dock:not(.searching) .nav-item:active,
 html.rail.rail-float .dock:not(.searching) #headerAvatar:active { transform: scale(.9); transition: transform var(--press-in); }
 @media (hover: hover) and (pointer: fine) {
-  html.rail.rail-float .dock:not(.searching) .nav-item:not(.active):hover { color: rgba(29,29,31,.86); background: rgba(120,120,128,.08); }
+  html.rail.rail-float .dock:not(.searching) .nav-item:not(.active):hover { color: rgba(255,255,255,.85); background: rgba(255,255,255,.06); }
 }
 
 /* ── 首页大图（hero）：按这块屏专门排 ──────────────────────────────────
@@ -6084,10 +6015,10 @@ html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay:
 .row-nav {
   position: absolute; z-index: 20; top: var(--rn-top, 50%);
   width: 44px; height: 44px; margin-top: -22px; border-radius: 50%;
-  display: grid; place-items: center; padding: 0; border: var(--hairline) solid rgba(0,0,0,.08);
-  background: rgba(250, 250, 252, .82); color: var(--text); cursor: pointer;
+  display: grid; place-items: center; padding: 0; border: var(--hairline) solid rgba(255,255,255,.22);
+  background: rgba(30, 30, 32, .62); color: #fff; cursor: pointer;
   backdrop-filter: blur(20px) saturate(1.6); -webkit-backdrop-filter: blur(20px) saturate(1.6);
-  box-shadow: 0 6px 20px rgba(0,0,0,.16), inset 0 1px 0 rgba(255,255,255,.9);
+  box-shadow: 0 8px 24px rgba(0,0,0,.45);
   opacity: 0; pointer-events: none; transform: scale(.86) translateZ(0);
   transition: opacity .22s ease, transform .3s var(--ease-spring-soft), background-color .2s;
 }
@@ -6095,7 +6026,7 @@ html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay:
 .row-nav.prev { left: max(6px, calc(2.5% - 22px)); }
 .row-nav.next { right: max(6px, calc(2.5% - 22px)); }
 .row-nav-host.rn-hover .row-nav.can { opacity: 1; pointer-events: auto; transform: scale(1) translateZ(0); }
-.row-nav:hover { background: rgba(255, 255, 255, .96); }
+.row-nav:hover { background: rgba(58, 58, 62, .78); }
 .row-nav:active { transform: scale(.92) translateZ(0); transition-duration: .08s; }
 @media (min-width: 1920px) {
   .row-nav { width: 52px; height: 52px; margin-top: -26px; }
@@ -7167,39 +7098,29 @@ body.voice-on .dock > *{ pointer-events:none !important; }
   :root {
     --glass-thick: none; --glass-thin: none; --glass-scrim: none; --glass-chip: none;
     --dock-blur: none;
-    --dock-bg: #F9F9FB;
+    --dock-bg: #1C1C1E;
     /* 半像素高光是「玻璃吃到光」的那一笔。玻璃没了，它得改回一条老实的
        描边，否则实色块的边缘会糊进背景里 */
-    --glass-edge: inset 0 0 0 0.5px rgba(0,0,0,.14);
-    --dock-border: var(--hairline) solid rgba(0,0,0,.14);
+    --glass-edge: inset 0 0 0 0.5px rgba(255,255,255,.16);
+    --dock-border: var(--hairline) solid rgba(255,255,255,.16);
   }
   *, *::before, *::after {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
-  /* 立面：接管一块区域、上面还要放字的那些。白底上的钉成浅色实底，
-     压在画面上的（海报角标、深色岛里的玻璃）钉成深色实底 */
-  .glass-capsule, .nav-container, #navContainer, #navSearch,
-  .section-header > span:first-child:not(.year-pill-slot),
-  .search-input-wrap, .year-pill-surface, .year-library-back, .page-back, .row-nav,
-  .detail-info-glass, .stills-paddlenav .paddlenav-arrow,
-  .sheet, .sc-chip, .sc-clear, .toast, .net-banner, .pg-sheet,
-  html.rail.rail-float .dock:not(.searching) {
-    background-color: #F9F9FB !important;
-  }
-  .detail-hero-info .glass-capsule, .hero-deck .glass-capsule,
-  .cs-info, .hero-status, .card-menu, .card-playing-badge,
-  .lib-sticker, .lib-specs, .lib-go,
-  .detail-btn-circle,
-  #wc-root .wc-avatar, #wc-root .wc-cta,
+  /* 立面：接管一块区域、上面还要放字的那些 */
+  .glass-capsule, .glass-capsule-bright, .nav-container, #navContainer, #navSearch,
+  .cs-info, .hero-status, .card-menu, .card-playing-badge, .card-rank,
+  .search-input-wrap, .lib-sticker, .lib-specs, .lib-go,
+  .year-pill-surface, .year-library-back,
+  .detail-btn-circle, .detail-info-glass, .stills-paddlenav .paddlenav-arrow,
+  .sheet, .sc-chip, .toast,
+  #wc-root .wc-avatar, #wc-root .wc-cta, .pg-sheet,
   #voiceOrbGlass, #voiceClose, #voiceTranscript, #voiceActions button {
     background-color: #1C1C1E !important;
   }
   /* 遮罩：本职就是「把整个世界推远」。玻璃撤了，那件事只能靠密度做 */
-  .sheet-overlay, .pg-scrim {
-    background-color: rgba(0,0,0,.55) !important;
-  }
-  .tv-auth-layer {
+  .sheet-overlay, .pg-scrim, .tv-auth-layer {
     background-color: rgba(0,0,0,.92) !important;
   }
 }
@@ -7211,23 +7132,15 @@ body.voice-on .dock > *{ pointer-events:none !important; }
    下面没有一条规则点到具体组件：这正是把颜色收敛成令牌换来的。 */
 @media (prefers-contrast: more) {
   :root {
-    --text-2: rgba(29, 29, 31, 0.86);
-    --text-3: rgba(29, 29, 31, 0.68);
-    --surface: #E9E9EE; --surface-2: #DCDCE2;
-    --glass-edge: inset 0 0 0 1px rgba(0,0,0,.30);
-    --dock-border: var(--hairline) solid rgba(0,0,0,.30);
-    --dock-bg: rgba(250, 250, 252, 0.94);
-    /* 焦点环要在任何底色上都成立：白环外面再套一圈黑，深浅两种背景
-       各由一层负责 */
-    --focus-ring: 0 0 0 3px rgba(255,255,255,1), 0 0 0 6px rgba(0,0,0,.92);
-  }
-  /* 深色岛（见 :root 下方）各自一份 */
-  .hero-deck, .detail-hero-info, .detail-nav-bar, .tv-hero, .tv-card, .cs-card, .lib-card,
-  .sc-sticky, .np, #wc-root, .tv-auth-layer, #voiceLayer {
     --text-2: rgba(255, 255, 255, 0.88);
     --text-3: rgba(255, 255, 255, 0.68);
     --surface: #2C2C2E; --surface-2: #3A3A3C;
     --glass-edge: inset 0 0 0 1px rgba(255,255,255,.34);
+    --dock-border: var(--hairline) solid rgba(255,255,255,.34);
+    --dock-bg: rgba(28, 28, 30, 0.88);
+    /* 焦点环要在任何底色上都成立：白环外面再套一圈黑，深浅两种背景
+       各由一层负责 */
+    --focus-ring: 0 0 0 3px rgba(255,255,255,1), 0 0 0 6px rgba(0,0,0,.92);
   }
 }
 
@@ -23333,9 +23246,8 @@ if (DEV) {
 
   var P = {
     refraction: 1.00, edgeRefr: 1.00, frost: 0.03, magnify: 0.18, dispersion: 0.50,
-    bevelDepth: 0.62, bevelWidth: 0.28, edgeHi: 0.08, edgeDark: 0.10,
-    /* 浅色界面：玻璃调成白（tint 1,1,1），边缘压一点暗，白底上才有轮廓 */
-    tintOp: 1.00, glassOp: 0.55, radius: 1.00, specular: 1.00, tint: [1.0, 1.0, 1.0],
+    bevelDepth: 0.62, bevelWidth: 0.28, edgeHi: 0.08, edgeDark: 0.00,
+    tintOp: 1.00, glassOp: 0.50, radius: 1.00, specular: 1.00, tint: [0.0, 0.0, 0.0],
     frostGrain: 0.0, frostHaze: 0.0
   };
   function proxied(url) { var p = window.__LG_NAV_PROXY; return (typeof p === "function") ? p(url) : url; }
@@ -23680,8 +23592,7 @@ if (DEV) {
     sctx.beginPath();
     for (var i = 0; i < regions.length; i++) { var g = regions[i]; sctx.rect(g.l * dpr, g.t * dpr, (g.r - g.l) * dpr, (g.b - g.t) * dpr); }
     sctx.clip();
-    // 底色 = 页面自己的底色（浅色界面是白的；原来写死 #000，白页上的玻璃会透出一块灰）
-    sctx.fillStyle = pageBg();
+    sctx.fillStyle = "#000";
     for (var i = 0; i < regions.length; i++) { var g2 = regions[i]; sctx.fillRect(g2.l * dpr, g2.t * dpr, (g2.r - g2.l) * dpr, (g2.b - g2.t) * dpr); }
     try { paintTree(root, dpr, regions); } catch (e) { if (Scene.debug) console.warn("[NavGlass] scene paint error", e); } finally { sctx.restore(); }
     sctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -23691,16 +23602,6 @@ if (DEV) {
       console.log("[NavGlass] RASTER #" + Scene.count + "  " + ms.toFixed(1) + "ms  bands=" + regions.length + "  rects=" + sceneRects.length + "  buf=" + ow + "x" + oh + "  ctx=" + ctxState());
     }
     return sceneRects.length > 0;
-  }
-
-  var DARK_LOOK = { tint: [0.0, 0.0, 0.0], glassOp: 0.50, edgeDark: 0.0 };
-  var _pageBg = null;
-  function pageBg() {
-    if (_pageBg) return _pageBg;
-    var c = "";
-    try { c = getComputedStyle(document.body).backgroundColor; } catch (e) {}
-    if (!c || c === "transparent" || /rgba\([^)]*,\s*0\)$/.test(c)) { try { c = getComputedStyle(document.documentElement).backgroundColor; } catch (e) {} }
-    return (_pageBg = (!c || c === "transparent" || /rgba\([^)]*,\s*0\)$/.test(c)) ? "#fff" : c);
   }
 
   /* ══ 共享 WebGL 折射器(唯一上下文) ══════════════════════════════════ */
@@ -23739,8 +23640,7 @@ if (DEV) {
     }
     cv.addEventListener("webglcontextlost", function (e) { e.preventDefault(); ready = false; }, false);
     cv.addEventListener("webglcontextrestored", function () { ready = false; dead = false; if (init()) schedule(); }, false);
-    /* look：宿主自己的色调（压在画面上的按钮要深色玻璃，见 HOSTS），不给就用 P */
-    function render(src, w, h, dpr, radiusFrac, texW, texH, padX, padY, look) {
+    function render(src, w, h, dpr, radiusFrac, texW, texH, padX, padY) {
       if (!init()) return null;
       if (w < 1 || h < 1) return null;
       if (cv.width < w) cv.width = w;     // grow-only: avoid reallocating the backbuffer every frame
@@ -23762,12 +23662,11 @@ if (DEV) {
       gl.uniform1f(U.uDispersion, P.dispersion);
       gl.uniform1f(U.uBevelDepth, P.bevelDepth);
       gl.uniform1f(U.uEdgeHi, P.edgeHi);
-      gl.uniform1f(U.uEdgeDark, look && look.edgeDark != null ? look.edgeDark : P.edgeDark);
+      gl.uniform1f(U.uEdgeDark, P.edgeDark);
       gl.uniform1f(U.uTintOp, P.tintOp);
-      gl.uniform1f(U.uGlassOp, look && look.glassOp != null ? look.glassOp : P.glassOp);
+      gl.uniform1f(U.uGlassOp, P.glassOp);
       gl.uniform1f(U.uSpecular, P.specular);
-      var tn = (look && look.tint) || P.tint;
-      gl.uniform3f(U.uTint, tn[0], tn[1], tn[2]);
+      gl.uniform3f(U.uTint, P.tint[0], P.tint[1], P.tint[2]);
       gl.uniform1f(U.uFrostGrain, P.frostGrain);
       gl.uniform1f(U.uFrostHaze, P.frostHaze);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -23779,7 +23678,7 @@ if (DEV) {
   /* ══ 一个宿主 = 一块廉价 2D 画布(折射由共享器代劳) ══════════════════ */
   function makeGlass(res, opts) {
     opts = opts || {};
-    var contexts = opts.ctx || ["view"], dim = opts.dim || 0, look = opts.look || null;
+    var contexts = opts.ctx || ["view"], dim = opts.dim || 0;
     var sampleMargin = (opts.sample != null) ? opts.sample : 16;   // CSS px of real content sampled AROUND the host so edge refraction bends it (not clamped)
     var ssMax = opts.ssMax || 2;                                   // max output supersample (device px multiplier)
     var host = null, canvas = null, hctx = null, DPR = 1, shown = false;
@@ -23861,7 +23760,7 @@ if (DEV) {
       var Mdev = Math.round(sampleMargin * DPR);
       if (!composeSlice(nr, frame, Mdev)) { setShown(false); return; }
       var texW = canvas.width + 2 * Mdev, texH = canvas.height + 2 * Mdev;
-      var out = Glass.render(bgc, canvas.width, canvas.height, DPR, radiusFrac(host, nr), texW, texH, Mdev, Mdev, look);
+      var out = Glass.render(bgc, canvas.width, canvas.height, DPR, radiusFrac(host, nr), texW, texH, Mdev, Mdev);
       if (!out) { setShown(false); return; }
       var W = canvas.width, H = canvas.height;
       try { hctx.clearRect(0, 0, W, H); hctx.drawImage(out, 0, out.height - H, W, H, 0, 0, W, H); }
@@ -23891,11 +23790,10 @@ if (DEV) {
     /* 搜索态 dock 不再退场，而是浮在结果面板之上 → 玻璃要继续折射 searchView 的内容 */
     makeGlass("navContainer", { ctx: ["view", "search"], sample: 16, ssMax: 2 }),
     makeGlass("navSearch", { ctx: ["view", "search"], sample: 16, ssMax: 2 }),
-    /* 这几枚压在大图 / 详情页头部的画面上（深色岛）：玻璃仍是深色，白色图标才看得清 */
-    makeGlass("heroInfoBtn", { ctx: ["view"], sample: 28, look: DARK_LOOK }),
-    makeGlass("detailNavBack", { ctx: ["detail"], sample: 28, look: DARK_LOOK }),
-    makeGlass("detailNavMore", { ctx: ["detail"], sample: 28, look: DARK_LOOK }),
-    makeGlass("detailMore", { ctx: ["detail"], sample: 28, look: DARK_LOOK })
+    makeGlass("heroInfoBtn", { ctx: ["view"], sample: 28 }),
+    makeGlass("detailNavBack", { ctx: ["detail"], sample: 28 }),
+    makeGlass("detailNavMore", { ctx: ["detail"], sample: 28 }),
+    makeGlass("detailMore", { ctx: ["detail"], sample: 28 })
   ];
   function each(fn) { for (var i = 0; i < glasses.length; i++) { try { fn(glasses[i]); } catch (e) {} } }
 
@@ -23996,10 +23894,10 @@ if (DEV) {
     if (navPill) {
       // Selected item = frosted glass: blur the refraction directly behind the pill (compositor
       // applies this continuously as the pill slides, so the frost tracks selection for free).
-      navPill.style.background = "rgba(120,120,128,0.16)";           // faint grey frost (light UI)
+      navPill.style.background = "rgba(255,255,255,0.08)";           // faint milky frost tint
       navPill.style.backdropFilter = "blur(12px) saturate(1.3)";
       navPill.style.webkitBackdropFilter = "blur(12px) saturate(1.3)";
-      navPill.style.boxShadow = "inset 0 0 0 0.5px rgba(0,0,0,0.05), inset 0 0.5px 0 rgba(255,255,255,0.6), 0 1px 4px rgba(0,0,0,0.08)";
+      navPill.style.boxShadow = "inset 0 0 0 0.5px rgba(255,255,255,0.20), 0 1px 6px rgba(0,0,0,0.18)";
     }
 
     setInterval(schedule, 1500);   // periodic re-check for host (re)mounts; no forced style rebuild

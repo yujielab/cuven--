@@ -1127,54 +1127,6 @@ console.log('\n■ 今日推荐：大号描边名次 + 海报压在数字右缘 
   caches.default.m.clear();
 }
 
-console.log('\n■ 浅色界面：白底深字，画面上的内容照旧深底浅字');
-{
-  const lc = await context({ ...devices['iPhone 15 Pro'] });
-  const lp = await enter(lc);
-  await lp.waitForTimeout(1500);
-  const rgb = s => (s.match(/\d+(\.\d+)?/g) || []).map(Number);
-  const P = await lp.evaluate(() => {
-    const cs = e => e ? getComputedStyle(e) : null;
-    const meta = n => (document.querySelector(`meta[name="${n}"]`) || {}).content || '';
-    const title = document.querySelector('.hcard.is-center .hero-logo-text, .hcard.is-center .hero-content');
-    const pill = document.querySelector('.section-header > span:first-child:not(.year-pill-slot)');
-    const inactive = document.querySelector('#navContainer .nav-item:not(.active)');
-    return { bg: cs(document.body).backgroundColor, color: cs(document.body).color,
-      theme: meta('theme-color'), bar: meta('apple-mobile-web-app-status-bar-style'), scheme: meta('color-scheme'),
-      hero: title ? cs(title).color : '', pillBg: pill ? cs(pill).backgroundColor : '', pillColor: pill ? cs(pill).color : '',
-      nav: cs(document.getElementById('navContainer')).backgroundColor, item: inactive ? cs(inactive).color : '',
-      active: cs(document.querySelector('#navContainer .nav-item.active')).color };
-  });
-  const light = c => { const v = rgb(c); return v.length >= 3 && v[0] > 225 && v[1] > 225 && v[2] > 225; };
-  const dark = c => { const v = rgb(c); return v.length >= 3 && v[0] < 70 && v[1] < 70 && v[2] < 70; };
-  ok(light(P.bg) && dark(P.color) && P.theme === '#ffffff' && P.bar === 'default' && P.scheme === 'light',
-    `页面白底深字；theme-color 白、状态栏 default（深色字）、color-scheme light（${P.bg} / ${P.color} / ${P.bar}）`);
-  ok(/255, 255, 255/.test(P.hero) && dark(P.pillColor) && light(P.pillBg) && light(P.nav) && dark(P.item) && /0, 122, 255/.test(P.active),
-    `首页大图上的片名照旧白字；分区标题是浅灰胶囊深字；导航是浅色玻璃、深色标签、选中蓝色（${P.hero} / ${P.item} / ${P.active}）`);
-  /* 详情页：头部深色、往下白底；内容短时白底那一截也不压到背景图上 */
-  const first = await lp.evaluate(() => { const v = state.allVideos.find(x => !/^\/Movies\/long/.test(x.path)) || state.allVideos[0]; return [v.path, v.name]; });
-  await lp.evaluate(([a, b]) => openDetail(a, b), first);
-  await lp.waitForSelector('#detailPlay', { state: 'visible', timeout: 10000 });
-  await lp.waitForTimeout(900);
-  const D = await lp.evaluate(() => {
-    const info = document.querySelector('.detail-hero-info'), hero = document.querySelector('.detail-hero');
-    const t = document.querySelector('.detail-logo-text, .detail-logo-img');
-    const sec = document.querySelector('#detailContent .detail-section, #detailContent .stills-section');
-    const before = getComputedStyle(info, '::before');
-    return { title: t && t.classList.contains('detail-logo-text') ? getComputedStyle(t).color : 'rgb(255, 255, 255)', under: before.backgroundImage,
-      heroBottom: Math.round(hero.getBoundingClientRect().bottom), secTop: sec ? Math.round(sec.getBoundingClientRect().top) : 0,
-      h3: getComputedStyle(document.querySelector('#detailContent .detail-section h3')).color, view: getComputedStyle(document.getElementById('detailView')).backgroundColor };
-  });
-  ok(/255, 255, 255/.test(D.title) && /rgb\(0, 0, 0\)/.test(D.under) && light(D.view) && dark(D.h3),
-    `详情页：片名白字压在深色衬底上，往下的「影片信息」在白底上是深色字（${D.h3}）`);
-  ok(D.secTop >= D.heroBottom - 2, `白底那一截从背景图下缘以下开始（图底 ${D.heroBottom}，下一节 ${D.secTop}）`);
-  await lp.evaluate(() => closeDetail()); await lp.waitForTimeout(700);
-  await lp.evaluate(([a, b]) => openSheetForFile(a, b), first); await lp.waitForTimeout(700);
-  const sh = await lp.evaluate(() => getComputedStyle(document.getElementById('sheetMenu')).backgroundColor);
-  ok(light(sh), `弹层是浅色玻璃（${sh}）`);
-  await lc.close();
-}
-
 console.log('\n■ 登录页：品牌区（流体底图 + Cuven max 字标 + 蓝色脉冲）+ 白色面板');
 {
   for (const [label, opt] of [['iPhone', { ...devices['iPhone 15 Pro'], deviceScaleFactor: 2 }], ['Mac', { viewport: { width: 1440, height: 900 } }]]) {
