@@ -5878,11 +5878,10 @@ html.rail.rail-float .dock:not(.searching) #headerAvatar:active { transform: sca
 
 /* ── 首页大图（hero）：按这块屏专门排 ──────────────────────────────────
    能放内容的是右侧那一列（状态栏 + 导航）以左的那一块 —— Safari 的视口本来就只有这么宽（466 − 84 = 382）。
-   · 全出血时：画面照旧铺满整屏（右边那一列也是画面），但标签、片名、按钮、暂停钮与轮播点都居中到左边那块，
-     彼此对齐，谁也不伸进右边那一列；左边那个给暂停钮配平的占位也收掉；
-   · 收成卡片时：卡落在左边那块里（左右边距收窄一档，卡不至于太窄），右邻那张从导航底下露一条边，
-     卡下面那条进度胶囊与卡同宽，同样不钻到导航底下。
-   步距、卡宽都还是那几条带 --m 的 calc，只是右边多减一个 --float-space；JS 的拖拽步距是从 DOM 量的，跟着变。 */
+   折起竖拿一打开就是卡片态，没有全出血那一态（--m 恒为 1，见下）：卡落在左边那块里（左右边距收窄一档，卡不至于太窄），
+   左右露出邻卡、右邻那张从导航底下露一条边；卡里的片名、年份胶囊、按钮居中对齐，卡下那排圆点同样不钻到导航底下。
+   步距、卡宽都还是那几条带 --m 的 calc，只是右边多减一个 --float-space；JS 的拖拽步距是从 DOM 量的，跟着变。
+   下面几条 :not(.morphed) 只管脚本打上 .morphed 之前的那一瞬。 */
 html.rail.rail-float .hero-deck {
   --gap-x: clamp(22px, 7vw, 40px);
   --pitch: calc(100% - var(--m) * (var(--gap-x) * 2 + var(--float-space)) + var(--gutter));
@@ -5894,11 +5893,14 @@ html.rail.rail-float .hcard {
 html.rail.rail-float .hero-deck:not(.morphed) .aap-host { padding-right: var(--float-space); }
 html.rail.rail-float .hero-deck:not(.morphed) .aap-host .aap-media-card-gallery.all-access-pass::before { width: 0; }
 html.rail.rail-float .hero-deck.morphed .aap-host { padding-right: calc(var(--m, 0) * var(--gap-x, 0px) + var(--float-space)); }
-/* 沉浸：大图铺满一整屏（别的手机是 85%）。状态栏在右边那一列，顶上没有要躲的 —— 画面从屏幕最上沿铺到最下沿，
-   主屏幕 App 里也不给顶上的安全区让位；片名与按钮跟着落到下半屏，暂停钮与轮播点抬到 Home 指示条之上。
-   往下一滚照旧收成卡片（形变的行程是 .hero-run 那一截，与大图多高无关） */
+/* 大图那一块占满一整屏（别的手机是 85%）：状态栏在右边那一列，顶上没有要躲的，主屏幕 App 里也不给顶上的安全区让位。
+   折起竖拿只有卡片态（见下）：卡落在这一屏里、左右露出邻卡，卡下一排圆点；不再有铺满整屏的那一态 */
 html.rail.rail-float .hero-deck,
 html.rail.rail-float.standalone .hero-deck { top: 0; height: 100svh; min-height: 0; max-height: none; }
+/* 一打开就是卡片态（见 updateHeroMorph）：没有「吸在顶上从大图收成卡」那段行程，大图跟着页面正常滚走；
+   脚本写 --m 之前的头一帧也已经是卡片的几何，不先闪一下整屏大图 */
+html.rail.rail-float .hero-run { height: 0; }
+html.rail.rail-float .hero-deck { --m: 1; }
 html.rail.rail-float.standalone .hero-stage { padding-top: 0; }
 html.rail.rail-float .hero-deck .aap-host { bottom: calc((1 - var(--m, 0)) * (var(--safe-b) + 16px) + var(--m, 0) * var(--gap-y, 0px)); }
 /* 文案只留三行：片名 → 「年份 · 类型」胶囊 → 按钮。片名下那行（类型 · 片长 / 严选标）不要，
@@ -5907,10 +5909,10 @@ html.rail.rail-float .hero-content > .hero-tags { display: none; }
 html.rail.rail-float .hero-content > .hero-logo-wrap { order: 1; transition-delay: 0s; }
 html.rail.rail-float .hero-content > .hero-status { order: 2; transition-delay: .08s; }
 html.rail.rail-float .hero-content > .hero-buttons { order: 3; transition-delay: .16s; }
-/* 收成卡片后卡下那一条：别的设备是与卡同宽的浏览进度条，这里换成 iOS 页码控件的样子 —— 一枚紧凑的玻璃胶囊
+/* 卡下那一条：别的设备是与卡同宽的浏览进度条，这里换成 iOS 页码控件的样子 —— 一枚紧凑的玻璃胶囊
    居中在卡下，一张一颗圆点：当前那颗纯白、略大，其余半透明，点哪颗跳到哪张。片单超过 8 张时只排 8 颗、跟着当前那张挪，
    还有更多的那一端最外两颗渐小（class 由 AAP.setCurrent 打）。胶囊 30 高，外面那层透明的 56 高不变，
-   中线还在原来那条进度条的中线上。全出血时的暂停钮 + 轮播点不变 */
+   中线还在原来那条进度条的中线上 */
 html.rail.rail-float .hero-deck.morphed .aap-host .aap-media-card-gallery.all-access-pass {
   width: auto; padding-inline: 0;
   background-color: transparent; box-shadow: none;
@@ -6196,7 +6198,7 @@ html.rail.rail-float #view-library:has(.lib-showcase) .library-veil {
     var w = Math.min(screen.width, screen.height);
     return w >= 600 && w < 760;
   };
-  var root = document.documentElement, t = 0;
+  var root = document.documentElement, t = 0, gen = 0;
   var set = function () {
     var fl = duo(), on = q.matches || fl || open();
     if (root.classList.contains('rail') === on && root.classList.contains('rail-float') === fl) return;
@@ -6204,8 +6206,21 @@ html.rail.rail-float #view-library:has(.lib-showcase) .library-veil {
     root.classList.add('rail-switching');
     root.classList.toggle('rail', on);
     root.classList.toggle('rail-float', fl);
+    /* 当场把新形态的样式算出来。合上那一下页面若正忙（整页按新尺寸重排、重绘），120ms 里一帧都没画，
+       样式系统就从没见过「新形态 + 不补间」这一态：等 rail-switching 摘掉才头一回算，格子照样从旧尺寸慢慢补间过去
+       （折起后胶囊条的格子从 58 一点点缩到 44、选中项的玻璃也是半透明的）。先算一次，这一跳就定死了。
+       页面头一回打标时（还在 <head> 里）没有旧形态可补间，不用算 */
+    if (document.body) void root.offsetWidth;
     clearTimeout(t);
-    t = setTimeout(function () { root.classList.remove('rail-switching'); try { window.dispatchEvent(new Event('railchange')); } catch (_) {} }, 120);
+    var my = ++gen;
+    /* 摘 rail-switching 也等真画出一帧之后：跟着视口尺寸走的那些样式（媒体查询）是在下一帧才换的，也得在不补间时落定 */
+    t = setTimeout(function () {
+      requestAnimationFrame(function () { requestAnimationFrame(function () {
+        if (my !== gen) return;
+        root.classList.remove('rail-switching');
+        try { window.dispatchEvent(new Event('railchange')); } catch (_) {}
+      }); });
+    }, 120);
   };
   /* 翻开 / 合上时视口与屏幕尺寸不一定同一刻更新：媒体查询先变、screen 晚一拍的话，
      合上那一下会读到展开时的屏幕宽度、认不出这是 Duo 的外屏，导航就卡在错的形态上，直到下一次转屏。
@@ -15499,6 +15514,17 @@ function setupHeroSwipe() {
     if (btn.classList.contains('btn-play')) playVideo(v.path, v.name);
     else openDetail(v.path, v.name);
   });
+  /* iPhone Duo 折起竖拿只有卡片态（见 updateHeroMorph），卡上的「播放 / 详情」跟别处的卡片态一样收起了：
+     点中间那张就开它的详情页（播放在详情页里），点露在两边的邻卡就翻到那张。别的设备的卡片态只是往下滚时路过的一态，不加。
+     横拖尾随的 click 已被上面捕获阶段那条吞掉，拖着翻页不会顺手打开详情 */
+  deck.addEventListener('click', e => {
+    if (!document.documentElement.classList.contains('rail-float') || !deck.classList.contains('morphed') || guard(e.target)) return;
+    const card = e.target.closest && e.target.closest('.hcard'), v = card && card._video;
+    if (!v) return;                                               /* 骨架卡：还没有内容 */
+    if (card.classList.contains('is-center')) { openDetail(v.path, v.name); return; }
+    const i = state.heroVideos.indexOf(v);
+    if (i >= 0 && i !== state.heroIdx) goToHero(i);
+  });
 
   /* 末段割线，不用瞬时差分：单帧 dx 受采样抖动影响太大，甩出去的力道会
      忽大忽小。取最近 ~90ms 的平均，既跟得上又不抖。
@@ -15683,6 +15709,9 @@ function updateHeroMorph(sc, el) {
   if (!heroEl) { heroMorphP = -1; return; }
   const run = heroRunHeight();
   let p = run > 0 ? Math.min(1, Math.max(0, (sc == null ? window.scrollY : sc) / run)) : 0;
+  /* iPhone Duo 折起竖拿：一打开就是卡片态（左右露出邻卡、卡下一排圆点），不要先铺满整屏再往下滚收成卡。
+     行程（.hero-run）在那里收成 0，没有吸顶空转那一截；卡片态照旧不自动轮播，左右滑 / 点圆点换片 */
+  if (document.documentElement.classList.contains('rail-float')) p = 1;
 
   /* 缓动，但不是动画 —— 是重参数化。
      位置对位置、不含时间常数，所以仍然逐像素跟手：手指停它就停、手指回它

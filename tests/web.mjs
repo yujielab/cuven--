@@ -677,9 +677,15 @@ for (const [w, h, label, mode, sai] of [[382, 580, '折起竖拿', 'float'], [46
     const midX = b => b ? (b.left + b.right) / 2 : NaN;
     const btns = r(card && card.querySelector('.hero-buttons')), ttl = r(card && (card.querySelector('.hero-logo-img') || card.querySelector('.hero-logo-text')));
     const aligned = Math.abs(midX(btns) - midX(dots)) <= 4 && (!ttl || Math.abs(midX(ttl) - midX(dots)) <= 4);
-    /* 沉浸：大图铺满一整屏，暂停钮与轮播点在 Home 指示条之上 */
-    const deck = r(document.querySelector('.hero-deck'));
+    /* 大图那一块占满一整屏，圆点在 Home 指示条之上 */
+    const deckEl = document.querySelector('.hero-deck'), deck = r(deckEl);
     const immersive = !!deck && Math.abs(deck.top) <= 1 && Math.abs(deck.height - innerHeight) <= 1 && dots.bottom <= innerHeight - 14;
+    /* 一打开就是卡片态（没滚动）：没有铺满整屏的大图那一态，也没有吸顶空转的那段行程；卡左右露出邻卡，卡下是圆点（不是进度条） */
+    const cc = r(card), run = document.querySelector('#view-home .hero-run');
+    const sib = [...document.querySelectorAll('.hcard:not(.is-center)')].map(r).filter(b => b.width > 0 && b.right > 0 && b.left < innerWidth);
+    const cardNow = scrollY === 0 && !!(deckEl && cc) && deckEl.classList.contains('morphed') && Math.abs(parseFloat(getComputedStyle(deckEl).getPropertyValue('--m')) - 1) < 0.01
+      && !!run && run.getBoundingClientRect().height === 0 && cc.left >= 8 && cc.width < innerWidth * 0.9 && sib.length >= 1
+      && getComputedStyle(document.getElementById('heroDots'), '::after').content === 'none';
     /* 文案三行：片名 → 年份胶囊 → 按钮；片名下那行（类型 · 片长 / 严选标）不出 */
     const st = r(card && card.querySelector('.hero-status')), tg = card && card.querySelector('.hero-tags');
     const order3 = !!(st && ttl && btns) && ttl.bottom <= st.top + 1 && st.bottom <= btns.top + 1 && (!tg || getComputedStyle(tg).display === 'none');
@@ -693,21 +699,20 @@ for (const [w, h, label, mode, sai] of [[382, 580, '折起竖拿', 'float'], [46
     const clear = !!(nav && play && dots) && play.top >= 0 && (float
       ? apart(play, nav) && apart(circ, nav) && apart(dots, nav) && nav.left > innerWidth / 2 && nav.right >= innerWidth - 24
         && nav.width <= 56 && Math.abs((nav.top + nav.bottom) / 2 - innerHeight * 0.55) <= 6
-        && newNav && shift === 0 && aligned && immersive && order3
+        && newNav && shift === 0 && aligned && immersive && cardNow && order3
       : rail ? apart(play, nav) && apart(dots, nav) && play.left >= nav.right
       : play.bottom <= nav.top && dots.bottom <= nav.top);
     const pillOk = float ? newNav : !!(pill && act) && Math.abs(pill.left - act.left) <= 2 && Math.abs(pill.top - act.top) <= 2 && Math.abs(pill.width - act.width) <= 2 && Math.abs(pill.height - act.height) <= 2;
     return { mode: float ? 'float' : rail ? 'rail' : 'bottom', vertical: nav ? nav.height > nav.width : false, clear, pillOk, sw: document.documentElement.scrollWidth, vw: innerWidth };
   });
   ok(g.mode === mode && g.vertical === (mode !== 'bottom') && g.clear && g.pillOk && g.sw === g.vw,
-    `${label} ${w}×${h}：${DESC[mode]}，${mode === 'float' ? '选中项有柔光圆底' : '选中指示器对齐'}，主视觉的按钮与轮播点不被导航挡住${mode === 'float' ? '、居中到导航左边那块，大图铺满整屏，文案是片名 → 年份胶囊 → 按钮' : ''}，没有横向溢出${g.mode === mode ? '' : `（实际：${g.mode}）`}`);
+    `${label} ${w}×${h}：${DESC[mode]}，${mode === 'float' ? '选中项有柔光圆底' : '选中指示器对齐'}，主视觉的按钮与轮播点不被导航挡住${mode === 'float' ? '、居中到导航左边那块；一打开就是卡片态（左右露出邻卡、卡下一排圆点，不先铺满整屏），卡上只留片名（年份胶囊、按钮收在它下面）' : ''}，没有横向溢出${g.mode === mode ? '' : `（实际：${g.mode}）`}`);
 }
-/* 往下一滚、大图收成卡片：卡落在导航左边那块，不钻到导航底下（实机的右侧安全区）。卡下不是与卡同宽的进度条，
+/* 一打开（不用往下滚）就是卡片态：卡落在导航左边那块，不钻到导航底下（实机的右侧安全区）。卡下不是与卡同宽的进度条，
    而是 iOS 页码控件那样的圆点胶囊：紧凑、居中在卡下，一张一颗点，当前那颗纯白、略大，其余半透明 */
 await duoCdp.send('Emulation.setSafeAreaInsetsOverride', { insets: { top: 0, right: 84, bottom: 20, left: 0 } });
 await pd.setViewportSize({ width: 466, height: 678 });
-await pd.waitForTimeout(600);
-await pd.evaluate(() => scrollTo(0, 300));
+await pd.evaluate(() => scrollTo(0, 0));
 await pd.waitForTimeout(900);
 const dotsOf = () => pd.evaluate(() => {
   const r = e => e.getBoundingClientRect(), ul = document.getElementById('heroDots');
@@ -716,17 +721,17 @@ const dotsOf = () => pd.evaluate(() => {
     const a = li.querySelector('.dotnav-link'), b = r(a);
     return { w: Math.round(b.width * 10) / 10, bg: getComputedStyle(a).backgroundColor, cur: a.classList.contains('current') };
   });
-  return { morphed: document.querySelector('.hero-deck').classList.contains('morphed'), card: [Math.round(c.left), Math.round(c.right), Math.round(c.bottom)],
+  return { y: Math.round(scrollY), morphed: document.querySelector('.hero-deck').classList.contains('morphed'), card: [Math.round(c.left), Math.round(c.right), Math.round(c.bottom)],
     cap: [Math.round(q.left), Math.round(q.right), Math.round(q.top), Math.round(q.height)], nav: Math.round(n.left),
     bar: getComputedStyle(ul, '::after').content, dots, n: state.heroVideos.length, idx: state.heroIdx, playing: AAP.playing };
 });
 const mo = await dotsOf();
 const cur0 = mo.dots.find(d => d.cur), rest0 = mo.dots.filter(d => !d.cur);
-ok(mo.morphed && mo.card[1] <= mo.nav - 8 && Math.abs((mo.cap[0] + mo.cap[1]) / 2 - (mo.card[0] + mo.card[1]) / 2) <= 2
+ok(mo.y === 0 && mo.morphed && mo.card[1] <= mo.nav - 8 && Math.abs((mo.cap[0] + mo.cap[1]) / 2 - (mo.card[0] + mo.card[1]) / 2) <= 2
   && mo.cap[1] - mo.cap[0] < (mo.card[1] - mo.card[0]) * 0.6 && mo.cap[3] >= 28 && mo.cap[3] <= 32 && mo.cap[2] >= mo.card[2] + 8
   && mo.bar === 'none' && mo.n > 1 && mo.dots.length === mo.n && !!cur0 && cur0.bg === 'rgb(255, 255, 255)'
   && rest0.every(d => d.bg === 'rgba(255, 255, 255, 0.5)' && cur0.w > d.w * 1.1),
-  `折起竖拿 · 大图收成卡片：卡 ${mo.card[0]}–${mo.card[1]} 停在导航（${mo.nav}）左边；卡下是居中的圆点胶囊（${mo.cap[0]}–${mo.cap[1]}，${mo.cap[3]} 高），` +
+  `折起竖拿 · 一打开（没滚动）就是卡片态：卡 ${mo.card[0]}–${mo.card[1]} 停在导航（${mo.nav}）左边；卡下是居中的圆点胶囊（${mo.cap[0]}–${mo.cap[1]}，${mo.cap[3]} 高），` +
   `${mo.dots.length} 张 ${mo.dots.length} 颗点，当前那颗纯白、略大（${cur0 && cur0.w} / ${rest0[0] && rest0[0].w}），不再是进度条`);
 /* 点最后一颗：跳到那一张；卡片态照旧不自动轮播（原来直接走 _jumpAap 会把轮播开起来） */
 await pd.click(`#heroDots .dotnav-item:nth-child(${mo.n}) .dotnav-link`);
@@ -752,8 +757,33 @@ const pat = (ds, l, r) => ds.length === 8 && (l ? small(ds[0]) && small(ds[1]) &
 ok(pat(many[2], false, true) && many[2][2].cur && pat(many[5], true, true) && many[5][4].cur && pat(many[10], true, false) && many[10][7].cur,
   `折起竖拿 · 片单超过 8 张：只排 8 颗，第 3 张时右端两颗渐小（${many[2].map(d => d.w).join(' ')}），` +
   `居中时两端渐小（${many[5].map(d => d.w).join(' ')}），到末尾左端渐小（${many[10].map(d => d.w).join(' ')}）`);
+/* 往下滚：大图跟着页面一起滚走（没有吸在顶上空转的那段行程），一直是卡片态 */
+await pd.evaluate(() => scrollTo(0, 200));
+await pd.waitForTimeout(500);
+const sc1 = await pd.evaluate(() => { const d = document.querySelector('.hero-deck');
+  return { y: Math.round(scrollY), top: Math.round(d.getBoundingClientRect().top), morphed: d.classList.contains('morphed'), m: getComputedStyle(d).getPropertyValue('--m').trim() }; });
+ok(sc1.y === 200 && Math.abs(sc1.top + 200) <= 1 && sc1.morphed && Math.abs(parseFloat(sc1.m) - 1) < 0.01,
+  `折起竖拿 · 往下滚 ${sc1.y}：大图跟着页面滚走（顶边到 ${sc1.top}），没有吸顶空转那一截，一直是卡片态（--m ${sc1.m}）`);
 await pd.evaluate(() => scrollTo(0, 0));
 await pd.waitForTimeout(500);
+/* 卡上不出按钮（与图一一样）：点中间那张开它的详情页；点露在左边的邻卡就翻到那张（不开详情、不开始轮播） */
+const pts = await pd.evaluate(() => {
+  const r = e => e.getBoundingClientRect(), c = r(document.querySelector('.hcard.is-center'));
+  const left = [...document.querySelectorAll('.hcard:not(.is-center)')].map(e => [e, r(e)]).find(([, b]) => b.left < 0 && b.right > 6);
+  const lx = left ? left[1].right / 2 : -1, ly = (c.top + c.bottom) / 2, hit = left && document.elementFromPoint(lx, ly);
+  return { cx: (c.left + c.right) / 2, cy: c.top + c.height * 0.3, lx, ly, leftOk: !!hit && hit.closest('.hcard') === left[0],
+    leftIdx: left ? state.heroVideos.indexOf(left[0]._video) : -1, idx: state.heroIdx };
+});
+await pd.mouse.click(pts.cx, pts.cy);
+const opened = await until(pd, () => document.getElementById('detailView').classList.contains('on'), null, 8000).then(() => true, () => false);
+await pd.evaluate(() => closeDetail());
+await pd.waitForTimeout(800);
+await pd.mouse.click(pts.lx, pts.ly);
+await pd.waitForTimeout(900);
+const tapped = await pd.evaluate(() => ({ idx: state.heroIdx, det: document.getElementById('detailView').classList.contains('on'), playing: AAP.playing }));
+ok(opened && pts.leftOk && pts.leftIdx >= 0 && tapped.idx === pts.leftIdx && !tapped.det && !tapped.playing,
+  `折起竖拿 · 卡上不出按钮：点中间那张开它的详情页${opened ? '' : '（没开）'}；点露在左边的邻卡翻到那张（第 ${pts.idx + 1} → ${tapped.idx + 1} 张，` +
+  `不开详情、不开始轮播）${pts.leftOk ? '' : '（左边没有露出的邻卡）'}`);
 /* 资料库展映：背景视频、片名都收在右侧那一列（状态栏 + 导航）以左，那一列底下是黑的；
    画面右上角的播放钮不出，进资料库时顶替「资料库」那一格并进导航胶囊，离开就换回；预告片一律静音，没有声音钮 */
 const navBox = () => pd.evaluate(() => { const r = e => e.getBoundingClientRect(), d = r(document.getElementById('dock')), m = r(document.getElementById('navMedia'));
@@ -881,7 +911,7 @@ for (const [label, opts] of [['普通 iPhone（393 宽）', devices['iPhone 15 P
     const st = card.querySelector('.hero-status').getBoundingClientRect(), lg = card.querySelector('.hero-logo-wrap').getBoundingClientRect();
     const tags = getComputedStyle(card.querySelector('.hero-tags')).display !== 'none';
     return { off: !c.contains('rail') && !c.contains('rail-float'), bottom: n.bottom >= innerHeight - 90 && n.width > n.height, deck: Math.round(d.height), vh: innerHeight,
-      same: tags && st.bottom <= lg.top + 1 }; });
+      same: tags && st.bottom <= lg.top + 1, full0: scrollY === 0 && !document.querySelector('.hero-deck').classList.contains('morphed') }; });
   /* 收成卡片后卡下照旧是那条与卡同宽的浏览进度条（圆点胶囊只给 Duo 折起）。等它真的收成卡（机器忙时滚动后的那一帧会晚到），
      再等合并那 .4 秒的宽度过渡走完 */
   await pa.evaluate(() => scrollTo(0, 400));
@@ -894,9 +924,9 @@ for (const [label, opts] of [['普通 iPhone（393 宽）', devices['iPhone 15 P
       && (!li || getComputedStyle(li).display === 'none') && Math.abs(q.left - c.left) <= 2 && Math.abs(q.right - c.right) <= 2,
       card: [Math.round(c.left), Math.round(c.right)], bar: [Math.round(q.left), Math.round(q.right)], fill: af.width };
   });
-  ok(b.off && b.bottom && b.deck < b.vh - 40 && b.same && bar.ok,
-    `${label}：不当成 iPhone Duo，照旧底部胶囊；大图照旧不铺满（${b.deck} / ${b.vh}），文案照旧（年份胶囊在片名上面，类型那行还在），` +
-    `收成卡片后卡下照旧是与卡同宽的进度条（卡 ${bar.card.join('–')}，进度条 ${bar.bar.join('–')}）${b.off && b.bottom && b.same ? '' : JSON.stringify(b)}`);
+  ok(b.off && b.bottom && b.deck < b.vh - 40 && b.same && b.full0 && bar.ok,
+    `${label}：不当成 iPhone Duo，照旧底部胶囊；大图照旧不铺满（${b.deck} / ${b.vh}），一打开照旧是全出血大图、往下滚才收成卡，文案照旧（年份胶囊在片名上面，类型那行还在），` +
+    `收成卡片后卡下照旧是与卡同宽的进度条（卡 ${bar.card.join('–')}，进度条 ${bar.bar.join('–')}）${b.off && b.bottom && b.same && b.full0 ? '' : JSON.stringify(b)}`);
   if (label.startsWith('普通 iPhone')) {
     /* 资料库照旧：展映铺满整宽，播放钮还在画面右上角（没有声音钮），导航里没有多出那一格 */
     await pa.evaluate(() => navTo('library'));
