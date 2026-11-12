@@ -1,4 +1,25 @@
 /**
+ * Cuven ᴿ 索引库 · v6 —— 缺片检测重做 · 原子提交 · 多重兜底
+ * ══════════════════════════════════════════════════════════════════
+ * 一、缺片检测（libOwn，见「缺片检测」一节；标准答案与压测在 tests/）
+ *   v5.4 在随机生成的六千部片海上：误藏（缺片被当成已有藏掉）七百部，精确率 66%。
+ *   原因是三条规则太宽：认下来的条目也照样按「片名 + 年份 ±1」把同名的另一部片藏掉；
+ *   没年份的条目只按片名一撞就藏，一个「Dune.mkv」能藏掉两部《沙丘》；Stream 认错的 id
+ *   照单全收。片名比对只做小写去符号，繁体、全角、重音、罗马数字、冠词、第二部全对不上。
+ *   v6：可信 id 精确比；没有可信 id 的条目「认领」索引里的一部片（名字先、年份后，
+ *   并列就谁都不认）；名字互相矛盾的不认（港台译名例外：长英文名 + 同年照认）；
+ *   id 的年份或中英文名与文件名全对不上就判为认错；剧集允许季目录年份晚于首播。
+ *   同一份压测：电影精确率 99.2–99.7%、召回率 99.6–99.8%，剧集 99.3% / 99.2%。
+ *   判定整张表按（索引版本, 片库成品）算一次，查目录每部片只剩一次数组读取（27ms → 9ms）。
+ * 二、存储（见「原子提交」一节）
+ *   · 读失败不再当成「不存在」（v5 会用空表覆盖整个索引）；内容损坏拒绝覆盖；
+ *   · 分片与 tid 表 copy-on-write，写 state.json 才算提交，平台随时掐进程都不留半截；
+ *   · 锁带身份、条件写抢锁、提交前核对并续期；影片表只增不减的检查；
+ *   · 每天自动备份 movies / state / 留底队列，体检里一键恢复；孤儿对象自动清理。
+ * 三、其它兜底：源闸门卡死自动放行；所有出站请求带超时；种子按 bencode 逐层解析
+ *   （v5 会在文件名里含「4:info」时算错 btih、遇到截断的种子死循环）；海报代理不再因
+ *   上游断网抛异常；取件遇到限速 / 断网自动重试（每部最多 4 次）而不是直接记为失败。
+ * ══════════════════════════════════════════════════════════════════
  * Cuven ᴿ 索引库 · v5.4 —— 片库对照改吃总账
  * ══════════════════════════════════════════════════════════════════
  * v5.4 只动片库对照这一块，索引管线与界面一行未改。
@@ -147,6 +168,7 @@
  *      · 一个 isolate 同一时刻只允许一个源在跑，见 srcEnter / srcLeave
  *
  * Secrets: SITE_USER / SITE_PASS / TMDB_KEY / GATE
+ * 变量:    TMDB_BASE（TMDB 走自己的反代时填，可选，默认 https://api.themoviedb.org/3）
  * 变量:    RECV_BASE（片库总账 Received.json 的公开 R2 域名，首选）
  *          STREAM_BASE（片库对照的回退路径，可选）  PLAN=paid（放宽配额，可选）
  *          TV_BASE（剧集版块若不在同一域名，单独指过去，可选）
@@ -177,8 +199,8 @@ const idxKeys = (ns, v3) => ({
   movies: ns + 'movies.json',
   state:  ns + 'state.json',
   /* 分片链：电影的 p0 沿用 v4.0 的旧路径，老索引零迁移就能继续读 */
-  part:   (y, i) => ns + 'y' + y + (i ? '.p' + i : '') + '.json',
-  tids:   (y) => ns + 'y' + y + '.t.json',
+  part:   (y, i, g) => ns + 'y' + y + (i ? '.p' + i : '') + (g ? '.g' + g : '') + '.json',
+  tids:   (y, g) => ns + 'y' + y + '.t' + (g ? '.g' + g : '') + '.json',
   v3,
 });
 /* ── 片库对照（Stream / Dropbox）──
@@ -259,10 +281,19 @@ function useSrc(id){
    走完。等太久就回 409，让前端自己重试，而不是硬闯。
    后台任务（ctx.waitUntil）也算在这一批里，否则它会跨到下一批去写键。
    ══════════════════════════════════════════════════════════════════ */
-let GSRC = null, GN = 0, GWAIT = null, GDONE = null;
+let GSRC = null, GN = 0, GWAIT = null, GDONE = null, GLAST = 0;
+/* [v6] 闸门卡死的兜底：一批请求里只要有一个后台任务永远不结束（平台在 30 秒后掐掉 waitUntil，
+   但那个 Promise 永远不会 settle），GN 就永远减不到 0 —— 这个 isolate 从此对另一个源一律回 409。
+   现在闸门记着最后一次进出的时刻，超过 GATE_STALE 没有任何进出就当作卡死，强制放行并记一笔 */
+const GATE_STALE = 120000;
 async function srcEnter(id, waitMs = 25000){
   const t0 = Date.now();
   while (GN > 0 && GSRC !== id){
+    if (Date.now() - GLAST > GATE_STALE){
+      trace('sys', '源闸门 ' + Math.round((Date.now() - GLAST) / 1000) + ' 秒没有进出，判为卡死，强制放行（' + (SOURCES[GSRC] || {}).name + ' → ' + (SOURCES[id] || {}).name + '）', { lvl:'warn' });
+      const d = GDONE; GN = 0; GDONE = null; GWAIT = null; if (d) d();
+      break;
+    }
     if (Date.now() - t0 > waitMs){
       const e = new Error('另一个源（' + (SOURCES[GSRC] || {}).name + '）正在运行，稍后再试');
       e.busy = 1; e.wait = 5; throw e;
@@ -270,11 +301,12 @@ async function srcEnter(id, waitMs = 25000){
     await Promise.race([GWAIT, sleep(900)]).catch(()=>{});
   }
   if (GN === 0){ GSRC = id; GWAIT = new Promise(r => { GDONE = r; }); }
-  GN++;
+  GN++; GLAST = Date.now();
   useSrc(id);
   return SRC;
 }
 function srcLeave(){
+  GLAST = Date.now();
   if (--GN > 0) return;
   GN = 0;
   const d = GDONE; GDONE = null; GWAIT = null;
@@ -370,8 +402,20 @@ function subTake(n){
   SUB.n += n;
   if (SUB.n > SUB.peak) SUB.peak = SUB.n;
 }
-/** 唯一的出站入口：所有 fetch 都必须从这儿走，预算才算得准 */
-async function sfetch(u, init){ subTake(1); return fetch(u, init); }
+/** 唯一的出站入口：所有 fetch 都必须从这儿走，预算才算得准。
+    [v6] 默认带超时（20 秒）：没有超时的 fetch 一旦挂起，整轮任务就挂到平台掐进程为止 */
+const FETCH_MS = 20000;
+async function sfetch(u, init){
+  subTake(1);
+  const o = init ? { ...init } : {};
+  if (!o.signal && typeof AbortSignal !== 'undefined' && AbortSignal.timeout) o.signal = AbortSignal.timeout(o.timeoutMs || FETCH_MS);
+  delete o.timeoutMs;
+  try { return await fetch(u, o); }
+  catch (e){
+    if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) throw new Error('请求超时（' + Math.round((init && init.timeoutMs || FETCH_MS) / 1000) + ' 秒没有响应）：' + String(u).replace(/api_key=[^&]+/, 'api_key=…').slice(0, 80));
+    throw e;
+  }
+}
 
 /* ══════════════════════════════════════════════════════════════════
    管线计数
@@ -662,6 +706,20 @@ function decodeShard(sh){
   }
   return out;
 }
+/** 两份分片内容是否逐行相同（压实 / 拆分之后核对用） */
+function sameGroups(a, b){
+  const ka = Object.keys(a), kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const id of ka){
+    const x = a[id], y = b[id];
+    if (!y || x.length !== y.length) return false;
+    for (let i = 0; i < x.length; i++){
+      const p = x[i], q = y[i];
+      if (p.tid !== q.tid || p.title !== q.title || p.spec !== q.spec || p.mb !== q.mb || p.score !== q.score) return false;
+    }
+  }
+  return true;
+}
 /** 只解一部片，避免为看一部片解开整个分片 */
 function shardRows(sh, id){
   if (!sh || !sh.i) return [];
@@ -687,14 +745,31 @@ function shardRows(sh, id){
    这种问题必须解开分片才答得出 —— 筛选就没法做。放两个小整数在影片记录
    上，筛选退化成一次整数比较。老索引读出来是 undefined，按 0 处理，
    跑一次「重算汇总」就补齐。 */
+/* K（v6）：[CANON_V, canon(中文名), canon(原名)] —— 缺片检测的比对键，建索引时算好存下，
+   冷启动的 isolate 不必为三万部片重算一遍；规则版本对不上（或老记录没有）就现场算 */
 const F = { N:0, O:1, Y:2, P:3, T:4, C:5, G:6, YS:7, R:8, B:9, Q:10, Z:11, BT:12,
-             SP:13, BM:14, HB:15, RB:16 };
-const newMovie = (hit, y) => ([
-  hit.title || '', hit.original_title || '', (hit.release_date||'').slice(0,4),
-  hit.poster_path || '', hit.vote_average ? +hit.vote_average.toFixed(1) : 0,
-  hit.vote_count || 0, hit.genre_ids || [], [y], 0, 0, null, null, null,
-  null, 0, 0, 0,
-]);
+             SP:13, BM:14, HB:15, RB:16, K:17 };
+const newMovie = (hit, y) => {
+  const t = hit.title || '', o = hit.original_title || '';
+  return [
+    t, o, (hit.release_date||'').slice(0,4),
+    hit.poster_path || '', hit.vote_average ? +hit.vote_average.toFixed(1) : 0,
+    hit.vote_count || 0, hit.genre_ids || [], [y], 0, 0, null, null, null,
+    null, 0, 0, 0, [CANON_V, canon(t), canon(o)],
+  ];
+};
+/** 老记录补上比对键（建索引 / 增量 / 重算这几条重活顺手做，请求路径上不做） */
+function movieKeysFill(movies, cap){
+  let n = 0;
+  for (const id in movies.m){
+    const mv = movies.m[id];
+    const k = mv[F.K];
+    if (Array.isArray(k) && k[0] === CANON_V) continue;
+    mv[F.K] = [CANON_V, canon(mv[F.N]), canon(mv[F.O])];
+    if (++n >= (cap || 1e9)) break;
+  }
+  return n;
+}
 const newYear = () => ({ page:1, last:0, done:false, bad:[] });
 
 /** SP：{ 年份: [分片号...] } —— 详情只读真正装着这部片的那几片 */
@@ -1184,6 +1259,73 @@ function parseTitle(raw){
   return { cn, latin, years };
 }
 const norm = (s) => String(s||'').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g,'');
+
+/* ══════════════════════════════════════════════════════════════════
+   片名比对键 canon（v6）
+   ──────────────────────────────────────────────────────────────────
+   norm 只做「小写 + 去掉非字母数字」，于是同一部片换个写法就对不上：
+     復仇者聯盟（繁体） ↔ 复仇者联盟      ＩＮＴＥＲＳＴＥＬＬＡＲ（全角） ↔ Interstellar
+     Amélie（重音） ↔ Amelie             Rocky II ↔ Rocky 2      The Batman ↔ Batman
+     沙丘：第二部 ↔ 沙丘2                Dune: Part Two ↔ Dune Part 2
+   canon 把这些都折到同一个键上。它只用来「比」：索引的归并键（groupKey）
+   仍然用 norm —— 换掉它会让 movies.k 里认过的键全部失效、整库重认一遍。
+   繁转简的字表与 Stream 那边（字幕繁转简）是同一张。
+   ══════════════════════════════════════════════════════════════════ */
+const ZH_T = `㑮㑯㑳㑶㒓㓄㓨㔋㖮㗲㗿㘉㘓㘔㘚㛝㜄㜏㜐㜗㜢㜷㞞㟺㠏㠣㢗㢝㥮㦎㦛㦞㨻㩋㩜㩳㩵㪎㯤㰙㵗㵾㶆㷍㷿㸇㹽㺏㺜㻶㿖㿗㿧䀉䀹䁪䁻䂎䃮䅐䅳䆉䉑䉙䉬䉲䉶䊭䊷䊺䋃䋔䋙䋚䋦䋹䋻䋼䋿䌈䌋䌖䌝䌟䌥䌰䍤䍦䍽䎙䎱䓣䕤䕳䖅䗅䗿䙔䙡䙱䚩䛄䛳䜀䜖䝭䝻䝼䞈䞋䞓䟃䟆䟐䠆䠱䡐䡩䡵䢨䤤䥄䥇䥑䥕䥗䥩䥯䥱䦘䦛䦟䦯䦳䧢䪊䪏䪗䪘䪴䪾䫀䫂䫟䫴䫶䫻䫾䬓䬘䬝䬞䬧䭀䭃䭑䭔䭿䮄䮝䮞䮠䮫䮰䮳䮾䯀䯤䰾䱀䱁䱙䱧䱬䱰䱷䱸䱽䲁䲅䲖䲘䲰䳜䳢䳤䳧䳫䴉䴋䴬䴱䴴䴽䵳䵴䶕䶲丟並乾亂亙亞佇佈佔併來侖侶侷俁係俓俔俠俥俬倀倆倈倉個們倖倫倲偉偑側偵偽傌傑傖傘備傢傭傯傳傴債傷傾僂僅僉僑僕僞僤僥僨僱價儀儁儂億儈儉儎儐儔儕儘償儣優儭儲儷儸儺儻儼兇兌兒兗內兩冊冑冪凈凍凙凜凱別刪剄則剋剎剗剛剝剮剴創剷剾劃劇劉劊劌劍劏劑劚勁勑動務勛勝勞勢勣勩勱勳勵勸勻匭匯匱區協卹卻卽厙厠厤厭厲厴參叄叢吒吳吶呂咼員哯唄唓唸問啓啞啟啢喎喚喪喫喬單喲嗆嗇嗊嗎嗚嗩嗰嗶嗹嘆嘍嘓嘔嘖嘗嘜嘩嘪嘮嘯嘰嘳嘵嘸嘺嘽噁噅噓噚噝噞噠噥噦噯噲噴噸噹嚀嚇嚌嚐嚕嚙嚛嚥嚦嚧嚨嚮嚲嚳嚴嚶嚽囀囁囂囃囅囈囉囌囑囒囪圇國圍園圓圖團圞垻埡埨埬埰執堅堊堖堚堝堯報場塊塋塏塒塗塚塢塤塵塸塹塿墊墜墠墮墰墲墳墶墻墾壇壈壋壎壓壗壘壙壚壜壞壟壠壢壣壩壪壯壺壼壽夠夢夥夾奐奧奩奪奬奮奼妝姍姦娙娛婁婡婦婭媈媧媯媰媼媽嫋嫗嫵嫺嫻嫿嬀嬃嬇嬈嬋嬌嬙嬡嬣嬤嬦嬪嬰嬸嬻孃孄孆孇孋孌孎孫學孻孾孿宮寀寠寢實寧審寫寬寵寶將專尋對導尷屆屍屓屜屢層屨屩屬岡峯峴島峽崍崑崗崙崢崬嵐嵗嵼嵽嵾嶁嶄嶇嶈嶔嶗嶘嶠嶢嶧嶨嶮嶸嶹嶺嶼嶽巊巋巒巔巖巗巘巰巹帥師帳帶幀幃幓幗幘幝幟幣幩幫幬幹幾庫廁廂廄廈廎廕廚廝廞廟廠廡廢廣廧廩廬廳弒弔弳張強彃彄彆彈彌彎彔彙彠彥彫彲彿後徑從徠復徵徹徿恆恥悅悞悵悶悽惡惱惲惻愛愜愨愴愷愻愾慄態慍慘慚慟慣慤慪慫慮慳慶慺慼慾憂憊憐憑憒憖憚憢憤憫憮憲憶憸憹懀懇應懌懍懎懞懟懣懤懨懲懶懷懸懺懼懾戀戇戔戧戩戰戱戲戶拋挩挱挾捨捫捱捲掃掄掆掗掙掚掛採揀揚換揮揯損搖搗搵搶摋摐摑摜摟摯摳摶摺摻撈撊撏撐撓撝撟撣撥撧撫撲撳撻撾撿擁擄擇擊擋擓擔據擟擠擣擫擬擯擰擱擲擴擷擺擻擼擽擾攄攆攋攏攔攖攙攛攜攝攢攣攤攪攬敎敓敗敘敵數斂斃斅斆斕斬斷斸於旂旣昇時晉晛晝暈暉暐暘暢暫曄曆曇曉曊曏曖曠曥曨曬書會朥朧朮東枴柵柺査桱桿梔梖梘梜條梟梲棄棊棖棗棟棡棧棲棶椏椲楇楊楓楨業極榘榦榪榮榲榿構槍槓槤槧槨槫槮槳槶槼樁樂樅樑樓標樞樠樢樣樤樧樫樳樸樹樺樿橈橋機橢橫橯檁檉檔檜檟檢檣檭檮檯檳檵檸檻櫃櫅櫍櫓櫚櫛櫝櫞櫟櫠櫥櫧櫨櫪櫫櫬櫱櫳櫸櫻欄欅欇權欍欏欐欑欒欓欖欘欞欽歎歐歟歡歲歷歸歿殘殞殢殤殨殫殭殮殯殰殲殺殻殼毀毆毊毿氂氈氌氣氫氬氭氳氾汎汙決沒沖況泝洩洶浹浿涇涗涼淒淚淥淨淩淪淵淶淺渙減渢渦測渾湊湋湞湧湯溈準溝溡溫溮溳溼滄滅滌滎滙滬滯滲滷滸滻滾滿漁漊漍漚漢漣漬漲漵漸漿潁潑潔潕潙潚潛潣潤潯潰潷潿澀澅澆澇澐澗澠澤澦澩澫澬澮澱澾濁濃濄濆濕濘濚濛濜濟濤濧濫濰濱濺濼濾濿瀂瀃瀅瀆瀇瀉瀋瀏瀕瀘瀝瀟瀠瀦瀧瀨瀰瀲瀾灃灄灍灑灒灕灘灙灝灡灣灤灧灩災為烏烴無煇煉煒煙煢煥煩煬煱熂熅熉熌熒熓熗熚熡熰熱熲熾燀燁燈燉燒燖燙燜營燦燬燭燴燶燻燼燾爃爄爇爍爐爖爛爥爧爭爲爺爾牀牆牘牽犖犛犞犢犧狀狹狽猌猙猶猻獁獃獄獅獊獎獨獩獪獫獮獰獱獲獵獷獸獺獻獼玀玁珼現琱琺琿瑋瑒瑣瑤瑩瑪瑲瑻瑽璉璊璕璗璝璡璣璦璫璯環璵璸璼璽璾璿瓄瓅瓊瓏瓔瓕瓚瓛甌甕產産甦甯畝畢畫異畵當畼疇疊痙痠痮痾瘂瘋瘍瘓瘞瘡瘧瘮瘱瘲瘺瘻療癆癇癉癐癒癘癟癡癢癤癥癧癩癬癭癮癰癱癲發皁皚皟皰皸皺盃盜盞盡監盤盧盨盪眝眞眥眾睍睏睜睞瞘瞜瞞瞤瞶瞼矇矉矑矓矚矯硃硜硤硨硯碕碙碩碭碸確碼碽磑磚磠磣磧磯磽磾礄礆礎礐礒礙礦礪礫礬礮礱祕祿禍禎禕禡禦禪禮禰禱禿秈稅稈稏稜稟種稱穀穇穌積穎穠穡穢穩穫穭窩窪窮窯窵窶窺竄竅竇竈竊竚竪竱競筆筍筧筴箇箋箏節範築篋篔篘篠篢篤篩篳篸簀簂簍簑簞簡簢簣簫簹簽簾籃籅籋籌籔籙籛籜籟籠籤籩籪籬籮籲粵糉糝糞糧糰糲糴糶糹糺糾紀紂紃約紅紆紇紈紉紋納紐紓純紕紖紗紘紙級紛紜紝紞紟紡紬紮細紱紲紳紵紹紺紼紿絀絁終絃組絅絆絍絎結絕絙絛絝絞絡絢絥給絧絨絪絰統絲絳絶絹絺綀綁綃綄綆綇綈綉綋綌綎綏綐綑經綖綜綝綞綟綠綡綢綣綧綪綫綬維綯綰綱網綳綴綵綸綹綺綻綽綾綿緄緇緊緋緍緑緒緓緔緗緘緙線緝緞緟締緡緣緤緦編緩緬緮緯緰緱緲練緶緷緸緹緻緼縈縉縊縋縍縎縐縑縕縗縛縝縞縟縣縧縫縬縭縮縯縰縱縲縳縴縵縶縷縸縹縺總績繂繃繅繆繈繏繐繒繓織繕繚繞繟繡繢繨繩繪繫繬繭繮繯繰繳繶繷繸繹繻繼繽繾繿纁纆纇纈纊續纍纏纓纔纕纖纗纘纚纜缽罃罈罌罎罰罵罷羅羆羈羋羣羥羨義羵羶習翫翬翹翽耬耮聖聞聯聰聲聳聵聶職聹聻聽聾肅脅脈脛脣脥脩脫脹腎腖腡腦腪腫腳腸膃膕膚膞膠膢膩膹膽膾膿臉臍臏臗臘臚臟臠臢臥臨臺與興舉舊舘艙艣艤艦艫艱艷芻苧茲荊莊莖莢莧菕華菴菸萇萊萬萴萵葉葒葝葤葦葯葷蒍蒐蒓蒔蒕蒞蒭蒼蓀蓆蓋蓧蓮蓯蓴蓽蔄蔔蔘蔞蔣蔥蔦蔭蔯蔿蕁蕆蕎蕒蕓蕕蕘蕝蕢蕩蕪蕭蕳蕷蕽薀薆薈薊薌薑薔薘薟薦薩薳薴薵薹薺藍藎藝藥藪藭藴藶藷藹藺蘀蘄蘆蘇蘊蘋蘚蘞蘟蘢蘭蘺蘿虆虉處虛虜號虧虯蛺蛻蜆蝀蝕蝟蝦蝨蝸螄螞螢螮螻螿蟂蟄蟈蟎蟘蟜蟣蟬蟯蟲蟳蟶蟻蠀蠁蠅蠆蠍蠐蠑蠔蠙蠟蠣蠦蠨蠱蠶蠻蠾衆衊術衕衚衛衝袞裊裏補裝裡製複褌褘褲褳褸褻襀襇襉襏襓襖襗襘襝襠襤襪襬襯襰襲襴襵覈見覎規覓視覘覛覡覥覦親覬覯覲覷覹覺覼覽覿觀觴觶觸訁訂訃計訊訌討訏訐訑訒訓訕訖託記訛訜訝訞訟訢訣訥訨訩訪設許訴訶診註証詀詁詆詊詎詐詑詒詓詔評詖詗詘詛詝詞詠詡詢詣試詩詪詫詬詭詮詰話該詳詵詷詼詿誂誄誅誆誇誋誌認誑誒誕誘誚語誠誡誣誤誥誦誨說誫説誰課誳誴誶誷誹誺誼誾調諂諄談諉請諍諏諑諒諓論諗諛諜諝諞諟諡諢諣諤諥諦諧諫諭諮諯諰諱諲諳諴諶諷諸諺諼諾謀謁謂謄謅謆謉謊謎謏謐謔謖謗謙謚講謝謠謡謨謫謬謭謯謱謳謸謹謾譁譂譅譆證譊譎譏譑譓譖識譙譚譜譞譟譨譫譭譯議譴護譸譽譾讀讅變讋讌讎讒讓讕讖讚讜讞豈豎豐豔豬豵豶貓貗貙貝貞貟負財貢貧貨販貪貫責貯貰貲貳貴貶買貸貺費貼貽貿賀賁賂賃賄賅資賈賊賑賒賓賕賙賚賜賝賞賟賠賡賢賣賤賦賧質賫賬賭賰賴賵賺賻購賽賾贃贄贅贇贈贉贊贋贍贏贐贑贓贔贖贗贚贛贜赬趕趙趨趲跡踐踰踴蹌蹔蹕蹟蹠蹣蹤蹳蹺蹻躂躉躊躋躍躎躑躒躓躕躘躚躝躡躥躦躪軀軉車軋軌軍軏軑軒軔軕軗軛軜軝軟軤軨軫軬軲軷軸軹軺軻軼軾軿較輄輅輇輈載輊輋輒輓輔輕輖輗輛輜輝輞輟輢輥輦輨輩輪輬輮輯輳輶輷輸輻輼輾輿轀轂轄轅轆轇轉轊轍轎轐轔轗轟轠轡轢轣轤辦辭辮辯農迴逕這連週進遊運過達違遙遜遞遠遡適遱遲遷選遺遼邁還邇邊邏邐郟郵鄆鄉鄒鄔鄖鄟鄧鄩鄭鄰鄲鄳鄴鄶鄺酇酈醃醖醜醞醟醣醫醬醱醲醶釀釁釃釅釋釐釒釓釔釕釗釘釙釚針釟釣釤釦釧釨釩釲釳釴釵釷釹釺釾釿鈀鈁鈃鈄鈅鈆鈇鈈鈉鈋鈍鈎鈐鈑鈒鈔鈕鈖鈗鈛鈞鈠鈡鈣鈥鈦鈧鈮鈯鈰鈲鈳鈴鈷鈸鈹鈺鈽鈾鈿鉀鉁鉅鉆鉈鉉鉊鉋鉍鉑鉔鉕鉗鉚鉛鉝鉞鉠鉢鉤鉥鉦鉧鉬鉭鉮鉳鉶鉷鉸鉺鉻鉽鉾鉿銀銁銂銃銅銈銊銍銏銑銓銖銘銚銛銜銠銣銥銦銨銩銪銫銬銱銳銶銷銹銻銼鋁鋂鋃鋅鋇鋉鋌鋏鋐鋒鋗鋙鋝鋟鋠鋣鋤鋥鋦鋨鋩鋪鋭鋮鋯鋰鋱鋶鋸鋹鋼錀錁錂錄錆錇錈錏錐錒錕錘錙錚錛錜錝錞錟錠錡錢錤錥錦錨錩錫錮錯録錳錶錸錼錽鍀鍁鍃鍄鍅鍆鍇鍈鍉鍊鍋鍍鍒鍔鍘鍚鍛鍠鍤鍥鍩鍬鍭鍮鍰鍵鍶鍺鍼鍾鎂鎄鎇鎈鎊鎌鎍鎓鎔鎖鎘鎙鎚鎛鎝鎞鎡鎢鎣鎦鎧鎩鎪鎬鎭鎮鎯鎰鎲鎳鎵鎶鎷鎸鎿鏃鏆鏇鏈鏉鏌鏍鏏鏐鏑鏗鏘鏚鏜鏝鏞鏟鏡鏢鏤鏥鏦鏨鏰鏵鏷鏹鏺鏻鏽鏾鐃鐄鐇鐈鐋鐍鐎鐏鐐鐒鐓鐔鐘鐙鐝鐠鐥鐦鐧鐨鐩鐪鐫鐮鐯鐲鐳鐵鐶鐸鐺鐼鐽鐿鑀鑄鑉鑊鑌鑑鑒鑔鑕鑞鑠鑣鑥鑪鑭鑰鑱鑲鑴鑷鑹鑼鑽鑾鑿钁钂長門閂閃閆閈閉開閌閍閎閏閐閑閒間閔閗閘閝閞閡閣閤閥閨閩閫閬閭閱閲閵閶閹閻閼閽閾閿闃闆闇闈闉闊闋闌闍闐闑闒闓闔闕闖關闞闠闡闢闤闥陘陝陞陣陰陳陸陽隉隊階隑隕際隤隨險隮隯隱隴隸隻雋雖雙雛雜雞離難雲電霑霢霣霧霼霽靂靄靆靈靉靚靜靝靦靧靨鞏鞝鞦鞽鞾韁韃韆韉韋韌韍韓韙韚韛韜韝韞韠韻響頁頂頃項順頇須頊頌頍頎頏預頑頒頓頔頗領頜頠頡頤頦頫頭頮頰頲頴頵頷頸頹頻頽顂顃顅顆題額顎顏顒顓顔顗願顙顛類顢顣顥顧顫顬顯顰顱顳顴風颭颮颯颰颱颳颶颷颸颺颻颼颾飀飄飆飈飋飛飠飢飣飥飦飩飪飫飭飯飱飲飴飵飶飼飽飾飿餃餄餅餈餉養餌餎餏餑餒餓餔餕餖餗餘餚餛餜餞餡餦餧館餪餫餬餭餱餳餵餶餷餸餺餼餾餿饁饃饅饈饉饊饋饌饑饒饗饘饜饞饟饠饢馬馭馮馯馱馳馴馹馼駁駃駉駊駎駐駑駒駓駔駕駘駙駚駛駝駞駟駡駢駤駧駩駪駫駭駰駱駶駸駻駼駿騁騂騃騄騅騉騊騌騍騎騏騑騔騖騙騚騜騝騞騟騠騤騧騪騫騭騮騰騱騴騵騶騷騸騻騼騾驀驁驂驃驄驅驊驋驌驍驎驏驓驕驗驙驚驛驟驢驤驥驦驨驪驫骯髏髒體髕髖髮鬆鬍鬖鬚鬠鬢鬥鬧鬨鬩鬮鬱鬹魎魘魚魛魟魢魥魦魨魯魴魵魷魺魽鮀鮁鮃鮄鮅鮆鮈鮊鮋鮍鮎鮐鮑鮒鮓鮚鮜鮝鮞鮟鮠鮡鮣鮤鮦鮪鮫鮭鮮鮯鮰鮳鮵鮶鮸鮺鮿鯀鯁鯄鯆鯇鯉鯊鯒鯔鯕鯖鯗鯛鯝鯞鯡鯢鯤鯧鯨鯪鯫鯬鯰鯱鯴鯶鯷鯻鯽鯾鯿鰁鰂鰃鰆鰈鰉鰊鰋鰌鰍鰏鰐鰑鰒鰓鰕鰛鰜鰟鰠鰣鰤鰥鰦鰧鰨鰩鰫鰭鰮鰱鰲鰳鰵鰶鰷鰹鰺鰻鰼鰽鰾鱀鱂鱄鱅鱆鱇鱈鱉鱊鱒鱔鱖鱗鱘鱚鱝鱟鱠鱢鱣鱤鱧鱨鱭鱮鱯鱲鱷鱸鱺鳥鳧鳩鳬鳲鳳鳴鳶鳷鳼鳽鳾鴀鴃鴅鴆鴇鴉鴐鴒鴔鴕鴗鴛鴜鴝鴞鴟鴣鴥鴦鴨鴮鴯鴰鴲鴳鴴鴷鴻鴽鴿鵁鵂鵃鵊鵏鵐鵑鵒鵓鵚鵜鵝鵟鵠鵡鵧鵩鵪鵫鵬鵮鵯鵰鵲鵷鵾鶄鶇鶉鶊鶌鶒鶓鶖鶗鶘鶚鶠鶡鶥鶦鶩鶪鶬鶭鶯鶰鶱鶲鶴鶹鶺鶻鶼鶿鷀鷁鷂鷄鷅鷉鷊鷐鷓鷔鷖鷗鷙鷚鷟鷣鷤鷥鷦鷨鷩鷫鷭鷯鷲鷳鷴鷷鷸鷹鷺鷽鷿鸂鸇鸊鸋鸌鸏鸑鸕鸗鸘鸚鸛鸝鸞鹵鹹鹺鹼鹽麗麥麨麩麪麫麬麯麲麳麴麵麷麼麽黃黌點黨黲黴黶黷黽黿鼂鼉鼕鼴齊齋齎齏齒齔齕齗齘齙齜齟齠齡齣齦齧齩齪齬齭齮齯齰齲齴齶齷齼齾龍龎龐龑龓龔龕龜龭龯鿁鿓𠁞𠌥𠏢𠐊𠗣𠞆𠠎𠬙𠽃𠿕𡂡𡃄𡃕𡃤𡄔𡄣𡅏𡅯𡑍𡑭𡓁𡓾𡔖𡞵𡟫𡠹𡢃𡮉𡮣𡳳𡸗𡹬𡻕𡽗𡾱𡿖𢍰𢠼𢣐𢣚𢣭𢤩𢤱𢤿𢯷𢶒𢶫𢷮𢹿𢺳𣈶𣋋𣍐𣙎𣜬𣝕𣞻𣠩𣠲𣯩𣯴𣯶𣽏𣾷𣿉𤁣𤄷𤅶𤑳𤑹𤒎𤒻𤓌𤓎𤓩𤘀𤛮𤛱𤜆𤠮𤢟𤢻𤩂𤪺𤫩𤬅𤳷𤳸𤷃𤸫𤺔𥊝𥌃𥏝𥕥𥖅𥖲𥗇𥗽𥜐𥜰𥞵𥢢𥢶𥢷𥨐𥪂𥯤𥴨𥴼𥵃𥵊𥶽𥸠𥻦𥼽𥽖𥾯𥿊𦀖𦂅𦃄𦃩𦅇𦅈𦆲𦒀𦔖𦘧𦟼𦠅𦡝𦢈𦣎𦧺𦪙𦪽𦱌𦾟𧎈𧒯𧔥𧕟𧜗𧜵𧝞𧞫𧟀𧡴𧢄𧦝𧦧𧩕𧩙𧩼𧫝𧬤𧭈𧭹𧳟𧵳𧶔𧶧𧷎𧸘𧹈𧽯𨂐𨄣𨅍𨆪𨇁𨇞𨇤𨇰𨇽𨈊𨈌𨊰𨊸𨊻𨋢𨌈𨍰𨎌𨎮𨏠𨏥𨞺𨟊𨢿𨣈𨣞𨣧𨤻𨥛𨥟𨦫𨧀𨧜𨧰𨧱𨨏𨨛𨨢𨩰𨪕𨫒𨬖𨭆𨭎𨭖𨭸𨮂𨮳𨯅𨯟𨰃𨰋𨰥𨰲𨲳𨳑𨳕𨴗𨴹𨵩𨵸𨶀𨶏𨶮𨶲𨷲𨼳𨽏𩀨𩅙𩎖𩎢𩏂𩏠𩏪𩏷𩑔𩒎𩓣𩓥𩔑𩔳𩖰𩗀𩗓𩗴𩘀𩘝𩘹𩘺𩙈𩚛𩚥𩚩𩚵𩛆𩛌𩛡𩛩𩜇𩜦𩜵𩝔𩝽𩞄𩞦𩞯𩟐𩟗𩠴𩡣𩡺𩢡𩢴𩢸𩢾𩣏𩣑𩣫𩣵𩣺𩤊𩤙𩤲𩤸𩥄𩥇𩥉𩥑𩦠𩧆𩭙𩯁𩯳𩰀𩰹𩳤𩴵𩵦𩵩𩵹𩶁𩶘𩶰𩶱𩷰𩸃𩸄𩸡𩸦𩻗𩻬𩻮𩼶𩽇𩿅𩿤𩿪𪀖𪀦𪀾𪁈𪁖𪂆𪃍𪃏𪃒𪃧𪄆𪄕𪅂𪆷𪇳𪈼𪉸𪋿𪌭𪍠𪓰𪔵𪘀𪘯𪙏𪟖𪷓𫒡𫜦`;
+const ZH_S = `𫝈㑔㑇㐹𠉂𪠟刾𪟎𪠵𠵾𪡛𠰱𪢌𫬐㘎𫝦㚯㛣𫝧𡞋𡞱𡝠𪨊𪩇㟆𫵷𪪑𢋈㤘𢛯𢗓𪫷𪮃𪮋㨫㧐擜𪯋𣘐𣗙𣳆𪷍𫞛𤆢𤈷𤎺𫞣𤠋𪺻𪼋𪽮𤻊𤽯𥁢𥅴𥇢䀥𥎝鿎𫀨𫀬𫁂𫁲𥬀𫂈𥮜𫁷𥺅䌶𫄚𫄜𫄞䌺䌻𫄩䌿䌾𫄮𦈓𦈖𦈘𦈜𦈟𦈞𦈠𦈙𫅅䍠𦍠𫅭䎬𬜯𫟕𦰴𫟑𫊪𧉞𫋲䙌𧜭𫌯𫍠𫍫䜧𫟢𫎧𧹕䞍𧹑𫎪𫎭𫎺𫎳𫎱𫏃𨅛𫟤𫟥𫟦𨑹𫟺𫠀䦂鿏𬭯𫔋𨱖𫔆䥾𨸄䦶䦷𫔵𨷿𨸟𫖅𩏼𩐀𩏿𫖫𫖬𫖱𫖰𫖲𩖗𫖺𫗇𫠈𫗊𩙮𩙯𩙧𫗟𩠇𩠈𫗱𫗰𩧭𫠊𩧰𩨁𩧿𩨇𫘮𩨏𩧪䯅𩩈鲃𫚐𫚏𩾈𫚠𩾊𩾋䲣𫠑䲝鳚𫚜𩾂鳤𪉂𫛬𫛰𫛮𫛺𫛼鹮𫜅𪎈𫜒𪎋𫜔𪑅𫜙𫜨𫜳丢并干乱亘亚伫布占并来仑侣局俣系𠇹伣侠伡私伥俩俫仓个们幸伦㑈伟㐽侧侦伪㐷杰伧伞备家佣偬传伛债伤倾偻仅佥侨仆伪𫢸侥偾雇价仪俊侬亿侩俭傤傧俦侪尽偿𠆲优𠋆储俪㑩傩傥俨凶兑儿兖内两册胄幂净冻𪞝凛凯别删刭则克刹刬刚剥剐剀创铲𠛅划剧刘刽刿剑㓥剂㔉劲𠡠动务勋胜劳势𪟝勚劢勋励劝匀匦汇匮区协恤却即厍厕历厌厉厣参叁丛咤吴呐吕呙员𠯟呗𪠳念问启哑启唡㖞唤丧吃乔单哟呛啬唝吗呜唢𠮶哔𪡏叹喽啯呕啧尝唛哗𪡃唠啸叽𪡞哓呒𪡀啴恶𠯠嘘㖊咝𪡋哒哝哕嗳哙喷吨当咛吓哜尝噜啮𪠸咽呖𠰷咙向亸喾严嘤𪢕啭嗫嚣𠱞冁呓啰苏嘱𪢠囱囵国围园圆图团𪢮坝垭𫭢𪣆采执坚垩垴𪣒埚尧报场块茔垲埘涂冢坞埙尘𫭟堑𪣻垫坠𫮃堕坛𪢸坟垯墙垦坛𡒄垱埙压𡋤垒圹垆坛坏垄垅坜𪤚坝塆壮壶壸寿够梦伙夹奂奥奁夺奖奋姹妆姗奸𫰛娱娄𫝫妇娅𫝨娲妫㛀媪妈袅妪妩娴娴婳妫媭𫝬娆婵娇嫱嫒𪥰嬷𫝩嫔婴婶𪥿娘𫝮𫝭𪥫㛤娈𡠟孙学𡥧𪧀孪宫采𪧘寝实宁审写宽宠宝将专寻对导尴届尸屃屉屡层屦𪨗属冈峰岘岛峡崃昆岗仑峥岽岚岁𡶴𫶇㟥嵝崭岖𡺃嵚崂𡺄峤峣峄峃崄嵘𫝵岭屿岳𪩎岿峦巅岩𪨷𪩘巯卺帅师帐带帧帏㡎帼帻𪩷帜币𪩸帮帱干几库厕厢厩厦庼荫厨厮𫷷庙厂庑废广𪪞廪庐厅弑吊弪张强𪪼𫸩别弹弥弯录汇彟彦雕彨佛后径从徕复征彻𪫌恒耻悦悮怅闷凄恶恼恽恻爱惬悫怆恺𢙏忾栗态愠惨惭恸惯悫怄怂虑悭庆㥪戚欲忧惫怜凭愦慭惮𢙒愤悯怃宪忆𪫺𢙐𢙓恳应怿懔𢠁蒙怼懑㤽恹惩懒怀悬忏惧慑恋戆戋戗戬战戯戏户抛捝挲挟舍扪挨卷扫抡㧏挜挣𪭵挂采拣扬换挥搄损摇捣揾抢𢫬𪭢掴掼搂挚抠抟折掺捞𪭾挦撑挠㧑挢掸拨𪮖抚扑揿挞挝捡拥掳择击挡㧟担据𪭧挤捣𢬍拟摈拧搁掷扩撷摆擞撸㧰扰摅撵𪮶拢拦撄搀撺携摄攒挛摊搅揽教敚败叙敌数敛毙𢽾敩斓斩断𣃁于旗既升时晋𬀪昼晕晖𬀩旸畅暂晔历昙晓𪰶向暧旷𣆐昽晒书会𦛨胧术东拐栅拐查𣐕杆栀𪱷枧𬂩条枭棁弃棋枨枣栋㭎栈栖梾桠㭏𣒌杨枫桢业极矩干杩荣榅桤构枪杠梿椠椁𣏢椮桨椢椝桩乐枞梁楼标枢𣗊㭤样𣔌榝㭴桪朴树桦椫桡桥机椭横𣓿檩柽档桧槚检樯𣘴梼台槟𪲛柠槛柜𪲎𬃊橹榈栉椟橼栎𪲮橱槠栌枥橥榇蘖栊榉樱栏榉𪳍权𣐤椤𪲔𪴙栾𣗋榄𣚚棂钦叹欧欤欢岁历归殁残殒𣨼殇㱮殚僵殓殡㱩歼杀壳壳毁殴𪵑毵牦毡氇气氢氩𣱝氲泛泛污决没冲况溯泄汹浃𬇙泾涚凉凄泪渌净凌沦渊涞浅涣减沨涡测浑凑𣲗浈涌汤沩准沟𪶄温浉涢湿沧灭涤荥汇沪滞渗卤浒浐滚满渔溇𬇹沤汉涟渍涨溆渐浆颍泼洁𣲘沩㴋潜𫞗润浔溃滗涠涩𣶩浇涝沄涧渑泽滪泶𬇕𫞚浍淀㳠浊浓㳡𣸣湿泞溁蒙浕济涛㳔滥潍滨溅泺滤𪵱澛𣽷滢渎㲿泻沈浏濒泸沥潇潆潴泷濑弥潋澜沣滠𫞝洒𪷽漓滩𣺼灏㳕湾滦滟滟灾为乌烃无𪸩炼炜烟茕焕烦炀㶽𪸕煴𤈶𤇄荧𤆡炝𤇹𤋏𬉼热颎炽𬊤烨灯炖烧𬊈烫焖营灿毁烛烩㶶熏烬焘𫞡𤇃𦶟烁炉𤇭烂𪹳𫞠争为爷尔床墙牍牵荦牦𪺭犊牺状狭狈𪺽狰犹狲犸呆狱狮𪺷奖独𤞃狯猃狝狞㺍获猎犷兽獭献猕猡𤞤𫞥现雕珐珲玮玚琐瑶莹玛玱𪻲𪻐琏𫞩𬍤𬍡𪻺琎玑瑷珰㻅环玙瑸𫞨玺𫞦璇𪻨𬍛琼珑璎𤦀瓒𤩽瓯瓮产产苏宁亩毕画异画当𪽈畴叠痉酸𪽪疴痖疯疡痪瘗疮疟瘆𪽷疭瘘瘘疗痨痫瘅𤶊愈疠瘪痴痒疖症疬癞癣瘿瘾痈瘫癫发皂皑𤾀疱皲皱杯盗盏尽监盘卢𪾔荡𪾣真眦众𪾢困睁睐眍䁖瞒𥆧瞆睑蒙𪾸𪾦眬瞩矫朱硁硖砗砚埼𥐻硕砀砜确码䂵硙砖硵碜碛矶硗䃅硚硷础𬒈𥐟碍矿砺砾矾𪿫砻秘禄祸祯祎祃御禅礼祢祷秃籼税秆䅉棱禀种称谷䅟稣积颖秾穑秽稳获穞窝洼穷窑窎窭窥窜窍窦灶窃𥩟竖𫁟竞笔笋笕䇲个笺筝节范筑箧筼𥬠筿𬕂笃筛筚𥮾箦𫂆篓蓑箪简𫂃篑箫筜签帘篮𥫣𥬞筹䉤箓篯箨籁笼签笾簖篱箩吁粤粽糁粪粮团粝籴粜纟𫄙纠纪纣𬘓约红纡纥纨纫纹纳纽纾纯纰纼纱纮纸级纷纭纴𬘘𫄛纺䌷扎细绂绁绅纻绍绀绋绐绌𫄟终弦组䌹绊𫟃绗结绝𫄠绦绔绞络绚𫄢给𫄡绒𬘡绖统丝绛绝绢𫄨𦈌绑绡𬘫绠𦈋绨绣𫟄绤𬘩绥䌼捆经𫄧综𬘭缍𫄫绿𫟅绸绻𬘯𬘬线绶维绹绾纲网绷缀彩纶绺绮绽绰绫绵绲缁紧绯𦈏绿绪绬绱缃缄缂线缉缎𫟆缔缗缘𫄬缌编缓缅𫄭纬𦈕缑缈练缏𦈉𦈑缇致缊萦缙缢缒𫄰𦈔绉缣缊缞缚缜缟缛县绦缝𦈚缡缩𬙂𫄳纵缧䌸纤缦絷缕𫄲缥𦈐总绩𫄴绷缫缪𫄶𦈝𰬸缯𦈛织缮缭绕𦈎绣缋𫄤绳绘系𫄱茧缰缳缲缴𫄷𫄣䍁绎𦈡继缤缱䍀𫄸𬙊颣缬纩续累缠缨才𬙋纤𫄹缵𫄥缆钵䓨坛罂坛罚骂罢罗罴羁芈群羟羡义𫅗膻习玩翚翘翙耧耢圣闻联聪声耸聩聂职聍𫆏听聋肃胁脉胫唇𣍰修脱胀肾胨脶脑𣍯肿脚肠腽腘肤䏝胶𦝼腻𪱥胆脍脓脸脐膑𣎑腊胪脏脔臜卧临台与兴举旧馆舱𫇛舣舰舻艰艳刍苎兹荆庄茎荚苋𰰨华庵烟苌莱万荝莴叶荭𫈎荮苇药荤𫇭搜莼莳蒀莅𫇴苍荪席盖𦰏莲苁莼荜𬜬卜参蒌蒋葱茑荫𫈟𫇭荨蒇荞荬芸莸荛𫈵蒉荡芜萧𫈉蓣𫇽蕰𫉁荟蓟芗姜蔷荙莶荐萨䓕苧䓓苔荠蓝荩艺药薮䓖蕴苈𫉄蔼蔺萚蕲芦苏蕴苹藓蔹𦻕茏兰蓠萝蔂𬟁处虚虏号亏虬蛱蜕蚬𬟽蚀猬虾虱蜗蛳蚂萤䗖蝼螀𫋇蛰蝈螨𫋌𫊸虮蝉蛲虫𫊻蛏蚁𧏗蚃蝇虿蝎蛴蝾蚝𧏖蜡蛎𫊮蟏蛊蚕蛮𧑏众蔑术同胡卫冲衮袅里补装里制复裈袆裤裢褛亵𫌀裥裥袯𫋹袄𫋷𫋻裣裆褴袜摆衬𧝝袭襕𫌇核见觃规觅视觇𫌪觋觍觎亲觊觏觐觑𫌭觉𫌨览觌观觞觯触讠订讣计讯讧讨𬣙讦𫍙讱训讪讫托记讹𫍛讶𫍚讼䜣诀讷𫟞讻访设许诉诃诊注证𧮪诂诋𫟟讵诈𫍡诒𫍜诏评诐诇诎诅𬣞词咏诩询诣试诗𬣳诧诟诡诠诘话该详诜𫍣诙诖𫍥诔诛诓夸𫍪志认诳诶诞诱诮语诚诫诬误诰诵诲说𫍨说谁课𫍮𫟡谇𫍬诽𫍧谊訚调谄谆谈诿请诤诹诼谅𬣡论谂谀谍谞谝𬤊谥诨𫍩谔𫍳谛谐谏谕咨𫍱𫍰讳𬤇谙𫍯谌讽诸谚谖诺谋谒谓誊诌𫍸𫍷谎谜𫍲谧谑谡谤谦谥讲谢谣谣谟谪谬谫𫍹𫍴讴𫍵谨谩哗𫟠𰶎𫍻证𫍢谲讥𫍤𬤝谮识谯谭谱𫍽噪𫍦谵毁译议谴护诪誉谫读谉变詟䜩雠谗让谰谶赞谠谳岂竖丰艳猪𫎆豮猫𫎌䝙贝贞贠负财贡贫货贩贪贯责贮贳赀贰贵贬买贷贶费贴贻贸贺贲赂赁贿赅资贾贼赈赊宾赇赒赉赐𫎩赏𧹖赔赓贤卖贱赋赕质赍账赌䞐赖赗赚赙购赛赜𧹗贽赘赟赠𫎫赞赝赡赢赆𫎬赃赑赎赝𫎦赣赃赪赶赵趋趱迹践逾踊跄𫏐跸迹跖蹒踪𫏆跷𫏋跶趸踌跻跃䟢踯跞踬蹰𨀁跹𨅬蹑蹿躜躏躯𨉗车轧轨军𫐄轪轩轫𫐅𨐅轭𫐇𬨂软轷𫐉轸𫐊轱𫐈轴轵轺轲轶轼𫐌较𨐈辂辁辀载轾𪨶辄挽辅轻𫐏𫐐辆辎辉辋辍𫐎辊辇𫐑辈轮辌𫐓辑辏𬨎𫐒输辐辒辗舆辒毂辖辕辘𫐖转𫐕辙轿𫐗辚𫐘轰𫐙辔轹𫐆轳办辞辫辩农回迳这连周进游运过达违遥逊递远溯适𫐷迟迁选遗辽迈还迩边逻逦郏邮郓乡邹邬郧𫑘邓𬩽郑邻郸𫑡邺郐邝酂郦腌酝丑酝蒏糖医酱酦𬪩𫑷酿衅酾酽释厘钅钆钇钌钊钉钋𫟲针𫓥钓钐扣钏𫓦钒𫟳𨰿𬬩钗钍钕钎䥺𬬱钯钫钘钭钥𫓪𫓧钚钠𨱂钝钩钤钣钑钞钮𫟴𫟵𫓨钧𨱁钟钙钬钛钪铌𨱄铈𨱃钶铃钴钹铍钰钸铀钿钾𨱅巨钻铊铉𬬿铇铋铂𫓬钷钳铆铅𫟷钺𫓭钵钩𬬸钲𬭁钼钽𬬹锫铏𫟹铰铒铬𫟸𫓴铪银𫓲𫟻铳铜𫓯𫓰铚𫟶铣铨铢铭铫铦衔铑铷铱铟铵铥铕铯铐铞锐𨱇销锈锑锉铝𰾄锒锌钡𨱈铤铗𬭎锋𫓶铻锊锓𫓵铘锄锃锔锇铓铺锐铖锆锂铽锍锯𬬮钢𬬭锞𨱋录锖锫锩铔锥锕锟锤锱铮锛𫓻𫓽𬭚锬锭锜钱𫓹𫓾锦锚锠锡锢错录锰表铼镎𫓸锝锨锪𨱉钫钔锴锳𫔂炼锅镀𫔄锷铡钖锻锽锸锲锘锹𬭤𨱎锾键锶锗针钟镁锿镅𫟿镑镰𫔅𬭩镕锁镉𫔈锤镈𨱏𫔇镃钨蓥镏铠铩锼镐镇镇𨱍镒镋镍镓鿔𨰾镌镎镞𨱌旋链𨱒镆镙𬭬镠镝铿锵𬭭镗镘镛铲镜镖镂𫔊𫓩錾镚铧镤镪䥽𬭸锈𫔌铙𨱑𫔍𫓱铴𫔎𨱓𨱔镣铹镦镡钟镫镢镨䦅锎锏镄𬭼𫓺镌镰䦃镯镭铁镮铎铛𫔁𫟼镱𰾭铸𫠁镬镔鉴鉴镲锧镴铄镳镥𬬻镧钥镵镶𫔔镊镩锣钻銮凿镢镋长门闩闪闫闬闭开闶𨸂闳闰𨸃闲闲间闵𫔯闸𫠂𫔰阂阁合阀闺闽阃阆闾阅阅𫔴阊阉阎阏阍阈阌阒板暗闱𬮱阔阕阑阇阗𫔶阘闿阖阙闯关阚阓阐辟阛闼陉陕升阵阴陈陆阳陧队阶𬮿陨际𬯎随险𬯀陦隐陇隶只隽虽双雏杂鸡离难云电沾霡𫕥雾𪵣霁雳霭叇灵叆靓静靔腼𫖃靥巩绱秋鞒𫖇缰鞑千鞯韦韧韨韩韪𫠅𫖔韬鞲韫𫖒韵响页顶顷项顺顸须顼颂𫠆颀颃预顽颁顿𬱖颇领颌𬱟颉颐颏𫖯头颒颊颋颕𫖳颔颈颓频颓𩓋𩖖𫖶颗题额颚颜颙颛颜𫖮愿颡颠类颟𫖹颢顾颤颥显颦颅颞颧风飐飑飒𩙥台刮飓𩙪飔飏飖飕𩙫飗飘飙飚𫗋飞饣饥饤饦𫗞饨饪饫饬饭飧饮饴𫗢𫗣饲饱饰饳饺饸饼糍饷养饵饹饻饽馁饿𫗦馂饾𫗧余肴馄馃饯馅𫗠𫗪馆𫗬𫗥糊𫗮糇饧喂馉馇𩠌馎饩馏馊馌馍馒馐馑馓馈馔饥饶飨𫗴餍馋𫗵𫗩馕马驭冯𫘛驮驰驯驲𫘜驳𫘝𬳶𫘟𩧨驻驽驹𬳵驵驾骀驸𩧫驶驼𫘞驷骂骈𫘠𩧲𩧴𬳽𫘡骇骃骆𩧺骎𫘣𬳿骏骋骍𫘤𫘧骓𫘥𫘦骔骒骑骐𬴂𩨀骛骗𩨊𫘩𩨃𬴃𩨈𫘨骙䯄𩨄骞骘骝腾𫘬𫘫𫘪驺骚骟𫘭𫠋骡蓦骜骖骠骢驱骅𩧯骕骁𬴊骣𫘯骄验𫘰惊驿骤驴骧骥骦𫘱骊骉肮髅脏体髌髋发松胡𩭹须𫘽鬓斗闹哄阋阄郁鬶魉魇鱼鱽𫚉鱾𩽹𫚌鲀鲁鲂𫚍鱿鲄𫠐𬶍鲅鲆𫚒𫚑𫚖𬶋鲌鲉鲏鲇鲐鲍鲋鲊鲒鲘鲞鲕𩽾𬶏𬶐䲟𫚓鲖鲔鲛鲑鲜𫚗𫚔鲓𫚛鲪𩾃鲝𫚚鲧鲠𩾁𫚙鲩鲤鲨鲬鲻鲯鲭鲞鲷鲴𫚡鲱鲵鲲鲳鲸鲮鲰𫚞鲶𩾇鲺𩽼鳀𬶟鲫𫚣鳊鳈鲗鳂䲠鲽鳇𬶠𫚢䲡鳅鲾鳄𫚊鳆鳃𫚥鳁鳒鳑鳋鲥𫚕鳏𫚤䲢鳎鳐𫚦鳍鳁鲢鳌鳓鳘𬶭鲦鲣鲹鳗鳛𫚧鳔𬶨鳉𫚋鳙𫠒𩾌鳕鳖𫚪鳟鳝鳜鳞鲟𬶮鲼鲎鲙𫚫鳣鳡鳢鲿鲚𫚈鳠𫚭鳄鲈鲡鸟凫鸠凫鸤凤鸣鸢𫛛𪉃𫛚䴓𫛜𫛞𫛝鸩鸨鸦𫛤鸰𫛡鸵𫁡鸳𪉈鸲鸮鸱鸪𫛣鸯鸭𫛦鸸鸹𪉆𫛩鸻䴕鸿𫛪鸽䴔鸺鸼𫛥𬷕鹀鹃鹆鹁𪉍鹈鹅𫛭鹄鹉𫛨𫛳鹌𫛱鹏鹐鹎雕鹊鹓鹍䴖鸫鹑鹒𫛵𫛶鹋鹙𫛸鹕鹗𬸘鹖鹛𫛷鹜䴗鸧𫛯莺𫛫𬸣鹟鹤鹠鹡鹘鹣鹚鹚鹢鹞鸡𫛽䴘鹝𫜀鹧𪉑鹥鸥鸷鹨𬸦𫜃𫛴鸶鹪𪉊𫜁鹔𬸪鹩鹫鹇鹇𫜄鹬鹰鹭鸴𬸯㶉鹯䴙𫛢鹱鹲𬸚鸬𫛟鹴鹦鹳鹂鸾卤咸鹾碱盐丽麦𪎊麸面面𤿲曲𪎉𪎌曲面𫜑么么黄黉点党黪霉黡黩黾鼋鼌鼍冬鼹齐斋赍齑齿龀龁龂𬹼龅龇龃龆龄出龈啮𫜪龊龉𫜭𬺈𫠜𫜬龋𫜮腭龌𬺓𫜰龙厐庞䶮𫜲龚龛龟𩨎𨱆䜤鿒𠀾𠆿𠉗𫝋㓆𠛆𠚳𪠡𪠺𪜎𪢒𪡺𠴛𪢐𠴢𠵸𠲥𪢖𫭼𡋗𪤄𡋀𡍣㛟𫝪㛿㛠𡭜𡭬𡳃𪨩𪨹岁𡸃㟜𪩛𪪴𢙑𪬚𢘝𢘞𪫡𢘙𪬯𪭝𪭯𢫞𢫊𢬦𪮳暅𣈣𫧃㭣𪳗𣘷𣘓𣞎𣑶𣯣𣭤毶𪶮㳢𣶫𣺽𪶒𣷷𤎻𪹀𤊀𪹹𪹠𤎺𤊰𪺣𤙯𫞢𪺪𪺸𤝢𢢐𫞧㻘㻏𪼴𪽝𤳄𪽭𤶧𪽴𥅿𥅘𪿊𥐰𥐯𪿞𪿵𬒗𫀓𫀌𥞦䅪𫞷𫀮𥧂𥩺𫁳𫂖𫁺𥱔𥭉𫁱𥮋𫂿𥹥𥺇𫄝𦈈𫄦𦈒𦈗𫄯𫄪𫄵𫟇𫅥𫅼𡳒𫆝𫞅𫆫𣍨𦟗𫇘䑽𦨩𫇪𦶻𧌥𫊹𧒭𧉐䘞䙊䘛𫌋𧝧𫌫𫌬𫍞𫍟𫍭䜥𫍶𫍺𫍼𫍾𫍐𧳕䞌𧹓䞎𪠀𫎨𪥠𫎸𫏌𨀱𨁴𫏕𧿈𨅫𫏨𫏞𫏑𨂺𨄄䢀䢁𨐆䢂𫐍𫐔𫐋𨐉𨐇𨐊𫟫𫟬𨡙𨡺𨟳𨠨𨤰𨱀𫓫䦀𬭊䦁𫟽𨱊𬭛𫓼𫓿𫟾𫓮𨱐𫔏𬭶𬭳𫔑𫔐𨱕𫔒䥿𫔓𫔉𫓳𫔕𫔃𫔖𨸁𨸀𨸅𫔲𨸆𨸇𨸉𨸊𨸌𨸋𨸎𫔽𨸘𫕚𫕨𫖑𩏾𫖓𫖖𩏽𫃗𫖪𫖭𩖕𫖵𫖷𫖴𫠇𩙦𫗈𫗉𩙩𩙭𩙨𩙬𩙰𩟿𩠀𫗡𩠁𩠂𫗤𫗨𩠃𩠉𩠆𩠊𩠋𫗳𩠎𩠏䭪𩠅𫗚𩠠𩡖𩧦𩧬𩧵𩧳𩧮𩧶䯃𩧸𩧻𩧼𩧩𩨆𩨉𩨅𩨋𩨍𩧱𩨌𫠌𩨐𩬣𫙂𩯒𩬤𩰰𩲒𩴌𫠏𩽺𩽻𫚎䲞𩽿𩽽𩾄𩾅𫚝𫚟𩾆𫚨𫚩𫚘𫚬𩾎𫠖𫛠𪉄𫛧𪉅𪉋𪉉𪉌𪉎𪉐𪉏𫛻𫛹𪉔𪉒𫜂𫛾𪉕𱊜𫜊𫧮𫜓𫜕𫜟𪔭𪚏𪚐𫜯𠛾𣶭𫓷𫜫`;
+let T2S = null, T2S_RE = null;
+function t2s(s){
+  if (!T2S){
+    T2S = new Map();
+    const t = [...ZH_T], z = [...ZH_S];
+    for (let i = 0; i < t.length && i < z.length; i++) if (t[i] !== z[i]) T2S.set(t[i], z[i]);
+    T2S_RE = new RegExp('[' + [...T2S.keys()].join('').replace(/[\]\\^-]/g, '\\$&') + ']', 'gu');
+  }
+  return s.replace(T2S_RE, (c) => T2S.get(c) || c);
+}
+const LAT_X = { 'ß':'ss', 'æ':'ae', 'œ':'oe', 'ø':'o', 'đ':'d', 'ł':'l', 'þ':'th', 'ð':'d', 'ı':'i' };
+const NUM_W = { one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9, ten:10 };
+/* 单独的 i / v / x 不换：X 战警、V 字仇杀队、I, Robot 里它们是字母不是数字 */
+const ROM_N = { ii:2, iii:3, iv:4, vi:6, vii:7, viii:8, ix:9 };
+const CN_D = { 一:1, 二:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9, 十:10, 两:2 };
+const CANON_V = 1;                 // 比对规则的版本：进目录缓存键，规则一改旧的判定不会被端上来
+function canon(raw){
+  let s = raw == null ? '' : String(raw);
+  if (!s) return '';
+  if (s.length > 200) s = s.slice(0, 200);
+  if (/[^\x00-\x7f]/.test(s)){
+    s = s.normalize('NFKC');                                  // 全角、兼容字、Ⅱ → II
+    s = s.replace(/[À-ɏḀ-ỿ]/g,
+      (c) => LAT_X[c.toLowerCase()] || c.normalize('NFD').replace(/[̀-ͯ]/g, ''));
+    if (/[㐀-鿿豈-﫿]|[\ud840-\ud87f]/.test(s)) s = t2s(s);
+    /* 电影续集的中文写法：第二部 / 第2部 / 第二集 → 2 */
+    s = s.replace(/第\s*([一二三四五六七八九十两]|\d{1,2})\s*[部集章]/g, (m, d) => ' ' + (CN_D[d] || d) + ' ');
+  }
+  s = s.toLowerCase().replace(/&/g, ' and ');
+  s = s.replace(/^\s*(?:the|a|an)\s+(?=\S)/, '');
+  s = s.replace(/\b(part|chapter|vol|volume|episode)\s*[.:]?\s*(one|two|three|four|five|six|seven|eight|nine|ten)\b/g,
+    (m, w, n) => w + ' ' + NUM_W[n]);
+  s = s.replace(/\b(?:ii|iii|iv|vi|vii|viii|ix)\b/g, (m) => ROM_N[m]);
+  return s.replace(/[^a-z0-9぀-ヿ㐀-鿿가-힯]/g, '');
+}
+/** 比对键的「分量」：一个汉字 / 假名 / 谚文按 2 算，字母数字按 1 算。
+    没有年份时只认分量 ≥ 6 的片名（三个汉字或六个字母）—— 「英雄」「Dune」这种太常见 */
+function keyWeight(k){
+  let w = 0;
+  for (let i = 0; i < k.length; i++) w += k.charCodeAt(i) > 0x2fff ? 2 : 1;
+  return w;
+}
+/** 一组名字 → 去重后的比对键（太短、太泛的扔掉） */
+function canonKeys(names){
+  const out = [];
+  for (const n of names){
+    const k = canon(n);
+    if (!k || LIB_GENERIC.has(k) || keyWeight(k) < 2) continue;
+    if (!out.includes(k)) out.push(k);
+  }
+  return out;
+}
+const yearOf = (v) => { const n = parseInt(String(v == null ? '' : v).slice(0, 4), 10); return n >= 1880 && n <= 2100 ? n : 0; };
 /* 剧集按"剧"归组：第一季和第二季必须落到同一个 TMDB 条目上，所以键里
    不带年份 —— 版块年份在剧集这边是"这一季播出的年"，不是这部剧的年。 */
 const groupKey = (pt) => isTV()
@@ -1241,12 +1383,13 @@ function weighted(m){
 /* ══════════ TMDB ══════════ */
 async function tmdb(env, path, params = {}){
   if (!env.TMDB_KEY) throw new Error('缺少 TMDB_KEY');
-  const u = new URL('https://api.themoviedb.org/3'+path);
+  /* TMDB_BASE：可选，走自己的反代时用（默认官方地址） */
+  const u = new URL(String(env.TMDB_BASE || 'https://api.themoviedb.org/3').replace(/\/+$/, '') + path);
   u.searchParams.set('api_key', env.TMDB_KEY);
   u.searchParams.set('language','zh-CN');
   for (const [k,v] of Object.entries(params)) u.searchParams.set(k,v);
   const r = await autoRetry('tmdb '+path, async () => {
-    const x = await sfetch(u.toString(), { headers:{Accept:'application/json'}, cf:{ cacheEverything:true, cacheTtl:21600 } });
+    const x = await sfetch(u.toString(), { headers:{Accept:'application/json'}, cf:{ cacheEverything:true, cacheTtl:21600 }, timeoutMs: 12000 });
     if (x.status === 429){ const e=new Error('HTTP 429'); e.retryAfter=Number(x.headers.get('retry-after'))||3; throw e; }
     if (x.status >= 500) throw new Error('HTTP '+x.status);
     if (!x.ok) throw new Error('HTTP '+x.status+'（检查 TMDB_KEY）');
@@ -1341,13 +1484,16 @@ function pickTMDB(results, cn, latin, years, opt = {}){
   let best = null, top = 0;
   const tv = !!opt.tv;
   const ccn = cleanCN(cn);
-  const nc = norm(cn), nl = norm(latin), nc2 = norm(ccn);
-  const hit = (a, b) => (!a || !b) ? 0 : (a === b ? 5 : (a.includes(b) || b.includes(a)) ? 2 : 0);
+  /* [v6] 比对用 canon：繁体 / 全角 / 重音 / 罗马数字 / 冠词都折到同一个键上。
+     「互相包含」要求短的那个至少两个字符 —— 一个字的片名包含在任何片名里都不算数 */
+  const nc = canon(cn), nl = canon(latin), nc2 = canon(ccn);
+  const hit = (a, b) => (!a || !b) ? 0 : (a === b ? 5
+    : (Math.min(a.length, b.length) >= 2 && (a.includes(b) || b.includes(a))) ? 2 : 0);
   for (const raw of (results||[]).slice(0, 10)){
     const r = asItem(raw);
     if (!r || r.adult) continue;
     const ry = (r.release_date||'').slice(0,4);
-    const nt = norm(r.title), no = norm(r.original_title);
+    const nt = canon(r.title), no = canon(r.original_title);
     const ts = Math.max(hit(nt,nc), hit(no,nc), hit(nt,nc2), hit(no,nc2))
              + Math.max(hit(no,nl), hit(nt,nl));
     const ss = Math.max(simTok(r.title, latin), simTok(r.original_title, latin),
@@ -1454,11 +1600,50 @@ async function tmdbMeta(env, id, ctx){
 }
 
 /* ══════════ R2 ══════════ */
-async function r2get(env, key, dflt){
+/* [v6] 读：「对象不存在」和「读失败」必须分开。
+   v5 的 r2get 把两者都当成「不存在」—— R2 偶发的读中断（body 读到一半断了、JSON 解析失败）
+   会让 movies.json 被当成空表读进来，这一轮跑完再写回去，整个索引就只剩这一轮新认的几部。
+   现在：不存在 → 返回默认值；读失败 → 重试两次后抛错（这一轮不写任何东西）；
+   内容不是合法 JSON → 抛 corrupt 错（不会拿空表覆盖它，体检里给「从备份恢复」）。 */
+async function r2getE(env, key){
   if (!env.R2) throw new Error('未绑定 R2，无法读写索引');
-  const o = await env.R2.get(key);
-  if (!o) return dflt;
-  try { return await o.json(); } catch { return dflt; }
+  let last;
+  for (let i = 0; i < 3; i++){
+    let o, txt;
+    try { o = await env.R2.get(key); }
+    catch (e){ last = e; await sleep(120 * (i + 1) * (i + 1)); continue; }
+    if (!o) return { val: undefined, etag: null };
+    try { txt = await o.text(); }
+    catch (e){ last = e; await sleep(120 * (i + 1) * (i + 1)); continue; }
+    try { return { val: JSON.parse(txt), etag: o.etag || o.httpEtag || null }; }
+    catch {
+      const err = new Error('R2 对象 ' + key + ' 不是合法的 JSON（' + txt.length + ' 字节）—— 不会拿空数据覆盖它，去体检里「从备份恢复」');
+      err.corrupt = 1; err.key = key;
+      throw err;
+    }
+  }
+  const err = new Error('读取 R2 ' + key + ' 失败（重试 3 次）：' + (last && last.message || last) + ' —— 本轮不写任何东西');
+  err.r2read = 1; err.key = key;
+  throw err;
+}
+async function r2get(env, key, dflt){
+  const r = await r2getE(env, key);
+  return r.val === undefined ? dflt : r.val;
+}
+/** 带前提的写：etag 对得上才写（null = 对象此刻必须不存在才写）。返回 false = 有人抢先写过了 */
+async function r2putIf(env, key, val, etag){
+  const body = JSON.stringify(val);
+  for (let i = 0; i < 5; i++){
+    try {
+      const r = await env.R2.put(key, body, { httpMetadata:{ contentType:'application/json' },
+        ...(etag ? { onlyIf: { etagMatches: etag } } : {}) });
+      return r !== null;
+    } catch (e){
+      if (!isRate10058(e) || i === 4) throw e;
+      await sleep([250, 600, 1200, 2200][i] * (0.7 + Math.random() * 0.6));
+    }
+  }
+  return false;
 }
 /* ══════════════════════════════════════════════════════════════════
    R2 写入
@@ -1539,6 +1724,60 @@ function uSkip(movies, key){
   return false;
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   [v6] 存储：原子提交（copy-on-write）
+   ──────────────────────────────────────────────────────────────────
+   v5 一轮的写盘顺序是：分片（原地覆盖）→ tid 表（原地覆盖）→ movies.json → state.json。
+   平台随时可能掐掉进程（1102），掐在中间就留下互相对不上的几份：
+     · 分片写了、state 没写：分片里多出这一轮的行，tid 表也记了，可影片表没有这些片 ——
+       这些帖子从此被 tid 表挡在门外，永远进不了索引；
+     · 两个任务重叠（锁过期被接管、原任务其实还在跑）：同一片被两边各写一遍，后写的盖掉先写的。
+   v6 的做法是数据库里最老的那一招：
+     · 分片和 tid 表每次都写成「新名字」（键里带一段代号 g），从不覆盖已提交的那份；
+     · state.json 里记着每一片、每张 tid 表当前用的是哪个代号 —— 写 state 就是提交，
+       在它之前掐掉，一切照旧（多出来的新对象没人引用，日后清掉）；
+     · 被替换下来的旧对象记进 state.grave，十分钟以后才删（别的 isolate 手里那份 45 秒内的
+       state 可能还指着它）；删之前再核对一遍现在的 state 没有引用它；
+     · movies.json 与 state.json 带同一个提交号 cid：两者对不上 = 掐在两次写之间，
+       影片表比 state 新 —— 记 heal，体检和定时任务会跑一遍「重算汇总」把计数对齐；
+     · 锁带身份（id），抢锁用 R2 的条件写（etag），提交前再核对一遍锁还是自己的并续期：
+       锁被别人接管了就放弃这一轮，绝不两边同时提交。
+   ══════════════════════════════════════════════════════════════════ */
+const GRAVE_MS = 10 * 60_000;
+const newGen = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const ystOf = (state, y) => state.years[y] || (state.years[y] = newYear());
+const pgOf = (state, y, i) => { const a = state && state.years && state.years[y] && state.years[y].pg; return (Array.isArray(a) && a[i]) || ''; };
+const partKey = (state, y, i) => IDX.part(y, i, pgOf(state, y, i));
+const tidsKey = (state, y) => IDX.tids(y, (state && state.years && state.years[y] && state.years[y].tg) || '');
+function graveAdd(state, key){ if (key) (state.grave = state.grave || []).push([key, Date.now()]); }
+/** state 现在引用着的全部对象键（分片 + tid 表） */
+function liveKeys(state){
+  const out = new Set();
+  for (const y of Object.keys((state && state.years) || {})){
+    const n = partCount(state, y);
+    for (let i = 0; i < n; i++) out.add(partKey(state, y, i));
+    out.add(tidsKey(state, y));
+  }
+  return out;
+}
+/** 删掉十分钟前就被替换下来、而且现在的 state 确实不再引用的旧对象 */
+async function graveSweep(env, state){
+  const g = state.grave || [];
+  if (!g.length) return 0;
+  const live = liveKeys(state), now = Date.now(), keep = [], del = [];
+  for (const e of g){
+    if (!Array.isArray(e) || !e[0]) continue;
+    if (live.has(e[0])) continue;                           // 被回滚的 state 又引用了它：不删，也不再记
+    (now - (e[1] || 0) > GRAVE_MS ? del : keep).push(e);
+  }
+  if (del.length){
+    try { await env.R2.delete(del.map(e => e[0])); }
+    catch (e){ trace('sys', '清理旧分片失败（下次再清）：' + (e.message || e), { lvl:'warn' }); return 0; }
+  }
+  state.grave = keep.slice(-400);
+  return del.length;
+}
+
 let idxCache = null;
 async function loadIndex(env, force){
   if (!force && idxCache && idxCache.exp > Date.now()) return idxCache.v;
@@ -1551,25 +1790,75 @@ async function loadIndex(env, force){
   idxCache = { v, exp: Date.now()+45000 };
   return v;
 }
+/**
+ * 重活读索引：不存在才给空表。另外两种「空」都不对劲，直接拒绝往下跑：
+ *   · state 记着有片、movies.json 却不见了；
+ *   · movies.json 里有片、state.json 却不见了（片表指针全丢，接着跑会从头写分片）。
+ * 返回时附带 m0（读进来时的影片数）—— 提交时拿它做「只增不减」的检查。
+ */
+async function loadForWrite(env){
+  const [mr, sr] = await Promise.all([ r2getE(env, IDX.movies), r2getE(env, IDX.state) ]);
+  const movies = mr.val === undefined ? blankMovies() : mr.val;
+  const state = sr.val === undefined ? blankState() : sr.val;
+  if (!movies || typeof movies !== 'object' || !state || typeof state !== 'object' || !state.years)
+    throw Object.assign(new Error('索引文件形状不对（movies / state）—— 不敢接着写，去体检里「从备份恢复」'), { corrupt: 1 });
+  movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+  const m0 = Object.keys(movies.m).length;
+  if (mr.val === undefined && (state.movies || 0) > 0)
+    throw Object.assign(new Error('movies.json 不见了（state 记着 ' + state.movies + ' 部）—— 不会用空表覆盖，去体检里「从备份恢复」'), { corrupt: 1 });
+  if (sr.val === undefined && m0 > 0)
+    throw Object.assign(new Error('state.json 不见了（movies.json 里有 ' + m0 + ' 部）—— 不会从头重写分片，去体检里「从备份恢复」'), { corrupt: 1 });
+  /* 提交号对不上：上一轮掐在 movies.json 与 state.json 两次写之间 —— 影片表的计数比分片多算了一截 */
+  if (movies.cid && state.cid && movies.cid !== state.cid && !state.heal){
+    state.heal = Date.now();
+    trace('sys', '上一轮掐在两次提交之间：影片表与片表对不上，稍后自动「重算汇总」对齐计数', { lvl:'warn' });
+  }
+  return { movies, state, m0 };
+}
+/**
+ * 提交：先核对锁还是自己的（并续期），再写 movies.json，最后写 state.json —— 写 state 才算数。
+ * shrink：允许影片变少（只有重置年份 / 清理孤儿这两种显式操作）。其余操作里影片表只增不减，
+ * 少了就是哪里出了错，宁可这一轮作废也不写回去。
+ */
+async function commitIndex(env, lk, movies, state, opt = {}){
+  if (movies){
+    const n = Object.keys(movies.m || {}).length;
+    if (!opt.shrink && opt.m0 != null && n < opt.m0)
+      throw Object.assign(new Error('影片表要从 ' + opt.m0 + ' 部变成 ' + n + ' 部 —— 这一轮不该删片，已放弃提交'), { corrupt: 1 });
+    if (opt.shrink && opt.m0 >= 50 && n < opt.m0 * 0.5 && !opt.force)
+      throw Object.assign(new Error('影片表要从 ' + opt.m0 + ' 部骤减到 ' + n + ' 部 —— 太反常，已放弃提交'), { corrupt: 1 });
+  }
+  if (lk) await lk.check();
+  const cid = newGen();
+  state.cid = cid;
+  delete state.lock;
+  state.at = Date.now();
+  state.ver = (state.ver || 0) + 1;
+  if (movies){ movies.cid = cid; await r2put(env, IDX.movies, movies); }
+  await r2put(env, IDX.state, state);
+  dropCaches();
+  return cid;
+}
 
 const lockAt = (l) => !l ? 0 : (typeof l === 'number' ? l : (l.at||0));
+const lockErr = (msg) => Object.assign(new Error(msg), { busy: 1, wait: 5, stale: false });
 
 /**
  * 带"死亡计数"的锁。
- * 任务被平台掐掉时 finally 不会执行，锁就留在 R2 里。以前前端只能反复重抢
- * —— 抢到又被掐、再写一个新锁，于是必须人工解锁。现在接管一个残留锁时
- * deaths 自增，任务按 deaths 把批量、时间预算、分片大小逐级减半，
- * 跑完一整轮就清零。自己会收敛，不用人管。
+ * 任务被平台掐掉时 finally 不会执行，锁就留在 R2 里。接管一个残留锁时 deaths 自增，
+ * 任务按 deaths 把批量、时间预算、分片大小逐级减半，跑完一整轮就清零。
+ * [v6] 锁带 id，抢锁用条件写（两个 isolate 同时抢只有一个写得进去）；fn 拿到一个 lk：
+ * lk.check() 核对锁还是自己的并续期 —— 提交前必调（commitIndex 会调）。
  */
 async function withIndexLock(env, fn){
-  const st = await r2get(env, IDX.state, blankState());
+  const got = await r2getE(env, IDX.state);
+  const st = got.val === undefined ? blankState() : got.val;
   govLoad(st);
   const now = Date.now();
   const at = lockAt(st.lock);
   if (at && now - at < LOCK_MS){
     const wait = Math.ceil((LOCK_MS - (now - at))/1000);
-    const e = new Error('另一个索引任务正在运行，约 '+wait+' 秒后释放');
-    e.busy = 1; e.wait = wait; e.stale = false; throw e;
+    throw lockErr('另一个索引任务正在运行，约 '+wait+' 秒后释放');
   }
   let deaths = st.deaths || 0;
   if (at){                                  // 接管残留锁 = 上一轮没善终
@@ -1577,13 +1866,44 @@ async function withIndexLock(env, fn){
     st.deaths = deaths;
     trace('kill', '接管残留锁（'+Math.round((now-at)/1000)+'s 前留下），降级等级 '+deaths);
   }
-  st.lock = { at: now, deaths };
-  await r2put(env, IDX.state, st);
-  try { return await fn(deaths); }
+  const id = newGen();
+  st.lock = { at: now, deaths, id };
+  if (!await r2putIf(env, IDX.state, st, got.etag)) throw lockErr('另一个索引任务刚刚抢到了锁，稍后再试');
+  const lk = {
+    id,
+    /** 锁还是自己的吗？是就续期（把 at 推到现在），不是就抛 busy —— 这一轮作废，不提交 */
+    async check(){
+      const cur = await r2getE(env, IDX.state);
+      const l = cur.val && cur.val.lock;
+      if (!l || l.id !== id) throw lockErr('索引锁已被接管（这一轮跑得太久），本轮作废、不提交');
+      l.at = Date.now();
+      if (!await r2putIf(env, IDX.state, cur.val, cur.etag)) throw lockErr('索引锁续期时被别的任务抢先，本轮作废、不提交');
+      return cur.val;
+    },
+  };
+  try { return await fn(deaths, lk); }
   finally {
-    const cur = await r2get(env, IDX.state, null).catch(()=>null);
-    if (cur && lockAt(cur.lock) === now){ delete cur.lock; await r2put(env, IDX.state, cur).catch(()=>{}); }
+    try {
+      const cur = await r2getE(env, IDX.state);
+      if (cur.val && cur.val.lock && cur.val.lock.id === id){
+        delete cur.val.lock;
+        await r2putIf(env, IDX.state, cur.val, cur.etag);
+      }
+    } catch {}
   }
+}
+/** 不拿锁也要改 state 的那几个小动作（解锁 / 清冷却 / 重置降级）：条件写，撞上并发就重读再改，
+    不会把别人刚提交的片表指针盖回旧值 */
+async function stateMutate(env, fn){
+  for (let i = 0; i < 4; i++){
+    const cur = await r2getE(env, IDX.state);
+    const st = cur.val === undefined ? blankState() : cur.val;
+    const r = fn(st);
+    if (r === false) return st;
+    if (await r2putIf(env, IDX.state, st, cur.etag)) return st;
+    await sleep(150 * (i + 1));
+  }
+  throw lockErr('state.json 正被频繁写入，稍后再试');
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1591,28 +1911,27 @@ async function withIndexLock(env, fn){
 
    v4.0 一个年份 = 一个大分片。每一轮任务都要把整年解开、改几行、
    再整年编回去 —— CPU 与内存成本正比于该年份的总行数。年份越满，
-   每轮越贵，最终必然撞上 Worker 的资源上限，平台直接掐进程返回
-   503 "Worker exceeded resource limits"（错误码 1102），代码里
-   catch 不到，锁也留在 R2 里。更糟的是降级只砍抓取页数，砍不到
-   编解码这块，所以一旦撞线就永远撞线，只能人工干预。
-
+   每轮越贵，最终必然撞上 Worker 的资源上限。
    v4.1 改成只追加的分片链：一片写满 PART_ROWS 行就封片，新行只
    进最后那一片。每轮的解码/编码工作量被钉死在一片的大小上，与
    年份总量无关 —— 索引再大，单轮成本也是常数。
      · p0 沿用旧路径，老索引不用迁移，直接当作"已封的第一片"
      · 去重靠单独的 tid 表（只存 base36 增量，解析成本近似于零）
      · 影片记 SP={年:[片号]}，详情只读装着它的那几片
+   v6 起分片与 tid 表都是 copy-on-write（见上面「原子提交」）。
    ══════════════════════════════════════════════════════════════════ */
 
-/** 分片 LRU：单片最多 PART_ROWS 行，最多常驻 PART_CACHE 片 */
+/** 分片 LRU：键就是对象名（带代号），代号一换自然不会读到旧的 */
 const partCache = new Map();
-async function loadPart(env, year, pi, ver){
-  const k = year+'/'+pi+'@'+ver;
-  const hit = partCache.get(k);
-  if (hit && hit.exp > Date.now()){ partCache.delete(k); partCache.set(k, hit); return hit.v; }
-  const v = await r2get(env, IDX.part(year, pi), null);
+async function loadPart(env, state, year, pi){
+  const key = partKey(state, year, pi);
+  const hit = partCache.get(key);
+  if (hit && hit.exp > Date.now()){ partCache.delete(key); partCache.set(key, hit); return hit.v; }
+  let v;
+  try { v = await r2get(env, key, null); }
+  catch (e){ if (e.corrupt){ trace('sys', '分片 ' + key + ' 内容损坏，跳过', { lvl:'err' }); v = null; } else throw e; }
   while (partCache.size >= PART_CACHE) partCache.delete(partCache.keys().next().value);
-  partCache.set(k, { v, exp: Date.now()+45000 });
+  partCache.set(key, { v, exp: Date.now()+45000 });
   return v;
 }
 const dropCaches = () => { idxCache = null; partCache.clear(); };
@@ -1625,42 +1944,50 @@ function partRows(state, y){
   return legacy ? [legacy] : [];
 }
 const partCount = (state, y) => partRows(state, y).length;
-const yearRows  = (state, y) => partRows(state, y).reduce((a,x)=>a+x, 0);
+const yearRows  = (state, y) => partRows(state, y).reduce((a,x)=>a+(x||0), 0);
 
-/** tid 表：只存 base36 增量，40000 条约 100KB，解析 ~10ms */
-function tidsBlob(set){
+/** tid 表：只存 base36 增量，40000 条约 100KB，解析 ~10ms。rows = 这张表对应的片表行数 */
+function tidsBlob(set, rows){
   const arr = [...set].sort((a,b)=>a-b);
   const b = arr.length ? arr[0] : 0;
   let prev = b; const out = [];
   for (const t of arr){ out.push(b36(t - prev)); prev = t; }
-  return { v:4, b, n: arr.length, t: out.join('.') };
+  return { v:4, b, n: arr.length, rows: rows == null ? arr.length : rows, t: out.join('.') };
 }
 function tidsParse(o){
   const s = new Set();
   if (!o || typeof o.t !== 'string') return s;
-  let cur = o.b|0;
+  let cur = Number(o.b) || 0;
   if (o.t) for (const d of o.t.split('.')){ cur += un36(d); s.add(cur); }
   return s;
 }
-/** 没有 tid 表就现场引导：只读各片的 t 字段，不解标题（便宜得多） */
+/**
+ * 该年份已收录的 tid。tid 表缺了、坏了、或者比片表记的行数少（v5 被掐在两次写之间留下的）
+ * 就从已提交的分片现场重建 —— 只读各片的 t 字段，不解标题。返回 { set, rebuilt }
+ */
 async function loadTids(env, y, state){
-  const o = await r2get(env, IDX.tids(y), null);
-  if (o && typeof o.t === 'string') return tidsParse(o);
+  const want = yearRows(state, y);
+  let o = null;
+  try { o = await r2get(env, tidsKey(state, y), null); }
+  catch (e){ if (!e.corrupt) throw e; }
+  if (o && typeof o.t === 'string' && Number(o.rows != null ? o.rows : o.n) >= want) return { set: tidsParse(o), rebuilt: false };
   const s = new Set();
   const n = partCount(state, y);
   for (let i = 0; i < n; i++){
-    const sh = await r2get(env, IDX.part(y, i), null);
-    if (!sh || !sh.t) continue;
-    const b = sh.b|0;
+    let sh = null;
+    try { sh = await r2get(env, partKey(state, y, i), null); } catch (e){ if (!e.corrupt) throw e; }
+    if (!sh || typeof sh.t !== 'string' || !sh.t) continue;
+    const b = Number(sh.b) || 0;
     for (const d of sh.t.split('.')) s.add(b + un36(d));
   }
-  return s;
+  if (want) trace('sys', y + ' 年 tid 表' + (o ? '落后于片表' : '缺失') + '，已从 ' + n + ' 片重建（' + s.size + ' 条）', { lvl: 'warn' });
+  return { set: s, rebuilt: true };
 }
 
 /**
  * 分片工作集：一次任务里只会碰"每个年份的最后一片"。
- * cap 由调用方按降级等级压低 —— 上一轮被平台掐过，下一轮就用更小的
- * 片，编码量随之减半。这条路径能真正收敛，v4.0 的降级不能。
+ * cap 由调用方按降级等级压低 —— 上一轮被平台掐过，下一轮就用更小的片。
+ * 写盘全部是新代号的对象；flush() 只把新代号记进 state（内存里），由调用方 commitIndex 提交。
  */
 function partSet(env, state, opt = {}){
   const cap = Math.max(300, opt.cap || PART_ROWS);
@@ -1668,19 +1995,32 @@ function partSet(env, state, opt = {}){
 
   async function open(y){
     if (Y.has(y)) return Y.get(y);
+    const st = ystOf(state, y);
     const pn = partRows(state, y).slice();
+    const pg = pn.map((_, i) => pgOf(state, y, i));
     let pi = Math.max(0, pn.length - 1);
-    let groups = {}, dict = null, rows = 0;
+    let groups = {}, dict = null, rows = 0, sealedBad = false;
+    const tl = await loadTids(env, y, state);
     if (pn.length){
       if (pn[pi] < cap){
-        const sh = await r2get(env, IDX.part(y, pi), null);
-        if (sh){ groups = decodeShard(sh); dict = sh.d || null; rows = pn[pi]; }
+        let sh = null;
+        try { sh = await r2get(env, partKey(state, y, pi), null); }
+        catch (e){ if (!e.corrupt) throw e; sealedBad = true; }
+        if (sh){
+          groups = decodeShard(sh); dict = sh.d || null; rows = Object.values(groups).reduce((a,x)=>a+x.length, 0);
+          for (const id in groups) for (const r of groups[id]) tl.set.add(Number(r.tid));   // 与已提交分片对齐
+        } else if (sealedBad || pn[pi] > 0){
+          /* 最后一片读不出来（损坏 / 不见了）：不往它上面覆盖，从新的一片接着写 */
+          trace('sys', y + ' 年第 ' + pi + ' 片读不出来，新行改写到下一片（体检里「重算汇总」）', { lvl:'err' });
+          pi = pn.length;
+        }
       } else {
         pi = pn.length;                       // 最后一片已满 → 直接开新片，不解码
       }
     }
-    const e = { y, pi, pn, groups, dict, rows, dictLen: 0, retrain: false,
-                tids: await loadTids(env, y, state), dirty: false, wrote: [] };
+    void st;
+    const e = { y, pi, pn, pg, groups, dict, rows, dictLen: 0, retrain: false,
+                tids: tl.set, tidsDirty: tl.rebuilt, dirty: false, wrote: [] };
     Y.set(y, e);
     return e;
   }
@@ -1693,8 +2033,10 @@ function partSet(env, state, opt = {}){
     if (rows <= HEAVY_ROWS){ const b = encodeBest(e.y, e.groups, old); sh = b.sh; retrain = b.retrain; }
     else sh = old && old.length >= 32 ? encodeShard(e.y, e.groups, old.slice())
                                       : encodeShard(e.y, e.groups, null);
-    await r2put(env, IDX.part(e.y, e.pi), sh);
-    e.pn[e.pi] = rows; e.dict = sh.d; e.dictLen = sh.d.length;
+    const g = newGen();
+    await r2put(env, IDX.part(e.y, e.pi, g), sh);
+    if (e.pn[e.pi] != null) graveAdd(state, IDX.part(e.y, e.pi, e.pg[e.pi] || ''));   // 被替换下来的旧版本
+    e.pn[e.pi] = rows; e.pg[e.pi] = g; e.dict = sh.d; e.dictLen = sh.d.length;
     e.retrain = e.retrain || retrain;
     e.wrote.push(e.pi); e.dirty = false;
   }
@@ -1723,12 +2065,12 @@ function partSet(env, state, opt = {}){
       let added = 0;
       for (const row of rowsIn){
         const tid = Number(row.tid);
-        if (!tid || e.tids.has(tid)) continue;
+        if (!(tid > 0) || e.tids.has(tid)) continue;
         if (mv && (mv[F.R]||0) >= ROWS_PER_MOVIE) break;
         e.tids.add(tid);
         const r = toRow(tid, row.title);
         (e.groups[id] || (e.groups[id] = [])).push(r);
-        e.rows++; added++; e.dirty = true;
+        e.rows++; added++; e.dirty = true; e.tidsDirty = true;
         if (mv){ mv[F.R] = (mv[F.R]||0) + 1; bumpBest(mv, r); bumpSpec(mv, r); }
       }
       if (mv && added){
@@ -1738,15 +2080,20 @@ function partSet(env, state, opt = {}){
       }
       return added;
     },
-    /** 落盘：写当前片 + tid 表，并把片表写回 state */
+    /** 落盘：写当前片 + tid 表（都是新对象），并把片表 / 代号写回 state（内存里，等 commitIndex 提交） */
     async flush(){
       const out = [];
       for (const e of Y.values()){
         if (e.dirty) await flushOne(e);
-        await r2put(env, IDX.tids(e.y), tidsBlob(e.tids));
-        const st = state.years[e.y] || (state.years[e.y] = newYear());
-        st.pn = e.pn;
-        const rows = e.pn.reduce((a,x)=>a+x, 0);
+        const st = ystOf(state, e.y);
+        const rows = e.pn.reduce((a,x)=>a+(x||0), 0);
+        if (e.tidsDirty || !st.tg){
+          const g = newGen();
+          await r2put(env, IDX.tids(e.y, g), tidsBlob(e.tids, rows));
+          if (st.tg || yearRows(state, e.y) > 0) graveAdd(state, tidsKey(state, e.y));   // 新年份没有旧表可替换
+          st.tg = g; e.tidsDirty = false;
+        }
+        st.pn = e.pn; st.pg = e.pg;
         (state.relsByYear = state.relsByYear || {})[e.y] = rows;
         (state.dictByYear = state.dictByYear || {})[e.y] = e.dictLen || (state.dictByYear||{})[e.y] || 0;
         out.push({ year: e.y, rows, parts: e.pn.length, part: e.pi,
@@ -1756,6 +2103,109 @@ function partSet(env, state, opt = {}){
       return out;
     },
   };
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   [v6] 日常维护：备份 / 恢复 / 清理孤儿对象
+   ──────────────────────────────────────────────────────────────────
+   · 备份：movies.json、state.json、留底队列每天各备一份到 bak/<源>/<日期>/，留最近 BAK_KEEP 天。
+     分片不备：它们是不可变对象，state 里记着名字。
+   · 恢复（体检里「从备份恢复」）：影片表取备份那一份；state.json 现在这份还能读就留着
+     （它指着最新的分片），读不出来才一起取备份。恢复后自动「重算汇总」按分片对齐计数。
+   · 孤儿对象：被掐掉的那一轮写了新代号的分片 / tid 表却没来得及提交，没人引用它们 ——
+     每天列一遍本源的键，既不被 state 引用、也不在 grave 里、而且已经放了六小时以上的，删掉。
+   ══════════════════════════════════════════════════════════════════ */
+const BAK_KEEP = 7;
+const bakPre = () => 'bak/' + SRC.id + '/';
+const idxNs = () => IDX.movies.slice(0, IDX.movies.lastIndexOf('/') + 1);
+async function r2list(env, prefix, max){
+  const out = [];
+  if (!env.R2 || typeof env.R2.list !== 'function') return out;
+  let cursor;
+  for (let i = 0; i < 20 && out.length < (max || 5000); i++){
+    const r = await env.R2.list({ prefix, cursor, limit: 1000 });
+    for (const o of (r && r.objects) || []) out.push(o);
+    if (!r || !r.truncated) break;
+    cursor = r.cursor;
+  }
+  return out;
+}
+async function backupNow(env, force){
+  const st = await r2get(env, IDX.state, null);
+  if (!st) return { ok:true, skipped:'还没有索引，不用备份' };
+  if (!force && st.bakAt && Date.now() - st.bakAt < 20 * 3600e3) return { ok:true, skipped:'今天已经备份过' };
+  const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const pre = bakPre() + day + '/';
+  let n = 0;
+  for (const k of [IDX.movies, IDX.state, PEND.key]){
+    const o = await env.R2.get(k);
+    if (!o) continue;
+    const txt = await o.text();
+    JSON.parse(txt);                                    // 坏的不备（备份一份坏的毫无意义）
+    await env.R2.put(pre + k.slice(k.lastIndexOf('/') + 1), txt, { httpMetadata:{ contentType:'application/json' } });
+    n++;
+  }
+  /* 只留最近 BAK_KEEP 天 */
+  const days = [...new Set((await r2list(env, bakPre())).map(o => o.key.slice(bakPre().length).split('/')[0]))].sort();
+  const drop = days.slice(0, Math.max(0, days.length - BAK_KEEP));
+  if (drop.length){
+    const keys = (await r2list(env, bakPre())).map(o => o.key).filter(k => drop.some(d => k.startsWith(bakPre() + d + '/')));
+    if (keys.length) await env.R2.delete(keys).catch(() => {});
+  }
+  await stateMutate(env, (x) => { x.bakAt = Date.now(); x.bakDay = day; });
+  trace('sys', '已备份 ' + SRC.name + ' 索引（' + n + ' 份）到 ' + pre + '，保留最近 ' + BAK_KEEP + ' 天', { lvl:'info' });
+  return { ok:true, day, files: n, kept: Math.min(days.length, BAK_KEEP), msg: '已备份到 ' + pre };
+}
+async function restoreBackup(env, lk, day){
+  const days = [...new Set((await r2list(env, bakPre())).map(o => o.key.slice(bakPre().length).split('/')[0]))].sort();
+  if (!days.length) throw new Error('没有备份可以恢复（每天由定时任务自动备份；也可以在体检里手动「立即备份」）');
+  const d = day && days.includes(String(day)) ? String(day) : days[days.length - 1];
+  const pre = bakPre() + d + '/';
+  const bm = await r2get(env, pre + 'movies.json', null);
+  if (!bm || !bm.m) throw new Error('备份 ' + d + ' 里没有可用的影片表');
+  let st = null, kept = true;
+  try { st = await r2get(env, IDX.state, null); } catch { st = null; }
+  if (!st || !st.years){ st = await r2get(env, pre + 'state.json', null); kept = false; }
+  if (!st || !st.years) throw new Error('现在的 state.json 读不出来，备份 ' + d + ' 里也没有可用的 state');
+  bm.m = bm.m || {}; bm.k = bm.k || {}; bm.u = bm.u || {};
+  st.heal = Date.now();                                 // 恢复后按分片重算一遍计数
+  delete st.resync;
+  await commitIndex(env, lk, bm, st, { shrink: true, force: true });
+  const bp = await r2get(env, pre + 'pending.json', null).catch(() => null);
+  if (bp && bp.q) await r2put(env, PEND.key, bp).catch(() => {});
+  trace('sys', '已从备份 ' + d + ' 恢复影片表（' + Object.keys(bm.m).length + ' 部）' + (kept ? '，片表沿用现在的 state' : '，state 也取自备份'), { lvl:'warn' });
+  return { ok:true, day: d, movies: Object.keys(bm.m).length, stateFrom: kept ? 'current' : 'backup',
+           msg: '已从 ' + d + ' 的备份恢复 ' + Object.keys(bm.m).length + ' 部影片，稍后自动重算汇总' };
+}
+/** 孤儿对象：没被提交的新代号分片 / tid 表（被掐掉的那一轮留下的） */
+async function orphanSweep(env, state){
+  const live = liveKeys(state);
+  for (const e of state.grave || []) if (e && e[0]) live.add(e[0]);
+  const keep = new Set([IDX.movies, IDX.state, PEND.key, LIB.list, LIB.legacy]);
+  const objs = await r2list(env, idxNs());
+  const cut = Date.now() - 6 * 3600e3;
+  const del = objs.filter(o => /\.(?:p\d+\.)?g[0-9a-z]+\.json$|\.t\.g[0-9a-z]+\.json$/.test(o.key) && !live.has(o.key) && !keep.has(o.key)
+    && (o.uploaded ? new Date(o.uploaded).getTime() < cut : false)).map(o => o.key);
+  if (del.length) await env.R2.delete(del.slice(0, 1000)).catch(() => {});
+  return del.length;
+}
+/** 定时任务里顺手做：一天一次备份 + 清孤儿；上一轮掐在两次提交之间（heal）就接着重算汇总 */
+async function maintain(env){
+  const st = await r2get(env, IDX.state, null).catch(() => null);
+  if (!st) return;
+  if (st.heal || st.resync){
+    const r = await repair(env, st.resync ? st.resync.act : 'resync').catch(e => ({ err: e.message || String(e) }));
+    trace('sys', '自动重算汇总：' + (r.err || r.msg || ''), { lvl: r.err ? 'warn' : 'info' });
+  }
+  if (!st.bakAt || Date.now() - st.bakAt > 20 * 3600e3){
+    await withIndexLock(env, async () => {
+      const b = await backupNow(env, false);
+      const cur = await r2get(env, IDX.state, null);
+      const n = cur ? await orphanSweep(env, cur) : 0;
+      if (n) trace('sys', '清掉 ' + n + ' 个没被提交的孤儿对象（被掐掉的轮次留下的）', { lvl:'info' });
+      return b;
+    }).catch(e => trace('sys', '日常备份没做成（下次再做）：' + (e.message || e), { lvl:'warn' }));
+  }
 }
 
 /* 版块自带的附加筛选（剧集那边的"状态"）。想改成"不限"就把 TV_FILTER
@@ -1780,9 +2230,9 @@ async function fetchList(env, year, pg){
   }, { tries: 3, gap: 800, onRetry: async (cls) => { if (cls === 'auth') await dropSession(env); } });
 }
 
-async function buildChunk(env, opt = {}){ return withIndexLock(env, (d) => buildInner(env, opt, d)); }
+async function buildChunk(env, opt = {}){ return withIndexLock(env, (d, lk) => buildInner(env, opt, d, lk)); }
 
-async function buildInner(env, { pages = 0, tmdbMax = 0, year = null } = {}, deaths = 0){
+async function buildInner(env, { pages = 0, tmdbMax = 0, year = null } = {}, deaths = 0, lk = null){
   const t0 = Date.now();
   pipeReset();
   /* 一轮的规模由计划决定，不再写死：Free 计划一次调用只有 50 个子请求，
@@ -1799,21 +2249,17 @@ async function buildInner(env, { pages = 0, tmdbMax = 0, year = null } = {}, dea
   const budget = Math.max(7000, BUDGET_MS - deaths * 3000) - 2500;
   const over = () => Date.now() - t0 > budget;
 
-  const [movies, state, pend] = await Promise.all([
-    r2get(env, IDX.movies, blankMovies()),
-    r2get(env, IDX.state, blankState()),
-    pendLoad(env),
-  ]);
-  movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+  const [{ movies, state, m0 }, pend] = await Promise.all([ loadForWrite(env), pendLoad(env) ]);
   let pendDirty = parserMigrate(movies, pend);
   govLoad(state);
+  await graveSweep(env, state);
+  movieKeysFill(movies);
 
   /* 冷却期直接返回：不碰网络，也不白占着锁；顺手把冷却写进 R2 让其它 isolate 一起忍 */
   const cool0 = govCoolLeft();
   if (cool0 > 0){
-    govSave(state); delete state.lock;
-    await r2put(env, IDX.state, state).catch(()=>{});
-    dropCaches();
+    govSave(state);
+    await commitIndex(env, lk, null, state).catch(()=>{});
     return { cooling: Math.ceil(cool0/1000), why: GOV.why, degraded: deaths,
       msg: '论坛限速冷却中，'+Math.ceil(cool0/1000)+' 秒后自动继续（'+(GOV.why||'限速')+'）',
       movies: state.movies||0, rels: state.rels||0 };
@@ -1996,14 +2442,12 @@ async function buildInner(env, { pages = 0, tmdbMax = 0, year = null } = {}, dea
     trace('match', 'TMDB 认定 ' + calls + ' 组 · 认下 ' + matchedNew + ' 部 · 认不出 ' + skipped +
       ' 组（已留底，可重试）· 命中缓存 ' + cached + (netFail ? ' · 网络失败 ' + netFail + ' 组' : ''),
       { lvl: skipped > matchedNew || netFail ? 'warn' : 'info' });
-  if (pendDirty) await pendSave(env, pend, state);
+  /* 留底队列只增不减：先于提交写（掐在提交前，下一轮重爬时再并进去，不丢）。
+     写之前先核对锁：锁已经被接管的一轮不能拿自己那份旧队列盖掉别人刚写的 */
+  if (pendDirty){ if (lk) await lk.check(); await pendSave(env, pend, state); }
   eventsFlush(state, [{ at: Date.now(), ch: 'pipe', lvl: 'info', msg: sum }]);
   govSave(state);
-  delete state.lock;
-  state.at = Date.now();
-  state.ver = (state.ver||0) + 1;
-  await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
-  dropCaches();
+  await commitIndex(env, lk, movies, state, { m0 });
 
   return {
     done: year ? !!st.done : BUILD_ORDER.every(y => state.years[y]?.done),
@@ -2020,26 +2464,22 @@ async function buildInner(env, { pages = 0, tmdbMax = 0, year = null } = {}, dea
 
 /** 每日增量：只扫近三年前几页 */
 async function incremental(env, headPages = 0){
-  return withIndexLock(env, async (deaths) => {
+  return withIndexLock(env, async (deaths, lk) => {
     const t0 = Date.now();
     pipeReset();
     const budget = Math.max(7000, BUDGET_MS - deaths*3000);
     headPages = Math.min(headPages || PLAN.pages, PLAN.pages * 2);
     headPages = Math.max(1, headPages >> Math.min(3, deaths));
     let budgetHit = 0;
-    const [movies, state, pend] = await Promise.all([
-      r2get(env, IDX.movies, blankMovies()),
-      r2get(env, IDX.state, blankState()),
-      pendLoad(env),
-    ]);
-    movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+    const [{ movies, state, m0 }, pend] = await Promise.all([ loadForWrite(env), pendLoad(env) ]);
     let pendDirty = parserMigrate(movies, pend);
     govLoad(state);
+    await graveSweep(env, state);
+    movieKeysFill(movies);
     const cool0 = govCoolLeft();
     if (cool0 > 0){
-      govSave(state); delete state.lock;
-      await r2put(env, IDX.state, state).catch(()=>{});
-      dropCaches();
+      govSave(state);
+      await commitIndex(env, lk, null, state).catch(()=>{});
       return { cooling: Math.ceil(cool0/1000), added:0, calls:0,
         msg: '论坛限速冷却中，'+Math.ceil(cool0/1000)+' 秒后再试' };
     }
@@ -2122,18 +2562,14 @@ async function incremental(env, headPages = 0){
     state.movies = Object.keys(movies.m).length;
     state.deaths = 0;
     pipeSave(state, 'incremental', Date.now() - t0);
-    if (pendDirty) await pendSave(env, pend, state);
+    if (pendDirty){ await lk.check(); await pendSave(env, pend, state); }
     const isum = '增量扫描：新增片源 ' + added + ' · TMDB ' + calls + ' · 子请求 ' +
       SUB.n + '/' + SUB.max + ' · ' + ((Date.now() - t0) / 1000).toFixed(1) + 's';
     trace('index', isum, { lvl: budgetHit ? 'warn' : 'info' });
     if (added) eventsFlush(state, [{ at: Date.now(), ch:'pipe', lvl:'info', msg: isum }]);
     govSave(state);
-    delete state.lock;
-    state.at = Date.now();
-    state.ver = (state.ver||0) + 1;
     state.lastIncremental = { at: Date.now(), added, calls, failed, ms: Date.now()-t0 };
-    await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
-    dropCaches();
+    await commitIndex(env, lk, movies, state, { m0 });
     return { added, calls, failed, degraded: deaths, movies: state.movies, rels: state.rels,
              sub: SUB.n, subMax: SUB.max, budgetHit, plan: PLAN.name, ms: Date.now()-t0 };
   });
@@ -2141,14 +2577,10 @@ async function incremental(env, headPages = 0){
 
 /** 单独重建某一年：清掉该年分片 + 从所有影片的 ys 里摘掉这一年 */
 async function resetYear(env, year){
-  return withIndexLock(env, async () => {
+  return withIndexLock(env, async (deaths, lk) => {
     year = Number(year);
     if (!YEARS[year]) throw new Error('未知年份 '+year);
-    const [movies, state] = await Promise.all([
-      r2get(env, IDX.movies, blankMovies()),
-      r2get(env, IDX.state, blankState()),
-    ]);
-    movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+    const { movies, state, m0 } = await loadForWrite(env);
     let touched = 0, dropped = 0;
     for (const id of Object.keys(movies.m)){
       const mv = movies.m[id], ys = mv[F.YS]||[];
@@ -2159,19 +2591,17 @@ async function resetYear(env, year){
     }
     for (const k of Object.keys(movies.k)) if (!movies.m[movies.k[k]]) delete movies.k[k];
     movies.u = {};
+    /* 旧分片不当场删：记进 grave，提交之后十分钟再删（提交前被掐，一切照旧） */
     const np = partCount(state, year);
-    for (let i = 0; i < Math.max(1, np); i++) await env.R2.delete(IDX.part(year, i)).catch(()=>{});
-    await env.R2.delete(IDX.tids(year)).catch(()=>{});
+    for (let i = 0; i < np; i++) graveAdd(state, partKey(state, year, i));
+    if (state.years[year]) graveAdd(state, tidsKey(state, year));
     state.years[year] = newYear();
     state.years[year].pn = [];
     (state.relsByYear = state.relsByYear||{})[year] = 0;
     state.rels = Object.values(state.relsByYear).reduce((a,x)=>a+x,0);
     state.movies = Object.keys(movies.m).length;
     state.deaths = 0;
-    delete state.lock;
-    state.at = Date.now(); state.ver = (state.ver||0)+1;
-    await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
-    dropCaches();
+    await commitIndex(env, lk, movies, state, { m0, shrink: true, force: true });
     return { year, touched, dropped, movies: state.movies };
   });
 }
@@ -2183,15 +2613,11 @@ async function resetYear(env, year){
  */
 const MIG_ROWS = 9000;
 async function migrateYear(env, year){
-  return withIndexLock(env, async () => {
+  return withIndexLock(env, async (deaths, lk) => {
     const old = await r2get(env, IDX.v3.movies, null);
     if (!old) throw new Error('没有找到 v3 索引（idx/movies.json）');
     const oldState = await r2get(env, IDX.v3.state, { years:{} });
-    const [movies, state] = await Promise.all([
-      r2get(env, IDX.movies, blankMovies()),
-      r2get(env, IDX.state, blankState()),
-    ]);
-    movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+    const { movies, state, m0 } = await loadForWrite(env);
     state.migrated = state.migrated || {};
     state.migAt = state.migAt || {};
 
@@ -2224,23 +2650,26 @@ async function migrateYear(env, year){
     const done = i >= ids.length;
 
     const pn = partRows(state, y).slice();
+    const pg = pn.map((_, i) => pgOf(state, y, i));
     let pi = pn.length ? pn.length - 1 : 0;
     let acc = {}, accRows = pn.length ? pn[pi] : 0;
     if (accRows >= PART_ROWS){ pi = pn.length; accRows = 0; }
     else if (pn.length){                       // 续写未满的那一片
-      const sh = await r2get(env, IDX.part(y, pi), null);
+      const sh = await r2get(env, partKey(state, y, pi), null);
       if (sh) acc = decodeShard(sh);
     }
     const dict = trainCodebook(batch.flatMap(([,l]) => l.map(r=>r.title)));
     const writePart = async () => {
       if (!accRows) return;
       const sh = encodeShard(y, acc, dict.slice());
-      await r2put(env, IDX.part(y, pi), sh);
-      pn[pi] = Object.values(acc).reduce((a,x)=>a+x.length,0);
+      const g = newGen();
+      await r2put(env, IDX.part(y, pi, g), sh);
+      if (pn[pi] != null) graveAdd(state, IDX.part(y, pi, pg[pi] || ''));
+      pn[pi] = Object.values(acc).reduce((a,x)=>a+x.length,0); pg[pi] = g;
       (state.dictByYear = state.dictByYear||{})[y] = sh.d.length;
       acc = {}; accRows = 0; pi = pn.length > pi ? pn.length : pi + 1;
     };
-    const tids = await loadTids(env, y, state);
+    const tids = (await loadTids(env, y, state)).set;
     for (const [id, list] of batch){
       const mv = movies.m[id];
       const keep = list.filter(r => !tids.has(Number(r.tid)));
@@ -2253,12 +2682,14 @@ async function migrateYear(env, year){
       if (accRows >= PART_ROWS) await writePart();
     }
     await writePart();
-    await r2put(env, IDX.tids(y), tidsBlob(tids));
+    const tg = newGen();
+    await r2put(env, IDX.tids(y, tg), tidsBlob(tids, pn.reduce((a,x)=>a+(x||0),0)));
+    if (state.years[y]) graveAdd(state, tidsKey(state, y));
 
     for (const k of Object.keys(old.k||{})) if (movies.m[old.k[k]]) movies.k[k] = old.k[k];
 
     const st = state.years[y] = { ...newYear(), ...(oldState.years?.[y] || {}), bad: [] };
-    st.pn = pn;
+    st.pn = pn; st.pg = pg; st.tg = tg;
     state.migAt[y] = done ? 0 : i;
     if (done) state.migrated[y] = true;
     const total = pn.reduce((a,x)=>a+x,0);
@@ -2266,10 +2697,8 @@ async function migrateYear(env, year){
     state.rels = Object.values(state.relsByYear).reduce((a,x)=>a+x,0);
     state.movies = Object.keys(movies.m).length;
     state.deaths = 0;
-    delete state.lock;
-    state.at = Date.now(); state.ver = (state.ver||0)+1;
-    await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
-    dropCaches();
+    movieKeysFill(movies);
+    await commitIndex(env, lk, movies, state, { m0 });
     const left = BUILD_ORDER.filter(x => !state.migrated[x]);
     return { year:y, rows, parts: pn.length, total, movies: state.movies,
       yearDone: done, left: left.length, done: !left.length,
@@ -2282,27 +2711,35 @@ async function migrateYear(env, year){
  * 所以改成按片来，前端顺着 parts 依次调用即可。
  */
 async function optimizeYear(env, year, part){
-  return withIndexLock(env, async () => {
+  return withIndexLock(env, async (deaths, lk) => {
     year = Number(year);
-    const state0 = await r2get(env, IDX.state, blankState());
-    const pn = partRows(state0, year);
+    const { state } = await loadForWrite(env);
+    const pn = partRows(state, year);
     if (!pn.length) return { year, skipped:true, parts:0, msg:'该年份没有分片' };
     const pi = part == null || part === '' ? pn.length - 1 : Number(part);
     if (!(pi >= 0 && pi < pn.length)) return { year, skipped:true, parts:pn.length, msg:'没有第 '+pi+' 片' };
-    const raw = await r2get(env, IDX.part(year, pi), null);
+    const raw = await r2get(env, partKey(state, year, pi), null);
     if (!raw || !raw.i?.length) return { year, part:pi, parts:pn.length, skipped:true, msg:'第 '+pi+' 片是空的' };
     const rows = raw.rows || raw.n?.length || 0;
     if (rows > SPLIT_MAX) return { year, part:pi, parts:pn.length, skipped:true, rows,
       msg:'第 '+pi+' 片有 '+rows+' 行，先用「拆分大片」再压实' };
     const before = JSON.stringify(raw).length;
-    const { sh, retrain } = encodeBest(year, decodeShard(raw), raw.d);
+    const groups = decodeShard(raw);
+    const { sh, retrain } = encodeBest(year, groups, raw.d);
     const after = JSON.stringify(sh).length;
-    if (after < before) await r2put(env, IDX.part(year, pi), sh);
-    const state = await r2get(env, IDX.state, blankState());
-    (state.dictByYear = state.dictByYear||{})[year] = sh.d.length;
-    state.ver = (state.ver||0)+1; state.at = Date.now(); delete state.lock;
-    await r2put(env, IDX.state, state);
-    dropCaches();
+    /* 压实前后逐行核对：解出来必须和原来一模一样，否则不写 */
+    if (after < before && !sameGroups(groups, decodeShard(sh)))
+      throw new Error(year + ' 年第 ' + pi + ' 片压实后核对不一致，已放弃写入');
+    if (after < before){
+      const g = newGen();
+      await r2put(env, IDX.part(year, pi, g), sh);
+      const st = ystOf(state, year);
+      st.pn = pn.slice(); st.pg = pn.map((_, i) => pgOf(state, year, i));
+      graveAdd(state, partKey(state, year, pi));
+      st.pg[pi] = g;
+      (state.dictByYear = state.dictByYear||{})[year] = sh.d.length;
+    }
+    await commitIndex(env, lk, null, state);
     return { year, part:pi, parts:pn.length, before, after: Math.min(before, after),
       saved: Math.max(0, before-after),
       ratio: +(before/Math.max(1,Math.min(before,after))).toFixed(2),
@@ -2318,20 +2755,17 @@ async function optimizeYear(env, year, part){
  * 只需要把受影响影片的 SP 改掉。一次切一片，返回 left 让前端接着调。
  */
 async function splitYear(env, year){
-  return withIndexLock(env, async () => {
+  return withIndexLock(env, async (deaths, lk) => {
     year = Number(year);
-    const [movies, state] = await Promise.all([
-      r2get(env, IDX.movies, blankMovies()),
-      r2get(env, IDX.state, blankState()),
-    ]);
-    movies.m = movies.m||{};
+    const { movies, state, m0 } = await loadForWrite(env);
     const pn = partRows(state, year).slice();
+    const pg = pn.map((_, i) => pgOf(state, year, i));
     const big = pn.findIndex(n => n > PART_ROWS * 1.5);
     if (big < 0) return { year, parts: pn.length, left: 0, msg:'没有需要拆分的大片' };
     if (pn[big] > SPLIT_MAX) throw new Error(year+' 年第 '+big+' 片有 '+pn[big]+' 行，超出可拆上限，请对该年份「重建」');
 
-    const raw = await r2get(env, IDX.part(year, big), null);
-    if (!raw){ pn[big] = 0; state.years[year].pn = pn; await r2put(env, IDX.state, state);
+    const raw = await r2get(env, partKey(state, year, big), null);
+    if (!raw){ pn[big] = 0; ystOf(state, year).pn = pn; ystOf(state, year).pg = pg; await commitIndex(env, lk, null, state);
       return { year, parts: pn.length, left: 0, msg:'第 '+big+' 片不存在，已修正片表' }; }
     const groups = decodeShard(raw);
     const ids = Object.keys(groups);
@@ -2348,10 +2782,13 @@ async function splitYear(env, year){
 
     const targets = [big];
     for (let k = 1; k < slices.length; k++) targets.push(pn.length + k - 1);
+    graveAdd(state, partKey(state, year, big));
     for (let k = 0; k < slices.length; k++){
       const sh = encodeShard(year, slices[k], dict.slice());
-      await r2put(env, IDX.part(year, targets[k]), sh);
+      const g = newGen();
+      await r2put(env, IDX.part(year, targets[k], g), sh);
       pn[targets[k]] = Object.values(slices[k]).reduce((a,x)=>a+x.length,0);
+      pg[targets[k]] = g;
       for (const id of Object.keys(slices[k])){
         const mv = movies.m[id];
         if (!mv) continue;
@@ -2360,14 +2797,12 @@ async function splitYear(env, year){
         markPart(mv, year, targets[k]);
       }
     }
-    for (let k = 0; k < pn.length; k++) if (pn[k] == null) pn[k] = 0;
-    (state.years[year] = state.years[year] || newYear()).pn = pn;
+    for (let k = 0; k < pn.length; k++){ if (pn[k] == null) pn[k] = 0; if (pg[k] == null) pg[k] = ''; }
+    const yst = ystOf(state, year);
+    yst.pn = pn; yst.pg = pg;
     (state.relsByYear = state.relsByYear||{})[year] = pn.reduce((a,x)=>a+x,0);
     state.rels = Object.values(state.relsByYear).reduce((a,x)=>a+x,0);
-    delete state.lock;
-    state.at = Date.now(); state.ver = (state.ver||0)+1;
-    await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
-    dropCaches();
+    await commitIndex(env, lk, movies, state, { m0 });
     const left = pn.filter(n => n > PART_ROWS * 1.5).length;
     return { year, from: big, into: targets, parts: pn.length, left,
       msg: year+' 年第 '+big+' 片已拆成 '+slices.length+' 片' + (left ? '，还剩 '+left+' 片要拆' : '') };
@@ -2527,7 +2962,17 @@ async function diagnose(env){
   try {
     movies = await r2get(env, IDX.movies, null);
     state  = await r2get(env, IDX.state, null);
-  } catch (e){ add('idx.read','索引可读','fail', e.message); }
+  } catch (e){ add('idx.read','索引可读','fail', e.message, e.corrupt ? 'restore' : null); }
+  if (state){
+    add('idx.commit','提交一致', state.heal || state.resync ? 'warn' : 'ok',
+      state.heal ? '上一轮掐在两次提交之间，影片表计数待按分片重算（定时任务会自动做）'
+        : state.resync ? '重算汇总进行到一半（定时任务会接着做）' : 'movies.json 与 state.json 是同一次提交',
+      state.heal || state.resync ? 'resync' : null);
+    const bak = state.bakAt ? Math.round((Date.now() - state.bakAt) / 3600e3) : null;
+    add('idx.backup','每日备份', bak == null ? 'warn' : (bak > 48 ? 'warn' : 'ok'),
+      bak == null ? '还没有备份（定时任务每天自动备份一次）' : '最近一次 ' + (state.bakDay || '') + '（' + bak + ' 小时前），保留 ' + BAK_KEEP + ' 天',
+      bak == null || bak > 48 ? 'backup' : null);
+  }
 
   if (!movies || !state){
     add('idx.exist','索引存在','warn','还没有 v4 索引',
@@ -2547,7 +2992,15 @@ async function diagnose(env){
     const missShard = [];
     const refYears = new Set();
     for (const id of ids) for (const y of (movies.m[id][F.YS]||[])) refYears.add(y);
-    for (const y of refYears) if (!partCount(state, y) || !await loadPart(env, y, 0, state.ver||0)) missShard.push(y);
+    for (const y of refYears){
+      const n = partCount(state, y);
+      if (!n){ missShard.push(y); continue; }
+      /* 只问元数据（head），不下载、不解析分片 —— 一个年份可能有几十片 */
+      for (let i = 0; i < n; i++){
+        const h = typeof env.R2.head === 'function' ? await env.R2.head(partKey(state, y, i)).catch(() => null) : await loadPart(env, state, y, i);
+        if (!h){ missShard.push(y + '#' + i); break; }
+      }
+    }
     add('idx.shard','分片齐全', missShard.length?'fail':'ok',
       missShard.length ? '缺少分片：'+missShard.join(', ')
         : refYears.size+' 个年份 · '+BUILD_ORDER.reduce((a,y)=>a+partCount(state,y),0)+' 片在位',
@@ -2610,7 +3063,7 @@ async function diagnose(env){
     /* 码本健康度：编码后平均长度掉到 30 以下才算健康 */
     const y0 = BUILD_ORDER.find(y => (state.relsByYear||{})[y]);
     if (y0){
-      const sh = await loadPart(env, y0, Math.max(0, partCount(state, y0)-1), state.ver||0);
+      const sh = await loadPart(env, state, y0, Math.max(0, partCount(state, y0)-1));
       if (sh?.n?.length){
         const avg = sh.n.reduce((a,x)=>a+x.length,0)/sh.n.length;
         add('idx.codec','码本效率', avg>34?'warn':'ok',
@@ -2635,29 +3088,31 @@ async function diagnose(env){
 
 async function repair(env, action, arg){
   if (action === 'unlock'){
-    const st = await r2get(env, IDX.state, blankState());
-    const had = !!lockAt(st.lock);
-    delete st.lock;
-    await r2put(env, IDX.state, st); dropCaches();
+    let had = false;
+    await stateMutate(env, (st) => { had = !!lockAt(st.lock); if (!had) return false; delete st.lock; });
+    dropCaches();
     return { ok:true, had };
   }
   /* 解锁 + 清降级计数：以前得人工点「强制解锁」再点「继续建立索引」，
      现在前端在卡死时会自己调这个。 */
   if (action === 'resetTask'){
-    const st = await r2get(env, IDX.state, blankState());
-    const was = st.deaths || 0;
-    delete st.lock; st.deaths = 0;
-    await r2put(env, IDX.state, st); dropCaches();
+    let was = 0;
+    await stateMutate(env, (st) => { was = st.deaths || 0; if (!st.lock && !was) return false; delete st.lock; st.deaths = 0; });
+    dropCaches();
     return { ok:true, deaths: was };
   }
   if (action === 'cooldown'){
     GOV.until = 0; GOV.strikes = 0; GOV.wins = 0; GOV.gap = 260; GOV.why = '';
-    const st = await r2get(env, IDX.state, blankState());
-    if (st.cool){ delete st.cool; await r2put(env, IDX.state, st); }
+    await stateMutate(env, (st) => { if (!st.cool) return false; delete st.cool; });
     dropCaches();
     return { ok:true, msg:'已清除限速冷却，请求间隔重置为 260ms' };
   }
   if (action === 'relogin'){ await dropSession(env); await session(env, true); return { ok:true }; }
+  /* 备份 / 恢复：movies.json + state.json 每天备一份（cron 自动做），留最近 BAK_KEEP 份。
+     恢复只恢复这两份 —— 它们引用的分片都是不可变对象，备份时在用的那一批十分钟内不会被删，
+     更早的备份所引用的分片若已被清理，恢复后跑一遍「重算汇总」即可对齐。 */
+  if (action === 'backup') return withIndexLock(env, async () => backupNow(env, true));
+  if (action === 'restore') return withIndexLock(env, async (deaths, lk) => restoreBackup(env, lk, arg));
   /**
    * 重试匹配。
    * v4 只是把 movies.u 清空 —— 可那时候认不出来的帖子行早就丢了，
@@ -2666,14 +3121,9 @@ async function repair(env, action, arg){
    * 分批做，一批的大小按剩余子请求预算算，返回 left>0 就再调一次。
    */
   if (action === 'retryUnmatched'){
-    return withIndexLock(env, async () => {
+    return withIndexLock(env, async (deaths, lk) => {
       const t0 = Date.now();
-      const [movies, state, pend] = await Promise.all([
-        r2get(env, IDX.movies, blankMovies()),
-        r2get(env, IDX.state, blankState()),
-        pendLoad(env),
-      ]);
-      movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+      const [{ movies, state, m0 }, pend] = await Promise.all([ loadForWrite(env), pendLoad(env) ]);
       parserMigrate(movies, pend);          // 解析器变了就把重试次数归零，别把老账判死
       const live = Object.keys(pend.q).filter(k =>
         !PEND_SKIP.has(pend.q[k].w) && (pend.q[k].n||0) < PEND.tries);
@@ -2681,8 +3131,7 @@ async function repair(env, action, arg){
       if (!live.length){
         const legacy = Object.keys(movies.u).length;
         const st = pendStat(pend); state.pend = st;
-        delete state.lock; state.at = Date.now();
-        await r2put(env, IDX.state, state); dropCaches();
+        await commitIndex(env, lk, null, state);
         return { ok:true, done:true, left:0, fixed:0, legacy, ...st,
           msg: legacy
             ? '留底队列里没有可重试的了。另有 ' + legacy + ' 条是 v4 时期的老账 —— '
@@ -2716,11 +3165,12 @@ async function repair(env, action, arg){
       catch (e){
         if (!e.budget) throw e;
         const st = pendStat(pend); state.pend = st;
-        delete state.lock; await r2put(env, IDX.state, state);
+        await commitIndex(env, lk, null, state);
         return { ok:true, left: st.retry, fixed:0, budget:1, ...st,
           msg:'本轮子请求预算用尽，进度已保存，继续调用即可' };
       }
 
+      await graveSweep(env, state);
       const ps = partSet(env, state);
       let fixed = 0, rows = 0, still = 0, net = 0;
       const won = [];
@@ -2741,10 +3191,11 @@ async function repair(env, action, arg){
       await ps.flush();
       state.movies = Object.keys(movies.m).length;
       state.deaths = 0;
-      const st = await pendSave(env, pend, state);
-      delete state.lock; state.at = Date.now(); state.ver = (state.ver||0) + 1;
-      await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
-      dropCaches();
+      const st = pendStat(pend); state.pend = st;
+      await commitIndex(env, lk, movies, state, { m0 });
+      /* 留底队列里删掉的是「已经认回来、写进分片」的条目 —— 必须在提交之后再写，
+         否则掐在中间，这些帖子既不在队列里、也不在索引里 */
+      await pendSave(env, pend, null).catch(e => trace('sys', '留底队列写回失败（下次重试会再认一遍，不丢）：' + (e.message || e), { lvl:'warn' }));
       trace('match', '重试匹配：认回 ' + fixed + ' 部 / ' + rows + ' 个片源，仍认不出 ' + still +
         '，还剩 ' + st.retry, { lvl: 'info' });
       const spent2 = Date.now() - t0;
@@ -2763,10 +3214,8 @@ async function repair(env, action, arg){
    * 才会真的去认一次，而且这次用的是 v5 的多策略认定。
    */
   if (action === 'rescanUnmatched'){
-    return withIndexLock(env, async () => {
-      const [movies, state] = await Promise.all([
-        r2get(env, IDX.movies, blankMovies()), r2get(env, IDX.state, blankState()),
-      ]);
+    return withIndexLock(env, async (deaths, lk) => {
+      const { movies, state, m0 } = await loadForWrite(env);
       const n = Object.keys(movies.u||{}).length;
       movies.u = {};
       let ys = 0;
@@ -2775,9 +3224,7 @@ async function repair(env, action, arg){
         if (!st) continue;
         if (st.done || (st.page||1) > 1){ st.page = 1; st.done = false; ys++; }
       }
-      delete state.lock; state.at = Date.now(); state.ver = (state.ver||0) + 1;
-      await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
-      dropCaches();
+      await commitIndex(env, lk, movies, state, { m0 });
       return { ok:true, cleared:n, years:ys,
         msg: '已清掉 ' + n + ' 条跳过标记，并把 ' + ys + ' 个年份的游标倒回第 1 页。'
            + '现在点「继续建立索引」会重走一遍列表页 —— 已入库的帖子由 tid 表直接跳过，'
@@ -2791,11 +3238,8 @@ async function repair(env, action, arg){
    * 游标存在 state 里，返回 left>0 就再调一次。
    */
   if (action === 'prune' || action === 'resync'){
-    return withIndexLock(env, async () => {
-      const [movies, state] = await Promise.all([
-        r2get(env, IDX.movies, blankMovies()), r2get(env, IDX.state, blankState()),
-      ]);
-      movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+    return withIndexLock(env, async (deaths, lk) => {
+      const { movies, state, m0 } = await loadForWrite(env);
 
       const list = [];
       for (const y of BUILD_ORDER)
@@ -2818,7 +3262,9 @@ async function repair(env, action, arg){
       let scanned = 0;
       while (at < list.length && Date.now() - t0 < 8000){
         const [y, pi] = list[at];
-        const sh = await r2get(env, IDX.part(y, pi), null);
+        let sh = null;
+        try { sh = await r2get(env, partKey(state, y, pi), null); }
+        catch (e){ if (!e.corrupt) throw e; trace('sys', y + ' 年第 ' + pi + ' 片损坏，重算时跳过', { lvl:'err' }); }
         const g = sh ? decodeShard(sh) : {};
         let rows = 0;
         for (const id of Object.keys(g)){
@@ -2840,7 +3286,9 @@ async function repair(env, action, arg){
       if (done){
         for (const y of Object.keys(pnBy)){
           const pn = pnBy[y].map(n => n||0);
-          (state.years[y] = state.years[y] || newYear()).pn = pn;
+          const yst = ystOf(state, y);
+          yst.pg = pn.map((_, i) => pgOf(state, y, i));
+          yst.pn = pn;
           (state.relsByYear = state.relsByYear||{})[y] = pn.reduce((a,x)=>a+x,0);
         }
         for (const y of BUILD_ORDER) if (!pnBy[y]) (state.relsByYear = state.relsByYear||{})[y] = 0;
@@ -2851,14 +3299,14 @@ async function repair(env, action, arg){
         for (const k of Object.keys(movies.k)) if (!movies.m[movies.k[k]]){ delete movies.k[k]; keys++; }
         state.rels = Object.values(state.relsByYear||{}).reduce((a,x)=>a+x,0);
         delete state.resync;
+        delete state.heal;                       // 计数已经按分片重算过，对齐了
       } else {
         state.resync = { act: action, at, pn: pnBy };
       }
       state.movies = Object.keys(movies.m).length;
       state.deaths = 0;
-      delete state.lock; state.at = Date.now(); state.ver = (state.ver||0)+1;
-      await Promise.all([ r2put(env, IDX.movies, movies), r2put(env, IDX.state, state) ]);
-      dropCaches();
+      movieKeysFill(movies);
+      await commitIndex(env, lk, movies, state, { m0, shrink: action === 'prune' });
       return { ok:true, done, scanned, left: Math.max(0, list.length - at),
         dropped, keys, movies: state.movies, rels: state.rels,
         msg: done ? '已重算 '+list.length+' 片' : '已扫 '+at+'/'+list.length+' 片，继续调用即可' };
@@ -3043,44 +3491,73 @@ async function recvGet(env, which, timeout){
   return x.json().catch(() => null);
 }
 
-/** 总账 → 本源的成品。一次 TMDB 请求都不发 —— Stream 那边已经认过了 */
+/**
+ * 总账 → 本源的成品（v7）。一次 TMDB 请求都不发 —— Stream 那边已经认过了。
+ *
+ * v6 在这里犯了两个让「缺片」判不准的错：
+ *   · 认下来的条目也照样建模糊键（片名 + 年份 ±1、没年份的只按片名）——
+ *     库里有「惊变 2023」（id 对得上），索引里另一部「惊变 2024」就被当成已有藏掉了；
+ *     一个没年份的「Dune.mkv」能把 1984 和 2021 两部《沙丘》一起藏掉。
+ *   · Stream 偶尔会把文件认错成年份差几十年的另一部片，v6 照单全收：
+ *     认错的那个 id 被当成「确定已有」，真正那部反而显示缺片。
+ * v7 把库里的条目分成三类，比对时各走各的（见 libOwn）：
+ *   ids  —— 可信的 TMDB id（类型对、TMDB 年份和文件名年份对得上），精确比对；
+ *   idn  —— 同一批条目的片名 + 年份，只在「索引里根本没有这个 id」时才拿来查
+ *           是不是两边把同一部片认成了不同的 id；
+ *   fz   —— 没有可信 id 的条目（没认出来、或者 id 被判为认错）：按文件名猜出来的
+ *           片名 + 年份，一个条目最多认领索引里的一部片。
+ */
 function recvBuild(doc){
   const kind = SRC.kind;                        // movie / tv
   const items = Array.isArray(doc.items) ? doc.items : [];
-  const ids = [], weak = new Set(), loose = new Set(), dedup = new Set();
-  let files = 0, mine = 0, missed = 0;
+  const ids = [], dedup = new Set(), idn = [], idnSeen = new Set(), fz = [];
+  let files = 0, mine = 0, missed = 0, distrust = 0;
+  const str = (v) => (typeof v === 'string' || typeof v === 'number') ? String(v).trim().slice(0, 160) : '';
+  const uniq = (arr) => { const o = []; for (const v of arr){ const t = str(v); if (t && !o.includes(t)) o.push(t); } return o; };
 
   for (const it of items){
-    /* 「文件数」按剧集展开：一部 12 集的剧在片库里就是 12 个文件，
-       报成 1 会让系统页的数字对不上 Stream 那边 */
-    files += (it.kind === 'series') ? (it.episodes || 1) : 1;
-
-    /* TMDB 的 movie id 与 tv id 是两套编号，混进同一个 Set 会互相误判。
-       认下来的按 type 分拣；没认下来的只能按目录形态猜（剧集目录 → tv）。 */
-    const ty = it.tmdb
-      ? (it.type || (it.kind === 'series' ? 'tv' : 'movie'))
-      : (it.kind === 'series' ? 'tv' : 'movie');
+    if (!it || typeof it !== 'object') continue;
+    /* 「文件数」按剧集展开：一部 12 集的剧在片库里就是 12 个文件 */
+    files += (it.kind === 'series') ? (Math.max(1, Number(it.episodes) || 1)) : 1;
+    const tm = Number(it.tmdb) > 0 ? Math.floor(Number(it.tmdb)) : 0;
+    /* TMDB 的 movie id 与 tv id 是两套编号：认下来的按 type 分拣，没认下来的按目录形态猜 */
+    const ty = (tm && (it.type === 'tv' || it.type === 'movie')) ? it.type
+             : (it.kind === 'series' ? 'tv' : 'movie');
     if (ty !== kind) continue;
     mine++;
-
-    const y = String(it.year || it.guessYear || '');
-    /* 模糊兜底键照旧建：libHas 先比 id，比不中才看这里。
-       认下来的多留一条键没坏处，认不下来的全靠它。 */
-    for (const nm of [it.title, it.orig, it.guess, it.guessZh, it.guessEn]){
-      const k = norm(nm);
-      if (!k || k.length < 2 || LIB_GENERIC.has(k)) continue;
-      if (y) weak.add(k + '|' + y); else loose.add(k);
+    const ty0 = yearOf(it.year), gy = yearOf(it.guessYear);
+    /* 可信度（与前端 trusted() 同一口径）：TMDB 年份与文件名年份差得离谱 → id 多半认错了。
+       剧集的目录年份是「这一季」的，可以晚于首播，不能早于首播一年以上 */
+    let trust = !!tm;
+    if (tm && ty0 && gy){
+      if (kind === 'movie' && Math.abs(ty0 - gy) > 1) trust = false;
+      if (kind === 'tv' && gy < ty0 - 1) trust = false;
     }
-
-    if (!it.tmdb){ missed++; continue; }
-    if (dedup.has(+it.tmdb)) continue;          // 同一部片在库里有几份拷贝
-    dedup.add(+it.tmdb);
-    const nm = it.title || it.guess || '';
-    ids.push([+it.tmdb, nm, y, norm(nm) + '|' + y]);
+    /* 名字全对不上也不可信：文件名里的中文名、英文名，和那个 id 的中文名、原名两两都不沾边。
+       只差一边（港台译名、文件名里只有英文名）不算 —— Stream 的认定大多数是对的，不能因为译名不同就推翻 */
+    if (trust && tm && (it.guessZh || it.guessEn)){
+      const gk = keySplit(canonKeys([it.guess, it.guessZh, it.guessEn])), tk = keySplit(canonKeys([it.title, it.orig]));
+      if (gk.cjk.length && tk.cjk.length && gk.lat.length && tk.lat.length && nameClash(gk, tk)
+          && !gk.keys.some(k => tk.keys.includes(k))) trust = false;
+    }
+    if (trust){
+      if (!dedup.has(tm)){ dedup.add(tm); ids.push([tm, str(it.title || it.guess), String(ty0 || gy || ''), '']); }
+      if (!idnSeen.has(tm)){
+        idnSeen.add(tm);
+        const nm = uniq([it.title, it.orig]);
+        const kk = canonKeys(nm);
+        if (kk.length) idn.push([tm, nm, ty0 || 0, kk]);
+      }
+      continue;
+    }
+    if (tm) distrust++;
+    missed++;
+    /* 认错的条目：title / orig / year 都是那个错 id 的，只能信文件名猜出来的那几样 */
+    const nm = tm ? uniq([it.guess, it.guessZh, it.guessEn]) : uniq([it.title, it.orig, it.guess, it.guessZh, it.guessEn]);
+    const kk = canonKeys(nm);
+    if (kk.length) fz.push([nm, tm ? gy : (gy || ty0), Number(it.season) || 0, kk]);
   }
-
-  return { ids, weak: [...weak].slice(0, LIB.cap), loose: [...loose].slice(0, LIB.cap),
-           files, mine, missed };
+  return { ids, idn, fz, files, mine, missed, distrust };
 }
 
 /**
@@ -3093,7 +3570,7 @@ async function libSyncRecv(env, force){
   if (!meta || !meta.gen) return null;
 
   const cur = await libDoc(env);
-  if (!force && cur.v === 6 && cur.gen === meta.gen){
+  if (!force && cur.v === 7 && cur.cv === CANON_V && cur.gen === meta.gen){
     /* 未变更不写 R2 —— 一份成品十几万字节，为一个时间戳重写不划算。
        新鲜度由调用方在内存里补（见 libRefresh）。 */
     return { mode:'received', unchanged:1, gen: meta.gen, files: cur.files || 0,
@@ -3108,19 +3585,20 @@ async function libSyncRecv(env, force){
 
   const b = recvBuild(doc);
   const out = {
-    v: 6, src: 'received', gen: meta.gen, via: recvBase(env).via,
+    v: 7, cv: CANON_V, src: 'received', gen: meta.gen, via: recvBase(env).via,
     recvTs: doc.ts || 0, recvCount: doc.count || doc.items.length,
     pending: doc.pending || 0, unmatched: doc.unmatched || 0,
     scan: Date.now(), at: Date.now(),
-    files: b.files, mine: b.mine, missed: b.missed,
-    ids: b.ids, weak: b.weak, loose: b.loose,
-    miss: [], seen: [], todo: [],               // 认定队列在这条路上永远是空的
+    files: b.files, mine: b.mine, missed: b.missed, distrust: b.distrust,
+    ids: b.ids, idn: b.idn, fz: b.fz,
+    weak: [], loose: [], miss: [], seen: [], todo: [],   // 认定队列在这条路上永远是空的
   };
   await r2put(env, LIB.list, out);
   libMem = null;
   trace('lib', '总账同步：片库 ' + b.files + ' 个文件 → 本源 ' + b.mine + ' 部（' +
-    b.ids.length + ' 部带 TMDB id' +
-    (b.missed ? '，' + b.missed + ' 部总账里也没认出来' : '') + '）· gen=' + meta.gen,
+    b.ids.length + ' 部带可信 TMDB id' +
+    (b.missed ? '，' + b.missed + ' 部没有可信 id（按片名 + 年份比）' : '') +
+    (b.distrust ? '，其中 ' + b.distrust + ' 部的 id 与文件名年份对不上、判为认错' : '') + '）· gen=' + meta.gen,
     { lvl: 'info' });
   return { mode:'received', gen: meta.gen, files: b.files, cands: b.mine,
            ids: b.ids.length, missed: b.missed, left: 0, done: true };
@@ -3140,9 +3618,13 @@ const blankLib = () => ({ v:5, scan:0, at:0, files:0, ids:[], weak:[], loose:[],
 /* PEND 的键按源取，见文件头部的 SRC_MOVIE / SRC_TV */
 const PEND_SKIP = new Set(['tv','pack','other']);  // 本来就不是这个源的东西，不该反复重试
 const blankPend = () => ({ v:5, at:0, q:{} });
+/* [v6] 读失败不能当成「队列是空的」：那样这一轮写回去，留底的帖子行就全没了。
+   读失败 → 抛错（这一轮不写）；内容损坏 → 当空队列（备份里有，体检里「从备份恢复」） */
 const pendLoad = async (env) => {
-  const d = await r2get(env, PEND.key, null).catch(() => null);
-  return (d && d.q) ? d : blankPend();
+  let d = null;
+  try { d = await r2get(env, PEND.key, null); }
+  catch (e){ if (!e.corrupt) throw e; trace('sys', '留底队列损坏，按空队列处理', { lvl:'err' }); }
+  return (d && d.q && typeof d.q === 'object') ? d : blankPend();
 };
 function pendAdd(doc, g, y, why){
   const n = Object.keys(doc.q).length;
@@ -3186,7 +3668,7 @@ async function pendSave(env, doc, state){
 /** 读成品；A/list.json 还没有时，用 v4 的模糊键表垫一下，不至于突然不过滤 */
 async function libDoc(env){
   const d = await r2get(env, LIB.list, null).catch(() => null);
-  if (d && (d.v === 6 || d.v === 5)) return d;   /* v6 = 总账直读；v5 = 老管线的成品 */
+  if (d && (d.v === 7 || d.v === 6 || d.v === 5)) return d;   /* v7 / v6 = 总账直读；v5 = 老管线的成品 */
   const old = await r2get(env, LIB.legacy, null).catch(() => null);
   const b = blankLib();
   if (old){
@@ -3379,23 +3861,59 @@ let libJob = null;   // 并发合流：同一 isolate 只回源一次
 let libFail = 0;     // 上次失败时刻 —— 静默期内不再重试
 
 /* 海报 / 列表的缓存版本号。总账模式下 gen 本身就是内容指纹 —— 比
-   「分钟 + 条数」精确得多：条数不变而内容变了的那一类改动也能翻转。 */
+   「分钟 + 条数」精确得多：条数不变而内容变了的那一类改动也能翻转。
+   比对规则的版本也带上：规则一改，边缘缓存里按旧规则判的结果自然作废。 */
 const libVer = (l) => !l ? '0'
-  : (l.gen ? 'r' + l.gen : Math.floor(l.at / 60000) + '.' + l.ids.size + '.' + l.fuzzy);
+  : (l.gen ? 'r' + l.gen : Math.floor(l.at / 60000) + '.' + l.ids.size + '.' + l.fz.length) + '.c' + CANON_V;
 
+/**
+ * 成品 → 热路径用的形状。比对键在这里算好（每份成品每个 isolate 算一次），
+ * 请求路径上不再做任何字符串归一化。
+ *   v7（总账）：ids / idn / fz 原样展开
+ *   v6（老总账成品）：只有 ids 与模糊键 —— 下一次同步就会升到 v7，这里先按 v7 的口径凑合：
+ *       模糊键当作「没有可信 id 的条目」，但认下来的那些片名不再进模糊集合
+ *   v5（文件名认定）：ids = 认下来的；没认下来的候选（待认定 + 认过但 TMDB 没有）进 fz
+ */
 function libHydrate(doc){
   if (!doc) return null;
-  const ids = new Set();
-  const names = [];
-  for (const it of doc.ids || []){ ids.add(+it[0]); if (names.length < 4) names.push(it[1]); }
-  const weak = new Set(doc.weak || []), loose = new Set(doc.loose || []);
+  const ids = new Set(), names = [], fz = [], idn = [];
+  for (const it of doc.ids || []){
+    const id = Number(it && it[0]);
+    if (id > 0){ ids.add(id); if (names.length < 4 && it[1]) names.push(it[1]); }
+  }
+  const pushFz = (nm, y, sn, kk) => { const keys = kk || canonKeys(nm); if (keys.length) fz.push({ ...keySplit(keys), y: yearOf(y), sn: sn || 0 }); };
+  /* 同步时已经把比对键算好存在成品里（cv = 规则版本）；版本对不上就现场重算 */
+  const stored = doc.cv === CANON_V;
+  if (doc.v === 7){
+    for (const e of doc.fz || []) if (Array.isArray(e)) pushFz(e[0] || [], e[1], e[2], stored && Array.isArray(e[3]) ? e[3] : null);
+    for (const e of doc.idn || []){
+      if (!Array.isArray(e) || !(Number(e[0]) > 0)) continue;
+      const keys = stored && Array.isArray(e[3]) ? e[3] : canonKeys(e[1] || []);
+      if (keys.length) idn.push({ id: Number(e[0]), ...keySplit(keys), y: yearOf(e[2]) });
+    }
+  } else {
+    /* 老成品：认下来的候选键（「片名|年份」）对应的片名，不能再拿去模糊认领别的片 */
+    const known = new Set();
+    for (const it of doc.ids || []) if (it && it[3]) known.add(String(it[3]).split('|')[0]);
+    const seenK = new Set();
+    const addKey = (k, y) => {
+      const nk = String(k || '');
+      if (!nk || known.has(nk) || seenK.has(nk + '|' + (y || ''))) return;
+      seenK.add(nk + '|' + (y || ''));
+      pushFz([nk], y, 0);
+    };
+    for (const a of doc.todo || []){ if (Array.isArray(a)){ const c = candOpen(a); pushFz([c.cn, c.latin], c.ys[0], 0); } }
+    for (const k of Array.isArray(doc.miss) ? doc.miss : []){ const [nk, y] = String(k).split('|'); addKey(nk, y); }
+    for (const k of doc.weak || []){ const i = String(k).lastIndexOf('|'); if (i > 0) addKey(String(k).slice(0, i), String(k).slice(i + 1)); }
+    for (const k of doc.loose || []) addKey(k, '');
+  }
   return { at: doc.at || 0, scan: doc.scan || 0, files: doc.files || 0,
-           ids, weak, loose, fuzzy: weak.size + loose.size,
+           ids, fz, idn, fuzzy: fz.length,
            tried: (Array.isArray(doc.miss) ? doc.miss : []).length,
-           todo: (doc.todo || []).length, sample: names, n: ids.size + weak.size + loose.size,
-           /* 总账直读专有：模式、内容指纹、本源部数、总账里也没认出来的部数 */
+           todo: (doc.todo || []).length, sample: names, n: ids.size + fz.length,
+           /* 总账直读专有：模式、内容指纹、本源部数、没有可信 id 的部数 */
            src: doc.src || 'scan', gen: doc.gen || '', via: doc.via || '',
-           mine: doc.mine || 0, missed: doc.missed || 0, pending: doc.pending || 0 };
+           mine: doc.mine || 0, missed: doc.missed || 0, distrust: doc.distrust || 0, pending: doc.pending || 0 };
 }
 
 async function libRefresh(env, alsoResolve){
@@ -3448,30 +3966,222 @@ async function libLoad(env, ctx){
   return libMem;
 }
 
-/**
- * 这部片我是不是已经有了。
- * 返回 2 = TMDB id 相等（确定）；1 = 只有模糊键命中（疑似）；0 = 没有。
- * nn / no / y 由调用方预先算好 —— 热路径上不再做字符串归一化。
- */
-function libHas(lib, id, nn, no, y){
-  if (!lib) return 0;
-  if (lib.ids.has(+id)) return 2;
-  if (!lib.fuzzy) return 0;
-  for (const k of [nn, no]){
-    if (!k || k.length < 2) continue;
-    if (lib.loose.has(k)) return 1;
-    if (!y) continue;
-    /* 引进版和原产地常差一年，前后各让一年 */
-    if (lib.weak.has(k + '|' + y) || lib.weak.has(k + '|' + (y-1)) || lib.weak.has(k + '|' + (y+1)))
-      return 1;
-  }
-  return 0;
+/* ══════════════════════════════════════════════════════════════════
+   缺片检测 libOwn（v6）
+   ──────────────────────────────────────────────────────────────────
+   回答「索引里这部片，我库里是不是已经有了」。每部片一个判定：
+     2 = 确定已有：库里有一份可信的 TMDB id 与它相同
+     1 = 很可能已有：库里有一份没有可信 id 的，片名 + 年份对得上，而且只对得上它一部；
+         或者两边 id 不同、但片名年份全同而索引里根本没有库里那个 id（多半是某一边认错了）
+     0 = 缺片
+   与 v5 的区别（每一条都对应一类线上误判，见 tests/match-cases.mjs）：
+     · 认下来的条目只按 id 比，不再顺手按「片名 + 年份 ±1」把同名的另一部片也藏掉；
+     · 没有可信 id 的条目「认领」索引里的一部片：同名多部时挑年份最贴近的那部，
+       两部一样贴近就谁都不认（宁可显示出来让人看一眼，也不悄悄藏掉一部缺片）；
+     · 没有年份的条目只认独一无二、够长的片名（「无间道」认，「英雄」「Dune」不认）；
+     · 片名比对用 canon：繁体、全角、重音、罗马数字、冠词、第二部 / Part Two 都对得上；
+     · 剧集的目录年份是这一季的：允许晚于首播（第三季 2016 ↔ 首播 2011），不许早于首播一年以上。
+   全部判定在每个（索引版本, 片库成品）上算一次，结果是一张与 catRows 对齐的 Int8Array：
+   查目录时每部片只剩一次数组读取，不再做字符串归一化 —— 这正是热路径该有的样子。
+   ══════════════════════════════════════════════════════════════════ */
+const KEYC = new Map();          // 影片 id → { n, o, keys }：跨索引版本复用，片名没变就不重算
+/** 一组比对键 → { keys, cjk, lat }：按文种分好，比对时不再逐个跑正则 */
+function keySplit(keys){
+  const cjk = [], lat = [];
+  for (const k of keys) (keyKind(k) === 'cjk' ? cjk : lat).push(k);
+  return { keys, cjk, lat };
 }
-/** 只有一条影片记录在手时的便利包装（详情 / 购物车） */
-const libHasM = (lib, id, m) => !lib || !m ? 0
-  : libHas(lib, id, norm(m[F.N]), norm(m[F.O]), Number(m[F.Y]) || 0);
+function rowKeys(r){
+  const m = r.m, n = m[F.N] || '', o = m[F.O] || '';
+  let e = KEYC.get(r.id);
+  if (!e || e.n !== n || e.o !== o){
+    const mk = m[F.K];
+    const stored = Array.isArray(mk) && mk[0] === CANON_V;
+    const cn = stored ? String(mk[1] || '') : canon(n), co = stored ? String(mk[2] || '') : canon(o);
+    const keys = [];
+    for (const k of [cn, co]) if (k && !LIB_GENERIC.has(k) && keyWeight(k) >= 2 && !keys.includes(k)) keys.push(k);
+    e = { n, o, cn, co, ...keySplit(keys) };
+    KEYC.set(r.id, e);
+    if (KEYC.size > 200000) KEYC.clear();
+  }
+  return e;
+}
+/** 年份契合度：-1 = 对不上；3 = 同年；2 = 差一年（剧集：晚于首播）；1 = 有一边不知道 */
+function yearFit(ly, iy, tv, strict){
+  if (!ly || !iy) return strict ? -1 : 1;
+  const d = ly - iy;
+  if (d === 0) return 3;
+  if (strict) return -1;
+  if (tv) return d === -1 ? 2 : (d >= 1 ? 2.5 - Math.min(d, 40) / 100 : -1);
+  return Math.abs(d) === 1 ? 2 : -1;
+}
+/* 名字的「文种」：汉字 / 假名 / 谚文算 cjk，其余算 lat */
+const keyKind = (k) => /[぀-ヿ㐀-鿿가-힯]/.test(k) ? 'cjk' : 'lat';
+/**
+ * 名字有没有互相矛盾：两边都有同一文种（中文 / 英文）的名字、却一个都对不上。
+ * 返回 0 = 不矛盾；否则返回「对上的那个名字」的分量 —— 调用方据此决定还认不认：
+ *   · 「City」「Fear」这种短英文名撞上、中文名却完全不同 → 多半是两部不同的片，不认；
+ *   · 「Interstellar」对上、中文名一个「星际穿越」一个「星際效應」（港台译名）→ 同一部片，
+ *     所以对上的名字够长（英文 ≥ 8 个字母 / 中文 ≥ 3 个字）、年份又全对时照认。
+ * 英文名允许「一个包含另一个」的出入（文件名常把副标题截掉），但长度得相差不到两成。
+ */
+function nameClash(a, b){
+  let clash = false, matchW = 0;
+  for (let t = 0; t < 2; t++){
+    const x = t ? a.lat : a.cjk, y = t ? b.lat : b.cjk;
+    if (!x.length || !y.length) continue;
+    let ok = false;
+    for (let i = 0; i < x.length && !ok; i++){
+      const p = x[i];
+      for (let j = 0; j < y.length; j++){
+        const q = y[j];
+        if (p === q){ ok = true; matchW = Math.max(matchW, keyWeight(p)); break; }
+        const sh = p.length < q.length ? p : q, lo = p.length < q.length ? q : p;
+        if (sh.length >= 4 && sh.length >= lo.length * 0.8 && lo.includes(sh)){ ok = true; break; }
+      }
+    }
+    if (!ok) clash = true;
+  }
+  return clash ? Math.max(1, matchW) : 0;
+}
+let ownCache = { ver: -1, lib: null, src: '', res: null };
+function libOwn(movies, ver, lib){
+  if (!lib) return null;
+  if (ownCache.ver === ver && ownCache.lib === lib && ownCache.src === SRC.id && ownCache.res) return ownCache.res;
+  const rows = catRows(movies, ver);
+  const own = new Int8Array(rows.length);
+  const pos = catPos(movies, ver);
+  const tv = isTV();
+  const stat = { exact: 0, name: 0, conflict: 0, amb: 0, ambSample: [], conflictSample: [], ms: 0 };
+  const t0 = Date.now();
+  for (const id of lib.ids){ const i = pos.get(id); if (i != null && !own[i]){ own[i] = 2; stat.exact++; } }
 
-const libStat = (env, l) => ({
+  if (lib.fz.length || lib.idn.length){
+    /* 索引这边的片名表：比对键 → 行号。只在片库里还有要按片名比的条目时才建。
+       行的比对键、年份各存一份平铺数组，候选计数用「代号 + 定长数组」而不是每次新建 Map ——
+       一个常见英文名（City、Home）能对上几百部片，这里是整段最热的循环 */
+    const n = rows.length;
+    const RK = new Array(n), RY = new Int16Array(n);
+    const byKey = new Map();
+    for (let i = 0; i < n; i++){
+      const e = RK[i] = rowKeys(rows[i]);
+      RY[i] = rows[i].y || 0;
+      for (const k of e.keys){
+        const a = byKey.get(k);
+        if (a){ if (a[a.length - 1] !== i) a.push(i); } else byKey.set(k, [i]);
+      }
+    }
+    /* 同名的行按年份排好：有年份的电影只取前后一年那一小段（二分），不必把同名的几百部都翻一遍 */
+    for (const a of byKey.values()) if (a.length > 6) a.sort((p, q) => RY[p] - RY[q] || p - q);
+    const lowYear = (a, y) => { let lo = 0, hi = a.length; while (lo < hi){ const m = (lo + hi) >> 1; if (RY[a[m]] < y) lo = m + 1; else hi = m; } return lo; };
+    const cnt = new Uint8Array(n), mark = new Int32Array(n), touched = [];
+    let gen = 0;
+    let CS = new Float64Array(64), CI = new Int32Array(64);      // 候选的分数 / 行号（复用，不每次分配）
+    /** 一个库里条目 → 它认领的那一行；null = 没对上；-1 = 对上了不止一部、说不准。
+        打分先看「几个名字对上了」，再看年份贴不贴近：中文名、原名都对上的差一年，
+        胜过只有一个名字对上的同年。名字互相矛盾的候选出局（见 nameClash）。 */
+    const pick = (L, strict) => {
+      const keys = L.keys, ly = L.y;
+      gen++; touched.length = 0;
+      const touchRange = (a, from, to) => {
+        for (let j = from; j < to; j++){
+          const i = a[j];
+          if (mark[i] !== gen){ mark[i] = gen; cnt[i] = 0; touched.push(i); }
+          cnt[i]++;
+        }
+      };
+      /* 有年份的电影（以及要求同年的推断）只可能对上前后一年里的片；剧集与没年份的整列取 */
+      const narrow = ly && (strict || !tv);
+      for (const k of keys){
+        const a = byKey.get(k);
+        if (!a) continue;
+        if (!narrow || a.length <= 6){ touchRange(a, 0, a.length); continue; }
+        const y0 = strict ? ly : ly - 1, y1 = strict ? ly : ly + 1;
+        if (!strict) touchRange(a, 0, lowYear(a, 1));               // 年份不知道的行（排在最前）
+        touchRange(a, lowYear(a, y0), lowYear(a, y1 + 1));
+      }
+      if (!touched.length) return null;
+      if (CS.length < touched.length){ CS = new Float64Array(touched.length * 2); CI = new Int32Array(touched.length * 2); }
+      let m2 = 0;
+      for (let j = 0; j < touched.length; j++){
+        const i = touched[j];
+        const yf = yearFit(ly, RY[i], tv, strict);
+        if (yf < 0) continue;
+        CS[m2] = cnt[i] * 10 + yf; CI[m2] = i; m2++;
+      }
+      if (!m2) return null;
+      /* 分数从高到低：候选通常只有几个，插入排序；同名几百部（没年份的常见英文名）才走整排 */
+      if (m2 <= 24){
+        for (let a = 1; a < m2; a++){
+          const sc = CS[a], ii = CI[a];
+          let q = a;
+          while (q > 0 && CS[q - 1] < sc){ CS[q] = CS[q - 1]; CI[q] = CI[q - 1]; q--; }
+          CS[q] = sc; CI[q] = ii;
+        }
+      } else {
+        const ord = Array.from({ length: m2 }, (_, q) => q).sort((p, q) => CS[q] - CS[p] || CI[p] - CI[q]);
+        const s2 = ord.map(q => CS[q]), i2 = ord.map(q => CI[q]);
+        for (let q = 0; q < m2; q++){ CS[q] = s2[q]; CI[q] = i2[q]; }
+      }
+      /* 没有年份、最好的候选也只对上一个名字、而候选又不止一个：怎么比都是「说不准」，不必细比 */
+      if (!ly && touched.length > 1 && cnt[CI[0]] < 2) return -1;
+      /* 从高到低逐个过名字矛盾的检查，第一、第二名定了就停 */
+      let best = -1, bs = -1, second = -1, bestNk = 0, nkSecond = 0;
+      for (let r = 0; r < m2; r++){
+        const mv = CS[r];
+        if (best >= 0 && second >= 0 && mv < second) break;
+        /* 第一名已定：两边年份都有时，分数更低的不可能并列；没有年份时，对上的名字更少的不改变结论 */
+        if (best >= 0 && mv < bs && ly && RY[best]) break;
+        if (best >= 0 && (!ly || !RY[best]) && cnt[CI[r]] < bestNk) break;
+        const i = CI[r], nk = cnt[i], yf = mv - nk * 10;
+        const rk = RK[i];
+        if (strict && nk < Math.min(keys.length, rk.keys.length)) continue;   // 认错 id 的推断：能比的名字必须全对上
+        const cw = nameClash(L, rk);
+        if (cw && !(cw >= 8 && yf >= 3)) continue;                            // 名字矛盾：只有「长名字 + 同年」才照认
+        if (best < 0){ best = i; bs = mv; bestNk = nk; }
+        else if (second < 0){ second = mv; nkSecond = nk; }
+        if (best >= 0 && second >= 0 && second < bs) break;
+      }
+      if (best < 0) return null;
+      if (second === bs) return -1;
+      if (!ly || !RY[best]){
+        /* 没有年份可比：要么中文名和原名都对上、别的候选对上的名字更少；
+           要么那个名字够长、整个索引里只有这一部叫它 */
+        if (bestNk >= 2 && nkSecond < bestNk) return best;
+        let strong = false;
+        for (const k of keys){ const a = byKey.get(k); if (a && a.length === 1 && a[0] === best && keyWeight(k) >= 6) strong = true; }
+        if (!strong || touched.length > 1) return -1;
+      }
+      return best;
+    };
+    for (const L of lib.fz){
+      const i = pick(L, false);
+      if (i === -1){ stat.amb++; if (stat.ambSample.length < 6) stat.ambSample.push(L.keys[0] + (L.y ? ' ' + L.y : '')); continue; }
+      if (i == null || own[i]) continue;
+      own[i] = 1; stat.name++;
+    }
+    for (const L of lib.idn){
+      if (pos.has(L.id)) continue;                 // 库里那个 id 索引里有：两边说的是两部不同的片
+      const i = pick(L, true);
+      if (i == null || i === -1 || own[i]) continue;
+      own[i] = 1; stat.conflict++;
+      if (stat.conflictSample.length < 6) stat.conflictSample.push((rows[i].m[F.N] || rows[i].id) + ' ' + rows[i].y + '：库里 id ' + L.id + '，索引 id ' + rows[i].id);
+    }
+  }
+  stat.ms = Date.now() - t0;
+  const res = { own, stat };
+  ownCache = { ver, lib, src: SRC.id, res };
+  return res;
+}
+/** 只有一部片在手时（详情 / 片单）：同一张判定表里查 */
+function libHasId(movies, ver, lib, id){
+  if (!lib) return 0;
+  const r = libOwn(movies, ver, lib);
+  const i = catPos(movies, ver).get(Number(id));
+  return i == null ? (lib.ids.has(Number(id)) ? 2 : 0) : r.own[i];
+}
+
+const libStat = (env, l, os) => ({
   on: l ? 1 : 0,
   /* 总账模式报总账的来源地址，否则报 Stream —— 界面上「连的是谁」不能含糊 */
   host: (() => {
@@ -3484,6 +4194,7 @@ const libStat = (env, l) => ({
   via: l ? (l.via || '') : '',
   mine: l ? (l.mine || 0) : 0,
   missed: l ? (l.missed || 0) : 0,
+  distrust: l ? (l.distrust || 0) : 0,
   pending: l ? (l.pending || 0) : 0,
   files: l ? l.files : 0,
   ids: l ? l.ids.size : 0,
@@ -3494,6 +4205,9 @@ const libStat = (env, l) => ({
   fresh: l ? (l.scan ? 0 : 1) : 1,
   at: l ? l.at : 0, scan: l ? l.scan : 0,
   sample: l ? l.sample : [],
+  /* 缺片检测这一轮的判定：id 确定 / 片名认领 / id 冲突认领 / 说不准 */
+  match: os ? { exact: os.exact, name: os.name, conflict: os.conflict, amb: os.amb,
+                ambSample: os.ambSample, conflictSample: os.conflictSample, ms: os.ms } : null,
   hint: (env.RECV_BASE || env.STREAM_BASE) ? ''
         : '未配置 RECV_BASE / STREAM_BASE，不过滤库中已有',
 });
@@ -3533,14 +4247,24 @@ function catRows(movies, ver){
       g: m[F.G] || [],
     });
   }
-  catCache = { ver, rows, ord: {} };
+  catCache = { ver, rows, ord: {}, pos: null };
   return rows;
+}
+/** 影片 id → 行号（详情 / 片单 / 缺片判定共用），每个索引版本建一次 */
+function catPos(movies, ver){
+  catRows(movies, ver);
+  if (catCache.pos) return catCache.pos;
+  const pos = new Map();
+  const rows = catCache.rows;
+  for (let i = 0; i < rows.length; i++) pos.set(rows[i].id, i);
+  catCache.pos = pos;
+  return pos;
 }
 /* 片名归一化只在真正要用的时候做：搜索，或者片库里还有认不出来的条目。
    三万部片做六万次正则替换是纯 CPU，而 Free 计划一次调用只有 10ms —
    浏览路径上一次都不该发生。算过的挂在行上，同一个索引版本内复用。 */
 function rowNorm(r){
-  if (r.n === null){ r.n = norm(r.m[F.N]); r.o = norm(r.m[F.O]); }
+  if (r.n === null){ const e = rowKeys(r); r.n = e.cn; r.o = e.co; }
   return r;
 }
 const CAT_CMP = {
@@ -3560,6 +4284,7 @@ function catOrder(movies, ver, sort){
   return ix;
 }
 function relevance(r, nt){
+  if (!nt) return 0;
   if (r.n === nt || r.o === nt) return 100;
   if (r.n.startsWith(nt)) return 82;
   if (r.o.startsWith(nt)) return 74;
@@ -3576,8 +4301,10 @@ function relevance(r, nt){
 function queryCatalog(movies, q){
   const { text='', year='', genre='', min=6, sort='new', page=1, size=42,
           lib=null, own='hide', dr='', qual='' } = q;
-  const nt = norm(text);
+  const nt = canon(text);
   const rows = catRows(movies, q.ver);
+  /* 缺片判定整张表算好：每部片只剩一次数组读取 */
+  const ownT = lib ? libOwn(movies, q.ver, lib).own : null;
   const ix = nt ? rows.map((_, i) => i) : catOrder(movies, q.ver, sort);
   const yr = year ? Number(year) : 0;
   const gn = genre ? Number(genre) : 0;
@@ -3601,13 +4328,8 @@ function queryCatalog(movies, q){
     let rel = 0;
     if (nt){ rel = relevance(rowNorm(r), nt); if (!rel) continue; }
     /* 片库过滤放在最后一道：hidden 才等于"因为已经有了而被藏起来的数量"，
-       前端拿它显示「已隐藏 N 部」，不至于让人以为索引丢片。
-       id 命中就够了，只有还要走模糊兜底时才需要归一化片名。 */
-    let has = 0;
-    if (lib){
-      has = lib.ids.has(r.id) ? 2 : 0;
-      if (!has && lib.fuzzy){ rowNorm(r); has = libHas(lib, r.id, r.n, r.o, r.y); }
-    }
+       前端拿它显示「已隐藏 N 部」，不至于让人以为索引丢片。 */
+    const has = ownT ? ownT[ix[k]] : 0;
     if (has && own === 'hide'){ hidden++; continue; }
     if (!has && own === 'only') continue;
     keep.push(rel ? [ix[k], rel, has] : [ix[k], 0, has]);
@@ -3662,7 +4384,7 @@ async function movieRows(env, movies, id, ver, state){
       ? sp.slice(0, 16)
       : partRows(state, y).map((_, i) => i).slice(0, 16);
     for (const pi of list){
-      const sh = await loadPart(env, y, pi, ver);
+      const sh = await loadPart(env, state, y, pi);
       for (const r of shardRows(sh, id)) all.push(r);
     }
   }
@@ -3713,40 +4435,90 @@ async function threadDetail(env, tid, ctx){
   return out;
 }
 
-function infoBounds(b){
-  const key=[0x34,0x3a,0x69,0x6e,0x66,0x6f]; let st=-1;
-  outer: for (let i=0;i+6<b.length;i++){
-    for (let j=0;j<6;j++) if (b[i+j]!==key[j]) continue outer;
-    st=i+6; break;
-  }
-  if (st<0) throw new Error('种子中未找到 info 字典');
-  const skip=(p)=>{
-    const c=b[p];
-    if (c===0x64||c===0x6c){ p++; while(b[p]!==0x65) p=skip(p); return p+1; }
-    if (c===0x69){ while(b[p]!==0x65) p++; return p+1; }
-    let n=0; while(b[p]>=0x30&&b[p]<=0x39){ n=n*10+(b[p]-0x30); p++; }
-    if (b[p]!==0x3a) throw new Error('bencode 解析失败');
-    return p+1+n;
+/* [v6] 种子（bencode）解析。
+   v5 是「在字节里找第一个 4:info / 4:name」：文件名、注释里出现这几个字就会认错位置，
+   算出来的 btih 是错的（磁力链接打不开）；遇到被截断的种子，整数那一支会一直往后读、死循环，
+   直到平台按 CPU 超限掐掉进程。这里换成真正的逐层解析：每一步都检查边界、层数有上限，
+   只在顶层字典里找 info，info 字典里找 name（优先 name.utf-8）。 */
+function bdecode(b){
+  const N = b.length;
+  let p = 0, depth = 0;
+  const fail = (why) => { const e = new Error('bencode 解析失败：' + why + '（第 ' + p + ' 字节）'); throw e; };
+  const str = () => {
+    let n = 0, k = 0;
+    while (p < N && b[p] >= 0x30 && b[p] <= 0x39){ n = n * 10 + (b[p] - 0x30); p++; if (++k > 10) fail('字符串长度太长'); }
+    if (k === 0 || p >= N || b[p] !== 0x3a) fail('字符串格式不对');
+    p++;
+    if (p + n > N) fail('字符串越界（种子被截断）');
+    const s0 = p; p += n;
+    return [s0, p];
   };
-  return [st, skip(st)];
+  const val = () => {
+    if (p >= N) fail('意外结束（种子被截断）');
+    const c = b[p];
+    if (c === 0x69){                                   // i…e
+      p++;
+      const s0 = p;
+      while (p < N && b[p] !== 0x65){ if (p - s0 > 24) fail('整数太长'); p++; }
+      if (p >= N) fail('整数没有结尾（种子被截断）');
+      p++;
+      return { t: 'i', s: s0 - 1, e: p };
+    }
+    if (c === 0x6c || c === 0x64){                     // l…e / d…e
+      if (++depth > 64) fail('嵌套太深');
+      const s0 = p; p++;
+      const kids = [];
+      while (true){
+        if (p >= N) fail('列表 / 字典没有结尾（种子被截断）');
+        if (b[p] === 0x65){ p++; break; }
+        if (c === 0x64){ const k = str(); kids.push(k, val()); }
+        else kids.push(val());
+      }
+      depth--;
+      return { t: c === 0x64 ? 'd' : 'l', s: s0, e: p, kids };
+    }
+    if (c >= 0x30 && c <= 0x39){ const [s0, e] = str(); return { t: 's', s: s0, e }; }
+    return fail('未知类型 0x' + c.toString(16));
+  };
+  const root = val();
+  if (root.t !== 'd') fail('顶层不是字典');
+  return root;
 }
-function bstr(b,key){
-  const k=new TextEncoder().encode(key.length+':'+key);
-  outer: for (let i=0;i+k.length<b.length;i++){
-    for (let j=0;j<k.length;j++) if (b[i+j]!==k[j]) continue outer;
-    let p=i+k.length,n=0;
-    while(b[p]>=0x30&&b[p]<=0x39){ n=n*10+(b[p]-0x30); p++; }
-    if (b[p]!==0x3a) return null;
-    return new TextDecoder().decode(b.slice(p+1,p+1+n));
-  }
+const bkey = (b, k) => new TextDecoder().decode(b.subarray(k[0], k[1]));
+function bget(b, dict, name){
+  if (!dict || dict.t !== 'd') return null;
+  for (let i = 0; i < dict.kids.length; i += 2) if (bkey(b, dict.kids[i]) === name) return dict.kids[i + 1];
   return null;
 }
+const bstrOf = (b, node) => node && node.t === 's' ? new TextDecoder('utf-8', { fatal: false }).decode(b.subarray(node.s, node.e)) : null;
+/** 种子 → { info:[起, 止], name, trackers } */
+function torrentMeta(b){
+  const root = bdecode(b);
+  const info = bget(b, root, 'info');
+  if (!info || info.t !== 'd') throw new Error('种子中未找到 info 字典');
+  const name = bstrOf(b, bget(b, info, 'name.utf-8')) || bstrOf(b, bget(b, info, 'name'));
+  const tr = [];
+  const ann = bstrOf(b, bget(b, root, 'announce'));
+  if (ann) tr.push(ann);
+  const al = bget(b, root, 'announce-list');
+  if (al && al.t === 'l') for (const tier of al.kids) if (tier.t === 'l') for (const u of tier.kids){ const x = bstrOf(b, u); if (x) tr.push(x); }
+  return { info: [info.s, info.e], name, trackers: [...new Set(tr.filter(u => /^(?:https?|udp|wss?):\/\//i.test(u)))].slice(0, 8) };
+}
+/* 老接口留着（内部只剩 magnetOf 用过）：语义改由 torrentMeta 提供 */
+function infoBounds(b){ return torrentMeta(b).info; }
 async function torrentBytes(env, aid){
-  const r = await authed(env,'forum.php?mod=attachment&aid='+aid);
+  const r = await authed(env,'forum.php?mod=attachment&aid='+encodeURIComponent(aid));
   if (r.status>=300 && r.status<400) throw new Error('附件不可直接下载');
   const buf = new Uint8Array(await r.arrayBuffer());
-  if (buf[0]!==0x64)
-    throw new Error('返回的不是种子（可能需要积分或权限）：'+strip(decodeGBK(buf.slice(0,300))).slice(0,60));
+  if (buf[0]!==0x64){
+    const head = strip(decodeGBK(buf.slice(0,300))).slice(0,60);
+    /* 空壳页 = 被限速（会过去）；有内容的提示页 = 积分 / 权限（不会过去） */
+    if (buf.length < MIN_BODY){ govPenalize('附件空响应'); throw new Error('附件返回空响应（被限速）'); }
+    throw Object.assign(new Error('返回的不是种子（可能需要积分或权限）：'+head), { hard: 1 });
+  }
+  /* 下载回来就验一遍：被截断 / 不完整的种子在这里就报出来，不进压缩包 */
+  try { torrentMeta(buf); }
+  catch (e){ const x = new Error('种子文件不完整：' + e.message); x.parse = 1; throw x; }
   return buf;
 }
 async function magnetOf(env, aid, ctx){
@@ -3754,12 +4526,12 @@ async function magnetOf(env, aid, ctx){
   const hit = await jget(env,k);
   if (hit) return hit;
   const buf = await torrentBytes(env, aid);
-  const [s,e] = infoBounds(buf);
+  const meta = torrentMeta(buf);
+  const [s,e] = meta.info;
   const d = await crypto.subtle.digest('SHA-1', buf.slice(s,e));
   const btih = [...new Uint8Array(d)].map(x=>x.toString(16).padStart(2,'0')).join('');
-  const name = bstr(buf,'name');
-  const trackers = [...new Set(new TextDecoder('utf-8',{fatal:false}).decode(buf)
-    .match(/(?:https?|udp):\/\/[^\s\x00-\x1f"']{6,90}\/announce/g)||[])].slice(0,8);
+  const name = meta.name;
+  const trackers = meta.trackers;
   let magnet = 'magnet:?xt=urn:btih:'+btih;
   if (name) magnet += '&dn='+encodeURIComponent(name);
   for (const t of trackers) magnet += '&tr='+encodeURIComponent(t);
@@ -3792,7 +4564,7 @@ async function pool(items, n, fn){
       const k = i++;
       if (k >= items.length) return;
       try { out[k] = { ok:true, value: await fn(items[k], k) }; }
-      catch (e){ out[k] = { ok:false, error: e.message||String(e), budget: !!e.budget }; }
+      catch (e){ out[k] = { ok:false, error: e.message||String(e), budget: !!e.budget, cls: classify(e), hard: !!(e.hard || e.parse) }; }
     }
   });
   await Promise.all(workers);
@@ -3823,7 +4595,7 @@ async function grabItems(env, items){
       return { kind:'torrent', b64: b64of(buf), bytes: buf.length, src: att[0].filename };
     }
     if ((d.magnets || []).length) return { kind:'magnet', magnet: d.magnets[0] };
-    throw new Error('该帖没有种子附件，也没有磁力链接');
+    throw Object.assign(new Error('该帖没有种子附件，也没有磁力链接'), { hard: 1 });
   });
 
   const out = [];
@@ -3836,6 +4608,11 @@ async function grabItems(env, items){
     } else if (r && r.budget){
       retry++;
       out.push({ tid: it.tid, ok: 0, retry: 1, err: '预算已尽，稍后自动重取' });
+    } else if (r && RETRYABLE.has(r.cls) && !r.hard){
+      /* [v6] 限速 / 网络 / 论坛 5xx / 超时：是「这会儿取不到」，不是「这部取不到」——
+         让浏览器过一会儿再要（它自己数次数，连着几次都这样才记为失败） */
+      retry++;
+      out.push({ tid: it.tid, ok: 0, retry: 1, soft: 1, err: (r.error || '暂时取不到').slice(0, 80) });
     } else {
       out.push({ tid: it.tid, ok: 0, name: safeName(it.name || ('影片-' + it.tid)),
                  err: (r && r.error) || '未知错误' });
@@ -3854,22 +4631,25 @@ async function grabItems(env, items){
 async function cronOne(env){
   const st = await r2get(env, IDX.state, blankState());
   govLoad(st);
-  if (govCoolLeft()){ trace('rate','cron 跳过：仍在限速冷却'); return; }
+  if (govCoolLeft()){ trace('rate','cron 跳过：仍在限速冷却'); await maintain(env).catch(() => {}); return; }
   const allDone = BUILD_ORDER.every(y => st.years?.[y]?.done);
-  if (allDone) await incremental(env);
-  else { await incremental(env, 2); await buildChunk(env); }
+  /* 一步失败不连累后面：增量 / 补建出错（锁忙、限速）照样做片库对照与日常维护 */
+  try {
+    if (allDone) await incremental(env);
+    else { await incremental(env, 2); await buildChunk(env); }
+  } catch (e){ trace('cron', SRC.name + ' 增量 / 补建：' + (e.message || e), { lvl: e.busy ? 'info' : 'warn' }); }
   /* 片库对照放在最后，用剩下的预算。总账模式下这一步是两个子请求
      （指针 + 变了才下正文）；老管线则是「有待认定就认一批」。 */
-  if (recvBase(env) && subLeft() > 4){
-    const r = await libSyncRecv(env, false).catch(e => { trace('lib', e.message || String(e)); return null; });
-    if (r) return;                          // 总账这条路走通了，老管线不必再跑
-  }
-  if (env.STREAM_BASE && subLeft() > 8){
+  let viaRecv = null;
+  if (recvBase(env) && subLeft() > 4)
+    viaRecv = await libSyncRecv(env, false).catch(e => { trace('lib', e.message || String(e)); return null; });
+  if (!viaRecv && env.STREAM_BASE && subLeft() > 8){       // 总账这条路走不通，才跑老管线
     const d = await libDoc(env).catch(() => null);
     if (d && (d.todo || []).length) await libResolveStep(env).catch(() => {});
     else if (!d || Date.now() - (d.scan || 0) > 6 * 3600_000)
       await libScanStep(env).catch(e => trace('lib', e.message || String(e)));
   }
+  await maintain(env).catch(e => trace('sys', '日常维护失败：' + (e.message || e), { lvl:'warn' }));
 }
 
 export default {
@@ -3922,7 +4702,13 @@ export default {
       /* 海报代理各自是独立调用、每次只发一个子请求，不进共享预算 ——
          一屏几十张海报同时进来，不该把正在跑的建索引算成「预算用尽」。
          非 200 不许缓存：一次 404 不能在浏览器里钉三十天。 */
-      const r = await fetch('https://image.tmdb.org/t/p/'+size+f, { cf:{cacheEverything:true,cacheTtl:604800} });
+      let r;
+      try {
+        r = await fetch('https://image.tmdb.org/t/p/'+size+f, { cf:{cacheEverything:true,cacheTtl:604800},
+          signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(15000) : undefined });
+      } catch (e){
+        return new Response('poster upstream error', { status:502, headers:{ 'cache-control':'no-store' } });
+      }
       return new Response(r.body, { status:r.status, headers:{
         'content-type': r.headers.get('content-type')||'image/jpeg',
         'cache-control': r.ok ? 'public, max-age=2592000, immutable' : 'no-store' } });
@@ -3944,7 +4730,8 @@ export default {
     catch (e){ subLeave(tok); return json({ error: e.message, kind:'busy', busy:1, wait: e.wait||5 }, 409); }
     const bg = [];
     const cx = {
-      waitUntil(pr){ bg.push(Promise.resolve(pr).catch(()=>{})); return ctx.waitUntil(pr); },
+      /* 闸门只等后台任务 60 秒：永远不结束的 Promise 不能把闸门一直攥在手里 */
+      waitUntil(pr){ bg.push(Promise.race([Promise.resolve(pr).catch(()=>{}), sleep(60000)])); return ctx.waitUntil(pr); },
       passThroughOnException(){ return ctx.passThroughOnException && ctx.passThroughOnException(); },
     };
     const leave = () => { srcLeave(); subLeave(tok); };
@@ -3994,15 +4781,17 @@ export default {
           const r = queryCatalog(movies, {
             ver,
             text: (Q.get('q')||'').trim(), year: Q.get('year')||'', genre: Q.get('genre')||'',
-            min: Q.get('min')==null ? 6 : Number(Q.get('min')),
-            sort: Q.get('sort')||'new', page: Math.max(1,Number(Q.get('page')||1)),
+            min: Q.get('min')==null ? 6 : (Number.isFinite(Number(Q.get('min'))) ? Number(Q.get('min')) : 6),
+            sort: Q.get('sort')||'new', page: Math.min(10000, Math.max(1, parseInt(Q.get('page')||'1', 10) || 1)),
             dr: Q.get('dr')||'', qual: Q.get('qual')||'',
             lib, own,
           });
           body = { ...r, src: SRC.id, indexed: state.movies||0, at: state.at||0,
             building: !BUILD_ORDER.every(y=>state.years?.[y]?.done),
             lib: { on: lib?1:0, files: lib?lib.files:0, ids: lib?lib.ids.size:0,
-                   todo: lib?lib.todo:0, at: lib?lib.at:0, own } };
+                   todo: lib?lib.todo:0, at: lib?lib.at:0, own,
+                   match: lib ? (() => { const st = libOwn(movies, ver, lib).stat;
+                     return { exact: st.exact, name: st.name, conflict: st.conflict, amb: st.amb }; })() : null } };
         } else if (p==='/api/cart'){
           /* 购物车批量取默认片源：只读影片表，不解分片 */
           const ids = (Q.get('ids')||'').split(',').map(Number).filter(Boolean).slice(0, CART_MAX);
@@ -4012,7 +4801,7 @@ export default {
             return { id, title:m[F.N], year:m[F.Y], poster:m[F.P], res:m[F.Q],
                      size:m[F.Z], sid:m[F.BT], rels:m[F.R], score:m[F.B],
                      hb:m[F.HB]||0, rb:m[F.RB]||resLevel(m[F.Q]),
-                     own: libHasM(lib, id, m) };
+                     own: libHasId(movies, ver, lib, id) };
           }) };
         } else {
           const id = Q.get('id');
@@ -4022,7 +4811,7 @@ export default {
           const meta = await tmdbMeta(env, id, cx).catch(()=>null);
           body = {
             movie: { id:+id, title:m[F.N], original:m[F.O], year:m[F.Y], poster:m[F.P],
-              own: libHasM(lib, id, m),
+              own: libHasId(movies, ver, lib, id),
               vote:m[F.T], votes:m[F.C], wr:+weighted(m).toFixed(1), res:m[F.Q], size:m[F.Z], sid:m[F.BT],
               hb:m[F.HB]||0, rb:m[F.RB]||resLevel(m[F.Q]),
               overview: meta?.overview||'', runtime: meta?.runtime||null,
@@ -4072,7 +4861,10 @@ export default {
           await libRefresh(env, true);
           return json(libStat(env, libMem));
         }
-        return json(libStat(env, await libLoad(env, cx)));
+        const l0 = await libLoad(env, cx);
+        let os = null;
+        if (l0){ try { const { movies, state } = await loadIndex(env); os = libOwn(movies, state.ver || 0, l0).stat; } catch {} }
+        return json(libStat(env, l0, os));
       }
 
       /* ── 日志：按频道取 ── */
@@ -5521,13 +6313,25 @@ var DL = {
           await sleep(1200 * soft); continue;
         }
         soft = 0;
-        var wr = [];
+        var wr = [], softN = 0;
+        if (!this.job.tries) this.job.tries = {};
         for (var i = 0; i < r.items.length; i++){
           var it = r.items[i];
-          if (it.retry) continue;                                  // 服务端预算到了，下一轮再取
+          if (it.retry){
+            /* 服务端预算到了（不算次数），或者论坛这会儿不通（算次数：连着 4 次才记为失败） */
+            if (it.soft){
+              softN++;
+              var tn = (this.job.tries[it.tid] || 0) + 1;
+              this.job.tries[it.tid] = tn;
+              if (tn >= 4) this.job.fail[it.tid] = it.err || '多次重试仍取不到';
+            }
+            continue;
+          }
           if (!it.ok){ this.job.fail[it.tid] = it.err || '取不到'; continue; }
           wr.push(it);
         }
+        /* 这一批一部都没取到、全是「这会儿不通」：退避一下再要，别对着论坛连珠炮 */
+        if (!wr.length && softN){ this.phase = 'wait'; this.paint(); await sleep(Math.min(15000, 2000 * softN)); this.phase = 'fetch'; }
         if (wr.length){
           var dec = await PERF.call({ op:'unb64', list: wr.map(function(x){ return x.kind === 'torrent' ? x.b64 : ''; }) })
             .catch(function(){ return null; });
@@ -7109,8 +7913,17 @@ function libRecvPanelHTML(L){
   var body = '<div class="kpi">'
     + '<div><b class="num">' + (L.files || 0).toLocaleString() + '</b><em>片库文件</em></div>'
     + '<div><b class="num">' + mine.toLocaleString() + '</b><em>本源作品</em></div>'
-    + '<div><b class="num">' + exact.toLocaleString() + '</b><em>带 TMDB id</em></div>'
-    + '<div><b class="num">' + fuzzy.toLocaleString() + '</b><em>只能模糊比</em></div></div>';
+    + '<div><b class="num">' + exact.toLocaleString() + '</b><em>带可信 TMDB id</em></div>'
+    + '<div><b class="num">' + fuzzy.toLocaleString() + '</b><em>按片名 + 年份比</em></div></div>';
+  /* v6 缺片检测这一轮的判定：确定 / 片名认领 / 推断两边认错 / 说不准（不藏） */
+  var M = L.match;
+  if (M) body += '<p class="fine" style="margin-top:8px">索引里判为已有：id 相同 <b>' + (M.exact || 0).toLocaleString()
+    + '</b> 部 · 片名 + 年份认领 <b>' + (M.name || 0).toLocaleString() + '</b> 部'
+    + (M.conflict ? ' · 两边 id 不同但片名年份全同 <b>' + M.conflict + '</b> 部' : '')
+    + (M.amb ? ' · <b>' + M.amb + '</b> 条库里条目对上了不止一部同名片，说不准是哪部，都不藏' : '')
+    + (L.distrust ? ' · <b>' + L.distrust + '</b> 条 Stream 给的 id 与文件名的年份 / 名字对不上，判为认错' : '')
+    + '</p>'
+    + (M.ambSample && M.ambSample.length ? '<p class="fine">说不准的例如：' + esc(M.ambSample.join('、')) + '</p>' : '');
   if (L.pending)
     body += '<div class="warnbox">Stream 那边还有 ' + L.pending.toLocaleString()
       + ' 部没轮到匹配 TMDB。它们这会儿只能按片名 + 年份猜（标「疑似已有」），'
@@ -7119,7 +7932,7 @@ function libRecvPanelHTML(L){
     + esc(L.host) + (L.via === 'r2' ? '（公开 R2 直读）' : '（经 Stream）')
     + ' · 同步于 ' + since(L.at) + ' · 内容指纹 <code>' + esc(L.gen || '—') + '</code>。'
     + 'TMDB 编号由 Stream 在写入时算好，这边取回来直接比 id —— 一次 TMDB 请求都不发。'
-    + '总账里也没认出来的那些退回片名 + 年份（中文名和原名都算），标「疑似已有」。</p>'
+    + '没有可信 id 的那些按片名 + 年份认领索引里的一部片（繁简、全角、罗马数字都对得上；同名多部时取年份最贴近的那部，并列就不认），标「疑似已有」。</p>'
     + (L.sample && L.sample.length
         ? '<p class="fine">例如：' + esc(L.sample.join('、')) + '…</p>' : '')
     + '<div class="row" style="margin-top:14px">'
@@ -7366,7 +8179,8 @@ function runIncremental(){
 /* ── 体检 ── */
 var FIXNAME = { unlock:'强制解锁', resetTask:'重置任务', cooldown:'清除冷却', relogin:'重新登录',
   prune:'清理孤儿', resync:'重算汇总', retryUnmatched:'重试匹配', rescanUnmatched:'重扫未匹配',
-  optimize:'重训码本', migrate:'从 v3 迁移', build:'去建索引', split:'拆分大片', libscan:'重新扫描片库' };
+  optimize:'重训码本', migrate:'从 v3 迁移', build:'去建索引', split:'拆分大片', libscan:'重新扫描片库',
+  restore:'从备份恢复', backup:'立即备份' };
 function runFix(act, arg, onStep, done){
   var url = '/api/repair?do=' + encodeURIComponent(act) + (arg ? '&year=' + encodeURIComponent(arg) : '');
   var n = 0;
@@ -7409,7 +8223,7 @@ function runDiagnose(btn){
           if (err){ b.textContent = '失败'; b.disabled = false; toast(err.message); return; }
           b.textContent = '已完成';
           say((FIXNAME[act] || act) + '：' + (r.msg || '完成'));
-          if (act === 'retryUnmatched' || act === 'resync'){ pageCache = {}; pre = {}; }
+          if (act === 'retryUnmatched' || act === 'resync' || act === 'restore'){ pageCache = {}; pre = {}; }
           loadState();
         });
       };
