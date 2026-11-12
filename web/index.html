@@ -1176,7 +1176,6 @@ img.res-parked { opacity: 0 !important; }
 .tv-card.tv-loading .tv-kick   { width: 74px; }
 .tv-card.tv-loading .tv-title  { width: 62%; }
 .tv-card.tv-loading .tv-foot-n { width: 56%; }
-.tv-card.tv-loading .tv-foot-s { width: 36%; }
 .tv-card.tv-loading .tv-play   { background: var(--surface-2); border: none; box-shadow: none; }
 .tv-card.tv-loading .ico-ini { opacity: 0; }
 /* 字标是在元数据回来那一刻插进来的，而骨架要撑到「图真的画出来」——
@@ -1246,7 +1245,6 @@ img.res-parked { opacity: 0 !important; }
 .tv-foot-n { font-size: 16px; font-weight: 700; letter-spacing: -.014em; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 缩略图从方块变成 16:9 之后底栏宽了一截 —— 副行收到 12px 才装得下
    「第 1 季 · 4K · 杜比视界」这一串，不然尾巴会被切成「杜…」 */
-.tv-foot-s { font-size: 12px; font-weight: 500; color: rgba(255,255,255,.66); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tv-play {
   flex: none; height: 34px; min-width: 84px; padding: 0 20px; border: none; border-radius: var(--r-pill);
   background: rgba(255,255,255,.24); color: #fff;
@@ -16652,7 +16650,6 @@ function tvFillYearRows(list) {
 
 function tvCardHTML(s) {
   const name = s.title || s.folder;
-  const footSub = [s.seasonLabel, s.res, s.hdr === 'DV' ? '杜比视界' : s.hdr].filter(Boolean).join(' · ');
   return '<article class="tv-card tv-loading" data-tv-path="' + esc(s.path) + '" data-tv-id="' + esc(s.id) + '" tabindex="0" role="button" aria-label="' + esc(name) + '，' + esc(tvCountLabel(s)) + '">' +
     '<div class="tv-art" data-tv-art="' + esc(s.id) + '" data-tv-id="' + esc(s.tmdbId || '') + '" data-tv-q="' + esc(s.en || s.zh || name) + '" data-tv-y="' + esc(s.year || '') + '" data-tv-land="1">' +
       '<div class="tv-haze"></div>' +
@@ -16668,8 +16665,7 @@ function tvCardHTML(s) {
     '<div class="tv-foot">' +
       '<div class="tv-foot-ico"><span class="ico-ini">' + esc((name || '?').trim().charAt(0)) + '</span></div>' +
       '<div class="tv-foot-copy">' +
-        '<div class="tv-foot-n tv-sk">' + esc(s.en && s.zh ? s.en : name) + '</div>' +
-        '<div class="tv-foot-s tv-sk">' + esc(footSub || tvCountLabel(s)) + '</div>' +
+        '<div class="tv-foot-n tv-sk">' + esc(s.en && s.zh ? s.en : name) + '</div>' +   /* 底部只留名字：季数 / 4K / 杜比视界那行小字不出 */
       '</div>' +
       /* 点它 = 点整张卡：不拦冒泡，交给 article 上的 openSeries */
       '<button class="tv-play tv-sk" type="button" tabindex="-1">详情</button>' +

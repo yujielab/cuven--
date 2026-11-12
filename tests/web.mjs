@@ -426,9 +426,13 @@ console.log('\n■ 片名一律中文（卡片、搜索、播放器 / 正在播�
     const box = document.createElement('div');
     box.innerHTML = videoCardHTML(f) + videoCardHTML(f, { landscape: true });
     const meta = [...box.querySelectorAll('.card-meta')].map(m => m.textContent).join(' | ');
-    return { html: box.querySelectorAll('.tag-border').length > 0 || /8K|高动态|DV|HDR|4K/.test(meta), meta, dom: document.querySelectorAll('.card .tag-border').length };
+    /* 剧集卡：底部只留名字，那行小字（第 1 季 · 4K · 杜比视界）不出 */
+    box.innerHTML = tvCardHTML({ title: '幕府将军', en: 'Shogun', zh: '幕府将军', folder: 'Shogun.S01.2160p.DV', path: '/ram2/x', id: 'x', seasonLabel: '第 1 季', res: '4K', hdr: 'DV', episodes: 3 });
+    const foot = box.querySelector('.tv-foot').textContent;
+    return { html: box.querySelectorAll('.tag-border').length > 0 || /8K|高动态|DV|HDR|4K/.test(meta), meta, dom: document.querySelectorAll('.card .tag-border').length,
+      tvFoot: !box.querySelector('.tv-foot-s') && !/4K|杜比视界|第 1 季/.test(foot) && /Shogun/.test(foot) };
   });
-  ok(!nb.html && nb.dom === 0, `卡片上不出 DV / 8K+ / 高动态这类规格小标签（文件名写满规格的卡，底下只写「${nb.meta}」；首页与搜索结果里的卡：${nb.dom} 枚）`);
+  ok(!nb.html && nb.dom === 0 && nb.tvFoot, `卡片上不出 DV / 8K+ / 高动态这类规格小标签（文件名写满规格的卡，底下只写「${nb.meta}」；首页与搜索结果里的卡：${nb.dom} 枚）；剧集卡底部只留名字`);
   const again = await zp.evaluate(() => videoCardHTML({ name: 'long.mp4', path: '/Movies/long.mp4' }).includes('漫长的测试'));
   ok(again, '记进中文名索引：之后新排的卡一出来就是中文');
   const hit = await zp.evaluate(() => { runSearch('漫长'); return !!document.querySelector('#searchBody .card[data-name="long.mp4"]'); });
