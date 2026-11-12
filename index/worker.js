@@ -1,4 +1,17 @@
 /**
+ * Cuven ᴿ 索引库 · v6.5 —— 新进库的片几分钟内自己认出来 · 片名以字母开头的不再丢
+ * ══════════════════════════════════════════════════════════════════
+ * 「F1：狂飙飞车明明有，缺片里还在」：片库里的文件是「F1 The Movie 2025 …」，只有英文名、还多一截，
+ * 按片名比不上，只能等 TMDB 认定 —— 而认定只在每天的定时任务或点「认定」时跑；各 isolate 的片库缓存
+ * 又要三十分钟才刷新。现在：
+ *   · 翻目录时的后台刷新也顺手认一批新文件（自带 24 个子请求的小配额，不碰这次调用的 50）；
+ *   · 实时清单模式下片库成品五分钟回一次 R2（别的 isolate 写进去的认定结果也跟着读回来）；
+ *     成品没变就沿用内存里那份，判定表不重算；页面里的目录缓存三分钟作废；
+ *   · 详情页写明「片库里对上的是哪个文件、怎么对上的」（id 相同 / 片名键 / 片名认领 / 两边 id 不同）。
+ * 顺手修掉：parseTitle 拿「第一个字母」当中文名的终点，「F1：狂飙飞车」「X战警」「K星异客」这类
+ * 中文名切成空的，又凑不出三个字母的英文名，整帖被跳过、游标照走 —— 永远进不了索引。现在字母后面
+ * 紧接着汉字就算中文名的一部分；切不出片名的帖子也连同帖子行进留底，不再悄悄丢掉。规则版本升到 v4。
+ * ══════════════════════════════════════════════════════════════════
  * Cuven ᴿ 索引库 · v6.4 —— 未匹配处理管线升级 · 剧集乱码修复
  * ══════════════════════════════════════════════════════════════════
  * 一、剧集版块是 UTF-8，以前一律按 GBK 解码：「余生有你」存成「浣欑敓鏈夊姩」，五千多组全进了「未匹配」。
@@ -1415,7 +1428,15 @@ function parseTitle(raw){
   if (isTV()) t = trimTV(t);
   const years = [...new Set(t.match(/(?:19|20)\d{2}/g)||[])];
   const s = t.replace(/\[[^\]]*\]/g,' ').replace(/【[^】]*】/g,' ').replace(/\s+/g,' ').trim();
-  const iLat = s.search(/[A-Za-z]/);
+  let iLat = s.search(/[A-Za-z]/);
+  /* [v6.5] 中文名以字母开头（「F1：狂飙飞车」「X战警」「K星异客」「V字仇杀队」）：字母后面紧接着就是汉字，
+     这几个字母是中文名的一部分 —— 以前拿「第一个字母」当中文名的终点，中文名切成空的，
+     又凑不出三个字母的英文名，整帖被跳过、永远进不了索引。英文名从汉字之后的第一个字母算起 */
+  const iCJK = s.search(/[\u3400-\u9fff]/);
+  if (iLat >= 0 && iCJK > iLat && iCJK - iLat <= 8 && !/\s/.test(s.slice(iLat, iCJK))){
+    const r2 = s.slice(iCJK).search(/[A-Za-z]/);
+    iLat = r2 >= 0 ? iCJK + r2 : -1;
+  }
   const my = s.match(SEPY);
   const iYr = my ? my.index + my[1].length : -1;
   const iTech = techAt(s);
@@ -1942,8 +1963,9 @@ const blankMovies = () => ({ v:4, m:{}, k:{}, u:{}, pv:0 });
    另外给跳过标记加了保质期：七天之后自然再试一次，认不出的片子等
    TMDB 补了条目就能自己捡回来。
    ══════════════════════════════════════════════════════════════════ */
-/* v3（v6.4）：认定加了英文、别名、英文主标题三轮 —— 以前「认不出」的结论全部作废、重新排队可重试 */
-const PARSER_V = 3;
+/* v3（v6.4）：认定加了英文、别名、英文主标题三轮 —— 以前「认不出」的结论全部作废、重新排队可重试
+   v4（v6.5）：中文名以字母开头的（F1：狂飙飞车 / X战警）不再切成空的 */
+const PARSER_V = 4;
 const U_TTL = 7 * 86400_000;
 
 function parserMigrate(movies, pend){
@@ -2831,7 +2853,12 @@ async function buildInner(env, opt = {}, deaths = 0, lk = null){
   for (const row of fresh){
     pipe('parse', 'i');
     const pt = parseTitle(row.title);
-    if (!pt.cn){ pipe('parse', 'e'); continue; }
+    if (!pt.cn){
+      pipe('parse', 'e');
+      /* [v6.5] 切不出片名的帖子不再丢：连同帖子行进留底（算认不出），解析器升级后「重试匹配」会用新解析器重切 */
+      if (pendAdd(pend, { key: 'np|' + norm(row.title).slice(0, 60), cn: '', latin: '', years: pt.years || [], rows: [row] }, target, 'nohit')) pendDirty = 1;
+      continue;
+    }
     const key = groupKey(pt);
     if (!byName.has(key)) byName.set(key, { key, ...pt, rows: [] });
     byName.get(key).rows.push(row);
@@ -3055,7 +3082,11 @@ async function incremental(env, headPages = 0){
           dedupe.add(tid);
           pipe('parse', 'i');
           const pt = parseTitle(row.title);
-          if (!pt.cn){ pipe('parse', 'e'); continue; }
+          if (!pt.cn){
+            pipe('parse', 'e');
+            if (pendAdd(pend, { key: 'np|' + norm(row.title).slice(0, 60), cn: '', latin: '', years: pt.years || [], rows: [row] }, y, 'nohit')) pendDirty = 1;
+            continue;
+          }
           const key = groupKey(pt);
           if (!byName.has(key)) byName.set(key, { key, ...pt, rows: [] });
           byName.get(key).rows.push(row);
@@ -4252,6 +4283,7 @@ async function libSyncRecv(env, force){
    一次同步最多新切 LIVE_PARSE_MAX 个，剩下的下次接着切（part > 0）。
    ══════════════════════════════════════════════════════════════════ */
 let LIVE_PARSE_MAX = 800;      // let：测试里会临时调小
+const LIVE_TTL = 5 * 60_000;    // 实时清单模式下片库成品的新鲜期（各 isolate 各自五分钟回一次 R2 / Stream）
 const liveRoot = (env) => String(env.RECV_BASE || '').replace(/\/+$/, '');
 const streamRoot = (env) => String(env.STREAM_BASE || '').replace(/\/+$/, '');
 const liveOn = (env) => !!(liveRoot(env) || streamRoot(env));
@@ -4366,7 +4398,7 @@ function liveCand(v, rootLen){
     if (pt.cn){ const g = groupKey(pt); if (!gks.includes(g)) gks.push(g); }
   }
   const nm = []; for (const x of [c.cn, c.latin]) if (x && !nm.includes(x)) nm.push(x);
-  return { k: c.k, p: [c.cn || '', c.latin || '', c.ys.join(','), gks, canonKeys(nm)] };
+  return { k: c.k, p: [c.cn || '', c.latin || '', c.ys.join(','), gks, canonKeys(nm), String(v.name || '').slice(0, 200)] };
 }
 /** 候选的压缩形 → 认定用的形状（libResolveOne 吃这个） */
 const livePackOpen = (p) => ({ cn: p[0] || '', latin: p[1] || '', ys: p[2] ? String(p[2]).split(',').filter(Boolean) : [] });
@@ -4398,27 +4430,37 @@ async function ledgerHints(env, prev){
 function liveCompose(doc){
   const ids = [], dedup = new Set(), idn = [], idnSeen = new Set(), fz = [], todo = [];
   let viaLedger = 0, viaTmdb = 0;
-  const addId = (id, t, y, k) => { if (!dedup.has(id)){ dedup.add(id); ids.push([id, t || '', String(y || ''), k || '']); } };
+  /* [v6.5] 每条都带上片库里对应的文件名：详情页上能写明「库里对上的是哪个文件」 */
+  const addId = (id, t, y, k, f) => { if (!dedup.has(id)){ dedup.add(id); ids.push([id, t || '', String(y || ''), k || '', f || '']); } };
   for (const pk in doc.lids || {}){
     const e = doc.lids[pk];
     if (!Array.isArray(e) || !(e[0] > 0)) continue;
-    addId(e[0], e[1], e[2], ''); viaLedger++;
+    addId(e[0], e[1], e[2], '', e[5] || pk.slice(pk.lastIndexOf('/') + 1)); viaLedger++;
     if (Array.isArray(e[4]) && e[4].length && !idnSeen.has(e[0])){ idnSeen.add(e[0]); idn.push([e[0], e[3] || [], yearOf(e[2]) || 0, e[4]]); }
   }
   const res = doc.res || {};
   for (const ck in doc.cands || {}){
     const p = doc.cands[ck];
     const r = res[ck];
-    if (Array.isArray(r) && r[0] > 0){ addId(r[0], r[1], r[2], ck); viaTmdb++; continue; }
+    if (Array.isArray(r) && r[0] > 0){
+      addId(r[0], r[1], r[2], ck, p[5]); viaTmdb++;
+      /* [v6.5] 这边认下的 id 也给「两边 id 不同」的推断用：TMDB 偶尔有同一部片的两个条目 */
+      if (!idnSeen.has(r[0])){
+        const nm2 = []; for (const x of [r[1], p[0], p[1]]) if (x && !nm2.includes(x)) nm2.push(x);
+        const kk = canonKeys(nm2);
+        if (kk.length){ idnSeen.add(r[0]); idn.push([r[0], nm2, yearOf(r[2]) || 0, kk]); }
+      }
+      continue;
+    }
     if (r === undefined) todo.push(ck);
     const nm = []; for (const x of [p[0], p[1]]) if (x && !nm.includes(x)) nm.push(x);
-    if ((p[4] && p[4].length) || (p[3] && p[3].length)) fz.push([nm, yearOf(String(p[2] || '').split(',')[0]) || '', 0, p[4] || [], p[3] || []]);
+    if ((p[4] && p[4].length) || (p[3] && p[3].length)) fz.push([nm, yearOf(String(p[2] || '').split(',')[0]) || '', 0, p[4] || [], p[3] || [], p[5] || '']);
   }
   for (const s of doc.tvs || []){                  // 剧集：v25 剧集表认好的 id 直接用，没有的按片名 + 季 + 年份认领
     if (s[0] > 0){
-      addId(s[0], s[1][0] || '', s[2], ''); viaLedger++;
+      addId(s[0], s[1][0] || '', s[2], '', s[5] || ''); viaLedger++;
       if (s[4].length && !idnSeen.has(s[0])){ idnSeen.add(s[0]); idn.push([s[0], s[1], yearOf(s[2]) || 0, s[4]]); }
-    } else if (s[4].length) fz.push([s[1], yearOf(s[2]) || '', s[3] || 0, s[4], []]);
+    } else if (s[4].length) fz.push([s[1], yearOf(s[2]) || '', s[3] || 0, s[4], [], s[5] || '']);
   }
   doc.ids = ids; doc.idn = idn; doc.fz = fz; doc.todo = todo;
   doc.viaLedger = viaLedger; doc.viaTmdb = viaTmdb;
@@ -4451,7 +4493,7 @@ async function libSyncLive(env, force){
       out.files += Math.max(1, Number(s.episodes || s.total) || 1);
       const nm = []; for (const x of [s.zh, s.en, s.title]) if (x && typeof x === 'string' && !nm.includes(x.trim())) nm.push(x.trim().slice(0, 160));
       const id = Number(s.tmdbId) > 0 ? Math.floor(Number(s.tmdbId)) : 0;
-      out.tvs.push([id, nm, String(yearOf(s.year) || ''), Number(s.season) || 0, canonKeys(nm)]);
+      out.tvs.push([id, nm, String(yearOf(s.year) || ''), Number(s.season) || 0, canonKeys(nm), String(s.folder || s.path || '').slice(0, 200)]);
     }
     out.mine = out.tvs.length;
   } else {
@@ -4474,7 +4516,7 @@ async function libSyncLive(env, force){
       const pk = String(v.path).toLowerCase();
       /* ① 总账提示：这个文件在 v22 那份快照里、而且 id 可信 */
       const lh = hints.map ? (hints.map.get('p:' + pk) || hints.map.get('n:' + String(v.name))) : prevL[pk];
-      if (lh){ out.lids[pk] = lh; continue; }
+      if (lh){ out.lids[pk] = lh.length > 5 ? lh : lh.slice(0, 5).concat([String(v.name).slice(0, 200)]); continue; }
       /* ② 切片名：只切第一次见到的文件 */
       let ck = prevFc[pk];
       if (ck === undefined || (ck && !prevC[ck] && !out.cands[ck])){
@@ -4725,6 +4767,7 @@ async function libResolveOne(env, c){
      第二轮换原名、两轮候选合起来再评一次。 */
   const raw = c.cn || c.latin;
   if (!raw) return { miss: 1 };
+  const left = () => env.__sub ? env.__sub.max - env.__sub.n : subLeft();
   const q1 = (() => { const x = cleanCN(c.cn); return (x && x.length >= 2) ? x : raw; })();
   /* 剧集不锁年份：版块年份是这一季的，TMDB 记的是首播年 */
   const yr = (!isTV() && c.ys.length === 1) ? c.ys[0] : '';
@@ -4740,7 +4783,7 @@ async function libResolveOne(env, c){
   if (pool === null) return null;                        // 网络失败：这次不下结论，留待下轮
   /* 年份锁住就等于 TMDB 先替我们筛了一道，片名沾边即可 —— 和索引侧同一个门槛 */
   let m = pickTMDB(pool, c.cn, c.latin, c.ys, { tv: isTV(), yearLocked: !!yr });
-  if (!m && subLeft() > 3){
+  if (!m && left() > 3){
     /* 换个说法再试：原名最管用，其次是洗之前的原始片名，最后是去掉年份 */
     const alt = (c.latin && norm(c.latin) !== norm(c.cn)) ? { q: c.latin, y: '' }
               : (norm(q1) !== norm(raw) ? { q: raw, y: '' }
@@ -4754,7 +4797,7 @@ async function libResolveOne(env, c){
   /* [v6.3] 文件名只有英文名（外语片常见：Parasite.2019…）：中文结果里只有中文名和原名（기생충），
      英文名对不上任何一个就判成认不出 —— 用英文再搜一次，拿英文片名比 */
   /* （切片名时没有中文名的标题，cn 里放的就是英文名 —— 按「有没有汉字」判断） */
-  if (!m && c.latin && !/[\u3400-\u9fff]/.test(c.cn || '') && subLeft() > 3){
+  if (!m && c.latin && !/[\u3400-\u9fff]/.test(c.cn || '') && left() > 3){
     const en = await ask(c.latin, yr, 'en-US');
     if (en && en.length) m = pickTMDB(en, '', c.latin, c.ys, { tv: isTV(), yearLocked: !!yr });
   }
@@ -4770,8 +4813,11 @@ async function libResolveOne(env, c){
 }
 
 /** ② 认定：跑一批，剩下的写回 todo。返回 left>0 就再调一次。 */
-async function libResolveStep(env){
+async function libResolveStep(env, opt = {}){
   const t0 = Date.now();
+  /* local：轻请求里后台认的时候用自带的一小份配额（同认定工），不碰这次调用的全局计数 */
+  const envR = opt.local ? Object.assign(Object.create(env), { __sub: { n: 0, max: opt.local } }) : env;
+  const budgetLeft = () => envR.__sub ? envR.__sub.max - envR.__sub.n : subLeft();
   const doc = await libDoc(env);
   /* [v6.3] 实时清单：认的是「总账里没有、索引片名键也没对上」的新文件，结果记进 res（按候选键），
      认出来的从「按片名认领」挪到「按 id 比」 */
@@ -4782,12 +4828,12 @@ async function libResolveStep(env){
     const deadline = t0 + 8000;
     let added = 0, missed = 0, retry = 0, n = 0;
     for (; n < todo.length && n < LIB.batch; n++){
-      if (subLeft() < 6 || Date.now() > deadline) break;
+      if (budgetLeft() < 6 || Date.now() > deadline) break;
       const ck = todo[n], p = (doc.cands || {})[ck];
       if (!p){ continue; }
       pipe('lib', 'i');
       let r;
-      try { r = await libResolveOne(env, livePackOpen(p)); }
+      try { r = await libResolveOne(envR, livePackOpen(p)); }
       catch (e){ if (e.budget) break; pipe('lib', 'e'); r = null; }
       if (r === null){ retry++; continue; }            // 网络失败：不下结论，留在队里
       pipe('lib', 'o');
@@ -4891,17 +4937,17 @@ const libVer = (l) => !l ? '0'
  */
 function libHydrate(doc){
   if (!doc) return null;
-  const ids = new Set(), names = [], fz = [], idn = [];
+  const ids = new Set(), names = [], fz = [], idn = [], files = new Map();
   for (const it of doc.ids || []){
     const id = Number(it && it[0]);
-    if (id > 0){ ids.add(id); if (names.length < 4 && it[1]) names.push(it[1]); }
+    if (id > 0){ ids.add(id); if (names.length < 4 && it[1]) names.push(it[1]); if (it[4] && !files.has(id)) files.set(id, String(it[4])); }
   }
-  const pushFz = (nm, y, sn, kk, gk) => { const keys = kk || canonKeys(nm);
-    if (keys.length || (gk && gk.length)) fz.push({ ...keySplit(keys), y: yearOf(y), sn: sn || 0, gk: Array.isArray(gk) && gk.length ? gk : null }); };
+  const pushFz = (nm, y, sn, kk, gk, file) => { const keys = kk || canonKeys(nm);
+    if (keys.length || (gk && gk.length)) fz.push({ ...keySplit(keys), y: yearOf(y), sn: sn || 0, gk: Array.isArray(gk) && gk.length ? gk : null, file: file || '' }); };
   /* 同步时已经把比对键算好存在成品里（cv = 规则版本）；版本对不上就现场重算 */
   const stored = doc.cv === CANON_V;
   if (doc.v === 7 || doc.v === 8){
-    for (const e of doc.fz || []) if (Array.isArray(e)) pushFz(e[0] || [], e[1], e[2], stored && Array.isArray(e[3]) ? e[3] : null, e[4]);
+    for (const e of doc.fz || []) if (Array.isArray(e)) pushFz(e[0] || [], e[1], e[2], stored && Array.isArray(e[3]) ? e[3] : null, e[4], e[5]);
     for (const e of doc.idn || []){
       if (!Array.isArray(e) || !(Number(e[0]) > 0)) continue;
       const keys = stored && Array.isArray(e[3]) ? e[3] : canonKeys(e[1] || []);
@@ -4923,8 +4969,8 @@ function libHydrate(doc){
     for (const k of doc.weak || []){ const i = String(k).lastIndexOf('|'); if (i > 0) addKey(String(k).slice(0, i), String(k).slice(i + 1)); }
     for (const k of doc.loose || []) addKey(k, '');
   }
-  return { at: doc.at || 0, scan: doc.scan || 0, files: doc.files || 0,
-           ids, fz, idn, fuzzy: fz.length,
+  return { at: doc.at || 0, docAt: doc.at || 0, scan: doc.scan || 0, files: doc.files || 0,
+           ids, fz, idn, fuzzy: fz.length, fileOf: files,
            tried: (Array.isArray(doc.miss) ? doc.miss : []).length,
            todo: (doc.todo || []).length, sample: names, n: ids.size + fz.length,
            /* 总账直读专有：模式、内容指纹、本源部数、没有可信 id 的部数 */
@@ -4939,16 +4985,22 @@ async function libRefresh(env, alsoResolve){
   if (libJob) return libJob;
   libJob = (async () => {
     let via = await libSyncAny(env, false);
-    /* 实时清单里有新文件要认：顺手认一批（剩下的交给定时任务 / 片库面板的「认定」） */
-    if (via && via.mode === 'live' && via.left && alsoResolve !== false && subLeft() > 10)
-      await libResolveStep(env).catch(() => {});
+    /* 实时清单里有新文件要认：当场认一批。[v6.5] 翻目录时的后台刷新（轻请求）也认 —— 用自带的一小份配额
+       （不碰这次调用的 50 个子请求），新进库的片几分钟内就从「缺片」里消失，不用等每天的定时任务 */
+    if (via && via.mode === 'live' && via.left){
+      if (alsoResolve !== false){ if (subLeft() > 10) await libResolveStep(env).catch(() => {}); }
+      else await libResolveStep(env, { local: 24 }).catch(() => {});
+    }
     if (!via){
       /* 走到这里只有两种情况：没配总账地址，或刚刚试过、总账不可用。
          两种都不该让 libScanStep 再问一次指针。 */
       await libScanStep(env, { skipRecv: true });
       if (alsoResolve !== false) await libResolveStep(env).catch(() => {});
     }
-    libMem = libHydrate(await libDoc(env));
+    /* 成品没变（同一次写入）就沿用内存里那份：判定表按成品对象缓存，换了对象就得重算 */
+    const doc = await libDoc(env);
+    if (libMem && doc && doc.at && doc.at === libMem.docAt && (doc.gen || '') === (libMem.gen || '')) libMem.at = Date.now();
+    else libMem = libHydrate(doc);
     /* gen 未变那一支不写 R2（省一次十几万字节的重写），所以成品里的 at
        还是旧的 —— 这一轮确实对过账了，在内存里把新鲜度补上，否则
        SWR 窗口永远是过期的，每个请求都要再问一次指针。 */
@@ -4980,7 +5032,8 @@ async function libLoad(env, ctx){
   }
   /* scan===0 说明这份成品是从 v4 的模糊键表搬过来的，还没被 v5 认过一遍 —— 
      后台补一次扫描，用户不用知道要去点哪个按钮。 */
-  const due = !libMem.scan || Date.now() - libMem.at > LIB.ttl;
+  /* [v6.5] 实时清单五分钟问一次（只问几十字节的指纹）；顺带把别的 isolate 写进 R2 的认定结果也读回来 */
+  const due = !libMem.scan || Date.now() - libMem.at > (libMem.src === 'live' ? LIVE_TTL : LIB.ttl);
   if (due && Date.now() - libFail > LIB.retry && ctx && ctx.waitUntil)
     ctx.waitUntil(libRefresh(env, false).catch(e => trace('lib', e.message || String(e))));
   return libMem;
@@ -5070,11 +5123,14 @@ function libOwn(movies, ver, lib){
   if (ownCache.ver === ver && ownCache.lib === lib && ownCache.src === SRC.id && ownCache.res) return ownCache.res;
   const rows = catRows(movies, ver);
   const own = new Int8Array(rows.length);
+  /* [v6.5] 每部判为已有的片记下「怎么对上的」：1 id 相同 · 2 片名键 · 3 片名认领 · 4 两边 id 不同的推断；
+     who = 认领它的那条片库条目（fz 的下标），详情页拿它说出文件名 */
+  const how = new Int8Array(rows.length), who = new Int32Array(rows.length).fill(-1);
   const pos = catPos(movies, ver);
   const tv = isTV();
   const stat = { exact: 0, key: 0, name: 0, conflict: 0, amb: 0, ambSample: [], conflictSample: [], ms: 0 };
   const t0 = Date.now();
-  for (const id of lib.ids){ const i = pos.get(id); if (i != null && !own[i]){ own[i] = 2; stat.exact++; } }
+  for (const id of lib.ids){ const i = pos.get(id); if (i != null && !own[i]){ own[i] = 2; how[i] = 1; stat.exact++; } }
 
   if (lib.fz.length || lib.idn.length){
     /* 索引这边的片名表：比对键 → 行号。只在片库里还有要按片名比的条目时才建。
@@ -5174,7 +5230,8 @@ function libOwn(movies, ver, lib){
       }
       return best;
     };
-    for (const L of lib.fz){
+    for (let fi = 0; fi < lib.fz.length; fi++){
+      const L = lib.fz[fi];
       /* [v6.3] 索引片名键：文件名切出来的键与建索引时论坛发布名的键相同 —— 直接查 movies.k。
          同名同原名的两部片（重拍、或前后两年的同名片）共用一个键，所以要求同年；差一年的交给下面的片名认领
          （那边会看有没有同名的另一部） */
@@ -5185,25 +5242,36 @@ function libOwn(movies, ver, lib){
           const i = id != null ? pos.get(Number(id)) : undefined;
           if (i != null && yearFit(L.y, RY[i], tv, true) === 3){ hit = i; break; }
         }
-        if (hit >= 0){ if (!own[hit]){ own[hit] = 2; stat.key++; } continue; }
+        if (hit >= 0){ if (!own[hit]){ own[hit] = 2; how[hit] = 2; who[hit] = fi; stat.key++; } continue; }
       }
       const i = pick(L, false);
       if (i === -1){ stat.amb++; if (stat.ambSample.length < 6) stat.ambSample.push(L.keys[0] + (L.y ? ' ' + L.y : '')); continue; }
       if (i == null || own[i]) continue;
-      own[i] = 1; stat.name++;
+      own[i] = 1; how[i] = 3; who[i] = fi; stat.name++;
     }
     for (const L of lib.idn){
       if (pos.has(L.id)) continue;                 // 库里那个 id 索引里有：两边说的是两部不同的片
       const i = pick(L, true);
       if (i == null || i === -1 || own[i]) continue;
-      own[i] = 1; stat.conflict++;
+      own[i] = 1; how[i] = 4; stat.conflict++;
       if (stat.conflictSample.length < 6) stat.conflictSample.push((rows[i].m[F.N] || rows[i].id) + ' ' + rows[i].y + '：库里 id ' + L.id + '，索引 id ' + rows[i].id);
     }
   }
   stat.ms = Date.now() - t0;
-  const res = { own, stat };
+  const res = { own, how, who, stat };
   ownCache = { ver, lib, src: SRC.id, res };
   return res;
+}
+/** [v6.5] 详情页：这部片在片库里对上的是哪个文件、怎么对上的 */
+function libWhy(movies, ver, lib, id){
+  if (!lib) return null;
+  const r = libOwn(movies, ver, lib);
+  const i = catPos(movies, ver).get(Number(id));
+  if (i == null) return null;
+  const how = ['', 'id', 'key', 'name', 'conflict'][r.how[i]] || '';
+  const L = r.who[i] >= 0 ? lib.fz[r.who[i]] : null;
+  const file = how === 'id' ? ((lib.fileOf && lib.fileOf.get(Number(id))) || '') : (L ? L.file || '' : '');
+  return { own: r.own[i], how, file };
 }
 /** 只有一部片在手时（详情 / 片单）：同一张判定表里查 */
 function libHasId(movies, ver, lib, id){
@@ -5856,6 +5924,7 @@ export default {
           body = {
             movie: { id:+id, title:m[F.N], original:m[F.O], year:m[F.Y], poster:m[F.P],
               own: libHasId(movies, ver, lib, id),
+              lib: lib ? (libWhy(movies, ver, lib, id) || { own: 0, how: '', file: '' }) : null,
               vote:m[F.T], votes:m[F.C], wr:+weighted(m).toFixed(1), res:m[F.Q], size:m[F.Z], sid:m[F.BT],
               hb:m[F.HB]||0, rb:m[F.RB]||resLevel(m[F.Q]),
               overview: meta?.overview||'', runtime: meta?.runtime||null,
@@ -6835,6 +6904,7 @@ details.dx[open]>summary{border-bottom-left-radius:0;border-bottom-right-radius:
 .sysline b{color:var(--t1);font-weight:var(--fw-m)}
 /* 说明性的小字：一律这一档，别再各处自写 style */
 p.fine{color:var(--t3);font-size:.78125rem;letter-spacing:var(--tr-s);line-height:var(--lh-r);margin:0}
+p.fine.libwhy{margin:-4px 0 10px;overflow-wrap:anywhere}
 /* 分页失败：转圈让位给一个重试 */
 .tail.err .spin{display:none}
 .tail #tailrt{font-size:.8125rem;color:var(--bad)}
@@ -8387,6 +8457,8 @@ function lib(reset){
   libShell(); libHead();
   var body = document.getElementById('libbody'), sum = document.getElementById('libsum');
   var ck = qs(1), cached = pageCache[ck];
+  /* [v6.5] 本页缓存三分钟就作废：片库那边刚进库的片，回到目录要能看到它从「缺片」里消失 */
+  if (cached && Date.now() - (cached.t || 0) > 180000){ delete pageCache[ck]; cached = null; }
   var stamp = S.libStamp = (S.libStamp || 0) + 1;
   if (LIBX){ LIBX.abort(); LIBX = null; }
   if (cached){
@@ -8425,7 +8497,7 @@ function lib(reset){
   api(ck, { signal: ac ? ac.signal : null }).then(function(j){
     if (S.libStamp !== stamp) return;
     if (LIBX === ac) LIBX = null;
-    pageCache[ck] = { items:j.items, page:1, pages:j.pages, at:j.at, lib:j.lib,
+    pageCache[ck] = { t: Date.now(), items:j.items, page:1, pages:j.pages, at:j.at, lib:j.lib,
                       hidden:j.hidden, counts:j.counts, total:j.total,
                       building:j.building, indexed:j.indexed };
     S.busy = false; S.items = j.items; S.pages = j.pages; S.page = 1;
@@ -8579,12 +8651,19 @@ function heroHTML(m, d){
   else if (mv.rb && mv.rb <= 4) tags += '<span class="pill">1080p 及以下</span>';
   if (mv.own === 2) tags += '<span class="pill ok">库中已有</span>';
   else if (mv.own === 1) tags += '<span class="pill warn">疑似已有</span>';
+  /* [v6.5] 库里对上的是哪个文件、怎么对上的 —— 判错了一眼看得出是哪一步 */
+  var L = mv.lib, libLine = '';
+  if (L && L.own){
+    var hw = { id: 'TMDB 编号相同', key: '文件名与论坛发布名是同一个片名', name: '按片名 + 年份认领', conflict: '片名年份全同（两边 TMDB 编号不同）' }[L.how] || '';
+    libLine = '<p class="fine libwhy">片库里：' + (L.file ? esc(L.file) : '（没记下文件名）') + (hw ? ' · ' + hw : '') + '</p>';
+  }
   return '<div class="hero"><div class="art">'
     + (mv.poster ? '<img src="' + img(mv.poster,'m') + '" alt="">' : '') + '</div>'
     + '<div style="flex:1;min-width:0"><h2>' + esc(mv.title) + '</h2>'
     + (mv.original && mv.original !== mv.title ? '<p class="lede" style="margin-top:3px">' + esc(mv.original) + '</p>' : '')
     + '<div class="fine">' + esc(line) + '</div>'
     + (tags ? '<div class="row" style="margin-bottom:10px">' + tags + '</div>' : '')
+    + libLine
     + (d && d.movie.overview ? '<p>' + esc(d.movie.overview) + '</p>' : '')
     + '</div></div>';
 }

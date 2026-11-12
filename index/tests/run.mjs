@@ -501,6 +501,63 @@ console.log('\n■ 片库对照：实时清单走 Stream 接口（STREAM_KEY）�
   ok(tom.get(94997) === 2 && tom.get(1399) === 2 && !tom.get(100088), '剧集：v25 剧集表里认好的两部判为确定已有，没有的那部显示缺片');
 }
 
+console.log('\n■ 片库对照：新进库的片几分钟内自己认出来、各 isolate 跟上、详情页写明对上的文件');
+{
+  const { env, r2, W } = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+  makeForumU(W, 8);
+  /* 「F1」这种：论坛标题是中文名，片库文件只有英文名（还多一截 The Movie），按名字比不上，只能靠 TMDB 认 */
+  W.tmdb.movie.push({ id: 911430, title: 'F1：狂飙飞车', original_title: 'F1', en: 'F1', aka: ['F1 The Movie'], release_date: '2025-06-25', poster_path: '/f1.jpg', popularity: 300, vote_average: 7.8, vote_count: 2000 });
+  W.forum.boards['44']['movie_nianfen=32'].unshift({ tid: 55001, title: 'F1：狂飙飞车 F1.2025.2160p.WEB-DL.DV.HDR 25GB', film: 911430 });
+  const A = H.isolate(env, W), B = H.isolate(env, W);
+  await turboAll(A);
+  const m0 = W.tmdb.movie[0];
+  const f0 = `${m0.title}.${m0.original_title.replace(/ /g, '.')}.2025.2160p.WEB-DL.x265.mkv`;
+  W.recv.files = { root: '/ram', _gen: 'p1', _ts: Date.now(), videos: [{ name: f0, path: '/ram/' + f0 }] };
+  W.recv.ptr = { g: 'p1' };
+  await A.call('/api/lib?refresh=1'); await A.settle();
+  await B.call('/api/catalog?min=0'); await B.settle();               // B 也加载一份片库（此时还没有 F1）
+  const own = async (I, id) => { const c = await (await I.call('/api/catalog?min=0&own=all&q=' + encodeURIComponent(id === 911430 ? 'F1' : m0.title))).json(); const x = c.items.find(y => y.id === id); return x ? x.own : null; };
+  ok(await own(B, 911430) === 0, '片库里还没有 F1：B 判它缺片');
+  /* F1 进库（指纹变了）。没人点任何按钮：五分钟后 A 上一次普通的翻目录，后台同步 + 顺手认定 */
+  const fF1 = 'F1 The Movie 2025 HKG BluRay Remux UHD DoVi HDR10 2160p Atmos TrueHD7.1-DreamHD.mkv';
+  W.recv.files = { root: '/ram', _gen: 'p2', _ts: Date.now(), videos: [{ name: f0, path: '/ram/' + f0 }, { name: fF1, path: '/ram/' + fF1 }] };
+  W.recv.ptr = { g: 'p2' };
+  A.clock.off += 6 * 60000;
+  const t0 = W.tmdb.calls;
+  await A.call('/api/catalog?min=0'); await A.settle();
+  const tmdbUsed = W.tmdb.calls - t0;
+  ok(await own(A, 911430) === 2 && tmdbUsed > 0 && tmdbUsed <= 24,
+    `没点任何按钮：翻目录时后台发现新文件、用自带的小配额认出来（TMDB ${tmdbUsed} 次，≤ 24），A 立刻判 F1「确定已有」`);
+  /* B 的片库缓存是五分钟前的：五分钟一到也跟上（读回 A 写进 R2 的认定结果） */
+  ok(await own(B, 911430) === 0, 'B 的缓存还没过期时照旧（最多五分钟）');
+  B.clock.off += 6 * 60000;
+  await B.call('/api/catalog?min=0'); await B.settle();
+  ok(await own(B, 911430) === 2, 'B 五分钟一到就读回最新的片库成品：F1 也判「确定已有」（以前要等三十分钟）');
+  const d = await (await A.call('/api/detail?id=911430')).json();
+  const d0 = await (await A.call('/api/detail?id=' + m0.id)).json();
+  ok(d.movie.lib && d.movie.lib.own === 2 && d.movie.lib.how === 'id' && d.movie.lib.file === fF1 && d0.movie.lib && d0.movie.lib.file === f0,
+    `详情页写明对上的文件：「${d.movie.lib && d.movie.lib.file.slice(0, 26)}…」· ${d.movie.lib && d.movie.lib.how}`);
+}
+
+console.log('\n■ 片名以字母开头、切不出片名的帖子');
+{
+  const { env, r2, W } = H.makeEnv();
+  makeForumU(W, 3);
+  const X = { id: 127585, title: 'X战警：天启', original_title: 'X-Men: Apocalypse', release_date: '2025-05-18', poster_path: '/x.jpg', popularity: 80, vote_average: 7, vote_count: 9000 };
+  W.tmdb.movie.push(X);
+  W.forum.boards['44']['movie_nianfen=32'].unshift(
+    { tid: 56001, title: 'X战警：天启 X-Men.Apocalypse.2025.1080p.BluRay.x264 10GB', film: X.id },
+    { tid: 56002, title: 'E.T. 外星人 2025 1080p.BluRay 3GB', film: null });
+  const I = H.isolate(env, W, { expose: ['parseTitle'] });
+  await turboAll(I);
+  const pt = I.k.parseTitle('F1：狂飙飞车 F1.The.Movie.2025.2160p 30GB');
+  const mv = r2.json(NS + 'movies.json'), pd = r2.json('idx/v5/pending.json');
+  const np = Object.entries(pd.q).find(([k]) => k.startsWith('np|'));
+  ok(pt.cn === 'F1：狂飙飞车' && pt.latin === 'F1 The Movie' && mv.m[X.id], '中文名以字母开头（F1：狂飙飞车 / X战警：天启）：切得出中文名，帖子进了索引（以前中文名切成空的，整帖被跳过）');
+  ok(np && np[1].r.some(r => r[0] === 56002), '切不出片名的帖子（「E.T. 外星人」这种）连同帖子行进了留底（解析器再升级时「重试匹配」能捡回来），不再悄悄丢掉');
+  verify(I.c, r2, W, '片名以字母开头之后的不变量');
+}
+
 console.log('\n■ 剧集版块是 UTF-8：按真实编码解码，旧版存下的乱码一键重建');
 {
   const OLD = process.env.IDX_V63_WORKER;
@@ -583,7 +640,7 @@ console.log('\n■ 认定管线 v3：英文、别名、去副标题；配额不�
   await turboAll(I);
   const mv = r2.json(NS + 'movies.json');
   for (const x of SP) ok(!!mv.m[x.id] && /[\u4e00-\u9fff]/.test(mv.m[x.id][0]), `${x.how}：「${x.t.split(' ')[0]}」认下（片名「${mv.m[x.id] && mv.m[x.id][0]}」）`);
-  ok(mv.pv === 3, '认定规则升到 v3：以前「认不出」的结论作废、留底条目的重试次数归零');
+  ok(mv.pv >= 3, '认定规则升到 v' + mv.pv + '：以前「认不出」的结论作废、留底条目的重试次数归零');
   /* 配额只够 3 个请求：一组都不判「认不出」，全按「没下结论」交回 */
   I.c.__set('TURBO_FREE.sub', 3);
   const g = Array.from({ length: 12 }, (_, i) => ({ k: 'b' + i + '|x', cn: '没有这部片' + '甲乙丙丁戊己庚辛壬癸子丑'[i], la: 'No Such Film ' + i, ys: ['2025'], y: 2025, t: '没有这部片 No.Such.Film.2025' }));
