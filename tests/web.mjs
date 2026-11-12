@@ -301,6 +301,8 @@ const tv = await until(page, () => {
   return v && v.getAttribute('src') && v.currentTime > 0.3 ? true : false;
 }, null, 40000).then(() => true).catch(() => false);
 ok(tv, '第一章的预告片地址晚到也会自己挂上开播（不用先滚走再滚回来）');
+const facts = await page.evaluate(() => [...document.querySelectorAll('.sc-chapter .sc-fact')].map(f => f.textContent));
+ok(facts.every(f => !/4K|1080p|杜比视界|HDR|8K|DV/.test(f)), `展厅介绍下面那排小胶囊没有规格小标签（${facts.join(' / ') || '无'}）`);
 /* 从第 10 秒进（跳过片头厂标），一律静音：没有开声音的钮，谁把它打开了就立刻关回去 */
 const t10 = await page.evaluate(() => { const v = document.querySelector('.sc-chapter video'); const t = v.currentTime; v.muted = false; return { t, btn: !!document.querySelector('.sc-chapter .sc-mutectl') }; });
 await page.waitForTimeout(150);
@@ -418,6 +420,15 @@ console.log('\n■ 片名一律中文（卡片、搜索、播放器 / 正在播�
     return r;
   });
   ok(sw.before === 'Some Film' && sw.after === '某部电影' && sw.aria.startsWith('某部电影'), `还没有中文名的卡先按原名排（${sw.before}），中文名一到原位换字（${sw.after}），读屏标签跟着换`);
+  /* 卡片上不出规格小标签：文件名里写满了 2160p / DV / HDR，竖版、横版卡都只写年份；首页、搜索结果里的卡也一枚都没有 */
+  const nb = await zp.evaluate(() => {
+    const f = { name: 'Big.Film.2021.2160p.UHD.DV.HDR10.Atmos.mkv', path: '/Movies/big.mkv' };
+    const box = document.createElement('div');
+    box.innerHTML = videoCardHTML(f) + videoCardHTML(f, { landscape: true });
+    const meta = [...box.querySelectorAll('.card-meta')].map(m => m.textContent).join(' | ');
+    return { html: box.querySelectorAll('.tag-border').length > 0 || /8K|高动态|DV|HDR|4K/.test(meta), meta, dom: document.querySelectorAll('.card .tag-border').length };
+  });
+  ok(!nb.html && nb.dom === 0, `卡片上不出 DV / 8K+ / 高动态这类规格小标签（文件名写满规格的卡，底下只写「${nb.meta}」；首页与搜索结果里的卡：${nb.dom} 枚）`);
   const again = await zp.evaluate(() => videoCardHTML({ name: 'long.mp4', path: '/Movies/long.mp4' }).includes('漫长的测试'));
   ok(again, '记进中文名索引：之后新排的卡一出来就是中文');
   const hit = await zp.evaluate(() => { runSearch('漫长'); return !!document.querySelector('#searchBody .card[data-name="long.mp4"]'); });
@@ -1212,8 +1223,8 @@ console.log('\n■ 年份页：一行一部的列表（竖版小海报 + 中文�
       `电影一行一部：竖版小海报在最左（2:3）、中文片名、「…」在行尾（${mv.map(x => x.title).join(' / ')}）`);
     /* 模拟的 TMDB 详情一律回「剧情」：被首页大图先取过详情的那部会是「剧情」，其余是搜索结果里那两个类型 */
     const viaSearch = mv.filter(x => /^(科幻 · 冒险|动画 · 家庭|战争 · 动作)$/.test(x.sub));
-    ok(mv.every(x => x.sub && x.sub !== '电影' && x.tags >= 1) && viaSearch.length >= 1,
-      `副标题是类型 + 规格徽标（${mv.map(x => x.sub).join(' / ')}）；类型来自 TMDB 搜索结果自带的类型编号，不多花请求`);
+    ok(mv.every(x => x.sub && x.sub !== '电影' && x.tags === 0) && tvr.every(x => x.tags === 0) && viaSearch.length >= 1,
+      `副标题只有类型（${mv.map(x => x.sub).join(' / ')}），没有 DV / 8K+ / 高动态这类规格小标签；类型来自 TMDB 搜索结果自带的类型编号，不多花请求`);
     ok(L.every(x => Math.abs(x.sepLeft - x.textLeft) <= 1), '行间发丝线从文字那一列起头，海报底下不画');
     ok(mv.every(x => /\/w185\//.test(x.img)), `小海报取 w185（${(mv[0] && mv[0].img.split('/t/p/')[1]) || ''}），不拉卡片那种大图`);
     ok(tvr.length === 1 && tvr[0].title === '幕府将军' && /集/.test(tvr[0].sub) && Math.abs(tvr[0].ratio - 1.5) < 0.05,
