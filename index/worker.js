@@ -16,6 +16,14 @@
  *   · 分片与 tid 表 copy-on-write，写 state.json 才算提交，平台随时掐进程都不留半截；
  *   · 锁带身份、条件写抢锁、提交前核对并续期；影片表只增不减的检查；
  *   · 每天自动备份 movies / state / 留底队列，体检里一键恢复；孤儿对象自动清理。
+ * 四、界面（v6.1）：设计语言对齐 Cuven Transfer
+ *   · 纸面：径向纸 + 18px 点阵（中心干净、边缘有颗粒）；色彩改 oklch，白云蓝以 L C H 三元组为源；
+ *   · 交互重点色改黑（主行动、选中年份、片单勾选），白云蓝只留给数据（进度、实时流、链接、聚焦环）；
+ *   · 圆角阶梯 30 / 13 / 16 / 11，同心；卡片 1px 描边 + 极浅投影；控件白底发丝描边；
+ *   · 导航：一块玻璃 + 一块白 thumb 在项间平移改宽；手机上落成底部 354×68 的玻璃坞（图标 + 字）；
+ *   · 片单动作坞改成浮着的玻璃胶囊（手机上坐在坞的正上方），退场走加速曲线；
+ *   · 顺手修掉：手机顶栏左右没有留白（商标和搜索框贴着屏幕边）、外观钮的 ◐ 被钉在角上裁掉一半、
+ *     「DOLBY VISION」角标在窄海报上压住版本数、详情页顶栏换成三行盖住片名。
  * 三、其它兜底：源闸门卡死自动放行；所有出站请求带超时；种子按 bencode 逐层解析
  *   （v5 会在文件名里含「4:info」时算错 btih、遇到截断的种子死循环）；海报代理不再因
  *   上游断网抛异常；取件遇到限速 / 断网自动重试（每部最多 4 次）而不是直接记为失败。
@@ -4998,7 +5006,9 @@ const PAGE = String.raw`<!DOCTYPE html>
   --t-fast:calc(.14s*var(--silk));   /* 高频重放的入场，越短越好 */
   --t-sheet:calc(.44s*var(--silk));  /* 底部动作坞这类抽屉 */
   /* 按压反馈不参与 --silk 缩放：它是"直接性"的地基，任何时候都必须即时。 */
-  --t-press:90ms;
+  --t-press:80ms;                    /* 按下 80ms 内到位；松手沿 --e-morph 回弹（同 Transfer） */
+  --e-morph:cubic-bezier(.32,.72,0,1);
+  --ease-exit:cubic-bezier(.4,0,1,1);  /* 离场加速：弹层、胶囊退场都用它，进出不再同一支曲线 */
 
   /* ── 字重 ──
      只在这里定义。任何状态（选中 / hover / 焦点）都不准改字重 ——
@@ -5038,7 +5048,12 @@ const PAGE = String.raw`<!DOCTYPE html>
      触屏 44，精细指针 40。视觉尺寸可以比这小，靠伪元素把可点范围撑开。 */
   --hit:44px; --hit-d:40px;
 
-  --r-s:10px; --r-m:14px; --r-l:20px; --r-xl:26px;
+  /* 圆角阶梯（同 Cuven Transfer）：卡片 30，卡内件 = 30 − 17（内容到卡边的内缩）= 13，同心；
+     小浮层 16 / 其内 11。坞与胶囊是整颗 stadium。 */
+  --r-s:11px; --r-m:13px; --r-l:30px; --r-xl:30px;
+  --r-card:30px; --r-in:13px; --r-pop:16px; --r-pop-in:11px;
+  --nav-h:68px;                       /* 底部坞（手机）与动作胶囊共用的高度 */
+  --hairw:1px;
   --pad:max(20px,env(safe-area-inset-left));
   --padr:max(20px,env(safe-area-inset-right));
   --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
@@ -5049,25 +5064,42 @@ const PAGE = String.raw`<!DOCTYPE html>
      实时数据；第二重点色黑 —— 商标、性价比之选、提示。海报仍是页面上唯一
      的大面积颜色。白底之后卡片不能再靠"白压灰"分层，改靠 1px 描边 +
      轻阴影（--sh 里带着那一圈描边）。要换主题色只改下面这六个。 */
-  --ac:#3D8FE4; --acf:#FFF;          /* 白云蓝：填充，及其上的文字 */
-  --act:#0C72CB;                     /* 白云蓝的文字档：深一级才够对比度 */
-  --acb:rgba(61,143,228,.13);        /* 白云蓝的薄染 */
-  --ink:#111214; --inkf:#FFF;        /* 黑：第二重点色 */
+  /* v6 起与 Cuven Transfer 同一套规矩：交互重点色 = 黑（主行动、选中态、片单勾选）；
+     白云蓝只留给「数据」—— 进度、实时流、链接、聚焦环。语义色不跟着走。
+     白云蓝以 L C H 三元组为源，透明度派生全从它出：换主题只动这一行（P3 屏只抬 C）。 */
+  --sky-lch:0.646 0.142 253.9;
+  --ac:oklch(var(--sky-lch)); --acf:#FFF;      /* 白云蓝：数据 / 聚焦 */
+  --act:oklch(0.545 0.135 254.2);              /* 白云蓝的正文档：白底跑文字 ≥ 4.5:1 */
+  --acb:oklch(var(--sky-lch) / .12);           /* 白云蓝的薄染 */
+  --ink:oklch(0.179 0.006 285.8); --inkf:#FFF; /* 黑：交互重点色 */
+  --ink-d:oklch(0.28 0.006 285.8);             /* 黑按下 */
 
-  --bg:#FFF; --sf:#FFF; --sf2:#F6F6F8; --sf3:#EEEEF1; --sf4:#E2E2E7;
-  --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.14);
-  --t1:#111214; --t2:rgba(60,60,67,.62); --t3:rgba(60,60,67,.36);
-  --ok:#22A94E; --okb:rgba(34,169,78,.12);
-  --warn:#C98600; --warnb:rgba(201,134,0,.12);
-  --bad:#DC3B40; --badb:rgba(220,59,64,.1);
-  --glass:rgba(255,255,255,.8);
-  --sel:rgba(61,143,228,.22);        /* 选区：一层薄染，不是反白 */
-  --sbar:rgba(0,0,0,.2);             /* 局部滚动条，只用在小容器里 */
-  --sh:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.04),0 10px 28px -14px rgba(0,0,0,.12);
-  --sh-s:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.05);
-  --sh-l:0 0 0 1px var(--line),0 2px 6px rgba(0,0,0,.05),0 24px 60px -20px rgba(0,0,0,.2);
-  --poster:#EAEAEE;
+  --bg:#FFF; --sf:#FFF;
+  --sf2:oklch(0.971 0.003 286.4); --sf3:oklch(0.958 0.003 286.3); --sf4:oklch(0.932 0.003 286.3);
+  --line:oklch(0.932 0.003 286.3); --line2:oklch(0.884 0.006 286.2); --hair:oklch(0.953 0.003 286.3);
+  --t1:oklch(0.206 0.006 285.9); --t2:oklch(0.562 0.012 286); --t3:oklch(0.708 0.012 286.1);
+  --ok:oklch(0.627 0.17 149.2); --okb:oklch(0.627 0.17 149.2 / .12);
+  --warn:oklch(0.555 0.146 49); --warnb:oklch(0.555 0.146 49 / .11);
+  --bad:oklch(0.577 0.215 27.3); --badb:oklch(0.577 0.215 27.3 / .09);
+  --glass:rgba(255,255,255,.72);
+  --glass-rgb:232,232,237; --glass-a:.72;      /* 坞 / 胶囊的玻璃（Transfer 同款 aap 玻璃） */
+  --sel:oklch(var(--sky-lch) / .22);           /* 选区：一层薄染，不是反白 */
+  --sbar:rgba(0,0,0,.2);                       /* 局部滚动条，只用在小容器里 */
+  /* 白底之上层级靠 1px 描边 + 极浅投影（同 Transfer 的卡片），不再靠大片柔影 */
+  --sh:0 0 0 1px var(--line),0 1px 2px rgba(20,20,30,.045);
+  --sh-s:0 0 0 1px var(--line),0 1px 2px rgba(20,20,30,.05);
+  --sh-l:0 0 0 1px var(--line),0 2px 6px rgba(20,20,30,.05),0 24px 60px -20px rgba(20,20,30,.18);
+  --sh-float:0 8px 26px rgba(18,18,28,.10),0 1px 3px rgba(18,18,28,.06),inset 0 0 0 1px rgba(20,20,30,.05);
+  --thumb:rgba(255,255,255,.92);                /* 分段控件 / 坞的白 thumb */
+  --sh-thumb:0 1px 2px rgba(18,18,28,.10),0 6px 16px rgba(18,18,28,.055),inset 0 0 0 .5px rgba(255,255,255,.92);
+  --poster:oklch(0.932 0.003 286.3);
+  /* 纸面（Transfer 的底）：中心白、往外压暗的径向纸 + 18px 点阵，点阵从中心往外抹掉 */
+  --paper:#f1f1f5;
+  --paper-grad:radial-gradient(120% 86% at 50% 38%,#ffffff 0%,#f8f8fa 58%,#ececf1 100%);
+  --paper-dot:rgba(11,11,18,.18);
 }
+@media (color-gamut:p3){ html:not([data-theme="dark"]){ --sky-lch:0.646 0.165 253.9 } }
+@media (-webkit-min-device-pixel-ratio:2),(min-resolution:192dpi){ :root{ --hairw:.5px } }
 /* 深色只写一份：跟随系统且系统是深色、或手动指定深色，都吃它。
    蓝色提亮一档，其上的文字改成墨色，对比度才够。 */
 @media (prefers-color-scheme:dark){
@@ -5081,12 +5113,20 @@ const PAGE = String.raw`<!DOCTYPE html>
     --warn:#FFD426; --warnb:rgba(255,212,38,.13);
     --bad:#FF6B5E; --badb:rgba(255,107,94,.13);
     --glass:rgba(18,18,20,.74);
+    --glass-rgb:30,30,34; --glass-a:.74;
+    --ink-d:#D8D8DD; --hair:rgba(255,255,255,.06);
     --sel:rgba(103,170,237,.3);
     --sbar:rgba(255,255,255,.22);
-    --sh:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.4),0 12px 34px -14px rgba(0,0,0,.8);
+    --sh:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.4);
     --sh-s:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.35);
     --sh-l:0 0 0 1px var(--line),0 2px 8px rgba(0,0,0,.45),0 28px 70px -24px rgba(0,0,0,.9);
+    --sh-float:0 10px 30px rgba(0,0,0,.55),0 1px 3px rgba(0,0,0,.4),inset 0 0 0 1px rgba(255,255,255,.08);
+    --thumb:rgba(255,255,255,.16);
+    --sh-thumb:0 1px 2px rgba(0,0,0,.5),inset 0 0 0 .5px rgba(255,255,255,.14);
     --poster:#222226;
+    --paper:#0a0a0b;
+    --paper-grad:radial-gradient(120% 86% at 50% 38%,#161618 0%,#0e0e10 60%,#0a0a0b 100%);
+    --paper-dot:rgba(255,255,255,.07);
   }
 }
 html[data-theme="dark"]{
@@ -5099,12 +5139,20 @@ html[data-theme="dark"]{
   --warn:#FFD426; --warnb:rgba(255,212,38,.13);
   --bad:#FF6B5E; --badb:rgba(255,107,94,.13);
   --glass:rgba(18,18,20,.74);
+  --glass-rgb:30,30,34; --glass-a:.74;
+  --ink-d:#D8D8DD; --hair:rgba(255,255,255,.06);
   --sel:rgba(103,170,237,.3);
   --sbar:rgba(255,255,255,.22);
-  --sh:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.4),0 12px 34px -14px rgba(0,0,0,.8);
+  --sh:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.4);
   --sh-s:0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.35);
   --sh-l:0 0 0 1px var(--line),0 2px 8px rgba(0,0,0,.45),0 28px 70px -24px rgba(0,0,0,.9);
+  --sh-float:0 10px 30px rgba(0,0,0,.55),0 1px 3px rgba(0,0,0,.4),inset 0 0 0 1px rgba(255,255,255,.08);
+  --thumb:rgba(255,255,255,.16);
+  --sh-thumb:0 1px 2px rgba(0,0,0,.5),inset 0 0 0 .5px rgba(255,255,255,.14);
   --poster:#222226;
+  --paper:#0a0a0b;
+  --paper-grad:radial-gradient(120% 86% at 50% 38%,#161618 0%,#0e0e10 60%,#0a0a0b 100%);
+  --paper-dot:rgba(255,255,255,.07);
 }
 html[data-theme="light"]{color-scheme:light}
 html[data-theme="dark"]{color-scheme:dark}
@@ -5117,10 +5165,34 @@ html.noanim *,html.noanim *::before,html.noanim *::after{
 html{-webkit-text-size-adjust:100%}
 /* 系统字体自带光学字号、字距表和易读性调校，不再外挂字体文件 ——
    于是"字体子集化"这一项天然满足：一个字节都没有多下发。 */
-body{background:var(--bg);color:var(--t1);font-family:var(--sans);font-size:1rem;
+/* ── 纸面（搬 Cuven Transfer 的底）──
+   两层：一层从中心往外压暗的径向纸，一层 18px 点阵，再用一支从中心衰减的径向遮罩
+   把点往边上抹掉 —— 视线中心是干净的白，越往外越有颗粒，页面不再是一块死白。
+   挂在 html 的固定伪层上：铺满视口、不跟着滚；body 透明。 */
+html{background:var(--paper)}
+html::before,html::after{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none}
+html::before{background:var(--paper-grad)}
+html::after{
+  background-image:radial-gradient(circle,var(--paper-dot) 0 .75px,transparent .8px);
+  background-size:18px 18px;background-position:9px 5px;
+  -webkit-mask-image:radial-gradient(78% 62% at 50% 38%,#000 0%,rgba(0,0,0,.55) 55%,transparent 100%);
+  mask-image:radial-gradient(78% 62% at 50% 38%,#000 0%,rgba(0,0,0,.55) 55%,transparent 100%)}
+@media (prefers-contrast:more){ html::after{display:none} }
+body{background:transparent;color:var(--t1);font-family:var(--sans);font-size:1rem;
   line-height:var(--lh-b);letter-spacing:var(--tr-b);
   -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
   overflow-x:hidden;padding-bottom:calc(104px + env(safe-area-inset-bottom))}
+/* 底部 scroll edge：内容滑进坞 / 胶囊下方之前先被洗掉，不撞硬边（同 Transfer 的 body::after）。
+   只在底部真有浮层时出现：手机上坞常驻，桌面上片单胶囊升起时才有 */
+/* 层：压在内容与推入层之上、顶栏（坞就在顶栏的层里）之下 —— 不然坞自己也被洗掉 */
+body::after{content:'';position:fixed;left:0;right:0;bottom:0;z-index:calc(var(--z-header) - 10);pointer-events:none;
+  height:calc(env(safe-area-inset-bottom) + 104px);opacity:0;transition:opacity var(--t-m) var(--e-soft);
+  -webkit-backdrop-filter:blur(7px);backdrop-filter:blur(7px);
+  -webkit-mask-image:linear-gradient(to top,#000 30%,rgba(0,0,0,.72) 52%,rgba(0,0,0,.32) 74%,transparent 100%);
+  mask-image:linear-gradient(to top,#000 30%,rgba(0,0,0,.72) 52%,rgba(0,0,0,.32) 74%,transparent 100%);
+  background:linear-gradient(to top,rgba(255,255,255,.62) 16%,rgba(255,255,255,.38) 48%,rgba(255,255,255,.14) 76%,rgba(255,255,255,0) 96%)}
+body:has(#dock.up)::after{opacity:1}
+body:has(#dock.up){padding-bottom:calc(120px + env(safe-area-inset-bottom))}
 button,input,select{font:inherit;color:inherit;letter-spacing:inherit}
 .wrap{max-width:1180px;margin:0 auto;padding-left:var(--pad);padding-right:var(--padr)}
 /* 焦点环保持中性色，且只画环 —— 不改元素自身的圆角，否则一聚焦形状就变了 */
@@ -5145,14 +5217,22 @@ b,strong{font-weight:var(--fw-s)}
 .qlist,.logs{scrollbar-width:thin;scrollbar-color:var(--sbar) transparent}
 
 /* 掉帧时性能调度器打上这个类：毛玻璃与大阴影先让路 */
-html.lite header,html.lite #dock{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;background:var(--sf)!important}
+html.lite header::before,html.lite #dock,html.lite #nav,html.lite .filters,html.lite body::after{
+  backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+html.lite header::before,html.lite #dock,html.lite #nav{background:var(--sf)!important}
+html.lite .filters{background:var(--sf)!important}
 html.lite .card,html.lite .art{box-shadow:var(--sh-s)!important}
 html.lite .shimmer{animation:none!important}
 
 /* ── 顶栏 ───────────────────────────────────────────────────────── */
-header{position:sticky;top:0;z-index:var(--z-header);isolation:isolate;
-  background:var(--glass);
-  backdrop-filter:saturate(180%) blur(22px);-webkit-backdrop-filter:saturate(180%) blur(22px)}
+/* 材质挂在 ::before 上，不挂在 header 本体：backdrop-filter 会给后代建一个「固定定位的
+   参照系」，手机上导航要以 position:fixed 浮到屏幕底部当坞，header 本体就不能带它 */
+header{position:sticky;top:0;z-index:var(--z-header);isolation:isolate}
+header::before{content:'';position:absolute;inset:0;z-index:-1;pointer-events:none;
+  background:linear-gradient(to bottom,rgba(255,255,255,.80),rgba(255,255,255,.62));
+  backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px)}
+@media (prefers-color-scheme:dark){ html:not([data-theme="light"]) header::before{background:rgba(14,14,16,.72)} }
+html[data-theme="dark"] header::before{background:rgba(14,14,16,.72)}
 /* 悬浮层压住内容的地方用一小段渐隐收口，而不是画一条 1px 的硬线 ——
    材质是"内容从下面滑过去"，硬线会把它变回一个占位的横条。 */
 header::after{content:'';position:absolute;left:0;right:0;top:100%;height:18px;pointer-events:none;
@@ -5160,53 +5240,68 @@ header::after{content:'';position:absolute;left:0;right:0;top:100%;height:18px;p
   transition:opacity var(--t-m) var(--e-soft)}
 header.stuck::after{opacity:.9}
 /* 白底之上"内容从下面滑过去"的渐隐看不出来了，吸住时补一道 1px 描边 */
-header.stuck{box-shadow:0 1px 0 var(--line)}
+header.stuck{box-shadow:0 var(--hairw) 0 var(--line)}
 .bar{display:flex;align-items:center;gap:12px;height:56px}
 .brand{display:flex;align-items:center;gap:9px;flex:none;background:none;border:0;cursor:pointer;
   padding:0;position:relative}
 .brand::before{content:'';position:absolute;inset:-9px -4px}   /* 26 + 9x2 = 44 高；两侧各 4px，与返回键的 4px 正好填满 8px 间距 */
-.mark{width:26px;height:26px;border-radius:8px;background:var(--ink);color:var(--inkf);flex:none;
+.mark{width:26px;height:26px;border-radius:9px;background:var(--ink);color:var(--inkf);flex:none;
   display:grid;place-items:center;font-size:.8125rem;font-weight:var(--fw-x);
   letter-spacing:-.04em;line-height:1;
   transition:transform var(--t-press) ease-out}
 .brand:active .mark{transform:scale(.96)}
-.bname{font-size:.9375rem;font-weight:var(--fw-s);letter-spacing:var(--tr-l);white-space:nowrap}
+.bname{font-size:1.125rem;font-weight:var(--fw-x);letter-spacing:.012em;white-space:nowrap}
+.bname em{font-style:normal;color:var(--t3);font-weight:500}       /* 「Cuven Transfer」那种两级：商标墨色、产品名第三层级 */
+.bar .sp{flex:1;min-width:0}
 .bname sup{font-size:.5625rem;font-weight:var(--fw-m);vertical-align:super;opacity:.5;margin-left:1px}
-nav.pills{display:flex;gap:2px;background:var(--sf3);border-radius:999px;padding:3px;margin:0 auto}
-/* 状态只改颜色和底色，绝不改字重 —— 改字重会让整排药丸重排一次 */
-nav.pills button{border:0;background:none;color:var(--t2);font-size:.8125rem;
-  font-weight:var(--fw-m);min-height:32px;padding:0 16px;border-radius:999px;cursor:pointer;
-  white-space:nowrap;position:relative;
-  transition:color var(--t-s) var(--e-soft),background var(--t-s) var(--e-soft),transform var(--t-press) ease-out}
+/* ── 导航（同 Transfer 的坞）──
+   一块玻璃，三项共用一块白 thumb：切页时 thumb 在项与项之间平移 + 改宽（JS 量位置），
+   不是各自的背景各自亮。选中态两个信号：thumb 位移 + 墨色字重 650，不只靠颜色。
+   三项等宽（flex:1 1 0），字重变化不会让邻居挪位。 */
+nav.pills{position:relative;display:flex;gap:0;margin:0;padding:4px;border-radius:999px;
+  background:rgba(var(--glass-rgb),var(--glass-a));
+  -webkit-backdrop-filter:blur(20px) saturate(180%);backdrop-filter:blur(20px) saturate(180%);
+  box-shadow:inset 0 0 0 1px rgba(20,20,30,.05)}
+nav.pills .hl{position:absolute;left:0;top:4px;bottom:4px;width:0;border-radius:999px;pointer-events:none;
+  background:var(--thumb);box-shadow:var(--sh-thumb);opacity:0;
+  transition:transform calc(.42s*var(--silk)) var(--e-morph),width calc(.42s*var(--silk)) var(--e-morph),opacity .2s ease}
+nav.pills .hl.on{opacity:1}
+nav.pills button{position:relative;z-index:1;flex:1 1 0;min-width:78px;border:0;background:none;color:var(--t3);
+  font-size:.8125rem;font-weight:500;min-height:32px;padding:0 14px;border-radius:999px;cursor:pointer;
+  white-space:nowrap;display:flex;align-items:center;justify-content:center;gap:4px;
+  transition:color .3s ease,font-weight .3s ease}
 nav.pills button::before{content:'';position:absolute;inset:-6px 0}   /* 32 + 6 + 6 = 44 */
-nav.pills button.on{background:var(--sf);color:var(--t1);box-shadow:var(--sh-s)}
-nav.pills button:active{transform:scale(.96)}
+nav.pills button.on{color:var(--ink);font-weight:650}
+nav.pills .ic{display:none;place-items:center;height:20px;transition:transform calc(.3s*var(--silk)) var(--e-morph)}
+nav.pills .ic svg{display:block}
+nav.pills button:active .ic{transform:scale(.88);transition-duration:var(--t-press)}
 /* 徽标的宽度是常驻的：数字从无到有、从 9 到 10，导航都不会跟着挪 */
 nav.pills button i{font-style:normal;font-size:.6875rem;opacity:.5;margin-left:5px;
   display:inline-block;min-width:1.9em;text-align:right}
 nav.pills button i:empty{min-width:0;margin-left:0}
 /* 源开关（电影 / 剧集）：与主导航同一套药丸，尺寸收一档，坐在工具区最左。
    它换的是"看哪一个库"，和换标签页不是一回事，所以不跟 nav 混在一起。 */
-.pills.mini{display:flex;gap:2px;background:var(--sf3);border-radius:999px;padding:3px;flex:none}
+.pills.mini{display:flex;gap:2px;background:var(--sf3);border-radius:999px;padding:3px;flex:none;
+  box-shadow:inset 0 0 0 1px rgba(20,20,30,.04)}
 .pills.mini button{border:0;background:none;color:var(--t2);font-size:.78125rem;height:30px;
   padding:0 11px;border-radius:999px;cursor:pointer;position:relative;white-space:nowrap;
   font-weight:var(--fw-m);letter-spacing:var(--tr-xs);
   transition:background var(--t-s) var(--e-soft),color var(--t-s) var(--e-soft),
              transform var(--t-press) ease-out}
 .pills.mini button::before{content:'';position:absolute;inset:-7px 0}  /* 30 + 7x2 = 44 */
-.pills.mini button.on{background:var(--sf);color:var(--t1);box-shadow:var(--sh-s)}
+.pills.mini button.on{background:var(--thumb);color:var(--ink);box-shadow:var(--sh-thumb)}
 .pills.mini button:active{transform:scale(.97)}
 .tools{display:flex;align-items:center;gap:8px;flex:none}
 /* 宽度不参与动画：它是布局属性，而且 / 快捷键也会触发聚焦 ——
    键盘发起的动作不该有动画。聚焦的状态指示交给底色和阴影。 */
-.field{display:flex;align-items:center;gap:7px;background:var(--sf3);border-radius:999px;
-  padding:0 13px;width:240px;min-height:36px;
-  transition:background var(--t-s) var(--e-soft),box-shadow var(--t-s) var(--e-soft)}
-.field:focus-within{background:var(--sf);box-shadow:var(--sh-s)}
+.field{display:flex;align-items:center;gap:7px;background:var(--sf);border-radius:999px;
+  padding:0 13px;width:240px;min-height:36px;box-shadow:inset 0 0 0 1px var(--line);
+  transition:box-shadow .16s ease}
+.field:focus-within{box-shadow:inset 0 0 0 1px var(--ac),0 0 0 3px var(--acb)}
 .field svg{flex:none;color:var(--t3)}
 #q{flex:1;min-width:0;background:none;border:0;font-size:.875rem;align-self:stretch}
 #q:focus-visible{outline:0}
-.field:has(#q:focus-visible){outline:2px solid var(--ac);outline-offset:3px}
+.field:has(#q:focus-visible){outline:0}   /* 聚焦信号交给上面的描边 + 淡环 */
 /* 没有 :has() 的老浏览器：把环还给输入框本身，宁可位置将就，也不能没有 */
 @supports not (selector(:has(*))){ #q:focus-visible{outline:2px solid var(--ac);outline-offset:-1px} }
 #q::placeholder{color:var(--t3)}
@@ -5220,7 +5315,7 @@ nav.pills button i:empty{min-width:0;margin-left:0}
    右边一直撑到搜索框内壁。这是不与邻居打架的前提下能给到的最大命中区。 */
 #clr::before{content:'';position:absolute;inset:-12px -13px -12px -7px}
 #clr.on{visibility:visible;opacity:1}
-.icb{border:0;background:var(--sf3);color:var(--t1);width:36px;height:36px;border-radius:50%;
+.icb{border:0;background:var(--sf);box-shadow:inset 0 0 0 1px var(--line);color:var(--t1);width:36px;height:36px;border-radius:50%;
   display:grid;place-items:center;cursor:pointer;flex:none;position:relative;
   transition:background var(--t-s) var(--e-soft),transform var(--t-press) ease-out}
 .icb::before{content:'';position:absolute;inset:-4px -5px}  /* 46×44；左右各 5px 都落在与邻居之间的空隙里 */
@@ -5230,69 +5325,96 @@ nav.pills button i:empty{min-width:0;margin-left:0}
 #back{display:none}
 #back.on{display:grid}
 /* 外观键的字形由 CSS 出，于是首帧就是对的，不用等脚本跑完再补一次 */
-#theme{font-size:.9375rem;line-height:1}
-#theme::before{content:'◐'}
-html[data-theme="light"] #theme::before{content:'☀'}
-html[data-theme="dark"] #theme::before{content:'☾'}
+/* 外观图标画在 ::after 上：原来的 ◐ 写在 ::before —— 那是 .icb 撑命中区用的绝对定位伪元素，
+   字形于是被钉在圆的左上角、裁掉一半。图标也改成画的，不再赌字体回退字形的大小与基线。
+   跟随系统 = 半实心圆；浅色 = 空心圆；深色 = 实心圆 */
+#theme::after{content:'';width:15px;height:15px;border-radius:50%;box-sizing:border-box;
+  border:1.6px solid currentColor;background:linear-gradient(90deg,currentColor 50%,transparent 50%)}
+html[data-theme="light"] #theme::after{background:none}
+html[data-theme="dark"] #theme::after{background:currentColor}
 @media(max-width:900px){
   .bname{display:none}
   .field{width:170px}
-  nav.pills button{padding:0 12px;font-size:.78125rem}
+  nav.pills button{min-width:64px;padding:0 10px;font-size:.78125rem}
+}
+/* ── 手机 / 竖屏平板：导航落成底部玻璃坞（Transfer 同款）──
+   354×68 的 stadium，图标 + 字；thumb 是同一块白在三项之间平移。
+   顶栏只剩商标、源开关、外观，一行放得下；搜索另起一行占满。 */
+@media(max-width:720px){
+  .bname{display:inline}
+  nav.pills#nav{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 14px);z-index:var(--z-dock);
+    transform:translateX(-50%);width:min(390px,calc(100vw - 36px));height:var(--nav-h);padding:5px;margin:0;
+    box-shadow:var(--sh-float);transition:box-shadow .34s var(--e-out)}
+  nav.pills#nav .hl{top:5px;bottom:5px}
+  nav.pills#nav button{flex-direction:column;gap:4px;min-height:0;min-width:0;padding:9px 0 8px;
+    font-size:.71875rem;letter-spacing:.012em}
+  nav.pills#nav button::before{inset:0}
+  nav.pills#nav .ic{display:grid}
+  /* 片单数量：挂在图标右上角的小墨点，不占字的位置 */
+  nav.pills#nav button i{position:absolute;top:6px;left:calc(50% + 7px);margin:0;min-width:17px;height:17px;
+    padding:0 5px;border-radius:999px;background:var(--ink);color:var(--inkf);opacity:1;
+    font-size:.625rem;font-weight:650;line-height:17px;text-align:center}
+  nav.pills#nav button i:empty{display:none}
+  body{padding-bottom:calc(env(safe-area-inset-bottom) + 104px)}
+  body::after{opacity:1}
+  body:has(#dock.up){padding-bottom:calc(env(safe-area-inset-bottom) + 178px)}
+  #push{padding-bottom:calc(env(safe-area-inset-bottom) + 112px)}
 }
 @media(max-width:600px){
-  /* 两行：第一行 商标 · 页签 · 外观，第二行 内容源 · 搜索。
-     .tools 用 display:contents 拆开，它的三个孩子直接参与顶栏换行。
-     10px = 返回键的 5px + 商标的 4px，还余 1px */
-  .bar{gap:10px;flex-wrap:wrap;height:auto;padding:8px 0}
+  /* 详情页多出返回键：商标收成只剩 C，一行仍放得下（否则外观钮会掉到第二行、顶栏变三行盖住标题） */
+  #back.on ~ .brand .bname{display:none}
+  .bar{gap:10px;flex-wrap:wrap;height:auto;padding-top:8px;padding-bottom:8px}   /* 只动上下：左右留白是 .wrap 的，原来 padding:8px 0 把它清零了，商标和搜索框贴着屏幕边 */
   .tools{display:contents}
-  nav.pills{order:1;flex:1;min-width:0;margin:0;justify-content:center}
   #srcNav{order:2}
   #theme{order:3}
-  .field{order:4;flex:1;width:auto;min-width:200px}
+  .field{order:4;flex:1 1 100%;width:auto;min-width:200px}
   .pills.mini button{padding:0 9px}
 }
 
 /* ── 通用件 ─────────────────────────────────────────────────────── */
 /* 大标题让浏览器去平衡断行，避免最后一行只剩两个字 */
-h1{font-size:1.875rem;font-weight:var(--fw-b);letter-spacing:var(--tr-2xl);
-  margin:24px 0 3px;line-height:var(--lh-t);text-wrap:balance}
-.lede{color:var(--t2);font-size:.90625rem;margin-bottom:2px;letter-spacing:var(--tr-b)}
-h2.sec{font-size:1.1875rem;font-weight:var(--fw-s);letter-spacing:var(--tr-l);margin:0;
+/* 字距按 Transfer 实测的 U 形曲线：31px 一档是 +.004em，不是正文那档的负字距 */
+h1{font-size:1.9375rem;font-weight:var(--fw-x);letter-spacing:.004em;
+  margin:26px 0 4px;line-height:var(--lh-t);text-wrap:balance}
+.lede{color:var(--t2);font-size:.9375rem;margin-bottom:2px;letter-spacing:-.006em}
+h2.sec{font-size:1.0625rem;font-weight:650;letter-spacing:-.022em;margin:0;
   line-height:var(--lh-h);text-wrap:balance}
 h3{font-size:1rem;font-weight:var(--fw-s);letter-spacing:var(--tr-b);line-height:var(--lh-h);
   text-wrap:balance}
-.card{background:var(--sf);border-radius:var(--r-l);box-shadow:var(--sh);padding:18px 20px;
+.card{background:var(--sf);border-radius:var(--r-card);box-shadow:var(--sh);padding:20px;
   margin:16px 0;isolation:isolate;transition:box-shadow var(--t-m) var(--e-soft)}
-.card.tight{padding:14px 16px}
+.card.tight{padding:16px}
 .hd{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
 .hd .sub{font-size:.75rem;color:var(--t3);font-family:var(--mono)}
 /* 主按钮直接给足真实高度（精细指针 40，触屏 44），不靠伪元素撑 ——
    它周围有 9px 的行间距，撑出去反而会和邻居打架。 */
-.btn{background:var(--sf3);color:var(--t1);border:0;border-radius:var(--r-s);
+/* 次级动作：白底发丝描边；主行动：墨色实心（同 Transfer 的 .btn.pri）。
+   按压反馈拆两段：按下 80ms 即时到位，松手沿 --e-morph 回弹 */
+.btn{background:var(--sf);color:var(--t1);border:0;box-shadow:inset 0 0 0 1px var(--line);border-radius:var(--r-in);
   padding:0 16px;min-height:var(--hit-d);display:inline-flex;align-items:center;
-  justify-content:center;font-size:.84375rem;font-weight:var(--fw-m);cursor:pointer;
-  text-decoration:none;letter-spacing:var(--tr-b);
-  transition:transform var(--t-press) ease-out,background var(--t-s) var(--e-soft),opacity var(--t-s)}
-.btn:active{transform:scale(.96)}
-.btn.on{background:var(--ac);color:var(--acf)}
-.btn.ink{background:var(--ink);color:var(--inkf)}
+  justify-content:center;font-size:.84375rem;font-weight:550;cursor:pointer;
+  text-decoration:none;letter-spacing:-.012em;
+  transition:transform calc(.3s*var(--silk)) var(--e-morph),background .16s ease,box-shadow .16s ease,opacity .16s}
+.btn:active{transform:scale(.97);background:var(--sf2);transition-duration:var(--t-press),.16s,.16s,.16s}
+.btn.on,.btn.ink{background:var(--ink);color:var(--inkf);box-shadow:0 1px 2px rgba(17,17,20,.18)}
+.btn.on:active,.btn.ink:active{background:var(--ink-d)}
 .btn[disabled]{opacity:.42;cursor:default;transform:none}
 /* 文案会在忙碌时换成"处理中…"，宽度先占住，行内的兄弟按钮就不会左右滑 */
 .btn.fixed{min-width:8.5em}
 .btn.sm.fixed{min-width:6.5em}
-.btn.sm{padding:0 12px;font-size:.78125rem;border-radius:9px;min-height:32px;position:relative}
+.btn.sm{padding:0 12px;font-size:.78125rem;border-radius:var(--r-s);min-height:32px;position:relative}
 .btn.sm::before{content:'';position:absolute;inset:-6px 0}   /* 32 + 6×2 = 44 */
-.link{background:none;border:0;color:var(--t2);font-size:.78125rem;cursor:pointer;padding:0;
-  text-decoration:underline;text-underline-offset:3px;position:relative;
+.link{background:none;border:0;color:var(--act);font-size:.78125rem;cursor:pointer;padding:0;
+  text-decoration:underline;text-decoration-color:oklch(var(--sky-lch) / .4);text-underline-offset:4px;position:relative;
   transition:color var(--t-xs) var(--e-soft)}
 .link::before{content:'';position:absolute;inset:-11px -7px}
 @media(pointer:coarse){ .btn{min-height:var(--hit)} }
 /* 触屏上点一下会留下"假 hover"，一直粘到点别处为止 —— 按钮看起来像还选中着。
    所以 hover 只在真有精细指针的设备上生效；:active 不受此限，触屏必须有按压反馈。 */
 @media (hover:hover) and (pointer:fine){
-  .icb:hover{background:var(--sf4)}
-  .btn:hover{background:var(--sf4)}
-  .btn.on:hover{opacity:.86;background:var(--ac)}
+  .icb:hover{background:var(--sf2)}
+  .btn:hover{background:var(--sf2)}
+  .btn.on:hover,.btn.ink:hover{background:var(--ink-d)}
   .link:hover{color:var(--t1)}
   .citem .cx:hover{color:var(--bad)}
   .art:hover{transform:translateY(-3px);box-shadow:var(--sh-l)}
@@ -5333,36 +5455,42 @@ h3{font-size:1rem;font-weight:var(--fw-s);letter-spacing:var(--tr-b);line-height
 
 /* ── 筛选台 ─────────────────────────────────────────────────────── */
 /* 吸顶高度跟着实测的顶栏走，顶栏在手机上换行也不会错位 */
-.filters{position:sticky;top:var(--hh,56px);z-index:var(--z-sticky);background:var(--bg);
+.filters{position:sticky;top:var(--hh,56px);z-index:var(--z-sticky);background:transparent;
   padding:10px var(--padr) 6px var(--pad);transition:box-shadow var(--t-m) var(--e-soft);
   margin-left:calc(var(--pad)*-1);margin-right:calc(var(--padr)*-1)}
 /* 吸住的时候补一道描边：白底上没有它，就看不出下面还有内容在滑 */
-.filters.stuck{box-shadow:0 1px 0 var(--line),0 8px 16px -12px rgba(0,0,0,.12)}
+/* 没吸住时筛选台就是纸面上的一组控件；吸住了才换上与顶栏同一层玻璃 */
+.filters.stuck{box-shadow:0 var(--hairw) 0 var(--line);
+  background:linear-gradient(to bottom,rgba(255,255,255,.80),rgba(255,255,255,.66));
+  -webkit-backdrop-filter:saturate(180%) blur(20px);backdrop-filter:saturate(180%) blur(20px)}
+@media (prefers-color-scheme:dark){ html:not([data-theme="light"]) .filters.stuck{background:rgba(14,14,16,.72)} }
+html[data-theme="dark"] .filters.stuck{background:rgba(14,14,16,.72)}
+@media(max-width:600px){ .filters{background:none;-webkit-backdrop-filter:none;backdrop-filter:none} }
 @media(max-width:600px){.filters{top:0;position:relative}}
 /* 行距 14px：上下两行的命中区各撑 6px，正好不重叠 */
 .fgroup{display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap}
 .fgroup>span.lb{font-size:.71875rem;color:var(--t3);font-weight:var(--fw-s);
   letter-spacing:var(--tr-xs);width:52px;flex:none}
-.seg{display:inline-flex;background:var(--sf3);border-radius:999px;padding:3px;gap:2px}
+.seg{display:inline-flex;background:var(--sf3);border-radius:999px;padding:3px;gap:2px;box-shadow:inset 0 0 0 1px rgba(20,20,30,.04)}
 .seg button{border:0;background:none;color:var(--t2);font-size:.78125rem;
   font-weight:var(--fw-m);min-height:30px;padding:0 13px;border-radius:999px;cursor:pointer;
   white-space:nowrap;position:relative;
   transition:color var(--t-s) var(--e-soft),background var(--t-s) var(--e-soft),transform var(--t-press) ease-out}
 /* 只往上下撑：左右紧挨着邻居，横向撑出去会互相抢点击 */
 .seg button::before{content:'';position:absolute;inset:-7px 0}
-.seg button.on{background:var(--sf);color:var(--t1);box-shadow:var(--sh-s)}
+.seg button.on{background:var(--thumb);color:var(--ink);box-shadow:var(--sh-thumb)}
 .seg button:active{transform:scale(.96)}
 .seg button em{font-style:normal;opacity:.45;font-size:.65625rem;margin-left:4px}
 .chips{display:flex;gap:6px;overflow-x:auto;overscroll-behavior-x:contain;flex:1;min-width:0;
   padding:6px 0 8px;scrollbar-width:none;-webkit-overflow-scrolling:touch;scroll-snap-type:x proximity}
 .chips::-webkit-scrollbar{display:none}
-.chips button{flex:none;border:0;background:var(--sf3);color:var(--t2);font-size:.78125rem;
+.chips button{flex:none;border:0;background:var(--sf);box-shadow:inset 0 0 0 1px var(--line);color:var(--t2);font-size:.78125rem;
   font-weight:var(--fw-m);min-height:32px;padding:0 13px;border-radius:999px;cursor:pointer;
   scroll-snap-align:center;position:relative;
   transition:color var(--t-s) var(--e-soft),background var(--t-s) var(--e-soft),transform var(--t-press) ease-out}
 /* 伸到容器的内边距边缘为止 —— 再往外就会被滚动容器裁掉，白撑 */
 .chips button::before{content:'';position:absolute;inset:-6px 0}
-.chips button.on{background:var(--ac);color:var(--acf)}
+.chips button.on{background:var(--ink);color:var(--inkf);box-shadow:none}
 .chips button:active{transform:scale(.96)}
 .fsum{display:flex;align-items:center;gap:10px;font-size:.75rem;color:var(--t3);
   padding:2px 0 8px;flex-wrap:wrap}
@@ -5388,10 +5516,12 @@ h3{font-size:1rem;font-weight:var(--fw-s);letter-spacing:var(--tr-b);line-height
 .art img.in{opacity:1}
 .art img.err{display:none}
 .badge{position:absolute;font-size:.625rem;font-weight:var(--fw-s);line-height:1.55;
-  border-radius:6px;padding:2px 6px;letter-spacing:var(--tr-xs);
+  border-radius:6px;padding:2px 6px;letter-spacing:var(--tr-xs);white-space:nowrap;
   backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
 .b-vote{left:6px;bottom:6px;background:rgba(0,0,0,.62);color:#fff;font-family:var(--mono)}
 .b-n{top:6px;right:6px;background:rgba(0,0,0,.62);color:rgba(255,255,255,.8);font-family:var(--mono)}
+/* 左上的规格角标与右上的版本数共用一行：给版本数留出位置，窄海报上也不压在一起 */
+.b-dv,.b-hdr{max-width:calc(100% - 42px);overflow:hidden;text-overflow:ellipsis}
 .b-dv{left:6px;top:6px;background:linear-gradient(100deg,#1B1B1F,#3A3A44);color:#fff;letter-spacing:.04em}
 .b-hdr{left:6px;top:6px;background:rgba(0,0,0,.62);color:#FFD98A;letter-spacing:.04em}
 .b-own{right:6px;bottom:6px;background:rgba(255,255,255,.94);color:#000;box-shadow:0 1px 6px rgba(0,0,0,.3)}
@@ -5404,7 +5534,7 @@ h3{font-size:1rem;font-weight:var(--fw-s);letter-spacing:var(--tr-b);line-height
   transition:transform var(--t-m) var(--e-pop),opacity var(--t-s) var(--e-soft)}
 .tile.in .tick{opacity:1}
 .tile.in .tick span{transform:scale(1);opacity:1}
-.tile.in .art{box-shadow:0 0 0 2.5px var(--ac),var(--sh)}
+.tile.in .art{box-shadow:0 0 0 2.5px var(--ink),var(--sh)}      /* 选中是交互态：墨色，不是数据蓝 */
 .tile.own .art img.in{opacity:.34;filter:grayscale(.55)}
 .tile.own .tname b{color:var(--t2)}
 .tname{display:block;width:100%;text-align:left;background:none;border:0;padding:9px 2px 0;cursor:pointer}
@@ -5440,7 +5570,7 @@ h3{font-size:1rem;font-weight:var(--fw-s);letter-spacing:var(--tr-b);line-height
 .hero p{color:var(--t2);font-size:.875rem;line-height:1.6;
   display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden}
 @media(max-width:600px){.hero{gap:16px}.hero .art{width:98px}.hero h2{font-size:1.3125rem;letter-spacing:var(--tr-l)}.hero p{-webkit-line-clamp:3}}
-.pick{background:var(--ink);color:var(--inkf);border-radius:var(--r-l);padding:18px 20px;margin:16px 0 12px}
+.pick{background:var(--ink);color:var(--inkf);border-radius:var(--r-card);padding:20px;margin:16px 0 12px}
 .pick .k{font-size:.65625rem;font-weight:var(--fw-x);letter-spacing:.09em;text-transform:uppercase;opacity:.5}
 .pick h4{font-size:.96875rem;font-weight:var(--fw-s);line-height:1.45;margin:7px 0 10px;
   letter-spacing:var(--tr-b);
@@ -5473,8 +5603,8 @@ h3{font-size:1rem;font-weight:var(--fw-s);letter-spacing:var(--tr-b);line-height
 <style>
 /* ── 下载台 ─────────────────────────────────────────────────────── */
 .kpi{display:flex;gap:28px;flex-wrap:wrap}
-.kpi div b{display:block;font-size:1.625rem;font-weight:var(--fw-b);letter-spacing:var(--tr-xl);
-  line-height:var(--lh-t)}
+.kpi div b{display:block;font-size:1.9375rem;font-weight:var(--fw-x);letter-spacing:.004em;
+  line-height:1.1}
 .kpi div em{font-style:normal;font-size:.71875rem;color:var(--t3);letter-spacing:var(--tr-xs)}
 .dl-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:12px}
 .dl-head b{font-size:2.125rem;font-weight:var(--fw-b);letter-spacing:var(--tr-2xl);
@@ -5563,7 +5693,7 @@ h3{font-size:1rem;font-weight:var(--fw-s);letter-spacing:var(--tr-b);line-height
   transition:background var(--t-s) var(--e-soft),color var(--t-s) var(--e-soft)}
 /* 同上：这一条也在横向滚动容器里，靠容器的 7px 内边距把 44 让出来 */
 .logtabs button::before{content:'';position:absolute;inset:-7px 0}
-.logtabs button.on{background:var(--sf);color:var(--t1);box-shadow:var(--sh-s)}
+.logtabs button.on{background:var(--thumb);color:var(--ink);box-shadow:var(--sh-thumb)}
 .logtabs button i{font-style:normal;font-size:.625rem;opacity:.5;margin-left:4px;
   font-variant-numeric:tabular-nums}
 .logs{margin-top:12px;max-height:300px;overflow:auto;font-family:var(--mono);font-size:.6875rem;line-height:1.6}
@@ -5590,7 +5720,7 @@ h3{font-size:1rem;font-weight:var(--fw-s);letter-spacing:var(--tr-b);line-height
    列表正被什么过滤着。 */
 .fgroup.prime{margin-bottom:10px}
 .lb.auto{width:auto;margin-left:6px}
-.ftog{border:0;background:var(--sf3);color:var(--t2);min-height:32px;padding:0 11px 0 13px;border-radius:999px;
+.ftog{border:0;background:var(--sf);box-shadow:inset 0 0 0 1px var(--line);color:var(--t2);min-height:32px;padding:0 11px 0 13px;border-radius:999px;
   font-size:.78125rem;font-weight:var(--fw-m);cursor:pointer;display:inline-flex;align-items:center;gap:6px;
   flex:none;position:relative;letter-spacing:var(--tr-s);
   transition:background var(--t-s) var(--e-soft),color var(--t-s) var(--e-soft),transform var(--t-press) ease-out}
@@ -5600,23 +5730,23 @@ h3{font-size:1rem;font-weight:var(--fw-s);letter-spacing:var(--tr-b);line-height
 .ftog.open::after{transform:translateY(2px) rotate(-135deg)}
 .ftog:active{transform:scale(.96)}
 .ftog i{font-style:normal;font-size:.65625rem;font-family:var(--mono);min-width:1.45em;height:1.45em;
-  border-radius:999px;display:none;place-items:center;background:var(--ac);color:var(--acf);padding:0 4px;line-height:1}
-.ftog.has{background:var(--acb);color:var(--act)}
+  border-radius:999px;display:none;place-items:center;background:var(--ink);color:var(--inkf);padding:0 4px;line-height:1}
+.ftog.has{color:var(--ink);box-shadow:inset 0 0 0 1px var(--line2)}
 .ftog.has i{display:grid}
-.ftog.open{box-shadow:var(--sh-s);background:var(--sf);color:var(--t1)}
-.ftog.open.has{color:var(--act)}
+.ftog.open{box-shadow:inset 0 0 0 1px var(--ac),0 0 0 3px var(--acb);background:var(--sf);color:var(--t1)}
+.ftog.open.has{color:var(--ink)}
 .fadv{padding-top:2px}
 .fadv[hidden]{display:none}
 [hidden]{display:none!important}
-@media (hover:hover) and (pointer:fine){ .ftog:hover{background:var(--sf4)} .ftog.has:hover{background:var(--acb)} }
+@media (hover:hover) and (pointer:fine){ .ftog:hover{background:var(--sf2)} }
 
 /* ── 可展开区（系统页）──
    一张卡就是一个区：标题行是开关，其余折在里面。展开状态跨重画、跨刷新
    都保留。不用 9999 的箭头，只有一个跟着转的人字。 */
 details.dx{padding:0}
 details.dx>summary{list-style:none;display:flex;align-items:center;gap:10px;padding:15px 20px;cursor:pointer;
-  font-size:1.0625rem;font-weight:var(--fw-s);letter-spacing:var(--tr-b);line-height:var(--lh-h);
-  -webkit-user-select:none;user-select:none;border-radius:var(--r-l);position:relative;
+  min-height:62px;font-size:1.0625rem;font-weight:650;letter-spacing:-.022em;line-height:var(--lh-h);
+  -webkit-user-select:none;user-select:none;border-radius:var(--r-card);position:relative;
   transition:background var(--t-s) var(--e-soft)}
 details.dx>summary::-webkit-details-marker{display:none}
 details.dx>summary::marker{content:''}
@@ -5631,6 +5761,7 @@ details.dx>summary:focus-visible{outline-offset:-3px}
 details.dx>.dxb{padding:0 20px 18px}
 details.dx>.dxb>.tail{height:52px}
 @media (hover:hover) and (pointer:fine){ details.dx>summary:hover{background:var(--sf2)} }
+details.dx[open]>summary{border-bottom-left-radius:0;border-bottom-right-radius:0}
 @media(pointer:coarse){ details.dx>summary{min-height:var(--hit)} }
 @media(max-width:600px){ details.dx>summary{padding:14px 16px} details.dx>.dxb{padding:0 16px 16px} }
 
@@ -5647,13 +5778,29 @@ p.fine{color:var(--t3);font-size:.78125rem;letter-spacing:var(--tr-s);line-heigh
 
 
 /* ── 底部动作坞 ─────────────────────────────────────────────────── */
-#dock{position:fixed;left:0;right:0;bottom:0;z-index:var(--z-dock);
-  padding:10px var(--padr) calc(10px + env(safe-area-inset-bottom)) var(--pad);
-  background:var(--glass);backdrop-filter:saturate(180%) blur(22px);
-  -webkit-backdrop-filter:saturate(180%) blur(22px);border-top:1px solid var(--line);
-  transform:translateY(130%);transition:transform var(--t-sheet) var(--e-std);pointer-events:none}
-#dock.up{transform:none;pointer-events:auto}
-.dbar{max-width:1180px;margin:0 auto;display:flex;align-items:center;gap:10px}
+/* ── 片单胶囊（Transfer 的动作胶囊）──
+   原来是贴底的一整条；改成浮在底部的一颗 stadium，玻璃与坞同款。手机上坐在坞的正上方、
+   与坞同宽；桌面上居中浮着。退场走加速曲线、比进场快（离场加速），化成一层霜再消失。 */
+#dock{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 14px);z-index:var(--z-dock);
+  width:min(560px,calc(100vw - 36px));padding:8px 8px 8px 22px;border-radius:999px;
+  background:rgba(var(--glass-rgb),var(--glass-a));
+  -webkit-backdrop-filter:blur(20px) saturate(180%);backdrop-filter:blur(20px) saturate(180%);
+  box-shadow:var(--sh-float);
+  transform:translate(-50%,calc(100% + 34px)) scale(.965);opacity:0;filter:blur(6px);pointer-events:none;
+  transition:transform calc(.26s*var(--silk)) var(--ease-exit),opacity calc(.18s*var(--silk)) var(--ease-exit),
+    filter calc(.18s*var(--silk)) var(--ease-exit)}
+#dock.up{transform:translate(-50%,0);opacity:1;filter:none;pointer-events:auto;
+  transition:transform var(--t-sheet) var(--e-std),opacity calc(.24s*var(--silk)) var(--e-out),filter calc(.24s*var(--silk)) var(--e-out)}
+@media(max-width:720px){
+  #dock{width:min(390px,calc(100vw - 36px));bottom:calc(env(safe-area-inset-bottom) + 24px + var(--nav-h));padding-left:18px}
+}
+.dbar{display:flex;align-items:center;gap:8px}
+.dbar .dn small:empty{display:none}   /* 胶囊高度由钮定，副行出现与否不会让胶囊跳 */
+/* 胶囊里的钮是整颗 stadium（与胶囊同心），高 44 —— 满足命中区 */
+#dock .btn{min-height:44px;border-radius:999px;padding:0 16px;background:rgba(255,255,255,.7)}
+#dock .btn.on{background:var(--ink);padding:0 20px}
+@media (prefers-color-scheme:dark){ html:not([data-theme="light"]) #dock .btn:not(.on){background:rgba(255,255,255,.08)} }
+html[data-theme="dark"] #dock .btn:not(.on){background:rgba(255,255,255,.08)}
 .dbar .dn{flex:1;font-size:.84375rem;color:var(--t2);min-width:0}
 .dbar .dn b{color:var(--t1);font-weight:var(--fw-b)}
 /* 副标题行常驻高度：下载开始/结束时动作坞自己不会长高或缩短 */
@@ -5666,7 +5813,7 @@ p.fine{color:var(--t3);font-size:.78125rem;letter-spacing:var(--tr-s);line-heigh
    ══════════════════════════════════════════════════════════════════ */
 /* 层级：推入层压在顶栏「下面」。顶栏是半透明材质，内容从它下面滑过去 ——
    既保住了返回键始终可点，也正是这层材质该有的样子。 */
-#push{position:fixed;inset:0;z-index:var(--z-push);background:var(--bg);overflow-y:auto;
+#push{position:fixed;inset:0;z-index:var(--z-push);background:var(--paper-grad) fixed,var(--paper);overflow-y:auto;
   overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;visibility:hidden;
   transform:translate3d(100%,0,0);box-shadow:-14px 0 40px -18px rgba(0,0,0,.4);
   padding:calc(var(--hh,56px) + 6px) var(--padr) calc(40px + env(safe-area-inset-bottom)) var(--pad)}
@@ -5682,13 +5829,29 @@ p.fine{color:var(--t3);font-size:.78125rem;letter-spacing:var(--tr-s);line-heigh
 #edge{position:fixed;left:0;top:var(--hh,56px);bottom:0;width:26px;z-index:var(--z-edge);
   display:none;touch-action:pan-y}
 #push.on ~ #edge{display:block}
-#toast{position:fixed;left:50%;bottom:calc(96px + env(safe-area-inset-bottom));
+#toast{position:fixed;left:50%;bottom:calc(96px + env(safe-area-inset-bottom));border-radius:var(--r-pop)!important;
   transform:translate(-50%,14px) scale(.96);opacity:0;background:var(--ink);color:var(--inkf);
   border-radius:var(--r-m);padding:11px 20px;font-size:.84375rem;pointer-events:none;
   z-index:var(--z-toast);
   transition:opacity var(--t-m) var(--e-soft),transform var(--t-m) var(--e-std);max-width:86vw;text-align:center;
   box-shadow:var(--sh-l)}
 #toast.on{opacity:1;transform:translate(-50%,0) scale(1)}
+body:has(#dock.up) #toast{bottom:calc(env(safe-area-inset-bottom) + 92px)}
+@media(max-width:720px){
+  #toast{bottom:calc(env(safe-area-inset-bottom) + 96px)}
+  body:has(#dock.up) #toast{bottom:calc(env(safe-area-inset-bottom) + 170px)}
+}
+/* 降低透明度：毛玻璃面全部落成实心，模糊一并摘掉；坞的白 thumb 换浅灰 + 内描边，选中态仍看得见 */
+@media (prefers-reduced-transparency:reduce){
+  header::before,#nav,#dock,.filters{background:var(--sf)!important;-webkit-backdrop-filter:none!important;backdrop-filter:none!important}
+  body::after{-webkit-backdrop-filter:none;backdrop-filter:none}
+  nav.pills .hl{background:var(--sf3);box-shadow:inset 0 0 0 1px rgba(20,20,30,.07)}
+}
+/* 高对比：浮面的发丝内描边加深，边界不再只靠投影 */
+@media (prefers-contrast:more){
+  #nav,#dock{box-shadow:0 8px 26px rgba(18,18,28,.10),inset 0 0 0 1px rgba(20,20,30,.4)}
+  .card,.chips button,.btn,.field,.icb,.ftog{--line:oklch(0.822 0.008 286.2)}
+}
 .fade{animation:fi var(--t-l) var(--e-out) both}
 @keyframes fi{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
 /* ── 无障碍：三个彼此独立的信号，分别处理 ──
@@ -5731,13 +5894,16 @@ p.fine{color:var(--t3);font-size:.78125rem;letter-spacing:var(--tr-s);line-heigh
     <button id="back" class="icb" aria-label="返回"><svg width="10" height="16" viewBox="0 0 11 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 1.5 2 9l7.5 7.5"/></svg></button>
     <button class="brand" id="home" aria-label="Cuven 索引库">
       <span class="mark">C</span>
-      <span class="bname">Cuven<sup>ᴿ</sup> 索引库</span>
+      <span class="bname">Cuven<sup>ᴿ</sup> <em>索引库</em></span>
     </button>
-    <nav class="pills" id="nav">
-      <button data-v="lib">片库</button>
-      <button data-v="dl">片单<i id="ncart"></i></button>
-      <button data-v="idx">系统</button>
+    <span class="sp"></span>
+    <nav class="pills" id="nav" aria-label="主导航">
+      <span class="hl" aria-hidden="true"></span>
+      <button data-v="lib"><span class="ic" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><rect x="1.5" y="1.5" width="7.6" height="10.4" rx="2.1"/><rect x="10.9" y="1.5" width="7.6" height="10.4" rx="2.1"/><rect x="1.5" y="13.6" width="17" height="4.9" rx="2.1" opacity=".42"/></svg></span><span class="lbl">片库</span></button>
+      <button data-v="dl"><span class="ic" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M4.2 1.6h11.6a2.2 2.2 0 0 1 2.2 2.2v12.4a2.2 2.2 0 0 1-2.2 2.2H4.2A2.2 2.2 0 0 1 2 16.2V3.8a2.2 2.2 0 0 1 2.2-2.2Zm1.6 4.3a.9.9 0 0 0 0 1.8h8.4a.9.9 0 0 0 0-1.8Zm0 3.6a.9.9 0 0 0 0 1.8h8.4a.9.9 0 0 0 0-1.8Zm0 3.6a.9.9 0 0 0 0 1.8h5.2a.9.9 0 0 0 0-1.8Z" fill-rule="evenodd"/></svg></span><span class="lbl">片单</span><i id="ncart"></i></button>
+      <button data-v="idx"><span class="ic" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M4 1.8h12A2.2 2.2 0 0 1 18.2 4v3.1A2.2 2.2 0 0 1 16 9.3H4A2.2 2.2 0 0 1 1.8 7.1V4A2.2 2.2 0 0 1 4 1.8Zm0 8.9h12a2.2 2.2 0 0 1 2.2 2.2V16a2.2 2.2 0 0 1-2.2 2.2H4A2.2 2.2 0 0 1 1.8 16v-3.1A2.2 2.2 0 0 1 4 10.7Zm1.5-5.2a1 1 0 1 0 0 .01Zm0 8.9a1 1 0 1 0 0 .01Z" fill-rule="evenodd"/></svg></span><span class="lbl">系统</span></button>
     </nav>
+    <span class="sp"></span>
     <div class="tools">
       <div class="pills mini" id="srcNav" role="group" aria-label="内容源">
         <button data-s="movie">电影</button><button data-s="tv">剧集</button>
@@ -6579,6 +6745,8 @@ var PUSH = {
     sync();
     addEventListener('resize', sync);
     addEventListener('orientationchange', function(){ setTimeout(sync, 260); });
+    /* 返回键出现 / 消失、字体换好之后顶栏高度也会变：直接盯着顶栏本身，不只等 resize */
+    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(sync).observe(hd);
   },
   /* x = 0 完全推入，100 完全退出。所有位置变化都只经过这里，
      于是"当前呈现值"永远是可信的 —— 中断时从它起算就不会跳。 */
@@ -7019,7 +7187,7 @@ function syncCtl(){
   var fr = document.getElementById('freset'); if (fr) fr.hidden = !adv;
 }
 function tileHTML(m, i){
-  var dr = m.hb === 7 ? '<span class="badge b-dv">DOLBY VISION</span>'
+  var dr = m.hb === 7 ? '<span class="badge b-dv">杜比视界</span>'
          : (m.hb >= 3 ? '<span class="badge b-hdr">HDR</span>' : '');
   var own = m.own === 2 ? '<span class="badge b-own">库中已有</span>'
           : (m.own === 1 ? '<span class="badge b-own weak">疑似已有</span>' : '');
@@ -8241,7 +8409,26 @@ function setNav(v){
   [].forEach.call(navEl.querySelectorAll('button'), function(b){
     b.classList.toggle('on', b.dataset.v === v);
   });
+  navThumb();
 }
+/* 坞的白 thumb：量选中项的位置与宽度，平移 + 改宽（CSS 过渡，同 Transfer 的 layout 弹簧曲线）。
+   字重换成 650 之后宽度才定，所以在下一帧量；尺寸变化（转屏、坞在顶栏与底部之间切换）重量一次 */
+function navThumb(){
+  var hl = navEl.querySelector('.hl');
+  if (!hl) return;
+  requestAnimationFrame(function(){
+    var b = navEl.querySelector('button.on');
+    if (!b || !b.offsetWidth){ hl.classList.remove('on'); return; }
+    hl.style.width = b.offsetWidth + 'px';
+    hl.style.transform = 'translateX(' + b.offsetLeft + 'px)';
+    hl.classList.add('on');
+  });
+}
+(function(){
+  var t = 0;
+  addEventListener('resize', function(){ clearTimeout(t); t = setTimeout(navThumb, 120); }, { passive:true });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(navThumb);
+})();
 function view(v, push){
   /* 详情开着的时候切标签：先把它推回去；这一条历史直接「换」成新标签页，
      不再 back()+push —— 那样当前历史项会停在详情上，前进 / 后退就错位。 */
