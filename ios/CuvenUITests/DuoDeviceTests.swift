@@ -85,7 +85,21 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-08b-home-tv")
         app.swipeUp(); sleep(2); snap("duo-08c-home-year")
         app.swipeUp(); sleep(2); snap("duo-08d-home-year-2")
-        app.swipeDown(); app.swipeDown(); app.swipeDown(); app.swipeDown(); app.swipeDown(); sleep(1)
+        // 「继续观看」只有一张时右边垫一张「没有更多了」（演示数据里正好一张）
+        print("DUO continue end card: \(app.staticTexts["没有更多了"].exists ? "shown" : "not found")")
+        // 首页最后一段「文件夹」：点进文件夹页（子文件夹一排 + 按年份分组的瀑布流）
+        if let folder = reveal(app, app.buttons.matching(identifier: "folder-card"), swipes: 8) {
+            snap("duo-08e-home-folders")
+            folder.tap(); sleep(2)
+            snap("duo-08f-folder")
+            app.swipeUp(); sleep(1)
+            snap("duo-08g-folder-2")
+            back(app)
+        } else {
+            print("DUO folder card: not found")
+        }
+        for _ in 0..<14 { app.swipeDown() }
+        sleep(1)
 
         // 资料库：和网页版一样的展映——一部片一章，满屏画幅 → 收成 16:9、介绍面板压上来 → 剧照
         tab(app, "资料库"); sleep(3)

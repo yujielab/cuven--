@@ -252,6 +252,28 @@ struct ContinueCard: View {
     }
 }
 
+/// 「继续观看」只剩一张时垫在右边的「没有更多了」（网页版 CW_END_CARD_HTML）：
+/// 与横版卡完全相同的外形（同宽、同比例、同圆角、同描边），里面只有一个对勾圆圈和一句话，不可点、不投影
+struct ContinueEndCard: View {
+    var width: CGFloat = 250
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "checkmark.circle")
+                .font(.system(size: 26))
+                .opacity(0.7)
+                .accessibilityHidden(true)
+            Text("没有更多了")
+                .font(.system(size: 14, weight: .medium))
+                .tracking(-0.14)
+        }
+        .foregroundStyle(.white.opacity(0.4))
+        .frame(width: width, height: width * 224 / 399)
+        .background(Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
+    }
+}
+
 // MARK: - 主页「Cuven TV · 剧集」：拼图（Games App「你游戏的相关更新」）
 
 /// 第一部是整宽的大卡，后两部并排两张小卡（左上角一枚状态小标签：已完结 / 更新中）；再往后是一排小海报

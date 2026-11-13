@@ -99,6 +99,10 @@ struct HomeView: View {
                             Button { resume(e) } label: { ContinueCard(entry: e, width: landscapeWidth(width)) }
                                 .buttonStyle(PressableStyle())
                         }
+                        // 只剩一张时右边垫一张「没有更多了」（网页版 CW_END_CARD_HTML）
+                        if cw.count == 1 {
+                            ContinueEndCard(width: landscapeWidth(width))
+                        }
                     }
                 }
             }
@@ -137,6 +141,18 @@ struct HomeView: View {
                     Rail(spacing: 17) {
                         ForEach(g.videos.prefix(15)) { v in
                             ZoomLink(route: .movie(v), slot: "year-\(g.year)") { PortraitCard(video: v) }.movieMenu(v)
+                        }
+                    }
+                }
+            }
+
+            // 网页版首页最后一段：片库根下一级的文件夹（有才出）
+            if !model.folders.isEmpty {
+                chipSection("文件夹") {
+                    Rail(spacing: 17) {
+                        ForEach(model.folders) { f in
+                            ZoomLink(route: .folder(f), slot: "home-folder") { FolderCard(folder: f) }
+                                .accessibilityIdentifier("folder-card")
                         }
                     }
                 }
@@ -409,6 +425,7 @@ struct RouteView: View {
     let route: Route
     var body: some View {
         switch route {
+        case .folder(let f): FolderView(folder: f)
         case .movie(let v): MovieDetailView(video: v)
         case .series(let s): SeriesDetailView(series: s)
         case .year(let y): YearView(year: y)

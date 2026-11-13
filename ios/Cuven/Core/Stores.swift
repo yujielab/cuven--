@@ -163,6 +163,12 @@ final class WatchlistStore {
 
 // MARK: - 片库
 
+/// 文件夹那一份缓存：根目录 + 根下一级的文件夹
+struct FolderCache: Codable {
+    var root: String
+    var folders: [LibraryFolder]
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -178,6 +184,9 @@ final class AppModel {
     var metaReady = false
     /// 演员弹层「在资料库中搜索」：要搜的词。根视图看到就换到「搜索」标签，搜索页填进搜索框后清掉
     var searchRequest: String?
+    /// 片库根下一级的文件夹（首页最后那排「文件夹」）；libraryRoot 是 /api/all 回包里的根目录，进文件夹时换成相对路径
+    var folders: [LibraryFolder] = []
+    @ObservationIgnored var libraryRoot = ""
 
     let playback = PlaybackStore()
     let watchlist = WatchlistStore()
@@ -227,6 +236,7 @@ final class AppModel {
         if let s = DiskCache.load([Series].self, "series.json") { series = s }
         if let sm = DiskCache.load([String: Meta].self, "series-metas.json") { seriesMetas = sm }
         if let he = DiskCache.load([Hero].self, "heroes.json") { heroes = he }
+        if let f = DiskCache.load(FolderCache.self, "folders.json") { folders = f.folders; libraryRoot = f.root }
         metaReady = !metas.isEmpty
         dataVersion &+= 1
         Perf.log("restore: \(videos.count) videos, \(metas.count) metas")
@@ -238,10 +248,13 @@ final class AppModel {
             let lib = try await APIClient.shared.library()
             let vids = lib.videos.filter { FileName.isVideo($0.name) }.sorted { $0.addedKey > $1.addedKey }
             videos = vids
+            folders = lib.folders
+            libraryRoot = lib.root ?? ""
             dataVersion &+= 1
-            Perf.log("library: \(vids.count) videos in \(Perf.ms(since: t0)) ms")
+            Perf.log("library: \(vids.count) videos, \(lib.folders.count) folders in \(Perf.ms(since: t0)) ms")
             phase = .ready
             DiskCache.save(vids, "library.json")
+            DiskCache.save(FolderCache(root: libraryRoot, folders: lib.folders), "folders.json")
             metaRound = 0
             await loadMetas()
         } catch {
@@ -329,6 +342,29 @@ final class AppModel {
         if let m = try? await APIClient.shared.tmdb(query: q, year: s.year, type: "tv", id: s.tmdbId, full: true) {
             seriesMetas[s.path] = m
             if seriesMetas.count % 8 == 0 { DiskCache.save(seriesMetas, "series-metas.json") }
+        }
+    }
+
+    /// 文件夹页（网页版 enterFolder）：子文件夹与视频。演示数据里是合成的，不请求接口
+    func folderContents(_ f: LibraryFolder) async throws -> (folders: [LibraryFolder], videos: [Video]) {
+        if DemoData.enabled { return DemoData.folderContents(f, videos: videos) }
+        let root = libraryRoot
+        let rel = !root.isEmpty && f.path.lowercased().hasPrefix(root.lowercased()) ? String(f.path.dropFirst(root.count)) : f.path
+        let r = try await APIClient.shared.list(path: rel)
+        let subs = r.items.filter { $0.type == "folder" }.map { LibraryFolder(name: $0.name, path: $0.path) }
+        let vids = r.items.filter { $0.type != "folder" && FileName.isVideo($0.name) }
+            .map { Video(name: $0.name, path: $0.path, size: $0.size, modified: $0.modified, added: $0.added) }
+        return (subs, vids)
+    }
+
+    /// 片库总表之外临时出现的文件（文件夹页）：没问过 TMDB 的补问一次，一批 80 个
+    func ensureMetas(for list: [Video]) async {
+        if DemoData.enabled { return }
+        let need = Array(Set(list.map(\.name).filter { metas[$0] == nil && !hidden.contains($0) }))
+        guard !need.isEmpty else { return }
+        for start in stride(from: 0, to: need.count, by: 80) {
+            let chunk = Array(need[start..<min(start + 80, need.count)])
+            if let r = try? await APIClient.shared.metaBatch(chunk) { apply([r]) }
         }
     }
 

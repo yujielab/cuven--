@@ -63,6 +63,14 @@ enum DemoData {
         }
         m.videos = videos
         m.metas = metas
+        // 根下一级的几个文件夹（首页最后那排「文件夹」）：名字是合成的
+        m.folders = folderNames.map { LibraryFolder(name: $0, path: "/demo/\($0)") }
+        m.libraryRoot = "/demo"
+        // 看到一半的一部（只在内存里）：首页「继续观看」只有一张，右边垫「没有更多了」
+        let cw = videos[3]
+        m.playback.update(WatchEntry(path: cw.path, name: cw.name, title: titles[3], subtitle: String(2026 - 3 % 8),
+                                     artwork: url("backdrop", 3), position: 1_520, duration: 6_300,
+                                     updated: now.addingTimeInterval(-7_200)))
 
         var series: [Series] = []
         var sm: [String: Meta] = [:]
@@ -95,6 +103,22 @@ enum DemoData {
             return Hero(path: v.path, name: v.name, title: english[i], year: 2026 - i, background: url("backdrop", i),
                         poster: url("tall", i), logo: url("logo", i, titles[i], dark: i % 5 == 2))
         }
+    }
+
+    /// 演示用的文件夹名（合成的）
+    private static let folderNames = ["合集 · 星际旅程", "导演剪辑版", "纪录片精选"]
+
+    /// 文件夹页的内容：第一个文件夹里还有一个子文件夹；视频从演示片单里按文件夹名挑一段（每次打开都一样）
+    static func folderContents(_ f: LibraryFolder, videos: [Video]) -> (folders: [LibraryFolder], videos: [Video]) {
+        guard !videos.isEmpty else { return ([], []) }
+        let seed = f.path.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF }
+        let count = min(videos.count, 7 + seed % 5)
+        let start = seed % videos.count
+        let picked = (0..<count).map { videos[(start + $0 * 3) % videos.count] }
+        var seen = Set<String>()
+        let unique = picked.filter { seen.insert($0.path).inserted }
+        let subs = f.path == "/demo/\(folderNames[0])" ? [LibraryFolder(name: "第一部分", path: f.path + "/第一部分")] : []
+        return (subs, unique)
     }
 
     static func episodes(_ s: Series) -> [EpisodeFile] {

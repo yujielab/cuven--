@@ -74,15 +74,68 @@ struct Video: Codable, Hashable, Identifiable, Sendable {
 struct LibraryPayload: Codable, Sendable {
     var root: String?
     var videos: [Video]
+    /// 根目录下一级的文件夹（网页版首页最后那排「文件夹」）
+    var folders: [LibraryFolder]
 
-    enum CodingKeys: String, CodingKey { case root, videos }
+    enum CodingKeys: String, CodingKey { case root, videos, folders }
 
-    init(root: String?, videos: [Video]) { self.root = root; self.videos = videos }
+    init(root: String?, videos: [Video], folders: [LibraryFolder] = []) { self.root = root; self.videos = videos; self.folders = folders }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         root = c.str(.root)
         videos = ((try? c.decode([Video].self, forKey: .videos)) ?? []).filter { !$0.path.isEmpty }
+        folders = ((try? c.decode([LibraryFolder].self, forKey: .folders)) ?? []).filter { !$0.path.isEmpty }
+    }
+}
+
+/// 片库里的一个文件夹（/api/all 的 folders、/api/list 里 type 为 folder 的那几项）
+struct LibraryFolder: Codable, Hashable, Identifiable, Sendable {
+    var name: String
+    var path: String
+    var id: String { path }
+
+    enum CodingKeys: String, CodingKey { case name, path }
+
+    init(name: String, path: String) { self.name = name; self.path = path }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = c.str(.path) ?? ""
+        name = c.str(.name) ?? (path as NSString).lastPathComponent
+    }
+}
+
+/// /api/list?path=… 的回包：{ folder, items: [{ name, path, type: "folder" | "file", size, modified, added }] }
+struct FolderListing: Decodable, Sendable {
+    var items: [Item]
+
+    struct Item: Decodable, Sendable {
+        var name: String
+        var path: String
+        var type: String?
+        var size: Int64?
+        var modified: String?
+        var added: String?
+
+        enum CodingKeys: String, CodingKey { case name, path, type, size, modified, added }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            path = c.str(.path) ?? ""
+            name = c.str(.name) ?? (path as NSString).lastPathComponent
+            type = c.str(.type)
+            size = c.int64(.size)
+            modified = c.str(.modified)
+            added = c.str(.added)
+        }
+    }
+
+    enum CodingKeys: String, CodingKey { case items }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        items = ((try? c.decode([Item].self, forKey: .items)) ?? []).filter { !$0.path.isEmpty }
     }
 }
 
@@ -393,6 +446,8 @@ struct HLSInfo: Codable, Sendable {
 // MARK: - 导航
 
 enum Route: Hashable {
+    /// 网页版的文件夹页（首页最后那排「文件夹」点进去）
+    case folder(LibraryFolder)
     case movie(Video)
     case series(Series)
     case year(Int)
