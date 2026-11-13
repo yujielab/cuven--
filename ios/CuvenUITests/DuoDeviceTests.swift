@@ -86,6 +86,18 @@ final class DuoDeviceTests: XCTestCase {
             sleep(2)
             if subtitle.exists { snap("duo-21-login") }
         }
+
+        // 连得上账户服务、读得懂它的回答：输一个不存在的用户名（只读查询，不写任何东西），应当提示「新用户」
+        let cont = app.buttons["Continue"].firstMatch          // 模拟器第一次弹键盘时的「滑动输入」提示
+        if cont.exists { cont.tap(); sleep(1) }
+        let field = app.textFields["login-user"].exists ? app.textFields["login-user"] : app.textFields.firstMatch
+        if field.exists {
+            field.tap()
+            field.typeText("cuvenciprobe\(Int(Date().timeIntervalSince1970) % 100000)")
+            let newUser = app.staticTexts["新用户 — 将建立您的账户"]
+            XCTAssertTrue(newUser.waitForExistence(timeout: 20), "账户服务查不到或读不懂（应当提示新用户）")
+            if subtitle.exists { snap("duo-22-login-lookup") }
+        }
     }
 
     private func tab(_ app: XCUIApplication, _ name: String) {
