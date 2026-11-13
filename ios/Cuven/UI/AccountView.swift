@@ -183,25 +183,25 @@ struct AccountView: View {
         }
     }
 
-    /// 大头像、用户名、邮箱，下面一颗小胶囊说明这是 Cuven 账户
+    /// 和网页版的资料弹层一样（.profile-block）：88 的圆头像（1px 白 18% 描边、投影），名字 19 粗体，邮箱 13 号灰字
     private var profile: some View {
-        VStack(spacing: 10) {
-            AvatarView(size: 96)
-                .shadow(color: .black.opacity(0.3), radius: 16, y: 8)
-            Text(account.displayName.isEmpty ? "Cuven 账户" : account.displayName)
-                .font(.system(size: 30, weight: .bold))
+        VStack(spacing: 14) {
+            AvatarView(size: 88)
+                .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.45), radius: 15, y: 10)
+            Text(account.displayName.isEmpty ? "访客" : account.displayName)
+                .font(.system(size: 19, weight: .bold))
+                .tracking(-0.19)
                 .foregroundStyle(.white)
+                .lineLimit(1)
             if let e = account.session?.email, !e.isEmpty {
-                Text(e).font(.system(size: 15)).foregroundStyle(.white.opacity(0.75))
+                Text(e).font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.4)).lineLimit(1)
+            } else {
+                Text("尚未设置电子邮件").font(.system(size: 13, weight: .medium)).italic().foregroundStyle(.white.opacity(0.22))
             }
-            Text("Cuven 账户 · 网页版与 Cuven TV 通用")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.9))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .background(.white.opacity(0.16), in: Capsule())
-                .padding(.top, 2)
         }
+        .padding(.top, 8)
+        .padding(.bottom, 20)
     }
 
     private var faceIDBinding: Binding<Bool> {
