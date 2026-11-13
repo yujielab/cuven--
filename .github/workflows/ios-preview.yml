@@ -29,8 +29,10 @@ concurrency:
 
 jobs:
   preview:
-    runs-on: macos-latest
-    timeout-minutes: 40
+    # iOS 27.1 SDK 才有 iPhone Duo 的系统行为（竖向栏移到侧边、内容铺到状态栏 / 摄像头那一列底下），
+    # 也只有这个镜像里有「iPhone Duo」模拟器
+    runs-on: xcode-27
+    timeout-minutes: 50
     steps:
       - name: 清理以前公开出去的截图
         env:
@@ -42,23 +44,25 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: 选 Xcode（装着的最新正式版）
+      - name: 选 Xcode（装着的最新正式版 27.x）
         run: |
-          XC=$(ls -d /Applications/Xcode_*.app | grep -viE 'beta|release_candidate|_rc' | sort -V | tail -1)
+          XC=$(ls -d /Applications/Xcode_*.app | grep -E 'Xcode_[0-9]+\.[0-9]+(\.[0-9]+)?\.app$' | grep -viE 'beta|release_candidate|_rc' | sort -V | tail -1)
+          echo "使用 $XC"
           sudo xcode-select -s "$XC"
           xcodebuild -version
+          xcodebuild -showsdks | grep -i ios || true
 
       - name: 生成工程（XcodeGen）
         run: |
           HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install xcodegen
           cd ios && xcodegen generate
 
-      - name: 选模拟器（最新 iOS 上最宽的 iPhone：Pro Max，最接近 Duo 外屏的宽度）
+      - name: 选模拟器（iPhone Duo 跑 Duo 测试；最新 iOS 上最大的普通 iPhone 跑真实片库的走查）
         run: |
           python3 - <<'PY' >> "$GITHUB_ENV"
           import json, re, subprocess, sys
           d = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '-j']))['devices']
-          best = None
+          phone = duo = None
           for rt, devs in d.items():
               m = re.search(r'iOS-(\d+)-(\d+)', rt)
               if not m:
@@ -68,32 +72,74 @@ jobs:
                   n = dv['name']
                   if not n.startswith('iPhone'):
                       continue
+                  if 'Duo' in n:
+                      if duo is None or ver > duo[0]:
+                          duo = (ver, dv['udid'], n, rt)
+                      continue
                   score = (ver, 'Pro Max' in n, 'Pro' in n, n)
-                  if best is None or score > best[0]:
-                      best = (score, dv['udid'], n, rt)
-          print('SIM_UDID=' + best[1])
-          print('使用模拟器', best[2], best[3], file=sys.stderr)
+                  if phone is None or score > phone[0]:
+                      phone = (score, dv['udid'], n, rt)
+          print('PHONE_UDID=' + phone[1])
+          print('使用模拟器（走查）', phone[2], phone[3], file=sys.stderr)
+          if duo:
+              print('DUO_UDID=' + duo[1])
+              print('使用模拟器（Duo）', duo[2], duo[3], file=sys.stderr)
+          else:
+              print('没有 iPhone Duo 模拟器', file=sys.stderr)
           PY
 
-      - name: 走一遍（UI 测试）
+      - name: 模拟器能力（折叠 / 姿态相关的 simctl 子命令）
+        run: |
+          xcrun simctl list devicetypes | grep -i -E 'duo|fold' || true
+          xcrun simctl help 2>&1 | sed -n '1,80p'
+          for c in ui io; do echo "---- simctl help $c"; xcrun simctl help $c 2>&1 | sed -n '1,60p'; done
+
+      - name: 编译测试包
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing -project ios/Cuven.xcodeproj -scheme Cuven -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/dd" > "$RUNNER_TEMP/build.log" 2>&1 || {
+              grep -E -B2 -A8 "error:|fatal error" "$RUNNER_TEMP/build.log" | head -300; tail -40 "$RUNNER_TEMP/build.log"; exit 1; }
+          grep -E "warning:" "$RUNNER_TEMP/build.log" | sort -u | head -60 || true
+
+      - name: iPhone Duo（演示数据）
+        if: env.DUO_UDID != ''
         run: |
           set +e
-          xcodebuild test -project ios/Cuven.xcodeproj -scheme Cuven -destination "id=$SIM_UDID" \
+          xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
+            -destination "id=$DUO_UDID" -only-testing:CuvenUITests/DuoDeviceTests \
+            -resultBundlePath "$RUNNER_TEMP/duo.xcresult" > "$RUNNER_TEMP/duo.log" 2>&1
+          code=$?
+          grep -E "Test Case|passed|failed|error:|XCTAssert|Failing|DUO " "$RUNNER_TEMP/duo.log" | tail -60
+          echo "exit $code"
+          if [ $code -ne 0 ]; then tail -40 "$RUNNER_TEMP/duo.log"; fi
+          echo "DUO_EXIT=$code" >> "$GITHUB_ENV"
+
+      - name: 走一遍（真实片库，普通 iPhone）
+        if: always()
+        run: |
+          set +e
+          xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
+            -destination "id=$PHONE_UDID" -only-testing:CuvenUITests/TourTests \
             -resultBundlePath "$RUNNER_TEMP/ui.xcresult" > "$RUNNER_TEMP/test.log" 2>&1
           code=$?
           grep -E "Test Case|passed|failed|error:|XCTAssert|Failing" "$RUNNER_TEMP/test.log" | tail -60
           echo "exit $code"
           if [ $code -ne 0 ]; then tail -40 "$RUNNER_TEMP/test.log"; fi
+          [ "${DUO_EXIT:-0}" = "0" ] || { echo "iPhone Duo 测试没通过（exit $DUO_EXIT）"; exit 1; }
           exit $code
 
       - name: 诊断日志（播放器状态、数量与耗时、主线程卡顿；不含片名与地址）
         if: always()
         run: |
           # App 的 Debug 构建把诊断写在自己容器的 Caches/cuven-diag.log（模拟器的系统日志不留 info 级别）
-          f=$(ls -t "$HOME"/Library/Developer/CoreSimulator/Devices/"$SIM_UDID"/data/Containers/Data/Application/*/Library/Caches/cuven-diag.log 2>/dev/null | head -1)
+          diag() { ls -t "$HOME"/Library/Developer/CoreSimulator/Devices/"$1"/data/Containers/Data/Application/*/Library/Caches/cuven-diag.log 2>/dev/null | head -1; }
+          if [ -n "${DUO_UDID:-}" ] && f=$(diag "$DUO_UDID") && [ -n "$f" ]; then
+            echo "==== iPhone Duo（演示数据）"; grep -v '^ *+ *[0-9.]*s  renders' "$f" | tail -80
+          fi
+          f=$(diag "$PHONE_UDID")
           if [ -z "$f" ]; then echo "(没有诊断日志)"; exit 0; fi
-          echo "整个运行里主线程卡住超过 1 秒：$(grep -c 'main blocked' "$f") 次"
-          # 从第一次真实片库启动（不带 -CuvenDemo YES）起往后打
+          echo "==== 真实片库（普通 iPhone）：主线程卡住超过 1 秒 $(grep -c 'main blocked' "$f") 次"
           n=$(grep -n '==== launch' "$f" | grep -v -- '-CuvenDemo YES' | head -1 | cut -d: -f1)
           if [ -n "$n" ]; then tail -n +"$n" "$f" | tail -400; else tail -120 "$f"; fi
 
@@ -104,8 +150,8 @@ jobs:
         run: |
           OUT="$RUNNER_TEMP/demo"
           mkdir -p "$OUT/pub"
-          test -d "$RUNNER_TEMP/ui.xcresult" || exit 0
-          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/ui.xcresult" --output-path "$OUT"
+          test -d "$RUNNER_TEMP/duo.xcresult" || exit 0
+          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/duo.xcresult" --output-path "$OUT"
           python3 - "$OUT" <<'PY'
           import json, os, subprocess, sys
           out = sys.argv[1]

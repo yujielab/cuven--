@@ -2,6 +2,7 @@
 #
 # 只有 macOS 上的 Xcode 能编 iOS：这里用 GitHub 的 macOS 构建机。
 #   · ios/ 或本文件有改动、推到 main / claude/** 时自动编；也可以在 Actions 页手动点 Run workflow。
+#   · 用 Xcode 27（runs-on: xcode-27）：iPhone Duo 的系统行为要 iOS 27.1 SDK。
 #   · 产物是未签名 IPA（Cuven-unsigned.ipa）：用 AltStore / SideStore / Sideloadly（自己的 Apple ID 重签）
 #     或 TrollStore 装到手机上。每次运行都挂在该次运行的 Artifacts 里；main 上的构建另外发布到
 #     Release「ios-latest」（手机上直接点下载）。
@@ -22,14 +23,16 @@ concurrency:
 
 jobs:
   ipa:
-    runs-on: macos-latest
+    # Xcode 27.1+（iOS 27.1 SDK）编出来的 App 在 iPhone Duo 上才铺满整屏、系统栏才会竖到侧边；
+    # 用 Xcode 26 编的只能待在状态栏那一列左边。这个镜像只在 xcode-27 这个标签上
+    runs-on: xcode-27
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
       - name: 选 Xcode（装着的最新正式版）
         run: |
-          XC=$(ls -d /Applications/Xcode_*.app | grep -viE 'beta|release_candidate|_rc' | sort -V | tail -1)
+          XC=$(ls -d /Applications/Xcode_*.app | grep -E 'Xcode_[0-9]+\.[0-9]+(\.[0-9]+)?\.app$' | grep -viE 'beta|release_candidate|_rc' | sort -V | tail -1)
           echo "使用 $XC"
           sudo xcode-select -s "$XC"
           xcodebuild -version

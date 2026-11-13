@@ -28,6 +28,8 @@ enum AppTab: Hashable { case home, library, me, search }
 /// iPhone Duo 上换成自己的竖向导航（见 Duo.swift）：折起竖拿是右缘那一列里的窄胶囊，展开 / 横拿是左侧导航条
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.horizontalSizeClass) private var hsc
+    @Environment(\.verticalSizeClass) private var vsc
     @State private var tab: AppTab = .home
     /// Duo 的导航里再点一下当前那一格：这一格回到根页面（系统标签栏自带这个行为，自己的导航要自己做）
     @State private var roots: [AppTab: Int] = [:]
@@ -51,6 +53,8 @@ struct RootView: View {
     private func layout(size: CGSize, inset: EdgeInsets) -> some View {
         Perf.count("root")
         let duo = Duo.mode(window: size)
+        LayoutLog.note("\(Int(size.width))x\(Int(size.height)) inset \(Int(inset.top))/\(Int(inset.leading))/\(Int(inset.bottom))/\(Int(inset.trailing)) "
+                       + "h=\(hsc.map { "\($0)" } ?? "-") v=\(vsc.map { "\($0)" } ?? "-") duo=\(duo.rawValue)")
         // 强制成折起形态、设备本身又没有右侧那一列（模拟器）：补一列黑边，模拟外屏
         let fakeColumn: CGFloat = (duo == .folded && Duo.forced != nil && inset.trailing < 20) ? Duo.foldedColumn : 0
         let column = max(inset.trailing, fakeColumn)
@@ -87,5 +91,16 @@ struct RootView: View {
         }
         .tabBarMinimizeBehavior(.onScrollDown)
         .onChange(of: tab) { _, _ in Haptics.selection() }
+    }
+}
+
+/// 诊断：窗口尺寸 / 安全区 / 尺寸类别一变就记一行（看 iPhone Duo 上系统给的空间）
+@MainActor
+enum LayoutLog {
+    private static var last = ""
+    static func note(_ key: String) {
+        guard key != last else { return }
+        last = key
+        Perf.log("layout " + key)
     }
 }
