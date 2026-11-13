@@ -197,7 +197,8 @@ final class AppModel {
     let watchlist = WatchlistStore()
 
     @ObservationIgnored private var started = false
-    @ObservationIgnored private var trailerCache: [String: [Trailer]] = [:]
+    /// Apple TV 上对上的那一部（电影按文件路径、剧集按目录记）；对不上记 nil，一部只问一次
+    @ObservationIgnored private var atvCache: [String: AtvLookup?] = [:]
     @ObservationIgnored private var seriesInflight: Set<String> = []
     @ObservationIgnored private var metaRound = 0
     /// 片库 / 元数据每变一次加一：首页那几排（电影清单、按年份、今日推荐）按它缓存，不在每次重绘时重算
@@ -459,20 +460,45 @@ final class AppModel {
 
     var newest: [Video] { Array(movies.prefix(15)) }
 
-    /// 详情页「预告片」：拿英文名去 Apple TV 找，年份差一年以内才算同一部（免得是同名的别的片）。
-    /// 只留公开的预告（订阅才看得了的花絮不要）；结果记在内存里，一部片只问一次
-    func trailers(for v: Video) async -> [Trailer] {
-        if DemoData.enabled { return [] }
-        if let hit = trailerCache[v.path] { return hit }
+    /// 去 Apple TV 找这部片：拿英文名（或原名）搜，片名要对得上、年份差一年以内才算同一部（免得是同名的别的片）。
+    /// 预告片和官方素材（无字背景、竖版全屏图、字标）都从这一次里来；结果记在内存里，一部只问一次
+    func atv(for v: Video) async -> AtvLookup? {
+        if DemoData.enabled { return nil }
+        if let hit = atvCache[v.path] { return hit }
         let m = meta(v)
-        let latin = [m?.en, m?.originalTitle].compactMap { $0 }
+        let r = await atvLookup(names: [m?.en, m?.originalTitle], year: year(v), type: "Movie")
+        atvCache[v.path] = .some(r)
+        return r
+    }
+
+    /// 剧集：同样按英文名找，类型要是 Show
+    func atv(for s: Series) async -> AtvLookup? {
+        if DemoData.enabled { return nil }
+        if let hit = atvCache[s.path] { return hit }
+        let m = seriesMetas[s.path]
+        let r = await atvLookup(names: [s.en, m?.en, m?.originalTitle], year: Int(s.year ?? "") ?? m?.year.flatMap { Int($0.prefix(4)) }, type: "Show")
+        atvCache[s.path] = .some(r)
+        return r
+    }
+
+    private func atvLookup(names: [String?], year: Int?, type: String) async -> AtvLookup? {
+        let latin = names.compactMap { $0 }
             .first { !$0.isEmpty && $0.range(of: "\\p{Han}", options: .regularExpression) == nil }
-        guard let name = latin, let r = try? await APIClient.shared.atvLookup(title: name) else { return [] }
-        var list = (r.trailers ?? []).filter { !$0.hls.isEmpty && !$0.hls.contains("/subscription/") }
-        if let y = year(v), let ry = r.year, abs(y - ry) > 1 { list = [] }
-        trailerCache[v.path] = list
-        Perf.log("trailers: \(list.count) (of \(r.trailers?.count ?? 0))")
-        return list
+        guard let name = latin, let r = try? await APIClient.shared.atvLookup(title: name) else { return nil }
+        if let t = r.type, t != type { return nil }
+        if let y = year, let ry = r.year, abs(y - ry) > 1 { return nil }
+        // 搜索层同名的优先，没有同名就给排序第一条：片名得对得上才敢用它的图
+        func norm(_ s: String) -> String { s.lowercased().filter { $0.isLetter || $0.isNumber } }
+        let a = norm(name), b = norm(r.title ?? "")
+        guard !a.isEmpty, !b.isEmpty, a == b || ((a.hasPrefix(b) || b.hasPrefix(a)) && year != nil && r.year == year) else { return nil }
+        Perf.log("atv: matched (trailers \(r.trailers?.count ?? 0), tall \(r.imageTall != nil), bg \(r.background != nil))")
+        return r
+    }
+
+    /// 资料库展映的预告片：Apple TV 上这部片的公开预告（订阅才看得了的花絮不要）
+    func trailers(for v: Video) async -> [Trailer] {
+        guard let r = await atv(for: v) else { return [] }
+        return (r.trailers ?? []).filter { !$0.hls.isEmpty && !$0.hls.contains("/subscription/") }
     }
 
     /// 片库里的类型（电影 + 剧集都算），片子多的在前：搜索页「浏览」的格子

@@ -3957,7 +3957,7 @@ const UTS_PARAMS = Object.freeze({
   pfm: 'appletv',
   locale: 'en-US',
 });
-const ATV_CACHE = 'https://cache.internal/atv-v1';   // 合成 edge 缓存键前缀
+const ATV_CACHE = 'https://cache.internal/atv-v2';   // 合成 edge 缓存键前缀（v2：lookup 多给 imageTall）
 // hero 同理：v15 是 30min 浏览器 + 6h 边缘，改 hero 只能靠手动 ATV_HERO_VER++
 const ATV_CC = 'public, max-age=120, s-maxage=86400, stale-while-revalidate=86400';
 
@@ -3975,6 +3975,8 @@ async function utsGet(path, extra = {}) {
 
 const atvFill  = (tpl, w, h, f) => tpl ? tpl.replace('{w}', w).replace('{h}', h).replace('{f}', f) : null;
 const atvClamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+// 竖版全屏图（contentImageTall，1680×3636 级别）按 pw 宽出图；没有就是 null
+const atvTall = (t, o) => t ? atvFill(t.url, o.pw, Math.round(o.pw * t.height / t.width), o.f) : null;
 const atvOpts  = url => ({
   w: atvClamp(parseInt(url.searchParams.get('w')) || 1920, 320, 3840),
   pw: atvClamp(parseInt(url.searchParams.get('pw')) || 1080, 240, 2160),   // 竖版海报宽(hero 专用)
@@ -4009,13 +4011,14 @@ async function atvHeroById(id, type, o) {
   const img = c?.images?.posterArt || c?.images?.coverArt16X9;   // 详情页的 16:9 hero 是 posterArt
   if (!c || !img?.url) return null;
   const h = Math.round(o.w * img.height / img.width);
-  const { trailers, logo, image43T } = atvParseExtras(json);
+  const { trailers, logo, image43T, imageTallT } = atvParseExtras(json);
   const hero = {
     source: 'appletv',
     title: c.title, type, id,
     year: c.releaseDate ? new Date(c.releaseDate).getUTCFullYear() : null,
     image: atvFill(img.url, o.w, h, o.f),
     image43: image43T ? atvFill(image43T.url, o.w, Math.round(o.w * 0.75), o.f) : null,   // 4:3 内容图
+    imageTall: atvTall(imageTallT, o),      // 竖版全屏图（TV app 手机端 hero 的官方素材）
     background: null,                       // 详情接口不提供无字 16:9 背景，叠层用 image + logo
     logo,
     template: img.url,
@@ -4052,6 +4055,7 @@ async function atvSearchHero(term, o) {
     const ex = await atvGetExtras(it.id, it.type);
     hero.logo = ex.logo;
     hero.image43 = ex.image43T ? atvFill(ex.image43T.url, o.w, Math.round(o.w * 0.75), o.f) : null;
+    hero.imageTall = atvTall(ex.imageTallT, o);
     hero.trailers = ex.trailers;
     hero.video = ex.trailers[0]?.hls || null;
     hero.videoType = 'hls';

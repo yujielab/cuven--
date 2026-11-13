@@ -18,6 +18,8 @@ struct MovieDetailView: View {
     @Environment(AppModel.self) private var model
     let video: Video
     @State private var full: Meta?
+    /// Apple TV 上对上的那一部：有就用它的无字背景、竖版全屏图和字标（对不上就是 TMDB 的）
+    @State private var atv: AtvLookup?
 
     var body: some View {
         let meta = full ?? model.meta(video)
@@ -25,8 +27,9 @@ struct MovieDetailView: View {
         let stills = (meta?.stills ?? []).compactMap { $0.url ?? $0.thumb }
 
         WebDetailScaffold(
-            art: meta?.backdrop ?? meta?.poster,
-            logo: meta?.logo,
+            art: atv?.background ?? meta?.backdrop ?? meta?.poster,
+            tallArt: atv?.imageTall,
+            logo: atv?.logo ?? meta?.logo,
             title: title,
             director: meta?.director,
             cast: meta?.cast ?? [],
@@ -43,6 +46,7 @@ struct MovieDetailView: View {
             }
         }
         .task { full = await model.fullMeta(for: video) }
+        .task(id: video.path) { atv = await model.atv(for: video) }
     }
 
     /// 网页版「影片信息」：类型 / 格式 / 评分
@@ -72,6 +76,7 @@ struct SeriesDetailView: View {
     @State private var info: [Int: SeasonEpisode] = [:]
     @State private var loading = true
     @State private var failed: String?
+    @State private var atv: AtvLookup?
 
     private var current: Series { picked ?? series }
 
@@ -91,8 +96,9 @@ struct SeriesDetailView: View {
         let next = nextEpisode()
 
         WebDetailScaffold(
-            art: meta?.backdrop ?? meta?.poster,
-            logo: meta?.logo,
+            art: atv?.background ?? meta?.backdrop ?? meta?.poster,
+            tallArt: atv?.imageTall,
+            logo: atv?.logo ?? meta?.logo,
             title: title,
             director: meta?.director,
             cast: meta?.cast ?? [],
@@ -120,6 +126,11 @@ struct SeriesDetailView: View {
             )
         }
         .task(id: current.path) { await load() }
+        .task(id: current.path) {
+            atv = nil
+            await model.ensureSeriesMeta(current)
+            atv = await model.atv(for: current)
+        }
     }
 
     /// 网页版 tvNextEp：没看过是第 1 集；看过就接着下一集（这一集没看完就还是这一集）；看到最后一集是「重看」
@@ -211,6 +222,8 @@ struct WebInfoRow: Hashable {
 
 struct WebDetailScaffold<Gallery: View>: View {
     let art: String?
+    /// Apple TV 的竖版全屏图：头部比宽还高（竖拿）时用它，铺满不用裁横图
+    var tallArt: String? = nil
     let logo: String?
     let title: String
     let director: String?
@@ -240,7 +253,7 @@ struct WebDetailScaffold<Gallery: View>: View {
             let bodyTop = max(220, heroH - vh * 0.35)
             ScrollView {
                 ZStack(alignment: .top) {
-                    WebDetailBackdrop(art: art, height: heroH)
+                    WebDetailBackdrop(art: heroH > vw * 1.05 ? (tallArt ?? art) : art, height: heroH)
                     VStack(alignment: .leading, spacing: 0) {
                         head(vw: vw)
                             .padding(.top, bodyTop)

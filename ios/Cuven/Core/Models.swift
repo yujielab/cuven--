@@ -455,10 +455,22 @@ enum Route: Hashable {
 }
 
 /// Apple TV 上这部片的预告片（/api/atv/lookup?video=1，HLS，系统播放器直接能放）
+/// /api/atv/lookup 的回包：Apple TV 上的那一部（预告片 + 官方素材）。图都是 Apple 图床（mzstatic）现成的地址
 struct AtvLookup: Decodable, Sendable {
     var title: String?
     var year: Int?
+    var type: String?
     var trailers: [Trailer]?
+    /// 16:9 带片名排版的成品图（搜索层的 shelfImage；id 直查时是 posterArt）
+    var image: String?
+    /// 16:9 无字的干净背景（只有按片名搜才有）
+    var background: String?
+    /// 4:3 内容图
+    var image43: String?
+    /// 竖版全屏图（TV app 手机端 hero 用的那张，约 0.46 宽高比）
+    var imageTall: String?
+    /// 片名字标（PNG）
+    var logo: String?
 }
 
 struct Trailer: Decodable, Hashable, Identifiable, Sendable {
