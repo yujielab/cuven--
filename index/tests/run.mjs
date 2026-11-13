@@ -988,6 +988,261 @@ console.log('\n■ 影片表只增不减、旧对象延迟清理');
   void b0;
 }
 
+console.log('\n■ 导入清单：库里没有的自动查好版本、放进片单（等人确认再下）');
+{
+  const { env, r2, W } = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+  makeForumU(W, 6);
+  const FX = [
+    /* 多版本：挑分辨率 / 杜比视界 / 体积上限 */
+    { id: 960001, cn: '群星闪耀时', en: 'Stars Align', y: 2025, rel: ['2160p.DV.HDR.REMUX.HEVC 78.5GB', '2160p.HDR10.WEB-DL.HEVC 22.1GB', '1080p.BluRay.x264 14.2GB', '720p.WEB-DL.x264 3.1GB'] },
+    /* TMDB 上另有别名：清单里写的是别名，索引里认不出，问 TMDB 拿编号 */
+    { id: 960002, cn: '远方来信', en: 'Letters From Afar', y: 2025, aka: ['天涯尺素'], rel: ['1080p.WEB-DL.x264 6.2GB'] },
+    /* 外语片：清单只写英文名，索引里存的是中文名和韩文原名 */
+    { id: 960003, cn: '雨夜迷踪', orig: '비 오는 밤', en: 'Rainy Night Trail', y: 2024, rel: ['1080p.BluRay.x264 9.5GB'] },
+    /* 同名两部（不同年）：不写年份 → 说不准；写了年份 → 认准那一部 */
+    { id: 960004, cn: '无声告白录', en: 'Silent Letter', y: 2024, rel: ['1080p.WEB-DL.x264 4GB'] },
+    { id: 960005, cn: '无声告白录', en: 'Silent Confession', y: 2025, rel: ['2160p.WEB-DL.HEVC 15GB'] },
+    /* 库里已有 */
+    { id: 960006, cn: '旧梦重温', en: 'Old Dreams Again', y: 2024, rel: ['1080p.BluRay.x264 8GB'] },
+  ];
+  let tid = 61000;
+  for (const f of FX) {
+    W.tmdb.movie.push({ id: f.id, title: f.cn, original_title: f.orig || f.en, en: f.en, aka: f.aka, release_date: f.y + '-03-01', poster_path: '/i' + f.id + '.jpg', popularity: 30, vote_average: 7, vote_count: 400 });
+    const b = W.forum.boards['44']['movie_nianfen=' + (f.y === 2025 ? 32 : 31)];
+    for (const r of f.rel) b.unshift({ tid: tid++, title: `${f.cn} ${f.en.replace(/ /g, '.')}.${f.y}.${r}`, film: f.id });
+  }
+  /* TMDB 有、论坛没有的片 */
+  W.tmdb.movie.push({ id: 960099, title: '尚未发布', original_title: 'Not Yet Posted', release_date: '2025-08-01', poster_path: '/n.jpg', popularity: 5, vote_average: 6, vote_count: 50 });
+  const I = H.isolate(env, W);
+  await turboAll(I);
+  const mv = r2.json(NS + 'movies.json');
+  ok(FX.every(f => mv.m[f.id]), '准备：' + FX.length + ' 部测试片都进了索引');
+  /* 片库：只有「旧梦重温」 */
+  W.recv.files = { root: '/ram', _gen: 'g1', _ts: Date.now() - 60000, videos: [{ name: '旧梦重温.Old.Dreams.Again.2024.1080p.BluRay.x264.mkv', path: '/ram/旧梦重温.Old.Dreams.Again.2024.1080p.BluRay.x264.mkv' }] };
+  W.recv.ptr = { g: 'g1' };
+  await I.call('/api/lib?refresh=1'); await I.settle();
+  for (let i = 0; i < 10; i++) { const r = await (await I.call('/api/lib?resolve=1')).json(); if (!r.left) break; }
+  const someId = Object.keys(mv.m).map(Number).find(id => id >= 700000 && id < 710000);
+  const post = async (items, src) => (await I.call('/api/import' + (src ? '?src=' + src : ''), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items }) })).json();
+  const t0 = W.tmdb.calls || 0;
+  const r = await post([
+    { 'tmbd_id(1)': String(someId), title: mv.m[someId][0] },                 // 0 手误的键名 + 编号是字符串
+    { tmdb_id: 960006, title: '旧梦重温' },                                   // 1 库里已有
+    { title: '群星闪耀时', year: 2025, res: '1080p' },                          // 2 只写片名 + 偏好 1080p
+    { tmdb_id: 960001, hdr: 'dv', note: '收藏版' },                            // 3 同一部再来一次 → dup
+    { title: '天涯尺素', year: 2025 },                                          // 4 别名：问 TMDB
+    { title: 'Rainy Night Trail', year: 2024 },                                 // 5 只有英文名
+    { title: '无声告白录' },                                                    // 6 同名两部，没写年份 → 说不准
+    { title: '无声告白录', year: 2025 },                                        // 7 写了年份 → 认准
+    { tmdb_id: 960099, title: '尚未发布' },                                     // 8 论坛没有
+    { title: '世上根本没有这部片', year: 2025 },                                // 9 哪儿都没有
+    { year: 2024 },                                                             // 10 缺 id 和片名
+    { tmdb_id: 'abc', title: 'x' },                                             // 11 编号不是数字
+    { tmdb_id: 94997, type: 'tv', title: '某部剧' },                            // 12 剧集放到电影这边
+  ]);
+  const S = r.items.map(x => x.status);
+  ok(r.items.length === 13 && r.lib === 1, '13 条全有结果，片库在线（' + S.join(' ') + '）');
+  ok(S[0] === 'add' && r.items[0].id === someId && r.items[0].sid === mv.m[someId][12], '「tmbd_id(1)」这种带序号、拼错的键名照认；没写偏好 → 默认版本（与片单「加入」时一样）');
+  ok(S[1] === 'owned' && r.items[1].own === 2, '库里已有的跳过（' + r.items[1].reason + '）');
+  ok(S[2] === 'add' && r.items[2].id === 960001 && r.items[2].res === '1080p' && /14\.2/.test(r.items[2].size || ''), '只写片名 + 年份 + res: 1080p → 认出「群星闪耀时」，挑 1080p 的那版（' + r.items[2].size + '，' + r.items[2].label + '）');
+  ok(S[3] === 'dup', '同一部在清单里出现两次：第二次标「重复」，不重复加');
+  ok(S[4] === 'add' && r.items[4].id === 960002 && r.items[4].via, '清单写的是别名「天涯尺素」：索引里没有这个名字，问 TMDB 认出是「远方来信」（' + r.items[4].via + '）');
+  ok(S[5] === 'add' && r.items[5].id === 960003, '只写英文名「Rainy Night Trail」：认出「' + r.items[5].title + '」');
+  ok(S[6] === 'ambiguous' && r.items[6].cands.length === 2 && r.items[6].cands.every(c => [960004, 960005].includes(c.id)), '同名两部、没写年份：不乱挑，列出 2 个候选让人点');
+  ok(S[7] === 'add' && r.items[7].id === 960005, '写了年份 2025：认准 2025 年那部');
+  ok(S[8] === 'notfound' && r.items[8].tmdb === 960099 && !r.items[8].retry, 'TMDB 有、论坛没有：标「论坛暂无」（' + r.items[8].reason + '）');
+  ok(S[9] === 'notfound' && /都没找到/.test(r.items[9].reason), '哪儿都没有的片名：「' + r.items[9].reason + '」');
+  ok(S[10] === 'invalid' && S[11] === 'invalid' && S[12] === 'invalid', '格式不对的三条各说原因：' + [10, 11, 12].map(i => r.items[i].reason).join(' / '));
+  ok(r.tmdb <= 30 && r.tmdb >= 1, `TMDB 只为索引里找不到的片名问（这次 ${r.tmdb} 个请求，上限 30）`);
+  /* 偏好：杜比视界、体积上限、找不到时退而求其次 */
+  const r2b = await post([
+    { tmdb_id: 960001, hdr: 'dv' },
+  ]);
+  const r3 = await post([{ tmdb_id: 960001, max_gb: 10 }]);
+  const r4 = await post([{ tmdb_id: 960001, res: '2160p', max_gb: 30 }]);
+  const r5 = await post([{ tmdb_id: 960002, res: '2160p' }]);
+  const r6 = await post([{ tmdb_id: 960002, max_gb: 1 }]);
+  ok(r2b.items[0].hb === 7 && /78\.5/.test(r2b.items[0].size), 'hdr: dv → 杜比视界那版（' + r2b.items[0].size + '）');
+  ok(/3\.1/.test(r3.items[0].size) && !r3.items[0].reason, 'max_gb: 10 → 10GB 以内最好的那版（' + r3.items[0].size + ' ' + r3.items[0].res + '）');
+  ok(r4.items[0].res === '2160p' && /22\.1/.test(r4.items[0].size), 'res: 2160p + max_gb: 30 → 30GB 以内的 2160p（' + r4.items[0].size + '）');
+  ok(r5.items[0].status === 'add' && r5.items[0].res === '1080p' && /最接近/.test(r5.items[0].reason), '要 2160p 但只有 1080p：照样加、说明「' + r5.items[0].reason + '」');
+  ok(r6.items[0].status === 'add' && /GB 以内/.test(r6.items[0].reason), '体积上限谁都满足不了：取最小的、说明「' + r6.items[0].reason + '」');
+  /* 编号是人给的：索引里没有这个编号、片名倒对上一部 —— 不自动加，交给人确认 */
+  const r7 = await post([{ tmdb_id: 123456789, title: '群星闪耀时', year: 2025 }]);
+  ok(r7.items[0].status === 'ambiguous' && r7.items[0].cands.length === 1 && r7.items[0].cands[0].id === 960001,
+    'tmdb_id 不在索引里、片名对上一部：不自动加，列出来让人确认（' + r7.items[0].reason + '）');
+  /* 接口：GET 不行、正文不对 400、超过一批的上限只处理前 30 条 */
+  const g = await I.call('/api/import');
+  const b = await I.call('/api/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"x":1}' });
+  const big = await post(Array.from({ length: 35 }, (_, i) => ({ tmdb_id: 990000 + i })));
+  ok(g.status === 405 && b.status === 400 && big.items.length === 30 && big.more === 5, '接口：GET 405、正文不对 400、一次最多 30 条（多出的 ' + big.more + ' 条交回让前端下一批再发）');
+  ok(!r2.keys('').some(k => /import/i.test(k)), '导入只读：R2 里没有多出任何东西');
+}
+
+console.log('\n■ 导入清单 · 剧集：只要整季包（全 N 集），索引里没有的去论坛搜索页搜');
+{
+  const { env, r2, W } = H.makeEnv();
+  makeForumU(W, 2);
+  const TV = [
+    { id: 410001, name: '长夜将尽', en: 'Long Night', y: 2026, rel: [
+      ['[全12集][中文字幕].Long.Night.S01.2026.1080p.WEB-DL.H264', '30.5GB'],
+      ['[全12集][高码版][中文字幕].Long.Night.S01.2026.2160p.WEB-DL.H265.HDR', '88.1GB'],
+      ['[第12集][中文字幕].Long.Night.S01E12.2026.2160p.WEB-DL.H265.DV', '9.9GB']] },
+    { id: 410002, name: '山海回声', en: 'Echoes', y: 2025, rel: [
+      ['[全10集].Echoes.S01.2025.1080p.WEB-DL.H264', '20GB'],
+      [' 第二季[第3-4集].Echoes.S02.2026.2160p.WEB-DL.H265', '10GB'],
+      [' 第二季[第5集].Echoes.S02.2026.2160p.WEB-DL.H265', '5GB']] },
+  ];
+  let tid = 81000;
+  W.forum.boards['2'] = { 'tv_shangyingshijian_3=23': [], 'tv_shangyingshijian_3=22': [] };
+  for (const s of TV) {
+    W.tmdb.tv.push({ id: s.id, name: s.name, original_name: s.en, first_air_date: s.y + '-02-01', poster_path: '/tv' + s.id + '.jpg', popularity: 30, vote_average: 7.5, vote_count: 300 });
+    for (const [r, sz] of s.rel) W.forum.boards['2']['tv_shangyingshijian_3=' + (/2026/.test(r) ? 23 : 22)].unshift({ tid: tid++, title: s.name + r + ' ' + sz });
+  }
+  /* 只在论坛搜索里出现的帖子（连载中 / 新剧：剧集版块的「已完结」筛选收不进索引） */
+  const SO = [
+    [420001, '夫妻的博弈', 'Mrs Revenge', 2026, ['夫妻的博弈[高码版][全25集][国粤多音轨/中文字幕].Mrs.Revenge.S01.2026.2160p.HQ.WEB-DL.H265.AAC.2Audio-BlackTV 123.42GB',
+      '夫妻的博弈[全25集][中文字幕].Mrs.Revenge.S01.2026.1080p.WEB-DL.H264-BlackTV 40.2GB', '夫妻的博弈[第25集][中文字幕].Mrs.Revenge.S01E25.2026.2160p.WEB-DL.H265.DV-BlackTV 5.1GB']],
+    [420002, '风，带有香气', 'Kaze Kaoru', 2026, ['风，带有香气[第123集][中文字幕].Kaze.Kaoru.S01.1080p.LINETV.WEB-DL.AAC2.0.H.264-BlackTV 0.34GB',
+      '风，带有香气[第122集][中文字幕].Kaze.Kaoru.S01.1080p.LINETV.WEB-DL.AAC2.0.H.264-BlackTV 0.33GB']],
+    [420003, '降世神通：七净土', 'Avatar Seven Havens', 2026, ['降世神通：七净土[全8集][中文字幕].Avatar.Seven.Havens.S01.2026.2160p.WEB-DL.H265 30GB']],
+    [420004, '夜曲', 'Nocturne', 2026, ['夜曲之歌[全10集][中文字幕].Nocturne.Song.S01.2026.1080p.WEB-DL 10GB']],
+    [420005, '金银岛', 'Treasure Island', 2026, ['金银岛[全6集][中文字幕].Treasure.Island.1999.1080p.BluRay 12GB']],
+    [420006, '视界任务', 'Vision Quest', 2026, ['视界任务[全8集][中文字幕].Vision.Quest.S01.2026.2160p.WEB-DL.H265 40GB']],
+  ];
+  W.forum.searchOnly = [];
+  for (const [id, name, en, y, titles] of SO) {
+    W.tmdb.tv.push({ id, name, original_name: en, first_air_date: y + '-03-01', poster_path: '/so' + id + '.jpg', popularity: 20, vote_average: 7, vote_count: 100 });
+    for (const t of titles) W.forum.searchOnly.push({ tid: tid++, title: t, fid: 2 });
+  }
+  /* 电影版块里同名的帖子：剧集搜索不能把它算进来 */
+  W.forum.searchOnly.push({ tid: tid++, title: '夫妻的博弈[全25集].Mrs.Revenge.2026.2160p.REMUX 300GB', fid: 44 });
+  const I = H.isolate(env, W);
+  await turboAll(I, { src: 'tv' });
+  const tvm = r2.json('idx/tv/v3.movies.json') || r2.json('idx/tv/movies.json') || { m: {} };
+  ok(tvm.m[410001] && tvm.m[410002], '准备：两部剧进了剧集索引');
+  const post = async (path, body) => (await I.call(path + '?src=tv', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json();
+  const r = await post('/api/import', { items: [{ tmdb_id: 410001, title: '长夜将尽' }, { title: '山海回声' }, { tmdb_id: 420001, title: '夫妻的博弈' }] });
+  const [a, b, c] = r.items;
+  ok(a.status === 'add' && a.res === '2160p' && /88\.1/.test(a.size) && /全12集/.test(a.label),
+    '索引里有的剧：不拿默认最佳（那是「第12集」的单集 DV 版），挑全 12 集里画质最好的 2160p（' + a.size + '，锁定「' + a.label + '」）');
+  ok(b.status === 'incomplete' && /第 2 季/.test(b.reason) && /第 5 集/.test(b.reason) && b.cands.length === 2 && /第 5 集/.test(b.cands[0].label) && /第 1 季全集/.test(b.cands[1].label),
+    '第二季只有单集 / 一段：不加，标「未完结」（' + b.reason + '），给两个按钮：' + b.cands.map(x => x.label).join(' / '));
+  ok(c.status === 'notfound' && c.fs === 1, '索引里没有的：标出来交给论坛搜索（' + c.reason + '）');
+  const fs = (item, kw) => post('/api/fsearch', kw ? { item, kw } : { item });
+  /* 跟着「换个名字再搜」走到底（浏览器也是这么做的） */
+  const fsAll = async (item) => { let x = await fs(item), n = 0; const kws = [x.again]; while (x.status === 'again' && n++ < 4){ x = await fs(item, x.again); kws.push(x.again); } x.kws = kws.filter(Boolean); return x; };
+  W.forum.searchLog = [];
+  const f1 = await fs({ tmdb_id: 420001, type: 'tv', title: '夫妻的博弈' });
+  ok(f1.status === 'add' && f1.ext === 1 && f1.id === 420001 && f1.res === '2160p' && /123\.42/.test(f1.size) && /全25集/.test(f1.label) && f1.sid && f1.poster === '/so420001.jpg',
+    '论坛搜索「夫妻的博弈」：搜到 4 条，去掉单集和电影版块那条，挑全 25 集里最好的 2160p（' + f1.size + '，' + f1.label + '）');
+  ok(W.forum.searchLog.length === 1 && W.forum.searchLog[0].kw === '夫妻的博弈', '搜索词按 GBK 编码发给论坛（论坛收到「' + (W.forum.searchLog[0] || {}).kw + '」）');
+  W.forum.searchGap = 30;
+  const f2 = await fs({ tmdb_id: 420002, type: 'tv', title: '风，带有香气' });
+  ok(f2.status === 'wait' && f2.wait === 30, '论坛限频（「30 秒内只能进行一次搜索」）：把秒数交回，浏览器等够了再搜（wait ' + f2.wait + '）');
+  W.forum.searchGap = 0;
+  const f3 = await fs({ tmdb_id: 420002, type: 'tv', title: '风，带有香气' });
+  ok(f3.status === 'incomplete' && /第 123 集/.test(f3.reason) && f3.cands.length === 1 && f3.cands[0].rec.sid,
+    '只有单集（第 122、123 集）：不加，标「未完结」（' + f3.reason + '），可以手动「' + (f3.cands[0] || {}).label + '」');
+  const f4 = await fs({ tmdb_id: 420003, type: 'tv', title: '降世神通：七净土' });
+  ok(f4.status === 'add' && /全8集/.test(f4.label) && W.forum.searchLog.slice(-1)[0].kw === '降世神通 七净土', '片名里的全角冒号换成空格再搜（论坛的空格是 AND）：「降世神通 七净土」搜到全 8 集');
+  const f5 = await fsAll({ tmdb_id: 420004, type: 'tv', title: '夜曲' });
+  ok(f5.status === 'notfound' && f5.kws.join() === 'Nocturne', '「夜曲」搜到「夜曲之歌」：片名对不上；换英文原名「Nocturne」再搜一次还是对不上，不加（' + f5.reason + '）');
+  const f6 = await fsAll({ tmdb_id: 420005, type: 'tv', title: '金银岛' });
+  ok(f6.status === 'notfound', '「金银岛」搜到 1999 年的那部：早于首播年，不加（' + f6.reason + '）');
+  const f7 = await fs({ tmdb_id: 420006, type: 'tv', title: '幻视任务' });
+  const f8 = f7.again ? await fs({ tmdb_id: 420006, type: 'tv', title: '幻视任务' }, f7.again) : null;
+  ok(f7.status === 'again' && f7.again === '视界任务' && f8 && f8.status === 'add' && f8.title === '视界任务',
+    '清单里的译名「幻视任务」论坛搜不到：换 TMDB 的中文名「视界任务」再搜一次，搜到全 8 集');
+  const f9 = await fs({ title: '风，带有香气', type: 'tv' });
+  ok(f9.status === 'incomplete' && f9.cands[0].rec.id < 0, '没有 tmdb_id 也能搜：片单里用帖子号（负数）当编号，不会撞上 TMDB 编号');
+  const bad = await I.call('/api/fsearch?src=tv');
+  ok(bad.status === 405 && !r2.keys('').some(k => /fsearch|search/i.test(k)), '接口只收 POST；搜索只读，R2 里没多出东西');
+}
+
+console.log('\n■ 推送到 PikPak：登录、选文件夹、建云下载任务');
+{
+  /* 没配账号：说清楚要配什么 */
+  {
+    const { env, W } = H.makeEnv();
+    const I = H.isolate(env, W);
+    const st = await (await I.call('/api/pikpak')).json();
+    ok(st.on === 0 && /PIKPAK_USER/.test(st.hint) && W.pk.calls === 0, '没配账号：面板直说要在 Worker 变量里加 PIKPAK_USER / PIKPAK_PASS，一个请求都不发');
+  }
+  const { env, r2, W } = H.makeEnv({ PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'pk-secret' });
+  W.pk.folders.push({ id: 'f-movie', name: '电影', parent: '' }, { id: 'f-tv', name: '剧集', parent: '' }, { id: 'f-2025', name: '2025', parent: 'f-movie' });
+  W.pk.files.push({ id: 'x1', name: 'readme.txt', parent: '' });
+  /* 三个帖子：种子 / 只有磁力 / 什么都没有 */
+  const T1 = H.torrent({ name: 'Dune.Part.Two.2024.2160p.mkv', length: 9, 'piece length': 16384, pieces: Buffer.alloc(20) });
+  W.forum.threads[51001] = { attach: [{ aid: 'P1', name: 'dune2.torrent', bytes: T1.bytes }] };
+  W.forum.threads[51002] = { attach: [], magnets: ['magnet:?xt=urn:btih:' + 'a'.repeat(40) + '&dn=Only.Magnet'] };
+  W.forum.threads[51003] = { attach: [], magnets: [] };
+  const I = H.isolate(env, W);
+  const call = async (u, body) => (await I.call(u, body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {})).json();
+  const st = await call('/api/pikpak');
+  ok(st.on === 1 && st.ok === 1 && st.user === 'me***@pk.test' && st.limit > 0 && W.pk.logins === 1, `登录 PikPak：先拿验证令牌再登录，账号只显示「${st.user}」，空间 ${Math.round(st.usage / 2 ** 40)}/${Math.round(st.limit / 2 ** 40)} TB`);
+  ok(W.pk.captchaInits[0] === 'POST:https://user.mypikpak.com/v1/auth/signin', '验证令牌的 action 写的是登录地址（和官方客户端一样）');
+  const tok = await H.isolate(env, W).call('/api/pikpak');
+  ok((await tok.json()).ok === 1 && W.pk.logins === 1, '令牌存进 KV：换一个 isolate 也不用重新登录（登录次数还是 1）');
+  const root = await call('/api/pikpak?do=ls');
+  ok(root.folders.map(f => f.name).join() === '电影,剧集' && !root.folders.some(f => f.name === 'readme.txt'), '列根目录：只列文件夹、按拼音排（' + root.folders.map(f => f.name).join('、') + '），普通文件不出现');
+  const sub = await call('/api/pikpak?do=ls&parent=f-movie');
+  ok(sub.folders.length === 1 && sub.folders[0].name === '2025', '进到「电影」里：看到「2025」');
+  const mk = await call('/api/pikpak?do=mkdir', { parent: 'f-movie', name: '索引库/推送' });
+  ok(mk.id && mk.name === '索引库 推送' && W.pk.folders.some(f => f.id === mk.id && f.parent === 'f-movie'), '新建文件夹：建在当前位置，名字里的「/」换成空格（' + mk.name + '）');
+  const push = await call('/api/pikpush', { parent: mk.id, items: [{ tid: 51001, name: '沙丘2' }, { tid: 51002, name: '只有磁力' }, { tid: 51003, name: '什么都没有' }] });
+  const t1 = W.pk.tasks[0], t2 = W.pk.tasks[1];
+  ok(push.ok === 2 && push.items[0].ok && push.items[1].ok && !push.items[2].ok && /没有种子附件/.test(push.items[2].err) && !push.items[2].retry,
+    '推送 3 部：2 部建成云下载任务，没有种子也没有磁力的那部标失败（不重试）');
+  ok(t1 && t1.parent === mk.id && t1.url.includes('btih:' + T1.btih) && /tr=udp%3A%2F%2Ftracker.test/.test(t1.url) && /dn=Dune.Part.Two/.test(t1.url) && t1.folder_type === '',
+    '种子 → 磁力：info hash 对得上、带着种子里的 tracker 和片名，任务建在选的文件夹里');
+  ok(t2 && t2.url.startsWith('magnet:?xt=urn:btih:' + 'a'.repeat(40)), '只有磁力的帖子：直接用帖子里的磁力');
+  const def = await call('/api/pikpush', { parent: '', items: [{ tid: 51002, name: 'x' }] });
+  ok(def.ok === 1 && W.pk.tasks[2].parent === '' && W.pk.tasks[2].folder_type === 'DOWNLOAD', '没选文件夹：进 PikPak 默认的「My Pack」（folder_type=DOWNLOAD）');
+  /* 令牌过期：先用 refresh_token 续，不重新登录 */
+  W.pk.access.clear();
+  const r1 = await call('/api/pikpak?do=ls');
+  ok(r1.folders && W.pk.refreshes === 1 && W.pk.logins === 1, '令牌过期（16）：用 refresh_token 续一次，不重新登录');
+  /* refresh 也失效（别处登录顶掉了）：重新登录 */
+  W.pk.access.clear(); W.pk.refresh.clear();
+  const r2x = await call('/api/pikpak?do=ls');
+  ok(r2x.folders && W.pk.logins === 2, 'refresh_token 也失效：自动重新登录一次');
+  /* 建任务要验证令牌（9）：现签一个带上 */
+  W.pk.driveCaptcha = true;
+  const cap = await call('/api/pikpush', { parent: 'f-tv', items: [{ tid: 51001, name: '沙丘2' }] });
+  W.pk.driveCaptcha = false;
+  ok(cap.ok === 1 && W.pk.captchaInits.some(a => a === 'POST:/drive/v1/files'), '建任务时 PikPak 要验证令牌（9）：按「POST:/drive/v1/files」签一个带上再建');
+  /* 空间满：整批停下，剩下的不再试 */
+  W.pk.quotaFull = true;
+  const full = await call('/api/pikpush', { parent: 'f-tv', items: [{ tid: 51001, name: 'a' }, { tid: 51002, name: 'b' }] });
+  W.pk.quotaFull = false;
+  ok(/空间不够/.test(full.stop) && full.items.every(x => x.held && x.retry) && full.ok === 0, 'PikPak 空间满：整批停下、原因交回（「' + full.stop.slice(0, 18) + '…」），这几部留着待推');
+  /* 文件夹被删了 */
+  const gone = await call('/api/pikpush', { parent: 'f-deleted', items: [{ tid: 51002, name: 'b' }] });
+  ok(!gone.items[0].ok && /文件夹不在了/.test(gone.items[0].err), '目标文件夹被删了：说「换一个文件夹」');
+  /* 「只要文件夹」的筛选不认：去掉筛选重来，自己挑文件夹 */
+  W.pk.rejectKindFilter = true;
+  const fb = await call('/api/pikpak?do=ls');
+  W.pk.rejectKindFilter = false;
+  ok(fb.folders && fb.folders.length === 2, '列文件夹的筛选条件 PikPak 不认：去掉筛选重列，照样只给文件夹');
+  /* 一次最多 4 部 */
+  const many = await call('/api/pikpush', { parent: '', items: Array.from({ length: 7 }, () => ({ tid: 51002, name: 'm' })) });
+  ok(many.items.length === 4 && many.batch === 4, '一次调用最多推 4 部（帖子页 + 种子 + 建任务，子请求要留余量），剩下的浏览器下一批再发');
+  /* 密码错：说清楚，十分钟内不再试（免得把账号试锁了） */
+  const e2 = H.makeEnv({ PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'wrong' });
+  const J = H.isolate(e2.env, e2.W);
+  const bad = await (await J.call('/api/pikpak')).json();
+  const n0 = e2.W.pk.logins;
+  const bad2 = await (await J.call('/api/pikpak?do=ls')).json();
+  ok(bad.ok === 0 && /账号或密码不对/.test(bad.err) && /账号或密码不对/.test(bad2.error) && e2.W.pk.logins === n0, '密码错：直说「账号或密码不对」；十分钟内不再拿错的密码去登录（登录次数没涨）');
+  /* PikPak 要滑块：说清楚怎么办 */
+  const e3 = H.makeEnv({ PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'pk-secret' });
+  e3.W.pk.captchaUrl = true;
+  const cs = await (await H.isolate(e3.env, e3.W).call('/api/pikpak')).json();
+  ok(cs.ok === 0 && cs.captcha === 1 && /App 或网页上登录一次/.test(cs.err), 'PikPak 要求滑块验证：说明 Worker 过不了，先在 App / 网页上登录一次再试');
+  ok(!r2.keys('').some(k => /pikpak|pk:/i.test(k)), 'R2 里不留 PikPak 的东西（令牌只在 KV）');
+}
+
 console.log('\n■ 从 v5.4 的线上数据升级');
 {
   const { env, r2, W } = H.makeEnv();
@@ -1141,6 +1396,56 @@ print(json.dumps({'bad':bad,'n':len(z.namelist()),'h':[hashlib.md5(z.read(n)).he
   ok(ctx.crc32(new Uint8Array(buf)) === zlib.crc32(buf), 'CRC32 与 zlib 一致');
   const b64 = buf.toString('base64');
   ok(Buffer.from(ctx.unb64(b64)).equals(buf) && Buffer.from(ctx.unb64(Buffer.from('ab').toString('base64'))).toString() === 'ab', 'base64 解码与 Node 一致（含补位）');
+}
+
+console.log('\n■ 打包的目录：一个根文件夹，里面每 20 部一个子文件夹');
+{
+  const src = fs.readFileSync(H.SRC_FILE, 'utf8');
+  const ws = /<script id="wsrc" type="text\/plain">([\s\S]*?)<\/script>/.exec(src)[1];
+  const ps = /\/\*<pack>\*\/([\s\S]*?)\/\*<\/pack>\*\//.exec(src)[1];
+  const ctx = vm.createContext({ TextEncoder, Uint8Array, Uint32Array, Math, String, Date, postMessage: () => {} });
+  vm.runInContext(ws + '\n' + ps, ctx);
+  /* 47 部：第 5、30 部只有磁力，第 12、33 部取件失败，第 7 / 8 部同名 */
+  const items = [], byTid = {}, fail = {};
+  for (let i = 1; i <= 47; i++) {
+    const tid = 700000 + i, name = i === 8 ? '第7部 同名 (2024) 1080p' : `第${i}部 影片 (2024) 2160p`;
+    items.push({ tid, name });
+    if (i === 12 || i === 33) { fail[tid] = '帖子已删除'; continue; }
+    byTid[tid] = (i === 5 || i === 30) ? { tid, name, kind: 'magnet', magnet: 'magnet:?xt=urn:btih:' + String(i).padStart(40, '0') }
+                                       : { tid, name, kind: 'torrent', data: new Uint8Array(crypto.randomBytes(200 + i)) };
+  }
+  items[7].name = items[6].name; byTid[items[7].tid].name = items[6].name;
+  const root = 'Cuven索引库-20261112';
+  const L = ctx.packLayout(items, byTid, fail, root, 20, new Date(2026, 10, 12, 9, 30));
+  const z = ctx.zip(L.files);
+  fs.mkdirSync('/tmp/idx-test', { recursive: true });
+  fs.writeFileSync('/tmp/idx-test/pack.zip', z);
+  const out = '/tmp/idx-test/pack-out';
+  fs.rmSync(out, { recursive: true, force: true });
+  const py = JSON.parse(execFileSync('python3', ['-c', `
+import zipfile,os,json
+z=zipfile.ZipFile('/tmp/idx-test/pack.zip')
+bad=z.testzip()
+z.extractall('${out}')
+top=sorted(os.listdir('${out}'))
+r=os.path.join('${out}',top[0])
+subs=sorted(d for d in os.listdir(r) if os.path.isdir(os.path.join(r,d)))
+cnt={d:sorted(os.listdir(os.path.join(r,d))) for d in subs}
+dirs=[i.filename for i in z.infolist() if i.is_dir()]
+attr=[i.external_attr for i in z.infolist() if i.is_dir()]
+print(json.dumps({'bad':bad,'top':top,'root':sorted(os.listdir(r)),'subs':subs,'cnt':cnt,'dirs':dirs,'attr':attr,
+  'list':open(os.path.join(r,'_清单.txt'),encoding='utf-8').read()}, ensure_ascii=False))`]).toString());
+  const res = (d) => py.cnt[d].filter(n => n.endsWith('.torrent')).length + (py.cnt[d].includes('_磁力链接.txt') ? 1 : 0);
+  ok(py.bad === null && py.top.length === 1 && py.top[0] === root, '解压出来只有一个根文件夹「' + py.top[0] + '」（Python zipfile 校验通过）');
+  ok(JSON.stringify(py.subs) === JSON.stringify(['001-020', '021-040', '041-045']) && py.root.includes('_清单.txt'),
+    '根文件夹里：' + py.subs.join(' / ') + ' 三个子文件夹 + _清单.txt（45 部取到了、2 部失败不占位置）');
+  ok(py.cnt['001-020'].filter(n => n.endsWith('.torrent')).length === 19 && py.cnt['001-020'].includes('_磁力链接.txt') && py.cnt['021-040'].includes('_磁力链接.txt') && !py.cnt['041-045'].includes('_磁力链接.txt'),
+    '每个子文件夹 20 部：001-020 里 19 个种子 + 1 部磁力（写进这个文件夹的 _磁力链接.txt），最后一个文件夹 5 部');
+  ok(py.cnt['001-020'].some(n => / \(2\)\.torrent$/.test(n)), '同名的两部不会互相覆盖（第二个加「(2)」）');
+  ok(/001-020\//.test(py.list) && /失败：帖子已删除/.test(py.list) && /每 20 部一个子文件夹（共 3 个）/.test(py.list), '清单写明每一部在哪个子文件夹，失败的也列出来');
+  ok(py.dirs.length === 4 && py.attr.every(a => (a & 0x10) === 0x10), '根文件夹和子文件夹都有目录条目（带目录属性），各种解压工具都会建成文件夹');
+  const L2 = ctx.packLayout(items.slice(0, 3), byTid, {}, root, 20);
+  ok(L2.dirs === 1 && L2.files.some(f => f.name === root + '/001-003/'), '不到 20 部：也是一个子文件夹（001-003）');
 }
 
 console.log('\n■ 页面里的脚本都能解析');

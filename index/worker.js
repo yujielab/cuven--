@@ -1,5 +1,26 @@
 /**
- * Cuven ᴿ 索引库 · v6.5 —— 新进库的片几分钟内自己认出来 · 片名以字母开头的不再丢
+ * Cuven ᴿ 索引库 · v6.9 —— 推送到 PikPak：片单直接建云下载任务，存到指定的文件夹
+ * ══════════════════════════════════════════════════════════════════
+ *   变量 PIKPAK_USER / PIKPAK_PASS；/api/pikpak（状态 / 列文件夹 / 建文件夹）、/api/pikpush（一次 4 部）。见 pkAuth、pkPush。
+ * ══════════════════════════════════════════════════════════════════
+ * v6.8 —— 打包：解压出来一个根文件夹，里面每 20 部一个子文件夹
+ * ══════════════════════════════════════════════════════════════════
+ *   Cuven索引库-日期/ _清单.txt · 001-020/ · 021-040/ …（磁力跟着进它那一段的子文件夹）。见页面里的 packLayout。
+ * ══════════════════════════════════════════════════════════════════
+ * v6.7 —— 导入清单：剧集只要整季包；索引里没有的自动去论坛搜
+ * ══════════════════════════════════════════════════════════════════
+ *   · 剧集只认「全 N 集 / 全集 / 完结」，挑画质最好的一版并锁定；只有单集 / 一段的标「未完结」，给按钮手动加；
+ *   · 索引里没有的（剧集版块只收已完结、电影只收近几年）：POST /api/fsearch 去论坛搜索页按片名搜，
+ *     片名年份核对过才用；论坛限频时把秒数交回，浏览器倒计时等够了再搜；同一个词 30 分钟内不重搜。
+ * ══════════════════════════════════════════════════════════════════
+ * v6.6 —— 导入清单：库里没有的自动查好版本、放进片单，确认后再下
+ * ══════════════════════════════════════════════════════════════════
+ * 片单页「导入清单」：贴一张表（JSON / CSV / 每行「tmdb_id:…/title:…」/ 每行一个片名），POST /api/import 逐条查：
+ *   · 库里已有的跳过；论坛有的按 res / hdr / max_gb / prefer / season 挑好版本，放进片单（电影、剧集各进各的）；
+ *   · 只有 title 时先在索引里按片名 + 年份找，找不到再问 TMDB（别名 / 港台译名 / 只有英文名），同名几部交给人挑；
+ *   · 只读，不写 R2；放进片单之后要人点「开始下载」才下。
+ * ══════════════════════════════════════════════════════════════════
+ * v6.5 —— 新进库的片几分钟内自己认出来 · 片名以字母开头的不再丢
  * ══════════════════════════════════════════════════════════════════
  * 「F1：狂飙飞车明明有，缺片里还在」：片库里的文件是「F1 The Movie 2025 …」，只有英文名、还多一截，
  * 按片名比不上，只能等 TMDB 认定 —— 而认定只在每天的定时任务或点「认定」时跑；各 isolate 的片库缓存
@@ -458,7 +479,7 @@ const SUB = { n: 0, max: PLAN_FREE.sub, peak: 0 };
        跑时它们各自是独立调用，撞不到硬线，subTake 也就不设上限；
      · 海报代理不进预算（见路由）。
    重活被平台掐掉时 finally 不会执行，所以登记带时间戳，太久的自动作废。 */
-const HEAVY_RE = /^\/api\/(build|incremental|fetch|repair|diagnose|unlock|migrate|optimize|split|reset)$/;
+const HEAVY_RE = /^\/api\/(build|incremental|fetch|pikpush|repair|diagnose|unlock|migrate|optimize|split|reset)$/;
 const HEAVY = new Map();           // token → 进门时刻
 const HEAVY_STALE = 150000;        // 超过这个时长还没离场的重活视为已被平台掐掉
 let HEAVY_SEQ = 0;
@@ -5504,6 +5525,413 @@ function decorate(r){
   return out;
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   [v6.6] 导入清单 —— 一张表进来，库里没有的自动查好、挑好版本、放进片单
+   ──────────────────────────────────────────────────────────────────
+   一条（JSON 对象，或 CSV / TSV 的一行，表头同名）：
+     tmdb_id   TMDB 编号（首选；电影 / 剧集各一套，见 type）
+     title     片名（没有 tmdb_id 时按片名 + 年份在索引里找，找不到再问 TMDB）
+     year      年份（同名消歧）            type     movie / tv（默认 movie）
+     season    剧集：只要某一季            res      想要的分辨率：2160p / 1080p / 720p
+     hdr       dv / hdr / sdr（默认不挑）  max_gb   体积上限（GB）
+     prefer    remux / bluray / web        note     备注（原样带回）
+   每条的结果：add（库里没有、论坛有 → 放进片单，等确认后下载）· owned（库里已有，跳过）·
+   notfound（论坛还没有）· ambiguous（片名对上不止一部，给出候选让人挑）· invalid · dup。
+   只读索引、不写 R2；TMDB 只在「片名在索引里找不到」时问，用自带的小配额。
+   ══════════════════════════════════════════════════════════════════ */
+const IMPORT_MAX = 30;            // 一次调用最多处理几条（前端按 12 条一批发）
+const RES_WANT = { '4320p': 6, '8k': 6, '2160p': 5, '4k': 5, 'uhd': 5, '1080p': 4, '1080': 4, '1080i': 3, '720p': 2, '720': 2, '480p': 1 };
+const SRC_WANT = { remux: 7, bluray: 6, 'blu-ray': 6, web: 5, 'web-dl': 5, webrip: 3 };
+/** 表头 / 键名宽松：大小写、「tmdb_id(1)」这种带序号的、tmbd 这种手误都认 */
+function importKeys(x){
+  const o = {};
+  for (const k0 of Object.keys(x)){
+    const k = String(k0).trim().toLowerCase().replace(/\s*[(（]\s*\d+\s*[)）]\s*$/, '').replace(/^tmbd/, 'tmdb').replace(/[\s-]+/g, '_');
+    if (!(k in o)) o[k] = x[k0];
+  }
+  return o;
+}
+function importIn(x0, i){
+  if (!x0 || typeof x0 !== 'object' || Array.isArray(x0)) return { i, bad: '这一条不是「键: 值」的对象' };
+  const x = importKeys(x0);
+  const pick = (...ks) => { for (const k of ks){ const v = x[k]; if (v != null && typeof v !== 'object' && String(v).trim() !== '') return v; } return null; };
+  const idRaw = pick('tmdb_id', 'tmdb', 'tmdbid', 'id');
+  const idS = idRaw == null ? '' : String(idRaw).trim().replace(/^(?:movie|tv)\//i, '');
+  const id = /^\d{1,9}$/.test(idS) ? Number(idS) : 0;
+  if (idS && !id) return { i, bad: 'tmdb_id「' + idS.slice(0, 20) + '」不是数字' };
+  const en = String(pick('en', 'original_title', 'original', 'orig', 'english', '英文名', '原名') || '').trim().slice(0, 160);
+  const title = String(pick('title', 'name', '片名', '中文名', 'cn') || en).trim().slice(0, 160);
+  const ty = String(pick('type', 'kind', '类型') || '').trim();
+  /* 没写 type 就跟着这次调用的源走；写了才拿来核对 */
+  const type = !ty ? '' : /^(tv|series|show|剧集|电视剧|剧)$/i.test(ty) ? 'tv' : 'movie';
+  const sn = Number(pick('season', '季'));
+  const res = RES_WANT[String(pick('res', 'resolution', 'quality', '分辨率') || '').trim().toLowerCase()] || 0;
+  const hdrS = String(pick('hdr', 'dr', '动态范围') || '').trim().toLowerCase();
+  const hdr = /^(dv|dovi|dolby\s*vision|杜比视界)$/.test(hdrS) ? 'dv' : /^hdr/.test(hdrS) ? 'hdr' : hdrS === 'sdr' ? 'sdr' : '';
+  const mg = Number(pick('max_gb', 'maxgb', 'max_size', 'size_gb', '体积上限'));
+  const prefer = SRC_WANT[String(pick('prefer', 'source', 'src', '来源') || '').trim().toLowerCase()] || 0;
+  const note = String(pick('note', 'notes', '备注') || '').slice(0, 200);
+  if (!id && !title) return { i, bad: '缺 tmdb_id 和 title（至少要有一个）' };
+  return { i, id, title, en: en !== title ? en : '', year: yearOf(pick('year', '年份', 'release_year')) || 0, type,
+           season: sn > 0 && sn < 100 ? Math.floor(sn) : 0, res, hdr, maxMb: mg > 0 ? mg * 1024 : 0, prefer, note };
+}
+/** 按偏好挑版本。rows 已按「最好」排好；全都不满足时退而求其次（并说明） */
+function importPick(rows, q){
+  let cand = rows.filter(r => !q.season || (r.sn || 0) === q.season);
+  if (!cand.length) return { r: null, why: q.season ? '没有第 ' + q.season + ' 季的片源' : '没有片源' };
+  const fit = cand.filter(r => !q.maxMb || !r.mb || r.mb <= q.maxMb);
+  let why = '';
+  if (!fit.length){ why = '没有 ' + Math.round(q.maxMb / 1024) + 'GB 以内的，取最小的'; cand = cand.slice().sort((a, b) => (a.mb || 9e9) - (b.mb || 9e9)).slice(0, 1); }
+  else cand = fit;
+  const sc = (r) => {
+    const res = r.spec & 15, src = (r.spec >> 4) & 15, hdr = (r.spec >> 8) & 15;
+    let s = r.score || 0;
+    if (q.res) s += res === q.res ? 60 : (res > q.res ? 10 - (res - q.res) * 8 : -30 * (q.res - res));
+    if (q.hdr === 'dv') s += hdr === 7 ? 40 : (hdr >= 3 ? 10 : -10);
+    else if (q.hdr === 'hdr') s += hdr >= 3 ? 30 : -10;
+    else if (q.hdr === 'sdr') s += hdr < 3 ? 30 : -20;
+    if (q.prefer) s += src === q.prefer ? 25 : (Math.abs(src - q.prefer) <= 1 ? 8 : 0);
+    return s;
+  };
+  const best = cand.slice().sort((a, b) => sc(b) - sc(a) || betterRow(a, b))[0];
+  if (q.res && (best.spec & 15) !== q.res && !why) why = '没有 ' + SPEC.res[q.res] + '，取最接近的';
+  else if (q.hdr === 'dv' && ((best.spec >> 8) & 15) !== 7 && !why) why = '没有杜比视界版';
+  return { r: best, why };
+}
+let IMPORT_IDX = { ver: -1, src: '', map: null };
+/** 索引里按片名找：canon 键全等 + 年份契合。唯一最好 → 这部；并列 → 说不准（交给人挑） */
+function importByTitle(rows, q, tv){
+  const keys = canonKeys([q.title, q.en].filter(Boolean));
+  const cnt = new Map();
+  for (const k of keys) for (const i of IMPORT_IDX.map.get(k) || []) cnt.set(i, (cnt.get(i) || 0) + 1);
+  const c = [];
+  for (const [i, n] of cnt){
+    const yf = yearFit(q.year, rows[i].y, tv, false);
+    if (q.year && yf < 2) continue;                   // 写了年份就得对得上（差一年以内）
+    /* 没写年份时，太短太泛的片名（「英雄」）不单独认 —— 交给 TMDB 去挑 */
+    if (!q.year && !keys.some(k => keyWeight(k) >= 6)) continue;
+    c.push({ i, s: n * 10 + Math.max(0, yf) });
+  }
+  if (!c.length) return null;
+  c.sort((a, b) => b.s - a.s || (rows[b.i].c || 0) - (rows[a.i].c || 0));
+  const top = c.filter(x => x.s === c[0].s);
+  if (top.length > 1) return { amb: top.slice(0, 5).map(x => rows[x.i]) };
+  return { row: rows[c[0].i] };
+}
+async function importItems(env, list, ctx){
+  const t0 = Date.now();
+  const { movies, state } = await loadIndex(env);
+  const ver = state.ver || 0;
+  const lib = await libLoad(env, ctx).catch(() => null);
+  const rows = catRows(movies, ver), tv = isTV(), kind = tv ? 'tv' : 'movie';
+  if (IMPORT_IDX.ver !== ver || IMPORT_IDX.src !== SRC.id || !IMPORT_IDX.map){
+    const map = new Map();
+    for (let i = 0; i < rows.length; i++) for (const k of rowKeys(rows[i]).keys){ const a = map.get(k); if (a) a.push(i); else map.set(k, [i]); }
+    IMPORT_IDX = { ver, src: SRC.id, map };
+  }
+  const arr = Array.isArray(list) ? list : [];
+  const items = arr.slice(0, IMPORT_MAX).map((x, i) => importIn(x, i));
+  const out = [], seen = new Set(), ask = [];
+  const C = { env, movies, ver, state, lib, seen, t0 };
+  for (const q of items){
+    if (q.bad){ out.push({ k: q.i, status: 'invalid', reason: q.bad }); continue; }
+    if (q.type && q.type !== kind){ out.push({ k: q.i, status: 'invalid', title: q.title, reason: '这条是' + (q.type === 'tv' ? '剧集' : '电影') + '，要在「' + (q.type === 'tv' ? '剧集' : '电影') + '」那边导入' }); continue; }
+    let id = q.id && movies.m[q.id] ? q.id : 0;
+    if (!id && q.title){
+      const r = importByTitle(rows, q, tv);
+      /* 片名对上好几部 → 交给人挑。给了 tmdb_id 却不在索引里、片名倒对上一部：
+         编号是人给的、更可信，可能是论坛还没有这部（同名的另一部）、也可能是索引认错了 —— 也交给人确认，不自动加 */
+      const amb = r && (r.amb || (q.id ? [r.row] : null));
+      if (amb){
+        out.push({ k: q.i, status: 'ambiguous', title: q.title, year: q.year || '', note: q.note,
+          reason: r.amb ? '片名对上 ' + amb.length + ' 部，挑一部' : '索引里没有 TMDB ' + q.id + '，但片名对上了这部 —— 是同一部就点它',
+          cands: amb.map(x => ({ id: x.id, title: x.m[F.N], year: x.m[F.Y], poster: x.m[F.P], own: lib ? libHasId(movies, ver, lib, x.id) : 0 })) });
+        continue;
+      }
+      if (r) id = r.row.id;
+    }
+    if (!id){
+      if (q.title && !q.id){ ask.push(q); continue; }     // 索引里按名字找不到：问 TMDB 拿编号再查一次
+      out.push({ k: q.i, status: 'notfound', fs: 1, title: q.title, year: q.year || '', note: q.note, tmdb: q.id, reason: '索引里没有 TMDB ' + q.id + '（' + (tv ? '剧集版块只收已完结的' : '电影只收近几年') + '），去论坛搜索' });
+      continue;
+    }
+    out.push(await importOne(C, q, id));
+  }
+  let tmdbN = 0;
+  if (ask.length){
+    const envT = Object.assign(Object.create(env), { __sub: { n: 0, max: 30 }, __r429: 0 });
+    const lat = (q) => q.en || (/[\u3400-\u9fff]/.test(q.title) ? '' : q.title);
+    const groups = ask.map(q => ({ key: 'imp' + q.i, cn: q.title, latin: lat(q), years: q.year ? [String(q.year)] : [], hint: q.year || 0, title: q.title }));
+    let res = new Map();
+    try { res = await matchBatch(envT, groups, { soft: true }); }
+    catch (e){ trace('tmdb', '导入清单：TMDB 没查成（' + (e.message || e) + '）', { lvl: 'err', ch: 'match' }); }
+    for (const q of ask){
+      let r = res.get('imp' + q.i);
+      /* 认定规则要求「片名对得上」—— 清单里写的却常是别名 / 港台译名（TMDB 按别名搜得到，返回的标题却是另一个）。
+         人已经明说了要哪部：直接拿搜索结果里「论坛有的」那几部来对，只有一部就是它，好几部就交给人挑 */
+      if (r && r.miss && envT.__sub.max - envT.__sub.n > 0){
+        const p = { query: q.title, include_adult: 'false' };
+        if (q.year && !tv) p[SRC.yparam] = q.year;
+        const j = await tmdb(envT, '/search/' + SRC.kind, p).catch(() => null);
+        const got = ((j && j.results) || []).filter(h => movies.m[h.id] && (!q.year || yearFit(q.year, yearOf(h.release_date || h.first_air_date), tv, false) >= 2));
+        if (got.length === 1) r = { hit: got[0], via: 'TMDB 按别名搜到' };
+        else if (got.length > 1){
+          out.push({ k: q.i, status: 'ambiguous', title: q.title, year: q.year || '', note: q.note, reason: 'TMDB 按这个名字搜到 ' + got.length + ' 部论坛有的，挑一部',
+            cands: got.slice(0, 5).map(h => { const m = movies.m[h.id]; return { id: h.id, title: m[F.N], year: m[F.Y], poster: m[F.P], own: lib ? libHasId(movies, ver, lib, h.id) : 0 }; }) });
+          continue;
+        }
+      }
+      const id = r && r.hit ? r.hit.id : 0;
+      if (id && movies.m[id]){ out.push(await importOne(C, q, id, r.via)); continue; }
+      out.push({ k: q.i, status: 'notfound', fs: 1, title: q.title, year: q.year || '', note: q.note, tmdb: id || 0,
+        retry: !id && r == null ? 1 : 0,
+        reason: id ? '论坛还没有这部（TMDB 认出来是 ' + id + (r.hit.title || r.hit.name ? '「' + (r.hit.title || r.hit.name) + '」' : '') + '）'
+                   : (r == null ? 'TMDB 这次没查成，稍后再导一次' : '索引和 TMDB 里都没找到这个片名') });
+    }
+    tmdbN = envT.__sub.n;
+  }
+  out.sort((a, b) => a.k - b.k);
+  return { items: out, src: SRC.id, n: items.length, more: Math.max(0, arr.length - items.length), max: IMPORT_MAX,
+           lib: lib ? 1 : 0, tmdb: tmdbN, ms: Date.now() - t0 };
+}
+/* ══════════ [v6.7] 剧集只要整季：全 N 集 / 全集 / 完结，不要单集、不要「第 123-127 集」 ══════════ */
+const PACK_FULL = /全\s*[0-9一二三四五六七八九十百零两]+\s*[集话話期回]|全集|全季|完结|完結|\bCOMPLETE\b/i;
+const PACK_PART = /第\s*\d+\s*[-~～至到]\s*\d+\s*[集话話期回]|第\s*\d+\s*[集话話期回]|第\s*\d{6,}|S\d{1,2}E\d{1,3}|\bEP?\d{1,3}\b/i;
+/** 一条剧集帖：full = 整季（全 N 集 / 全集 / 完结）· part = 单集 / 一段 / 连载中 · unk = 标题里没写 */
+function packOf(t){
+  t = String(t || '');
+  if (/更新至|更至|连载中|未完结|未完結/.test(t)) return 'part';
+  if (PACK_FULL.test(t)) return 'full';
+  if (PACK_PART.test(t)) return 'part';
+  return /共\s*\d+\s*[集话話]/.test(t) ? 'full' : 'unk';
+}
+const packLabel = (t) => ((String(t).match(/全\s*[0-9一二三四五六七八九十百]+\s*[集话話期回]|全集|完结/) || [])[0] || '').replace(/\s+/g, '');
+/** 单集 / 一段的集数范围（「第 123-127 集」→ 123..127，「更新至第 12 集」→ 12..12） */
+function epRange(t){
+  t = String(t || '');
+  let m = t.match(/第\s*(\d+)\s*[-~～至到]\s*(\d+)\s*[集话話期回]/);
+  if (m) return { a: +m[1], b: +m[2] };
+  m = t.match(/S\d{1,2}E(\d{1,3})(?:\s*-\s*E?(\d{1,3}))?/i);
+  if (m) return { a: +m[1], b: +(m[2] || m[1]) };
+  m = t.match(/第\s*(\d{1,4})\s*[集话話期回]/);
+  if (m) return { a: +m[1], b: +m[1] };
+  return { a: 0, b: 0 };
+}
+/**
+ * 剧集挑版本：只在同一季里挑；整季包（全 N 集）优先，其次标题没写集数的；只剩单集 / 一段时不加，交回「未完结」
+ * 没指定季就挑论坛上最新的那一季。rows 是 decorate 过的行（带 title / sn / spec / mb / labels）
+ */
+function tvPick(rows, q){
+  const R = rows.map(r => ({ r, pk: packOf(r.title), sn: r.sn || 1 }));
+  if (!R.length) return { st: 'none', why: '没有片源' };
+  const seasons = [...new Set(R.map(x => x.sn))].sort((a, b) => b - a);
+  const want = q.season || seasons[0];
+  const inS = R.filter(x => x.sn === want);
+  const sTag = (seasons.length > 1 || want > 1) ? '第 ' + want + ' 季' : '';
+  if (!inS.length) return { st: 'none', why: '没有第 ' + want + ' 季的片源' };
+  const best = (lst) => importPick(lst.map(x => x.r).sort(betterRow), { ...q, season: 0 });
+  const full = inS.filter(x => x.pk === 'full'), unk = inS.filter(x => x.pk === 'unk');
+  if (full.length || unk.length){
+    const p = best(full.length ? full : unk);
+    return { st: 'add', r: p.r, season: want, pack: packLabel(p.r.title) || '整季',
+             why: [sTag, p.why, full.length ? '' : '标题没写「全集」，按整季包算'].filter(Boolean).join('；') };
+  }
+  const part = inS.map(x => ({ ...x, e: epRange(x.r.title) }))
+    .sort((a, b) => (b.e.b - a.e.b) || ((b.e.b - b.e.a) - (a.e.b - a.e.a)) || betterRow(a.r, b.r));
+  const top = part[0].e;
+  const latest = best(part.filter(x => x.e.b === top.b && x.e.a === top.a)).r;
+  const olderS = seasons.find(n => n < want && R.some(x => x.sn === n && x.pk === 'full'));
+  const older = olderS ? { season: olderS, r: best(R.filter(x => x.sn === olderS && x.pk === 'full')).r } : null;
+  return { st: 'incomplete', season: want, latest, older, ep: top,
+           why: (sTag ? sTag : '') + '论坛还没有全集，最新到' + (top.b ? '第 ' + (top.a && top.a !== top.b ? top.a + '-' : '') + top.b + ' 集' : '单集') };
+}
+/** 挑中的一行 → 片单记录（锁定这个版本） */
+function recOf(r, extra){
+  const pk = isTV() ? packLabel(r.title) : '';
+  return { sid: r.sid, res: specRes(r.spec), size: r.size, hb: (r.spec >> 8) & 15, rb: r.spec & 15,
+           label: r.labels.slice(0, 4).concat(pk ? [pk] : []).join(' · '), ...extra };
+}
+/** 剧集「未完结」时给人挑的两个按钮：最新的那一段 / 上一季的全集 */
+function partCands(p, base){
+  const c = [];
+  if (p.latest) c.push({ label: '仍然加入最新的（' + (p.ep && p.ep.b ? '第 ' + (p.ep.a && p.ep.a !== p.ep.b ? p.ep.a + '-' : '') + p.ep.b + ' 集' : '单集') + '）', rec: { ...base, ...recOf(p.latest) } });
+  if (p.older) c.push({ label: '加入第 ' + p.older.season + ' 季全集', rec: { ...base, ...recOf(p.older.r) } });
+  return c;
+}
+async function importOne(C, q, id, via){
+  const m = C.movies.m[id];
+  const base = { k: q.i, id, title: m[F.N], year: m[F.Y], poster: m[F.P], note: q.note };
+  if (via) base.via = via;
+  if (C.seen.has(id)) return { ...base, status: 'dup', reason: '清单里前面已经有这部' };
+  C.seen.add(id);
+  if (C.lib){
+    const w = libWhy(C.movies, C.ver, C.lib, id);
+    if (w && w.own) return { ...base, status: 'owned', own: w.own, file: w.file || '', reason: w.own === 2 ? '库中已有' : '库里很可能已有（片名年份对上）' };
+  }
+  /* 剧集：不管有没有写偏好，都要在全部片源里挑整季包（默认最佳片源可能是单集） */
+  if (isTV()){
+    if (Date.now() - C.t0 > 20000) return { ...base, status: 'notfound', retry: 1, reason: '这一批太大，没来得及挑版本，重试一次' };
+    const p = tvPick((await movieRows(C.env, C.movies, id, C.ver, C.state)).map(decorate), q);
+    if (p.st === 'none') return { ...base, status: 'notfound', reason: p.why };
+    const card = { id, title: m[F.N], year: m[F.Y], poster: m[F.P] };
+    if (p.st === 'incomplete') return { ...base, status: 'incomplete', reason: p.why, cands: partCands(p, card) };
+    return { ...base, status: 'add', ...recOf(p.r), reason: p.why };
+  }
+  let sid = m[F.BT], res = m[F.Q], size = m[F.Z], hb = m[F.HB] || 0, rb = m[F.RB] || resLevel(m[F.Q]), label = '', why = '';
+  if (q.res || q.hdr || q.maxMb || q.prefer){
+    if (Date.now() - C.t0 > 15000) why = '这一批太大，没来得及按偏好挑，先放默认版本';
+    else {
+      const p = importPick((await movieRows(C.env, C.movies, id, C.ver, C.state)).map(decorate), q);
+      if (!p.r) return { ...base, status: 'notfound', reason: p.why };
+      const r = p.r;
+      sid = r.sid; res = specRes(r.spec); size = r.size; hb = (r.spec >> 8) & 15; rb = r.spec & 15;
+      label = r.labels.slice(0, 4).join(' · '); why = p.why;
+    }
+  }
+  if (!sid) return { ...base, status: 'notfound', reason: '这部片没有可用的片源' };
+  return { ...base, status: 'add', sid, res, size, hb, rb, label, reason: why };
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   [v6.7] 论坛搜索：索引里没有的（剧集版块只收「已完结」、电影只收近几年），直接去论坛的搜索页按片名搜
+   ──────────────────────────────────────────────────────────────────
+   search.php?mod=forum&srchtxt=<GBK>&searchsubmit=yes → 302 到 searchid=… 的结果页。空格在 Discuz 里是 AND，
+   所以片名里的标点一律换成空格（「降世神通：七净土」→「降世神通 七净土」，论坛写成全角半角都搜得到）。
+   论坛限制搜索频率（「您在 N 秒内只能进行一次搜索」）：认出来就把秒数交回，浏览器等够了再搜下一条。
+   搜到的帖子：片名（中文名 / 原名 / TMDB 译名）要对得上、年份不能早于首播，剧集只要整季包。
+   同一个关键词 30 分钟内不重搜（Cache API）。
+   ══════════════════════════════════════════════════════════════════ */
+const FS_TTL = 1800, FS_PAGES = 3;
+function fsKw(name){
+  return String(name || '').replace(/[：:·・,，.。!！?？\-—–_/\\()（）\[\]【】「」『』"'“”‘’~～;；]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+}
+/** 论坛的「搜太快了」：返回要等的秒数，没有就 0 */
+function fsWait(html){
+  const m = html.match(/(\d+)\s*秒内只能进行一次搜索/);
+  if (m) return Math.min(180, Math.max(1, +m[1]));
+  if (/最多响应搜索请求/.test(html)) return 30;
+  return 0;
+}
+/** 搜索结果页 → [{ tid, title, fid }]（Discuz 的 li.pbw；结构对不上时退回扫所有帖子链接） */
+function parseSearch(html){
+  const out = [], seen = new Set();
+  const push = (tid, raw, fid) => {
+    tid = Number(tid);
+    if (!tid || seen.has(tid)) return;
+    const title = strip(raw);
+    if (title.length < 2) return;
+    seen.add(tid); out.push({ tid, title, fid: Number(fid) || 0 });
+  };
+  for (const b0 of html.split(/<li[^>]*class="pbw"/i).slice(1)){
+    const b = b0.split(/<\/li>/i)[0];
+    const a = b.match(/<h3[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+    if (!a) continue;
+    const tid = (a[1].match(/tid=(\d+)/) || a[1].match(/thread-(\d+)-/) || b0.match(/^[^>]*id="(\d+)"/) || [])[1];
+    const fid = (b.match(/forumdisplay&(?:amp;)?fid=(\d+)/) || b.match(/forum-(\d+)-\d+\.html/) || [])[1];
+    push(tid, a[2], fid);
+  }
+  if (!out.length && /searchid=|相关内容/.test(html)){
+    const re = /<a[^>]+href="[^"]*(?:viewthread&(?:amp;)?tid=|thread-)(\d+)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+    let m;
+    while ((m = re.exec(html))) push(m[1], m[2], 0);
+  }
+  return out;
+}
+const fsPath = (env, loc) => /^https?:/i.test(loc) ? loc : String(loc).replace(/^\/+/, '');
+async function forumSearch(env, kw){
+  const ck = 'https://fsearch.cuven/' + SRC.id + '/' + encodeURIComponent(kw);
+  try { const hit = await caches.default.match(ck); if (hit) return { ...(await hit.json()), cached: 1 }; } catch {}
+  let r = await authed(env, 'search.php?mod=forum&srchtxt=' + gbkEncode(kw) + '&searchsubmit=yes');
+  for (let hop = 0; r.status >= 300 && r.status < 400 && hop < 3; hop++){
+    const loc = r.headers.get('location') || '';
+    if (!loc || /action=login/.test(loc)) break;
+    r = await authed(env, fsPath(env, loc));
+  }
+  const html = decodeHTML(await r.arrayBuffer(), r);
+  const wait = fsWait(html);
+  if (wait){ const e = new Error('论坛限制搜索频率：' + wait + ' 秒一次'); e.wait = wait; throw e; }
+  if (loginWall(html) && !/searchid=|相关内容/.test(html)) throw new Error('论坛搜索要登录或没有权限');
+  if (/搜索(功能)?已关闭|未开启搜索/.test(html)) throw new Error('论坛关闭了搜索');
+  const list = parseSearch(html);
+  const total = Number((html.match(/相关内容\s*(\d+)\s*个/) || [])[1]) || list.length;
+  const sidm = html.match(/searchid=(\d+)/);
+  /* 翻页看的是同一次搜索的缓存结果，不算新的搜索、不受频率限制 */
+  for (let pg = 2; pg <= FS_PAGES && sidm && list.length < total; pg++){
+    const r2 = await authed(env, 'search.php?mod=forum&searchid=' + sidm[1] + '&orderby=lastpost&ascdesc=desc&searchsubmit=yes&page=' + pg);
+    const more = parseSearch(decodeHTML(await r2.arrayBuffer(), r2));
+    let add = 0;
+    for (const x of more) if (!list.some(y => y.tid === x.tid)){ list.push(x); add++; }
+    if (!add) break;
+  }
+  const out = { kw, total, list };
+  try { await caches.default.put(ck, new Response(JSON.stringify(out), { headers: { 'content-type': 'application/json', 'cache-control': 'max-age=' + FS_TTL } })); } catch {}
+  return out;
+}
+/** 搜到的帖子里挑「就是这部」的：片名键全等，或够长的一个几乎包含另一个；年份不能早于首播（电影差一年以内） */
+function fsMatch(list, names, year){
+  const tv = isTV(), other = tv ? SRC_MOVIE.fid : SRC_TV.fid;
+  const want = canonKeys(names.filter(Boolean));
+  const out = [];
+  for (const x of list){
+    if (x.fid && x.fid === other) continue;
+    const pt = parseTitle(x.title);
+    const ks = canonKeys([pt.cn, pt.latin].filter(Boolean));
+    let ok = false;
+    for (const a of ks) for (const b of want){
+      if (a === b){ ok = true; continue; }
+      /* 一个包含另一个：短的够长（三个汉字 / 六个字母），长的最多多出两个汉字（「篇」「剧场版」）或三个字母 ——
+         「夜曲」≠「夜曲之歌」，「Nocturne」≠「Nocturne Song」 */
+      const sh = a.length < b.length ? a : b, lo = a.length < b.length ? b : a;
+      if (keyWeight(sh) >= 6 && lo.includes(sh) && lo.length - sh.length <= (keyKind(sh) === 'cjk' ? 2 : 3)) ok = true;
+    }
+    if (!ok) continue;
+    const ys = (pt.years || []).map(Number).filter(Boolean);
+    if (year && ys.length && !(tv ? ys.some(y => y >= year - 1) : ys.some(y => Math.abs(y - year) <= 1))) continue;
+    out.push(x);
+  }
+  return out;
+}
+async function fsearchItem(env, item, kwOver, ctx){
+  const q = importIn(item, 0);
+  if (q.bad) return { status: 'invalid', reason: q.bad };
+  const lib = await libLoad(env, ctx).catch(() => null);
+  if (q.id && lib && lib.ids && lib.ids.has(q.id)) return { status: 'owned', id: q.id, title: q.title, own: 2, reason: '库中已有（TMDB 编号相同）' };
+  /* TMDB 拿译名、原名、首播年、海报：片名对不上时多一个名字可比，年份用来排除同名的老片 */
+  let d = null;
+  if (q.id){
+    const envT = Object.assign(Object.create(env), { __sub: { n: 0, max: 6 }, __r429: 0 });
+    d = await tmdb(envT, '/' + SRC.kind + '/' + q.id, {}).catch(() => null);
+  }
+  const zh = d ? (d.name || d.title || '') : '', orig = d ? (d.original_name || d.original_title || '') : '';
+  const year = yearOf(d && (d.first_air_date || d.release_date)) || q.year || 0;
+  const cjk = (x) => /[㐀-鿿]/.test(x || '');
+  const names = [q.title, zh, orig, q.en].filter(Boolean);
+  const kws = [...new Set([q.title, zh].filter(cjk).concat([q.title, zh, q.en, orig].filter(Boolean)).map(fsKw).filter(k => k.length >= 2))];
+  const kw = kwOver && kws.includes(kwOver) ? kwOver : kws[0];
+  if (!kw) return { status: 'notfound', reason: '没有能拿去搜的片名' };
+  const card = { id: q.id || 0, title: zh && cjk(zh) ? zh : (q.title || zh), year: year || '', poster: d ? (d.poster_path || '') : '', note: q.note };
+  const S = await forumSearch(env, kw);
+  const hit = fsMatch(S.list, names, year);
+  const next = kws[kws.indexOf(kw) + 1];
+  if (!hit.length){
+    if (next) return { status: 'again', again: next, searched: S.cached ? 0 : 1, reason: '「' + kw + '」没搜到对得上的，换「' + next + '」再搜' };
+    return { ...card, status: 'notfound', searched: S.cached ? 0 : 1,
+      reason: S.list.length ? '论坛搜「' + kw + '」有 ' + S.total + ' 条，片名年份都对不上' : '论坛搜「' + kw + '」没有结果' };
+  }
+  const rows = hit.map(x => decorate(toRow(x.tid, x.title))).sort(betterRow);
+  const ext = { ext: 1, via: '论坛搜索「' + kw + '」' };
+  const cid = q.id || -rows[0].tid;              // 没有 TMDB 编号：拿帖子号当片单里的编号（负数，不会撞上 TMDB 编号）
+  if (isTV()){
+    const p = tvPick(rows, q);
+    if (p.st === 'incomplete') return { ...card, id: cid, ...ext, status: 'incomplete', searched: S.cached ? 0 : 1, reason: p.why, cands: partCands(p, { ...card, id: cid, ext: 1 }) };
+    if (p.st !== 'add') return { ...card, status: 'notfound', searched: S.cached ? 0 : 1, reason: p.why };
+    return { ...card, id: cid, ...ext, status: 'add', searched: S.cached ? 0 : 1, ...recOf(p.r), reason: p.why };
+  }
+  const p = importPick(rows, q);
+  if (!p.r) return { ...card, status: 'notfound', searched: S.cached ? 0 : 1, reason: p.why };
+  return { ...card, id: cid, ...ext, status: 'add', searched: S.cached ? 0 : 1, ...recOf(p.r), reason: p.why };
+}
+
 /* ══════════ 主题 / 种子 ══════════ */
 async function threadDetail(env, tid, ctx){
   const k = kkey(env,'t:'+tid);
@@ -5725,6 +6153,268 @@ async function grabItems(env, items){
 }
 
 /* ══════════════════════════════════════════════════════════════════
+   [v6.9] 推送到 PikPak：片单里的片直接在 PikPak 里建「云下载」任务，存到指定的文件夹
+   ──────────────────────────────────────────────────────────────────
+   账号放在 Worker 的变量里：PIKPAK_USER（邮箱 / 手机号 / 用户名）、PIKPAK_PASS（建议设成「密钥」）。
+   PikPak 没有公开接口，这里走的是它的 App 自己用的那套（参数对照开源客户端 pikpakapi 0.1.11）：
+     登录    user.mypikpak.com  /v1/shield/captcha/init（拿一次性的验证令牌）→ /v1/auth/signin
+     续期    /v1/auth/token（refresh_token；失效了就重新登录）
+     云盘    api-drive.mypikpak.com  /drive/v1/files（列文件夹 / 建文件夹 / upload_type=UPLOAD_TYPE_URL 建云下载）
+   令牌存 KV（access 两小时、refresh 长期），各 isolate 共用；密码只在登录那一次发给 PikPak。
+   一部片 = 帖子页（KV 缓存）+ 种子附件（算出磁力，KV 缓存一天）+ 一次建任务，所以一次调用只推几部。
+   种子 → 磁力时带上片名和种子里的 tracker：PikPak 按 info hash 找资源，带上 tracker 找得更快。
+   登录失败不反复试（账号密码不对十分钟内不再登，免得把账号试锁了）。
+   ══════════════════════════════════════════════════════════════════ */
+const PK = {
+  cid: 'YNxT9w7GMdWvEOKa', secret: 'dbw2OtmVEeuUvIptb1Coyg', ver: '1.47.1', pkg: 'com.pikcloud.pikpak',
+  salts: ['Gez0T9ijiI9WCeTsKSg3SMlx', 'zQdbalsolyb1R/', 'ftOjr52zt51JD68C3s', 'yeOBMH0JkbQdEFNNwQ0RI9T3wU/v', 'BRJrQZiTQ65WtMvwO',
+          'je8fqxKPdQVJiy1DM6Bc9Nb1', 'niV', '9hFCW2R1', 'sHKHpe2i96', 'p7c5E6AcXQ/IJUuAEC9W6', '', 'aRv9hjc9P+Pbn+u3krN6',
+          'BzStcgE8qVdqjEH16l4', 'SqgeZvL5j9zoHP95xWHt', 'zVof5yaJkPe3VFpadPof'],
+  ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  signin: 'https://user.mypikpak.com/v1/auth/signin',     // 验证令牌的 action 里写的是这个固定地址（走反代也一样）
+  batch: 4,                                               // 一次调用最多推几部
+  key: 'pk:tok',
+};
+const pkOn = (env) => !!(env.PIKPAK_USER && env.PIKPAK_PASS);
+const pkUserBase = (env) => String(env.PIKPAK_USER_BASE || 'https://user.mypikpak.com').replace(/\/+$/, '');
+const pkApiBase = (env) => String(env.PIKPAK_API_BASE || 'https://api-drive.mypikpak.com').replace(/\/+$/, '');
+
+/* MD5（PikPak 的设备号和验证签名要用；WebCrypto 标准里没有 MD5，自己算，测试里对着 Node 的结果核过） */
+const MD5_S = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+const MD5_K = Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) >>> 0);
+function md5(str){
+  const b = new TextEncoder().encode(String(str)), n = b.length;
+  const w = new Uint32Array((((n + 8) >> 6) + 1) * 16);
+  for (let i = 0; i < n; i++) w[i >> 2] |= b[i] << ((i & 3) * 8);
+  w[n >> 2] |= 0x80 << ((n & 3) * 8);
+  w[w.length - 2] = (n * 8) >>> 0;
+  w[w.length - 1] = Math.floor(n / 0x20000000);
+  let a = 0x67452301, bb = 0xefcdab89, c = 0x98badcfe, d = 0x10325476;
+  for (let i = 0; i < w.length; i += 16){
+    let A = a, B = bb, C = c, D = d;
+    for (let j = 0; j < 64; j++){
+      let f, g;
+      if (j < 16){ f = (B & C) | (~B & D); g = j; }
+      else if (j < 32){ f = (D & B) | (~D & C); g = (5 * j + 1) & 15; }
+      else if (j < 48){ f = B ^ C ^ D; g = (3 * j + 5) & 15; }
+      else { f = C ^ (B | ~D); g = (7 * j) & 15; }
+      const x = (A + f + MD5_K[j] + w[i + g]) | 0, s = MD5_S[(j >> 4) * 4 + (j & 3)];
+      A = D; D = C; C = B;
+      B = (B + ((x << s) | (x >>> (32 - s)))) | 0;
+    }
+    a = (a + A) | 0; bb = (bb + B) | 0; c = (c + C) | 0; d = (d + D) | 0;
+  }
+  let out = '';
+  for (const v of [a, bb, c, d]) for (let k = 0; k < 4; k++) out += ((v >>> (k * 8)) & 255).toString(16).padStart(2, '0');
+  return out;
+}
+const pkDevice = (env) => md5(String(env.PIKPAK_USER) + String(env.PIKPAK_PASS));
+function pkSign(dev, ts){
+  let s = PK.cid + PK.ver + PK.pkg + dev + ts;
+  for (const salt of PK.salts) s = md5(s + salt);
+  return '1.' + s;
+}
+const pkMask = (u) => { u = String(u || ''); const i = u.indexOf('@'); return i > 0 ? u.slice(0, Math.min(2, i)) + '***' + u.slice(i) : u.slice(0, 3) + '***' + u.slice(-2); };
+/** PikPak 的报错 → 人话（认不出的原样带上它自己的说明） */
+const PK_MSG = [
+  [/invalid_account_or_password|account_not_found|password_error/i, 'PikPak 账号或密码不对（检查 PIKPAK_USER / PIKPAK_PASS）'],
+  [/captcha_invalid|captcha_required/i, 'PikPak 的人机验证没通过'],
+  [/file_space_not_enough|space_not_enough|quota_exceed/i, 'PikPak 空间不够了'],
+  [/task_daily_create_limit|daily.*limit|task_run_nums_limit|task.*limit/i, 'PikPak 今天的云下载次数用完了（或同时进行的任务太多）'],
+  [/too_many_requests|frequen/i, 'PikPak 说请求太频繁'],
+  [/file_not_found|parent.*not.*found|not_found/i, '目标文件夹不在了（可能被删了），换一个文件夹'],
+  [/permission_denied|forbidden/i, 'PikPak 拒绝了这个操作'],
+];
+function pkError(j, status){
+  const raw = String((j && (j.error_description || j.error)) || ('HTTP ' + status));
+  const key = String((j && j.error) || '') + ' ' + raw;
+  const hit = PK_MSG.find(([re]) => re.test(key));
+  const e = new Error(hit ? hit[1] + (hit[1].includes(raw) ? '' : '：' + raw.slice(0, 80)) : 'PikPak：' + raw.slice(0, 140));
+  e.pk = 1; e.code = Number(j && j.error_code) || 0; e.err = String((j && j.error) || ''); e.status = status;
+  return e;
+}
+async function pkJSON(env, method, url, body, headers){
+  let r;
+  try {
+    r = await sfetch(url, { method, body: body == null ? undefined : JSON.stringify(body),
+      headers: { 'content-type': 'application/json; charset=utf-8', accept: 'application/json', 'user-agent': PK.ua, ...(headers || {}) } });
+  } catch (e){
+    if (e.budget) throw e;
+    throw Object.assign(new Error('连不上 PikPak：' + (e.message || e)), { pk: 1, net: 1 });
+  }
+  const txt = await r.text().catch(() => '');
+  let j = null;
+  try { j = txt ? JSON.parse(txt) : {}; } catch {}
+  if (j && !j.error && r.status < 400) return j;
+  if (!j) throw Object.assign(new Error('PikPak 回的不是 JSON（HTTP ' + r.status + '）：' + txt.slice(0, 80)), { pk: 1, status: r.status, net: r.status >= 500 ? 1 : 0 });
+  throw pkError(j, r.status);
+}
+/** 一次性的验证令牌。回了 url 而没有令牌 = PikPak 要人去过滑块，Worker 过不了 */
+async function pkCaptcha(env, action, meta){
+  const dev = pkDevice(env);
+  const j = await pkJSON(env, 'POST', pkUserBase(env) + '/v1/shield/captcha/init',
+    { client_id: PK.cid, action, device_id: dev, meta }, { 'x-device-id': dev });
+  if (!j.captcha_token)
+    throw Object.assign(new Error(j.url ? 'PikPak 要求人机验证（滑块），Worker 过不了：先用同一个账号在 PikPak 的 App 或网页上登录一次，过几分钟再试'
+                                        : 'PikPak 没给验证令牌'), { pk: 1, captcha: 1 });
+  return j.captcha_token;
+}
+const pkSignMeta = (env, sub) => { const t = String(Date.now()); return { captcha_sign: pkSign(pkDevice(env), t), client_version: PK.ver, package_name: PK.pkg, user_id: sub || '', timestamp: t }; };
+async function pkSignin(env){
+  const u = String(env.PIKPAK_USER).trim(), meta = {};
+  if (/^[\w.+-]+@[\w-]+(\.[\w-]+)+$/.test(u)) meta.email = u;
+  else if (/^\+?\d{11,18}$/.test(u)) meta.phone_number = u;
+  else meta.username = u;
+  const ct = await pkCaptcha(env, 'POST:' + PK.signin, meta);
+  return pkJSON(env, 'POST', pkUserBase(env) + '/v1/auth/signin',
+    { client_id: PK.cid, client_secret: PK.secret, password: String(env.PIKPAK_PASS), username: u, captcha_token: ct }, { 'x-device-id': pkDevice(env) });
+}
+let PK_MEM = null, PK_FAIL = null, PK_JOB = null;
+/** 拿一个能用的 access token：内存 → KV → 续期 → 重新登录。同一个 isolate 里同时来的几个请求合成一次 */
+async function pkAuth(env, force){
+  if (!pkOn(env)) throw Object.assign(new Error('还没配 PikPak 账号：在 Worker 的变量里加 PIKPAK_USER 和 PIKPAK_PASS'), { pk: 1, conf: 1 });
+  const tag = md5('u:' + env.PIKPAK_USER + ':' + env.PIKPAK_PASS).slice(0, 10);
+  const fresh = (st) => st && st.u === tag && st.access && st.exp - 120000 > Date.now();
+  if (!force && fresh(PK_MEM)) return PK_MEM;
+  if (PK_JOB) return PK_JOB;
+  PK_JOB = (async () => {
+    let st = await jget(env, PK.key).catch(() => null);
+    if (st && st.u !== tag) st = null;
+    /* 别的 isolate 刚续过：直接用（force 时内存里那份已经被判了过期，KV 里的更新才算数） */
+    if (fresh(st) && (!force || !PK_MEM || st.access !== PK_MEM.access)) return (PK_MEM = st);
+    if (PK_FAIL && PK_FAIL.tag === tag && Date.now() < PK_FAIL.until) throw Object.assign(new Error(PK_FAIL.msg), { pk: 1, auth: 1, cool: 1 });
+    let j = null;
+    if (st && st.refresh){
+      try { j = await pkJSON(env, 'POST', pkUserBase(env) + '/v1/auth/token',
+        { client_id: PK.cid, client_secret: PK.secret, grant_type: 'refresh_token', refresh_token: st.refresh }, { 'x-device-id': pkDevice(env) }); }
+      catch (e){ if (e.budget || e.net) throw e; j = null; }      // refresh 失效（别处登录顶掉了、太久没用）：重新登录
+    }
+    if (!j || !j.access_token){
+      try { j = await pkSignin(env); }
+      catch (e){
+        if (!e.budget && !e.net){
+          const bad = /invalid_account_or_password|account_not_found|password_error/i.test(e.err || '');
+          PK_FAIL = { tag, msg: e.message, until: Date.now() + (bad ? 600000 : 60000) };
+          trace('pikpak', 'PikPak 登录失败：' + e.message, { lvl: 'err' });
+        }
+        e.auth = 1; throw e;
+      }
+    }
+    if (!j.access_token) throw Object.assign(new Error('PikPak 登录没拿到令牌'), { pk: 1, auth: 1 });
+    PK_FAIL = null;
+    st = { u: tag, access: j.access_token, refresh: j.refresh_token || (st && st.refresh) || '', sub: j.sub || (st && st.sub) || '',
+           exp: Date.now() + (Number(j.expires_in) || 7200) * 1000, at: Date.now() };
+    PK_MEM = st;
+    await jput(env, PK.key, st, 30 * 86400).catch(() => {});
+    return st;
+  })();
+  try { return await PK_JOB; } finally { PK_JOB = null; }
+}
+/** 云盘接口：令牌过期（16 / 401）自动续一次；要验证令牌（9）就现签一个带上再来 */
+async function pkCall(env, method, path, opt = {}){
+  let st = await pkAuth(env), ct = '';
+  const qs = opt.q ? '?' + new URLSearchParams(Object.entries(opt.q).filter(([, v]) => v != null && v !== '')).toString() : '';
+  for (let i = 0; ; i++){
+    const h = { authorization: 'Bearer ' + st.access, 'x-device-id': pkDevice(env) };
+    if (ct) h['x-captcha-token'] = ct;
+    try { return await pkJSON(env, method, pkApiBase(env) + path + qs, opt.body, h); }
+    catch (e){
+      if (i >= 2 || e.budget || e.net) throw e;
+      if (e.code === 16 || e.code === 4121 || e.code === 4122 || e.status === 401 || /unauthenticated|invalid_token/i.test(e.err || '')){ st = await pkAuth(env, true); continue; }
+      if (e.code === 9 || /captcha/i.test(e.err || '')){ ct = await pkCaptcha(env, method + ':' + path, pkSignMeta(env, st.sub)); continue; }
+      throw e;
+    }
+  }
+}
+async function pkStatus(env){
+  if (!pkOn(env)) return { on: 0, hint: '在 Worker 的变量里加 PIKPAK_USER（邮箱 / 手机号）和 PIKPAK_PASS（密码，类型选「密钥」），保存后刷新' };
+  const out = { on: 1, user: pkMask(env.PIKPAK_USER), batch: PK.batch };
+  try {
+    const a = await pkCall(env, 'GET', '/drive/v1/about');
+    const q = (a && a.quota) || {};
+    out.ok = 1; out.limit = Number(q.limit) || 0; out.usage = Number(q.usage) || 0;
+  } catch (e){ if (e.budget) throw e; out.ok = 0; out.err = e.message || String(e); out.captcha = e.captcha ? 1 : 0; }
+  return out;
+}
+/** 一个文件夹下面的子文件夹（只要文件夹）。parent 空 = 根目录 */
+async function pkList(env, parent){
+  const folders = [];
+  const base = { trashed: { eq: false }, phase: { eq: 'PHASE_TYPE_COMPLETE' } };
+  let token = '', onlyDir = true, more = false;
+  for (let pg = 0; pg < 4; pg++){
+    const q = { parent_id: parent || '', thumbnail_size: 'SIZE_SMALL', limit: '200', with_audit: 'false', page_token: token,
+                filters: JSON.stringify(onlyDir ? { ...base, kind: { eq: 'drive#folder' } } : base) };
+    let j;
+    try { j = await pkCall(env, 'GET', '/drive/v1/files', { q }); }
+    catch (e){
+      /* 「只要文件夹」这个筛选条件万一不认：去掉它重来，文件夹自己挑 */
+      if (onlyDir && pg === 0 && e.pk && !e.auth && !e.net && !e.budget && !/not_found/i.test(e.err || '')){ onlyDir = false; pg--; continue; }
+      throw e;
+    }
+    for (const f of (j.files || [])) if (f && f.kind === 'drive#folder' && f.id) folders.push({ id: String(f.id), name: String(f.name || '') });
+    token = j.next_page_token || '';
+    if (!token) break;
+    if (pg === 3) more = true;
+  }
+  folders.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+  return { parent: parent || '', folders, more: more ? 1 : 0 };
+}
+async function pkMkdir(env, parent, name){
+  name = String(name || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+  if (!name) throw Object.assign(new Error('文件夹名不能是空的'), { pk: 1 });
+  const j = await pkCall(env, 'POST', '/drive/v1/files', { body: { kind: 'drive#folder', name, parent_id: parent || '' } });
+  const f = j.file || j;
+  if (!f || !f.id) throw Object.assign(new Error('PikPak 没建成这个文件夹'), { pk: 1 });
+  return { id: String(f.id), name: String(f.name || name) };
+}
+/** 一个帖子 → 磁力链接：有种子附件就从种子算（带 tracker），没有就用帖子里贴的磁力 */
+async function magnetOfThread(env, tid, ctx){
+  const d = await threadDetail(env, tid, ctx);
+  const att = (d.attachments || []).filter(a => a.isTorrent);
+  if (att.length){ const m = await magnetOf(env, att[0].aid, ctx); return { magnet: m.magnet, name: m.name || att[0].filename || '', btih: m.btih }; }
+  if ((d.magnets || []).length) return { magnet: d.magnets[0], name: '', btih: (d.magnets[0].match(/btih:([0-9a-zA-Z]+)/) || [])[1] || '' };
+  throw Object.assign(new Error('该帖没有种子附件，也没有磁力链接'), { hard: 1 });
+}
+/**
+ * 推一批：[{ tid, name }] → 每部在 parent 文件夹里建一个云下载任务。
+ * 出参每部一条：{ tid, ok, task, name } / { retry }（预算到了或这会儿不通，过会儿再来）/ { err }（这部推不了）
+ * PikPak 那头整个不行了（没登录上、空间满、次数用完）：stop = 原因，剩下的不再试
+ */
+async function pkPush(env, parent, items, ctx){
+  const t0 = Date.now(), out = [];
+  let ok = 0, stop = '';
+  await pkAuth(env);                                  // 登不上就整批报错，不去白拉种子
+  for (const it of items){
+    if (stop){ out.push({ tid: it.tid, ok: 0, retry: 1, held: 1 }); continue; }
+    if (subLeft() < 5 || Date.now() - t0 > 22000){ out.push({ tid: it.tid, ok: 0, retry: 1 }); continue; }
+    let m;
+    try { m = await magnetOfThread(env, it.tid, ctx); }
+    catch (e){
+      if (e.budget){ out.push({ tid: it.tid, ok: 0, retry: 1 }); continue; }
+      if (RETRYABLE.has(classify(e)) && !e.hard && !e.parse) out.push({ tid: it.tid, ok: 0, retry: 1, soft: 1, err: (e.message || '暂时取不到').slice(0, 80) });
+      else out.push({ tid: it.tid, ok: 0, err: (e.message || String(e)).slice(0, 120) });
+      continue;
+    }
+    try {
+      const j = await pkCall(env, 'POST', '/drive/v1/files', { body: {
+        kind: 'drive#file', upload_type: 'UPLOAD_TYPE_URL', url: { url: m.magnet },
+        parent_id: parent || '', folder_type: parent ? '' : 'DOWNLOAD' } });
+      const t = j.task || {};
+      ok++;
+      out.push({ tid: it.tid, ok: 1, task: String(t.id || ''), name: String(t.name || t.file_name || m.name || it.name || '').slice(0, 160),
+                 phase: String(t.phase || ''), btih: m.btih });
+    } catch (e){
+      if (e.budget){ out.push({ tid: it.tid, ok: 0, retry: 1 }); continue; }
+      /* 账号层面的问题：这一批后面的、以及浏览器手里剩下的都不用再试了 */
+      if (e.auth || e.conf || e.captcha || /空间不够|次数用完/.test(e.message)){ stop = e.message; out.push({ tid: it.tid, ok: 0, retry: 1, held: 1 }); continue; }
+      if (e.net || e.status === 429 || e.code === 10 || /太频繁/.test(e.message)) out.push({ tid: it.tid, ok: 0, retry: 1, soft: 1, err: e.message.slice(0, 100) });
+      else out.push({ tid: it.tid, ok: 0, err: e.message.slice(0, 140) });
+    }
+  }
+  return { items: out, ok, stop, ms: Date.now() - t0, sub: SUB.n, batch: PK.batch };
+}
+
+/* ══════════════════════════════════════════════════════════════════
    路由
    子请求预算是「按调用」算的，但计数器是 isolate 全局的：v5.3 起只有
    重活进门才登记预算（subEnter），轻请求与海报代理不再把它清零 ——
@@ -5863,6 +6553,30 @@ export default {
         if (!items.length) return json({ error:'没有有效的片源' },400);
         const r = await grabItems(env, items);
         return json({ ...r, max: GRAB_MAX });
+      }
+      /* [v6.9] PikPak：状态 / 列文件夹 / 建文件夹（轻）；推送建云下载任务（重，走子请求预算） */
+      if (p==='/api/pikpak' || p==='/api/pikpush'){
+        const pkFail = (e) => { if (!e.pk) throw e; return json({ error: e.message, pk: 1, conf: e.conf ? 1 : 0, auth: e.auth ? 1 : 0, captcha: e.captcha ? 1 : 0 }, e.conf ? 400 : 502); };
+        const body = request.method === 'POST' ? await request.json().catch(() => null) : null;
+        if (p==='/api/pikpush'){
+          if (request.method !== 'POST' || !body) return json({ error:'请用 POST，正文是 { parent, items: [...] }' }, 405);
+          const items = (Array.isArray(body.items) ? body.items : []).slice(0, PK.batch).map(x => ({
+            tid: /^\d+$/.test(String(x.tid)) ? Number(x.tid) : tidOf(x.sid||''),
+            name: String(x.name||'').slice(0,120),
+          })).filter(x => x.tid > 0);
+          if (!items.length) return json({ error:'没有要推送的片源' }, 400);
+          try { return json(await pkPush(env, String(body.parent || ''), items, cx)); } catch (e){ return pkFail(e); }
+        }
+        const act = Q.get('do') || 'status';
+        try {
+          if (act === 'status') return json(await pkStatus(env));
+          if (act === 'ls') return json(await pkList(env, Q.get('parent') || ''));
+          if (act === 'mkdir'){
+            if (!body) return json({ error:'请用 POST，正文是 { parent, name }' }, 405);
+            return json(await pkMkdir(env, String(body.parent || ''), body.name));
+          }
+          return json({ error:'未知操作' }, 400);
+        } catch (e){ return pkFail(e); }
       }
       /* v4 的服务端打包已移除：它是 CPU / 内存峰值的来源，也是"一次下载
          分出好几个 zip"的根因。老前端如果还在打这个地址，明确告诉它。 */
@@ -6054,6 +6768,22 @@ export default {
           solo: !!(body && body.solo),
           flush: turbo && Q.get('pages') === '0',
         }));
+      }
+      /* [v6.6] 导入清单：只读，不写 R2；库里没有的查好版本交回，浏览器放进片单、等人确认再下 */
+      if (p==='/api/import'){
+        if (request.method !== 'POST') return json({ error:'请用 POST，正文是 { items: [...] }' }, 405);
+        const body = await request.json().catch(() => null);
+        const list = Array.isArray(body) ? body : (body && Array.isArray(body.items) ? body.items : null);
+        if (!list) return json({ error:'正文要是 JSON 数组，或 { items: [...] }' }, 400);
+        return json(await importItems(env, list, cx));
+      }
+      /* [v6.7] 导入清单里索引没有的：去论坛搜索页搜一条。论坛限频时回 { wait: 秒 }，浏览器等够了再来 */
+      if (p==='/api/fsearch'){
+        if (request.method !== 'POST') return json({ error:'请用 POST，正文是 { item: {...} }' }, 405);
+        const body = await request.json().catch(() => null);
+        if (!body || !body.item || typeof body.item !== 'object') return json({ error:'正文要是 { item: {...} }' }, 400);
+        try { return json(await fsearchItem(env, body.item, body.kw ? String(body.kw) : '', cx)); }
+        catch (e){ if (e.wait) return json({ status:'wait', wait: e.wait, reason: e.message }); throw e; }
       }
       /* [v6.2] 认定工：不持锁、不写 R2，自带一整份子请求配额 */
       if (p==='/api/tm'){
@@ -6769,6 +7499,44 @@ html[data-theme="dark"] .filters.stuck{background:rgba(14,14,16,.72)}
   width:22px;height:22px;display:grid;place-items:center;line-height:1;position:relative;
   transition:color var(--t-s) var(--e-soft)}
 .citem .cx::before{content:'';position:absolute;inset:-11px}   /* 22 + 11×2 = 44 */
+/* [v6.6] 导入清单 */
+.imp textarea{display:block;width:100%;min-height:150px;resize:vertical;background:var(--sf2);color:var(--t1);border:0;
+  box-shadow:inset 0 0 0 1px var(--line);border-radius:var(--r-m);padding:12px 14px;font-family:var(--mono);
+  font-size:.75rem;line-height:1.6;transition:box-shadow .16s ease}
+.imp textarea:focus-visible{outline:0;box-shadow:inset 0 0 0 1px var(--ac),0 0 0 3px var(--acb)}
+.imp textarea[disabled]{opacity:.6}
+.imp p.fine{margin:10px 2px 14px}
+.imp label.btn[aria-disabled]{opacity:.42;pointer-events:none}
+.imp-sum{display:flex;flex-wrap:wrap;gap:6px;margin:16px 0 10px}
+.ilist{max-height:440px;overflow:auto;margin-top:8px;border-top:1px solid var(--line)}
+.irow{display:flex;gap:11px;align-items:flex-start;padding:11px 2px;border-bottom:1px solid var(--line);font-size:.8125rem}
+.irow:last-child{border-bottom:0}
+.irow > .dot{margin-top:6px}
+.irow .ib{flex:1;min-width:0}
+.irow .ib b{font-weight:var(--fw-m)}
+.irow .ib .num{color:var(--t3);font-size:.75rem}
+.irow .ib em{display:block;font-style:normal;color:var(--t3);font-size:.71875rem;margin-top:3px;line-height:1.5;overflow-wrap:anywhere}
+.irow > .pill{flex:none}
+.irow .cands{display:flex;flex-wrap:wrap;gap:8px;margin-top:9px}
+.imp-prog{margin-top:10px;font-size:.75rem;color:var(--t3);justify-content:space-between}
+.imp-prog span{flex:1;min-width:0;line-height:1.5}
+/* [v6.9] 推送到 PikPak */
+.pkdest{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--sf2);border-radius:var(--r-m);padding:11px 14px;font-size:.8125rem}
+.pkdest span{color:var(--t3)}
+.pkdest b{flex:1;min-width:0;font-weight:var(--fw-m);overflow-wrap:anywhere}
+.pk p.fine{margin:10px 2px 14px}
+.pkcrumb{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:.8125rem;color:var(--t3);margin-bottom:8px}
+.pklist{max-height:320px;overflow:auto;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.pkdir{display:flex;align-items:center;gap:10px;width:100%;background:none;border:0;border-bottom:1px solid var(--line);
+  padding:0 4px;min-height:44px;font-size:.84375rem;color:var(--t1);cursor:pointer;text-align:left}
+.pkdir:last-child{border-bottom:0}
+.pkdir b{flex:1;min-width:0;font-weight:var(--fw-m);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pkdir i{font-style:normal;color:var(--t3)}
+.pkdir:active{background:var(--sf2)}
+@media (hover:hover) and (pointer:fine){ .pkdir:hover{background:var(--sf2)} }
+.field.pkname{flex:1;width:auto;min-width:160px}
+.field.pkname input{flex:1;min-width:0;background:none;border:0;font-size:.875rem;align-self:stretch;color:var(--t1)}
+.field.pkname input:focus-visible{outline:0}
 
 /* ── 索引管线可视化 ─────────────────────────────────────────────── */
 .flow{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding:4px 0 10px;
@@ -7156,7 +7924,8 @@ function zip(files){
     w2(out, p+10, 0); w2(out, p+12, dt); w2(out, p+14, dd);
     w4(out, p+16, crcs[i]); w4(out, p+20, f2.data.length); w4(out, p+24, f2.data.length);
     w2(out, p+28, nm2.length); w2(out, p+30, 0); w2(out, p+32, 0);
-    w2(out, p+34, 0); w2(out, p+36, 0); w4(out, p+38, 0); w4(out, p+42, offs[i]);
+    /* 外部属性：以「/」结尾的是目录条目，标上 MS-DOS 目录位（0x10），解压工具一律建成文件夹 */
+    w2(out, p+34, 0); w2(out, p+36, 0); w4(out, p+38, /\/$/.test(f2.name) ? 0x10 : 0); w4(out, p+42, offs[i]);
     out.set(nm2, p+46); p += 46 + nm2.length;
   }
   w4(out, p, 0x06054b50); w2(out, p+4, 0); w2(out, p+6, 0);
@@ -7574,6 +8343,50 @@ var kAll = function(st){ return tx(st,'readonly',function(s){ return s.getAll();
      ② 全部齐了，本地压成「一个」包 —— CRC 与组装交给 GPU / 独立线程。
    任务按片单指纹认领：同一份片单回来还是同一个任务，接着取缺的那几部。
    ══════════════════════════════════════════════════════════════════ */
+/*<pack>*/
+/* [v6.8] 压缩包的目录：
+     Cuven索引库-日期/            ← 根文件夹：不管用什么工具、解压到哪儿，先得到的都是这一个文件夹
+       _清单.txt                  ← 每一部在哪个子文件夹（失败的也列出来）
+       001-020/                   ← 每 20 部一个子文件夹，按片单顺序
+         xxx.torrent …
+         _磁力链接.txt             ← 这一段里只有磁力的几部（没有就不放）
+       021-040/ …
+   「部」只算取到了的（种子或磁力）；失败的不占位置，所以每个子文件夹都是满的 20 部，只有最后一个可能不满。 */
+var PACK_PER = 20;
+function packLayout(items, byTid, fail, root, per, now){
+  per = per > 0 ? per : PACK_PER;
+  var E = new TextEncoder(), files = [], used = {}, where = {}, mags = {}, order = [], last = '';
+  var got = items.filter(function(it){ var p = byTid[it.tid]; return p && ((p.kind === 'torrent' && p.data) || p.magnet); });
+  var w = Math.max(3, String(got.length).length);
+  var pad = function(n){ n = String(n); while (n.length < w) n = '0' + n; return n; };
+  var dirOf = function(i){ var a = Math.floor(i / per) * per + 1; return pad(a) + '-' + pad(Math.min(got.length, a + per - 1)); };
+  files.push({ name: root + '/', data: new Uint8Array(0), crc: 0 });
+  got.forEach(function(it, i){
+    var p = byTid[it.tid], sub = dirOf(i), d = root + '/' + sub + '/';
+    if (sub !== last){ last = sub; order.push(d); files.push({ name: d, data: new Uint8Array(0), crc: 0 }); }
+    where[it.tid] = sub;
+    if (p.kind === 'torrent' && p.data){
+      var nm = d + p.name + '.torrent', c = 2;
+      while (used[nm]) nm = d + p.name + ' (' + (c++) + ').torrent';
+      used[nm] = 1;
+      files.push({ name: nm, data: new Uint8Array(p.data) });
+    } else (mags[d] = mags[d] || []).push('# ' + p.name + '\n' + p.magnet);
+    /* 这个子文件夹的最后一部：把它的磁力清单也放进去 */
+    if ((i + 1) % per === 0 || i === got.length - 1)
+      if (mags[d]) files.push({ name: d + '_磁力链接.txt', data: E.encode(mags[d].join('\n\n') + '\n') });
+  });
+  var fails = items.filter(function(it){ return !where[it.tid]; });
+  var head = 'Cuven ᴿ 索引库 · 打包清单\n生成时间 ' + (now || new Date()).toLocaleString('zh-CN') +
+    '\n共 ' + items.length + ' 项，成功 ' + got.length + '，失败 ' + fails.length +
+    '\n每 ' + per + ' 部一个子文件夹（共 ' + order.length + ' 个），按片单顺序\n\n';
+  var body = items.map(function(it){
+    var f = where[it.tid];
+    return it.name + '  ·  #' + it.tid + '  ·  ' + (f ? f + '/' : '失败：' + ((fail && fail[it.tid]) || '没取到'));
+  }).join('\n');
+  files.splice(1, 0, { name: root + '/_清单.txt', data: E.encode(head + body + '\n') });
+  return { files: files, ok: got.length, dirs: order.length };
+}
+/*</pack>*/
 var DL = {
   job:null, run:false, stop:false, phase:'', got:0, bytes:0, t0:0, err:'', tick:null,
 
@@ -7704,41 +8517,25 @@ var DL = {
     mine.forEach(function(p){ if (p) byTid[p.tid] = p; });
     mine = this.job.items.map(function(it){ return byTid[it.tid]; }).filter(Boolean);
 
-    var files = [], mags = [], used = {}, ok = 0;
-    for (var k = 0; k < mine.length; k++){
-      var p = mine[k];
-      if (!p) continue;
-      if (p.kind === 'torrent' && p.data){
-        var nm = p.name + '.torrent', c = 2;
-        while (used[nm]) nm = p.name + ' (' + (c++) + ').torrent';
-        used[nm] = 1;
-        files.push({ name:nm, data:new Uint8Array(p.data) });
-        ok++;
-      } else if (p.magnet){ mags.push('# ' + p.name + '\n' + p.magnet); ok++; }
-    }
-    var E = new TextEncoder();
-    if (mags.length) files.push({ name:'_磁力链接.txt', data:E.encode(mags.join('\n\n') + '\n') });
-    var fails = Object.keys(this.job.fail);
-    var head = 'Cuven ᴿ 索引库 · 打包清单\n生成时间 ' + new Date().toLocaleString('zh-CN') +
-      '\n共 ' + this.job.total + ' 项，成功 ' + ok + '，失败 ' + fails.length + '\n\n';
-    var body = this.job.items.map(function(it){
-      var f = DL.job.fail[it.tid];
-      return it.name + '  ·  #' + it.tid + '  ·  ' + (f ? '失败：' + f : '已收录');
-    }).join('\n');
-    files.push({ name:'_清单.txt', data:E.encode(head + body + '\n') });
+    /* [v6.8] 解压出来是一个根文件夹，里面每 20 部一个子文件夹（见 packLayout） */
+    var stamp = new Date().toISOString().slice(0,10).replace(/-/g,'');
+    var root = 'Cuven索引库-' + stamp;
+    var L = packLayout(this.job.items, byTid, this.job.fail, root, PACK_PER);
+    var files = L.files, ok = L.ok;
 
     var total = files.reduce(function(a, f){ return a + f.data.length; }, 0);
     var how = PERF.route(total, files.length);
-    /* GPU 路径：所有条目拼成一段连续内存，一片一线程并行算 CRC */
+    /* GPU 路径：所有条目拼成一段连续内存，一片一线程并行算 CRC（目录条目是空的，CRC 本来就是 0，不送进去） */
     if (how === 'gpu'){
       try {
-        var cat = new Uint8Array(total), segs = [], o = 0;
+        var cat = new Uint8Array(total), segs = [], idx = [], o = 0;
         for (var z = 0; z < files.length; z++){
-          cat.set(files[z].data, o); segs.push([o, files[z].data.length]); o += files[z].data.length;
+          if (!files[z].data.length) continue;
+          cat.set(files[z].data, o); segs.push([o, files[z].data.length]); idx.push(z); o += files[z].data.length;
         }
         var crcs = await PERF.crcGPU(cat, segs);
-        for (var y = 0; y < files.length; y++) files[y].crc = crcs[y];
-      } catch(e){ how = 'worker'; }
+        for (var y = 0; y < idx.length; y++) files[idx[y]].crc = crcs[y];
+      } catch(e){ how = 'worker'; for (var q2 = 0; q2 < files.length; q2++) if (files[q2].data.length) delete files[q2].crc; }
     }
     this.how = how;
     var zbuf;
@@ -7749,16 +8546,15 @@ var DL = {
     } catch(e){ this.err = '本地打包失败：' + (e.message || e); this.paint(); return; }
 
     var blob = new Blob([zbuf], { type:'application/zip' });
-    var stamp = new Date().toISOString().slice(0,10).replace(/-/g,'');
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'Cuven索引库-' + stamp + '.zip';
+    a.download = root + '.zip';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function(){ URL.revokeObjectURL(a.href); }, 90000);
     this.phase = 'done'; this.okCount = ok; this.zipSize = blob.size;
     this.paint();
     haptic('done');
-    toast('已打包 ' + ok + ' 部 · ' + fmtSize(blob.size));
+    toast('已打包 ' + ok + ' 部（' + L.dirs + ' 个文件夹，每个 ' + PACK_PER + ' 部）· ' + fmtSize(blob.size));
   },
   /* 进行中每一批都会来一次：阶段没变就只打补丁（数字 / 进度 / 行状态），
      阶段变了（取件 → 打包 → 完成）按钮组要换，才整页重画 */
@@ -8061,7 +8857,7 @@ var PUSH = {
    目录 / 详情这类轻接口 40s；建索引 / 取件 / 认定这类重活服务端自己按
    预算收工，通常 15s 内回来，给 110s 是留给网关。 */
 var API_T = { light:40000, heavy:110000 };
-var HEAVY_API = /^\/api\/(build|incremental|fetch|repair|diagnose|unlock|migrate|optimize|split|reset)(\?|$)|^\/api\/lib\?(scan|resolve|refresh)/;
+var HEAVY_API = /^\/api\/(build|incremental|fetch|pikpush|repair|diagnose|unlock|migrate|optimize|split|reset)(\?|$)|^\/api\/lib\?(scan|resolve|refresh)/;
 function api(u, opt){
   opt = opt || {};
   var h = { 'x-gate': GATE };
@@ -8213,6 +9009,7 @@ function cartAdd(m){
   CART.ord.push(m.id);
   CART.o[m.id] = { id:m.id, title:m.title, year:m.year, poster:m.poster, res:m.res,
                    size:m.size, sid:m.sid, own:m.own, hb:m.hb, rb:m.rb };
+  if (m.ext) CART.o[m.id].ext = 1;          // [v6.7] 论坛搜索搜来的：索引里没有这部，没有详情页可换版本
   cartSave(); paintDock(); markTile(m.id, true); return true;
 }
 function cartDel(id){
@@ -8821,11 +9618,604 @@ function qrowHTML(it, j){
    顺序按"接下来要做什么"排：正在进行的任务（有才显示）→ 片单 → 开始下载。
    任务进行中每一批都会来一次 paint：只原地改数字、进度条与行状态
    （patchDL），不整页重画 —— 海报不重闪，列表滚动位置也不丢。 */
+/* ══════════ [v6.6] 导入清单 ══════════
+   一张表 → 服务端逐条查：库里已有的跳过，论坛有的按偏好挑好版本放进片单（电影、剧集各进各的片单）。
+   只是放进片单 —— 真正下载要等人在片单里看过、点「开始下载」。
+   认得的格式：JSON 数组 / {"items":[…]} / 每行一个 JSON 对象；CSV、TSV（第一行是表头）；
+   每行「tmdb_id:123/title:沙丘/year:2024」；每行一个片名（末尾的年份拆出来）或一个 TMDB 编号。 */
+var IMP = { open:false, text:'', busy:false, done:0, total:0, rows:null, jobs:null, added:[], failed:[], note:'', nolib:0,
+            sq:[], sdone:0, stotal:0, swait:0, gap:0, stop:false, phase:'' };
+var IMP_BATCH = 12, IMP_CAP = 1000;
+var IMP_KEYS = /^(tmdb_id|tmdb|tmdbid|id|title|name|片名|中文名|cn|en|original_title|original|orig|english|英文名|原名|year|年份|release_year|type|kind|类型|season|季|res|resolution|quality|分辨率|hdr|dr|动态范围|max_gb|maxgb|max_size|size_gb|体积上限|prefer|source|src|来源|note|notes|备注)$/;
+var IMP_SAMPLE = '[\n  {"tmdb_id": 911430, "title": "F1：狂飙飞车", "year": 2025},\n'
+  + '  {"title": "沙丘2", "year": 2024, "res": "2160p", "hdr": "dv"},\n'
+  + '  {"title": "奥本海默", "year": 2023, "res": "1080p", "max_gb": 20, "note": "给爸妈"},\n'
+  + '  {"tmdb_id": 94997, "type": "tv", "title": "龙之家族", "season": 2}\n]';
+var IMP_ST = { add:['ok', '加入片单'], incart:['ok', '片单里已有'], owned:['', '库中已有'], dup:['', '清单里重复'],
+  notfound:['warn', '论坛暂无'], ambiguous:['warn', '要你挑'], incomplete:['warn', '未完结'], queued:['', '排队搜索'], searching:['', '搜索中'],
+  invalid:['bad', '格式不对'], full:['bad', '片单满了'], error:['bad', '没查成'] };
+function impKey(k){ return String(k).trim().toLowerCase().replace(/\s*[(（]\s*\d+\s*[)）]\s*$/, '').replace(/^tmbd/, 'tmdb').replace(/[\s-]+/g, '_'); }
+function impCSV(l, sep){
+  var out = [], cur = '', q = false;
+  for (var i = 0; i < l.length; i++){
+    var c = l.charAt(i);
+    if (q){ if (c === '"'){ if (l.charAt(i + 1) === '"'){ cur += '"'; i++; } else q = false; } else cur += c; }
+    else if (c === '"' && !cur.trim()) q = true;
+    else if (c === sep){ out.push(cur.trim()); cur = ''; }
+    else cur += c;
+  }
+  out.push(cur.trim());
+  return out;
+}
+/** 一行「键:值/键:值」；没有认得的键就整行当片名（末尾的年份拆出来），纯数字当 TMDB 编号 */
+function impLine(l){
+  l = l.trim();
+  var re = /(^|[\/|;，；\t]\s*)([A-Za-z_一-龥]+(?:\s*[(（]\s*\d+\s*[)）])?)\s*[:：=]\s*/g, m, marks = [];
+  while ((m = re.exec(l))){ var k = impKey(m[2]); if (IMP_KEYS.test(k)) marks.push({ k: k, at: m.index, end: re.lastIndex }); }
+  var o = {};
+  if (marks.length){
+    var pre = l.slice(0, marks[0].at).trim();
+    if (pre) o.title = pre;
+    marks.forEach(function(mk, i){
+      var v = l.slice(mk.end, i + 1 < marks.length ? marks[i + 1].at : l.length).trim();
+      if (v && !(mk.k in o)) o[mk.k] = v;
+    });
+    return o;
+  }
+  l = l.replace(/^(?:[-*•·]|\d{1,4}[.)、])\s+/, '');
+  if (/^\d{1,9}$/.test(l)) return { tmdb_id: l };
+  var y = /^(.*?)[\s(（\[【]+((?:18|19|20)\d{2})[)）\]】]*$/.exec(l);
+  return y && y[1].trim() ? { title: y[1].trim(), year: y[2] } : { title: l };
+}
+function impParse(t){
+  t = String(t || '').replace(/^﻿/, '').trim();
+  if (!t) return { items: [], err: '先贴一份清单，或选一个文件' };
+  if (/^[\[{]/.test(t)){
+    var j = null, e1 = null;
+    try { j = JSON.parse(t); } catch(e){ e1 = e; }
+    if (j == null && t.charAt(0) === '{'){
+      try { j = t.split(/\r?\n/).filter(function(l){ return l.trim(); }).map(function(l){ return JSON.parse(l.trim().replace(/,$/, '')); }); }
+      catch(e){ j = null; }
+    }
+    if (j == null) return { items: [], err: 'JSON 解析不了：' + (e1 && e1.message || '格式不对') };
+    if (Array.isArray(j)) return { items: j };
+    if (j && typeof j === 'object'){
+      var inner = j.items || j.list || j.movies || j.films || j.data;
+      if (Array.isArray(inner)) return { items: inner };
+      var vals = Object.keys(j).map(function(k){ return j[k]; });
+      if (vals.length > 1 && vals.every(function(v){ return v && typeof v === 'object' && !Array.isArray(v); })) return { items: vals };
+      return { items: [j] };
+    }
+    return { items: [], err: 'JSON 里没有清单（要数组，或 {"items": [...]}）' };
+  }
+  var lines = t.split(/\r?\n/).filter(function(l){ return l.trim(); });
+  var head = lines[0], sep = head.indexOf('\t') >= 0 ? '\t' : (head.indexOf(',') >= 0 ? ',' : '');
+  if (sep && !/[:：=]/.test(head)){
+    var hs = impCSV(head, sep).map(impKey);
+    if (hs.filter(function(h){ return IMP_KEYS.test(h); }).length * 2 >= hs.length){
+      return { items: lines.slice(1).map(function(l){
+        var c = impCSV(l, sep), o = {};
+        hs.forEach(function(h, i){ if (h && c[i] != null && c[i] !== '' && !(h in o)) o[h] = c[i]; });
+        return o;
+      }) };
+    }
+  }
+  return { items: lines.map(impLine) };
+}
+function impType(x){
+  if (!x || typeof x !== 'object') return 'movie';
+  var o = {};
+  Object.keys(x).forEach(function(k){ var kk = impKey(k); if (!(kk in o)) o[kk] = x[k]; });
+  return /^(tv|series|show|剧集|电视剧|剧)$/i.test(String(o.type || o.kind || o['类型'] || '').trim()) ? 'tv' : 'movie';
+}
+function cartKeyOf(src){ return src === 'movie' ? 'cvcart' : 'cvcart:' + src; }
+/** 加进某个源的片单（不一定是当前源）：1 = 加了，0 = 本来就有，-1 = 满了 */
+function cartAddTo(src, m, label){
+  var rec = { id:m.id, title:m.title, year:m.year, poster:m.poster, res:m.res, size:m.size, sid:m.sid, own:m.own || 0, hb:m.hb, rb:m.rb };
+  if (label) rec.pickLabel = label;
+  if (m.ext) rec.ext = 1;
+  if (src === S.src){
+    if (CART.o[m.id]) return 0;
+    if (CART.ord.length >= MAX) return -1;
+    if (!cartAdd(m)) return -1;
+    if (label){ CART.o[m.id].pickLabel = label; cartSave(); }
+    return 1;
+  }
+  var c = null;
+  try { c = JSON.parse(localStorage.getItem(cartKeyOf(src)) || 'null'); } catch(e){}
+  if (!c || !c.ord) c = { ord: [], o: {} };
+  if (c.o[m.id]) return 0;
+  if (c.ord.length >= MAX) return -1;
+  c.ord.push(m.id); c.o[m.id] = rec;
+  try { localStorage.setItem(cartKeyOf(src), JSON.stringify(c)); } catch(e){ return -1; }
+  return 1;
+}
+function cartDropFrom(src, ids){
+  if (src === S.src){
+    ids.forEach(function(id){ if (CART.o[id]){ delete CART.o[id]; markTile(id, false); } });
+    CART.ord = CART.ord.filter(function(x){ return CART.o[x]; });
+    cartSave(); paintDock(); return;
+  }
+  try {
+    var c = JSON.parse(localStorage.getItem(cartKeyOf(src)) || 'null');
+    if (!c || !c.ord) return;
+    ids.forEach(function(id){ delete c.o[id]; });
+    c.ord = c.ord.filter(function(x){ return c.o[x]; });
+    localStorage.setItem(cartKeyOf(src), JSON.stringify(c));
+  } catch(e){}
+}
+function impTake(j, it, src){
+  var row = { src: src, it: it, st: it.status, x: j.x };
+  if (it.status === 'add'){
+    var r = cartAddTo(src, it, it.label || '');
+    row.st = r === 1 ? 'add' : r === 0 ? 'incart' : 'full';
+    if (r === 1) IMP.added.push({ src: src, id: it.id });
+  }
+  /* [v6.7] 索引里没有的：排队去论坛搜索页搜（TMDB 认出来的编号一起带上，搜的时候能多一个译名可比） */
+  if (it.status === 'notfound' && it.fs){
+    row.st = 'queued'; j.src = src; j.kw = ''; j.waits = 0;
+    if (it.tmdb) j.tmdb = it.tmdb;
+    IMP.sq.push(j);
+  } else if (it.status === 'notfound' && it.retry) IMP.failed.push(j);     // TMDB 这次没查成：可以重试
+  IMP.rows[j.i] = row;
+}
+function impStart(){
+  if (IMP.busy) return;
+  var ta = document.getElementById('imptx');
+  if (ta) IMP.text = ta.value;
+  var P = impParse(IMP.text);
+  IMP.note = P.err || (!P.items.length ? '清单是空的' : '');
+  if (IMP.note){ renderDL(); return; }
+  if (P.items.length > IMP_CAP) IMP.note = '清单有 ' + P.items.length + ' 条，这次先查前 ' + IMP_CAP + ' 条';
+  IMP.rows = []; IMP.added = []; IMP.nolib = 0; IMP.gap = 0;
+  IMP.jobs = P.items.slice(0, IMP_CAP).map(function(x, i){ return { i: i, x: x, t: impType(x) }; });
+  impRun(IMP.jobs);
+}
+function impRun(jobs){
+  IMP.busy = true; IMP.done = 0; IMP.total = jobs.length; IMP.failed = []; IMP.sq = []; IMP.stop = false; IMP.phase = 'index';
+  var batches = [];
+  ['movie', 'tv'].forEach(function(t){
+    var g = jobs.filter(function(j){ return j.t === t; });
+    for (var k = 0; k < g.length; k += IMP_BATCH) batches.push({ t: t, jobs: g.slice(k, k + IMP_BATCH) });
+  });
+  renderDL();
+  var step = function(bi){
+    if (bi >= batches.length) return IMP.sq.length && !IMP.stop ? impSearch() : impFinish();
+    var b = batches[bi];
+    api('/api/import', { method: 'POST', body: JSON.stringify({ items: b.jobs.map(function(j){ return j.x; }) }), src: b.t, timeout: 45000 })
+      .then(function(r){
+        (r.items || []).forEach(function(it){ var j = b.jobs[it.k]; if (j) impTake(j, it, b.t); });
+        var n = Math.min(r.n || 0, b.jobs.length);
+        if (n < b.jobs.length) batches.splice(bi + 1, 0, { t: b.t, jobs: b.jobs.slice(n) });   // 服务端一次收不下：剩下的下一批再发
+        if (!r.lib) IMP.nolib = 1;
+        IMP.done += n;
+      }, function(e){
+        b.jobs.forEach(function(j){ IMP.failed.push(j); IMP.rows[j.i] = { src: b.t, x: j.x, st: 'error', it: { status: 'error', reason: e.message || String(e) } }; });
+        IMP.done += b.jobs.length;
+      })
+      .then(function(){ if (S.view === 'dl') renderDL(); step(bi + 1); });
+  };
+  step(0);
+}
+/* [v6.7] 论坛搜索：一条一条搜。论坛限频（N 秒一次）时等够了再搜，等的秒数记下来，之后每条搜完都先等这么久 */
+function impSearch(){
+  IMP.busy = true; IMP.phase = 'search'; IMP.stop = false; IMP.sdone = 0; IMP.stotal = IMP.sq.length;
+  IMP.sq.forEach(function(j){ var r = IMP.rows[j.i]; if (r) r.st = 'queued'; });
+  if (S.view === 'dl') renderDL();
+  var next = function(){
+    if (IMP.stop || !IMP.sq.length) return impFinish();
+    var j = IMP.sq[0], row = IMP.rows[j.i] || (IMP.rows[j.i] = { src: j.src, x: j.x, st: 'queued', it: {} });
+    var go = function(){
+      if (IMP.stop) return impFinish();
+      row.st = 'searching'; impPaint();
+      var item = (j.x && typeof j.x === 'object' && !Array.isArray(j.x)) ? Object.assign({}, j.x) : {};
+      if (j.tmdb && item.tmdb_id == null && item.tmdb == null && item.id == null) item.tmdb_id = j.tmdb;
+      api('/api/fsearch', { method: 'POST', body: JSON.stringify(j.kw ? { item: item, kw: j.kw } : { item: item }), src: j.src, timeout: 45000 })
+        .then(function(r){
+          if (r.status === 'wait'){
+            IMP.gap = Math.max(IMP.gap, r.wait || 10);
+            row.st = 'queued';
+            if (++j.waits > 6){
+              IMP.sq.shift(); IMP.sdone++; IMP.failed.push(j);
+              row.st = 'error'; row.it = Object.assign({}, row.it, { status: 'error', reason: '论坛一直限频，这条没搜成' });
+              return impWait(IMP.gap, next);
+            }
+            return impWait((r.wait || 10) + 1, go);
+          }
+          if (r.status === 'again'){
+            j.kw = r.again; row.st = 'queued'; row.it = Object.assign({}, row.it, { reason: r.reason });
+            return impWait(r.searched ? IMP.gap : 0, go);
+          }
+          IMP.sq.shift(); IMP.sdone++;
+          if (!r.note && row.it && row.it.note) r.note = row.it.note;
+          impTake(j, r, j.src);
+          impWait(r.searched ? IMP.gap : 0, next);
+        }, function(e){
+          IMP.sq.shift(); IMP.sdone++; IMP.failed.push(j);
+          row.st = 'error'; row.it = Object.assign({}, row.it, { status: 'error', reason: '论坛搜索失败：' + (e.message || e) });
+          impWait(IMP.gap, next);
+        });
+    };
+    go();
+  };
+  next();
+}
+function impWait(sec, fn){
+  if (S.view === 'dl') renderDL();
+  if (!(sec > 0)) return fn();
+  IMP.swait = Math.ceil(sec); impPaint();
+  var t = setInterval(function(){
+    IMP.swait--;
+    if (IMP.stop || IMP.swait <= 0){ clearInterval(t); IMP.swait = 0; fn(); return; }
+    impPaint();
+  }, 1000);
+}
+function impBusyText(){
+  return IMP.phase === 'search' ? '论坛搜索 ' + IMP.sdone + ' / ' + IMP.stotal : '查询中 ' + IMP.done + ' / ' + IMP.total;
+}
+function impProgHTML(){
+  if (IMP.phase !== 'search') return '';
+  var left = IMP.stotal - IMP.sdone, per = Math.max(IMP.gap, 2), min = Math.ceil(left * per / 60);
+  return '<span>索引里没有的 ' + IMP.stotal + ' 部，正在论坛搜索页一条条搜'
+    + (IMP.swait ? ' · 论坛限制搜索频率，' + IMP.swait + ' 秒后搜下一条' : '')
+    + (left > 1 && IMP.gap ? ' · 大约还要 ' + min + ' 分钟' : '') + '</span>'
+    + '<button class="btn sm" id="impstop">' + (IMP.stop ? '正在停…' : '停止搜索') + '</button>';
+}
+/** 搜索进行中：只改进度、按钮字和状态变了的那几行，不整页重画（列表不跳、输入框不丢焦点） */
+function impPaint(){
+  if (S.view !== 'dl') return;
+  var b = document.getElementById('impgo'); if (b && IMP.busy) b.textContent = impBusyText();
+  var p = document.getElementById('impprog'); if (p) p.innerHTML = impProgHTML();
+  var bar = document.querySelector('#impcard .bar2 i');
+  if (bar){
+    var f = IMP.phase === 'search' ? (IMP.stotal ? IMP.sdone / IMP.stotal : 0) : (IMP.total ? IMP.done / IMP.total : 0);
+    bar.style.transform = 'scaleX(' + Math.max(.02, f) + ')';
+  }
+  (IMP.rows || []).forEach(function(r, i){
+    var e = document.getElementById('ir' + i);
+    if (e && r && e.getAttribute('data-st') !== r.st) e.outerHTML = impRowHTML(r, i);
+  });
+  impBindRows();
+}
+function impFinish(){
+  IMP.busy = false; IMP.phase = ''; IMP.swait = 0;
+  /* 停下了：还没搜的留着，「继续论坛搜索」接着搜 */
+  IMP.sq.forEach(function(j){ var r = IMP.rows[j.i]; if (r){ r.st = 'notfound'; r.it = Object.assign({}, r.it, { reason: '还没去论坛搜（停下了）' }); } });
+  var n = IMP.added.length, tv = IMP.added.filter(function(a){ return a.src !== S.src; }).length;
+  var inc = (IMP.rows || []).filter(function(r){ return r && r.st === 'incomplete'; }).length;
+  if (S.view === 'dl') renderDL();
+  toast((n ? '加进片单 ' + n + ' 部' + (tv ? '（' + tv + ' 部在另一边的片单）' : '') : '没有新加进片单的')
+    + (inc ? '，' + inc + ' 部还没完结' : '') + (n ? '，看过再点「开始下载」' : ''));
+}
+function impUndo(){
+  var by = {};
+  IMP.added.forEach(function(a){ (by[a.src] = by[a.src] || []).push(a.id); });
+  Object.keys(by).forEach(function(src){ cartDropFrom(src, by[src]); });
+  (IMP.rows || []).forEach(function(r){ if (r && r.st === 'add') r.st = 'undone'; });
+  toast('撤回了这次加进片单的 ' + IMP.added.length + ' 部');
+  IMP.added = [];
+  renderDL();
+}
+/** 「未完结」那行的按钮：服务端已经把版本挑好（rec），直接放进片单 */
+function impPickRec(i, k){
+  var row = IMP.rows && IMP.rows[i];
+  var c = row && row.it && row.it.cands && row.it.cands[k];
+  if (!c || !c.rec) return;
+  var rec = c.rec, rr = cartAddTo(row.src, rec, rec.label || '');
+  row.it = Object.assign({}, rec, { status: 'add', note: row.it.note, reason: '你挑的：' + c.label.replace(/^(仍然)?加入/, '') });
+  row.st = rr === 1 ? 'add' : rr === 0 ? 'incart' : 'full';
+  if (rr === 1) IMP.added.push({ src: row.src, id: rec.id });
+  renderDL();
+}
+function impPick(i, id){
+  var row = IMP.rows && IMP.rows[i];
+  if (!row || IMP.phase === 'index') return;
+  api('/api/cart?ids=' + id, { src: row.src }).then(function(r){
+    var m = r.items && r.items[0];
+    if (!m || m.missing) throw new Error('索引里没有这部了');
+    var rr = cartAddTo(row.src, m, '');
+    row.it = { status: 'add', id: m.id, title: m.title, year: m.year, poster: m.poster, res: m.res, size: m.size, hb: m.hb, note: row.it.note, reason: '你挑的' };
+    row.st = rr === 1 ? 'add' : rr === 0 ? 'incart' : 'full';
+    if (rr === 1) IMP.added.push({ src: row.src, id: m.id });
+    if (m.own) row.it.reason = '你挑的 · 注意：库里' + (m.own === 2 ? '已有' : '可能已有');
+    renderDL();
+  }).catch(function(e){ toast(e.message || String(e)); });
+}
+function impRowHTML(row, i){
+  if (!row) return '';
+  var it = row.it || {}, st = IMP_ST[row.st] || ['', row.st === 'undone' ? '已撤回' : row.st];
+  var name = it.title || (row.x && typeof row.x === 'object' ? (row.x.title || row.x.name || '') : '') || ('第 ' + (i + 1) + ' 条');
+  var bits = [];
+  if (row.st === 'add' || row.st === 'incart'){
+    /* 锁定了版本的（label 里已经有分辨率、HDR）就不再重复写 */
+    bits.push(it.label ? '' : it.res, it.size, it.label ? '' : (it.hb === 7 ? '杜比视界' : it.hb >= 3 ? 'HDR' : ''), it.label, it.reason, it.via ? '经' + it.via : '');
+  } else if (row.st === 'owned') bits.push(it.reason, it.file);
+  else if (row.st === 'invalid' && row.x != null && !it.title) bits.push(it.reason, String(typeof row.x === 'object' ? JSON.stringify(row.x) : row.x).slice(0, 80));
+  else bits.push(it.reason);
+  if (it.note) bits.push('备注：' + it.note);
+  var h = '<div class="irow" id="ir' + i + '" data-st="' + esc(row.st) + '"><span class="dot ' + st[0] + (row.st === 'searching' ? ' live' : '') + '"></span><div class="ib"><b>' + esc(name) + '</b>'
+    + (it.year ? ' <span class="num">' + esc(it.year) + '</span>' : '')
+    + (row.src !== S.src ? ' <span class="pill">' + (row.src === 'tv' ? '剧集' : '电影') + '</span>' : '')
+    + '<em>' + esc(bits.filter(Boolean).join('  ·  ') || '—') + '</em>';
+  if (row.st === 'owned' && it.id)
+    h += '<div class="cands"><button class="btn sm" data-icand="' + i + ':' + it.id + '">仍然加入（换个版本）</button></div>';
+  if (row.st === 'incomplete' && it.cands && it.cands.length)
+    h += '<div class="cands">' + it.cands.map(function(c, k){
+      return '<button class="btn sm" data-irec="' + i + ':' + k + '">' + esc(c.label) + '</button>';
+    }).join('') + '</div>';
+  if (row.st === 'ambiguous' && it.cands)
+    h += '<div class="cands">' + it.cands.map(function(c){
+      return '<button class="btn sm" data-icand="' + i + ':' + c.id + '">' + esc(c.title + (c.year ? ' (' + c.year + ')' : '')) + (c.own ? ' · 库' + (c.own === 2 ? '中已有' : '里可能有') : '') + '</button>';
+    }).join('') + '</div>';
+  return h + '</div><span class="pill ' + st[0] + '">' + esc(st[1]) + '</span></div>';
+}
+function impHTML(){
+  if (!IMP.open) return '';
+  var h = '<div class="card imp" id="impcard"><div class="hd"><h2 class="sec">导入清单</h2><span class="sub">JSON · CSV · 每行一条</span></div>'
+    + '<textarea id="imptx" spellcheck="false" autocomplete="off" aria-label="清单" placeholder="' + esc(IMP_SAMPLE) + '"' + (IMP.busy ? ' disabled' : '') + '>' + esc(IMP.text) + '</textarea>'
+    + '<p class="fine">每条至少有 <b>tmdb_id</b> 或 <b>title</b>；还可以写 year、type（movie / tv）、season、res（2160p / 1080p / 720p）、hdr（dv / hdr / sdr）、max_gb、prefer（remux / bluray / web）、note。'
+    + '库里已有的自动跳过；论坛有的按偏好挑好版本放进片单，剧集只要整季包（全 N 集），单集和没完结的不加；索引里没有的自动去论坛搜索页搜。'
+    + '只是放进片单，点「开始下载」之前什么都不会下。</p>'
+    + '<div class="row"><button class="btn on fixed" id="impgo"' + (IMP.busy ? ' disabled' : '') + '>' + (IMP.busy ? impBusyText() : '查询并加入片单') + '</button>'
+    + '<label class="btn" for="impfile"' + (IMP.busy ? ' aria-disabled="true"' : '') + '>选文件</label>'
+    + '<input type="file" id="impfile" accept=".json,.csv,.tsv,.txt,application/json,text/csv,text/plain" hidden>'
+    + '<button class="btn" id="impeg"' + (IMP.busy ? ' disabled' : '') + '>填入示例</button>'
+    + '<span class="grow"></span><button class="btn sm" id="impx"' + (IMP.busy ? ' disabled' : '') + '>收起</button></div>';
+  if (IMP.busy){
+    var frac = IMP.phase === 'search' ? (IMP.stotal ? IMP.sdone / IMP.stotal : 0) : (IMP.total ? IMP.done / IMP.total : 0);
+    h += '<div class="bar2" style="margin-top:14px"><i style="transform:scaleX(' + Math.max(.02, frac) + ')"></i></div>'
+      + '<div class="row imp-prog" id="impprog">' + impProgHTML() + '</div>';
+  }
+  if (IMP.note) h += '<div class="warnbox">' + esc(IMP.note) + '</div>';
+  if (IMP.rows && IMP.rows.length){
+    var cnt = {}, rows = IMP.rows;
+    rows.forEach(function(r){ if (r) cnt[r.st] = (cnt[r.st] || 0) + 1; });
+    h += '<div class="imp-sum">' + Object.keys(IMP_ST).concat(['undone']).filter(function(k){ return cnt[k]; }).map(function(k){
+      return '<span class="pill ' + (IMP_ST[k] ? IMP_ST[k][0] : '') + '">' + (IMP_ST[k] ? IMP_ST[k][1] : '已撤回') + ' <b class="num">' + cnt[k] + '</b></span>';
+    }).join('') + '</div>';
+    if (!IMP.busy){
+      var other = IMP.added.filter(function(a){ return a.src !== S.src; }).length;
+      h += '<p class="fine">' + (IMP.added.length ? '这次加进片单 ' + IMP.added.length + ' 部' + (other ? '（其中 ' + other + ' 部在' + (S.src === 'tv' ? '电影' : '剧集') + '的片单里，切过去就能看到）' : '') + '。看一眼下面的片单，没问题再点「开始下载」。' : '这次没有新加进片单的。')
+        + (IMP.nolib ? ' 片库这次没连上，没法排除库里已有的 —— 下载前留意一下。' : '') + '</p>';
+      h += '<div class="row" style="margin-bottom:6px">'
+        + (IMP.added.length ? '<button class="btn sm" id="impundo">撤回这次加入的 ' + IMP.added.length + ' 部</button>' : '')
+        + (IMP.sq.length ? '<button class="btn sm" id="impmore">继续论坛搜索（剩 ' + IMP.sq.length + ' 条）</button>' : '')
+        + (IMP.failed.length ? '<button class="btn sm" id="impretry">重试没查成的 ' + IMP.failed.length + ' 条</button>' : '')
+        + '<button class="btn sm" id="impclr">清掉结果</button></div>';
+    }
+    h += '<div class="ilist">' + rows.map(impRowHTML).join('') + '</div>';
+  }
+  return h + '</div>';
+}
+function impBind(){
+  var g = function(id){ return document.getElementById(id); };
+  var on = function(id, fn){ var e = g(id); if (e) e.onclick = fn; };
+  var ta = g('imptx');
+  if (ta) ta.oninput = function(){ IMP.text = ta.value; };
+  on('impopen', function(){ IMP.open = true; renderDL(); var t = g('imptx'); if (t) t.focus(); });
+  on('impopen2', function(){ IMP.open = true; renderDL(); var t = g('imptx'); if (t) t.focus(); });
+  on('impx', function(){ if (!IMP.busy){ IMP.open = false; renderDL(); } });
+  on('impgo', impStart);
+  on('impeg', function(){ IMP.text = IMP_SAMPLE; IMP.note = ''; renderDL(); });
+  on('impundo', impUndo);
+  on('impretry', function(){ var f = IMP.failed.slice(); if (f.length && !IMP.busy){ IMP.note = ''; impRun(f); } });
+  on('impclr', function(){ IMP.rows = null; IMP.added = []; IMP.failed = []; IMP.sq = []; IMP.note = ''; renderDL(); });
+  on('impmore', function(){ if (!IMP.busy && IMP.sq.length) impSearch(); });
+  impBindRows();
+  var f = g('impfile');
+  if (f) f.onchange = function(){
+    var file = f.files && f.files[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024){ toast('文件太大（超过 2MB）'); return; }
+    var rd = new FileReader();
+    rd.onload = function(){ IMP.text = String(rd.result || ''); IMP.note = '读进来了：' + file.name + '（' + impParse(IMP.text).items.length + ' 条），点「查询并加入片单」'; renderDL(); };
+    rd.onerror = function(){ toast('文件读不出来'); };
+    rd.readAsText(file);
+  };
+}
+function impBindRows(){
+  var st = document.getElementById('impstop');
+  if (st) st.onclick = function(){ IMP.stop = true; st.textContent = '正在停…'; };
+  [].forEach.call(document.querySelectorAll('[data-icand]'), function(b){
+    b.onclick = function(){ var p = b.dataset.icand.split(':'); impPick(+p[0], +p[1]); };
+  });
+  [].forEach.call(document.querySelectorAll('[data-irec]'), function(b){
+    b.onclick = function(){ var p = b.dataset.irec.split(':'); impPickRec(+p[0], +p[1]); };
+  });
+}
+/* ══════════ [v6.9] 推送到 PikPak ══════════
+   片单里的片直接在 PikPak 里建「云下载」任务，存到选好的文件夹。账号在 Worker 变量里（PIKPAK_USER / PIKPAK_PASS），
+   这里只管：选文件夹（逐层进、可新建，选好的记在本机）、一批 4 部地推、推过的打标记（同一个文件夹不重复推）。 */
+var PKS = { open:false, st:null, stErr:'', browse:false, cur:null, list:null, listErr:'', loading:false, mk:false,
+            run:false, stop:false, done:0, total:0, ok:0, fail:0, msg:'', rows:null, again:false };
+function pkLoad(){ try { var v = JSON.parse(localStorage.getItem('cvpk') || 'null'); if (v && typeof v === 'object') return v; } catch(e){} return {}; }
+var PKC = pkLoad();
+if (!PKC.pushed) PKC.pushed = {};
+function pkSave(){ try { localStorage.setItem('cvpk', JSON.stringify(PKC)); } catch(e){} }
+function pkFolder(){ return PKC.folder || { id: '', path: [] }; }
+function pkPathText(f){ f = f || pkFolder(); return f.id ? '/' + f.path.map(function(x){ return x.name; }).join('/') : '默认位置（My Pack）'; }
+/** 空间：PikPak 动辄几 TB，到 1 TB 就按 TB 写 */
+function pkSize(b){ b = Number(b) || 0; return b >= 1099511627776 ? (b / 1099511627776).toFixed(b >= 10995116277760 ? 0 : 1).replace(/\.0$/, '') + ' TB' : fmtSize(b); }
+function pkTid(m){ return m && m.sid ? parseInt(m.sid, 36) : 0; }
+function pkPushedHere(m){ var r = PKC.pushed[pkTid(m)]; return !!(r && r.f === pkFolder().id); }
+function pkTodo(){
+  return CART.ord.map(function(id){ return CART.o[id]; }).filter(function(m){ return m && pkTid(m) > 0 && (PKS.again || !pkPushedHere(m)); });
+}
+function pkStatus(){
+  PKS.st = null; PKS.stErr = '';
+  api('/api/pikpak').then(function(r){ PKS.st = r; }, function(e){ PKS.stErr = e.message || String(e); })
+    .then(function(){ if (S.view === 'dl') renderDL(); });
+}
+function pkBrowse(f){
+  PKS.browse = true; PKS.cur = f; PKS.list = null; PKS.listErr = ''; PKS.loading = true; PKS.mk = false;
+  if (S.view === 'dl') renderDL();
+  api('/api/pikpak?do=ls&parent=' + encodeURIComponent(f.id || '')).then(function(r){ PKS.list = r.folders || []; PKS.more = r.more; },
+    function(e){ PKS.listErr = e.message || String(e); })
+    .then(function(){ PKS.loading = false; if (S.view === 'dl') renderDL(); });
+}
+function pkMkdir(name){
+  var f = PKS.cur || { id: '', path: [] };
+  name = String(name || '').trim();
+  if (!name) return;
+  PKS.loading = true; if (S.view === 'dl') renderDL();
+  api('/api/pikpak?do=mkdir', { method: 'POST', body: JSON.stringify({ parent: f.id, name: name }) }).then(function(r){
+    toast('建好了：' + r.name);
+    pkBrowse({ id: r.id, path: f.path.concat([{ id: r.id, name: r.name }]) });
+  }, function(e){ PKS.loading = false; PKS.listErr = e.message || String(e); if (S.view === 'dl') renderDL(); });
+}
+function pkPick(f){
+  PKC.folder = { id: f.id || '', path: f.path || [] }; pkSave();
+  PKS.browse = false; toast('推送到：' + pkPathText());
+  if (S.view === 'dl') renderDL();
+}
+function pkStart(){
+  if (PKS.run) return;
+  var todo = pkTodo();
+  if (!todo.length){ toast('片单里的都已经推送到这个文件夹了'); return; }
+  var f = pkFolder();
+  PKS.run = true; PKS.stop = false; PKS.done = 0; PKS.ok = 0; PKS.fail = 0; PKS.msg = ''; PKS.total = todo.length;
+  PKS.rows = todo.map(function(m){ return { tid: pkTid(m), id: m.id, name: relName(m), title: m.title, st: 'wait', msg: '' }; });
+  var by = {}; PKS.rows.forEach(function(r){ by[r.tid] = r; });
+  var tries = {}, soft = 0, batch = (PKS.st && PKS.st.batch) || 4;
+  renderDL();
+  var finish = function(){
+    PKS.run = false;
+    if (S.view === 'dl') renderDL();
+    toast(PKS.msg ? 'PikPak：' + PKS.msg.slice(0, 40) : '推送完成：成功 ' + PKS.ok + ' 部' + (PKS.fail ? '，失败 ' + PKS.fail + ' 部' : ''));
+  };
+  var step = function(){
+    if (PKS.stop){ PKS.msg = PKS.msg || '已停止'; return finish(); }
+    var left = PKS.rows.filter(function(r){ return r.st === 'wait'; });
+    if (!left.length) return finish();
+    var take = left.slice(0, batch);
+    take.forEach(function(r){ r.st = 'run'; });
+    pkPaint();
+    api('/api/pikpush', { method: 'POST', body: JSON.stringify({ parent: f.id, items: take.map(function(r){ return { tid: r.tid, name: r.name }; }) }), timeout: 60000 })
+      .then(function(res){
+        soft = 0;
+        var progress = 0;
+        (res.items || []).forEach(function(x){
+          var r = by[x.tid]; if (!r) return;
+          if (x.ok){ r.st = 'ok'; r.msg = x.name || ''; PKS.ok++; PKS.done++; progress++;
+            PKC.pushed[x.tid] = { f: f.id, at: Date.now(), task: x.task || '' }; }
+          else if (x.retry){
+            r.st = 'wait';
+            if (x.soft && (tries[x.tid] = (tries[x.tid] || 0) + 1) >= 4){ r.st = 'fail'; r.msg = x.err || '多次重试仍不行'; PKS.fail++; PKS.done++; }
+          } else { r.st = 'fail'; r.msg = x.err || '推送失败'; PKS.fail++; PKS.done++; progress++; }
+        });
+        take.forEach(function(r){ if (r.st === 'run') r.st = 'wait'; });
+        pkSave();
+        if (res.stop){ PKS.msg = res.stop; PKS.stop = true; }
+        if (!progress && !res.stop) return sleep(2500).then(step);
+        step();
+      }, function(e){
+        take.forEach(function(r){ if (r.st === 'run') r.st = 'wait'; });
+        var d = e.data || {};
+        if (d.pk){ PKS.msg = e.message; PKS.stop = true; return step(); }
+        if (++soft > 5){ PKS.msg = e.message || String(e); PKS.stop = true; return step(); }
+        sleep(1500 * soft).then(step);
+      });
+  };
+  step();
+}
+function pkPaint(){
+  if (S.view !== 'dl') return;
+  var b = document.getElementById('pkgo'); if (b && PKS.run) b.textContent = '推送中 ' + PKS.done + ' / ' + PKS.total;
+  var bar = document.querySelector('#pkcard .bar2 i');
+  if (bar) bar.style.transform = 'scaleX(' + Math.max(.02, PKS.total ? PKS.done / PKS.total : 0) + ')';
+  (PKS.rows || []).forEach(function(r, i){ var e = document.getElementById('pkr' + i); if (e && e.getAttribute('data-st') !== r.st) e.outerHTML = pkRowHTML(r, i); });
+}
+var PK_ST = { wait:['', '待推'], run:['', '推送中'], ok:['ok', '已推送'], fail:['bad', '失败'] };
+function pkRowHTML(r, i){
+  var s = PK_ST[r.st] || ['', r.st];
+  return '<div class="irow" id="pkr' + i + '" data-st="' + r.st + '"><span class="dot ' + s[0] + (r.st === 'run' ? ' live' : '') + '"></span>'
+    + '<div class="ib"><b>' + esc(r.title || r.name) + '</b><em>' + esc(r.msg || (r.st === 'ok' ? '已建云下载任务' : '—')) + '</em></div>'
+    + '<span class="pill ' + s[0] + '">' + s[1] + '</span></div>';
+}
+function pkHTML(){
+  if (!PKS.open) return '';
+  var st = PKS.st, h = '<div class="card pk" id="pkcard"><div class="hd"><h2 class="sec">推送到 PikPak</h2>'
+    + '<span class="sub">' + (st && st.ok ? esc(st.user) + (st.limit ? ' · ' + pkSize(st.usage) + ' / ' + pkSize(st.limit) : '') : '云下载') + '</span></div>';
+  if (PKS.stErr) h += '<div class="err" style="margin:0 0 12px">' + esc(PKS.stErr) + '</div>';
+  if (!st && !PKS.stErr) return h + '<p class="fine">正在连 PikPak…</p></div>';
+  if (st && !st.on) return h + '<div class="warnbox" style="margin:0 0 12px">' + esc(st.hint) + '</div>'
+    + '<div class="row"><button class="btn sm" id="pkre">配好了，重新检查</button><span class="grow"></span><button class="btn sm" id="pkx">收起</button></div></div>';
+  if (st && !st.ok) h += '<div class="err" style="margin:0 0 12px">' + esc(st.err || 'PikPak 连不上') + '</div>';
+  if (PKS.browse){
+    var c = PKS.cur || { id: '', path: [] };
+    h += '<div class="pkcrumb"><button class="link" data-pkgo="-1">根目录</button>'
+      + c.path.map(function(x, k){ return ' <span>›</span> <button class="link" data-pkgo="' + k + '">' + esc(x.name) + '</button>'; }).join('') + '</div>';
+    if (PKS.listErr) h += '<div class="err" style="margin:10px 0">' + esc(PKS.listErr) + '</div>';
+    h += '<div class="pklist">';
+    if (PKS.loading) h += '<p class="fine" style="padding:12px 2px">读取中…</p>';
+    else if (PKS.list && !PKS.list.length) h += '<p class="fine" style="padding:12px 2px">这里没有子文件夹</p>';
+    else if (PKS.list) h += PKS.list.map(function(x, k){ return '<button class="pkdir" data-pkin="' + k + '"><span>📁</span><b>' + esc(x.name) + '</b><i>›</i></button>'; }).join('');
+    h += '</div>';
+    if (PKS.more) h += '<p class="fine">子文件夹太多，只列了前 800 个</p>';
+    h += PKS.mk ? '<div class="row" style="margin-top:12px"><div class="field pkname"><input id="pkname" placeholder="新文件夹的名字" maxlength="80" autocomplete="off"></div>'
+        + '<button class="btn sm on" id="pkmkok">建</button><button class="btn sm" id="pkmkno">取消</button></div>' : '';
+    h += '<div class="row" style="margin-top:14px"><button class="btn on" id="pkuse">存到「' + esc(c.id ? c.path[c.path.length - 1].name : '根目录') + '」</button>'
+      + (PKS.mk ? '' : '<button class="btn" id="pkmk">新建文件夹</button>') + '<button class="btn" id="pkdef">用默认位置</button>'
+      + '<span class="grow"></span><button class="btn sm" id="pkcancel">取消</button></div>';
+    return h + '</div>';
+  }
+  var todo = pkTodo(), pushed = CART.ord.filter(function(id){ return pkPushedHere(CART.o[id]); }).length;
+  h += '<div class="pkdest"><span>存到</span><b>' + esc(pkPathText()) + '</b><button class="btn sm" id="pkchoose"' + (PKS.run ? ' disabled' : '') + '>换文件夹</button></div>';
+  h += '<p class="fine">每部片在 PikPak 里建一个云下载任务：有种子的换成磁力（带着种子里的 tracker），只有磁力的直接用。PikPak 自己去下，下好就在这个文件夹里。</p>';
+  h += '<div class="row"><button class="btn on fixed" id="pkgo"' + (PKS.run || !todo.length || (st && !st.ok) ? ' disabled' : '') + '>'
+    + (PKS.run ? '推送中 ' + PKS.done + ' / ' + PKS.total : '推送 ' + todo.length + ' 部') + '</button>'
+    + (PKS.run ? '<button class="btn" id="pkstop">停止</button>' : '')
+    + (!PKS.run && pushed ? '<button class="btn sm" id="pkagain">' + (PKS.again ? '跳过已推送的' : '已推送过的 ' + pushed + ' 部也重推') + '</button>' : '')
+    + '<span class="grow"></span><button class="btn sm" id="pkx"' + (PKS.run ? ' disabled' : '') + '>收起</button></div>';
+  if (pushed && !PKS.again && !PKS.run) h += '<p class="fine" style="margin-top:10px">片单里有 ' + pushed + ' 部已经推送到这个文件夹，这次跳过。</p>';
+  if (PKS.run) h += '<div class="bar2" style="margin-top:14px"><i style="transform:scaleX(' + Math.max(.02, PKS.total ? PKS.done / PKS.total : 0) + ')"></i></div>';
+  if (PKS.msg) h += '<div class="warnbox">' + esc(PKS.msg) + '</div>';
+  if (PKS.rows && PKS.rows.length){
+    if (!PKS.run) h += '<div class="imp-sum"><span class="pill ok">已推送 <b class="num">' + PKS.ok + '</b></span>'
+      + (PKS.fail ? '<span class="pill bad">失败 <b class="num">' + PKS.fail + '</b></span>' : '')
+      + (PKS.rows.some(function(r){ return r.st === 'wait'; }) ? '<span class="pill">没推 <b class="num">' + PKS.rows.filter(function(r){ return r.st === 'wait'; }).length + '</b></span>' : '') + '</div>'
+      + (PKS.ok ? '<div class="row" style="margin-bottom:6px"><button class="btn sm" id="pkdrop">从片单里移除推送成功的 ' + PKS.ok + ' 部</button></div>' : '');
+    h += '<div class="ilist">' + PKS.rows.map(pkRowHTML).join('') + '</div>';
+  }
+  return h + '</div>';
+}
+function pkBind(){
+  var g = function(id){ return document.getElementById(id); };
+  var on = function(id, fn){ var e = g(id); if (e) e.onclick = fn; };
+  on('pkopen', function(){ PKS.open = true; if (!PKS.st) pkStatus(); renderDL(); var c = g('pkcard'); if (c && c.scrollIntoView) c.scrollIntoView({ block: 'nearest' }); });
+  on('pkx', function(){ if (!PKS.run){ PKS.open = false; renderDL(); } });
+  on('pkre', pkStatus);
+  on('pkchoose', function(){ pkBrowse(pkFolder().id ? pkFolder() : { id: '', path: [] }); });
+  on('pkcancel', function(){ PKS.browse = false; renderDL(); });
+  on('pkuse', function(){ pkPick(PKS.cur || { id: '', path: [] }); });
+  on('pkdef', function(){ pkPick({ id: '', path: [] }); });
+  on('pkmk', function(){ PKS.mk = true; renderDL(); var i = g('pkname'); if (i) i.focus(); });
+  on('pkmkno', function(){ PKS.mk = false; renderDL(); });
+  on('pkmkok', function(){ var i = g('pkname'); pkMkdir(i && i.value); });
+  var nm = g('pkname'); if (nm) nm.onkeydown = function(ev){ if (ev.key === 'Enter') pkMkdir(nm.value); };
+  on('pkgo', pkStart);
+  on('pkstop', function(){ PKS.stop = true; var b = g('pkstop'); if (b) b.textContent = '正在停…'; });
+  on('pkagain', function(){ PKS.again = !PKS.again; renderDL(); });
+  on('pkdrop', function(){
+    var ids = (PKS.rows || []).filter(function(r){ return r.st === 'ok'; }).map(function(r){ return r.id; });
+    ids.forEach(function(id){ if (CART.o[id]){ delete CART.o[id]; markTile(id, false); } });
+    CART.ord = CART.ord.filter(function(x){ return CART.o[x]; }); cartSave(); paintDock();
+    PKS.rows = PKS.rows.filter(function(r){ return r.st !== 'ok'; }); PKS.ok = 0;
+    toast('从片单里移除了 ' + ids.length + ' 部'); renderDL();
+  });
+  [].forEach.call(document.querySelectorAll('[data-pkin]'), function(b){
+    b.onclick = function(){ var x = PKS.list[+b.dataset.pkin], c = PKS.cur || { id: '', path: [] }; pkBrowse({ id: x.id, path: c.path.concat([{ id: x.id, name: x.name }]) }); };
+  });
+  [].forEach.call(document.querySelectorAll('[data-pkgo]'), function(b){
+    b.onclick = function(){ var k = +b.dataset.pkgo, c = PKS.cur || { id: '', path: [] };
+      if (k < 0) pkBrowse({ id: '', path: [] }); else { var p = c.path.slice(0, k + 1); pkBrowse({ id: p[k].id, path: p }); } };
+  });
+}
 function renderDL(){
   S.view = 'dl'; backEl.classList.remove('on'); setNav('dl');
   if (io) io.disconnect();
   var n = cartCount(), j = DL.job;
-  var h = '<h1>片单</h1><p class="lede">点海报加进来，一次最多 ' + MAX + ' 部；取齐之后在本机压成一个包</p>';
+  var h = '<h1>片单</h1><p class="lede">点海报加进来，或导入一张清单；一次最多 ' + MAX + ' 部，取齐之后在本机压成一个包</p>';
 
   if (j){
     var pct = j.total ? Math.round(DL.got / j.total * 100) : 0;
@@ -8854,37 +10244,46 @@ function renderDL(){
     h += '<div class="qlist">' + j.items.map(function(it){ return qrowHTML(it, j); }).join('') + '</div></div>';
   }
 
+  h += impHTML();
+  h += pkHTML();
   h += '<div class="card"><div class="hd"><h2 class="sec">片单</h2>'
-    + '<span class="sub">' + n + ' / ' + MAX + '</span></div>';
+    + '<div class="row" style="column-gap:12px"><span class="sub">' + n + ' / ' + MAX + '</span>'
+    + (IMP.open ? '' : '<button class="btn sm" id="impopen">导入清单</button>') + '</div></div>';
   if (!n) h += '<div class="empty" style="--empty-h:190px"><h3>片单是空的</h3>'
     + '<p>在片库点海报就能加进来。全部取齐之后会在本机压成一个包。</p>'
-    + '<div class="row"><button class="btn on" id="tolib">去片库挑片</button></div></div>';
+    + '<div class="row"><button class="btn on" id="tolib">去片库挑片</button>'
+    + (IMP.open ? '' : '<button class="btn" id="impopen2">导入清单</button>') + '</div></div>';
   else {
     h += CART.ord.map(function(id){
       var m = CART.o[id]; if (!m) return '';
       var line = [m.own === 2 ? '库中已有' : m.own === 1 ? '疑似已有' : '', m.res, m.size,
         m.hb === 7 ? '杜比视界' : m.hb >= 3 ? 'HDR' : '',
-        m.pickLabel ? '已指定：' + m.pickLabel : ''].filter(Boolean).join('  ·  ') || '默认最佳片源';
+        m.pickLabel ? '已指定：' + m.pickLabel : '', m.ext ? '论坛搜索' : '',
+        PKC.pushed[pkTid(m)] ? '已推送到 PikPak' : ''].filter(Boolean).join('  ·  ') || '默认最佳片源';
       return '<div class="citem" data-id="' + id + '"><div class="cth">'
         + (m.poster ? '<img loading="lazy" decoding="async" src="' + img(m.poster) + '" alt="">' : '') + '</div>'
         + '<div class="cb"><b>' + esc(m.title) + '</b><em>'
         + esc([m.year, line].filter(Boolean).join('  ·  ')) + '</em></div>'
-        + '<button class="btn sm" data-open="' + id + '">换版本</button>'
+        + (m.ext ? '' : '<button class="btn sm" data-open="' + id + '">换版本</button>')
         + '<button class="cx" data-del="' + id + '" aria-label="移除">✕</button></div>';
     }).join('');
     h += '<div class="row" style="margin-top:16px">'
       + '<button class="btn on" id="dstart">' + (j && !sameJob() ? '按当前片单重新下载' : '开始下载 ' + n + ' 部') + '</button>'
+      + (PKS.open ? '' : '<button class="btn" id="pkopen">推送到 PikPak</button>')
       + '<button class="btn" id="dclr2">清空片单</button></div>';
   }
   h += '</div>';
-  h += '<p class="fine" style="margin:4px 2px 0">取件按批落进本机数据库，刷新、断网、关页都不丢，回来只补缺的那几部。</p>';
+  h += '<p class="fine" style="margin:4px 2px 0">取件按批落进本机数据库，刷新、断网、关页都不丢，回来只补缺的那几部。'
+    + '压缩包解压出来是一个文件夹，里面每 ' + PACK_PER + ' 部一个子文件夹（001-020、021-040…），按片单顺序，附一份清单。</p>';
 
-  var oldQ = out.querySelector('.qlist');
-  var keep = oldQ ? oldQ.scrollTop : 0;
+  var oldQ = out.querySelector('.qlist'), oldI = out.querySelector('.ilist');
+  var keep = oldQ ? oldQ.scrollTop : 0, keepI = oldI ? oldI.scrollTop : 0;
   out.innerHTML = h;
   DL._pp = DL.phase;
   var newQ = out.querySelector('.qlist');
   if (newQ && keep) newQ.scrollTop = keep;
+  var newI = out.querySelector('.ilist');
+  if (newI && keepI) newI.scrollTop = keepI;
   if (!DL.run) paint();
   var bind = function(id, fn){ var e = document.getElementById(id); if (e) e.onclick = fn; };
   bind('dstart', function(){
@@ -8896,6 +10295,8 @@ function renderDL(){
   bind('ddrop', function(){ DL.clear().then(function(){ renderDL(); toast('任务已清除'); }); });
   bind('dclr2', clearCart);
   bind('tolib', function(){ view('lib'); });
+  impBind();
+  pkBind();
   [].forEach.call(out.querySelectorAll('[data-del]'), function(b){
     b.onclick = function(){ cartDel(+b.dataset.del); };
   });

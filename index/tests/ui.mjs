@@ -10,7 +10,8 @@ let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('  ✓', m); } else { fail++; console.log('  ✗', m); } };
 
 /* 一个有内容的小索引：两年、十几部片、每部几个版本，片库总账里有几部 */
-const { env, W } = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+const { env, W } = H.makeEnv({ RECV_BASE: 'https://recv.test', PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'pk-secret' });
+W.pk.folders.push({ id: 'f-movie', name: '电影', parent: '' }, { id: 'f-tv', name: '剧集', parent: '' });
 const NAMES = [['沙丘：第二部', 'Dune Part Two'], ['奥本海默', 'Oppenheimer'], ['芭比', 'Barbie'], ['流浪地球2', 'The Wandering Earth II'],
   ['满江红', 'Full River Red'], ['封神第一部', 'Creation of the Gods'], ['长安三万里', 'Chang An'], ['孤注一掷', 'No More Bets'],
   ['消失的她', 'Lost in the Stars'], ['热辣滚烫', 'YOLO'], ['飞驰人生2', 'Pegasus 2'], ['第二十条', 'Article 20'], ['坚如磐石', 'Under the Light'], ['巨齿鲨2', 'Meg 2']];
@@ -29,6 +30,16 @@ const fn = (i, y) => `${NAMES[i][0]}.${NAMES[i][1].replace(/ /g, '.')}.${y}.2160
 W.recv.files = { root: '/ram', _gen: 'u1', _ts: Date.now() - 120000, videos: [{ name: 'x.mkv', path: '/ram/x.mkv' }, { name: fn(2, 2024), path: '/ram/' + fn(2, 2024) }] };
 W.recv.ptr = { g: 'u1' };
 W.recv.doc.items[0].path = '/ram/x.mkv';
+/* [v6.7] 只在论坛搜索里有的剧（剧集索引是空的）：一部有全集，一部只有单集 */
+W.tmdb.tv.push({ id: 520001, name: '夫妻的博弈', original_name: 'Mrs Revenge', first_air_date: '2026-03-01', poster_path: '/s1.jpg', popularity: 9, vote_average: 7, vote_count: 50 });
+W.tmdb.tv.push({ id: 520002, name: '风，带有香气', original_name: 'Kaze Kaoru', first_air_date: '2026-03-01', poster_path: '/s2.jpg', popularity: 9, vote_average: 7, vote_count: 50 });
+W.forum.searchOnly = [
+  { tid: 90001, fid: 2, title: '夫妻的博弈[高码版][全25集][国粤多音轨/中文字幕].Mrs.Revenge.S01.2026.2160p.HQ.WEB-DL.H265.AAC.2Audio-BlackTV 123.42GB' },
+  { tid: 90002, fid: 2, title: '夫妻的博弈[第25集][中文字幕].Mrs.Revenge.S01E25.2026.2160p.WEB-DL.H265.DV-BlackTV 5.1GB' },
+  { tid: 90003, fid: 2, title: '风，带有香气[第123集][中文字幕].Kaze.Kaoru.S01.1080p.LINETV.WEB-DL.AAC2.0.H.264-BlackTV 0.34GB' },
+];
+/* 每个帖子一个种子附件：「开始下载」→ 取件 → 本机打包这条链路能走通 */
+for (let t = 40000; t < tid; t++) W.forum.threads[t] = { attach: [{ aid: 'A' + t, name: 't' + t + '.torrent', bytes: H.torrent({ name: 'f' + t + '.mkv', length: 9, 'piece length': 16384, pieces: Buffer.alloc(20) }).bytes }] };
 const I = H.isolate(env, W);
 for (let i = 0; i < 30; i++) { const r = await (await I.call('/api/build')).json(); if (r.done || r.error) break; }
 await I.call('/api/lib?refresh=1'); await I.settle();
@@ -140,6 +151,176 @@ for (const [label, opt] of [['手机', { ...devices['iPhone 14'] }], ['手机 ·
   await p.waitForTimeout(200);
   const th = await p.evaluate(() => document.documentElement.getAttribute('data-theme'));
   ok(['light', 'dark', 'auto'].includes(th), '外观钮能切换（' + th + '）');
+  ok(!errs.length, '页面零报错' + (errs.length ? '：' + errs.slice(0, 3).join(' | ') : ''));
+  await ctx.close();
+}
+
+/* [v6.6] 导入清单：贴一张表 → 库里没有的进片单，库里有的跳过；什么都不会自己开始下载 */
+for (const [label, opt] of [['导入清单 · 手机', { ...devices['iPhone 14'] }], ['导入清单 · 桌面', { viewport: { width: 1280, height: 860 } }]]) {
+  console.log('\n■ ' + label);
+  const { p, ctx, errs } = await page(opt);
+  await p.click('#nav button[data-v="dl"]');
+  await settle(p);
+  await p.click('#impopen2');
+  await p.waitForSelector('#imptx');
+  /* 几种格式都认 */
+  const parsed = await p.evaluate(() => ({
+    json: impParse('[{"tmdb_id":1,"title":"a"}]').items.length,
+    wrap: impParse('{"items":[{"title":"a"},{"title":"b"}]}').items.length,
+    jsonl: impParse('{"title":"a"}\n{"title":"b"}\n{"title":"c"}').items.length,
+    csv: impParse('tmdb_id,title,year\n911430,"F1：狂飙飞车",2025\n,沙丘2,2024').items,
+    line: impParse('tmbd_id(1):911430/title:F1：狂飙飞车/year:2025\ntmdb_id(2):693134/title:沙丘2/res:2160p').items,
+    plain: impParse('奥本海默 2023\n2. 芭比\n94997').items,
+  }));
+  ok(parsed.json === 1 && parsed.wrap === 2 && parsed.jsonl === 3, '认得 JSON 数组、{"items":[…]}、每行一个 JSON 对象');
+  ok(parsed.csv.length === 2 && parsed.csv[0].title === 'F1：狂飙飞车' && parsed.csv[0].tmdb_id === '911430' && parsed.csv[1].title === '沙丘2' && !parsed.csv[1].tmdb_id, 'CSV（带表头、引号里的全角冒号不乱切）');
+  ok(parsed.line.length === 2 && parsed.line[0]['tmdb_id'] === '911430' && parsed.line[0].title === 'F1：狂飙飞车' && parsed.line[0].year === '2025' && parsed.line[1].res === '2160p',
+    '「tmbd_id(1):xxxx/title:xxx/year:…」一行一条（拼错的 tmbd、带序号的键、片名里的全角冒号都没问题）');
+  ok(parsed.plain[0].title === '奥本海默' && parsed.plain[0].year === '2023' && parsed.plain[1].title === '芭比' && parsed.plain[2].tmdb_id === '94997', '每行一个片名（末尾年份拆出来、去掉「2.」序号）或一个 TMDB 编号');
+  const list = [
+    { tmdb_id: 700001, title: '奥本海默' },
+    { title: '芭比', year: 2024 },
+    { title: '满江红', year: 2024, res: '1080p', note: '周末看' },
+    { title: '孤注一掷', year: 2025 },
+    { tmdb_id: 700001 },
+    { title: '根本没有这部片', year: 2025 },
+    { tmdb_id: 94997, type: 'tv', title: '某部剧' },
+    { year: 2024 },
+  ];
+  await p.fill('#imptx', JSON.stringify(list, null, 2));
+  await p.click('#impgo');
+  await p.waitForFunction(() => !IMP.busy && IMP.rows && IMP.rows.length, null, { timeout: 15000 });
+  await settle(p);
+  const r = await p.evaluate(() => ({
+    st: IMP.rows.map(x => x && x.st),
+    cart: CART.ord.slice(), pick: CART.o[700004] && CART.o[700004].pickLabel, res: CART.o[700004] && CART.o[700004].res,
+    job: !!document.getElementById('dlprog'), start: (document.getElementById('dstart') || {}).textContent || '',
+    pills: [].map.call(document.querySelectorAll('.imp-sum .pill'), e => e.textContent.replace(/\s+/g, ' ')).join(' / '),
+    tvRow: (document.querySelectorAll('.irow')[6] || {}).textContent || '',
+    over: document.documentElement.scrollWidth - innerWidth,
+    cnt: document.getElementById('ncart').textContent,
+  }));
+  ok(r.st.join(' ') === 'add owned add add dup notfound notfound invalid', '每条的结果：' + r.st.join(' '));
+  ok(r.cart.length === 3 && r.cart.includes(700001) && r.cart.includes(700004) && r.cart.includes(700007) && r.cnt === '3', '库里没有的 3 部进了片单（坞上的数字 ' + r.cnt + '），库里已有的「芭比」没进');
+  ok(r.res === '1080p' && /1080p/.test(r.pick || ''), '写了 res: 1080p 的那条挑的是 1080p 版（片单里标「已指定：' + r.pick + '」）');
+  ok(!r.job && /开始下载 3 部/.test(r.start), '只是放进片单：没有开始任何下载，等人点「' + r.start + '」');
+  ok(/加入片单 3/.test(r.pills) && /库中已有 1/.test(r.pills) && /论坛暂无 2/.test(r.pills), '结果汇总：' + r.pills);
+  ok(/剧集/.test(r.tvRow), '剧集那条走剧集源去查、标着「剧集」');
+  ok(r.over <= 0, '结果列表不撑出横向滚动（多出 ' + r.over + 'px）');
+  await p.click('#impundo');
+  await settle(p);
+  const u = await p.evaluate(() => ({ n: CART.ord.length, st: IMP.rows.filter(x => x && x.st === 'undone').length }));
+  ok(u.n === 0 && u.st === 3, '「撤回这次加入的」：3 部从片单里拿掉');
+  await p.click('.irow[data-st="owned"] [data-icand]');
+  await settle(p);
+  const fo = await p.evaluate(() => ({ cart: CART.ord.slice(), st: IMP.rows[1] && IMP.rows[1].st, why: IMP.rows[1] && IMP.rows[1].it.reason }));
+  ok(fo.cart.length === 1 && fo.cart[0] === 700002 && fo.st === 'add' && /库里已有/.test(fo.why || ''), '库中已有的那条点「仍然加入」：照样加进片单，并提醒「' + fo.why + '」');
+  if (!label.includes('手机')) {
+    /* [v6.8] 打包：解压出来一个根文件夹，里面每 20 部一个子文件夹 */
+    await p.evaluate(() => { IMP.rows = null; CART = { ord: [], o: {} }; cartSave(); paintDock(); });
+    await p.click('#nav button[data-v="lib"]'); await settle(p);
+    for (const k of [0, 1, 2]) { await p.locator('.grid .art').nth(k).click(); await p.waitForTimeout(150); }
+    await p.click('#nav button[data-v="dl"]'); await settle(p);
+    const dlp = p.waitForEvent('download', { timeout: 30000 });
+    await p.click('#dstart');
+    const dl = await dlp;
+    const zp = '/tmp/idx-test/ui-pack.zip';
+    await dl.saveAs(zp);
+    const { execFileSync } = await import('node:child_process');
+    const pz = JSON.parse(execFileSync('python3', ['-c', `
+import zipfile,json
+z=zipfile.ZipFile('${zp}')
+print(json.dumps({'bad':z.testzip(),'names':z.namelist()}, ensure_ascii=False))`]).toString());
+    const root = (pz.names[0] || '').replace(/\/$/, '');
+    const tor = pz.names.filter(n => n.endsWith('.torrent'));
+    ok(pz.bad === null && /^Cuven索引库-\d{8}$/.test(root) && pz.names.every(n => n.startsWith(root + '/')) && pz.names.includes(root + '/001-003/') && pz.names.includes(root + '/_清单.txt') && tor.length === 3 && tor.every(n => n.startsWith(root + '/001-003/')),
+      '点「开始下载」：取件、本机打包，下载的包解开是一个根文件夹「' + root + '」，3 部种子在「001-003」子文件夹里，清单在根文件夹');
+    await p.evaluate(() => DL.clear());
+    /* 剧集：索引里没有 → 自动去论坛搜索页搜；论坛限频时倒计时等；只要全集，单集的标「未完结」可手动加 */
+    await p.evaluate(() => { IMP.rows = null; IMP.added = []; IMP.sq = []; CART = { ord: [], o: {} }; cartSave(); try { localStorage.removeItem('cvcart:tv'); } catch (e) {} renderDL(); });
+    W.forum.searchGap = 2; W.forum.lastSearch = 0; W.forum.searchLog = [];
+    await p.fill('#imptx', 'tmdb_id(1):520001/title:夫妻的博弈/type:tv\ntmdb_id(2):520002/title:风，带有香气/type:tv');
+    await p.click('#impgo');
+    await p.waitForFunction(() => IMP.phase === 'search', null, { timeout: 15000 });
+    let sawWait = '';
+    for (let i = 0; i < 80; i++) {
+      const t = await p.evaluate(() => ({ busy: IMP.busy, prog: (document.getElementById('impprog') || {}).textContent || '' }));
+      if (/秒后搜下一条/.test(t.prog)) sawWait = t.prog;
+      if (!t.busy) break;
+      await p.waitForTimeout(250);
+    }
+    await settle(p);
+    const tvr = await p.evaluate(() => {
+      let tvc = null; try { tvc = JSON.parse(localStorage.getItem('cvcart:tv') || 'null'); } catch (e) {}
+      return { st: IMP.rows.map(x => x && x.st), tv: tvc, irec: !!document.querySelector('[data-irec]'), blocked: 0 };
+    });
+    const blocked = W.forum.searchLog.filter(x => x.blocked).length;
+    ok(tvr.st.join(' ') === 'add incomplete', '剧集两条：索引里没有，自动去论坛搜 —— 有全集的加入、只有单集的标「未完结」（' + tvr.st.join(' ') + '）');
+    const rec = tvr.tv && tvr.tv.o && tvr.tv.o[520001];
+    ok(rec && rec.ext === 1 && rec.res === '2160p' && /全25集/.test(rec.pickLabel || ''), '加进剧集片单的是全 25 集的 2160p，版本锁定（「已指定：' + (rec && rec.pickLabel) + '」）');
+    ok(/秒后搜下一条/.test(sawWait) && W.forum.searchLog.filter(x => !x.blocked).length >= 2, '论坛限频（2 秒一次）：进度里倒计时「' + sawWait.replace(/停止搜索|正在停…/, '').slice(0, 40) + '…」，等够了接着搜（被挡 ' + blocked + ' 次）');
+    await p.click('[data-irec]');
+    await settle(p);
+    const after = await p.evaluate(() => { let c = null; try { c = JSON.parse(localStorage.getItem('cvcart:tv') || 'null'); } catch (e) {} return { st: IMP.rows[1].st, n: c ? c.ord.length : 0 }; });
+    ok(after.st === 'add' && after.n === 2, '「未完结」那条点「仍然加入最新的」：照样加进片单（剧集片单 ' + after.n + ' 部）');
+    await p.click('#srcNav button[data-s="tv"]');
+    await settle(p);
+    await p.click('#nav button[data-v="dl"]');
+    await settle(p);
+    const ext = await p.evaluate(() => { const it = document.querySelector('.citem[data-id="520001"]'); return it ? { open: !!it.querySelector('[data-open]'), txt: it.textContent } : null; });
+    ok(ext && !ext.open && /论坛搜索/.test(ext.txt), '片单里论坛搜来的那部：标着「论坛搜索」，没有「换版本」（索引里没有它的详情页）');
+  }
+  ok(!errs.length, '页面零报错' + (errs.length ? '：' + errs.slice(0, 3).join(' | ') : ''));
+  await ctx.close();
+}
+/* [v6.9] 推送到 PikPak：选文件夹（逐层进、新建）、推送、打标记、记住文件夹 */
+{
+  console.log('\n■ 推送到 PikPak · 手机');
+  const { p, ctx, errs } = await page({ ...devices['iPhone 14'] });
+  for (const k of [0, 1, 2]) { await p.locator('.grid .art').nth(k).click(); await p.waitForTimeout(150); }
+  await p.click('#nav button[data-v="dl"]'); await settle(p);
+  await p.click('#pkopen');
+  await p.waitForFunction(() => PKS.st, null, { timeout: 10000 });
+  await settle(p);
+  const head = await p.evaluate(() => document.querySelector('#pkcard .hd').textContent);
+  ok(/me\*\*\*@pk\.test/.test(head) && /TB/.test(head), '打开推送面板：显示 PikPak 账号（打码）和空间（' + head.replace('推送到 PikPak', '').trim() + '）');
+  await p.click('#pkchoose');
+  await p.waitForSelector('.pkdir');
+  const dirs = await p.evaluate(() => [].map.call(document.querySelectorAll('.pkdir b'), e => e.textContent));
+  await p.locator('.pkdir', { hasText: '电影' }).click();
+  await p.waitForFunction(() => !PKS.loading && PKS.cur && PKS.cur.id === 'f-movie');
+  await p.click('#pkmk');
+  await p.fill('#pkname', '索引库推送');
+  await p.click('#pkmkok');
+  await p.waitForFunction(() => !PKS.loading && PKS.cur && PKS.cur.path.length === 2);
+  const crumb = await p.evaluate(() => document.querySelector('.pkcrumb').textContent.replace(/\s+/g, ''));
+  const made = W.pk.folders.find(f => f.name === '索引库推送');
+  ok(dirs.join() === '电影,剧集' && made && made.parent === 'f-movie' && crumb === '根目录›电影›索引库推送', '换文件夹：列出「电影、剧集」，进「电影」新建「索引库推送」，自动进到新文件夹（' + crumb + '）');
+  await p.click('#pkuse'); await settle(p);
+  const dest = await p.evaluate(() => ({ t: document.querySelector('.pkdest b').textContent, ls: JSON.parse(localStorage.getItem('cvpk')).folder.id, btn: document.getElementById('pkgo').textContent }));
+  ok(dest.t === '/电影/索引库推送' && dest.ls === made.id && /推送 3 部/.test(dest.btn), '选定：存到「' + dest.t + '」，记在本机；按钮「' + dest.btn + '」');
+  await p.click('#pkgo');
+  await p.waitForFunction(() => !PKS.run && PKS.rows && PKS.rows.length, null, { timeout: 20000 });
+  await settle(p);
+  const res = await p.evaluate(() => ({ st: PKS.rows.map(r => r.st), tags: [].filter.call(document.querySelectorAll('.citem em'), e => /已推送到 PikPak/.test(e.textContent)).length,
+    btn: document.getElementById('pkgo').textContent, dis: document.getElementById('pkgo').disabled, over: document.documentElement.scrollWidth - innerWidth }));
+  ok(res.st.join() === 'ok,ok,ok' && W.pk.tasks.length === 3 && W.pk.tasks.every(t => t.parent === made.id && /^magnet:\?xt=urn:btih:/.test(t.url)),
+    '推送 3 部：PikPak 里建了 3 个云下载任务，都在「索引库推送」里');
+  ok(res.tags === 3 && res.dis && /推送 0 部/.test(res.btn), '片单里 3 部都标上「已推送到 PikPak」；同一个文件夹不重复推（按钮变成「推送 0 部」）');
+  ok(res.over <= 0, '手机上不出横向滚动（多出 ' + res.over + 'px）');
+  await p.click('#pkagain'); await settle(p);
+  const again = await p.evaluate(() => document.getElementById('pkgo').textContent);
+  ok(/推送 3 部/.test(again), '「已推送过的也重推」：按钮回到「推送 3 部」');
+  await p.click('#pkdrop'); await settle(p);
+  const left = await p.evaluate(() => CART.ord.length);
+  ok(left === 0, '「从片单里移除推送成功的」：片单清空');
+  await p.reload({ waitUntil: 'networkidle' }); await p.waitForTimeout(400);
+  await p.locator('.grid .art').nth(4).click(); await p.waitForTimeout(150);
+  await p.click('#nav button[data-v="dl"]'); await settle(p);
+  await p.click('#pkopen');
+  await p.waitForFunction(() => PKS.st); await settle(p);
+  const kept = await p.evaluate(() => document.querySelector('.pkdest b').textContent);
+  ok(kept === '/电影/索引库推送', '刷新页面：推送位置还记着（' + kept + '）');
   ok(!errs.length, '页面零报错' + (errs.length ? '：' + errs.slice(0, 3).join(' | ') : ''));
   await ctx.close();
 }
