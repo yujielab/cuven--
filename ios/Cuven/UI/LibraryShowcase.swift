@@ -152,6 +152,8 @@ struct ShowcaseChapter: View {
     let isActive: Bool
     /// (这一章跨着屏幕中线, 画幅已经整个滚出屏幕)
     let report: (Bool, Bool) -> Void
+    /// Apple TV 上对上的那一部：画幅用它的无字 16:9 背景、标题用它的字标（预告片也是这一次问来的）
+    @State private var atv: AtvLookup?
 
     var body: some View {
         // 网页版的几何：画幅先是一块 16:9（高不超过 74% 屏），放大到铺满；钉住的行程 = 一屏 + 面板压上来的那段 + 停一会儿
@@ -168,7 +170,7 @@ struct ShowcaseChapter: View {
 
         ZStack(alignment: .top) {
             // ① 画幅：一块 16:9，按滚动放大 / 收回，钉在屏上
-            ShowcaseMedia(video: video, art: m?.backdrop ?? m?.poster, trailer: trailer, isActive: isActive)
+            ShowcaseMedia(video: video, art: atv?.background ?? m?.backdrop ?? m?.poster, trailer: trailer, isActive: isActive)
                 .frame(width: boxW, height: boxH)
                 .visualEffect { content, proxy in
                     let y = proxy.frame(in: .scrollView(axis: .vertical)).minY - T
@@ -228,6 +230,7 @@ struct ShowcaseChapter: View {
                 .padding(.top, contentTop)
         }
         .frame(width: vw, alignment: .top)
+        .task(id: video.path) { atv = await model.atv(for: video) }
         .onGeometryChange(for: [Bool].self) { proxy in
             let f = proxy.frame(in: .scrollView(axis: .vertical))
             let center = f.minY <= H * 0.5 && f.maxY > H * 0.5
@@ -249,7 +252,7 @@ struct ShowcaseChapter: View {
                     .foregroundStyle(.white.opacity(0.78))
                     .multilineTextAlignment(.center)
             }
-            if let logo = m?.logo, !logo.isEmpty {
+            if let logo = atv?.logo ?? m?.logo, !logo.isEmpty {
                 LogoImage(url: TMDBImage.url(logo, "w500"), height: 96, fallback: model.title(video), maxWidth: w * 0.78)
                     .frame(maxWidth: w * 0.78)
                     .padding(.top, 14)
