@@ -37,7 +37,7 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 **本地开发**：`brew install xcodegen && cd ios && xcodegen generate && open Cuven.xcodeproj`（工程文件不进仓库）。
 
 **模拟器预览**：`.github/workflows/ios-preview.yml` 在 iOS 模拟器里连生产接口把主要页面走一遍（`ios/CuvenUITests`：首页、剧集详情与分集、
-电影详情、试播、资料库、我的、搜索），日志里只有测试结果和播放器状态（来源类型、就绪、进度，不含片名与地址）。
+电影详情、试播、资料库、我的、搜索），日志里只有测试结果和 App 的诊断日志（Debug 构建写在容器里的 `Caches/cuven-diag.log`：播放器来源 / 就绪 / 每 5 秒的进度与缓冲、片库与元数据各轮的数量和耗时、主线程卡住超过 1 秒的记录，不含片名与地址）。
 仓库是公开的，而截图里是片库的真实内容，所以截图默认不上传；在 Actions 页手动运行并勾选「上传截图」才会上传，3 天后自动删除。
 
 **Duo 预览（演示数据）**：模拟器里没有 Duo，启动参数 `-CuvenDuo folded|rail|off` 强制某种形态（`folded` 且设备没有右侧那一列时补一列 84pt 黑边，模拟外屏）；

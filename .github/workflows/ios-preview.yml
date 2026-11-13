@@ -1,7 +1,7 @@
 # 在 iOS 模拟器里把 App 主要页面走一遍（ios/CuvenUITests），连生产接口，最后试播一部片。
 #
 # ⚠︎ 这个仓库是公开的：日志、构建产物、引用任何人都看得到，真实片库的截图却是片库的真实内容。所以：
-#   · 日志里只有测试是否通过、播放器状态（来源类型 / 就绪 / 进度，不含片名与地址）；
+#   · 日志里只有测试是否通过、诊断日志（播放器状态、数量与耗时、主线程卡顿，不含片名与地址）；
 #   · 真实片库的截图默认不上传，只有在 Actions 页手动运行并勾选「上传截图」时才上传，且 3 天后自动删除；
 #   · iPhone Duo 那几种形态用演示数据跑（DuoTests：片名、海报、字标都是本地合成的），这部分截图提交到
 #     refs/ci/ios-preview-demo（不是分支）：git fetch origin refs/ci/ios-preview-demo && git checkout FETCH_HEAD -- .
@@ -86,14 +86,16 @@ jobs:
           if [ $code -ne 0 ]; then tail -40 "$RUNNER_TEMP/test.log"; fi
           exit $code
 
-      - name: 播放器与性能日志（来源 / 就绪 / 进度、数量与耗时、主线程卡顿，不含片名与地址）
+      - name: 诊断日志（播放器状态、数量与耗时、主线程卡顿；不含片名与地址）
         if: always()
         run: |
-          xcrun simctl spawn "$SIM_UDID" log show --last 40m --style compact \
-            --predicate 'subsystem == "us.cuven.tv" AND category == "player"' 2>/dev/null | tail -60 || true
-          echo "---- perf ----"
-          xcrun simctl spawn "$SIM_UDID" log show --last 40m --style compact \
-            --predicate 'subsystem == "us.cuven.tv" AND category == "perf"' 2>/dev/null | tail -250 || true
+          # App 的 Debug 构建把诊断写在自己容器的 Caches/cuven-diag.log（模拟器的系统日志不留 info 级别）
+          f=$(ls -t "$HOME"/Library/Developer/CoreSimulator/Devices/"$SIM_UDID"/data/Containers/Data/Application/*/Library/Caches/cuven-diag.log 2>/dev/null | head -1)
+          if [ -z "$f" ]; then echo "(没有诊断日志)"; exit 0; fi
+          echo "整个运行里主线程卡住超过 1 秒：$(grep -c 'main blocked' "$f") 次"
+          # 从第一次真实片库启动（不带 -CuvenDemo YES）起往后打
+          n=$(grep -n '==== launch' "$f" | grep -v -- '-CuvenDemo YES' | head -1 | cut -d: -f1)
+          if [ -n "$n" ]; then tail -n +"$n" "$f" | tail -400; else tail -120 "$f"; fi
 
       - name: Duo 演示截图（只含合成内容）提交到 refs/ci/ios-preview-demo
         if: always()

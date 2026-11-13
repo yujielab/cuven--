@@ -58,20 +58,24 @@ final class TourTests: XCTestCase {
         app.swipeUp(); sleep(3); snap("09-movie-detail-2")
         app.swipeDown(); sleep(2)
 
-        // 播放：系统播放器
+        // 播放：系统播放器。放 20 秒（播放器日志里每 5 秒一行进度），然后关掉 ——
+        // 系统播放器的控件几秒就自己藏起来，查询一慢按钮就不在了：往下滑关；还在的话重开 App（进度已经存了）
+        var relaunched = false
         if play.exists {
             play.tap()
-            sleep(15)
+            sleep(20)
             snap("10-player")
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            sleep(1)
-            for label in ["关闭", "Close", "完成", "Done"] where app.buttons[label].exists {
-                app.buttons[label].tap(); break
+            app.swipeDown(velocity: .fast)
+            if !app.buttons["detail-play"].waitForExistence(timeout: 8) {
+                app.terminate()
+                app.launch()
+                _ = app.staticTexts["最新加入"].waitForExistence(timeout: 60)
+                relaunched = true
             }
-            sleep(3)
+            sleep(2)
             snap("10b-after-player")
         }
-        back()
+        if !relaunched { back() }
 
         // 资料库 → 剧集 / 我的 / 搜索（搜索放最后：键盘会盖住标签栏）
         tapTab(["资料库"])
