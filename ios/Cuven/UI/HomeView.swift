@@ -135,13 +135,7 @@ struct HomeView: View {
             let tv = Array(model.homeSeries.prefix(12))
             if !tv.isEmpty {
                 section("Cuven TV · 剧集", count: nil, subtitle: "片库里的剧集，一季一张", route: .shelf(.series)) {
-                    Rail(spacing: 14) {
-                        ForEach(tv) { s in
-                            ZoomLink(route: .series(s), slot: "series") { SeriesCard(series: s, width: min(width * 0.86, 440)) }
-                                .accessibilityIdentifier("series-card")
-                                .seriesMenu(s)
-                        }
-                    }
+                    SeriesMosaic(series: tv, width: min(width, 760))
                 }
             }
 

@@ -245,6 +245,117 @@ struct ContinueCard: View {
     }
 }
 
+// MARK: - 主页「Cuven TV · 剧集」：拼图（Games App「你游戏的相关更新」）
+
+/// 第一部是整宽的大卡，后两部并排两张小卡（左上角一枚状态小标签：已完结 / 更新中）；再往后是一排小海报
+struct SeriesMosaic: View {
+    let series: [Series]
+    let width: CGFloat
+
+    var body: some View {
+        let w = max(240, width - Theme.gutter * 2)
+        VStack(alignment: .leading, spacing: 14) {
+            if let first = series.first {
+                ZoomLink(route: .series(first), slot: "series") {
+                    SeriesCard(series: first, width: w)
+                        .overlay(alignment: .topLeading) { StatusChip(series: first).padding(14) }
+                }
+                .accessibilityIdentifier("series-card")
+                .seriesMenu(first)
+                .padding(.horizontal, Theme.gutter)
+            }
+            let pair = Array(series.dropFirst().prefix(2))
+            if !pair.isEmpty {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(pair) { s in
+                        ZoomLink(route: .series(s), slot: "series") { SeriesTile(series: s, width: (w - 12) / 2) }
+                            .accessibilityIdentifier("series-card")
+                            .seriesMenu(s)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, Theme.gutter)
+            }
+            let rest = Array(series.dropFirst(3))
+            if !rest.isEmpty {
+                Rail {
+                    ForEach(rest) { s in
+                        ZoomLink(route: .series(s), slot: "series-rest") { SeriesPosterCard(series: s, width: 112) }
+                            .seriesMenu(s)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 状态小标签（Games「现已登场 / 进行中」那枚）：已完结 / 更新中
+struct StatusChip: View {
+    let series: Series
+
+    var body: some View {
+        let done = series.full == true || series.complete == true
+        Label(done ? "已完结" : "更新中", systemImage: done ? "checkmark.seal.fill" : "calendar")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial, in: Capsule())
+    }
+}
+
+/// 拼图里的小卡：上面剧照（带状态小标签），下面一条取自剧照颜色的底：第几季、剧名、「查看」胶囊，右下角小海报
+struct SeriesTile: View {
+    @Environment(AppModel.self) private var model
+    let series: Series
+    let width: CGFloat
+    @State private var tint: Color = Theme.surface2
+
+    var body: some View {
+        let m = model.seriesMetas[series.path]
+        let art = m?.backdrop ?? m?.posterClean ?? m?.poster
+        VStack(alignment: .leading, spacing: 0) {
+            Color.clear
+                .frame(width: width, height: width)
+                .overlay { RemoteImage(url: TMDBImage.url(art, "w780"), maxPixel: width * 3) }
+                .clipped()
+                .overlay(alignment: .topLeading) { StatusChip(series: series).padding(10) }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(series.seasonLabel ?? "剧集")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+                Text(m?.title ?? series.name)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                HStack(alignment: .bottom) {
+                    Text("查看")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 7)
+                        .background(Color.white.opacity(0.2), in: Capsule())
+                    Spacer(minLength: 4)
+                    RemoteImage(url: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), maxPixel: 120)
+                        .frame(width: 26, height: 39)
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                }
+                .padding(.top, 8)
+            }
+            .padding(12)
+            .frame(width: width, alignment: .leading)
+            .background(tint)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
+        .task { await model.ensureSeriesMeta(series) }
+        .task(id: art) {
+            guard let u = TMDBImage.url(art, "w780"), let c = await ArtTint.color(for: u, ceiling: 0.5) else { return }
+            withAnimation(.easeOut(duration: 0.3)) { tint = c }
+        }
+    }
+}
+
 // MARK: - 剧集卡：整张剧照 + 下半幅压暗 + 官方字标（统一 60 高，深色字标反白）+ 底栏
 
 struct SeriesCard: View {

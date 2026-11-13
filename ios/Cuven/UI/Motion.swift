@@ -86,7 +86,9 @@ extension View {
     }
 }
 
-// MARK: - 长按菜单（Apple TV：长按海报弹出「播放 / 想看 / 分享」，预览是那张卡本身）
+// MARK: - 长按菜单（Apple TV：长按海报弹出「播放 / 想看」，预览是那张卡本身）
+//
+// 不放「分享」：每张海报都挂一个分享项，无障碍快照（XCUITest 也靠它）在首页要走一两百个，主线程被拖住几十秒；分享在详情页的工具栏里
 
 struct MovieMenu: ViewModifier {
     @Environment(AppModel.self) private var model
@@ -101,9 +103,6 @@ struct MovieMenu: ViewModifier {
                                                           artwork: m?.backdrop ?? m?.poster), model: model)
             }
             WatchlistMenuButton(key: video.path, kind: .movie)
-            if let url = TMDBLink.url(model.meta(video), kind: "movie") {
-                ShareLink(item: url, subject: Text(model.title(video))) { Label("分享", systemImage: "square.and.arrow.up") }
-            }
         }
     }
 }
@@ -115,10 +114,6 @@ struct SeriesMenu: ViewModifier {
     func body(content: Content) -> some View {
         content.contextMenu {
             WatchlistMenuButton(key: series.path, kind: .series)
-            let meta = model.seriesMetas[series.path]
-            if let url = TMDBLink.url(meta, kind: "tv") {
-                ShareLink(item: url, subject: Text(meta?.title ?? series.name)) { Label("分享", systemImage: "square.and.arrow.up") }
-            }
         }
     }
 }

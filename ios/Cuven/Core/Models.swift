@@ -411,7 +411,7 @@ struct Trailer: Decodable, Hashable, Identifiable, Sendable {
 
 /// 整页清单：首页分区标题「›」进去的，和搜索页「浏览」里的某一类
 enum Shelf: Hashable {
-    case newest, picks, series, watchlist
+    case newest, picks, series, watchlist, continueWatching
     case genre(String)
 
     var title: String {
@@ -420,6 +420,7 @@ enum Shelf: Hashable {
         case .picks: return "今日推荐"
         case .series: return "Cuven TV · 剧集"
         case .watchlist: return "想看"
+        case .continueWatching: return "继续观看"
         case .genre(let g): return g
         }
     }
@@ -431,6 +432,7 @@ enum Shelf: Hashable {
         case .picks: return "picks"
         case .series: return "series"
         case .watchlist: return "watchlist"
+        case .continueWatching: return "continue"
         case .genre(let g): return "genre-" + g
         }
     }

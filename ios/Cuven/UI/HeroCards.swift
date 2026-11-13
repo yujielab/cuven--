@@ -161,7 +161,7 @@ struct HeroCard: View {
     }
 }
 
-/// iOS 页码控件样式的圆点胶囊：当前那颗纯白、略大，其余半透明；点哪颗翻到哪张
+/// 页码：玻璃胶囊里一排圆点，当前那颗是纯白的短胶囊，其余半透明；点哪颗翻到哪张
 struct PageDots: View {
     let ids: [String]
     @Binding var current: String?
@@ -170,9 +170,10 @@ struct PageDots: View {
         let cur = current ?? ids.first
         HStack(spacing: 9) {
             ForEach(ids, id: \.self) { id in
-                Circle()
+                // 当前这一页是一颗短胶囊（Games「首页」的页码），其余是圆点
+                Capsule()
                     .fill(id == cur ? Color.white : Color.white.opacity(0.5))
-                    .frame(width: id == cur ? 8 : 7, height: id == cur ? 8 : 7)
+                    .frame(width: id == cur ? 20 : 7, height: 7)
                     .contentShape(Rectangle().inset(by: -6))
                     .onTapGesture { withAnimation(.snappy) { current = id } }
             }

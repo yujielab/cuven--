@@ -102,8 +102,13 @@ final class TourTests: XCTestCase {
         tapTab(["资料库"])
         sleep(6)
         snap("11-library")
-        let seg = app.segmentedControls.buttons["剧集"]
-        if seg.exists { seg.tap(); sleep(6); snap("11b-library-series") }
+        // 标题「你的电影 ⌃⌄」是个菜单：换成剧集
+        let kindMenu = app.buttons["library-kind"].firstMatch
+        if kindMenu.waitForExistence(timeout: 5) {
+            kindMenu.tap(); sleep(1)
+            let item = app.buttons["剧集"].firstMatch
+            if item.waitForExistence(timeout: 3) { item.tap(); sleep(6); snap("11b-library-series") }
+        }
         let acct = visible(app.buttons.matching(identifier: "account-button"))
         if acct.waitForExistence(timeout: 5) {
             acct.tap(); sleep(2)

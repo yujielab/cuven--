@@ -302,14 +302,21 @@ struct DetailActions: View {
                 if let secondary { secondaryButton(secondary) }
                 WatchlistButton(key: watchKey, kind: watchKind)
             }
-        } else {
+        } else if let secondary {
             VStack(alignment: .leading, spacing: 12) {
                 primaryButton
                     .frame(width: 236)
                 HStack(spacing: 12) {
-                    if let secondary { secondaryButton(secondary) }
+                    secondaryButton(secondary)
                     WatchlistButton(key: watchKey, kind: watchKind)
                 }
+            }
+        } else {
+            // 没有次要按钮时「+」就跟在主按钮右边，不单独占一行
+            HStack(spacing: 12) {
+                primaryButton
+                    .frame(width: 236)
+                WatchlistButton(key: watchKey, kind: watchKind)
             }
         }
     }
@@ -338,20 +345,26 @@ struct DetailActions: View {
     }
 }
 
-/// 详情页的底色：取画面最下面一截的平均色、压暗（Apple TV：画面往下化进同一种颜色，不是一律黑）。一张图只算一次
+/// 从画面取色：画面最下面一截的平均色（Apple TV 详情页：画面往下化进同一种颜色，不是一律黑）。
+/// ceiling 是亮度上限：详情页的底色压得暗（白字始终看得清），名次卡这类整块底色可以亮一些。一张图只算一次
 @MainActor
 enum ArtTint {
-    private static var cache: [URL: Color] = [:]
+    private static var cache: [URL: (h: CGFloat, s: CGFloat, b: CGFloat)] = [:]
 
-    static func color(for url: URL) async -> Color? {
-        if let hit = cache[url] { return hit }
-        guard let img = await ImagePipeline.shared.image(url, maxPixel: 120), let cg = img.cgImage,
-              let c = average(cg) else { return nil }
-        cache[url] = c
-        return c
+    static func color(for url: URL, ceiling: CGFloat = 0.42) async -> Color? {
+        let hsb: (h: CGFloat, s: CGFloat, b: CGFloat)
+        if let hit = cache[url] {
+            hsb = hit
+        } else {
+            guard let img = await ImagePipeline.shared.image(url, maxPixel: 120), let cg = img.cgImage,
+                  let v = average(cg) else { return nil }
+            cache[url] = v
+            hsb = v
+        }
+        return Color(UIColor(hue: hsb.h, saturation: min(1, hsb.s * 1.1), brightness: min(hsb.b, ceiling) * 0.85, alpha: 1))
     }
 
-    nonisolated static func average(_ cg: CGImage) -> Color? {
+    nonisolated static func average(_ cg: CGImage) -> (h: CGFloat, s: CGFloat, b: CGFloat)? {
         let h = cg.height, w = cg.width
         guard h > 4, w > 4,
               let strip = cg.cropping(to: CGRect(x: 0, y: h * 3 / 4, width: w, height: h - h * 3 / 4)) else { return nil }
@@ -373,8 +386,7 @@ enum ArtTint {
         let total = Double(n * n) * 255
         var hue: CGFloat = 0, sat: CGFloat = 0, bri: CGFloat = 0, alpha: CGFloat = 0
         UIColor(red: r / total, green: g / total, blue: b / total, alpha: 1).getHue(&hue, saturation: &sat, brightness: &bri, alpha: &alpha)
-        // 压暗做底色：亮度封顶，饱和度略提，白字压在上面始终看得清
-        return Color(UIColor(hue: hue, saturation: min(1, sat * 1.1), brightness: min(bri, 0.42) * 0.85, alpha: 1))
+        return (hue, sat, bri)
     }
 }
 

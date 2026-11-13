@@ -15,8 +15,10 @@ final class DuoUnfoldedTests: XCTestCase {
         app.launch()
         sleep(4)
         let size = report(app, "unfolded")
+        // 内屏上到底显示的是什么（App 的窗口没跟着变大时，看看是镜像、缩放还是黑屏）
+        snap("duo-30-unfolded-probe")
         guard size.width > 500 else {
-            print("DUO unfolded: still the outer display, no screenshots")
+            print("DUO unfolded: the app window stayed at the outer display size")
             return
         }
         snap("duo-31-unfolded-home")

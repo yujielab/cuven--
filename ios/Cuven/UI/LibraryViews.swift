@@ -1,6 +1,9 @@
 import SwiftUI
 
-// MARK: - 资料库
+// MARK: - 资料库（版式参考 Games App 的「资料库」）
+//
+// 顶上两块快捷大卡（继续观看、想看）；然后「你的电影 ⌃⌄ / 共 N 部」（点标题换成剧集），右边一颗玻璃圆钮是排序、年份与显示方式；
+// 下面默认是一行一部：海报、片名、上次看到 / 加入时间，行尾「播放」胶囊（也可以换回海报网格）。
 
 struct LibraryView: View {
     @Environment(AppModel.self) private var model
@@ -10,44 +13,62 @@ struct LibraryView: View {
     @State private var kind: Kind = .movies
     @State private var order: Order = .added
     @State private var year: Int?
+    @AppStorage("library_grid") private var grid = false
 
     var body: some View {
+        let movieList = kind == .movies ? movies : []
+        let seriesItems = kind == .series ? seriesList : []
         ZoomStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Picker("类型", selection: $kind) {
-                        ForEach(Kind.allCases) { Text($0.rawValue).tag($0) }
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(spacing: 12) {
+                        let cw = model.playback.continueWatching.count
+                        let wl = model.watchlist.items.count
+                        ShortcutTile(title: "继续观看", subtitle: cw > 0 ? "\(cw) 部看到一半" : "还没有看到一半的",
+                                     symbol: "play.fill", colors: ShortcutTile.amber, route: .shelf(.continueWatching))
+                            .accessibilityIdentifier("library-continue")
+                        ShortcutTile(title: "想看", subtitle: wl > 0 ? "\(wl) 部" : "在详情页点「+」加进来",
+                                     symbol: "bookmark.fill", colors: ShortcutTile.ocean, route: .shelf(.watchlist))
+                            .accessibilityIdentifier("library-watchlist")
                     }
-                    .pickerStyle(.segmented)
                     .padding(.horizontal, Theme.gutter)
+                    .padding(.top, 4)
+
+                    header(count: kind == .movies ? movieList.count : seriesItems.count)
+                        .padding(.horizontal, Theme.gutter)
+                        .padding(.top, 30)
+                        .padding(.bottom, 10)
 
                     if kind == .movies {
-                        let list = movies
-                        Text(verbatim: year.map { "\($0) 年 · \(list.count) 部" } ?? "\(list.count) 部电影")
-                            .font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.tertiary)
-                            .padding(.horizontal, Theme.gutter)
-                        PosterGrid {
-                            ForEach(list) { v in
-                                ZoomLink(route: .movie(v), slot: "library") { MoviePosterTile(video: v) }
-                                    .accessibilityIdentifier("library-movie")
-                                    .movieMenu(v)
+                        if grid {
+                            PosterGrid {
+                                ForEach(movieList) { v in
+                                    ZoomLink(route: .movie(v), slot: "library") { MoviePosterTile(video: v) }
+                                        .accessibilityIdentifier("library-movie")
+                                        .movieMenu(v)
+                                }
+                            }
+                        } else {
+                            LazyVStack(spacing: 0) {
+                                ForEach(movieList) { v in LibraryMovieRow(video: v) }
                             }
                         }
                     } else {
-                        let list = seriesList
-                        Text(verbatim: year.map { "\($0) 年 · \(list.count) 部" } ?? "\(list.count) 部剧集")
-                            .font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.tertiary)
-                            .padding(.horizontal, Theme.gutter)
-                        PosterGrid {
-                            ForEach(list) { s in
-                                ZoomLink(route: .series(s), slot: "library") { SeriesPosterTile(series: s) }
-                                    .accessibilityIdentifier("library-series")
-                                    .seriesMenu(s)
+                        if grid {
+                            PosterGrid {
+                                ForEach(seriesItems) { s in
+                                    ZoomLink(route: .series(s), slot: "library") { SeriesPosterTile(series: s) }
+                                        .accessibilityIdentifier("library-series")
+                                        .seriesMenu(s)
+                                }
+                            }
+                        } else {
+                            LazyVStack(spacing: 0) {
+                                ForEach(seriesItems) { s in LibrarySeriesRow(series: s) }
                             }
                         }
                     }
                 }
-                .padding(.vertical, 8)
                 .padding(.bottom, 30)
             }
             .scrollIndicators(.hidden)
@@ -55,25 +76,60 @@ struct LibraryView: View {
             .navigationTitle("资料库")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Picker("排序", selection: $order) {
-                            ForEach(Order.allCases) { Text($0.rawValue).tag($0) }
-                        }
-                        Picker("年份", selection: $year) {
-                            Text("全部年份").tag(Int?.none)
-                            ForEach(years, id: \.self) { y in Text(String(y)).tag(Int?.some(y)) }
-                        }
-                    } label: {
-                        // 标题 + 符号都给：系统在竖向栏里用符号，溢出菜单里用标题
-                        Label("排序与筛选", systemImage: "line.3.horizontal.decrease")
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
                     AvatarButton()
                 }
                 .sharedBackgroundVisibility(.hidden)
             }
             .refreshable { await model.refreshAll() }
+        }
+    }
+
+    /// 「你的电影 ⌃⌄」（点开换成剧集）+「共 N 部」；右边玻璃圆钮：排序、年份、列表 / 网格
+    private func header(count: Int) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Menu {
+                    Picker("类型", selection: $kind) {
+                        ForEach(Kind.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                } label: {
+                    HStack(spacing: 7) {
+                        Text(kind == .movies ? "你的电影" : "你的剧集")
+                            .font(.system(size: 26, weight: .bold))
+                            .foregroundStyle(.white)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(Theme.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .accessibilityIdentifier("library-kind")
+                Text(verbatim: year.map { "\($0) 年 · 共 \(count) 部" } ?? "共 \(count) 部")
+                    .font(.system(size: 17))
+                    .foregroundStyle(Theme.secondary)
+            }
+            Spacer(minLength: 0)
+            Menu {
+                Picker("排序", selection: $order) {
+                    ForEach(Order.allCases) { Text($0.rawValue).tag($0) }
+                }
+                Picker("年份", selection: $year) {
+                    Text("全部年份").tag(Int?.none)
+                    ForEach(years, id: \.self) { y in Text(String(y)).tag(Int?.some(y)) }
+                }
+                Picker("显示", selection: $grid) {
+                    Label("列表", systemImage: "list.bullet").tag(false)
+                    Label("海报网格", systemImage: "square.grid.3x2").tag(true)
+                }
+            } label: {
+                Image(systemName: "line.3.horizontal.decrease")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 48, height: 48)
+                    .glassEffect(.regular, in: Circle())
+            }
+            .accessibilityLabel("排序与筛选")
+            .accessibilityIdentifier("library-filter")
         }
     }
 
@@ -102,6 +158,170 @@ struct LibraryView: View {
         case .rating: list.sort { (model.seriesMetas[$0.path]?.rating ?? 0) > (model.seriesMetas[$1.path]?.rating ?? 0) }
         }
         return list
+    }
+}
+
+/// 资料库顶上的快捷大卡（Games「更新与活动」「成就」那种）：渐变底、左边一枚图标、标题与一行说明、右边「›」
+struct ShortcutTile: View {
+    let title: String
+    let subtitle: String
+    let symbol: String
+    let colors: [Color]
+    let route: Route
+
+    static let amber = [Color(red: 0.45, green: 0.30, blue: 0.15), Color(red: 0.30, green: 0.22, blue: 0.16)]
+    static let ocean = [Color(red: 0.16, green: 0.31, blue: 0.42), Color(red: 0.14, green: 0.23, blue: 0.31)]
+
+    var body: some View {
+        NavigationLink(value: route) {
+            HStack(spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        .fill(LinearGradient(colors: [colors[0].opacity(1).mix(with: .white, by: 0.28), colors[0]],
+                                             startPoint: .topLeading, endPoint: .bottomTrailing))
+                    Image(systemName: symbol)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 56, height: 56)
+                .rotationEffect(.degrees(-6))
+                .shadow(color: .black.opacity(0.3), radius: 8, y: 5)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
+                    Text(subtitle).font(.system(size: 15)).foregroundStyle(.white.opacity(0.72)).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 92)
+            .background(LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing),
+                        in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
+            .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        }
+        .buttonStyle(PressableStyle(scale: 0.98))
+    }
+}
+
+/// 资料库里的一部电影（Games「你的游戏」那一行）：海报、片名、上次看到 / 加入时间，行尾「播放」胶囊；点别处进详情
+struct LibraryMovieRow: View {
+    @Environment(AppModel.self) private var model
+    let video: Video
+
+    var body: some View {
+        let m = model.meta(video)
+        let entry = model.playback.entry(video.path)
+        ZStack(alignment: .trailing) {
+            ZoomLink(route: .movie(video), slot: "library", press: false) {
+                HStack(spacing: 16) {
+                    RemoteImage(url: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), maxPixel: 260)
+                        .frame(width: 58, height: 87)
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
+                        .overlay(alignment: .bottom) {
+                            if let e = entry, e.fraction > 0.01 {
+                                ProgressCapsule(fraction: e.fraction).padding(.horizontal, 5).padding(.bottom, 5)
+                            }
+                        }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(model.title(video))
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                        Text(subtitle(m, entry))
+                            .font(.system(size: 14))
+                            .foregroundStyle(Theme.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 96)
+                }
+                .padding(.vertical, 9)
+                .contentShape(Rectangle())
+            }
+            .accessibilityIdentifier("library-movie")
+            .movieMenu(video)
+            PlayPill(video: video)
+        }
+        .padding(.horizontal, Theme.gutter)
+    }
+
+    private func subtitle(_ m: Meta?, _ e: WatchEntry?) -> String {
+        if let e, e.position > 30 { return "上次看到 · " + Relative.string(e.updated) }
+        if let d = Relative.date(video.added) { return "加入于 " + Relative.string(d) }
+        return [model.year(video).map { String($0) }, m?.genres?.first].compactMap { $0 }.joined(separator: " · ")
+    }
+}
+
+/// 资料库里的一部剧：海报、剧名、上次看到第几集 / 第几季与集数，行尾「查看」
+struct LibrarySeriesRow: View {
+    @Environment(AppModel.self) private var model
+    let series: Series
+
+    var body: some View {
+        let m = model.seriesMetas[series.path]
+        ZoomLink(route: .series(series), slot: "library", press: false) {
+            HStack(spacing: 16) {
+                ZStack {
+                    Theme.surface
+                    RemoteImage(url: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), maxPixel: 260, placeholder: .clear)
+                }
+                .frame(width: 58, height: 87)
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(m?.title ?? series.name)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                    Text(subtitle)
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 12)
+                Text("查看")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.12), in: Capsule())
+            }
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+        .accessibilityIdentifier("library-series")
+        .seriesMenu(series)
+        .padding(.horizontal, Theme.gutter)
+        .task { await model.ensureSeriesMeta(series) }
+    }
+
+    private var subtitle: String {
+        if let e = model.playback.lastEpisode(of: series.path), let ep = e.episode {
+            return "上次看到第 \(ep) 集 · " + Relative.string(e.updated)
+        }
+        return [series.seasonLabel, series.countLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+}
+
+/// 「2 小时前」「昨天」这类相对时间；入库时间是 ISO 8601（有的带毫秒）
+enum Relative {
+    nonisolated(unsafe) private static let fractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    nonisolated(unsafe) private static let plain = ISO8601DateFormatter()
+
+    static func date(_ s: String?) -> Date? {
+        guard let s, !s.isEmpty else { return nil }
+        return fractional.date(from: s) ?? plain.date(from: s)
+    }
+
+    static func string(_ d: Date) -> String {
+        d.formatted(.relative(presentation: .named))
     }
 }
 

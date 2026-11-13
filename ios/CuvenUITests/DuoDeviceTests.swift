@@ -36,15 +36,15 @@ final class DuoDeviceTests: XCTestCase {
         // 「想看」：详情页头部的「+」，回首页后多出「想看」那一排
         let plus = visible(app.buttons.matching(identifier: "watchlist-button"))
         if plus.exists { plus.tap(); sleep(1) } else { XCTFail("详情页没有「想看」钮") }
-        app.swipeUp(); sleep(2); snap("duo-04-detail-info")
-        // 演员与职员 ›：整页名单
-        if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 3) {
+        // 演员与职员 ›：整页名单（标题在头部下面，先找它，再往下滑）
+        if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 2) {
             castLink.tap(); sleep(2)
             snap("duo-04b-cast")
             back(app)
         } else {
             XCTFail("详情页没有「演员与职员 ›」")
         }
+        app.swipeUp(); sleep(2); snap("duo-04-detail-info")
         back(app)
         app.swipeUp(); sleep(2); snap("duo-08-home-watchlist")
 
@@ -53,6 +53,15 @@ final class DuoDeviceTests: XCTestCase {
             header.tap(); sleep(2)
             snap("duo-09-shelf")
             back(app)
+            // 今日推荐 ›：排行页（拼贴头图 + 两列名次卡）；它在「最新加入」上面，先滑回顶上再往下找
+            app.swipeDown(); app.swipeDown(); sleep(1)
+            if let picks = reveal(app, app.buttons.matching(identifier: "section-今日推荐"), swipes: 3) {
+                picks.tap(); sleep(3)
+                snap("duo-09b-picks-chart")
+                app.swipeUp(); sleep(2)
+                snap("duo-09c-picks-chart-2")
+                back(app)
+            }
         } else {
             XCTFail("首页找不到「最新加入 ›」")
         }
@@ -62,10 +71,9 @@ final class DuoDeviceTests: XCTestCase {
         report(app, "library")
         snap("duo-05-library")
 
-        // 剧集详情：横排的分集大卡
-        let seg = app.segmentedControls.buttons["剧集"]
-        if seg.waitForExistence(timeout: 5) {
-            seg.tap(); sleep(2)
+        // 剧集详情：横排的分集大卡（资料库的标题「你的电影 ⌃⌄」是个菜单，换成剧集）
+        if switchLibrary(app, to: "剧集") {
+            snap("duo-05a-library-series")
             let s1 = app.buttons["library-series"].firstMatch
             if s1.waitForExistence(timeout: 5) {
                 s1.tap(); sleep(3)
@@ -84,7 +92,7 @@ final class DuoDeviceTests: XCTestCase {
                 }
                 back(app)
             }
-            app.segmentedControls.buttons["电影"].tap(); sleep(1)
+            switchLibrary(app, to: "电影")
         }
 
         let acct = visible(app.buttons.matching(identifier: "account-button"))
@@ -185,11 +193,22 @@ final class DuoDeviceTests: XCTestCase {
         return w.width > w.height || shot.width > shot.height
     }
 
+    /// 资料库的标题「你的电影 ⌃⌄」是个菜单：点开选「剧集」/「电影」
+    @discardableResult
+    private func switchLibrary(_ app: XCUIApplication, to kind: String) -> Bool {
+        let menu = app.buttons["library-kind"].firstMatch
+        guard menu.waitForExistence(timeout: 5) else { return false }
+        menu.tap(); sleep(1)
+        let item = app.buttons[kind].firstMatch
+        guard item.waitForExistence(timeout: 3) else { return false }
+        item.tap(); sleep(2)
+        return true
+    }
+
+    /// 标签：竖在侧边时不算 tabBars，直接按名字找按钮（少问一次）
     private func tab(_ app: XCUIApplication, _ name: String) {
-        let b = app.tabBars.buttons[name].firstMatch
-        if b.exists { b.tap(); return }
-        let any = app.buttons[name].firstMatch
-        if any.exists { any.tap() }
+        let b = app.buttons[name].firstMatch
+        if b.waitForExistence(timeout: 5) { b.tap() }
     }
 
     /// 系统返回钮：竖在侧边时不在 navigationBars 里，按它的标识找
@@ -217,10 +236,11 @@ final class DuoDeviceTests: XCTestCase {
         add(a)
     }
 
-    /// 往上滑，直到有一个匹配项在屏上点得到（懒加载的排要滑到才会生成）
+    /// 往上滑，直到第一个匹配项在屏上点得到（懒加载的排要滑到才会生成）。只看第一个：每问一次元素就是一次快照
     private func reveal(_ app: XCUIApplication, _ q: XCUIElementQuery, swipes: Int = 6) -> XCUIElement? {
         for i in 0...swipes {
-            if let e = q.allElementsBoundByIndex.first(where: { $0.isHittable }) { return e }
+            let e = q.firstMatch
+            if e.exists && e.isHittable { return e }
             if i < swipes { app.swipeUp(); sleep(1) }
         }
         return nil
