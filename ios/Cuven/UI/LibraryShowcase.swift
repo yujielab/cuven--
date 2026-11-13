@@ -486,6 +486,8 @@ final class ShowcaseTrailer {
     private(set) var paused = false
     private var visible = true
     private var covered = false
+    /// 正片播放器盖在上面（全屏）：预告片停着
+    private var playerUp = false
 
     @ObservationIgnored private var loadTask: Task<Void, Never>?
     @ObservationIgnored private var timeObserver: Any?
@@ -493,10 +495,21 @@ final class ShowcaseTrailer {
     @ObservationIgnored private var statusObservation: NSKeyValueObservation?
     @ObservationIgnored private var start: Double = 10
 
+    @ObservationIgnored private var playerObservers: [NSObjectProtocol] = []
+
     init() {
         player.isMuted = true
         player.preventsDisplaySleepDuringVideoPlayback = false
         player.actionAtItemEnd = .pause
+        let nc = NotificationCenter.default
+        playerObservers = [
+            nc.addObserver(forName: .cuvenPlayerPresented, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.playerUp = true; self?.sync() }
+            },
+            nc.addObserver(forName: .cuvenPlayerClosed, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.playerUp = false; self?.sync() }
+            },
+        ]
     }
 
     func mount(_ v: Video, model: AppModel) {
@@ -546,7 +559,7 @@ final class ShowcaseTrailer {
 
     private func sync() {
         guard player.currentItem != nil else { return }
-        if visible && !covered && !paused { player.play() } else { player.pause() }
+        if visible && !covered && !paused && !playerUp { player.play() } else { player.pause() }
     }
 
     private func attach(_ url: URL) {

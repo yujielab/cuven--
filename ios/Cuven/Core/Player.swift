@@ -244,6 +244,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         vc.onClose = { [weak self] in self?.closedByUser() }
         controller = vc
         plog("present")
+        NotificationCenter.default.post(name: .cuvenPlayerPresented, object: nil)
         UIApplication.topViewController()?.present(vc, animated: true)
     }
 
@@ -413,6 +414,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         player = nil
         controller = nil
         current = nil
+        NotificationCenter.default.post(name: .cuvenPlayerClosed, object: nil)
     }
 
     private func detachItem() {
@@ -494,4 +496,10 @@ enum Haptics {
     @MainActor static func selection() { guard enabled else { return }; UISelectionFeedbackGenerator().selectionChanged() }
     @MainActor static func success() { guard enabled else { return }; UINotificationFeedbackGenerator().notificationOccurred(.success) }
     @MainActor static func error() { guard enabled else { return }; UINotificationFeedbackGenerator().notificationOccurred(.error) }
+}
+
+extension Notification.Name {
+    /// 播放器盖上来 / 关掉：资料库那段静音预告片跟着停 / 接着放
+    static let cuvenPlayerPresented = Notification.Name("cuven.player.presented")
+    static let cuvenPlayerClosed = Notification.Name("cuven.player.closed")
 }
