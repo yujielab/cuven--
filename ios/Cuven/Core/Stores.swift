@@ -393,6 +393,21 @@ final class AppModel {
 
     var newest: [Video] { Array(movies.prefix(15)) }
 
+    /// 详情页「你可能还喜欢」：和这部片同类型的几部，同的类型越多越靠前，再按评分；不含它自己（同一个 TMDB 编号的别的版本也不算）
+    func related(to video: Video, limit: Int = 12) -> [Video] {
+        guard let mine = meta(video), let g = mine.genres, !g.isEmpty else { return [] }
+        let wanted = Set(g)
+        var scored: [(video: Video, shared: Int, rating: Double)] = []
+        for v in movies where v.path != video.path {
+            guard let m = meta(v), let gs = m.genres else { continue }
+            if let id = mine.id, m.id == id { continue }
+            let shared = gs.reduce(0) { $0 + (wanted.contains($1) ? 1 : 0) }
+            if shared > 0 { scored.append((v, shared, m.rating ?? 0)) }
+        }
+        scored.sort { $0.shared != $1.shared ? $0.shared > $1.shared : $0.rating > $1.rating }
+        return scored.prefix(limit).map(\.video)
+    }
+
     var yearGroups: [(year: Int, videos: [Video])] {
         derive()
         return cachedYearGroups

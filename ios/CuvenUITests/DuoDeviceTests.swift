@@ -105,7 +105,14 @@ final class DuoDeviceTests: XCTestCase {
         sleep(4)
         XCUIDevice.shared.orientation = .landscapeLeft
         sleep(3)
+        if !rotated(app) { XCUIDevice.shared.orientation = .landscapeRight; sleep(3) }
         report(app, "landscape")
+        // 折起时外屏在模拟器里可能不跟着转：没转就不截（免得把竖屏图标成横屏）
+        guard rotated(app) else {
+            print("DUO landscape: did not rotate (window and screenshot stay portrait)")
+            XCUIDevice.shared.orientation = .portrait
+            return
+        }
         snap("duo-11-landscape-home")
         tab(app, "资料库"); sleep(3)
         snap("duo-12-landscape-library")
@@ -135,6 +142,12 @@ final class DuoDeviceTests: XCTestCase {
             XCTAssertTrue(newUser.waitForExistence(timeout: 20), "账户服务查不到或读不懂（应当提示新用户）")
             if subtitle.exists { snap("duo-22-login-lookup") }
         }
+    }
+
+    private func rotated(_ app: XCUIApplication) -> Bool {
+        let w = app.windows.firstMatch.frame.size
+        let shot = XCUIScreen.main.screenshot().image.size
+        return w.width > w.height || shot.width > shot.height
     }
 
     private func tab(_ app: XCUIApplication, _ name: String) {

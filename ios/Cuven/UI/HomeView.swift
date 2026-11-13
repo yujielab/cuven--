@@ -294,6 +294,8 @@ struct HeroIndicator: View {
 /// 字标、信息行，下面「播放」+「想看」
 struct HeroPage: View {
     @Environment(AppModel.self) private var model
+    /// 「减弱动态效果」打开时：不推近、不做视差（只是装饰的动效都收起来）
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let item: HeroItem
     let wide: Bool
     let width: CGFloat
@@ -301,6 +303,8 @@ struct HeroPage: View {
 
     var body: some View {
         let m = model.meta(item.video)
+        let calm = reduceMotion
+        let w = width
         let art = wide ? (item.hero.background ?? item.hero.poster) : (item.hero.poster ?? item.hero.background)
         ZStack(alignment: .bottom) {
             ZoomLink(route: .movie(item.video), slot: "hero", press: false) {
@@ -308,10 +312,10 @@ struct HeroPage: View {
                 Color.clear
                     .overlay {
                         RemoteImage(url: URL(string: art ?? ""), maxPixel: 1600)
-                            .scaleEffect(active ? 1.07 : 1.0)
+                            .scaleEffect(active && !calm ? 1.07 : 1.0)
                             .animation(.linear(duration: HeroPager.interval + 1.5), value: active)
                             .scrollTransition(.interactive, axis: .horizontal) { content, phase in
-                                content.offset(x: phase.value * -width * 0.28)
+                                content.offset(x: calm ? 0 : CGFloat(phase.value) * -w * 0.28)
                             }
                     }
                     .clipped()

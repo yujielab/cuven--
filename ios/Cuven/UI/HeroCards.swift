@@ -8,6 +8,7 @@ import SwiftUI
 
 struct HeroCards: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let items: [HeroItem]
     let width: CGFloat
     /// 卡片高度（不含下面那排圆点）
@@ -16,6 +17,7 @@ struct HeroCards: View {
 
     var body: some View {
         let gap: CGFloat = 26, spacing: CGFloat = 12
+        let calm = reduceMotion
         let cardW = max(200, width - gap * 2)
         let cardH = max(300, cardHeight)
         VStack(spacing: 16) {
@@ -34,7 +36,7 @@ struct HeroCards: View {
                             // 翻卡时两侧的卡略缩、略暗（Apple TV 卡片轮播的手感）
                             .scrollTransition(.interactive, axis: .horizontal) { content, phase in
                                 content
-                                    .scaleEffect(phase.isIdentity ? 1 : 0.94)
+                                    .scaleEffect(phase.isIdentity || calm ? 1 : 0.94)
                                     .opacity(phase.isIdentity ? 1 : 0.75)
                             }
                         }

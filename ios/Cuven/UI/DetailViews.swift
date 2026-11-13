@@ -13,6 +13,7 @@ struct MovieDetailView: View {
     @State private var full: Meta?
     @State private var selected: Video?
     @State private var showTitle = false
+    @State private var related: [Video] = []
 
     var body: some View {
         let meta = full ?? model.meta(video)
@@ -104,6 +105,23 @@ struct MovieDetailView: View {
                         }
                     }
 
+                        if !related.isEmpty {
+                            VStack(alignment: .leading, spacing: 12) {
+                                DetailSectionTitle("你可能还喜欢")
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    LazyHStack(alignment: .top, spacing: 12) {
+                                        ForEach(related) { v in
+                                            ZoomLink(route: .movie(v), slot: "related") { PosterCard(video: v, width: 118) }
+                                                .movieMenu(v)
+                                        }
+                                    }
+                                    .scrollTargetLayout()
+                                }
+                                .scrollTargetBehavior(.viewAligned)
+                                .scrollClipDisabled()
+                            }
+                        }
+
                         InfoSections(sections: [
                             ("信息", movieInfo(meta)),
                             ("文件", fileInfo(file)),
@@ -137,7 +155,10 @@ struct MovieDetailView: View {
                 }
             }
         }
-        .task { full = await model.fullMeta(for: video) }
+        .task {
+            related = model.related(to: video)
+            full = await model.fullMeta(for: video)
+        }
     }
 
     private func infoLine(_ m: Meta?) -> String {
@@ -340,6 +361,7 @@ struct InfoSections: View {
 struct SeriesDetailView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.horizontalSizeClass) private var hsc
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let series: Series
     @State private var files: [EpisodeFile] = []
     @State private var info: [Int: SeasonEpisode] = [:]
@@ -351,6 +373,7 @@ struct SeriesDetailView: View {
         let meta = model.seriesMetas[series.path]
         let last = model.playback.lastEpisode(of: series.path)
         let title = meta?.title ?? series.name
+        let calm = reduceMotion
 
         GeometryReader { geo in
             let wide = hsc == .regular || geo.size.width > geo.size.height
@@ -395,7 +418,7 @@ struct SeriesDetailView: View {
                                     }
                                     .buttonStyle(PressableStyle())
                                     .scrollTransition(.interactive, axis: .horizontal) { c, phase in
-                                        c.scaleEffect(phase.isIdentity ? 1 : 0.95).opacity(phase.isIdentity ? 1 : 0.8)
+                                        c.scaleEffect(phase.isIdentity || calm ? 1 : 0.95).opacity(phase.isIdentity ? 1 : 0.8)
                                     }
                                     .accessibilityIdentifier("episode-card")
                                 }

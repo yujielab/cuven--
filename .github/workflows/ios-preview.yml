@@ -92,7 +92,8 @@ jobs:
         run: |
           xcrun simctl list devicetypes | grep -i -E 'duo|fold' || true
           xcrun simctl help 2>&1 | sed -n '1,80p'
-          for c in ui io; do echo "---- simctl help $c"; xcrun simctl help $c 2>&1 | sed -n '1,60p'; done
+          echo "---- simctl help ui"; xcrun simctl help ui 2>&1 | sed -n '1,60p'
+          echo "---- simctl help io"; xcrun simctl help io 2>&1 | sed -n '55,200p'
 
       - name: 编译测试包
         run: |
@@ -114,6 +115,8 @@ jobs:
           echo "exit $code"
           if [ $code -ne 0 ]; then tail -40 "$RUNNER_TEMP/duo.log"; fi
           echo "DUO_EXIT=$code" >> "$GITHUB_ENV"
+          # 折叠屏有几块屏、各自什么状态（看能不能用 screenConfig 模拟展开 / 转向）
+          echo "---- Duo 屏幕"; xcrun simctl io "$DUO_UDID" enumerate 2>&1 | head -120 || true
 
       - name: 走一遍（真实片库，普通 iPhone）
         if: always()
