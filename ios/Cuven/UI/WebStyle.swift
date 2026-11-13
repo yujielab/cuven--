@@ -19,20 +19,28 @@ struct SectionChip: View {
     }
 }
 
-/// 「品质保证」小章（网页版 .cuven-seal：11 号 800 粗，rgba(10,10,12,.52) + 模糊，1px 白 18% 描边，高 28）
+/// 「品质保证」小章（网页版 .cuven-seal：11 号 800 粗，rgba(10,10,12,.52) + 模糊，1px 白 18% 描边，高 28）。
+/// note：前面带「Cuven」（详情页头部那一行，12.5 号、左右 12）
 struct QualitySeal: View {
-    var text = "品质保证"
+    var note = false
+    var size: CGFloat = 11
+    var hPad: CGFloat = 10
 
     var body: some View {
-        Text(text)
-            .font(.system(size: 11, weight: .heavy))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 8)
-            .frame(height: 28)
-            .background(.ultraThinMaterial, in: Capsule())
-            .background(Color(red: 10 / 255, green: 10 / 255, blue: 12 / 255).opacity(0.52), in: Capsule())
-            .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 1))
-            .environment(\.colorScheme, .dark)
+        HStack(spacing: size * 0.32) {
+            if note { Text("Cuven").font(.system(size: size, weight: .heavy)) }
+            Text("品质保证").font(.system(size: size * 0.94, weight: .bold))
+        }
+        .foregroundStyle(.white)
+        .shadow(color: .black.opacity(0.5), radius: 1.5, y: 1)
+        .padding(.horizontal, hPad)
+        .frame(height: 28)
+        .background(.ultraThinMaterial, in: Capsule())
+        .background(Color(red: 10 / 255, green: 10 / 255, blue: 12 / 255).opacity(0.52), in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 1))
+        .shadow(color: .black.opacity(0.35), radius: 7, y: 4)
+        .environment(\.colorScheme, .dark)
+        .fixedSize()
     }
 }
 

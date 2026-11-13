@@ -33,10 +33,18 @@ final class DuoDeviceTests: XCTestCase {
         sleep(2)
         report(app, "detail")
         snap("duo-03-detail")
-        // 「想看」：详情页头部的「+」，回首页后多出「想看」那一排
-        let plus = visible(app.buttons.matching(identifier: "watchlist-button"))
-        if plus.exists { plus.tap(); sleep(1) } else { XCTFail("详情页没有「想看」钮") }
-        // 演员与职员 ›：整页名单（标题在头部下面，先找它，再往下滑）
+        // 「更多操作」：播放钮旁边那颗玻璃圆钮，弹出和网页版一样的弹层（播放 / 复制直链 / 取消）
+        let more = app.buttons["detail-more"].firstMatch
+        if more.waitForExistence(timeout: 3) {
+            more.tap(); sleep(2)
+            snap("duo-03b-detail-more")
+            let cancel = app.buttons["sheet-cancel"].firstMatch
+            if cancel.waitForExistence(timeout: 3) { cancel.tap() } else { app.swipeDown() }
+            sleep(1)
+        } else {
+            XCTFail("详情页没有「更多操作」钮")
+        }
+        // 演员阵容 · 查看全部 ›：整页名单（在简介下面，先找它，再往下滑）
         if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 2) {
             castLink.tap(); sleep(2)
             snap("duo-04b-cast")
@@ -45,6 +53,7 @@ final class DuoDeviceTests: XCTestCase {
             XCTFail("详情页没有「演员与职员 ›」")
         }
         app.swipeUp(); sleep(2); snap("duo-04-detail-info")
+        app.swipeUp(); sleep(2); snap("duo-04c-detail-tech")
         back(app)
         // 主页往下：今日推荐、最新加入（横版卡）、Cuven TV（高卡）、按年份（年份条 + 剧集卡 + 竖版卡）
         app.swipeUp(); sleep(2); snap("duo-08-home-rows")
@@ -115,7 +124,7 @@ final class DuoDeviceTests: XCTestCase {
             if b.exists && b.isHittable { b.tap(); sleep(1); break }
         }
 
-        // 长按海报：菜单（播放 / 想看 / 分享），预览是那张卡（放在最后：菜单没收起也不影响别的步骤）
+        // 长按海报：菜单（播放 / 想看），预览是那张卡（放在最后：菜单没收起也不影响别的步骤）
         tab(app, "主页"); sleep(2)
         if let poster = reveal(app, app.buttons.matching(identifier: "newest-poster")) {
             poster.press(forDuration: 1.2); sleep(2)

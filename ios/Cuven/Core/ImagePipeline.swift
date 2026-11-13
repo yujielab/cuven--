@@ -176,6 +176,8 @@ struct LogoImage: View {
     var height: CGFloat
     var alignment: Alignment = .center
     var fallback: String? = nil
+    /// 宽度上限（网页版详情页：最大 320×110，按比例收，框跟着字标实际大小走）
+    var maxWidth: CGFloat = .infinity
 
     @State private var image: UIImage?
     @State private var dark = false
@@ -185,10 +187,12 @@ struct LogoImage: View {
         let _ = Perf.count("logo")
         Group {
             if let image {
+                let aspect = max(0.1, image.size.width / max(1, image.size.height))
+                let h = min(height, maxWidth / aspect)
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(height: height)
+                    .frame(width: maxWidth.isFinite ? h * aspect : nil, height: h)
                     .frame(maxWidth: .infinity, alignment: alignment)
                     .modifier(InvertIf(on: dark))
                     .shadow(color: .black.opacity(0.55), radius: 12, y: 4)

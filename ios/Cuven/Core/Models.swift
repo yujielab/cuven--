@@ -196,6 +196,9 @@ struct Series: Codable, Hashable, Identifiable, Sendable {
     var res: String?
     var hdr: String?
     var tags: [String]?
+    /// 目录名里读出来的音轨语种（「国语」「英语」）与音频格式（Atmos / TrueHD …）：详情页「语言」那一块用
+    var langs: [String]?
+    var audio: String?
     var full: Bool?
     var complete: Bool?
     var tmdbId: Int?
@@ -206,7 +209,7 @@ struct Series: Codable, Hashable, Identifiable, Sendable {
     var added: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, path, folder, title, zh, en, season, seasonLabel, year, res, hdr, tags, full, complete, tmdbId, tmdbMiss, episodes, total, size, added
+        case id, path, folder, title, zh, en, season, seasonLabel, year, res, hdr, tags, langs, audio, full, complete, tmdbId, tmdbMiss, episodes, total, size, added
     }
 
     init(id: String, path: String, title: String, en: String?, season: Int, year: String, episodes: Int, full: Bool, tags: [String] = [], added: String) {
@@ -229,6 +232,8 @@ struct Series: Codable, Hashable, Identifiable, Sendable {
         res = c.str(.res)
         hdr = c.str(.hdr)
         tags = try? c.decodeIfPresent([String].self, forKey: .tags)
+        langs = try? c.decodeIfPresent([String].self, forKey: .langs)
+        audio = c.str(.audio)
         full = c.bool(.full)
         complete = c.bool(.complete)
         tmdbId = c.int(.tmdbId)
