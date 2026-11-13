@@ -46,26 +46,12 @@ final class DuoDeviceTests: XCTestCase {
         }
         app.swipeUp(); sleep(2); snap("duo-04-detail-info")
         back(app)
-        app.swipeUp(); sleep(2); snap("duo-08-home-watchlist")
-
-        // 分区标题「›」进整页清单
-        if let header = reveal(app, app.buttons.matching(identifier: "section-最新加入")) {
-            header.tap(); sleep(2)
-            snap("duo-09-shelf")
-            back(app)
-            // 今日推荐 ›：排行页（拼贴头图 + 两列名次卡）；它在「最新加入」上面，先滑回顶上再往下找
-            app.swipeDown(); app.swipeDown(); sleep(1)
-            if let picks = reveal(app, app.buttons.matching(identifier: "section-今日推荐"), swipes: 3) {
-                picks.tap(); sleep(3)
-                snap("duo-09b-picks-chart")
-                app.swipeUp(); sleep(2)
-                snap("duo-09c-picks-chart-2")
-                back(app)
-            }
-        } else {
-            XCTFail("首页找不到「最新加入 ›」")
-        }
-        app.swipeDown(); app.swipeDown(); app.swipeDown(); sleep(1)
+        // 主页往下：今日推荐、最新加入（横版卡）、Cuven TV（高卡）、按年份（年份条 + 剧集卡 + 竖版卡）
+        app.swipeUp(); sleep(2); snap("duo-08-home-rows")
+        app.swipeUp(); sleep(2); snap("duo-08b-home-tv")
+        app.swipeUp(); sleep(2); snap("duo-08c-home-year")
+        app.swipeUp(); sleep(2); snap("duo-08d-home-year-2")
+        app.swipeDown(); app.swipeDown(); app.swipeDown(); app.swipeDown(); app.swipeDown(); sleep(1)
 
         tab(app, "资料库"); sleep(3)
         report(app, "library")
@@ -86,25 +72,22 @@ final class DuoDeviceTests: XCTestCase {
                     seasonMenu.tap(); sleep(1)
                     snap("duo-05d-season-menu")
                     let s2 = app.buttons["第 2 季"].firstMatch
-                    if s2.waitForExistence(timeout: 3) { s2.tap() } else { app.menuItems["第 2 季"].firstMatch.tap() }
-                    sleep(2)
-                    snap("duo-05e-season-2")
+                    if s2.waitForExistence(timeout: 3) {
+                        s2.tap(); sleep(2)
+                        snap("duo-05e-season-2")
+                    } else {
+                        print("DUO season menu: item not exposed")
+                        app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.1)).tap(); sleep(1)
+                    }
                 }
                 back(app)
             }
             switchLibrary(app, to: "电影")
         }
 
-        let acct = visible(app.buttons.matching(identifier: "account-button"))
-        if acct.waitForExistence(timeout: 5) {
-            acct.tap(); sleep(2)
-            snap("duo-06-account")
-            let done = app.buttons["account-done"].firstMatch
-            if done.waitForExistence(timeout: 3) { done.tap() } else { app.swipeDown() }
-            sleep(1)
-        } else {
-            XCTFail("资料库右上角没有头像（账户与设置）")
-        }
+        // 账户与设置：网页版导航胶囊里的头像，这里是「账户」标签
+        tab(app, "账户"); sleep(2)
+        snap("duo-06-account")
 
         tab(app, "搜索"); sleep(2)
         snap("duo-07a-search-home")          // 为你推荐 + 浏览

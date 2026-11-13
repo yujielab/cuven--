@@ -109,14 +109,9 @@ final class TourTests: XCTestCase {
             let item = app.buttons["剧集"].firstMatch
             if item.waitForExistence(timeout: 3) { item.tap(); sleep(6); snap("11b-library-series") }
         }
-        let acct = visible(app.buttons.matching(identifier: "account-button"))
-        if acct.waitForExistence(timeout: 5) {
-            acct.tap(); sleep(2)
-            snap("12-account")
-            let done = app.buttons["account-done"].firstMatch
-            if done.waitForExistence(timeout: 3) { done.tap() } else { app.swipeDown() }
-            sleep(1)
-        }
+        tapTab(["账户"])
+        sleep(2)
+        snap("12-account")
         tapTab(["搜索", "Search"])
         sleep(3)
         snap("12b-search-home")

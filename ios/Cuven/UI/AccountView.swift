@@ -66,6 +66,8 @@ struct AccountView: View {
     @State private var refreshing = false
     @State private var confirmSignOut = false
     @State private var tint = Color(red: 0.22, green: 0.24, blue: 0.62)
+    /// 当标签页用（网页版导航胶囊里的头像）：没有「完成」
+    var asTab = false
 
     var body: some View {
         ZoomStack {
@@ -159,9 +161,11 @@ struct AccountView: View {
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成", systemImage: "checkmark") { dismiss() }
-                        .accessibilityIdentifier("account-done")
+                if !asTab {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("完成", systemImage: "checkmark") { dismiss() }
+                            .accessibilityIdentifier("account-done")
+                    }
                 }
             }
             .confirmationDialog("退出登录？", isPresented: $confirmSignOut, titleVisibility: .visible) {

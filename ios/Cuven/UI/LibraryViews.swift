@@ -74,12 +74,6 @@ struct LibraryView: View {
             .scrollIndicators(.hidden)
             .background(Theme.bg)
             .navigationTitle("资料库")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    AvatarButton()
-                }
-                .sharedBackgroundVisibility(.hidden)
-            }
             .refreshable { await model.refreshAll() }
         }
     }
@@ -406,12 +400,6 @@ struct SearchView: View {
             }
             .background(Theme.bg)
             .navigationTitle("搜索")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    AvatarButton()
-                }
-                .sharedBackgroundVisibility(.hidden)
-            }
         }
     }
 

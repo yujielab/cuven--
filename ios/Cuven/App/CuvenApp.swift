@@ -24,7 +24,7 @@ struct CuvenApp: App {
     }
 }
 
-enum AppTab: Hashable { case home, library, search }
+enum AppTab: Hashable { case home, library, account, search }
 
 /// 系统标签栏：主页 / 资料库，搜索单独一颗（搜索标签）。账户与设置在主页 / 资料库右上角的头像里。
 ///
@@ -38,18 +38,18 @@ struct RootView: View {
     @Environment(\.horizontalSizeClass) private var hsc
     @Environment(\.verticalSizeClass) private var vsc
     @State private var tab: AppTab = .home
-    @State private var showAccount = false
 
     var body: some View {
         TabView(selection: $tab) {
             Tab("主页", systemImage: "house.fill", value: AppTab.home) { HomeView() }
             Tab("资料库", systemImage: "square.stack.fill", value: AppTab.library) { LibraryView() }
+            // 网页版导航胶囊里的头像：账户与设置
+            Tab("账户", systemImage: "person.crop.circle.fill", value: AppTab.account) { AccountView(asTab: true) }
             Tab(value: AppTab.search, role: .search) { SearchView() }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
         .onChange(of: tab) { _, _ in Haptics.selection() }
-        .environment(\.openAccount, { showAccount = true })
-        .sheet(isPresented: $showAccount) { AccountView() }
+        .environment(\.openAccount, { tab = .account })
         .fullScreenCover(isPresented: .constant(account.loginRequired && !account.isLoggedIn)) {
             LoginView()
                 .environment(model)

@@ -9,7 +9,7 @@ enum Theme {
     static let hairline = Color.white.opacity(0.12)
     static let accent = Color(red: 0.04, green: 0.52, blue: 1.0)
     static let cardRadius: CGFloat = 14
-    static let gutter: CGFloat = 20
+    static let gutter: CGFloat = 23          // 网页版左右留白
 }
 
 // MARK: - 分区标题
@@ -169,6 +169,7 @@ struct ProgressCapsule: View {
 
 // MARK: - 今日推荐：大号描边名次 + 海报压在数字右缘
 
+/// 网页版「今日推荐」的一张（.rank-card：左边 82 宽给大号描边名次，海报 164×246、圆角 14，右下角「品质保证」小章）
 struct RankCard: View {
     @Environment(AppModel.self) private var model
     let rank: Int
@@ -176,18 +177,18 @@ struct RankCard: View {
 
     var body: some View {
         let m = model.meta(video)
-        let posterW: CGFloat = 116
         ZStack(alignment: .bottomLeading) {
-            OutlinedNumber(text: String(rank), size: rank >= 10 ? 112 : 132)
-                .offset(x: -4, y: 18)
-            RemoteImage(url: TMDBImage.url(m?.poster ?? m?.posterClean, "w342"), maxPixel: posterW * 3)
-                .frame(width: posterW, height: posterW * 1.5)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.5), radius: 10, x: -6, y: 4)
-                .padding(.leading, rank >= 10 ? 74 : 56)
+            OutlinedNumber(text: String(rank), size: rank >= 10 ? 150 : 190, stroke: 2.4)
+                .offset(x: -8, y: 34)
+            RemoteImage(url: TMDBImage.url(m?.poster ?? m?.posterClean, "w342"), maxPixel: 164 * 3)
+                .frame(width: 164, height: 246)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
+                .overlay(alignment: .bottomTrailing) { QualitySeal().padding(8) }
+                .shadow(color: .black.opacity(0.5), radius: 12, x: -6, y: 6)
+                .padding(.leading, 82)
         }
-        .frame(width: (rank >= 10 ? 74 : 56) + posterW, height: posterW * 1.5, alignment: .bottomLeading)
+        .frame(width: 246, height: 246, alignment: .bottomLeading)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("第 \(rank) 名，\(model.title(video))")
     }
@@ -197,13 +198,14 @@ struct RankCard: View {
 struct OutlinedNumber: View {
     let text: String
     let size: CGFloat
+    var stroke: CGFloat = 1.6
     var body: some View {
         let font = Font.system(size: size, weight: .heavy, design: .rounded)
         ZStack {
             ForEach(0..<8, id: \.self) { i in
                 let a = Double(i) * .pi / 4
                 Text(text).font(font).foregroundStyle(Color.white.opacity(0.9))
-                    .offset(x: cos(a) * 1.6, y: sin(a) * 1.6)
+                    .offset(x: cos(a) * stroke, y: sin(a) * stroke)
             }
             Text(text).font(font).foregroundStyle(Theme.bg)
         }
@@ -213,35 +215,40 @@ struct OutlinedNumber: View {
 
 // MARK: - 继续观看：横版卡 + 进度
 
+/// 网页版「继续观看」：和「最新加入」同一种横版卡（16:9、圆角 14、左下片名压在渐暗上），卡里一条进度；卡下一行灰字是什么时候看的
 struct ContinueCard: View {
     let entry: WatchEntry
     var width: CGFloat = 250
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 13) {
             ZStack(alignment: .bottomLeading) {
-                RemoteImage(url: TMDBImage.url(entry.artwork, "w780"), maxPixel: width * 3)
-                    .frame(width: width, height: width * 9 / 16)
+                Color.clear
+                    .overlay { RemoteImage(url: TMDBImage.url(entry.artwork, "w780"), maxPixel: width * 3) }
                     .clipped()
-                LinearGradient(colors: [.clear, .black.opacity(0.75)], startPoint: .center, endPoint: .bottom)
-                HStack(spacing: 6) {
-                    Image(systemName: "play.fill").font(.system(size: 11, weight: .bold))
-                    Text("还剩 \(Format.clock(entry.remaining))").font(.system(size: 12, weight: .semibold)).monospacedDigit()
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0.45),
+                    .init(color: .black.opacity(0.72), location: 1),
+                ], startPoint: .top, endPoint: .bottom)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text([entry.title, entry.subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    ProgressCapsule(fraction: entry.fraction)
                 }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 10).padding(.bottom, 16)
-                ProgressCapsule(fraction: entry.fraction).padding(.horizontal, 10).padding(.bottom, 7)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 14)
             }
-            .frame(width: width, height: width * 9 / 16)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-                Text([entry.subtitle, Format.relative(entry.updated)].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
-                    .font(.system(size: 12)).foregroundStyle(Theme.tertiary).lineLimit(1)
-            }
-            .frame(width: width, alignment: .leading)
+            .frame(width: width, height: width * 224 / 399)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
+            Text("\(Format.relative(entry.updated)) · 还剩 \(Format.clock(entry.remaining))")
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(.white.opacity(0.4))
+                .lineLimit(1)
         }
+        .frame(width: width, alignment: .leading)
     }
 }
 
