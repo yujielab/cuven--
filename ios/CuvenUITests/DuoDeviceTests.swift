@@ -72,6 +72,16 @@ final class DuoDeviceTests: XCTestCase {
                 snap("duo-05b-series")
                 app.swipeUp(); sleep(2)
                 snap("duo-05c-series-episodes")
+                // 季切换：「第 1 季 ⌃⌄」点开是季的菜单，选第 2 季
+                let seasonMenu = app.buttons["season-menu"].firstMatch
+                if seasonMenu.waitForExistence(timeout: 3) {
+                    seasonMenu.tap(); sleep(1)
+                    snap("duo-05d-season-menu")
+                    let s2 = app.buttons["第 2 季"].firstMatch
+                    if s2.waitForExistence(timeout: 3) { s2.tap() } else { app.menuItems["第 2 季"].firstMatch.tap() }
+                    sleep(2)
+                    snap("duo-05e-season-2")
+                }
                 back(app)
             }
             app.segmentedControls.buttons["电影"].tap(); sleep(1)

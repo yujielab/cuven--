@@ -671,16 +671,31 @@ struct SeriesDetailView: View {
     @Environment(\.horizontalSizeClass) private var hsc
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let series: Series
+    /// 季切换：同一部剧的别的季（同一个 TMDB 编号，没有就同名）；没切过就是传进来的那一季
+    @State private var picked: Series?
     @State private var files: [EpisodeFile] = []
     @State private var info: [Int: SeasonEpisode] = [:]
     @State private var loading = true
     @State private var failed: String?
     @State private var showTitle = false
 
+    private var current: Series { picked ?? series }
+
+    /// 同一部剧的所有季，按季号排
+    private var seasons: [Series] {
+        let key = current.tmdbId ?? model.seriesMetas[current.path]?.id
+        let same = model.series.filter { s in
+            if let key { return (s.tmdbId ?? model.seriesMetas[s.path]?.id) == key }
+            return s.name == current.name
+        }
+        let list = same.contains(where: { $0.path == current.path }) ? same : same + [current]
+        return list.sorted { ($0.season ?? 0) < ($1.season ?? 0) }
+    }
+
     var body: some View {
-        let meta = model.seriesMetas[series.path]
-        let last = model.playback.lastEpisode(of: series.path)
-        let title = meta?.title ?? series.name
+        let meta = model.seriesMetas[current.path]
+        let last = model.playback.lastEpisode(of: current.path)
+        let title = meta?.title ?? current.name
         let calm = reduceMotion
 
         GeometryReader { geo in
@@ -690,35 +705,59 @@ struct SeriesDetailView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     DetailHero(art: (wide ? meta?.backdrop : (meta?.posterClean ?? meta?.backdrop)) ?? meta?.backdrop ?? meta?.poster,
                                logo: meta?.logo, title: title, kicker: kicker(meta), meta: infoLine(meta),
-                               badges: (series.tags ?? []).filter { !$0.isEmpty }, overview: meta?.overview,
+                               badges: (current.tags ?? []).filter { !$0.isEmpty }, overview: meta?.overview,
                                cast: meta?.cast?.prefix(3).map(\.name).joined(separator: "、"),
                                wide: wide, height: heroH) {
                         DetailActions(wide: wide, primary: resumeLabel(last), primaryID: "series-play",
                                       disabled: files.isEmpty, play: { playFirstOrResume(last) },
-                                      watchKey: series.path, watchKind: .series)
+                                      watchKey: current.path, watchKind: .series)
                     }
 
                     VStack(alignment: .leading, spacing: 14) {
-                        DetailSectionTitle(series.seasonLabel ?? "剧集")
+                        seasonHeader
                             .padding(.horizontal, Theme.gutter)
                         if loading && files.isEmpty {
                             ProgressView().frame(maxWidth: .infinity).padding(.vertical, 30)
                         } else if let failed, files.isEmpty {
                             Text(failed).font(.system(size: 14)).foregroundStyle(Theme.secondary).padding(.horizontal, Theme.gutter)
                         }
-                        let cardW = min(hsc == .regular ? 340 : geo.size.width * 0.8, 380)
+                        // Apple TV：一张卡约六成宽，右边露出下一张
+                        let cardW = min(hsc == .regular ? 300 : geo.size.width * 0.62, 320)
+                        let upNext = last.flatMap { l in files.firstIndex { $0.path == l.path } } ?? 0
                         ScrollView(.horizontal, showsIndicators: false) {
                             LazyHStack(alignment: .top, spacing: 14) {
                                 ForEach(Array(files.enumerated()), id: \.element.id) { i, f in
+                                    let progress = model.playback.entry(f.path)?.fraction
                                     Button { play(index: i) } label: {
                                         EpisodeCard(file: f, info: f.ep.flatMap { info[$0] }, fallbackArt: meta?.backdrop,
-                                                    progress: model.playback.entry(f.path)?.fraction, width: cardW)
+                                                    progress: progress, width: cardW, upNext: i == upNext)
                                     }
                                     .buttonStyle(PressableStyle())
+                                    .accessibilityIdentifier("episode-card")
+                                    // 「…」叠在卡片右下角（不嵌在卡片的按钮里）
+                                    .overlay(alignment: .bottomTrailing) {
+                                        Menu {
+                                            Button("播放", systemImage: "play.fill") { play(index: i) }
+                                            if (progress ?? 0) > 0.01 {
+                                                Button("从头播放", systemImage: "arrow.counterclockwise") {
+                                                    model.playback.finish(f.path)
+                                                    play(index: i)
+                                                }
+                                            }
+                                        } label: {
+                                            Image(systemName: "ellipsis")
+                                                .font(.system(size: 16, weight: .bold))
+                                                .foregroundStyle(.white.opacity(0.85))
+                                                .frame(width: 44, height: 40)
+                                                .contentShape(Rectangle())
+                                        }
+                                        .accessibilityLabel("更多操作")
+                                        .padding(.trailing, 4)
+                                        .padding(.bottom, 3)
+                                    }
                                     .scrollTransition(.interactive, axis: .horizontal) { c, phase in
                                         c.scaleEffect(phase.isIdentity || calm ? 1 : 0.95).opacity(phase.isIdentity ? 1 : 0.8)
                                     }
-                                    .accessibilityIdentifier("episode-card")
                                 }
                             }
                             .scrollTargetLayout()
@@ -756,7 +795,34 @@ struct SeriesDetailView: View {
                 }
             }
         }
-        .task { await load() }
+        .task(id: current.path) { await load() }
+    }
+
+    /// 「第 1 季 ⌃⌄」：同一部剧不止一季时，点开是季的菜单（Apple TV 的季切换）
+    @ViewBuilder private var seasonHeader: some View {
+        let all = seasons
+        if all.count > 1 {
+            Menu {
+                Picker("季", selection: Binding(get: { current.path }, set: { p in
+                    guard let s = all.first(where: { $0.path == p }), s.path != current.path else { return }
+                    Haptics.selection()
+                    withAnimation(.snappy) { picked = s }
+                })) {
+                    ForEach(all, id: \.path) { s in Text(s.seasonLabel ?? s.season.map { "第 \($0) 季" } ?? s.name).tag(s.path) }
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Text(current.seasonLabel ?? "剧集").font(.system(size: 22, weight: .bold)).foregroundStyle(.white)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Theme.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .accessibilityIdentifier("season-menu")
+        } else {
+            DetailSectionTitle(current.seasonLabel ?? "剧集")
+        }
     }
 
     /// 第一行：「剧集 · 类型 · 类型」
@@ -766,7 +832,7 @@ struct SeriesDetailView: View {
 
     /// 第二行：年份、第几季、集数、评分（后面跟着规格徽标）
     private func infoLine(_ m: Meta?) -> String {
-        var parts = [series.year.map { "\($0) 年" }, series.seasonLabel, series.countLabel.isEmpty ? nil : series.countLabel]
+        var parts = [current.year.map { "\($0) 年" }, current.seasonLabel, current.countLabel.isEmpty ? nil : current.countLabel]
             .compactMap { $0 }.filter { !$0.isEmpty }
         if let r = m?.rating, r > 0 { parts.append(String(format: "★ %.1f", r)) }
         return parts.joined(separator: " · ")
@@ -774,32 +840,35 @@ struct SeriesDetailView: View {
 
     private func seriesInfo(_ m: Meta?) -> [(String, String)] {
         var rows: [(String, String)] = []
-        if let y = series.year, !y.isEmpty { rows.append(("年份", "\(y) 年")) }
-        if let s = series.seasonLabel, !s.isEmpty { rows.append(("季", s)) }
-        if !series.countLabel.isEmpty { rows.append(("集数", series.countLabel)) }
+        if let y = current.year, !y.isEmpty { rows.append(("年份", "\(y) 年")) }
+        if let s = current.seasonLabel, !s.isEmpty { rows.append(("季", s)) }
+        if !current.countLabel.isEmpty { rows.append(("集数", current.countLabel)) }
         if let g = m?.genres, !g.isEmpty { rows.append(("类型", g.joined(separator: "、"))) }
         if let r = m?.rating, r > 0 { rows.append(("评分", String(format: "★ %.1f（TMDB）", r))) }
-        if let en = series.en ?? m?.en, !en.isEmpty, en != (m?.title ?? series.name) { rows.append(("原名", en)) }
+        if let en = current.en ?? m?.en, !en.isEmpty, en != (m?.title ?? current.name) { rows.append(("原名", en)) }
         return rows
     }
 
     private func load() async {
+        files = []
+        info = [:]
+        failed = nil
         if DemoData.enabled {
-            files = DemoData.episodes(series)
-            info = DemoData.season(series)
+            files = DemoData.episodes(current)
+            info = DemoData.season(current)
             loading = false
             return
         }
         loading = true
-        await model.ensureSeriesMeta(series)
+        await model.ensureSeriesMeta(current)
         do {
-            let list = try await APIClient.shared.episodes(seriesPath: series.path)
+            let list = try await APIClient.shared.episodes(seriesPath: current.path)
             files = list.sorted { ($0.ep ?? Int.max, $0.name) < ($1.ep ?? Int.max, $1.name) }
         } catch {
             failed = "分集清单没取到：\(error.localizedDescription)"
         }
         loading = false
-        if let id = series.tmdbId ?? model.seriesMetas[series.path]?.id, let s = series.season {
+        if let id = current.tmdbId ?? model.seriesMetas[current.path]?.id, let s = current.season {
             if let eps = try? await APIClient.shared.season(tmdbId: id, season: s) {
                 var d: [Int: SeasonEpisode] = [:]
                 for e in eps { if let n = e.ep { d[n] = e } }
@@ -818,12 +887,12 @@ struct SeriesDetailView: View {
     }
 
     private func request(_ f: EpisodeFile) -> PlayRequest {
-        let meta = model.seriesMetas[series.path]
+        let meta = model.seriesMetas[current.path]
         let name = f.ep.flatMap { info[$0]?.name }
         let sub = [f.ep.map { "第 \($0) 集" }, name].compactMap { $0 }.joined(separator: " · ")
-        return PlayRequest(path: f.path, name: f.name, title: meta?.title ?? series.name, subtitle: sub,
+        return PlayRequest(path: f.path, name: f.name, title: meta?.title ?? current.name, subtitle: sub,
                            artwork: f.ep.flatMap { info[$0]?.still } ?? meta?.backdrop,
-                           seriesPath: series.path, episode: f.ep)
+                           seriesPath: current.path, episode: f.ep)
     }
 
     private func play(index: Int) {
@@ -834,51 +903,67 @@ struct SeriesDetailView: View {
     }
 }
 
-/// 分集大卡：剧照铺满整张卡、下半截压暗，上面写第几集、集名、简介、时长；看过的带进度条
+/// 分集卡（Apple TV）：上半截是剧照，往下化进同一张图的毛玻璃（越往下越糊、略压暗），
+/// 上面写第几集、集名、三行简介；最下面一行：「▶」（按「播放」会从这一集开始的那张才有）、进度、时长，右下角留给叠上来的「…」
 struct EpisodeCard: View {
     let file: EpisodeFile
     let info: SeasonEpisode?
     let fallbackArt: String?
     let progress: Double?
     let width: CGFloat
+    var upNext = false
 
     var body: some View {
-        let height = width * 0.92
+        let height = width * 0.99
         ZStack(alignment: .bottomLeading) {
             Color.clear
                 .overlay { RemoteImage(url: TMDBImage.url(info?.still ?? fallbackArt, "w780"), maxPixel: width * 3) }
                 .clipped()
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .mask(LinearGradient(stops: [
+                    .init(color: .clear, location: 0.3),
+                    .init(color: .black, location: 0.58),
+                ], startPoint: .top, endPoint: .bottom))
+                .allowsHitTesting(false)
             LinearGradient(stops: [
                 .init(color: .clear, location: 0.3),
-                .init(color: .black.opacity(0.7), location: 0.6),
-                .init(color: .black.opacity(0.92), location: 1),
+                .init(color: .black.opacity(0.3), location: 0.58),
+                .init(color: .black.opacity(0.5), location: 1),
             ], startPoint: .top, endPoint: .bottom)
-            VStack(alignment: .leading, spacing: 4) {
+            .allowsHitTesting(false)
+
+            VStack(alignment: .leading, spacing: 3) {
                 Text(file.ep.map { "第 \($0) 集" } ?? FileName.stem(file.name))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.72))
                 if let name = info?.name, !name.isEmpty {
                     Text(name).font(.system(size: 17, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
                 }
                 if let o = info?.overview, !o.isEmpty {
-                    Text(o).font(.system(size: 13)).foregroundStyle(.white.opacity(0.75)).lineLimit(3)
+                    Text(o).font(.system(size: 14)).foregroundStyle(.white.opacity(0.72)).lineLimit(3)
                 }
-                HStack(spacing: 8) {
-                    let rt = Format.runtime(info?.runtime)
-                    Image(systemName: "play.fill").font(.system(size: 11, weight: .bold))
-                    if !rt.isEmpty { Text(rt).font(.system(size: 13, weight: .semibold)) }
-                    if let p = progress, p > 0.01 {
-                        ProgressCapsule(fraction: p).frame(maxWidth: 80)
+                HStack(spacing: 7) {
+                    if upNext {
+                        Image(systemName: "play.fill").font(.system(size: 12, weight: .bold))
                     }
+                    if let p = progress, p > 0.01 {
+                        ProgressCapsule(fraction: p).frame(width: 56)
+                    }
+                    let rt = Format.runtime(info?.runtime)
+                    if !rt.isEmpty { Text(rt).font(.system(size: 14, weight: .semibold)) }
+                    Spacer(minLength: 44)
                 }
-                .foregroundStyle(.white)
-                .padding(.top, 4)
+                .foregroundStyle(.white.opacity(0.9))
+                .frame(height: 20)
+                .padding(.top, 6)
             }
-            .padding(14)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 13)
         }
         .frame(width: width, height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5))
         .contentShape(Rectangle())
     }
 }

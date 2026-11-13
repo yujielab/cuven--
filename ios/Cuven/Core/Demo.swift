@@ -78,6 +78,15 @@ enum DemoData {
                             overview: "演示剧集：本地生成的画面与分集，用来核对版面。", rating: 8, type: "tv", genres: ["剧情"],
                             stills: [Still(url: url("backdrop", 60 + i), thumb: url("backdrop", 60 + i))])
         }
+        // 第一部剧再多一季（同一个 TMDB 编号）：剧集详情的季切换有东西可切
+        let s2 = "/demo-tv/\(seriesTitles[0]) 第二季"
+        series.append(Series(id: "demo-0-s2", path: s2, title: seriesTitles[0], en: english[0], season: 2, year: "2026",
+                             episodes: 6, full: false, tags: ["4K"], added: iso.string(from: now.addingTimeInterval(-86400 * 60))))
+        sm[s2] = Meta(id: 7000, title: seriesTitles[0], en: english[0], year: "2026",
+                      poster: url("poster", 48, seriesTitles[0]), posterClean: url("poster", 48), backdrop: url("backdrop", 48),
+                      logo: url("logo", 40, seriesTitles[0]),
+                      overview: "演示剧集第二季：本地生成的画面与分集，用来核对季切换。", rating: 8.4, type: "tv", genres: ["剧情"],
+                      stills: [Still(url: url("backdrop", 68), thumb: url("backdrop", 68))])
         m.series = series
         m.seriesMetas = sm
 
