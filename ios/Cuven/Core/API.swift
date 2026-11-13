@@ -75,6 +75,11 @@ final class APIClient: @unchecked Sendable {
         try await get("/api/all", timeout: 30, fresh: true)
     }
 
+    /// 一个文件夹里的子文件夹与视频（网页版 enterFolder）：path 是相对片库根目录的路径
+    func list(path: String) async throws -> FolderListing {
+        try await get("/api/list", [("path", path)], timeout: 15)
+    }
+
     /// 一批文件名 → TMDB 结果。回包里：值为 null = 后端确定认不出（不显示）；没有这个键 = 这次没问成（过会儿再问）。
     /// full = true 时带字标、演员、剧照（详情页用）
     func metaBatch(_ names: [String], full: Bool = false) async throws -> [String: Meta?] {
@@ -115,6 +120,13 @@ final class APIClient: @unchecked Sendable {
     func heroes() async throws -> [Hero] {
         let p: HeroPayload = try await get("/api/atv/hero", timeout: 20)
         return p.heroes
+    }
+
+    // MARK: 预告片
+
+    /// 按片名（英文名）在 Apple TV 上找这部片，连预告片一起
+    func atvLookup(title: String) async throws -> AtvLookup {
+        try await get("/api/atv/lookup", [("title", title), ("video", "1")], timeout: 20)
     }
 
     // MARK: 播放

@@ -74,15 +74,68 @@ struct Video: Codable, Hashable, Identifiable, Sendable {
 struct LibraryPayload: Codable, Sendable {
     var root: String?
     var videos: [Video]
+    /// 根目录下一级的文件夹（网页版首页最后那排「文件夹」）
+    var folders: [LibraryFolder]
 
-    enum CodingKeys: String, CodingKey { case root, videos }
+    enum CodingKeys: String, CodingKey { case root, videos, folders }
 
-    init(root: String?, videos: [Video]) { self.root = root; self.videos = videos }
+    init(root: String?, videos: [Video], folders: [LibraryFolder] = []) { self.root = root; self.videos = videos; self.folders = folders }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         root = c.str(.root)
         videos = ((try? c.decode([Video].self, forKey: .videos)) ?? []).filter { !$0.path.isEmpty }
+        folders = ((try? c.decode([LibraryFolder].self, forKey: .folders)) ?? []).filter { !$0.path.isEmpty }
+    }
+}
+
+/// 片库里的一个文件夹（/api/all 的 folders、/api/list 里 type 为 folder 的那几项）
+struct LibraryFolder: Codable, Hashable, Identifiable, Sendable {
+    var name: String
+    var path: String
+    var id: String { path }
+
+    enum CodingKeys: String, CodingKey { case name, path }
+
+    init(name: String, path: String) { self.name = name; self.path = path }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = c.str(.path) ?? ""
+        name = c.str(.name) ?? (path as NSString).lastPathComponent
+    }
+}
+
+/// /api/list?path=… 的回包：{ folder, items: [{ name, path, type: "folder" | "file", size, modified, added }] }
+struct FolderListing: Decodable, Sendable {
+    var items: [Item]
+
+    struct Item: Decodable, Sendable {
+        var name: String
+        var path: String
+        var type: String?
+        var size: Int64?
+        var modified: String?
+        var added: String?
+
+        enum CodingKeys: String, CodingKey { case name, path, type, size, modified, added }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            path = c.str(.path) ?? ""
+            name = c.str(.name) ?? (path as NSString).lastPathComponent
+            type = c.str(.type)
+            size = c.int64(.size)
+            modified = c.str(.modified)
+            added = c.str(.added)
+        }
+    }
+
+    enum CodingKeys: String, CodingKey { case items }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        items = ((try? c.decode([Item].self, forKey: .items)) ?? []).filter { !$0.path.isEmpty }
     }
 }
 
@@ -96,6 +149,10 @@ struct CastMember: Codable, Hashable, Sendable {
 
     enum CodingKeys: String, CodingKey { case id, name, character, profilePath = "profile_path" }
 
+    init(id: Int? = nil, name: String, character: String? = nil, profilePath: String? = nil) {
+        self.id = id; self.name = name; self.character = character; self.profilePath = profilePath
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = c.int(.id)
@@ -106,7 +163,7 @@ struct CastMember: Codable, Hashable, Sendable {
 
     var profileURL: URL? {
         guard let p = profilePath, !p.isEmpty else { return nil }
-        return URL(string: p.hasPrefix("http") ? p : "https://image.tmdb.org/t/p/w185" + p)
+        return URL(string: p.hasPrefix("http") || p.hasPrefix("demo:") ? p : "https://image.tmdb.org/t/p/w185" + p)
     }
 }
 
@@ -192,6 +249,9 @@ struct Series: Codable, Hashable, Identifiable, Sendable {
     var res: String?
     var hdr: String?
     var tags: [String]?
+    /// 目录名里读出来的音轨语种（「国语」「英语」）与音频格式（Atmos / TrueHD …）：详情页「语言」那一块用
+    var langs: [String]?
+    var audio: String?
     var full: Bool?
     var complete: Bool?
     var tmdbId: Int?
@@ -202,7 +262,7 @@ struct Series: Codable, Hashable, Identifiable, Sendable {
     var added: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, path, folder, title, zh, en, season, seasonLabel, year, res, hdr, tags, full, complete, tmdbId, tmdbMiss, episodes, total, size, added
+        case id, path, folder, title, zh, en, season, seasonLabel, year, res, hdr, tags, langs, audio, full, complete, tmdbId, tmdbMiss, episodes, total, size, added
     }
 
     init(id: String, path: String, title: String, en: String?, season: Int, year: String, episodes: Int, full: Bool, tags: [String] = [], added: String) {
@@ -225,6 +285,8 @@ struct Series: Codable, Hashable, Identifiable, Sendable {
         res = c.str(.res)
         hdr = c.str(.hdr)
         tags = try? c.decodeIfPresent([String].self, forKey: .tags)
+        langs = try? c.decodeIfPresent([String].self, forKey: .langs)
+        audio = c.str(.audio)
         full = c.bool(.full)
         complete = c.bool(.complete)
         tmdbId = c.int(.tmdbId)
@@ -384,7 +446,52 @@ struct HLSInfo: Codable, Sendable {
 // MARK: - 导航
 
 enum Route: Hashable {
+    /// 网页版的文件夹页（首页最后那排「文件夹」点进去）
+    case folder(LibraryFolder)
     case movie(Video)
     case series(Series)
     case year(Int)
+    case shelf(Shelf)
+}
+
+/// Apple TV 上这部片的预告片（/api/atv/lookup?video=1，HLS，系统播放器直接能放）
+struct AtvLookup: Decodable, Sendable {
+    var title: String?
+    var year: Int?
+    var trailers: [Trailer]?
+}
+
+struct Trailer: Decodable, Hashable, Identifiable, Sendable {
+    var title: String?
+    var hls: String
+    var id: String { hls }
+}
+
+/// 整页清单：首页分区标题「›」进去的，和搜索页「浏览」里的某一类
+enum Shelf: Hashable {
+    case newest, picks, series, watchlist, continueWatching
+    case genre(String)
+
+    var title: String {
+        switch self {
+        case .newest: return "最新加入"
+        case .picks: return "今日推荐"
+        case .series: return "Cuven TV · 剧集"
+        case .watchlist: return "想看"
+        case .continueWatching: return "继续观看"
+        case .genre(let g): return g
+        }
+    }
+
+    /// 缩放转场的来源标记（同一部片出现在不同清单里，各算各的）
+    var key: String {
+        switch self {
+        case .newest: return "newest"
+        case .picks: return "picks"
+        case .series: return "series"
+        case .watchlist: return "watchlist"
+        case .continueWatching: return "continue"
+        case .genre(let g): return "genre-" + g
+        }
+    }
 }

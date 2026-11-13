@@ -8,8 +8,21 @@ final class TourTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = true
         app = XCUIApplication()
-        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        // 没有测试账户（仓库是公开的，不放凭据）：Debug 构建认 -CuvenSkipLogin，跳过登录页
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-CuvenSkipLogin", "YES"]
         app.launch()
+    }
+
+    /// 首页的「最新加入 ›」（分区标题是一个链接，字在链接里，不一定单独算一段文字）
+    private func homeReady(timeout: TimeInterval) -> Bool {
+        let link = app.buttons["section-最新加入"]
+        let text = app.staticTexts["最新加入"]
+        let end = Date().addingTimeInterval(timeout)
+        while Date() < end {
+            if link.exists || text.exists { return true }
+            _ = link.waitForExistence(timeout: 2)
+        }
+        return link.exists || text.exists
     }
 
     func testTour() {
@@ -17,7 +30,7 @@ final class TourTests: XCTestCase {
         snap("01-launch")
 
         // 片库与元数据到了，首页会出现「最新加入」
-        XCTAssertTrue(app.staticTexts["最新加入"].waitForExistence(timeout: 90), "首页没有出现「最新加入」")
+        XCTAssertTrue(homeReady(timeout: 90), "首页没有出现「最新加入」")
         sleep(8)
         snap("02-home")
 
@@ -56,34 +69,45 @@ final class TourTests: XCTestCase {
         sleep(5)
         snap("08-movie-detail")
         app.swipeUp(); sleep(3); snap("09-movie-detail-2")
+        // 预告片不在详情页了（和网页版一样在资料库的展映里放），下面资料库那一步看它
         app.swipeDown(); sleep(2)
 
-        // 播放：系统播放器
+        // 播放：系统播放器（点了立刻弹出，片源准备好再挂上）。等 30 秒（诊断日志里有准备 / 挂上 / 首帧的耗时和每 5 秒的进度），然后关掉 ——
+        // 系统播放器的控件几秒就自己藏起来，查询一慢按钮就不在了：往下滑关；还在的话重开 App（进度已经存了）
+        var relaunched = false
         if play.exists {
             play.tap()
-            sleep(15)
+            sleep(30)
             snap("10-player")
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            sleep(1)
-            for label in ["关闭", "Close", "完成", "Done"] where app.buttons[label].exists {
-                app.buttons[label].tap(); break
+            app.swipeDown(velocity: .fast)
+            if !app.buttons["detail-play"].waitForExistence(timeout: 8) {
+                app.terminate()
+                app.launch()
+                _ = homeReady(timeout: 60)
+                relaunched = true
             }
-            sleep(3)
+            sleep(2)
             snap("10b-after-player")
         }
-        back()
+        if !relaunched { back() }
 
-        // 资料库 → 剧集 / 我的 / 搜索（搜索放最后：键盘会盖住标签栏）
+        // 资料库（展映）→ 我的 / 搜索（搜索放最后：键盘会盖住标签栏）
         tapTab(["资料库"])
         sleep(6)
         snap("11-library")
-        let seg = app.segmentedControls.buttons["剧集"]
-        if seg.exists { seg.tap(); sleep(6); snap("11b-library-series") }
-        tapTab(["我的"])
+        // 展映：第一章在屏幕中间时挂上它的预告片（有的话：右上角出现播放 / 暂停钮），再往上滚到介绍面板
+        if app.buttons["showcase-trailer"].waitForExistence(timeout: 12) { print("TOUR library trailer: shown") }
+        else { print("TOUR library trailer: none") }
+        snap("11a-library-trailer")
+        app.swipeUp(); sleep(2)
+        app.swipeUp(); sleep(2)
+        snap("11b-library-intro")
+        tapTab(["账户"])
         sleep(2)
-        snap("12-me")
+        snap("12-account")
         tapTab(["搜索", "Search"])
-        sleep(2)
+        sleep(3)
+        snap("12b-search-home")
         let field = app.searchFields.firstMatch
         if field.waitForExistence(timeout: 5) {
             field.tap()
@@ -113,5 +137,11 @@ final class TourTests: XCTestCase {
         a.name = name
         a.lifetime = .keepAlways
         add(a)
+    }
+
+    /// 第一个真正在屏上的匹配项（切到别的标签后，上一页的同名按钮还留在层级里，只是看不见）
+    private func visible(_ q: XCUIElementQuery) -> XCUIElement {
+        _ = q.firstMatch.waitForExistence(timeout: 5)
+        return q.allElementsBoundByIndex.first { $0.isHittable } ?? q.firstMatch
     }
 }
