@@ -1,7 +1,8 @@
 # 在 iOS 模拟器里把 App 主要页面走一遍（ios/CuvenUITests），每一步截图。
 # 连的是生产接口，片库 / 海报都是真的。截图：
 #   · 挂在本次运行的 Artifacts 里（ios-preview-<n>，原尺寸 PNG）；
-#   · 同时缩成小 JPEG、按 base64 打进日志（=== SHOT 名字 === … === END ===），方便在拿不到 Artifacts 的地方还原查看。
+#   · 缩成 JPEG 另外提交到引用 refs/ci/ios-preview（不是分支，不进 PR 也不进历史）：
+#     git fetch origin refs/ci/ios-preview && git checkout FETCH_HEAD -- .   （在空目录里）
 name: iOS Preview
 
 on:
@@ -9,6 +10,9 @@ on:
     branches: ['claude/**']
     paths: ['ios/**', '.github/workflows/ios-preview.yml']
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 concurrency:
   group: ios-preview-${{ github.ref }}
@@ -64,6 +68,7 @@ jobs:
               exit 1
             }
           grep -E "Test Case|passed|failed|error:" "$RUNNER_TEMP/test.log" | tail -30
+          grep -E "Test Case|passed|failed|error:|XCTAssert" "$RUNNER_TEMP/test.log" | tail -60 > "$RUNNER_TEMP/test-summary.txt" || true
 
       - name: 导出截图
         if: always()
@@ -92,13 +97,27 @@ jobs:
                   continue
               name = human.split('_')[0]
               small = os.path.join(out, 'small', name + '.jpg')
-              subprocess.run(['sips', '-s', 'format', 'jpeg', '-s', 'formatOptions', '55', '--resampleWidth', '360', src, '--out', small],
+              subprocess.run(['sips', '-s', 'format', 'jpeg', '-s', 'formatOptions', '70', '--resampleWidth', '540', src, '--out', small],
                              check=True, stdout=subprocess.DEVNULL)
               os.rename(src, os.path.join(out, name + os.path.splitext(f)[1]))
-              print('=== SHOT ' + name + ' ===')
-              print(subprocess.check_output(['base64', '-b', '120', '-i', small]).decode().strip())
-              print('=== END ===')
+              print(name, os.path.getsize(small))
           PY
+
+      - name: 截图提交到 refs/ci/ios-preview
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          D="$RUNNER_TEMP/shots/small"
+          test -d "$D" || exit 0
+          cp "$RUNNER_TEMP/test-summary.txt" "$D/" 2>/dev/null || true
+          echo "${GITHUB_SHA} run ${{ github.run_number }}" > "$D/SOURCE"
+          cd "$D"
+          git init -q . && git checkout -q -b shots
+          git add -A
+          git -c user.name=ios-preview -c user.email=ios-preview@users.noreply.github.com commit -qm "iOS preview ${GITHUB_SHA::7} · run ${{ github.run_number }}"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/ci/ios-preview
+          echo "已提交到 refs/ci/ios-preview"
 
       - name: 上传截图
         if: always()
