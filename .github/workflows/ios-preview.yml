@@ -88,11 +88,6 @@ jobs:
               print('没有 iPhone Duo 模拟器', file=sys.stderr)
           PY
 
-      - name: 先把模拟器开起来（和编译同时进行；刚开机就启动 App 容易超时）
-        run: |
-          if [ -n "${DUO_UDID:-}" ]; then xcrun simctl boot "$DUO_UDID" 2>&1 || true; fi
-          xcrun simctl boot "$PHONE_UDID" 2>&1 || true
-
       - name: 模拟器能力（折叠 / 姿态相关的 simctl 子命令）
         run: |
           xcrun simctl list devicetypes | grep -i -E 'duo|fold' || true
@@ -112,7 +107,8 @@ jobs:
         if: env.DUO_UDID != ''
         run: |
           set +e
-          xcrun simctl bootstatus "$DUO_UDID" -b > /dev/null 2>&1
+          # 先开机、等它完全起来再测（刚开机就启动 App 容易超时）；不和编译同时开机，两台一起开机会把编译拖慢十几倍
+          xcrun simctl boot "$DUO_UDID" 2>/dev/null; xcrun simctl bootstatus "$DUO_UDID" -b > /dev/null 2>&1; sleep 15
           xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
             -destination "id=$DUO_UDID" -only-testing:CuvenUITests/DuoDeviceTests \
             -resultBundlePath "$RUNNER_TEMP/duo.xcresult" > "$RUNNER_TEMP/duo.log" 2>&1
@@ -147,7 +143,7 @@ jobs:
         if: always()
         run: |
           set +e
-          xcrun simctl bootstatus "$PHONE_UDID" -b > /dev/null 2>&1
+          xcrun simctl boot "$PHONE_UDID" 2>/dev/null; xcrun simctl bootstatus "$PHONE_UDID" -b > /dev/null 2>&1; sleep 15
           xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
             -destination "id=$PHONE_UDID" -only-testing:CuvenUITests/TourTests \
             -resultBundlePath "$RUNNER_TEMP/ui.xcresult" > "$RUNNER_TEMP/test.log" 2>&1

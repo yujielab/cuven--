@@ -105,7 +105,8 @@ final class TourTests: XCTestCase {
             sleep(1)
         }
         tapTab(["搜索", "Search"])
-        sleep(2)
+        sleep(3)
+        snap("12b-search-home")
         let field = app.searchFields.firstMatch
         if field.waitForExistence(timeout: 5) {
             field.tap()

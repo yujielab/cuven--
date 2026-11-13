@@ -17,12 +17,34 @@ enum Theme {
 struct SectionHeader: View {
     let title: String
     var count: Int? = nil
+    /// 标题下面一行灰字（App Store 的分区标题：「Arcade 名人堂 ›」下面「知名角色等你来相遇」）
+    var subtitle: String? = nil
     /// 有的话：标题后面带「›」，整行点进去看全部（Apple TV 的分区标题）
     var route: Route? = nil
     var action: (() -> Void)? = nil
 
     var body: some View {
-        let row = HStack(alignment: .firstTextBaseline, spacing: 6) {
+        let row = VStack(alignment: .leading, spacing: 3) {
+            titleRow
+            if let subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.system(size: 15))
+                    .foregroundStyle(Theme.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, Theme.gutter)
+        if let route {
+            NavigationLink(value: route) { row.contentShape(Rectangle()) }
+                .buttonStyle(PressableStyle(scale: 0.98))
+                .accessibilityIdentifier("section-\(title)")
+        } else {
+            row
+        }
+    }
+
+    private var titleRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(title).font(.system(size: 22, weight: .bold)).foregroundStyle(.white)
             if route != nil {
                 Image(systemName: "chevron.right")
@@ -42,14 +64,6 @@ struct SectionHeader: View {
                 }
                 .buttonStyle(.plain)
             }
-        }
-        .padding(.horizontal, Theme.gutter)
-        if let route {
-            NavigationLink(value: route) { row.contentShape(Rectangle()) }
-                .buttonStyle(PressableStyle(scale: 0.98))
-                .accessibilityIdentifier("section-\(title)")
-        } else {
-            row
         }
     }
 }

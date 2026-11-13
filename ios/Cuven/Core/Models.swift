@@ -388,11 +388,14 @@ enum Route: Hashable {
     case series(Series)
     case year(Int)
     case shelf(Shelf)
+    /// 搜索页「浏览 ›」：全部类型
+    case browse
 }
 
-/// 首页分区标题「›」进去的整页清单
-enum Shelf: String, Hashable {
+/// 整页清单：首页分区标题「›」进去的，和搜索页「浏览」里的某一类
+enum Shelf: Hashable {
     case newest, picks, series, watchlist
+    case genre(String)
 
     var title: String {
         switch self {
@@ -400,6 +403,18 @@ enum Shelf: String, Hashable {
         case .picks: return "今日推荐"
         case .series: return "Cuven TV · 剧集"
         case .watchlist: return "想看"
+        case .genre(let g): return g
+        }
+    }
+
+    /// 缩放转场的来源标记（同一部片出现在不同清单里，各算各的）
+    var key: String {
+        switch self {
+        case .newest: return "newest"
+        case .picks: return "picks"
+        case .series: return "series"
+        case .watchlist: return "watchlist"
+        case .genre(let g): return "genre-" + g
         }
     }
 }

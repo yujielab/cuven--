@@ -81,6 +81,16 @@ final class DuoDeviceTests: XCTestCase {
         }
 
         tab(app, "搜索"); sleep(2)
+        snap("duo-07a-search-home")          // 为你推荐 + 浏览
+        // 浏览：点一格类型，进那一类的整页清单
+        if let tile = reveal(app, app.buttons.matching(identifier: "genre-tile")) {
+            tile.tap(); sleep(2)
+            snap("duo-07b-genre")
+            back(app)
+        } else {
+            XCTFail("搜索页没有「浏览」的类型格子")
+        }
+        app.swipeDown(); sleep(1)
         let field = app.searchFields.firstMatch
         if field.waitForExistence(timeout: 5) {
             field.tap()

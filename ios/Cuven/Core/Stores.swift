@@ -393,6 +393,18 @@ final class AppModel {
 
     var newest: [Video] { Array(movies.prefix(15)) }
 
+    /// 片库里的类型（电影 + 剧集都算），片子多的在前：搜索页「浏览」的格子
+    var genres: [(name: String, count: Int)] {
+        var n: [String: Int] = [:]
+        for v in movies { for g in meta(v)?.genres ?? [] { n[g, default: 0] += 1 } }
+        for s in series { for g in seriesMetas[s.path]?.genres ?? [] { n[g, default: 0] += 1 } }
+        return n.map { (name: $0.key, count: $0.value) }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.name < $1.name }
+    }
+
+    func movies(inGenre g: String) -> [Video] { movies.filter { meta($0)?.genres?.contains(g) == true } }
+    func series(inGenre g: String) -> [Series] { series.filter { seriesMetas[$0.path]?.genres?.contains(g) == true } }
+
     /// 详情页「你可能还喜欢」：和这部片同类型的几部，同的类型越多越靠前，再按评分；不含它自己（同一个 TMDB 编号的别的版本也不算）
     func related(to video: Video, limit: Int = 12) -> [Video] {
         guard let mine = meta(video), let g = mine.genres, !g.isEmpty else { return [] }

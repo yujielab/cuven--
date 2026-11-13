@@ -16,8 +16,9 @@ struct HomeView: View {
                         if cards {
                             VStack(spacing: 12) {
                                 HomeHeader()
+                                // 卡片约占三分之二高（App Store「新作快报」的比例），下面一排的标题露出来
                                 HeroCards(items: heroItems, width: geo.size.width,
-                                          cardHeight: geo.size.height - 56 - 12 - 46 - 24)
+                                          cardHeight: min(geo.size.height * 0.66, geo.size.height - 56 - 12 - 46 - 24))
                             }
                             .padding(.top, geo.safeAreaInsets.top + 8)
                         } else {
@@ -84,7 +85,7 @@ struct HomeView: View {
         } else {
             let cw = model.playback.continueWatching
             if !cw.isEmpty {
-                section("继续观看", count: cw.count) {
+                section("继续观看", count: cw.count, subtitle: "接着上次看到的地方") {
                     Rail {
                         ForEach(cw) { e in
                             Button { resume(e) } label: { ContinueCard(entry: e) }
@@ -97,7 +98,7 @@ struct HomeView: View {
             // 想看（Apple TV 的「+」）：电影和剧集混排，最新加进来的在前
             let wl = model.watchlist.items
             if !wl.isEmpty {
-                section("想看", count: wl.count, route: .shelf(.watchlist)) {
+                section("想看", count: wl.count, subtitle: "你加进来的电影和剧集", route: .shelf(.watchlist)) {
                     Rail {
                         ForEach(wl, id: \.key) { w in
                             if w.kind == .movie, let v = model.video(path: w.key) {
@@ -112,7 +113,7 @@ struct HomeView: View {
 
             let picks = model.todayPicks
             if !picks.isEmpty {
-                section("今日推荐", count: picks.count, route: .shelf(.picks)) {
+                section("今日推荐", count: picks.count, subtitle: "每天上午、下午、晚上各换一批", route: .shelf(.picks)) {
                     Rail(spacing: 6) {
                         ForEach(Array(picks.enumerated()), id: \.element.id) { i, v in
                             ZoomLink(route: .movie(v), slot: "picks") { RankCard(rank: i + 1, video: v) }.movieMenu(v)
@@ -121,7 +122,7 @@ struct HomeView: View {
                 }
             }
 
-            section("最新加入", count: nil, route: .shelf(.newest)) {
+            section("最新加入", count: nil, subtitle: "刚放进片库的电影", route: .shelf(.newest)) {
                 Rail {
                     ForEach(model.newest) { v in
                         ZoomLink(route: .movie(v), slot: "newest") { PosterCard(video: v) }
@@ -133,7 +134,7 @@ struct HomeView: View {
 
             let tv = Array(model.homeSeries.prefix(12))
             if !tv.isEmpty {
-                section("Cuven TV · 剧集", count: nil, route: .shelf(.series)) {
+                section("Cuven TV · 剧集", count: nil, subtitle: "片库里的剧集，一季一张", route: .shelf(.series)) {
                     Rail(spacing: 14) {
                         ForEach(tv) { s in
                             ZoomLink(route: .series(s), slot: "series") { SeriesCard(series: s, width: min(width * 0.86, 440)) }
@@ -156,9 +157,10 @@ struct HomeView: View {
         }
     }
 
-    private func section<C: View>(_ title: String, count: Int?, route: Route? = nil, @ViewBuilder _ body: () -> C) -> some View {
+    private func section<C: View>(_ title: String, count: Int?, subtitle: String? = nil, route: Route? = nil,
+                                  @ViewBuilder _ body: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            SectionHeader(title: title, count: count, route: route)
+            SectionHeader(title: title, count: count, subtitle: subtitle, route: route)
             body()
         }
     }
@@ -382,6 +384,7 @@ struct RouteView: View {
         case .series(let s): SeriesDetailView(series: s)
         case .year(let y): YearView(year: y)
         case .shelf(let s): ShelfView(shelf: s)
+        case .browse: BrowseView()
         }
     }
 }

@@ -29,6 +29,10 @@ struct ShelfView: View {
                             seriesRow(s)
                         }
                     }
+                case .genre(let g):
+                    // 搜索页「浏览」里的一类：先电影（最新入库的在前），再剧集
+                    ForEach(model.movies(inGenre: g)) { v in movieRow(v) }
+                    ForEach(model.series(inGenre: g)) { s in seriesRow(s) }
                 }
             }
             .padding(.bottom, 30)
@@ -44,7 +48,7 @@ struct ShelfView: View {
         let sub = [model.year(v).map { "\($0) 年" }, m?.genres?.prefix(2).joined(separator: " · ")]
             .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         return ShelfRow(image: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), title: model.title(v),
-                        subtitle: sub.isEmpty ? "电影" : sub, slot: "shelf-\(shelf.rawValue)", route: .movie(v)) {
+                        subtitle: sub.isEmpty ? "电影" : sub, slot: "shelf-\(shelf.key)", route: .movie(v)) {
             Button("播放", systemImage: "play.fill") {
                 PlayerCoordinator.shared.play(PlayRequest(path: v.path, name: v.name, title: model.title(v),
                                                           subtitle: model.year(v).map { String($0) },
@@ -58,7 +62,7 @@ struct ShelfView: View {
         let m = model.seriesMetas[s.path]
         let sub = [s.year.map { "\($0) 年" }, s.seasonLabel, s.countLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         return ShelfRow(image: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), title: m?.title ?? s.name,
-                        subtitle: sub.isEmpty ? "剧集" : sub, slot: "shelf-\(shelf.rawValue)", route: .series(s)) {
+                        subtitle: sub.isEmpty ? "剧集" : sub, slot: "shelf-\(shelf.key)", route: .series(s)) {
             WatchlistMenuButton(key: s.path, kind: .series)
         }
     }
