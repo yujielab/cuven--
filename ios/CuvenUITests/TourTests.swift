@@ -38,12 +38,15 @@ final class TourTests: XCTestCase {
         // 回到顶上：大图里「此刻在屏上」的那张的「详情」→ 电影详情（大图会自动翻页，不能拿第一张）
         app.swipeDown(); app.swipeDown(); app.swipeDown(); app.swipeDown()
         sleep(2)
-        let heroDetail = app.buttons.matching(identifier: "hero-detail").allElementsBoundByIndex.first { $0.isHittable }
-        if let heroDetail {
+        let screen = app.windows.firstMatch.frame
+        func onScreen(_ e: XCUIElement) -> Bool {
+            let f = e.frame
+            return f.width > 0 && f.minX >= screen.minX - 1 && f.maxX <= screen.maxX + 1 && f.minY >= screen.minY && f.maxY <= screen.maxY
+        }
+        if let heroDetail = app.buttons.matching(identifier: "hero-detail").allElementsBoundByIndex.first(where: onScreen) {
             heroDetail.tap()
-        } else {
-            let poster = app.buttons.matching(identifier: "newest-poster").allElementsBoundByIndex.first { $0.isHittable }
-            poster?.tap()
+        } else if let poster = app.buttons.matching(identifier: "newest-poster").allElementsBoundByIndex.first(where: onScreen) {
+            poster.tap()
         }
         let play = app.buttons["detail-play"].firstMatch
         XCTAssertTrue(play.waitForExistence(timeout: 20), "电影详情页没有播放钮")
@@ -53,7 +56,7 @@ final class TourTests: XCTestCase {
         app.swipeDown(); sleep(2)
 
         // 播放：系统播放器
-        if play.exists && play.isHittable {
+        if play.exists {
             play.tap()
             sleep(15)
             snap("10-player")

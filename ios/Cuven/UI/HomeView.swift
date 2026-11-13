@@ -250,8 +250,9 @@ struct HeroPage: View {
         let m = model.meta(item.video)
         let art = wide ? (item.hero.background ?? item.hero.poster) : (item.hero.poster ?? item.hero.background)
         ZStack(alignment: .bottom) {
-            RemoteImage(url: URL(string: art ?? ""), maxPixel: 1600)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // 铺满裁切的图放在 overlay 里：图比框大时不会把框撑大（只设 max 的弹性框会跟着子视图变大）
+            Color.clear
+                .overlay { RemoteImage(url: URL(string: art ?? ""), maxPixel: 1600) }
                 .clipped()
             LinearGradient(stops: [
                 .init(color: .black.opacity(0.35), location: 0),

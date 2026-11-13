@@ -152,9 +152,10 @@ struct DetailHeader: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            RemoteImage(url: TMDBImage.url(backdrop, "w1280"), maxPixel: 1800)
+            // 同首页大图：图放在 overlay 里裁切，16:9 的剧照铺满 460 高时不会把整列撑宽
+            Color.clear
                 .frame(height: 460)
-                .frame(maxWidth: .infinity)
+                .overlay { RemoteImage(url: TMDBImage.url(backdrop, "w1280"), maxPixel: 1800) }
                 .clipped()
             LinearGradient(stops: [
                 .init(color: .black.opacity(0.45), location: 0),
