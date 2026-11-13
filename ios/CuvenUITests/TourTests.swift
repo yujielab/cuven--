@@ -69,14 +69,7 @@ final class TourTests: XCTestCase {
         sleep(5)
         snap("08-movie-detail")
         app.swipeUp(); sleep(3); snap("09-movie-detail-2")
-        // 预告片（有的话）：全屏放 10 秒再关掉（诊断日志里有这部片找到几段）
-        if let card = app.buttons.matching(identifier: "trailer-card").allElementsBoundByIndex.first(where: { $0.isHittable }) {
-            card.tap(); sleep(10)
-            snap("09b-trailer")
-            let close = app.buttons["trailer-close"].firstMatch
-            if close.waitForExistence(timeout: 3) { close.tap() } else { app.swipeDown() }
-            sleep(2)
-        }
+        // 预告片不在详情页了（和网页版一样在资料库的展映里放），下面资料库那一步看它
         app.swipeDown(); sleep(2)
 
         // 播放：系统播放器（点了立刻弹出，片源准备好再挂上）。等 30 秒（诊断日志里有准备 / 挂上 / 首帧的耗时和每 5 秒的进度），然后关掉 ——
