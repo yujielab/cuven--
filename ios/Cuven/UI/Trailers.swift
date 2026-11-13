@@ -234,12 +234,15 @@ struct TrailerDots: View {
 /// 只画面、不带系统控件的播放层
 struct VideoSurface: UIViewRepresentable {
     let player: AVPlayer
+    /// 资料库的展映画幅要铺满（.resizeAspectFill、透明底）；全屏预告片是完整画面加黑底
+    var gravity: AVLayerVideoGravity = .resizeAspect
+    var background: UIColor = .black
 
     func makeUIView(context: Context) -> PlayerLayerView {
         let v = PlayerLayerView()
         v.playerLayer.player = player
-        v.playerLayer.videoGravity = .resizeAspect
-        v.backgroundColor = .black
+        v.playerLayer.videoGravity = gravity
+        v.backgroundColor = background
         return v
     }
 

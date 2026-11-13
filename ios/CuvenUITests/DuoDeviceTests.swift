@@ -62,37 +62,47 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-08d-home-year-2")
         app.swipeDown(); app.swipeDown(); app.swipeDown(); app.swipeDown(); app.swipeDown(); sleep(1)
 
+        // 资料库：和网页版一样的展映——一部片一章，满屏画幅 → 收成 16:9、介绍面板压上来 → 剧照
         tab(app, "资料库"); sleep(3)
         report(app, "library")
         snap("duo-05-library")
-
-        // 剧集详情：横排的分集大卡（资料库的标题「你的电影 ⌃⌄」是个菜单，换成剧集）
-        if switchLibrary(app, to: "剧集") {
-            snap("duo-05a-library-series")
-            let s1 = app.buttons["library-series"].firstMatch
-            if s1.waitForExistence(timeout: 5) {
-                s1.tap(); sleep(3)
-                snap("duo-05b-series")
-                app.swipeUp(); sleep(2)
-                snap("duo-05c-series-episodes")
-                // 季切换：「第 1 季 ⌃⌄」点开是季的菜单，选第 2 季
-                let seasonMenu = app.buttons["season-menu"].firstMatch
-                if seasonMenu.waitForExistence(timeout: 3) {
-                    seasonMenu.tap(); sleep(1)
-                    snap("duo-05d-season-menu")
-                    let s2 = app.buttons["第 2 季"].firstMatch
-                    if s2.waitForExistence(timeout: 3) {
-                        s2.tap(); sleep(2)
-                        snap("duo-05e-season-2")
-                    } else {
-                        print("DUO season menu: item not exposed")
-                        app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.1)).tap(); sleep(1)
-                    }
-                }
-                back(app)
-            }
-            switchLibrary(app, to: "电影")
+        app.swipeUp(); sleep(2); snap("duo-05f-library-shrink")
+        app.swipeUp(); sleep(2); snap("duo-05g-library-intro")
+        if let d = reveal(app, app.buttons.matching(identifier: "library-movie"), swipes: 2) {
+            d.tap(); sleep(2)
+            XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "资料库「影片详情」没进到详情页")
+            snap("duo-05h-library-detail")
+            back(app)
+        } else {
+            XCTFail("资料库没有「影片详情」")
         }
+
+        // 剧集详情：主页「Cuven TV」那一排的高卡（资料库和网页版一样只放电影）
+        tab(app, "主页"); sleep(2)
+        if let s1 = reveal(app, app.buttons.matching(identifier: "series-card"), swipes: 4) {
+            s1.tap(); sleep(3)
+            snap("duo-05b-series")
+            app.swipeUp(); sleep(2)
+            snap("duo-05c-series-episodes")
+            // 季切换：分集标题右边「第 1 季 ›」点开是季的菜单，选第 2 季
+            if let seasonMenu = reveal(app, app.buttons.matching(identifier: "season-menu"), swipes: 1) {
+                seasonMenu.tap(); sleep(1)
+                snap("duo-05d-season-menu")
+                let s2 = app.buttons["第 2 季"].firstMatch
+                if s2.waitForExistence(timeout: 3) {
+                    s2.tap(); sleep(2)
+                    snap("duo-05e-season-2")
+                } else {
+                    print("DUO season menu: item not exposed")
+                    app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.1)).tap(); sleep(1)
+                }
+            }
+            back(app)
+        } else {
+            XCTFail("主页没有剧集高卡")
+        }
+        for _ in 0..<6 { app.swipeDown() }
+        sleep(1)
 
         // 账户与设置：网页版导航胶囊里的头像，这里是「账户」标签
         tab(app, "账户"); sleep(2)
@@ -183,18 +193,6 @@ final class DuoDeviceTests: XCTestCase {
         let w = app.windows.firstMatch.frame.size
         let shot = XCUIScreen.main.screenshot().image.size
         return w.width > w.height || shot.width > shot.height
-    }
-
-    /// 资料库的标题「你的电影 ⌃⌄」是个菜单：点开选「剧集」/「电影」
-    @discardableResult
-    private func switchLibrary(_ app: XCUIApplication, to kind: String) -> Bool {
-        let menu = app.buttons["library-kind"].firstMatch
-        guard menu.waitForExistence(timeout: 5) else { return false }
-        menu.tap(); sleep(1)
-        let item = app.buttons[kind].firstMatch
-        guard item.waitForExistence(timeout: 3) else { return false }
-        item.tap(); sleep(2)
-        return true
     }
 
     /// 标签：竖在侧边时不算 tabBars，直接按名字找按钮（少问一次）

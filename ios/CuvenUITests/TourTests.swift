@@ -98,17 +98,17 @@ final class TourTests: XCTestCase {
         }
         if !relaunched { back() }
 
-        // 资料库 → 剧集 / 我的 / 搜索（搜索放最后：键盘会盖住标签栏）
+        // 资料库（展映）→ 我的 / 搜索（搜索放最后：键盘会盖住标签栏）
         tapTab(["资料库"])
         sleep(6)
         snap("11-library")
-        // 标题「你的电影 ⌃⌄」是个菜单：换成剧集
-        let kindMenu = app.buttons["library-kind"].firstMatch
-        if kindMenu.waitForExistence(timeout: 5) {
-            kindMenu.tap(); sleep(1)
-            let item = app.buttons["剧集"].firstMatch
-            if item.waitForExistence(timeout: 3) { item.tap(); sleep(6); snap("11b-library-series") }
-        }
+        // 展映：第一章在屏幕中间时挂上它的预告片（有的话：右上角出现播放 / 暂停钮），再往上滚到介绍面板
+        if app.buttons["showcase-trailer"].waitForExistence(timeout: 12) { print("TOUR library trailer: shown") }
+        else { print("TOUR library trailer: none") }
+        snap("11a-library-trailer")
+        app.swipeUp(); sleep(2)
+        app.swipeUp(); sleep(2)
+        snap("11b-library-intro")
         tapTab(["账户"])
         sleep(2)
         snap("12-account")
