@@ -48,6 +48,7 @@ struct PosterCard: View {
     var width: CGFloat = 128
 
     var body: some View {
+        let _ = Perf.count("poster")
         let m = model.meta(video)
         VStack(alignment: .leading, spacing: 7) {
             RemoteImage(url: TMDBImage.url(m?.poster ?? m?.posterClean, "w342"), maxPixel: width * 3)

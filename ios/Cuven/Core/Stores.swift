@@ -146,6 +146,12 @@ final class AppModel {
     @ObservationIgnored private var started = false
     @ObservationIgnored private var seriesInflight: Set<String> = []
     @ObservationIgnored private var metaRound = 0
+    /// 片库 / 元数据每变一次加一：首页那几排（电影清单、按年份、今日推荐）按它缓存，不在每次重绘时重算
+    @ObservationIgnored private var dataVersion = 0
+    @ObservationIgnored private var derivedVersion = -1
+    @ObservationIgnored private var cachedMovies: [Video] = []
+    @ObservationIgnored private var cachedYearGroups: [(year: Int, videos: [Video])] = []
+    @ObservationIgnored private var cachedPicks: (version: Int, seed: UInt32, list: [Video])?
 
     // MARK: 启动 / 刷新
 
@@ -154,6 +160,7 @@ final class AppModel {
         started = true
         if DemoData.enabled {                       // 演示数据：不连服务器、不读写本地缓存
             DemoData.populate(self)
+            dataVersion &+= 1
             phase = .ready
             metaReady = true
             return
@@ -181,13 +188,18 @@ final class AppModel {
         if let sm = DiskCache.load([String: Meta].self, "series-metas.json") { seriesMetas = sm }
         if let he = DiskCache.load([Hero].self, "heroes.json") { heroes = he }
         metaReady = !metas.isEmpty
+        dataVersion &+= 1
+        Perf.log("restore: \(videos.count) videos, \(metas.count) metas")
     }
 
     func refreshLibrary() async {
         do {
+            let t0 = Date()
             let lib = try await APIClient.shared.library()
             let vids = lib.videos.filter { FileName.isVideo($0.name) }.sorted { $0.addedKey > $1.addedKey }
             videos = vids
+            dataVersion &+= 1
+            Perf.log("library: \(vids.count) videos in \(Perf.ms(since: t0)) ms")
             phase = .ready
             DiskCache.save(vids, "library.json")
             metaRound = 0
@@ -206,17 +218,22 @@ final class AppModel {
         while i < chunks.count {
             let group = Array(chunks[i..<min(i + 2, chunks.count)])
             i += 2
+            let t0 = Date()
             let results = await withTaskGroup(of: [String: Meta?].self, returning: [[String: Meta?]].self) { g in
                 for c in group { g.addTask { (try? await APIClient.shared.metaBatch(c)) ?? [:] } }
                 var out: [[String: Meta?]] = []
                 for await r in g { out.append(r) }
                 return out
             }
-            for r in results { apply(r) }
+            let t1 = Date()
+            apply(results)
             metaReady = true
+            Perf.log("metas: +\(results.reduce(0) { $0 + $1.count }) → \(metas.count) (fetch \(Perf.ms(t0, t1)) ms, apply \(Perf.ms(since: t1)) ms)")
         }
+        let t2 = Date()
         DiskCache.save(metas, "metas.json")
         DiskCache.save(Array(hidden), "hidden.json")
+        Perf.log("metas saved in \(Perf.ms(since: t2)) ms")
         let left = videos.contains { metas[$0.name] == nil && !hidden.contains($0.name) }
         if left && metaRound < 3 {
             metaRound += 1
@@ -225,15 +242,22 @@ final class AppModel {
         }
     }
 
-    private func apply(_ r: [String: Meta?]) {
-        for (name, value) in r {
-            if let m = value, m.hasArt {
-                metas[name] = m
-                hidden.remove(name)
-            } else {
-                hidden.insert(name)       // 后端确定认不出，或认出来了却没有海报
+    /// 一批结果改在副本上、最后各写回一次：观察者只收到一次变更，也不会每改一条就把整张表复制一遍
+    private func apply(_ results: [[String: Meta?]]) {
+        var m = metas, h = hidden
+        for r in results {
+            for (name, value) in r {
+                if let meta = value, meta.hasArt {
+                    m[name] = meta
+                    h.remove(name)
+                } else {
+                    h.insert(name)       // 后端确定认不出，或认出来了却没有海报
+                }
             }
         }
+        metas = m
+        hidden = h
+        dataVersion &+= 1
     }
 
     func refreshSeries() async {
@@ -293,8 +317,14 @@ final class AppModel {
 
     func video(path: String) -> Video? { videos.first { $0.path == path } }
 
-    /// 能显示的电影：有 TMDB、有海报；同一部片（同一个 TMDB 编号）只留最新入库的那个文件
-    var movies: [Video] {
+    /// 派生清单按 dataVersion 缓存。先读一下 videos / metas：调用它的视图照样会跟着这两样刷新
+    private func derive() {
+        _ = videos.count
+        _ = metas.count
+        guard derivedVersion != dataVersion else { return }
+        derivedVersion = dataVersion
+        let t0 = Date()
+        // 能显示的电影：有 TMDB、有海报；同一部片（同一个 TMDB 编号）只留最新入库的那个文件
         var seen = Set<Int>()
         var out: [Video] = []
         for v in videos {
@@ -305,7 +335,16 @@ final class AppModel {
             }
             out.append(v)
         }
-        return out
+        cachedMovies = out
+        var by: [Int: [Video]] = [:]
+        for v in out { if let y = year(v) { by[y, default: []].append(v) } }
+        cachedYearGroups = by.keys.sorted(by: >).map { ($0, by[$0]!) }
+        Perf.log("derive: \(out.count) movies, \(by.count) years in \(Perf.ms(since: t0)) ms")
+    }
+
+    var movies: [Video] {
+        derive()
+        return cachedMovies
     }
 
     /// 同一部片的所有文件（4K / 1080p 等不同版本）
@@ -318,12 +357,11 @@ final class AppModel {
     var newest: [Video] { Array(movies.prefix(15)) }
 
     var yearGroups: [(year: Int, videos: [Video])] {
-        var by: [Int: [Video]] = [:]
-        for v in movies { if let y = year(v) { by[y, default: []].append(v) } }
-        return by.keys.sorted(by: >).map { ($0, by[$0]!) }
+        derive()
+        return cachedYearGroups
     }
 
-    func movies(inYear y: Int) -> [Video] { movies.filter { year($0) == y } }
+    func movies(inYear y: Int) -> [Video] { yearGroups.first { $0.year == y }?.videos ?? [] }
 
     func seriesInYear(_ y: Int) -> [Series] { series.filter { Int($0.year ?? "") == y } }
 
@@ -349,16 +387,20 @@ final class AppModel {
         let c = cal.dateComponents([.year, .month, .day], from: ref)
         let dayKey = (c.year ?? 2026) * 10000 + (c.month ?? 1) * 100 + (c.day ?? 1)
         let seed = UInt32(truncatingIfNeeded: dayKey * 3 + period)
+        let pool0 = movies
+        if let c = cachedPicks, c.version == derivedVersion, c.seed == seed { return c.list }
         var seen = Set<String>()
-        let pool = movies.filter { seen.insert(title($0).lowercased()).inserted }
+        let pool = pool0.filter { seen.insert(title($0).lowercased()).inserted }
         let picks = Array(Self.shuffle(pool, seed: seed).prefix(15))
-        return picks.sorted { a, b in
+        let list = picks.sorted { a, b in
             let ra = metas[a.name]?.rating ?? 0, rb = metas[b.name]?.rating ?? 0
             if ra != rb { return ra > rb }
             let ya = year(a) ?? 0, yb = year(b) ?? 0
             if ya != yb { return ya > yb }
             return a.name < b.name
         }
+        cachedPicks = (derivedVersion, seed, list)
+        return list
     }
 
     static func shuffle<T>(_ arr: [T], seed: UInt32) -> [T] {

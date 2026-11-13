@@ -9,6 +9,7 @@ struct CuvenApp: App {
         // 播放走系统的「影视」音频会话：静音键不影响声音，画中画 / 锁屏后继续放
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         URLCache.shared = URLCache(memoryCapacity: 16 << 20, diskCapacity: 256 << 20)
+        Perf.startWatchdog()
     }
 
     var body: some Scene {
@@ -48,6 +49,7 @@ struct RootView: View {
     }
 
     private func layout(size: CGSize, inset: EdgeInsets) -> some View {
+        Perf.count("root")
         let duo = Duo.mode(window: size)
         // 强制成折起形态、设备本身又没有右侧那一列（模拟器）：补一列黑边，模拟外屏
         let fakeColumn: CGFloat = (duo == .folded && Duo.forced != nil && inset.trailing < 20) ? Duo.foldedColumn : 0

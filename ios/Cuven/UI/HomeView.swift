@@ -5,6 +5,7 @@ struct HomeView: View {
     @Environment(\.duoMode) private var duo
 
     var body: some View {
+        let _ = Perf.count("home")
         NavigationStack {
             GeometryReader { geo in
                 let wide = geo.size.width > geo.size.height || geo.size.width >= 700
@@ -198,6 +199,7 @@ struct HeroPager: View {
     @State private var current: String?
 
     var body: some View {
+        let _ = Perf.count("heroPager")
         ZStack(alignment: .bottom) {
             if items.isEmpty {
                 LinearGradient(colors: [Theme.surface2, Theme.bg], startPoint: .top, endPoint: .bottom)

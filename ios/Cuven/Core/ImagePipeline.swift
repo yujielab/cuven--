@@ -78,6 +78,7 @@ struct RemoteImage: View {
     @State private var loadedURL: URL?
 
     var body: some View {
+        let _ = Perf.count("image")
         ZStack {
             placeholder
             if let image {
@@ -181,6 +182,7 @@ struct LogoImage: View {
     @State private var failed = false
 
     var body: some View {
+        let _ = Perf.count("logo")
         Group {
             if let image {
                 Image(uiImage: image)

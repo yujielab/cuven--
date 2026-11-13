@@ -86,11 +86,14 @@ jobs:
           if [ $code -ne 0 ]; then tail -40 "$RUNNER_TEMP/test.log"; fi
           exit $code
 
-      - name: 播放器日志（来源 / 就绪 / 进度，不含片名与地址）
+      - name: 播放器与性能日志（来源 / 就绪 / 进度、数量与耗时、主线程卡顿，不含片名与地址）
         if: always()
         run: |
-          xcrun simctl spawn "$SIM_UDID" log show --last 30m --style compact \
+          xcrun simctl spawn "$SIM_UDID" log show --last 40m --style compact \
             --predicate 'subsystem == "us.cuven.tv" AND category == "player"' 2>/dev/null | tail -60 || true
+          echo "---- perf ----"
+          xcrun simctl spawn "$SIM_UDID" log show --last 40m --style compact \
+            --predicate 'subsystem == "us.cuven.tv" AND category == "perf"' 2>/dev/null | tail -250 || true
 
       - name: Duo 演示截图（只含合成内容）提交到 refs/ci/ios-preview-demo
         if: always()
