@@ -251,6 +251,12 @@ struct SearchView: View {
             .navigationTitle("搜索")
             .navigationBarTitleDisplayMode(.inline)
         }
+        // 详情页演员弹层「在资料库中搜索」：把名字填进搜索框（网页版 searchByActor）
+        .onChange(of: model.searchRequest, initial: true) { _, q in
+            guard let q else { return }
+            query = q
+            model.searchRequest = nil
+        }
     }
 
     private func content(width: CGFloat) -> some View {

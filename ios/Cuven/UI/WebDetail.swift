@@ -249,7 +249,7 @@ struct WebDetailScaffold<Gallery: View>: View {
                                 .padding(.horizontal, Theme.gutter)
                         }
                         if !cast.isEmpty {
-                            WebCastSection(people: cast, route: .cast(title: title, people: Array(cast.prefix(40)), director: director))
+                            WebCastSection(people: cast)
                                 .padding(.top, 32)
                         }
                         gallery()
@@ -473,14 +473,19 @@ struct WebSynopsis: View {
     }
 }
 
-/// 「演员阵容」（22 粗体）+ 右边「查看全部 ›」（整行可点）；下面一排 120 的圆头像、名字（15 半粗）、角色（14、65% 白）
+/// 「演员阵容」（22 粗体）+ 右边「查看全部 ›」（整行可点，弹出完整的演员阵容）；下面一排 120 的圆头像、名字（15 半粗）、
+/// 角色（14、65% 白），点一位弹出那位演员（网页版 setupCastClicks：横排头像 → openActorSheet，标题行 → openFullCastSheet）
 struct WebCastSection: View {
     let people: [CastMember]
-    let route: Route
+    @State private var showAll = false
+    @State private var picked: ActorPick?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            NavigationLink(value: route) {
+            Button {
+                Haptics.light()
+                showAll = true
+            } label: {
                 HStack(alignment: .center, spacing: 12) {
                     Text("演员阵容")
                         .font(.system(size: 22, weight: .bold))
@@ -507,22 +512,30 @@ struct WebCastSection: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: 16) {
                     ForEach(Array(people.prefix(12).enumerated()), id: \.offset) { _, c in
-                        VStack(alignment: .leading, spacing: 0) {
-                            WebCastAvatar(name: c.name, url: c.profileURL)
-                                .padding(.bottom, 12)
-                            Text(c.name)
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .lineLimit(1)
-                                .padding(.bottom, 3)
-                            if let ch = c.character, !ch.isEmpty {
-                                Text(ch)
-                                    .font(.system(size: 14))
-                                    .foregroundStyle(.white.opacity(0.65))
-                                    .lineLimit(2)
+                        Button {
+                            Haptics.light()
+                            picked = ActorPick(member: c)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 0) {
+                                WebCastAvatar(name: c.name, url: c.profileURL)
+                                    .padding(.bottom, 12)
+                                Text(c.name)
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+                                    .padding(.bottom, 3)
+                                if let ch = c.character, !ch.isEmpty {
+                                    Text(ch)
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(.white.opacity(0.65))
+                                        .lineLimit(2)
+                                }
                             }
+                            .frame(width: 120, alignment: .leading)
+                            .contentShape(Rectangle())
                         }
-                        .frame(width: 120, alignment: .leading)
+                        .buttonStyle(PressableStyle(scale: 0.96))
+                        .accessibilityIdentifier("cast-card")
                     }
                 }
                 .scrollTargetLayout()
@@ -530,6 +543,8 @@ struct WebCastSection: View {
             .contentMargins(.horizontal, Theme.gutter, for: .scrollContent)
             .scrollTargetBehavior(.viewAligned)
         }
+        .sheet(isPresented: $showAll) { CastSheet(people: people) }
+        .sheet(item: $picked) { p in ActorSheet(member: p.member) }
     }
 }
 
@@ -629,6 +644,8 @@ struct WebEpisodesSection: View {
     let pick: (Series) -> Void
     let play: (Int) -> Void
     @State private var tileWidth: CGFloat = 300
+    /// 分集简介的「更多」：网页版 tvEpDescSheet
+    @State private var episodeSheet: EpisodeSheetItem?
 
     var body: some View {
         WebGallerySection(heading: heading) {
@@ -666,12 +683,11 @@ struct WebEpisodesSection: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(alignment: .top, spacing: 20) {
                         ForEach(Array(files.enumerated()), id: \.element.id) { i, f in
-                            Button { play(i) } label: {
-                                WebEpisodeTile(file: f, info: f.ep.flatMap { info[$0] }, fallbackArt: fallbackArt,
-                                               progress: model.playback.entry(f.path)?.fraction, width: tileWidth)
-                            }
-                            .buttonStyle(PressableStyle())
-                            .accessibilityIdentifier("episode-card")
+                            let ep = f.ep.flatMap { info[$0] }
+                            WebEpisodeTile(file: f, info: ep, fallbackArt: fallbackArt,
+                                           progress: model.playback.entry(f.path)?.fraction, width: tileWidth,
+                                           onPlay: { play(i) },
+                                           onMore: { episodeSheet = WebEpisodeTile.sheetItem(file: f, info: ep) })
                         }
                     }
                     .scrollTargetLayout()
@@ -684,89 +700,159 @@ struct WebEpisodesSection: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { w in
             tileWidth = min(300, max(220, w * 0.78))
         }
+        .sheet(item: $episodeSheet) { EpisodeSheet(item: $0) }
     }
 }
 
 /// 网页版的分集卡：16:9 剧照（圆角 18），左上「第 1 集」小牌（看完了带「· 已看」、剧照暗一档），右下播放圆钮；
-/// 卡下集名（半粗）接着简介（三行封顶），再一行「45 分钟」
+/// 卡下集名（半粗）接着简介（三行封顶，真被截断了第三行末尾压一枚「更多」，点开是整段简介的弹层），再一行「45 分钟」。
+/// 点卡（剧照或下面的字）放这一集；「更多」是单独的一颗钮，不顺手把这一集放了
 struct WebEpisodeTile: View {
     let file: EpisodeFile
     let info: SeasonEpisode?
     let fallbackArt: String?
     let progress: Double?
     let width: CGFloat
+    let onPlay: () -> Void
+    var onMore: (() -> Void)? = nil
+    @State private var fullHeight: CGFloat = 0
+    @State private var shownHeight: CGFloat = 0
 
     var body: some View {
         let done = (progress ?? 0) >= 0.9
         let still = info?.still
         VStack(alignment: .leading, spacing: 0) {
-            ZStack {
-                Color.white.opacity(0.04)
-                if let still {
-                    RemoteImage(url: TMDBImage.url(still, "w780"), maxPixel: width * 3, placeholder: .clear)
-                        .opacity(done ? 0.52 : 1)
-                } else {
-                    Text(String(format: "%02d", file.ep ?? 0))
-                        .font(.system(size: 46, weight: .heavy))
-                        .tracking(-1.4)
-                        .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.14))
+            Button(action: onPlay) {
+                ZStack {
+                    Color.white.opacity(0.04)
+                    if let still {
+                        RemoteImage(url: TMDBImage.url(still, "w780"), maxPixel: width * 3, placeholder: .clear)
+                            .opacity(done ? 0.52 : 1)
+                    } else {
+                        Text(String(format: "%02d", file.ep ?? 0))
+                            .font(.system(size: 46, weight: .heavy))
+                            .tracking(-1.4)
+                            .monospacedDigit()
+                            .foregroundStyle(.white.opacity(0.14))
+                    }
+                    Text(Self.badge(file) + (done ? " · 已看" : ""))
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 11)
+                        .frame(height: 26)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .background(Color(red: 20 / 255, green: 20 / 255, blue: 22 / 255).opacity(0.5), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.white.opacity(0.16), lineWidth: 0.5))
+                        .environment(\.colorScheme, .dark)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(12)
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.white)
+                        .frame(width: 38, height: 38)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .background(Color(red: 20 / 255, green: 20 / 255, blue: 22 / 255).opacity(0.5), in: Circle())
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.16), lineWidth: 0.5))
+                        .environment(\.colorScheme, .dark)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                        .padding(11)
+                    if let p = progress, p > 0.01, !done {
+                        ProgressCapsule(fraction: p)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                            .padding(.leading, 14).padding(.trailing, 62).padding(.bottom, 26)
+                    }
                 }
-                Text((file.ep.map { "第 \($0) 集" } ?? FileName.stem(file.name)) + (done ? " · 已看" : ""))
-                    .font(.system(size: 12.5, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 11)
-                    .frame(height: 26)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    .background(Color(red: 20 / 255, green: 20 / 255, blue: 22 / 255).opacity(0.5), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.white.opacity(0.16), lineWidth: 0.5))
-                    .environment(\.colorScheme, .dark)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .padding(12)
-                Image(systemName: "play.fill")
-                    .font(.system(size: 15))
-                    .foregroundStyle(.white)
-                    .frame(width: 38, height: 38)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .background(Color(red: 20 / 255, green: 20 / 255, blue: 22 / 255).opacity(0.5), in: Circle())
-                    .overlay(Circle().strokeBorder(Color.white.opacity(0.16), lineWidth: 0.5))
-                    .environment(\.colorScheme, .dark)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                    .padding(11)
-                if let p = progress, p > 0.01, !done {
-                    ProgressCapsule(fraction: p)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                        .padding(.leading, 14).padding(.trailing, 62).padding(.bottom, 26)
-                }
+                .frame(width: width, height: width * 169 / 300)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.3), radius: 12, y: 8)
+                .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
-            .frame(width: width, height: width * 169 / 300)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5))
-            .shadow(color: .black.opacity(0.3), radius: 12, y: 8)
+            .buttonStyle(PressableStyle())
+            .accessibilityIdentifier("episode-card")
 
-            Text(caption(done: done))
-                .lineLimit(3)
-                .lineSpacing(3)
-                .multilineTextAlignment(.leading)
-                .padding(.horizontal, 4)
-                .padding(.top, 16)
-                .frame(width: width, alignment: .leading)
-            let rt = info?.runtime.map { "\($0) 分钟" } ?? ""
-            if !rt.isEmpty {
-                Text(rt)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color(red: 235 / 255, green: 235 / 255, blue: 245 / 255).opacity(0.6))
+            VStack(alignment: .leading, spacing: 0) {
+                Text(caption(done: done))
+                    .lineLimit(3)
+                    .lineSpacing(3)
+                    .multilineTextAlignment(.leading)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in shownHeight = h }
+                    // 不限行数的同一段字（看不见），只用来量全文多高：比三行高才露出「更多」（网页版 tvEpClampCheck）
+                    .background(alignment: .top) {
+                        Text(caption(done: done))
+                            .lineSpacing(3)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .hidden()
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in fullHeight = h }
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        if let onMore, fullHeight > shownHeight + 1 {
+                            moreButton(onMore)
+                        }
+                    }
                     .padding(.horizontal, 4)
-                    .padding(.top, 8)
+                    .padding(.top, 16)
+                    .frame(width: width, alignment: .leading)
+                let rt = info?.runtime.map { "\($0) 分钟" } ?? ""
+                if !rt.isEmpty {
+                    Text(rt)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(red: 235 / 255, green: 235 / 255, blue: 245 / 255).opacity(0.6))
+                        .padding(.horizontal, 4)
+                        .padding(.top, 8)
+                }
             }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onPlay)
         }
         .frame(width: width, alignment: .leading)
-        .contentShape(Rectangle())
+    }
+
+    /// 「第 1 集」（没有集号就是文件名）
+    static func badge(_ f: EpisodeFile) -> String {
+        f.ep.map { "第 \($0) 集" } ?? FileName.stem(f.name)
+    }
+
+    /// 网页版 tvEpDescSheet 的那张：「第 1 集 · 45 分钟」、集名、整段简介
+    static func sheetItem(file: EpisodeFile, info: SeasonEpisode?) -> EpisodeSheetItem {
+        let kicker = [badge(file), info?.runtime.map { "\($0) 分钟" }].compactMap { $0 }.joined(separator: " · ")
+        let title = info?.name.flatMap { $0.isEmpty ? nil : $0 } ?? badge(file)
+        return EpisodeSheetItem(kicker: kicker, title: title, overview: info?.overview ?? "")
+    }
+
+    /// 压在第三行行尾的「更多」（网页版 .ep-more：高 20、左右 9、11.5 号半粗，深灰半透明 + 模糊，发丝描边）；
+    /// 左边一条 56 宽的收尾带，字先淡掉再碰到它
+    private func moreButton(_ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text("更多")
+                .font(.system(size: 11.5, weight: .semibold))
+                .tracking(-0.07)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 9)
+                .frame(height: 20)
+                .background(.ultraThinMaterial, in: Capsule())
+                .background(Color(red: 66 / 255, green: 66 / 255, blue: 70 / 255).opacity(0.86), in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5))
+                .environment(\.colorScheme, .dark)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(PressableStyle(scale: 0.94))
+        .background(alignment: .leading) {
+            LinearGradient(stops: [.init(color: Theme.bg.opacity(0), location: 0), .init(color: Theme.bg, location: 0.82)],
+                           startPoint: .leading, endPoint: .trailing)
+                .frame(width: 56)
+                .padding(.vertical, -4)
+                .offset(x: -56)
+                .allowsHitTesting(false)
+        }
+        .accessibilityLabel("更多")
+        .accessibilityIdentifier("episode-more")
     }
 
     /// 「第 1 个故事 演示分集简介…」：标题 13 半粗白字，简介同字号 60% 灰
     private func caption(done: Bool) -> AttributedString {
-        let name = info?.name ?? (file.ep.map { "第 \($0) 集" } ?? FileName.stem(file.name))
+        let name = info?.name ?? Self.badge(file)
         var t = AttributedString(name)
         t.font = .system(size: 13, weight: .semibold)
         t.foregroundColor = done ? .white.opacity(0.65) : Color(red: 245 / 255, green: 245 / 255, blue: 247 / 255)

@@ -413,7 +413,6 @@ struct RouteView: View {
         case .series(let s): SeriesDetailView(series: s)
         case .year(let y): YearView(year: y)
         case .shelf(let s): ShelfView(shelf: s)
-        case .cast(let t, let p, let d): CastView(title: t, people: p, director: d)
         }
     }
 }

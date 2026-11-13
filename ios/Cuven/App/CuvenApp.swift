@@ -49,6 +49,7 @@ struct RootView: View {
         }
         .tabBarMinimizeBehavior(.onScrollDown)
         .onChange(of: tab) { _, _ in Haptics.selection() }
+        .onChange(of: model.searchRequest) { _, q in if q != nil { tab = .search } }
         .environment(\.openAccount, { tab = .account })
         .fullScreenCover(isPresented: .constant(account.loginRequired && !account.isLoggedIn)) {
             LoginView()

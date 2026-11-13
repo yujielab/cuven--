@@ -45,12 +45,20 @@ final class DuoDeviceTests: XCTestCase {
             XCTFail("详情页没有「更多操作」钮")
         }
         // 演员阵容 · 查看全部 ›：整页名单（在简介下面，先找它，再往下滑）
+        // 和网页版一样是一张弹层（「演员阵容 · N 位」，一行一位）；点一行换成那位演员（「在资料库中搜索」「在 TMDB 查看」）
         if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 2) {
             castLink.tap(); sleep(2)
             snap("duo-04b-cast")
-            back(app)
+            let row = app.buttons["cast-row"].firstMatch
+            if row.waitForExistence(timeout: 3) {
+                row.tap(); sleep(2)
+                snap("duo-04e-actor")
+            } else {
+                print("DUO cast sheet: no rows")
+            }
+            closeSheet(app)
         } else {
-            XCTFail("详情页没有「演员与职员 ›」")
+            XCTFail("详情页没有「演员阵容 · 查看全部 ›」")
         }
         app.swipeUp(); sleep(2); snap("duo-04-detail-info")
         app.swipeUp(); sleep(2); snap("duo-04c-detail-tech")
@@ -84,6 +92,15 @@ final class DuoDeviceTests: XCTestCase {
             snap("duo-05b-series")
             app.swipeUp(); sleep(2)
             snap("duo-05c-series-episodes")
+            // 分集简介超过三行：第三行末尾的「更多」，点开是整段简介的弹层（底下「关闭」）
+            let epMore = app.buttons["episode-more"].firstMatch
+            if epMore.waitForExistence(timeout: 2) {
+                epMore.tap(); sleep(2)
+                snap("duo-05f-episode-more")
+                closeSheet(app)
+            } else {
+                print("DUO episode more: none")
+            }
             // 季切换：分集标题右边「第 1 季 ›」点开是季的菜单，选第 2 季
             if let seasonMenu = reveal(app, app.buttons.matching(identifier: "season-menu"), swipes: 1) {
                 seasonMenu.tap(); sleep(1)
@@ -205,6 +222,13 @@ final class DuoDeviceTests: XCTestCase {
         let w = app.windows.firstMatch.frame.size
         let shot = XCUIScreen.main.screenshot().image.size
         return w.width > w.height || shot.width > shot.height
+    }
+
+    /// 关掉网页版式的弹层：点底部那颗胶囊（「取消」/「关闭」），找不到就往下滑
+    private func closeSheet(_ app: XCUIApplication) {
+        let cancel = app.buttons["sheet-cancel"].firstMatch
+        if cancel.waitForExistence(timeout: 3) && cancel.isHittable { cancel.tap() } else { app.swipeDown() }
+        sleep(1)
     }
 
     /// 标签：竖在侧边时不算 tabBars，直接按名字找按钮（少问一次）

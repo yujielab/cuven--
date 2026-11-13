@@ -176,6 +176,8 @@ final class AppModel {
     var seriesMetas: [String: Meta] = [:]    // 剧集目录 → TMDB（带字标）
     var heroes: [Hero] = []
     var metaReady = false
+    /// 演员弹层「在资料库中搜索」：要搜的词。根视图看到就换到「搜索」标签，搜索页填进搜索框后清掉
+    var searchRequest: String?
 
     let playback = PlaybackStore()
     let watchlist = WatchlistStore()

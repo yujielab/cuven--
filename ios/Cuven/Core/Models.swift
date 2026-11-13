@@ -397,8 +397,6 @@ enum Route: Hashable {
     case series(Series)
     case year(Int)
     case shelf(Shelf)
-    /// 「演员与职员 ›」：整页名单（Apple TV 的 Cast & Crew）
-    case cast(title: String, people: [CastMember], director: String?)
 }
 
 /// Apple TV 上这部片的预告片（/api/atv/lookup?video=1，HLS，系统播放器直接能放）

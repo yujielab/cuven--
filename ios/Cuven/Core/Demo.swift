@@ -104,7 +104,11 @@ enum DemoData {
     static func season(_ s: Series) -> [Int: SeasonEpisode] {
         var d: [Int: SeasonEpisode] = [:]
         for n in 1...(s.episodes ?? 8) {
-            d[n] = SeasonEpisode(ep: n, name: "第 \(n) 个故事", overview: "演示分集简介：本地生成，用来核对分集清单的版面。",
+            // 第 1 集的简介故意写长：超过三行，卡上第三行末尾才会压一枚「更多」（核对分集「更多」弹层）
+            let overview = n == 1
+                ? "演示分集简介：本地生成，用来核对分集清单的版面。这一集的简介故意写得长一些，好让卡片下面的字超过三行——超过三行时，第三行末尾压一枚「更多」，点开是整段简介的弹层，和网页版一样。弹层里能滚，底下是「关闭」。"
+                : "演示分集简介：本地生成，用来核对分集清单的版面。"
+            d[n] = SeasonEpisode(ep: n, name: "第 \(n) 个故事", overview: overview,
                                  still: "demo://backdrop/\(100 + n)", runtime: 42 + n)
         }
         return d
