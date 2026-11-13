@@ -58,12 +58,12 @@ final class TourTests: XCTestCase {
         app.swipeUp(); sleep(3); snap("09-movie-detail-2")
         app.swipeDown(); sleep(2)
 
-        // 播放：系统播放器。放 20 秒（播放器日志里每 5 秒一行进度），然后关掉 ——
+        // 播放：系统播放器（点了立刻弹出，片源准备好再挂上）。等 30 秒（诊断日志里有准备 / 挂上 / 首帧的耗时和每 5 秒的进度），然后关掉 ——
         // 系统播放器的控件几秒就自己藏起来，查询一慢按钮就不在了：往下滑关；还在的话重开 App（进度已经存了）
         var relaunched = false
         if play.exists {
             play.tap()
-            sleep(20)
+            sleep(30)
             snap("10-player")
             app.swipeDown(velocity: .fast)
             if !app.buttons["detail-play"].waitForExistence(timeout: 8) {
