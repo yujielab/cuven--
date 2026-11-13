@@ -40,6 +40,21 @@ final class DuoDeviceTests: XCTestCase {
         report(app, "library")
         snap("duo-05-library")
 
+        // 剧集详情：横排的分集大卡
+        let seg = app.segmentedControls.buttons["剧集"]
+        if seg.waitForExistence(timeout: 5) {
+            seg.tap(); sleep(2)
+            let s1 = app.buttons["library-series"].firstMatch
+            if s1.waitForExistence(timeout: 5) {
+                s1.tap(); sleep(3)
+                snap("duo-05b-series")
+                app.swipeUp(); sleep(2)
+                snap("duo-05c-series-episodes")
+                back(app)
+            }
+            app.segmentedControls.buttons["电影"].tap(); sleep(1)
+        }
+
         let acct = visible(app.buttons.matching(identifier: "account-button"))
         if acct.waitForExistence(timeout: 5) {
             acct.tap(); sleep(2)
