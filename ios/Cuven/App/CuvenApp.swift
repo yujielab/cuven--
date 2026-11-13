@@ -64,7 +64,9 @@ struct RootView: View {
                 Color.clear
             }
         }
-        .onAppear { model.start() }
+        // 登录以后才开始取片库（登录页盖着的时候不在后面下载整个片库）
+        .onAppear { if !account.loginRequired || account.isLoggedIn { model.start() } }
+        .onChange(of: account.isLoggedIn) { _, now in if now { model.start() } }
     }
 }
 

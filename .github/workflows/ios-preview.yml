@@ -88,6 +88,11 @@ jobs:
               print('没有 iPhone Duo 模拟器', file=sys.stderr)
           PY
 
+      - name: 先把模拟器开起来（和编译同时进行；刚开机就启动 App 容易超时）
+        run: |
+          if [ -n "${DUO_UDID:-}" ]; then xcrun simctl boot "$DUO_UDID" 2>&1 || true; fi
+          xcrun simctl boot "$PHONE_UDID" 2>&1 || true
+
       - name: 模拟器能力（折叠 / 姿态相关的 simctl 子命令）
         run: |
           xcrun simctl list devicetypes | grep -i -E 'duo|fold' || true
@@ -107,6 +112,7 @@ jobs:
         if: env.DUO_UDID != ''
         run: |
           set +e
+          xcrun simctl bootstatus "$DUO_UDID" -b > /dev/null 2>&1
           xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
             -destination "id=$DUO_UDID" -only-testing:CuvenUITests/DuoDeviceTests \
             -resultBundlePath "$RUNNER_TEMP/duo.xcresult" > "$RUNNER_TEMP/duo.log" 2>&1
@@ -118,10 +124,30 @@ jobs:
           # 折叠屏有几块屏、各自什么状态（看能不能用 screenConfig 模拟展开 / 转向）
           echo "---- Duo 屏幕"; xcrun simctl io "$DUO_UDID" enumerate 2>&1 | head -120 || true
 
+      - name: iPhone Duo 展开（演示数据；关掉外屏、打开内屏，只是试探，不算失败）
+        if: env.DUO_UDID != ''
+        run: |
+          set +e
+          xcrun simctl io "$DUO_UDID" screenConfig --display=primary-1 power on
+          xcrun simctl io "$DUO_UDID" screenConfig --display=primary power off
+          sleep 5
+          xcrun simctl io "$DUO_UDID" enumerate 2>&1 | grep -E "^\s+\([0-9]+\)|Pixel Size|UI Orientation" | head -20
+          xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
+            -destination "id=$DUO_UDID" -only-testing:CuvenUITests/DuoUnfoldedTests \
+            -resultBundlePath "$RUNNER_TEMP/duo-unfolded.xcresult" > "$RUNNER_TEMP/duo-unfolded.log" 2>&1
+          code=$?
+          grep -E "Test Case|error:|XCTAssert|DUO " "$RUNNER_TEMP/duo-unfolded.log" | tail -40
+          echo "exit $code"
+          xcrun simctl io "$DUO_UDID" screenConfig --display=primary power on
+          xcrun simctl io "$DUO_UDID" screenConfig --display=primary-1 power off
+          xcrun simctl shutdown "$DUO_UDID"
+          exit 0
+
       - name: 走一遍（真实片库，普通 iPhone）
         if: always()
         run: |
           set +e
+          xcrun simctl bootstatus "$PHONE_UDID" -b > /dev/null 2>&1
           xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
             -destination "id=$PHONE_UDID" -only-testing:CuvenUITests/TourTests \
             -resultBundlePath "$RUNNER_TEMP/ui.xcresult" > "$RUNNER_TEMP/test.log" 2>&1
@@ -153,29 +179,37 @@ jobs:
         run: |
           OUT="$RUNNER_TEMP/demo"
           mkdir -p "$OUT/pub"
-          test -d "$RUNNER_TEMP/duo.xcresult" || exit 0
-          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/duo.xcresult" --output-path "$OUT"
+          for r in duo duo-unfolded; do
+            test -d "$RUNNER_TEMP/$r.xcresult" || continue
+            mkdir -p "$OUT/$r"
+            xcrun xcresulttool export attachments --path "$RUNNER_TEMP/$r.xcresult" --output-path "$OUT/$r" || true
+          done
           python3 - "$OUT" <<'PY'
           import json, os, subprocess, sys
           out = sys.argv[1]
-          found = []
-          def walk(x):
+          def walk(x, found):
               if isinstance(x, dict):
                   if 'exportedFileName' in x:
                       found.append((x.get('suggestedHumanReadableName') or '', x['exportedFileName']))
                   for v in x.values():
-                      walk(v)
+                      walk(v, found)
               elif isinstance(x, list):
                   for v in x:
-                      walk(v)
-          walk(json.load(open(os.path.join(out, 'manifest.json'))))
-          for human, f in sorted(found):
-              if not human.startswith('duo-'):
-                  continue                      # 只发演示数据那几张，真实片库的截图不出这台机器
-              name = human.split('_')[0]
-              subprocess.run(['sips', '-s', 'format', 'jpeg', '-s', 'formatOptions', '72', '--resampleWidth', '600',
-                              os.path.join(out, f), '--out', os.path.join(out, 'pub', name + '.jpg')], check=True, stdout=subprocess.DEVNULL)
-              print(name)
+                      walk(v, found)
+          for sub in ('duo', 'duo-unfolded'):
+              d = os.path.join(out, sub)
+              manifest = os.path.join(d, 'manifest.json')
+              if not os.path.exists(manifest):
+                  continue
+              found = []
+              walk(json.load(open(manifest)), found)
+              for human, f in sorted(found):
+                  if not human.startswith('duo-'):
+                      continue                  # 只发演示数据那几张，真实片库的截图不出这台机器
+                  name = human.split('_')[0]
+                  subprocess.run(['sips', '-s', 'format', 'jpeg', '-s', 'formatOptions', '72', '--resampleWidth', '600',
+                                  os.path.join(d, f), '--out', os.path.join(out, 'pub', name + '.jpg')], check=True, stdout=subprocess.DEVNULL)
+                  print(name)
           PY
           cd "$OUT/pub"
           [ "$(ls | wc -l)" -gt 0 ] || exit 0

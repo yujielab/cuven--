@@ -89,6 +89,13 @@ final class DuoDeviceTests: XCTestCase {
         }
         snap("duo-07-search")
 
+        // 先收起键盘、退出搜索：键盘盖住了侧边那一列底下的标签栏
+        app.swipeDown(); sleep(1)
+        for label in ["关闭", "Close", "取消", "Cancel"] {
+            let b = app.buttons[label].firstMatch
+            if b.exists && b.isHittable { b.tap(); sleep(1); break }
+        }
+
         // 长按海报：菜单（播放 / 想看 / 分享），预览是那张卡（放在最后：菜单没收起也不影响别的步骤）
         tab(app, "主页"); sleep(2)
         if let poster = reveal(app, app.buttons.matching(identifier: "newest-poster")) {
