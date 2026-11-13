@@ -1,8 +1,9 @@
-# 在 iOS 模拟器里把 App 主要页面走一遍（ios/CuvenUITests），每一步截图。
-# 连的是生产接口，片库 / 海报都是真的。截图：
-#   · 挂在本次运行的 Artifacts 里（ios-preview-<n>，原尺寸 PNG）；
-#   · 缩成 JPEG 另外提交到引用 refs/ci/ios-preview（不是分支，不进 PR 也不进历史）：
-#     git fetch origin refs/ci/ios-preview && git checkout FETCH_HEAD -- .   （在空目录里）
+# 在 iOS 模拟器里把 App 主要页面走一遍（ios/CuvenUITests），连生产接口，最后试播一部片。
+#
+# ⚠︎ 这个仓库是公开的：日志、构建产物、引用任何人都看得到，截图里却是片库的真实内容。所以：
+#   · 日志里只有测试是否通过、播放器状态（来源类型 / 就绪 / 进度，不含片名与地址）；
+#   · 截图默认不上传，只有在 Actions 页手动运行并勾选「上传截图」时才上传，且 3 天后自动删除；
+#   · 每次运行先删掉以前公开出去的截图（refs/ci/ios-preview 引用与 ios-preview-* 产物）。
 name: iOS Preview
 
 on:
@@ -10,9 +11,15 @@ on:
     branches: ['claude/**']
     paths: ['ios/**', '.github/workflows/ios-preview.yml']
   workflow_dispatch:
+    inputs:
+      screenshots:
+        description: '上传截图（仓库公开：截图里是片库内容，3 天后自动删除）'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: ios-preview-${{ github.ref }}
@@ -23,6 +30,14 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 40
     steps:
+      - name: 清理以前公开出去的截图
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/ci/ios-preview" >/dev/null 2>&1 && echo "已删除 refs/ci/ios-preview" || true
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" --jq '.artifacts[] | select(.name | startswith("ios-preview-")) | .id' \
+            | while read -r id; do gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" >/dev/null && echo "已删除截图产物 $id"; done || true
+
       - uses: actions/checkout@v4
 
       - name: 选 Xcode（装着的最新正式版）
@@ -58,71 +73,36 @@ jobs:
           print('使用模拟器', best[2], best[3], file=sys.stderr)
           PY
 
-      - name: 走一遍（UI 测试，带截图）
+      - name: 走一遍（UI 测试）
         run: |
           set +e
           xcodebuild test -project ios/Cuven.xcodeproj -scheme Cuven -destination "id=$SIM_UDID" \
             -resultBundlePath "$RUNNER_TEMP/ui.xcresult" > "$RUNNER_TEMP/test.log" 2>&1
           code=$?
-          grep -E "Test Case|passed|failed|error:|XCTAssert|Failing" "$RUNNER_TEMP/test.log" | tail -60 > "$RUNNER_TEMP/test-summary.txt"
-          echo "exit $code" >> "$RUNNER_TEMP/test-summary.txt"
-          cat "$RUNNER_TEMP/test-summary.txt"
+          grep -E "Test Case|passed|failed|error:|XCTAssert|Failing" "$RUNNER_TEMP/test.log" | tail -60
+          echo "exit $code"
           if [ $code -ne 0 ]; then tail -40 "$RUNNER_TEMP/test.log"; fi
           exit $code
 
-      - name: 导出截图
+      - name: 播放器日志（来源 / 就绪 / 进度，不含片名与地址）
         if: always()
+        run: |
+          xcrun simctl spawn "$SIM_UDID" log show --last 30m --style compact \
+            --predicate 'subsystem == "us.cuven.tv" AND category == "player"' 2>/dev/null | tail -60 || true
+
+      - name: 导出截图（只在手动运行并勾选时）
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.screenshots
         run: |
           OUT="$RUNNER_TEMP/shots"
-          mkdir -p "$OUT/small"
+          mkdir -p "$OUT"
           test -d "$RUNNER_TEMP/ui.xcresult" || exit 0
           xcrun xcresulttool export attachments --path "$RUNNER_TEMP/ui.xcresult" --output-path "$OUT"
-          python3 - "$OUT" <<'PY'
-          import json, os, subprocess, sys
-          out = sys.argv[1]
-          found = []
-          def walk(x):
-              if isinstance(x, dict):
-                  if 'exportedFileName' in x:
-                      found.append((x.get('suggestedHumanReadableName') or x['exportedFileName'], x['exportedFileName']))
-                  for v in x.values():
-                      walk(v)
-              elif isinstance(x, list):
-                  for v in x:
-                      walk(v)
-          walk(json.load(open(os.path.join(out, 'manifest.json'))))
-          for human, f in sorted(found):
-              src = os.path.join(out, f)
-              if not f.lower().endswith(('.png', '.jpg', '.jpeg', '.heic')):
-                  continue
-              name = human.split('_')[0]
-              small = os.path.join(out, 'small', name + '.jpg')
-              subprocess.run(['sips', '-s', 'format', 'jpeg', '-s', 'formatOptions', '70', '--resampleWidth', '540', src, '--out', small],
-                             check=True, stdout=subprocess.DEVNULL)
-              os.rename(src, os.path.join(out, name + os.path.splitext(f)[1]))
-              print(name, os.path.getsize(small))
-          PY
 
-      - name: 截图提交到 refs/ci/ios-preview
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          D="$RUNNER_TEMP/shots/small"
-          test -d "$D" || exit 0
-          cp "$RUNNER_TEMP/test-summary.txt" "$D/" 2>/dev/null || true
-          echo "${GITHUB_SHA} run ${{ github.run_number }}" > "$D/SOURCE"
-          cd "$D"
-          git init -q . && git checkout -q -b shots
-          git add -A
-          git -c user.name=ios-preview -c user.email=ios-preview@users.noreply.github.com commit -qm "iOS preview ${GITHUB_SHA::7} · run ${{ github.run_number }}"
-          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/ci/ios-preview
-          echo "已提交到 refs/ci/ios-preview"
-
-      - name: 上传截图
-        if: always()
+      - name: 上传截图（3 天后删除）
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.screenshots
         uses: actions/upload-artifact@v4
         with:
           name: ios-preview-${{ github.run_number }}
           path: ${{ runner.temp }}/shots
+          retention-days: 3
           if-no-files-found: ignore

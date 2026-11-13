@@ -236,11 +236,10 @@ struct ProfileView: View {
             List {
                 Section {
                     HStack(spacing: 14) {
-                        Image(systemName: "play.tv.fill")
-                            .font(.system(size: 26))
-                            .foregroundStyle(.white)
+                        Image("BrandIcon")
+                            .resizable()
                             .frame(width: 56, height: 56)
-                            .background(Theme.accent.gradient, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Cuven max").font(.system(size: 20, weight: .bold))
                             Text("版本 \(Bundle.main.appVersion)").font(.system(size: 13)).foregroundStyle(Theme.tertiary)
@@ -264,6 +263,7 @@ struct ProfileView: View {
 
                 Section("偏好") {
                     Toggle("触感反馈", isOn: $haptics)
+                        .tint(Theme.accent)          // 全局是白色 tint：开着的开关会白底白钮，看不出状态
                         .onChange(of: haptics) { _, v in Haptics.enabled = v }
                 }
 

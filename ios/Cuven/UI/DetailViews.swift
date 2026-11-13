@@ -122,6 +122,7 @@ struct MovieDetailView: View {
         .scrollIndicators(.hidden)
         .background(Theme.bg)
         .ignoresSafeArea(edges: .top)
+        .overlay(alignment: .top) { StatusBarScrim() }
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .task { full = await model.fullMeta(for: video) }
@@ -244,6 +245,7 @@ struct SeriesDetailView: View {
         .scrollIndicators(.hidden)
         .background(Theme.bg)
         .ignoresSafeArea(edges: .top)
+        .overlay(alignment: .top) { StatusBarScrim() }
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .task { await load() }
@@ -367,5 +369,17 @@ struct YearView: View {
         .background(Theme.bg)
         .navigationTitle(String(year))
         .navigationBarTitleDisplayMode(.large)
+    }
+}
+
+/// 内容滚到状态栏底下时压一层渐暗（详情页没有导航栏底色）
+struct StatusBarScrim: View {
+    var body: some View {
+        GeometryReader { geo in
+            LinearGradient(colors: [.black.opacity(0.7), .black.opacity(0)], startPoint: .top, endPoint: .bottom)
+                .frame(height: geo.safeAreaInsets.top + 24)
+                .ignoresSafeArea(edges: .top)
+        }
+        .allowsHitTesting(false)
     }
 }

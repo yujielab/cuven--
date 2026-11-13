@@ -1,6 +1,10 @@
 import AVKit
 import AVFoundation
 import UIKit
+import os
+
+/// 播放器状态日志：只记来源类型、状态与进度，不记片名与地址
+private let playerLog = Logger(subsystem: "us.cuven.tv", category: "player")
 
 /// 一次播放请求。剧集带上后面的几集（queue），播完自动接下一集
 struct PlayRequest {
@@ -67,6 +71,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         if let hls = sign?.hls, !hls.isEmpty, let master = URL(string: APIClient.base + hls) {
             let info = master.deletingLastPathComponent().appendingPathComponent("info.json")
             let (status, body) = await APIClient.shared.hlsInfo(info)
+            playerLog.info("source hls, info.json \(status, privacy: .public)")
             if (200..<300).contains(status) && body?.ok != false { return master }
             if status >= 400 && status < 500 && status != 404 {
                 throw PlayError.unsupported(body?.error ?? "这个文件转不了 HLS（HTTP \(status)）")
@@ -74,6 +79,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             if isMKV { return master }            // info.json 没取到（网络抖动）：让播放器自己试
         }
         if isMKV { throw PlayError.unsupported("服务器没有为这个 MKV 提供 HLS，iPhone 无法直接播放 MKV") }
+        playerLog.info("source direct")
         return APIClient.shared.streamURL(path: req.path, name: req.name, sign: sign)
     }
 
@@ -145,6 +151,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         guard item === player?.currentItem else { return }
         switch item.status {
         case .readyToPlay:
+            playerLog.info("ready, duration \(item.duration.seconds, privacy: .public)")
             if let s = pendingSeek {
                 pendingSeek = nil
                 player?.seek(to: CMTime(seconds: s, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: CMTime(seconds: 1, preferredTimescale: 600)) { [weak self] _ in
@@ -153,6 +160,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             }
         case .failed:
             let msg = item.error?.localizedDescription ?? "未知错误"
+            playerLog.error("failed: \(msg, privacy: .public)")
             controller?.dismiss(animated: true)
             alert("播放失败", msg)
         default:
@@ -164,6 +172,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         guard let req = current, let p = player, let item = p.currentItem else { return }
         let pos = p.currentTime().seconds
         let dur = item.duration.seconds
+        playerLog.info("time \(pos, privacy: .public) / \(dur, privacy: .public), rate \(p.rate, privacy: .public)")
         guard pos.isFinite, dur.isFinite, dur > 0, pos > 1 else { return }
         model?.playback.update(WatchEntry(path: req.path, name: req.name, title: req.title, subtitle: req.subtitle, artwork: req.artwork,
                                           position: pos, duration: dur, updated: Date(), seriesPath: req.seriesPath, episode: req.episode))
