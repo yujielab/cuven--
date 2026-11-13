@@ -64,26 +64,41 @@ extension View {
 struct DuoNav: View {
     @Binding var tab: AppTab
     let mode: DuoMode
+    /// 再点一下当前那一格（回到这一格的根页面）
+    var reselect: (AppTab) -> Void = { _ in }
 
-    private var items: [(AppTab, String, String)] {
-        [(.home, "house.fill", "主页"), (.library, "square.stack.fill", "资料库"),
-         (.search, "magnifyingglass", "搜索"), (.me, "person.crop.circle.fill", "我的")]
+    private static let items: [(AppTab, String, String)] = [
+        (.home, "house.fill", "主页"), (.library, "square.stack.fill", "资料库"),
+        (.search, "magnifyingglass", "搜索"), (.me, "person.crop.circle.fill", "我的"),
+    ]
+
+    // 尺寸写成常量：外面要按它把整枚摆进安全区、躲开键盘
+    private static func cell(_ mode: DuoMode) -> CGSize { mode == .rail ? CGSize(width: 62, height: 56) : CGSize(width: 44, height: 44) }
+    private static func gap(_ mode: DuoMode) -> CGFloat { mode == .rail ? 8 : 4 }
+    private static func pad(_ mode: DuoMode) -> CGFloat { mode == .rail ? 8 : 5 }
+
+    static func width(_ mode: DuoMode) -> CGFloat { cell(mode).width + pad(mode) * 2 }
+    static func height(_ mode: DuoMode) -> CGFloat {
+        let n = CGFloat(items.count)
+        return cell(mode).height * n + gap(mode) * (n - 1) + pad(mode) * 2
     }
 
     var body: some View {
         let rail = mode == .rail
-        VStack(spacing: rail ? 8 : 4) {
-            ForEach(items, id: \.0) { item in
+        let cell = Self.cell(mode)
+        VStack(spacing: Self.gap(mode)) {
+            ForEach(Self.items, id: \.0) { item in
                 let on = tab == item.0
                 Button {
-                    if !on { tab = item.0; Haptics.selection() }
+                    // 选中的反馈由 TabView 的 onChange 统一给（这里不再震一次）
+                    if on { reselect(item.0); Haptics.light() } else { tab = item.0 }
                 } label: {
                     VStack(spacing: 3) {
                         Image(systemName: item.1).font(.system(size: rail ? 20 : 19, weight: .semibold))
                         if rail { Text(item.2).font(.system(size: 10, weight: .semibold)) }
                     }
                     .foregroundStyle(on ? Color.white : Color.white.opacity(0.55))
-                    .frame(width: rail ? 62 : 44, height: rail ? 56 : 44)
+                    .frame(width: cell.width, height: cell.height)
                     .background {
                         if on {
                             RoundedRectangle(cornerRadius: rail ? 16 : 22, style: .continuous)
@@ -94,10 +109,11 @@ struct DuoNav: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(item.2)
+                .accessibilityAddTraits(on ? .isSelected : [])
                 .accessibilityIdentifier("duo-nav-\(item.2)")
             }
         }
-        .padding(rail ? 8 : 5)
+        .padding(Self.pad(mode))
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: rail ? 26 : 27, style: .continuous))
         .animation(.snappy(duration: 0.25), value: tab)
     }

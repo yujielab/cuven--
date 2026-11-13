@@ -29,6 +29,7 @@ struct LibraryView: View {
                         PosterGrid {
                             ForEach(list) { v in
                                 NavigationLink(value: Route.movie(v)) { MoviePosterTile(video: v) }.buttonStyle(.plain)
+                                    .accessibilityIdentifier("library-movie")
                             }
                         }
                     } else {
@@ -39,6 +40,7 @@ struct LibraryView: View {
                         PosterGrid {
                             ForEach(list) { s in
                                 NavigationLink(value: Route.series(s)) { SeriesPosterTile(series: s) }.buttonStyle(.plain)
+                                    .accessibilityIdentifier("library-series")
                             }
                         }
                     }
