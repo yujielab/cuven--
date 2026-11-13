@@ -142,6 +142,14 @@ struct Meta: Codable, Hashable, Sendable {
         case releaseDate = "release_date"
     }
 
+    init(id: Int? = nil, title: String? = nil, en: String? = nil, year: String? = nil, poster: String? = nil, posterClean: String? = nil,
+         backdrop: String? = nil, logo: String? = nil, overview: String? = nil, rating: Double? = nil, type: String? = nil,
+         runtime: Int? = nil, genres: [String]? = nil, stills: [Still]? = nil) {
+        self.id = id; self.title = title; self.en = en; self.year = year; self.poster = poster; self.posterClean = posterClean
+        self.backdrop = backdrop; self.logo = logo; self.logoChecked = true; self.overview = overview; self.rating = rating
+        self.type = type; self.runtime = runtime; self.genres = genres; self.stills = stills
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = c.int(.id)
@@ -197,6 +205,12 @@ struct Series: Codable, Hashable, Identifiable, Sendable {
         case id, path, folder, title, zh, en, season, seasonLabel, year, res, hdr, tags, full, complete, tmdbId, tmdbMiss, episodes, total, size, added
     }
 
+    init(id: String, path: String, title: String, en: String?, season: Int, year: String, episodes: Int, full: Bool, tags: [String] = [], added: String) {
+        self.id = id; self.path = path; self.title = title; self.zh = title; self.en = en; self.season = season
+        self.seasonLabel = "第 \(season) 季"; self.year = year; self.episodes = episodes; self.full = full; self.complete = full
+        self.tags = tags; self.added = added; self.total = full ? episodes : episodes + 4
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         path = c.str(.path) ?? ""
@@ -248,6 +262,7 @@ struct EpisodeFile: Codable, Hashable, Identifiable, Sendable {
     var id: String { path }
 
     enum CodingKeys: String, CodingKey { case ep, path, name, size }
+    init(ep: Int?, path: String, name: String, size: Int64? = nil) { self.ep = ep; self.path = path; self.name = name; self.size = size }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         ep = c.int(.ep)
@@ -275,6 +290,9 @@ struct SeasonEpisode: Codable, Hashable, Sendable {
     var airDate: String?
 
     enum CodingKeys: String, CodingKey { case ep, name, overview, still, runtime, airDate = "air_date" }
+    init(ep: Int?, name: String?, overview: String?, still: String?, runtime: Int?) {
+        self.ep = ep; self.name = name; self.overview = overview; self.still = still; self.runtime = runtime; self.airDate = nil
+    }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         ep = c.int(.ep)
@@ -309,6 +327,10 @@ struct Hero: Codable, Hashable, Identifiable, Sendable {
     var id: String { path }
 
     enum CodingKeys: String, CodingKey { case path, name, title, type, year, background, poster, logo }
+    init(path: String, name: String? = nil, title: String? = nil, year: Int? = nil, background: String?, poster: String?, logo: String? = nil) {
+        self.path = path; self.name = name; self.title = title; self.type = "Movie"; self.year = year
+        self.background = background; self.poster = poster; self.logo = logo
+    }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         path = c.str(.path) ?? ""

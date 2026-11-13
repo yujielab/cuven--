@@ -1,9 +1,11 @@
 # 在 iOS 模拟器里把 App 主要页面走一遍（ios/CuvenUITests），连生产接口，最后试播一部片。
 #
-# ⚠︎ 这个仓库是公开的：日志、构建产物、引用任何人都看得到，截图里却是片库的真实内容。所以：
+# ⚠︎ 这个仓库是公开的：日志、构建产物、引用任何人都看得到，真实片库的截图却是片库的真实内容。所以：
 #   · 日志里只有测试是否通过、播放器状态（来源类型 / 就绪 / 进度，不含片名与地址）；
-#   · 截图默认不上传，只有在 Actions 页手动运行并勾选「上传截图」时才上传，且 3 天后自动删除；
-#   · 每次运行先删掉以前公开出去的截图（refs/ci/ios-preview 引用与 ios-preview-* 产物）。
+#   · 真实片库的截图默认不上传，只有在 Actions 页手动运行并勾选「上传截图」时才上传，且 3 天后自动删除；
+#   · iPhone Duo 那几种形态用演示数据跑（DuoTests：片名、海报、字标都是本地合成的），这部分截图提交到
+#     refs/ci/ios-preview-demo（不是分支）：git fetch origin refs/ci/ios-preview-demo && git checkout FETCH_HEAD -- .
+#   · 每次运行先删掉以前公开出去的真实片库截图（refs/ci/ios-preview 引用与 ios-preview-* 产物）。
 name: iOS Preview
 
 on:
@@ -51,7 +53,7 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install xcodegen
           cd ios && xcodegen generate
 
-      - name: 选模拟器（最新 iOS 上的 iPhone Pro）
+      - name: 选模拟器（最新 iOS 上最宽的 iPhone：Pro Max，最接近 Duo 外屏的宽度）
         run: |
           python3 - <<'PY' >> "$GITHUB_ENV"
           import json, re, subprocess, sys
@@ -66,7 +68,7 @@ jobs:
                   n = dv['name']
                   if not n.startswith('iPhone'):
                       continue
-                  score = (ver, 'Pro' in n and 'Max' not in n, n)
+                  score = (ver, 'Pro Max' in n, 'Pro' in n, n)
                   if best is None or score > best[0]:
                       best = (score, dv['udid'], n, rt)
           print('SIM_UDID=' + best[1])
@@ -89,6 +91,46 @@ jobs:
         run: |
           xcrun simctl spawn "$SIM_UDID" log show --last 30m --style compact \
             --predicate 'subsystem == "us.cuven.tv" AND category == "player"' 2>/dev/null | tail -60 || true
+
+      - name: Duo 演示截图（只含合成内容）提交到 refs/ci/ios-preview-demo
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          OUT="$RUNNER_TEMP/demo"
+          mkdir -p "$OUT/pub"
+          test -d "$RUNNER_TEMP/ui.xcresult" || exit 0
+          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/ui.xcresult" --output-path "$OUT"
+          python3 - "$OUT" <<'PY'
+          import json, os, subprocess, sys
+          out = sys.argv[1]
+          found = []
+          def walk(x):
+              if isinstance(x, dict):
+                  if 'exportedFileName' in x:
+                      found.append((x.get('suggestedHumanReadableName') or '', x['exportedFileName']))
+                  for v in x.values():
+                      walk(v)
+              elif isinstance(x, list):
+                  for v in x:
+                      walk(v)
+          walk(json.load(open(os.path.join(out, 'manifest.json'))))
+          for human, f in sorted(found):
+              if not human.startswith('duo-'):
+                  continue                      # 只发演示数据那几张，真实片库的截图不出这台机器
+              name = human.split('_')[0]
+              subprocess.run(['sips', '-s', 'format', 'jpeg', '-s', 'formatOptions', '72', '--resampleWidth', '600',
+                              os.path.join(out, f), '--out', os.path.join(out, 'pub', name + '.jpg')], check=True, stdout=subprocess.DEVNULL)
+              print(name)
+          PY
+          cd "$OUT/pub"
+          [ "$(ls | wc -l)" -gt 0 ] || exit 0
+          echo "${GITHUB_SHA} run ${{ github.run_number }}" > SOURCE
+          git init -q . && git checkout -q -b demo
+          git add -A
+          git -c user.name=ios-preview -c user.email=ios-preview@users.noreply.github.com commit -qm "iOS Duo demo preview ${GITHUB_SHA::7}"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/ci/ios-preview-demo
+          echo "已提交到 refs/ci/ios-preview-demo"
 
       - name: 导出截图（只在手动运行并勾选时）
         if: always() && github.event_name == 'workflow_dispatch' && inputs.screenshots

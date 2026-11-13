@@ -2,6 +2,7 @@ import SwiftUI
 
 struct HomeView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.duoMode) private var duo
 
     var body: some View {
         NavigationStack {
@@ -9,8 +10,14 @@ struct HomeView: View {
                 let wide = geo.size.width > geo.size.height || geo.size.width >= 700
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 34) {
-                        HeroPager(items: heroItems, wide: wide, width: geo.size.width,
-                                  height: wide ? min(geo.size.height * 0.82, geo.size.width * 9 / 16 + 60) : min(geo.size.height * 0.78, 720))
+                        if duo == .folded {
+                            // iPhone Duo 折起竖拿：一打开就是卡片态，大图那一块占满这一屏
+                            HeroCards(items: heroItems, width: geo.size.width,
+                                      height: geo.size.height + geo.safeAreaInsets.top, topInset: geo.safeAreaInsets.top)
+                        } else {
+                            HeroPager(items: heroItems, wide: wide, width: geo.size.width,
+                                      height: wide ? min(geo.size.height * 0.82, geo.size.width * 9 / 16 + 60) : min(geo.size.height * 0.78, 720))
+                        }
                         content(width: geo.size.width)
                     }
                     .padding(.bottom, 40)
@@ -176,9 +183,7 @@ struct HeroItem: Identifiable {
 
 extension Hero {
     static func fallback(path: String, backdrop: String, poster: String?) -> Hero {
-        let json: [String: Any] = ["path": path, "background": backdrop, "poster": poster ?? backdrop]
-        let data = (try? JSONSerialization.data(withJSONObject: json)) ?? Data()
-        return (try? JSONDecoder().decode(Hero.self, from: data)) ?? (try! JSONDecoder().decode(Hero.self, from: Data("{\"path\":\"\"}".utf8)))
+        Hero(path: path, background: backdrop, poster: poster ?? backdrop)
     }
 }
 
@@ -310,10 +315,13 @@ struct HeroPage: View {
 struct RouteView: View {
     let route: Route
     var body: some View {
-        switch route {
-        case .movie(let v): MovieDetailView(video: v)
-        case .series(let s): SeriesDetailView(series: s)
-        case .year(let y): YearView(year: y)
+        Group {
+            switch route {
+            case .movie(let v): MovieDetailView(video: v)
+            case .series(let s): SeriesDetailView(series: s)
+            case .year(let y): YearView(year: y)
+            }
         }
+        .duoHidesTabBar()
     }
 }

@@ -59,6 +59,8 @@ final class PlaybackStore {
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
     init() {
+        // 演示数据模式：进度只在内存里，不读也不写本地（截图里不能混进真实的观看记录）
+        if DemoData.enabled { return }
         if let data = UserDefaults.standard.data(forKey: key),
            let list = try? JSONDecoder().decode([WatchEntry].self, from: data) {
             entries = Dictionary(list.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
@@ -111,6 +113,7 @@ final class PlaybackStore {
     }
 
     private func persist() {
+        if DemoData.enabled { return }
         saveTask?.cancel()
         let list = Array(entries.values)
         let key = self.key
@@ -149,6 +152,12 @@ final class AppModel {
     func start() {
         guard !started else { return }
         started = true
+        if DemoData.enabled {                       // 演示数据：不连服务器、不读写本地缓存
+            DemoData.populate(self)
+            phase = .ready
+            metaReady = true
+            return
+        }
         restore()
         phase = videos.isEmpty ? .loading : .ready
         Task { await refreshLibrary() }
@@ -157,6 +166,7 @@ final class AppModel {
     }
 
     func refreshAll() async {
+        if DemoData.enabled { return }
         async let a: Void = refreshLibrary()
         async let b: Void = refreshSeries()
         async let c: Void = refreshHeroes()
@@ -246,6 +256,7 @@ final class AppModel {
 
     /// 剧集的 TMDB（按剧集表认好的编号取，带字标 / 纯净海报 / 剧照）
     func ensureSeriesMeta(_ s: Series, force: Bool = false) async {
+        if DemoData.enabled { return }
         if !force, seriesMetas[s.path] != nil { return }
         if seriesInflight.contains(s.path) { return }
         seriesInflight.insert(s.path)
@@ -259,6 +270,7 @@ final class AppModel {
 
     /// 电影详情：全量结果（字标、演员、纯净海报）
     func fullMeta(for v: Video) async -> Meta? {
+        if DemoData.enabled { return metas[v.name] }
         if let m = try? await APIClient.shared.metaBatch([v.name], full: true), let hit = m[v.name], let meta = hit {
             return meta
         }

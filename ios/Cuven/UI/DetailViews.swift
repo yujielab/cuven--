@@ -252,6 +252,12 @@ struct SeriesDetailView: View {
     }
 
     private func load() async {
+        if DemoData.enabled {
+            files = DemoData.episodes(series)
+            info = DemoData.season(series)
+            loading = false
+            return
+        }
         loading = true
         await model.ensureSeriesMeta(series)
         do {

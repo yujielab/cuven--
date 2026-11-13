@@ -50,6 +50,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
 
     func play(_ req: PlayRequest, model: AppModel) {
         self.model = model
+        if DemoData.enabled { alert("演示模式", "演示数据没有片源，不能播放。"); return }
         Haptics.success()
         Task { await start(req) }
     }

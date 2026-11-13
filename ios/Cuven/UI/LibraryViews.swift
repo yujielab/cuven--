@@ -162,6 +162,7 @@ struct SeriesPosterTile: View {
 
 struct SearchView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.duoMode) private var duo
     @State private var query = ""
 
     var body: some View {
@@ -190,7 +191,9 @@ struct SearchView: View {
             .scrollDismissesKeyboard(.immediately)
             .background(Theme.bg)
             .navigationTitle("搜索")
-            .searchable(text: $query, prompt: "电影、剧集、年份")
+            // Duo 下没有底部标签栏可挂搜索框：放到导航栏下面、一直显示
+            .searchable(text: $query, placement: duo == .off ? .automatic : .navigationBarDrawer(displayMode: .always),
+                        prompt: "电影、剧集、年份")
             .navigationDestination(for: Route.self) { RouteView(route: $0) }
         }
     }

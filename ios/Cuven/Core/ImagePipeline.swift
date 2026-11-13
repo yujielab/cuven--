@@ -23,6 +23,11 @@ actor ImagePipeline {
     func image(_ url: URL, maxPixel: CGFloat) async -> UIImage? {
         let key = "\(url.absoluteString)#\(Int(maxPixel))" as NSString
         if let hit = memory.object(forKey: key) { return hit }
+        if url.scheme == "demo" {                       // 演示数据：本地画，不走网络
+            let img = DemoData.render(url, maxPixel: maxPixel)
+            if let img { memory.setObject(img, forKey: key) }
+            return img
+        }
         if let t = inflight[key as String] { return await t.value }
         let session = self.session
         let task = Task.detached(priority: .userInitiated) { () -> UIImage? in
@@ -42,6 +47,7 @@ actor ImagePipeline {
 
     /// 只要原始字节（字标的明暗分析用，见 LogoTone）
     func data(_ url: URL) async -> Data? {
+        if url.scheme == "demo" { return DemoData.render(url, maxPixel: 400)?.pngData() }
         guard let (data, resp) = try? await session.data(from: url),
               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
         return data

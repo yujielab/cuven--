@@ -43,10 +43,13 @@ final class TourTests: XCTestCase {
             let f = e.frame
             return f.width > 0 && f.minX >= screen.minX - 1 && f.maxX <= screen.maxX + 1 && f.minY >= screen.minY && f.maxY <= screen.maxY
         }
-        if let heroDetail = app.buttons.matching(identifier: "hero-detail").allElementsBoundByIndex.first(where: onScreen) {
-            heroDetail.tap()
-        } else if let poster = app.buttons.matching(identifier: "newest-poster").allElementsBoundByIndex.first(where: onScreen) {
+        // 大图会自动翻页，按钮可能正跨在屏幕边上：往下滑一点，点「最新加入」里第一张完整在屏上的海报
+        app.swipeUp()
+        sleep(2)
+        if let poster = app.buttons.matching(identifier: "newest-poster").allElementsBoundByIndex.first(where: onScreen) {
             poster.tap()
+        } else if let heroDetail = app.buttons.matching(identifier: "hero-detail").allElementsBoundByIndex.first(where: onScreen) {
+            heroDetail.tap()
         }
         let play = app.buttons["detail-play"].firstMatch
         XCTAssertTrue(play.waitForExistence(timeout: 20), "电影详情页没有播放钮")
