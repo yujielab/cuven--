@@ -37,6 +37,14 @@ final class DuoDeviceTests: XCTestCase {
         let plus = visible(app.buttons.matching(identifier: "watchlist-button"))
         if plus.exists { plus.tap(); sleep(1) } else { XCTFail("详情页没有「想看」钮") }
         app.swipeUp(); sleep(2); snap("duo-04-detail-info")
+        // 演员与职员 ›：整页名单
+        if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 3) {
+            castLink.tap(); sleep(2)
+            snap("duo-04b-cast")
+            back(app)
+        } else {
+            XCTFail("详情页没有「演员与职员 ›」")
+        }
         back(app)
         app.swipeUp(); sleep(2); snap("duo-08-home-watchlist")
 

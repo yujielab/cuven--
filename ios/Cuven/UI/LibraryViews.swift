@@ -168,8 +168,8 @@ struct SeriesPosterTile: View {
 
 // MARK: - 搜索
 
-/// 搜索（App Store「搜寻」的版式）：大标题 + 右上头像，搜索框在标题下面；
-/// 没输入时是「为你推荐 ›」（横着一页一页翻、每页三行、行尾「播放」胶囊）和「浏览 ›」（按类型的彩色格子）；输入了就是结果列表
+/// 搜索（Apple TV「搜索」的版式）：大标题 + 右上头像，搜索框在标题下面；
+/// 没输入时是三列竖版画面格子（最新加入、剧集、想看，再是片库里的类型），输入了就是结果列表
 struct SearchView: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
@@ -200,7 +200,7 @@ struct SearchView: View {
             let hits = model.search(query)
             LazyVStack(alignment: .leading, spacing: 0) {
                 if query.trimmingCharacters(in: .whitespaces).isEmpty {
-                    discover(width: width)
+                    discover()
                 } else if hits.isEmpty {
                     ContentUnavailableView.search(text: query).padding(.top, 60)
                 } else {
@@ -216,21 +216,10 @@ struct SearchView: View {
         .background(Theme.bg)
     }
 
-    @ViewBuilder private func discover(width: CGFloat) -> some View {
-        let picks = model.todayPicks
-        if !picks.isEmpty {
-            SectionHeader(title: "为你推荐", route: .shelf(.picks))
-                .padding(.top, 12)
-                .padding(.bottom, 4)
-            PagedRows(videos: Array(picks.prefix(12)), width: width, slot: "search-picks")
-        }
-        let genres = model.genres.prefix(8).map { $0.name }
-        if !genres.isEmpty {
-            SectionHeader(title: "浏览", route: .browse)
-                .padding(.top, 28)
-                .padding(.bottom, 12)
-            GenreGrid(genres: genres)
-        }
+    /// 没输入时：Apple TV「搜索」那样，搜索框下面直接是一格格竖版画面（几个清单 + 片库里的类型）
+    private func discover() -> some View {
+        BrowseGrid(tiles: model.browseTiles)
+            .padding(.top, 14)
     }
 
     private func route(_ h: AppModel.SearchHit) -> Route {

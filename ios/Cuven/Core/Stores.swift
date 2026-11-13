@@ -181,6 +181,7 @@ final class AppModel {
     let watchlist = WatchlistStore()
 
     @ObservationIgnored private var started = false
+    @ObservationIgnored private var trailerCache: [String: [Trailer]] = [:]
     @ObservationIgnored private var seriesInflight: Set<String> = []
     @ObservationIgnored private var metaRound = 0
     /// 片库 / 元数据每变一次加一：首页那几排（电影清单、按年份、今日推荐）按它缓存，不在每次重绘时重算
@@ -392,6 +393,22 @@ final class AppModel {
     }
 
     var newest: [Video] { Array(movies.prefix(15)) }
+
+    /// 详情页「预告片」：拿英文名去 Apple TV 找，年份差一年以内才算同一部（免得是同名的别的片）。
+    /// 只留公开的预告（订阅才看得了的花絮不要）；结果记在内存里，一部片只问一次
+    func trailers(for v: Video) async -> [Trailer] {
+        if DemoData.enabled { return [] }
+        if let hit = trailerCache[v.path] { return hit }
+        let m = meta(v)
+        let latin = [m?.en, m?.originalTitle].compactMap { $0 }
+            .first { !$0.isEmpty && $0.range(of: "\\p{Han}", options: .regularExpression) == nil }
+        guard let name = latin, let r = try? await APIClient.shared.atvLookup(title: name) else { return [] }
+        var list = (r.trailers ?? []).filter { !$0.hls.isEmpty && !$0.hls.contains("/subscription/") }
+        if let y = year(v), let ry = r.year, abs(y - ry) > 1 { list = [] }
+        trailerCache[v.path] = list
+        Perf.log("trailers: \(list.count) (of \(r.trailers?.count ?? 0))")
+        return list
+    }
 
     /// 片库里的类型（电影 + 剧集都算），片子多的在前：搜索页「浏览」的格子
     var genres: [(name: String, count: Int)] {

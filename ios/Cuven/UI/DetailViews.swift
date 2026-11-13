@@ -14,96 +14,69 @@ struct MovieDetailView: View {
     @State private var selected: Video?
     @State private var showTitle = false
     @State private var related: [Video] = []
+    @State private var trailers: [Trailer] = []
+    @State private var trailerStart: TrailerStart?
 
     var body: some View {
         let meta = full ?? model.meta(video)
         let versions = model.versions(of: video)
         let file = selected ?? video
         let resume = model.playback.resumePosition(file.path)
+        let title = model.title(video)
+        let primaryTitle = resume.map { "继续播放 · \(Format.clock($0))" } ?? "播放"
+        let restart: DetailAction? = resume == nil ? nil : DetailAction(title: "从头播放", symbol: "arrow.counterclockwise", action: {
+            model.playback.finish(file.path)
+            play(file, meta: meta)
+        })
 
         GeometryReader { geo in
             let wide = hsc == .regular || geo.size.width > geo.size.height
-            let heroH = wide ? min(geo.size.height * 0.92, 640) : min(geo.size.height * 0.86, 720)
+            // 竖拿：头部几乎一整屏（Apple TV：画面在上、取色的底在下，下一块的标题刚好露出来）
+            let heroH = wide ? min(geo.size.height * 0.92, 640) : max(520, geo.size.height * 0.95)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     DetailHero(art: (wide ? meta?.backdrop : (meta?.posterClean ?? meta?.backdrop)) ?? meta?.backdrop ?? meta?.poster,
-                               logo: meta?.logo, title: model.title(video), meta: infoLine(meta),
+                               logo: meta?.logo, title: title, kicker: kicker(meta), meta: infoLine(meta),
                                badges: FileName.specs(file.name), overview: meta?.overview,
                                cast: meta?.cast?.prefix(3).map(\.name).joined(separator: "、"),
                                wide: wide, height: heroH) {
-                        VStack(spacing: 10) {
-                            HStack(spacing: 12) {
-                                Button { play(file, meta: meta) } label: {
-                                    PrimaryLabel(title: resume.map { "继续播放 · \(Format.clock($0))" } ?? "播放", systemImage: "play.fill")
-                                        .frame(maxWidth: wide ? nil : .infinity)
-                                        .padding(.horizontal, wide ? 28 : 0)
-                                }
-                                .buttonStyle(.glassProminent)
-                                .controlSize(.large)
-                                .accessibilityIdentifier("detail-play")
-                                WatchlistButton(key: video.path, kind: .movie)
-                            }
-                            if resume != nil {
-                                Button {
-                                    model.playback.finish(file.path)
-                                    play(file, meta: meta)
-                                } label: {
-                                    Label("从头播放", systemImage: "arrow.counterclockwise")
-                                        .font(.system(size: 14, weight: .semibold))
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundStyle(.white.opacity(0.85))
-                            }
-                        }
-                        .frame(maxWidth: wide ? nil : 520)
+                        DetailActions(wide: wide, primary: primaryTitle, primaryID: "detail-play",
+                                      play: { play(file, meta: meta) }, secondary: restart,
+                                      watchKey: video.path, watchKind: .movie)
                     }
 
-                    VStack(alignment: .leading, spacing: 26) {
-                    if versions.count > 1 {
-                        VStack(alignment: .leading, spacing: 10) {
-                            DetailSectionTitle("版本")
-                            ForEach(versions) { v in
-                                Button { selected = v; Haptics.selection() } label: {
-                                    HStack(spacing: 10) {
-                                        Image(systemName: v.path == file.path ? "checkmark.circle.fill" : "circle")
-                                            .foregroundStyle(v.path == file.path ? Theme.accent : Theme.tertiary)
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(FileName.specs(v.name).joined(separator: " · ").isEmpty ? FileName.stem(v.name) : FileName.specs(v.name).joined(separator: " · "))
-                                                .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-                                            Text(Format.size(v.size)).font(.system(size: 12)).foregroundStyle(Theme.tertiary)
-                                        }
-                                        Spacer()
-                                    }
-                                    .padding(12)
-                                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                }
-                                .buttonStyle(.plain)
-                            }
+                    VStack(alignment: .leading, spacing: 28) {
+                        if !trailers.isEmpty {
+                            TrailerRow(trailers: trailers, stills: (meta?.stills ?? []).compactMap { $0.url ?? $0.thumb },
+                                       backdrop: meta?.backdrop) { i in trailerStart = TrailerStart(index: i) }
                         }
-                    }
 
-                    if let cast = meta?.cast, !cast.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
-                            DetailSectionTitle("演员")
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                LazyHStack(alignment: .top, spacing: 14) {
-                                    ForEach(Array(cast.prefix(20).enumerated()), id: \.offset) { _, c in
-                                        VStack(spacing: 6) {
-                                            RemoteImage(url: c.profileURL, maxPixel: 240)
-                                                .frame(width: 72, height: 72)
-                                                .clipShape(Circle())
-                                            Text(c.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                                            if let ch = c.character, !ch.isEmpty {
-                                                Text(ch).font(.system(size: 11)).foregroundStyle(Theme.tertiary).lineLimit(1)
+                        if versions.count > 1 {
+                            VStack(alignment: .leading, spacing: 10) {
+                                DetailSectionTitle("版本")
+                                ForEach(versions) { v in
+                                    Button { selected = v; Haptics.selection() } label: {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: v.path == file.path ? "checkmark.circle.fill" : "circle")
+                                                .foregroundStyle(v.path == file.path ? Theme.accent : Theme.tertiary)
+                                            VStack(alignment: .leading, spacing: 3) {
+                                                Text(FileName.specs(v.name).joined(separator: " · ").isEmpty ? FileName.stem(v.name) : FileName.specs(v.name).joined(separator: " · "))
+                                                    .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+                                                Text(Format.size(v.size)).font(.system(size: 12)).foregroundStyle(Theme.tertiary)
                                             }
+                                            Spacer()
                                         }
-                                        .frame(width: 84)
+                                        .padding(12)
+                                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                                     }
+                                    .buttonStyle(.plain)
                                 }
                             }
-                            .scrollClipDisabled()
                         }
-                    }
+
+                        if let cast = meta?.cast, !cast.isEmpty {
+                            CastRail(people: cast, route: .cast(title: title, people: Array(cast.prefix(40)), director: meta?.director))
+                        }
 
                         if !related.isEmpty {
                             VStack(alignment: .leading, spacing: 12) {
@@ -129,7 +102,7 @@ struct MovieDetailView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, Theme.gutter)
-                    .padding(.top, 18)
+                    .padding(.top, 22)
                     .padding(.bottom, 40)
                 }
             }
@@ -143,32 +116,41 @@ struct MovieDetailView: View {
         }
         .background(Theme.bg)
         .overlay(alignment: .top) { StatusBarScrim() }
-        .navigationTitle(showTitle ? model.title(video) : "")
+        .navigationTitle(showTitle ? title : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
             if let url = TMDBLink.url(meta, kind: "movie") {
                 ToolbarItem(placement: .topBarTrailing) {
-                    ShareLink(item: url, subject: Text(model.title(video)), message: Text(model.title(video))) {
+                    ShareLink(item: url, subject: Text(title), message: Text(title)) {
                         Label("分享", systemImage: "square.and.arrow.up")
                     }
                 }
             }
         }
+        .fullScreenCover(item: $trailerStart) { s in
+            TrailerPlayerView(movieTitle: title, trailers: trailers, start: s.index)
+        }
         .task {
             related = model.related(to: video)
             full = await model.fullMeta(for: video)
         }
+        .task(id: video.path) { trailers = await model.trailers(for: video) }
     }
 
+    /// 第一行：「电影 · 类型 · 类型」
+    private func kicker(_ m: Meta?) -> String {
+        (["电影"] + (m?.genres?.prefix(2).map { $0 } ?? [])).joined(separator: " · ")
+    }
+
+    /// 第二行：年份、片长、评分（后面跟着规格徽标）
     private func infoLine(_ m: Meta?) -> String {
         var parts: [String] = []
-        if let y = model.year(video) { parts.append(String(y)) }
-        if let g = m?.genres, !g.isEmpty { parts.append(g.prefix(3).joined(separator: " · ")) }
+        if let y = model.year(video) { parts.append("\(y) 年") }
         let rt = Format.runtime(m?.runtime)
         if !rt.isEmpty { parts.append(rt) }
         if let r = m?.rating, r > 0 { parts.append(String(format: "★ %.1f", r)) }
-        return parts.joined(separator: "  ·  ")
+        return parts.joined(separator: " · ")
     }
 
     private func movieInfo(_ m: Meta?) -> [(String, String)] {
@@ -200,13 +182,14 @@ struct MovieDetailView: View {
     }
 }
 
-/// 详情页头部（Apple TV 的样子）：剧照铺满、下半截压暗，上面叠字标、信息行、规格徽标、简介（带「更多」）和操作按钮。
-/// 宽屏：内容靠左，右下角「主演 …」；竖屏：内容居中，简介在按钮下面。
-/// 剧照带 backgroundExtensionEffect（iPhone Duo 上系统栏竖在侧边时延伸到那一列底下），下拉时往上撑大
+/// 详情页头部（Apple TV 的样子）：画面铺满，往下化进一块从画面本身取的颜色（不是一律黑），内容一律靠左：
+/// 字标；「电影 · 类型」；简介（两行，「更多」是叠在行尾的小胶囊）；年份 · 片长 · 评分 + 规格徽标；按钮。
+/// 宽屏：内容在左边一栏，右下角「主演 …」。画面带 backgroundExtensionEffect（iPhone Duo 上延伸到侧边那一列底下），下拉时往上撑大
 struct DetailHero<Actions: View>: View {
     let art: String?
     let logo: String?
     let title: String
+    let kicker: String
     let meta: String
     let badges: [String]
     let overview: String?
@@ -214,26 +197,28 @@ struct DetailHero<Actions: View>: View {
     let wide: Bool
     let height: CGFloat
     @ViewBuilder var actions: () -> Actions
+    @State private var tint: Color = Theme.bg
 
     var body: some View {
         ZStack(alignment: .bottom) {
+            tint
             Color.clear
                 .overlay { RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1800) }
                 .clipped()
                 .backgroundExtensionEffect()
                 .stretchy()
             LinearGradient(stops: [
-                .init(color: .black.opacity(0.45), location: 0),
-                .init(color: .clear, location: 0.2),
-                .init(color: .clear, location: wide ? 0.34 : 0.3),
-                .init(color: .black.opacity(0.8), location: wide ? 0.74 : 0.64),
-                .init(color: .black, location: 1),
+                .init(color: .black.opacity(0.3), location: 0),
+                .init(color: .clear, location: 0.16),
+                .init(color: .clear, location: wide ? 0.34 : 0.36),
+                .init(color: tint.opacity(0.9), location: wide ? 0.72 : 0.6),
+                .init(color: tint, location: wide ? 0.94 : 0.78),
             ], startPoint: .top, endPoint: .bottom)
             .allowsHitTesting(false)
 
             if wide {
                 HStack(alignment: .bottom, spacing: 24) {
-                    column(.leading)
+                    column
                         .frame(maxWidth: 520, alignment: .leading)
                     Spacer(minLength: 0)
                     if let cast, !cast.isEmpty {
@@ -247,39 +232,156 @@ struct DetailHero<Actions: View>: View {
                 .padding(.horizontal, Theme.gutter + 6)
                 .padding(.bottom, 26)
             } else {
-                column(.center)
+                column
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, Theme.gutter)
-                    .padding(.bottom, 18)
+                    .padding(.bottom, 22)
             }
         }
         .frame(height: height)
+        .task(id: art) {
+            // 和画面同一个地址（磁盘缓存里已经有），只是解成一张小图来取色
+            guard let u = TMDBImage.url(art, "w1280"), let c = await ArtTint.color(for: u) else { return }
+            withAnimation(.easeOut(duration: 0.4)) { tint = c }
+        }
     }
 
-    private func column(_ alignment: HorizontalAlignment) -> some View {
-        VStack(alignment: alignment, spacing: 12) {
-            LogoImage(url: TMDBImage.url(logo, "w500"), height: wide ? 96 : 82,
-                      alignment: alignment == .leading ? .leading : .center, fallback: title)
-                .frame(maxWidth: wide ? 440 : 320)
-            if !meta.isEmpty {
-                Text(meta)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.82))
-                    .multilineTextAlignment(alignment == .leading ? .leading : .center)
+    private var column: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            LogoImage(url: TMDBImage.url(logo, "w500"), height: wide ? 96 : 80, alignment: .leading, fallback: title)
+                .frame(maxWidth: wide ? 440 : 280, alignment: .leading)
+                .padding(.bottom, 4)
+            if !kicker.isEmpty {
+                Text(kicker)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
             }
-            if !badges.isEmpty {
-                HStack(spacing: 6) { ForEach(badges.prefix(6), id: \.self) { SpecBadge(text: $0) } }
+            if let o = overview, !o.isEmpty {
+                ExpandableText(text: o, lines: 2, fade: tint)
             }
-            if wide, let o = overview, !o.isEmpty {
-                ExpandableText(text: o, lines: 2)
+            if !meta.isEmpty || !badges.isEmpty {
+                FlowLayout(spacing: 8, lineSpacing: 6) {
+                    if !meta.isEmpty {
+                        Text(meta)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.8))
+                    }
+                    ForEach(badges.prefix(6), id: \.self) { SpecBadge(text: $0) }
+                }
             }
             actions()
-                .padding(.top, 4)
-            if !wide, let o = overview, !o.isEmpty {
-                ExpandableText(text: o, lines: 3)
-                    .padding(.top, 6)
+                .padding(.top, 8)
+        }
+    }
+}
+
+/// 详情页的次要按钮
+struct DetailAction {
+    let title: String
+    let symbol: String
+    let action: () -> Void
+}
+
+/// 详情页的按钮（Apple TV）：一颗宽的白色主按钮；竖拿时下面一行是次要按钮（有的话）和「+」，宽屏上排成一行
+struct DetailActions: View {
+    let wide: Bool
+    let primary: String
+    let primaryID: String
+    var disabled = false
+    let play: () -> Void
+    var secondary: DetailAction? = nil
+    let watchKey: String
+    let watchKind: WatchItem.Kind
+
+    var body: some View {
+        if wide {
+            HStack(spacing: 12) {
+                primaryButton
+                    .frame(minWidth: 200)
+                    .fixedSize()
+                if let secondary { secondaryButton(secondary) }
+                WatchlistButton(key: watchKey, kind: watchKind)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                primaryButton
+                    .frame(width: 236)
+                HStack(spacing: 12) {
+                    if let secondary { secondaryButton(secondary) }
+                    WatchlistButton(key: watchKey, kind: watchKind)
+                }
             }
         }
     }
+
+    private var primaryButton: some View {
+        Button(action: play) {
+            PrimaryLabel(title: primary, systemImage: "play.fill")
+                .lineLimit(1)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 14)
+        }
+        .buttonStyle(.glassProminent)
+        .controlSize(.large)
+        .disabled(disabled)
+        .accessibilityIdentifier(primaryID)
+    }
+
+    private func secondaryButton(_ a: DetailAction) -> some View {
+        Button(action: a.action) {
+            Label(a.title, systemImage: a.symbol)
+                .font(.system(size: 16, weight: .semibold))
+                .padding(.horizontal, 8)
+        }
+        .buttonStyle(.glass)
+        .controlSize(.large)
+    }
+}
+
+/// 详情页的底色：取画面最下面一截的平均色、压暗（Apple TV：画面往下化进同一种颜色，不是一律黑）。一张图只算一次
+@MainActor
+enum ArtTint {
+    private static var cache: [URL: Color] = [:]
+
+    static func color(for url: URL) async -> Color? {
+        if let hit = cache[url] { return hit }
+        guard let img = await ImagePipeline.shared.image(url, maxPixel: 120), let cg = img.cgImage,
+              let c = average(cg) else { return nil }
+        cache[url] = c
+        return c
+    }
+
+    nonisolated static func average(_ cg: CGImage) -> Color? {
+        let h = cg.height, w = cg.width
+        guard h > 4, w > 4,
+              let strip = cg.cropping(to: CGRect(x: 0, y: h * 3 / 4, width: w, height: h - h * 3 / 4)) else { return nil }
+        let n = 8
+        var px = [UInt8](repeating: 0, count: n * n * 4)
+        let ok: Bool = px.withUnsafeMutableBytes { buf in
+            guard let ctx = CGContext(data: buf.baseAddress, width: n, height: n, bitsPerComponent: 8, bytesPerRow: n * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.interpolationQuality = .medium
+            ctx.draw(strip, in: CGRect(x: 0, y: 0, width: n, height: n))
+            return true
+        }
+        guard ok else { return nil }
+        var r = 0.0, g = 0.0, b = 0.0
+        for i in stride(from: 0, to: px.count, by: 4) {
+            r += Double(px[i]); g += Double(px[i + 1]); b += Double(px[i + 2])
+        }
+        let total = Double(n * n) * 255
+        var hue: CGFloat = 0, sat: CGFloat = 0, bri: CGFloat = 0, alpha: CGFloat = 0
+        UIColor(red: r / total, green: g / total, blue: b / total, alpha: 1).getHue(&hue, saturation: &sat, brightness: &bri, alpha: &alpha)
+        // 压暗做底色：亮度封顶，饱和度略提，白字压在上面始终看得清
+        return Color(UIColor(hue: hue, saturation: min(1, sat * 1.1), brightness: min(bri, 0.42) * 0.85, alpha: 1))
+    }
+}
+
+/// 全屏预告片从第几段开始
+struct TrailerStart: Identifiable {
+    let index: Int
+    var id: Int { index }
 }
 
 /// TMDB 的公开页面（分享用：分享的是片子的公开资料，不是片库里的文件）
@@ -298,26 +400,67 @@ struct DetailSectionTitle: View {
     }
 }
 
-/// 简介：默认 4 行，长的带「更多」
+/// 简介：默认 4 行，真的被截断了才带「更多」（量出全文和截断后的高度来比，不靠字数猜）。
+/// 给了 fade：「更多」是叠在最后一行末尾的小胶囊，底下的字往这个颜色里淡出去（Apple TV 详情页的写法）
 struct ExpandableText: View {
     let text: String
     var lines: Int = 4
+    var fade: Color? = nil
     @State private var expanded = false
+    @State private var fullHeight: CGFloat = 0
+    @State private var shownHeight: CGFloat = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(text)
-                .font(.system(size: 15))
-                .foregroundStyle(.white.opacity(0.86))
-                .lineSpacing(4)
+        let truncated = !expanded && fullHeight > shownHeight + 1
+        if let fade {
+            styled
                 .lineLimit(expanded ? nil : lines)
-            if !expanded && text.count > lines * 28 {
-                Button("更多") { withAnimation(.snappy) { expanded = true } }
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .buttonStyle(.plain)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in shownHeight = h }
+                .background(alignment: .top) { measure }
+                .overlay(alignment: .bottomTrailing) {
+                    if truncated {
+                        moreButton
+                            .padding(.leading, 40)
+                            .background(LinearGradient(colors: [fade.opacity(0), fade, fade], startPoint: .leading, endPoint: .trailing))
+                    }
+                }
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                styled
+                    .lineLimit(expanded ? nil : lines)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in shownHeight = h }
+                    .background(alignment: .top) { measure }
+                if truncated { moreButton }
             }
         }
+    }
+
+    private var styled: some View {
+        Text(text)
+            .font(.system(size: 15))
+            .foregroundStyle(.white.opacity(0.86))
+            .lineSpacing(4)
+    }
+
+    /// 不限行数的同一段字（看不见），只用来量全文多高
+    private var measure: some View {
+        styled
+            .fixedSize(horizontal: false, vertical: true)
+            .hidden()
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in fullHeight = h }
+    }
+
+    private var moreButton: some View {
+        Button { withAnimation(.snappy) { expanded = true } } label: {
+            Text("更多")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+                .background(Color.white.opacity(fade == nil ? 0 : 0.2), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("overview-more")
     }
 }
 
@@ -353,6 +496,171 @@ struct InfoSections: View {
     }
 }
 
+// MARK: - 演员与职员（Apple TV 的 Cast & Crew）
+
+/// 详情页里的一排演员：标题「演员与职员 ›」点进整页名单；下面横排圆头像
+struct CastRail: View {
+    let people: [CastMember]
+    let route: Route
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            NavigationLink(value: route) {
+                HStack(spacing: 6) {
+                    Text("演员与职员").font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 15, weight: .heavy))
+                        .foregroundStyle(Theme.secondary)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PressableStyle(scale: 0.98))
+            .accessibilityIdentifier("cast-link")
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 14) {
+                    ForEach(Array(people.prefix(20).enumerated()), id: \.offset) { _, c in
+                        VStack(spacing: 6) {
+                            PersonPhoto(name: c.name, url: c.profileURL, size: 72)
+                            Text(c.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                            if let ch = c.character, !ch.isEmpty {
+                                Text(ch).font(.system(size: 11)).foregroundStyle(Theme.tertiary).lineLimit(1)
+                            }
+                        }
+                        .frame(width: 84)
+                    }
+                }
+            }
+            .scrollClipDisabled()
+        }
+    }
+}
+
+/// 圆头像；没有照片时是名字的第一个字
+struct PersonPhoto: View {
+    let name: String
+    let url: URL?
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            Circle().fill(Theme.surface2)
+            Text(String(name.prefix(1)))
+                .font(.system(size: size * 0.38, weight: .semibold))
+                .foregroundStyle(Theme.secondary)
+            if url != nil {
+                RemoteImage(url: url, maxPixel: size * 3, placeholder: .clear)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+    }
+}
+
+/// 整页名单：导演在最前，然后是演员（头像、名字、角色），发丝线从文字那一列起头
+struct CastView: View {
+    let title: String
+    let people: [CastMember]
+    let director: String?
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                if let d = director, !d.isEmpty {
+                    PersonRow(name: d, role: "导演", url: nil)
+                }
+                ForEach(Array(people.enumerated()), id: \.offset) { _, p in
+                    PersonRow(name: p.name, role: p.character ?? "", url: p.profileURL)
+                }
+            }
+            .padding(.vertical, 6)
+            .padding(.bottom, 30)
+        }
+        .scrollIndicators(.hidden)
+        .background(Theme.bg)
+        .navigationTitle("演员与职员")
+        .navigationBarTitleDisplayMode(.large)
+    }
+}
+
+struct PersonRow: View {
+    let name: String
+    let role: String
+    let url: URL?
+
+    var body: some View {
+        HStack(spacing: 16) {
+            PersonPhoto(name: name, url: url, size: 64)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(name).font(.system(size: 17)).foregroundStyle(.white).lineLimit(1)
+                if !role.isEmpty {
+                    Text(role).font(.system(size: 15)).foregroundStyle(Theme.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Theme.gutter)
+        .padding(.vertical, 8)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.hairline).frame(height: 0.5).padding(.leading, Theme.gutter + 64 + 16)
+        }
+    }
+}
+
+// MARK: - 预告片（详情页里的一排）
+
+/// 「预告片」：横排的 16:9 卡（画面用这部片的剧照，正中一颗玻璃播放钮），点了全屏放，左右滑换下一段
+struct TrailerRow: View {
+    let trailers: [Trailer]
+    let stills: [String]
+    let backdrop: String?
+    let onPlay: (Int) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            DetailSectionTitle("预告片")
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 12) {
+                    ForEach(Array(trailers.enumerated()), id: \.element.id) { i, t in
+                        Button { onPlay(i) } label: {
+                            VStack(alignment: .leading, spacing: 7) {
+                                ZStack {
+                                    Color.clear
+                                        .overlay { RemoteImage(url: TMDBImage.url(image(i), "w780"), maxPixel: 760) }
+                                        .clipped()
+                                    Image(systemName: "play.fill")
+                                        .font(.system(size: 20, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .frame(width: 50, height: 50)
+                                        .glassEffect(.regular, in: Circle())
+                                }
+                                .frame(width: 256, height: 144)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
+                                Text(t.title ?? "预告片")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+                                    .frame(width: 256, alignment: .leading)
+                            }
+                        }
+                        .buttonStyle(PressableStyle())
+                        .accessibilityIdentifier("trailer-card")
+                    }
+                }
+                .scrollTargetLayout()
+            }
+            .scrollTargetBehavior(.viewAligned)
+            .scrollClipDisabled()
+        }
+    }
+
+    private func image(_ i: Int) -> String? {
+        stills.isEmpty ? backdrop : stills[i % stills.count]
+    }
+}
+
 // MARK: - 剧集详情
 //
 // 同电影：剧照 + 字标 + 播放（接着上次那一集）；下面是简介、这一季的分集（横排的大卡：剧照、第几集、集名、简介、时长、进度），
@@ -377,27 +685,17 @@ struct SeriesDetailView: View {
 
         GeometryReader { geo in
             let wide = hsc == .regular || geo.size.width > geo.size.height
-            let heroH = wide ? min(geo.size.height * 0.92, 640) : min(geo.size.height * 0.86, 720)
+            let heroH = wide ? min(geo.size.height * 0.92, 640) : max(520, geo.size.height * 0.95)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     DetailHero(art: (wide ? meta?.backdrop : (meta?.posterClean ?? meta?.backdrop)) ?? meta?.backdrop ?? meta?.poster,
-                               logo: meta?.logo, title: title, meta: infoLine(meta),
+                               logo: meta?.logo, title: title, kicker: kicker(meta), meta: infoLine(meta),
                                badges: (series.tags ?? []).filter { !$0.isEmpty }, overview: meta?.overview,
                                cast: meta?.cast?.prefix(3).map(\.name).joined(separator: "、"),
                                wide: wide, height: heroH) {
-                        HStack(spacing: 12) {
-                            Button { playFirstOrResume(last) } label: {
-                                PrimaryLabel(title: resumeLabel(last), systemImage: "play.fill")
-                                    .frame(maxWidth: wide ? nil : .infinity)
-                                    .padding(.horizontal, wide ? 28 : 0)
-                            }
-                            .buttonStyle(.glassProminent)
-                            .controlSize(.large)
-                            .disabled(files.isEmpty)
-                            .accessibilityIdentifier("series-play")
-                            WatchlistButton(key: series.path, kind: .series)
-                        }
-                        .frame(maxWidth: wide ? nil : 520)
+                        DetailActions(wide: wide, primary: resumeLabel(last), primaryID: "series-play",
+                                      disabled: files.isEmpty, play: { playFirstOrResume(last) },
+                                      watchKey: series.path, watchKind: .series)
                     }
 
                     VStack(alignment: .leading, spacing: 14) {
@@ -461,12 +759,17 @@ struct SeriesDetailView: View {
         .task { await load() }
     }
 
+    /// 第一行：「剧集 · 类型 · 类型」
+    private func kicker(_ m: Meta?) -> String {
+        (["剧集"] + (m?.genres?.prefix(2).map { $0 } ?? [])).joined(separator: " · ")
+    }
+
+    /// 第二行：年份、第几季、集数、评分（后面跟着规格徽标）
     private func infoLine(_ m: Meta?) -> String {
-        var parts = [series.year, series.seasonLabel, series.countLabel.isEmpty ? nil : series.countLabel,
-                     m?.genres?.prefix(2).joined(separator: " · ")]
+        var parts = [series.year.map { "\($0) 年" }, series.seasonLabel, series.countLabel.isEmpty ? nil : series.countLabel]
             .compactMap { $0 }.filter { !$0.isEmpty }
         if let r = m?.rating, r > 0 { parts.append(String(format: "★ %.1f", r)) }
-        return parts.joined(separator: "  ·  ")
+        return parts.joined(separator: " · ")
     }
 
     private func seriesInfo(_ m: Meta?) -> [(String, String)] {

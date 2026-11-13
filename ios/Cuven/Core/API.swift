@@ -117,6 +117,13 @@ final class APIClient: @unchecked Sendable {
         return p.heroes
     }
 
+    // MARK: 预告片
+
+    /// 按片名（英文名）在 Apple TV 上找这部片，连预告片一起
+    func atvLookup(title: String) async throws -> AtvLookup {
+        try await get("/api/atv/lookup", [("title", title), ("video", "1")], timeout: 20)
+    }
+
     // MARK: 播放
 
     func streamSign(path: String) async throws -> StreamSign {

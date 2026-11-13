@@ -20,6 +20,16 @@ enum DemoData {
         "Endless Summer", "Between Mountains and Seas", "Borderline", "Night Flight", "Deep Blue",
     ]
     private static let genres = [["科幻", "冒险"], ["剧情"], ["爱情", "剧情"], ["悬疑", "惊悚"], ["动画", "家庭"], ["动作", "犯罪"], ["喜剧"], ["历史", "战争"]]
+    /// 演示用的演员名单（虚构的名字，头像是本地画的色块）
+    private static let people = ["陈默", "林夏", "周远", "许晴", "沈川", "苏念", "顾言", "唐宁", "叶舟", "程露"]
+    private static let roles = ["艾琳", "船长", "老周", "记者", "向导", "医生", "警探", "少年", "画家", "邮差"]
+    private static func cast(_ i: Int) -> [CastMember] {
+        (0..<8).map { k in
+            let n = (i + k * 3) % people.count
+            return CastMember(id: 100 + n, name: people[n], character: roles[(i + k) % roles.count], profilePath: url("face", 200 + n))
+        }
+    }
+
     private static let seriesTitles = ["灯火人间", "海港往事", "无人之境", "长街", "旧城新事", "风起时", "极地来信", "午夜电台"]
 
     private static func url(_ kind: String, _ seed: Int, _ text: String? = nil, dark: Bool = false) -> String {
@@ -42,11 +52,14 @@ enum DemoData {
             let name = "Demo.\(english[i].replacingOccurrences(of: " ", with: ".")).\(year).2160p.DV.Atmos.mkv"
             let added = iso.string(from: now.addingTimeInterval(-Double(i) * 86400 * 3))
             videos.append(Video(name: name, path: "/demo/\(name)", size: Int64(8_000_000_000 + i * 731_000_000), added: added))
-            metas[name] = Meta(id: 9000 + i, title: t, en: english[i], year: String(year),
+            var meta = Meta(id: 9000 + i, title: t, en: english[i], year: String(year),
                                poster: url("poster", i, t), posterClean: url("poster", i), backdrop: url("backdrop", i),
                                logo: url("logo", i, t, dark: i % 5 == 2),
                                overview: "这是演示数据里的一部片：用来核对版面，不是真实的片库内容。画面、片名与简介都是本地生成的。",
                                rating: 6 + Double(i % 7) * 0.5, type: "movie", runtime: 92 + i * 3, genres: genres[i % genres.count])
+            meta.cast = cast(i)
+            meta.director = people[(i + 5) % people.count]
+            metas[name] = meta
         }
         m.videos = videos
         m.metas = metas
@@ -101,6 +114,7 @@ enum DemoData {
         case "poster": ratio = 1.5
         case "tall": ratio = 2.16
         case "logo": ratio = 0.3
+        case "face": ratio = 1
         default: ratio = 9.0 / 16.0
         }
         let w = min(max(maxPixel, 200), 900)

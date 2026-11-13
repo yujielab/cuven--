@@ -96,6 +96,10 @@ struct CastMember: Codable, Hashable, Sendable {
 
     enum CodingKeys: String, CodingKey { case id, name, character, profilePath = "profile_path" }
 
+    init(id: Int? = nil, name: String, character: String? = nil, profilePath: String? = nil) {
+        self.id = id; self.name = name; self.character = character; self.profilePath = profilePath
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = c.int(.id)
@@ -106,7 +110,7 @@ struct CastMember: Codable, Hashable, Sendable {
 
     var profileURL: URL? {
         guard let p = profilePath, !p.isEmpty else { return nil }
-        return URL(string: p.hasPrefix("http") ? p : "https://image.tmdb.org/t/p/w185" + p)
+        return URL(string: p.hasPrefix("http") || p.hasPrefix("demo:") ? p : "https://image.tmdb.org/t/p/w185" + p)
     }
 }
 
@@ -388,8 +392,21 @@ enum Route: Hashable {
     case series(Series)
     case year(Int)
     case shelf(Shelf)
-    /// 搜索页「浏览 ›」：全部类型
-    case browse
+    /// 「演员与职员 ›」：整页名单（Apple TV 的 Cast & Crew）
+    case cast(title: String, people: [CastMember], director: String?)
+}
+
+/// Apple TV 上这部片的预告片（/api/atv/lookup?video=1，HLS，系统播放器直接能放）
+struct AtvLookup: Decodable, Sendable {
+    var title: String?
+    var year: Int?
+    var trailers: [Trailer]?
+}
+
+struct Trailer: Decodable, Hashable, Identifiable, Sendable {
+    var title: String?
+    var hls: String
+    var id: String { hls }
 }
 
 /// 整页清单：首页分区标题「›」进去的，和搜索页「浏览」里的某一类
