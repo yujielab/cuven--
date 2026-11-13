@@ -4595,7 +4595,7 @@ function tmdbCacheKey(q, year, full, kind) {
   const y = obj ? (q.year || '') : (year || '');
   const p = new URLSearchParams({ q: t.toLowerCase() });
   if (y) p.set('y', y);
-  if (full) p.set('f', '1');
+  if (full) p.set('f', '2');        // f=2：全量结果多了 logoChecked（见 fetchMetadata），旧的 f=1 那批不再读
   if (kind) p.set('t', kind);       // type=tv / movie 各存一份：同名的电影与剧集不能互相顶掉
   return new Request(`${TMDB_CACHE}?${p}`);
 }
@@ -4621,14 +4621,21 @@ async function handleTmdb(url, env, ctx) {
   try { payload = await fetchMetadata(q, year, full, env, kind); }
   catch (e) { return jsonResponse({ error: 'tmdb unavailable' }, 502, { 'Cache-Control': 'no-store' }); }   // 出错不缓存、不回 null
   const body = payload ? JSON.stringify(payload) : 'null';
+  const keep = tmdbCacheable(payload, full);
   const resp = new Response(body, {
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
-      'Cache-Control': 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=2592000',
+      'Cache-Control': keep ? 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=2592000' : 'public, max-age=120',
     },
   });
-  ctx?.waitUntil?.(cache.put(ck, resp.clone()));
+  if (keep) ctx?.waitUntil?.(cache.put(ck, resp.clone()));
   return resp;
+}
+
+/* 全量结果里字标那一问没问成（TMDB images 超时 / 出错）：这份只能算半份 —— 照常回给前端，但不进边缘缓存，
+   浏览器也只留两分钟；否则「暂时没取到字标」会被当成「没有字标」记上一个星期 */
+function tmdbCacheable(payload, full) {
+  return !(full && payload && payload.logoChecked === false);
 }
 
 async function handleTmdbBatch(request, env, ctx) {
@@ -4668,6 +4675,7 @@ async function handleTmdbBatch(request, env, ctx) {
       catch { failed = true; }
       if (failed) return;
       result[q.name] = data;
+      if (!tmdbCacheable(data, full)) return;
       const resp = new Response(data ? JSON.stringify(data) : 'null', {
         headers: {
           'Content-Type': 'application/json; charset=utf-8',
@@ -4998,9 +5006,13 @@ async function fetchMetadata(title, year, full, env, kind = '', budget = null) {
   }
 
   // TMDB Logo + Stills（剧照画廊用）
+  // logoChecked：images 这一问真的问到了（logo 为空 = TMDB 上确实没有字标）。没问成时 logo 也是空，
+  // 但那不算数 —— 前端首页按「有没有字标」决定剧集出不出，只认问到了的答案；没问成的这份也不进长缓存（见 tmdbCacheable）
+  out.logoChecked = false;
   if (imgRes.status === 'fulfilled' && imgRes.value?.ok) {
     try {
       const imgData = await imgRes.value.json();
+      out.logoChecked = true;
       const logos = imgData.logos || [];
       const pick = f => logos.find(f);
       const best =
