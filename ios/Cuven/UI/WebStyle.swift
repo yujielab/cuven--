@@ -114,6 +114,12 @@ struct LandscapeCard: View {
             .frame(width: width, height: width * 224 / 399)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
+            // 「新」角标（网页版 .card.is-new）：上次打开以后才入库的片子；这张卡只用在「最新加入」那一排，和网页版一样只标这里
+            .overlay(alignment: .topLeading) {
+                if model.freshPaths.contains(video.path) {
+                    FreshBadge().padding(8)
+                }
+            }
             Text(addedLabel)
                 .font(.system(size: 12.5, weight: .medium))
                 .foregroundStyle(.white.opacity(0.4))
@@ -135,6 +141,22 @@ struct LandscapeCard: View {
         case 30..<365: return "\(days / 30) 个月前"
         default: return "\(days / 365) 年前"
         }
+    }
+}
+
+/// 「新」角标（网页版 .card.is-new .card-poster::after）：蓝色胶囊（高 28、左右 10），白字 10 号粗体，投影
+struct FreshBadge: View {
+    var body: some View {
+        Text("新")
+            .font(.system(size: 10, weight: .bold))
+            .tracking(0.2)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .background(Theme.accent, in: Capsule())
+            .shadow(color: .black.opacity(0.45), radius: 5, y: 2)
+            .accessibilityLabel("新片")
+            .accessibilityIdentifier("fresh-badge")
     }
 }
 

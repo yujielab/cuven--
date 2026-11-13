@@ -119,6 +119,8 @@ struct YearView: View {
     @State private var sheetMovie: Video?
     @State private var sheetSeries: Series?
     @State private var openSeries: Series?
+    /// 「查看分集」：弹层关完再推进去（关的过程中推，偶尔推不进去）
+    @State private var pendingSeries: Series?
     @State private var toast: String?
     @State private var showTitle = false
 
@@ -189,7 +191,9 @@ struct YearView: View {
                 }
             })
         }
-        .sheet(item: $sheetSeries) { s in
+        .sheet(item: $sheetSeries, onDismiss: {
+            if let s = pendingSeries { pendingSeries = nil; openSeries = s }
+        }) { s in
             let seen = model.playback.lastEpisode(of: s.path) != nil
             WebActionSheet(title: YearSeriesRow.name(s), rows: [
                 WebSheetRow(symbol: "play.circle.fill", tint: WebSheetRow.orange, label: seen ? "继续看" : "从第 1 集看起",
@@ -199,7 +203,7 @@ struct YearView: View {
                     }
                 },
                 WebSheetRow(symbol: "info.circle", tint: WebSheetRow.blue, label: "查看分集", note: "简介、演员与每一集", id: "sheet-detail") {
-                    openSeries = s
+                    pendingSeries = s
                 },
             ])
         }

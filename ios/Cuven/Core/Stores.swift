@@ -187,6 +187,11 @@ final class AppModel {
     /// 片库根下一级的文件夹（首页最后那排「文件夹」）；libraryRoot 是 /api/all 回包里的根目录，进文件夹时换成相对路径
     var folders: [LibraryFolder] = []
     @ObservationIgnored var libraryRoot = ""
+    /// 「新」角标（网页版 Notify.freshSet）：上次看到的最新入库时间之后才进来的片子，只标首页「最新加入」那一排。
+    /// 一次会话只算一次、算完立刻把水位抬到这一回的最新：从详情页回来角标不会当场消失，下次打开就没了
+    private(set) var freshPaths: Set<String> = []
+    @ObservationIgnored private var freshFrozen = false
+    private static let seenKey = "cuven_lib_seen_v1"
 
     let playback = PlaybackStore()
     let watchlist = WatchlistStore()
@@ -209,6 +214,7 @@ final class AppModel {
         started = true
         if DemoData.enabled {                       // 演示数据：不连服务器、不读写本地缓存
             DemoData.populate(self)
+            freezeFresh()
             dataVersion &+= 1
             phase = .ready
             metaReady = true
@@ -248,6 +254,7 @@ final class AppModel {
             let lib = try await APIClient.shared.library()
             let vids = lib.videos.filter { FileName.isVideo($0.name) }.sorted { $0.addedKey > $1.addedKey }
             videos = vids
+            freezeFresh()
             folders = lib.folders
             libraryRoot = lib.root ?? ""
             dataVersion &+= 1
@@ -259,7 +266,27 @@ final class AppModel {
             await loadMetas()
         } catch {
             if videos.isEmpty { phase = .failed(error.localizedDescription) }
+            freezeFresh()   // 没连上：就按上次存下的片库算
         }
+    }
+
+    /// 片库第一次拿到真数据时算一回「新」（网页版 renderHome 之后的 Notify.mount）：
+    /// 入库时间（added，没有就 modified）晚于上次记下的水位的算新；第一次打开整个库都比 0 新——那不叫新片，叫片库，
+    /// 所以首次只记水位、不标新。算完立刻把水位抬到这一回最新的入库时间
+    private func freezeFresh() {
+        guard !freshFrozen, !videos.isEmpty else { return }
+        freshFrozen = true
+        let stamps = videos.map { (path: $0.path, t: Relative.date($0.addedKey)?.timeIntervalSince1970 ?? 0) }
+        if DemoData.enabled {
+            // 演示数据：当作上次是 4 天前打开的（最新入库的两部算新），不读写真实的水位
+            let seen = Date().timeIntervalSince1970 - 4 * 86_400
+            freshPaths = Set(stamps.filter { $0.t > seen }.map { $0.path })
+            return
+        }
+        let seen = UserDefaults.standard.double(forKey: Self.seenKey)
+        freshPaths = seen > 0 ? Set(stamps.filter { $0.t > seen }.map { $0.path }) : []
+        let newest = stamps.map { $0.t }.max() ?? 0
+        if newest > 0 { UserDefaults.standard.set(newest, forKey: Self.seenKey) }
     }
 
     /// 片库里每个文件名问一次 TMDB（批接口一次 80 个，两路并发）。没回答的过一会儿再问，最多三轮

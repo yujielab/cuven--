@@ -34,8 +34,13 @@ struct LibraryView: View {
                             ShowcaseChapter(video: v, vw: vw, vh: vh, top: top, trailer: trailer,
                                             isActive: active == v.path,
                                             report: { center, isCovered in
-                                                if center, active != v.path { active = v.path }
-                                                if active == v.path, covered != isCovered { covered = isCovered }
+                                                // 换章时连「画面是否滚出屏幕」一起换成这一章的（不依赖刚写进去的 active 能不能马上读回来）
+                                                if center && active != v.path {
+                                                    active = v.path
+                                                    covered = isCovered
+                                                } else if active == v.path && covered != isCovered {
+                                                    covered = isCovered
+                                                }
                                             })
                             // 标题跟网页版一样压在第一章的画面上、随页面滚走（不是钉在顶上的导航栏）
                             .overlay(alignment: .top) {
@@ -60,14 +65,16 @@ struct LibraryView: View {
             }
             .background(Color.black)
             .toolbar(.hidden, for: .navigationBar)
+            // 挂在导航栈的根内容上（不是挂在 ZoomStack 外面）：推进详情页时根内容才算「不在屏上」，预告片跟着停；
+            // 挂在外面的话导航栈本身一直在屏上，推进去以后预告片还在后面静音地放
+            .onAppear { trailer.setVisible(true) }
+            .onDisappear { trailer.setVisible(false) }
         }
         .onChange(of: active) { _, path in
             guard let path, let v = list.first(where: { $0.path == path }) else { return }
             trailer.mount(v, model: model)
         }
         .onChange(of: covered) { _, c in trailer.setCovered(c) }
-        .onAppear { trailer.setVisible(true) }
-        .onDisappear { trailer.setVisible(false) }
     }
 
     /// 网页版 sortOrder：上映日期新的在前；同一天按入库时间；再按片名
@@ -286,7 +293,7 @@ struct ShowcaseMedia: View {
         ZStack {
             RadialGradient(colors: [Color(red: 27 / 255, green: 39 / 255, blue: 64 / 255), Color(red: 10 / 255, green: 15 / 255, blue: 24 / 255), .black],
                            center: UnitPoint(x: 0.5, y: 0.38), startRadius: 0, endRadius: 400)
-            RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1600, placeholder: .clear)
+            RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1280, placeholder: .clear)
                 .scaleEffect(drift ? 1.12 : 1.02)
             if mine {
                 VideoSurface(player: trailer.player, gravity: .resizeAspectFill, background: .clear)

@@ -8,13 +8,59 @@ final class DuoDeviceTests: XCTestCase {
         continueAfterFailure = true
     }
 
-    private func launch(demo: Bool = true, welcome: Bool = false) -> XCUIApplication {
+    private func launch(demo: Bool = true, welcome: Bool = false, privacy: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         if demo { app.launchArguments += ["-CuvenDemo", "YES"] }
         if welcome { app.launchArguments += ["-CuvenWelcome", "YES"] }
+        if privacy { app.launchArguments += ["-CuvenPrivacy", "YES"] }
         app.launch()
         return app
+    }
+
+    /// 隐私同意闸门（网页版 #pgSheet）：登录后没同意过就盖上。演示数据默认不出，这里用 -CuvenPrivacy YES 强制。
+    /// 弹层本身只有文案与合成内容；勾满三项、开通知（系统权限弹窗点「允许」，没弹就算了），「同意并进入」以后应当到主页
+    func testPrivacyGate() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = launch(privacy: true)
+        let agree = app.buttons["pg-agree"].firstMatch
+        XCTAssertTrue(agree.waitForExistence(timeout: 15), "隐私同意闸门没出现")
+        sleep(2)                                   // 弹层推上来、标题与要点依次升上来
+        report(app, "privacy")
+        snap("duo-00c-privacy")
+        XCTAssertFalse(agree.isEnabled, "四项都没完成，「同意并进入」不该能点")
+
+        // 展开完整说明，再往下滚到「您的选择」
+        let disclose = app.buttons["pg-disclose"].firstMatch
+        if disclose.waitForExistence(timeout: 3) { disclose.tap(); sleep(1) }
+        app.swipeUp(); sleep(1)
+        snap("duo-00d-privacy-2")
+        for id in ["pg-privacy", "pg-cross", "pg-age"] {
+            if let row = reveal(app, app.buttons.matching(identifier: id), swipes: 3) { row.tap(); usleep(300_000) } else { print("DUO privacy: \(id) not found") }
+        }
+        if let notify = reveal(app, app.buttons.matching(identifier: "pg-notify"), swipes: 2) {
+            notify.tap(); sleep(2)
+            // 系统的通知权限弹窗在 SpringBoard 里（文字跟模拟器的系统语言走）
+            let sb = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            var handled = false
+            for label in ["允许", "Allow"] {
+                let b = sb.buttons[label].firstMatch
+                if b.waitForExistence(timeout: 3) { b.tap(); handled = true; break }
+            }
+            if !handled { print("DUO privacy: no notification permission alert (already decided?)") }
+            sleep(1)
+        } else {
+            print("DUO privacy: notify row not found")
+        }
+        snap("duo-00e-privacy-done")
+        if agree.isEnabled {
+            agree.tap()
+            sleep(2)
+            XCTAssertFalse(app.buttons["pg-agree"].exists, "点了「同意并进入」闸门还在")
+            XCTAssertTrue(app.buttons["主页"].firstMatch.waitForExistence(timeout: 10), "同意以后没到主页")
+        } else {
+            print("DUO privacy: agree still disabled (hint: \(app.staticTexts["pg-hint"].firstMatch.label))")
+        }
     }
 
     /// 欢迎页（网页版 #wc-root）：已登录时打开 App 先盖这一屏。演示数据默认不出，这里用 -CuvenWelcome YES 强制。

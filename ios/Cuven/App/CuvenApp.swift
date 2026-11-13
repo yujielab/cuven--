@@ -7,6 +7,8 @@ struct CuvenApp: App {
     @State private var account: AccountStore
     /// 欢迎页（网页版 #wc-root）：打开 App 时已登录就先盖这一屏，点「确认并继续」淡出。只在启动这一刻判断一次
     @State private var welcome: Bool
+    /// 隐私同意闸门（网页版 __privacyGate）：欢迎页退场 0.5 秒后、或刚登录完，没同意过就盖上
+    @State private var privacy = false
 
     init() {
         // 播放走系统的「影视」音频会话：静音键不影响声音，画中画 / 锁屏后继续放
@@ -22,15 +24,22 @@ struct CuvenApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
+                .overlay { if privacy { PrivacyGateView { privacy = false } } }
                 // 和网页版一样整屏盖在最上面（片库在底下照常加载）；退场是 0.45 秒的淡出
                 .overlay {
                     if welcome {
                         WelcomeView {
                             withAnimation(.timingCurve(0.32, 0.72, 0, 1, duration: 0.45)) { welcome = false }
+                            Task { @MainActor in
+                                try? await Task.sleep(nanoseconds: 500_000_000)
+                                if PrivacyGate.shouldShow(account) { privacy = true }
+                            }
                         }
                         .transition(.opacity)
                     }
                 }
+                .onAppear { if !welcome && PrivacyGate.shouldShow(account) { privacy = true } }
+                .onChange(of: account.isLoggedIn) { _, now in if now && !welcome && PrivacyGate.shouldShow(account) { privacy = true } }
                 .environment(model)
                 .environment(account)
                 .preferredColorScheme(.dark)
