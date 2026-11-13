@@ -23,7 +23,7 @@ struct LibraryView: View {
 
                     if kind == .movies {
                         let list = movies
-                        Text(year.map { "\($0) 年 · \(list.count) 部" } ?? "\(list.count) 部电影")
+                        Text(verbatim: year.map { "\($0) 年 · \(list.count) 部" } ?? "\(list.count) 部电影")
                             .font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.tertiary)
                             .padding(.horizontal, Theme.gutter)
                         PosterGrid {
@@ -33,7 +33,7 @@ struct LibraryView: View {
                         }
                     } else {
                         let list = seriesList
-                        Text(year.map { "\($0) 年 · \(list.count) 部" } ?? "\(list.count) 部剧集")
+                        Text(verbatim: year.map { "\($0) 年 · \(list.count) 部" } ?? "\(list.count) 部剧集")
                             .font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.tertiary)
                             .padding(.horizontal, Theme.gutter)
                         PosterGrid {

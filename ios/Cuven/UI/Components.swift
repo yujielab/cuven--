@@ -263,3 +263,44 @@ struct SkeletonRow: View {
         .redacted(reason: .placeholder)
     }
 }
+
+/// 自动换行的一排（规格徽标等）：一行放不下就折到下一行，不会把整列撑得比屏幕宽
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 6
+    var lineSpacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxW = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, lineH: CGFloat = 0, widest: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > 0 && x + s.width > maxW { y += lineH + lineSpacing; x = 0; lineH = 0 }
+            x += s.width + spacing
+            lineH = max(lineH, s.height)
+            widest = max(widest, x - spacing)
+        }
+        return CGSize(width: min(widest, maxW), height: y + lineH)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, lineH: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > bounds.minX && x + s.width > bounds.maxX { y += lineH + lineSpacing; x = bounds.minX; lineH = 0 }
+            v.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(s))
+            x += s.width + spacing
+            lineH = max(lineH, s.height)
+        }
+    }
+}
+
+/// 白色玻璃的主按钮（播放）：字一律黑色 —— 白底白字看不见
+struct PrimaryLabel: View {
+    let title: String
+    let systemImage: String
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.system(size: 17, weight: .bold))
+            .foregroundStyle(.black)
+    }
+}

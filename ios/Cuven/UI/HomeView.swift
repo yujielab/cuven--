@@ -9,8 +9,8 @@ struct HomeView: View {
                 let wide = geo.size.width > geo.size.height || geo.size.width >= 700
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 34) {
-                        HeroPager(items: heroItems, wide: wide,
-                                  height: wide ? min(geo.size.height * 0.82, geo.size.width * 9 / 16 + 60) : min(geo.size.height * 0.74, 700))
+                        HeroPager(items: heroItems, wide: wide, width: geo.size.width,
+                                  height: wide ? min(geo.size.height * 0.82, geo.size.width * 9 / 16 + 60) : min(geo.size.height * 0.78, 720))
                         content(width: geo.size.width)
                     }
                     .padding(.bottom, 40)
@@ -19,6 +19,13 @@ struct HomeView: View {
                 .background(Theme.bg)
                 .ignoresSafeArea(edges: .top)
                 .refreshable { await model.refreshAll() }
+                // 内容滚到状态栏底下时压一层渐暗，时间和电量不至于压在海报上看不清
+                .overlay(alignment: .top) {
+                    LinearGradient(colors: [.black.opacity(0.75), .black.opacity(0)], startPoint: .top, endPoint: .bottom)
+                        .frame(height: geo.safeAreaInsets.top + 18)
+                        .ignoresSafeArea(edges: .top)
+                        .allowsHitTesting(false)
+                }
             }
             .background(Theme.bg)
             .toolbar(.hidden, for: .navigationBar)
@@ -181,6 +188,7 @@ struct HeroPager: View {
     @Environment(AppModel.self) private var model
     let items: [HeroItem]
     let wide: Bool
+    let width: CGFloat
     let height: CGFloat
     @State private var current: String?
 
@@ -193,7 +201,8 @@ struct HeroPager: View {
                     LazyHStack(spacing: 0) {
                         ForEach(items) { it in
                             HeroPage(item: it, wide: wide)
-                                .containerRelativeFrame(.horizontal)
+                                .frame(width: width, height: height)
+                                .clipped()
                                 .id(it.id)
                         }
                     }
@@ -213,11 +222,12 @@ struct HeroPager: View {
                     .animation(.snappy, value: current)
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .glassEffect(.regular, in: Capsule())
-                    .padding(.bottom, 10)
+                    .padding(.bottom, 14)
+                    .allowsHitTesting(false)
                 }
             }
         }
-        .frame(height: height)
+        .frame(width: width, height: height)
         .clipped()
         .task(id: items.map(\.id).joined(separator: "|")) {
             guard items.count > 1 else { return }
@@ -264,8 +274,7 @@ struct HeroPage: View {
                                                                   subtitle: model.year(item.video).map { String($0) },
                                                                   artwork: m?.backdrop ?? item.hero.background), model: model)
                     } label: {
-                        Label(model.playback.resumePosition(item.video.path) != nil ? "继续播放" : "播放", systemImage: "play.fill")
-                            .font(.system(size: 16, weight: .bold))
+                        PrimaryLabel(title: model.playback.resumePosition(item.video.path) != nil ? "继续播放" : "播放", systemImage: "play.fill")
                             .padding(.horizontal, 10)
                     }
                     .buttonStyle(.glassProminent)
@@ -282,7 +291,7 @@ struct HeroPage: View {
                 }
             }
             .padding(.horizontal, 24)
-            .padding(.bottom, 52)
+            .padding(.bottom, 66)          // 下面留给翻页圆点
         }
     }
 

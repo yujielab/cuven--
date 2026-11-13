@@ -27,8 +27,7 @@ struct MovieDetailView: View {
 
                     VStack(spacing: 10) {
                         Button { play(file, meta: meta) } label: {
-                            Label(resume.map { "继续播放 · \(Format.clock($0))" } ?? "播放", systemImage: "play.fill")
-                                .font(.system(size: 17, weight: .bold))
+                            PrimaryLabel(title: resume.map { "继续播放 · \(Format.clock($0))" } ?? "播放", systemImage: "play.fill")
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.glassProminent)
@@ -50,7 +49,7 @@ struct MovieDetailView: View {
 
                     let specs = FileName.specs(file.name)
                     if !specs.isEmpty {
-                        HStack(spacing: 6) { ForEach(specs, id: \.self) { SpecBadge(text: $0) } }
+                        FlowLayout { ForEach(specs, id: \.self) { SpecBadge(text: $0) } }
                     }
 
                     if let o = meta?.overview, !o.isEmpty {
@@ -114,6 +113,7 @@ struct MovieDetailView: View {
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, Theme.gutter)
                 .padding(.top, 6)
                 .padding(.bottom, 40)
@@ -199,8 +199,7 @@ struct SeriesDetailView: View {
 
                     if !files.isEmpty {
                         Button { playFirstOrResume(last) } label: {
-                            Label(resumeLabel(last), systemImage: "play.fill")
-                                .font(.system(size: 17, weight: .bold))
+                            PrimaryLabel(title: resumeLabel(last), systemImage: "play.fill")
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.glassProminent)
@@ -210,7 +209,7 @@ struct SeriesDetailView: View {
 
                     let specs = (series.tags ?? []).filter { !$0.isEmpty }
                     if !specs.isEmpty {
-                        HStack(spacing: 6) { ForEach(specs, id: \.self) { SpecBadge(text: $0) } }
+                        FlowLayout { ForEach(specs, id: \.self) { SpecBadge(text: $0) } }
                     }
 
                     if let o = meta?.overview, !o.isEmpty {
@@ -235,6 +234,7 @@ struct SeriesDetailView: View {
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, Theme.gutter)
                 .padding(.top, 6)
                 .padding(.bottom, 40)

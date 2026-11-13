@@ -60,15 +60,15 @@ jobs:
 
       - name: 走一遍（UI 测试，带截图）
         run: |
-          set -o pipefail
+          set +e
           xcodebuild test -project ios/Cuven.xcodeproj -scheme Cuven -destination "id=$SIM_UDID" \
-            -resultBundlePath "$RUNNER_TEMP/ui.xcresult" > "$RUNNER_TEMP/test.log" 2>&1 || {
-              grep -E -B2 -A8 "error:|failed|Failing|XCTAssert" "$RUNNER_TEMP/test.log" | head -200
-              tail -40 "$RUNNER_TEMP/test.log"
-              exit 1
-            }
-          grep -E "Test Case|passed|failed|error:" "$RUNNER_TEMP/test.log" | tail -30
-          grep -E "Test Case|passed|failed|error:|XCTAssert" "$RUNNER_TEMP/test.log" | tail -60 > "$RUNNER_TEMP/test-summary.txt" || true
+            -resultBundlePath "$RUNNER_TEMP/ui.xcresult" > "$RUNNER_TEMP/test.log" 2>&1
+          code=$?
+          grep -E "Test Case|passed|failed|error:|XCTAssert|Failing" "$RUNNER_TEMP/test.log" | tail -60 > "$RUNNER_TEMP/test-summary.txt"
+          echo "exit $code" >> "$RUNNER_TEMP/test-summary.txt"
+          cat "$RUNNER_TEMP/test-summary.txt"
+          if [ $code -ne 0 ]; then tail -40 "$RUNNER_TEMP/test.log"; fi
+          exit $code
 
       - name: 导出截图
         if: always()

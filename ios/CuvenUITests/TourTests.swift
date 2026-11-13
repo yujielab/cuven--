@@ -35,45 +35,47 @@ final class TourTests: XCTestCase {
             back()
         }
 
-        // 回到顶上：大图的「详情」→ 电影详情
+        // 回到顶上：大图里「此刻在屏上」的那张的「详情」→ 电影详情（大图会自动翻页，不能拿第一张）
         app.swipeDown(); app.swipeDown(); app.swipeDown(); app.swipeDown()
         sleep(2)
-        let detail = app.buttons["hero-detail"].firstMatch
-        if detail.waitForExistence(timeout: 10) {
-            detail.tap()
-        } else if app.buttons["newest-poster"].firstMatch.waitForExistence(timeout: 5) {
-            app.buttons["newest-poster"].firstMatch.tap()
+        let heroDetail = app.buttons.matching(identifier: "hero-detail").allElementsBoundByIndex.first { $0.isHittable }
+        if let heroDetail {
+            heroDetail.tap()
+        } else {
+            let poster = app.buttons.matching(identifier: "newest-poster").allElementsBoundByIndex.first { $0.isHittable }
+            poster?.tap()
         }
         let play = app.buttons["detail-play"].firstMatch
         XCTAssertTrue(play.waitForExistence(timeout: 20), "电影详情页没有播放钮")
         sleep(5)
         snap("08-movie-detail")
         app.swipeUp(); sleep(3); snap("09-movie-detail-2")
-        app.swipeDown(); sleep(1)
+        app.swipeDown(); sleep(2)
 
         // 播放：系统播放器
-        if play.exists {
+        if play.exists && play.isHittable {
             play.tap()
             sleep(15)
             snap("10-player")
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            sleep(1)
             for label in ["关闭", "Close", "完成", "Done"] where app.buttons[label].exists {
                 app.buttons[label].tap(); break
             }
-            if app.otherElements["AVPlayerView"].exists || !app.tabBars.firstMatch.exists {
-                app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-                sleep(1)
-                for label in ["关闭", "Close", "完成", "Done"] where app.buttons[label].exists {
-                    app.buttons[label].tap(); break
-                }
-            }
             sleep(3)
+            snap("10b-after-player")
         }
         back()
 
-        // 资料库 / 搜索
+        // 资料库 → 剧集 / 我的 / 搜索（搜索放最后：键盘会盖住标签栏）
         tapTab(["资料库"])
         sleep(6)
         snap("11-library")
+        let seg = app.segmentedControls.buttons["剧集"]
+        if seg.exists { seg.tap(); sleep(6); snap("11b-library-series") }
+        tapTab(["我的"])
+        sleep(2)
+        snap("12-me")
         tapTab(["搜索", "Search"])
         sleep(2)
         let field = app.searchFields.firstMatch
@@ -81,11 +83,8 @@ final class TourTests: XCTestCase {
             field.tap()
             field.typeText("沙丘")
             sleep(3)
-            snap("12-search")
+            snap("13-search")
         }
-        tapTab(["我的"])
-        sleep(2)
-        snap("13-me")
     }
 
     private func back() {
