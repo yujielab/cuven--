@@ -33,8 +33,22 @@ final class DuoDeviceTests: XCTestCase {
         sleep(2)
         report(app, "detail")
         snap("duo-03-detail")
+        // 「想看」：详情页头部的「+」，回首页后多出「想看」那一排
+        let plus = visible(app.buttons.matching(identifier: "watchlist-button"))
+        if plus.exists { plus.tap(); sleep(1) } else { XCTFail("详情页没有「想看」钮") }
         app.swipeUp(); sleep(2); snap("duo-04-detail-info")
         back(app)
+        app.swipeUp(); sleep(2); snap("duo-08-home-watchlist")
+
+        // 分区标题「›」进整页清单
+        if let header = reveal(app, app.buttons.matching(identifier: "section-最新加入")) {
+            header.tap(); sleep(2)
+            snap("duo-09-shelf")
+            back(app)
+        } else {
+            XCTFail("首页找不到「最新加入 ›」")
+        }
+        app.swipeDown(); app.swipeDown(); app.swipeDown(); sleep(1)
 
         tab(app, "资料库"); sleep(3)
         report(app, "library")
@@ -74,6 +88,14 @@ final class DuoDeviceTests: XCTestCase {
             sleep(2)
         }
         snap("duo-07-search")
+
+        // 长按海报：菜单（播放 / 想看 / 分享），预览是那张卡（放在最后：菜单没收起也不影响别的步骤）
+        tab(app, "主页"); sleep(2)
+        if let poster = reveal(app, app.buttons.matching(identifier: "newest-poster")) {
+            poster.press(forDuration: 1.2); sleep(2)
+            snap("duo-10-menu")
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.06)).tap(); sleep(1)
+        }
     }
 
     func testLandscape() {
@@ -145,6 +167,15 @@ final class DuoDeviceTests: XCTestCase {
         a.name = name
         a.lifetime = .keepAlways
         add(a)
+    }
+
+    /// 往上滑，直到有一个匹配项在屏上点得到（懒加载的排要滑到才会生成）
+    private func reveal(_ app: XCUIApplication, _ q: XCUIElementQuery, swipes: Int = 6) -> XCUIElement? {
+        for i in 0...swipes {
+            if let e = q.allElementsBoundByIndex.first(where: { $0.isHittable }) { return e }
+            if i < swipes { app.swipeUp(); sleep(1) }
+        }
+        return nil
     }
 
     /// 第一个真正在屏上的匹配项（切到别的标签后，上一页的同名按钮还留在层级里，只是看不见）

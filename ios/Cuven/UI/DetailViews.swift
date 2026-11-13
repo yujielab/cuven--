@@ -12,6 +12,7 @@ struct MovieDetailView: View {
     let video: Video
     @State private var full: Meta?
     @State private var selected: Video?
+    @State private var showTitle = false
 
     var body: some View {
         let meta = full ?? model.meta(video)
@@ -19,50 +20,44 @@ struct MovieDetailView: View {
         let file = selected ?? video
         let resume = model.playback.resumePosition(file.path)
 
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                DetailHeader(backdrop: meta?.backdrop ?? meta?.posterClean ?? meta?.poster,
-                             logo: meta?.logo, title: model.title(video))
-
-                VStack(alignment: .leading, spacing: 22) {
-                    Text(infoLine(meta))
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(Theme.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-
-                    VStack(spacing: 10) {
-                        Button { play(file, meta: meta) } label: {
-                            PrimaryLabel(title: resume.map { "继续播放 · \(Format.clock($0))" } ?? "播放", systemImage: "play.fill")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.glassProminent)
-                        .controlSize(.large)
-                        .accessibilityIdentifier("detail-play")
-                        if resume != nil {
-                            Button {
-                                model.playback.finish(file.path)
-                                play(file, meta: meta)
-                            } label: {
-                                Label("从头播放", systemImage: "arrow.counterclockwise")
-                                    .font(.system(size: 16, weight: .semibold))
-                                    .frame(maxWidth: .infinity)
+        GeometryReader { geo in
+            let wide = hsc == .regular || geo.size.width > geo.size.height
+            let heroH = wide ? min(geo.size.height * 0.92, 640) : min(geo.size.height * 0.86, 720)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    DetailHero(art: (wide ? meta?.backdrop : (meta?.posterClean ?? meta?.backdrop)) ?? meta?.backdrop ?? meta?.poster,
+                               logo: meta?.logo, title: model.title(video), meta: infoLine(meta),
+                               badges: FileName.specs(file.name), overview: meta?.overview,
+                               cast: meta?.cast?.prefix(3).map(\.name).joined(separator: "、"),
+                               wide: wide, height: heroH) {
+                        VStack(spacing: 10) {
+                            HStack(spacing: 12) {
+                                Button { play(file, meta: meta) } label: {
+                                    PrimaryLabel(title: resume.map { "继续播放 · \(Format.clock($0))" } ?? "播放", systemImage: "play.fill")
+                                        .frame(maxWidth: wide ? nil : .infinity)
+                                        .padding(.horizontal, wide ? 28 : 0)
+                                }
+                                .buttonStyle(.glassProminent)
+                                .controlSize(.large)
+                                .accessibilityIdentifier("detail-play")
+                                WatchlistButton(key: video.path, kind: .movie)
                             }
-                            .buttonStyle(.glass)
-                            .controlSize(.large)
+                            if resume != nil {
+                                Button {
+                                    model.playback.finish(file.path)
+                                    play(file, meta: meta)
+                                } label: {
+                                    Label("从头播放", systemImage: "arrow.counterclockwise")
+                                        .font(.system(size: 14, weight: .semibold))
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.white.opacity(0.85))
+                            }
                         }
-                    }
-                    .frame(maxWidth: 520)
-                    .frame(maxWidth: .infinity)
-
-                    let specs = FileName.specs(file.name)
-                    if !specs.isEmpty {
-                        FlowLayout { ForEach(specs, id: \.self) { SpecBadge(text: $0) } }
+                        .frame(maxWidth: wide ? nil : 520)
                     }
 
-                    if let o = meta?.overview, !o.isEmpty {
-                        ExpandableText(text: o)
-                    }
-
+                    VStack(alignment: .leading, spacing: 26) {
                     if versions.count > 1 {
                         VStack(alignment: .leading, spacing: 10) {
                             DetailSectionTitle("版本")
@@ -109,21 +104,28 @@ struct MovieDetailView: View {
                         }
                     }
 
-                    InfoSections(sections: [
-                        ("信息", movieInfo(meta)),
-                        ("文件", fileInfo(file)),
-                    ])
+                        InfoSections(sections: [
+                            ("信息", movieInfo(meta)),
+                            ("文件", fileInfo(file)),
+                        ])
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, Theme.gutter)
+                    .padding(.top, 18)
+                    .padding(.bottom, 40)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, Theme.gutter)
-                .padding(.top, 6)
-                .padding(.bottom, 40)
+            }
+            .scrollIndicators(.hidden)
+            .background(Theme.bg)
+            .ignoresSafeArea(edges: .top)
+            // 滚过头部大图，片名才出现在导航栏里（Apple TV 的做法）
+            .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y > heroH - 150 } action: { _, v in
+                withAnimation(.easeOut(duration: 0.2)) { showTitle = v }
             }
         }
-        .scrollIndicators(.hidden)
         .background(Theme.bg)
-        .ignoresSafeArea(edges: .top)
         .overlay(alignment: .top) { StatusBarScrim() }
+        .navigationTitle(showTitle ? model.title(video) : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
@@ -177,34 +179,85 @@ struct MovieDetailView: View {
     }
 }
 
-/// 详情页顶上：剧照铺满、往下压暗，字标压在底部（深色字标自动反白）。
-/// 剧照带 backgroundExtensionEffect：iPhone Duo 上系统栏竖在侧边时，画面延伸到那一列底下（镜像 + 模糊）
-struct DetailHeader: View {
-    let backdrop: String?
+/// 详情页头部（Apple TV 的样子）：剧照铺满、下半截压暗，上面叠字标、信息行、规格徽标、简介（带「更多」）和操作按钮。
+/// 宽屏：内容靠左，右下角「主演 …」；竖屏：内容居中，简介在按钮下面。
+/// 剧照带 backgroundExtensionEffect（iPhone Duo 上系统栏竖在侧边时延伸到那一列底下），下拉时往上撑大
+struct DetailHero<Actions: View>: View {
+    let art: String?
     let logo: String?
     let title: String
+    let meta: String
+    let badges: [String]
+    let overview: String?
+    let cast: String?
+    let wide: Bool
+    let height: CGFloat
+    @ViewBuilder var actions: () -> Actions
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            // 同首页大图：图放在 overlay 里裁切，16:9 的剧照铺满 460 高时不会把整列撑宽
             Color.clear
-                .frame(height: 460)
-                .overlay { RemoteImage(url: TMDBImage.url(backdrop, "w1280"), maxPixel: 1800) }
+                .overlay { RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1800) }
                 .clipped()
                 .backgroundExtensionEffect()
+                .stretchy()
             LinearGradient(stops: [
                 .init(color: .black.opacity(0.45), location: 0),
-                .init(color: .clear, location: 0.22),
-                .init(color: .clear, location: 0.45),
-                .init(color: .black.opacity(0.75), location: 0.8),
+                .init(color: .clear, location: 0.2),
+                .init(color: .clear, location: wide ? 0.34 : 0.3),
+                .init(color: .black.opacity(0.8), location: wide ? 0.74 : 0.64),
                 .init(color: .black, location: 1),
             ], startPoint: .top, endPoint: .bottom)
-            LogoImage(url: TMDBImage.url(logo, "w500"), height: 80, fallback: title)
-                .frame(maxWidth: 320)
-                .padding(.horizontal, 30)
-                .padding(.bottom, 18)
+            .allowsHitTesting(false)
+
+            if wide {
+                HStack(alignment: .bottom, spacing: 24) {
+                    column(.leading)
+                        .frame(maxWidth: 520, alignment: .leading)
+                    Spacer(minLength: 0)
+                    if let cast, !cast.isEmpty {
+                        (Text("主演 ").foregroundStyle(Theme.tertiary) + Text(cast).foregroundStyle(.white.opacity(0.85)))
+                            .font(.system(size: 14, weight: .medium))
+                            .multilineTextAlignment(.trailing)
+                            .lineLimit(2)
+                            .frame(maxWidth: 280, alignment: .trailing)
+                    }
+                }
+                .padding(.horizontal, Theme.gutter + 6)
+                .padding(.bottom, 26)
+            } else {
+                column(.center)
+                    .padding(.horizontal, Theme.gutter)
+                    .padding(.bottom, 18)
+            }
         }
-        .frame(height: 460)
+        .frame(height: height)
+    }
+
+    private func column(_ alignment: HorizontalAlignment) -> some View {
+        VStack(alignment: alignment, spacing: 12) {
+            LogoImage(url: TMDBImage.url(logo, "w500"), height: wide ? 96 : 82,
+                      alignment: alignment == .leading ? .leading : .center, fallback: title)
+                .frame(maxWidth: wide ? 440 : 320)
+            if !meta.isEmpty {
+                Text(meta)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .multilineTextAlignment(alignment == .leading ? .leading : .center)
+            }
+            if !badges.isEmpty {
+                HStack(spacing: 6) { ForEach(badges.prefix(6), id: \.self) { SpecBadge(text: $0) } }
+            }
+            if wide, let o = overview, !o.isEmpty {
+                ExpandableText(text: o, lines: 2)
+            }
+            actions()
+                .padding(.top, 4)
+            if !wide, let o = overview, !o.isEmpty {
+                ExpandableText(text: o, lines: 3)
+                    .padding(.top, 6)
+            }
+        }
     }
 }
 
@@ -227,6 +280,7 @@ struct DetailSectionTitle: View {
 /// 简介：默认 4 行，长的带「更多」
 struct ExpandableText: View {
     let text: String
+    var lines: Int = 4
     @State private var expanded = false
 
     var body: some View {
@@ -235,8 +289,8 @@ struct ExpandableText: View {
                 .font(.system(size: 15))
                 .foregroundStyle(.white.opacity(0.86))
                 .lineSpacing(4)
-                .lineLimit(expanded ? nil : 4)
-            if !expanded && text.count > 110 {
+                .lineLimit(expanded ? nil : lines)
+            if !expanded && text.count > lines * 28 {
                 Button("更多") { withAnimation(.snappy) { expanded = true } }
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
@@ -291,46 +345,37 @@ struct SeriesDetailView: View {
     @State private var info: [Int: SeasonEpisode] = [:]
     @State private var loading = true
     @State private var failed: String?
+    @State private var showTitle = false
 
     var body: some View {
         let meta = model.seriesMetas[series.path]
         let last = model.playback.lastEpisode(of: series.path)
+        let title = meta?.title ?? series.name
 
         GeometryReader { geo in
+            let wide = hsc == .regular || geo.size.width > geo.size.height
+            let heroH = wide ? min(geo.size.height * 0.92, 640) : min(geo.size.height * 0.86, 720)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    DetailHeader(backdrop: meta?.backdrop ?? meta?.posterClean ?? meta?.poster, logo: meta?.logo, title: meta?.title ?? series.name)
-
-                    VStack(alignment: .leading, spacing: 22) {
-                        Text([series.year, series.seasonLabel, series.countLabel, meta?.genres?.prefix(2).joined(separator: " · ")]
-                                .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "  ·  "))
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(Theme.secondary)
-                            .frame(maxWidth: .infinity, alignment: .center)
-
-                        if !files.isEmpty {
+                    DetailHero(art: (wide ? meta?.backdrop : (meta?.posterClean ?? meta?.backdrop)) ?? meta?.backdrop ?? meta?.poster,
+                               logo: meta?.logo, title: title, meta: infoLine(meta),
+                               badges: (series.tags ?? []).filter { !$0.isEmpty }, overview: meta?.overview,
+                               cast: meta?.cast?.prefix(3).map(\.name).joined(separator: "、"),
+                               wide: wide, height: heroH) {
+                        HStack(spacing: 12) {
                             Button { playFirstOrResume(last) } label: {
                                 PrimaryLabel(title: resumeLabel(last), systemImage: "play.fill")
-                                    .frame(maxWidth: .infinity)
+                                    .frame(maxWidth: wide ? nil : .infinity)
+                                    .padding(.horizontal, wide ? 28 : 0)
                             }
                             .buttonStyle(.glassProminent)
                             .controlSize(.large)
-                            .frame(maxWidth: 520)
-                            .frame(maxWidth: .infinity)
+                            .disabled(files.isEmpty)
                             .accessibilityIdentifier("series-play")
+                            WatchlistButton(key: series.path, kind: .series)
                         }
-
-                        let specs = (series.tags ?? []).filter { !$0.isEmpty }
-                        if !specs.isEmpty {
-                            FlowLayout { ForEach(specs, id: \.self) { SpecBadge(text: $0) } }
-                        }
-
-                        if let o = meta?.overview, !o.isEmpty {
-                            ExpandableText(text: o)
-                        }
+                        .frame(maxWidth: wide ? nil : 520)
                     }
-                    .padding(.horizontal, Theme.gutter)
-                    .padding(.top, 6)
 
                     VStack(alignment: .leading, spacing: 14) {
                         DetailSectionTitle(series.seasonLabel ?? "剧集")
@@ -348,7 +393,10 @@ struct SeriesDetailView: View {
                                         EpisodeCard(file: f, info: f.ep.flatMap { info[$0] }, fallbackArt: meta?.backdrop,
                                                     progress: model.playback.entry(f.path)?.fraction, width: cardW)
                                     }
-                                    .buttonStyle(.plain)
+                                    .buttonStyle(PressableStyle())
+                                    .scrollTransition(.interactive, axis: .horizontal) { c, phase in
+                                        c.scaleEffect(phase.isIdentity ? 1 : 0.95).opacity(phase.isIdentity ? 1 : 0.8)
+                                    }
                                     .accessibilityIdentifier("episode-card")
                                 }
                             }
@@ -356,8 +404,9 @@ struct SeriesDetailView: View {
                             .padding(.horizontal, Theme.gutter)
                         }
                         .scrollTargetBehavior(.viewAligned)
+                        .scrollClipDisabled()
                     }
-                    .padding(.top, 28)
+                    .padding(.top, 22)
 
                     InfoSections(sections: [("信息", seriesInfo(meta))])
                         .padding(.horizontal, Theme.gutter)
@@ -368,21 +417,33 @@ struct SeriesDetailView: View {
             .scrollIndicators(.hidden)
             .background(Theme.bg)
             .ignoresSafeArea(edges: .top)
+            .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y > heroH - 150 } action: { _, v in
+                withAnimation(.easeOut(duration: 0.2)) { showTitle = v }
+            }
         }
         .background(Theme.bg)
         .overlay(alignment: .top) { StatusBarScrim() }
+        .navigationTitle(showTitle ? title : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
             if let url = TMDBLink.url(meta, kind: "tv") {
                 ToolbarItem(placement: .topBarTrailing) {
-                    ShareLink(item: url, subject: Text(meta?.title ?? series.name), message: Text(meta?.title ?? series.name)) {
+                    ShareLink(item: url, subject: Text(title), message: Text(title)) {
                         Label("分享", systemImage: "square.and.arrow.up")
                     }
                 }
             }
         }
         .task { await load() }
+    }
+
+    private func infoLine(_ m: Meta?) -> String {
+        var parts = [series.year, series.seasonLabel, series.countLabel.isEmpty ? nil : series.countLabel,
+                     m?.genres?.prefix(2).joined(separator: " · ")]
+            .compactMap { $0 }.filter { !$0.isEmpty }
+        if let r = m?.rating, r > 0 { parts.append(String(format: "★ %.1f", r)) }
+        return parts.joined(separator: "  ·  ")
     }
 
     private func seriesInfo(_ m: Meta?) -> [(String, String)] {
@@ -512,7 +573,7 @@ struct YearView: View {
                         SectionHeader(title: "剧集", count: series.count)
                         PosterGrid {
                             ForEach(series) { s in
-                                NavigationLink(value: Route.series(s)) { SeriesPosterTile(series: s) }.buttonStyle(.plain)
+                                ZoomLink(route: .series(s), slot: "year") { SeriesPosterTile(series: s) }.seriesMenu(s)
                             }
                         }
                     }
@@ -521,7 +582,7 @@ struct YearView: View {
                     SectionHeader(title: "电影", count: movies.count)
                     PosterGrid {
                         ForEach(movies) { v in
-                            NavigationLink(value: Route.movie(v)) { MoviePosterTile(video: v) }.buttonStyle(.plain)
+                            ZoomLink(route: .movie(v), slot: "year") { MoviePosterTile(video: v) }.movieMenu(v)
                         }
                     }
                 }

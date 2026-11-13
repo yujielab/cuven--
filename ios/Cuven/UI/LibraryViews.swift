@@ -12,7 +12,7 @@ struct LibraryView: View {
     @State private var year: Int?
 
     var body: some View {
-        NavigationStack {
+        ZoomStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     Picker("类型", selection: $kind) {
@@ -28,8 +28,9 @@ struct LibraryView: View {
                             .padding(.horizontal, Theme.gutter)
                         PosterGrid {
                             ForEach(list) { v in
-                                NavigationLink(value: Route.movie(v)) { MoviePosterTile(video: v) }.buttonStyle(.plain)
+                                ZoomLink(route: .movie(v), slot: "library") { MoviePosterTile(video: v) }
                                     .accessibilityIdentifier("library-movie")
+                                    .movieMenu(v)
                             }
                         }
                     } else {
@@ -39,8 +40,9 @@ struct LibraryView: View {
                             .padding(.horizontal, Theme.gutter)
                         PosterGrid {
                             ForEach(list) { s in
-                                NavigationLink(value: Route.series(s)) { SeriesPosterTile(series: s) }.buttonStyle(.plain)
+                                ZoomLink(route: .series(s), slot: "library") { SeriesPosterTile(series: s) }
                                     .accessibilityIdentifier("library-series")
+                                    .seriesMenu(s)
                             }
                         }
                     }
@@ -71,7 +73,6 @@ struct LibraryView: View {
                 }
                 .sharedBackgroundVisibility(.hidden)
             }
-            .navigationDestination(for: Route.self) { RouteView(route: $0) }
             .refreshable { await model.refreshAll() }
         }
     }
@@ -172,7 +173,7 @@ struct SearchView: View {
     @State private var query = ""
 
     var body: some View {
-        NavigationStack {
+        ZoomStack {
             GeometryReader { geo in
                 // 系统栏竖在侧边（iPhone Duo 折起时 / 展开横拿时）：左右安全区一边宽一边窄。
                 // 这时搜索标签不再把搜索框挂在底部的标签栏上，得在标题下面一直显示一个
@@ -183,7 +184,6 @@ struct SearchView: View {
             }
             .background(Theme.bg)
             .navigationTitle("搜索")
-            .navigationDestination(for: Route.self) { RouteView(route: $0) }
         }
     }
 
@@ -195,14 +195,14 @@ struct SearchView: View {
                         SectionHeader(title: "最新加入").padding(.vertical, 10)
                         PosterGrid {
                             ForEach(model.newest.prefix(12)) { v in
-                                NavigationLink(value: Route.movie(v)) { MoviePosterTile(video: v) }.buttonStyle(.plain)
+                                ZoomLink(route: .movie(v), slot: "search") { MoviePosterTile(video: v) }.movieMenu(v)
                             }
                         }
                     } else if hits.isEmpty {
                         ContentUnavailableView.search(text: query).padding(.top, 60)
                     } else {
                         ForEach(hits) { h in
-                            NavigationLink(value: route(h)) { SearchRow(hit: h) }.buttonStyle(.plain)
+                            ZoomLink(route: route(h), slot: "search-row", press: false) { SearchRow(hit: h) }
                             Divider().overlay(Theme.hairline).padding(.leading, 84)
                         }
                     }

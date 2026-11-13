@@ -26,12 +26,17 @@ struct HeroCards: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: spacing) {
                         ForEach(items) { it in
-                            NavigationLink(value: Route.movie(it.video)) {
+                            ZoomLink(route: .movie(it.video), slot: "herocard") {
                                 HeroCard(item: it, width: cardW, height: cardH)
                             }
-                            .buttonStyle(.plain)
                             .accessibilityIdentifier("hero-card")
                             .id(it.id)
+                            // 翻卡时两侧的卡略缩、略暗（Apple TV 卡片轮播的手感）
+                            .scrollTransition(.interactive, axis: .horizontal) { content, phase in
+                                content
+                                    .scaleEffect(phase.isIdentity ? 1 : 0.94)
+                                    .opacity(phase.isIdentity ? 1 : 0.75)
+                            }
                         }
                     }
                     .scrollTargetLayout()

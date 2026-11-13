@@ -125,6 +125,42 @@ final class PlaybackStore {
     }
 }
 
+// MARK: - 想看（Apple TV 的「+」：加进来的电影 / 剧集，在首页有一排）
+
+struct WatchItem: Codable, Hashable {
+    enum Kind: String, Codable { case movie, series }
+    var key: String          // 电影：文件路径；剧集：剧集目录
+    var kind: Kind
+    var added: Date
+}
+
+@MainActor
+@Observable
+final class WatchlistStore {
+    private(set) var items: [WatchItem] = []
+    private let storeKey = "cuven_watchlist_v1"
+
+    init() {
+        // 演示数据模式：只在内存里（截图里不混进真实的片单）
+        if DemoData.enabled { return }
+        if let d = UserDefaults.standard.data(forKey: storeKey), let list = try? JSONDecoder().decode([WatchItem].self, from: d) {
+            items = list
+        }
+    }
+
+    func contains(_ key: String) -> Bool { items.contains { $0.key == key } }
+
+    func toggle(_ key: String, kind: WatchItem.Kind) {
+        if let i = items.firstIndex(where: { $0.key == key }) {
+            items.remove(at: i)
+        } else {
+            items.insert(WatchItem(key: key, kind: kind, added: Date()), at: 0)
+        }
+        guard !DemoData.enabled, let d = try? JSONEncoder().encode(items) else { return }
+        UserDefaults.standard.set(d, forKey: storeKey)
+    }
+}
+
 // MARK: - 片库
 
 @MainActor
@@ -142,6 +178,7 @@ final class AppModel {
     var metaReady = false
 
     let playback = PlaybackStore()
+    let watchlist = WatchlistStore()
 
     @ObservationIgnored private var started = false
     @ObservationIgnored private var seriesInflight: Set<String> = []

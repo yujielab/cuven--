@@ -387,4 +387,19 @@ enum Route: Hashable {
     case movie(Video)
     case series(Series)
     case year(Int)
+    case shelf(Shelf)
+}
+
+/// 首页分区标题「›」进去的整页清单
+enum Shelf: String, Hashable {
+    case newest, picks, series, watchlist
+
+    var title: String {
+        switch self {
+        case .newest: return "最新加入"
+        case .picks: return "今日推荐"
+        case .series: return "Cuven TV · 剧集"
+        case .watchlist: return "想看"
+        }
+    }
 }

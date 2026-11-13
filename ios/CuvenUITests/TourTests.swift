@@ -13,12 +13,24 @@ final class TourTests: XCTestCase {
         app.launch()
     }
 
+    /// 首页的「最新加入 ›」（分区标题是一个链接，字在链接里，不一定单独算一段文字）
+    private func homeReady(timeout: TimeInterval) -> Bool {
+        let link = app.buttons["section-最新加入"]
+        let text = app.staticTexts["最新加入"]
+        let end = Date().addingTimeInterval(timeout)
+        while Date() < end {
+            if link.exists || text.exists { return true }
+            _ = link.waitForExistence(timeout: 2)
+        }
+        return link.exists || text.exists
+    }
+
     func testTour() {
         sleep(3)
         snap("01-launch")
 
         // 片库与元数据到了，首页会出现「最新加入」
-        XCTAssertTrue(app.staticTexts["最新加入"].waitForExistence(timeout: 90), "首页没有出现「最新加入」")
+        XCTAssertTrue(homeReady(timeout: 90), "首页没有出现「最新加入」")
         sleep(8)
         snap("02-home")
 
@@ -70,7 +82,7 @@ final class TourTests: XCTestCase {
             if !app.buttons["detail-play"].waitForExistence(timeout: 8) {
                 app.terminate()
                 app.launch()
-                _ = app.staticTexts["最新加入"].waitForExistence(timeout: 60)
+                _ = homeReady(timeout: 60)
                 relaunched = true
             }
             sleep(2)

@@ -17,12 +17,19 @@ enum Theme {
 struct SectionHeader: View {
     let title: String
     var count: Int? = nil
+    /// 有的话：标题后面带「›」，整行点进去看全部（Apple TV 的分区标题）
+    var route: Route? = nil
     var action: (() -> Void)? = nil
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        let row = HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(title).font(.system(size: 22, weight: .bold)).foregroundStyle(.white)
-            if let count { Text("\(count)").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.tertiary) }
+            if route != nil {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 17, weight: .heavy))
+                    .foregroundStyle(Theme.secondary)
+            }
+            if let count { Text("\(count)").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.tertiary).padding(.leading, 2) }
             Spacer()
             if let action {
                 Button(action: action) {
@@ -37,6 +44,38 @@ struct SectionHeader: View {
             }
         }
         .padding(.horizontal, Theme.gutter)
+        if let route {
+            NavigationLink(value: route) { row.contentShape(Rectangle()) }
+                .buttonStyle(PressableStyle(scale: 0.98))
+                .accessibilityIdentifier("section-\(title)")
+        } else {
+            row
+        }
+    }
+}
+
+/// 「想看」：圆形玻璃钮，「+」加进片单、「✓」已在片单里（符号切换带动画）
+struct WatchlistButton: View {
+    @Environment(AppModel.self) private var model
+    let key: String
+    let kind: WatchItem.Kind
+    var size: CGFloat = 50
+
+    var body: some View {
+        let on = model.watchlist.contains(key)
+        Button {
+            withAnimation(.snappy) { model.watchlist.toggle(key, kind: kind) }
+            Haptics.light()
+        } label: {
+            Image(systemName: on ? "checkmark" : "plus")
+                .font(.system(size: size * 0.38, weight: .semibold))
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: size, height: size)
+        }
+        .buttonStyle(.glass)
+        .buttonBorderShape(.circle)
+        .accessibilityLabel(on ? "从想看移除" : "加入想看")
+        .accessibilityIdentifier("watchlist-button")
     }
 }
 
@@ -72,6 +111,31 @@ struct PosterCard: View {
     @ViewBuilder private var progressOverlay: some View {
         if let e = model.playback.entry(video.path), e.fraction > 0.01 {
             ProgressCapsule(fraction: e.fraction).padding(.horizontal, 8).padding(.bottom, 8)
+        }
+    }
+}
+
+/// 剧集的竖版海报卡（「想看」那一排里和电影海报卡并排）
+struct SeriesPosterCard: View {
+    @Environment(AppModel.self) private var model
+    let series: Series
+    var width: CGFloat = 128
+
+    var body: some View {
+        let m = model.seriesMetas[series.path]
+        VStack(alignment: .leading, spacing: 7) {
+            RemoteImage(url: TMDBImage.url(m?.poster ?? m?.posterClean, "w342"), maxPixel: width * 3)
+                .frame(width: width, height: width * 1.5)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(m?.title ?? series.name)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text(series.seasonLabel ?? "剧集").font(.system(size: 12)).foregroundStyle(Theme.tertiary)
+            }
+            .frame(width: width, alignment: .leading)
         }
     }
 }

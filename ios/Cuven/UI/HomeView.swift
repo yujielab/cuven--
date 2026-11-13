@@ -6,7 +6,7 @@ struct HomeView: View {
 
     var body: some View {
         let _ = Perf.count("home")
-        NavigationStack {
+        ZoomStack {
             GeometryReader { geo in
                 let wide = geo.size.width > geo.size.height || geo.size.width >= 700
                 // 卡片态：紧凑宽度、竖着、但比普通 iPhone 矮得多（iPhone Duo 折起时的外屏，系统栏在侧边那一列）
@@ -43,7 +43,6 @@ struct HomeView: View {
             }
             .background(Theme.bg)
             .toolbar(.hidden, for: .navigationBar)
-            .navigationDestination(for: Route.self) { RouteView(route: $0) }
         }
     }
 
@@ -88,7 +87,24 @@ struct HomeView: View {
                 section("继续观看", count: cw.count) {
                     Rail {
                         ForEach(cw) { e in
-                            Button { resume(e) } label: { ContinueCard(entry: e) }.buttonStyle(.plain)
+                            Button { resume(e) } label: { ContinueCard(entry: e) }
+                                .buttonStyle(PressableStyle())
+                        }
+                    }
+                }
+            }
+
+            // 想看（Apple TV 的「+」）：电影和剧集混排，最新加进来的在前
+            let wl = model.watchlist.items
+            if !wl.isEmpty {
+                section("想看", count: wl.count, route: .shelf(.watchlist)) {
+                    Rail {
+                        ForEach(wl, id: \.key) { w in
+                            if w.kind == .movie, let v = model.video(path: w.key) {
+                                ZoomLink(route: .movie(v), slot: "watch") { PosterCard(video: v) }.movieMenu(v)
+                            } else if w.kind == .series, let s = model.series.first(where: { $0.path == w.key }) {
+                                ZoomLink(route: .series(s), slot: "watch") { SeriesPosterCard(series: s) }.seriesMenu(s)
+                            }
                         }
                     }
                 }
@@ -96,55 +112,43 @@ struct HomeView: View {
 
             let picks = model.todayPicks
             if !picks.isEmpty {
-                section("今日推荐", count: picks.count) {
+                section("今日推荐", count: picks.count, route: .shelf(.picks)) {
                     Rail(spacing: 6) {
                         ForEach(Array(picks.enumerated()), id: \.element.id) { i, v in
-                            NavigationLink(value: Route.movie(v)) { RankCard(rank: i + 1, video: v) }.buttonStyle(.plain)
+                            ZoomLink(route: .movie(v), slot: "picks") { RankCard(rank: i + 1, video: v) }.movieMenu(v)
                         }
                     }
                 }
             }
 
-            section("最新加入", count: nil) {
+            section("最新加入", count: nil, route: .shelf(.newest)) {
                 Rail {
                     ForEach(model.newest) { v in
-                        NavigationLink(value: Route.movie(v)) { PosterCard(video: v) }.buttonStyle(.plain)
+                        ZoomLink(route: .movie(v), slot: "newest") { PosterCard(video: v) }
                             .accessibilityIdentifier("newest-poster")
+                            .movieMenu(v)
                     }
                 }
             }
 
             let tv = Array(model.homeSeries.prefix(12))
             if !tv.isEmpty {
-                section("Cuven TV · 剧集", count: nil) {
+                section("Cuven TV · 剧集", count: nil, route: .shelf(.series)) {
                     Rail(spacing: 14) {
                         ForEach(tv) { s in
-                            NavigationLink(value: Route.series(s)) { SeriesCard(series: s, width: min(width * 0.86, 440)) }.buttonStyle(.plain)
+                            ZoomLink(route: .series(s), slot: "series") { SeriesCard(series: s, width: min(width * 0.86, 440)) }
                                 .accessibilityIdentifier("series-card")
+                                .seriesMenu(s)
                         }
                     }
                 }
             }
 
             ForEach(model.yearGroups, id: \.year) { g in
-                VStack(alignment: .leading, spacing: 12) {
-                    NavigationLink(value: Route.year(g.year)) {
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(String(g.year)).font(.system(size: 22, weight: .bold)).foregroundStyle(.white)
-                            Text("\(g.videos.count)").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.tertiary)
-                            Spacer()
-                            Text("查看电影和剧集")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 12).padding(.vertical, 6)
-                                .background(Theme.accent, in: Capsule())
-                        }
-                        .padding(.horizontal, Theme.gutter)
-                    }
-                    .buttonStyle(.plain)
+                section(String(g.year), count: g.videos.count, route: .year(g.year)) {
                     Rail {
                         ForEach(g.videos.prefix(15)) { v in
-                            NavigationLink(value: Route.movie(v)) { PosterCard(video: v) }.buttonStyle(.plain)
+                            ZoomLink(route: .movie(v), slot: "year-\(g.year)") { PosterCard(video: v) }.movieMenu(v)
                         }
                     }
                 }
@@ -152,9 +156,9 @@ struct HomeView: View {
         }
     }
 
-    private func section<C: View>(_ title: String, count: Int?, @ViewBuilder _ body: () -> C) -> some View {
+    private func section<C: View>(_ title: String, count: Int?, route: Route? = nil, @ViewBuilder _ body: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            SectionHeader(title: title, count: count)
+            SectionHeader(title: title, count: count, route: route)
             body()
         }
     }
@@ -203,9 +207,13 @@ struct HeroPager: View {
     let width: CGFloat
     let height: CGFloat
     @State private var current: String?
+    /// 当前这一页从什么时候开始（翻页指示器里那颗胶囊的进度、自动翻页都按它算；手动翻页时重新计时）
+    @State private var pageStart = Date()
+    static let interval: Double = 8
 
     var body: some View {
         let _ = Perf.count("heroPager")
+        let currentID = current ?? items.first?.id
         ZStack(alignment: .bottom) {
             if items.isEmpty {
                 LinearGradient(colors: [Theme.surface2, Theme.bg], startPoint: .top, endPoint: .bottom)
@@ -213,7 +221,7 @@ struct HeroPager: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 0) {
                         ForEach(items) { it in
-                            HeroPage(item: it, wide: wide)
+                            HeroPage(item: it, wide: wide, width: width, active: it.id == currentID)
                                 .frame(width: width, height: height)
                                 .clipped()
                                 .id(it.id)
@@ -225,49 +233,93 @@ struct HeroPager: View {
                 .scrollPosition(id: $current)
 
                 if items.count > 1 {
-                    HStack(spacing: 7) {
-                        ForEach(items) { it in
-                            Capsule()
-                                .fill(it.id == (current ?? items.first?.id) ? Color.white : Color.white.opacity(0.4))
-                                .frame(width: it.id == (current ?? items.first?.id) ? 18 : 7, height: 7)
-                        }
-                    }
-                    .animation(.snappy, value: current)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    .glassEffect(.regular, in: Capsule())
-                    .padding(.bottom, 14)
-                    .allowsHitTesting(false)
+                    HeroIndicator(ids: items.map(\.id), current: currentID, start: pageStart, duration: Self.interval)
+                        .padding(.bottom, 14)
                 }
             }
         }
         .frame(width: width, height: height)
         .clipped()
+        .stretchy()
+        .onChange(of: current) { _, _ in pageStart = Date() }
         .task(id: items.map(\.id).joined(separator: "|")) {
             guard items.count > 1 else { return }
+            pageStart = Date()
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(8))
+                try? await Task.sleep(for: .milliseconds(250))
                 guard !Task.isCancelled else { return }
-                let idx = items.firstIndex { $0.id == current } ?? 0
-                withAnimation(.easeInOut(duration: 0.6)) { current = items[(idx + 1) % items.count].id }
+                if Date().timeIntervalSince(pageStart) >= Self.interval {
+                    let idx = items.firstIndex { $0.id == current } ?? 0
+                    withAnimation(.smooth(duration: 0.8)) { current = items[(idx + 1) % items.count].id }
+                    pageStart = Date()
+                }
             }
         }
     }
 }
 
+/// Apple TV 的翻页指示器：当前这一页是一颗会慢慢填满的胶囊，满了就翻到下一页
+struct HeroIndicator: View {
+    let ids: [String]
+    let current: String?
+    let start: Date
+    let duration: Double
+
+    var body: some View {
+        HStack(spacing: 7) {
+            ForEach(ids, id: \.self) { id in
+                if id == current {
+                    TimelineView(.animation(minimumInterval: 1.0 / 30, paused: false)) { tl in
+                        let p = min(1, max(0, tl.date.timeIntervalSince(start) / duration))
+                        Capsule().fill(Color.white.opacity(0.32))
+                            .frame(width: 28, height: 7)
+                            .overlay(alignment: .leading) {
+                                Capsule().fill(.white).frame(width: max(7, 28 * p))
+                            }
+                    }
+                    .transition(.scale.combined(with: .opacity))
+                } else {
+                    Circle().fill(Color.white.opacity(0.45)).frame(width: 7, height: 7)
+                }
+            }
+        }
+        .animation(.snappy(duration: 0.3), value: current)
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .glassEffect(.regular, in: Capsule())
+        .allowsHitTesting(false)
+    }
+}
+
+/// 一页大图：整幅画面点进详情（缩放转场）；当前页的画面慢慢推近，翻页时画面带视差；
+/// 字标、信息行，下面「播放」+「想看」
 struct HeroPage: View {
     @Environment(AppModel.self) private var model
     let item: HeroItem
     let wide: Bool
+    let width: CGFloat
+    let active: Bool
 
     var body: some View {
         let m = model.meta(item.video)
         let art = wide ? (item.hero.background ?? item.hero.poster) : (item.hero.poster ?? item.hero.background)
         ZStack(alignment: .bottom) {
-            // 铺满裁切的图放在 overlay 里：图比框大时不会把框撑大（只设 max 的弹性框会跟着子视图变大）
-            Color.clear
-                .overlay { RemoteImage(url: URL(string: art ?? ""), maxPixel: 1600) }
-                .clipped()
-                .backgroundExtensionEffect()      // iPhone Duo：系统栏竖在侧边时，画面延伸到那一列底下
+            ZoomLink(route: .movie(item.video), slot: "hero", press: false) {
+                // 铺满裁切的图放在 overlay 里：图比框大时不会把框撑大（只设 max 的弹性框会跟着子视图变大）
+                Color.clear
+                    .overlay {
+                        RemoteImage(url: URL(string: art ?? ""), maxPixel: 1600)
+                            .scaleEffect(active ? 1.07 : 1.0)
+                            .animation(.linear(duration: HeroPager.interval + 1.5), value: active)
+                            .scrollTransition(.interactive, axis: .horizontal) { content, phase in
+                                content.offset(x: phase.value * -width * 0.28)
+                            }
+                    }
+                    .clipped()
+                    .backgroundExtensionEffect()      // iPhone Duo：系统栏竖在侧边时，画面延伸到那一列底下
+                    .contentShape(Rectangle())
+            }
+            .accessibilityIdentifier("hero-detail")
+
             LinearGradient(stops: [
                 .init(color: .black.opacity(0.35), location: 0),
                 .init(color: .clear, location: 0.18),
@@ -275,14 +327,18 @@ struct HeroPage: View {
                 .init(color: .black.opacity(0.7), location: 0.78),
                 .init(color: .black, location: 1),
             ], startPoint: .top, endPoint: .bottom)
+            .allowsHitTesting(false)
+
             VStack(spacing: 12) {
                 LogoImage(url: URL(string: item.hero.logo ?? "") ?? TMDBImage.url(m?.logo, "w500"), height: wide ? 90 : 72,
                           fallback: model.title(item.video))
                     .frame(maxWidth: wide ? 420 : 300)
+                    .allowsHitTesting(false)
                 Text(line(m))
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.78))
+                    .foregroundStyle(.white.opacity(0.8))
                     .lineLimit(1)
+                    .allowsHitTesting(false)
                 HStack(spacing: 12) {
                     Button {
                         PlayerCoordinator.shared.play(PlayRequest(path: item.video.path, name: item.video.name, title: model.title(item.video),
@@ -290,31 +346,24 @@ struct HeroPage: View {
                                                                   artwork: m?.backdrop ?? item.hero.background), model: model)
                     } label: {
                         PrimaryLabel(title: model.playback.resumePosition(item.video.path) != nil ? "继续播放" : "播放", systemImage: "play.fill")
-                            .padding(.horizontal, 10)
+                            .padding(.horizontal, 22)
                     }
                     .buttonStyle(.glassProminent)
                     .controlSize(.large)
                     .accessibilityIdentifier("hero-play")
-                    NavigationLink(value: Route.movie(item.video)) {
-                        Label("详情", systemImage: "info.circle")
-                            .font(.system(size: 16, weight: .semibold))
-                            .padding(.horizontal, 6)
-                    }
-                    .buttonStyle(.glass)
-                    .controlSize(.large)
-                    .accessibilityIdentifier("hero-detail")
+                    WatchlistButton(key: item.video.path, kind: .movie, size: 50)
                 }
             }
             .padding(.horizontal, 24)
-            .padding(.bottom, 66)          // 下面留给翻页圆点
+            .padding(.bottom, 62)          // 下面留给翻页指示器
         }
     }
 
     private func line(_ m: Meta?) -> String {
         var parts: [String] = []
-        if let t = m?.title, !t.isEmpty { parts.append(t) }
+        if let g = m?.genres, !g.isEmpty { parts.append(g.prefix(2).joined(separator: " · ")) }
         if let y = model.year(item.video) { parts.append(String(y)) }
-        if let g = m?.genres?.first { parts.append(g) }
+        if let r = m?.rating, r > 0 { parts.append(String(format: "★ %.1f", r)) }
         return parts.joined(separator: " · ")
     }
 }
@@ -328,6 +377,7 @@ struct RouteView: View {
         case .movie(let v): MovieDetailView(video: v)
         case .series(let s): SeriesDetailView(series: s)
         case .year(let y): YearView(year: y)
+        case .shelf(let s): ShelfView(shelf: s)
         }
     }
 }
