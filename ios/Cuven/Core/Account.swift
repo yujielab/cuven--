@@ -388,7 +388,8 @@ final class AccountStore {
     var isLoggedIn: Bool { session != nil }
     var displayName: String { session?.username ?? "" }
 
-    func signIn(username: String, email: String, method: String) {
+    /// alert：登录通知邮件（网页版的 login_alert；注册走 welcome，不发这封）
+    func signIn(username: String, email: String, method: String, alert: Bool = true) {
         let s = AccountSession(username: username, email: email.lowercased(), method: method, at: Date())
         if let d = try? JSONEncoder().encode(s) { Keychain.set(d, account: "session") }
         session = s
@@ -398,7 +399,7 @@ final class AccountStore {
             Task { await AccountAPI.putEmailMap(email, username: username) }
             UserDefaults.standard.set(email.lowercased(), forKey: mapKey)
         }
-        AccountAPI.notify("login_alert", username: username, method: method)
+        if alert { AccountAPI.notify("login_alert", username: username, method: method) }
         Task { await refreshAvatar() }
     }
 
@@ -430,9 +431,9 @@ final class AccountStore {
         }
     }
 
-    /// 为当前账户开启：先验一次生物识别，再把账户写进受生物识别保护的钥匙串项
-    func enableFaceID() async -> Bool {
-        guard let s = session else { return false }
+    /// 开启：先验一次生物识别，再把账户写进受生物识别保护的钥匙串项（登录流程里身份还没写进钥匙串时传进来）
+    func enableFaceID(for pending: AccountSession? = nil) async -> Bool {
+        guard let s = pending ?? session else { return false }
         let ctx = LAContext()
         guard (try? await ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "开启后，下次轻点一下即可登录 Cuven max")) == true,
               let d = try? JSONEncoder().encode(s), Keychain.set(d, account: "faceid", biometric: true) else { return false }

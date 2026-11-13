@@ -62,9 +62,14 @@ struct LibraryView: View {
                             ForEach(years, id: \.self) { y in Text(String(y)).tag(Int?.some(y)) }
                         }
                     } label: {
-                        Image(systemName: "line.3.horizontal.decrease")
+                        // 标题 + 符号都给：系统在竖向栏里用符号，溢出菜单里用标题
+                        Label("排序与筛选", systemImage: "line.3.horizontal.decrease")
                     }
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    AvatarButton()
+                }
+                .sharedBackgroundVisibility(.hidden)
             }
             .navigationDestination(for: Route.self) { RouteView(route: $0) }
             .refreshable { await model.refreshAll() }
@@ -164,7 +169,6 @@ struct SeriesPosterTile: View {
 
 struct SearchView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.duoMode) private var duo
     @State private var query = ""
 
     var body: some View {
@@ -193,9 +197,7 @@ struct SearchView: View {
             .scrollDismissesKeyboard(.immediately)
             .background(Theme.bg)
             .navigationTitle("搜索")
-            // Duo 下没有底部标签栏可挂搜索框：放到导航栏下面、一直显示
-            .searchable(text: $query, placement: duo == .off ? .automatic : .navigationBarDrawer(displayMode: .always),
-                        prompt: "电影、剧集、年份")
+            .searchable(text: $query, prompt: "电影、剧集、年份")
             .navigationDestination(for: Route.self) { RouteView(route: $0) }
         }
     }
@@ -229,69 +231,6 @@ struct SearchRow: View {
 }
 
 // MARK: - 我的
-
-struct ProfileView: View {
-    @Environment(AppModel.self) private var model
-    @State private var haptics = Haptics.enabled
-    @State private var cacheSize: Int64 = DiskCache.size()
-    @State private var refreshing = false
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    HStack(spacing: 14) {
-                        Image("BrandIcon")
-                            .resizable()
-                            .frame(width: 56, height: 56)
-                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Cuven max").font(.system(size: 20, weight: .bold))
-                            Text("版本 \(Bundle.main.appVersion)").font(.system(size: 13)).foregroundStyle(Theme.tertiary)
-                        }
-                    }
-                    .padding(.vertical, 6)
-                }
-
-                Section("片库") {
-                    LabeledContent("电影", value: "\(model.movies.count) 部")
-                    LabeledContent("剧集", value: "\(model.series.count) 部")
-                    LabeledContent("继续观看", value: "\(model.playback.continueWatching.count) 部")
-                    Button {
-                        refreshing = true
-                        Task { await model.refreshAll(); refreshing = false }
-                    } label: {
-                        HStack { Text("刷新片库"); Spacer(); if refreshing { ProgressView() } }
-                    }
-                    .disabled(refreshing)
-                }
-
-                Section("偏好") {
-                    Toggle("触感反馈", isOn: $haptics)
-                        .tint(Theme.accent)          // 全局是白色 tint：开着的开关会白底白钮，看不出状态
-                        .onChange(of: haptics) { _, v in Haptics.enabled = v }
-                }
-
-                Section("存储") {
-                    LabeledContent("本地缓存", value: Format.size(cacheSize).isEmpty ? "0 MB" : Format.size(cacheSize))
-                    Button("清除缓存（片库清单、海报、元数据）") {
-                        model.clearCaches()
-                        cacheSize = DiskCache.size()
-                        Task { await model.refreshAll(); cacheSize = DiskCache.size() }
-                    }
-                    Button("清除继续观看", role: .destructive) { model.playback.clearAll() }
-                }
-
-                Section("服务器") {
-                    LabeledContent("片源", value: "stream.cuven.online")
-                }
-            }
-            .scrollContentBackground(.hidden)
-            .background(Theme.bg)
-            .navigationTitle("我的")
-        }
-    }
-}
 
 extension Bundle {
     var appVersion: String {

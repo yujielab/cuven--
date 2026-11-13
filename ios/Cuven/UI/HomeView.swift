@@ -2,22 +2,28 @@ import SwiftUI
 
 struct HomeView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.duoMode) private var duo
+    @Environment(\.horizontalSizeClass) private var hsc
 
     var body: some View {
         let _ = Perf.count("home")
         NavigationStack {
             GeometryReader { geo in
                 let wide = geo.size.width > geo.size.height || geo.size.width >= 700
+                // 卡片态：紧凑宽度、竖着、但比普通 iPhone 矮得多（iPhone Duo 折起时的外屏，系统栏在侧边那一列）
+                let cards = hsc == .compact && geo.size.height > geo.size.width && geo.size.height < geo.size.width * 1.95
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 34) {
-                        if duo == .folded {
-                            // iPhone Duo 折起竖拿：一打开就是卡片态，大图那一块占满这一屏
-                            HeroCards(items: heroItems, width: geo.size.width,
-                                      height: geo.size.height + geo.safeAreaInsets.top, topInset: geo.safeAreaInsets.top)
+                        if cards {
+                            VStack(spacing: 12) {
+                                HomeHeader()
+                                HeroCards(items: heroItems, width: geo.size.width,
+                                          cardHeight: geo.size.height - 56 - 12 - 46 - 24)
+                            }
+                            .padding(.top, geo.safeAreaInsets.top + 8)
                         } else {
                             HeroPager(items: heroItems, wide: wide, width: geo.size.width,
                                       height: wide ? min(geo.size.height * 0.82, geo.size.width * 9 / 16 + 60) : min(geo.size.height * 0.78, 720))
+                                .overlay(alignment: .top) { HomeHeader().padding(.top, geo.safeAreaInsets.top + 8) }
                         }
                         content(width: geo.size.width)
                     }
@@ -261,6 +267,7 @@ struct HeroPage: View {
             Color.clear
                 .overlay { RemoteImage(url: URL(string: art ?? ""), maxPixel: 1600) }
                 .clipped()
+                .backgroundExtensionEffect()      // iPhone Duo：系统栏竖在侧边时，画面延伸到那一列底下
             LinearGradient(stops: [
                 .init(color: .black.opacity(0.35), location: 0),
                 .init(color: .clear, location: 0.18),
@@ -317,13 +324,26 @@ struct HeroPage: View {
 struct RouteView: View {
     let route: Route
     var body: some View {
-        Group {
-            switch route {
-            case .movie(let v): MovieDetailView(video: v)
-            case .series(let s): SeriesDetailView(series: s)
-            case .year(let y): YearView(year: y)
-            }
+        switch route {
+        case .movie(let v): MovieDetailView(video: v)
+        case .series(let s): SeriesDetailView(series: s)
+        case .year(let y): YearView(year: y)
         }
-        .duoHidesTabBar()
+    }
+}
+
+/// 主页顶上：大标题「主页」+ 右上角头像（账户与设置）—— 压在大图上，跟着大图一起滚走
+struct HomeHeader: View {
+    var body: some View {
+        HStack(alignment: .center) {
+            Text("主页")
+                .font(.system(size: 32, weight: .bold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
+            Spacer()
+            AvatarButton()
+        }
+        .padding(.horizontal, Theme.gutter)
+        .frame(height: 56)
     }
 }

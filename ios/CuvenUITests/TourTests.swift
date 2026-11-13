@@ -8,7 +8,8 @@ final class TourTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = true
         app = XCUIApplication()
-        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        // 没有测试账户（仓库是公开的，不放凭据）：Debug 构建认 -CuvenSkipLogin，跳过登录页
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-CuvenSkipLogin", "YES"]
         app.launch()
     }
 
@@ -83,9 +84,14 @@ final class TourTests: XCTestCase {
         snap("11-library")
         let seg = app.segmentedControls.buttons["剧集"]
         if seg.exists { seg.tap(); sleep(6); snap("11b-library-series") }
-        tapTab(["我的"])
-        sleep(2)
-        snap("12-me")
+        let acct = app.buttons["account-button"].firstMatch
+        if acct.waitForExistence(timeout: 5) {
+            acct.tap(); sleep(2)
+            snap("12-account")
+            let done = app.buttons["account-done"].firstMatch
+            if done.waitForExistence(timeout: 3) { done.tap() } else { app.swipeDown() }
+            sleep(1)
+        }
         tapTab(["搜索", "Search"])
         sleep(2)
         let field = app.searchFields.firstMatch

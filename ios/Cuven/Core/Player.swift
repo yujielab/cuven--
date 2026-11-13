@@ -147,6 +147,9 @@ final class PlayerLoadingCover: UIView {
 @MainActor
 final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     static let shared = PlayerCoordinator()
+    /// 账户与设置里的「自动播放下一集」
+    nonisolated static let autoplayKey = "autoplay_next"
+    private var autoplayNext: Bool { UserDefaults.standard.object(forKey: Self.autoplayKey) as? Bool ?? true }
 
     private var player: AVPlayer?
     private var controller: CuvenPlayerViewController?
@@ -387,7 +390,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         guard let req = current else { return }
         plog("ended")
         model?.playback.finish(req.path)
-        if var next = req.queue.first {
+        if autoplayNext, var next = req.queue.first {
             next.queue = Array(req.queue.dropFirst())
             begin(next)
         } else {

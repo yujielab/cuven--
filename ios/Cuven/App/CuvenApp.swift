@@ -4,6 +4,7 @@ import AVFoundation
 @main
 struct CuvenApp: App {
     @State private var model = AppModel()
+    @State private var account = AccountStore()
 
     init() {
         // 播放走系统的「影视」音频会话：静音键不影响声音，画中画 / 锁屏后继续放
@@ -16,85 +17,58 @@ struct CuvenApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
+                .environment(account)
                 .preferredColorScheme(.dark)
                 .tint(.white)
         }
     }
 }
 
-enum AppTab: Hashable { case home, library, me, search }
+enum AppTab: Hashable { case home, library, search }
 
-/// 底部是系统的 Liquid Glass 标签栏：主页 / 资料库 / 我的，搜索单独一颗（iOS 26 的搜索标签）。
-/// iPhone Duo 上换成自己的竖向导航（见 Duo.swift）：折起竖拿是右缘那一列里的窄胶囊，展开 / 横拿是左侧导航条
+/// 系统标签栏：主页 / 资料库，搜索单独一颗（搜索标签）。账户与设置在主页 / 资料库右上角的头像里。
+///
+/// iPhone Duo（按 Apple 的 Designing for iPhone Duo）：一律用系统的标签栏、导航栏与工具栏，不自己画。
+/// 用 iOS 27.1 SDK 编译后，折起时（外屏）和展开横拿时系统把它们竖着放到侧边那一列：
+/// 灵动岛、状态栏、工具栏（返回在最上）、标签栏自上而下；展开竖拿时恢复成横向的顶栏 / 底栏。
+/// 内容只按安全区与尺寸类别排版，不认设备型号。
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(AccountStore.self) private var account
     @Environment(\.horizontalSizeClass) private var hsc
     @Environment(\.verticalSizeClass) private var vsc
     @State private var tab: AppTab = .home
-    /// Duo 的导航里再点一下当前那一格：这一格回到根页面（系统标签栏自带这个行为，自己的导航要自己做）
-    @State private var roots: [AppTab: Int] = [:]
+    @State private var showAccount = false
 
     var body: some View {
-        // 外面这一层守着安全区（含键盘）：拿它在窗口里的框，算出四边的安全区和键盘高度；
-        // 里面那一层铺满整屏放内容 —— 加了 .ignoresSafeArea() 的那一层自己读到的安全区是 0
-        GeometryReader { safe in
-            let sf = safe.frame(in: .global)
-            GeometryReader { g in
-                let full = g.frame(in: .global)
-                let inset = EdgeInsets(top: max(0, sf.minY - full.minY), leading: max(0, sf.minX - full.minX),
-                                       bottom: max(0, full.maxY - sf.maxY), trailing: max(0, full.maxX - sf.maxX))
-                layout(size: g.size, inset: inset)
-            }
-            .ignoresSafeArea()
-        }
-        .onAppear { model.start() }
-    }
-
-    private func layout(size: CGSize, inset: EdgeInsets) -> some View {
-        Perf.count("root")
-        let duo = Duo.mode(window: size)
-        LayoutLog.note("\(Int(size.width))x\(Int(size.height)) inset \(Int(inset.top))/\(Int(inset.leading))/\(Int(inset.bottom))/\(Int(inset.trailing)) "
-                       + "h=\(hsc.map { "\($0)" } ?? "-") v=\(vsc.map { "\($0)" } ?? "-") duo=\(duo.rawValue)")
-        // 强制成折起形态、设备本身又没有右侧那一列（模拟器）：补一列黑边，模拟外屏
-        let fakeColumn: CGFloat = (duo == .folded && Duo.forced != nil && inset.trailing < 20) ? Duo.foldedColumn : 0
-        let column = max(inset.trailing, fakeColumn)
-        // 侧边导航条放在左侧安全区里面（横拿时左边是灵动岛 / 摄像头），内容整体让出这一条
-        let railLead = duo == .rail ? inset.leading + Duo.railWidth : 0
-        let navH = DuoNav.height(duo)
-        // 竖向居中略偏下；键盘起来时整枚挪到键盘上面，放不下就贴着顶
-        let lo = inset.top + navH / 2 + 8
-        let hi = size.height - inset.bottom - navH / 2 - 10
-        let navY = max(lo, min(duo == .folded ? size.height * 0.55 : size.height / 2, hi))
-        let navX = duo == .folded
-            ? (column >= 56 ? size.width - column / 2 : size.width - 12 - DuoNav.width(duo) / 2)
-            : inset.leading + Duo.railWidth / 2
-        return ZStack(alignment: .topLeading) {
-            Color.black
-            tabs
-                .padding(.trailing, fakeColumn)
-                .padding(.leading, railLead)
-            if duo != .off {
-                DuoNav(tab: $tab, mode: duo) { roots[$0, default: 0] += 1 }
-                    .position(x: navX, y: navY)
-                    .animation(.smooth(duration: 0.28), value: navY)
-            }
-        }
-        .environment(\.duoMode, duo)
-    }
-
-    private var tabs: some View {
         TabView(selection: $tab) {
-            Tab("主页", systemImage: "house.fill", value: AppTab.home) { HomeView().duoHidesTabBar().id(roots[.home, default: 0]) }
-            Tab("资料库", systemImage: "square.stack.fill", value: AppTab.library) { LibraryView().duoHidesTabBar().id(roots[.library, default: 0]) }
-            Tab("我的", systemImage: "person.crop.circle", value: AppTab.me) { ProfileView().duoHidesTabBar().id(roots[.me, default: 0]) }
-            Tab(value: AppTab.search, role: .search) { SearchView().duoHidesTabBar().id(roots[.search, default: 0]) }
+            Tab("主页", systemImage: "house.fill", value: AppTab.home) { HomeView() }
+            Tab("资料库", systemImage: "square.stack.fill", value: AppTab.library) { LibraryView() }
+            Tab(value: AppTab.search, role: .search) { SearchView() }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
         .onChange(of: tab) { _, _ in Haptics.selection() }
+        .environment(\.openAccount, { showAccount = true })
+        .sheet(isPresented: $showAccount) { AccountView() }
+        .fullScreenCover(isPresented: .constant(account.loginRequired && !account.isLoggedIn)) {
+            LoginView()
+                .environment(model)
+                .environment(account)
+        }
+        .background {
+            // 诊断：窗口尺寸 / 安全区 / 尺寸类别一变就记一行（看 iPhone Duo 上系统给的空间）
+            GeometryReader { g in
+                let i = g.safeAreaInsets
+                let _ = LayoutLog.note("\(Int(g.size.width))x\(Int(g.size.height)) inset \(Int(i.top))/\(Int(i.leading))/\(Int(i.bottom))/\(Int(i.trailing)) "
+                                       + "h=\(hsc.map { "\($0)" } ?? "-") v=\(vsc.map { "\($0)" } ?? "-")")
+                Color.clear
+            }
+        }
+        .onAppear { model.start() }
     }
 }
 
-/// 诊断：窗口尺寸 / 安全区 / 尺寸类别一变就记一行（看 iPhone Duo 上系统给的空间）
+/// 诊断：只在变化时记一行
 @MainActor
 enum LayoutLog {
     private static var last = ""
