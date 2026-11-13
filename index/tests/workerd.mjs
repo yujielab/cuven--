@@ -28,7 +28,9 @@ W.recv.doc = { gen: 'w1', items: [
 
 const srv = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${MP}`);
-  const r = await H.worldFetch(W, url).catch(e => new Response(String(e), { status: 500 }));
+  const chunks = []; for await (const c of req) chunks.push(c);
+  const init = { method: req.method, headers: req.headers, ...(chunks.length ? { body: Buffer.concat(chunks).toString() } : {}) };
+  const r = await H.worldFetch(W, url, init).catch(e => new Response(String(e), { status: 500 }));
   if (!r) { res.writeHead(404); res.end(); return; }
   const headers = {};
   r.headers.forEach((v, k) => { if (k !== 'set-cookie') headers[k] = v; });
@@ -57,6 +59,10 @@ RECV_BASE = "http://127.0.0.1:${MP}"
 SITE_USER = "u"
 SITE_PASS = "p"
 TMDB_KEY = "k"
+PIKPAK_USER = "me@pk.test"
+PIKPAK_PASS = "pk-secret"
+PIKPAK_USER_BASE = "http://127.0.0.1:${MP}/pkuser"
+PIKPAK_API_BASE = "http://127.0.0.1:${MP}/pkapi"
 `);
 const wr = spawn('npx', ['--yes', 'wrangler@3.114.0', 'dev', '--local', '--port', String(WP), '--ip', '127.0.0.1', '--test-scheduled', '--persist-to', path.join(dir, 'state')],
   { cwd: dir, env: { ...process.env, NO_D1_WARNING: 'true', WRANGLER_SEND_METRICS: 'false', CI: '1' } });
@@ -95,6 +101,13 @@ try {
     const fs1 = await fsq(), fs2 = await fsq();
     ok(fs1.status === 'add' && fs1.ext === 1 && fs1.res === '2160p' && fs1.id === -9901 && fs2.status === 'add' && W.forum.searchLog.length === 1 && W.forum.searchLog[0].kw === '只在搜索里的片',
       '论坛搜索：302 跟到结果页、GBK 搜索词、挑 2160p；第二次走缓存不重搜（论坛收到 ' + W.forum.searchLog.length + ' 次搜索，' + (fs1.error || fs1.status) + '）');
+    /* [v6.9] PikPak：真 workerd 里的 MD5 签名、登录、建云下载任务（GBK 帖子页 → 种子 → 磁力） */
+    W.pk.folders.push({ id: 'f-cv', name: '索引库', parent: '' });
+    const pst = await (await get('/api/pikpak')).json();
+    const pls = await (await get('/api/pikpak?do=ls')).json();
+    const ppu = await (await get('/api/pikpush', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ parent: 'f-cv', items: [{ tid: 7000, name: 'a' }] }) })).json();
+    ok(pst.ok === 1 && pls.folders && pls.folders[0].name === '索引库' && ppu.ok === 1 && W.pk.tasks.length === 1 && W.pk.tasks[0].parent === 'f-cv' && /^magnet:\?xt=urn:btih:[0-9a-f]{40}/.test(W.pk.tasks[0].url),
+      'PikPak：登录、列文件夹、种子算成磁力建云下载任务（' + (pst.err || ppu.error || ppu.stop || 'ok') + '）');
     const bk = await (await get('/api/repair?do=backup')).json();
     ok(bk.ok && bk.files === 3, '手动备份：' + (bk.msg || bk.error));
     const dg = await (await get('/api/diagnose')).json();

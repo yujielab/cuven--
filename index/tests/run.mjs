@@ -1160,6 +1160,89 @@ console.log('\n■ 导入清单 · 剧集：只要整季包（全 N 集），索
   ok(bad.status === 405 && !r2.keys('').some(k => /fsearch|search/i.test(k)), '接口只收 POST；搜索只读，R2 里没多出东西');
 }
 
+console.log('\n■ 推送到 PikPak：登录、选文件夹、建云下载任务');
+{
+  /* 没配账号：说清楚要配什么 */
+  {
+    const { env, W } = H.makeEnv();
+    const I = H.isolate(env, W);
+    const st = await (await I.call('/api/pikpak')).json();
+    ok(st.on === 0 && /PIKPAK_USER/.test(st.hint) && W.pk.calls === 0, '没配账号：面板直说要在 Worker 变量里加 PIKPAK_USER / PIKPAK_PASS，一个请求都不发');
+  }
+  const { env, r2, W } = H.makeEnv({ PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'pk-secret' });
+  W.pk.folders.push({ id: 'f-movie', name: '电影', parent: '' }, { id: 'f-tv', name: '剧集', parent: '' }, { id: 'f-2025', name: '2025', parent: 'f-movie' });
+  W.pk.files.push({ id: 'x1', name: 'readme.txt', parent: '' });
+  /* 三个帖子：种子 / 只有磁力 / 什么都没有 */
+  const T1 = H.torrent({ name: 'Dune.Part.Two.2024.2160p.mkv', length: 9, 'piece length': 16384, pieces: Buffer.alloc(20) });
+  W.forum.threads[51001] = { attach: [{ aid: 'P1', name: 'dune2.torrent', bytes: T1.bytes }] };
+  W.forum.threads[51002] = { attach: [], magnets: ['magnet:?xt=urn:btih:' + 'a'.repeat(40) + '&dn=Only.Magnet'] };
+  W.forum.threads[51003] = { attach: [], magnets: [] };
+  const I = H.isolate(env, W);
+  const call = async (u, body) => (await I.call(u, body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {})).json();
+  const st = await call('/api/pikpak');
+  ok(st.on === 1 && st.ok === 1 && st.user === 'me***@pk.test' && st.limit > 0 && W.pk.logins === 1, `登录 PikPak：先拿验证令牌再登录，账号只显示「${st.user}」，空间 ${Math.round(st.usage / 2 ** 40)}/${Math.round(st.limit / 2 ** 40)} TB`);
+  ok(W.pk.captchaInits[0] === 'POST:https://user.mypikpak.com/v1/auth/signin', '验证令牌的 action 写的是登录地址（和官方客户端一样）');
+  const tok = await H.isolate(env, W).call('/api/pikpak');
+  ok((await tok.json()).ok === 1 && W.pk.logins === 1, '令牌存进 KV：换一个 isolate 也不用重新登录（登录次数还是 1）');
+  const root = await call('/api/pikpak?do=ls');
+  ok(root.folders.map(f => f.name).join() === '电影,剧集' && !root.folders.some(f => f.name === 'readme.txt'), '列根目录：只列文件夹、按拼音排（' + root.folders.map(f => f.name).join('、') + '），普通文件不出现');
+  const sub = await call('/api/pikpak?do=ls&parent=f-movie');
+  ok(sub.folders.length === 1 && sub.folders[0].name === '2025', '进到「电影」里：看到「2025」');
+  const mk = await call('/api/pikpak?do=mkdir', { parent: 'f-movie', name: '索引库/推送' });
+  ok(mk.id && mk.name === '索引库 推送' && W.pk.folders.some(f => f.id === mk.id && f.parent === 'f-movie'), '新建文件夹：建在当前位置，名字里的「/」换成空格（' + mk.name + '）');
+  const push = await call('/api/pikpush', { parent: mk.id, items: [{ tid: 51001, name: '沙丘2' }, { tid: 51002, name: '只有磁力' }, { tid: 51003, name: '什么都没有' }] });
+  const t1 = W.pk.tasks[0], t2 = W.pk.tasks[1];
+  ok(push.ok === 2 && push.items[0].ok && push.items[1].ok && !push.items[2].ok && /没有种子附件/.test(push.items[2].err) && !push.items[2].retry,
+    '推送 3 部：2 部建成云下载任务，没有种子也没有磁力的那部标失败（不重试）');
+  ok(t1 && t1.parent === mk.id && t1.url.includes('btih:' + T1.btih) && /tr=udp%3A%2F%2Ftracker.test/.test(t1.url) && /dn=Dune.Part.Two/.test(t1.url) && t1.folder_type === '',
+    '种子 → 磁力：info hash 对得上、带着种子里的 tracker 和片名，任务建在选的文件夹里');
+  ok(t2 && t2.url.startsWith('magnet:?xt=urn:btih:' + 'a'.repeat(40)), '只有磁力的帖子：直接用帖子里的磁力');
+  const def = await call('/api/pikpush', { parent: '', items: [{ tid: 51002, name: 'x' }] });
+  ok(def.ok === 1 && W.pk.tasks[2].parent === '' && W.pk.tasks[2].folder_type === 'DOWNLOAD', '没选文件夹：进 PikPak 默认的「My Pack」（folder_type=DOWNLOAD）');
+  /* 令牌过期：先用 refresh_token 续，不重新登录 */
+  W.pk.access.clear();
+  const r1 = await call('/api/pikpak?do=ls');
+  ok(r1.folders && W.pk.refreshes === 1 && W.pk.logins === 1, '令牌过期（16）：用 refresh_token 续一次，不重新登录');
+  /* refresh 也失效（别处登录顶掉了）：重新登录 */
+  W.pk.access.clear(); W.pk.refresh.clear();
+  const r2x = await call('/api/pikpak?do=ls');
+  ok(r2x.folders && W.pk.logins === 2, 'refresh_token 也失效：自动重新登录一次');
+  /* 建任务要验证令牌（9）：现签一个带上 */
+  W.pk.driveCaptcha = true;
+  const cap = await call('/api/pikpush', { parent: 'f-tv', items: [{ tid: 51001, name: '沙丘2' }] });
+  W.pk.driveCaptcha = false;
+  ok(cap.ok === 1 && W.pk.captchaInits.some(a => a === 'POST:/drive/v1/files'), '建任务时 PikPak 要验证令牌（9）：按「POST:/drive/v1/files」签一个带上再建');
+  /* 空间满：整批停下，剩下的不再试 */
+  W.pk.quotaFull = true;
+  const full = await call('/api/pikpush', { parent: 'f-tv', items: [{ tid: 51001, name: 'a' }, { tid: 51002, name: 'b' }] });
+  W.pk.quotaFull = false;
+  ok(/空间不够/.test(full.stop) && full.items.every(x => x.held && x.retry) && full.ok === 0, 'PikPak 空间满：整批停下、原因交回（「' + full.stop.slice(0, 18) + '…」），这几部留着待推');
+  /* 文件夹被删了 */
+  const gone = await call('/api/pikpush', { parent: 'f-deleted', items: [{ tid: 51002, name: 'b' }] });
+  ok(!gone.items[0].ok && /文件夹不在了/.test(gone.items[0].err), '目标文件夹被删了：说「换一个文件夹」');
+  /* 「只要文件夹」的筛选不认：去掉筛选重来，自己挑文件夹 */
+  W.pk.rejectKindFilter = true;
+  const fb = await call('/api/pikpak?do=ls');
+  W.pk.rejectKindFilter = false;
+  ok(fb.folders && fb.folders.length === 2, '列文件夹的筛选条件 PikPak 不认：去掉筛选重列，照样只给文件夹');
+  /* 一次最多 4 部 */
+  const many = await call('/api/pikpush', { parent: '', items: Array.from({ length: 7 }, () => ({ tid: 51002, name: 'm' })) });
+  ok(many.items.length === 4 && many.batch === 4, '一次调用最多推 4 部（帖子页 + 种子 + 建任务，子请求要留余量），剩下的浏览器下一批再发');
+  /* 密码错：说清楚，十分钟内不再试（免得把账号试锁了） */
+  const e2 = H.makeEnv({ PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'wrong' });
+  const J = H.isolate(e2.env, e2.W);
+  const bad = await (await J.call('/api/pikpak')).json();
+  const n0 = e2.W.pk.logins;
+  const bad2 = await (await J.call('/api/pikpak?do=ls')).json();
+  ok(bad.ok === 0 && /账号或密码不对/.test(bad.err) && /账号或密码不对/.test(bad2.error) && e2.W.pk.logins === n0, '密码错：直说「账号或密码不对」；十分钟内不再拿错的密码去登录（登录次数没涨）');
+  /* PikPak 要滑块：说清楚怎么办 */
+  const e3 = H.makeEnv({ PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'pk-secret' });
+  e3.W.pk.captchaUrl = true;
+  const cs = await (await H.isolate(e3.env, e3.W).call('/api/pikpak')).json();
+  ok(cs.ok === 0 && cs.captcha === 1 && /App 或网页上登录一次/.test(cs.err), 'PikPak 要求滑块验证：说明 Worker 过不了，先在 App / 网页上登录一次再试');
+  ok(!r2.keys('').some(k => /pikpak|pk:/i.test(k)), 'R2 里不留 PikPak 的东西（令牌只在 KV）');
+}
+
 console.log('\n■ 从 v5.4 的线上数据升级');
 {
   const { env, r2, W } = H.makeEnv();

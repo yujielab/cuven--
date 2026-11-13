@@ -10,7 +10,8 @@ let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('  ✓', m); } else { fail++; console.log('  ✗', m); } };
 
 /* 一个有内容的小索引：两年、十几部片、每部几个版本，片库总账里有几部 */
-const { env, W } = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+const { env, W } = H.makeEnv({ RECV_BASE: 'https://recv.test', PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'pk-secret' });
+W.pk.folders.push({ id: 'f-movie', name: '电影', parent: '' }, { id: 'f-tv', name: '剧集', parent: '' });
 const NAMES = [['沙丘：第二部', 'Dune Part Two'], ['奥本海默', 'Oppenheimer'], ['芭比', 'Barbie'], ['流浪地球2', 'The Wandering Earth II'],
   ['满江红', 'Full River Red'], ['封神第一部', 'Creation of the Gods'], ['长安三万里', 'Chang An'], ['孤注一掷', 'No More Bets'],
   ['消失的她', 'Lost in the Stars'], ['热辣滚烫', 'YOLO'], ['飞驰人生2', 'Pegasus 2'], ['第二十条', 'Article 20'], ['坚如磐石', 'Under the Light'], ['巨齿鲨2', 'Meg 2']];
@@ -269,6 +270,57 @@ print(json.dumps({'bad':z.testzip(),'names':z.namelist()}, ensure_ascii=False))`
     const ext = await p.evaluate(() => { const it = document.querySelector('.citem[data-id="520001"]'); return it ? { open: !!it.querySelector('[data-open]'), txt: it.textContent } : null; });
     ok(ext && !ext.open && /论坛搜索/.test(ext.txt), '片单里论坛搜来的那部：标着「论坛搜索」，没有「换版本」（索引里没有它的详情页）');
   }
+  ok(!errs.length, '页面零报错' + (errs.length ? '：' + errs.slice(0, 3).join(' | ') : ''));
+  await ctx.close();
+}
+/* [v6.9] 推送到 PikPak：选文件夹（逐层进、新建）、推送、打标记、记住文件夹 */
+{
+  console.log('\n■ 推送到 PikPak · 手机');
+  const { p, ctx, errs } = await page({ ...devices['iPhone 14'] });
+  for (const k of [0, 1, 2]) { await p.locator('.grid .art').nth(k).click(); await p.waitForTimeout(150); }
+  await p.click('#nav button[data-v="dl"]'); await settle(p);
+  await p.click('#pkopen');
+  await p.waitForFunction(() => PKS.st, null, { timeout: 10000 });
+  await settle(p);
+  const head = await p.evaluate(() => document.querySelector('#pkcard .hd').textContent);
+  ok(/me\*\*\*@pk\.test/.test(head) && /TB/.test(head), '打开推送面板：显示 PikPak 账号（打码）和空间（' + head.replace('推送到 PikPak', '').trim() + '）');
+  await p.click('#pkchoose');
+  await p.waitForSelector('.pkdir');
+  const dirs = await p.evaluate(() => [].map.call(document.querySelectorAll('.pkdir b'), e => e.textContent));
+  await p.locator('.pkdir', { hasText: '电影' }).click();
+  await p.waitForFunction(() => !PKS.loading && PKS.cur && PKS.cur.id === 'f-movie');
+  await p.click('#pkmk');
+  await p.fill('#pkname', '索引库推送');
+  await p.click('#pkmkok');
+  await p.waitForFunction(() => !PKS.loading && PKS.cur && PKS.cur.path.length === 2);
+  const crumb = await p.evaluate(() => document.querySelector('.pkcrumb').textContent.replace(/\s+/g, ''));
+  const made = W.pk.folders.find(f => f.name === '索引库推送');
+  ok(dirs.join() === '电影,剧集' && made && made.parent === 'f-movie' && crumb === '根目录›电影›索引库推送', '换文件夹：列出「电影、剧集」，进「电影」新建「索引库推送」，自动进到新文件夹（' + crumb + '）');
+  await p.click('#pkuse'); await settle(p);
+  const dest = await p.evaluate(() => ({ t: document.querySelector('.pkdest b').textContent, ls: JSON.parse(localStorage.getItem('cvpk')).folder.id, btn: document.getElementById('pkgo').textContent }));
+  ok(dest.t === '/电影/索引库推送' && dest.ls === made.id && /推送 3 部/.test(dest.btn), '选定：存到「' + dest.t + '」，记在本机；按钮「' + dest.btn + '」');
+  await p.click('#pkgo');
+  await p.waitForFunction(() => !PKS.run && PKS.rows && PKS.rows.length, null, { timeout: 20000 });
+  await settle(p);
+  const res = await p.evaluate(() => ({ st: PKS.rows.map(r => r.st), tags: [].filter.call(document.querySelectorAll('.citem em'), e => /已推送到 PikPak/.test(e.textContent)).length,
+    btn: document.getElementById('pkgo').textContent, dis: document.getElementById('pkgo').disabled, over: document.documentElement.scrollWidth - innerWidth }));
+  ok(res.st.join() === 'ok,ok,ok' && W.pk.tasks.length === 3 && W.pk.tasks.every(t => t.parent === made.id && /^magnet:\?xt=urn:btih:/.test(t.url)),
+    '推送 3 部：PikPak 里建了 3 个云下载任务，都在「索引库推送」里');
+  ok(res.tags === 3 && res.dis && /推送 0 部/.test(res.btn), '片单里 3 部都标上「已推送到 PikPak」；同一个文件夹不重复推（按钮变成「推送 0 部」）');
+  ok(res.over <= 0, '手机上不出横向滚动（多出 ' + res.over + 'px）');
+  await p.click('#pkagain'); await settle(p);
+  const again = await p.evaluate(() => document.getElementById('pkgo').textContent);
+  ok(/推送 3 部/.test(again), '「已推送过的也重推」：按钮回到「推送 3 部」');
+  await p.click('#pkdrop'); await settle(p);
+  const left = await p.evaluate(() => CART.ord.length);
+  ok(left === 0, '「从片单里移除推送成功的」：片单清空');
+  await p.reload({ waitUntil: 'networkidle' }); await p.waitForTimeout(400);
+  await p.locator('.grid .art').nth(4).click(); await p.waitForTimeout(150);
+  await p.click('#nav button[data-v="dl"]'); await settle(p);
+  await p.click('#pkopen');
+  await p.waitForFunction(() => PKS.st); await settle(p);
+  const kept = await p.evaluate(() => document.querySelector('.pkdest b').textContent);
+  ok(kept === '/电影/索引库推送', '刷新页面：推送位置还记着（' + kept + '）');
   ok(!errs.length, '页面零报错' + (errs.length ? '：' + errs.slice(0, 3).join(' | ') : ''));
   await ctx.close();
 }

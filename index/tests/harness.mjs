@@ -120,7 +120,79 @@ export function world() {
     /* stream：Stream v25 的接口（登录门后面）。key = AUTH_SECRET；files / tv / gen 同上 */
     stream: { base: 'https://stream.test', key: 'stream-secret', files: null, tv: null, gen: null, calls: 0, logins: 0, fail: null },
     img: { calls: 0, fail: false },
+    /* pk：PikPak（user.mypikpak.com / api-drive.mypikpak.com）。folders: [{id,name,parent}]，files：文件夹里的普通文件，tasks：建出来的云下载任务
+       开关：captchaUrl（要滑块）、driveCaptcha（建任务要验证令牌）、quotaFull、rejectKindFilter、fail(url) */
+    pk: { user: 'me@pk.test', pass: 'pk-secret', folders: [], files: [], tasks: [], access: new Set(), refresh: new Set(), captchas: new Set(),
+          calls: 0, logins: 0, refreshes: 0, captchaInits: [], seq: 0, captchaUrl: false, driveCaptcha: false, quotaFull: false, rejectKindFilter: false, fail: null },
   };
+}
+
+/** PikPak 的两套接口（登录 / 云盘）。path 是去掉主机之后的路径 */
+export async function pikpakMock(W, kind, url, init = {}) {
+  const P = W.pk, p = url.pathname, q = url.searchParams;
+  P.calls++;
+  const body = init.body ? JSON.parse(typeof init.body === 'string' ? init.body : new TextDecoder().decode(init.body)) : null;
+  const H = new Headers(init.headers || {});
+  const err = (st, error, code, desc) => Response.json({ error, error_code: code, error_description: desc || error }, { status: st });
+  const id = (pre) => pre + (++P.seq);
+  if (kind === 'user') {
+    if (p === '/v1/shield/captcha/init') {
+      P.captchaInits.push(body.action);
+      if (body.client_id !== 'YNxT9w7GMdWvEOKa') return err(400, 'invalid_client', 3);
+      if (P.captchaUrl) return Response.json({ captcha_token: '', url: 'https://user.mypikpak.com/captcha/v2/spritePuzzle.html' });
+      const t = id('ct'); P.captchas.add(t);
+      return Response.json({ captcha_token: t, expires_in: 300 });
+    }
+    if (p === '/v1/auth/signin') {
+      P.logins++;
+      if (!body.captcha_token || !P.captchas.has(body.captcha_token)) return err(400, 'captcha_invalid', 9, 'Verification code is invalid');
+      P.captchas.delete(body.captcha_token);
+      if (body.username !== P.user || body.password !== P.pass) return err(400, 'invalid_account_or_password', 4002, 'Account or password is incorrect');
+      const a = id('at'), r = id('rt'); P.access.add(a); P.refresh.add(r);
+      return Response.json({ token_type: 'Bearer', access_token: a, refresh_token: r, expires_in: 7200, sub: 'uid-1' });
+    }
+    if (p === '/v1/auth/token') {
+      P.refreshes++;
+      if (body.grant_type !== 'refresh_token' || !P.refresh.has(body.refresh_token)) return err(400, 'invalid_grant', 4126, 'refresh token is invalid');
+      P.refresh.delete(body.refresh_token);
+      const a = id('at'), r = id('rt'); P.access.add(a); P.refresh.add(r);
+      return Response.json({ token_type: 'Bearer', access_token: a, refresh_token: r, expires_in: 7200, sub: 'uid-1' });
+    }
+    return err(404, 'not_found', 5);
+  }
+  const tok = (H.get('authorization') || '').replace(/^Bearer /, '');
+  if (!P.access.has(tok)) return err(401, 'unauthenticated', 16, 'Unauthenticated');
+  if (p === '/drive/v1/about') return Response.json({ kind: 'drive#about', quota: { kind: 'drive#quota', limit: '6597069766656', usage: '1099511627776' } });
+  if (p === '/drive/v1/files' && (init.method || 'GET') === 'GET') {
+    const f = JSON.parse(q.get('filters') || '{}');
+    if (f.kind && P.rejectKindFilter) return err(400, 'invalid_argument', 3, 'filters.kind is not supported');
+    const parent = q.get('parent_id') || '';
+    let list = P.folders.filter(x => (x.parent || '') === parent).map(x => ({ kind: 'drive#folder', id: x.id, name: x.name, parent_id: parent }));
+    if (!(f.kind && f.kind.eq === 'drive#folder')) list = list.concat(P.files.filter(x => (x.parent || '') === parent).map(x => ({ kind: 'drive#file', id: x.id, name: x.name })));
+    const lim = Number(q.get('limit') || 100), off = Number(q.get('page_token') || 0);
+    const page = list.slice(off, off + lim);
+    return Response.json({ kind: 'drive#fileList', files: page, next_page_token: off + lim < list.length ? String(off + lim) : '' });
+  }
+  if (p === '/drive/v1/files' && init.method === 'POST') {
+    if (body.parent_id && !P.folders.some(x => x.id === body.parent_id)) return err(400, 'file_not_found', 20, 'parent not found');
+    if (body.kind === 'drive#folder') {
+      const f = { id: id('fo'), name: body.name, parent: body.parent_id || '' };
+      P.folders.push(f);
+      return Response.json({ upload_type: 'UPLOAD_TYPE_UNKNOWN', file: { kind: 'drive#folder', id: f.id, name: f.name, parent_id: f.parent } });
+    }
+    if (body.kind === 'drive#file' && body.upload_type === 'UPLOAD_TYPE_URL') {
+      if (P.driveCaptcha && !P.captchas.has(H.get('x-captcha-token') || '')) return err(400, 'captcha_invalid', 9, 'captcha token is required');
+      if (P.quotaFull) return err(403, 'file_space_not_enough', 8, 'Storage space is not enough');
+      const u = body.url && body.url.url || '';
+      if (!/^magnet:\?xt=urn:btih:[0-9a-zA-Z]{32,40}/.test(u)) return err(400, 'invalid_argument', 3, 'url is invalid');
+      const dn = decodeURIComponent((/[?&]dn=([^&]*)/.exec(u) || [])[1] || '');
+      const t = { id: id('task'), name: dn || 'magnet', url: u, parent: body.parent_id || '', folder_type: body.folder_type || '', phase: 'PHASE_TYPE_RUNNING' };
+      P.tasks.push(t);
+      return Response.json({ upload_type: 'UPLOAD_TYPE_URL', url: { kind: 'upload#url' }, task: { kind: 'drive#task', id: t.id, name: t.name, type: 'offline', phase: t.phase, file_id: id('fi') } });
+    }
+    return err(400, 'invalid_argument', 3);
+  }
+  return err(404, 'not_found', 5);
 }
 
 const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9一-龥]/g, '');
@@ -257,8 +329,12 @@ function streamApiMock(W, url, init) {
 }
 
 /** 模拟的外部世界（给真 workerd 测试用的本地 HTTP 服务也走这里）。返回 Response 或 null（不认识的主机） */
-export async function worldFetch(W, url) {
+export async function worldFetch(W, url, init) {
   if (url.pathname.startsWith('/3/')) return tmdbApi(W, url);
+  for (const k of ['user', 'api']) if (url.pathname.startsWith('/pk' + k + '/')) {
+    const u = new URL(url.href); u.pathname = url.pathname.slice(('/pk' + k).length);
+    return pikpakMock(W, k === 'user' ? 'user' : 'api', u, init);
+  }
   /* workerd 测试里论坛与总账挂在同一个本地端口上：先按论坛的路径前缀分 */
   if (url.href.startsWith(W.forum.base)) return forumPage(W, url);
   if (url.host === new URL(W.recv.base).host) return recvObj(W, url);
@@ -296,6 +372,10 @@ export function isolate(env, W, opt = {}) {
       W.stream.calls++;
       if (W.stream.fail) { let r = W.stream.fail(url); if (r && typeof r.then === 'function') r = await r; if (r) { if (r instanceof Response) return r; throw r; } }
       return streamApiMock(W, url, init);
+    }
+    if (url.host === 'user.mypikpak.com' || url.host === 'api-drive.mypikpak.com') {
+      if (W.pk.fail) { let r = W.pk.fail(url, init); if (r && typeof r.then === 'function') r = await r; if (r) { if (r instanceof Response) return r; throw r; } }
+      return pikpakMock(W, url.host.startsWith('user') ? 'user' : 'api', url, init);
     }
     if (url.host === 'image.tmdb.org') {
       W.img.calls++;
