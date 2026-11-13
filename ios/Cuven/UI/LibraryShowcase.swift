@@ -60,14 +60,16 @@ struct LibraryView: View {
             }
             .background(Color.black)
             .toolbar(.hidden, for: .navigationBar)
+            // 挂在导航栈的根内容上（不是挂在 ZoomStack 外面）：推进详情页时根内容才算「不在屏上」，预告片跟着停；
+            // 挂在外面的话导航栈本身一直在屏上，推进去以后预告片还在后面静音地放
+            .onAppear { trailer.setVisible(true) }
+            .onDisappear { trailer.setVisible(false) }
         }
         .onChange(of: active) { _, path in
             guard let path, let v = list.first(where: { $0.path == path }) else { return }
             trailer.mount(v, model: model)
         }
         .onChange(of: covered) { _, c in trailer.setCovered(c) }
-        .onAppear { trailer.setVisible(true) }
-        .onDisappear { trailer.setVisible(false) }
     }
 
     /// 网页版 sortOrder：上映日期新的在前；同一天按入库时间；再按片名
