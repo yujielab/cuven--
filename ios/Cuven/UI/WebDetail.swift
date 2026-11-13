@@ -272,18 +272,7 @@ struct WebDetailScaffold<Gallery: View>: View {
         }
         .background(Theme.bg)
         .overlay(alignment: .top) { StatusBarScrim() }
-        .overlay(alignment: .bottom) {
-            if let toast {
-                Text(toast)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 18)
-                    .frame(height: 44)
-                    .glassEffect(.regular, in: Capsule())
-                    .padding(.bottom, 24)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
+        .webToast($toast)
         .navigationTitle(showTitle ? title : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
@@ -374,13 +363,8 @@ struct WebDetailScaffold<Gallery: View>: View {
     private func copyLink() {
         guard let file else { return }
         Task { @MainActor in
-            let sign = try? await APIClient.shared.streamSign(path: file.path)
-            let url = APIClient.shared.streamURL(path: file.path, name: file.name, sign: sign)
-            UIPasteboard.general.string = url.absoluteString
-            Haptics.success()
+            await StreamLink.copy(path: file.path, name: file.name)
             withAnimation(.snappy) { toast = "直链已复制" }
-            try? await Task.sleep(nanoseconds: 1_600_000_000)
-            withAnimation(.easeOut(duration: 0.3)) { toast = nil }
         }
     }
 }
@@ -943,12 +927,23 @@ extension View {
     }
 }
 
-// MARK: - 「更多操作」弹层（网页版 openSheetForFile：片名、「播放」「复制直链」、取消）
+// MARK: - 弹层（网页版 openSheet：片名、一两行大按钮、取消）
 
-struct WebFileSheet: View {
+struct WebSheetRow {
+    let symbol: String
+    let tint: Color
+    let label: String
+    let note: String
+    let id: String
+    let action: () -> Void
+
+    static let orange = Color.orange
+    static let blue = Color(red: 10 / 255, green: 132 / 255, blue: 1)
+}
+
+struct WebActionSheet: View {
     let title: String
-    let onPlay: () -> Void
-    let onCopy: () -> Void
+    let rows: [WebSheetRow]
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -961,13 +956,34 @@ struct WebFileSheet: View {
                 .padding(.horizontal, 24)
                 .padding(.top, 26)
                 .padding(.bottom, 24)
-            row(symbol: "play.circle.fill", tint: .orange, label: "播放", note: "站内播放 · 杜比视界 · HDR · 多音轨字幕", id: "sheet-play") {
-                dismiss()
-                onPlay()
-            }
-            row(symbol: "link", tint: Color(red: 10 / 255, green: 132 / 255, blue: 1), label: "复制直链", note: "在 VLC 等其它播放器中打开", id: "sheet-copy") {
-                dismiss()
-                onCopy()
+            ForEach(rows.indices, id: \.self) { i in
+                let r = rows[i]
+                Button {
+                    dismiss()
+                    r.action()
+                } label: {
+                    HStack(spacing: 16) {
+                        Image(systemName: r.symbol)
+                            .font(.system(size: 22))
+                            .foregroundStyle(r.tint)
+                            .frame(width: 44, height: 44)
+                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(r.label).font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                            Text(r.note).font(.system(size: 13)).foregroundStyle(.white.opacity(0.4)).lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.leading, 12)
+                    .padding(.trailing, 24)
+                    .padding(.vertical, 12)
+                    .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5))
+                    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .buttonStyle(PressableStyle(scale: 0.98))
+                .padding(.bottom, 12)
+                .accessibilityIdentifier(r.id)
             }
             Button { dismiss() } label: {
                 Text("取消")
@@ -985,36 +1001,89 @@ struct WebFileSheet: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 20)
-        .presentationDetents([.height(330)])
+        .presentationDetents([.height(CGFloat(150 + rows.count * 80))])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(34)
         .environment(\.colorScheme, .dark)
     }
+}
 
-    private func row(symbol: String, tint: Color, label: String, note: String, id: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 16) {
-                Image(systemName: symbol)
-                    .font(.system(size: 22))
-                    .foregroundStyle(tint)
-                    .frame(width: 44, height: 44)
-                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(label).font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
-                    Text(note).font(.system(size: 13)).foregroundStyle(.white.opacity(0.4)).lineLimit(1)
-                }
-                Spacer(minLength: 0)
+/// 网页版 openSheetForFile：「播放」（站内播放 · 杜比视界 · HDR · 多音轨字幕）「复制直链」（在 VLC 等其它播放器中打开）
+struct WebFileSheet: View {
+    let title: String
+    let onPlay: () -> Void
+    let onCopy: () -> Void
+
+    var body: some View {
+        WebActionSheet(title: title, rows: [
+            WebSheetRow(symbol: "play.circle.fill", tint: WebSheetRow.orange, label: "播放", note: "站内播放 · 杜比视界 · HDR · 多音轨字幕", id: "sheet-play", action: onPlay),
+            WebSheetRow(symbol: "link", tint: WebSheetRow.blue, label: "复制直链", note: "在 VLC 等其它播放器中打开", id: "sheet-copy", action: onCopy),
+        ])
+    }
+}
+
+/// 签好名的 /stream 直链（网页版 copyStreamLink），复制到剪贴板
+enum StreamLink {
+    @MainActor static func copy(path: String, name: String) async {
+        let sign = try? await APIClient.shared.streamSign(path: path)
+        let url = APIClient.shared.streamURL(path: path, name: name, sign: sign)
+        UIPasteboard.general.string = url.absoluteString
+        Haptics.success()
+    }
+}
+
+/// 页面底部一枚玻璃小胶囊（「直链已复制」），1.6 秒后自己退
+struct WebToast: ViewModifier {
+    @Binding var text: String?
+
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .bottom) {
+            if let t = text {
+                Text(t)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 18)
+                    .frame(height: 44)
+                    .glassEffect(.regular, in: Capsule())
+                    .padding(.bottom, 24)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .task(id: t) {
+                        try? await Task.sleep(nanoseconds: 1_600_000_000)
+                        withAnimation(.easeOut(duration: 0.3)) { text = nil }
+                    }
             }
-            .padding(.leading, 12)
-            .padding(.trailing, 24)
-            .padding(.vertical, 12)
-            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5))
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
-        .buttonStyle(PressableStyle(scale: 0.98))
-        .padding(.bottom, 12)
-        .accessibilityIdentifier(id)
+    }
+}
+
+extension View {
+    func webToast(_ text: Binding<String?>) -> some View { modifier(WebToast(text: text)) }
+}
+
+/// 剧集「接着看」：取分集清单，按网页版 tvNextEp 的规矩挑一集放（年份页、搜索结果的「…」用）
+enum SeriesPlayback {
+    @MainActor static func playNext(_ s: Series, model: AppModel) async -> Bool {
+        var files: [EpisodeFile]
+        if DemoData.enabled {
+            files = DemoData.episodes(s)
+        } else {
+            files = (try? await APIClient.shared.episodes(seriesPath: s.path)) ?? []
+            files.sort { ($0.ep ?? Int.max, $0.name) < ($1.ep ?? Int.max, $1.name) }
+        }
+        guard !files.isEmpty else { return false }
+        var index = 0
+        if let last = model.playback.lastEpisode(of: s.path), let i = files.firstIndex(where: { $0.path == last.path }) {
+            index = last.fraction < 0.9 ? i : min(i + 1, files.count - 1)
+        }
+        let meta = model.seriesMetas[s.path]
+        func req(_ f: EpisodeFile) -> PlayRequest {
+            PlayRequest(path: f.path, name: f.name, title: meta?.title ?? s.name, subtitle: f.ep.map { "第 \($0) 集" },
+                        artwork: meta?.backdrop, seriesPath: s.path, episode: f.ep)
+        }
+        var r = req(files[index])
+        r.queue = files[(index + 1)...].map { req($0) }
+        PlayerCoordinator.shared.play(r, model: model)
+        return true
     }
 }
 

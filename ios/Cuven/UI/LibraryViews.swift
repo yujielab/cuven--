@@ -228,10 +228,12 @@ struct SeriesPosterTile: View {
     }
 }
 
-// MARK: - 搜索
+// MARK: - 搜索：和网页版一样（「搜索或提问」）
+//
+// 没输入：「最近添加」两列竖版海报（片名、年份），最近入库的 12 部。
+// 输入了：「“夜” · 4 个结果」，剧集在上（「剧集 · 1」一排宽卡：剧照、「更新至第 15 集 / 共 19 集」、字标或片名，
+// 底栏缩略图 + 剧名 + 「详情」），电影在下（「电影 · 3」，同样的两列海报）。没结果：「未找到「夜」相关结果」。
 
-/// 搜索（Apple TV「搜索」的版式）：大标题 + 右上头像，搜索框在标题下面；
-/// 没输入时是三列竖版画面格子（最新加入、剧集、想看，再是片库里的类型），输入了就是结果列表
 struct SearchView: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
@@ -239,70 +241,234 @@ struct SearchView: View {
     var body: some View {
         ZoomStack {
             GeometryReader { geo in
-                // 系统栏竖在侧边（iPhone Duo 折起时 / 展开横拿时）：左右安全区一边宽一边窄。
-                // 这时搜索标签不再把搜索框挂在底部的标签栏上，得在标题下面一直显示一个
+                // 系统栏竖在侧边（iPhone Duo 折起时 / 展开横拿时）：搜索框不挂在底部的标签栏上，得在标题下面一直显示
                 let sideBars = abs(geo.safeAreaInsets.leading - geo.safeAreaInsets.trailing) > 30
-                results(width: geo.size.width)
+                content(width: geo.size.width)
                     .searchable(text: $query, placement: sideBars ? .navigationBarDrawer(displayMode: .always) : .automatic,
-                                prompt: "电影、剧集、年份")
+                                prompt: "搜索或提问")
             }
             .background(Theme.bg)
             .navigationTitle("搜索")
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 
-    private func results(width: CGFloat) -> some View {
-        ScrollView {
-            let hits = model.search(query)
-            LazyVStack(alignment: .leading, spacing: 0) {
-                if query.trimmingCharacters(in: .whitespaces).isEmpty {
-                    discover()
-                } else if hits.isEmpty {
-                    ContentUnavailableView.search(text: query).padding(.top, 60)
+    private func content(width: CGFloat) -> some View {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                if q.isEmpty {
+                    let recent = model.movies.sorted { $0.addedKey > $1.addedKey }.prefix(12)
+                    if recent.isEmpty {
+                        emptyHint(title: "搜索电影、剧集", detail: "输入片名开始，结果会即时出现")
+                    } else {
+                        Text("最近添加")
+                            .font(.system(size: 14, weight: .bold))
+                            .tracking(1.1)
+                            .foregroundStyle(.white.opacity(0.65))
+                            .padding(.horizontal, Theme.gutter)
+                            .padding(.top, 20)
+                            .padding(.bottom, 16)
+                        SearchPosterGrid(videos: Array(recent))
+                    }
                 } else {
-                    ForEach(hits) { h in
-                        ZoomLink(route: route(h), slot: "search-row", press: false) { SearchRow(hit: h) }
-                        Divider().overlay(Theme.hairline).padding(.leading, 84)
+                    let hits = model.search(q)
+                    let tv = hits.compactMap { h -> Series? in if case .series(let s) = h.kind { return s } else { return nil } }
+                    let mv = hits.compactMap { h -> Video? in if case .movie(let v) = h.kind { return v } else { return nil } }
+                    if hits.isEmpty {
+                        emptyHint(title: "未找到「\(q)」相关结果", detail: "试试不同的关键词，或检查拼写")
+                    } else {
+                        (Text("“\(q)”").fontWeight(.semibold).foregroundStyle(.white.opacity(0.65))
+                         + Text(" · \(tv.count + mv.count) 个结果").foregroundStyle(.white.opacity(0.4)))
+                            .font(.system(size: 13, weight: .medium))
+                            .padding(.horizontal, Theme.gutter)
+                            .padding(.top, 22)
+                            .padding(.bottom, 4)
+                        if !tv.isEmpty {
+                            subhead("剧集 · \(tv.count)")
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                LazyHStack(spacing: 14) {
+                                    ForEach(tv) { s in
+                                        ZoomLink(route: .series(s), slot: "search-tv") {
+                                            SearchTVCard(series: s, width: min(width * 0.86, 560))
+                                        }
+                                        .accessibilityIdentifier("search-series")
+                                    }
+                                }
+                                .scrollTargetLayout()
+                                .padding(.vertical, 6)
+                            }
+                            .contentMargins(.horizontal, Theme.gutter, for: .scrollContent)
+                            .scrollTargetBehavior(.viewAligned)
+                            .padding(.top, 6)
+                        }
+                        if !mv.isEmpty {
+                            if !tv.isEmpty { subhead("电影 · \(mv.count)") }
+                            SearchPosterGrid(videos: mv)
+                                .padding(.top, 8)
+                        }
                     }
                 }
             }
-            .padding(.bottom, 30)
+            .padding(.bottom, 40)
         }
         .scrollDismissesKeyboard(.immediately)
         .background(Theme.bg)
     }
 
-    /// 没输入时：Apple TV「搜索」那样，搜索框下面直接是一格格竖版画面（几个清单 + 片库里的类型）
-    private func discover() -> some View {
-        BrowseGrid(tiles: model.browseTiles)
+    private func subhead(_ t: String) -> some View {
+        Text(t)
+            .font(.system(size: 15, weight: .bold))
+            .tracking(-0.15)
+            .foregroundStyle(.white.opacity(0.65))
+            .padding(.horizontal, Theme.gutter)
             .padding(.top, 14)
     }
 
-    private func route(_ h: AppModel.SearchHit) -> Route {
-        switch h.kind {
-        case .movie(let v): return .movie(v)
-        case .series(let s): return .series(s)
+    private func emptyHint(title: String, detail: String) -> some View {
+        VStack(spacing: 8) {
+            Text(title).font(.system(size: 17, weight: .semibold)).foregroundStyle(.white.opacity(0.8))
+                .multilineTextAlignment(.center)
+            Text(detail).font(.system(size: 14)).foregroundStyle(.white.opacity(0.4))
         }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, Theme.gutter)
+        .padding(.top, 80)
     }
 }
 
-struct SearchRow: View {
-    let hit: AppModel.SearchHit
+/// 网页版 .library-grid：两列（最小 158 宽）竖版海报，行距 32、列距 16；海报下片名（15 粗）、年份（13 灰）
+struct SearchPosterGrid: View {
+    @Environment(AppModel.self) private var model
+    let videos: [Video]
+
     var body: some View {
-        HStack(spacing: 14) {
-            RemoteImage(url: hit.image, maxPixel: 200)
-                .frame(width: 52, height: 78)
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            VStack(alignment: .leading, spacing: 4) {
-                Text(hit.title).font(.system(size: 16, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-                Text(hit.subtitle).font(.system(size: 13)).foregroundStyle(Theme.tertiary).lineLimit(1)
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 158), spacing: 16, alignment: .top)], alignment: .leading, spacing: 32) {
+            ForEach(videos) { v in
+                ZoomLink(route: .movie(v), slot: "search-grid") {
+                    let m = model.meta(v)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Color.white.opacity(0.06)
+                            .aspectRatio(2 / 3, contentMode: .fit)
+                            .overlay { RemoteImage(url: TMDBImage.url(m?.poster ?? m?.posterClean, "w342"), maxPixel: 600, placeholder: .clear) }
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
+                            .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
+                        Text(model.title(v))
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .padding(.top, 12)
+                        Text(model.year(v).map { String($0) } ?? " ")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.4))
+                            .padding(.top, 2)
+                    }
+                }
+                .accessibilityIdentifier("search-movie")
+                .movieMenu(v)
             }
-            Spacer()
-            Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.tertiary)
         }
         .padding(.horizontal, Theme.gutter)
-        .padding(.vertical, 10)
-        .contentShape(Rectangle())
+    }
+}
+
+/// 网页版 .tv-card：15:13 的大卡（圆角 26）——上面一张清楚的 16:9 剧照，往下化进同一张图的失焦版；
+/// 文案压在下半截（「更新至第 15 集 / 共 19 集」、字标或片名），最底下一条毛玻璃底栏：缩略图、剧名、「详情」
+struct SearchTVCard: View {
+    @Environment(AppModel.self) private var model
+    let series: Series
+    let width: CGFloat
+
+    var body: some View {
+        let m = model.seriesMetas[series.path]
+        let art = m?.backdrop ?? m?.posterClean ?? m?.poster
+        let height = width * 13 / 15
+        let footName = (series.en?.isEmpty == false && series.zh?.isEmpty == false) ? series.en! : (m?.title ?? series.name)
+        ZStack(alignment: .bottom) {
+            LinearGradient(colors: [Color(red: 44 / 255, green: 44 / 255, blue: 46 / 255), Color(red: 23 / 255, green: 23 / 255, blue: 26 / 255)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            // 失焦的那层铺满整卡，清楚的那张贴顶、16:9、底缘往下淡出
+            RemoteImage(url: TMDBImage.url(art, "w342"), maxPixel: 400, placeholder: .clear)
+                .scaleEffect(1.3)
+                .blur(radius: 28)
+                .opacity(0.9)
+            RemoteImage(url: TMDBImage.url(art, "w780"), maxPixel: width * 3, placeholder: .clear)
+                .frame(width: width, height: width * 9 / 16)
+                .clipped()
+                .mask(LinearGradient(stops: [.init(color: .black, location: 0.7), .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom))
+                .frame(maxHeight: .infinity, alignment: .top)
+            LinearGradient(stops: [
+                .init(color: .black.opacity(0.86), location: 0),
+                .init(color: .black.opacity(0.78), location: 0.2),
+                .init(color: .black.opacity(0.6), location: 0.38),
+                .init(color: .black.opacity(0.32), location: 0.52),
+                .init(color: .black.opacity(0.06), location: 0.68),
+                .init(color: .clear, location: 0.84),
+            ], startPoint: .bottom, endPoint: .top)
+
+            VStack(spacing: 0) {
+                VStack(spacing: 4) {
+                    Text(series.countLabel)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.72))
+                    Group {
+                        if let logo = m?.logo, !logo.isEmpty {
+                            LogoImage(url: TMDBImage.url(logo, "w500"), height: 60, fallback: m?.title ?? series.name, maxWidth: width - 40)
+                        } else {
+                            Text(m?.title ?? series.name)
+                                .font(.system(size: min(27, max(21, width * 0.07)), weight: .heavy))
+                                .tracking(-0.6)
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .lineLimit(2)
+                        }
+                    }
+                    .frame(minHeight: 66, alignment: .bottom)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
+
+                HStack(spacing: 10) {
+                    Color.white.opacity(0.1)
+                        .overlay {
+                            if let still = m?.stills?.first?.thumb ?? m?.stills?.first?.url ?? m?.poster {
+                                RemoteImage(url: TMDBImage.url(still, "w300"), maxPixel: 220, placeholder: .clear)
+                            } else {
+                                Text(String(series.name.prefix(1))).font(.system(size: 17, weight: .heavy)).foregroundStyle(.white.opacity(0.72))
+                            }
+                        }
+                        .frame(width: 68, height: 38)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5))
+                    Text(footName)
+                        .font(.system(size: 16, weight: .bold))
+                        .tracking(-0.2)
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Text("详情")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 20)
+                        .frame(minWidth: 84, minHeight: 34)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .background(Color.white.opacity(0.24), in: Capsule())
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 11)
+                .padding(.bottom, 13)
+                .background(.ultraThinMaterial.opacity(0.6))
+                .background(Color(red: 18 / 255, green: 18 / 255, blue: 20 / 255).opacity(0.42))
+                .overlay(alignment: .top) { Rectangle().fill(Color.white.opacity(0.14)).frame(height: 0.5) }
+            }
+            .environment(\.colorScheme, .dark)
+        }
+        .frame(width: width, height: height)
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .shadow(color: .black.opacity(0.5), radius: 27, y: 22)
+        .task { await model.ensureSeriesMeta(series) }
     }
 }
 

@@ -104,20 +104,32 @@ final class DuoDeviceTests: XCTestCase {
         for _ in 0..<6 { app.swipeDown() }
         sleep(1)
 
+        // 年份页：主页「2026 · 查看电影和剧集 ›」进去，一行一部；行尾「…」是和详情页同一张弹层
+        tab(app, "主页"); sleep(2)
+        if let bar = reveal(app, app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'year-bar-'")), swipes: 6) {
+            bar.tap(); sleep(2)
+            snap("duo-09-year")
+            let more = app.buttons["year-more"].firstMatch
+            if more.waitForExistence(timeout: 3) {
+                more.tap(); sleep(2)
+                snap("duo-09b-year-more")
+                let cancel = app.buttons["sheet-cancel"].firstMatch
+                if cancel.waitForExistence(timeout: 3) { cancel.tap() } else { app.swipeDown() }
+                sleep(1)
+            }
+            back(app)
+        } else {
+            XCTFail("主页没有年份条")
+        }
+        for _ in 0..<8 { app.swipeDown() }
+        sleep(1)
+
         // 账户与设置：网页版导航胶囊里的头像，这里是「账户」标签
         tab(app, "账户"); sleep(2)
         snap("duo-06-account")
 
         tab(app, "搜索"); sleep(2)
-        snap("duo-07a-search-home")          // 为你推荐 + 浏览
-        // 浏览：点一格类型，进那一类的整页清单
-        if let tile = reveal(app, app.buttons.matching(identifier: "genre-tile")) {
-            tile.tap(); sleep(2)
-            snap("duo-07b-genre")
-            back(app)
-        } else {
-            XCTFail("搜索页没有「浏览」的类型格子")
-        }
+        snap("duo-07a-search-home")          // 最近添加：两列竖版海报
         app.swipeDown(); sleep(1)
         let field = app.searchFields.firstMatch
         if field.waitForExistence(timeout: 5) {
