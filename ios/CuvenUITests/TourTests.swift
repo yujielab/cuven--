@@ -84,7 +84,7 @@ final class TourTests: XCTestCase {
         snap("11-library")
         let seg = app.segmentedControls.buttons["剧集"]
         if seg.exists { seg.tap(); sleep(6); snap("11b-library-series") }
-        let acct = app.buttons["account-button"].firstMatch
+        let acct = visible(app.buttons.matching(identifier: "account-button"))
         if acct.waitForExistence(timeout: 5) {
             acct.tap(); sleep(2)
             snap("12-account")
@@ -123,5 +123,11 @@ final class TourTests: XCTestCase {
         a.name = name
         a.lifetime = .keepAlways
         add(a)
+    }
+
+    /// 第一个真正在屏上的匹配项（切到别的标签后，上一页的同名按钮还留在层级里，只是看不见）
+    private func visible(_ q: XCUIElementQuery) -> XCUIElement {
+        _ = q.firstMatch.waitForExistence(timeout: 5)
+        return q.allElementsBoundByIndex.first { $0.isHittable } ?? q.firstMatch
     }
 }

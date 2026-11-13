@@ -40,7 +40,7 @@ final class DuoDeviceTests: XCTestCase {
         report(app, "library")
         snap("duo-05-library")
 
-        let acct = app.buttons["account-button"].firstMatch
+        let acct = visible(app.buttons.matching(identifier: "account-button"))
         if acct.waitForExistence(timeout: 5) {
             acct.tap(); sleep(2)
             snap("duo-06-account")
@@ -62,9 +62,12 @@ final class DuoDeviceTests: XCTestCase {
     }
 
     func testLandscape() {
-        XCUIDevice.shared.orientation = .landscapeLeft
+        // 先竖着启动、再转横：冷启动时直接横着启动，模拟器上偶尔起不来
+        XCUIDevice.shared.orientation = .portrait
         let app = launch()
         sleep(4)
+        XCUIDevice.shared.orientation = .landscapeLeft
+        sleep(3)
         report(app, "landscape")
         snap("duo-11-landscape-home")
         tab(app, "资料库"); sleep(3)
@@ -92,8 +95,10 @@ final class DuoDeviceTests: XCTestCase {
         if any.exists { any.tap() }
     }
 
+    /// 系统返回钮：竖在侧边时不在 navigationBars 里，按它的标识找
     private func back(_ app: XCUIApplication) {
-        let nav = app.navigationBars.buttons.firstMatch
+        let sys = app.buttons["BackButton"].firstMatch
+        let nav = sys.exists ? sys : app.navigationBars.buttons.firstMatch
         print("DUO back \(nav.exists ? "\(nav.frame)" : "none")")
         if nav.exists { nav.tap() } else { app.swipeRight() }
         sleep(2)
@@ -113,5 +118,11 @@ final class DuoDeviceTests: XCTestCase {
         a.name = name
         a.lifetime = .keepAlways
         add(a)
+    }
+
+    /// 第一个真正在屏上的匹配项（切到别的标签后，上一页的同名按钮还留在层级里，只是看不见）
+    private func visible(_ q: XCUIElementQuery) -> XCUIElement {
+        _ = q.firstMatch.waitForExistence(timeout: 5)
+        return q.allElementsBoundByIndex.first { $0.isHittable } ?? q.firstMatch
     }
 }

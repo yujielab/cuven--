@@ -173,6 +173,21 @@ struct SearchView: View {
 
     var body: some View {
         NavigationStack {
+            GeometryReader { geo in
+                // 系统栏竖在侧边（iPhone Duo 折起时 / 展开横拿时）：左右安全区一边宽一边窄。
+                // 这时搜索标签不再把搜索框挂在底部的标签栏上，得在标题下面一直显示一个
+                let sideBars = abs(geo.safeAreaInsets.leading - geo.safeAreaInsets.trailing) > 30
+                results
+                    .searchable(text: $query, placement: sideBars ? .navigationBarDrawer(displayMode: .always) : .automatic,
+                                prompt: "电影、剧集、年份")
+            }
+            .background(Theme.bg)
+            .navigationTitle("搜索")
+            .navigationDestination(for: Route.self) { RouteView(route: $0) }
+        }
+    }
+
+    private var results: some View {
             ScrollView {
                 let hits = model.search(query)
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -196,10 +211,6 @@ struct SearchView: View {
             }
             .scrollDismissesKeyboard(.immediately)
             .background(Theme.bg)
-            .navigationTitle("搜索")
-            .searchable(text: $query, prompt: "电影、剧集、年份")
-            .navigationDestination(for: Route.self) { RouteView(route: $0) }
-        }
     }
 
     private func route(_ h: AppModel.SearchHit) -> Route {
