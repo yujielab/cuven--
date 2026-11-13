@@ -8,9 +8,42 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 | --- | --- |
 | `Stream_v25.js` | 主 Worker：Dropbox 代理、`/stream` 直连、MKV → HLS、自带的首页与 `/watch` 播放页 |
 | `web/index.html` | 前端（Stream · Cinematic Edition，单文件 SPA），站内播放器，不再依赖 Infuse |
+| `ios/` | 原生 iOS App「Cuven max」（SwiftUI，不是网页套壳），直连同一个 Worker；GitHub Actions 打 IPA，见下文 |
 | `audio-tx/` | 可选的 DTS / TrueHD → AC-3 转码 Worker |
 | `index/` | Cuven ᴿ 索引库 Worker（论坛 → TMDB → R2 索引，对照片库标出缺片），说明与测试见 [`index/README.md`](index/README.md) |
 | `tests/` | 回归测试：Worker（`run.mjs`）与前端（`web.mjs`） |
+
+## 原生 iOS App（`ios/`）
+
+100% 原生：SwiftUI 界面 + 系统播放器（AVPlayerViewController），不嵌网页。直接调用 Stream Worker 的接口，
+生产环境没开签名，不需要登录。最低 iOS 26（Liquid Glass 标签栏与玻璃按钮）。
+
+| 部分 | 做法 |
+| --- | --- |
+| 数据 | `/api/all` 片库清单 → `/api/tmdb-batch`（一次 80 个文件名，两路并发；没回答的过 8 秒再问，最多三轮）。后端回 null（确定认不出）或认出来却没有海报的不显示；同一部片（同一个 TMDB 编号）只显示最新入库的文件，详情页里列出全部版本。片库、元数据、剧集表、首页大图都存一份在本地，下次打开先用上次的、网络回来再换新 |
+| 首页 | Apple TV 大图轮播（`/api/atv/hero`：竖拿用竖版海报，横拿 / iPad 用 16:9 背景；字标 + 播放 / 详情，8 秒自动翻页）、继续观看、今日推荐（与网页版同一个按日期与时段打乱的种子，大号描边名次）、最新加入、Cuven TV 剧集（只出有字标的剧集；字标统一 60 高，深色字标自动反白）、按年份的一排排 |
+| 资料库 / 搜索 | 电影 / 剧集网格，按最新加入、年份、评分排序，按年份筛；搜索中文名、英文名、原名、年份 |
+| 详情 | 电影：剧照 + 字标、继续播放 / 从头播放、规格徽标、简介、版本、演员、文件。剧集：分集清单（`/api/tv/episodes`）配 TMDB 那一季的集名、剧照、简介与时长，每集带进度 |
+| 播放 | `/api/stream-sign` 给了 HLS（MKV 实时重封装）就先看 `info.json`：能放就放，4xx 带着原因提示；否则走 `/stream` 直链（MP4 / MOV 带 `safari=1`）。系统全屏播放器：音轨、字幕、画中画、AirPlay、杜比视界都是系统的。续播（看过 30 秒以上、没到 95%）、每 5 秒存一次进度、剧集播完自动接下一集 |
+| iPhone Duo | 认屏幕本身：iPhone 且短边超过 440pt（别的 iPhone 最多 440）。**折起竖拿**（外屏，右侧一整列安全区）：系统标签栏收起，换成挂在那一列里的竖向玻璃胶囊（主页 / 资料库 / 搜索 / 我的，只有图标），内容不越过那一列；首页大图一打开就是卡片态（左右露出邻卡，下面一排圆点，点哪颗翻到哪张，不自动轮播）。**展开**（内屏，横竖都算）和**折起横拿**：左侧竖排导航条（图标 + 字），放在左侧安全区里面（横拿时那边是摄像头），内容整体让出这一条。两种导航都是：键盘起来时整枚挪到键盘上面；再点一下当前那一格回到这一格的根页面 |
+
+**打包**：`.github/workflows/ios.yml` 在 GitHub 的 macOS 构建机上用 XcodeGen 生成工程、`xcodebuild archive`（不签名）、
+打成 `Cuven-unsigned.ipa`。`ios/` 有改动、推到 `main` 或 `claude/**` 时自动跑，也可以在 Actions 页手动运行；
+每次的 IPA 在那次运行的 Artifacts 里，`main` 上的构建另外发布到 Release「ios-latest」。
+
+**安装**：未签名的 IPA 要用自己的 Apple ID 重签后安装 —— AltStore / SideStore / Sideloadly（免费 Apple ID 的签名 7 天过期，
+到期重签即可；付费开发者账号一年），或支持的系统版本上用 TrollStore 永久安装。
+
+**本地开发**：`brew install xcodegen && cd ios && xcodegen generate && open Cuven.xcodeproj`（工程文件不进仓库）。
+
+**模拟器预览**：`.github/workflows/ios-preview.yml` 在 iOS 模拟器里连生产接口把主要页面走一遍（`ios/CuvenUITests`：首页、剧集详情与分集、
+电影详情、试播、资料库、我的、搜索），日志里只有测试结果和播放器状态（来源类型、就绪、进度，不含片名与地址）。
+仓库是公开的，而截图里是片库的真实内容，所以截图默认不上传；在 Actions 页手动运行并勾选「上传截图」才会上传，3 天后自动删除。
+
+**Duo 预览（演示数据）**：模拟器里没有 Duo，启动参数 `-CuvenDuo folded|rail|off` 强制某种形态（`folded` 且设备没有右侧那一列时补一列 84pt 黑边，模拟外屏）；
+`-CuvenDemo YES` 换成演示数据（片名、海报、字标都是本地合成的，不连服务器、不能播放）。`ios/CuvenUITests/DuoTests.swift` 用演示数据把
+折起竖拿、横拿、展开竖拿各走一遍，顺带检查导航条不压内容、键盘不盖导航胶囊、再点一下回到根页面；这几张截图不含片库内容，
+提交到 `refs/ci/ios-preview-demo`（不是分支）：`git fetch origin refs/ci/ios-preview-demo && git checkout FETCH_HEAD -- .`
 
 ## MKV → HLS 链路
 

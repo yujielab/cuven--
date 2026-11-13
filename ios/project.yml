@@ -1,0 +1,60 @@
+# Cuven 原生 iOS App（SwiftUI）。工程文件由 XcodeGen 现生成，不进仓库：
+#   brew install xcodegen && cd ios && xcodegen generate && open Cuven.xcodeproj
+name: Cuven
+options:
+  bundleIdPrefix: us.cuven
+  deploymentTarget:
+    iOS: "26.0"
+  developmentLanguage: zh-Hans
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Cuven:
+    type: application
+    platform: iOS
+    sources:
+      - path: Cuven
+        excludes:
+          - Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: us.cuven.tv
+        PRODUCT_NAME: Cuven
+        INFOPLIST_FILE: Cuven/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_PREVIEWS: YES
+        SWIFT_EMIT_LOC_STRINGS: NO
+  # 模拟器里走一遍主要页面并截图（.github/workflows/ios-preview.yml 用），不进 IPA
+  CuvenUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: CuvenUITests
+    dependencies:
+      - target: Cuven
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: us.cuven.tv.uitests
+        TEST_TARGET_NAME: Cuven
+        CODE_SIGN_STYLE: Automatic
+schemes:
+  Cuven:
+    build:
+      targets:
+        Cuven: all
+        CuvenUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - name: CuvenUITests
+    archive:
+      config: Release

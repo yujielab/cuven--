@@ -1,0 +1,93 @@
+# Cuven 原生 iOS App（ios/，SwiftUI）→ IPA
+#
+# 只有 macOS 上的 Xcode 能编 iOS：这里用 GitHub 的 macOS 构建机。
+#   · ios/ 或本文件有改动、推到 main / claude/** 时自动编；也可以在 Actions 页手动点 Run workflow。
+#   · 产物是未签名 IPA（Cuven-unsigned.ipa）：用 AltStore / SideStore / Sideloadly（自己的 Apple ID 重签）
+#     或 TrollStore 装到手机上。每次运行都挂在该次运行的 Artifacts 里；main 上的构建另外发布到
+#     Release「ios-latest」（手机上直接点下载）。
+name: iOS App
+
+on:
+  push:
+    branches: [main, 'claude/**']
+    paths: ['ios/**', '.github/workflows/ios.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 选 Xcode（装着的最新正式版）
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app | grep -viE 'beta|release_candidate|_rc' | sort -V | tail -1)
+          echo "使用 $XC"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+          echo "iOS SDK $(xcrun --sdk iphoneos --show-sdk-version)"
+
+      - name: 生成工程（XcodeGen）
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install xcodegen
+          cd ios && xcodegen generate
+
+      - name: 编译（Release，未签名）
+        run: |
+          set -o pipefail
+          xcodebuild -project ios/Cuven.xcodeproj -scheme Cuven -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/Cuven.xcarchive" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            archive > "$RUNNER_TEMP/build.log" 2>&1 || {
+              echo "::group::编译错误"
+              grep -E -B2 -A8 "error:|fatal error|Command .* failed" "$RUNNER_TEMP/build.log" | head -400
+              echo "::endgroup::"
+              tail -60 "$RUNNER_TEMP/build.log"
+              exit 1
+            }
+          grep -E "warning:" "$RUNNER_TEMP/build.log" | sort -u | head -80 || true
+          tail -5 "$RUNNER_TEMP/build.log"
+
+      - name: 打包 IPA
+        run: |
+          APP="$RUNNER_TEMP/Cuven.xcarchive/Products/Applications/Cuven.app"
+          test -d "$APP"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          (cd "$RUNNER_TEMP/ipa" && zip -qry "$GITHUB_WORKSPACE/Cuven-unsigned.ipa" Payload)
+          ls -lh Cuven-unsigned.ipa
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' -c 'Print :CFBundleVersion' -c 'Print :MinimumOSVersion' "$APP/Info.plist"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cuven-ipa-${{ github.run_number }}
+          path: Cuven-unsigned.ipa
+          if-no-files-found: error
+
+      - name: 编译日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: ${{ runner.temp }}/build.log
+          if-no-files-found: ignore
+
+      - name: 发布到 Release「ios-latest」（只在 main 上）
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete ios-latest --yes --cleanup-tag || true
+          gh release create ios-latest Cuven-unsigned.ipa --prerelease --target "$GITHUB_SHA" \
+            --title "Cuven iOS · build ${{ github.run_number }}" \
+            --notes "未签名 IPA（${GITHUB_SHA::7}）。用 AltStore / SideStore / Sideloadly（自己的 Apple ID 重签）或 TrollStore 安装。"

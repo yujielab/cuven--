@@ -1,0 +1,5 @@
+# XcodeGen 生成的工程与构建产物
+Cuven.xcodeproj/
+build/
+DerivedData/
+*.ipa
