@@ -30,7 +30,10 @@ struct CuvenApp: App {
                     if welcome {
                         WelcomeView {
                             withAnimation(.timingCurve(0.32, 0.72, 0, 1, duration: 0.45)) { welcome = false }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { if PrivacyGate.shouldShow(account) { privacy = true } }
+                            Task { @MainActor in
+                                try? await Task.sleep(nanoseconds: 500_000_000)
+                                if PrivacyGate.shouldShow(account) { privacy = true }
+                            }
                         }
                         .transition(.opacity)
                     }
