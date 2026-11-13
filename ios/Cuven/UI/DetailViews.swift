@@ -33,6 +33,7 @@ struct MovieDetailView: View {
                         }
                         .buttonStyle(.glassProminent)
                         .controlSize(.large)
+                        .accessibilityIdentifier("detail-play")
                         if resume != nil {
                             Button {
                                 model.playback.finish(file.path)
@@ -204,6 +205,7 @@ struct SeriesDetailView: View {
                         }
                         .buttonStyle(.glassProminent)
                         .controlSize(.large)
+                        .accessibilityIdentifier("series-play")
                     }
 
                     let specs = (series.tags ?? []).filter { !$0.isEmpty }

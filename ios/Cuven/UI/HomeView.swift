@@ -88,6 +88,7 @@ struct HomeView: View {
                 Rail {
                     ForEach(model.newest) { v in
                         NavigationLink(value: Route.movie(v)) { PosterCard(video: v) }.buttonStyle(.plain)
+                            .accessibilityIdentifier("newest-poster")
                     }
                 }
             }
@@ -98,6 +99,7 @@ struct HomeView: View {
                     Rail(spacing: 14) {
                         ForEach(tv) { s in
                             NavigationLink(value: Route.series(s)) { SeriesCard(series: s, width: min(width * 0.86, 440)) }.buttonStyle(.plain)
+                                .accessibilityIdentifier("series-card")
                         }
                     }
                 }
@@ -268,6 +270,7 @@ struct HeroPage: View {
                     }
                     .buttonStyle(.glassProminent)
                     .controlSize(.large)
+                    .accessibilityIdentifier("hero-play")
                     NavigationLink(value: Route.movie(item.video)) {
                         Label("详情", systemImage: "info.circle")
                             .font(.system(size: 16, weight: .semibold))
@@ -275,6 +278,7 @@ struct HeroPage: View {
                     }
                     .buttonStyle(.glass)
                     .controlSize(.large)
+                    .accessibilityIdentifier("hero-detail")
                 }
             }
             .padding(.horizontal, 24)

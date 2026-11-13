@@ -30,3 +30,31 @@ targets:
         CODE_SIGN_STYLE: Automatic
         ENABLE_PREVIEWS: YES
         SWIFT_EMIT_LOC_STRINGS: NO
+  # 模拟器里走一遍主要页面并截图（.github/workflows/ios-preview.yml 用），不进 IPA
+  CuvenUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: CuvenUITests
+    dependencies:
+      - target: Cuven
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: us.cuven.tv.uitests
+        TEST_TARGET_NAME: Cuven
+        CODE_SIGN_STYLE: Automatic
+schemes:
+  Cuven:
+    build:
+      targets:
+        Cuven: all
+        CuvenUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - name: CuvenUITests
+    archive:
+      config: Release
