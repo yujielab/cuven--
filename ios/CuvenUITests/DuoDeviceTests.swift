@@ -8,12 +8,29 @@ final class DuoDeviceTests: XCTestCase {
         continueAfterFailure = true
     }
 
-    private func launch(demo: Bool = true) -> XCUIApplication {
+    private func launch(demo: Bool = true, welcome: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         if demo { app.launchArguments += ["-CuvenDemo", "YES"] }
+        if welcome { app.launchArguments += ["-CuvenWelcome", "YES"] }
         app.launch()
         return app
+    }
+
+    /// 欢迎页（网页版 #wc-root）：已登录时打开 App 先盖这一屏。演示数据默认不出，这里用 -CuvenWelcome YES 强制。
+    /// 只截欢迎页本身（演示账户名、没有头像时的剪影），点「确认并继续」以后不截（后面是片库）
+    func testWelcome() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = launch(welcome: true)
+        let cta = app.buttons["welcome-continue"].firstMatch
+        XCTAssertTrue(cta.waitForExistence(timeout: 15), "欢迎页没出现")
+        sleep(3)                                   // 问候语两行依次模糊淡入（0.2 / 0.55 秒起，各 1 秒）
+        report(app, "welcome")
+        snap("duo-00-welcome")
+        cta.tap()
+        sleep(2)
+        XCTAssertFalse(app.buttons["welcome-continue"].exists, "点了「确认并继续」欢迎页还在")
+        XCTAssertTrue(app.buttons["主页"].firstMatch.waitForExistence(timeout: 10), "欢迎页之后没到主页")
     }
 
     func testPortrait() {

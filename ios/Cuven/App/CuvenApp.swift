@@ -4,18 +4,33 @@ import AVFoundation
 @main
 struct CuvenApp: App {
     @State private var model = AppModel()
-    @State private var account = AccountStore()
+    @State private var account: AccountStore
+    /// 欢迎页（网页版 #wc-root）：打开 App 时已登录就先盖这一屏，点「确认并继续」淡出。只在启动这一刻判断一次
+    @State private var welcome: Bool
 
     init() {
         // 播放走系统的「影视」音频会话：静音键不影响声音，画中画 / 锁屏后继续放
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         URLCache.shared = URLCache(memoryCapacity: 16 << 20, diskCapacity: 256 << 20)
         Perf.startWatchdog()
+        // 账户在这里建：登录状态（钥匙串里 30 天内的会话）一出来就决定要不要欢迎页，第一帧就盖上，不闪主页
+        let acc = AccountStore()
+        _account = State(initialValue: acc)
+        _welcome = State(initialValue: WelcomeGate.shouldShow(acc))
     }
 
     var body: some Scene {
         WindowGroup {
             RootView()
+                // 和网页版一样整屏盖在最上面（片库在底下照常加载）；退场是 0.45 秒的淡出
+                .overlay {
+                    if welcome {
+                        WelcomeView {
+                            withAnimation(.timingCurve(0.32, 0.72, 0, 1, duration: 0.45)) { welcome = false }
+                        }
+                        .transition(.opacity)
+                    }
+                }
                 .environment(model)
                 .environment(account)
                 .preferredColorScheme(.dark)
