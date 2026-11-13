@@ -31,7 +31,7 @@ enum PlayError: LocalizedError {
 }
 
 /// AVPlayerViewController 直接全屏呈现（系统播放器：音轨 / 字幕 / 画中画 / AirPlay / 杜比视界都是系统的）。
-/// 点了「播放」就弹出来，片源还在准备时盖一层加载封面（剧照 + 片名 + 状态），真正开播才淡出
+/// 点了「播放」就弹出来，片源还在准备时盖一层加载画面（和网页版一样：极光、Cuven max、胶囊进度条、轮播文案），真正开播才淡出
 final class CuvenPlayerViewController: AVPlayerViewController {
     var onClose: (() -> Void)?
     private let cover = PlayerLoadingCover()
@@ -45,8 +45,8 @@ final class CuvenPlayerViewController: AVPlayerViewController {
         }
     }
 
-    /// preparing：片源准备中（自己转圈）；buffering：片源已挂上、等首帧（系统播放器自己会转圈，这里只留封面和字）；
-    /// playing：淡出
+    /// preparing：片源准备中（进度条第一段）；buffering：片源已挂上、等首帧（第二段；后面几段加载画面自己读播放器那一项）；
+    /// playing：进度条走满、淡出
     enum Phase { case preparing, buffering, playing }
 
     func setPhase(_ phase: Phase) {
@@ -65,84 +65,7 @@ final class CuvenPlayerViewController: AVPlayerViewController {
     }
 }
 
-/// 加载封面：剧照铺满压暗、居中片名 + 状态；不拦触摸（关闭钮等系统控件照常能点）
-final class PlayerLoadingCover: UIView {
-    private let art = UIImageView()
-    private let shade = UIView()
-    private let spinner = UIActivityIndicatorView(style: .large)
-    private let titleLabel = UILabel()
-    private let statusLabel = UILabel()
-    private var artTask: Task<Void, Never>?
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = .black
-        isUserInteractionEnabled = false
-        art.contentMode = .scaleAspectFill
-        art.clipsToBounds = true
-        art.alpha = 0
-        shade.backgroundColor = UIColor.black.withAlphaComponent(0.6)
-        for v in [art, shade] {
-            v.frame = bounds
-            v.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            addSubview(v)
-        }
-        spinner.color = .white
-        spinner.hidesWhenStopped = true
-        titleLabel.font = .systemFont(ofSize: 22, weight: .bold)
-        titleLabel.textColor = .white
-        titleLabel.textAlignment = .center
-        titleLabel.numberOfLines = 2
-        statusLabel.font = .systemFont(ofSize: 14, weight: .medium)
-        statusLabel.textColor = UIColor.white.withAlphaComponent(0.7)
-        statusLabel.textAlignment = .center
-        let stack = UIStackView(arrangedSubviews: [spinner, titleLabel, statusLabel])
-        stack.axis = .vertical
-        stack.alignment = .center
-        stack.spacing = 8
-        stack.setCustomSpacing(20, after: spinner)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 32),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -32),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
-
-    func configure(title: String, artwork: URL?) {
-        titleLabel.text = title
-        artTask?.cancel()
-        art.image = nil
-        art.alpha = 0
-        guard let artwork else { return }
-        artTask = Task { @MainActor [weak self] in
-            let img = await ImagePipeline.shared.image(artwork, maxPixel: 1400)
-            guard let self, !Task.isCancelled, let img else { return }
-            self.art.image = img
-            UIView.animate(withDuration: 0.3) { self.art.alpha = 1 }
-        }
-    }
-
-    func setPhase(_ phase: CuvenPlayerViewController.Phase) {
-        switch phase {
-        case .preparing:
-            statusLabel.text = "正在准备片源…"
-            spinner.startAnimating()
-            alpha = 1
-        case .buffering:
-            statusLabel.text = "正在缓冲…"
-            spinner.stopAnimating()
-            alpha = 1
-        case .playing:
-            spinner.stopAnimating()
-            UIView.animate(withDuration: 0.35) { self.alpha = 0 }
-        }
-    }
-}
+// 加载画面（PlayerLoadingCover）在 UI/PlayerLoading.swift：和网页版一样的极光 + Cuven max + 胶囊进度条 + 文案
 
 @MainActor
 final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
