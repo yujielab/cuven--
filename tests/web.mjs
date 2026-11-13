@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import * as H from './harness.mjs';
 
@@ -1339,6 +1340,104 @@ console.log('\n■ 年份页：一行一部的列表（竖版小海报 + 中文�
     for (const [n] of YL) { try { fs.unlinkSync(SM(n)); } catch {} }
     H.tv.entries = tv0; H.tmdb.shows = shows0;
     /* 剧集表也还原：后面几节看到的还是原来那张 */
+    try { await H.worker.fetch(new Request('https://stream.cuven.online/api/tv?refresh=1'), H.env, H.ctx); while (H.pending.length) await Promise.all(H.pending.splice(0)); } catch (_) {}
+    delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
+    caches.default.m.clear();
+  }
+}
+
+console.log('\n■ 剧集字标：深色字标反白、首页只出有字标的剧集、字标统一高度');
+{
+  /* 合成字标：透明底 PNG，一排竖条当「字」，颜色各不相同 */
+  const png = (w, h, paint) => {
+    const row = w * 4 + 1, raw = Buffer.alloc(row * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) raw.set(paint(x, y, w, h), y * row + 1 + x * 4);
+    const chunk = (t, d) => { const len = Buffer.alloc(4), crc = Buffer.alloc(4), td = Buffer.concat([Buffer.from(t), d]);
+      len.writeUInt32BE(d.length); crc.writeUInt32BE(zlib.crc32(td)); return Buffer.concat([len, td, crc]); };
+    const hdr = Buffer.alloc(13); hdr.writeUInt32BE(w, 0); hdr.writeUInt32BE(h, 4); hdr[8] = 8; hdr[9] = 6;
+    return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', hdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+  };
+  const ink = (x, y, w, h) => x >= 0 && x < w && Math.floor(x / (w / 11)) % 2 === 0 && y >= h * .15 && y < h * .85;
+  const solid = c => (x, y, w, h) => ink(x, y, w, h) ? [...c, 255] : [0, 0, 0, 0];
+  /* 白字黑描边：每根竖条外圈 3px 黑、里面白 */
+  const outlined = (x, y, w, h) => !ink(x, y, w, h) ? [0, 0, 0, 0]
+    : [[-3, 0], [3, 0], [0, -3], [0, 3]].some(([dx, dy]) => !ink(x + dx, y + dy, w, h)) ? [0, 0, 0, 255] : [255, 255, 255, 255];
+  const LOGO = {
+    'logo-dark.png': png(240, 60, solid([0, 0, 0])),          /* 黑字，4:1 */
+    'logo-white.png': png(600, 40, solid([255, 255, 255])),   /* 白字，15:1：同高放不下，得按卡宽收 */
+    'logo-gray.png': png(200, 80, solid([51, 51, 51])),       /* 深灰 #333 */
+    'logo-navy.png': png(200, 80, solid([0, 0, 128])),        /* 深蓝 */
+    'logo-red.png': png(200, 80, solid([229, 9, 20])),        /* 纯红 */
+    'logo-outline.png': png(200, 80, outlined),               /* 白字黑描边 */
+  };
+  const tmdbImg = r => {
+    const name = (r.request().url().match(/\/(logo-[a-z]+\.png)/) || [])[1];
+    if (name === 'logo-gone.png') return r.fulfill({ status: 404, body: '' });
+    if (name && LOGO[name]) return r.fulfill({ status: 200, contentType: 'image/png', headers: { 'Access-Control-Allow-Origin': '*' }, body: LOGO[name] });
+    return r.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="3"/>' });
+  };
+  const SM = f => path.join(HERE, 'samples', f);
+  const MV = [['Dune.Part.Two.2024.2160p.DV.mkv', 'dv81.mkv']];
+  for (const [n, src] of MV) { try { fs.unlinkSync(SM(n)); } catch {} fs.linkSync(SM(src), SM(n)); }
+  /* 四部 2024 年的剧：黑字标 / 白字标 / TMDB 上没有字标 / 字标图 404 */
+  const SHOWS = [['Shogun.S01.2160p.DV', 'Shogun.S01', 126308, '幕府将军', 'Shogun', 1, '/logo-dark.png'],
+    ['The.Bear.S03.1080p', 'The.Bear.S03', 136315, '熊家餐馆', 'The Bear', 3, '/logo-white.png'],
+    ['Severance.S02.1080p', 'Severance.S02', 95396, '人生切割术', 'Severance', 2, null],
+    ['Ripley.S01.1080p', 'Ripley.S01', 94028, '天才雷普利', 'Ripley', 1, '/logo-gone.png']];
+  const tv0 = H.tv.entries, shows0 = H.tmdb.shows;
+  try {
+    H.env.TMDB_API_KEY = 'tmdb-test';
+    caches.default.m.clear();
+    H.tmdb.movies = [{ id: 9600, query: 'dune part two', title: '沙丘2', date: '2024-03-01' }];
+    H.tv.entries = SHOWS.flatMap(([dir, stem]) => [1, 2].map(i => ({ path_display: `/ram2/${dir}/${stem}E0${i}.mkv`, size: 5000, server_modified: '2026-03-01T00:00:00Z' })));
+    H.tmdb.shows = SHOWS.map(([, , id, zh, en, n, logo]) => ({ id, name: zh, original: en, first: '2024-02-27', logo, seasons: [{ n, air: '2024-02-27', count: 10 }] }));
+    await H.worker.fetch(new Request('https://stream.cuven.online/api/tv?refresh=1'), H.env, H.ctx);
+    while (H.pending.length) await Promise.all(H.pending.splice(0));
+    const lc = await context({ ...devices['iPhone 15 Pro'] });
+    await lc.route('https://image.tmdb.org/**', tmdbImg);
+    const lp = await enter(lc);
+    /* 1) 明暗判断：暗墨占多数、几乎没有亮墨才反 */
+    const tones = await lp.evaluate(ns => Promise.all(ns.map(n => LogoTone.probe('https://image.tmdb.org/t/p/w500/' + n))),
+      ['logo-dark.png', 'logo-gray.png', 'logo-navy.png', 'logo-red.png', 'logo-white.png', 'logo-outline.png']);
+    ok(tones.join() === '1,1,1,0,0,0', `深色字标才反白：黑字 / 深灰 / 深蓝反；纯红、白字、白字黑描边不动（${tones.join(' ')}）`);
+    /* 2) 首页年份轨道那排：TMDB 上没有字标的、字标图读不到的都不出 */
+    await until(lp, () => !!document.querySelector('.year-tv.on[data-year="2024"]'), null, 15000).catch(() => {});
+    await lp.evaluate(() => { const s = document.querySelector('.year-tv[data-year="2024"]'); if (s) s.scrollIntoView({ block: 'center' }); });
+    const rowOk = await until(lp, () => {
+      const cards = [...document.querySelectorAll('.year-tv[data-year="2024"] .tv-card')];
+      return cards.length === 2 && cards.every(c => { const l = c.querySelector('.tv-card-logo.loaded'); return !!l && l.naturalWidth > 0; })
+        && !!document.querySelector('.year-tv[data-year="2024"] .tv-card[data-tv-path*="Shogun"] .tv-card-logo.logo-inv');
+    }, null, 20000).then(() => true, () => false);
+    const R = await lp.evaluate(() => [...document.querySelectorAll('.year-tv[data-year="2024"] .tv-card')].map(c => {
+      const l = c.querySelector('.tv-card-logo'), sl = c.querySelector('.tv-slot');
+      return { path: c.dataset.tvPath, inv: !!l && l.classList.contains('logo-inv'), filter: l ? getComputedStyle(l).filter : '',
+        h: l ? l.offsetHeight : 0, w: l ? l.offsetWidth : 0, slotW: sl.clientWidth };
+    }));
+    const dark = R.find(x => /Shogun/.test(x.path)), white = R.find(x => /Bear/.test(x.path));
+    ok(rowOk && R.length === 2 && !!dark && !!white,
+      `首页年份轨道：TMDB 上没有字标的、字标图读不到的（404）都不出，只留 ${R.map(x => x.path.split('/')[2]).join(' / ')}`);
+    ok(!!dark && dark.inv && /^invert\(1\) hue-rotate\(180deg\) drop-shadow/.test(dark.filter) && !!white && !white.inv && /^drop-shadow/.test(white.filter),
+      `黑字标叠上反相变白（${dark && dark.filter.split(' drop')[0]}），白字标不动；投影排在反相之后，照旧是黑的`);
+    ok(!!dark && !!white && dark.h === 60 && white.h === 60 && Math.abs(dark.w - 240) <= 1 && white.w <= white.slotW && white.w >= white.slotW - 1,
+      `剧集卡字标统一 60 高：4:1 的 ${dark && dark.w}×${dark && dark.h}；15:1 的同高放不下，按卡的内容区收到 ${white && white.w}×${white && white.h}（内容区 ${white && white.slotW} 宽），不溢出`);
+    /* 3) 「最新发行」hero 同一条规矩，字标统一 72 高 */
+    await lp.evaluate(() => scrollTo(0, 0));
+    const hv = await until(lp, () => !!document.querySelector('#tvHeroWrap .tv-hero[data-tv-path*="Shogun"] .tv-hero-logo.logo-inv'), null, 15000).then(() => true, () => false);
+    const HV = await lp.evaluate(() => [...document.querySelectorAll('#tvHeroWrap .tv-hero:not([data-clone])')].map(c => {
+      const l = c.querySelector('.tv-hero-logo');
+      return { path: c.dataset.tvPath, h: l ? l.offsetHeight : -1, w: l ? l.offsetWidth : -1, inW: c.querySelector('.tv-hero-in').clientWidth - 48 };
+    }));
+    ok(hv && HV.length === 2 && HV.every(x => /Shogun|Bear/.test(x.path) && x.h === 72 && x.w <= x.inW + 1),
+      `「最新发行」也只上有字标的两部（${HV.map(x => x.path.split('/')[2]).join(' / ')}），字标统一 72 高、不超出卡，黑字标同样反白`);
+    /* 4) 资料库年份页照旧：四部剧都在 */
+    await lp.evaluate(() => openYearLibrary(2024));
+    const yl = await until(lp, () => document.querySelectorAll('.yl-tv-section:not([hidden]) .yl-row').length >= 4, null, 12000)
+      .then(() => 4, () => lp.evaluate(() => document.querySelectorAll('.yl-tv-section .yl-row').length));
+    ok(yl === 4, `资料库年份页照旧四部剧都在（${yl}）：只有首页按字标筛`);
+    await lc.close();
+  } finally {
+    for (const [n] of MV) { try { fs.unlinkSync(SM(n)); } catch {} }
+    H.tv.entries = tv0; H.tmdb.shows = shows0;
     try { await H.worker.fetch(new Request('https://stream.cuven.online/api/tv?refresh=1'), H.env, H.ctx); while (H.pending.length) await Promise.all(H.pending.splice(0)); } catch (_) {}
     delete H.env.TMDB_API_KEY; H.tmdb.movies = [];
     caches.default.m.clear();

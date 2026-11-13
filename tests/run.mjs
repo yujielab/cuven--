@@ -674,6 +674,24 @@ console.log('\n■ 剧集：/api/tv、/api/tv/episodes、/api/tmdb/season、/api
   const m2 = await get('/api/tmdb?query=Fargo');
   ok(m2.body && m2.body.type === 'movie' && m2.body.id === 275, '不带 type：老规矩，电影优先');
 
+  /* 字标那一问问到了才算数（logoChecked）：「TMDB 上确实没有字标」与「这次没问成」分得清 ——
+     前端首页只出有字标的剧集，靠的就是这一点；没问成的那份不进缓存，好了以后再问就有 */
+  ok(m1.body.logo === 'https://image.tmdb.org/t/p/w500/logo.png' && m1.body.logoChecked === true, '全量结果带字标，logoChecked = true');
+  H.tmdb.shows.push({ id: 777001, name: '没有字标的剧', original: 'No Logo Show', first: '2024-01-01', logo: null, seasons: [{ n: 1, air: '2024-01-01', count: 8 }] },
+    { id: 777002, name: '字标那一问出错的剧', original: 'Shaky Logo Show', first: '2024-01-01', seasons: [{ n: 1, air: '2024-01-01', count: 8 }] });
+  const nl = await get('/api/tmdb?id=777001&type=tv&logo=1');
+  ok(nl.body && nl.body.id === 777001 && nl.body.logo === null && nl.body.logoChecked === true, 'TMDB 上确实没有字标：logo 为空、logoChecked = true');
+  H.tmdb.fail = p => p === '/tv/777002/images';
+  const sr = await H.call('/api/tmdb?id=777002&type=tv&logo=1', 'GET', { Cookie: cookie });
+  const sb = await sr.json(); await settle();
+  H.tmdb.fail = null;
+  const nCalls = H.tmdb.calls.length;
+  const sb2 = (await get('/api/tmdb?id=777002&type=tv&logo=1')).body; await settle();
+  ok(sb && sb.id === 777002 && sb.logo === null && sb.logoChecked === false && /max-age=120/.test(sr.headers.get('cache-control') || '')
+    && H.tmdb.calls.length > nCalls && sb2.logoChecked === true && !!sb2.logo,
+    `字标那一问出错：logoChecked = false、浏览器只留两分钟（${sr.headers.get('cache-control')}）、不进边缘缓存 —— 好了再问就拿到字标`);
+  H.tmdb.shows = H.tmdb.shows.filter(x => x.id < 777000);
+
   // TV 目录不存在 → 空表（前端据此整段不显示），不报错
   H.env.TV_FOLDER = '/nope';
   const t2 = await get('/api/tv');

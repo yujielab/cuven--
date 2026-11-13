@@ -25,7 +25,7 @@ export const os = { calls: [], subs: [], files: {}, quota: false, loginOk: true 
  * 递归列 /ram2 时按 pageSize 分页（0 = 一页给完）；lists 记下 list_folder 被调了几次
  */
 export const tv = { entries: [], pageSize: 0, lists: 0 };
-/** TMDB 替身：shows = [{ id, name, original, first, seasons: [{ n, air, count, eps: [{ zh, en, overview, still }] }] }] */
+/** TMDB 替身：shows = [{ id, name, original, first, logo, seasons: [{ n, air, count, eps: [{ zh, en, overview, still }] }] }]（logo 见 /tv/:id/images） */
 export const tmdb = { calls: [], shows: [], movies: [], videos: {}, find: {}, fail: null };   // fail(path, q) → true：这次回 500
 /** IMDb GraphQL 替身：status ≠ 200 时照实回那个状态（现实里 Worker 打过去多半是 403）；title = 回给 data.title 的对象 */
 export const imdb = { status: 403, calls: 0, title: null };
@@ -174,8 +174,9 @@ globalThis.fetch = async (input, init = {}) => {
       return Response.json({ name: `第 ${se.n} 季`, episodes: (se.eps || []).map((e, i) => ({ episode_number: i + 1,
         name: zh ? e.zh : e.en, overview: zh ? (e.overview || '') : 'EN: ' + e.en, still_path: e.still || null, runtime: 50, air_date: se.air })) });
     }
+    /* x.logo：这部剧的字标文件（默认 /logo.png）；null = TMDB 上没有字标 */
     m = /^\/tv\/(\d+)\/images$/.exec(p);
-    if (m && show(m[1])) return Response.json({ logos: [{ file_path: '/logo.png', iso_639_1: 'zh', aspect_ratio: 3 }],
+    if (m && show(m[1])) return Response.json({ logos: show(m[1]).logo === null ? [] : [{ file_path: show(m[1]).logo || '/logo.png', iso_639_1: 'zh', aspect_ratio: 3 }],
       posters: [{ file_path: '/titled.jpg', iso_639_1: 'en', vote_average: 9 }, { file_path: '/clean.jpg', iso_639_1: null, vote_average: 5 }], backdrops: [] });
     m = /^\/tv\/(\d+)\/credits$/.exec(p);
     if (m && show(m[1])) return Response.json({ cast: [], crew: [] });

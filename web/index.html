@@ -926,7 +926,7 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
 .cs-slide.active .cs-logo-wrap { opacity: 1; transform: translateY(0) translateZ(0); }
 .cs-logo-img {
   max-height: 100%; max-width: min(320px, 74%); object-fit: contain;
-  filter: drop-shadow(0 6px 22px rgba(0,0,0,.55));
+  filter: var(--logo-tone,) drop-shadow(0 6px 22px rgba(0,0,0,.55));
   transform: translateZ(0);
 }
 @media (min-width: 700px) {
@@ -1036,7 +1036,9 @@ body { padding-bottom: calc(var(--dock-gap) + var(--dock-h) + 28px); }
   position: absolute; left: 0; right: 0; bottom: 0; z-index: 2;
   display: flex; flex-direction: column; align-items: center; padding: 0 24px 34px;
 }
-.tv-hero-logo { max-height: 84px; max-width: min(76%, 330px); object-fit: contain; filter: drop-shadow(0 6px 24px rgba(0,0,0,.65)); }
+/* 字标一律同高（剧集卡那排同理）：宽度跟着字标自己的比例走，只在会超出卡的内容区时才按宽度收 ——
+   原来是「最高 84、最宽 76%」，宽字标先被宽度卡住，一张张翻过去字标忽大忽小。底边对齐，与下面那行的间距不变 */
+.tv-hero-logo { height: 72px; width: auto; max-width: 100%; object-fit: contain; object-position: center bottom; filter: var(--logo-tone,) drop-shadow(0 6px 24px rgba(0,0,0,.65)); }
 /* 一张图都取不到时的兜底：总得让人看出这是哪部剧 */
 .tv-hero-title { font-size: clamp(24px, 7vw, 30px); font-weight: 800; letter-spacing: -.024em; color: #fff; text-align: center; text-shadow: 0 2px 16px rgba(0,0,0,.55); }
 /* 参考稿的 hero-gallery-link：17px 正文色 + 一枚尖角，卡上唯一的行动提示 */
@@ -1209,9 +1211,12 @@ img.res-parked { opacity: 0 !important; }
   line-height: 1.2;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
+/* 字标一律同高：一排卡上的字标一样高，宽度跟着字标自己的比例走，只在会超出卡（文案区左右各留 20）时
+   才按宽度收（object-fit 在同高的框里等比缩、底边对齐）。原来是「最高 66、最宽 86%」：
+   宽字标先被宽度卡住、窄字标顶到 66，同一排高高矮矮 */
 .tv-card-logo {
-  max-height: 66px; max-width: 86%; object-fit: contain; object-position: center bottom;
-  filter: drop-shadow(0 4px 18px rgba(0,0,0,.6));
+  height: 60px; width: auto; max-width: 100%; object-fit: contain; object-position: center bottom;
+  filter: var(--logo-tone,) drop-shadow(0 4px 18px rgba(0,0,0,.6));
   opacity: 0; transition: opacity .5s var(--ease-dissolve);
 }
 /* 贴了字标就整块居中 —— 字标居中而「全 9 集」还靠左，两个重心会打架 */
@@ -1876,7 +1881,7 @@ html.standalone .hero-deck { height: calc(85vh - var(--safe-t)); top: var(--safe
 }
 
 .hero-status { padding: 6px 18px; font-size: 11px; letter-spacing: 0.02em; font-weight: 600; background: rgba(0, 0, 0, 0.3); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: var(--hairline) solid rgba(255, 255, 255, 0.15); border-radius: var(--r-pill); transform: translateZ(0); }
-.hero-logo-img { max-width: calc(320px - var(--m, 0) * 60px); max-height: calc(110px - var(--m, 0) * 18px); object-fit: contain; filter: drop-shadow(0 8px 24px rgba(0,0,0, 0.6)); transform: translateZ(0); }
+.hero-logo-img { max-width: calc(320px - var(--m, 0) * 60px); max-height: calc(110px - var(--m, 0) * 18px); object-fit: contain; filter: var(--logo-tone,) drop-shadow(0 8px 24px rgba(0,0,0, 0.6)); transform: translateZ(0); }
 .hero-logo-text { font-size: clamp(32px, 9vw, 48px); letter-spacing: -0.02em; font-weight: 800; text-shadow: 0 4px 32px rgba(0,0,0, 0.9), 0 2px 8px rgba(0,0,0, 0.6); line-height: 1.1; transform: translateZ(0); }
 
 .hero-tags { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; justify-content: center; font-size: 14px; font-weight: 600; color: rgba(255,255,255,.9); text-shadow: 0 2px 8px rgba(0,0,0, 0.5); }
@@ -3245,7 +3250,7 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
   display: block; width: auto; height: auto;
   max-height: 72px; max-width: 200px;          /* 不支持容器单位时的兜底 */
   object-fit: contain;
-  filter: drop-shadow(0 1px 4px rgba(0,0,0,.55));
+  filter: var(--logo-tone,) drop-shadow(0 1px 4px rgba(0,0,0,.55));
   opacity: 0; transform: scale(.94);
   transition: opacity .45s var(--ease-dissolve), transform .5s var(--ease-smooth);
 }
@@ -3410,7 +3415,10 @@ html.rail.rail-float .yl-group { padding-right: var(--float-space); }
 }
 
 .detail-logo-wrap { margin-bottom: 20px; }
-.detail-logo-img { max-width: 320px; max-height: 110px; object-fit: contain; filter: drop-shadow(0 4px 16px rgba(0,0,0,.8)); transform: translateZ(0); }
+.detail-logo-img { max-width: 320px; max-height: 110px; object-fit: contain; filter: var(--logo-tone,) drop-shadow(0 4px 16px rgba(0,0,0,.8)); transform: translateZ(0); }
+/* 深色字标反白（见 LogoTone）：先反相、再把色相转半圈 —— 黑字变白字、深红变浅红，彩色点缀保留原来的色相。
+   各处字标的滤镜都写成 var(--logo-tone,) drop-shadow(…)：反相排在投影之前，投影照旧是黑的 */
+.logo-inv { --logo-tone: invert(1) hue-rotate(180deg); }
 .detail-logo-text { font-size: clamp(32px, 8vw, 48px); font-weight: 800; letter-spacing: -0.02em; text-shadow: 0 4px 24px rgba(0,0,0,.9); line-height: 1.1; transform: translateZ(0); }
 
 .detail-meta-row { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 8px; margin-bottom: 16px; font-size: 13px; font-weight: 600; color: rgba(255,255,255,.9); text-shadow: 0 2px 4px rgba(0,0,0,.6); }
@@ -5150,7 +5158,7 @@ html.standalone .lib-showcase { --sc-top: var(--safe-t); }
   max-height: 148px;
   margin: 14px auto 0;
   object-fit: contain;
-  filter: drop-shadow(0 2px 18px rgba(0, 0, 0, .45));
+  filter: var(--logo-tone,) drop-shadow(0 2px 18px rgba(0, 0, 0, .45));
 }
 
 .sc-note {
@@ -12042,6 +12050,109 @@ function logoUrl(url) {
   return ImgFit.tmdb(url, 'logo', css * ImgFit.dpr(), 'w500');
 }
 
+/* ══ 深色字标自动反白 ═════════════════════════════════════════════════════
+   字标都贴在压暗的画面上（剧照、海报、预告片底下垫着暗渐变，资料库贴纸是深色毛玻璃），按理该是浅色的；
+   可 TMDB 上不少字标（中文的尤多）是黑字，贴上去几乎看不见。挑着反，不是一律反：
+   读一张缩小的同款字标（TMDB w154，带 CORS）的像素，只看实心的部分（半透明的抗锯齿边、柔光不算），按相对亮度分：
+     · 暗墨：亮度 < 0.13（比 #666 还暗，在暗底上对比不到 3:1，基本看不清）
+     · 亮墨：亮度 > 0.30（约 #959595 往上）
+   暗墨占七成以上、亮墨不到一成，才算深色字标。白字黑描边、亮字带暗投影这类黑白各半的不动；
+   纯红这类彩色字标也不动（亮度 0.17，落在两档之间，在暗底上有 3.9:1）。
+   深色字标的贴图打上 .logo-inv：反相再把色相转半圈（见 CSS），黑字变白字，深红变浅红，彩色点缀保留原来的色相。
+   结果按字标文件记在本地（同一枚字标不会变），下次一贴上就是对的；读不到像素（跨域没放行、解码失败）就不反。
+   不必在每个贴字标的地方各接一遍：字标图的 load 在捕获阶段统一接住（load 不冒泡，捕获照样经过 document）；
+   先脱离文档、加载完才插进去的那种（资料库贴纸）自己调 apply */
+const LogoTone = (() => {
+  const KEY = 'logo_tone_v1', CAP = 800;
+  const SEL = '.tv-card-logo, .tv-hero-logo, .hero-logo-img, .cs-logo-img, .sc-logo, .lib-logo, .detail-logo-img';
+  let mem = {};
+  try { mem = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (_) { mem = {}; }
+  let saveT = 0;
+  const persist = () => {
+    clearTimeout(saveT);
+    saveT = setTimeout(() => {
+      const ks = Object.keys(mem);                  /* 先进先出：对象的键按写入顺序排 */
+      if (ks.length > CAP) ks.slice(0, ks.length - CAP).forEach(k => delete mem[k]);
+      try { localStorage.setItem(KEY, JSON.stringify(mem)); } catch (_) {}
+    }, 800);
+  };
+  /* 同一枚字标的不同尺寸（w154 / w500 / original）是同一个文件：按 TMDB 的文件路径记 */
+  const keyOf = url => {
+    const m = /image\.tmdb\.org\/t\/p\/[^/]+(\/[^?#]+)/.exec(url || '');
+    return m ? m[1] : String(url || '').split(/[?#]/)[0];
+  };
+  /* 量的那张：TMDB 取 w154 就分得出明暗（矢量字标原样取）。另带一个参数 —— 页面上的字标是不带 CORS 取的，
+     同一个 URL 再以 CORS 方式去取，可能拿到缓存里那份没有 ACAO 的回包而失败（液态玻璃那边踩过同一个坑） */
+  const probeUrl = url => {
+    let u = String(url);
+    if (/image\.tmdb\.org\/t\/p\//.test(u) && !/\.svg(\?|$)/i.test(u)) u = u.replace(/\/t\/p\/(original|w\d+|h\d+)\//, '/t/p/w154/');
+    return u + (u.indexOf('?') < 0 ? '?' : '&') + 'lt=1';
+  };
+  const LIN = new Float32Array(256);
+  for (let i = 0; i < 256; i++) { const c = i / 255; LIN[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+  /* 1 = 深色字标（要反），0 = 不用反，null = 量不出来（几乎全透明） */
+  function measure(img) {
+    const nw = img.naturalWidth, nh = img.naturalHeight;
+    if (!nw || !nh) return null;
+    const k = Math.min(1, 160 / Math.max(nw, nh));
+    const w = Math.max(1, Math.round(nw * k)), h = Math.max(1, Math.round(nh * k));
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const cx = cv.getContext('2d', { willReadFrequently: true });
+    if (!cx) return null;
+    cx.drawImage(img, 0, 0, w, h);
+    const px = cx.getImageData(0, 0, w, h).data;     /* 跨域没放行的话这里抛 SecurityError */
+    let ink = 0, dim = 0, lit = 0;
+    for (let i = 0; i < px.length; i += 4) {
+      if (px[i + 3] < 128) continue;
+      const L = 0.2126 * LIN[px[i]] + 0.7152 * LIN[px[i + 1]] + 0.0722 * LIN[px[i + 2]];
+      ink++;
+      if (L < 0.13) dim++; else if (L > 0.3) lit++;
+    }
+    if (ink < 24) return null;
+    return dim >= ink * 0.7 && lit <= ink * 0.1 ? 1 : 0;
+  }
+  const inflight = new Map();
+  function probe(url) {
+    const k = keyOf(url);
+    if (!k) return Promise.resolve(null);
+    if (k in mem) return Promise.resolve(mem[k]);
+    if (inflight.has(k)) return inflight.get(k);
+    const p = new Promise(resolve => {
+      const im = new Image();
+      im.crossOrigin = 'anonymous';
+      im.decoding = 'async';
+      im.onload = () => {
+        let v = null;
+        try { v = measure(im); } catch (_) { v = null; }
+        if (v !== null) { mem[k] = v; persist(); }
+        resolve(v);
+      };
+      im.onerror = () => resolve(null);
+      im.src = probeUrl(url);
+    });
+    inflight.set(k, p);
+    p.then(() => inflight.delete(k));
+    return p;
+  }
+  /* 给一张贴上去的字标定调：量过的当场打上，没量过的量完再打（这期间贴图换了图就作罢） */
+  function apply(img) {
+    const url = img && (img.currentSrc || img.src);
+    if (!url || /^data:/.test(url)) return;
+    const k = keyOf(url);
+    if (k in mem) { img.classList.toggle('logo-inv', mem[k] === 1); return; }
+    probe(url).then(v => {
+      if (v === null || keyOf(img.currentSrc || img.src) !== k) return;
+      img.classList.toggle('logo-inv', v === 1);
+    });
+  }
+  document.addEventListener('load', e => {
+    const t = e.target;
+    if (t && t.tagName === 'IMG' && t.matches(SEL)) apply(t);
+  }, true);
+  return { probe, apply };
+})();
+
 /* 顶部那枚提示胶囊：断网常驻，恢复 / 省流提示一会儿就收 */
 const NetBanner = (() => {
   let el = null, hideT = 0;
@@ -13307,6 +13418,66 @@ const ArtGate = (() => {
   };
 })();
 
+/* ══ 首页只出有字标的剧集 ═══════════════════════════════════════════════════
+   首页的剧集卡（年份轨道下面那排）与「最新发行」hero 都是「画面 + 官方字标」的版式：没有字标的那几部只能排一行字，
+   跟旁边的卡不是一个样子 —— 首页不出它们；资料库、年份页、搜索、详情照旧。
+   「没有字标」只认确定的答案：
+     · TMDB 那一问问到了、确实没有（logoChecked 且 logo 为空）—— 记在本地三天（之后再问一次：TMDB 上可能补了字标）；
+     · 字标图本身读不到（404、解码失败）—— 只记这一趟，下次打开再试。
+   没问成（出错、超时、旧版后端的回包没有 logoChecked）不算：弱网下整排剧集消失，比出一张没字标的卡糟。
+   已经排在首页上的卡，答案一到就收起来（与没有封面的卡同一套收法：淡出 + 宽度收拢，一排收空了那排藏起来） */
+const LogoGate = (() => {
+  const KEY = 'tv_nologo_v1', TTL = 3 * 86400000;
+  let mem = {};
+  try { mem = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (_) { mem = {}; }
+  const t0 = Date.now();
+  for (const k in mem) if (!(t0 - mem[k] < TTL)) delete mem[k];
+  const failed = new Set();          /* 字标图读不到的：只这一趟 */
+  let saveT = 0;
+  const persist = () => { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(KEY, JSON.stringify(mem)); } catch (_) {} }, 600); };
+  const off = path => !!(path && (mem[path] || failed.has(path)));
+  /* 只收首页年份轨道里的剧集卡；hero 在拼之前就筛过了（它有首尾克隆和圆点，不能拆一张） */
+  function prune(path) {
+    let sel = path;
+    try { sel = CSS.escape(path); } catch (_) { sel = String(path).replace(/["\\]/g, '\\$&'); }
+    document.querySelectorAll('#view-home .tv-card[data-tv-path="' + sel + '"]').forEach(c => ArtGate.collapse(c));
+  }
+  return {
+    off,
+    /** TMDB 回包到了（d 为空就是没问成，不算） */
+    settle(path, d) {
+      if (!path || !d) return;
+      if (d.logo) { if (mem[path]) { delete mem[path]; persist(); } return; }
+      if (d.logoChecked !== true) return;
+      if (!mem[path]) { mem[path] = Date.now(); persist(); }
+      prune(path);
+    },
+    /** 字标图读不到 */
+    fail(path) {
+      if (!path) return;
+      failed.add(path);
+      prune(path);
+    },
+    /** 排首页前先筛 */
+    filterTv: list => (list || []).filter(s => !(s && off(s.path))),
+  };
+})();
+
+/* 字标图读不读得到：读到 true，挂了 false，ms 内没回音 null（慢不算挂） */
+function logoLoads(url, ms) {
+  return new Promise(resolve => {
+    if (!url) { resolve(false); return; }
+    const im = new Image();
+    let done = false;
+    const fin = v => { if (!done) { done = true; resolve(v); } };
+    im.onload = () => fin(true);
+    im.onerror = () => fin(false);
+    setTimeout(() => fin(null), ms);
+    im.decoding = 'async';
+    im.src = url;
+  });
+}
+
 const negTmdbCache = new Map(); 
 const NEG_TTL = 90 * 1000;
 function negSet(k) { negTmdbCache.set(k, Date.now() + NEG_TTL); }
@@ -14339,6 +14510,7 @@ async function loadPosterElement(el) {
         sticker.className = 'lib-sticker';
         sticker.appendChild(img);
         panel.insertBefore(sticker, panel.firstChild);
+        LogoTone.apply(img);         /* 它加载时还不在文档里，捕获阶段那条接不到：自己定调（深色字标反白） */
         requestAnimationFrame(() => img.classList.add('loaded'));
       };
       img.src = downsizeForCard(d.logo, false);
@@ -16479,7 +16651,7 @@ function tvRenderSection(sec, list) {
 async function tvBuildHero(sec, list) {
   const wrap = sec.querySelector('#tvHeroWrap');
   if (!wrap) return;
-  const cands = list.slice(0, 8);
+  const cands = LogoGate.filterTv(list).slice(0, 8);      /* 已知没有字标的不占候选名额 */
   const metas = await Promise.all(cands.map(s => tvFetchMeta(s.en || s.zh || s.title, s.year, s.tmdbId).catch(() => null)));
   if (!wrap.isConnected) return;
 
@@ -16488,9 +16660,11 @@ async function tvBuildHero(sec, list) {
     const d = (m && (m.release_date || (m.year ? m.year + '-01-01' : ''))) || x.s.added || '';
     return Date.parse(d) || 0;
   };
-  /* 没有封面的剧不上 hero（原来一张图都没有时退回全部 —— 那就是一排空卡） */
+  /* 没有封面的剧不上 hero（原来一张图都没有时退回全部 —— 那就是一排空卡）；
+     没有字标的也不上（首页只出有字标的剧集，见 LogoGate）—— 确定没有的顺手记下，年份轨道里那张也收掉 */
+  cands.forEach((s, i) => LogoGate.settle(s.path, metas[i]));
   let items = cands.map((s, i) => ({ s, m: metas[i] }))
-    .filter(x => x.m && (x.m.posterClean || x.m.poster || x.m.backdrop))
+    .filter(x => x.m && (x.m.posterClean || x.m.poster || x.m.backdrop) && x.m.logo && !LogoGate.off(x.s.path))
     .sort((a, b) => relKey(b) - relKey(a));
   /* 同一部剧只上一次：一次补进来三季，hero 不该被同一张脸占三格。留季号大的那个 */
   const seen = new Map();
@@ -16499,8 +16673,14 @@ async function tvBuildHero(sec, list) {
     const cur = seen.get(k);
     if (!cur || (x.s.season || 0) > (cur.s.season || 0)) seen.set(k, x);
   });
-  items = items.filter(x => seen.get(String(x.s.en || x.s.zh || x.s.title || x.s.path).toLowerCase()) === x).slice(0, 5);
-  if (!items.length) { wrap.remove(); return; }
+  items = items.filter(x => seen.get(String(x.s.en || x.s.zh || x.s.title || x.s.path).toLowerCase()) === x);
+  /* 字标图先取一遍：读不到的这一趟不上（年份轨道里那张也收掉）；取到的进了缓存，卡上那张直接出。
+     慢（4 秒没回音）不算读不到 */
+  const reads = await Promise.all(items.map(x => logoLoads(downsizeForCard(x.m.logo, false), 4000)));
+  if (!wrap.isConnected) return;
+  items = items.filter((x, i) => { if (reads[i] === false) { LogoGate.fail(x.s.path); return false; } return true; }).slice(0, 5);
+  /* 一部都上不了：整段藏起来（剧集区只有这一块，留着就是一截空白） */
+  if (!items.length) { wrap.remove(); sec.hidden = true; return; }
 
   wrap.innerHTML =
     '<div class="tv-hero-rail">' + items.map(tvHeroCardHTML).join('') + '</div>' +
@@ -16658,7 +16838,8 @@ async function tvFillYearList(year) {
    它们仍在上方的剧集区里 */
 function tvFillYearRows(list) {
   const by = {};
-  (list || []).forEach(s => { if (s.year) (by[s.year] = by[s.year] || []).push(s); });
+  /* 首页只出有字标的剧集（见 LogoGate）：已知没有字标的先筛掉，不排出来再收 */
+  LogoGate.filterTv(list).forEach(s => { if (s.year) (by[s.year] = by[s.year] || []).push(s); });
   /* 两段排序：先按入库时间倒序决定「进哪 15 部」，再按季/片名决定「怎么摆」。
      只做后者的话，被截掉的是片名靠后的，与新旧无关 —— 那不合理 */
   const ts = x => String(x.added || '');
@@ -16778,6 +16959,11 @@ async function tvLoadArt(el) {
   const pic = d && (d.posterClean || d.poster || d.backdrop);
   if (host && (pic || d || tvMetaMiss.has(tid ? 'tv:#' + tid : tvMetaKey(q, el.dataset.tvY)))) ArtGate.settleTv(host.dataset.tvPath, !!pic);
   if (!d) { done(false); return; }
+  /* 首页只出有字标的剧集（见 LogoGate）：确定没有字标的，首页上这张卡此刻已经在收了，图就不必再取 */
+  if (host) {
+    LogoGate.settle(host.dataset.tvPath, d);
+    if (LogoGate.off(host.dataset.tvPath) && host.closest('#view-home')) return;
+  }
   ylMeta(el, d);
   const clean = d.posterClean || '';
   /* data-tv-land：这一格要横图（16:10 大卡、瀑布流矮格）—— 剧照优先，
@@ -16851,6 +17037,7 @@ async function tvLoadArt(el) {
         lg.remove();
         if (title) title.classList.remove('is-off');
         if (copy) copy.classList.remove('has-logo');
+        LogoGate.fail(card.dataset.tvPath);    /* 字标读不到：首页这一趟不出这部（别处退回文字片名） */
       };
       if (title) title.classList.add('is-off');
       if (copy) copy.classList.add('has-logo');
