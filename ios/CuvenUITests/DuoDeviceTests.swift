@@ -235,9 +235,18 @@ final class DuoDeviceTests: XCTestCase {
         for _ in 0..<8 { app.swipeDown() }
         sleep(1)
 
-        // 账户与设置：网页版导航胶囊里的头像，这里是「账户」标签
-        tab(app, "账户"); sleep(2)
-        snap("duo-06-account")
+        // 账户与设置：主页标题那一行右边的头像（从侧边导航里分出来了）
+        snap("duo-02d-home-avatar")
+        let avatar = app.buttons["home-account"].firstMatch
+        if avatar.waitForExistence(timeout: 5) {
+            avatar.tap(); sleep(2)
+            snap("duo-06-account")
+            let done = app.buttons["account-done"].firstMatch
+            if done.waitForExistence(timeout: 3) { done.tap() } else { app.swipeDown() }
+            sleep(1)
+        } else {
+            XCTFail("主页右上没有头像")
+        }
 
         tab(app, "搜索"); sleep(2)
         snap("duo-07a-search-home")          // 最近添加：海报网格

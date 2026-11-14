@@ -60,9 +60,10 @@ struct CuvenApp: App {
     }
 }
 
-enum AppTab: Hashable { case home, library, account, search }
+enum AppTab: Hashable { case home, library, search }
 
-/// 系统标签栏：主页 / 资料库 / 账户，搜索单独一颗（搜索标签：横在底下时 iOS 26 把它拆出来）。
+/// 系统标签栏：主页 / 资料库，搜索单独一颗（搜索标签：横在底下时 iOS 26 把它拆出来）。
+/// 账户与设置不是标签：主页标题那一行右边的头像点开（用户要求：头像从侧边导航里分出来）。
 ///
 /// iPhone Duo：导航栏与工具栏一律用系统的（返回在侧边那一列最上面）。标签栏在展开竖拿时也是系统的（横在底下）；
 /// 折起（外屏，横竖都算）和展开横拿时，系统把标签栏竖着放进侧边那一列、搜索和别的格挤在一枚胶囊里——
@@ -89,10 +90,6 @@ struct RootView: View {
             }
             Tab("资料库", systemImage: "square.stack.fill", value: AppTab.library) {
                 LibraryView().duoHidesTabBar().id(roots[.library, default: 0])
-            }
-            // 网页版导航胶囊里的头像：账户与设置
-            Tab("账户", systemImage: "person.crop.circle.fill", value: AppTab.account) {
-                AccountView(asTab: true).duoHidesTabBar().id(roots[.account, default: 0])
             }
             Tab(value: AppTab.search, role: .search) {
                 SearchView().duoHidesTabBar().id(roots[.search, default: 0])

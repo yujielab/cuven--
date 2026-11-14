@@ -104,9 +104,22 @@ final class TourTests: XCTestCase {
         app.swipeUp(); sleep(2)
         app.swipeUp(); sleep(2)
         snap("11b-library-intro")
-        tapTab(["账户"])
+        // 账户与设置：主页标题那一行右边的头像（不再是一个标签）
+        tapTab(["主页"])
         sleep(2)
-        snap("12-account")
+        for _ in 0..<6 { app.swipeDown() }
+        sleep(1)
+        let avatar = app.buttons["home-account"].firstMatch
+        if avatar.waitForExistence(timeout: 5) {
+            avatar.tap()
+            sleep(2)
+            snap("12-account")
+            let done = app.buttons["account-done"].firstMatch
+            if done.waitForExistence(timeout: 3) { done.tap() } else { app.swipeDown() }
+            sleep(1)
+        } else {
+            print("TOUR account: no avatar on home")
+        }
         tapTab(["搜索", "Search"])
         sleep(3)
         snap("12b-search-home")

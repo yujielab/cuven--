@@ -33,8 +33,8 @@ struct DSMetrics {
     var posterWidth: CGFloat { cardWidth(visible: width < 500 ? 2.6 : (width < 800 ? 4.4 : 6.4)) }
     /// 16:9 卡宽：折起一张多一点，展开两张多（竖）/ 三张多（横）（S6）
     var wideCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.15 : (width < 800 ? 2.2 : 3.3)) }
-    /// 精选卡（3:4 的大号竖卡）：折起一屏一张多一截，展开两张多 / 三张多
-    var featureCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.3 : (width < 800 ? 2.3 : 3.4)) }
+    /// 精选卡（3:4 的大号竖卡）：在「一屏一张多一截 / 两张多 / 三张多」的基础上再大 30%（用户要求）
+    var featureCardWidth: CGFloat { (cardWidth(visible: width < 500 ? 1.3 : (width < 800 ? 2.3 : 3.4)) * 1.3).rounded(.down) }
     /// 长文案的分集卡（方卡）：折起一屏将近两张，展开三张、四张
     var episodeTallCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.9 : (width < 800 ? 2.9 : 4.1)) }
     /// 详情页「简介」那一排卡：折起一张多一截（Apple TV 的简介卡约占屏宽七成）
@@ -430,16 +430,16 @@ struct DSMediaCard<MenuItems: View>: View {
 // MARK: - 精选卡（Apple TV 的精选：一张大号竖卡）
 //
 // 3:4、大圆角，一圈很细的亮边（深色页面上卡的轮廓）；画面铺满（ImageEffect.featureCard：裁成 3:4，下半段渐进式模糊），
-// 再压一层由透明到暗的渐变（F34、C58）；左下一列：字标（没有就是粗体片名）→「★ 电影 · 剧情 · 惊悚」（一颗小黑圆章 + 白字）
-// →「评分 8.6 · 2025 · 2 小时 15 分钟」（灰字）。卡下不写字（T20）
+// 再压一层由透明到暗的渐变（F34、C58）；左下一列：字标（没有就是粗体片名）→「★ 为您的口味量身定制的内容」（一颗小黑圆章 + 白字）
+// →「Cuven 独占」（灰字）。卡下不写字（T20）
 
 struct DSFeatureCard: View {
     let art: URL?
     let logo: URL?
     let title: String
-    /// 白字那一行：「电影 · 剧情 · 惊悚」
+    /// 白字那一行（小黑圆章后面）
     let kicker: String
-    /// 灰字那一行：「评分 8.6 · 2025 · 2 小时 15 分钟」
+    /// 灰字那一行
     let line: String
     let width: CGFloat
 
@@ -549,17 +549,60 @@ struct DSPressReporting: ButtonStyle {
 // MARK: - 按钮（S17：主操作是白色胶囊黑字——tvOS 聚焦的按钮；次操作是半透明材质。都至少 44 高：F74）
 
 struct DSPlayButtonStyle: ButtonStyle {
+    /// 按自然宽度放大几倍（头图上的「播放」是 1.45：用户要求加宽 45%）；字和图标在中间。
+    /// 1 就是原来的样子：按字的宽度，标签自己带了 maxWidth 的（详情页、资料库）照旧拉满
+    var widen: CGFloat = 1
+
+    @ViewBuilder
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.headline)
-            .foregroundStyle(.black)
-            .padding(.horizontal, 22)
-            .frame(minHeight: 48)
+        if widen > 1 {
+            let layout = DSWiden(factor: widen)
+            layout {
+                configuration.label
+                    .font(.headline)
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 22)
+                    .frame(maxWidth: .infinity, minHeight: 48)
+            }
+            .modifier(DSPlayChrome(pressed: configuration.isPressed))
+        } else {
+            configuration.label
+                .font(.headline)
+                .foregroundStyle(.black)
+                .padding(.horizontal, 22)
+                .frame(minHeight: 48)
+                .modifier(DSPlayChrome(pressed: configuration.isPressed))
+        }
+    }
+}
+
+/// 白色胶囊、按下缩一点
+private struct DSPlayChrome: ViewModifier {
+    let pressed: Bool
+
+    func body(content: Content) -> some View {
+        content
             .background(Color.white, in: Capsule())
-            .scaleEffect(configuration.isPressed ? 0.96 : 1)
-            .opacity(configuration.isPressed ? 0.9 : 1)
-            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: configuration.isPressed)
+            .scaleEffect(pressed ? 0.96 : 1)
+            .opacity(pressed ? 0.9 : 1)
+            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: pressed)
             .contentShape(Capsule())
+    }
+}
+
+/// 把唯一的子视图按理想宽度放大 factor 倍（高照旧）：头图上加宽的「播放」
+struct DSWiden: Layout {
+    var factor: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let s = subviews.first else { return .zero }
+        let ideal = s.sizeThatFits(.unspecified)
+        return CGSize(width: (ideal.width * max(1, factor)).rounded(), height: ideal.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: CGPoint(x: bounds.midX, y: bounds.midY), anchor: .center,
+                              proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
     }
 }
 
@@ -723,8 +766,9 @@ struct DSHeroCarousel: View {
             }
             .allowsHitTesting(false)
             HStack(spacing: 12) {
+                // 「播放」比自然宽度宽 45%（用户要求）
                 Button(action: p.play) { Label(p.playTitle, systemImage: "play.fill") }
-                    .buttonStyle(.dsPlay)
+                    .buttonStyle(DSPlayButtonStyle(widen: 1.45))
                     .accessibilityIdentifier("hero-play")
                 detailLink(p)
                     .buttonStyle(.dsSecondary)
@@ -894,10 +938,13 @@ struct DSBlurFadeImage: View {
 struct DSBlurFade: ViewModifier {
     let on: Bool
     var radius: CGFloat = 24
+    /// 不透明的模糊（整张画面：四边不往里渗透明）。字标、文字这种带透明底的要用 false，
+    /// 不然透明的地方在淡入那一瞬间被糊成一块黑底（详情页字标「闪一下黑框」就是这个）
+    var opaque = true
 
     func body(content: Content) -> some View {
         content
-            .blur(radius: on ? radius : 0, opaque: true)
+            .blur(radius: on ? radius : 0, opaque: opaque)
             .opacity(on ? 0 : 1)
     }
 }
@@ -907,8 +954,14 @@ extension AnyTransition {
         .modifier(active: DSBlurFade(on: true), identity: DSBlurFade(on: false))
     }
 
-    /// 轻一点的模糊淡入（卡上的图、字标第一次载入）
+    /// 轻一点的模糊淡入（卡上的图第一次载入）
     static func dsBlurFade(radius: CGFloat) -> AnyTransition {
         .modifier(active: DSBlurFade(on: true, radius: radius), identity: DSBlurFade(on: false, radius: radius))
+    }
+
+    /// 带透明底的东西（字标、文字）的模糊淡入：透明的地方保持透明，不出黑框
+    static func dsBlurFadeClear(radius: CGFloat = 24) -> AnyTransition {
+        .modifier(active: DSBlurFade(on: true, radius: radius, opaque: false),
+                  identity: DSBlurFade(on: false, radius: radius, opaque: false))
     }
 }

@@ -4,13 +4,15 @@ import SwiftUI
 //
 // 和 Apple TV 的主页一样只有两样东西：最上面一张铺满的轮播头图（S15–S17），下面一排排海报（T23、S8）。
 // 头图几乎占满一屏，连同 iPhone Duo 侧边那一列一起平铺（画面在系统栏底下过去，不做镜像模糊：F6、S19），
-// 左上一行白色大字「Home」，页码点浮在画面底部。
+// 左上一行白色大字「Home」、右上一枚头像（点开账户与设置），页码点浮在画面底部。
 // 下面的顺序：继续观看（有才有）→ 今年 → 去年（电影和剧集一起，最新入库的在前）→ 五个大类（引人入胜的剧情、令人坐立难安、
 // 科幻和奇幻之旅、动作演员就位、刺激犯罪与偷窃）。卡上只有画面：无字主视觉 + 官方字标，或本来就印着片名的海报，卡下不写字（T20、F80）。
 // 分区之间只靠留白（F3、F12、F38）。折起的外屏、展开的竖拿 / 横拿是同一套部件，只按可用宽度长大（S1、D2、F9）。
 
 struct HomeView: View {
     @Environment(AppModel.self) private var model
+    /// 右上头像点开的账户与设置（用户要求：头像从侧边导航里拿出来，放在主页标题这一行的右边）
+    @State private var showAccount = false
 
     var body: some View {
         let _ = Perf.count("home")
@@ -42,6 +44,7 @@ struct HomeView: View {
             .background(Theme.bg)
             .toolbar(.hidden, for: .navigationBar)
         }
+        .sheet(isPresented: $showAccount) { AccountView() }
     }
 
     // MARK: 头图
@@ -65,17 +68,37 @@ struct HomeView: View {
             } else {
                 Color.clear.frame(width: fullWidth, height: max(insets.top, 12) + 64)
             }
-            // 左上的白字「Home」：Apple TV 主页那样的大标题，压在画面上、跟着头图一起滚走（C13、F34）
-            Text("Home")
-                .font(.largeTitle.bold())
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.35), radius: 10, y: 2)
-                .padding(.top, max(insets.top, 12) + 8)
-                .padding(.leading, insets.leading + m.margin)
-                .allowsHitTesting(false)
-                .accessibilityAddTraits(.isHeader)
+            // 最上面一行：左边白字「Home」（Apple TV 主页那样的大标题，压在画面上、跟着头图一起滚走：C13、F34），
+            // 右边一枚头像（玻璃圈里的圆头像），点开是账户与设置——头像不再放在侧边导航里（用户要求）
+            HStack(alignment: .center, spacing: 12) {
+                Text("Home")
+                    .font(.largeTitle.bold())
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.35), radius: 10, y: 2)
+                    .allowsHitTesting(false)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 12)
+                accountButton
+            }
+            .padding(.top, max(insets.top, 12) + 8)
+            .padding(.leading, insets.leading + m.margin)
+            .padding(.trailing, insets.trailing + m.margin)
+            .frame(width: fullWidth)
         }
         .frame(width: fullWidth, alignment: .topLeading)
+    }
+
+    /// 头像：38 点的圆头像套在一圈 Liquid Glass 里（共 46 点，点得到的范围够大：F74）
+    private var accountButton: some View {
+        Button { showAccount = true } label: {
+            AvatarView(size: 38)
+                .padding(4)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("账户与设置")
+        .accessibilityIdentifier("home-account")
     }
 
     /// 头图的每一页（T30–T32）：只放拿到了无字背景 + 字标的，最多 5 部（AppModel.resolveHeroes 挑）。
@@ -207,15 +230,10 @@ struct HomeView: View {
     private func featuredCard(_ v: Video, _ m: DSMetrics) -> some View {
         let w = m.featureCardWidth
         let art = model.featuredArt(v, width: w)
-        let meta = model.meta(v)
-        let kicker = (["电影"] + (meta?.genres ?? []).prefix(2)).joined(separator: " · ")
-        let line = DetailText.line([
-            meta?.rating.map { "评分 " + String(format: "%.1f", $0) },
-            model.year(v).map { String($0) },
-            Format.runtime(meta?.runtime),
-        ])
+        // 用户要求：分类那一行写「为您的口味量身定制的内容」，评分那一行写「Cuven 独占」
         return ZoomLink(route: .movie(v), slot: "featured") {
-            DSFeatureCard(art: art?.url, logo: art?.logo, title: model.title(v), kicker: kicker, line: line, width: w)
+            DSFeatureCard(art: art?.url, logo: art?.logo, title: model.title(v),
+                          kicker: "为您的口味量身定制的内容", line: "Cuven 独占", width: w)
         }
         .accessibilityIdentifier("featured-card")
         .movieMenu(v)

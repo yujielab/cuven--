@@ -596,7 +596,7 @@ struct DetailScaffold<Episodes: View>: View {
             // 系统栏压住的那一截（展开横拿、外屏时栏在侧边一列，顶上几乎没有：D5、D6）
             let barBottom = geo.safeAreaInsets.top
             // 左下那一列字的顶边升到栏底下、快淡完时，片名出现在导航栏里（字块约高：字标 + 一行信息 + 按钮）
-            let blockH: CGFloat = m.wide ? 192 : 168
+            let blockH = Self.blockHeight(m)
             let titleAt: CGFloat = heroH - blockH - barBottom + 6
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -649,10 +649,15 @@ struct DetailScaffold<Episodes: View>: View {
         max(420, (h * (h > w ? 0.9 : 0.92)).rounded())
     }
 
+    /// 左下那一列字（字标格 + 一行信息 + 按钮）大约多高
+    static func blockHeight(_ m: DSMetrics) -> CGFloat { m.wide ? 192 : 168 }
+
     private func hero(_ m: DSMetrics, width: CGFloat, height: CGFloat, insets: EdgeInsets, barBottom: CGFloat) -> some View {
-        // 头部比宽还高就用竖版全屏图，否则用 16:9（和首页头图同一条规则：S15）；画面占头部上面七成（横着的屏八成）
+        // 头部比宽还高就用竖版全屏图，否则用 16:9（和首页头图同一条规则：S15）。
+        // 画面连同下段那一截渐进式模糊，刚好收在字标上沿（用户要求：模糊落在字标上方那条线上）：
+        // 字块离底 32、高 blockHeight，画面底边比字块顶边低 16（字标在格子里靠下放，看得见的上沿还要再低一点）
         let tall = height > width
-        let imageH = (height * (tall ? 0.7 : 0.8)).rounded()
+        let imageH = min((height * 0.85).rounded(), max((height * 0.5).rounded(), (height - 32 - Self.blockHeight(m) + 16).rounded()))
         let pick = art.flatMap { tall ? ($0.tall ?? $0.wide) : ($0.wide ?? $0.tall) }
         // 字块的顶边从栏底下 40 点开始淡，升到栏底上方 40 点时淡完（没滚动时字块离栏底远得多，是全亮的）
         let fadeFrom = barBottom - 40
@@ -689,14 +694,15 @@ struct DetailScaffold<Episodes: View>: View {
                             .accessibilityElement(children: .ignore)
                             .accessibilityLabel(title)
                             .accessibilityAddTraits(.isHeader)
-                            .transition(.dsBlurFade)
+                            // 透明底的模糊淡入：不透明的模糊会把字标四周的透明糊成一块黑框（「字标闪一下」）
+                            .transition(.dsBlurFadeClear())
                     } else {
                         Text(title)
                             .font(.largeTitle.bold())
                             .foregroundStyle(.white)
                             .lineLimit(3)
                             .accessibilityAddTraits(.isHeader)
-                            .transition(.dsBlurFade)
+                            .transition(.dsBlurFadeClear())
                     }
                 } else {
                     Color.clear.frame(height: logoH)
@@ -862,8 +868,8 @@ struct DetailHeroBackdrop: View {
             }
             .frame(width: width, height: imageHeight)
             .clipped()
-            // 画面下段化进底色：配合画面里那段渐进式模糊，看不出接缝
-            LinearGradient(stops: Self.dissolve(tone, from: imgEnd * 0.58, to: imgEnd), startPoint: .top, endPoint: .bottom)
+            // 画面最下面那一段化进底色：和画面里那段渐进式模糊在同一截（画面高的 76% 起，到底边——也就是字标上沿），看不出接缝
+            LinearGradient(stops: Self.dissolve(tone, from: imgEnd * 0.76, to: imgEnd), startPoint: .top, endPoint: .bottom)
             // 顶上浅浅压暗：状态栏和返回钮停在画面上也看得清（F34）
             LinearGradient(colors: [.black.opacity(0.38), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.18))
             // 头部最后一小段融进页面的黑
