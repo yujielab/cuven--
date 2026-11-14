@@ -912,6 +912,33 @@ final class AppModel {
         return list.prefix(limit).map(\.video)
     }
 
+    /// 精选区顶上的立体海报封面：印着片名的海报（一眼认得出是哪一部）——Apple 海报 → TMDB 海报 → Apple 竖版主视觉
+    func coverArt(_ v: Video) -> URL? {
+        let a = appleArt(v)
+        if let p = Self.nonEmpty(a?.poster) { return URL(string: AppleImage.sized(p, width: 450) ?? p) }
+        let m = meta(v)
+        if let p = Self.nonEmpty(m?.poster) ?? Self.nonEmpty(m?.posterClean) { return TMDBImage.url(p, "w500") }
+        if let t = Self.nonEmpty(a?.tall) { return URL(string: AppleImage.sized(t, width: 450) ?? t) }
+        return nil
+    }
+
+    /// 主页「精选剧集」：评分 6 分以上、有海报也有剧照的剧，评分高的在前（同分的新的在前）；同一部剧的几季只出一次
+    func featuredSeries(limit: Int = .max) -> [Series] {
+        var seen = Set<String>()
+        var list: [(series: Series, rating: Double, year: String)] = []
+        for s in series {
+            let m = seriesMetas[s.path]
+            guard let r = m?.rating, r >= 6,
+                  Self.nonEmpty(m?.poster) != nil || Self.nonEmpty(m?.posterClean) != nil,
+                  Self.nonEmpty(m?.backdrop) != nil else { continue }
+            let key = (s.tmdbId ?? m?.id).map { "t\($0)" } ?? "n" + s.name
+            guard seen.insert(key).inserted else { continue }
+            list.append((s, r, s.year ?? m?.year ?? ""))
+        }
+        list.sort { a, b in a.rating != b.rating ? a.rating > b.rating : a.year > b.year }
+        return list.prefix(limit).map(\.series)
+    }
+
     /// 剧集的海报卡：TMDB 纯净海报 + 字标 → 印着剧名的海报
     func seriesPosterArt(_ s: Series, width: CGFloat = 0) -> (url: URL?, logo: URL?) {
         let m = seriesMetas[s.path]

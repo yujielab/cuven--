@@ -72,14 +72,21 @@ final class DuoDeviceTests: XCTestCase {
         report(app, "home")
         snap("duo-01-home")
         app.swipeUp(); sleep(2); snap("duo-02-home-rows")
-        // 精选电影：今年 / 去年下面一排大号竖卡（评分高的在前）
-        if reveal(app, app.buttons.matching(identifier: "featured-card"), swipes: 3) != nil {
+        // 精选电影 / 精选剧集：今年 / 去年下面，照游戏 App 合集页的一整块（立体海报 + 大标题 + 一排带底栏的大卡）
+        if reveal(app, app.buttons.matching(identifier: "featured-card"), swipes: 5) != nil {
             sleep(2)
             snap("duo-02c-home-featured")
         } else {
             print("DUO featured card: none")
         }
-        for _ in 0..<5 { app.swipeDown() }
+        if reveal(app, app.buttons.matching(identifier: "featured-series-card"), swipes: 4) != nil {
+            sleep(2)
+            snap("duo-02e-home-featured-tv")
+        } else {
+            print("DUO featured series card: none")
+        }
+        // 回到顶上：看到「Home」那一行的头像就停（多拉一下会触发下拉刷新）
+        for _ in 0..<12 where !app.buttons["home-account"].firstMatch.isOnScreen(in: app) { app.swipeDown() }
         sleep(1)
 
         // 详情：头图上此刻在屏上的那一页的「详情」（详情页从头图上放大出来）；返回是系统的返回钮（折起时在侧边那一列最上面）
