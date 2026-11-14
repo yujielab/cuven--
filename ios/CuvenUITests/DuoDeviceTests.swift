@@ -72,7 +72,15 @@ final class DuoDeviceTests: XCTestCase {
         report(app, "home")
         snap("duo-01-home")
         app.swipeUp(); sleep(2); snap("duo-02-home-rows")
-        app.swipeDown(); app.swipeDown(); sleep(1)
+        // 精选电影：今年 / 去年下面一排大号竖卡（评分高的在前）
+        if reveal(app, app.buttons.matching(identifier: "featured-card"), swipes: 3) != nil {
+            sleep(2)
+            snap("duo-02c-home-featured")
+        } else {
+            print("DUO featured card: none")
+        }
+        for _ in 0..<5 { app.swipeDown() }
+        sleep(1)
 
         // 详情：头图上此刻在屏上的那一页的「详情」（详情页从头图上放大出来）；返回是系统的返回钮（折起时在侧边那一列最上面）
         let heroDetail = visible(app.buttons.matching(identifier: "hero-detail"))

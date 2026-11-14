@@ -865,6 +865,40 @@ final class AppModel {
         return (TMDBImage.url(m?.poster ?? m?.posterClean, size), nil)
     }
 
+    /// 精选卡的画面：无字的竖版画面 + 字标，两样都有才算（和头图同一个门槛：没有字标、只有印着片名的海报的不上）。
+    /// Apple TV 的竖版主视觉 → TMDB 纯净海报；卡大，要的图也大一档
+    func featuredArt(_ v: Video, width: CGFloat = 0) -> (url: URL?, logo: URL?)? {
+        let m = meta(v)
+        let a = appleArt(v)
+        guard let logo = (Self.nonEmpty(a?.logo) ?? Self.nonEmpty(m?.logo)).flatMap({ TMDBImage.url($0, "w500") }) else { return nil }
+        let px = Int(min(1600, max(600, width * 3)).rounded())
+        if let t = Self.nonEmpty(a?.tall) { return (URL(string: AppleImage.sized(t, width: px) ?? t), logo) }
+        if let c = Self.nonEmpty(m?.posterClean) { return (TMDBImage.url(c, "w780"), logo) }
+        return nil
+    }
+
+    /// 做得成精选卡吗（featuredArt 的便宜版：只看有没有，不拼地址；主页每次刷新都要对全片库问一遍）
+    private func featuredReady(_ v: Video) -> Bool {
+        let m = meta(v), a = appleArt(v)
+        guard Self.nonEmpty(a?.logo) != nil || Self.nonEmpty(m?.logo) != nil else { return false }
+        return Self.nonEmpty(a?.tall) != nil || Self.nonEmpty(m?.posterClean) != nil
+    }
+
+    /// 主页「精选电影」：评分高的在前（同分的新上映在前、再按入库），只要做得成精选卡的、评分 6 分以上的
+    func featuredMovies(limit: Int = .max) -> [Video] {
+        var list: [(video: Video, rating: Double, release: String)] = []
+        for v in movies {
+            guard let r = meta(v)?.rating, r >= 6, featuredReady(v) else { continue }
+            list.append((v, r, meta(v)?.releaseDate ?? year(v).map { String($0) } ?? ""))
+        }
+        list.sort { a, b in
+            if a.rating != b.rating { return a.rating > b.rating }
+            if a.release != b.release { return a.release > b.release }
+            return a.video.addedKey > b.video.addedKey
+        }
+        return list.prefix(limit).map(\.video)
+    }
+
     /// 剧集的海报卡：TMDB 纯净海报 + 字标 → 印着剧名的海报
     func seriesPosterArt(_ s: Series, width: CGFloat = 0) -> (url: URL?, logo: URL?) {
         let m = seriesMetas[s.path]

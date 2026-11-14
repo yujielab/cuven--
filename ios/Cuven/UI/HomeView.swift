@@ -122,7 +122,7 @@ struct HomeView: View {
         return [y, y - 1]
     }
 
-    /// 顺序：继续观看 → 今年 → 去年 → 五个大类（docs/ios-design.md「主页」；F1：最要紧的在上）
+    /// 顺序：继续观看 → 今年 → 去年 → 精选电影 → 五个大类（docs/ios-design.md「主页」；F1：最要紧的在上）
     @ViewBuilder
     private func shelves(_ m: DSMetrics) -> some View {
         if model.movies.isEmpty {
@@ -149,6 +149,7 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: m.shelfGap) {
                 continueWatching(m)
                 ForEach(homeYears, id: \.self) { y in yearShelf(y, m) }
+                featuredShelf(m)
                 ForEach(HomeCategory.allCases) { c in categoryShelf(c, m) }
             }
         }
@@ -186,6 +187,37 @@ struct HomeView: View {
                 }
             }
         }
+    }
+
+    /// 精选电影：评分高的在前，一排大号竖卡（Apple TV 的精选卡）；标题「精选电影 ›」进全部（按评分的海报网格）
+    @ViewBuilder
+    private func featuredShelf(_ m: DSMetrics) -> some View {
+        let items = model.featuredMovies(limit: 10)
+        if !items.isEmpty {
+            DSSection(title: Shelf.featured.title, metrics: m, route: .shelf(.featured)) {
+                DSShelf(metrics: m) {
+                    ForEach(items, id: \.path) { v in featuredCard(v, m) }
+                }
+            }
+        }
+    }
+
+    /// 一张精选卡：点开是详情（从这张卡上放大出来），长按是播放 / 想看（C21）
+    private func featuredCard(_ v: Video, _ m: DSMetrics) -> some View {
+        let w = m.featureCardWidth
+        let art = model.featuredArt(v, width: w)
+        let meta = model.meta(v)
+        let kicker = (["电影"] + (meta?.genres ?? []).prefix(2)).joined(separator: " · ")
+        let line = DetailText.line([
+            meta?.rating.map { "评分 " + String(format: "%.1f", $0) },
+            model.year(v).map { String($0) },
+            Format.runtime(meta?.runtime),
+        ])
+        return ZoomLink(route: .movie(v), slot: "featured") {
+            DSFeatureCard(art: art?.url, logo: art?.logo, title: model.title(v), kicker: kicker, line: line, width: w)
+        }
+        .accessibilityIdentifier("featured-card")
+        .movieMenu(v)
     }
 
     /// 五个大类之一：电影和剧集一起，新的在前；标题「›」进这一类的全部

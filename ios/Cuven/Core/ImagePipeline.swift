@@ -9,6 +9,8 @@ enum ImageEffect: String, Hashable, Sendable {
     case none
     /// 底部一段渐进式模糊：上半张清楚，往下越来越糊（分集卡、预告片卡：字压在模糊上，Apple TV 的样子）
     case bottomBlur
+    /// 精选卡：先裁成 3:4（很瘦的竖版主视觉留上面、海报居中），再把下半段渐进式地糊掉（字标和两行字压在上面）
+    case featureCard
 }
 
 /// 图片：内存缓存（NSCache）+ 磁盘缓存（URLCache）+ 按显示尺寸降采样解码 —— 一屏几十张海报也不吃内存。
@@ -96,21 +98,44 @@ enum ImageEffects {
         switch effect {
         case .none: return image
         case .bottomBlur: return bottomBlur(image)
+        case .featureCard: return featureCard(image)
         }
     }
 
+    /// 精选卡：裁成 3:4。比 3:4 瘦的往高里裁——Apple TV 的竖版主视觉（约 0.46）人物多在上半截，从离顶 8% 处往下取；
+    /// 2:3 的纯净海报居中取；比 3:4 宽的左右居中取。裁好再把下半段糊掉（离底 46% 起，24% 以下糊到最大）
+    static func featureCard(_ image: UIImage) -> UIImage? {
+        guard let cg = image.cgImage else { return nil }
+        let W = CGFloat(cg.width), H = CGFloat(cg.height)
+        guard W > 8, H > 8 else { return nil }
+        let aspect: CGFloat = 3.0 / 4.0
+        var rect = CGRect(x: 0, y: 0, width: W, height: H)
+        if W / H < aspect {
+            let h = (W / aspect).rounded(.down)
+            let y = W / H < 0.6 ? min(H - h, (H * 0.08).rounded(.down)) : ((H - h) / 2).rounded(.down)
+            rect = CGRect(x: 0, y: y, width: W, height: h)
+        } else if W / H > aspect {
+            let w = (H * aspect).rounded(.down)
+            rect = CGRect(x: ((W - w) / 2).rounded(.down), y: 0, width: w, height: H)
+        }
+        // CGImage 的裁切以左上为原点
+        guard let cropped = cg.cropping(to: rect) else { return nil }
+        let base = UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
+        return bottomBlur(base, clearAbove: 0.46, fullBelow: 0.24) ?? base
+    }
+
     /// 渐进式模糊：用一张竖向渐变当遮罩做「可变半径模糊」（CIMaskedVariableBlur：遮罩黑处不糊、白处糊到最大）。
-    /// 离底 48% 以上清楚，往下逐渐变糊，离底 26% 以下糊到最大（字就压在这一段上）；半径按图宽算，大小图糊得一样
-    static func bottomBlur(_ image: UIImage) -> UIImage? {
+    /// 默认离底 48% 以上清楚，往下逐渐变糊，离底 26% 以下糊到最大（字就压在这一段上）；半径按图宽算，大小图糊得一样
+    static func bottomBlur(_ image: UIImage, clearAbove: CGFloat = 0.48, fullBelow: CGFloat = 0.26) -> UIImage? {
         guard let cg = image.cgImage else { return nil }
         let input = CIImage(cgImage: cg)
         let r = input.extent
         guard r.width > 8, r.height > 8 else { return nil }
         // Core Image 的原点在左下：y 越小越靠底
         let ramp = CIFilter.linearGradient()
-        ramp.point0 = CGPoint(x: r.midX, y: r.minY + r.height * 0.48)
+        ramp.point0 = CGPoint(x: r.midX, y: r.minY + r.height * clearAbove)
         ramp.color0 = CIColor.black
-        ramp.point1 = CGPoint(x: r.midX, y: r.minY + r.height * 0.26)
+        ramp.point1 = CGPoint(x: r.midX, y: r.minY + r.height * fullBelow)
         ramp.color1 = CIColor.white
         guard let mask = ramp.outputImage?.cropped(to: r) else { return nil }
         let blur = CIFilter.maskedVariableBlur()

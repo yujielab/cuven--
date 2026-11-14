@@ -30,6 +30,8 @@ struct DSMetrics {
     var posterWidth: CGFloat { cardWidth(visible: width < 500 ? 2.6 : (width < 800 ? 4.4 : 6.4)) }
     /// 16:9 卡宽：折起一张多一点，展开两张多（竖）/ 三张多（横）（S6）
     var wideCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.15 : (width < 800 ? 2.2 : 3.3)) }
+    /// 精选卡（3:4 的大号竖卡）：折起一屏一张多一截，展开两张多 / 三张多
+    var featureCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.3 : (width < 800 ? 2.3 : 3.4)) }
 
     /// 一屏看得见 visible 张（整数部分完整、小数部分是露出来的那一截）时每张多宽
     func cardWidth(visible v: CGFloat) -> CGFloat {
@@ -359,6 +361,84 @@ struct DSMediaCard<MenuItems: View>: View {
         .scaleEffect(pressed ? 0.96 : 1)
         .brightness(pressed ? -0.06 : 0)
         .animation(.spring(response: 0.28, dampingFraction: 0.68), value: pressed)
+    }
+}
+
+// MARK: - 精选卡（Apple TV 的精选：一张大号竖卡）
+//
+// 3:4、大圆角，一圈很细的亮边（深色页面上卡的轮廓）；画面铺满（ImageEffect.featureCard：裁成 3:4，下半段渐进式模糊），
+// 再压一层由透明到暗的渐变（F34、C58）；左下一列：字标（没有就是粗体片名）→「★ 电影 · 剧情 · 惊悚」（一颗小黑圆章 + 白字）
+// →「评分 8.6 · 2025 · 2 小时 15 分钟」（灰字）。卡下不写字（T20）
+
+struct DSFeatureCard: View {
+    let art: URL?
+    let logo: URL?
+    let title: String
+    /// 白字那一行：「电影 · 剧情 · 惊悚」
+    let kicker: String
+    /// 灰字那一行：「评分 8.6 · 2025 · 2 小时 15 分钟」
+    let line: String
+    let width: CGFloat
+
+    var body: some View {
+        let w = width
+        let h = (w * 4 / 3).rounded()
+        let radius = max(16, min(24, (w * 0.05).rounded()))
+        let pad = max(16, (w * 0.055).rounded())
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        ZStack(alignment: .bottomLeading) {
+            Color(white: 0.11)
+            RemoteImage(url: art, maxPixel: w * 3, placeholder: .clear, effect: .featureCard)
+                .frame(width: w, height: h)
+            LinearGradient(stops: DSFeatureCardStyle.shade, startPoint: .top, endPoint: .bottom)
+            VStack(alignment: .leading, spacing: 14) {
+                if let logo {
+                    LogoImage(url: logo, height: max(36, min(64, (w * 0.14).rounded())), alignment: .leading,
+                              fallback: title, maxWidth: (w * 0.7).rounded())
+                } else {
+                    Text(title)
+                        .font(.title.bold())
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 22, height: 22)
+                            .background(Color.black.opacity(0.85), in: Circle())
+                        Text(kicker)
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
+                    if !line.isEmpty {
+                        Text(line)
+                            .foregroundStyle(.white.opacity(0.6))
+                            .lineLimit(1)
+                    }
+                }
+                .font(.body)
+            }
+            // 字收在下面那一段暗里：特大字号时也不往上冲
+            .dynamicTypeSize(...DynamicTypeSize.xLarge)
+            .padding(pad)
+        }
+        .frame(width: w, height: h)
+        .clipShape(shape)
+        .overlay { shape.strokeBorder(Color.white.opacity(0.12), lineWidth: 1) }
+        .contentShape(shape)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel([title, kicker, line].filter { !$0.isEmpty }.joined(separator: "，"))
+    }
+}
+
+enum DSFeatureCardStyle {
+    /// 下半段的暗：离顶 40% 开始，到底 62%；alpha 走 smoothstep
+    static let shade: [Gradient.Stop] = (0...8).map { i in
+        let t = Double(i) / 8
+        let s = t * t * (3 - 2 * t)
+        return Gradient.Stop(color: .black.opacity(0.62 * s), location: 0.4 + 0.6 * t)
     }
 }
 

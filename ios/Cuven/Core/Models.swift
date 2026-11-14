@@ -566,6 +566,8 @@ enum Shelf: Hashable {
     case genre(String)
     /// 主页的五个大类之一（引人入胜的剧情……）：电影和剧集都在里面
     case category(HomeCategory)
+    /// 精选电影：评分高的在前（主页今年 / 去年下面那排大号竖卡的全部）
+    case featured
 
     var title: String {
         switch self {
@@ -576,6 +578,7 @@ enum Shelf: Hashable {
         case .continueWatching: return "继续观看"
         case .genre(let g): return g
         case .category(let c): return c.title
+        case .featured: return "精选电影"
         }
     }
 
@@ -589,6 +592,7 @@ enum Shelf: Hashable {
         case .continueWatching: return "continue"
         case .genre(let g): return "genre-" + g
         case .category(let c): return "cat-" + c.rawValue
+        case .featured: return "featured"
         }
     }
 }
