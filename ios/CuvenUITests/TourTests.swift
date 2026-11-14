@@ -78,6 +78,9 @@ final class TourTests: XCTestCase {
             play.tap()
             sleep(30)
             snap("10-player")
+            // 还没开播：加载画面（顶层窗口）还盖着，点它左上的关闭
+            let closeLoading = app.buttons["player-loading-close"]
+            if closeLoading.exists { closeLoading.tap(); sleep(2) }
             app.swipeDown(velocity: .fast)
             if !app.buttons["detail-play"].waitForExistence(timeout: 8) {
                 app.terminate()
