@@ -79,6 +79,8 @@ struct RootView: View {
     /// 自己画的导航里再点一下当前那一格：这一格回到根页面（换一个 id，整页重建）
     @State private var roots: [AppTab: Int] = [:]
 
+    private var showsLogin: Bool { account.loginRequired && !account.isLoggedIn }
+
     var body: some View {
         let column = DuoLayout.isColumn(window: window)
         TabView(selection: $tab) {
@@ -112,10 +114,14 @@ struct RootView: View {
         // 标签栏不在滚动时缩小：HIG 只在标签栏带附件（迷你播放器之类）时这么做（C10）；标签名一字一词（C8）
         .onChange(of: tab) { _, _ in Haptics.selection() }
         .onChange(of: model.searchRequest) { _, q in if q != nil { tab = .search } }
-        .fullScreenCover(isPresented: .constant(account.loginRequired && !account.isLoggedIn)) {
-            LoginView()
-                .environment(model)
-                .environment(account)
+        // 没登录：登录层整屏盖在最上面（和网页版的鉴权层一样：冷启动第一帧就盖着，不闪主页；
+        // 登录成功淡出 0.2 秒，退出登录时 0.28 秒淡入）。盖着的时候底下的标签页不给读屏念
+        .accessibilityHidden(showsLogin)
+        .overlay {
+            if showsLogin {
+                LoginView()
+                    .transition(.opacity)
+            }
         }
         .background {
             // 诊断：窗口尺寸 / 安全区 / 尺寸类别一变就记一行（看 iPhone Duo 上系统给的空间）

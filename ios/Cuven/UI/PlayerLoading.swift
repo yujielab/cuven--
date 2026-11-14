@@ -1,19 +1,26 @@
 import SwiftUI
 import UIKit
+import Network
 
-// MARK: - 播放加载画面：和网页版一样（web/index.html 的 np-load；用户要求）
+// MARK: - 播放加载画面：和网页版一模一样（web/index.html 的 .np / .np-load；用户要求）
 //
 // 点「播放」到真正开播之间，一整个顶层窗口盖在所有东西上面（正在升起的系统播放器、iPhone Duo 侧边的导航都在它下面），
-// 直到首帧出来才收起。
-// · 极光背景：深色底上一条蓝到青的光带慢慢流动、呼吸（网页版 Aurora 的配色与节奏；这里用 MeshGradient 画）。
-// · 正中「Cuven max」字标（圆体，Cuven 细、max 粗而大）。
-// · 下面一条 iOS 更新式的胶囊进度条：按真实阶段推进——拿到片源 → 播放列表 → 挂上片源 → 可以播 → 开播；
-//   阶段之间缓缓爬升，不倒退，开播前不走满；开播时走满，0.26 秒后淡出（网页版 STAGE / loaderDone 同一套数）。
-// · 再下面一句句提示，每 2.4 秒换一句：旧的模糊、放大着散掉，新的从模糊里缩回来；十句都轮完还没开播，如实说网络慢。
-// · 左上一颗关闭钮（44 点，玻璃圆）：不想等了随时退出。
-// · 「减弱动态效果」时极光停在一帧，提示只淡入淡出（F59、F60）。
+// 首帧出来才收起。每一项都照网页版：
+// · 整层 0.2 秒淡入（.np.on）；底色 rgb(10, 9, 15)。
+// · 极光：网页版 Aurora 的着色器逐行移植（Aurora.metal），同样的推进（time += dt，dt 最多 0.05 秒）、同样 25% 的分辨率，
+//   手指按住时光带绕着手指转（网页版的 pointer：uOn 0.2 秒级缓入缓出、位置 16/s 跟随、速度 8/s 平滑）。
+// · 正中一列整体上移 3% 屏高：「Cuven」clamp(25, 7.4vw, 38) 中等粗、字距 −0.01em；「max」clamp(58, 17.5vw, 92) 特粗、
+//   字距 −0.045em、上移 0.02em；行高 1；投影 0 2 22 rgba(10,9,15,.32)。
+// · 进度条：min(50vw, 232) × 6、圆角 3、底 24% 白、值纯白，上边距 clamp(34, 6vh, 56)；
+//   进度按真实阶段推进（STAGE 同网页版），目标 = 起点 +（上限 − 起点）×(1 − e^(−t/2.6 秒))，
+//   进度条以每秒 5（开播后 14）的速率追目标——不倒退、开播前不走满。
+// · 提示：上边距 18、15 号中等粗、字距 0.02em、86% 白；每 2.4 秒换一句：旧的 0.52 秒里模糊 10、放大到 1.06、淡出，
+//   再换字、从模糊 10、0.94 倍缩回清楚（cubic-bezier(.4,0,.2,1)）；十句都轮完还没开播，如实说网络的情况。
+// · 横着的矮屏（高 ≤ 500）：「Cuven」clamp(20, 5.4vh, 30)、「max」clamp(44, 13vh, 68)、进度条上边距 24。
+// · 左上关闭钮（.np-x）：40 点圆、16% 白 + 模糊底、20 点的「×」，离安全区上沿 10、左沿 12；按下缩到 0.92。
+// · 开播：进度条走满，0.26 秒后 0.46 秒淡出（ease），再拿掉窗口。
 
-/// 加载的阶段：进度条在 [起点, 上限] 里缓缓爬升（和网页版 STAGE 一样）
+/// 加载的阶段：进度条在 [起点, 上限] 里爬（网页版 STAGE）
 enum PlayerLoadStage: Int, Comparable {
     case open, source, meta, data, ready, play
 
@@ -35,20 +42,12 @@ enum PlayerLoadStage: Int, Comparable {
 @Observable
 final class PlayerLoadingModel {
     var title = ""
-    var stage: PlayerLoadStage = .open
+    /// 每次重新开始加载（换一集也算）加一：进度条、提示从头来
+    var generation = 0
+    var base: Double = 0
+    var cap: Double = 0
     var stageAt = Date()
-    /// 换阶段那一刻进度条已经到了哪：新阶段从不低于它的地方起步（不倒退）
-    var floor: Double = 0
     var leaving = false
-
-    /// 此刻的进度：从阶段起点（或上一刻的位置）按指数曲线爬向这一阶段的上限；开播那一段很快走满
-    func progress(at now: Date) -> Double {
-        let (base, cap) = stage.range
-        let b = max(base, floor)
-        let t = max(0, now.timeIntervalSince(stageAt))
-        if stage == .play { return b + (1 - b) * (1 - exp(-t / 0.09)) }
-        return b + (max(b, cap) - b) * (1 - exp(-t / 2.6))
-    }
 }
 
 /// 顶层窗口的开关：PlayerCoordinator 在每个阶段调一下
@@ -58,6 +57,7 @@ final class PlayerLoadingOverlay {
     private var window: UIWindow?
     private let model = PlayerLoadingModel()
     private var hideTask: Task<Void, Never>?
+    private var current: PlayerLoadStage = .open
     /// 点了左上角的关闭
     var onClose: (() -> Void)?
 
@@ -66,10 +66,12 @@ final class PlayerLoadingOverlay {
     func show(title: String) {
         hideTask?.cancel()
         model.title = title
-        model.stage = .open
-        model.stageAt = Date()
-        model.floor = 0
+        model.generation += 1
         model.leaving = false
+        model.base = 0
+        model.cap = 0
+        current = .open
+        apply(.open, force: true)
         guard window == nil else { return }
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return }
@@ -85,22 +87,30 @@ final class PlayerLoadingOverlay {
     }
 
     func stage(_ s: PlayerLoadStage) {
-        guard window != nil, s > model.stage else { return }
-        model.floor = model.progress(at: Date())
-        model.stage = s
+        guard window != nil, s > current else { return }
+        current = s
+        apply(s, force: false)
+    }
+
+    /// 网页版 loaderStage：起点只往上走
+    private func apply(_ s: PlayerLoadStage, force: Bool) {
+        let (base, cap) = s.range
+        guard force || base > model.base else { return }
+        model.base = base
+        model.cap = cap
         model.stageAt = Date()
     }
 
-    /// 开播：进度条走满，0.26 秒后淡出、拿掉窗口
+    /// 开播：进度条走满，0.26 秒后 0.46 秒淡出，再拿掉窗口（网页版 loaderDone）
     func finish() {
-        guard window != nil, !model.leaving else { return }
+        guard window != nil, !model.leaving, current < .play else { return }
         stage(.play)
         hideTask?.cancel()
         hideTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 260_000_000)
             guard let self, !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.46)) { self.model.leaving = true }
-            try? await Task.sleep(nanoseconds: 480_000_000)
+            withAnimation(.timingCurve(0.25, 0.1, 0.25, 1, duration: 0.46)) { self.model.leaving = true }
+            try? await Task.sleep(nanoseconds: 460_000_000)
             guard !Task.isCancelled else { return }
             self.remove()
         }
@@ -119,173 +129,287 @@ final class PlayerLoadingOverlay {
     }
 }
 
+/// 网络断没断（十句提示轮完还没开播时，如实说是断网还是慢）
+final class LoaderNet: @unchecked Sendable {
+    static let shared = LoaderNet()
+    private let monitor = NWPathMonitor()
+    private(set) var offline = false
+
+    private init() {
+        monitor.pathUpdateHandler = { [weak self] p in self?.offline = p.status != .satisfied }
+        monitor.start(queue: DispatchQueue.global(qos: .utility))
+    }
+}
+
+/// 进度条的追随（网页版 barFrame）：每帧往目标追一段
+@MainActor
+final class LoaderBarSim {
+    var p: Double = 0
+    var last: Date?
+    var generation = -1
+
+    func step(_ now: Date, model: PlayerLoadingModel) -> Double {
+        if generation != model.generation {
+            generation = model.generation
+            p = 0
+            last = nil
+        }
+        let dt = last.map { min(0.1, max(0, now.timeIntervalSince($0))) } ?? 0
+        last = now
+        let base = model.base, cap = model.cap
+        let goal = base + (cap - base) * (1 - exp(-max(0, now.timeIntervalSince(model.stageAt)) / 2.6))
+        p += (goal - p) * (1 - exp(-dt * (base >= 1 ? 14 : 5)))
+        return p
+    }
+}
+
 struct PlayerLoadingView: View {
     let model: PlayerLoadingModel
     let onClose: () -> Void
     @State private var appeared = false
+    @State private var bar = LoaderBarSim()
+    @State private var aurora = AuroraSim()
     @State private var tip = 0
+    @State private var tipText = Self.tips[0]
+    @State private var tipPhase: TipPhase = .shown
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private enum TipPhase { case shown, leaving, entering }
 
     /// 和网页版同一组提示
     private static let tips = ["请保持屏幕亮起", "正在渲染绚烂颜色", "正在预热画面质量", "正在添加全景声系统", "正在为您的设备优化",
                                "正在量身定制体验", "正为您添加动态字幕", "一切几乎就绪", "还需要一小会", "即将完成"]
     static let ink = Color(red: 10 / 255, green: 9 / 255, blue: 15 / 255)
+    private static let tipCurve = Animation.timingCurve(0.4, 0, 0.2, 1, duration: 0.52)
 
     var body: some View {
         GeometryReader { geo in
-            let landscape = geo.size.width > geo.size.height && geo.size.height < 500
-            ZStack {
-                Self.ink
-                AuroraBackground()
-                VStack(spacing: 0) {
-                    wordmark(landscape: landscape)
-                    progressBar(width: min(geo.size.width * 0.5, 232))
-                        .padding(.top, landscape ? 24 : 44)
-                    tipLine
-                        .padding(.top, 18)
+            // 整个屏幕（这一层铺满、不让安全区）；安全区只用来摆左上的关闭钮
+            let insets = geo.safeAreaInsets
+            let W = geo.size.width
+            let H = geo.size.height
+            // 网页版 @media (orientation: landscape) and (max-height: 500px)
+            let short = W > H && H <= 500
+            TimelineView(.animation) { tl in
+                ZStack {
+                    Self.ink
+                    AuroraView(sim: aurora, date: tl.date, width: W, height: H, still: reduceMotion)
+                    VStack(spacing: 0) {
+                        wordmark(W: W, H: H, short: short)
+                        progressBar(width: min(W * 0.5, 232), p: bar.step(tl.date, model: model))
+                            .padding(.top, short ? 24 : min(56, max(34, H * 0.06)))
+                        tipLine
+                            .padding(.top, 18)
+                    }
+                    .padding(.horizontal, 24)
+                    .frame(width: W)
+                    .offset(y: -H * 0.03)
                 }
-                .offset(y: -geo.size.height * 0.03)
-                .padding(.horizontal, 24)
-
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                        .frame(width: 44, height: 44)
-                        .glassEffect(.regular, in: Circle())
-                        .contentShape(Circle())
-                }
-                .buttonStyle(PressableStyle(scale: 0.92))
-                .padding(.top, geo.safeAreaInsets.top + 8)
-                .padding(.leading, geo.safeAreaInsets.leading + 16)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .accessibilityLabel("关闭")
-                .accessibilityIdentifier("player-loading-close")
+                .frame(width: W, height: H)
+                // 手指按住：光带绕着手指转（网页版 pointermove / pointerdown，抬手就缓缓收回）
+                .contentShape(Rectangle())
+                .simultaneousGesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                    .onChanged { aurora.pointer($0.location) }
+                    .onEnded { _ in aurora.release() })
             }
-            .ignoresSafeArea()
+            .overlay(alignment: .topLeading) {
+                closeButton
+                    .padding(.top, insets.top + 10)
+                    .padding(.leading, insets.leading + 12)
+            }
         }
+        .ignoresSafeArea()
         .opacity(model.leaving ? 0 : (appeared ? 1 : 0))
-        .onAppear { withAnimation(.easeOut(duration: 0.25)) { appeared = true } }
-        .task {
-            // 每 2.4 秒换一句；十句都轮完还停在最后一条（如实说网络慢）
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_400_000_000)
-                guard !Task.isCancelled, tip < Self.tips.count else { return }
-                withAnimation(.easeInOut(duration: 0.52)) { tip += 1 }
-            }
-        }
+        // 网页版 .np.on：opacity .2s ease
+        .onAppear { withAnimation(.timingCurve(0.25, 0.1, 0.25, 1, duration: 0.2)) { appeared = true } }
+        .task(id: model.generation) { await rotateTips() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(model.title.isEmpty ? "正在载入" : "正在载入：" + model.title)
         .accessibilityIdentifier("player-loading")
     }
 
-    /// 「Cuven」细、「max」粗而大，圆体（和网页版 np-brand 同一套比例）
-    private func wordmark(landscape: Bool) -> some View {
-        VStack(spacing: landscape ? -4 : -6) {
+    /// 「Cuven」细、「max」粗而大，圆体，行高 1（网页版 np-brand / np-b1 / np-b2）
+    private func wordmark(W: CGFloat, H: CGFloat, short: Bool) -> some View {
+        let s1 = short ? min(30, max(20, H * 0.054)) : min(38, max(25, W * 0.074))
+        let s2 = short ? min(68, max(44, H * 0.13)) : min(92, max(58, W * 0.175))
+        // SwiftUI 的字比 CSS 行高 1 的行框高出约 0.19 em（上下各半）：收回来，再照网页版上移 max 0.02em
+        let spacing = -(s1 * 0.095 + s2 * 0.095) - s2 * 0.02
+        return VStack(spacing: spacing) {
             Text("Cuven")
-                .font(.system(size: landscape ? 26 : 34, weight: .medium, design: .rounded))
+                .font(.system(size: s1, weight: .medium, design: .rounded))
+                .tracking(-0.01 * s1)
             Text("max")
-                .font(.system(size: landscape ? 60 : 84, weight: .heavy, design: .rounded))
-                .tracking(landscape ? -2.4 : -3.6)
+                .font(.system(size: s2, weight: .heavy, design: .rounded))
+                .tracking(-0.045 * s2)
         }
         .foregroundStyle(.white)
         .shadow(color: Self.ink.opacity(0.32), radius: 11, y: 2)
-        .accessibilityHidden(true)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Cuven max")
     }
 
-    /// 胶囊进度条：232 宽、6 高，底 24% 白、值纯白
-    private func progressBar(width: CGFloat) -> some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60)) { tl in
-            let p = model.progress(at: tl.date)
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.24))
-                Capsule().fill(Color.white).frame(width: max(6, width * p))
-            }
-            .frame(width: width, height: 6)
-            .shadow(color: Self.ink.opacity(0.22), radius: 7, y: 2)
-            .accessibilityElement()
-            .accessibilityLabel("加载进度")
-            .accessibilityValue("\(Int((p * 100).rounded()))%")
+    /// 胶囊进度条：底 24% 白、值纯白，外面一圈 0.5 点的暗边和一层柔影（网页版 np-bar）
+    private func progressBar(width: CGFloat, p: Double) -> some View {
+        ZStack(alignment: .leading) {
+            Capsule().fill(Color.white.opacity(0.24))
+            Capsule().fill(Color.white).frame(width: width * min(1, max(0, p)))
         }
+        .frame(width: width, height: 6)
+        .clipShape(Capsule())
+        .background(Capsule().fill(Self.ink.opacity(0.14)).padding(-0.5))
+        .shadow(color: Self.ink.opacity(0.22), radius: 7, y: 2)
+        .accessibilityElement()
+        .accessibilityLabel("加载进度")
+        .accessibilityValue("\(Int((p * 100).rounded()))%")
     }
 
-    /// 一句提示：旧的模糊、放大着散掉，新的从模糊里缩回来（网页版 np-tip 的 leave / enter）
+    /// 一句提示（网页版 np-tips / np-tip）
     private var tipLine: some View {
-        let text = tip < Self.tips.count ? Self.tips[tip] : "网络较慢，正在为您缓冲"
-        return ZStack {
-            Text(text)
-                .font(.system(size: 15, weight: .medium))
-                .tracking(0.3)
-                .foregroundStyle(.white.opacity(0.86))
-                .lineLimit(1)
-                .shadow(color: Self.ink.opacity(0.5), radius: 6, y: 1)
-                .id(tip)
-                .transition(reduceMotion ? .opacity : .asymmetric(
-                    insertion: .modifier(active: TipFX(blur: 10, scale: 0.94, opacity: 0), identity: TipFX(blur: 0, scale: 1, opacity: 1)),
-                    removal: .modifier(active: TipFX(blur: 10, scale: 1.06, opacity: 0), identity: TipFX(blur: 0, scale: 1, opacity: 1))))
+        Text(tipText)
+            .font(.system(size: 15, weight: .medium))
+            .tracking(0.3)
+            .foregroundStyle(.white.opacity(0.86))
+            .lineLimit(1)
+            .fixedSize()
+            .shadow(color: Self.ink.opacity(0.5), radius: 6, y: 1)
+            .blur(radius: reduceMotion || tipPhase == .shown ? 0 : 10)
+            .scaleEffect(reduceMotion ? 1 : (tipPhase == .leaving ? 1.06 : (tipPhase == .entering ? 0.94 : 1)))
+            .opacity(tipPhase == .shown ? 1 : 0)
+            .frame(height: 22)
+            .accessibilityHidden(true)
+    }
+
+    /// 每 2.4 秒换一句：旧的模糊、放大着散掉（0.52 秒），换字，新的从模糊里缩回来（网页版 nextTip）
+    private func rotateTips() async {
+        tip = 0
+        tipText = Self.tips[0]
+        tipPhase = .shown
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 2_400_000_000)
+            guard !Task.isCancelled else { return }
+            let next: String
+            if tip >= Self.tips.count - 1 {
+                // 十句都轮完了还没开播（约 24 秒）：不再停在「即将完成」，如实说网络的情况
+                next = LoaderNet.shared.offline ? "网络已断开，恢复后自动继续" : "网络较慢，正在为您缓冲"
+                if tipText == next { continue }
+            } else {
+                tip += 1
+                next = Self.tips[tip]
+            }
+            withAnimation(Self.tipCurve) { tipPhase = .leaving }
+            try? await Task.sleep(nanoseconds: 520_000_000)
+            guard !Task.isCancelled else { return }
+            var quiet = Transaction()
+            quiet.disablesAnimations = true
+            withTransaction(quiet) {
+                tipText = next
+                tipPhase = .entering
+            }
+            try? await Task.sleep(nanoseconds: 16_000_000)
+            withAnimation(Self.tipCurve) { tipPhase = .shown }
         }
-        .frame(height: 22)
-        .accessibilityHidden(true)
+    }
+
+    /// 左上关闭（网页版 .np-x）：40 点圆、16% 白 + 模糊底、20 点的「×」（线宽 2.2 / 24）
+    private var closeButton: some View {
+        Button(action: onClose) {
+            Path { p in
+                p.move(to: CGPoint(x: 6.5, y: 6.5)); p.addLine(to: CGPoint(x: 17.5, y: 17.5))
+                p.move(to: CGPoint(x: 17.5, y: 6.5)); p.addLine(to: CGPoint(x: 6.5, y: 17.5))
+            }
+            .stroke(Color.white, style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
+            .frame(width: 24, height: 24)
+            .scaleEffect(20.0 / 24.0)
+            .frame(width: 40, height: 40)
+            .background(Circle().fill(Color.white.opacity(0.16)))
+            .background(.ultraThinMaterial, in: Circle())
+            .contentShape(Circle())
+        }
+        .buttonStyle(PressableStyle(scale: 0.92))
+        .accessibilityLabel("关闭")
+        .accessibilityIdentifier("player-loading-close")
     }
 }
 
-private struct TipFX: ViewModifier {
-    let blur: CGFloat
-    let scale: CGFloat
-    let opacity: Double
+// MARK: - 极光（网页版 Aurora 的推进与手指交互；着色器在 Aurora.metal）
 
-    func body(content: Content) -> some View {
-        content.blur(radius: blur).scaleEffect(scale).opacity(opacity)
+/// 每帧推进（网页版 draw 里的那一套状态）
+final class AuroraSim {
+    private var time: Double = 0
+    private var last: Date?
+    private var mx = 0.0, my = 0.0, vx = 0.0, vy = 0.0, on = 0.0
+    private var tx = 0.0, ty = 0.0, inside = false
+
+    struct Uniforms {
+        var time: Float
+        var mouse: SIMD2<Float>
+        var on: Float
+        var reach: Float
+        var vel: SIMD2<Float>
+    }
+
+    func pointer(_ p: CGPoint) {
+        tx = Double(p.x)
+        ty = Double(p.y)
+        inside = true
+    }
+
+    func release() { inside = false }
+
+    func step(_ now: Date, W: Double, H: Double) -> Uniforms {
+        let t = last.map { min(0.05, max(0, now.timeIntervalSince($0))) } ?? 0     // 网页版：一帧最多算 0.05 秒
+        last = now
+        time = (time + t).truncatingRemainder(dividingBy: 3600)                     // speed 50 → ×1
+        let want: Double = inside ? 1 : 0
+        if want > 0 && on < 0.02 { mx = tx; my = ty }
+        on += (want - on) * (1 - exp(-t * 5))
+        let k = 1 - exp(-t * 16)
+        let nx = mx + (tx - mx) * k, ny = my + (ty - my) * k
+        if t > 0 {
+            let e = 1 - exp(-t * 8)
+            vx += ((nx - mx) / t - vx) * e
+            vy += ((ny - my) / t - vy) * e
+        }
+        mx = nx
+        my = ny
+        let h = max(1, H)
+        let sp = hypot(vx, vy) / h, lim = sp > 3 ? 3 / sp : 1
+        return Uniforms(time: Float(time),
+                        mouse: SIMD2(Float((mx - W / 2) / h), Float((h / 2 - my) / h)),
+                        on: Float(on * 1.45),                                       // hover 145
+                        reach: Float(240 / h),                                      // reach 240
+                        vel: SIMD2(Float(vx / h * lim), Float(-vy / h * lim)))
     }
 }
 
-/// 极光（网页版 Aurora 的配色：底 #0A090F，光 #2E55F2 → #85E7FF）：一张 4×4 的网格渐变，
-/// 中间几个点绕着慢慢转、整体一呼一吸；「减弱动态效果」时停在一帧
-struct AuroraBackground: View {
-    @State private var start = Date()
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+/// 极光那一层：在一块小画布上跑着色器（网页版的离屏纹理：屏幕像素 × 0.25，倍率最多 2），再整块线性放大到全屏
+struct AuroraView: View {
+    let sim: AuroraSim
+    let date: Date
+    let width: CGFloat
+    let height: CGFloat
+    var still = false
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { tl in
-            let t = tl.date.timeIntervalSince(start)
-            MeshGradient(width: 4, height: 4, points: Self.points(t), colors: Self.colors(t), smoothsColors: true)
-        }
-        .accessibilityHidden(true)
-    }
-
-    private static func points(_ t: Double) -> [SIMD2<Float>] {
-        var out: [SIMD2<Float>] = []
-        for j in 0..<4 {
-            for i in 0..<4 {
-                var x = Double(i) / 3, y = Double(j) / 3
-                let inner = (1...2).contains(i) && (1...2).contains(j)
-                if inner {
-                    x += 0.09 * sin(t * 0.49 + Double(i) * 1.7 + Double(j) * 0.9)
-                    y += 0.08 * cos(t * 0.37 + Double(j) * 1.3 + Double(i) * 0.6)
-                } else if i == 0 || i == 3 {
-                    if j == 1 || j == 2 { y += 0.05 * sin(t * 0.31 + Double(j) * 2.1 + Double(i)) }
-                } else {
-                    x += 0.05 * sin(t * 0.29 + Double(i) * 1.9 + Double(j))
-                }
-                out.append(SIMD2(Float(x), Float(y)))
-            }
-        }
-        return out
-    }
-
-    private static func colors(_ t: Double) -> [Color] {
-        // 一呼一吸（网页版 breath 的两条正弦）
-        let breath = ((-sin(t * 0.735) + sin(t * 0.49 + 1)) * 0.25 + 0.5)
-        let k = 0.7 + 0.3 * breath
-        let bg = PlayerLoadingView.ink
-        func blue(_ a: Double) -> Color { Color(red: 46 / 255, green: 85 / 255, blue: 242 / 255).opacity(a * k) }
-        func cyan(_ a: Double) -> Color { Color(red: 133 / 255, green: 231 / 255, blue: 1).opacity(a * k) }
-        // 光带从左下斜到右上（网页版 angle -119°）
-        return [
-            bg, bg, blue(0.25), bg,
-            bg, blue(0.75), cyan(0.55), blue(0.3),
-            blue(0.35), cyan(0.7), blue(0.6), bg,
-            bg, blue(0.3), bg, bg,
-        ]
+        // 网页版画布 = 点 × min(倍率, 2)，极光那一张纹理再 × 0.25：每个点 min(倍率, 2) × 0.25 个像素。
+        // 这里小画布按屏幕倍率出像素，所以它的尺寸（点）= 全屏 × min(倍率, 2) × 0.25 ÷ 屏幕倍率
+        let k = min(displayScale, 2) * 0.25 / max(1, displayScale)
+        let fw = max(1, (width * k).rounded()), fh = max(1, (height * k).rounded())
+        let u = sim.step(still ? Date(timeIntervalSinceReferenceDate: 0) : date, W: Double(width), H: Double(height))
+        Rectangle()
+            .frame(width: fw, height: fh)
+            .colorEffect(ShaderLibrary.cuvenAurora(
+                .float2(Float(fw), Float(fh)),
+                .float(u.time),
+                .float2(u.mouse.x, u.mouse.y),
+                .float(u.on),
+                .float(u.reach),
+                .float2(u.vel.x, u.vel.y)))
+            .drawingGroup()
+            .scaleEffect(x: width / fw, y: height / fh, anchor: .topLeading)
+            .frame(width: width, height: height, alignment: .topLeading)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
