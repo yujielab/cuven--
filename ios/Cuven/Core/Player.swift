@@ -31,7 +31,7 @@ enum PlayError: LocalizedError {
 }
 
 /// AVPlayerViewController 直接全屏呈现（系统播放器：音轨 / 字幕 / 画中画 / AirPlay / 杜比视界都是系统的）。
-/// 点了「播放」就弹出来，片源还在准备时盖一层加载画面（和网页版一样：极光、Cuven max、胶囊进度条、轮播文案），真正开播才淡出
+/// 点了「播放」就弹出来；过了两秒还没开播，才盖一层黑底 + 系统转圈的加载画面，开播那一刻就收起（C90、C68、C69）
 final class CuvenPlayerViewController: AVPlayerViewController {
     var onClose: (() -> Void)?
     private let cover = PlayerLoadingCover()
@@ -45,8 +45,8 @@ final class CuvenPlayerViewController: AVPlayerViewController {
         }
     }
 
-    /// preparing：片源准备中（进度条第一段）；buffering：片源已挂上、等首帧（第二段；后面几段加载画面自己读播放器那一项）；
-    /// playing：进度条走满、淡出
+    /// preparing：片源准备中；buffering：片源已挂上、等首帧（这两段都只是「还在等」，加载画面不分段报进度：C68）；
+    /// playing：开播，加载画面马上收起
     enum Phase { case preparing, buffering, playing }
 
     func setPhase(_ phase: Phase) {
@@ -65,7 +65,7 @@ final class CuvenPlayerViewController: AVPlayerViewController {
     }
 }
 
-// 加载画面（PlayerLoadingCover）在 UI/PlayerLoading.swift：和网页版一样的极光 + Cuven max + 胶囊进度条 + 文案
+// 加载画面（PlayerLoadingCover）在 UI/PlayerLoading.swift：超过两秒才出现的黑底 + 系统转圈 + 一行片名（C90）
 
 @MainActor
 final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {

@@ -1,6 +1,5 @@
 import SwiftUI
 import UIKit
-import UserNotifications
 
 // MARK: - 数据与隐私：和网页版的「隐私同意闸门」一样（web/index.html 的 #pgSheet / __privacyGate）
 //
@@ -9,10 +8,11 @@ import UserNotifications
 // 存的版本号对不上（政策换了版本）就重新问。
 // 这一屏：深色压暗 + 模糊的底，下面推上来一张 92% 屏高的玻璃弹层（顶边圆角 28，没有关闭钮，不能下滑关掉）：
 // 数据和隐私图标、「数据与隐私」、四条要点、「阅读完整隐私说明」（展开是全文），
-// 「您的选择」：隐私三项（勾选）+「开启新片上架通知」（开关），四项都完成「同意并进入」才亮；
-// 点了按钮变绿「已同意」，0.62 秒后弹层退下去。
-// 通知那一项：网页版是 Web Push 订阅；iOS 这边请求系统通知权限（推送的后端还没有，不另外订阅）。
-// 系统里拒绝了也算这一项处理过（App 不能把通知当成用下去的前提），那一行写明到设置里去开。
+// 「您的选择」：隐私三项（勾选），三项都勾上「同意并继续」才亮；点了按钮变绿「已同意」，0.62 秒后弹层退下去。
+// 弹层顶上不画把手：把手表示能拖动改高度，这张弹层拖不动（C51）。
+// 整屏只有一颗醒目的按钮「同意并继续」（C35、C81）。
+// 通知不在这里问，也不是放行的条件：权限挪到有人打开「账户」里「新片上架通知」的那一刻再向系统要（C78、C79）。
+// 记录还是同一个键、同一份 JSON，scopes.notifications 这一栏照旧写，这里一律记 false。
 
 /// 网页版 hasConsent / onAgree 的那一份记录
 enum PrivacyGate {
@@ -63,11 +63,6 @@ struct PrivacyGateView: View {
     @State private var privacy = false
     @State private var crossBorder = false
     @State private var age = false
-    /// 通知：开着（系统授权了）/ 被系统关掉了 / 正在问系统
-    @State private var notifyOn = false
-    @State private var notifyBlocked = false
-    @State private var notifyBusy = false
-    @State private var notifyNote = PrivacyGateView.notifyNoteDefault
 
     @State private var expanded = false
     @State private var agreed = false
@@ -79,18 +74,15 @@ struct PrivacyGateView: View {
     static let green = Color(red: 50 / 255, green: 215 / 255, blue: 75 / 255)
     static let text2 = Color.white.opacity(0.65)
     static let text3 = Color.white.opacity(0.4)
-    static let notifyNoteDefault = "有新影片入库时，在锁屏和通知中心提醒你。开启需要授予系统通知权限。"
-    static let notifyNoteBlocked = "通知已被系统关掉，请到 iOS 设置里为 Cuven 打开通知。"
 
     /// 网页版的 silk 曲线
     private static let present = Animation.timingCurve(0.30, 0.52, 0.07, 1, duration: 0.604)
-    private static let settle = Animation.timingCurve(0.24, 0.17, 0.17, 1.04, duration: 0.365)
     private static let pop = Animation.timingCurve(0.33, 0.40, 0.12, 1.23, duration: 0.241)
     private static let dismiss = Animation.timingCurve(0.32, 0.72, 0, 1, duration: 0.42)
 
-    /// 还差几项（隐私三项 + 通知）。通知：开着或被系统拒绝了都算处理过
+    /// 还差几项：只算隐私三项（通知不是放行条件：C78、C79）
     private var missing: Int {
-        [privacy, crossBorder, age, notifyOn || notifyBlocked].filter { !$0 }.count
+        [privacy, crossBorder, age].filter { !$0 }.count
     }
 
     var body: some View {
@@ -131,21 +123,13 @@ struct PrivacyGateView: View {
             withAnimation(reduceMotion ? .easeOut(duration: 0.01) : Self.present) { sheetIn = true }
             appeared = true
         }
-        .task { await refreshNotify() }
     }
 
     // MARK: 弹层
 
     private func sheet(height: CGFloat, bottomInset: CGFloat) -> some View {
         VStack(spacing: 0) {
-            // 拉把（只是样子：这张弹层不能下滑关掉）
-            Capsule()
-                .fill(Color.white.opacity(0.24))
-                .frame(width: 36, height: 5)
-                .padding(.top, 8)
-                .frame(height: 22, alignment: .bottom)
-                .accessibilityHidden(true)
-
+            // 不画把手：把手表示可以拖着改高度，这张弹层拖不动（C51）。原来把手占的 22 点并进标题上方的留白
             ScrollView {
                 VStack(spacing: 0) {
                     head
@@ -198,7 +182,7 @@ struct PrivacyGateView: View {
                 .modifier(Rise(on: shown, delay: 0.5, reduce: reduceMotion))
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 24)
+        .padding(.top, 46)
         .padding(.horizontal, 8)
     }
 
@@ -364,12 +348,7 @@ struct PrivacyGateView: View {
             .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(GlassEdge(radius: 14))
-
-            groupLabel("通知")
-            notifyRow
-                .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(GlassEdge(radius: 14))
+            // 「开启新片上架通知」不再放在这里：挪到「账户」，有人打开时才问系统（C78、C79）
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 40)
@@ -405,7 +384,7 @@ struct PrivacyGateView: View {
                 }
                 .frame(width: 24, height: 24)
                 .animation(.easeOut(duration: 0.2), value: isOn.wrappedValue)
-                rowText(title: title, note: note, dim: false)
+                rowText(title: title, note: note)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 13)
@@ -420,42 +399,12 @@ struct PrivacyGateView: View {
         .accessibilityAddTraits(isOn.wrappedValue ? .isSelected : [])
     }
 
-    /// 「开启新片上架通知」：右边一颗 51×31 的开关（开是绿色）；被系统关掉了就灰下来、说明换成到设置里去开
-    private var notifyRow: some View {
-        Button {
-            toggleNotify()
-        } label: {
-            HStack(spacing: 14) {
-                rowText(title: "开启新片上架通知", note: notifyNote, dim: notifyBlocked)
-                ZStack(alignment: notifyOn ? .trailing : .leading) {
-                    Capsule().fill(notifyOn ? Self.green : Color(red: 120 / 255, green: 120 / 255, blue: 128 / 255).opacity(0.32))
-                    Circle()
-                        .fill(.white)
-                        .frame(width: 27, height: 27)
-                        .shadow(color: .black.opacity(0.4), radius: 4, y: 3)
-                        .padding(2)
-                }
-                .frame(width: 51, height: 31)
-                .animation(Self.settle, value: notifyOn)
-                .opacity(notifyBusy ? 0.6 : 1)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 13)
-            .frame(minHeight: 56)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressTint(radius: 0))
-        .disabled(notifyBusy || notifyBlocked)
-        .accessibilityIdentifier("pg-notify")
-        .accessibilityValue(notifyOn ? "开" : "关")
-    }
-
-    private func rowText(title: String, note: String?, dim: Bool) -> some View {
+    private func rowText(title: String, note: String?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(.system(size: 16))
                 .tracking(-0.19)
-                .foregroundStyle(dim ? Self.text2 : .white)
+                .foregroundStyle(.white)
                 .multilineTextAlignment(.leading)
             if let note {
                 Text(note)
@@ -469,7 +418,7 @@ struct PrivacyGateView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: 底部：提示一行 + 「同意并进入」
+    // MARK: 底部：提示一行 + 唯一一颗醒目的「同意并继续」（C35、C81）
 
     private func footer(bottomInset: CGFloat) -> some View {
         let ready = missing == 0
@@ -484,7 +433,7 @@ struct PrivacyGateView: View {
                 .animation(.easeOut(duration: 0.2), value: hint)
                 .accessibilityIdentifier("pg-hint")
             Button(action: agree) {
-                Text(agreed ? "已同意" : "同意并进入")
+                Text(agreed ? "已同意" : "同意并继续")
                     .font(.system(size: 17, weight: .semibold))
                     .tracking(-0.2)
                     .foregroundStyle(agreed ? Color(red: 5 / 255, green: 36 / 255, blue: 14 / 255) : (ready ? .white : Self.text3))
@@ -516,7 +465,8 @@ struct PrivacyGateView: View {
 
     private func agree() {
         guard missing == 0, !agreed else { return }
-        consent = PrivacyGate.record(privacy: privacy, crossBorder: crossBorder, age: age, notifications: notifyOn)
+        // 通知不在这里问：scopes.notifications 记 false（键与 JSON 的样子不变）
+        consent = PrivacyGate.record(privacy: privacy, crossBorder: crossBorder, age: age, notifications: false)
         Haptics.success()
         withAnimation(.easeOut(duration: 0.2)) { agreed = true }
         // 按钮轻轻鼓一下（网页版 pgPulse）
@@ -528,52 +478,6 @@ struct PrivacyGateView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.62) {
             withAnimation(reduceMotion ? .easeOut(duration: 0.01) : Self.dismiss) { sheetIn = false }
             DispatchQueue.main.asyncAfter(deadline: .now() + (reduceMotion ? 0.05 : 0.42)) { onDone() }
-        }
-    }
-
-    private func toggleNotify() {
-        guard !notifyBusy, !notifyBlocked else { return }
-        Haptics.selection()
-        if notifyOn {
-            // 网页版：关掉只是这一项不算完成（系统授权收不回来，到设置里去关）
-            notifyOn = false
-            return
-        }
-        notifyBusy = true
-        Task { @MainActor in
-            let center = UNUserNotificationCenter.current()
-            let settings = await center.notificationSettings()
-            var granted = false
-            switch settings.authorizationStatus {
-            case .authorized, .provisional, .ephemeral:
-                granted = true
-            case .denied:
-                granted = false
-            default:
-                granted = (try? await center.requestAuthorization(options: [.alert, .badge, .sound])) ?? false
-            }
-            notifyBusy = false
-            if granted {
-                notifyOn = true
-            } else {
-                notifyOn = false
-                notifyBlocked = true
-                notifyNote = Self.notifyNoteBlocked
-            }
-        }
-    }
-
-    /// 打开时先看系统里的状态：已经授权了就直接是开着；已经拒绝了就灰下来（这一项也算处理过）
-    private func refreshNotify() async {
-        let s = await UNUserNotificationCenter.current().notificationSettings()
-        switch s.authorizationStatus {
-        case .authorized, .provisional, .ephemeral:
-            notifyOn = true
-        case .denied:
-            notifyBlocked = true
-            notifyNote = Self.notifyNoteBlocked
-        default:
-            break
         }
     }
 }
