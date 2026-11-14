@@ -28,7 +28,7 @@ final class DuoDeviceTests: XCTestCase {
         sleep(2)                                   // 弹层推上来、标题与要点依次升上来
         report(app, "privacy")
         snap("duo-00c-privacy")
-        XCTAssertFalse(agree.isEnabled, "四项都没完成，「同意并进入」不该能点")
+        XCTAssertFalse(agree.isEnabled, "三项都没勾，「同意并继续」不该能点")
 
         // 展开完整说明，再往下滚到「您的选择」
         let disclose = app.buttons["pg-disclose"].firstMatch
@@ -38,25 +38,11 @@ final class DuoDeviceTests: XCTestCase {
         for id in ["pg-privacy", "pg-cross", "pg-age"] {
             if let row = reveal(app, app.buttons.matching(identifier: id), swipes: 3) { row.tap(); usleep(300_000) } else { print("DUO privacy: \(id) not found") }
         }
-        if let notify = reveal(app, app.buttons.matching(identifier: "pg-notify"), swipes: 2) {
-            notify.tap(); sleep(2)
-            // 系统的通知权限弹窗在 SpringBoard 里（文字跟模拟器的系统语言走）
-            let sb = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-            var handled = false
-            for label in ["允许", "Allow"] {
-                let b = sb.buttons[label].firstMatch
-                if b.waitForExistence(timeout: 3) { b.tap(); handled = true; break }
-            }
-            if !handled { print("DUO privacy: no notification permission alert (already decided?)") }
-            sleep(1)
-        } else {
-            print("DUO privacy: notify row not found")
-        }
         snap("duo-00e-privacy-done")
         if agree.isEnabled {
             agree.tap()
             sleep(2)
-            XCTAssertFalse(app.buttons["pg-agree"].exists, "点了「同意并进入」闸门还在")
+            XCTAssertFalse(app.buttons["pg-agree"].exists, "点了「同意并继续」闸门还在")
             XCTAssertTrue(app.buttons["主页"].firstMatch.waitForExistence(timeout: 10), "同意以后没到主页")
         } else {
             print("DUO privacy: agree still disabled (hint: \(app.staticTexts["pg-hint"].firstMatch.label))")
