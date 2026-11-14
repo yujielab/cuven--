@@ -10,6 +10,11 @@ struct HeroArt: @unchecked Sendable {
     let edge: UIColor
 }
 
+final class HeroArtBox {
+    let art: HeroArt
+    init(_ art: HeroArt) { self.art = art }
+}
+
 /// 解码以后再给图做一道处理（结果和原图分开缓存）
 enum ImageEffect: String, Hashable, Sendable {
     case none
@@ -25,14 +30,16 @@ enum ImageEffect: String, Hashable, Sendable {
 actor ImagePipeline {
     static let shared = ImagePipeline()
 
-    private let memory = NSCache<NSString, UIImage>()
+    /// NSCache 本身线程安全：视图第一次画的时候就能同步查（cached），不用等 actor
+    nonisolated(unsafe) private let memory = NSCache<NSString, UIImage>()
     private var inflight: [String: Task<UIImage?, Never>] = [:]
     /// 详情页头部处理好的画面（按「地址 + 尺寸 + 宽高比」）
-    private var heroCache: [String: HeroArt] = [:]
+    nonisolated(unsafe) private let heroCache = NSCache<NSString, HeroArtBox>()
     private let session: URLSession
 
     init() {
         memory.totalCostLimit = 160 << 20
+        heroCache.countLimit = 24
         let cfg = URLSessionConfiguration.default
         cfg.urlCache = URLCache(memoryCapacity: 24 << 20, diskCapacity: 600 << 20)
         cfg.requestCachePolicy = .returnCacheDataElseLoad
@@ -41,8 +48,17 @@ actor ImagePipeline {
         session = URLSession(configuration: cfg)
     }
 
+    /// 内存里已经有的（不等、不解码）：视图第一次画就直接用——滑回来的卡、再打开的详情页不会先闪一下占位再淡入
+    nonisolated func cached(_ url: URL, maxPixel: CGFloat, effect: ImageEffect = .none) -> UIImage? {
+        memory.object(forKey: Self.key(url, maxPixel, effect))
+    }
+
+    nonisolated private static func key(_ url: URL, _ maxPixel: CGFloat, _ effect: ImageEffect) -> NSString {
+        (effect == .none ? "\(url.absoluteString)#\(Int(maxPixel))" : "\(url.absoluteString)#\(Int(maxPixel))#\(effect.rawValue)") as NSString
+    }
+
     func image(_ url: URL, maxPixel: CGFloat) async -> UIImage? {
-        let key = "\(url.absoluteString)#\(Int(maxPixel))" as NSString
+        let key = Self.key(url, maxPixel, .none)
         if let hit = memory.object(forKey: key) { return hit }
         if url.scheme == "demo" {                       // 演示数据：本地画，不走网络
             let img = DemoData.render(url, maxPixel: maxPixel)
@@ -69,7 +85,7 @@ actor ImagePipeline {
     /// 处理过的图（见 ImageEffect）：先照常拿原图，再在后台做一次处理，按「地址 + 尺寸 + 处理」记在内存里
     func image(_ url: URL, maxPixel: CGFloat, effect: ImageEffect) async -> UIImage? {
         guard effect != .none else { return await image(url, maxPixel: maxPixel) }
-        let key = "\(url.absoluteString)#\(Int(maxPixel))#\(effect.rawValue)" as NSString
+        let key = Self.key(url, maxPixel, effect)
         if let hit = memory.object(forKey: key) { return hit }
         guard let base = await image(url, maxPixel: maxPixel) else { return nil }
         let out = await Task.detached(priority: .userInitiated) { ImageEffects.apply(effect, to: base) }.value ?? base
@@ -80,13 +96,20 @@ actor ImagePipeline {
 
     /// 详情页头部的画面：裁成画面区的宽高比、底下渐进式模糊，顺带取底边的主色；解码和处理都在后台，结果记在内存里
     func heroArt(_ url: URL, maxPixel: CGFloat, aspect: CGFloat) async -> HeroArt? {
-        let key = "\(url.absoluteString)#\(Int(maxPixel))#\(Int((aspect * 100).rounded()))"
-        if let hit = heroCache[key] { return hit }
+        if let hit = cachedHeroArt(url, maxPixel: maxPixel, aspect: aspect) { return hit }
         guard let base = await image(url, maxPixel: maxPixel) else { return nil }
         guard let out = await Task.detached(priority: .userInitiated, operation: { ImageEffects.heroArt(base, aspect: aspect) }).value else { return nil }
-        if heroCache.count > 24 { heroCache.removeAll() }
-        heroCache[key] = out
+        heroCache.setObject(HeroArtBox(out), forKey: Self.heroKey(url, maxPixel, aspect))
         return out
+    }
+
+    /// 处理好的头部画面，内存里有就同步给（再打开同一部片的详情页，头部直接是好的，不再淡入一遍）
+    nonisolated func cachedHeroArt(_ url: URL, maxPixel: CGFloat, aspect: CGFloat) -> HeroArt? {
+        heroCache.object(forKey: Self.heroKey(url, maxPixel, aspect))?.art
+    }
+
+    nonisolated private static func heroKey(_ url: URL, _ maxPixel: CGFloat, _ aspect: CGFloat) -> NSString {
+        "\(url.absoluteString)#\(Int(maxPixel))#\(Int((aspect * 100).rounded()))" as NSString
     }
 
     /// 只要原始字节（字标的明暗分析用，见 LogoTone）
@@ -221,14 +244,28 @@ enum ImageEffects {
 /// 网络图片视图：加载前是一块暗色占位，加载完淡入
 struct RemoteImage: View {
     let url: URL?
-    var maxPixel: CGFloat = 900
-    var contentMode: ContentMode = .fill
-    var placeholder: Color = Color.white.opacity(0.06)
+    let maxPixel: CGFloat
+    let contentMode: ContentMode
+    let placeholder: Color
     /// 解码后的处理（分集卡、预告片卡底部的渐进式模糊）
-    var effect: ImageEffect = .none
+    let effect: ImageEffect
 
     @State private var image: UIImage?
     @State private var loadedURL: URL?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// 内存里已经有这张图：第一次画就直接是它（不闪占位、不再淡入一遍）
+    init(url: URL?, maxPixel: CGFloat = 900, contentMode: ContentMode = .fill,
+         placeholder: Color = Color.white.opacity(0.06), effect: ImageEffect = .none) {
+        self.url = url
+        self.maxPixel = maxPixel
+        self.contentMode = contentMode
+        self.placeholder = placeholder
+        self.effect = effect
+        let hit = url.flatMap { ImagePipeline.shared.cached($0, maxPixel: maxPixel, effect: effect) }
+        _image = State(initialValue: hit)
+        _loadedURL = State(initialValue: hit == nil ? nil : url)
+    }
 
     var body: some View {
         let _ = Perf.count("image")
@@ -238,15 +275,17 @@ struct RemoteImage: View {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
-                    .transition(.opacity)
+                    // 第一次载入：从一点点模糊里淡入，不带方向（「减弱动态效果」时只淡入）
+                    .transition(reduceMotion ? .opacity : .dsBlurFade(radius: 8))
             }
         }
         .task(id: url) {
             guard let url else { image = nil; return }
+            if loadedURL == url, image != nil { return }
             if loadedURL != url { image = nil }
             let img = await ImagePipeline.shared.image(url, maxPixel: maxPixel, effect: effect)
             guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.25)) { image = img }
+            withAnimation(.easeOut(duration: 0.32)) { image = img }
             loadedURL = url
         }
     }
@@ -335,6 +374,22 @@ struct LogoImage: View {
     @State private var image: UIImage?
     @State private var dark = false
     @State private var failed = false
+    @State private var loadedURL: URL?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// 内存里已经有这枚字标（明暗也判过了）：第一次画就直接是它
+    init(url: URL?, height: CGFloat, alignment: Alignment = .center, fallback: String? = nil, maxWidth: CGFloat = .infinity) {
+        self.url = url
+        self.height = height
+        self.alignment = alignment
+        self.fallback = fallback
+        self.maxWidth = maxWidth
+        if let url, let hit = ImagePipeline.shared.cached(url, maxPixel: 900), let d = LogoTone.shared.cached(url) {
+            _image = State(initialValue: hit)
+            _dark = State(initialValue: d)
+            _loadedURL = State(initialValue: url)
+        }
+    }
 
     var body: some View {
         let _ = Perf.count("logo")
@@ -349,7 +404,7 @@ struct LogoImage: View {
                     .frame(maxWidth: .infinity, alignment: alignment)
                     .modifier(InvertIf(on: dark))
                     .shadow(color: .black.opacity(0.55), radius: 12, y: 4)
-                    .transition(.opacity)
+                    .transition(reduceMotion ? .opacity : .dsBlurFade(radius: 10))
             } else if failed || url == nil, let fallback {
                 Text(fallback)
                     .font(.system(size: height * 0.42, weight: .heavy))
@@ -366,12 +421,13 @@ struct LogoImage: View {
         .task(id: url) {
             failed = false
             guard let url else { image = nil; return }
+            if loadedURL == url, image != nil { return }
             if let d = LogoTone.shared.cached(url) { dark = d }
             let img = await ImagePipeline.shared.image(url, maxPixel: 900)
             let d = await LogoTone.shared.isDark(url)      // 字节已在 URLCache 里，不再走网络
             guard !Task.isCancelled else { return }
             dark = d
-            if let img { withAnimation(.easeOut(duration: 0.3)) { image = img } } else { failed = true }
+            if let img { withAnimation(.easeOut(duration: 0.36)) { image = img }; loadedURL = url } else { failed = true }
         }
     }
 }

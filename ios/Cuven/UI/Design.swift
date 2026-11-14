@@ -835,8 +835,8 @@ struct DSPageCapsule: View {
 /// 「减弱动态效果」时只淡入淡出、不模糊（F59）
 struct DSBlurFadeImage: View {
     let url: URL?
-    var maxPixel: CGFloat = 1800
-    var duration: Double = 0.9
+    let maxPixel: CGFloat
+    let duration: Double
     @State private var shown: Shown?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -844,6 +844,16 @@ struct DSBlurFadeImage: View {
         let url: URL
         let image: UIImage
         static func == (a: Shown, b: Shown) -> Bool { a.url == b.url }
+    }
+
+    /// 内存里已经有：第一次画就直接是它（回到主页时头图不再淡入一遍）
+    init(url: URL?, maxPixel: CGFloat = 1800, duration: Double = 0.9) {
+        self.url = url
+        self.maxPixel = maxPixel
+        self.duration = duration
+        if let url, let hit = ImagePipeline.shared.cached(url, maxPixel: maxPixel) {
+            _shown = State(initialValue: Shown(url: url, image: hit))
+        }
     }
 
     var body: some View {
@@ -880,5 +890,10 @@ struct DSBlurFade: ViewModifier {
 extension AnyTransition {
     static var dsBlurFade: AnyTransition {
         .modifier(active: DSBlurFade(on: true), identity: DSBlurFade(on: false))
+    }
+
+    /// 轻一点的模糊淡入（卡上的图、字标第一次载入）
+    static func dsBlurFade(radius: CGFloat) -> AnyTransition {
+        .modifier(active: DSBlurFade(on: true, radius: radius), identity: DSBlurFade(on: false, radius: radius))
     }
 }

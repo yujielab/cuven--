@@ -827,10 +827,25 @@ struct DetailHeroBackdrop: View {
         static func == (a: Shown, b: Shown) -> Bool { a.key == b.key }
     }
 
+    /// 处理好的头部画面内存里已经有（再打开同一部片）：第一次画就直接是它，不闪底色、不再淡入
+    init(url: URL?, width: CGFloat, height: CGFloat, imageHeight: CGFloat) {
+        self.url = url
+        self.width = width
+        self.height = height
+        self.imageHeight = imageHeight
+        if let url, let art = ImagePipeline.shared.cachedHeroArt(url, maxPixel: Self.pixels(width, imageHeight),
+                                                                 aspect: width / max(1, imageHeight)) {
+            _shown = State(initialValue: Shown(key: Self.key(url, width, imageHeight), art: art))
+        }
+    }
+
+    private static func pixels(_ w: CGFloat, _ h: CGFloat) -> CGFloat { min(2400, max(w, h) * 3) }
+    private static func key(_ url: URL?, _ w: CGFloat, _ h: CGFloat) -> String { "\(url?.absoluteString ?? "")#\(Int(w))x\(Int(h))" }
+
     var body: some View {
         let tone = Color(uiColor: shown.map { ImageEffects.heroTone($0.art.edge) } ?? UIColor(white: 0.07, alpha: 1))
         let imgEnd = min(1, imageHeight / max(1, height))
-        let key = "\(url?.absoluteString ?? "")#\(Int(width))x\(Int(imageHeight))"
+        let key = Self.key(url, width, imageHeight)
         ZStack(alignment: .top) {
             tone
             ZStack {
@@ -862,8 +877,8 @@ struct DetailHeroBackdrop: View {
             guard let url else { return }
             if shown?.key == key { return }
             let aspect = width / max(1, imageHeight)
-            let px = min(2400, max(width, imageHeight) * 3)
-            guard let art = await ImagePipeline.shared.heroArt(url, maxPixel: px, aspect: aspect), !Task.isCancelled else { return }
+            guard let art = await ImagePipeline.shared.heroArt(url, maxPixel: Self.pixels(width, imageHeight), aspect: aspect),
+                  !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: 0.8)) { shown = Shown(key: key, art: art) }
         }
     }
