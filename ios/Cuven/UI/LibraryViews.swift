@@ -136,11 +136,21 @@ enum Relative {
 //
 // 系统大标题与系统搜索栏，提示「电影、剧集、年份」（C13、F90、C62：提示写清能搜什么，边输边出结果）。
 // 没输入：「文件夹」一排（片库根下一级）和「最近添加」海报网格（C61：搜索页先给能浏览的东西）。
-// 输入了：按类型分区，每区一排同样的海报（C63：最相关的那一类在上，区内按相关度）；卡上只有画面，卡下不写字（T20）。
+// 输入了（用户要求，照 Apple TV 的搜索和网页版）：上面一排胶囊分类「全部 / 电影 / 剧集」（选中的那颗填实，换的时候滑过去）。
+// 「全部」和网页版一样，电影和剧集样子不同、一眼分得出：剧集一排 16:9 横卡（画面 + 字标），电影一排竖海报；最相关的那一类在上（C63）。
+// 「电影」「剧集」是一行一部的列表：缩略图（电影竖海报、剧集 16:9）、片名、「电影 · 动作 · 2026 年」，右边一颗「•••」菜单，行间细线。
+
+/// 搜索结果的分类（Apple TV 的「热门结果 / 电影 / 电视节目」）
+enum SearchScope: String, CaseIterable, Identifiable {
+    case all = "全部", movies = "电影", shows = "剧集"
+    var id: String { rawValue }
+}
 
 struct SearchView: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
+    @State private var scope: SearchScope = .all
+    @Namespace private var scopeNS
 
     var body: some View {
         ZoomStack {
@@ -223,20 +233,78 @@ struct SearchView: View {
         } else {
             let movies = hits.compactMap { h -> Video? in if case .movie(let v) = h.kind { return v } else { return nil } }
             let shows = hits.compactMap { h -> Series? in if case .series(let s) = h.kind { return s } else { return nil } }
-            // 分区之间只靠留白（F3）
-            VStack(alignment: .leading, spacing: metrics.shelfGap) {
-                // C63：最相关的那一条属于哪一类，哪一类在上
-                if Self.isSeries(hits[0]) {
-                    showsSection(shows, metrics)
-                    moviesSection(movies, metrics)
-                } else {
-                    moviesSection(movies, metrics)
-                    showsSection(shows, metrics)
+            let scopes = SearchScope.allCases.filter { $0 == .all || ($0 == .movies ? !movies.isEmpty : !shows.isEmpty) }
+            // 这次的结果里没有当前那一类：回到「全部」
+            let shown = scopes.contains(scope) ? scope : .all
+            VStack(alignment: .leading, spacing: 18) {
+                if scopes.count > 1 { scopeBar(scopes, shown: shown, metrics) }
+                Group {
+                    switch shown {
+                    case .all:
+                        allResults(q, movies: movies, shows: shows, seriesFirst: Self.isSeries(hits[0]), metrics)
+                    case .movies:
+                        resultList(movies.map { .movie($0) }, metrics)
+                    case .shows:
+                        resultList(shows.map { .series($0) }, metrics)
+                    }
                 }
+                .transition(.opacity)
+                .id(shown)
             }
+            .animation(.smooth(duration: 0.3), value: shown)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 8)
             .padding(.bottom, 40)
+        }
+    }
+
+    /// 分类胶囊：选中的那颗填实（系统的强调色）、白字，别的只有字；换的时候那颗胶囊滑过去（F57）；点得到 44 高（F74）
+    private func scopeBar(_ scopes: [SearchScope], shown: SearchScope, _ metrics: DSMetrics) -> some View {
+        HStack(spacing: 6) {
+            ForEach(scopes) { s in
+                Button {
+                    guard s != shown else { return }
+                    Haptics.selection()
+                    withAnimation(.smooth(duration: 0.3)) { scope = s }
+                } label: {
+                    Text(s.rawValue)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .frame(height: 36)
+                        .background {
+                            if s == shown {
+                                Capsule()
+                                    .fill(Color.accentColor)
+                                    .matchedGeometryEffect(id: "scope", in: scopeNS)
+                            }
+                        }
+                        .frame(minHeight: 44)
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(s == shown ? .isSelected : [])
+                .accessibilityIdentifier("search-scope-\(s.id)")
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, metrics.margin - 6)
+    }
+
+    /// 「全部」：和网页版一样，剧集一排 16:9 横卡、电影一排竖海报（卡型不同，一眼分得出）；最相关的那一类在上
+    @ViewBuilder private func allResults(_ q: String, movies: [Video], shows: [Series], seriesFirst: Bool, _ metrics: DSMetrics) -> some View {
+        VStack(alignment: .leading, spacing: metrics.shelfGap) {
+            Text("「\(q)」· \(movies.count + shows.count) 个结果")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, metrics.margin)
+            if seriesFirst {
+                showsSection(shows, metrics)
+                moviesSection(movies, metrics)
+            } else {
+                moviesSection(movies, metrics)
+                showsSection(shows, metrics)
+            }
         }
     }
 
@@ -245,10 +313,10 @@ struct SearchView: View {
         return false
     }
 
-    /// 电影：海报一排（纯净画面 + 字标，卡下不写字：T20）
+    /// 电影：竖海报一排（纯净画面 + 字标，卡下不写字：T20）
     @ViewBuilder private func moviesSection(_ list: [Video], _ metrics: DSMetrics) -> some View {
         if !list.isEmpty {
-            DSSection(title: "电影", metrics: metrics) {
+            DSSection(title: "电影 · \(list.count)", metrics: metrics) {
                 DSShelf(metrics: metrics) {
                     ForEach(list) { v in
                         let art = model.posterArt(v, width: metrics.posterWidth)
@@ -264,16 +332,16 @@ struct SearchView: View {
         }
     }
 
-    /// 剧集：同样的海报一排（纯净海报 + 字标）
+    /// 剧集：16:9 横卡一排（画面 + 字标），和电影的竖海报分开（网页版 search-tv-rail）
     @ViewBuilder private func showsSection(_ list: [Series], _ metrics: DSMetrics) -> some View {
         if !list.isEmpty {
-            DSSection(title: "剧集", metrics: metrics) {
+            DSSection(title: "剧集 · \(list.count)", metrics: metrics) {
                 DSShelf(metrics: metrics) {
                     ForEach(list) { s in
-                        let art = model.seriesPosterArt(s, width: metrics.posterWidth)
+                        let art = model.seriesWideArt(s)
                         ZoomLink(route: .series(s), slot: "search-series") {
-                            DSPosterLockup(art: art.url, title: model.seriesMetas[s.path]?.title ?? s.name, subtitle: s.seasonLabel,
-                                           metrics: metrics, logo: art.logo)
+                            DSWideLockup(art: art.url, title: model.seriesMetas[s.path]?.title ?? s.name, subtitle: s.seasonLabel,
+                                         metrics: metrics, logo: art.logo)
                         }
                         .accessibilityIdentifier("search-series")
                         .seriesMenu(s)
@@ -282,6 +350,126 @@ struct SearchView: View {
                 }
             }
         }
+    }
+
+    /// 「电影」「剧集」：一行一部的列表（参考图）
+    private func resultList(_ entries: [HomeEntry], _ metrics: DSMetrics) -> some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(entries.enumerated()), id: \.element.id) { i, e in
+                SearchResultRow(entry: e, metrics: metrics, divider: i < entries.count - 1)
+            }
+        }
+    }
+}
+
+/// 列表里的一行：缩略图（电影竖海报 70 宽、剧集 16:9 横图）→ 片名（Title 3）和一行灰字「电影 · 动作 · 2026 年」→ 右边「•••」菜单。
+/// 整行点了进详情（从缩略图上放大出来），「•••」单独一颗、点按区 44（F74）；行间一道细线，从字的左边线开始（C51）
+struct SearchResultRow: View {
+    @Environment(AppModel.self) private var model
+    let entry: HomeEntry
+    let metrics: DSMetrics
+    let divider: Bool
+
+    var body: some View {
+        let thumbW: CGFloat = isMovie ? 70 : 124
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 14) {
+                ZoomLink(route: route, slot: "search-list") {
+                    HStack(spacing: 14) {
+                        thumbnail(width: thumbW)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(title)
+                                .font(.title3)
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            Text(subtitle)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .accessibilityIdentifier(isMovie ? "search-row-movie" : "search-row-series")
+                Menu {
+                    switch entry {
+                    case .movie(let v): MovieMenuItems(video: v)
+                    case .series(let s): SeriesMenuItems(series: s)
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("更多")
+            }
+            .padding(.vertical, 10)
+            .padding(.horizontal, metrics.margin)
+            if divider {
+                Divider()
+                    .padding(.leading, metrics.margin + thumbW + 14)
+                    .padding(.trailing, metrics.margin)
+            }
+        }
+        .task {
+            if case .series(let s) = entry { await model.ensureSeriesMeta(s) }
+        }
+    }
+
+    private var isMovie: Bool {
+        if case .movie = entry { return true }
+        return false
+    }
+
+    private var route: Route {
+        switch entry {
+        case .movie(let v): return .movie(v)
+        case .series(let s): return .series(s)
+        }
+    }
+
+    private var title: String {
+        switch entry {
+        case .movie(let v): return model.title(v)
+        case .series(let s): return model.seriesMetas[s.path]?.title ?? s.name
+        }
+    }
+
+    /// 「电影 · 动作 · 2026 年」「剧集 · 剧情 · 2024 年 · 第 1 季」
+    private var subtitle: String {
+        switch entry {
+        case .movie(let v):
+            return DetailText.line(["电影", model.meta(v)?.genres?.first, model.year(v).map { "\($0) 年" }])
+        case .series(let s):
+            let m = model.seriesMetas[s.path]
+            return DetailText.line(["剧集", m?.genres?.first, (s.year ?? m?.year).map { String($0.prefix(4)) + " 年" }, s.seasonLabel])
+        }
+    }
+
+    /// 缩略图：电影用印着片名的海报（小图上认得出），剧集用 16:9 的剧照；圆角 + 一圈很细的边
+    private func thumbnail(width w: CGFloat) -> some View {
+        let h: CGFloat = isMovie ? (w * 1.5).rounded() : (w * 9 / 16).rounded()
+        let url: URL? = {
+            switch entry {
+            case .movie(let v):
+                let m = model.meta(v)
+                return TMDBImage.url(m?.poster ?? m?.posterClean, "w185") ?? model.posterArt(v, width: w).url
+            case .series(let s):
+                return model.seriesWideArt(s).url
+            }
+        }()
+        return Color(white: 0.11)
+            .overlay { RemoteImage(url: url, maxPixel: w * 3, placeholder: .clear) }
+            .frame(width: w, height: h)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
+            }
+            .accessibilityHidden(true)
     }
 }
 

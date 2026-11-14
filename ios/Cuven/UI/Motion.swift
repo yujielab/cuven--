@@ -93,29 +93,42 @@ extension View {
 // 不放「分享」：每张海报都挂一个分享项，无障碍快照（XCUITest 也靠它）在首页要走一两百个，主线程被拖住几十秒；分享在详情页的工具栏里
 
 struct MovieMenu: ViewModifier {
-    @Environment(AppModel.self) private var model
     let video: Video
 
     func body(content: Content) -> some View {
-        content.contextMenu {
-            Button(model.playback.resumePosition(video.path) != nil ? "继续播放" : "播放", systemImage: "play.fill") {
-                PlayerCoordinator.shared.play(PlayRequest(path: video.path, name: video.name, title: model.title(video),
-                                                          subtitle: model.year(video).map { String($0) },
-                                                          artwork: model.backgroundArtString(video)), model: model)
-            }
-            WatchlistMenuButton(key: video.path, kind: .movie)
-        }
+        content.contextMenu { MovieMenuItems(video: video) }
     }
 }
 
 struct SeriesMenu: ViewModifier {
-    @Environment(AppModel.self) private var model
     let series: Series
 
     func body(content: Content) -> some View {
-        content.contextMenu {
-            WatchlistMenuButton(key: series.path, kind: .series)
+        content.contextMenu { SeriesMenuItems(series: series) }
+    }
+}
+
+/// 一部电影的菜单项（长按菜单和列表里的「•••」共用）：播放 / 继续播放、加入想看
+struct MovieMenuItems: View {
+    @Environment(AppModel.self) private var model
+    let video: Video
+
+    var body: some View {
+        Button(model.playback.resumePosition(video.path) != nil ? "继续播放" : "播放", systemImage: "play.fill") {
+            PlayerCoordinator.shared.play(PlayRequest(path: video.path, name: video.name, title: model.title(video),
+                                                      subtitle: model.year(video).map { String($0) },
+                                                      artwork: model.backgroundArtString(video)), model: model)
         }
+        WatchlistMenuButton(key: video.path, kind: .movie)
+    }
+}
+
+/// 一部剧的菜单项：加入想看
+struct SeriesMenuItems: View {
+    let series: Series
+
+    var body: some View {
+        WatchlistMenuButton(key: series.path, kind: .series)
     }
 }
 
