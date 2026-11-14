@@ -8,7 +8,7 @@ import UIKit
 //   下面一行大号粗体标题和一段灰色说明；
 // · 下面一排大卡：标题「为您的口味量身定制的内容 ›」+ 灰字「向左滑动查看更多」，
 //   每张卡是整幅画面，底下一条磨砂的条：小海报、片名、「Cuven 独占 · 类型」、「查看」胶囊（参考图卡底那一条）。
-// 动效：海报第一次出现时从叠在一起的一摞弹开成一扇（一张晚一点），之后各自轻轻浮动（错开节拍）；
+// 动效：海报第一次滑进屏幕时从叠在一起的一摞弹开成一扇（一张晚一点），之后在屏上时各自轻轻浮动（错开节拍，滑走就停）；
 // 整条带往上滚时海报比字慢一点（视差）；横滑的大卡停在左边线上（不放大、不压暗别的卡：用户早先的要求）。
 // 「减弱动态效果」打开时：不弹、不浮、没有视差，只淡入。
 
@@ -88,12 +88,12 @@ struct FeaturedCollectionHeader: View {
         VStack(alignment: .leading, spacing: 0) {
             PosterFan(covers: Array(covers.prefix(3)), width: posterW)
                 .frame(maxWidth: .infinity)
-                .frame(height: posterW * 1.5 + posterW * 0.62)
-                .padding(.top, 28)
+                .frame(height: PosterFan.height(posterW))
+                .padding(.top, 22)
                 // 整条带往上滚时海报比字慢一点（视差）
                 .visualEffect { c, proxy in
                     let y = proxy.frame(in: .scrollView(axis: .vertical)).minY
-                    return c.offset(y: max(-40, min(40, -y * lag)))
+                    return c.offset(y: max(-28, min(28, -y * lag)))
                 }
             Text(title)
                 .font(.system(size: metrics.wide ? 44 : 36, weight: .heavy))
@@ -139,62 +139,92 @@ struct FeaturedCollectionHeader: View {
 
 // MARK: - 立体海报：斜着叠成一扇
 
-/// 三张立体海报：最左边的在最上面、往右一张比一张低一点，各自斜一点（参考图三枚图标的摆法）
+/// 三张立体海报：最左边的在最上面、往右一张比一张低一点，各自斜一点（参考图三枚图标的摆法）。
+/// 第一次滑进屏幕时才从叠在一起的一摞弹开（主页一载入它还在屏幕下面，那时弹了看不到）；
+/// 之后在屏上时各自轻轻浮动，滑出屏幕、换到别的页就停（不在背后一直跑、不费电）。
 struct PosterFan: View {
     let covers: [URL?]
     let width: CGFloat
     @State private var fanned = false
-    @State private var float = false
+    @State private var onScreen = false
+    @State private var appeared = false
+    /// 这一轮浮动从什么时候开始（nil = 停着）；幅度从 0 慢慢加满，开始时不跳
+    @State private var floatFrom: Date?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// 每一张的位置（按海报宽算）、倾斜角、浮动的相位
+    /// 每一张的位置（按海报宽算）与倾斜角
     private static let layout: [(x: CGFloat, y: CGFloat, angle: Double, tilt: Double)] = [
         (-0.92, -0.20, -9, 16),
         (0, 0.16, -2, 0),
         (0.92, 0.46, 8, -16),
     ]
 
+    /// 一扇占的高：上沿约 -1.06、下沿约 +1.37 个海报宽（算上斜放、透视和厚度），再留浮动的上下 5 点
+    static func height(_ width: CGFloat) -> CGFloat { (width * 2.43).rounded() + 12 }
+
     var body: some View {
-        ZStack {
-            ForEach(Array(covers.enumerated()), id: \.offset) { i, url in
-                let l = Self.layout[min(i, Self.layout.count - 1)]
-                let spread: Bool = fanned || reduceMotion
-                let tilt: Double = spread ? l.tilt : 0
-                let angle: Double = spread ? l.angle : 0
-                let dx: CGFloat = spread ? l.x * width : 0
-                let dy: CGFloat = spread ? l.y * width : 0
-                // 各自轻轻浮动：上下 5 点、斜一点点，节拍错开
-                let bob: CGFloat = (reduceMotion || !float) ? 5 : -5
-                let sway: Double = (reduceMotion || !float) ? -0.8 : 0.8
-                let floatAnim: Animation? = reduceMotion ? nil
-                    : Animation.easeInOut(duration: 2.8 + Double(i) * 0.35).repeatForever(autoreverses: true).delay(Double(i) * 0.45)
-                let openAnim: Animation = reduceMotion ? Animation.easeInOut(duration: 0.3)
-                    : Animation.spring(response: 0.72, dampingFraction: 0.7).delay(Double(i) * 0.07)
-                Poster3D(url: url, width: width)
-                    .rotation3DEffect(.degrees(tilt), axis: (x: 0.15, y: 1, z: 0), perspective: 0.55)
-                    .rotationEffect(.degrees(angle))
-                    .offset(x: dx, y: dy)
-                    .offset(y: reduceMotion ? 0 : bob)
-                    .rotationEffect(.degrees(reduceMotion ? 0 : sway))
-                    .animation(floatAnim, value: float)
-                    .scaleEffect(spread ? 1 : 0.86)
-                    .opacity(spread ? 1 : 0)
-                    .animation(openAnim, value: spread)
-                    .zIndex(Double(covers.count - i))
+        // 浮动很慢（5 点、五六秒一个来回），每秒 30 帧就够顺
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: floatFrom == nil)) { context in
+            let amp = Self.amplitude(since: floatFrom, now: context.date)
+            let t = context.date.timeIntervalSinceReferenceDate
+            ZStack {
+                ForEach(Array(covers.enumerated()), id: \.offset) { i, url in
+                    poster(i, url, t: t, amp: amp)
+                }
             }
         }
+        // 右边那张低、上下不对称：整扇往上挪一点，在框里居中
+        .offset(y: -width * 0.15)
         .frame(width: width * 2.9)
-        .onAppear {
-            guard !fanned else { return }
-            fanned = true
-            // 弹开那一下走完再开始浮动：两种动画分开，弹开不会被卷进无限循环里
-            guard !reduceMotion else { return }
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(900))
-                float = true
-            }
+        .onScrollVisibilityChange(threshold: 0.2) { visible in
+            onScreen = visible
+            if visible, !fanned { fanned = true }
+            syncFloat()
         }
+        .onAppear { appeared = true; syncFloat() }
+        .onDisappear { appeared = false; syncFloat() }
+        .onChange(of: reduceMotion) { syncFloat() }
         .accessibilityHidden(true)
+    }
+
+    private func poster(_ i: Int, _ url: URL?, t: Double, amp: CGFloat) -> some View {
+        let l = Self.layout[min(i, Self.layout.count - 1)]
+        let spread: Bool = fanned || reduceMotion
+        let tilt: Double = spread ? l.tilt : 0
+        let angle: Double = spread ? l.angle : 0
+        let dx: CGFloat = spread ? l.x * width : 0
+        let dy: CGFloat = spread ? l.y * width : 0
+        // 各自轻轻浮动：上下 5 点、斜 0.8°，周期和相位错开
+        let phase: Double = t * 2 * Double.pi / (5.6 + Double(i) * 0.8) + Double(i) * 1.9
+        let bob: CGFloat = 5 * amp * CGFloat(sin(phase))
+        let sway: Double = 0.8 * Double(amp) * sin(phase + 1.1)
+        let openAnim: Animation = reduceMotion ? Animation.easeInOut(duration: 0.3)
+            : Animation.spring(response: 0.72, dampingFraction: 0.7).delay(Double(i) * 0.07)
+        return Poster3D(url: url, width: width)
+            .rotation3DEffect(.degrees(tilt), axis: (x: 0.15, y: 1, z: 0), perspective: 0.55)
+            .rotationEffect(.degrees(angle))
+            .offset(x: dx, y: dy)
+            .scaleEffect(spread ? 1 : 0.86)
+            .opacity(spread ? 1 : 0)
+            .animation(openAnim, value: spread)
+            // 浮动在弹开的动画外面：每一帧直接给位置，不被弹簧卷进去
+            .offset(y: bob)
+            .rotationEffect(.degrees(sway))
+            .zIndex(Double(covers.count - i))
+    }
+
+    /// 浮动的幅度：弹开那一下（约 0.7 秒）走完才慢慢加上来，再过 1.4 秒到满幅
+    private static func amplitude(since: Date?, now: Date) -> CGFloat {
+        guard let since else { return 0 }
+        let a = min(1, max(0, (now.timeIntervalSince(since) - 0.6) / 1.4))
+        return CGFloat(a * a * (3 - 2 * a))
+    }
+
+    /// 在屏上（滑进来了、这一页也在前台）而且没开「减弱动态效果」才浮动
+    private func syncFloat() {
+        let active = appeared && onScreen && !reduceMotion
+        if active, floatFrom == nil { floatFrom = Date() }
+        if !active, floatFrom != nil { floatFrom = nil }
     }
 }
 
