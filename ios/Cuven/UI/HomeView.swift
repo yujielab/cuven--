@@ -80,7 +80,7 @@ struct HomeView: View {
             let logo = (it.hero.logo?.isEmpty == false ? it.hero.logo : nil) ?? model.logoArtString(v)
             return DSHeroPage(id: it.id,
                               wideArt: it.hero.background ?? model.backgroundArtString(v),
-                              tallArt: it.hero.poster ?? model.appleArt(v)?.tall ?? meta?.posterClean ?? meta?.poster,
+                              tallArt: it.hero.poster ?? model.tallArtString(v) ?? meta?.posterClean ?? meta?.poster,
                               logo: logo,
                               title: model.title(v),
                               meta: heroMeta(it),
@@ -102,8 +102,9 @@ struct HomeView: View {
             for v in model.newest.prefix(6) {
                 let m = model.meta(v)
                 let apple = model.appleArt(v)
-                guard let bd = apple?.background ?? m?.backdrop else { continue }
-                out.append(HeroItem(hero: Hero.fallback(path: v.path, backdrop: bd, poster: apple?.tall ?? m?.posterClean ?? m?.poster), video: v))
+                // 全屏的头图要大图：Apple 的按 1920 / 1290 宽要（backgroundArtString / tallArtString 已换好尺寸）
+                guard let bd = (apple?.background != nil ? model.backgroundArtString(v) : nil) ?? m?.backdrop else { continue }
+                out.append(HeroItem(hero: Hero.fallback(path: v.path, backdrop: bd, poster: model.tallArtString(v) ?? m?.posterClean ?? m?.poster), video: v))
             }
         }
         return out
