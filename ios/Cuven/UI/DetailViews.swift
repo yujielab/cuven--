@@ -14,7 +14,8 @@ struct YearView: View {
         let entries = model.homeYear(year)
         let movies = entries.filter { if case .movie = $0 { return true } else { return false } }.count
         GeometryReader { geo in
-            let metrics = DSMetrics(width: geo.size.width)
+            let insets = geo.safeAreaInsets
+            let metrics = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing)
             ScrollView {
                 if entries.isEmpty {
                     ContentUnavailableView("这一年还没有影片", systemImage: "film",
@@ -24,9 +25,13 @@ struct YearView: View {
                     EntryGrid(entries: entries, metrics: metrics, slot: "year-\(year)", movieID: "year-movie", seriesID: "year-series")
                         .padding(.top, 8)
                         .padding(.bottom, 40)
+                        .padding(.leading, insets.leading)
+                        .padding(.trailing, insets.trailing)
                 }
             }
             .scrollIndicators(.hidden)
+            // 整页铺满（连同侧边那一列），网格留在安全区里
+            .ignoresSafeArea(edges: .horizontal)
         }
         .background(Theme.bg)
         .navigationTitle(Text(verbatim: "\(year) 年"))

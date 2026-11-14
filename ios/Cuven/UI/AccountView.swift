@@ -86,7 +86,8 @@ struct AccountView: View {
             .confirmationDialog("退出登录？", isPresented: $confirmSignOut, titleVisibility: .visible) {
                 Button("退出登录", role: .destructive) {
                     dismiss()
-                    account.signOut()
+                    // 登录层淡入（网页版鉴权层打开：0.28 秒 --silk-in）
+                    withAnimation(.timingCurve(0.22, 0.68, 0.28, 1, duration: 0.28)) { account.signOut() }
                 }
             } message: {
                 Text("退出后需要重新登录才能观看。观看进度保留在这台设备上。")

@@ -43,7 +43,8 @@ struct FolderView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let metrics = DSMetrics(width: geo.size.width)
+            let insets = geo.safeAreaInsets
+            let metrics = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing)
             ScrollView {
                 VStack(alignment: .leading, spacing: max(16, metrics.shelfGap - 14)) {
                     if loading && subfolders.isEmpty && videos.isEmpty {
@@ -68,8 +69,12 @@ struct FolderView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 8)
                 .padding(.bottom, 40)
+                .padding(.leading, insets.leading)
+                .padding(.trailing, insets.trailing)
             }
             .scrollIndicators(.hidden)
+            // 整页铺满（连同侧边那一列）：横着的一排滑到那一列底下，网格和字留在安全区里
+            .ignoresSafeArea(edges: .horizontal)
         }
         .background(Theme.bg)
         .navigationTitle(folder.name)

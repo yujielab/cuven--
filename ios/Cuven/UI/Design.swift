@@ -14,6 +14,9 @@ import SwiftUI
 /// 排与排之间留足（T24），每排露出下一张的一截，告诉人还能往右滑（S8、I13）
 struct DSMetrics {
     let width: CGFloat
+    /// 两侧的安全区（iPhone Duo 侧边那一列）：横着的一排一直铺到它底下（dsBleedRow），字和网格留在安全区里
+    var leadingInset: CGFloat = 0
+    var trailingInset: CGFloat = 0
 
     /// 展开的 Duo、iPad、横拿：一排多放几张，字号上一级
     var wide: Bool { width >= 600 }
@@ -106,9 +109,21 @@ struct DSShelf<Content: View>: View {
                 .scrollTargetLayout()
                 .padding(.vertical, 4)
         }
-        .contentMargins(.horizontal, metrics.margin, for: .scrollContent)
+        .dsBleedRow(metrics)
         .scrollTargetBehavior(.viewAligned)
         .scrollClipDisabled()
+    }
+}
+
+extension View {
+    /// 横着的一排（用户要求：所有元素都能越过安全区）：滚动区一直铺到两侧安全区底下（iPhone Duo 侧边那一列），
+    /// 卡滑过去时从那一列底下过、不在安全区边上被切掉，在那一列上也能滑；第一张仍停在左边线上，最后一张能滑回安全区里
+    func dsBleedRow(_ m: DSMetrics) -> some View {
+        self
+            .contentMargins(.leading, m.margin + m.leadingInset, for: .scrollContent)
+            .contentMargins(.trailing, m.margin + m.trailingInset, for: .scrollContent)
+            .padding(.leading, -m.leadingInset)
+            .padding(.trailing, -m.trailingInset)
     }
 }
 

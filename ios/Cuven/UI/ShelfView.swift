@@ -12,7 +12,8 @@ struct ShelfView: View {
     var body: some View {
         let entries = self.entries
         GeometryReader { geo in
-            let metrics = DSMetrics(width: geo.size.width)
+            let insets = geo.safeAreaInsets
+            let metrics = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing)
             ScrollView {
                 if entries.isEmpty {
                     emptyState.padding(.top, 60)
@@ -21,9 +22,13 @@ struct ShelfView: View {
                               movieID: "shelf-movie", seriesID: "shelf-series")
                         .padding(.top, 8)
                         .padding(.bottom, 40)
+                        .padding(.leading, insets.leading)
+                        .padding(.trailing, insets.trailing)
                 }
             }
             .scrollIndicators(.hidden)
+            // 整页铺满（连同侧边那一列），网格留在安全区里
+            .ignoresSafeArea(edges: .horizontal)
         }
         .background(Theme.bg)
         .navigationTitle(shelf.title)

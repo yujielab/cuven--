@@ -17,8 +17,9 @@ struct HomeView: View {
         ZoomStack {
             GeometryReader { geo in
                 let insets = geo.safeAreaInsets
-                // 内容区的宽（不算侧边那一列）：边距、卡宽、排间距都从它算（F9、D4、S3、S5、S6）
-                let m = DSMetrics(width: geo.size.width)
+                // 内容区的宽（不算侧边那一列）：边距、卡宽、排间距都从它算（F9、D4、S3、S5、S6）；
+                // 安全区也带上：横着的一排一直铺到侧边那一列底下
+                let m = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing)
                 let fullWidth = geo.size.width + insets.leading + insets.trailing
                 let fullHeight = geo.size.height + insets.top + insets.bottom
                 ScrollView {

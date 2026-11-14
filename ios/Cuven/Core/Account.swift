@@ -243,9 +243,14 @@ enum AccountAPI {
     }
 
     static func putRecord(_ r: AccountRecord) async -> Bool {
-        guard let name = r.username else { return false }
+        (200..<300).contains(await putRecordStatus(r))
+    }
+
+    /// 写账户档，返回 HTTP 状态码（0 = 网络错误；登录页「保存失败（状态码）· 请重试」要用）
+    static func putRecordStatus(_ r: AccountRecord) async -> Int {
+        guard let name = r.username else { return 0 }
         let (code, _) = await send("PUT", "/file/" + component("username_\(name).json"), json: r)
-        return (200..<300).contains(code)
+        return code
     }
 
     static func putEmailMap(_ email: String, username: String) async {
@@ -355,6 +360,9 @@ struct AccountSession: Codable, Equatable {
     var at: Date
 }
 
+/// 生物识别的结果：登录页照网页版分开说——取消了、没通过、这台设备用不了
+enum BiometricOutcome { case ok, cancelled, failed, unavailable }
+
 @MainActor
 @Observable
 final class AccountStore {
@@ -432,14 +440,20 @@ final class AccountStore {
     }
 
     /// 开启：先验一次生物识别，再把账户写进受生物识别保护的钥匙串项（登录流程里身份还没写进钥匙串时传进来）
-    func enableFaceID(for pending: AccountSession? = nil) async -> Bool {
-        guard let s = pending ?? session else { return false }
+    @discardableResult
+    func enableFaceID(for pending: AccountSession? = nil) async -> BiometricOutcome {
+        guard let s = pending ?? session else { return .unavailable }
         let ctx = LAContext()
-        guard (try? await ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "开启后，下次轻点一下即可登录 Cuven max")) == true,
-              let d = try? JSONEncoder().encode(s), Keychain.set(d, account: "faceid", biometric: true) else { return false }
+        do {
+            guard try await ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics,
+                                               localizedReason: "开启后，下次轻点一下即可登录 Cuven max") else { return .failed }
+        } catch {
+            return Self.outcome(error)
+        }
+        guard let d = try? JSONEncoder().encode(s), Keychain.set(d, account: "faceid", biometric: true) else { return .unavailable }
         faceIDUser = s.username
         UserDefaults.standard.set(s.username, forKey: "cuven_faceid_user")
-        return true
+        return .ok
     }
 
     func disableFaceID() {
@@ -448,14 +462,29 @@ final class AccountStore {
         UserDefaults.standard.removeObject(forKey: "cuven_faceid_user")
     }
 
-    /// 读受保护的钥匙串项会弹系统的面容 ID 验证；通过即登录
-    func faceIDLogin() async -> Bool {
+    /// 面容 ID 快速登录：验过以后从受保护的钥匙串项里取出账户。这里不写登录状态——
+    /// 登录页先放完成功的那一段（和网页版一样），最后一步才 signIn
+    func faceIDSession() async -> (session: AccountSession?, outcome: BiometricOutcome) {
         let ctx = LAContext()
         ctx.localizedReason = "登录 Cuven max"
-        guard (try? await ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "登录 Cuven max")) == true,
-              let d = Keychain.get(account: "faceid", context: ctx),
-              let s = try? JSONDecoder().decode(AccountSession.self, from: d) else { return false }
-        signIn(username: s.username, email: s.email, method: "faceid")
-        return true
+        do {
+            guard try await ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics,
+                                               localizedReason: "登录 Cuven max") else { return (nil, .failed) }
+        } catch {
+            return (nil, Self.outcome(error))
+        }
+        guard let d = Keychain.get(account: "faceid", context: ctx),
+              let s = try? JSONDecoder().decode(AccountSession.self, from: d) else { return (nil, .unavailable) }
+        return (s, .ok)
+    }
+
+    /// 系统的生物识别错误 → 登录页分开说的三种情况（网页版：NotAllowedError 是取消，其余是用不了）
+    private static func outcome(_ error: Error) -> BiometricOutcome {
+        guard let e = error as? LAError else { return .unavailable }
+        switch e.code {
+        case .userCancel, .appCancel, .systemCancel, .userFallback: return .cancelled
+        case .authenticationFailed: return .failed
+        default: return .unavailable
+        }
     }
 }

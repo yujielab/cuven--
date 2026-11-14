@@ -586,8 +586,9 @@ struct DetailScaffold<Episodes: View>: View {
 
     var body: some View {
         GeometryReader { geo in
-            let m = DSMetrics(width: geo.size.width)
             let insets = geo.safeAreaInsets
+            // 横着的一排（简介卡、分集、预告片、演员）一直铺到侧边那一列底下
+            let m = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing)
             // 整个窗口：把顶上的状态栏 / 导航栏、底下的标签栏、侧边那一列加回来（画面从屏幕最顶上开始、连同侧边那一列一起平铺）
             let fullH = geo.size.height + insets.top + insets.bottom
             let fullW = geo.size.width + insets.leading + insets.trailing
