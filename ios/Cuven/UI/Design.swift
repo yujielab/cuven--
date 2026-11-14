@@ -535,8 +535,10 @@ struct DSHeroPage: Identifiable {
     var detail: Route
 }
 
-/// 全屏轮播：一页一部，左右翻；画面在后、字在前，翻页时画面比字走得慢一点（两层视差：S12、S15）；
-/// 没碰它时 7 秒翻一页，一碰就不再自己翻（S17、F79）；「减弱动态效果」或旁白开着时不自己翻（S17、F59）。
+/// 全屏轮播：一页一部，左右翻。画面单独一层、不跟着页走：换页时旧画面模糊淡出、新画面从模糊里淡入，
+/// 不带任何进入方向（用户要求；新画面解码好了才换，不会先闪一下空的）；字和按钮跟着手指左右翻（直接操控：F54）。
+/// 没碰它时 7 秒翻一页（页码点那颗胶囊跟着填满），一碰就不再自己翻（S17、F79）；「减弱动态效果」或旁白开着时不自己翻（S17、F59）。
+/// 只认真的左右翻页才算「碰过」：竖着滑从头图上开始也照样滚动整页（原来挂的拖动手势会把竖滑吃掉）。
 /// 画面铺满整个窗口宽（fullWidth，含 iPhone Duo 侧边那一列：画面在那一列底下平铺过去，F6、S19），
 /// 字和按钮留在安全区里（leadingInset / trailingInset，F7）；页码点浮在画面底部（S16）
 struct DSHeroCarousel: View {
@@ -550,19 +552,32 @@ struct DSHeroCarousel: View {
     var trailingInset: CGFloat = 0
     @State private var current: String?
     @State private var touched = false
+    /// 这一页开始停留的时刻（页码胶囊按它填满）；不自己翻页时是 nil
+    @State private var pageStart: Date?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.zoomNamespace) private var zoomNamespace
 
+    private static let interval: Double = 7
+
     var body: some View {
         let w = fullWidth ?? metrics.width
         let tall = height > w
+        let shown = pages.first { $0.id == current } ?? pages.first
         ZStack(alignment: .bottom) {
+            // 后面一层：当前这一页的画面 + 渐暗。不接点按——只有「详情」钮进详情页（用户要求：翻页、滑动时不会误进），
+            // 详情页仍从这张画面上放大出来、返回时缩回去（F57：这张画面是缩放转场的起点）
+            if let shown {
+                DSHeroBackdrop(page: shown, tall: tall, width: w, height: height)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 0) {
                     ForEach(pages) { p in
-                        page(p, tall: tall, width: w)
-                            .frame(width: w, height: height)
+                        foreground(p, width: w)
+                            .frame(width: w, height: height, alignment: .bottomLeading)
                             .id(p.id)
                     }
                 }
@@ -574,11 +589,18 @@ struct DSHeroCarousel: View {
             .contentMargins(.horizontal, 0, for: .scrollContent)
             .ignoresSafeArea(.container, edges: .horizontal)
             .frame(width: w, height: height)
-            .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in touched = true })
+            // 真的左右翻了才算碰过（只是从这里开始竖着滑，不算）
+            .onScrollPhaseChange { _, phase in
+                if phase == .interacting && !touched {
+                    touched = true
+                    pageStart = nil
+                }
+            }
 
             if pages.count > 1 {
                 // 页码点浮在画面底部、内容区的正中（不算侧边那一列：S16）
-                DSPageDots(ids: pages.map(\.id), current: current ?? pages.first?.id)
+                DSPageDots(ids: pages.map(\.id), current: current ?? pages.first?.id,
+                           pageStart: pageStart, interval: Self.interval)
                     .padding(.bottom, 18)
                     .offset(x: (leadingInset - trailingInset) / 2)
                     .allowsHitTesting(false)
@@ -587,9 +609,19 @@ struct DSHeroCarousel: View {
         .frame(width: w, height: height)
         .task(id: touched) {
             // 自己翻页：没被碰过、没开「减弱动态效果」和旁白时才翻
-            guard !touched, !reduceMotion, !voiceOver, pages.count > 1 else { return }
+            guard !touched, !reduceMotion, !voiceOver, pages.count > 1 else {
+                pageStart = nil
+                return
+            }
+            // 先把每一页的画面解码进缓存：换页时新画面马上就有
+            for p in pages {
+                if let u = TMDBImage.url(tall ? (p.tallArt ?? p.wideArt) : (p.wideArt ?? p.tallArt), "w1280") {
+                    _ = await ImagePipeline.shared.image(u, maxPixel: 2000)
+                }
+            }
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 7_000_000_000)
+                pageStart = Date()
+                try? await Task.sleep(nanoseconds: UInt64(Self.interval * 1_000_000_000))
                 guard !Task.isCancelled, !touched else { return }
                 let ids = pages.map(\.id)
                 let i = ids.firstIndex(of: current ?? ids[0]) ?? 0
@@ -598,78 +630,46 @@ struct DSHeroCarousel: View {
         }
     }
 
-    private func page(_ p: DSHeroPage, tall: Bool, width w: CGFloat) -> some View {
-        let art = tall ? (p.tallArt ?? p.wideArt) : (p.wideArt ?? p.tallArt)
-        let still = reduceMotion
+    /// 前面一层：字标、信息、按钮（左对齐：F1、F2）。字本身不接手势
+    private func foreground(_ p: DSHeroPage, width w: CGFloat) -> some View {
         // 字标：所有页一样高，太宽的按屏宽的 45% 收（统一的视觉重量；F12）
         let logoHeight = min(132, max(84, (w * 0.2).rounded()))
         let logoMaxWidth = (w * 0.45).rounded()
-        return ZStack(alignment: .bottomLeading) {
-            // 后面一层：画面 + 渐暗。画面本身不接点按——只有「详情」钮进详情页（用户要求：翻页、滑动时不会误进），
-            // 详情页仍从这张画面上放大出来、返回时缩回去（F57：这张画面是缩放转场的起点）
-            ZStack {
-                // 画面（翻页时只走 85%：比字慢，像在后面：S12）
-                Color.black
-                    .overlay {
-                        RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 2000, placeholder: .clear)
-                            .visualEffect { c, proxy in
-                                let x = proxy.frame(in: .scrollView(axis: .horizontal)).minX
-                                return c.offset(x: still ? 0 : -x * 0.15)
-                            }
-                    }
-                    .clipped()
-                // 顶上浅浅压暗：状态栏和左上的标题停在画面上也看得清（F34）
-                LinearGradient(colors: [.black.opacity(0.45), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.22))
-                // 底部渐暗，最后融进页面的黑：字和页码点在画面上的对比度靠它（S17、F34、C58）
-                LinearGradient(stops: [
-                    .init(color: .clear, location: 0.42),
-                    .init(color: .black.opacity(0.5), location: 0.7),
-                    .init(color: .black.opacity(0.9), location: 0.94),
-                    .init(color: .black, location: 1),
-                ], startPoint: .top, endPoint: .bottom)
+        return VStack(alignment: .leading, spacing: 14) {
+            Group {
+                if let logo = p.logo, !logo.isEmpty {
+                    LogoImage(url: TMDBImage.url(logo, "w500"), height: logoHeight, alignment: .leading,
+                              fallback: p.title, maxWidth: logoMaxWidth)
+                        .frame(width: logoMaxWidth, height: logoHeight, alignment: .bottomLeading)
+                } else {
+                    Text(p.title)
+                        .font(metrics.wide ? .largeTitle.bold() : .title.bold())
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                }
+                if !p.meta.isEmpty {
+                    Text(p.meta)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.8))
+                        .lineLimit(1)
+                }
             }
-            .frame(width: w, height: height)
-            .modifier(DSHeroZoomSource(route: p.detail))
             .allowsHitTesting(false)
-            .accessibilityHidden(true)
-            // 前面一层：字标、信息、按钮（左对齐：F1、F2）。字本身不接手势，点在字上也是点到后面的画面
-            VStack(alignment: .leading, spacing: 14) {
-                Group {
-                    if let logo = p.logo, !logo.isEmpty {
-                        LogoImage(url: TMDBImage.url(logo, "w500"), height: logoHeight, alignment: .leading,
-                                  fallback: p.title, maxWidth: logoMaxWidth)
-                            .frame(width: logoMaxWidth, height: logoHeight, alignment: .bottomLeading)
-                    } else {
-                        Text(p.title)
-                            .font(metrics.wide ? .largeTitle.bold() : .title.bold())
-                            .foregroundStyle(.white)
-                            .lineLimit(2)
-                    }
-                    if !p.meta.isEmpty {
-                        Text(p.meta)
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.8))
-                            .lineLimit(1)
-                    }
-                }
-                .allowsHitTesting(false)
-                HStack(spacing: 12) {
-                    Button(action: p.play) { Label(p.playTitle, systemImage: "play.fill") }
-                        .buttonStyle(.dsPlay)
-                        .accessibilityIdentifier("hero-play")
-                    detailLink(p)
-                        .buttonStyle(.dsSecondary)
-                        .accessibilityIdentifier("hero-detail")
-                }
-                .padding(.top, 4)
+            HStack(spacing: 12) {
+                Button(action: p.play) { Label(p.playTitle, systemImage: "play.fill") }
+                    .buttonStyle(.dsPlay)
+                    .accessibilityIdentifier("hero-play")
+                detailLink(p)
+                    .buttonStyle(.dsSecondary)
+                    .accessibilityIdentifier("hero-detail")
             }
-            .padding(.leading, leadingInset + metrics.margin)
-            .padding(.trailing, trailingInset + metrics.margin)
-            // 下面给页码点留一行（S16）
-            .padding(.bottom, pages.count > 1 ? 52 : 32)
-            .frame(maxWidth: min(w, leadingInset + metrics.margin + 560), alignment: .leading)
+            .padding(.top, 4)
         }
-        .contentShape(Rectangle())
+        .padding(.leading, leadingInset + metrics.margin)
+        .padding(.trailing, trailingInset + metrics.margin)
+        // 下面给页码点留一行（S16）
+        .padding(.bottom, pages.count > 1 ? 52 : 32)
+        .frame(maxWidth: min(w, leadingInset + metrics.margin + 560), alignment: .leading)
     }
 
     /// 「详情」推进和点画面同一个目标：详情页同样从这张画面上放大出来（F57）
@@ -697,21 +697,136 @@ private struct DSHeroZoomSource: ViewModifier {
     }
 }
 
-/// 页码点（Page controls：居中、不超过约 10 个：S16）；当前那颗拉长一点。浮在画面上，带一点影子托住（F34）
+/// 头图画面那一层：当前这一页的画面（换页时模糊淡入：DSBlurFadeImage）+ 顶上浅浅压暗 + 底部渐暗融进页面的黑。
+/// 它是「详情」缩放转场的起点（F57）
+struct DSHeroBackdrop: View {
+    let page: DSHeroPage
+    let tall: Bool
+    let width: CGFloat
+    let height: CGFloat
+
+    var body: some View {
+        let art = tall ? (page.tallArt ?? page.wideArt) : (page.wideArt ?? page.tallArt)
+        ZStack {
+            Color.black
+            DSBlurFadeImage(url: TMDBImage.url(art, "w1280"), maxPixel: 2000)
+                .frame(width: width, height: height)
+                .clipped()
+            // 顶上浅浅压暗：状态栏和左上的标题停在画面上也看得清（F34）
+            LinearGradient(colors: [.black.opacity(0.45), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.22))
+            // 底部渐暗，最后融进页面的黑：字和页码点在画面上的对比度靠它（S17、F34、C58）
+            LinearGradient(stops: [
+                .init(color: .clear, location: 0.42),
+                .init(color: .black.opacity(0.5), location: 0.7),
+                .init(color: .black.opacity(0.9), location: 0.94),
+                .init(color: .black, location: 1),
+            ], startPoint: .top, endPoint: .bottom)
+        }
+        .frame(width: width, height: height)
+        .modifier(DSHeroZoomSource(route: page.detail))
+    }
+}
+
+/// 页码点（照 iOS 的页码控件，用户给的参考图）：当前那颗拉长成胶囊，自动翻页时从左往右填满（满了就翻到下一页）；
+/// 别的点半透明，离当前越远越小（远处两三颗逐级缩小），一排不超过 10 颗（S16）。浮在画面上，带一点影子托住（F34）
 struct DSPageDots: View {
     let ids: [String]
     let current: String?
+    /// 这一页开始停留的时刻；nil 就是不自己翻页（胶囊整颗是白的）
+    var pageStart: Date? = nil
+    var interval: Double = 7
 
     var body: some View {
+        let list = Array(ids.prefix(10))
+        let ci = list.firstIndex(of: current ?? "") ?? 0
         HStack(spacing: 8) {
-            ForEach(ids.prefix(10), id: \.self) { id in
-                Capsule()
-                    .fill(id == current ? Color.white : Color.white.opacity(0.4))
-                    .frame(width: id == current ? 18 : 6, height: 6)
+            ForEach(Array(list.enumerated()), id: \.element) { i, _ in
+                let d = abs(i - ci)
+                if d == 0 {
+                    DSPageCapsule(pageStart: pageStart, interval: interval)
+                        .transition(.opacity)
+                } else {
+                    Circle()
+                        .fill(Color.white.opacity(0.5))
+                        .frame(width: Self.size(d), height: Self.size(d))
+                        .frame(width: 8, height: 8)
+                }
             }
         }
-        .shadow(color: .black.opacity(0.35), radius: 4, y: 1)
-        .animation(.smooth(duration: 0.3), value: current)
+        .shadow(color: .black.opacity(0.3), radius: 4, y: 1)
+        .animation(.smooth(duration: 0.35), value: ci)
         .accessibilityHidden(true)
+    }
+
+    /// 离当前那颗 1–2：8 点；3：6 点；再远：4.5 点
+    private static func size(_ d: Int) -> CGFloat { d <= 2 ? 8 : (d == 3 ? 6 : 4.5) }
+}
+
+/// 当前那颗：28×8 的胶囊，底 50% 白，白色的那段随这一页停留的时间填满
+struct DSPageCapsule: View {
+    let pageStart: Date?
+    let interval: Double
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: pageStart == nil)) { tl in
+            let p = pageStart.map { min(1, max(0, tl.date.timeIntervalSince($0) / interval)) } ?? 1
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.5))
+                Capsule().fill(Color.white).frame(width: max(8, 28 * p))
+            }
+        }
+        .frame(width: 28, height: 8)
+    }
+}
+
+/// 一张铺满的图：换图时旧图模糊淡出、新图从模糊里淡入，不带任何方向；新图解码好了才换（不会先闪一下空的）。
+/// 「减弱动态效果」时只淡入淡出、不模糊（F59）
+struct DSBlurFadeImage: View {
+    let url: URL?
+    var maxPixel: CGFloat = 1800
+    var duration: Double = 0.9
+    @State private var shown: Shown?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private struct Shown: Equatable {
+        let url: URL
+        let image: UIImage
+        static func == (a: Shown, b: Shown) -> Bool { a.url == b.url }
+    }
+
+    var body: some View {
+        ZStack {
+            if let s = shown {
+                Image(uiImage: s.image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .id(s.url)
+                    .transition(reduceMotion ? .opacity : .dsBlurFade)
+            }
+        }
+        .task(id: url) {
+            guard let url else { return }
+            if shown?.url == url { return }
+            guard let img = await ImagePipeline.shared.image(url, maxPixel: maxPixel), !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: duration)) { shown = Shown(url: url, image: img) }
+        }
+    }
+}
+
+/// 模糊淡入 / 淡出（不带方向）：出现时从 24 点模糊、全透明到清楚、不透明；消失时反过来
+struct DSBlurFade: ViewModifier {
+    let on: Bool
+    var radius: CGFloat = 24
+
+    func body(content: Content) -> some View {
+        content
+            .blur(radius: on ? radius : 0, opaque: true)
+            .opacity(on ? 0 : 1)
+    }
+}
+
+extension AnyTransition {
+    static var dsBlurFade: AnyTransition {
+        .modifier(active: DSBlurFade(on: true), identity: DSBlurFade(on: false))
     }
 }

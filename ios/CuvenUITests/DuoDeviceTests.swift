@@ -83,9 +83,9 @@ final class DuoDeviceTests: XCTestCase {
         sleep(1)
 
         // 详情：头图上此刻在屏上的那一页的「详情」（详情页从头图上放大出来）；返回是系统的返回钮（折起时在侧边那一列最上面）
-        let heroDetail = visible(app.buttons.matching(identifier: "hero-detail"))
+        let heroDetail = visible(app.buttons.matching(identifier: "hero-detail"), in: app)
         let poster = app.buttons["movie-card"].firstMatch
-        if heroDetail.exists && heroDetail.isHittable { heroDetail.tap() } else if poster.exists { poster.tap() }
+        if heroDetail.isOnScreen(in: app) { heroDetail.tapCenter() } else if poster.exists { poster.tap() }
         XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "没进到电影详情")
         sleep(2)
         report(app, "detail")
@@ -367,15 +367,15 @@ final class DuoDeviceTests: XCTestCase {
     private func reveal(_ app: XCUIApplication, _ q: XCUIElementQuery, swipes: Int = 6) -> XCUIElement? {
         for i in 0...swipes {
             let e = q.firstMatch
-            if e.exists && e.isHittable { return e }
+            if e.isOnScreen(in: app) { return e }
             if i < swipes { app.swipeUp(); sleep(1) }
         }
         return nil
     }
 
     /// 第一个真正在屏上的匹配项（切到别的标签后，上一页的同名按钮还留在层级里，只是看不见）
-    private func visible(_ q: XCUIElementQuery) -> XCUIElement {
+    private func visible(_ q: XCUIElementQuery, in app: XCUIApplication) -> XCUIElement {
         _ = q.firstMatch.waitForExistence(timeout: 5)
-        return q.allElementsBoundByIndex.first { $0.isHittable } ?? q.firstMatch
+        return q.allElementsBoundByIndex.first { $0.isOnScreen(in: app) } ?? q.firstMatch
     }
 }
