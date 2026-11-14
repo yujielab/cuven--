@@ -296,7 +296,8 @@ struct DSMediaCard<MenuItems: View>: View {
     var body: some View {
         let w = width ?? metrics.wideCardWidth
         let h = (w * 9 / 16).rounded()
-        let radius: CGFloat = metrics.wide ? 18 : 14
+        // 圆角跟着卡宽走（参考图那种大圆角：约卡宽的 4.5%，14–22 点）
+        let radius: CGFloat = max(14, min(22, (w * 0.045).rounded()))
         // 字离左、下两边的距离；「•••」的点按区按它摆，三个点的右缘和字的边线对齐
         let pad: CGFloat = metrics.wide ? 18 : 14
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)

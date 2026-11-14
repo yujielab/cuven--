@@ -118,8 +118,11 @@ enum ImageEffects {
         blur.inputImage = input.clampedToExtent()
         blur.mask = mask
         blur.radius = Float(max(4, r.width * 0.03))
-        guard let out = blur.outputImage?.cropped(to: r),
-              let done = context.createCGImage(out, from: r) else { return nil }
+        guard let out = blur.outputImage?.cropped(to: r) else { return nil }
+        // 按原图的色彩空间出图（Apple 的图有的是 Display P3：不压成 sRGB、不掉饱和度）；不是 RGB 的就用默认的
+        let space = cg.colorSpace.flatMap { $0.model == .rgb ? $0 : nil }
+        guard let done = space.flatMap({ context.createCGImage(out, from: r, format: .RGBA8, colorSpace: $0) })
+                ?? context.createCGImage(out, from: r) else { return nil }
         return UIImage(cgImage: done, scale: image.scale, orientation: image.imageOrientation)
     }
 }
