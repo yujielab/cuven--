@@ -182,7 +182,7 @@ struct SeriesDetailView: View {
                     // C66：先放占位卡，不留白屏；卡和真卡一样大，换上来时排不跳（C23）
                     DSShelf(metrics: m) {
                         ForEach(0..<3, id: \.self) { i in
-                            DSWideLockup(art: nil, title: "第 \(i + 1) 集", subtitle: "45 分钟", metrics: m)
+                            DSWideLockup(art: nil, title: "第 \(i + 1) 集", subtitle: "45 分钟", metrics: m, caption: true)
                         }
                     }
                     .redacted(reason: .placeholder)
@@ -217,7 +217,7 @@ struct SeriesDetailView: View {
         return Button { play(index: i) } label: {
             DSWideLockup(art: art, title: Self.episodeTitle(f, ep),
                          subtitle: DetailText.line([runtime, done ? "已看" : nil]),
-                         progress: done ? nil : fraction, metrics: m)
+                         progress: done ? nil : fraction, metrics: m, caption: true)
         }
         .buttonStyle(PressableStyle())
         .accessibilityIdentifier("episode-card")
@@ -652,7 +652,7 @@ struct DetailScaffold<Episodes: View>: View {
                 ForEach(Array(trailers.enumerated()), id: \.offset) { i, t in
                     Button { trailerPick = DetailTrailerPick(index: i) } label: {
                         DSWideLockup(art: TMDBImage.url(trailerArt.isEmpty ? nil : trailerArt[i % trailerArt.count], "w780"),
-                                     title: t.title ?? "预告片", metrics: m)
+                                     title: t.title ?? "预告片", metrics: m, caption: true)
                     }
                     .buttonStyle(PressableStyle())
                     .accessibilityIdentifier("trailer-card")
@@ -782,7 +782,7 @@ struct DetailLinkHeader: View {
 }
 
 /// 演员那一排的一位（T21 monogram：圆形照片 + 名字，角色在第二行）。
-/// 停在左侧基准线上的那位像 tvOS 的焦点一样微微放大（S7–S9）；字一直在，名字是要读的
+/// 圆和字都不随滑动放大（卡在排里一动不动）；字一直在，名字是要读的
 struct DetailMonogram: View {
     let member: CastMember
     let diameter: CGFloat
@@ -806,7 +806,6 @@ struct DetailMonogram: View {
             .frame(width: diameter)
         }
         .frame(width: diameter)
-        .modifier(DSFocusEffect(metrics: metrics, cardWidth: diameter, poster: true))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel([member.name, role.isEmpty ? nil : "饰 " + role].compactMap { $0 }.joined(separator: "，"))
     }

@@ -1,82 +1,78 @@
 import SwiftUI
 
-// MARK: - 整页清单（首页分区标题「›」进来的，账户里的「继续观看」「想看」）
+// MARK: - 整页清单（主页分区标题「›」进来的，账户里的「继续观看」「想看」，搜索里的某一类）
 //
-// 系统大标题 + 一张系统列表（C13、C29、C31）：前面竖版小海报，片名与一行灰字，行尾系统的「›」进详情（系统推入：F53）；
-// 「播放 / 想看」在长按菜单里（C21、C43、C45），行尾不再有「…」。
-// 今日推荐也是这张列表，名次在行首（App Store 排行的写法）；不再有斜叠海报的头图、取色的名次大卡和叠在卡上的胶囊钮（F3、F38、F80）。
+// 系统大标题（C13）+ 一张海报网格（T23）：电影和剧集一起，卡上只有画面（纯净画面 + 字标），卡下不写字（T20、F80）；
+// 「播放 / 想看」在长按菜单里（C21、C43、C45）。
 
 struct ShelfView: View {
     @Environment(AppModel.self) private var model
     let shelf: Shelf
 
     var body: some View {
-        List {
-            switch shelf {
-            case .newest:
-                ForEach(model.movies) { v in
-                    LibraryMovieRow(video: v, identifier: "shelf-movie")
-                }
-            case .picks:
-                ForEach(Array(model.todayPicks.enumerated()), id: \.element.id) { i, v in
-                    LibraryMovieRow(video: v, rank: i + 1, identifier: "shelf-movie")
-                }
-            case .series:
-                ForEach(model.series) { s in
-                    LibrarySeriesRow(series: s, identifier: "shelf-series")
-                }
-            case .watchlist:
-                ForEach(model.watchlist.items, id: \.key) { w in
-                    if w.kind == .movie, let v = model.video(path: w.key) {
-                        LibraryMovieRow(video: v, identifier: "shelf-movie")
-                    } else if w.kind == .series, let s = model.series.first(where: { $0.path == w.key }) {
-                        LibrarySeriesRow(series: s, identifier: "shelf-series")
-                    }
-                }
-            case .continueWatching:
-                ForEach(model.playback.continueWatching) { e in
-                    if let sp = e.seriesPath, let s = model.series.first(where: { $0.path == sp }) {
-                        LibrarySeriesRow(series: s, subtitle: Self.left(e, episode: true), identifier: "shelf-series")
-                    } else if let v = model.video(path: e.path) {
-                        LibraryMovieRow(video: v, subtitle: Self.left(e, episode: false), identifier: "shelf-movie")
-                    }
-                }
-            case .genre(let g):
-                // 某一类：先电影（最新入库的在前），再剧集
-                ForEach(model.movies(inGenre: g)) { v in
-                    LibraryMovieRow(video: v, identifier: "shelf-movie")
-                }
-                ForEach(model.series(inGenre: g)) { s in
-                    LibrarySeriesRow(series: s, identifier: "shelf-series")
+        let entries = self.entries
+        GeometryReader { geo in
+            let metrics = DSMetrics(width: geo.size.width)
+            ScrollView {
+                if entries.isEmpty {
+                    emptyState.padding(.top, 60)
+                } else {
+                    EntryGrid(entries: entries, metrics: metrics, slot: "shelf-" + shelf.key,
+                              movieID: "shelf-movie", seriesID: "shelf-series")
+                        .padding(.top, 8)
+                        .padding(.bottom, 40)
                 }
             }
+            .scrollIndicators(.hidden)
         }
-        .listStyle(.plain)
-        .overlay { emptyState }
+        .background(Theme.bg)
         .navigationTitle(shelf.title)
         .navigationBarTitleDisplayMode(.large)
     }
 
-    /// 继续观看的灰字：「第 3 集 · 还剩 24 分钟」——告诉人看到哪了（F84：短而平实）
-    static func left(_ e: WatchEntry, episode: Bool) -> String? {
-        var parts: [String] = []
-        if episode, let n = e.episode { parts.append("第 \(n) 集") }
-        let minutes = Int((e.remaining / 60).rounded())
-        if minutes >= 1 { parts.append("还剩 \(minutes) 分钟") }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    private var entries: [HomeEntry] {
+        switch shelf {
+        case .newest:
+            return model.movies.map { .movie($0) }
+        case .picks:
+            return model.todayPicks.map { .movie($0) }
+        case .series:
+            return model.series.map { .series($0) }
+        case .watchlist:
+            return model.watchlist.items.compactMap { w -> HomeEntry? in
+                if w.kind == .movie, let v = model.video(path: w.key) { return .movie(v) }
+                if w.kind == .series, let s = model.series.first(where: { $0.path == w.key }) { return .series(s) }
+                return nil
+            }
+        case .continueWatching:
+            var seen = Set<String>()
+            return model.playback.continueWatching.compactMap { e -> HomeEntry? in
+                if let sp = e.seriesPath, let s = model.series.first(where: { $0.path == sp }) {
+                    return seen.insert("s:" + s.path).inserted ? .series(s) : nil
+                }
+                if let v = model.video(path: e.path) { return seen.insert("m:" + v.path).inserted ? .movie(v) : nil }
+                return nil
+            }
+        case .genre(let g):
+            // 某一类：先电影（最新入库的在前），再剧集
+            return model.movies(inGenre: g).map { .movie($0) } + model.series(inGenre: g).map { .series($0) }
+        case .category(let c):
+            return model.categoryEntries(c)
+        }
     }
 
     /// 空的时候告诉人下一步（F88）
     @ViewBuilder private var emptyState: some View {
         switch shelf {
-        case .watchlist where model.watchlist.items.isEmpty:
+        case .watchlist:
             ContentUnavailableView("想看还是空的", systemImage: "plus.circle",
                                    description: Text("长按海报，选「加入想看」，片子就会出现在这里。"))
-        case .continueWatching where model.playback.continueWatching.isEmpty:
+        case .continueWatching:
             ContentUnavailableView("还没有看到一半的", systemImage: "play.circle",
                                    description: Text("看过 30 秒以上、还没看完的电影和剧集会出现在这里。"))
         default:
-            EmptyView()
+            ContentUnavailableView("这里还没有影片", systemImage: "film",
+                                   description: Text("片库里有了这一类的电影或剧集，会出现在这里。"))
         }
     }
 }

@@ -76,7 +76,7 @@ final class DuoDeviceTests: XCTestCase {
 
         // 详情：头图上此刻在屏上的那一页的「详情」（详情页从头图上放大出来）；返回是系统的返回钮（折起时在侧边那一列最上面）
         let heroDetail = visible(app.buttons.matching(identifier: "hero-detail"))
-        let poster = app.buttons["newest-poster"].firstMatch
+        let poster = app.buttons["movie-card"].firstMatch
         if heroDetail.exists && heroDetail.isHittable { heroDetail.tap() } else if poster.exists { poster.tap() }
         XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "没进到电影详情")
         sleep(2)
@@ -111,14 +111,20 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-04-detail-info")
         app.swipeUp(); sleep(2); snap("duo-04c-detail-tech")
         back(app)
-        // 主页往下：继续观看、今日推荐（海报）、最新加入（16:9）、剧集（16:9 + 字标）、各年份（海报）——分区之间只靠留白
+        // 主页往下：继续观看（有才有）、今年、去年（电影和剧集的海报）、五个大类——卡上只有画面，分区之间只靠留白
         app.swipeUp(); sleep(2); snap("duo-08-home-rows")
         app.swipeUp(); sleep(2); snap("duo-08b-home-tv")
         app.swipeUp(); sleep(2); snap("duo-08c-home-year")
         app.swipeUp(); sleep(2); snap("duo-08d-home-year-2")
-        // 首页最后一段「文件夹」：点进文件夹页（大标题、子文件夹一排、海报网格）
-        if let folder = reveal(app, app.buttons.matching(identifier: "folder-card"), swipes: 8) {
-            snap("duo-08e-home-folders")
+        // 五个大类（引人入胜的剧情……刺激犯罪与偷窃）在今年、去年两排下面
+        app.swipeUp(); sleep(2); snap("duo-08e-home-categories")
+        for _ in 0..<14 { app.swipeDown() }
+        sleep(1)
+
+        // 「文件夹」一排在搜索页（没输入时）：点进文件夹页（大标题、子文件夹一排、海报网格）
+        tab(app, "搜索"); sleep(2)
+        if let folder = reveal(app, app.buttons.matching(identifier: "folder-card"), swipes: 2) {
+            snap("duo-08e-search-folders")
             folder.tap(); sleep(2)
             snap("duo-08f-folder")
             app.swipeUp(); sleep(1)
@@ -127,8 +133,7 @@ final class DuoDeviceTests: XCTestCase {
         } else {
             print("DUO folder card: not found")
         }
-        for _ in 0..<14 { app.swipeDown() }
-        sleep(1)
+        tab(app, "主页"); sleep(1)
 
         // 资料库：展映——一部片一章，满屏画幅 → 收成 16:9，下面字标、一行信息、三行简介、播放 / 详情
         tab(app, "资料库"); sleep(3)
@@ -145,7 +150,7 @@ final class DuoDeviceTests: XCTestCase {
             XCTFail("资料库没有「详情」")
         }
 
-        // 剧集详情：主页「剧集」那一排（资料库只放电影）
+        // 剧集详情：主页今年 / 去年那两排里的剧集海报（资料库只放电影）
         tab(app, "主页"); sleep(2)
         if let s1 = reveal(app, app.buttons.matching(identifier: "series-card"), swipes: 4) {
             s1.tap(); sleep(3)
@@ -224,7 +229,7 @@ final class DuoDeviceTests: XCTestCase {
 
         // 长按海报：菜单（播放 / 想看），预览是那张卡（放在最后：菜单没收起也不影响别的步骤）
         tab(app, "主页"); sleep(2)
-        if let poster = reveal(app, app.buttons.matching(identifier: "newest-poster")) {
+        if let poster = reveal(app, app.buttons.matching(identifier: "movie-card")) {
             poster.press(forDuration: 1.2); sleep(2)
             snap("duo-10-menu")
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.06)).tap(); sleep(1)

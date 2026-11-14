@@ -4,12 +4,14 @@ import SwiftUI
 //
 // 原则：内容在前，界面退后（F1、F80、T1）。分组靠留白，不靠描边和底板（F3）；玻璃只给系统栏和少数控件，内容层不用（F38）；
 // 字一律用系统文字样式（F15），层级靠字重、字号和 .secondary（F18）；颜色只给一个主操作（F32、F33）。
-// 同一套设计随屏幕长大（S1、D2）：折起是它，展开就是更大的它——更大的头图、每排更多的卡、更从容的留白，
-// 一排里停在左侧基准线上的那张像 tvOS 的焦点那样微微放大、阴影加深、标题浮出来（S7–S9），画面里一点点视差（S12）。
-// 打开「减弱动态效果」：放大、视差、自动翻页都停，只留阴影和标题（F59、S24）。
+// 同一套设计随屏幕长大（S1、D2）：折起是它，展开就是更大的它——更大的头图、每排更多的卡、更从容的留白。
+// 卡只放画面：无字的主视觉 + 官方字标（没有无字的那张，就用本来就印着片名的海报），卡下不写片名（T20：画面自己说明是哪一部）。
+// 卡在排里不放大、不压暗别的卡：滑动时只有画面在卡里极轻地挪一点（S12：约 2%，几乎觉察不到 F61）；按下去略缩，是触感反馈（F55）。
+// 打开「减弱动态效果」：视差、自动翻页都停（F59、S24）。
 
 /// 版面尺寸：都从当前宽度算（F9、D4：看宽度和尺寸类别，不看机型）。
-/// 边距 / 卡间距 / 排间距按 tvOS 的比例（80 / 40 / 100，以 1920 宽为准）缩到眼前的宽度，再以 iPhone 的系统边距兜底（S3、S5）
+/// 边距按 tvOS 的 80（以 1920 宽为准）缩到眼前的宽度、iPhone 至少 20（S3、S5）；卡与卡之间比 tvOS 的 40 再松一些，
+/// 排与排之间留足（T24），每排露出下一张的一截，告诉人还能往右滑（S8、I13）
 struct DSMetrics {
     let width: CGFloat
 
@@ -17,22 +19,32 @@ struct DSMetrics {
     var wide: Bool { width >= 600 }
     /// 左右边距（S5：80·s；iPhone 至少 20）
     var margin: CGFloat { max(20, (width * 80 / 1920).rounded()) }
-    /// 卡与卡的间距（S5：40·s；至少 12）
-    var gutter: CGFloat { max(12, (width * 40 / 1920).rounded()) }
+    /// 卡与卡的间距：折起至少 18、展开至少 24（留白分组：F3、F12）
+    var gutter: CGFloat { max(wide ? 24 : 18, (width * 48 / 1920).rounded()) }
     /// 排与排之间（T24「行距至少 100」按比例缩，再给标题留位：F12）
-    var shelfGap: CGFloat { max(40, (width * 100 / 1920).rounded() + 16) }
+    var shelfGap: CGFloat { max(wide ? 56 : 44, (width * 120 / 1920).rounded() + 24) }
+    /// 分区标题到那一排卡
+    var titleGap: CGFloat { wide ? 16 : 12 }
 
-    /// 竖版海报宽：一排放整数张，最后一张从右边距里露出一条（S6、S8、I13）
-    var posterWidth: CGFloat { cardWidth(columns: width < 500 ? 3 : (width < 800 ? 4 : 6)) }
-    /// 16:9 卡宽：折起一张半屏多一点，展开两张（竖）/ 四张（横）（S6）
-    var wideCardWidth: CGFloat {
-        if width < 500 { return min(300, width - margin * 2 - 36) }
-        return cardWidth(columns: width < 800 ? 2 : 4)
+    /// 竖版海报宽：折起一排两张半、展开竖拿四张多、横拿六张多——最后那张露出一截（S6、S8）
+    var posterWidth: CGFloat { cardWidth(visible: width < 500 ? 2.6 : (width < 800 ? 4.4 : 6.4)) }
+    /// 16:9 卡宽：折起一张多一点，展开两张多（竖）/ 三张多（横）（S6）
+    var wideCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.15 : (width < 800 ? 2.2 : 3.3)) }
+
+    /// 一屏看得见 visible 张（整数部分完整、小数部分是露出来的那一截）时每张多宽
+    func cardWidth(visible v: CGFloat) -> CGFloat {
+        let full = max(1, v.rounded(.down))
+        return ((width - margin - full * gutter) / max(1, v)).rounded(.down)
     }
 
+    /// 网格：一行整数张，左右都是边距（年份页、清单、搜索、文件夹）
+    func gridColumns() -> Int { width < 500 ? 3 : (width < 800 ? 4 : 6) }
+    func gridCardWidth() -> CGFloat { cardWidth(columns: gridColumns()) }
+
+    /// 一行正好 n 张、左右都是边距时每张多宽
     func cardWidth(columns n: Int) -> CGFloat {
-        let n = CGFloat(max(1, n))
-        return ((width - margin * 2 - (n - 1) * gutter) / n).rounded(.down)
+        let c = CGFloat(max(1, n))
+        return ((width - margin * 2 - (c - 1) * gutter) / c).rounded(.down)
     }
 }
 
@@ -76,8 +88,8 @@ struct DSShelfTitle: View {
     }
 }
 
-/// 一排卡（T23：只用标准的横排；S8：卡停在左侧基准线上，右边露出下一张的一条）。
-/// 留出上下的空，放大的那张不碰到上下的字（T22、S9）
+/// 一排卡（T23：只用标准的横排；S8：卡停在左侧边线上，右边露出下一张的一截）。
+/// 卡不放大，所以上下只留按下去时略缩的那一点空
 struct DSShelf<Content: View>: View {
     let metrics: DSMetrics
     @ViewBuilder var content: () -> Content
@@ -86,7 +98,7 @@ struct DSShelf<Content: View>: View {
         ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(alignment: .top, spacing: metrics.gutter) { content() }
                 .scrollTargetLayout()
-                .padding(.vertical, 14)
+                .padding(.vertical, 4)
         }
         .contentMargins(.horizontal, metrics.margin, for: .scrollContent)
         .scrollTargetBehavior(.viewAligned)
@@ -102,86 +114,17 @@ struct DSSection<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: metrics.titleGap) {
             DSShelfTitle(title: title, metrics: metrics, route: route)
             content()
         }
     }
 }
 
-// MARK: - 焦点（触屏上的 tvOS 焦点：S7–S12）
+// MARK: - 画面
 
-/// 一张卡离左侧基准线多近：1 = 正停在基准线上（就是「焦点」那张），0 = 离开一张卡以上。全靠滚动位置算，不用计时器（S10）
-private func dsEmphasis(minX: CGFloat, keyline: CGFloat, span: CGFloat) -> CGFloat {
-    let d = abs(minX - keyline)
-    return max(0, 1 - d / max(1, span))
-}
-
-/// 卡片的焦点样子：停在基准线上时以中心放大（不超过卡间距：S9），画面在卡里有一点点视差（S12：约 3%）。
-/// 用 visualEffect 按滚动位置直接算，不进 body、不触发重排
-struct DSFocusEffect: ViewModifier {
-    let metrics: DSMetrics
-    let cardWidth: CGFloat
-    /// 竖版海报放大多一点（T27：海报约 1.14、16:9 约 1.09）
-    var poster = true
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    func body(content: Content) -> some View {
-        let keyline = metrics.margin
-        let span = cardWidth + metrics.gutter
-        // 两边各长出的不超过卡间距（S9）
-        let target: CGFloat = poster ? 1.14 : 1.09
-        let maxScale = min(target, 1 + 2 * metrics.gutter / max(1, cardWidth))
-        let still = reduceMotion
-        return content
-            .visualEffect { c, proxy in
-                let e = dsEmphasis(minX: proxy.frame(in: .scrollView(axis: .horizontal)).minX, keyline: keyline, span: span)
-                return c.scaleEffect(still ? 1 : 1 + (maxScale - 1) * e)
-            }
-    }
-}
-
-/// 焦点卡的阴影：放大时更大、更软、更远（T8、S9）。是一层单独的影子，透明度跟着焦点走
-struct DSFocusShadow: ViewModifier {
-    let metrics: DSMetrics
-    let cardWidth: CGFloat
-    var cornerRadius: CGFloat = 12
-
-    func body(content: Content) -> some View {
-        let keyline = metrics.margin
-        let span = cardWidth + metrics.gutter
-        return content.background {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(Color.black)
-                .blur(radius: 14)
-                .offset(y: 12)
-                .visualEffect { c, proxy in
-                    let e = dsEmphasis(minX: proxy.frame(in: .scrollView(axis: .horizontal)).minX, keyline: keyline, span: span)
-                    return c.opacity(0.25 + 0.5 * e)
-                }
-        }
-    }
-}
-
-/// 卡下的标题槽：位置先留好，焦点那张淡入（T20：海报的标题在聚焦时才出现；S9：行高不跳）
-struct DSFocusCaption: ViewModifier {
-    let metrics: DSMetrics
-    let cardWidth: CGFloat
-    /// 一直显示（16:9 卡的标题是要读的：继续观看、最新加入）
-    var always = false
-
-    func body(content: Content) -> some View {
-        let keyline = metrics.margin
-        let span = cardWidth + metrics.gutter
-        let always = always
-        return content.visualEffect { c, proxy in
-            let e = dsEmphasis(minX: proxy.frame(in: .scrollView(axis: .horizontal)).minX, keyline: keyline, span: span)
-            return c.opacity(always ? 1 : Double(0.15 + 0.85 * e))
-        }
-    }
-}
-
-/// 卡里的画面视差：画面比卡宽一点，随卡在排里的位置往反方向挪几点（S12：约 3%、几乎觉察不到 F61）
+/// 卡里的画面视差：画面比卡宽一点，随卡在排里的位置往反方向挪几点（S12：约 2%、几乎觉察不到 F61）。
+/// 只挪画面、不缩放、不改明暗——卡本身在排里一动不动
 struct DSParallaxArt: View {
     let url: URL?
     let metrics: DSMetrics
@@ -189,15 +132,15 @@ struct DSParallaxArt: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let travel = reduceMotion ? 0 : (size.width * 0.03).rounded()
+        let travel = reduceMotion ? 0 : (size.width * 0.02).rounded()
         let keyline = metrics.margin
         let span = size.width + metrics.gutter
-        Color(white: 0.12)
+        Color(white: 0.11)
             .overlay {
                 RemoteImage(url: url, maxPixel: size.width * 3, placeholder: .clear)
                     .frame(width: size.width + travel * 2, height: size.height)
                     .visualEffect { c, proxy in
-                        // 卡在基准线右边（还没到）时画面偏左，滑过基准线以后偏右：像一层在后面的画
+                        // 卡在左边线右边（还没到）时画面偏左，滑过以后偏右：像一层在后面的画
                         let x = proxy.frame(in: .scrollView(axis: .horizontal)).minX + travel
                         let t = max(-1, min(1, (x - keyline) / max(1, span)))
                         return c.offset(x: -t * travel)
@@ -208,11 +151,8 @@ struct DSParallaxArt: View {
     }
 }
 
-// MARK: - 卡（tvOS 的 lockup：画面 + 下面的字，一起放大缩小：T20、T22）
-
-/// 竖版主视觉上压的字标：Apple TV 没有现成带片名的海报、用它那张无字的竖版主视觉时，卡还得认得出是哪一部（T20）。
-/// 底部一层渐暗保证字标的对比度（F34、C58）；字标高约卡高的 18%、宽不超过卡宽的八成，居中压在下沿上方。
-/// 它是卡的前景：画面在后面有视差，字标不动（S12：两层）；跟着卡一起放大，因为它就在卡里
+/// 竖版画面上压的字标：画面本身没有片名（Apple TV 的无字主视觉、TMDB 的纯净海报）时，卡靠它认出是哪一部（T20）。
+/// 底部一层渐暗保证对比度（F34、C58）；所有卡的字标一样高（卡高的 16%），太宽的按卡宽的 78% 收（统一的视觉重量：F12）
 struct DSPosterLogo: View {
     let logo: URL
     let size: CGSize
@@ -221,12 +161,12 @@ struct DSPosterLogo: View {
     var body: some View {
         ZStack(alignment: .bottom) {
             LinearGradient(stops: [
-                .init(color: .clear, location: 0.45),
-                .init(color: .black.opacity(0.7), location: 1),
+                .init(color: .clear, location: 0.5),
+                .init(color: .black.opacity(0.65), location: 1),
             ], startPoint: .top, endPoint: .bottom)
-            LogoImage(url: logo, height: (size.height * 0.18).rounded(), alignment: .center,
-                      fallback: title, maxWidth: (size.width * 0.8).rounded())
-                .padding(.horizontal, (size.width * 0.1).rounded())
+            LogoImage(url: logo, height: (size.height * 0.16).rounded(), alignment: .center,
+                      fallback: title, maxWidth: (size.width * 0.78).rounded())
+                .padding(.horizontal, (size.width * 0.11).rounded())
                 .padding(.bottom, (size.height * 0.07).rounded())
         }
         .frame(width: size.width, height: size.height)
@@ -235,11 +175,36 @@ struct DSPosterLogo: View {
     }
 }
 
-/// 竖版海报（2:3）：海报本来就带片名，所以卡下的字只在焦点那张出现（T20）。
-/// logo：画面是无字的竖版主视觉时（Apple TV 素材）压在下面的字标
+/// 横版画面上压的字标：左下，高为卡高的 22%、宽不超过卡宽的一半；左下角一团渐暗托住它（F34）
+struct DSWideLogo: View {
+    let logo: URL
+    let size: CGSize
+    var title: String? = nil
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            LinearGradient(stops: [
+                .init(color: .clear, location: 0.35),
+                .init(color: .black.opacity(0.6), location: 1),
+            ], startPoint: .top, endPoint: .bottom)
+            LogoImage(url: logo, height: (size.height * 0.22).rounded(), alignment: .leading,
+                      fallback: title, maxWidth: (size.width * 0.5).rounded())
+                .padding(.leading, (size.width * 0.06).rounded())
+                .padding(.bottom, (size.height * 0.1).rounded())
+        }
+        .frame(width: size.width, height: size.height)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+// MARK: - 卡（只有画面：无字主视觉 + 字标，或本来就印着片名的海报。片名只给旁白念：F75）
+
+/// 竖版海报（2:3）。logo：画面没有片名时压在下面的字标
 struct DSPosterLockup: View {
     let art: URL?
     let title: String
+    /// 只给旁白（卡上不写字）
     var subtitle: String? = nil
     let metrics: DSMetrics
     var width: CGFloat? = nil
@@ -248,34 +213,20 @@ struct DSPosterLockup: View {
     var body: some View {
         let w = width ?? metrics.posterWidth
         let h = (w * 1.5).rounded()
-        VStack(alignment: .leading, spacing: 10) {
-            DSParallaxArt(url: art, metrics: metrics, size: CGSize(width: w, height: h))
-                .overlay {
-                    if let logo { DSPosterLogo(logo: logo, size: CGSize(width: w, height: h), title: title) }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .modifier(DSFocusShadow(metrics: metrics, cardWidth: w))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Text(subtitle ?? " ")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        DSParallaxArt(url: art, metrics: metrics, size: CGSize(width: w, height: h))
+            .overlay {
+                if let logo { DSPosterLogo(logo: logo, size: CGSize(width: w, height: h), title: title) }
             }
-            .frame(width: w, alignment: .leading)
-            .modifier(DSFocusCaption(metrics: metrics, cardWidth: w))
-        }
-        .frame(width: w, alignment: .leading)
-        .modifier(DSFocusEffect(metrics: metrics, cardWidth: w, poster: true))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel([title, subtitle].compactMap { $0 }.joined(separator: "，"))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .frame(width: w, height: h)
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel([title, subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，"))
     }
 }
 
-/// 16:9 卡：标题一直在（要读：继续观看、最新加入）；可选进度条（F36：进度用形状表达，不只靠颜色）
+/// 16:9 卡：画面 + 左下字标；可选进度条（F36：进度用形状表达，不只靠颜色）。
+/// caption：分集、预告片这种卡下的字本身就是内容（第 3 集 · 集名），才把字写出来
 struct DSWideLockup: View {
     let art: URL?
     let title: String
@@ -283,12 +234,17 @@ struct DSWideLockup: View {
     var progress: Double? = nil
     let metrics: DSMetrics
     var width: CGFloat? = nil
+    var logo: URL? = nil
+    var caption = false
 
     var body: some View {
         let w = width ?? metrics.wideCardWidth
         let h = (w * 9 / 16).rounded()
         VStack(alignment: .leading, spacing: 10) {
             DSParallaxArt(url: art, metrics: metrics, size: CGSize(width: w, height: h))
+                .overlay {
+                    if let logo { DSWideLogo(logo: logo, size: CGSize(width: w, height: h), title: title) }
+                }
                 .overlay(alignment: .bottom) {
                     if let p = progress, p > 0.01 {
                         // 进度：底部一条细的胶囊（F36）
@@ -304,25 +260,26 @@ struct DSWideLockup: View {
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .modifier(DSFocusShadow(metrics: metrics, cardWidth: w))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+            if caption {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
+                    if let subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
+                .frame(width: w, alignment: .leading)
             }
-            .frame(width: w, alignment: .leading)
         }
         .frame(width: w, alignment: .leading)
-        .modifier(DSFocusEffect(metrics: metrics, cardWidth: w, poster: false))
+        .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([title, subtitle].compactMap { $0 }.joined(separator: "，"))
+        .accessibilityLabel([title, subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，"))
     }
 }
 
@@ -383,11 +340,18 @@ struct DSHeroPage: Identifiable {
 }
 
 /// 全屏轮播：一页一部，左右翻；画面在后、字在前，翻页时画面比字走得慢一点（两层视差：S12、S15）；
-/// 没碰它时 7 秒翻一页，一碰就不再自己翻（S17、F79）；「减弱动态效果」或旁白开着时不自己翻（S17、F59）
+/// 没碰它时 7 秒翻一页，一碰就不再自己翻（S17、F79）；「减弱动态效果」或旁白开着时不自己翻（S17、F59）。
+/// 画面铺满整个窗口宽（fullWidth，含 iPhone Duo 侧边那一列：画面在那一列底下平铺过去，F6、S19），
+/// 字和按钮留在安全区里（leadingInset / trailingInset，F7）；页码点浮在画面底部（S16）
 struct DSHeroCarousel: View {
     let pages: [DSHeroPage]
     let metrics: DSMetrics
     let height: CGFloat
+    /// 画面铺多宽（整个窗口，含侧边那一列）；不给就是内容区的宽
+    var fullWidth: CGFloat? = nil
+    /// 字要躲开的左右安全区
+    var leadingInset: CGFloat = 0
+    var trailingInset: CGFloat = 0
     @State private var current: String?
     @State private var touched = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -395,13 +359,14 @@ struct DSHeroCarousel: View {
     @Environment(\.zoomNamespace) private var zoomNamespace
 
     var body: some View {
-        let tall = height > metrics.width
-        VStack(spacing: 14) {
+        let w = fullWidth ?? metrics.width
+        let tall = height > w
+        ZStack(alignment: .bottom) {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 0) {
                     ForEach(pages) { p in
-                        page(p, tall: tall)
-                            .frame(width: metrics.width, height: height)
+                        page(p, tall: tall, width: w)
+                            .frame(width: w, height: height)
                             .id(p.id)
                     }
                 }
@@ -409,13 +374,18 @@ struct DSHeroCarousel: View {
             }
             .scrollTargetBehavior(.paging)
             .scrollPosition(id: $current)
-            .frame(height: height)
+            .frame(width: w, height: height)
             .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in touched = true })
 
             if pages.count > 1 {
+                // 页码点浮在画面底部、内容区的正中（不算侧边那一列：S16）
                 DSPageDots(ids: pages.map(\.id), current: current ?? pages.first?.id)
+                    .padding(.bottom, 18)
+                    .offset(x: (leadingInset - trailingInset) / 2)
+                    .allowsHitTesting(false)
             }
         }
+        .frame(width: w, height: height)
         .task(id: touched) {
             // 自己翻页：没被碰过、没开「减弱动态效果」和旁白时才翻
             guard !touched, !reduceMotion, !voiceOver, pages.count > 1 else { return }
@@ -429,31 +399,35 @@ struct DSHeroCarousel: View {
         }
     }
 
-    private func page(_ p: DSHeroPage, tall: Bool) -> some View {
+    private func page(_ p: DSHeroPage, tall: Bool, width w: CGFloat) -> some View {
         let art = tall ? (p.tallArt ?? p.wideArt) : (p.wideArt ?? p.tallArt)
         let still = reduceMotion
-        let w = metrics.width
+        // 字标：所有页一样高，太宽的按屏宽的 45% 收（统一的视觉重量；F12）
+        let logoHeight = min(132, max(84, (w * 0.2).rounded()))
+        let logoMaxWidth = (w * 0.45).rounded()
         return ZStack(alignment: .bottomLeading) {
-            // 后面一层：画面 + 底部渐暗。整张画面也是去详情的链接——点画面和点「详情」一样（T31：头图里的每一项都能直接选），
-            // 详情页从这张画面上放大出来、返回时缩回去（F57：转场交代从哪来、回哪去）；
-            // 「详情」钮已经给旁白念了，这层不再重复（F75）
+            // 后面一层：画面 + 渐暗。整张画面也是去详情的链接——点画面和点「详情」一样（T31），
+            // 详情页从这张画面上放大出来、返回时缩回去（F57）；「详情」钮已经给旁白念了，这层不再重复（F75）
             ZoomLink(route: p.detail, slot: "hero", press: false) {
                 ZStack {
                     // 画面（翻页时只走 85%：比字慢，像在后面：S12）
                     Color.black
                         .overlay {
-                            RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1800, placeholder: .clear)
+                            RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 2000, placeholder: .clear)
                                 .visualEffect { c, proxy in
                                     let x = proxy.frame(in: .scrollView(axis: .horizontal)).minX
                                     return c.offset(x: still ? 0 : -x * 0.15)
                                 }
                         }
                         .clipped()
-                    // 底部渐暗：保证字的对比度（S17、F34）
+                    // 顶上浅浅压暗：状态栏和左上的标题停在画面上也看得清（F34）
+                    LinearGradient(colors: [.black.opacity(0.45), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.22))
+                    // 底部渐暗，最后融进页面的黑：字和页码点在画面上的对比度靠它（S17、F34、C58）
                     LinearGradient(stops: [
-                        .init(color: .clear, location: 0.45),
-                        .init(color: .black.opacity(0.55), location: 0.75),
-                        .init(color: .black.opacity(0.85), location: 1),
+                        .init(color: .clear, location: 0.42),
+                        .init(color: .black.opacity(0.5), location: 0.7),
+                        .init(color: .black.opacity(0.9), location: 0.94),
+                        .init(color: .black, location: 1),
                     ], startPoint: .top, endPoint: .bottom)
                 }
                 .frame(width: w, height: height)
@@ -461,11 +435,12 @@ struct DSHeroCarousel: View {
             }
             .accessibilityHidden(true)
             // 前面一层：字标、信息、按钮（左对齐：F1、F2）。字本身不接手势，点在字上也是点到后面的画面
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 14) {
                 Group {
                     if let logo = p.logo, !logo.isEmpty {
-                        LogoImage(url: TMDBImage.url(logo, "w500"), height: metrics.wide ? 96 : 72, alignment: .leading,
-                                  fallback: p.title, maxWidth: min(w * 0.7, 360))
+                        LogoImage(url: TMDBImage.url(logo, "w500"), height: logoHeight, alignment: .leading,
+                                  fallback: p.title, maxWidth: logoMaxWidth)
+                            .frame(width: logoMaxWidth, height: logoHeight, alignment: .bottomLeading)
                     } else {
                         Text(p.title)
                             .font(metrics.wide ? .largeTitle.bold() : .title.bold())
@@ -490,9 +465,11 @@ struct DSHeroCarousel: View {
                 }
                 .padding(.top, 4)
             }
-            .padding(.horizontal, metrics.margin)
-            .padding(.bottom, 28)
-            .frame(maxWidth: min(w, 560), alignment: .leading)
+            .padding(.leading, leadingInset + metrics.margin)
+            .padding(.trailing, trailingInset + metrics.margin)
+            // 下面给页码点留一行（S16）
+            .padding(.bottom, pages.count > 1 ? 52 : 32)
+            .frame(maxWidth: min(w, leadingInset + metrics.margin + 560), alignment: .leading)
         }
         .contentShape(Rectangle())
     }
@@ -508,7 +485,7 @@ struct DSHeroCarousel: View {
     }
 }
 
-/// 页码点（Page controls：居中、不超过约 10 个：S16）；当前那颗拉长一点
+/// 页码点（Page controls：居中、不超过约 10 个：S16）；当前那颗拉长一点。浮在画面上，带一点影子托住（F34）
 struct DSPageDots: View {
     let ids: [String]
     let current: String?
@@ -517,10 +494,11 @@ struct DSPageDots: View {
         HStack(spacing: 8) {
             ForEach(ids.prefix(10), id: \.self) { id in
                 Capsule()
-                    .fill(id == current ? Color.white : Color.white.opacity(0.35))
+                    .fill(id == current ? Color.white : Color.white.opacity(0.4))
                     .frame(width: id == current ? 18 : 6, height: 6)
             }
         }
+        .shadow(color: .black.opacity(0.35), radius: 4, y: 1)
         .animation(.smooth(duration: 0.3), value: current)
         .accessibilityHidden(true)
     }

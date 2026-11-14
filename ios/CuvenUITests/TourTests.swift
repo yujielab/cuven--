@@ -13,24 +13,23 @@ final class TourTests: XCTestCase {
         app.launch()
     }
 
-    /// 首页的「最新加入 ›」（分区标题是一个链接，字在链接里，不一定单独算一段文字）
+    /// 首页的货架出来了：今年 / 去年那两排里有电影海报（卡上只有画面，靠标识认）
     private func homeReady(timeout: TimeInterval) -> Bool {
-        let link = app.buttons["section-最新加入"]
-        let text = app.staticTexts["最新加入"]
+        let card = app.buttons.matching(identifier: "movie-card").firstMatch
         let end = Date().addingTimeInterval(timeout)
         while Date() < end {
-            if link.exists || text.exists { return true }
-            _ = link.waitForExistence(timeout: 2)
+            if card.exists { return true }
+            _ = card.waitForExistence(timeout: 2)
         }
-        return link.exists || text.exists
+        return card.exists
     }
 
     func testTour() {
         sleep(3)
         snap("01-launch")
 
-        // 片库与元数据到了，首页会出现「最新加入」
-        XCTAssertTrue(homeReady(timeout: 90), "首页没有出现「最新加入」")
+        // 片库与元数据到了，首页会出现今年 / 去年的电影海报
+        XCTAssertTrue(homeReady(timeout: 90), "首页没有出现电影海报")
         sleep(8)
         snap("02-home")
 
@@ -56,10 +55,10 @@ final class TourTests: XCTestCase {
             let f = e.frame
             return f.width > 0 && f.minX >= screen.minX - 1 && f.maxX <= screen.maxX + 1 && f.minY >= screen.minY && f.maxY <= screen.maxY
         }
-        // 大图会自动翻页，按钮可能正跨在屏幕边上：往下滑一点，点「最新加入」里第一张完整在屏上的海报
+        // 大图会自动翻页，按钮可能正跨在屏幕边上：往下滑一点，点第一张完整在屏上的电影海报
         app.swipeUp()
         sleep(2)
-        if let poster = app.buttons.matching(identifier: "newest-poster").allElementsBoundByIndex.first(where: onScreen) {
+        if let poster = app.buttons.matching(identifier: "movie-card").allElementsBoundByIndex.first(where: onScreen) {
             poster.tap()
         } else if let heroDetail = app.buttons.matching(identifier: "hero-detail").allElementsBoundByIndex.first(where: onScreen) {
             heroDetail.tap()

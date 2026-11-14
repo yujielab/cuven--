@@ -10,52 +10,64 @@ import SwiftUI
 
 // MARK: 海报网格
 
-/// 海报网格（T23、C20：标准网格；S6：每排张数跟 DSMetrics——折起 3、展开竖拿 4、展开横拿 6）。
-/// 网格不在横排里，没有左侧基准线，也就没有「焦点」那一张：卡下的字一直显示（T20 的「聚焦才出字」只用在横排）
-struct LibraryGrid: View {
+/// 海报网格（T23、C20：标准网格；每行 3 / 4 / 6 张：DSMetrics.gridColumns）。电影和剧集都能放（HomeEntry）。
+/// 卡上只有画面（纯净画面 + 字标，或印着片名的海报），卡下不写字（T20、F80）；看了一半的底部一条细进度（F36）
+struct EntryGrid: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.dynamicTypeSize) private var typeSize
-    let videos: [Video]
+    let entries: [HomeEntry]
     let metrics: DSMetrics
     /// 缩放转场的来源（同一部片可能也在别的排里，各算各的）
     var slot = "grid"
-    var identifier = "grid-movie"
-
-    /// 每排几张：与 DSMetrics.posterWidth 同一组分档（S6）；大字号时少放一张，字才放得下（S4）
-    static func columns(_ m: DSMetrics, large: Bool) -> Int {
-        let n = m.width < 500 ? 3 : (m.width < 800 ? 4 : 6)
-        return large ? max(2, n - 1) : n
-    }
+    var movieID = "grid-movie"
+    var seriesID = "grid-series"
 
     var body: some View {
-        let n = Self.columns(metrics, large: typeSize.isAccessibilitySize)
-        let w = max(40, metrics.cardWidth(columns: n))
-        // 行距：T24 网格的竖向间距至少 100，按 S5 缩到当前宽度，至少 24（卡下还有两行字）
-        let rowGap = max(24, (metrics.width * 100 / 1920).rounded())
+        let n = metrics.gridColumns()
+        let w = max(40, metrics.gridCardWidth())
         LazyVGrid(columns: Array(repeating: GridItem(.fixed(w), spacing: metrics.gutter, alignment: .top), count: n),
-                  alignment: .leading, spacing: rowGap) {
-            ForEach(videos) { v in
-                // 画面：Apple TV 优先（带片名的海报，或无字的竖版主视觉 + 字标），TMDB 兜底
-                let art = model.posterArt(v, width: w)
-                ZoomLink(route: .movie(v), slot: slot) {
-                    LibraryGridCard(art: art.url,
-                                    title: model.title(v),
-                                    subtitle: model.year(v).map { String($0) },
-                                    width: w,
-                                    progress: model.playback.entry(v.path)?.fraction,
-                                    logo: art.logo)
-                }
-                .accessibilityIdentifier(identifier)
-                .movieMenu(v)
-            }
+                  alignment: .leading, spacing: metrics.gutter + 6) {
+            ForEach(entries) { e in cell(e, width: w) }
         }
         .padding(.horizontal, metrics.margin)
     }
+
+    @ViewBuilder private func cell(_ e: HomeEntry, width w: CGFloat) -> some View {
+        switch e {
+        case .movie(let v):
+            let art = model.posterArt(v, width: w)
+            ZoomLink(route: .movie(v), slot: slot) {
+                LibraryGridCard(art: art.url, title: model.title(v), subtitle: model.year(v).map { String($0) },
+                                width: w, progress: model.playback.entry(v.path)?.fraction, logo: art.logo)
+            }
+            .accessibilityIdentifier(movieID)
+            .movieMenu(v)
+        case .series(let s):
+            let art = model.seriesPosterArt(s, width: w)
+            ZoomLink(route: .series(s), slot: slot) {
+                LibraryGridCard(art: art.url, title: model.seriesMetas[s.path]?.title ?? s.name, subtitle: s.seasonLabel,
+                                width: w, logo: art.logo)
+            }
+            .accessibilityIdentifier(seriesID)
+            .seriesMenu(s)
+            .task { await model.ensureSeriesMeta(s) }
+        }
+    }
 }
 
-/// 网格里的一张：海报（2:3、圆角 12，和 DSPosterLockup 同一个样子），下面片名与一行灰字（F18）。
-/// 看了一半的，海报底部一条细进度（F36：用形状表达，不只靠颜色）。
-/// logo：画面是 Apple TV 无字的竖版主视觉时压在下面的字标（DSPosterLogo）
+/// 只有电影的网格（文件夹页、搜索页的最近添加）
+struct LibraryGrid: View {
+    let videos: [Video]
+    let metrics: DSMetrics
+    var slot = "grid"
+    var identifier = "grid-movie"
+
+    var body: some View {
+        EntryGrid(entries: videos.map { .movie($0) }, metrics: metrics, slot: slot, movieID: identifier)
+    }
+}
+
+/// 网格里的一张：2:3 海报，圆角 12（和 DSPosterLockup 同一个样子）。logo：画面没有片名时压在下面的字标。
+/// 片名和年份只给旁白（F75）
 struct LibraryGridCard: View {
     let art: URL?
     let title: String
@@ -66,37 +78,23 @@ struct LibraryGridCard: View {
 
     var body: some View {
         let h = (width * 1.5).rounded()
-        VStack(alignment: .leading, spacing: 8) {
-            Color(white: 0.12)
-                .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: .clear) }
-                .frame(width: width, height: h)
-                .overlay {
-                    if let logo { DSPosterLogo(logo: logo, size: CGSize(width: width, height: h), title: title) }
-                }
-                .overlay(alignment: .bottom) {
-                    if let p = progress, p > 0.01 {
-                        LibraryProgressBar(fraction: p)
-                            .padding(.horizontal, 8)
-                            .padding(.bottom, 8)
-                    }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Text(subtitle ?? " ")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        Color(white: 0.11)
+            .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: .clear) }
+            .frame(width: width, height: h)
+            .overlay {
+                if let logo { DSPosterLogo(logo: logo, size: CGSize(width: width, height: h), title: title) }
             }
-            .frame(width: width, alignment: .leading)
-        }
-        .frame(width: width, alignment: .leading)
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel([title, subtitle].compactMap { $0 }.joined(separator: "，"))
+            .overlay(alignment: .bottom) {
+                if let p = progress, p > 0.01 {
+                    LibraryProgressBar(fraction: p)
+                        .padding(.horizontal, 8)
+                        .padding(.bottom, 8)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel([title, subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，"))
     }
 }
 
@@ -112,104 +110,6 @@ private struct LibraryProgressBar: View {
             }
         }
         .frame(height: 4)
-    }
-}
-
-// MARK: 列表
-
-/// 列表的一行（C29：前面一张小图，后面简短的字）：竖版小海报、片名（Headline）、一行灰字（Subheadline、.secondary：F18）。
-/// 放在 List 的 NavigationLink 里，行尾的「›」由系统画（C31）；排行榜的名次在最前面（App Store 排行的写法）
-struct LibraryRow: View {
-    let art: URL?
-    let title: String
-    var subtitle: String = ""
-    var rank: Int? = nil
-
-    var body: some View {
-        HStack(spacing: 14) {
-            if let rank {
-                Text(verbatim: String(rank))
-                    .font(.headline)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: 22)
-            }
-            Color(white: 0.12)
-                .overlay { RemoteImage(url: art, maxPixel: 200, placeholder: .clear) }
-                .frame(width: 46, height: 69)
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                if !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-        }
-        .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
-    }
-}
-
-/// 列表里的一部电影：点整行进详情（系统推入：F53），行尾系统的「›」（C31），长按「播放 / 想看」（C21、C43）
-struct LibraryMovieRow: View {
-    @Environment(AppModel.self) private var model
-    let video: Video
-    /// 不给就是「2026 · 科幻 · 冒险」
-    var subtitle: String? = nil
-    var rank: Int? = nil
-    var identifier = "list-movie"
-
-    /// 「科幻 · 冒险」：最多两个类型（F84：短）
-    static func genres(_ m: Meta?) -> String? {
-        let g = (m?.genres ?? []).prefix(2).joined(separator: " · ")
-        return g.isEmpty ? nil : g
-    }
-
-    var body: some View {
-        let m = model.meta(video)
-        let line = subtitle ?? [model.year(video).map { String($0) }, Self.genres(m)].compactMap { $0 }.joined(separator: " · ")
-        NavigationLink(value: Route.movie(video)) {
-            // 小图：Apple TV 优先、TMDB 兜底（行里已经写着片名，不压字标）
-            LibraryRow(art: model.thumbArt(video), title: model.title(video),
-                       subtitle: line.isEmpty ? "电影" : line, rank: rank)
-        }
-        .accessibilityIdentifier(identifier)
-        .movieMenu(video)
-    }
-}
-
-/// 列表里的一部剧：第二季起片名后面带「第 n 季」；灰字是年份、类型与集数；长按「想看」
-struct LibrarySeriesRow: View {
-    @Environment(AppModel.self) private var model
-    let series: Series
-    var subtitle: String? = nil
-    var showYear = true
-    var identifier = "list-series"
-
-    static func name(_ s: Series, meta: Meta?) -> String {
-        let base = meta?.title.flatMap { $0.isEmpty ? nil : $0 } ?? s.name
-        if let n = s.season, n > 1 { return base + " 第 \(n) 季" }
-        return base
-    }
-
-    var body: some View {
-        let m = model.seriesMetas[series.path]
-        let line = subtitle ?? [showYear ? series.year : nil, m?.genres?.first, series.countLabel]
-            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
-        NavigationLink(value: Route.series(series)) {
-            LibraryRow(art: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), title: Self.name(series, meta: m),
-                       subtitle: line.isEmpty ? "剧集" : line)
-        }
-        .accessibilityIdentifier(identifier)
-        .seriesMenu(series)
-        .task { await model.ensureSeriesMeta(series) }
     }
 }
 
@@ -235,9 +135,8 @@ enum Relative {
 // MARK: - 搜索
 //
 // 系统大标题与系统搜索栏，提示「电影、剧集、年份」（C13、F90、C62：提示写清能搜什么，边输边出结果）。
-// 没输入：「最近添加」海报网格（C61：搜索页先给能浏览的东西）。
-// 输入了：按类型分区，每区一排同样的卡——剧集是 16:9 卡、电影是竖版海报（C63：最相关的那一类在上，区内按相关度）；
-// 去掉了结果数一行和自绘的大宽卡（F3、F38）。
+// 没输入：「文件夹」一排（片库根下一级）和「最近添加」海报网格（C61：搜索页先给能浏览的东西）。
+// 输入了：按类型分区，每区一排同样的海报（C63：最相关的那一类在上，区内按相关度）；卡上只有画面，卡下不写字（T20）。
 
 struct SearchView: View {
     @Environment(AppModel.self) private var model
@@ -279,19 +178,34 @@ struct SearchView: View {
         .background(Theme.bg)
     }
 
-    /// 没输入：最近入库的 12 部（每排 3 / 4 / 6 张都正好排满）
+    /// 没输入：文件夹（片库根下一级，有才有）和最近入库的 12 部（每行 3 / 4 / 6 张都正好排满）
     @ViewBuilder private func landing(_ metrics: DSMetrics) -> some View {
         let recent = Array(model.movies.sorted { $0.addedKey > $1.addedKey }.prefix(12))
-        if recent.isEmpty {
+        if recent.isEmpty && model.folders.isEmpty {
             // F88：空的时候告诉人下一步
             ContentUnavailableView("搜索电影、剧集", systemImage: "magnifyingglass",
                                    description: Text("输入片名或年份，结果会随着输入出现。"))
                 .padding(.top, 60)
         } else {
-            VStack(alignment: .leading, spacing: 8) {
-                DSShelfTitle(title: "最近添加", metrics: metrics)
-                LibraryGrid(videos: recent, metrics: metrics, slot: "search-recent", identifier: "search-movie")
-                    .padding(.top, 6)
+            VStack(alignment: .leading, spacing: metrics.shelfGap) {
+                if !model.folders.isEmpty {
+                    DSSection(title: "文件夹", metrics: metrics) {
+                        DSShelf(metrics: metrics) {
+                            ForEach(model.folders) { f in
+                                ZoomLink(route: .folder(f), slot: "search-folder") {
+                                    FolderCard(folder: f, width: metrics.posterWidth)
+                                }
+                                .accessibilityIdentifier("folder-card")
+                            }
+                        }
+                    }
+                }
+                if !recent.isEmpty {
+                    VStack(alignment: .leading, spacing: metrics.titleGap) {
+                        DSShelfTitle(title: "最近添加", metrics: metrics)
+                        LibraryGrid(videos: recent, metrics: metrics, slot: "search-recent", identifier: "search-movie")
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 8)
@@ -309,8 +223,8 @@ struct SearchView: View {
         } else {
             let movies = hits.compactMap { h -> Video? in if case .movie(let v) = h.kind { return v } else { return nil } }
             let shows = hits.compactMap { h -> Series? in if case .series(let s) = h.kind { return s } else { return nil } }
-            // 分区之间只靠留白（F3）：看得见的间距 = DSMetrics.shelfGap（DSShelf 自己上下各留 14 给焦点放大）
-            VStack(alignment: .leading, spacing: max(16, metrics.shelfGap - 14)) {
+            // 分区之间只靠留白（F3）
+            VStack(alignment: .leading, spacing: metrics.shelfGap) {
                 // C63：最相关的那一条属于哪一类，哪一类在上
                 if Self.isSeries(hits[0]) {
                     showsSection(shows, metrics)
@@ -331,20 +245,16 @@ struct SearchView: View {
         return false
     }
 
-    /// 电影：竖版海报一排（DSPosterLockup：停在左侧基准线上的那张放大、片名浮出：T20、S7–S9）
+    /// 电影：海报一排（纯净画面 + 字标，卡下不写字：T20）
     @ViewBuilder private func moviesSection(_ list: [Video], _ metrics: DSMetrics) -> some View {
         if !list.isEmpty {
             DSSection(title: "电影", metrics: metrics) {
                 DSShelf(metrics: metrics) {
                     ForEach(list) { v in
-                        // 画面：Apple TV 优先（海报，或竖版主视觉 + 字标），TMDB 兜底
                         let art = model.posterArt(v, width: metrics.posterWidth)
                         ZoomLink(route: .movie(v), slot: "search-movie") {
-                            DSPosterLockup(art: art.url,
-                                           title: model.title(v),
-                                           subtitle: model.year(v).map { String($0) },
-                                           metrics: metrics,
-                                           logo: art.logo)
+                            DSPosterLockup(art: art.url, title: model.title(v), subtitle: model.year(v).map { String($0) },
+                                           metrics: metrics, logo: art.logo)
                         }
                         .accessibilityIdentifier("search-movie")
                         .movieMenu(v)
@@ -354,18 +264,16 @@ struct SearchView: View {
         }
     }
 
-    /// 剧集：16:9 卡一排（DSWideLockup：剧名与集数一直显示）
+    /// 剧集：同样的海报一排（纯净海报 + 字标）
     @ViewBuilder private func showsSection(_ list: [Series], _ metrics: DSMetrics) -> some View {
         if !list.isEmpty {
             DSSection(title: "剧集", metrics: metrics) {
                 DSShelf(metrics: metrics) {
                     ForEach(list) { s in
-                        let meta = model.seriesMetas[s.path]
+                        let art = model.seriesPosterArt(s, width: metrics.posterWidth)
                         ZoomLink(route: .series(s), slot: "search-series") {
-                            DSWideLockup(art: TMDBImage.url(meta?.backdrop ?? meta?.posterClean ?? meta?.poster, "w780"),
-                                         title: LibrarySeriesRow.name(s, meta: meta),
-                                         subtitle: s.countLabel,
-                                         metrics: metrics)
+                            DSPosterLockup(art: art.url, title: model.seriesMetas[s.path]?.title ?? s.name, subtitle: s.seasonLabel,
+                                           metrics: metrics, logo: art.logo)
                         }
                         .accessibilityIdentifier("search-series")
                         .seriesMenu(s)

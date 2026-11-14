@@ -25,8 +25,8 @@ final class DuoUnfoldedTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-32-unfolded-rows")
         app.swipeDown(); app.swipeDown(); sleep(1)
 
-        // 详情（头图的「详情」，没有就点「最新加入」的卡）
-        if let open = firstHittable(app, ["hero-detail", "newest-poster"]) {
+        // 详情（头图的「详情」，没有就点主页上的一张电影海报）
+        if let open = firstHittable(app, ["hero-detail", "movie-card"]) {
             open.tap()
             if app.buttons["detail-play"].waitForExistence(timeout: 8) {
                 sleep(2)

@@ -81,12 +81,11 @@ struct FolderView: View {
         // 没有封面的不显示（与资料库同一条规矩）
         let shown = ordered(videos.filter { !model.hidden.contains($0.name) })
         if !subfolders.isEmpty {
-            // 子文件夹：一排（DSShelf：停在左侧基准线上的那张微微放大：S7–S9）
+            // 子文件夹：一排（DSShelf：卡停在左边线上，右边露出下一张一截：S8）
             DSShelf(metrics: metrics) {
                 ForEach(subfolders) { f in
                     ZoomLink(route: .folder(f), slot: "folder") {
                         FolderCard(folder: f, width: metrics.posterWidth)
-                            .modifier(DSFocusEffect(metrics: metrics, cardWidth: metrics.posterWidth, poster: true))
                     }
                     .accessibilityIdentifier("folder-card")
                 }
