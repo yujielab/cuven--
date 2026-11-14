@@ -374,6 +374,9 @@ struct DSHeroCarousel: View {
             }
             .scrollTargetBehavior(.paging)
             .scrollPosition(id: $current)
+            // 翻页按整页宽对齐：不让系统按侧边那一列的安全区给它加内边距，否则每一页都错开一截（F6）
+            .contentMargins(.horizontal, 0, for: .scrollContent)
+            .ignoresSafeArea(.container, edges: .horizontal)
             .frame(width: w, height: height)
             .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in touched = true })
 
@@ -406,33 +409,32 @@ struct DSHeroCarousel: View {
         let logoHeight = min(132, max(84, (w * 0.2).rounded()))
         let logoMaxWidth = (w * 0.45).rounded()
         return ZStack(alignment: .bottomLeading) {
-            // 后面一层：画面 + 渐暗。整张画面也是去详情的链接——点画面和点「详情」一样（T31），
-            // 详情页从这张画面上放大出来、返回时缩回去（F57）；「详情」钮已经给旁白念了，这层不再重复（F75）
-            ZoomLink(route: p.detail, slot: "hero", press: false) {
-                ZStack {
-                    // 画面（翻页时只走 85%：比字慢，像在后面：S12）
-                    Color.black
-                        .overlay {
-                            RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 2000, placeholder: .clear)
-                                .visualEffect { c, proxy in
-                                    let x = proxy.frame(in: .scrollView(axis: .horizontal)).minX
-                                    return c.offset(x: still ? 0 : -x * 0.15)
-                                }
-                        }
-                        .clipped()
-                    // 顶上浅浅压暗：状态栏和左上的标题停在画面上也看得清（F34）
-                    LinearGradient(colors: [.black.opacity(0.45), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.22))
-                    // 底部渐暗，最后融进页面的黑：字和页码点在画面上的对比度靠它（S17、F34、C58）
-                    LinearGradient(stops: [
-                        .init(color: .clear, location: 0.42),
-                        .init(color: .black.opacity(0.5), location: 0.7),
-                        .init(color: .black.opacity(0.9), location: 0.94),
-                        .init(color: .black, location: 1),
-                    ], startPoint: .top, endPoint: .bottom)
-                }
-                .frame(width: w, height: height)
-                .contentShape(Rectangle())
+            // 后面一层：画面 + 渐暗。画面本身不接点按——只有「详情」钮进详情页（用户要求：翻页、滑动时不会误进），
+            // 详情页仍从这张画面上放大出来、返回时缩回去（F57：这张画面是缩放转场的起点）
+            ZStack {
+                // 画面（翻页时只走 85%：比字慢，像在后面：S12）
+                Color.black
+                    .overlay {
+                        RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 2000, placeholder: .clear)
+                            .visualEffect { c, proxy in
+                                let x = proxy.frame(in: .scrollView(axis: .horizontal)).minX
+                                return c.offset(x: still ? 0 : -x * 0.15)
+                            }
+                    }
+                    .clipped()
+                // 顶上浅浅压暗：状态栏和左上的标题停在画面上也看得清（F34）
+                LinearGradient(colors: [.black.opacity(0.45), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.22))
+                // 底部渐暗，最后融进页面的黑：字和页码点在画面上的对比度靠它（S17、F34、C58）
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0.42),
+                    .init(color: .black.opacity(0.5), location: 0.7),
+                    .init(color: .black.opacity(0.9), location: 0.94),
+                    .init(color: .black, location: 1),
+                ], startPoint: .top, endPoint: .bottom)
             }
+            .frame(width: w, height: height)
+            .modifier(DSHeroZoomSource(route: p.detail))
+            .allowsHitTesting(false)
             .accessibilityHidden(true)
             // 前面一层：字标、信息、按钮（左对齐：F1、F2）。字本身不接手势，点在字上也是点到后面的画面
             VStack(alignment: .leading, spacing: 14) {
@@ -481,6 +483,20 @@ struct DSHeroCarousel: View {
             NavigationLink(value: ZoomTarget(route: p.detail, slot: "hero")) { Text("详情") }
         } else {
             NavigationLink(value: p.detail) { Text("详情") }
+        }
+    }
+}
+
+/// 头图画面当缩放转场的起点：「详情」推进的是同一个 ZoomTarget，详情页就从这张画面上放大出来（F57）
+private struct DSHeroZoomSource: ViewModifier {
+    let route: Route
+    @Environment(\.zoomNamespace) private var ns
+
+    func body(content: Content) -> some View {
+        if let ns {
+            content.matchedTransitionSource(id: ZoomTarget(route: route, slot: "hero"), in: ns)
+        } else {
+            content
         }
     }
 }

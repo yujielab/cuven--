@@ -182,6 +182,8 @@ struct Meta: Codable, Hashable, Sendable {
     var poster: String?
     var posterClean: String?
     var backdrop: String?
+    /// TMDB 上没有字的那张横版剧照（iso_639_1 为空的 backdrop；只在全量结果里，首页头图横拿时兜底用）
+    var backdropClean: String?
     var logo: String?
     var logoChecked: Bool?
     var overview: String?
@@ -194,7 +196,7 @@ struct Meta: Codable, Hashable, Sendable {
     var stills: [Still]?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, en, year, poster, posterClean, backdrop, logo, logoChecked, overview, rating, type, runtime, genres, cast, director, stills
+        case id, title, en, year, poster, posterClean, backdrop, backdropClean, logo, logoChecked, overview, rating, type, runtime, genres, cast, director, stills
         case originalTitle = "original_title"
         case releaseDate = "release_date"
     }
@@ -218,6 +220,7 @@ struct Meta: Codable, Hashable, Sendable {
         poster = c.str(.poster)
         posterClean = c.str(.posterClean)
         backdrop = c.str(.backdrop)
+        backdropClean = c.str(.backdropClean)
         logo = c.str(.logo)
         logoChecked = c.bool(.logoChecked)
         overview = c.str(.overview)
@@ -373,6 +376,16 @@ struct SeasonPayload: Codable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         episodes = (try? c.decode([SeasonEpisode].self, forKey: .episodes)) ?? []
     }
+}
+
+/// 头图里的一部（首页最上面那张轮播）：无字的横图和字标两样都要有才上；竖版无字图可能没有（竖着的屏就把横图居中裁）
+struct HeroPick: Identifiable, Hashable {
+    let video: Video
+    var hero: Hero?
+    let wide: String
+    var tall: String?
+    let logo: String
+    var id: String { video.path }
 }
 
 // MARK: - 首页大图（/api/atv/hero：Apple TV 商店最新发行里、库里有的那些）

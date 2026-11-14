@@ -50,6 +50,11 @@ struct MovieDetailView: View {
             EmptyView()
         }
         .task { full = await model.fullMeta(for: video) }
+        // 在线字幕：打开详情页时先让后台去找（不等），点播放时主列表里就有这一条备选
+        .task(id: video.path) {
+            guard !DemoData.enabled else { return }
+            await APIClient.shared.warmSubs(path: video.path)
+        }
         .task(id: video.path) {
             atv = await model.atv(for: video)
             // 和资料库展映同一份：Apple TV 上的公开预告（订阅才看得了的不要）；atv 已经记在内存里，不再走网络

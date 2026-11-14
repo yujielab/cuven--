@@ -56,8 +56,8 @@ struct HomeView: View {
             if !pages.isEmpty {
                 DSHeroCarousel(pages: pages, metrics: m, height: height, fullWidth: fullWidth,
                                leadingInset: insets.leading, trailingInset: insets.trailing)
-            } else if model.movies.isEmpty && !loadFailed {
-                // 还在载入：先占住头图的位置，不留白屏（C66）
+            } else if (model.movies.isEmpty || !model.heroResolved) && !loadFailed {
+                // 还在载入 / 还在挑头图：先占住头图的位置，不留白屏（C66），也不先放一张不合格的
                 LinearGradient(colors: [Color(white: 0.12), Theme.bg], startPoint: .top, endPoint: .bottom)
                     .frame(width: fullWidth, height: height)
                     .accessibilityHidden(true)
@@ -77,58 +77,36 @@ struct HomeView: View {
         .frame(width: fullWidth, alignment: .topLeading)
     }
 
-    /// 头图的每一页（T30–T32）：画面、字标、一行信息、播放 / 详情。看了一半的直接「继续播放」，不再问（S17、F85）
+    /// 头图的每一页（T30–T32）：只放拿到了无字背景 + 字标的，最多 5 部（AppModel.resolveHeroes 挑）。
+    /// 横着的屏用无字的横图，竖着的屏用竖版无字图（没有就把横图居中裁）。看了一半的直接「继续播放」，不再问（S17、F85）
     private var heroPages: [DSHeroPage] {
-        heroItems.map { it in
-            let v = it.video
-            let meta = model.meta(v)
-            // 头图源本来就是 Apple TV 的素材；缺哪样先补全片库的 Apple TV 素材，再退 TMDB
-            let logo = (it.hero.logo?.isEmpty == false ? it.hero.logo : nil) ?? model.logoArtString(v)
-            return DSHeroPage(id: it.id,
-                              wideArt: it.hero.background ?? model.backgroundArtString(v),
-                              tallArt: it.hero.poster ?? model.tallArtString(v) ?? meta?.posterClean ?? meta?.poster,
-                              logo: logo,
+        model.heroPicks.map { p in
+            let v = p.video
+            return DSHeroPage(id: p.id,
+                              wideArt: p.wide,
+                              tallArt: p.tall ?? p.wide,
+                              logo: p.logo,
                               title: model.title(v),
-                              meta: heroMeta(it),
+                              meta: heroMeta(p),
                               playTitle: model.playback.resumePosition(v.path) != nil ? "继续播放" : "播放",
-                              play: { playHero(it) },
+                              play: { playHero(p) },
                               detail: .movie(v))
         }
     }
 
-    private var heroItems: [HeroItem] {
-        var out: [HeroItem] = []
-        var seen = Set<String>()
-        for h in model.heroes {
-            guard let v = model.video(path: h.path), seen.insert(v.path).inserted else { continue }
-            out.append(HeroItem(hero: h, video: v))
-        }
-        if out.isEmpty {
-            // 大图源取不到：退回最新加入、带横版剧照的几部
-            for v in model.newest.prefix(6) {
-                let m = model.meta(v)
-                let apple = model.appleArt(v)
-                // 全屏的头图要大图：Apple 的按 1920 / 1290 宽要（backgroundArtString / tallArtString 已换好尺寸）
-                guard let bd = (apple?.background != nil ? model.backgroundArtString(v) : nil) ?? m?.backdrop else { continue }
-                out.append(HeroItem(hero: Hero.fallback(path: v.path, backdrop: bd, poster: model.tallArtString(v) ?? m?.posterClean ?? m?.poster), video: v))
-            }
-        }
-        return out
-    }
-
     /// 「电影 · 2026 · 科幻」：一行、短、平实（F84、S15）
-    private func heroMeta(_ it: HeroItem) -> String {
-        let kind = (it.hero.type ?? "Movie").lowercased().hasPrefix("show") ? "剧集" : "电影"
-        let year = (it.hero.year ?? model.year(it.video)).map { String($0) }
-        let genre = model.meta(it.video)?.genres?.first
+    private func heroMeta(_ p: HeroPick) -> String {
+        let kind = (p.hero?.type ?? "Movie").lowercased().hasPrefix("show") ? "剧集" : "电影"
+        let year = (p.hero?.year ?? model.year(p.video)).map { String($0) }
+        let genre = model.meta(p.video)?.genres?.first
         return [kind, year, genre].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
-    private func playHero(_ it: HeroItem) {
-        let v = it.video
+    private func playHero(_ p: HeroPick) {
+        let v = p.video
         PlayerCoordinator.shared.play(PlayRequest(path: v.path, name: v.name, title: model.title(v),
                                                   subtitle: model.year(v).map { String($0) },
-                                                  artwork: it.hero.background ?? model.backgroundArtString(v)), model: model)
+                                                  artwork: p.wide), model: model)
     }
 
     private var loadFailed: Bool {
@@ -283,18 +261,6 @@ struct HomeView: View {
         } else {
             PlayerCoordinator.shared.play(PlayRequest(path: e.path, name: e.name, title: e.title, subtitle: e.subtitle, artwork: e.artwork), model: model)
         }
-    }
-}
-
-struct HeroItem: Identifiable {
-    let hero: Hero
-    let video: Video
-    var id: String { hero.id }
-}
-
-extension Hero {
-    static func fallback(path: String, backdrop: String, poster: String?) -> Hero {
-        Hero(path: path, background: backdrop, poster: poster ?? backdrop)
     }
 }
 

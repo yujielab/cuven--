@@ -234,10 +234,12 @@ final class AppModel {
             dataVersion &+= 1
             phase = .ready
             metaReady = true
+            Task { await resolveHeroes() }
             return
         }
         restore()
         phase = videos.isEmpty ? .loading : .ready
+        Task { await resolveHeroes() }
         Task { await refreshLibrary() }
         Task { await refreshSeries() }
         Task { await refreshHeroes() }
@@ -283,7 +285,9 @@ final class AppModel {
             DiskCache.save(FolderCache(root: libraryRoot, folders: lib.folders), "folders.json")
             metaRound = 0
             await loadMetas()
-            // 片名、年份齐了再去 Apple TV 对画面：放到后台，不让下拉刷新等它（一轮可能要一两分钟）
+            // 片名、年份齐了再挑头图（要按英文名去 Apple TV 查无字背景和字标）
+            await resolveHeroes()
+            // 再去 Apple TV 对全片库的画面：放到后台，不让下拉刷新等它（一轮可能要一两分钟）
             Task { await self.loadAtvArt() }
         } catch {
             if videos.isEmpty { phase = .failed(error.localizedDescription) }
@@ -377,6 +381,72 @@ final class AppModel {
         guard let list = try? await APIClient.shared.heroes(), !list.isEmpty else { return }
         heroes = list
         DiskCache.save(list, "heroes.json")
+        await resolveHeroes()
+    }
+
+    // MARK: 首页头图（只放拿到了无字背景 + 字标的，最多 5 部）
+
+    /// 挑好的头图（resolveHeroes 填）
+    private(set) var heroPicks: [HeroPick] = []
+    /// 至少挑过一轮了：之前头图位置先占着，不先放一张不合格的再换掉
+    private(set) var heroResolved = false
+    @ObservationIgnored private var heroResolving = false
+
+    /// 挑头图：候选是 Apple TV 头图池（/api/atv/hero）的顺序，再是最新加入的；每一部都要有
+    /// 无字的横图（Apple TV 无字背景 → TMDB 没有字的剧照）和字标（Apple → TMDB），两样缺一就不上；按候选顺序取前 5 部。
+    /// 片名要先认出来（Apple TV 按英文名查），所以元数据到了以后才挑
+    func resolveHeroes() async {
+        guard metaReady, !heroResolving else { return }
+        heroResolving = true
+        defer { heroResolving = false }
+        var seen = Set<String>()
+        var cands: [(video: Video, hero: Hero?)] = []
+        for h in heroes { if let v = video(path: h.path), seen.insert(v.path).inserted { cands.append((v, h)) } }
+        for v in newest where seen.insert(v.path).inserted { cands.append((v, nil)) }
+        cands = Array(cands.prefix(12))
+        if DemoData.enabled {
+            // 演示数据：合成的头图本来就是无字背景 + 字标
+            heroPicks = Array(cands.compactMap { c -> HeroPick? in
+                guard let h = c.hero, let w = h.background, let l = h.logo else { return nil }
+                return HeroPick(video: c.video, hero: h, wide: w, tall: h.poster, logo: l)
+            }.prefix(5))
+            heroResolved = true
+            return
+        }
+        let picked = await withTaskGroup(of: (Int, HeroPick?).self) { g in
+            for (i, c) in cands.enumerated() {
+                g.addTask { (i, await self.heroPick(c.video, hero: c.hero)) }
+            }
+            var out = [HeroPick?](repeating: nil, count: cands.count)
+            for await (i, p) in g { out[i] = p }
+            return out
+        }
+        let picks = Array(picked.compactMap { $0 }.prefix(5))
+        if picks != heroPicks { heroPicks = picks }
+        heroResolved = true
+        Perf.log("hero: \(picks.count) of \(cands.count) candidates have a clean background and a logo")
+    }
+
+    /// 一部能不能上头图：无字横图 + 字标都拿到才算（Apple TV 素材表 → 这一部的 Apple TV 查询 → TMDB 全量结果）
+    private func heroPick(_ v: Video, hero h: Hero?) async -> HeroPick? {
+        let a = appleArt(v)
+        var wide = Self.nonEmpty(a?.background)
+        var logo = Self.nonEmpty(h?.logo) ?? Self.nonEmpty(a?.logo)
+        var tall = Self.nonEmpty(h?.poster) ?? Self.nonEmpty(a?.tall)
+        // 片名还没认出来就先不查（Apple TV 按英文名查；查不到会记成「没有」，等元数据到了再挑）
+        if wide == nil || logo == nil || tall == nil, meta(v) != nil, let r = await atv(for: v) {
+            wide = wide ?? Self.nonEmpty(r.background)
+            logo = logo ?? Self.nonEmpty(r.logo)
+            tall = tall ?? Self.nonEmpty(r.imageTall)
+        }
+        if wide == nil || logo == nil {
+            let m = await fullMeta(for: v)
+            wide = wide ?? Self.nonEmpty(m?.backdropClean)
+            logo = logo ?? Self.nonEmpty(m?.logo)
+        }
+        guard let w = wide, let l = logo else { return nil }
+        return HeroPick(video: v, hero: h, wide: AppleImage.sized(w, width: 1920) ?? w,
+                        tall: tall.map { AppleImage.sized($0, width: 1290) ?? $0 }, logo: l)
     }
 
     /// 剧集的 TMDB（按剧集表认好的编号取，带字标 / 纯净海报 / 剧照）

@@ -22325,7 +22325,10 @@ const Player = (() => {
       if (my !== seq || cur !== c) return;
     }
     const own = Array.from(v.textTracks || []).some(t => zhRank(t) > 0 || /^(zh|chi|zho)/i.test(t.language || ''));
-    const best = own ? null : d.subs.map(s => ({ s, r: zhRank({ srclang: s.srclang, label: s.label || s.name }) })).sort((a, b) => b.r - a.r)[0];
+    /* 自带的（同目录外挂）中文优先；没有自带的中文，才默认打开在线找来的那条（在线字幕只兜底，平时是备选） */
+    const ranked = d.subs.map(s => ({ s, r: zhRank({ srclang: s.srclang, label: s.label || s.name }) }));
+    const ownZh = ranked.filter(x => !x.s.online && x.r > 0).sort((a, b) => b.r - a.r)[0];
+    const best = own ? null : (ownZh || ranked.filter(x => x.s.online).sort((a, b) => b.r - a.r)[0]);
     /* 一条字幕都没有、只有在线找来的那条（哪怕是英文）：也默认打开 —— 本来就是为它找的 */
     const only = !own && d.subs.length === 1 && d.subs[0].online ? d.subs[0] : null;
     let pick = null;
