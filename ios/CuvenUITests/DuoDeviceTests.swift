@@ -82,20 +82,19 @@ final class DuoDeviceTests: XCTestCase {
         sleep(2)
         report(app, "detail")
         snap("duo-03-detail")
-        // 「更多操作」：播放钮旁边那颗玻璃圆钮，弹出和网页版一样的弹层（播放 / 复制直链 / 取消）
+        // 「…」：播放钮旁边的系统菜单（从头播放 / 复制直链 / 分享）；点菜单外面收起
         let more = app.buttons["detail-more"].firstMatch
         if more.waitForExistence(timeout: 3) {
             more.tap(); sleep(2)
             snap("duo-03b-detail-more")
-            let cancel = app.buttons["sheet-cancel"].firstMatch
-            if cancel.waitForExistence(timeout: 3) { cancel.tap() } else { app.swipeDown() }
+            XCTAssertTrue(app.buttons["detail-copy"].firstMatch.exists, "「…」菜单里没有「复制直链」")
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.06)).tap()
             sleep(1)
         } else {
-            XCTFail("详情页没有「更多操作」钮")
+            XCTFail("详情页没有「…」菜单")
         }
-        // 演员阵容 · 查看全部 ›：整页名单（在简介下面，先找它，再往下滑）
-        // 和网页版一样是一张弹层（「演员阵容 · N 位」，一行一位）；点一行换成那位演员（「在资料库中搜索」「在 TMDB 查看」）
-        if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 2) {
+        // 演员 ›：一张半屏 / 全屏的系统弹层，一行一位；点一行在弹层里推进那位演员（「在资料库中搜索」「在 TMDB 查看」）
+        if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 3) {
             castLink.tap(); sleep(2)
             snap("duo-04b-cast")
             let row = app.buttons["cast-row"].firstMatch
@@ -107,7 +106,7 @@ final class DuoDeviceTests: XCTestCase {
             }
             closeSheet(app)
         } else {
-            XCTFail("详情页没有「演员阵容 · 查看全部 ›」")
+            XCTFail("详情页没有「演员 ›」")
         }
         app.swipeUp(); sleep(2); snap("duo-04-detail-info")
         app.swipeUp(); sleep(2); snap("duo-04c-detail-tech")
@@ -153,16 +152,15 @@ final class DuoDeviceTests: XCTestCase {
             snap("duo-05b-series")
             app.swipeUp(); sleep(2)
             snap("duo-05c-series-episodes")
-            // 分集简介超过三行：第三行末尾的「更多」，点开是整段简介的弹层（底下「关闭」）
-            let epMore = app.buttons["episode-more"].firstMatch
-            if epMore.waitForExistence(timeout: 2) {
-                epMore.tap(); sleep(2)
+            // 长按分集卡：系统菜单，预览里是这一集的剧照、集名和整段简介；点菜单外面收起
+            if let ep = reveal(app, app.buttons.matching(identifier: "episode-card"), swipes: 1) {
+                ep.press(forDuration: 1.2); sleep(2)
                 snap("duo-05f-episode-more")
-                closeSheet(app)
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.06)).tap(); sleep(1)
             } else {
-                print("DUO episode more: none")
+                print("DUO episode card: none")
             }
-            // 季切换：分集标题右边「第 1 季 ›」点开是季的菜单，选第 2 季
+            // 季切换：「剧集」标题右边「第 1 季 ⌃⌄」点开是季的菜单，选第 2 季
             if let seasonMenu = reveal(app, app.buttons.matching(identifier: "season-menu"), swipes: 1) {
                 seasonMenu.tap(); sleep(1)
                 snap("duo-05d-season-menu")
@@ -285,7 +283,7 @@ final class DuoDeviceTests: XCTestCase {
         return w.width > w.height || shot.width > shot.height
     }
 
-    /// 关掉网页版式的弹层：点底部那颗胶囊（「取消」/「关闭」），找不到就往下滑
+    /// 关掉弹层：点右上角系统的 xmark（标识 sheet-cancel），找不到就往下滑
     private func closeSheet(_ app: XCUIApplication) {
         let cancel = app.buttons["sheet-cancel"].firstMatch
         if cancel.waitForExistence(timeout: 3) && cancel.isHittable { cancel.tap() } else { app.swipeDown() }

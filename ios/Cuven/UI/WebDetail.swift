@@ -60,7 +60,7 @@ struct MovieDetailView: View {
         DetailText.line([
             m?.genres?.first,
             model.year(video).map { String($0) },
-            FileName.runtime(m?.runtime),
+            Format.runtime(m?.runtime),
             DetailText.rating(m?.rating),
         ])
     }
@@ -70,7 +70,7 @@ struct MovieDetailView: View {
         [
             DetailInfoRow(label: "类型", value: (m?.genres ?? []).joined(separator: "、")),
             DetailInfoRow(label: "年份", value: model.year(video).map { String($0) } ?? ""),
-            DetailInfoRow(label: "片长", value: FileName.runtime(m?.runtime)),
+            DetailInfoRow(label: "片长", value: Format.runtime(m?.runtime)),
             DetailInfoRow(label: "评分", value: DetailText.rating(m?.rating) ?? ""),
             DetailInfoRow(label: "导演", value: m?.director ?? ""),
             DetailInfoRow(label: "格式", value: WebFormat.line(name: video.name)),
@@ -211,7 +211,7 @@ struct SeriesDetailView: View {
         let fraction = model.playback.entry(f.path)?.fraction ?? 0
         let done = fraction >= 0.9
         let art = TMDBImage.url(ep?.still ?? fallbackArt, "w780")
-        let runtime = FileName.runtime(ep?.runtime)
+        let runtime = Format.runtime(ep?.runtime)
         return Button { play(index: i) } label: {
             DSWideLockup(art: art, title: Self.episodeTitle(f, ep),
                          subtitle: DetailText.line([runtime, done ? "已看" : nil]),
@@ -872,103 +872,7 @@ enum DetailText {
     }
 }
 
-// MARK: - 年份页还在用的几样（DetailViews.swift 的 YearView：「…」弹层、复制直链、底部提示、剧集接着看）
-//
-// 详情页自己已经不用这张自绘的弹层了（「…」改成系统菜单：C11、C45）；年份页换掉以后，WebSheetRow / WebActionSheet / WebFileSheet 可以一起删。
-// 弹层照网页版 openSheet：片名、一两行大按钮、取消。
-
-struct WebSheetRow {
-    let symbol: String
-    let tint: Color
-    let label: String
-    let note: String
-    let id: String
-    let action: () -> Void
-
-    static let orange = Color.orange
-    static let blue = Color(red: 10 / 255, green: 132 / 255, blue: 1)
-}
-
-struct WebActionSheet: View {
-    let title: String
-    let rows: [WebSheetRow]
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Text(title)
-                .font(.system(size: 17, weight: .bold))
-                .tracking(-0.2)
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .padding(.horizontal, 24)
-                .padding(.top, 26)
-                .padding(.bottom, 24)
-            ForEach(rows.indices, id: \.self) { i in
-                let r = rows[i]
-                Button {
-                    dismiss()
-                    r.action()
-                } label: {
-                    HStack(spacing: 16) {
-                        Image(systemName: r.symbol)
-                            .font(.system(size: 22))
-                            .foregroundStyle(r.tint)
-                            .frame(width: 44, height: 44)
-                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(r.label).font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
-                            Text(r.note).font(.system(size: 13)).foregroundStyle(.white.opacity(0.4)).lineLimit(1)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.leading, 12)
-                    .padding(.trailing, 24)
-                    .padding(.vertical, 12)
-                    .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5))
-                    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                }
-                .buttonStyle(PressableStyle(scale: 0.98))
-                .padding(.bottom, 12)
-                .accessibilityIdentifier(r.id)
-            }
-            Button { dismiss() } label: {
-                Text("取消")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(Color.white.opacity(0.06), in: Capsule())
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
-                    .contentShape(Capsule())
-            }
-            .buttonStyle(PressableStyle(scale: 0.97))
-            .padding(.top, 12)
-            .accessibilityIdentifier("sheet-cancel")
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 20)
-        .presentationDetents([.height(CGFloat(150 + rows.count * 80))])
-        .presentationDragIndicator(.visible)
-        .presentationCornerRadius(34)
-        .environment(\.colorScheme, .dark)
-    }
-}
-
-/// 网页版 openSheetForFile：「播放」（站内播放 · 杜比视界 · HDR · 多音轨字幕）「复制直链」（在 VLC 等其它播放器中打开）
-struct WebFileSheet: View {
-    let title: String
-    let onPlay: () -> Void
-    let onCopy: () -> Void
-
-    var body: some View {
-        WebActionSheet(title: title, rows: [
-            WebSheetRow(symbol: "play.circle.fill", tint: WebSheetRow.orange, label: "播放", note: "站内播放 · 杜比视界 · HDR · 多音轨字幕", id: "sheet-play", action: onPlay),
-            WebSheetRow(symbol: "link", tint: WebSheetRow.blue, label: "复制直链", note: "在 VLC 等其它播放器中打开", id: "sheet-copy", action: onCopy),
-        ])
-    }
-}
+// MARK: - 复制直链与底部提示（详情页「…」菜单里的「复制直链」用）
 
 /// 签好名的 /stream 直链（网页版 copyStreamLink），复制到剪贴板
 enum StreamLink {
@@ -1006,33 +910,6 @@ struct WebToast: ViewModifier {
 
 extension View {
     func webToast(_ text: Binding<String?>) -> some View { modifier(WebToast(text: text)) }
-}
-
-/// 剧集「接着看」：取分集清单，按网页版 tvNextEp 的规矩挑一集放（年份页、搜索结果的「…」用）
-enum SeriesPlayback {
-    @MainActor static func playNext(_ s: Series, model: AppModel) async -> Bool {
-        var files: [EpisodeFile]
-        if DemoData.enabled {
-            files = DemoData.episodes(s)
-        } else {
-            files = (try? await APIClient.shared.episodes(seriesPath: s.path)) ?? []
-            files.sort { ($0.ep ?? Int.max, $0.name) < ($1.ep ?? Int.max, $1.name) }
-        }
-        guard !files.isEmpty else { return false }
-        var index = 0
-        if let last = model.playback.lastEpisode(of: s.path), let i = files.firstIndex(where: { $0.path == last.path }) {
-            index = last.fraction < 0.9 ? i : min(i + 1, files.count - 1)
-        }
-        let meta = model.seriesMetas[s.path]
-        func req(_ f: EpisodeFile) -> PlayRequest {
-            PlayRequest(path: f.path, name: f.name, title: meta?.title ?? s.name, subtitle: f.ep.map { "第 \($0) 集" },
-                        artwork: meta?.backdrop, seriesPath: s.path, episode: f.ep)
-        }
-        var r = req(files[index])
-        r.queue = files[(index + 1)...].map { req($0) }
-        PlayerCoordinator.shared.play(r, model: model)
-        return true
-    }
 }
 
 // MARK: - 「格式」那一格（网页版：扩展名 · 8K+ UHD（4K 片源）/ 高动态（1080p）· DV / HDR）
