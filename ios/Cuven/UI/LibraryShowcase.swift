@@ -1,16 +1,18 @@
 import SwiftUI
 import AVFoundation
 
-// MARK: - 资料库：和网页版一样的「展映」（web/index.html 的 lib-showcase）
+// MARK: - 资料库：电影感的「展映」，一部电影一章（新片在前）
 //
-// 顶上「资料库 / Cuven 为你提供严格品质的影片」，浮在第一章的画面上，底下一层渐进模糊。
-// 一部电影一章（新片在前），每章三段：
-//   ① 画幅：一块 16:9 先放大到铺满整屏，钉住不动；「2026 · 科幻 · 冒险 · 116 分钟」和字标居中，往上滚先淡出，
-//      压暗层跟着退；再往上滚，画幅收回成一整幅 16:9，下沿始终咬着介绍面板的上沿（同一套几何：k = 间隙 / 16:9 的高）。
-//      这一章在屏幕中间时放它的预告片（Apple TV 的公开预告，静音、从第 10 秒起、循环），右上角一颗播放 / 暂停 + 进度环；
-//      没有预告片就给剧照一段极慢的推镜。
-//   ② 介绍：简介、「评分 6.5」小胶囊、「导演 …　　主演 …」、两颗等宽的钮「▶ 播放」「影片详情」。
-//   ③ 剧照：「剧照」一排 16:9 大图；最后一条两端渐隐的分隔线。
+// 依据（编号见 docs/ios-design.md）：保留满屏画幅、钉住、收回 16:9、静音预告片与播放 / 暂停 + 进度环（T1、T30、F77），
+// 每章只留三样：
+//   ① 画幅：一块 16:9 先放大到铺满整屏，钉住不动；居中是字标和一行「年份 · 类型」，往上滚先淡出、压暗层跟着退；
+//      再往上滚，画幅收回成一整幅 16:9，下沿始终咬着介绍面板的上沿（同一套几何：k = 间隙 / 16:9 的高；跟着手指走：F54、S10）。
+//      这一章在屏幕中间时放它的预告片（静音、从第 10 秒起、循环；系统关了「自动播放视频预览」就停在那儿等人点：F77、S17），
+//      右上角一颗播放 / 暂停 + 进度环；没有预告片就给画面一段极慢的推镜（「减弱动态效果」打开时不推：F59）。
+//   ② 介绍：简介（三行）和两颗同样大小的钮「播放」「详情」（C35、C36、S17）。
+//   ③ 章与章之间只有留白（F3、F12）。
+// 去掉了：评分胶囊、演职员一行、剧照排、章间的渐隐线、头部的口号（F80、F3）。
+// 标题「资料库」是 Large Title 粗体，压在第一章的画面上、随页面滚走（C13、F15、F19）。
 
 struct LibraryView: View {
     @Environment(AppModel.self) private var model
@@ -25,10 +27,13 @@ struct LibraryView: View {
                 let vh = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
                 let vw = geo.size.width
                 let top = geo.safeAreaInsets.top
+                let margin = DSMetrics(width: vw).margin
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         if list.isEmpty {
-                            emptyState.frame(height: vh)
+                            emptyState
+                                .frame(height: vh)
+                                .overlay(alignment: .top) { ShowcaseHeader(top: top, margin: margin).allowsHitTesting(false) }
                         }
                         ForEach(list) { v in
                             ShowcaseChapter(video: v, vw: vw, vh: vh, top: top, trailer: trailer,
@@ -42,19 +47,12 @@ struct LibraryView: View {
                                                     covered = isCovered
                                                 }
                                             })
-                            // 标题跟网页版一样压在第一章的画面上、随页面滚走（不是钉在顶上的导航栏）
+                            // 标题压在第一章的画面上、随页面滚走（不是钉在顶上的导航栏）
                             .overlay(alignment: .top) {
                                 if v.path == list.first?.path {
-                                    ShowcaseHeader(top: top).allowsHitTesting(false)
+                                    ShowcaseHeader(top: top, margin: margin).allowsHitTesting(false)
                                 }
                             }
-                        }
-                        if !list.isEmpty {
-                            Text("共 \(list.count) 部")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.white.opacity(0.3))
-                                .frame(height: 120)
-                                .frame(maxWidth: .infinity)
                         }
                     }
                 }
@@ -77,7 +75,7 @@ struct LibraryView: View {
         .onChange(of: covered) { _, c in trailer.setCovered(c) }
     }
 
-    /// 网页版 sortOrder：上映日期新的在前；同一天按入库时间；再按片名
+    /// 上映日期新的在前；同一天按入库时间；再按片名
     private var order: [Video] {
         model.movies.sorted { a, b in
             let ra = releaseKey(a), rb = releaseKey(b)
@@ -93,50 +91,55 @@ struct LibraryView: View {
         return ""
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "film.stack").font(.system(size: 40)).foregroundStyle(.white.opacity(0.3))
-            Text(model.phase == .loading || model.phase == .idle ? "正在载入资料库…" : "资料库是空的").font(.system(size: 17, weight: .semibold)).foregroundStyle(.white.opacity(0.6))
+    /// 还没有片子：载入中只是一个系统转圈（C69：不写含糊的「正在载入…」）；空了、失败了说清下一步，带一颗钮（F87、F88）
+    @ViewBuilder private var emptyState: some View {
+        switch model.phase {
+        case .idle, .loading:
+            ProgressView()
+                .controlSize(.large)
+                .frame(maxWidth: .infinity)
+        case .failed(let message):
+            ContentUnavailableView {
+                Label("没能载入资料库", systemImage: "wifi.exclamationmark")
+            } description: {
+                Text(message)
+            } actions: {
+                Button("重试") { Task { await model.refreshAll() } }
+            }
+        case .ready:
+            ContentUnavailableView {
+                Label("资料库是空的", systemImage: "film.stack")
+            } description: {
+                Text("片库里加入电影后，会一部一章地出现在这里。")
+            } actions: {
+                Button("重新载入") { Task { await model.refreshAll() } }
+            }
         }
-        .frame(maxWidth: .infinity)
     }
 }
 
-/// 标题浮在画面上：「资料库」32 号 800 粗，「Cuven 为你提供严格品质的影片」14 号 40% 白；底下四层模糊叠出来的渐进模糊 + 一层由暗到透明
+/// 标题：「资料库」Large Title 粗体（F15、F19），和下面的简介、钮同一条左边线（F2）；不放口号（F80）。
+/// 底下一层由暗到透明的渐变，让状态栏和标题在画面上看得清（F34）；不用材质（F38：玻璃只给功能层）
 struct ShowcaseHeader: View {
     let top: CGFloat
+    let margin: CGFloat
 
     var body: some View {
-        let h = top + 104
-        VStack(alignment: .leading, spacing: 6) {
-            Text("资料库")
-                .font(.system(size: 32, weight: .heavy))
-                .tracking(-0.64)
-                .foregroundStyle(.white)
-            Text("Cuven 为你提供严格品质的影片")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.white.opacity(0.4))
-        }
-        .padding(.top, top + 28)
-        .padding(.horizontal, Theme.gutter)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: h, alignment: .top)
-        .background(alignment: .top) {
-            ZStack {
-                Rectangle().fill(.ultraThinMaterial)
-                    .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.3), .init(color: .clear, location: 0.8)],
-                                         startPoint: .top, endPoint: .bottom))
+        Text("资料库")
+            .font(.largeTitle.bold())
+            .foregroundStyle(.white)
+            .accessibilityAddTraits(.isHeader)
+            .padding(.top, top + 10)
+            .padding(.horizontal, margin)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(alignment: .top) {
                 LinearGradient(stops: [
-                    .init(color: .black.opacity(0.66), location: 0),
-                    .init(color: .black.opacity(0.5), location: 0.3),
-                    .init(color: .black.opacity(0.26), location: 0.6),
-                    .init(color: .black.opacity(0.08), location: 0.84),
+                    .init(color: .black.opacity(0.5), location: 0),
+                    .init(color: .black.opacity(0.22), location: 0.55),
                     .init(color: .clear, location: 1),
                 ], startPoint: .top, endPoint: .bottom)
+                .frame(height: top + 120)
             }
-            .frame(height: h + 64)
-            .environment(\.colorScheme, .dark)
-        }
     }
 }
 
@@ -156,7 +159,7 @@ struct ShowcaseChapter: View {
     @State private var atv: AtvLookup?
 
     var body: some View {
-        // 网页版的几何：画幅先是一块 16:9（高不超过 74% 屏），放大到铺满；钉住的行程 = 一屏 + 面板压上来的那段 + 停一会儿
+        // 几何：画幅先是一块 16:9（高不超过 74% 屏），放大到铺满；钉住的行程 = 一屏 + 面板压上来的那段 + 停一会儿
         let boxH = min(vw * 9 / 16, vh * 0.74)
         let boxW = boxH * 16 / 9
         let overlap = vh - (top + boxH)
@@ -166,6 +169,7 @@ struct ShowcaseChapter: View {
         let cover = max(vw / boxW, (vh - top) / boxH)
         let contentTop = portalH - overlap
         let H = vh, T = top
+        let margin = DSMetrics(width: vw).margin
         let m = model.meta(video)
 
         ZStack(alignment: .top) {
@@ -185,7 +189,7 @@ struct ShowcaseChapter: View {
                 .frame(width: vw, height: portalH, alignment: .top)
                 .clipped()
 
-            // 均匀压暗：标题在场时压住画面，标题走了就还画面一个干净的满屏
+            // 均匀压暗：字在场时压住画面，字走了就还画面一个干净的满屏（F34：字在画面上要看得清）
             Color.black
                 .frame(width: vw, height: vh)
                 .visualEffect { content, proxy in
@@ -196,7 +200,7 @@ struct ShowcaseChapter: View {
                 }
                 .allowsHitTesting(false)
 
-            // 「2026 · 科幻 · 冒险 · 116 分钟」+ 字标：居中，往上滚先淡出、略缩、上移
+            // 字标 + 一行信息：居中，往上滚先淡出、略缩、上移
             copy(m)
                 .frame(width: vw, height: vh)
                 .visualEffect { content, proxy in
@@ -210,11 +214,12 @@ struct ShowcaseChapter: View {
                 }
                 .allowsHitTesting(false)
 
-            // 右上角：预告片的播放 / 暂停 + 进度环（拿到预告片才出现）
+            // 右上角：预告片的播放 / 暂停 + 进度环（拿到预告片才出现：F77 自动播放的预览要有看得见的停止钮）
             if isActive && trailer.loaded && trailer.path == video.path {
                 ShowcaseControl(trailer: trailer)
-                    .padding(.top, top + 18)
-                    .padding(.trailing, 20)
+                    .padding(.top, top + 12)
+                    // 44 的点按区里画 34 的环：环的右缘落在边距上（F2）
+                    .padding(.trailing, max(8, margin - 5))
                     .frame(width: vw, alignment: .topTrailing)
                     .visualEffect { content, proxy in
                         let y = proxy.frame(in: .scrollView(axis: .vertical)).minY
@@ -225,7 +230,7 @@ struct ShowcaseChapter: View {
                     .transition(.opacity)
             }
 
-            // ② ③ 介绍面板（黑底，平口顶边压上来）
+            // ② 介绍面板（黑底，平口顶边压上来）
             ShowcaseIntro(video: video, meta: m, vw: vw)
                 .padding(.top, contentTop)
         }
@@ -241,55 +246,51 @@ struct ShowcaseChapter: View {
         }
     }
 
+    /// 居中：字标（没有字标就是片名，Large Title 粗体），下面一行「年份 · 类型」（Subheadline：F15、F84）
     @ViewBuilder private func copy(_ m: Meta?) -> some View {
-        let w = min(vw * 0.88, 420)
-        VStack(spacing: 0) {
-            let line = eyebrow(m)
-            if !line.isEmpty {
-                Text(line)
-                    .font(.system(size: 15, weight: .semibold))
-                    .tracking(0.18)
-                    .foregroundStyle(.white.opacity(0.78))
-                    .multilineTextAlignment(.center)
-            }
+        let w = min(vw * 0.84, 460)
+        VStack(spacing: 12) {
             if let logo = atv?.logo ?? m?.logo, !logo.isEmpty {
-                LogoImage(url: TMDBImage.url(logo, "w500"), height: 96, fallback: model.title(video), maxWidth: w * 0.78)
-                    .frame(maxWidth: w * 0.78)
-                    .padding(.top, 14)
+                LogoImage(url: TMDBImage.url(logo, "w500"), height: vw >= 600 ? 120 : 96, fallback: model.title(video), maxWidth: w * 0.8)
+                    .frame(maxWidth: w * 0.8)
             } else {
                 Text(model.title(video))
-                    .font(.system(size: 38, weight: .semibold))
-                    .tracking(-0.23)
+                    .font(.largeTitle.bold())
                     .foregroundStyle(.white)
                     .multilineTextAlignment(.center)
-                    .lineLimit(3)
+                    .lineLimit(2)
                     .minimumScaleFactor(0.7)
-                    .padding(.top, 10)
+            }
+            let line = info(m)
+            if !line.isEmpty {
+                Text(line)
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(1)
             }
         }
         .frame(width: w)
-        .shadow(color: .black.opacity(0.35), radius: 10, y: 2)
-        // 网页版 top: 49%
-        .position(x: vw / 2, y: vh * 0.49)
+        .shadow(color: .black.opacity(0.3), radius: 10, y: 2)
+        .position(x: vw / 2, y: vh * 0.5)
     }
 
-    /// 网页版的 eyebrow：年份 · 两个类型 · 片长
-    private func eyebrow(_ m: Meta?) -> String {
+    /// 一行信息：年份 · 类型（最多两个）
+    private func info(_ m: Meta?) -> String {
         var parts: [String] = []
-        if let y = m?.year?.prefix(4), !y.isEmpty { parts.append(String(y)) } else if let y = model.year(video) { parts.append(String(y)) }
-        if let g = m?.genres, !g.isEmpty { parts.append(g.prefix(2).joined(separator: " · ")) }
-        if let r = m?.runtime, r > 0 { parts.append("\(r) 分钟") }
+        if let y = model.year(video) { parts.append(String(y)) }
+        if let g = m?.genres { parts.append(contentsOf: g.prefix(2)) }
         return parts.joined(separator: " · ")
     }
 }
 
-/// 画幅里的内容：剧照（没有预告片时慢慢推镜）、预告片（就绪才淡入）、上下两道缓动渐变
+/// 画幅里的内容：画面（没有预告片时慢慢推镜）、预告片（就绪才淡入）、上下两道缓动渐变
 struct ShowcaseMedia: View {
     let video: Video
     let art: String?
     let trailer: ShowcaseTrailer
     let isActive: Bool
     @State private var drift = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let mine = isActive && trailer.path == video.path
@@ -304,14 +305,14 @@ struct ShowcaseMedia: View {
                     .animation(.easeInOut(duration: 0.8), value: trailer.showing)
                     .allowsHitTesting(false)
             }
-            // 网页版 .sc-scrim：上沿 34% → 0（26%），下沿 42% → 0（34%），alpha 走 smoothstep 免得 OLED 上起条带
+            // 上沿 34% → 0（26%），下沿 42% → 0（34%），alpha 走 smoothstep 免得 OLED 上起条带
             LinearGradient(stops: Self.ease(0.34, span: 0.26), startPoint: .top, endPoint: .bottom)
             LinearGradient(stops: Self.ease(0.42, span: 0.34), startPoint: .bottom, endPoint: .top)
         }
         .clipped()
-        .onChange(of: isActive && !(mine && trailer.showing), initial: true) { _, still in
-            // 拿不到预告片的那一章：剧照极慢地推近、再拉远（26 秒一趟）
-            if still && isActive {
+        .onChange(of: isActive && !(mine && trailer.showing) && !reduceMotion, initial: true) { _, still in
+            // 拿不到预告片的那一章：画面极慢地推近、再拉远（26 秒一趟）；「减弱动态效果」打开时不推（F59）
+            if still {
                 withAnimation(.easeInOut(duration: 26).repeatForever(autoreverses: true)) { drift = true }
             } else {
                 withAnimation(.easeOut(duration: 0.6)) { drift = false }
@@ -328,7 +329,8 @@ struct ShowcaseMedia: View {
     }
 }
 
-/// 右上角那颗：播放 / 暂停 + 进度环（38，环 2.5 宽：底 34% 白、值纯白）
+/// 右上角那颗：播放 / 暂停 + 进度环（环 34、2.5 宽：底 34% 白、值纯白），点按区 44（C33）；
+/// 播放 ↔ 暂停用系统的符号替换动效（F57）
 struct ShowcaseControl: View {
     let trailer: ShowcaseTrailer
 
@@ -344,9 +346,11 @@ struct ShowcaseControl: View {
                 Image(systemName: trailer.paused ? "play.fill" : "pause.fill")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(.white)
+                    .contentTransition(.symbolEffect(.replace))
+                    .animation(.snappy(duration: 0.25), value: trailer.paused)
             }
             .frame(width: 34, height: 34)
-            .frame(width: 38, height: 38)
+            .frame(width: 44, height: 44)
             .contentShape(Circle())
         }
         .buttonStyle(PressableStyle(scale: 0.94))
@@ -355,7 +359,9 @@ struct ShowcaseControl: View {
     }
 }
 
-/// 介绍面板：简介（17 半粗 62% 白）、「评分 6.5」、演职员、两颗等宽的钮；剧照一排；分隔线
+/// 介绍面板（黑底，平口顶边压上来）：只留简介（三行，Body 宽松行距：F21；全文在「详情」里：F24）
+/// 和两颗同样大小的钮（C36：主次靠样子不靠大小）——「播放」白色胶囊黑字、「详情」半透明材质（S17、.dsPlay / .dsSecondary）。
+/// 和下一章之间只靠留白（F3、F12）
 struct ShowcaseIntro: View {
     @Environment(AppModel.self) private var model
     let video: Video
@@ -363,115 +369,39 @@ struct ShowcaseIntro: View {
     let vw: CGFloat
 
     var body: some View {
-        let gutter = max(20, vw * 0.056)
-        let stills = (meta?.stills ?? []).compactMap { $0.thumb ?? $0.url }.prefix(10)
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(meta?.overview.flatMap { $0.isEmpty ? nil : $0 } ?? "这部影片暂时没有简介。")
-                    .font(.system(size: 17, weight: .semibold))
-                    .tracking(0.19)
-                    .lineSpacing(7)
-                    .foregroundStyle(.white.opacity(0.62))
-                    .fixedSize(horizontal: false, vertical: true)
-                if let r = meta?.rating, r > 0 {
-                    Text(String(format: "评分 %.1f", r))
-                        .font(.system(size: 12, weight: .semibold))
-                        .tracking(0.24)
-                        .foregroundStyle(.white.opacity(0.74))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
-                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
-                        .padding(.top, 22)
-                }
-                let credits = creditsLine
-                if !credits.isEmpty {
-                    Text(credits)
-                        .font(.system(size: 14, weight: .semibold))
-                        .lineSpacing(5)
-                        .foregroundStyle(.white.opacity(0.42))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, 20)
-                }
-                HStack(spacing: 10) {
-                    Button { play() } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "play.fill").font(.system(size: 14))
-                            Text("播放")
-                        }
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.black)
+        let metrics = DSMetrics(width: vw)
+        let resume = model.playback.resumePosition(video.path) != nil
+        VStack(alignment: .leading, spacing: 22) {
+            if let text = meta?.overview, !text.isEmpty {
+                Text(text)
+                    .font(.body.leading(.loose))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .frame(maxWidth: 620, alignment: .leading)
+            }
+            HStack(spacing: 12) {
+                // F85：按钮是动词；看了一半的直接接着放（S17）
+                Button { play() } label: {
+                    Label(resume ? "继续播放" : "播放", systemImage: "play.fill")
                         .frame(maxWidth: .infinity)
-                        .frame(height: 46)
-                        .background(Color.white, in: Capsule())
-                        .contentShape(Capsule())
-                    }
-                    .buttonStyle(PressableStyle(scale: 0.96))
-                    .accessibilityIdentifier("showcase-play")
-
-                    NavigationLink(value: Route.movie(video)) {
-                        Text("影片详情")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 46)
-                            .background(Color.white.opacity(0.08), in: Capsule())
-                            .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
-                            .contentShape(Capsule())
-                    }
-                    .buttonStyle(PressableStyle(scale: 0.96))
-                    .accessibilityIdentifier("library-movie")
                 }
-                .padding(.top, 24)
-            }
-            .padding(.horizontal, gutter)
-            .padding(.top, 38)
+                .buttonStyle(.dsPlay)
+                .accessibilityIdentifier("showcase-play")
 
-            if !stills.isEmpty {
-                Text("剧照")
-                    .font(.system(size: 13, weight: .bold))
-                    .tracking(0.78)
-                    .foregroundStyle(.white.opacity(0.42))
-                    .padding(.horizontal, gutter)
-                    .padding(.top, 34)
-                    .padding(.bottom, 20)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(spacing: 14) {
-                        ForEach(Array(stills.enumerated()), id: \.offset) { _, s in
-                            Color(red: 17 / 255, green: 17 / 255, blue: 20 / 255)
-                                .overlay { RemoteImage(url: TMDBImage.url(s, "w780"), maxPixel: 900, placeholder: .clear) }
-                                .frame(width: vw * 0.78, height: vw * 0.78 * 9 / 16)
-                                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                        }
-                    }
-                    .scrollTargetLayout()
-                    .padding(.bottom, 6)
+                NavigationLink(value: Route.movie(video)) {
+                    Text("详情")
+                        .frame(maxWidth: .infinity)
                 }
-                .contentMargins(.horizontal, gutter, for: .scrollContent)
-                .scrollTargetBehavior(.viewAligned)
+                .buttonStyle(.dsSecondary)
+                .accessibilityIdentifier("library-movie")
             }
-
-            // 章与章之间：一条两端渐隐的线
-            LinearGradient(stops: [
-                .init(color: .clear, location: 0),
-                .init(color: .white.opacity(0.12), location: 0.2),
-                .init(color: .white.opacity(0.12), location: 0.8),
-                .init(color: .clear, location: 1),
-            ], startPoint: .leading, endPoint: .trailing)
-            .frame(height: 1)
-            .padding(.horizontal, gutter)
-            .padding(.top, 40)
+            .frame(maxWidth: 460)
         }
-        .padding(.bottom, 48)
+        .padding(.horizontal, metrics.margin)
+        .padding(.top, 28)
+        .padding(.bottom, metrics.shelfGap + 16)
         .frame(width: vw, alignment: .leading)
         .background(Color.black)
-    }
-
-    /// 「导演 许晴　　主演 叶舟、林夏、沈川」
-    private var creditsLine: String {
-        var parts: [String] = []
-        if let d = meta?.director, !d.isEmpty { parts.append("导演 " + d) }
-        if let c = meta?.cast, !c.isEmpty { parts.append("主演 " + c.prefix(3).map(\.name).joined(separator: "、")) }
-        return parts.joined(separator: "　　")
     }
 
     private func play() {
@@ -526,6 +456,8 @@ final class ShowcaseTrailer {
         guard path != v.path else { return }
         unmount()
         path = v.path
+        // F77、S17：系统「自动播放视频预览」关着时不自己放，停在那儿等人点右上角那颗钮
+        paused = !UIAccessibility.isVideoAutoplayEnabled
         loadTask = Task { [weak self] in
             let list = await model.trailers(for: v)
             guard let self, !Task.isCancelled, self.path == v.path,
