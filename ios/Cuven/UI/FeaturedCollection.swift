@@ -76,25 +76,39 @@ struct FeaturedCollectionHeader: View {
     let blurb: String
     let covers: [URL?]
     let metrics: DSMetrics
-    @State private var tint = Color(hue: 0.5, saturation: 0.55, brightness: 0.42)
+    /// 合集页的头（整页最上面）：主色从最顶上开始、铺到状态栏和导航栏底下，往下沉到黑（参考图）；
+    /// 主页里的是一条由黑浮上来、再沉回黑的带
+    var page = false
+    /// 主色的色相、饱和度：排在最前那张海报的平均色；取到之前是灰，取到了慢慢染上
+    @State private var hue: Double = 0
+    @State private var sat: Double = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// 排在最前那部的海报（带的颜色从它取）
     private var lead: URL? { covers.first.flatMap { $0 } }
 
+    static func posterWidth(_ m: DSMetrics) -> CGFloat { min(150, max(92, (m.width * 0.27).rounded())) }
+
+    /// 大标题的底边离这一块顶上多远（合集页滚过它，才把标题接到导航栏里）
+    static func titleBottom(_ m: DSMetrics) -> CGFloat {
+        22 + PosterFan.height(posterWidth(m)) + 22 + (m.wide ? 52 : 43)
+    }
+
     var body: some View {
-        let posterW = min(150, max(92, (metrics.width * 0.27).rounded()))
+        let posterW = Self.posterWidth(metrics)
         let lag: CGFloat = reduceMotion ? 0 : 0.08
         VStack(alignment: .leading, spacing: 0) {
-            PosterFan(covers: Array(covers.prefix(3)), width: posterW)
-                .frame(maxWidth: .infinity)
-                .frame(height: PosterFan.height(posterW))
-                .padding(.top, 22)
-                // 整条带往上滚时海报比字慢一点（视差）
-                .visualEffect { c, proxy in
-                    let y = proxy.frame(in: .scrollView(axis: .vertical)).minY
-                    return c.offset(y: max(-28, min(28, -y * lag)))
-                }
+            if !covers.isEmpty {
+                PosterFan(covers: Array(covers.prefix(3)), width: posterW)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: PosterFan.height(posterW))
+                    .padding(.top, 22)
+                    // 整条带往上滚时海报比字慢一点（视差）
+                    .visualEffect { c, proxy in
+                        let y = proxy.frame(in: .scrollView(axis: .vertical)).minY
+                        return c.offset(y: max(-28, min(28, -y * lag)))
+                    }
+            }
             Text(title)
                 .font(.system(size: metrics.wide ? 44 : 36, weight: .heavy))
                 .foregroundStyle(.white)
@@ -110,30 +124,54 @@ struct FeaturedCollectionHeader: View {
         .padding(.horizontal, metrics.margin)
         .padding(.bottom, 34)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // 由黑浮上来的一条主色、再沉回黑：上下都接得上前后的分区；铺到侧边那一列底下
-        .background {
+        .background { backdrop }
+        .task(id: lead) { await loadTint() }
+    }
+
+    private func tone(_ brightness: Double) -> Color { Color(hue: hue, saturation: sat, brightness: brightness) }
+
+    /// 底色，铺到侧边那一列底下
+    @ViewBuilder private var backdrop: some View {
+        if page {
+            // 合集页：最顶上一片主色（往上一直铺到状态栏、导航栏底下，下拉露出来的也是它），往下沉到黑
+            VStack(spacing: 0) {
+                tone(0.74).frame(height: 800)
+                LinearGradient(stops: [
+                    .init(color: tone(0.74), location: 0),
+                    .init(color: tone(0.34), location: 0.62),
+                    .init(color: tone(0.34).opacity(0), location: 1),
+                ], startPoint: .top, endPoint: .bottom)
+            }
+            .padding(.top, -800)
+            .padding(.leading, -metrics.leadingInset)
+            .padding(.trailing, -metrics.trailingInset)
+            .allowsHitTesting(false)
+        } else {
+            // 主页里：由黑浮上来的一条主色、再沉回黑，上下都接得上前后的分区
             LinearGradient(stops: [
-                .init(color: tint.opacity(0), location: 0),
-                .init(color: tint, location: 0.2),
-                .init(color: tint.opacity(0.55), location: 0.6),
-                .init(color: tint.opacity(0), location: 1),
+                .init(color: tone(0.42).opacity(0), location: 0),
+                .init(color: tone(0.42), location: 0.2),
+                .init(color: tone(0.42).opacity(0.55), location: 0.6),
+                .init(color: tone(0.42).opacity(0), location: 1),
             ], startPoint: .top, endPoint: .bottom)
             .padding(.leading, -metrics.leadingInset)
             .padding(.trailing, -metrics.trailingInset)
             .allowsHitTesting(false)
         }
-        .task(id: lead) { await loadTint() }
     }
 
-    /// 带的颜色：排在最前那张海报的平均色（只取色相，饱和度、亮度落到参考图那种青绿的深浅）
+    /// 主色：排在最前那张海报的平均色（只取色相，饱和度落到参考图那种浓淡，亮度由用处定）
     private func loadTint() async {
         guard let u = lead,
               let img = await ImagePipeline.shared.image(u, maxPixel: 96), let cg = img.cgImage,
               let c = ImageEffects.averageColor(cg, bottom: 1) else { return }
         var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         guard c.getHue(&h, saturation: &s, brightness: &b, alpha: &a), s > 0.1 else { return }
-        let t = Color(hue: Double(h), saturation: Double(min(0.68, max(0.36, s * 1.1))), brightness: 0.42)
-        withAnimation(.easeInOut(duration: 0.8)) { tint = t }
+        let ns = Double(min(page ? 0.72 : 0.68, max(0.36, s * 1.1)))
+        withAnimation(.easeInOut(duration: 0.8)) {
+            hue = Double(h)
+            sat = ns
+        }
     }
 }
 
@@ -152,12 +190,21 @@ struct PosterFan: View {
     @State private var floatFrom: Date?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// 每一张的位置（按海报宽算）与倾斜角
-    private static let layout: [(x: CGFloat, y: CGFloat, angle: Double, tilt: Double)] = [
+    /// 三张时每一张的位置（按海报宽算）与倾斜角
+    private static let fan3: [(x: CGFloat, y: CGFloat, angle: Double, tilt: Double)] = [
         (-0.92, -0.20, -9, 16),
         (0, 0.16, -2, 0),
         (0.92, 0.46, 8, -16),
     ]
+
+    /// 不到三张（这一类只有一两部）时收拢、居中
+    private static func layout(_ i: Int, of n: Int) -> (x: CGFloat, y: CGFloat, angle: Double, tilt: Double) {
+        switch n {
+        case 1: return (0, 0.12, -3, 0)
+        case 2: return i == 0 ? (-0.48, -0.02, -7, 12) : (0.48, 0.3, 7, -12)
+        default: return fan3[min(i, fan3.count - 1)]
+        }
+    }
 
     /// 一扇占的高：上沿约 -1.06、下沿约 +1.37 个海报宽（算上斜放、透视和厚度），再留浮动的上下 5 点
     static func height(_ width: CGFloat) -> CGFloat { (width * 2.43).rounded() + 12 }
@@ -188,7 +235,7 @@ struct PosterFan: View {
     }
 
     private func poster(_ i: Int, _ url: URL?, t: Double, amp: CGFloat) -> some View {
-        let l = Self.layout[min(i, Self.layout.count - 1)]
+        let l = Self.layout(i, of: covers.count)
         let spread: Bool = fanned || reduceMotion
         let tilt: Double = spread ? l.tilt : 0
         let angle: Double = spread ? l.angle : 0

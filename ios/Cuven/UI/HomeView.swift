@@ -215,13 +215,13 @@ struct HomeView: View {
     }
 
     /// 精选电影：评分高的在前；照用户给的参考图（游戏 App 的合集页）做成一整块：立体海报封面 + 大标题 + 说明 + 一排带底栏的大卡；
-    /// 那排的标题点进全部（按评分的海报网格）
+    /// 那排的标题点进合集页（同样的立体海报和大标题，下面一列大卡）
     @ViewBuilder
     private func featuredShelf(_ m: DSMetrics) -> some View {
         let items = model.featuredMovies(limit: 10)
         if !items.isEmpty {
             // 照参考图（游戏 App 的合集页）：立体海报封面 + 大标题 + 一段说明，下面一排带底栏的大卡
-            FeaturedCollection(title: Shelf.featured.title, blurb: "Cuven 按评分为你挑出片库里最值得一看的电影。",
+            FeaturedCollection(title: Shelf.featured.title, blurb: Shelf.featured.blurb ?? "",
                                rowTitle: "为您的口味量身定制的内容", rowRoute: .shelf(.featured),
                                covers: items.prefix(3).map { model.coverArt($0) }, metrics: m) {
                 ForEach(items, id: \.path) { v in featuredCard(v, m) }
@@ -246,8 +246,8 @@ struct HomeView: View {
     private func featuredSeriesShelf(_ m: DSMetrics) -> some View {
         let items = model.featuredSeries(limit: 10)
         if items.count >= 3 {
-            FeaturedCollection(title: "精选剧集", blurb: "Cuven 按评分为你挑出片库里最值得追的剧集。",
-                               rowTitle: "一集接一集停不下来", rowRoute: .shelf(.series),
+            FeaturedCollection(title: Shelf.featuredSeries.title, blurb: Shelf.featuredSeries.blurb ?? "",
+                               rowTitle: "一集接一集停不下来", rowRoute: .shelf(.featuredSeries),
                                covers: items.prefix(3).map { s in
                                    let sm = model.seriesMetas[s.path]
                                    return TMDBImage.url(sm?.poster ?? sm?.posterClean, "w500")

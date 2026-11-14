@@ -82,6 +82,17 @@ final class DuoDeviceTests: XCTestCase {
         if reveal(app, app.buttons.matching(identifier: "featured-series-card"), swipes: 4) != nil {
             sleep(2)
             snap("duo-02e-home-featured-tv")
+            // 合集页（照游戏 App 的合集页）：那一排的标题「一集接一集停不下来 ›」点进去
+            let heading = app.buttons["section-一集接一集停不下来"].firstMatch
+            if heading.isOnScreen(in: app) {
+                heading.tap(); sleep(3)
+                snap("duo-02f-collection")
+                app.swipeUp(); sleep(2)
+                snap("duo-02g-collection-cards")
+                back(app)
+            } else {
+                print("DUO collection heading: not on screen")
+            }
         } else {
             print("DUO featured series card: none")
         }
