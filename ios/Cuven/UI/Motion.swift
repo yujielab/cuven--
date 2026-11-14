@@ -97,10 +97,9 @@ struct MovieMenu: ViewModifier {
     func body(content: Content) -> some View {
         content.contextMenu {
             Button(model.playback.resumePosition(video.path) != nil ? "继续播放" : "播放", systemImage: "play.fill") {
-                let m = model.meta(video)
                 PlayerCoordinator.shared.play(PlayRequest(path: video.path, name: video.name, title: model.title(video),
                                                           subtitle: model.year(video).map { String($0) },
-                                                          artwork: m?.backdrop ?? m?.poster), model: model)
+                                                          artwork: model.backgroundArtString(video)), model: model)
             }
             WatchlistMenuButton(key: video.path, kind: .movie)
         }

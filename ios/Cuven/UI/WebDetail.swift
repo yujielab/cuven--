@@ -29,9 +29,11 @@ struct MovieDetailView: View {
 
         DetailScaffold(
             title: model.title(video),
-            wideArt: atv?.background ?? meta?.backdrop ?? meta?.poster,
-            tallArt: atv?.imageTall,
-            logo: atv?.logo ?? meta?.logo,
+            // 画面：这一部的 Apple TV 查询（顺带预告片）先到就用它的；还没回来先用全片库的 Apple TV 素材，最后才是 TMDB
+            // （详情页的 TMDB 是全量结果，字标只有它有：放在最后兜底）
+            wideArt: atv?.background ?? model.backgroundArtString(video) ?? meta?.backdrop ?? meta?.poster,
+            tallArt: atv?.imageTall ?? model.tallArtString(video),
+            logo: atv?.logo ?? model.logoArtString(video) ?? meta?.logo,
             metaLine: metaLine(meta),
             playTitle: resume ? "继续播放" : "播放",
             playID: "detail-play",
@@ -81,7 +83,7 @@ struct MovieDetailView: View {
     private func trailerArt(_ m: Meta?) -> [String] {
         let stills = (m?.stills ?? []).compactMap { $0.url ?? $0.thumb }.filter { !$0.isEmpty }
         if !stills.isEmpty { return stills }
-        return [atv?.background ?? m?.backdrop].compactMap { $0 }
+        return [atv?.background ?? model.backgroundArtString(video)].compactMap { $0 }
     }
 
     /// 「从头播放」：只在有进度时出现。先清掉这部的进度，播放器就从头开始
@@ -97,7 +99,7 @@ struct MovieDetailView: View {
     private func play(_ meta: Meta?) {
         PlayerCoordinator.shared.play(PlayRequest(path: video.path, name: video.name, title: model.title(video),
                                                   subtitle: model.year(video).map { String($0) },
-                                                  artwork: meta?.backdrop ?? meta?.poster), model: model)
+                                                  artwork: atv?.background ?? model.backgroundArtString(video) ?? meta?.poster), model: model)
     }
 }
 

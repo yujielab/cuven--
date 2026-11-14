@@ -544,6 +544,9 @@
  *       库候选集变化或超龄由 cron 重建；素材双轨：横版 posterArt（iPad / 桌面）
  *       + 竖版 contentImageTall（iPhone），前端按断点选轨；hero 已零 TMDB 依赖
  *     → lookup / search 保留（前端严选区已下线，接口留给外部调用）；edge 缓存 6h
+ *     → art（片库全部电影的素材，Apple TV 优先、TMDB 兜底）：前端按批 POST 片名 + 年份，
+ *       同一套匹配规则；一次最多新查 6 部（其余回 pending，前端隔一秒再问），
+ *       成品「R2 全局索引（模板态，与尺寸无关）+ isolate 内存」；没收录的记 miss，7 天后再试
  *
  * 环境变量
  *   DROPBOX_REFRESH_TOKEN, DROPBOX_APP_KEY, DROPBOX_APP_SECRET
@@ -686,6 +689,8 @@ export default {
         case '/api/atv/hero':           return cors(await handleAtvHero(url, env, ctx));
         case '/api/atv/lookup':         return cors(await handleAtvLookup(url, env, ctx));
         case '/api/atv/search':         return cors(await handleAtvSearch(url, env, ctx));
+        // 片库全部电影的 Apple TV 素材（海报 / 横版 / 背景 / 竖版 / 字标），前端按批问，TMDB 兜底
+        case '/api/atv/art':            return cors(await handleAtvArt(request, url, env, ctx));
         case '/api/coming-soon/remind': return cors(await handleRemind(request, env, ctx));
         case '/api/refresh':    return cors(await handleRefreshCache(env, ctx));
         // 重复影片：列表（纯读，带 gen 可长缓存）/ 清理（写，需 confirm）
@@ -4152,6 +4157,147 @@ async function handleAtvLookup(url, env, ctx) {
       }, 404, { 'Cache-Control': 'public, max-age=600', 'Server-Timing': t.header() });   // 未命中短缓存，扛住批量扫库
   if (cache) ctx?.waitUntil?.(cache.put(ck, resp.clone()));
   return resp;
+}
+
+/* ── 片库素材索引 —— POST /api/atv/art ─────────────────────────────────
+ *  「所有电影优先用 Apple TV 的图，TMDB 兜底」：前端（iOS）把片库里的电影按批问过来，
+ *    { items: [{ k: 片子的 path, t: ['Dune: Part Two', …拉丁字母片名，最多 3 个], y: 2024 }] }
+ *  回 { items: { k: { id, title, year, poster, tall, wide, background, logo } }, pending: [k…] }
+ *    poster      2:3、印着片名的海报（Apple 有才有，pw 宽）
+ *    tall        竖版全屏的干净画面（≈0.46，没有字；前端裁成 2:3 再压字标）
+ *    wide        16:9、带片名排版的横图（w 宽）
+ *    background  16:9 的干净背景（w 宽）
+ *    logo        片名字标 PNG（1000 宽）
+ *  items 和 pending 里都没有的 = Apple TV 上没有这部 → 前端用 TMDB。
+ *  · 匹配与 hero 池同一套：折叠片名全等；带年份时商店年份要在 ±1 以内（同名重制版宁缺毋错配）
+ *  · 一次请求最多新查 ATV_ART_BUDGET 部（每部 = 1~2 次搜索 + 1 次详情），其余回 pending
+ *  · 成品：R2 一份全局索引（键 = 折叠片名|年份，存模板 + 高宽比，与请求尺寸无关），isolate 内存挡一层；
+ *    Apple 没收录的记 miss（7 天后再试）；接口出错的不记，回 pending 让前端过会儿再问
+ * ──────────────────────────────────────────────────────────────────── */
+const ATV_ART_VER = 1;                          // 改了索引里存的东西就 +1（R2 键换代）
+const R2_ATV_ART_KEY = `atv-art-v${ATV_ART_VER}.json`;   // { items: { key: entry | { miss: ts } }, _ts }
+const ATV_ART_BUDGET = 6;                       // 每次请求最多新查几部：≤ 6 × 3 次子请求，给免费计划的 50 次留余量
+const ATV_ART_MAX_ITEMS = 120;
+const ATV_ART_TTL = 30 * 24 * 3600_000;         // 素材 30 天后重查一次（商店换图）
+const ATV_ART_MISS_TTL = 7 * 24 * 3600_000;     // 没收录的 7 天后再试
+let _atvArt = null;                             // { items, at }：isolate 内存里的索引，60 秒内不重读 R2
+
+async function atvArtLoad(env) {
+  const now = Date.now();
+  if (_atvArt && now - _atvArt.at < 60_000) return _atvArt.items;
+  const stored = await r2GetJson(env, R2_ATV_ART_KEY);
+  // 内存里新查到、还没落进 R2 的条目也留着（没绑 R2 时只靠它）
+  const items = Object.assign({}, stored?.items || {}, _atvArt?.items || {});
+  _atvArt = { items, at: now };
+  return items;
+}
+
+// 写回 R2：先读最新的再合并，别把别的请求刚写进去的条目盖掉
+async function atvArtSave(env, fresh) {
+  if (!env.FILE_CACHE) return;
+  const stored = await r2GetJson(env, R2_ATV_ART_KEY);
+  await r2PutJson(env, R2_ATV_ART_KEY, { items: Object.assign({}, stored?.items || {}, fresh), _ts: Date.now() });
+}
+
+// 模板 + 高宽比（a = 高 / 宽）；方向不对的不要（海报得是竖的，横图得是横的）
+const atvArtTpl = t => t?.url && t.width > 0 && t.height > 0 ? { u: t.url, a: +(t.height / t.width).toFixed(4) } : null;
+const atvArtPortrait = t => t?.url && t.height > t.width ? atvArtTpl(t) : null;
+const atvArtLandscape = t => t?.url && t.width > t.height ? atvArtTpl(t) : null;
+
+async function atvArtMatch(titles, year) {
+  for (const term of titles.slice(0, 2)) {      // 英文名先搜，搜不到再试第二个名字
+    const key = atvNorm(term);
+    if (!key) continue;
+    const sj = await utsGet('/search', { searchTerm: term });
+    if (!sj) return { error: true };            // 接口没回（超时 / 出错）：这次不算没有
+    const hits = [];
+    for (const shelf of sj?.data?.canvas?.shelves || [])
+      for (const it of shelf.items || [])
+        if (it.type === 'Movie' && it.id && atvNorm(it.title) === key) hits.push(it);
+    const it = year
+      ? hits.find(h => h.releaseDate && Math.abs(new Date(h.releaseDate).getUTCFullYear() - year) <= 1)
+      : hits[0];
+    if (!it) continue;
+    const dj = await utsGet(`/movies/${it.id}`);
+    if (!dj) return { error: true };            // 详情没取到：竖版图和字标都在详情里，下次再来
+    const imgs = dj?.data?.content?.images || {}, sImgs = it.images || {};
+    const logoT = imgs.contentLogo?.url && imgs.contentLogo.width > 0 ? imgs.contentLogo : null;
+    const entry = {
+      id: it.id, title: it.title,
+      year: it.releaseDate ? new Date(it.releaseDate).getUTCFullYear() : (year || null),
+      c: atvArtPortrait(imgs.coverArt) || atvArtPortrait(sImgs.coverArt),                     // 2:3 海报
+      t: atvArtPortrait(imgs.contentImageTall),                                                 // 竖版全屏
+      w: atvArtLandscape(sImgs.shelfImage) || atvArtLandscape(imgs.coverArt16X9),               // 16:9 带片名
+      b: atvArtLandscape(sImgs.shelfImageBackground) || atvArtLandscape(imgs.posterArt),        // 16:9 干净背景
+      l: logoT ? atvFill(logoT.url, 1000, Math.round(1000 * logoT.height / logoT.width), 'png') : null,
+      at: Date.now(),
+    };
+    if (!entry.c && !entry.t && !entry.w && !entry.b) continue;
+    return { entry };
+  }
+  return { miss: true };
+}
+
+// 模板态 → 线上：按请求的 w / pw / f 现场展开（{c} 是裁切方式占位，统一给 bb）
+function atvArtWire(e, o) {
+  const fill = (t, w) => t ? t.u.replace('{w}', w).replace('{h}', Math.round(w * t.a)).replace('{f}', o.f).replace('{c}', 'bb') : null;
+  return { id: e.id, title: e.title, year: e.year,
+    poster: fill(e.c, o.pw), tall: fill(e.t, o.pw), wide: fill(e.w, o.w), background: fill(e.b, o.w), logo: e.l || null };
+}
+
+async function handleAtvArt(request, url, env, ctx) {
+  if (request.method !== 'POST') return jsonResponse({ error: 'POST required' }, 405);
+  let body;
+  try { body = await request.json(); }
+  catch { return jsonResponse({ error: 'Invalid JSON' }, 400); }
+  const t = timer();
+  const o = atvOpts(url);
+  const list = (Array.isArray(body?.items) ? body.items : []).slice(0, ATV_ART_MAX_ITEMS);
+  const index = await atvArtLoad(env);
+  t.mark('index');
+  const now = Date.now();
+  const out = {}, pending = [], jobs = [], byKey = new Map(), fresh = {};
+
+  for (const q of list) {
+    const k = typeof q?.k === 'string' && q.k ? q.k.slice(0, 1024) : null;
+    if (!k) continue;
+    // 只认拉丁字母的片名（商店是英文区）；中文名搜不到，直接算没有
+    const titles = (Array.isArray(q.t) ? q.t : [q.t])
+      .filter(x => typeof x === 'string').map(x => x.trim().slice(0, 200))
+      .filter(x => x && !/\p{Script=Han}/u.test(x) && atvNorm(x)).slice(0, 3);
+    if (!titles.length) continue;
+    const year = parseInt(q.y, 10) || 0;
+    const key = atvNorm(titles[0]) + '|' + (year || '');
+    const e = index[key];
+    if (e && !e.miss && now - (e.at || 0) < ATV_ART_TTL) { out[k] = atvArtWire(e, o); continue; }
+    if (e?.miss && now - e.miss < ATV_ART_MISS_TTL) continue;            // Apple TV 上没有：不再问
+    const dup = byKey.get(key);
+    if (dup) { dup.ks.push(k); continue; }                               // 同一批里同名同年的只查一次
+    const job = { key, titles, year, ks: [k], stale: e && !e.miss ? e : null };
+    byKey.set(key, job);
+    jobs.push(job);
+  }
+
+  const now_ = jobs.slice(0, ATV_ART_BUDGET), later = jobs.slice(ATV_ART_BUDGET);
+  await parallel(now_.map(j => async () => {
+    const r = await atvArtMatch(j.titles, j.year).catch(() => ({ error: true }));
+    if (r.entry) { fresh[j.key] = r.entry; for (const k of j.ks) out[k] = atvArtWire(r.entry, o); }
+    else if (r.miss) fresh[j.key] = { miss: now };
+    else if (j.stale) for (const k of j.ks) out[k] = atvArtWire(j.stale, o);   // 出错：旧的先用着
+    else pending.push(...j.ks);                                                  // 出错且没有旧的：过会儿再问
+  }), 3);
+  for (const j of later) {
+    if (j.stale) for (const k of j.ks) out[k] = atvArtWire(j.stale, o);        // 超龄的先回旧图，下次再刷
+    else pending.push(...j.ks);
+  }
+  t.mark('uts');
+
+  if (Object.keys(fresh).length) {
+    Object.assign(index, fresh);                 // 同一个 isolate 里马上可见
+    ctx?.waitUntil?.(atvArtSave(env, fresh));
+  }
+  return jsonResponse({ items: out, pending, count: Object.keys(out).length }, 200,
+    { 'Cache-Control': 'no-store', 'Server-Timing': t.header() });
 }
 
 // ── hero 数据源:资料库 → Apple TV 商店(hero 唯一源管线)──────────────
