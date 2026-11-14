@@ -69,7 +69,7 @@ final class TourTests: XCTestCase {
         sleep(5)
         snap("08-movie-detail")
         app.swipeUp(); sleep(3); snap("09-movie-detail-2")
-        // 预告片不在详情页了（和网页版一样在资料库的展映里放），下面资料库那一步看它
+        // 预告片在详情页「预告片」一排（有才有），资料库展映里也有静音的那一段，下面资料库那一步看它
         app.swipeDown(); sleep(2)
 
         // 播放：系统播放器（点了立刻弹出，片源准备好再挂上）。等 30 秒（诊断日志里有准备 / 挂上 / 首帧的耗时和每 5 秒的进度），然后关掉 ——

@@ -19,7 +19,7 @@ final class DuoDeviceTests: XCTestCase {
     }
 
     /// 隐私同意闸门（网页版 #pgSheet）：登录后没同意过就盖上。演示数据默认不出，这里用 -CuvenPrivacy YES 强制。
-    /// 弹层本身只有文案与合成内容；勾满三项、开通知（系统权限弹窗点「允许」，没弹就算了），「同意并进入」以后应当到主页
+    /// 弹层本身只有文案与合成内容；勾满三项，「同意并继续」以后应当到主页（通知权限挪到账户页的开关里）
     func testPrivacyGate() {
         XCUIDevice.shared.orientation = .portrait
         let app = launch(privacy: true)
@@ -28,7 +28,7 @@ final class DuoDeviceTests: XCTestCase {
         sleep(2)                                   // 弹层推上来、标题与要点依次升上来
         report(app, "privacy")
         snap("duo-00c-privacy")
-        XCTAssertFalse(agree.isEnabled, "四项都没完成，「同意并进入」不该能点")
+        XCTAssertFalse(agree.isEnabled, "三项都没勾，「同意并继续」不该能点")
 
         // 展开完整说明，再往下滚到「您的选择」
         let disclose = app.buttons["pg-disclose"].firstMatch
@@ -38,25 +38,11 @@ final class DuoDeviceTests: XCTestCase {
         for id in ["pg-privacy", "pg-cross", "pg-age"] {
             if let row = reveal(app, app.buttons.matching(identifier: id), swipes: 3) { row.tap(); usleep(300_000) } else { print("DUO privacy: \(id) not found") }
         }
-        if let notify = reveal(app, app.buttons.matching(identifier: "pg-notify"), swipes: 2) {
-            notify.tap(); sleep(2)
-            // 系统的通知权限弹窗在 SpringBoard 里（文字跟模拟器的系统语言走）
-            let sb = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-            var handled = false
-            for label in ["允许", "Allow"] {
-                let b = sb.buttons[label].firstMatch
-                if b.waitForExistence(timeout: 3) { b.tap(); handled = true; break }
-            }
-            if !handled { print("DUO privacy: no notification permission alert (already decided?)") }
-            sleep(1)
-        } else {
-            print("DUO privacy: notify row not found")
-        }
         snap("duo-00e-privacy-done")
         if agree.isEnabled {
             agree.tap()
             sleep(2)
-            XCTAssertFalse(app.buttons["pg-agree"].exists, "点了「同意并进入」闸门还在")
+            XCTAssertFalse(app.buttons["pg-agree"].exists, "点了「同意并继续」闸门还在")
             XCTAssertTrue(app.buttons["主页"].firstMatch.waitForExistence(timeout: 10), "同意以后没到主页")
         } else {
             print("DUO privacy: agree still disabled (hint: \(app.staticTexts["pg-hint"].firstMatch.label))")
@@ -88,28 +74,27 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-02-home-rows")
         app.swipeDown(); app.swipeDown(); sleep(1)
 
-        // 详情：系统的返回钮（折起时在侧边那一列最上面）
-        let card = app.buttons["hero-card"].firstMatch
+        // 详情：头图上此刻在屏上的那一页的「详情」（详情页从头图上放大出来）；返回是系统的返回钮（折起时在侧边那一列最上面）
+        let heroDetail = visible(app.buttons.matching(identifier: "hero-detail"))
         let poster = app.buttons["newest-poster"].firstMatch
-        if card.waitForExistence(timeout: 5) { card.tap() } else if poster.exists { poster.tap() }
+        if heroDetail.exists && heroDetail.isHittable { heroDetail.tap() } else if poster.exists { poster.tap() }
         XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "没进到电影详情")
         sleep(2)
         report(app, "detail")
         snap("duo-03-detail")
-        // 「更多操作」：播放钮旁边那颗玻璃圆钮，弹出和网页版一样的弹层（播放 / 复制直链 / 取消）
+        // 「…」：播放钮旁边的系统菜单（从头播放 / 复制直链 / 分享）；点菜单外面收起
         let more = app.buttons["detail-more"].firstMatch
         if more.waitForExistence(timeout: 3) {
             more.tap(); sleep(2)
             snap("duo-03b-detail-more")
-            let cancel = app.buttons["sheet-cancel"].firstMatch
-            if cancel.waitForExistence(timeout: 3) { cancel.tap() } else { app.swipeDown() }
+            XCTAssertTrue(app.buttons["detail-copy"].firstMatch.exists, "「…」菜单里没有「复制直链」")
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.06)).tap()
             sleep(1)
         } else {
-            XCTFail("详情页没有「更多操作」钮")
+            XCTFail("详情页没有「…」菜单")
         }
-        // 演员阵容 · 查看全部 ›：整页名单（在简介下面，先找它，再往下滑）
-        // 和网页版一样是一张弹层（「演员阵容 · N 位」，一行一位）；点一行换成那位演员（「在资料库中搜索」「在 TMDB 查看」）
-        if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 2) {
+        // 演员 ›：一张半屏 / 全屏的系统弹层，一行一位；点一行在弹层里推进那位演员（「在资料库中搜索」「在 TMDB 查看」）
+        if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 3) {
             castLink.tap(); sleep(2)
             snap("duo-04b-cast")
             let row = app.buttons["cast-row"].firstMatch
@@ -121,19 +106,17 @@ final class DuoDeviceTests: XCTestCase {
             }
             closeSheet(app)
         } else {
-            XCTFail("详情页没有「演员阵容 · 查看全部 ›」")
+            XCTFail("详情页没有「演员 ›」")
         }
         app.swipeUp(); sleep(2); snap("duo-04-detail-info")
         app.swipeUp(); sleep(2); snap("duo-04c-detail-tech")
         back(app)
-        // 主页往下：今日推荐、最新加入（横版卡）、Cuven TV（高卡）、按年份（年份条 + 剧集卡 + 竖版卡）
+        // 主页往下：继续观看、今日推荐（海报）、最新加入（16:9）、剧集（16:9 + 字标）、各年份（海报）——分区之间只靠留白
         app.swipeUp(); sleep(2); snap("duo-08-home-rows")
         app.swipeUp(); sleep(2); snap("duo-08b-home-tv")
         app.swipeUp(); sleep(2); snap("duo-08c-home-year")
         app.swipeUp(); sleep(2); snap("duo-08d-home-year-2")
-        // 「继续观看」只有一张时右边垫一张「没有更多了」（演示数据里正好一张）
-        print("DUO continue end card: \(app.staticTexts["没有更多了"].exists ? "shown" : "not found")")
-        // 首页最后一段「文件夹」：点进文件夹页（子文件夹一排 + 按年份分组的瀑布流）
+        // 首页最后一段「文件夹」：点进文件夹页（大标题、子文件夹一排、海报网格）
         if let folder = reveal(app, app.buttons.matching(identifier: "folder-card"), swipes: 8) {
             snap("duo-08e-home-folders")
             folder.tap(); sleep(2)
@@ -147,7 +130,7 @@ final class DuoDeviceTests: XCTestCase {
         for _ in 0..<14 { app.swipeDown() }
         sleep(1)
 
-        // 资料库：和网页版一样的展映——一部片一章，满屏画幅 → 收成 16:9、介绍面板压上来 → 剧照
+        // 资料库：展映——一部片一章，满屏画幅 → 收成 16:9，下面字标、一行信息、三行简介、播放 / 详情
         tab(app, "资料库"); sleep(3)
         report(app, "library")
         snap("duo-05-library")
@@ -155,30 +138,29 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-05g-library-intro")
         if let d = reveal(app, app.buttons.matching(identifier: "library-movie"), swipes: 2) {
             d.tap(); sleep(2)
-            XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "资料库「影片详情」没进到详情页")
+            XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "资料库「详情」没进到详情页")
             snap("duo-05h-library-detail")
             back(app)
         } else {
-            XCTFail("资料库没有「影片详情」")
+            XCTFail("资料库没有「详情」")
         }
 
-        // 剧集详情：主页「Cuven TV」那一排的高卡（资料库和网页版一样只放电影）
+        // 剧集详情：主页「剧集」那一排（资料库只放电影）
         tab(app, "主页"); sleep(2)
         if let s1 = reveal(app, app.buttons.matching(identifier: "series-card"), swipes: 4) {
             s1.tap(); sleep(3)
             snap("duo-05b-series")
             app.swipeUp(); sleep(2)
             snap("duo-05c-series-episodes")
-            // 分集简介超过三行：第三行末尾的「更多」，点开是整段简介的弹层（底下「关闭」）
-            let epMore = app.buttons["episode-more"].firstMatch
-            if epMore.waitForExistence(timeout: 2) {
-                epMore.tap(); sleep(2)
+            // 长按分集卡：系统菜单，预览里是这一集的剧照、集名和整段简介；点菜单外面收起
+            if let ep = reveal(app, app.buttons.matching(identifier: "episode-card"), swipes: 1) {
+                ep.press(forDuration: 1.2); sleep(2)
                 snap("duo-05f-episode-more")
-                closeSheet(app)
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.06)).tap(); sleep(1)
             } else {
-                print("DUO episode more: none")
+                print("DUO episode card: none")
             }
-            // 季切换：分集标题右边「第 1 季 ›」点开是季的菜单，选第 2 季
+            // 季切换：「剧集」标题右边「第 1 季 ⌃⌄」点开是季的菜单，选第 2 季
             if let seasonMenu = reveal(app, app.buttons.matching(identifier: "season-menu"), swipes: 1) {
                 seasonMenu.tap(); sleep(1)
                 snap("duo-05d-season-menu")
@@ -198,22 +180,22 @@ final class DuoDeviceTests: XCTestCase {
         for _ in 0..<6 { app.swipeDown() }
         sleep(1)
 
-        // 年份页：主页「2026 · 查看电影和剧集 ›」进去，一行一部；行尾「…」是和详情页同一张弹层
+        // 年份页：主页分区标题「2026 ›」进去——系统列表，一行一部（小海报、片名、一行灰字、›）；长按一行是系统菜单（播放 / 想看）
         tab(app, "主页"); sleep(2)
-        if let bar = reveal(app, app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'year-bar-'")), swipes: 6) {
-            bar.tap(); sleep(2)
+        if let title = reveal(app, app.buttons.matching(NSPredicate(format: "identifier MATCHES 'section-[0-9]{4}'")), swipes: 8) {
+            title.tap(); sleep(2)
             snap("duo-09-year")
-            let more = app.buttons["year-more"].firstMatch
-            if more.waitForExistence(timeout: 3) {
-                more.tap(); sleep(2)
-                snap("duo-09b-year-more")
-                let cancel = app.buttons["sheet-cancel"].firstMatch
-                if cancel.waitForExistence(timeout: 3) { cancel.tap() } else { app.swipeDown() }
-                sleep(1)
+            let row = app.buttons.matching(NSPredicate(format: "identifier IN {'year-movie', 'year-series'}")).firstMatch
+            if row.waitForExistence(timeout: 3) {
+                row.press(forDuration: 1.2); sleep(2)
+                snap("duo-09b-year-menu")
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.06)).tap(); sleep(1)
+            } else {
+                print("DUO year page: no rows")
             }
             back(app)
         } else {
-            XCTFail("主页没有年份条")
+            XCTFail("主页没有年份分区")
         }
         for _ in 0..<8 { app.swipeDown() }
         sleep(1)
@@ -223,7 +205,7 @@ final class DuoDeviceTests: XCTestCase {
         snap("duo-06-account")
 
         tab(app, "搜索"); sleep(2)
-        snap("duo-07a-search-home")          // 最近添加：两列竖版海报
+        snap("duo-07a-search-home")          // 最近添加：海报网格
         app.swipeDown(); sleep(1)
         let field = app.searchFields.firstMatch
         if field.waitForExistence(timeout: 5) {
@@ -301,7 +283,7 @@ final class DuoDeviceTests: XCTestCase {
         return w.width > w.height || shot.width > shot.height
     }
 
-    /// 关掉网页版式的弹层：点底部那颗胶囊（「取消」/「关闭」），找不到就往下滑
+    /// 关掉弹层：点右上角系统的 xmark（标识 sheet-cancel），找不到就往下滑
     private func closeSheet(_ app: XCUIApplication) {
         let cancel = app.buttons["sheet-cancel"].firstMatch
         if cancel.waitForExistence(timeout: 3) && cancel.isHittable { cancel.tap() } else { app.swipeDown() }

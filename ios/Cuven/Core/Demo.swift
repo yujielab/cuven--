@@ -66,7 +66,7 @@ enum DemoData {
         // 根下一级的几个文件夹（首页最后那排「文件夹」）：名字是合成的
         m.folders = folderNames.map { LibraryFolder(name: $0, path: "/demo/\($0)") }
         m.libraryRoot = "/demo"
-        // 看到一半的一部（只在内存里）：首页「继续观看」只有一张，右边垫「没有更多了」
+        // 看到一半的一部（只在内存里）：首页「继续观看」里有一张
         let cw = videos[3]
         m.playback.update(WatchEntry(path: cw.path, name: cw.name, title: titles[3], subtitle: String(2026 - 3 % 8),
                                      artwork: url("backdrop", 3), position: 1_520, duration: 6_300,

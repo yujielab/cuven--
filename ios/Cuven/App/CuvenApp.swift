@@ -5,7 +5,7 @@ import AVFoundation
 struct CuvenApp: App {
     @State private var model = AppModel()
     @State private var account: AccountStore
-    /// 欢迎页（网页版 #wc-root）：打开 App 时已登录就先盖这一屏，点「确认并继续」淡出。只在启动这一刻判断一次
+    /// 欢迎页：只出一次（C75）——第一次以已登录状态打开，或第一次登录成功以后；点「确认并继续」淡出并记下「看过了」
     @State private var welcome: Bool
     /// 隐私同意闸门（网页版 __privacyGate）：欢迎页退场 0.5 秒后、或刚登录完，没同意过就盖上
     @State private var privacy = false
@@ -15,6 +15,9 @@ struct CuvenApp: App {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         URLCache.shared = URLCache(memoryCapacity: 16 << 20, diskCapacity: 256 << 20)
         Perf.startWatchdog()
+        // 设置里不再有「触感」开关（系统「声音与触感」里已经有：C95）。以前在 App 里关掉过的，
+        // 清掉那一项，Haptics.enabled 回到默认的开（系统里关了触感，系统自己会让它不震）
+        UserDefaults.standard.removeObject(forKey: "haptics")
         // 账户在这里建：登录状态（钥匙串里 30 天内的会话）一出来就决定要不要欢迎页，第一帧就盖上，不闪主页
         let acc = AccountStore()
         _account = State(initialValue: acc)
@@ -29,6 +32,7 @@ struct CuvenApp: App {
                 .overlay {
                     if welcome {
                         WelcomeView {
+                            WelcomeGate.markSeen()
                             withAnimation(.timingCurve(0.32, 0.72, 0, 1, duration: 0.45)) { welcome = false }
                             Task { @MainActor in
                                 try? await Task.sleep(nanoseconds: 500_000_000)
@@ -39,7 +43,15 @@ struct CuvenApp: App {
                     }
                 }
                 .onAppear { if !welcome && PrivacyGate.shouldShow(account) { privacy = true } }
-                .onChange(of: account.isLoggedIn) { _, now in if now && !welcome && PrivacyGate.shouldShow(account) { privacy = true } }
+                // 刚登录成功：第一次就迎接一下（只此一次：C75），没出欢迎页就直接看要不要问隐私同意
+                .onChange(of: account.isLoggedIn) { _, now in
+                    guard now, !welcome else { return }
+                    if WelcomeGate.shouldShow(account) {
+                        withAnimation(.easeOut(duration: 0.3)) { welcome = true }
+                    } else if PrivacyGate.shouldShow(account) {
+                        privacy = true
+                    }
+                }
                 .environment(model)
                 .environment(account)
                 .preferredColorScheme(.dark)
@@ -71,10 +83,9 @@ struct RootView: View {
             Tab("账户", systemImage: "person.crop.circle.fill", value: AppTab.account) { AccountView(asTab: true) }
             Tab(value: AppTab.search, role: .search) { SearchView() }
         }
-        .tabBarMinimizeBehavior(.onScrollDown)
+        // 标签栏不在滚动时缩小：HIG 只在标签栏带附件（迷你播放器之类）时这么做（C10）；标签名一字一词（C8）
         .onChange(of: tab) { _, _ in Haptics.selection() }
         .onChange(of: model.searchRequest) { _, q in if q != nil { tab = .search } }
-        .environment(\.openAccount, { tab = .account })
         .fullScreenCover(isPresented: .constant(account.loginRequired && !account.isLoggedIn)) {
             LoginView()
                 .environment(model)

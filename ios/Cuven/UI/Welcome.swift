@@ -2,20 +2,30 @@ import SwiftUI
 
 // MARK: - 欢迎页：和网页版一样（web/index.html 的 #wc-root）
 //
-// 什么时候出：和网页版同一条规矩——打开 App 时已经登录（30 天内）就先盖这一屏；没登录直接是登录页，
-// 登录成功以后也不再出（网页版只在载入那一刻判断一次）。不记「看过了」：每次冷启动都有。
+// 什么时候出（HIG 引导：C72、C75、C76）：只出一次——第一次以已登录状态打开 App，或第一次登录成功以后；
+// 点「确认并继续」就记下「看过了」，之后的启动直接回到上次的地方，不再挡着（C75「不在后来的启动里再出」）。
+// -CuvenWelcome YES（UI 测试 / 截图）可以强制再出。
 // 这一屏：深色底（#04060a）上 620 颗光点按黄金角排成一朵「葵花」，圆心是头像；一波亮度从里往外一遍遍扫过（3.2 秒一趟），
 // 每颗各自闪烁、偶尔泛一下蓝，手指按住会把附近的光点推开、提亮。
 // 上面「Good Morning !」（按时段）和「欢迎回来 · 用户名」先后模糊淡入，中间 132 的玻璃圆头像，
 // 底下一颗玻璃大胶囊「确认并继续」；点了整屏淡出（0.45 秒）。
 // 排版照网页版的三段：上 35%（问候，顶 56）、中 50%（头像，往下 28）、下 15%；底部安全区不算在里面。矮横屏（高 ≤ 420）收紧。
 
-/// 打开 App 时要不要先出欢迎页
+/// 要不要出欢迎页：只出一次（C75）
 enum WelcomeGate {
+    /// 看过了就记在这里（与账户无关：同一台设备上只迎接一次）
+    static let seenKey = "cuven_welcome_seen_v1"
+
     @MainActor static func shouldShow(_ account: AccountStore) -> Bool {
         // UI 测试 / 截图：-CuvenWelcome YES 强制显示（演示数据、跳过登录时默认不出，免得挡住别的测试）
         if UserDefaults.standard.bool(forKey: "CuvenWelcome") { return true }
+        guard !UserDefaults.standard.bool(forKey: seenKey) else { return false }
         return account.loginRequired && account.isLoggedIn
+    }
+
+    /// 点了「确认并继续」：以后不再出（C75）
+    static func markSeen() {
+        UserDefaults.standard.set(true, forKey: seenKey)
     }
 }
 
@@ -192,9 +202,11 @@ struct WelcomeField: View {
     let size: CGSize
     let touch: CGPoint?
     @State private var start = Date()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.animation) { timeline in
+        // 「减弱动态效果」打开时光点不再流动，停在第一帧（F59：停掉自动、重复的动效）
+        TimelineView(.animation(minimumInterval: nil, paused: reduceMotion)) { timeline in
             let t = timeline.date.timeIntervalSince(start)
             Canvas { ctx, _ in
                 Self.draw(&ctx, t: t, center: center, size: size, touch: touch)

@@ -1,150 +1,208 @@
 import SwiftUI
 
-// MARK: - 资料库用过的小部件（资料库本身见 LibraryShowcase.swift）
+// MARK: - 资料库、搜索、年份页、文件夹页、整页清单共用的部件（资料库本身见 LibraryShowcase.swift）
+//
+// 依据（编号见 docs/ios-design.md）：
+// · 只用系统的标准网格与列表（T23、C20、C29），不做花样版式；
+// · 每排张数、边距、卡间距都跟设计系统 DSMetrics（S3、S5、S6），折起和展开是同一套设计长大（S1、D2）；
+// · 字一律用系统文字样式，层级靠字重和 .secondary（F15、F18）；不画描边、不垫底板，分组只靠留白（F3、F12）；
+// · 点开是系统的推入 / 缩放转场（F53），更多操作在长按菜单里（C21、C43）。
 
+// MARK: 海报网格
 
-/// 资料库顶上的快捷大卡（Games「更新与活动」「成就」那种）：渐变底、左边一枚图标、标题与一行说明、右边「›」
-struct ShortcutTile: View {
-    let title: String
-    let subtitle: String
-    let symbol: String
-    let colors: [Color]
-    let route: Route
+/// 海报网格（T23、C20：标准网格；S6：每排张数跟 DSMetrics——折起 3、展开竖拿 4、展开横拿 6）。
+/// 网格不在横排里，没有左侧基准线，也就没有「焦点」那一张：卡下的字一直显示（T20 的「聚焦才出字」只用在横排）
+struct LibraryGrid: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
+    let videos: [Video]
+    let metrics: DSMetrics
+    /// 缩放转场的来源（同一部片可能也在别的排里，各算各的）
+    var slot = "grid"
+    var identifier = "grid-movie"
 
-    static let amber = [Color(red: 0.45, green: 0.30, blue: 0.15), Color(red: 0.30, green: 0.22, blue: 0.16)]
-    static let ocean = [Color(red: 0.16, green: 0.31, blue: 0.42), Color(red: 0.14, green: 0.23, blue: 0.31)]
+    /// 每排几张：与 DSMetrics.posterWidth 同一组分档（S6）；大字号时少放一张，字才放得下（S4）
+    static func columns(_ m: DSMetrics, large: Bool) -> Int {
+        let n = m.width < 500 ? 3 : (m.width < 800 ? 4 : 6)
+        return large ? max(2, n - 1) : n
+    }
 
     var body: some View {
-        NavigationLink(value: route) {
-            HStack(spacing: 16) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 15, style: .continuous)
-                        .fill(LinearGradient(colors: [colors[0].opacity(1).mix(with: .white, by: 0.28), colors[0]],
-                                             startPoint: .topLeading, endPoint: .bottomTrailing))
-                    Image(systemName: symbol)
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundStyle(.white)
+        let n = Self.columns(metrics, large: typeSize.isAccessibilitySize)
+        let w = max(40, metrics.cardWidth(columns: n))
+        // 行距：T24 网格的竖向间距至少 100，按 S5 缩到当前宽度，至少 24（卡下还有两行字）
+        let rowGap = max(24, (metrics.width * 100 / 1920).rounded())
+        let size = w < 120 ? "w342" : "w500"
+        LazyVGrid(columns: Array(repeating: GridItem(.fixed(w), spacing: metrics.gutter, alignment: .top), count: n),
+                  alignment: .leading, spacing: rowGap) {
+            ForEach(videos) { v in
+                let m = model.meta(v)
+                ZoomLink(route: .movie(v), slot: slot) {
+                    LibraryGridCard(art: TMDBImage.url(m?.poster ?? m?.posterClean, size),
+                                    title: model.title(v),
+                                    subtitle: model.year(v).map { String($0) },
+                                    width: w,
+                                    progress: model.playback.entry(v.path)?.fraction)
                 }
-                .frame(width: 56, height: 56)
-                .rotationEffect(.degrees(-6))
-                .shadow(color: .black.opacity(0.3), radius: 8, y: 5)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title).font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
-                    Text(subtitle).font(.system(size: 15)).foregroundStyle(.white.opacity(0.72)).lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.7))
+                .accessibilityIdentifier(identifier)
+                .movieMenu(v)
             }
-            .padding(.horizontal, 20)
-            .frame(height: 92)
-            .background(LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing),
-                        in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
-            .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         }
-        .buttonStyle(PressableStyle(scale: 0.98))
+        .padding(.horizontal, metrics.margin)
     }
 }
 
-/// 资料库里的一部电影（Games「你的游戏」那一行）：海报、片名、上次看到 / 加入时间，行尾「播放」胶囊；点别处进详情
+/// 网格里的一张：海报（2:3、圆角 12，和 DSPosterLockup 同一个样子），下面片名与一行灰字（F18）。
+/// 看了一半的，海报底部一条细进度（F36：用形状表达，不只靠颜色）
+struct LibraryGridCard: View {
+    let art: URL?
+    let title: String
+    var subtitle: String? = nil
+    let width: CGFloat
+    var progress: Double? = nil
+
+    var body: some View {
+        let h = (width * 1.5).rounded()
+        VStack(alignment: .leading, spacing: 8) {
+            Color(white: 0.12)
+                .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: .clear) }
+                .frame(width: width, height: h)
+                .overlay(alignment: .bottom) {
+                    if let p = progress, p > 0.01 {
+                        LibraryProgressBar(fraction: p)
+                            .padding(.horizontal, 8)
+                            .padding(.bottom, 8)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(subtitle ?? " ")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(width: width, alignment: .leading)
+        }
+        .frame(width: width, alignment: .leading)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel([title, subtitle].compactMap { $0 }.joined(separator: "，"))
+    }
+}
+
+/// 看到哪儿：一条细胶囊（F36）
+private struct LibraryProgressBar: View {
+    let fraction: Double
+
+    var body: some View {
+        GeometryReader { g in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.3))
+                Capsule().fill(.white).frame(width: max(4, g.size.width * min(1, fraction)))
+            }
+        }
+        .frame(height: 4)
+    }
+}
+
+// MARK: 列表
+
+/// 列表的一行（C29：前面一张小图，后面简短的字）：竖版小海报、片名（Headline）、一行灰字（Subheadline、.secondary：F18）。
+/// 放在 List 的 NavigationLink 里，行尾的「›」由系统画（C31）；排行榜的名次在最前面（App Store 排行的写法）
+struct LibraryRow: View {
+    let art: URL?
+    let title: String
+    var subtitle: String = ""
+    var rank: Int? = nil
+
+    var body: some View {
+        HStack(spacing: 14) {
+            if let rank {
+                Text(verbatim: String(rank))
+                    .font(.headline)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 22)
+            }
+            Color(white: 0.12)
+                .overlay { RemoteImage(url: art, maxPixel: 200, placeholder: .clear) }
+                .frame(width: 46, height: 69)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// 列表里的一部电影：点整行进详情（系统推入：F53），行尾系统的「›」（C31），长按「播放 / 想看」（C21、C43）
 struct LibraryMovieRow: View {
     @Environment(AppModel.self) private var model
     let video: Video
+    /// 不给就是「2026 · 科幻 · 冒险」
+    var subtitle: String? = nil
+    var rank: Int? = nil
+    var identifier = "list-movie"
+
+    /// 「科幻 · 冒险」：最多两个类型（F84：短）
+    static func genres(_ m: Meta?) -> String? {
+        let g = (m?.genres ?? []).prefix(2).joined(separator: " · ")
+        return g.isEmpty ? nil : g
+    }
 
     var body: some View {
         let m = model.meta(video)
-        let entry = model.playback.entry(video.path)
-        ZStack(alignment: .trailing) {
-            ZoomLink(route: .movie(video), slot: "library", press: false) {
-                HStack(spacing: 16) {
-                    RemoteImage(url: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), maxPixel: 260)
-                        .frame(width: 58, height: 87)
-                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
-                        .overlay(alignment: .bottom) {
-                            if let e = entry, e.fraction > 0.01 {
-                                ProgressCapsule(fraction: e.fraction).padding(.horizontal, 5).padding(.bottom, 5)
-                            }
-                        }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(model.title(video))
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .lineLimit(2)
-                        Text(subtitle(m, entry))
-                            .font(.system(size: 14))
-                            .foregroundStyle(Theme.secondary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 96)
-                }
-                .padding(.vertical, 9)
-                .contentShape(Rectangle())
-            }
-            .accessibilityIdentifier("library-movie")
-            .movieMenu(video)
-            PlayPill(video: video)
+        let line = subtitle ?? [model.year(video).map { String($0) }, Self.genres(m)].compactMap { $0 }.joined(separator: " · ")
+        NavigationLink(value: Route.movie(video)) {
+            LibraryRow(art: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), title: model.title(video),
+                       subtitle: line.isEmpty ? "电影" : line, rank: rank)
         }
-        .padding(.horizontal, Theme.gutter)
-    }
-
-    private func subtitle(_ m: Meta?, _ e: WatchEntry?) -> String {
-        if let e, e.position > 30 { return "上次看到 · " + Relative.string(e.updated) }
-        if let d = Relative.date(video.added) { return "加入于 " + Relative.string(d) }
-        return [model.year(video).map { String($0) }, m?.genres?.first].compactMap { $0 }.joined(separator: " · ")
+        .accessibilityIdentifier(identifier)
+        .movieMenu(video)
     }
 }
 
-/// 资料库里的一部剧：海报、剧名、上次看到第几集 / 第几季与集数，行尾「查看」
+/// 列表里的一部剧：第二季起片名后面带「第 n 季」；灰字是年份、类型与集数；长按「想看」
 struct LibrarySeriesRow: View {
     @Environment(AppModel.self) private var model
     let series: Series
+    var subtitle: String? = nil
+    var showYear = true
+    var identifier = "list-series"
+
+    static func name(_ s: Series, meta: Meta?) -> String {
+        let base = meta?.title.flatMap { $0.isEmpty ? nil : $0 } ?? s.name
+        if let n = s.season, n > 1 { return base + " 第 \(n) 季" }
+        return base
+    }
 
     var body: some View {
         let m = model.seriesMetas[series.path]
-        ZoomLink(route: .series(series), slot: "library", press: false) {
-            HStack(spacing: 16) {
-                ZStack {
-                    Theme.surface
-                    RemoteImage(url: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), maxPixel: 260, placeholder: .clear)
-                }
-                .frame(width: 58, height: 87)
-                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(m?.title ?? series.name)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                    Text(subtitle)
-                        .font(.system(size: 14))
-                        .foregroundStyle(Theme.secondary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 12)
-                Text("查看")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(Theme.accent)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 7)
-                    .background(Color.white.opacity(0.12), in: Capsule())
-            }
-            .padding(.vertical, 9)
-            .contentShape(Rectangle())
+        let line = subtitle ?? [showYear ? series.year : nil, m?.genres?.first, series.countLabel]
+            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        NavigationLink(value: Route.series(series)) {
+            LibraryRow(art: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), title: Self.name(series, meta: m),
+                       subtitle: line.isEmpty ? "剧集" : line)
         }
-        .accessibilityIdentifier("library-series")
+        .accessibilityIdentifier(identifier)
         .seriesMenu(series)
-        .padding(.horizontal, Theme.gutter)
         .task { await model.ensureSeriesMeta(series) }
-    }
-
-    private var subtitle: String {
-        if let e = model.playback.lastEpisode(of: series.path), let ep = e.episode {
-            return "上次看到第 \(ep) 集 · " + Relative.string(e.updated)
-        }
-        return [series.seasonLabel, series.countLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 
@@ -167,72 +225,12 @@ enum Relative {
     }
 }
 
-/// 自适应列数的海报网格
-struct PosterGrid<Content: View>: View {
-    @ViewBuilder var content: () -> Content
-    var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 104, maximum: 170), spacing: 12, alignment: .top)], alignment: .leading, spacing: 18) {
-            content()
-        }
-        .padding(.horizontal, 16)
-    }
-}
-
-struct MoviePosterTile: View {
-    @Environment(AppModel.self) private var model
-    let video: Video
-
-    var body: some View {
-        let m = model.meta(video)
-        VStack(alignment: .leading, spacing: 6) {
-            Color.clear
-                .aspectRatio(2.0 / 3.0, contentMode: .fit)
-                .overlay { RemoteImage(url: TMDBImage.url(m?.poster ?? m?.posterClean, "w342"), maxPixel: 520) }
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
-                .overlay(alignment: .bottom) {
-                    if let e = model.playback.entry(video.path), e.fraction > 0.01 {
-                        ProgressCapsule(fraction: e.fraction).padding(.horizontal, 6).padding(.bottom, 6)
-                    }
-                }
-            Text(model.title(video)).font(.system(size: 13, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-            Text(model.year(video).map { String($0) } ?? " ").font(.system(size: 11)).foregroundStyle(Theme.tertiary)
-        }
-    }
-}
-
-struct SeriesPosterTile: View {
-    @Environment(AppModel.self) private var model
-    let series: Series
-
-    var body: some View {
-        let m = model.seriesMetas[series.path]
-        VStack(alignment: .leading, spacing: 6) {
-            Color.clear
-                .aspectRatio(2.0 / 3.0, contentMode: .fit)
-                .overlay {
-                    ZStack {
-                        Text(series.name).font(.system(size: 13, weight: .bold)).foregroundStyle(Theme.tertiary)
-                            .multilineTextAlignment(.center).padding(8)
-                        RemoteImage(url: TMDBImage.url(m?.poster ?? m?.posterClean, "w342"), maxPixel: 520, placeholder: .clear)
-                    }
-                }
-                .background(Theme.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
-            Text(m?.title ?? series.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-            Text([series.seasonLabel, series.countLabel].compactMap { $0 }.joined(separator: " · "))
-                .font(.system(size: 11)).foregroundStyle(Theme.tertiary).lineLimit(1)
-        }
-        .task { await model.ensureSeriesMeta(series) }
-    }
-}
-
-// MARK: - 搜索：和网页版一样（「搜索或提问」）
+// MARK: - 搜索
 //
-// 没输入：「最近添加」两列竖版海报（片名、年份），最近入库的 12 部。
-// 输入了：「“夜” · 4 个结果」，剧集在上（「剧集 · 1」一排宽卡：剧照、「更新至第 15 集 / 共 19 集」、字标或片名，
-// 底栏缩略图 + 剧名 + 「详情」），电影在下（「电影 · 3」，同样的两列海报）。没结果：「未找到「夜」相关结果」。
+// 系统大标题与系统搜索栏，提示「电影、剧集、年份」（C13、F90、C62：提示写清能搜什么，边输边出结果）。
+// 没输入：「最近添加」海报网格（C61：搜索页先给能浏览的东西）。
+// 输入了：按类型分区，每区一排同样的卡——剧集是 16:9 卡、电影是竖版海报（C63：最相关的那一类在上，区内按相关度）；
+// 去掉了结果数一行和自绘的大宽卡（F3、F38）。
 
 struct SearchView: View {
     @Environment(AppModel.self) private var model
@@ -243,15 +241,16 @@ struct SearchView: View {
             GeometryReader { geo in
                 // 系统栏竖在侧边（iPhone Duo 折起时 / 展开横拿时）：搜索框不挂在底部的标签栏上，得在标题下面一直显示
                 let sideBars = abs(geo.safeAreaInsets.leading - geo.safeAreaInsets.trailing) > 30
-                content(width: geo.size.width)
+                content(DSMetrics(width: geo.size.width))
                     .searchable(text: $query, placement: sideBars ? .navigationBarDrawer(displayMode: .always) : .automatic,
-                                prompt: "搜索或提问")
+                                prompt: "电影、剧集、年份")
             }
             .background(Theme.bg)
             .navigationTitle("搜索")
-            .navigationBarTitleDisplayMode(.inline)
+            // C13：顶层页用大标题，往上滚收成小标题
+            .navigationBarTitleDisplayMode(.large)
         }
-        // 详情页演员弹层「在资料库中搜索」：把名字填进搜索框（网页版 searchByActor）
+        // 详情页演员弹层「在资料库中搜索」：把名字填进搜索框
         .onChange(of: model.searchRequest, initial: true) { _, q in
             guard let q else { return }
             query = q
@@ -259,222 +258,114 @@ struct SearchView: View {
         }
     }
 
-    private func content(width: CGFloat) -> some View {
+    private func content(_ metrics: DSMetrics) -> some View {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         return ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                if q.isEmpty {
-                    let recent = model.movies.sorted { $0.addedKey > $1.addedKey }.prefix(12)
-                    if recent.isEmpty {
-                        emptyHint(title: "搜索电影、剧集", detail: "输入片名开始，结果会即时出现")
-                    } else {
-                        Text("最近添加")
-                            .font(.system(size: 14, weight: .bold))
-                            .tracking(1.1)
-                            .foregroundStyle(.white.opacity(0.65))
-                            .padding(.horizontal, Theme.gutter)
-                            .padding(.top, 20)
-                            .padding(.bottom, 16)
-                        SearchPosterGrid(videos: Array(recent))
-                    }
-                } else {
-                    let hits = model.search(q)
-                    let tv = hits.compactMap { h -> Series? in if case .series(let s) = h.kind { return s } else { return nil } }
-                    let mv = hits.compactMap { h -> Video? in if case .movie(let v) = h.kind { return v } else { return nil } }
-                    if hits.isEmpty {
-                        emptyHint(title: "未找到「\(q)」相关结果", detail: "试试不同的关键词，或检查拼写")
-                    } else {
-                        (Text("“\(q)”").fontWeight(.semibold).foregroundStyle(.white.opacity(0.65))
-                         + Text(" · \(tv.count + mv.count) 个结果").foregroundStyle(.white.opacity(0.4)))
-                            .font(.system(size: 13, weight: .medium))
-                            .padding(.horizontal, Theme.gutter)
-                            .padding(.top, 22)
-                            .padding(.bottom, 4)
-                        if !tv.isEmpty {
-                            subhead("剧集 · \(tv.count)")
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                LazyHStack(spacing: 14) {
-                                    ForEach(tv) { s in
-                                        ZoomLink(route: .series(s), slot: "search-tv") {
-                                            SearchTVCard(series: s, width: min(width * 0.86, 560))
-                                        }
-                                        .accessibilityIdentifier("search-series")
-                                    }
-                                }
-                                .scrollTargetLayout()
-                                .padding(.vertical, 6)
-                            }
-                            .contentMargins(.horizontal, Theme.gutter, for: .scrollContent)
-                            .scrollTargetBehavior(.viewAligned)
-                            .padding(.top, 6)
-                        }
-                        if !mv.isEmpty {
-                            if !tv.isEmpty { subhead("电影 · \(mv.count)") }
-                            SearchPosterGrid(videos: mv)
-                                .padding(.top, 8)
-                        }
-                    }
-                }
+            if q.isEmpty {
+                landing(metrics)
+            } else {
+                results(q, metrics)
             }
-            .padding(.bottom, 40)
         }
+        .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(.immediately)
         .background(Theme.bg)
     }
 
-    private func subhead(_ t: String) -> some View {
-        Text(t)
-            .font(.system(size: 15, weight: .bold))
-            .tracking(-0.15)
-            .foregroundStyle(.white.opacity(0.65))
-            .padding(.horizontal, Theme.gutter)
-            .padding(.top, 14)
-    }
-
-    private func emptyHint(title: String, detail: String) -> some View {
-        VStack(spacing: 8) {
-            Text(title).font(.system(size: 17, weight: .semibold)).foregroundStyle(.white.opacity(0.8))
-                .multilineTextAlignment(.center)
-            Text(detail).font(.system(size: 14)).foregroundStyle(.white.opacity(0.4))
+    /// 没输入：最近入库的 12 部（每排 3 / 4 / 6 张都正好排满）
+    @ViewBuilder private func landing(_ metrics: DSMetrics) -> some View {
+        let recent = Array(model.movies.sorted { $0.addedKey > $1.addedKey }.prefix(12))
+        if recent.isEmpty {
+            // F88：空的时候告诉人下一步
+            ContentUnavailableView("搜索电影、剧集", systemImage: "magnifyingglass",
+                                   description: Text("输入片名或年份，结果会随着输入出现。"))
+                .padding(.top, 60)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                DSShelfTitle(title: "最近添加", metrics: metrics)
+                LibraryGrid(videos: recent, metrics: metrics, slot: "search-recent", identifier: "search-movie")
+                    .padding(.top, 6)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 8)
+            .padding(.bottom, 40)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, Theme.gutter)
-        .padding(.top, 80)
     }
-}
 
-/// 网页版 .library-grid：两列（最小 158 宽）竖版海报，行距 32、列距 16；海报下片名（15 粗）、年份（13 灰）
-struct SearchPosterGrid: View {
-    @Environment(AppModel.self) private var model
-    let videos: [Video]
+    @ViewBuilder private func results(_ q: String, _ metrics: DSMetrics) -> some View {
+        let hits = model.search(q)
+        if hits.isEmpty {
+            // F87、F88：不怪人，说怎么办
+            ContentUnavailableView("没有找到「\(q)」", systemImage: "magnifyingglass",
+                                   description: Text("试试别的片名，或输入年份，比如 2026。"))
+                .padding(.top, 60)
+        } else {
+            let movies = hits.compactMap { h -> Video? in if case .movie(let v) = h.kind { return v } else { return nil } }
+            let shows = hits.compactMap { h -> Series? in if case .series(let s) = h.kind { return s } else { return nil } }
+            // 分区之间只靠留白（F3）：看得见的间距 = DSMetrics.shelfGap（DSShelf 自己上下各留 14 给焦点放大）
+            VStack(alignment: .leading, spacing: max(16, metrics.shelfGap - 14)) {
+                // C63：最相关的那一条属于哪一类，哪一类在上
+                if Self.isSeries(hits[0]) {
+                    showsSection(shows, metrics)
+                    moviesSection(movies, metrics)
+                } else {
+                    moviesSection(movies, metrics)
+                    showsSection(shows, metrics)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 8)
+            .padding(.bottom, 40)
+        }
+    }
 
-    var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 158), spacing: 16, alignment: .top)], alignment: .leading, spacing: 32) {
-            ForEach(videos) { v in
-                ZoomLink(route: .movie(v), slot: "search-grid") {
-                    let m = model.meta(v)
-                    VStack(alignment: .leading, spacing: 0) {
-                        Color.white.opacity(0.06)
-                            .aspectRatio(2 / 3, contentMode: .fit)
-                            .overlay { RemoteImage(url: TMDBImage.url(m?.poster ?? m?.posterClean, "w342"), maxPixel: 600, placeholder: .clear) }
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
-                            .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
-                        Text(model.title(v))
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                            .padding(.top, 12)
-                        Text(model.year(v).map { String($0) } ?? " ")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.4))
-                            .padding(.top, 2)
+    private static func isSeries(_ h: AppModel.SearchHit) -> Bool {
+        if case .series = h.kind { return true }
+        return false
+    }
+
+    /// 电影：竖版海报一排（DSPosterLockup：停在左侧基准线上的那张放大、片名浮出：T20、S7–S9）
+    @ViewBuilder private func moviesSection(_ list: [Video], _ metrics: DSMetrics) -> some View {
+        if !list.isEmpty {
+            let size = metrics.posterWidth < 120 ? "w342" : "w500"
+            DSSection(title: "电影", metrics: metrics) {
+                DSShelf(metrics: metrics) {
+                    ForEach(list) { v in
+                        let meta = model.meta(v)
+                        ZoomLink(route: .movie(v), slot: "search-movie") {
+                            DSPosterLockup(art: TMDBImage.url(meta?.poster ?? meta?.posterClean, size),
+                                           title: model.title(v),
+                                           subtitle: model.year(v).map { String($0) },
+                                           metrics: metrics)
+                        }
+                        .accessibilityIdentifier("search-movie")
+                        .movieMenu(v)
                     }
                 }
-                .accessibilityIdentifier("search-movie")
-                .movieMenu(v)
             }
         }
-        .padding(.horizontal, Theme.gutter)
     }
-}
 
-/// 网页版 .tv-card：15:13 的大卡（圆角 26）——上面一张清楚的 16:9 剧照，往下化进同一张图的失焦版；
-/// 文案压在下半截（「更新至第 15 集 / 共 19 集」、字标或片名），最底下一条毛玻璃底栏：缩略图、剧名、「详情」
-struct SearchTVCard: View {
-    @Environment(AppModel.self) private var model
-    let series: Series
-    let width: CGFloat
-
-    var body: some View {
-        let m = model.seriesMetas[series.path]
-        let art = m?.backdrop ?? m?.posterClean ?? m?.poster
-        let height = width * 13 / 15
-        let footName = (series.en?.isEmpty == false && series.zh?.isEmpty == false) ? series.en! : (m?.title ?? series.name)
-        ZStack(alignment: .bottom) {
-            LinearGradient(colors: [Color(red: 44 / 255, green: 44 / 255, blue: 46 / 255), Color(red: 23 / 255, green: 23 / 255, blue: 26 / 255)],
-                           startPoint: .topLeading, endPoint: .bottomTrailing)
-            // 失焦的那层铺满整卡，清楚的那张贴顶、16:9、底缘往下淡出
-            RemoteImage(url: TMDBImage.url(art, "w342"), maxPixel: 400, placeholder: .clear)
-                .scaleEffect(1.3)
-                .blur(radius: 28)
-                .opacity(0.9)
-            RemoteImage(url: TMDBImage.url(art, "w780"), maxPixel: width * 3, placeholder: .clear)
-                .frame(width: width, height: width * 9 / 16)
-                .clipped()
-                .mask(LinearGradient(stops: [.init(color: .black, location: 0.7), .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom))
-                .frame(maxHeight: .infinity, alignment: .top)
-            LinearGradient(stops: [
-                .init(color: .black.opacity(0.86), location: 0),
-                .init(color: .black.opacity(0.78), location: 0.2),
-                .init(color: .black.opacity(0.6), location: 0.38),
-                .init(color: .black.opacity(0.32), location: 0.52),
-                .init(color: .black.opacity(0.06), location: 0.68),
-                .init(color: .clear, location: 0.84),
-            ], startPoint: .bottom, endPoint: .top)
-
-            VStack(spacing: 0) {
-                VStack(spacing: 4) {
-                    Text(series.countLabel)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.72))
-                    Group {
-                        if let logo = m?.logo, !logo.isEmpty {
-                            LogoImage(url: TMDBImage.url(logo, "w500"), height: 60, fallback: m?.title ?? series.name, maxWidth: width - 40)
-                        } else {
-                            Text(m?.title ?? series.name)
-                                .font(.system(size: min(27, max(21, width * 0.07)), weight: .heavy))
-                                .tracking(-0.6)
-                                .foregroundStyle(.white)
-                                .multilineTextAlignment(.center)
-                                .lineLimit(2)
+    /// 剧集：16:9 卡一排（DSWideLockup：剧名与集数一直显示）
+    @ViewBuilder private func showsSection(_ list: [Series], _ metrics: DSMetrics) -> some View {
+        if !list.isEmpty {
+            DSSection(title: "剧集", metrics: metrics) {
+                DSShelf(metrics: metrics) {
+                    ForEach(list) { s in
+                        let meta = model.seriesMetas[s.path]
+                        ZoomLink(route: .series(s), slot: "search-series") {
+                            DSWideLockup(art: TMDBImage.url(meta?.backdrop ?? meta?.posterClean ?? meta?.poster, "w780"),
+                                         title: LibrarySeriesRow.name(s, meta: meta),
+                                         subtitle: s.countLabel,
+                                         metrics: metrics)
                         }
+                        .accessibilityIdentifier("search-series")
+                        .seriesMenu(s)
+                        .task { await model.ensureSeriesMeta(s) }
                     }
-                    .frame(minHeight: 66, alignment: .bottom)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 20)
-                .padding(.bottom, 12)
-
-                HStack(spacing: 10) {
-                    Color.white.opacity(0.1)
-                        .overlay {
-                            if let still = m?.stills?.first?.thumb ?? m?.stills?.first?.url ?? m?.poster {
-                                RemoteImage(url: TMDBImage.url(still, "w300"), maxPixel: 220, placeholder: .clear)
-                            } else {
-                                Text(String(series.name.prefix(1))).font(.system(size: 17, weight: .heavy)).foregroundStyle(.white.opacity(0.72))
-                            }
-                        }
-                        .frame(width: 68, height: 38)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5))
-                    Text(footName)
-                        .font(.system(size: 16, weight: .bold))
-                        .tracking(-0.2)
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                    Text("详情")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 20)
-                        .frame(minWidth: 84, minHeight: 34)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .background(Color.white.opacity(0.24), in: Capsule())
-                }
-                .padding(.horizontal, 14)
-                .padding(.top, 11)
-                .padding(.bottom, 13)
-                .background(.ultraThinMaterial.opacity(0.6))
-                .background(Color(red: 18 / 255, green: 18 / 255, blue: 20 / 255).opacity(0.42))
-                .overlay(alignment: .top) { Rectangle().fill(Color.white.opacity(0.14)).frame(height: 0.5) }
             }
-            .environment(\.colorScheme, .dark)
         }
-        .frame(width: width, height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .shadow(color: .black.opacity(0.5), radius: 27, y: 22)
-        .task { await model.ensureSeriesMeta(series) }
     }
 }
 

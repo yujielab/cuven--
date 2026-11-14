@@ -1,16 +1,16 @@
 import SwiftUI
 import UIKit
 
-// MARK: - 详情页：和网页版一致（web/index.html 的 openDetail；尺寸是在 iPhone Duo 上量出来的）
+// MARK: - 详情页（电影 / 剧集同一页）：按 Apple HIG 收拾成 Apple TV 的样子（规则编号见 docs/ios-design.md）
 //
-// 头部画面高 75vh（至少 540），下半段渐隐进黑，顶上一层压暗。内容从「头部底边往上 35vh」起，居中一列：
-// 字标（最大 320×110）→「导演 … · 主演 …」→ 评分 ≥ 8 时「Cuven 品质保证」→ 白胶囊「▶ 立即播放」+ 玻璃圆钮（更多操作）。
-// 下面是简介（超过 140 字收成三行，下面一枚「更多」）、演员阵容（查看全部 ›），
-// 再是一段铺满宽度的画廊（电影「剧照」第 N 幕；剧集「剧集 · 全 8 集」分集卡），「影片信息」，
-// 「尖端色彩和画面质量技术」「语言」两块玻璃卡，最后一行法务说明。剧集和电影是同一个页面，只有画廊那一段不同。
-
-/// 网页版 isCuvenPick：评分 ≥ 8.0 才盖「品质保证」
-let cuvenSealMin = 8.0
+// 头部：全幅画面（竖拿用 Apple TV 的竖版全屏图，横拿 16:9：S15），往下渐暗（F34），字压在左下（F1、F2）：
+// 字标（没有字标就是 Large Title 的片名）→ 一行信息「类型 · 年份 · 片长 · ★评分」（F18）→
+// 一颗白色「播放」+ 一颗「…」系统菜单（从头播放、复制直链、分享：S17、C11、C15、C35、C45）。
+// 下面只靠留白分区（F3、F12）：简介（三行后「更多」：F21、F24）→ 分集（剧集）→ 预告片（有才有）→
+// 演员（圆形照片：T21）→ 信息（左灰右白的几行）。
+// 不放玻璃卡、印章、法务行、剧照「第 N 幕」、分隔线（F38、F80、F84）；导航栏不垫底、不压自制的渐暗，
+// 系统的滚动边缘效果就够（C17、C27）；头部滚走了片名才出现在导航栏里（C12）。
+// 展开的 Duo 是同一套设计长大：边距、卡宽、字号都从 DSMetrics 来（S1、D2、I11）。
 
 // MARK: - 电影
 
@@ -18,44 +18,80 @@ struct MovieDetailView: View {
     @Environment(AppModel.self) private var model
     let video: Video
     @State private var full: Meta?
-    /// Apple TV 上对上的那一部：有就用它的无字背景、竖版全屏图和字标（对不上就是 TMDB 的）
+    /// Apple TV 上对上的那一部：有就用它的无字背景、竖版全屏图、字标和预告片（对不上就是 TMDB 的）
     @State private var atv: AtvLookup?
+    @State private var trailers: [Trailer] = []
 
     var body: some View {
         let meta = full ?? model.meta(video)
-        let title = model.title(video)
-        let stills = (meta?.stills ?? []).compactMap { $0.url ?? $0.thumb }
+        // C89：「播放」自己接着上次的地方放，不问；从头看放进「…」菜单
+        let resume = model.playback.resumePosition(video.path) != nil
 
-        WebDetailScaffold(
-            art: atv?.background ?? meta?.backdrop ?? meta?.poster,
+        DetailScaffold(
+            title: model.title(video),
+            wideArt: atv?.background ?? meta?.backdrop ?? meta?.poster,
             tallArt: atv?.imageTall,
             logo: atv?.logo ?? meta?.logo,
-            title: title,
-            director: meta?.director,
-            cast: meta?.cast ?? [],
-            rating: meta?.rating,
-            overview: meta?.overview,
-            playTitle: "立即播放",
+            metaLine: metaLine(meta),
+            playTitle: resume ? "继续播放" : "播放",
             playID: "detail-play",
             onPlay: { play(meta) },
+            onRestart: restartAction(meta),
             file: (path: video.path, name: video.name),
+            shareURL: DetailText.tmdbPage(kind: "movie", id: meta?.id),
+            overview: meta?.overview,
+            cast: meta?.cast ?? [],
+            trailers: trailers,
+            trailerArt: trailerArt(meta),
             infoRows: infoRows(meta)
-        ) {
-            if stills.count >= 2 {
-                WebStillsSection(stills: Array(stills.prefix(12)))
-            }
+        ) { _ in
+            EmptyView()
         }
         .task { full = await model.fullMeta(for: video) }
-        .task(id: video.path) { atv = await model.atv(for: video) }
+        .task(id: video.path) {
+            atv = await model.atv(for: video)
+            // 和资料库展映同一份：Apple TV 上的公开预告（订阅才看得了的不要）；atv 已经记在内存里，不再走网络
+            trailers = await model.trailers(for: video)
+        }
     }
 
-    /// 网页版「影片信息」：类型 / 格式 / 评分
-    private func infoRows(_ m: Meta?) -> [WebInfoRow] {
-        let genres = (m?.genres ?? []).joined(separator: " · ")
-        var rows = [WebInfoRow(label: "类型", value: "Feature Film · " + (genres.isEmpty ? "未知类型" : genres))]
-        rows.append(WebInfoRow(label: "格式", value: WebFormat.line(name: video.name)))
-        if let r = m?.rating, r > 0 { rows.append(WebInfoRow(label: "评分", value: String(format: "★ %.1f", r), rating: r)) }
-        return rows
+    /// 头部那一行：「科幻 · 2026 · 1 小时 32 分钟 · ★ 7.5」（F84：短、平实）
+    private func metaLine(_ m: Meta?) -> String {
+        DetailText.line([
+            m?.genres?.first,
+            model.year(video).map { String($0) },
+            Format.runtime(m?.runtime),
+            DetailText.rating(m?.rating),
+        ])
+    }
+
+    /// 「信息」：类型、年份、片长、评分、导演、格式；没有的项不写
+    private func infoRows(_ m: Meta?) -> [DetailInfoRow] {
+        [
+            DetailInfoRow(label: "类型", value: (m?.genres ?? []).joined(separator: "、")),
+            DetailInfoRow(label: "年份", value: model.year(video).map { String($0) } ?? ""),
+            DetailInfoRow(label: "片长", value: Format.runtime(m?.runtime)),
+            DetailInfoRow(label: "评分", value: DetailText.rating(m?.rating) ?? ""),
+            DetailInfoRow(label: "导演", value: m?.director ?? ""),
+            DetailInfoRow(label: "格式", value: WebFormat.line(name: video.name)),
+        ].filter { !$0.value.isEmpty && $0.value != "—" }
+    }
+
+    /// 预告片卡的画面：剧照轮着用；没有剧照就是背景图
+    private func trailerArt(_ m: Meta?) -> [String] {
+        let stills = (m?.stills ?? []).compactMap { $0.url ?? $0.thumb }.filter { !$0.isEmpty }
+        if !stills.isEmpty { return stills }
+        return [atv?.background ?? m?.backdrop].compactMap { $0 }
+    }
+
+    /// 「从头播放」：只在有进度时出现。先清掉这部的进度，播放器就从头开始
+    private func restartAction(_ meta: Meta?) -> (() -> Void)? {
+        guard model.playback.resumePosition(video.path) != nil else { return nil }
+        let path = video.path
+        return {
+            model.playback.finish(path)
+            play(meta)
+        }
     }
 
     private func play(_ meta: Meta?) {
@@ -65,12 +101,12 @@ struct MovieDetailView: View {
     }
 }
 
-// MARK: - 剧集（同一个页面：按钮写「播放第 1 集 / 继续看第 n 集」，画廊换成分集卡）
+// MARK: - 剧集（同一个页面：按钮写「播放第 1 集 / 继续看第 n 集」，多一段分集）
 
 struct SeriesDetailView: View {
     @Environment(AppModel.self) private var model
     let series: Series
-    /// 季切换：网页版分集标题右边的「第 1 季 ›」
+    /// 季切换：分集标题右边的季菜单（C45）
     @State private var picked: Series?
     @State private var files: [EpisodeFile] = []
     @State private var info: [Int: SeasonEpisode] = [:]
@@ -92,38 +128,29 @@ struct SeriesDetailView: View {
 
     var body: some View {
         let meta = model.seriesMetas[current.path]
-        let title = meta?.title ?? current.name
         let next = nextEpisode()
+        let fallbackArt = atv?.background ?? meta?.backdrop
 
-        WebDetailScaffold(
-            art: atv?.background ?? meta?.backdrop ?? meta?.poster,
+        DetailScaffold(
+            title: meta?.title ?? current.name,
+            wideArt: atv?.background ?? meta?.backdrop ?? meta?.poster,
             tallArt: atv?.imageTall,
             logo: atv?.logo ?? meta?.logo,
-            title: title,
-            director: meta?.director,
-            cast: meta?.cast ?? [],
-            rating: meta?.rating,
-            overview: meta?.overview,
+            metaLine: metaLine(meta),
             playTitle: playLabel(next),
             playID: "series-play",
             playDisabled: next == nil,
             onPlay: { if let next, let i = files.firstIndex(of: next.file) { play(index: i) } },
+            onRestart: restartAction(next),
             file: next.map { (path: $0.file.path, name: $0.file.name) },
-            infoRows: infoRows(meta),
-            audio: audioLine
-        ) {
-            WebEpisodesSection(
-                heading: "剧集 · " + current.countLabel,
-                files: files,
-                info: info,
-                fallbackArt: meta?.backdrop,
-                loading: loading,
-                failed: failed,
-                seasons: seasons,
-                current: current,
-                pick: { s in withAnimation(.snappy) { picked = s } },
-                play: { i in play(index: i) }
-            )
+            shareURL: DetailText.tmdbPage(kind: "tv", id: current.tmdbId ?? meta?.id),
+            overview: meta?.overview,
+            cast: meta?.cast ?? [],
+            trailers: DetailText.playable(atv?.trailers),
+            trailerArt: trailerArt(meta),
+            infoRows: infoRows(meta)
+        ) { m in
+            episodes(m, fallbackArt: fallbackArt)
         }
         .task(id: current.path) { await load() }
         .task(id: current.path) {
@@ -131,6 +158,132 @@ struct SeriesDetailView: View {
             await model.ensureSeriesMeta(current)
             atv = await model.atv(for: current)
         }
+    }
+
+    // MARK: 分集
+
+    /// 「剧集」+ 右边的季菜单；下面一排 16:9 的分集卡（T23：标准的横排；S8：停在左侧基准线上）
+    private func episodes(_ m: DSMetrics, fallbackArt: String?) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text("剧集")
+                    .font(.dsShelfTitle(wide: m.wide))
+                    .foregroundStyle(.primary)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 8)
+                if seasons.count > 1 { seasonMenu }
+            }
+            .padding(.horizontal, m.margin)
+
+            if files.isEmpty {
+                if loading {
+                    // C66：先放占位卡，不留白屏；卡和真卡一样大，换上来时排不跳（C23）
+                    DSShelf(metrics: m) {
+                        ForEach(0..<3, id: \.self) { i in
+                            DSWideLockup(art: nil, title: "第 \(i + 1) 集", subtitle: "45 分钟", metrics: m)
+                        }
+                    }
+                    .redacted(reason: .placeholder)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                } else {
+                    // F87：说清楚怎么了，不怪人
+                    Text(failed ?? "暂无可播放文件")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, m.margin)
+                        .padding(.vertical, 8)
+                }
+            } else {
+                DSShelf(metrics: m) {
+                    ForEach(Array(files.enumerated()), id: \.element.id) { i, f in
+                        episodeCard(f, index: i, metrics: m, fallbackArt: fallbackArt)
+                    }
+                }
+            }
+        }
+    }
+
+    /// 一集：剧照 + 「第 1 集 · 集名」+ 片长（看完的写「已看」：F36 状态不只靠颜色）；看到一半的带进度条。
+    /// 点一下就放这一集（C88）；长按出菜单，预览里是这一集的整段简介（C21）
+    private func episodeCard(_ f: EpisodeFile, index i: Int, metrics m: DSMetrics, fallbackArt: String?) -> some View {
+        let ep = f.ep.flatMap { info[$0] }
+        let fraction = model.playback.entry(f.path)?.fraction ?? 0
+        let done = fraction >= 0.9
+        let art = TMDBImage.url(ep?.still ?? fallbackArt, "w780")
+        let runtime = Format.runtime(ep?.runtime)
+        return Button { play(index: i) } label: {
+            DSWideLockup(art: art, title: Self.episodeTitle(f, ep),
+                         subtitle: DetailText.line([runtime, done ? "已看" : nil]),
+                         progress: done ? nil : fraction, metrics: m)
+        }
+        .buttonStyle(PressableStyle())
+        .accessibilityIdentifier("episode-card")
+        .contextMenu {
+            Button(done ? "重看这一集" : "播放这一集", systemImage: "play.fill") { play(index: i) }
+        } preview: {
+            DetailEpisodePreview(art: art, kicker: DetailText.line([Self.badge(f), runtime]),
+                                 title: Self.episodeName(ep) ?? Self.badge(f), overview: ep?.overview)
+        }
+    }
+
+    /// 季：分区标题右边一个系统菜单（C45：用来挑一个值的控件是菜单；C31：当前那一季打勾）
+    private var seasonMenu: some View {
+        Menu {
+            Picker("季", selection: Binding(get: { current.path }, set: { p in
+                guard let s = seasons.first(where: { $0.path == p }), s.path != current.path else { return }
+                Haptics.selection()
+                withAnimation(.snappy) { picked = s }
+            })) {
+                ForEach(seasons, id: \.path) { s in Text(Self.seasonName(s)).tag(s.path) }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(Self.seasonName(current))
+                Image(systemName: "chevron.up.chevron.down")
+                    .imageScale(.small)
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
+            // 点得到的高度够 44（F74），版面上收回去，标题行不因此变高（F12）
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .padding(.vertical, -12)
+        .accessibilityIdentifier("season-menu")
+    }
+
+    /// 「第 1 集」（没有集号就是文件名）
+    static func badge(_ f: EpisodeFile) -> String {
+        f.ep.map { "第 \($0) 集" } ?? FileName.stem(f.name)
+    }
+
+    /// 集名（空的算没有）
+    static func episodeName(_ ep: SeasonEpisode?) -> String? {
+        guard let n = ep?.name, !n.isEmpty else { return nil }
+        return n
+    }
+
+    /// 卡下的字：「第 1 集 · 集名」；没有集名就只写「第 1 集」
+    static func episodeTitle(_ f: EpisodeFile, _ ep: SeasonEpisode?) -> String {
+        guard let n = episodeName(ep) else { return badge(f) }
+        return f.ep == nil ? n : badge(f) + " · " + n
+    }
+
+    private static func seasonName(_ s: Series) -> String {
+        s.seasonLabel ?? s.season.map { "第 \($0) 季" } ?? s.name
+    }
+
+    // MARK: 文字
+
+    /// 头部那一行：「剧情 · 2026 · 第 1 季 · ★ 8.0」
+    private func metaLine(_ m: Meta?) -> String {
+        DetailText.line([m?.genres?.first, year(m), current.seasonLabel, DetailText.rating(m?.rating)])
+    }
+
+    private func year(_ m: Meta?) -> String? {
+        if let y = current.year, !y.isEmpty { return y }
+        return m?.year.map { String($0.prefix(4)) }
     }
 
     /// 网页版 tvNextEp：没看过是第 1 集；看过就接着下一集（这一集没看完就还是这一集）；看到最后一集是「重看」
@@ -151,6 +304,17 @@ struct SeriesDetailView: View {
         return loading ? "播放第 1 集" : "暂无可播放文件"
     }
 
+    /// 「从头播放」：要放的那一集有进度时才有，清掉它的进度再放
+    private func restartAction(_ next: (file: EpisodeFile, label: String)?) -> (() -> Void)? {
+        guard let next, model.playback.resumePosition(next.file.path) != nil,
+              let i = files.firstIndex(of: next.file) else { return nil }
+        let path = next.file.path
+        return {
+            model.playback.finish(path)
+            play(index: i)
+        }
+    }
+
     private var audioLine: String? {
         guard let langs = current.langs, !langs.isEmpty else { return nil }
         var s = langs.joined(separator: "、")
@@ -158,14 +322,26 @@ struct SeriesDetailView: View {
         return s
     }
 
-    private func infoRows(_ m: Meta?) -> [WebInfoRow] {
-        let genres = (m?.genres ?? []).joined(separator: " · ")
-        var rows = [WebInfoRow(label: "类型", value: "TV Series · " + (genres.isEmpty ? "未知类型" : genres))]
-        rows.append(WebInfoRow(label: "剧集", value: [current.seasonLabel, current.countLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")))
-        rows.append(WebInfoRow(label: "格式", value: WebFormat.line(series: current, firstFile: files.first?.name)))
-        if let r = m?.rating, r > 0 { rows.append(WebInfoRow(label: "评分", value: String(format: "★ %.1f", r), rating: r)) }
-        return rows
+    /// 「信息」：类型、年份、剧集（季 · 集数）、评分、导演、语言、格式；没有的项不写
+    private func infoRows(_ m: Meta?) -> [DetailInfoRow] {
+        [
+            DetailInfoRow(label: "类型", value: (m?.genres ?? []).joined(separator: "、")),
+            DetailInfoRow(label: "年份", value: year(m) ?? ""),
+            DetailInfoRow(label: "剧集", value: DetailText.line([current.seasonLabel, current.countLabel])),
+            DetailInfoRow(label: "评分", value: DetailText.rating(m?.rating) ?? ""),
+            DetailInfoRow(label: "导演", value: m?.director ?? ""),
+            DetailInfoRow(label: "语言", value: audioLine ?? ""),
+            DetailInfoRow(label: "格式", value: WebFormat.line(series: current, firstFile: files.first?.name)),
+        ].filter { !$0.value.isEmpty && $0.value != "—" }
     }
+
+    private func trailerArt(_ m: Meta?) -> [String] {
+        let stills = (m?.stills ?? []).compactMap { $0.url ?? $0.thumb }.filter { !$0.isEmpty }
+        if !stills.isEmpty { return stills }
+        return [atv?.background ?? m?.backdrop].compactMap { $0 }
+    }
+
+    // MARK: 数据与播放
 
     private func load() async {
         files = []
@@ -212,167 +388,251 @@ struct SeriesDetailView: View {
     }
 }
 
-// MARK: - 骨架
+// MARK: - 骨架（电影、剧集共用）
 
-struct WebInfoRow: Hashable {
+/// 「信息」里的一行：左边灰色的项，右边白色的值
+struct DetailInfoRow: Hashable {
     let label: String
     let value: String
-    var rating: Double? = nil
 }
 
-struct WebDetailScaffold<Gallery: View>: View {
-    let art: String?
-    /// Apple TV 的竖版全屏图：头部比宽还高（竖拿）时用它，铺满不用裁横图
-    var tallArt: String? = nil
-    let logo: String?
+/// 全屏放第几段预告片（fullScreenCover(item:) 要一个能区分的值）
+struct DetailTrailerPick: Identifiable {
+    let index: Int
+    var id: Int { index }
+}
+
+struct DetailScaffold<Episodes: View>: View {
     let title: String
-    let director: String?
-    let cast: [CastMember]
-    let rating: Double?
-    let overview: String?
+    /// 16:9 的无字背景（横拿、展开横拿用）
+    let wideArt: String?
+    /// Apple TV 的竖版全屏图：头部比宽还高（竖拿）时用它，铺满不用裁横图
+    let tallArt: String?
+    let logo: String?
+    /// 「类型 · 年份 · 片长 · ★评分」
+    let metaLine: String
     let playTitle: String
     let playID: String
     var playDisabled = false
     let onPlay: () -> Void
-    /// 「更多操作」弹层对着的文件（剧集是下一集）
+    /// 「从头播放」：有进度才有
+    var onRestart: (() -> Void)? = nil
+    /// 「复制直链」对着的文件（剧集是下一集）
     let file: (path: String, name: String)?
-    let infoRows: [WebInfoRow]
-    var audio: String? = nil
-    @ViewBuilder var gallery: () -> Gallery
+    /// 「分享」：TMDB 上这一部的页面
+    let shareURL: URL?
+    let overview: String?
+    let cast: [CastMember]
+    let trailers: [Trailer]
+    /// 预告片卡的画面（轮着用）
+    let trailerArt: [String]
+    let infoRows: [DetailInfoRow]
+    /// 分集那一段（电影没有）：拿到当前宽度的版面尺寸再排
+    @ViewBuilder var episodes: (DSMetrics) -> Episodes
 
-    @State private var showSheet = false
     @State private var showTitle = false
     @State private var toast: String?
+    @State private var castSheet: CastSheetRequest?
+    @State private var trailerPick: DetailTrailerPick?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geo in
-            // 网页版的 vh / vw 是整个窗口：把安全区（侧边那一列、底部指示条）加回来
-            let vh = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
-            let vw = geo.size.width + geo.safeAreaInsets.leading + geo.safeAreaInsets.trailing
-            let heroH = max(540, vh * 0.75)
-            let bodyTop = max(220, heroH - vh * 0.35)
+            let m = DSMetrics(width: geo.size.width)
+            // 整个窗口的高：把顶上的状态栏 / 导航栏、底下的标签栏加回来（画面从屏幕最顶上开始）
+            let fullH = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
+            let heroH = Self.heroHeight(width: geo.size.width, height: fullH)
+            // 系统栏压住的那一截（展开横拿、外屏时栏在侧边一列，顶上几乎没有：D5、D6）
+            let barBottom = geo.safeAreaInsets.top
+            // 左下那一列字的顶边升到栏底下、快淡完时，片名出现在导航栏里（字块约高：字标 + 一行信息 + 按钮）
+            let blockH: CGFloat = m.wide ? 192 : 168
+            let titleAt: CGFloat = heroH - blockH - barBottom + 6
+            // 简介限一个好读的宽度：展开的 Duo 上不拉满一整行（F8）
+            let synopsisMax: CGFloat = m.wide ? 640 : .infinity
             ScrollView {
-                ZStack(alignment: .top) {
-                    WebDetailBackdrop(art: heroH > vw * 1.05 ? (tallArt ?? art) : art, height: heroH)
-                    VStack(alignment: .leading, spacing: 0) {
-                        head(vw: vw)
-                            .padding(.top, bodyTop)
+                VStack(alignment: .leading, spacing: 0) {
+                    hero(m, height: heroH, barBottom: barBottom)
+                    // 分区之间只靠同一种留白（F3、F12）
+                    VStack(alignment: .leading, spacing: m.shelfGap) {
                         if let o = overview, !o.isEmpty {
-                            WebSynopsis(text: o)
-                                .padding(.horizontal, Theme.gutter)
+                            DetailSynopsis(text: o)
+                                .frame(maxWidth: synopsisMax, alignment: .leading)
+                                .padding(.horizontal, m.margin)
                         }
-                        if !cast.isEmpty {
-                            WebCastSection(people: cast)
-                                .padding(.top, 32)
-                        }
-                        gallery()
-                        WebInfoSection(rows: infoRows)
-                            .padding(.top, 40)
-                            .padding(.horizontal, Theme.gutter)
-                        WebTechAndLanguage(audio: audio)
-                            .padding(.top, 32)
-                            .padding(.horizontal, Theme.gutter)
+                        episodes(m)
+                        if !trailers.isEmpty { trailerSection(m) }
+                        if !cast.isEmpty { castSection(m) }
+                        if !infoRows.isEmpty { infoSection(m) }
                     }
-                    .padding(.bottom, 80)
+                    .padding(.top, 24)
+                    .padding(.bottom, m.shelfGap)
                 }
             }
             .scrollIndicators(.hidden)
+            // 画面铺到状态栏和导航栏底下（F6）；字和按钮还在安全区里（F7）
             .ignoresSafeArea(edges: .top)
-            // 滚过字标，片名才出现在导航栏里
-            .onScrollGeometryChange(for: Bool.self) { g in g.contentOffset.y > bodyTop + 40 } action: { _, v in
+            // C12：头部滚走了，片名才出现在导航栏里
+            .onScrollGeometryChange(for: Bool.self) { g in
+                g.contentOffset.y + g.contentInsets.top > titleAt
+            } action: { _, v in
                 withAnimation(.easeOut(duration: 0.2)) { showTitle = v }
             }
         }
         .background(Theme.bg)
-        .overlay(alignment: .top) { StatusBarScrim() }
         .webToast($toast)
         .navigationTitle(showTitle ? title : "")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(.hidden, for: .navigationBar)
-        .toolbar {
-            // 网页版右上角那颗玻璃圆钮：同一个「更多操作」
-            if file != nil {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showSheet = true } label: {
-                        Label("更多操作", systemImage: "arrow.up.left.and.arrow.down.right.circle")
-                            .labelStyle(.iconOnly)
-                            .rotationEffect(.degrees(90))
+        // 全部演员：一张弹层，点演员在弹层里推进去，不叠第二层（C50、C56）
+        .sheet(item: $castSheet) { r in CastSheet(people: cast, start: r.start) }
+        // 预告片：全屏，系统那一套手势和关闭（C49、S22）
+        .fullScreenCover(item: $trailerPick) { p in
+            TrailerPlayerView(movieTitle: title, trailers: trailers, start: p.index)
+        }
+    }
+
+    // MARK: 头部
+
+    /// 竖拿约屏高的七成五（S15：65–75%）；横拿 16:9，但不高过屏幕的八成五，播放钮留在第一屏里（F1）
+    static func heroHeight(width w: CGFloat, height h: CGFloat) -> CGFloat {
+        if h > w { return max(420, (h * 0.75).rounded()) }
+        return max(280, min((w * 9 / 16).rounded(), (h * 0.85).rounded()))
+    }
+
+    private func hero(_ m: DSMetrics, height: CGFloat, barBottom: CGFloat) -> some View {
+        // 头部比宽还高就用竖版全屏图，否则用 16:9（和首页头图同一条规则：S15）
+        let tall = height > m.width
+        let art = tall ? (tallArt ?? wideArt) : (wideArt ?? tallArt)
+        let still = reduceMotion
+        // 字块的顶边从栏底下 40 点开始淡，升到栏底上方 40 点时淡完（没滚动时字块离栏底远得多，是全亮的）
+        let fadeFrom = barBottom - 40
+        return ZStack(alignment: .bottomLeading) {
+            Color.black
+                .overlay {
+                    RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1800, placeholder: .clear)
+                        .visualEffect { c, proxy in
+                            // 往上滚时画面比字走得慢一点（两层视差：S12；幅度小：F61）；「减弱动态效果」时不动（F59）
+                            let minY = proxy.frame(in: .scrollView(axis: .vertical)).minY
+                            return c.offset(y: still ? 0 : max(0, -minY) * 0.2)
+                        }
+                }
+                .overlay {
+                    // 顶上浅浅压暗：状态栏和返回钮停在画面上也看得清（F34）。是画面的一部分，跟着内容走，不是盖在栏下的渐暗（C27）
+                    LinearGradient(colors: [.black.opacity(0.4), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.2))
+                }
+                .overlay {
+                    if !tall {
+                        // 横拿时字在左下，左边再压暗一点（F34）
+                        LinearGradient(colors: [.black.opacity(0.55), .clear], startPoint: .leading, endPoint: UnitPoint(x: 0.6, y: 0.5))
                     }
                 }
-            }
+                .overlay {
+                    // 底部渐暗，最后融进页面的黑：字在画面上的对比度靠它（F34、S17、C58）
+                    LinearGradient(stops: [
+                        .init(color: .clear, location: 0.4),
+                        .init(color: .black.opacity(0.6), location: 0.72),
+                        .init(color: .black, location: 1),
+                    ], startPoint: .top, endPoint: .bottom)
+                }
+                .clipped()
+                // 横拿时侧边那一列底下也是画面（镜像模糊：F6、S19）
+                .backgroundExtensionEffect()
+                .frame(height: height)
+                // 下拉时以底边为准撑大，填满拉出来的空隙（跟着手指走：S10）
+                .stretchy()
+                .accessibilityHidden(true)
+
+            heroInfo(m)
+                .padding(.horizontal, m.margin)
+                .padding(.bottom, 24)
+                .visualEffect { c, proxy in
+                    // 字块升到导航栏底下就淡出，片名交给导航栏（C12）；淡入淡出在「减弱动态效果」时也合适（F60）
+                    let y = proxy.frame(in: .scrollView(axis: .vertical)).minY
+                    return c.opacity(Double(max(0, min(1, (y - fadeFrom) / 80))))
+                }
         }
-        .sheet(isPresented: $showSheet) {
-            WebFileSheet(title: title, onPlay: onPlay, onCopy: copyLink)
-        }
+        .frame(height: height)
     }
 
-    /// 居中的一列：字标、导演 / 主演、品质保证、按钮
-    private func head(vw: CGFloat) -> some View {
-        VStack(spacing: 0) {
-            Group {
-                if let logo, !logo.isEmpty {
-                    LogoImage(url: TMDBImage.url(logo, "w500"), height: 110, fallback: title, maxWidth: 320)
-                        .frame(maxWidth: 320)
-                } else {
-                    Text(title)
-                        .font(.system(size: min(48, max(32, vw * 0.08)), weight: .heavy))
-                        .tracking(-0.6)
-                        .foregroundStyle(.white)
-                        .multilineTextAlignment(.center)
-                        .shadow(color: .black.opacity(0.9), radius: 12, y: 4)
-                }
+    /// 左下一列：字标或片名、一行信息、播放 +「…」（F1、F2）
+    private func heroInfo(_ m: DSMetrics) -> some View {
+        let maxW: CGFloat = m.wide ? 560 : .infinity
+        return VStack(alignment: .leading, spacing: 12) {
+            if let logo, !logo.isEmpty {
+                LogoImage(url: TMDBImage.url(logo, "w500"), height: m.wide ? 96 : 72, alignment: .leading,
+                          fallback: title, maxWidth: min(m.width * 0.7, 360))
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(title)
+                    .accessibilityAddTraits(.isHeader)
+            } else {
+                Text(title)
+                    .font(.largeTitle.bold())
+                    .foregroundStyle(.primary)
+                    .lineLimit(3)
+                    .accessibilityAddTraits(.isHeader)
             }
-            .padding(.bottom, 20)
-
-            if let c = credits {
-                Text(c)
-                    .multilineTextAlignment(.center)
-                    .lineSpacing(4)
-                    .shadow(color: .black.opacity(0.5), radius: 1, y: 1)
-                    .padding(.bottom, 24)
-            }
-            if let r = rating, r >= cuvenSealMin {
-                QualitySeal(note: true, size: 12.5, hPad: 12)
-                    .padding(.top, -6)
-                    .padding(.bottom, 22)
+            if !metaLine.isEmpty {
+                Text(metaLine)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             HStack(spacing: 12) {
-                WebPlayButton(title: playTitle, identifier: playID, disabled: playDisabled, action: onPlay)
-                Button { showSheet = true } label: { WebCircleLabel() }
-                    .buttonStyle(PressableStyle(scale: 0.93))
-                    .disabled(file == nil)
-                    .accessibilityLabel("更多操作")
-                    .accessibilityIdentifier("detail-more")
+                playButton(m)
+                moreMenu
             }
-            .padding(.bottom, 32)
+            .padding(.top, 4)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, Theme.gutter)
+        .frame(maxWidth: maxW, alignment: .leading)
     }
 
-    /// 「导演 苏念 · 主演 陈默 · 许晴 · 顾言」：标签 40% 白、半粗；名字 65% 白；中间的点再淡一半
-    private var credits: AttributedString? {
-        func part(_ label: String, _ value: String) -> AttributedString {
-            var l = AttributedString(label + " ")
-            l.font = .system(size: 13, weight: .semibold)
-            l.foregroundColor = .white.opacity(0.4)
-            var v = AttributedString(value)
-            v.font = .system(size: 13)
-            v.foregroundColor = .white.opacity(0.65)
-            return l + v
+    /// 主操作：白色胶囊黑字（S17、C35：一页只有这一颗醒目的钮）；折起时拉满一行，展开时按字的宽度
+    private func playButton(_ m: DSMetrics) -> some View {
+        let minW: CGFloat = m.wide ? 180 : 0
+        let maxW: CGFloat? = m.wide ? nil : CGFloat.infinity
+        return Button(action: onPlay) {
+            Label(playTitle, systemImage: "play.fill")
+                .lineLimit(1)
+                .frame(minWidth: minW, maxWidth: maxW)
         }
-        var parts: [AttributedString] = []
-        if let d = director, !d.isEmpty { parts.append(part("导演", d)) }
-        if !cast.isEmpty { parts.append(part("主演", cast.prefix(3).map(\.name).joined(separator: " · "))) }
-        guard var out = parts.first else { return nil }
-        var sep = AttributedString("  ·  ")
-        sep.font = .system(size: 13)
-        sep.foregroundColor = .white.opacity(0.2)
-        for p in parts.dropFirst() { out += sep + p }
-        return out
+        .buttonStyle(.dsPlay)
+        .disabled(playDisabled)
+        .opacity(playDisabled ? 0.5 : 1)
+        .accessibilityIdentifier(playID)
     }
 
-    /// 「复制直链」：和网页版一样，签好名的 /stream 地址（可在 VLC 等播放器里打开）
+    /// 「…」：系统菜单，符号是不带圈的 ellipsis（C11、C15、C45）；底是一层半透明材质，像 tvOS 没聚焦的钮（S17、C35）。
+    /// 菜单项都带 SF Symbol（F50），常用的在前（C41）；没有的项不出现
+    private var moreMenu: some View {
+        Menu {
+            if let onRestart {
+                Button("从头播放", systemImage: "arrow.counterclockwise", action: onRestart)
+                    .accessibilityIdentifier("detail-restart")
+            }
+            if file != nil {
+                Button("复制直链", systemImage: "link") { copyLink() }
+                    .accessibilityIdentifier("detail-copy")
+            }
+            if let shareURL {
+                ShareLink(item: shareURL, subject: Text(title)) {
+                    Label("分享", systemImage: "square.and.arrow.up")
+                }
+                .accessibilityIdentifier("detail-share")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.headline)
+                .foregroundStyle(.white)
+                .frame(width: 48, height: 48)
+                .background(.thinMaterial, in: Circle())
+                .environment(\.colorScheme, .dark)
+                .contentShape(Circle())
+        }
+        .disabled(onRestart == nil && file == nil && shareURL == nil)
+        .accessibilityLabel("更多")
+        .accessibilityIdentifier("detail-more")
+    }
+
+    /// 「复制直链」：签好名的 /stream 地址（可在 VLC 等播放器里打开）；复制完底部一句「直链已复制」
     private func copyLink() {
         guard let file else { return }
         Task { @MainActor in
@@ -380,746 +640,239 @@ struct WebDetailScaffold<Gallery: View>: View {
             withAnimation(.snappy) { toast = "直链已复制" }
         }
     }
-}
 
-/// 头部画面：铺满、往下渐隐进黑（网页版 mask：50% 以下渐隐），顶上 25% 压暗；侧边那一列底下延伸，下拉时撑大
-struct WebDetailBackdrop: View {
-    let art: String?
-    let height: CGFloat
+    // MARK: 分区
 
-    var body: some View {
-        Color.black
-            .overlay { RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1800, placeholder: .clear) }
-            .clipped()
-            .overlay {
-                LinearGradient(colors: [.black.opacity(0.55), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.25))
+    /// 预告片：一排 16:9 卡，点一张全屏放（从这一段开始，左右滑换下一段）
+    private func trailerSection(_ m: DSMetrics) -> some View {
+        DSSection(title: "预告片", metrics: m) {
+            DSShelf(metrics: m) {
+                ForEach(Array(trailers.enumerated()), id: \.offset) { i, t in
+                    Button { trailerPick = DetailTrailerPick(index: i) } label: {
+                        DSWideLockup(art: TMDBImage.url(trailerArt.isEmpty ? nil : trailerArt[i % trailerArt.count], "w780"),
+                                     title: t.title ?? "预告片", metrics: m)
+                    }
+                    .buttonStyle(PressableStyle())
+                    .accessibilityIdentifier("trailer-card")
+                }
             }
-            .overlay {
-                LinearGradient(stops: [
-                    .init(color: .clear, location: 0.5),
-                    .init(color: .black.opacity(0.5), location: 0.75),
-                    .init(color: .black, location: 1),
-                ], startPoint: .top, endPoint: .bottom)
-            }
-            .backgroundExtensionEffect()
-            .frame(height: height)
-            .stretchy()
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-    }
-}
-
-/// 白色胶囊播放钮（网页版 .detail-actions .btn-play：高 50、左右 48、16 号粗体黑字，白色微光）
-struct WebPlayButton: View {
-    let title: String
-    let identifier: String
-    var disabled = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: "play.fill").font(.system(size: 15, weight: .bold))
-                Text(title).font(.system(size: 16, weight: .bold)).lineLimit(1)
-            }
-            .foregroundStyle(.black)
-            .padding(.horizontal, 48)
-            .frame(height: 50)
-            .background(Color.white, in: Capsule())
-            .shadow(color: .white.opacity(0.15), radius: 12, y: 8)
-            .contentShape(Capsule())
         }
-        .buttonStyle(PressableStyle(scale: 0.96))
-        .opacity(disabled ? 0.5 : 1)
-        .disabled(disabled)
-        .accessibilityIdentifier(identifier)
+    }
+
+    /// 演员：标题「演员 ›」点开全部名单；下面一排圆形照片（T21 monogram），点一位直接看那一位
+    private func castSection(_ m: DSMetrics) -> some View {
+        let d = (m.posterWidth * 0.86).rounded()
+        return VStack(alignment: .leading, spacing: 6) {
+            DetailLinkHeader(title: "演员", metrics: m, id: "cast-link") {
+                castSheet = CastSheetRequest(start: nil)
+            }
+            DSShelf(metrics: m) {
+                ForEach(Array(cast.prefix(20).enumerated()), id: \.offset) { _, c in
+                    Button { castSheet = CastSheetRequest(start: c) } label: {
+                        DetailMonogram(member: c, diameter: d, metrics: m)
+                    }
+                    .buttonStyle(PressableStyle())
+                    .accessibilityIdentifier("cast-card")
+                }
+            }
+        }
+    }
+
+    /// 信息：几行左灰右白的字，不垫底板、不画线（F3）；展开时限宽，左右不隔太远（F8）
+    private func infoSection(_ m: DSMetrics) -> some View {
+        let maxW: CGFloat = m.wide ? 520 : .infinity
+        return DSSection(title: "信息", metrics: m) {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(infoRows, id: \.self) { r in
+                    HStack(alignment: .firstTextBaseline, spacing: 16) {
+                        Text(r.label)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 16)
+                        Text(r.value)
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    .font(.subheadline)
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            .frame(maxWidth: maxW, alignment: .leading)
+            .padding(.horizontal, m.margin)
+            .padding(.top, 8)
+        }
     }
 }
 
-/// 玻璃圆钮（网页版 .btn-circle：50×50、图标 22）
-struct WebCircleLabel: View {
-    var body: some View {
-        Image(systemName: "arrow.up.left.and.arrow.down.right.circle")
-            .rotationEffect(.degrees(90))
-            .font(.system(size: 22))
-            .foregroundStyle(.white)
-            .frame(width: 50, height: 50)
-            .glassEffect(.regular.interactive(), in: Circle())
-            .contentShape(Circle())
-    }
-}
+// MARK: - 小部件
 
-/// 简介：15 号、行高 1.6、88% 白；超过 140 字收成三行，下面一枚「更多 ⌄ / 收起 ⌃」
-struct WebSynopsis: View {
+/// 简介：Body、宽松行距（F21），次要色；三行后一枚「更多」，点了就地展开（F24：截断了就要能看全文）。
+/// 真被截断了才有「更多」：量一份不限行数的同一段字，比三行高才露出来
+struct DetailSynopsis: View {
     let text: String
     @State private var expanded = false
-
-    var body: some View {
-        let long = text.count > 140
-        VStack(alignment: .leading, spacing: 10) {
-            Text(text)
-                .font(.system(size: 15))
-                .lineSpacing(6)
-                .foregroundStyle(.white.opacity(0.88))
-                .lineLimit(long && !expanded ? 3 : nil)
-                .fixedSize(horizontal: false, vertical: true)
-                .shadow(color: .black.opacity(0.6), radius: 1, y: 1)
-            if long {
-                Button {
-                    withAnimation(.smooth(duration: 0.4)) { expanded.toggle() }
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(expanded ? "收起" : "更多")
-                        Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.system(size: 10, weight: .bold))
-                    }
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.leading, 14)
-                    .padding(.trailing, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-                .buttonStyle(PressableStyle(scale: 0.94))
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// 「演员阵容」（22 粗体）+ 右边「查看全部 ›」（整行可点，弹出完整的演员阵容）；下面一排 120 的圆头像、名字（15 半粗）、
-/// 角色（14、65% 白），点一位弹出那位演员（网页版 setupCastClicks：横排头像 → openActorSheet，标题行 → openFullCastSheet）
-struct WebCastSection: View {
-    let people: [CastMember]
-    @State private var showAll = false
-    @State private var picked: ActorPick?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Button {
-                Haptics.light()
-                showAll = true
-            } label: {
-                HStack(alignment: .center, spacing: 12) {
-                    Text("演员阵容")
-                        .font(.system(size: 22, weight: .bold))
-                        .tracking(-0.2)
-                        .foregroundStyle(.white)
-                    Spacer(minLength: 8)
-                    HStack(spacing: 4) {
-                        if people.count > 12 {
-                            Text("共 \(people.count) 位").font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.4))
-                        }
-                        Text("查看全部")
-                        Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
-                    }
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.65))
-                }
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(PressableStyle(scale: 0.98))
-            .accessibilityIdentifier("cast-link")
-            .padding(.horizontal, Theme.gutter)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(alignment: .top, spacing: 16) {
-                    ForEach(Array(people.prefix(12).enumerated()), id: \.offset) { _, c in
-                        Button {
-                            Haptics.light()
-                            picked = ActorPick(member: c)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 0) {
-                                WebCastAvatar(name: c.name, url: c.profileURL)
-                                    .padding(.bottom, 12)
-                                Text(c.name)
-                                    .font(.system(size: 15, weight: .semibold))
-                                    .foregroundStyle(.white)
-                                    .lineLimit(1)
-                                    .padding(.bottom, 3)
-                                if let ch = c.character, !ch.isEmpty {
-                                    Text(ch)
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(.white.opacity(0.65))
-                                        .lineLimit(2)
-                                }
-                            }
-                            .frame(width: 120, alignment: .leading)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(PressableStyle(scale: 0.96))
-                        .accessibilityIdentifier("cast-card")
-                    }
-                }
-                .scrollTargetLayout()
-            }
-            .contentMargins(.horizontal, Theme.gutter, for: .scrollContent)
-            .scrollTargetBehavior(.viewAligned)
-        }
-        .sheet(isPresented: $showAll) { CastSheet(people: people) }
-        .sheet(item: $picked) { p in ActorSheet(member: p.member) }
-    }
-}
-
-/// 网页版 .cast-avatar-small：120 的圆，发丝描边、投影；没有照片时是名字的头一个字（38 粗体）压在深灰渐变上
-struct WebCastAvatar: View {
-    let name: String
-    let url: URL?
-
-    var body: some View {
-        ZStack {
-            LinearGradient(colors: [Color(red: 44 / 255, green: 44 / 255, blue: 46 / 255), Color(red: 26 / 255, green: 26 / 255, blue: 28 / 255)],
-                           startPoint: .topLeading, endPoint: .bottomTrailing)
-            Text(String(name.trimmingCharacters(in: .whitespaces).prefix(1)).uppercased())
-                .font(.system(size: 38, weight: .bold))
-                .foregroundStyle(.white.opacity(0.55))
-            if url != nil {
-                RemoteImage(url: url, maxPixel: 360, placeholder: .clear)
-            }
-        }
-        .frame(width: 120, height: 120)
-        .clipShape(Circle())
-        .overlay(Circle().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.45), radius: 10, y: 8)
-    }
-}
-
-/// 画廊那一段的壳（网页版 .stills-section）：上面 40、一条铺满宽度的发丝线、28，标题 18 粗体，下面 24 是横排
-struct WebGallerySection<Trailing: View, Content: View>: View {
-    let heading: String
-    @ViewBuilder var trailing: () -> Trailing
-    @ViewBuilder var content: () -> Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5)
-                .padding(.top, 40)
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(heading)
-                    .font(.system(size: 18, weight: .bold))
-                    .tracking(-0.2)
-                    .foregroundStyle(.white)
-                Spacer(minLength: 8)
-                trailing()
-            }
-            .padding(.horizontal, Theme.gutter)
-            .padding(.top, 28)
-            .padding(.bottom, 24)
-            content()
-        }
-    }
-}
-
-/// 「剧照」：260×300 的竖卡（圆角 18），卡下一行「第 N 幕」
-struct WebStillsSection: View {
-    let stills: [String]
-
-    var body: some View {
-        WebGallerySection(heading: "剧照") { EmptyView() } content: {
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(alignment: .top, spacing: 20) {
-                    ForEach(Array(stills.enumerated()), id: \.offset) { i, s in
-                        VStack(alignment: .leading, spacing: 0) {
-                            Color.white.opacity(0.04)
-                                .overlay { RemoteImage(url: TMDBImage.url(s, "w780"), maxPixel: 900, placeholder: .clear) }
-                                .frame(width: 260, height: 300)
-                                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5))
-                                .shadow(color: .black.opacity(0.3), radius: 12, y: 8)
-                            Text("第 \(i + 1) 幕")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(Color(red: 245 / 255, green: 245 / 255, blue: 247 / 255))
-                                .padding(.horizontal, 4)
-                                .padding(.top, 16)
-                        }
-                        .frame(width: 260, alignment: .leading)
-                    }
-                }
-                .scrollTargetLayout()
-            }
-            .contentMargins(.horizontal, Theme.gutter, for: .scrollContent)
-            .scrollTargetBehavior(.viewAligned)
-        }
-    }
-}
-
-/// 「剧集 · 全 8 集」+ 右边「第 1 季 ›」（不止一季才有）；下面一排分集卡
-struct WebEpisodesSection: View {
-    @Environment(AppModel.self) private var model
-    let heading: String
-    let files: [EpisodeFile]
-    let info: [Int: SeasonEpisode]
-    let fallbackArt: String?
-    let loading: Bool
-    let failed: String?
-    let seasons: [Series]
-    let current: Series
-    let pick: (Series) -> Void
-    let play: (Int) -> Void
-    @State private var tileWidth: CGFloat = 300
-    /// 分集简介的「更多」：网页版 tvEpDescSheet
-    @State private var episodeSheet: EpisodeSheetItem?
-
-    var body: some View {
-        WebGallerySection(heading: heading) {
-            if seasons.count > 1 {
-                Menu {
-                    Picker("季", selection: Binding(get: { current.path }, set: { p in
-                        guard let s = seasons.first(where: { $0.path == p }), s.path != current.path else { return }
-                        Haptics.selection()
-                        pick(s)
-                    })) {
-                        ForEach(seasons, id: \.path) { s in Text(s.seasonLabel ?? s.season.map { "第 \($0) 季" } ?? s.name).tag(s.path) }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(current.seasonLabel ?? "选择季")
-                        Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
-                    }
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.65))
-                    .padding(.vertical, 4)
-                }
-                .accessibilityIdentifier("season-menu")
-            }
-        } content: {
-            if files.isEmpty {
-                Group {
-                    if loading {
-                        ProgressView().frame(maxWidth: .infinity).padding(.vertical, 30)
-                    } else {
-                        Text(failed ?? "暂无可播放文件").font(.system(size: 14)).foregroundStyle(.white.opacity(0.4))
-                            .padding(.horizontal, Theme.gutter)
-                    }
-                }
-            } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(alignment: .top, spacing: 20) {
-                        ForEach(Array(files.enumerated()), id: \.element.id) { i, f in
-                            let ep = f.ep.flatMap { info[$0] }
-                            WebEpisodeTile(file: f, info: ep, fallbackArt: fallbackArt,
-                                           progress: model.playback.entry(f.path)?.fraction, width: tileWidth,
-                                           onPlay: { play(i) },
-                                           onMore: { episodeSheet = WebEpisodeTile.sheetItem(file: f, info: ep) })
-                        }
-                    }
-                    .scrollTargetLayout()
-                }
-                .contentMargins(.horizontal, Theme.gutter, for: .scrollContent)
-                .scrollTargetBehavior(.viewAligned)
-            }
-        }
-        // 网页版：卡宽 min(74vw, 300)、高按 300:169
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { w in
-            tileWidth = min(300, max(220, w * 0.78))
-        }
-        .sheet(item: $episodeSheet) { EpisodeSheet(item: $0) }
-    }
-}
-
-/// 网页版的分集卡：16:9 剧照（圆角 18），左上「第 1 集」小牌（看完了带「· 已看」、剧照暗一档），右下播放圆钮；
-/// 卡下集名（半粗）接着简介（三行封顶，真被截断了第三行末尾压一枚「更多」，点开是整段简介的弹层），再一行「45 分钟」。
-/// 点卡（剧照或下面的字）放这一集；「更多」是单独的一颗钮，不顺手把这一集放了
-struct WebEpisodeTile: View {
-    let file: EpisodeFile
-    let info: SeasonEpisode?
-    let fallbackArt: String?
-    let progress: Double?
-    let width: CGFloat
-    let onPlay: () -> Void
-    var onMore: (() -> Void)? = nil
     @State private var fullHeight: CGFloat = 0
     @State private var shownHeight: CGFloat = 0
 
     var body: some View {
-        let done = (progress ?? 0) >= 0.9
-        let still = info?.still
-        VStack(alignment: .leading, spacing: 0) {
-            Button(action: onPlay) {
-                ZStack {
-                    Color.white.opacity(0.04)
-                    if let still {
-                        RemoteImage(url: TMDBImage.url(still, "w780"), maxPixel: width * 3, placeholder: .clear)
-                            .opacity(done ? 0.52 : 1)
-                    } else {
-                        Text(String(format: "%02d", file.ep ?? 0))
-                            .font(.system(size: 46, weight: .heavy))
-                            .tracking(-1.4)
-                            .monospacedDigit()
-                            .foregroundStyle(.white.opacity(0.14))
-                    }
-                    Text(Self.badge(file) + (done ? " · 已看" : ""))
-                        .font(.system(size: 12.5, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 11)
-                        .frame(height: 26)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        .background(Color(red: 20 / 255, green: 20 / 255, blue: 22 / 255).opacity(0.5), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.white.opacity(0.16), lineWidth: 0.5))
-                        .environment(\.colorScheme, .dark)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        .padding(12)
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 15))
-                        .foregroundStyle(.white)
-                        .frame(width: 38, height: 38)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .background(Color(red: 20 / 255, green: 20 / 255, blue: 22 / 255).opacity(0.5), in: Circle())
-                        .overlay(Circle().strokeBorder(Color.white.opacity(0.16), lineWidth: 0.5))
-                        .environment(\.colorScheme, .dark)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                        .padding(11)
-                    if let p = progress, p > 0.01, !done {
-                        ProgressCapsule(fraction: p)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                            .padding(.leading, 14).padding(.trailing, 62).padding(.bottom, 26)
-                    }
-                }
-                .frame(width: width, height: width * 169 / 300)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.3), radius: 12, y: 8)
-                .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            }
-            .buttonStyle(PressableStyle())
-            .accessibilityIdentifier("episode-card")
-
-            VStack(alignment: .leading, spacing: 0) {
-                Text(caption(done: done))
-                    .lineLimit(3)
-                    .lineSpacing(3)
-                    .multilineTextAlignment(.leading)
-                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in shownHeight = h }
-                    // 不限行数的同一段字（看不见），只用来量全文多高：比三行高才露出「更多」（网页版 tvEpClampCheck）
-                    .background(alignment: .top) {
-                        Text(caption(done: done))
-                            .lineSpacing(3)
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .hidden()
-                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in fullHeight = h }
-                    }
-                    .overlay(alignment: .bottomTrailing) {
-                        if let onMore, fullHeight > shownHeight + 1 {
-                            moreButton(onMore)
-                        }
-                    }
-                    .padding(.horizontal, 4)
-                    .padding(.top, 16)
-                    .frame(width: width, alignment: .leading)
-                let rt = info?.runtime.map { "\($0) 分钟" } ?? ""
-                if !rt.isEmpty {
-                    Text(rt)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color(red: 235 / 255, green: 235 / 255, blue: 245 / 255).opacity(0.6))
-                        .padding(.horizontal, 4)
-                        .padding(.top, 8)
-                }
-            }
-            .contentShape(Rectangle())
-            .onTapGesture(perform: onPlay)
-        }
-        .frame(width: width, alignment: .leading)
-    }
-
-    /// 「第 1 集」（没有集号就是文件名）
-    static func badge(_ f: EpisodeFile) -> String {
-        f.ep.map { "第 \($0) 集" } ?? FileName.stem(f.name)
-    }
-
-    /// 网页版 tvEpDescSheet 的那张：「第 1 集 · 45 分钟」、集名、整段简介
-    static func sheetItem(file: EpisodeFile, info: SeasonEpisode?) -> EpisodeSheetItem {
-        let kicker = [badge(file), info?.runtime.map { "\($0) 分钟" }].compactMap { $0 }.joined(separator: " · ")
-        let title = info?.name.flatMap { $0.isEmpty ? nil : $0 } ?? badge(file)
-        return EpisodeSheetItem(kicker: kicker, title: title, overview: info?.overview ?? "")
-    }
-
-    /// 压在第三行行尾的「更多」（网页版 .ep-more：高 20、左右 9、11.5 号半粗，深灰半透明 + 模糊，发丝描边）；
-    /// 左边一条 56 宽的收尾带，字先淡掉再碰到它
-    private func moreButton(_ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text("更多")
-                .font(.system(size: 11.5, weight: .semibold))
-                .tracking(-0.07)
-                .foregroundStyle(.white)
-                .padding(.horizontal, 9)
-                .frame(height: 20)
-                .background(.ultraThinMaterial, in: Capsule())
-                .background(Color(red: 66 / 255, green: 66 / 255, blue: 70 / 255).opacity(0.86), in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5))
-                .environment(\.colorScheme, .dark)
-                .contentShape(Capsule())
-        }
-        .buttonStyle(PressableStyle(scale: 0.94))
-        .background(alignment: .leading) {
-            LinearGradient(stops: [.init(color: Theme.bg.opacity(0), location: 0), .init(color: Theme.bg, location: 0.82)],
-                           startPoint: .leading, endPoint: .trailing)
-                .frame(width: 56)
-                .padding(.vertical, -4)
-                .offset(x: -56)
-                .allowsHitTesting(false)
-        }
-        .accessibilityLabel("更多")
-        .accessibilityIdentifier("episode-more")
-    }
-
-    /// 「第 1 个故事 演示分集简介…」：标题 13 半粗白字，简介同字号 60% 灰
-    private func caption(done: Bool) -> AttributedString {
-        let name = info?.name ?? Self.badge(file)
-        var t = AttributedString(name)
-        t.font = .system(size: 13, weight: .semibold)
-        t.foregroundColor = done ? .white.opacity(0.65) : Color(red: 245 / 255, green: 245 / 255, blue: 247 / 255)
-        if let o = info?.overview, !o.isEmpty {
-            var d = AttributedString(" " + o)
-            d.font = .system(size: 13)
-            d.foregroundColor = Color(red: 235 / 255, green: 235 / 255, blue: 245 / 255).opacity(0.6)
-            t += d
-        }
-        return t
-    }
-}
-
-/// 「影片信息」（18 粗体）：一行一项，左边 40% 白、右边白色半粗，行下 5% 发丝线；评分后面跟 TMDB 与「品质保证」
-struct WebInfoSection: View {
-    let rows: [WebInfoRow]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5)
-                .padding(.bottom, 28)
-            Text("影片信息")
-                .font(.system(size: 18, weight: .bold))
-                .tracking(-0.2)
-                .foregroundStyle(.white)
-                .padding(.bottom, 16)
-            ForEach(rows, id: \.self) { r in
-                HStack(alignment: .firstTextBaseline, spacing: 16) {
-                    Text(r.label)
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.4))
-                    Spacer(minLength: 0)
-                    HStack(alignment: .firstTextBaseline, spacing: 0) {
-                        Text(r.value)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .multilineTextAlignment(.trailing)
-                        if let rating = r.rating {
-                            Text(" TMDB").font(.system(size: 12)).foregroundStyle(.white.opacity(0.4))
-                            if rating >= cuvenSealMin {
-                                QualitySeal(hPad: 9)
-                                    .padding(.leading, 8)
-                                    .alignmentGuide(.firstTextBaseline) { d in d[VerticalAlignment.center] + 4 }
-                            }
-                        }
-                    }
-                }
-                .padding(.vertical, 12)
-                .overlay(alignment: .bottom) { Rectangle().fill(Color.white.opacity(0.05)).frame(height: 0.5) }
-            }
-        }
-    }
-}
-
-/// 「尖端色彩和画面质量技术」两张说明 +「语言」+ 法务一行（文案与网页版一致）
-struct WebTechAndLanguage: View {
-    var audio: String? = nil
-
-    private static let soft = Color(red: 235 / 255, green: 235 / 255, blue: 245 / 255)
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            sectionTitle("尖端色彩和画面质量技术")
-            VStack(alignment: .leading, spacing: 0) {
-                techGroup("HDR Ultimate", "高动态技术 (HDR Ultimate) 绚丽生动的色彩、更锐利的对比度和更丰富的细节，为你呈现精致鲜活的迷人画质。")
-                separator
-                techGroup("Dolby Atmos", "声音以前所未有的层次感、清晰度和细节，让你尽享全方位萦绕的声音体验。")
-            }
-            .webGlassCard()
-
-            sectionTitle("语言")
-                .padding(.top, 28)
-            VStack(alignment: .leading, spacing: 0) {
-                langItem("原始音频", "English")
-                separator
-                langItem("音频", audio ?? "English (Dolby Atmos、Dolby Digital 7.1、Dolby 5.1、AAC、AD)")
-                separator
-                langItem("字幕", "Arabic、Bulgarian、Croatian、Czech、Danish、Dutch、English (SDH)、Estonian、Finnish、Greek、Hebrew、Hungarian、Icelandic、Latvian、Lithuanian、Norwegian、Polish、Portuguese、Slovak、Slovenian、Swedish、Turkish、Ukrainian")
-            }
-            .webGlassCard()
-
-            Text("有关法律责任和信息 CUVEN 均不受理 适用法务归属为卢森堡地区")
-                .font(.system(size: 13))
-                .tracking(0.2)
-                .foregroundStyle(Self.soft.opacity(0.3))
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity)
-                .padding(.top, 32)
-        }
-    }
-
-    private func sectionTitle(_ t: String) -> some View {
-        Text(t.uppercased())
-            .font(.system(size: 13, weight: .semibold))
-            .tracking(0.5)
-            .foregroundStyle(Self.soft.opacity(0.55))
-            .padding(.bottom, 8)
-    }
-
-    private var separator: some View {
-        Rectangle().fill(Color.white.opacity(0.05)).frame(height: 0.5).padding(.horizontal, 20)
-    }
-
-    private func techGroup(_ badge: String, _ desc: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(badge.uppercased())
-                .font(.system(size: 11, weight: .bold))
-                .tracking(0.8)
-                .foregroundStyle(.white.opacity(0.95))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Color.white.opacity(0.15), lineWidth: 0.5))
-            Text(desc)
-                .font(.system(size: 14))
-                .tracking(0.2)
-                .lineSpacing(6)
-                .foregroundStyle(Self.soft.opacity(0.6))
+        let clipped = fullHeight > shownHeight + 1
+        VStack(alignment: .leading, spacing: 2) {
+            Text(text)
+                .font(.body.leading(.loose))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading)
+                .lineLimit(expanded ? nil : 3)
                 .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 18)
-    }
-
-    private func langItem(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(label)
-                .font(.system(size: 15))
-                .tracking(0.2)
-                .foregroundStyle(Self.soft.opacity(0.45))
-            Text(value)
-                .font(.system(size: 15))
-                .lineSpacing(5)
-                .foregroundStyle(.white.opacity(0.95))
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
-    }
-}
-
-extension View {
-    /// 网页版 .detail-info-glass：白 4% 底、1px 白 8% 描边、圆角 20、上沿一道高光
-    func webGlassCard() -> some View {
-        self
-            .padding(.vertical, 4)
-            .background(.ultraThinMaterial.opacity(0.35), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
-            .overlay(alignment: .top) {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .strokeBorder(LinearGradient(colors: [.white.opacity(0.12), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.08)), lineWidth: 1)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in shownHeight = h }
+                .background(alignment: .top) {
+                    Text(text)
+                        .font(.body.leading(.loose))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .hidden()
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in fullHeight = h }
+                }
+            if clipped || expanded {
+                Button {
+                    withAnimation(.smooth(duration: 0.35)) { expanded.toggle() }
+                } label: {
+                    Text(expanded ? "收起" : "更多")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        // 点得到的高度够 44（F74），版面上收回去
+                        .padding(.vertical, 12)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.vertical, -12)
+                .accessibilityIdentifier("synopsis-more")
             }
-            .shadow(color: .black.opacity(0.2), radius: 16, y: 8)
-            .environment(\.colorScheme, .dark)
+        }
     }
 }
 
-// MARK: - 弹层（网页版 openSheet：片名、一两行大按钮、取消）
-
-struct WebSheetRow {
-    let symbol: String
-    let tint: Color
-    let label: String
-    let note: String
+/// 分区标题（和 DSShelfTitle 一个样子：F2、F86），整行是一颗钮，标题后面一个「›」（有去处才带：C31）
+struct DetailLinkHeader: View {
+    let title: String
+    let metrics: DSMetrics
     let id: String
     let action: () -> Void
 
-    static let orange = Color.orange
-    static let blue = Color(red: 10 / 255, green: 132 / 255, blue: 1)
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(title)
+                    .font(.dsShelfTitle(wide: metrics.wide))
+                    .foregroundStyle(.primary)
+                Image(systemName: "chevron.forward")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            // 点得到的高度够 44（F74），版面上收回去，和别的分区标题一样高（F12）
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, -10)
+        .padding(.horizontal, metrics.margin)
+        .accessibilityAddTraits(.isHeader)
+        .accessibilityIdentifier(id)
+    }
 }
 
-struct WebActionSheet: View {
-    let title: String
-    let rows: [WebSheetRow]
-    @Environment(\.dismiss) private var dismiss
+/// 演员那一排的一位（T21 monogram：圆形照片 + 名字，角色在第二行）。
+/// 停在左侧基准线上的那位像 tvOS 的焦点一样微微放大（S7–S9）；字一直在，名字是要读的
+struct DetailMonogram: View {
+    let member: CastMember
+    let diameter: CGFloat
+    let metrics: DSMetrics
 
     var body: some View {
-        VStack(spacing: 0) {
-            Text(title)
-                .font(.system(size: 17, weight: .bold))
-                .tracking(-0.2)
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .padding(.horizontal, 24)
-                .padding(.top, 26)
-                .padding(.bottom, 24)
-            ForEach(rows.indices, id: \.self) { i in
-                let r = rows[i]
-                Button {
-                    dismiss()
-                    r.action()
-                } label: {
-                    HStack(spacing: 16) {
-                        Image(systemName: r.symbol)
-                            .font(.system(size: 22))
-                            .foregroundStyle(r.tint)
-                            .frame(width: 44, height: 44)
-                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(r.label).font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
-                            Text(r.note).font(.system(size: 13)).foregroundStyle(.white.opacity(0.4)).lineLimit(1)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.leading, 12)
-                    .padding(.trailing, 24)
-                    .padding(.vertical, 12)
-                    .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5))
-                    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                }
-                .buttonStyle(PressableStyle(scale: 0.98))
-                .padding(.bottom, 12)
-                .accessibilityIdentifier(r.id)
+        let role = member.character ?? ""
+        VStack(spacing: 10) {
+            // 圆有近百点宽：取大一号的照片，按 点 × 屏幕倍率 要像素（F62）
+            CastPhoto(member: member, size: diameter, large: true)
+            VStack(spacing: 2) {
+                Text(member.name.isEmpty ? "未知演员" : member.name)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(role.isEmpty ? " " : role)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            Button { dismiss() } label: {
-                Text("取消")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(Color.white.opacity(0.06), in: Capsule())
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
-                    .contentShape(Capsule())
-            }
-            .buttonStyle(PressableStyle(scale: 0.97))
-            .padding(.top, 12)
-            .accessibilityIdentifier("sheet-cancel")
-            Spacer(minLength: 0)
+            .lineLimit(1)
+            .multilineTextAlignment(.center)
+            .frame(width: diameter)
         }
-        .padding(.horizontal, 20)
-        .presentationDetents([.height(CGFloat(150 + rows.count * 80))])
-        .presentationDragIndicator(.visible)
-        .presentationCornerRadius(34)
+        .frame(width: diameter)
+        .modifier(DSFocusEffect(metrics: metrics, cardWidth: diameter, poster: true))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel([member.name, role.isEmpty ? nil : "饰 " + role].compactMap { $0 }.joined(separator: "，"))
+    }
+}
+
+/// 长按分集卡时的预览（C21）：剧照、「第 1 集 · 45 分钟」、集名、整段简介——卡上只放最要紧的字
+struct DetailEpisodePreview: View {
+    let art: URL?
+    let kicker: String
+    let title: String
+    let overview: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Color(uiColor: .systemGray5)
+                .overlay { RemoteImage(url: art, maxPixel: 1000, placeholder: .clear) }
+                .frame(width: 340, height: 191)
+                .clipped()
+            VStack(alignment: .leading, spacing: 6) {
+                if !kicker.isEmpty {
+                    Text(kicker)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                if let overview, !overview.isEmpty {
+                    Text(overview)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(16)
+            .frame(width: 340, alignment: .leading)
+        }
+        .background(Color(uiColor: .secondarySystemBackground))
         .environment(\.colorScheme, .dark)
     }
 }
 
-/// 网页版 openSheetForFile：「播放」（站内播放 · 杜比视界 · HDR · 多音轨字幕）「复制直链」（在 VLC 等其它播放器中打开）
-struct WebFileSheet: View {
-    let title: String
-    let onPlay: () -> Void
-    let onCopy: () -> Void
+/// 详情页的几句字
+enum DetailText {
+    /// 几段字用「 · 」连起来，空的跳过
+    static func line(_ parts: [String?]) -> String {
+        parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+    }
 
-    var body: some View {
-        WebActionSheet(title: title, rows: [
-            WebSheetRow(symbol: "play.circle.fill", tint: WebSheetRow.orange, label: "播放", note: "站内播放 · 杜比视界 · HDR · 多音轨字幕", id: "sheet-play", action: onPlay),
-            WebSheetRow(symbol: "link", tint: WebSheetRow.blue, label: "复制直链", note: "在 VLC 等其它播放器中打开", id: "sheet-copy", action: onCopy),
-        ])
+    /// 「★ 7.5」：没有评分就是 nil
+    static func rating(_ r: Double?) -> String? {
+        guard let r, r > 0 else { return nil }
+        return String(format: "★ %.1f", r)
+    }
+
+    /// TMDB 上这一部的页面（「…」里的「分享」）
+    static func tmdbPage(kind: String, id: Int?) -> URL? {
+        guard let id else { return nil }
+        return URL(string: "https://www.themoviedb.org/\(kind)/\(id)")
+    }
+
+    /// 放得了的预告片：和 AppModel.trailers(for:) 同一条规矩（订阅才看得了的不要）
+    static func playable(_ t: [Trailer]?) -> [Trailer] {
+        (t ?? []).filter { !$0.hls.isEmpty && !$0.hls.contains("/subscription/") }
     }
 }
+
+// MARK: - 复制直链与底部提示（详情页「…」菜单里的「复制直链」用）
 
 /// 签好名的 /stream 直链（网页版 copyStreamLink），复制到剪贴板
 enum StreamLink {
@@ -1157,33 +910,6 @@ struct WebToast: ViewModifier {
 
 extension View {
     func webToast(_ text: Binding<String?>) -> some View { modifier(WebToast(text: text)) }
-}
-
-/// 剧集「接着看」：取分集清单，按网页版 tvNextEp 的规矩挑一集放（年份页、搜索结果的「…」用）
-enum SeriesPlayback {
-    @MainActor static func playNext(_ s: Series, model: AppModel) async -> Bool {
-        var files: [EpisodeFile]
-        if DemoData.enabled {
-            files = DemoData.episodes(s)
-        } else {
-            files = (try? await APIClient.shared.episodes(seriesPath: s.path)) ?? []
-            files.sort { ($0.ep ?? Int.max, $0.name) < ($1.ep ?? Int.max, $1.name) }
-        }
-        guard !files.isEmpty else { return false }
-        var index = 0
-        if let last = model.playback.lastEpisode(of: s.path), let i = files.firstIndex(where: { $0.path == last.path }) {
-            index = last.fraction < 0.9 ? i : min(i + 1, files.count - 1)
-        }
-        let meta = model.seriesMetas[s.path]
-        func req(_ f: EpisodeFile) -> PlayRequest {
-            PlayRequest(path: f.path, name: f.name, title: meta?.title ?? s.name, subtitle: f.ep.map { "第 \($0) 集" },
-                        artwork: meta?.backdrop, seriesPath: s.path, episode: f.ep)
-        }
-        var r = req(files[index])
-        r.queue = files[(index + 1)...].map { req($0) }
-        PlayerCoordinator.shared.play(r, model: model)
-        return true
-    }
 }
 
 // MARK: - 「格式」那一格（网页版：扩展名 · 8K+ UHD（4K 片源）/ 高动态（1080p）· DV / HDR）

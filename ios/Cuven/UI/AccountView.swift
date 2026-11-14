@@ -1,18 +1,8 @@
 import SwiftUI
+import UIKit
+import UserNotifications
 
-// MARK: - 账户与设置（主页 / 资料库右上角的头像打开；取代原来的「我的」标签）
-
-/// 「打开账户页」：根视图注入，头像按钮调用
-private struct OpenAccountKey: EnvironmentKey {
-    static let defaultValue: () -> Void = {}
-}
-
-extension EnvironmentValues {
-    var openAccount: () -> Void {
-        get { self[OpenAccountKey.self] }
-        set { self[OpenAccountKey.self] = newValue }
-    }
-}
+// MARK: - 账户与设置（「账户」标签）
 
 /// 圆形头像：账户设置里的头像（默认头像或自己上传的），取不到就是首字母
 struct AvatarView: View {
@@ -42,128 +32,53 @@ struct AvatarView: View {
     }
 }
 
-/// 头像按钮（自定义视图的工具栏项：在 iPhone Duo 上也留在横向的顶栏里，不进侧边那一列）
-struct AvatarButton: View {
-    @Environment(\.openAccount) private var openAccount
-
-    var body: some View {
-        Button(action: openAccount) { AvatarView(size: 34) }
-            .buttonStyle(.plain)
-            .accessibilityLabel("账户")
-            .accessibilityIdentifier("account-button")
-    }
-}
-
-/// 账户与设置（版式参考 Games App 的个人页）：顶上一片渐变（颜色取自头像），大头像、用户名、邮箱；
-/// 下面一组组圆角卡片：观看、登录与安全、播放、片库、存储、关于。观看那组点进去是整页清单（在这一页里推进去）
+/// 账户与设置：系统的 Form、分组样式——在 iPhone 上就是 inset grouped，行高、留白、分隔线都用系统的（C30、F14）。
+/// 顶上头像、名字、邮箱；下面依次是观看、通知、播放、片库、存储、登录与安全、关于，最底下单独一组「退出登录」。
+/// 不放和系统重复的开关：「触感」归系统的「声音与触感」管（C95），Haptics.enabled 保持默认的开。
+/// 标签用平实的短词，开着会怎样写在组的脚注里（F84、F89）。
 struct AccountView: View {
     @Environment(AppModel.self) private var model
     @Environment(AccountStore.self) private var account
     @Environment(\.dismiss) private var dismiss
-    @State private var haptics = Haptics.enabled
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage(PlayerCoordinator.autoplayKey) private var autoplayNext = true
+    /// 「新片上架通知」：自己选的开 / 关。系统那边的通知权限另看（notifyBlocked）
+    @AppStorage(AccountView.notifyKey) private var notifyWanted = false
+    /// 系统设置里 Cuven 的通知是关着的（拒绝过，或者后来到设置里关了）
+    @State private var notifyBlocked = false
+    @State private var notifyAsking = false
     @State private var cacheSize: Int64 = DiskCache.size()
     @State private var refreshing = false
     @State private var confirmSignOut = false
-    @State private var tint = Color(red: 0.22, green: 0.24, blue: 0.62)
-    /// 当标签页用（网页版导航胶囊里的头像）：没有「完成」
+    /// 当标签页用（「账户」标签）：没有关闭钮
     var asTab = false
+
+    static let notifyKey = "cuven_notify_new_titles"
 
     var body: some View {
         ZoomStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
-                    profile
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 18)
-
-                    AccountGroup("观看") {
-                        AccountRow(symbol: "play.circle.fill", title: "继续观看",
-                                   detail: "\(model.playback.continueWatching.count) 部", route: .shelf(.continueWatching))
-                        AccountRow(symbol: "bookmark.circle.fill", title: "想看",
-                                   detail: "\(model.watchlist.items.count) 部", route: .shelf(.watchlist))
-                    }
-
-                    if account.loginRequired {
-                        AccountGroup("登录与安全") {
-                            if account.biometryAvailable {
-                                AccountToggleRow(symbol: "faceid", title: "使用\(account.biometryName)快速登录", isOn: faceIDBinding)
-                            }
-                            if let s = account.session {
-                                AccountRow(symbol: "key.fill", title: "登录方式", detail: methodName(s.method))
-                                AccountRow(symbol: "clock.fill", title: "登录于", detail: s.at.formatted(date: .abbreviated, time: .shortened))
-                            }
-                            AccountButtonRow(symbol: "rectangle.portrait.and.arrow.right", title: "退出登录", destructive: true) {
-                                confirmSignOut = true
-                            }
-                            .accessibilityIdentifier("account-signout")
-                        }
-                    }
-
-                    AccountGroup("播放") {
-                        AccountToggleRow(symbol: "forward.end.circle.fill", title: "自动播放下一集", isOn: $autoplayNext)
-                        AccountToggleRow(symbol: "hand.tap.fill", title: "触感反馈", isOn: $haptics)
-                            .onChange(of: haptics) { _, v in Haptics.enabled = v }
-                    }
-
-                    AccountGroup("片库") {
-                        AccountRow(symbol: "film.fill", title: "电影", detail: "\(model.movies.count) 部")
-                        AccountRow(symbol: "tv.fill", title: "剧集", detail: "\(model.series.count) 部")
-                        AccountButtonRow(symbol: "arrow.clockwise", title: refreshing ? "正在刷新…" : "刷新片库", busy: refreshing) {
-                            refreshing = true
-                            Task { await model.refreshAll(); refreshing = false; cacheSize = DiskCache.size() }
-                        }
-                    }
-
-                    AccountGroup("存储") {
-                        AccountRow(symbol: "internaldrive.fill", title: "本地缓存",
-                                   detail: Format.size(cacheSize).isEmpty ? "0 MB" : Format.size(cacheSize))
-                        AccountButtonRow(symbol: "trash.fill", title: "清除缓存（片库清单、海报、元数据）") {
-                            model.clearCaches()
-                            cacheSize = DiskCache.size()
-                            Task { await model.refreshAll(); cacheSize = DiskCache.size() }
-                        }
-                        AccountButtonRow(symbol: "xmark.circle.fill", title: "清除继续观看", destructive: true) {
-                            model.playback.clearAll()
-                        }
-                    }
-
-                    AccountGroup("关于") {
-                        HStack(spacing: 14) {
-                            Image("BrandIcon")
-                                .resizable()
-                                .frame(width: 40, height: 40)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Cuven max").font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
-                                Text("版本 \(Bundle.main.appVersion)").font(.system(size: 13)).foregroundStyle(Theme.secondary)
-                            }
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                        AccountRow(symbol: "server.rack", title: "片源", detail: "stream.cuven.online")
-                        AccountRow(symbol: "person.badge.key.fill", title: "账户服务", detail: "check.cuven.us")
-                    }
-                }
-                .padding(.horizontal, Theme.gutter)
-                .padding(.bottom, 40)
+            Form {
+                profileSection
+                watchingSection
+                notifySection
+                playbackSection
+                librarySection
+                storageSection
+                securitySection
+                aboutSection
+                signOutSection
             }
-            .scrollIndicators(.hidden)
-            .background(alignment: .top) {
-                // 顶上一片渐变，颜色取自头像（没有头像就是 Cuven 的蓝紫）
-                LinearGradient(colors: [tint, tint.opacity(0.55), Theme.bg], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 520)
-                    .frame(maxWidth: .infinity, alignment: .top)
-                    .ignoresSafeArea()
-            }
-            .background(Theme.bg)
-            .navigationTitle("")
-            .navigationBarTitleDisplayMode(.inline)
+            .formStyle(.grouped)
+            .tint(Theme.accent)
+            // 顶层页用大标题，滚动时收成小标题（C13）；弹出来用时是小标题
+            .navigationTitle("账户")
+            .navigationBarTitleDisplayMode(asTab ? .large : .inline)
             .toolbar {
                 if !asTab {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("完成", systemImage: "checkmark") { dismiss() }
+                    // 弹出来用时：标准的关闭（xmark），不写「完成」——这一页没有要保存的编辑（C14、C53）
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("关闭", systemImage: "xmark") { dismiss() }
                             .accessibilityIdentifier("account-done")
                     }
                 }
@@ -176,33 +91,222 @@ struct AccountView: View {
             } message: {
                 Text("退出后需要重新登录才能观看。观看进度保留在这台设备上。")
             }
-            .task(id: account.avatarURL) {
-                guard let u = account.avatarURL, let c = await ArtTint.color(for: u, ceiling: 0.6) else { return }
-                withAnimation(.easeOut(duration: 0.4)) { tint = c }
+            .task {
+                seedNotifyPreference()
+                await refreshNotify()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                // 从系统设置回来：通知权限可能变了
+                if phase == .active { Task { @MainActor in await refreshNotify() } }
             }
         }
     }
 
-    /// 和网页版的资料弹层一样（.profile-block）：88 的圆头像（1px 白 18% 描边、投影），名字 19 粗体，邮箱 13 号灰字
-    private var profile: some View {
-        VStack(spacing: 14) {
-            AvatarView(size: 88)
-                .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1))
-                .shadow(color: .black.opacity(0.45), radius: 15, y: 10)
-            Text(account.displayName.isEmpty ? "访客" : account.displayName)
-                .font(.system(size: 19, weight: .bold))
-                .tracking(-0.19)
-                .foregroundStyle(.white)
-                .lineLimit(1)
-            if let e = account.session?.email, !e.isEmpty {
-                Text(e).font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.4)).lineLimit(1)
-            } else {
-                Text("尚未设置电子邮件").font(.system(size: 13, weight: .medium)).italic().foregroundStyle(.white.opacity(0.22))
+    // MARK: 各组
+
+    /// 顶上：头像、名字、邮箱，居中，不垫底色（像系统「Apple 账户」页的头部）
+    private var profileSection: some View {
+        Section {
+            VStack(spacing: 4) {
+                AvatarView(size: 80)
+                    .accessibilityHidden(true)
+                    .padding(.bottom, 8)
+                Text(account.displayName.isEmpty ? "访客" : account.displayName)
+                    .font(.title2.weight(.semibold))
+                    .lineLimit(1)
+                if let e = account.session?.email, !e.isEmpty {
+                    Text(e)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                } else {
+                    Text("未设置电子邮件")
+                        .font(.subheadline)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .accessibilityElement(children: .combine)
+            .listRowBackground(Color.clear)
+        }
+    }
+
+    /// 观看：点进去是整页清单（在这一页里推进去，行尾是系统的「›」：C31）
+    private var watchingSection: some View {
+        Section("观看") {
+            NavigationLink(value: Route.shelf(.continueWatching)) {
+                LabeledContent("继续观看", value: "\(model.playback.continueWatching.count) 部")
+            }
+            NavigationLink(value: Route.shelf(.watchlist)) {
+                LabeledContent("想看", value: "\(model.watchlist.items.count) 部")
             }
         }
-        .padding(.top, 8)
-        .padding(.bottom, 20)
     }
+
+    /// 新片上架通知：打开开关的那一刻才向系统要通知权限，不在启动时、也不在隐私闸门里问（C78、C79）。
+    /// 系统里关着就给一行说明和「打开设置」，直接跳到系统里 Cuven 的通知设置，不描述路径（C97、F89）
+    private var notifySection: some View {
+        Section {
+            Toggle("新片上架通知", isOn: notifyBinding)
+                .tint(.green)
+                .accessibilityIdentifier("account-notify")
+            if notifyWanted && notifyBlocked {
+                Button("打开设置") { openNotificationSettings() }
+                    .accessibilityIdentifier("account-notify-settings")
+            }
+        } header: {
+            Text("通知")
+        } footer: {
+            Text(notifyWanted && notifyBlocked ? "系统设置里关掉了 Cuven 的通知。" : "开着时，有新影片入库会提醒你。")
+        }
+    }
+
+    private var playbackSection: some View {
+        Section("播放") {
+            Toggle("自动播放下一集", isOn: $autoplayNext)
+                .tint(.green)
+        }
+    }
+
+    /// 片库：数量 + 刷新（慢的操作：按钮里换成转圈和「正在刷新…」，不挡整屏：C39）
+    private var librarySection: some View {
+        Section("片库") {
+            LabeledContent("电影", value: "\(model.movies.count) 部")
+            LabeledContent("剧集", value: "\(model.series.count) 部")
+            Button {
+                refreshLibrary()
+            } label: {
+                HStack {
+                    Text(refreshing ? "正在刷新…" : "刷新片库")
+                    Spacer(minLength: 8)
+                    if refreshing { ProgressView() }
+                }
+            }
+            .disabled(refreshing)
+        }
+    }
+
+    private var storageSection: some View {
+        Section {
+            LabeledContent("缓存", value: cacheText)
+            Button("清除缓存") { clearCache() }
+            Button("清除继续观看", role: .destructive) { model.playback.clearAll() }
+        } header: {
+            Text("存储")
+        } footer: {
+            Text("清除缓存后，片库清单、海报和影片信息会重新下载。")
+        }
+    }
+
+    @ViewBuilder
+    private var securitySection: some View {
+        if account.loginRequired {
+            Section("登录与安全") {
+                if account.biometryAvailable {
+                    Toggle("使用\(account.biometryName)登录", isOn: faceIDBinding)
+                        .tint(.green)
+                }
+                if let s = account.session {
+                    LabeledContent("登录方式", value: methodName(s.method))
+                    LabeledContent("登录时间", value: s.at.formatted(date: .abbreviated, time: .shortened))
+                }
+            }
+        }
+    }
+
+    private var aboutSection: some View {
+        Section("关于") {
+            LabeledContent("版本", value: Bundle.main.appVersion)
+            LabeledContent("片源", value: "stream.cuven.online")
+            LabeledContent("账户服务", value: "check.cuven.us")
+        }
+    }
+
+    /// 退出登录单独放在最底下（红字、居中），点了先用系统的确认（C44、C47）
+    @ViewBuilder
+    private var signOutSection: some View {
+        if account.loginRequired {
+            Section {
+                Button("退出登录", role: .destructive) { confirmSignOut = true }
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("account-signout")
+            }
+        }
+    }
+
+    // MARK: 通知
+
+    private var notifyBinding: Binding<Bool> {
+        Binding(
+            get: { notifyWanted },
+            set: { on in
+                notifyWanted = on
+                if on { askNotify() }
+            })
+    }
+
+    /// 打开开关时：系统还没问过就弹系统的询问；问过了就只看结果（拒绝过的只能到设置里开）
+    private func askNotify() {
+        guard !notifyAsking else { return }
+        notifyAsking = true
+        Task { @MainActor in
+            let center = UNUserNotificationCenter.current()
+            let before = await center.notificationSettings()
+            if before.authorizationStatus == .notDetermined {
+                _ = try? await center.requestAuthorization(options: [.alert, .badge, .sound])
+            }
+            let after = await center.notificationSettings()
+            notifyBlocked = after.authorizationStatus == .denied
+            notifyAsking = false
+        }
+    }
+
+    /// 看一眼系统里的通知权限（打开这一页时、从系统设置回来时）
+    private func refreshNotify() async {
+        let s = await UNUserNotificationCenter.current().notificationSettings()
+        notifyBlocked = s.authorizationStatus == .denied
+    }
+
+    /// 以前在隐私闸门里开过通知的人：这里的开关一开始就是开着（只在还没有这项设置时看一次）
+    private func seedNotifyPreference() {
+        guard UserDefaults.standard.object(forKey: Self.notifyKey) == nil,
+              let raw = UserDefaults.standard.string(forKey: PrivacyGate.key)?.data(using: .utf8),
+              let r = try? JSONDecoder().decode(PrivacyGate.Record.self, from: raw) else { return }
+        notifyWanted = r.scopes.notifications
+    }
+
+    /// 直接打开系统设置里 Cuven 的通知那一页（C97）
+    private func openNotificationSettings() {
+        guard let url = URL(string: UIApplication.openNotificationSettingsURLString) else { return }
+        openURL(url)
+    }
+
+    // MARK: 片库与存储
+
+    private func refreshLibrary() {
+        refreshing = true
+        Task { @MainActor in
+            await model.refreshAll()
+            refreshing = false
+            cacheSize = DiskCache.size()
+        }
+    }
+
+    private func clearCache() {
+        model.clearCaches()
+        cacheSize = DiskCache.size()
+        Task { @MainActor in
+            await model.refreshAll()
+            cacheSize = DiskCache.size()
+        }
+    }
+
+    private var cacheText: String {
+        let s = Format.size(cacheSize)
+        return s.isEmpty ? "0 MB" : s
+    }
+
+    // MARK: 登录
 
     private var faceIDBinding: Binding<Bool> {
         Binding(
@@ -221,129 +325,5 @@ struct AccountView: View {
         case "demo": return "演示"
         default: return m
         }
-    }
-}
-
-
-// MARK: - 账户页的分组卡片（Games 个人页那种：组标题在上，下面一块圆角卡片，行与行之间一道发丝线）
-
-struct AccountGroup<Content: View>: View {
-    let title: String
-    @ViewBuilder var content: () -> Content
-
-    init(_ title: String, @ViewBuilder content: @escaping () -> Content) {
-        self.title = title
-        self.content = content
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title).font(.system(size: 24, weight: .bold)).foregroundStyle(.white)
-            VStack(spacing: 0) {
-                Group(subviews: content()) { rows in
-                    ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
-                        row
-                        if i < rows.count - 1 {
-                            Rectangle().fill(Theme.hairline).frame(height: 0.5).padding(.leading, 60)
-                        }
-                    }
-                }
-            }
-            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
-        }
-    }
-}
-
-/// 一行：左边符号，标题，右边值；给了 route 就是可点进去的一行（带「›」）
-struct AccountRow: View {
-    let symbol: String
-    let title: String
-    var detail: String? = nil
-    var route: Route? = nil
-
-    var body: some View {
-        if let route {
-            NavigationLink(value: route) { content(chevron: true) }
-                .buttonStyle(PressableStyle(scale: 0.98))
-        } else {
-            content(chevron: false)
-        }
-    }
-
-    private func content(chevron: Bool) -> some View {
-        HStack(spacing: 14) {
-            AccountSymbol(name: symbol)
-            Text(title).font(.system(size: 17)).foregroundStyle(.white).lineLimit(1)
-            Spacer(minLength: 8)
-            if let detail {
-                Text(detail).font(.system(size: 15)).foregroundStyle(Theme.secondary).lineLimit(1)
-            }
-            if chevron {
-                Image(systemName: "chevron.right").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.tertiary)
-            }
-        }
-        .padding(.horizontal, 16)
-        .frame(minHeight: 56)
-        .contentShape(Rectangle())
-    }
-}
-
-struct AccountToggleRow: View {
-    let symbol: String
-    let title: String
-    @Binding var isOn: Bool
-
-    var body: some View {
-        HStack(spacing: 14) {
-            AccountSymbol(name: symbol)
-            Toggle(title, isOn: $isOn)
-                .font(.system(size: 17))
-                .tint(Theme.accent)
-        }
-        .padding(.horizontal, 16)
-        .frame(minHeight: 56)
-    }
-}
-
-struct AccountButtonRow: View {
-    let symbol: String
-    let title: String
-    var destructive = false
-    var busy = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 14) {
-                AccountSymbol(name: symbol, destructive: destructive)
-                Text(title)
-                    .font(.system(size: 17))
-                    .foregroundStyle(destructive ? Color.red : Theme.accent)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                if busy { ProgressView() }
-            }
-            .padding(.horizontal, 16)
-            .frame(minHeight: 56)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressableStyle(scale: 0.98))
-        .disabled(busy)
-    }
-}
-
-/// 行首的符号：一枚小圆角方块里放白色符号
-struct AccountSymbol: View {
-    let name: String
-    var destructive = false
-
-    var body: some View {
-        Image(systemName: name)
-            .font(.system(size: 15, weight: .semibold))
-            .foregroundStyle(.white)
-            .frame(width: 30, height: 30)
-            .background((destructive ? Color.red : Color.white).opacity(destructive ? 0.75 : 0.16),
-                        in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
