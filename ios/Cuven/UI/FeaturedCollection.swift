@@ -79,6 +79,9 @@ struct FeaturedCollectionHeader: View {
     @State private var tint = Color(hue: 0.5, saturation: 0.55, brightness: 0.42)
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    /// 排在最前那部的海报（带的颜色从它取）
+    private var lead: URL? { covers.first.flatMap { $0 } }
+
     var body: some View {
         let posterW = min(150, max(92, (metrics.width * 0.27).rounded()))
         let lag: CGFloat = reduceMotion ? 0 : 0.08
@@ -119,12 +122,12 @@ struct FeaturedCollectionHeader: View {
             .padding(.trailing, -metrics.trailingInset)
             .allowsHitTesting(false)
         }
-        .task(id: covers.first ?? nil) { await loadTint() }
+        .task(id: lead) { await loadTint() }
     }
 
     /// 带的颜色：排在最前那张海报的平均色（只取色相，饱和度、亮度落到参考图那种青绿的深浅）
     private func loadTint() async {
-        guard let u = covers.first ?? nil,
+        guard let u = lead,
               let img = await ImagePipeline.shared.image(u, maxPixel: 96), let cg = img.cgImage,
               let c = ImageEffects.averageColor(cg, bottom: 1) else { return }
         var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
@@ -140,7 +143,7 @@ struct FeaturedCollectionHeader: View {
 struct PosterFan: View {
     let covers: [URL?]
     let width: CGFloat
-    @State private var open = false
+    @State private var fanned = false
     @State private var float = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -155,7 +158,7 @@ struct PosterFan: View {
         ZStack {
             ForEach(Array(covers.enumerated()), id: \.offset) { i, url in
                 let l = Self.layout[min(i, Self.layout.count - 1)]
-                let spread: Bool = open || reduceMotion
+                let spread: Bool = fanned || reduceMotion
                 let tilt: Double = spread ? l.tilt : 0
                 let angle: Double = spread ? l.angle : 0
                 let dx: CGFloat = spread ? l.x * width : 0
@@ -182,8 +185,8 @@ struct PosterFan: View {
         }
         .frame(width: width * 2.9)
         .onAppear {
-            guard !open else { return }
-            open = true
+            guard !fanned else { return }
+            fanned = true
             // 弹开那一下走完再开始浮动：两种动画分开，弹开不会被卷进无限循环里
             guard !reduceMotion else { return }
             Task { @MainActor in
