@@ -32,9 +32,11 @@ struct ZoomStack<Content: View>: View {
     var body: some View {
         NavigationStack {
             content()
-                .navigationDestination(for: Route.self) { RouteView(route: $0) }
+                // iPhone Duo「侧边一列」的形态：推进去的每一页也要收起系统标签栏（不然推进去它又回来了，见 DuoNav.swift）
+                .duoHidesTabBar()
+                .navigationDestination(for: Route.self) { RouteView(route: $0).duoHidesTabBar() }
                 .navigationDestination(for: ZoomTarget.self) { t in
-                    RouteView(route: t.route).navigationTransition(.zoom(sourceID: t, in: ns))
+                    RouteView(route: t.route).navigationTransition(.zoom(sourceID: t, in: ns)).duoHidesTabBar()
                 }
         }
         .environment(\.zoomNamespace, ns)

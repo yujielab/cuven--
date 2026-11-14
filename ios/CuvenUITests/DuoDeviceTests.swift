@@ -43,7 +43,7 @@ final class DuoDeviceTests: XCTestCase {
             agree.tap()
             sleep(2)
             XCTAssertFalse(app.buttons["pg-agree"].exists, "点了「同意并继续」闸门还在")
-            XCTAssertTrue(app.buttons["主页"].firstMatch.waitForExistence(timeout: 10), "同意以后没到主页")
+            XCTAssertTrue(navButton(app, "主页").waitForExistence(timeout: 10), "同意以后没到主页")
         } else {
             print("DUO privacy: agree still disabled (hint: \(app.staticTexts["pg-hint"].firstMatch.label))")
         }
@@ -62,7 +62,7 @@ final class DuoDeviceTests: XCTestCase {
         cta.tap()
         sleep(2)
         XCTAssertFalse(app.buttons["welcome-continue"].exists, "点了「确认并继续」欢迎页还在")
-        XCTAssertTrue(app.buttons["主页"].firstMatch.waitForExistence(timeout: 10), "欢迎页之后没到主页")
+        XCTAssertTrue(navButton(app, "主页").waitForExistence(timeout: 10), "欢迎页之后没到主页")
     }
 
     func testPortrait() {
@@ -290,10 +290,17 @@ final class DuoDeviceTests: XCTestCase {
         sleep(1)
     }
 
-    /// 标签：竖在侧边时不算 tabBars，直接按名字找按钮（少问一次）
+    /// 导航里的一格：按名字（label）找。折起时是 App 自己画在侧边那一列的导航（DuoNav，标识是 nav-*），
+    /// 展开竖拿时是系统标签栏；两种都按 label 认，取第一个点得到的（收起的系统标签栏若还在层级里，点不到，跳过）
+    private func navButton(_ app: XCUIApplication, _ name: String) -> XCUIElement {
+        app.buttons.matching(NSPredicate(format: "label == %@", name)).firstMatch
+    }
+
     private func tab(_ app: XCUIApplication, _ name: String) {
-        let b = app.buttons[name].firstMatch
-        if b.waitForExistence(timeout: 5) { b.tap() }
+        let q = app.buttons.matching(NSPredicate(format: "label == %@", name))
+        guard q.firstMatch.waitForExistence(timeout: 5) else { return }
+        let b = q.allElementsBoundByIndex.first { $0.isHittable } ?? q.firstMatch
+        b.tap()
     }
 
     /// 系统返回钮：竖在侧边时不在 navigationBars 里，按它的标识找
