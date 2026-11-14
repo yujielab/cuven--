@@ -51,8 +51,10 @@ struct DetailAboutRow: View {
             .fixedSize(horizontal: false, vertical: true)
             .scrollTargetLayout()
         }
-        .contentMargins(.horizontal, metrics.margin, for: .scrollContent)
+        // 一直铺到侧边那一列底下，不在安全区边上被切掉（用户要求）
+        .dsBleedRow(metrics)
         .scrollTargetBehavior(.viewAligned)
+        .scrollClipDisabled()
         .sheet(item: $open) { c in
             DetailAboutSheet(card: c)
                 .navigationTransition(.zoom(sourceID: c.id, in: ns))

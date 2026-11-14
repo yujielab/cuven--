@@ -157,7 +157,8 @@ struct SearchView: View {
             GeometryReader { geo in
                 // 系统栏竖在侧边（iPhone Duo 折起时 / 展开横拿时）：搜索框不挂在底部的标签栏上，得在标题下面一直显示
                 let sideBars = abs(geo.safeAreaInsets.leading - geo.safeAreaInsets.trailing) > 30
-                content(DSMetrics(width: geo.size.width))
+                let insets = geo.safeAreaInsets
+                content(DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing))
                     .searchable(text: $query, placement: sideBars ? .navigationBarDrawer(displayMode: .always) : .automatic,
                                 prompt: "电影、剧集、年份")
             }
@@ -177,14 +178,21 @@ struct SearchView: View {
     private func content(_ metrics: DSMetrics) -> some View {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         return ScrollView {
-            if q.isEmpty {
-                landing(metrics)
-            } else {
-                results(q, metrics)
+            Group {
+                if q.isEmpty {
+                    landing(metrics)
+                } else {
+                    results(q, metrics)
+                }
             }
+            // 字、网格、列表留在安全区里；横着的一排自己铺到侧边那一列底下（dsBleedRow）
+            .padding(.leading, metrics.leadingInset)
+            .padding(.trailing, metrics.trailingInset)
         }
         .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(.immediately)
+        // 整页铺满（连同侧边那一列）
+        .ignoresSafeArea(edges: .horizontal)
         .background(Theme.bg)
     }
 

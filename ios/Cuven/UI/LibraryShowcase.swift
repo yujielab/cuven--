@@ -35,9 +35,11 @@ struct LibraryView: View {
         ZoomStack {
             GeometryReader { geo in
                 let vh = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
-                let vw = geo.size.width
+                // 整页铺满（用户要求：所有元素都能越过安全区）：画幅、预告片连同侧边那一列一起铺满；字留在安全区里
+                let lead = geo.safeAreaInsets.leading, trail = geo.safeAreaInsets.trailing
+                let vw = geo.size.width + lead + trail
                 let top = geo.safeAreaInsets.top
-                let margin = DSMetrics(width: vw).margin
+                let margin = DSMetrics(width: geo.size.width).margin + lead
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         if feed.isEmpty {
@@ -46,7 +48,7 @@ struct LibraryView: View {
                                 .overlay(alignment: .top) { ShowcaseHeader(top: top, margin: margin).allowsHitTesting(false) }
                         }
                         ForEach(feed) { e in
-                            ShowcaseChapter(video: e.video, vw: vw, vh: vh, top: top, trailer: trailer,
+                            ShowcaseChapter(video: e.video, vw: vw, vh: vh, top: top, lead: lead, trail: trail, trailer: trailer,
                                             isActive: active == e.id,
                                             report: { center, isCovered in
                                                 // 换章时连「画面是否滚出屏幕」一起换成这一章的
@@ -68,7 +70,7 @@ struct LibraryView: View {
                     }
                 }
                 .scrollIndicators(.hidden)
-                .ignoresSafeArea(edges: .top)
+                .ignoresSafeArea(edges: [.top, .horizontal])
                 .background(Color.black)
                 .refreshable {
                     await model.refreshAll()
@@ -183,6 +185,9 @@ struct ShowcaseChapter: View {
     let vw: CGFloat
     let vh: CGFloat
     let top: CGFloat
+    /// 两侧安全区（侧边那一列）：画幅铺满整个窗口，字、钮按它们留在安全区里
+    var lead: CGFloat = 0
+    var trail: CGFloat = 0
     let trailer: ShowcaseTrailer
     let isActive: Bool
     /// (这一章跨着屏幕中线, 画幅已经整个滚出屏幕)
@@ -204,13 +209,13 @@ struct ShowcaseChapter: View {
         let cover = max(vw / boxW, (vh - top) / boxH)
         let contentTop = portalH - overlap
         let H = vh, T = top
-        let margin = DSMetrics(width: vw).margin
+        let margin = DSMetrics(width: vw - lead - trail).margin
         let m = full ?? model.meta(video)
 
         // 章的高度 = 面板的顶边 + 面板本身（不再按画幅的行程定高：面板短的那一章底下不会空出一块黑）
         VStack(spacing: 0) {
             Color.clear.frame(height: contentTop)
-            ShowcaseIntro(video: video, meta: m, vw: vw)
+            ShowcaseIntro(video: video, meta: m, vw: vw, lead: lead, trail: trail)
         }
         .frame(width: vw, alignment: .top)
         .background(alignment: .top) {
@@ -260,7 +265,7 @@ struct ShowcaseChapter: View {
                 if isActive && trailer.loaded && trailer.path == video.path {
                     ShowcaseControl(trailer: trailer)
                         .padding(.top, top + 12)
-                        .padding(.trailing, max(8, margin - 5))
+                        .padding(.trailing, max(8, margin - 5) + trail)
                         .frame(width: vw, alignment: .topTrailing)
                         .visualEffect { content, proxy in
                             let y = proxy.frame(in: .scrollView(axis: .vertical)).minY
@@ -288,7 +293,8 @@ struct ShowcaseChapter: View {
 
     /// 居中：一行「年份 · 类型 · 片长」（网页版 sc-eyebrow）在上，字标（没有字标就是片名，Large Title 粗体）在下
     @ViewBuilder private func copy(_ m: Meta?) -> some View {
-        let w = min(vw * 0.84, 460)
+        let safeW = vw - lead - trail
+        let w = min(safeW * 0.84, 460)
         VStack(spacing: 14) {
             let line = eyebrow(m)
             if !line.isEmpty {
@@ -298,7 +304,7 @@ struct ShowcaseChapter: View {
                     .lineLimit(1)
             }
             if let logo = atv?.logo ?? model.logoArtString(video), !logo.isEmpty {
-                LogoImage(url: TMDBImage.url(logo, "w500"), height: vw >= 600 ? 120 : 96, fallback: model.title(video), maxWidth: w * 0.8)
+                LogoImage(url: TMDBImage.url(logo, "w500"), height: safeW >= 600 ? 120 : 96, fallback: model.title(video), maxWidth: w * 0.8)
                     .frame(maxWidth: w * 0.8)
             } else {
                 Text(model.title(video))
@@ -311,7 +317,8 @@ struct ShowcaseChapter: View {
         }
         .frame(width: w)
         .shadow(color: .black.opacity(0.3), radius: 10, y: 2)
-        .position(x: vw / 2, y: vh * 0.5)
+        // 居中在安全区的正中（不是整个窗口的正中：不压到侧边那一列）
+        .position(x: lead + safeW / 2, y: vh * 0.5)
     }
 
     /// 「2026 · 科幻 · 冒险 · 116 分钟」
@@ -407,9 +414,11 @@ struct ShowcaseIntro: View {
     let video: Video
     let meta: Meta?
     let vw: CGFloat
+    var lead: CGFloat = 0
+    var trail: CGFloat = 0
 
     var body: some View {
-        let metrics = DSMetrics(width: vw)
+        let metrics = DSMetrics(width: vw - lead - trail)
         let resume = model.playback.resumePosition(video.path) != nil
         let stills = (meta?.stills ?? []).compactMap { s -> URL? in TMDBImage.url(s.url ?? s.thumb, "w780") }.prefix(10)
         VStack(alignment: .leading, spacing: 20) {
@@ -436,7 +445,7 @@ struct ShowcaseIntro: View {
                         .lineLimit(2)
                 }
             }
-            .padding(.horizontal, metrics.margin)
+            .padding(.leading, metrics.margin + lead).padding(.trailing, metrics.margin + trail)
 
             HStack(spacing: 12) {
                 // F85：按钮是动词；看了一半的直接接着放（S17）
@@ -455,7 +464,7 @@ struct ShowcaseIntro: View {
                 .accessibilityIdentifier("library-movie")
             }
             .frame(maxWidth: 460)
-            .padding(.horizontal, metrics.margin)
+            .padding(.leading, metrics.margin + lead).padding(.trailing, metrics.margin + trail)
 
             if !stills.isEmpty {
                 // 剧照：一排 16:9（网页版 sc-gallery），停在左边线上、右边露出下一张一截（S8）
@@ -463,7 +472,7 @@ struct ShowcaseIntro: View {
                     Text("剧照")
                         .font(.dsShelfTitle(wide: metrics.wide))
                         .foregroundStyle(.primary)
-                        .padding(.horizontal, metrics.margin)
+                        .padding(.leading, metrics.margin + lead).padding(.trailing, metrics.margin + trail)
                         .accessibilityAddTraits(.isHeader)
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: metrics.gutter) {
@@ -478,7 +487,9 @@ struct ShowcaseIntro: View {
                         }
                         .scrollTargetLayout()
                     }
-                    .contentMargins(.horizontal, metrics.margin, for: .scrollContent)
+                    // 剧照一排铺满整个宽（连同侧边那一列），第一张停在安全区的左边线上
+                    .contentMargins(.leading, metrics.margin + lead, for: .scrollContent)
+                    .contentMargins(.trailing, metrics.margin + trail, for: .scrollContent)
                     .scrollTargetBehavior(.viewAligned)
                 }
             }
@@ -486,7 +497,7 @@ struct ShowcaseIntro: View {
             // 章与章之间：一道两头渐隐的细线（网页版 sc-rule）
             LinearGradient(colors: [.clear, .white.opacity(0.14), .clear], startPoint: .leading, endPoint: .trailing)
                 .frame(height: 1)
-                .padding(.horizontal, metrics.margin)
+                .padding(.leading, metrics.margin + lead).padding(.trailing, metrics.margin + trail)
                 .padding(.top, 12)
                 .accessibilityHidden(true)
         }
