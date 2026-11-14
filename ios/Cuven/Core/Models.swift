@@ -479,6 +479,71 @@ struct Trailer: Decodable, Hashable, Identifiable, Sendable {
     var id: String { hls }
 }
 
+// MARK: - 全片库的 Apple TV 素材（POST /api/atv/art）
+//
+// 电影的画面一律 Apple TV 优先、TMDB 兜底（片名、简介、类型这些字仍是 TMDB 的中文）。
+// 后端按英文名 + 年份在 Apple TV 上对片（片名对得上、年份差一年以内才算），成品存在 R2，一次回一批。
+
+/// 一部电影在 Apple TV 上的素材：都是 Apple 图床（mzstatic）现成的地址，没有的项是 nil
+struct AtvArt: Codable, Hashable, Sendable {
+    var id: String?
+    var title: String?
+    var year: Int?
+    /// 2:3 带片名的海报（Apple 有才有），pw 宽
+    var poster: String?
+    /// 竖版无字主视觉（宽高比约 0.46），pw 宽：放进 2:3 的卡里居中裁，再压上字标
+    var tall: String?
+    /// 16:9 带片名排版的成品图，w 宽
+    var wide: String?
+    /// 16:9 无字背景，w 宽
+    var background: String?
+    /// 片名字标（PNG，1000 宽）
+    var logo: String?
+
+    enum CodingKeys: String, CodingKey { case id, title, year, poster, tall, wide, background, logo }
+
+    init(id: String? = nil, title: String? = nil, year: Int? = nil, poster: String? = nil, tall: String? = nil,
+         wide: String? = nil, background: String? = nil, logo: String? = nil) {
+        self.id = id; self.title = title; self.year = year; self.poster = poster; self.tall = tall
+        self.wide = wide; self.background = background; self.logo = logo
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = c.str(.id)
+        title = c.str(.title)
+        year = c.int(.year)
+        poster = c.str(.poster)
+        tall = c.str(.tall)
+        wide = c.str(.wide)
+        background = c.str(.background)
+        logo = c.str(.logo)
+    }
+}
+
+/// 回包：items 是对上的；pending 是这一轮还没来得及问（后端每次有预算），过一秒再问；两边都没有的键 = Apple TV 上没有
+struct AtvArtResponse: Decodable, Sendable {
+    var items: [String: AtvArt]
+    var pending: [String]
+
+    enum CodingKeys: String, CodingKey { case items, pending }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // 值写成 null 的键也当「没有」
+        let raw = (try? c.decode([String: AtvArt?].self, forKey: .items)) ?? [:]
+        items = raw.compactMapValues { $0 }
+        pending = (try? c.decode([String].self, forKey: .pending)) ?? []
+    }
+}
+
+/// 问一部：k 是客户端自己的键（同一部片的各个版本共用），t 是拉丁字母的片名（最好的在前，最多三个），y 是年份
+struct AtvArtQuery: Encodable, Hashable, Sendable {
+    var k: String
+    var t: [String]
+    var y: Int?
+}
+
 /// 整页清单：首页分区标题「›」进去的，和搜索页「浏览」里的某一类
 enum Shelf: Hashable {
     case newest, picks, series, watchlist, continueWatching

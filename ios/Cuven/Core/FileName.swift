@@ -122,3 +122,21 @@ enum TMDBImage {
         return URL(string: raw)
     }
 }
+
+/// Apple 图床（mzstatic）的地址：末尾一段是「宽x高[裁切码].格式」，图床按这段现做（与 Worker 的 atvFill 同一个规矩）。
+/// 换一个宽度、按原比例算高，就能要到合适大小的图：卡片要小图，全屏头部要大图（F62：按 点 × 屏幕倍率 要像素）
+enum AppleImage {
+    private static let tail = try! NSRegularExpression(pattern: "/([0-9]+)x([0-9]+)([A-Za-z]*)\\.([A-Za-z0-9]+)$")
+
+    static func sized(_ raw: String?, width: Int) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        guard width > 0, raw.contains("mzstatic.com") else { return raw }
+        let ns = raw as NSString
+        guard let m = tail.firstMatch(in: raw, range: NSRange(location: 0, length: ns.length)),
+              let w = Int(ns.substring(with: m.range(at: 1))), let h = Int(ns.substring(with: m.range(at: 2))),
+              w > 0, h > 0 else { return raw }
+        let nh = Int((Double(width) * Double(h) / Double(w)).rounded())
+        let code = ns.substring(with: m.range(at: 3)), ext = ns.substring(with: m.range(at: 4))
+        return ns.replacingCharacters(in: m.range, with: "/\(width)x\(nh)\(code).\(ext)")
+    }
+}

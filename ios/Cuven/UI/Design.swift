@@ -210,19 +210,49 @@ struct DSParallaxArt: View {
 
 // MARK: - 卡（tvOS 的 lockup：画面 + 下面的字，一起放大缩小：T20、T22）
 
-/// 竖版海报（2:3）：海报本来就带片名，所以卡下的字只在焦点那张出现（T20）
+/// 竖版主视觉上压的字标：Apple TV 没有现成带片名的海报、用它那张无字的竖版主视觉时，卡还得认得出是哪一部（T20）。
+/// 底部一层渐暗保证字标的对比度（F34、C58）；字标高约卡高的 18%、宽不超过卡宽的八成，居中压在下沿上方。
+/// 它是卡的前景：画面在后面有视差，字标不动（S12：两层）；跟着卡一起放大，因为它就在卡里
+struct DSPosterLogo: View {
+    let logo: URL
+    let size: CGSize
+    var title: String? = nil
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            LinearGradient(stops: [
+                .init(color: .clear, location: 0.45),
+                .init(color: .black.opacity(0.7), location: 1),
+            ], startPoint: .top, endPoint: .bottom)
+            LogoImage(url: logo, height: (size.height * 0.18).rounded(), alignment: .center,
+                      fallback: title, maxWidth: (size.width * 0.8).rounded())
+                .padding(.horizontal, (size.width * 0.1).rounded())
+                .padding(.bottom, (size.height * 0.07).rounded())
+        }
+        .frame(width: size.width, height: size.height)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+/// 竖版海报（2:3）：海报本来就带片名，所以卡下的字只在焦点那张出现（T20）。
+/// logo：画面是无字的竖版主视觉时（Apple TV 素材）压在下面的字标
 struct DSPosterLockup: View {
     let art: URL?
     let title: String
     var subtitle: String? = nil
     let metrics: DSMetrics
     var width: CGFloat? = nil
+    var logo: URL? = nil
 
     var body: some View {
         let w = width ?? metrics.posterWidth
         let h = (w * 1.5).rounded()
         VStack(alignment: .leading, spacing: 10) {
             DSParallaxArt(url: art, metrics: metrics, size: CGSize(width: w, height: h))
+                .overlay {
+                    if let logo { DSPosterLogo(logo: logo, size: CGSize(width: w, height: h), title: title) }
+                }
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .modifier(DSFocusShadow(metrics: metrics, cardWidth: w))
             VStack(alignment: .leading, spacing: 2) {

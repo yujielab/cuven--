@@ -174,7 +174,8 @@ struct ShowcaseChapter: View {
 
         ZStack(alignment: .top) {
             // ① 画幅：一块 16:9，按滚动放大 / 收回，钉在屏上
-            ShowcaseMedia(video: video, art: atv?.background ?? m?.backdrop ?? m?.poster, trailer: trailer, isActive: isActive)
+            // 画幅：这一章的 Apple TV 查询（顺带预告片）→ 全片库的 Apple TV 素材 → TMDB
+            ShowcaseMedia(video: video, art: atv?.background ?? model.backgroundArtString(video), trailer: trailer, isActive: isActive)
                 .frame(width: boxW, height: boxH)
                 .visualEffect { content, proxy in
                     let y = proxy.frame(in: .scrollView(axis: .vertical)).minY - T
@@ -250,7 +251,7 @@ struct ShowcaseChapter: View {
     @ViewBuilder private func copy(_ m: Meta?) -> some View {
         let w = min(vw * 0.84, 460)
         VStack(spacing: 12) {
-            if let logo = atv?.logo ?? m?.logo, !logo.isEmpty {
+            if let logo = atv?.logo ?? model.logoArtString(video), !logo.isEmpty {
                 LogoImage(url: TMDBImage.url(logo, "w500"), height: vw >= 600 ? 120 : 96, fallback: model.title(video), maxWidth: w * 0.8)
                     .frame(maxWidth: w * 0.8)
             } else {
@@ -407,7 +408,7 @@ struct ShowcaseIntro: View {
     private func play() {
         PlayerCoordinator.shared.play(PlayRequest(path: video.path, name: video.name, title: model.title(video),
                                                   subtitle: model.year(video).map { String($0) },
-                                                  artwork: meta?.backdrop ?? meta?.poster), model: model)
+                                                  artwork: model.backgroundArtString(video)), model: model)
     }
 }
 

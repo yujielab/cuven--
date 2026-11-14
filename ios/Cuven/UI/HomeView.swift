@@ -76,10 +76,11 @@ struct HomeView: View {
         heroItems.map { it in
             let v = it.video
             let meta = model.meta(v)
-            let logo = (it.hero.logo?.isEmpty == false ? it.hero.logo : nil) ?? meta?.logo
+            // 头图源本来就是 Apple TV 的素材；缺哪样先补全片库的 Apple TV 素材，再退 TMDB
+            let logo = (it.hero.logo?.isEmpty == false ? it.hero.logo : nil) ?? model.logoArtString(v)
             return DSHeroPage(id: it.id,
-                              wideArt: it.hero.background ?? meta?.backdrop,
-                              tallArt: it.hero.poster ?? meta?.posterClean ?? meta?.poster,
+                              wideArt: it.hero.background ?? model.backgroundArtString(v),
+                              tallArt: it.hero.poster ?? model.appleArt(v)?.tall ?? meta?.posterClean ?? meta?.poster,
                               logo: logo,
                               title: model.title(v),
                               meta: heroMeta(it),
@@ -100,8 +101,9 @@ struct HomeView: View {
             // 大图源取不到：退回最新加入、带横版剧照的几部
             for v in model.newest.prefix(6) {
                 let m = model.meta(v)
-                guard let bd = m?.backdrop else { continue }
-                out.append(HeroItem(hero: Hero.fallback(path: v.path, backdrop: bd, poster: m?.posterClean ?? m?.poster), video: v))
+                let apple = model.appleArt(v)
+                guard let bd = apple?.background ?? m?.backdrop else { continue }
+                out.append(HeroItem(hero: Hero.fallback(path: v.path, backdrop: bd, poster: apple?.tall ?? m?.posterClean ?? m?.poster), video: v))
             }
         }
         return out
@@ -117,10 +119,9 @@ struct HomeView: View {
 
     private func playHero(_ it: HeroItem) {
         let v = it.video
-        let meta = model.meta(v)
         PlayerCoordinator.shared.play(PlayRequest(path: v.path, name: v.name, title: model.title(v),
                                                   subtitle: model.year(v).map { String($0) },
-                                                  artwork: meta?.backdrop ?? it.hero.background), model: model)
+                                                  artwork: it.hero.background ?? model.backgroundArtString(v)), model: model)
     }
 
     private var loadFailed: Bool {
@@ -171,7 +172,7 @@ struct HomeView: View {
                 DSShelf(metrics: m) {
                     ForEach(entries) { e in
                         Button { resume(e) } label: {
-                            DSWideLockup(art: TMDBImage.url(e.artwork, "w780"), title: e.title,
+                            DSWideLockup(art: continueArt(e), title: e.title,
                                          subtitle: remainingLabel(e), progress: e.fraction, metrics: m)
                         }
                         .buttonStyle(PressableStyle())
@@ -191,8 +192,10 @@ struct HomeView: View {
             DSSection(title: "今日推荐", metrics: m, route: .shelf(.picks)) {
                 DSShelf(metrics: m) {
                     ForEach(Array(list.enumerated()), id: \.element.id) { i, v in
+                        let art = model.posterArt(v, width: m.posterWidth)
                         ZoomLink(route: .movie(v), slot: "picks") {
-                            DSPosterLockup(art: posterURL(v, m), title: model.title(v), subtitle: rankLabel(i + 1, v), metrics: m)
+                            DSPosterLockup(art: art.url, title: model.title(v), subtitle: rankLabel(i + 1, v), metrics: m,
+                                           logo: art.logo)
                         }
                         // 长按：播放 / 想看（C21、C43、S23）
                         .movieMenu(v)
@@ -211,9 +214,8 @@ struct HomeView: View {
             DSSection(title: "最新加入", metrics: m, route: .shelf(.newest)) {
                 DSShelf(metrics: m) {
                     ForEach(list) { v in
-                        let meta = model.meta(v)
                         ZoomLink(route: .movie(v), slot: "newest") {
-                            DSWideLockup(art: TMDBImage.url(meta?.backdrop ?? meta?.posterClean ?? meta?.poster, "w780"),
+                            DSWideLockup(art: model.wideArt(v),
                                          title: model.title(v), subtitle: addedLabel(v),
                                          progress: model.playback.entry(v.path)?.fraction, metrics: m)
                                 .overlay {
@@ -261,8 +263,10 @@ struct HomeView: View {
             DSSection(title: String(g.year), metrics: m, route: .year(g.year)) {
                 DSShelf(metrics: m) {
                     ForEach(g.videos.prefix(15)) { v in
+                        let art = model.posterArt(v, width: m.posterWidth)
                         ZoomLink(route: .movie(v), slot: "year-\(g.year)") {
-                            DSPosterLockup(art: posterURL(v, m), title: model.title(v), subtitle: genreLabel(v), metrics: m)
+                            DSPosterLockup(art: art.url, title: model.title(v), subtitle: genreLabel(v), metrics: m,
+                                           logo: art.logo)
                         }
                         .movieMenu(v)
                     }
@@ -291,10 +295,11 @@ struct HomeView: View {
 
     // MARK: 卡下的字（F84：短、平实）
 
-    /// 竖版海报的图：展开时卡大，取大一档（S12：按 @3x 备图）
-    private func posterURL(_ v: Video, _ m: DSMetrics) -> URL? {
-        let meta = model.meta(v)
-        return TMDBImage.url(meta?.poster ?? meta?.posterClean, m.posterWidth * 3 > 342 ? "w500" : "w342")
+    /// 继续观看的画面：电影按片库里的那一部取（Apple TV 优先、TMDB 兜底：AppModel.wideArt）；
+    /// 剧集用存进度时记下的那一集剧照
+    private func continueArt(_ e: WatchEntry) -> URL? {
+        if e.seriesPath == nil, let v = model.video(path: e.path) { return model.wideArt(v) }
+        return TMDBImage.url(e.artwork, "w780")
     }
 
     /// 「第 1 名 · 科幻」：名次进卡下的字，不再画描边大数字（F3、F80）

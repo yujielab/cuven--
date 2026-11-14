@@ -32,17 +32,18 @@ struct LibraryGrid: View {
         let w = max(40, metrics.cardWidth(columns: n))
         // 行距：T24 网格的竖向间距至少 100，按 S5 缩到当前宽度，至少 24（卡下还有两行字）
         let rowGap = max(24, (metrics.width * 100 / 1920).rounded())
-        let size = w < 120 ? "w342" : "w500"
         LazyVGrid(columns: Array(repeating: GridItem(.fixed(w), spacing: metrics.gutter, alignment: .top), count: n),
                   alignment: .leading, spacing: rowGap) {
             ForEach(videos) { v in
-                let m = model.meta(v)
+                // 画面：Apple TV 优先（带片名的海报，或无字的竖版主视觉 + 字标），TMDB 兜底
+                let art = model.posterArt(v, width: w)
                 ZoomLink(route: .movie(v), slot: slot) {
-                    LibraryGridCard(art: TMDBImage.url(m?.poster ?? m?.posterClean, size),
+                    LibraryGridCard(art: art.url,
                                     title: model.title(v),
                                     subtitle: model.year(v).map { String($0) },
                                     width: w,
-                                    progress: model.playback.entry(v.path)?.fraction)
+                                    progress: model.playback.entry(v.path)?.fraction,
+                                    logo: art.logo)
                 }
                 .accessibilityIdentifier(identifier)
                 .movieMenu(v)
@@ -53,13 +54,15 @@ struct LibraryGrid: View {
 }
 
 /// 网格里的一张：海报（2:3、圆角 12，和 DSPosterLockup 同一个样子），下面片名与一行灰字（F18）。
-/// 看了一半的，海报底部一条细进度（F36：用形状表达，不只靠颜色）
+/// 看了一半的，海报底部一条细进度（F36：用形状表达，不只靠颜色）。
+/// logo：画面是 Apple TV 无字的竖版主视觉时压在下面的字标（DSPosterLogo）
 struct LibraryGridCard: View {
     let art: URL?
     let title: String
     var subtitle: String? = nil
     let width: CGFloat
     var progress: Double? = nil
+    var logo: URL? = nil
 
     var body: some View {
         let h = (width * 1.5).rounded()
@@ -67,6 +70,9 @@ struct LibraryGridCard: View {
             Color(white: 0.12)
                 .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: .clear) }
                 .frame(width: width, height: h)
+                .overlay {
+                    if let logo { DSPosterLogo(logo: logo, size: CGSize(width: width, height: h), title: title) }
+                }
                 .overlay(alignment: .bottom) {
                     if let p = progress, p > 0.01 {
                         LibraryProgressBar(fraction: p)
@@ -170,7 +176,8 @@ struct LibraryMovieRow: View {
         let m = model.meta(video)
         let line = subtitle ?? [model.year(video).map { String($0) }, Self.genres(m)].compactMap { $0 }.joined(separator: " · ")
         NavigationLink(value: Route.movie(video)) {
-            LibraryRow(art: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), title: model.title(video),
+            // 小图：Apple TV 优先、TMDB 兜底（行里已经写着片名，不压字标）
+            LibraryRow(art: model.thumbArt(video), title: model.title(video),
                        subtitle: line.isEmpty ? "电影" : line, rank: rank)
         }
         .accessibilityIdentifier(identifier)
@@ -327,16 +334,17 @@ struct SearchView: View {
     /// 电影：竖版海报一排（DSPosterLockup：停在左侧基准线上的那张放大、片名浮出：T20、S7–S9）
     @ViewBuilder private func moviesSection(_ list: [Video], _ metrics: DSMetrics) -> some View {
         if !list.isEmpty {
-            let size = metrics.posterWidth < 120 ? "w342" : "w500"
             DSSection(title: "电影", metrics: metrics) {
                 DSShelf(metrics: metrics) {
                     ForEach(list) { v in
-                        let meta = model.meta(v)
+                        // 画面：Apple TV 优先（海报，或竖版主视觉 + 字标），TMDB 兜底
+                        let art = model.posterArt(v, width: metrics.posterWidth)
                         ZoomLink(route: .movie(v), slot: "search-movie") {
-                            DSPosterLockup(art: TMDBImage.url(meta?.poster ?? meta?.posterClean, size),
+                            DSPosterLockup(art: art.url,
                                            title: model.title(v),
                                            subtitle: model.year(v).map { String($0) },
-                                           metrics: metrics)
+                                           metrics: metrics,
+                                           logo: art.logo)
                         }
                         .accessibilityIdentifier("search-movie")
                         .movieMenu(v)

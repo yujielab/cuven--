@@ -169,6 +169,13 @@ struct FolderCache: Codable {
     var folders: [LibraryFolder]
 }
 
+/// 全片库 Apple TV 素材的本地那一份：对上的素材、各自问到的时间、Apple TV 上没有的（记下时间，过几天再问）
+struct AtvArtCache: Codable {
+    var items: [String: AtvArt] = [:]
+    var stamps: [String: Double] = [:]
+    var misses: [String: Double] = [:]
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -199,6 +206,14 @@ final class AppModel {
     @ObservationIgnored private var started = false
     /// Apple TV 上对上的那一部（电影按文件路径、剧集按目录记）；对不上记 nil，一部只问一次
     @ObservationIgnored private var atvCache: [String: AtvLookup?] = [:]
+    /// 全片库电影的 Apple TV 素材（POST /api/atv/art），键见 atvArtKey：同一部片的各个版本共用一份。
+    /// 画面一律从下面几个取用函数拿：Apple TV 优先，TMDB 兜底
+    private(set) var atvArtIndex: [String: AtvArt] = [:]
+    @ObservationIgnored private var atvArtStamps: [String: Double] = [:]
+    @ObservationIgnored private var atvArtMisses: [String: Double] = [:]
+    /// 后端还没有这个接口（Worker 没重新部署）：这次打开不再问
+    @ObservationIgnored private var atvArtUnavailable = false
+    @ObservationIgnored private var atvArtLoading = false
     @ObservationIgnored private var seriesInflight: Set<String> = []
     @ObservationIgnored private var metaRound = 0
     /// 片库 / 元数据每变一次加一：首页那几排（电影清单、按年份、今日推荐）按它缓存，不在每次重绘时重算
@@ -244,6 +259,9 @@ final class AppModel {
         if let sm = DiskCache.load([String: Meta].self, "series-metas.json") { seriesMetas = sm }
         if let he = DiskCache.load([Hero].self, "heroes.json") { heroes = he }
         if let f = DiskCache.load(FolderCache.self, "folders.json") { folders = f.folders; libraryRoot = f.root }
+        if let a = DiskCache.load(AtvArtCache.self, "atv-art.json") {
+            atvArtIndex = a.items; atvArtStamps = a.stamps; atvArtMisses = a.misses
+        }
         metaReady = !metas.isEmpty
         dataVersion &+= 1
         Perf.log("restore: \(videos.count) videos, \(metas.count) metas")
@@ -265,6 +283,8 @@ final class AppModel {
             DiskCache.save(FolderCache(root: libraryRoot, folders: lib.folders), "folders.json")
             metaRound = 0
             await loadMetas()
+            // 片名、年份齐了再去 Apple TV 对画面：放到后台，不让下拉刷新等它（一轮可能要一两分钟）
+            Task { await self.loadAtvArt() }
         } catch {
             if videos.isEmpty { phase = .failed(error.localizedDescription) }
             freezeFresh()   // 没连上：就按上次存下的片库算
@@ -501,6 +521,171 @@ final class AppModel {
         return (r.trailers ?? []).filter { !$0.hls.isEmpty && !$0.hls.contains("/subscription/") }
     }
 
+    // MARK: 全片库的 Apple TV 素材（Apple TV 优先，TMDB 兜底）
+
+    /// 素材表的键：认出了 TMDB 编号的按编号（同一部片的 4K / 1080p 等版本共用一份），没认出的按文件路径
+    func atvArtKey(_ v: Video) -> String {
+        if let id = metas[v.name]?.id { return "m\(id)" }
+        return v.path
+    }
+
+    /// 这部电影在 Apple TV 上的素材（还没问到 / Apple TV 上没有就是 nil）
+    func appleArt(_ v: Video) -> AtvArt? { atvArtIndex[atvArtKey(v)] }
+
+    /// 去 Apple TV 对全片库的电影：片名、年份齐了以后在后台跑，一批 100 部；
+    /// 后端每次有预算，问不完的放在 pending 里，过一秒接着问。对上的、没有的都记在本地：
+    /// 没有的过 3 天再问，对上的 14 天后刷新一次（Apple 换图）。后端还没这个接口（404）就这次打开不再问
+    func loadAtvArt() async {
+        if DemoData.enabled || atvArtUnavailable || atvArtLoading { return }
+        atvArtLoading = true
+        defer { atvArtLoading = false }
+        let now = Date().timeIntervalSince1970
+        let missTTL: Double = 3 * 86_400, refreshAfter: Double = 14 * 86_400
+
+        // 先问首页上看得见的（今日推荐、最新加入），再按入库新旧问其余的；没问过的在前，要刷新的在后
+        var fresh: [AtvArtQuery] = [], stale: [AtvArtQuery] = []
+        var seen = Set<String>()
+        for v in todayPicks + movies {
+            let k = atvArtKey(v)
+            guard seen.insert(k).inserted else { continue }
+            if let t = atvArtMisses[k], now - t < missTTL { continue }
+            let known = atvArtIndex[k] != nil
+            if known, let t = atvArtStamps[k], now - t < refreshAfter { continue }
+            guard let q = atvArtQuery(v, key: k) else { continue }
+            if known { stale.append(q) } else { fresh.append(q) }
+        }
+        var queue = fresh + stale
+        guard !queue.isEmpty else { return }
+        Perf.log("atv-art: asking for \(queue.count) movies (\(fresh.count) new)")
+
+        // 结果攒在副本上，隔几轮才写回一次：看着这张表的视图（首页每一张卡）不至于每秒都重画。
+        // 第一轮马上写回——那一批就是首页上看得见的几部
+        var index = atvArtIndex
+        func publish() { if index != atvArtIndex { atvArtIndex = index } }
+        var rounds = 0, stalls = 0
+        while !queue.isEmpty && rounds < 40 {
+            rounds += 1
+            let batch = Array(queue.prefix(100))
+            let resp: AtvArtResponse
+            do {
+                resp = try await APIClient.shared.atvArt(batch)
+            } catch is APIClient.AtvArtUnavailable {
+                atvArtUnavailable = true
+                Perf.log("atv-art: endpoint not deployed, TMDB art only")
+                break
+            } catch {
+                break      // 网络断了：下次刷新再接着问
+            }
+            let pending = Set(resp.pending)
+            let stamp = Date().timeIntervalSince1970
+            for q in batch where !pending.contains(q.k) {
+                if let art = resp.items[q.k] {
+                    index[q.k] = art
+                    atvArtStamps[q.k] = stamp
+                    atvArtMisses[q.k] = nil
+                } else if index[q.k] == nil {
+                    atvArtMisses[q.k] = stamp            // Apple TV 上没有：过 3 天再问
+                } else {
+                    atvArtStamps[q.k] = stamp            // 以前对上过、这次没回：留着旧的，过 14 天再刷新
+                }
+            }
+            if rounds == 1 || rounds % 4 == 0 { publish() }
+            let done = batch.count - pending.count
+            queue = batch.filter { pending.contains($0.k) } + Array(queue.dropFirst(batch.count))
+            if rounds % 8 == 0 { saveAtvArt() }
+            if done == 0 {
+                stalls += 1
+                if stalls >= 2 { break }        // 后端这会儿一部也问不动：下次再来
+            } else {
+                stalls = 0
+            }
+            if !pending.isEmpty { try? await Task.sleep(nanoseconds: 1_000_000_000) }
+        }
+        publish()
+        saveAtvArt()
+        Perf.log("atv-art: \(atvArtIndex.count) matched, \(atvArtMisses.count) not on Apple TV, \(queue.count) left after \(rounds) rounds")
+    }
+
+    /// 问一部用的片名：TMDB 的英文名、原名、文件名里的片名，只留拉丁字母的（Apple TV 美区目录按英文名搜），最多三个
+    private func atvArtQuery(_ v: Video, key: String) -> AtvArtQuery? {
+        let m = meta(v)
+        var names: [String] = []
+        for raw in [m?.en, m?.originalTitle, FileName.title(v.name)] {
+            guard let s = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty,
+                  s.range(of: "\\p{Han}", options: .regularExpression) == nil,
+                  s.range(of: "[A-Za-z]", options: .regularExpression) != nil,
+                  !names.contains(where: { $0.caseInsensitiveCompare(s) == .orderedSame }) else { continue }
+            names.append(s)
+            if names.count == 3 { break }
+        }
+        guard !names.isEmpty else { return nil }
+        return AtvArtQuery(k: key, t: names, y: year(v))
+    }
+
+    private func saveAtvArt() {
+        DiskCache.save(AtvArtCache(items: atvArtIndex, stamps: atvArtStamps, misses: atvArtMisses), "atv-art.json")
+    }
+
+    /// 海报卡（2:3）：Apple 带片名的海报 → Apple 竖版主视觉（卡里居中裁）+ 字标压在下面 → TMDB 海报。
+    /// 竖版主视觉上没有字，所以要有字标（Apple 的，没有就 TMDB 的）才用它；连字标都没有就退回 TMDB 那张带片名的海报。
+    /// width 是卡宽（点）：Apple 的图按 点 × 3 要像素（F62），TMDB 的取 w342 / w500
+    func posterArt(_ v: Video, width: CGFloat = 0) -> (url: URL?, logo: URL?) {
+        let m = meta(v)
+        let px = width > 0 ? Int(min(1200, max(342, width * 3)).rounded()) : 0
+        if let a = appleArt(v) {
+            if let p = Self.nonEmpty(a.poster) { return (URL(string: AppleImage.sized(p, width: px) ?? p), nil) }
+            if let t = Self.nonEmpty(a.tall), let logo = Self.nonEmpty(a.logo) ?? Self.nonEmpty(m?.logo) {
+                return (URL(string: AppleImage.sized(t, width: px) ?? t), TMDBImage.url(logo, "w500"))
+            }
+        }
+        return (TMDBImage.url(m?.poster ?? m?.posterClean, width * 3 > 342 ? "w500" : "w342"), nil)
+    }
+
+    /// 列表行里的小图（行里已经写着片名，不压字标）：Apple 海报 → Apple 竖版主视觉 → TMDB 海报
+    func thumbArt(_ v: Video) -> URL? {
+        if let a = appleArt(v), let s = Self.nonEmpty(a.poster) ?? Self.nonEmpty(a.tall) {
+            return URL(string: AppleImage.sized(s, width: 200) ?? s)
+        }
+        let m = meta(v)
+        return TMDBImage.url(m?.poster ?? m?.posterClean, "w185")
+    }
+
+    /// 16:9 卡：Apple 带片名排版的 16:9 → Apple 无字背景 → TMDB 横版剧照 → TMDB 海报
+    func wideArt(_ v: Video) -> URL? {
+        if let a = appleArt(v), let s = Self.nonEmpty(a.wide) ?? Self.nonEmpty(a.background) { return URL(string: s) }
+        let m = meta(v)
+        return TMDBImage.url(m?.backdrop ?? m?.posterClean ?? m?.poster, "w780")
+    }
+
+    /// 无字的大画面（详情页横拿、资料库画幅、头图、播放器封面）：Apple 无字背景 → Apple 16:9 → TMDB 剧照。
+    /// 原样的地址字符串（这些地方自己用 TMDBImage.url 换尺寸）；Apple 的要大一号，铺满展开的屏也清楚
+    func backgroundArtString(_ v: Video) -> String? {
+        if let a = appleArt(v), let s = Self.nonEmpty(a.background) ?? Self.nonEmpty(a.wide) {
+            return AppleImage.sized(s, width: 1920)
+        }
+        let m = meta(v)
+        return Self.nonEmpty(m?.backdrop) ?? Self.nonEmpty(m?.poster)
+    }
+
+    /// 竖版全屏图（详情页竖拿、头图）：只有 Apple TV 有；要大图
+    func tallArtString(_ v: Video) -> String? {
+        AppleImage.sized(Self.nonEmpty(appleArt(v)?.tall), width: 1290)
+    }
+
+    /// 字标：Apple → TMDB（原样的地址字符串，交给 LogoImage 前用 TMDBImage.url 换尺寸）
+    func logoArtString(_ v: Video) -> String? {
+        Self.nonEmpty(appleArt(v)?.logo) ?? Self.nonEmpty(meta(v)?.logo)
+    }
+
+    func backgroundArt(_ v: Video) -> URL? { TMDBImage.url(backgroundArtString(v), "w1280") }
+
+    func logoArt(_ v: Video) -> URL? { TMDBImage.url(logoArtString(v), "w500") }
+
+    private static func nonEmpty(_ s: String?) -> String? {
+        guard let s, !s.isEmpty else { return nil }
+        return s
+    }
+
     /// 片库里的类型（电影 + 剧集都算），片子多的在前：搜索页「浏览」的格子
     var genres: [(name: String, count: Int)] {
         var n: [String: Int] = [:]
@@ -627,7 +812,7 @@ final class AppModel {
             guard s > 0 else { continue }
             let sub = [year(v).map { String($0) }, m?.genres?.prefix(2).joined(separator: " · ")].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
             hits.append(SearchHit(kind: .movie(v), title: title(v), subtitle: sub.isEmpty ? "电影" : sub,
-                                  image: TMDBImage.url(m?.poster, "w185"), score: s))
+                                  image: thumbArt(v), score: s))
         }
         for se in series {
             let m = seriesMetas[se.path]

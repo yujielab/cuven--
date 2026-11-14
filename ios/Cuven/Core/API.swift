@@ -129,6 +129,27 @@ final class APIClient: @unchecked Sendable {
         try await get("/api/atv/lookup", [("title", title), ("video", "1")], timeout: 20)
     }
 
+    /// 后端还没有 /api/atv/art（Worker 没重新部署）：这一次打开就不再问，画面全用 TMDB
+    struct AtvArtUnavailable: Error {}
+
+    private struct AtvArtRequest: Encodable { let items: [AtvArtQuery] }
+
+    /// 一批电影的 Apple TV 素材（全片库：海报、竖版主视觉、16:9、无字背景、字标）。一次最多 120 部。
+    /// 404 / 405 → AtvArtUnavailable；回包解不出来也按「没有这个接口」算（老版本的 Worker）
+    func atvArt(_ items: [AtvArtQuery]) async throws -> AtvArtResponse {
+        var req = URLRequest(url: url("/api/atv/art", [("w", "1280"), ("pw", "600"), ("f", "webp")]), timeoutInterval: 40)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(AtvArtRequest(items: items))
+        let (data, resp) = try await session.data(for: req)
+        if let http = resp as? HTTPURLResponse, http.statusCode == 404 || http.statusCode == 405 {
+            throw AtvArtUnavailable()
+        }
+        try check(resp, data)
+        guard let r = try? decoder.decode(AtvArtResponse.self, from: data) else { throw AtvArtUnavailable() }
+        return r
+    }
+
     // MARK: 播放
 
     func streamSign(path: String) async throws -> StreamSign {
