@@ -6,8 +6,9 @@ import UIKit
 // 头部：全幅画面（竖拿用 Apple TV 的竖版全屏图，横拿 16:9：S15），往下渐暗（F34），字压在左下（F1、F2）：
 // 字标（没有字标就是 Large Title 的片名）→ 一行信息「类型 · 年份 · 片长 · ★评分」（F18）→
 // 一颗白色「播放」+ 一颗「…」系统菜单（从头播放、复制直链、分享：S17、C11、C15、C35、C45）。
-// 下面只靠留白分区（F3、F12）：简介（三行后「更多」：F21、F24）→ 分集（剧集）→ 预告片（有才有）→
-// 演员（圆形照片：T21）→ 信息（左灰右白的几行）。
+// 下面照用户给的参考图（Apple「游戏」App 的详情页，DetailInfo.swift）：整页染上画面的颜色，一组一行粗体标题 + 一张半透明大圆角卡——
+// 简介（几行 + 导演）→ 分集（剧集）→ 预告片（有才有）→ 演员（圆形照片：T21）→ 影片详细信息（评分、类型、年份、片长、画面、声音、大小）
+// → 更多同类型的几部；往上滚过头部，顶上钉住一条：海报、片名、「播放」。
 // 不放玻璃卡、印章、法务行、剧照「第 N 幕」、分隔线（F38、F80、F84）；导航栏不垫底、不压自制的渐暗，
 // 系统的滚动边缘效果就够（C17、C27）；头部滚走了片名才出现在导航栏里（C12）。
 // 展开的 Duo 是同一套设计长大：边距、卡宽、字号都从 DSMetrics 来（S1、D2、I11）。
@@ -39,7 +40,12 @@ struct MovieDetailView: View {
             onRestart: restartAction(meta),
             file: (path: video.path, name: video.name),
             shareURL: DetailText.tmdbPage(kind: "movie", id: meta?.id),
-            about: aboutCards(meta),
+            genres: meta?.genres ?? [],
+            overview: meta?.overview,
+            director: meta?.director,
+            facts: facts(meta),
+            related: related(meta),
+            thumb: TMDBImage.url(meta?.poster ?? meta?.posterClean, "w185"),
             cast: meta?.cast ?? [],
             trailers: trailers,
             trailerArt: trailerArt(meta)
@@ -112,36 +118,48 @@ struct MovieDetailView: View {
         ])
     }
 
-    /// 「简介」那一排：简介、评分、影片规格；原来页面最底下「信息」的几行（类型、上映、片长、导演、格式）并进影片规格的弹层
-    private func aboutCards(_ m: Meta?) -> [DetailAboutCard] {
-        var out: [DetailAboutCard] = []
-        if let o = m?.overview, !o.isEmpty {
-            out.append(.synopsis(title: model.title(video), genres: m?.genres ?? [], overview: o))
-        }
+    /// 「影片详细信息」那张卡的几行（参考图：左边大号评分 / 描边徽章 / 大符号，右边一行带颜色的字）
+    private func facts(_ m: Meta?) -> [DetailFact] {
+        var out: [DetailFact] = []
         if let r = m?.rating, r > 0 {
-            out.append(.rating(r, percentile: model.ratingPercentile(r, series: false), pool: "电影"))
+            let (t, sub) = DetailFacts.ratingText(percentile: model.ratingPercentile(r, series: false), pool: "电影")
+            out.append(DetailFact(id: "rating", lead: .rating(r), text: t, sub: sub))
+        }
+        if let g = m?.genres, !g.isEmpty {
+            out.append(DetailFact(id: "genre", lead: .symbol(DetailFacts.genreSymbol(g.first)), text: g.joined(separator: "、")))
+        }
+        if let y = model.year(video) {
+            out.append(DetailFact(id: "year", lead: .symbol("calendar"), text: "\(y) 年上映"))
+        }
+        let runtime = Format.runtime(m?.runtime)
+        if !runtime.isEmpty {
+            out.append(DetailFact(id: "runtime", lead: .symbol("clock.fill"), text: runtime))
         }
         let spec = MediaSpec(name: video.name, size: video.size)
-        let runtime = Format.runtime(m?.runtime)
-        let year = model.year(video).map { String($0) }
-        let rows = [
-            DetailInfoRow(label: "类型", value: (m?.genres ?? []).joined(separator: "、")),
-            DetailInfoRow(label: "上映", value: year ?? ""),
-            DetailInfoRow(label: "片长", value: runtime),
-            DetailInfoRow(label: "导演", value: m?.director ?? ""),
-            DetailInfoRow(label: "分辨率", value: spec.resolution ?? ""),
-            DetailInfoRow(label: "动态范围", value: spec.range ?? ""),
-            DetailInfoRow(label: "视频", value: spec.video ?? ""),
-            DetailInfoRow(label: "音频", value: spec.audio ?? ""),
-            DetailInfoRow(label: "封装", value: spec.container ?? ""),
-            DetailInfoRow(label: "大小", value: spec.size ?? ""),
-            DetailInfoRow(label: "文件", value: video.name),
-        ].filter { !$0.value.isEmpty }
-        // 大字：分辨率 · 动态范围；文件名里读不出来就写片长
-        let title = spec.headline ?? (runtime.isEmpty ? (spec.container ?? "影片规格") : runtime)
-        let text = DetailText.line([spec.headline == nil ? nil : runtime, year, spec.video, spec.audio, spec.container, spec.size])
-        out.append(DetailAboutCard(id: "specs", title: title, caption: "影片规格", text: text, sheetTitle: "影片规格", rows: rows))
+        if let res = spec.resolution {
+            out.append(DetailFact(id: "video", lead: .badge(res == "1080p" || res == "720p" ? "HD" : res),
+                                  text: spec.headline ?? res, sub: spec.video))
+        }
+        if let audio = spec.audio {
+            out.append(DetailFact(id: "audio", lead: .symbol("speaker.wave.3.fill"), text: audio))
+        }
+        if let size = spec.size {
+            out.append(DetailFact(id: "size", lead: .badge(DetailFacts.sizeBadge(size)), text: size, sub: video.name))
+        }
         return out
+    }
+
+    /// 「更多××电影 ›」：同类型的几部（同的类型越多越靠前，再按评分）；标题点进这一类的全部
+    private func related(_ m: Meta?) -> DetailRelated? {
+        guard let g = m?.genres?.first else { return nil }
+        let items = model.related(to: video, limit: 3).map { v -> DetailRelatedItem in
+            let mm = model.meta(v)
+            return DetailRelatedItem(id: v.path, title: model.title(v),
+                                     subtitle: DetailText.line([model.year(v).map { String($0) }, mm?.genres?.first]),
+                                     art: TMDBImage.url(mm?.poster ?? mm?.posterClean, "w342"), route: .movie(v))
+        }
+        guard !items.isEmpty else { return nil }
+        return DetailRelated(title: "更多\(g)电影", route: .shelf(.genre(g)), items: items)
     }
 
     /// 预告片卡的画面：剧照轮着用；没有剧照就是背景图
@@ -213,7 +231,12 @@ struct SeriesDetailView: View {
             onRestart: restartAction(next),
             file: next.map { (path: $0.file.path, name: $0.file.name) },
             shareURL: DetailText.tmdbPage(kind: "tv", id: current.tmdbId ?? meta?.id),
-            about: aboutCards(meta),
+            genres: meta?.genres ?? [],
+            overview: meta?.overview,
+            director: meta?.director,
+            facts: facts(meta),
+            related: related(meta),
+            thumb: TMDBImage.url(meta?.poster ?? meta?.posterClean, "w185"),
             cast: meta?.cast ?? [],
             trailers: DetailText.playable(atv?.trailers),
             trailerArt: trailerArt(meta)
@@ -447,34 +470,56 @@ struct SeriesDetailView: View {
         }
     }
 
-    /// 「简介」那一排：简介、评分、影片规格（季与集数、语言、分辨率、动态范围、音频、封装；原来「信息」的几行也在影片规格的弹层里）
-    private func aboutCards(_ m: Meta?) -> [DetailAboutCard] {
-        var out: [DetailAboutCard] = []
-        if let o = m?.overview, !o.isEmpty {
-            out.append(.synopsis(title: m?.title ?? current.name, genres: m?.genres ?? [], overview: o))
-        }
+    /// 「影片详细信息」那张卡的几行：评分、类型、年份与季、集数、语言、画面、声音
+    private func facts(_ m: Meta?) -> [DetailFact] {
+        var out: [DetailFact] = []
         if let r = m?.rating, r > 0 {
-            out.append(.rating(r, percentile: model.ratingPercentile(r, series: true), pool: "剧集"))
+            let (t, sub) = DetailFacts.ratingText(percentile: model.ratingPercentile(r, series: true), pool: "剧集")
+            out.append(DetailFact(id: "rating", lead: .rating(r), text: t, sub: sub))
+        }
+        if let g = m?.genres, !g.isEmpty {
+            out.append(DetailFact(id: "genre", lead: .symbol(DetailFacts.genreSymbol(g.first)), text: g.joined(separator: "、")))
+        }
+        if let y = year(m) {
+            out.append(DetailFact(id: "year", lead: .symbol("calendar"), text: "\(y) 年", sub: current.seasonLabel))
+        }
+        if (current.episodes ?? 0) > 0 {
+            out.append(DetailFact(id: "episodes", lead: .symbol("rectangle.stack.fill"), text: current.countLabel))
+        }
+        let langs = (current.langs ?? []).filter { !$0.isEmpty }
+        if let first = langs.first {
+            out.append(DetailFact(id: "lang", lead: .badge(DetailFacts.languageBadge(first)),
+                                  text: langs.count > 1 ? "\(first)和其他 \(langs.count - 1) 种" : first))
         }
         let spec = MediaSpec.series(current, firstFile: files.first?.name)
-        let langs = (current.langs ?? []).joined(separator: "、")
-        let episodes = DetailText.line([current.seasonLabel, current.countLabel])
-        let rows = [
-            DetailInfoRow(label: "类型", value: (m?.genres ?? []).joined(separator: "、")),
-            DetailInfoRow(label: "年份", value: year(m) ?? ""),
-            DetailInfoRow(label: "剧集", value: episodes),
-            DetailInfoRow(label: "导演", value: m?.director ?? ""),
-            DetailInfoRow(label: "语言", value: langs),
-            DetailInfoRow(label: "分辨率", value: spec.resolution ?? ""),
-            DetailInfoRow(label: "动态范围", value: spec.range ?? ""),
-            DetailInfoRow(label: "视频", value: spec.video ?? ""),
-            DetailInfoRow(label: "音频", value: spec.audio ?? ""),
-            DetailInfoRow(label: "封装", value: spec.container ?? ""),
-        ].filter { !$0.value.isEmpty }
-        let title = spec.headline ?? (current.seasonLabel ?? "影片规格")
-        let text = DetailText.line([episodes, langs.isEmpty ? nil : langs, spec.audio, spec.container])
-        out.append(DetailAboutCard(id: "specs", title: title, caption: "影片规格", text: text, sheetTitle: "影片规格", rows: rows))
+        if let res = spec.resolution {
+            out.append(DetailFact(id: "video", lead: .badge(res == "1080p" || res == "720p" ? "HD" : res),
+                                  text: spec.headline ?? res, sub: spec.video))
+        }
+        if let audio = spec.audio {
+            out.append(DetailFact(id: "audio", lead: .symbol("speaker.wave.3.fill"), text: audio))
+        }
         return out
+    }
+
+    /// 「更多××剧集 ›」：同类型的几部剧（同一部剧的别的季不算，一部只出一次）
+    private func related(_ m: Meta?) -> DetailRelated? {
+        guard let g = m?.genres?.first else { return nil }
+        let mine = current.tmdbId ?? m?.id
+        var seen = Set<String>()
+        var items: [DetailRelatedItem] = []
+        for s in model.series(inGenre: g) {
+            let sm = model.seriesMetas[s.path]
+            let key = (s.tmdbId ?? sm?.id).map { "t\($0)" } ?? "n" + s.name
+            if let mine, (s.tmdbId ?? sm?.id) == mine { continue }
+            if s.name == current.name || !seen.insert(key).inserted { continue }
+            items.append(DetailRelatedItem(id: s.path, title: sm?.title ?? s.name,
+                                           subtitle: DetailText.line([s.year, sm?.genres?.first]),
+                                           art: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w342"), route: .series(s)))
+            if items.count == 3 { break }
+        }
+        guard !items.isEmpty else { return nil }
+        return DetailRelated(title: "更多\(g)剧集", route: .shelf(.genre(g)), items: items)
     }
 
     private func trailerArt(_ m: Meta?) -> [String] {
@@ -569,8 +614,16 @@ struct DetailScaffold<Episodes: View>: View {
     let file: (path: String, name: String)?
     /// 「分享」：TMDB 上这一部的页面
     let shareURL: URL?
-    /// 「简介」那一排卡：简介、评分、影片规格（DetailAbout.swift）
-    let about: [DetailAboutCard]
+    /// 「简介」卡：类型（弹层里用）、整段简介、导演
+    let genres: [String]
+    let overview: String?
+    let director: String?
+    /// 「影片详细信息」卡的几行（DetailInfo.swift）
+    let facts: [DetailFact]
+    /// 「更多××」那一张卡
+    let related: DetailRelated?
+    /// 顶上钉住的那一条里的小海报
+    let thumb: URL?
     let cast: [CastMember]
     let trailers: [Trailer]
     /// 预告片卡的画面（轮着用）
@@ -579,6 +632,8 @@ struct DetailScaffold<Episodes: View>: View {
     @ViewBuilder var episodes: (DSMetrics) -> Episodes
 
     @State private var showTitle = false
+    /// 头部画面底边的主色：整页跟着染（DetailPalette）
+    @State private var edge: UIColor?
     @State private var toast: String?
     @State private var castSheet: CastSheetRequest?
     @State private var trailerPick: DetailTrailerPick?
@@ -595,44 +650,73 @@ struct DetailScaffold<Episodes: View>: View {
             let heroH = Self.heroHeight(width: fullW, height: fullH)
             // 系统栏压住的那一截（展开横拿、外屏时栏在侧边一列，顶上几乎没有：D5、D6）
             let barBottom = geo.safeAreaInsets.top
-            // 左下那一列字的顶边升到栏底下、快淡完时，片名出现在导航栏里（字块约高：字标 + 一行信息 + 按钮）
-            let blockH = Self.blockHeight(m)
-            let titleAt: CGFloat = heroH - blockH - barBottom + 6
+            // 「播放」那一行滚到顶上那条底下时，顶上钉住一条：海报、片名、「播放」（参考图）
+            let pinAt: CGFloat = heroH - 32 - 52 - barBottom - 66
+            let palette = DetailPalette.from(edge)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     hero(m, width: fullW, height: heroH, insets: insets, barBottom: barBottom)
-                    // 分区之间只靠同一种留白（F3、F12）
+                    // 一组一行粗体标题 + 一张卡（参考图）；分区之间同一种留白（F3、F12）
                     VStack(alignment: .leading, spacing: m.shelfGap) {
-                        // 简介、评分、影片规格：一排卡（Apple TV 的简介卡）
-                        if !about.isEmpty {
-                            DSSection(title: "简介", metrics: m) {
-                                DetailAboutRow(cards: about, metrics: m)
+                        if let overview, !overview.isEmpty {
+                            group(m, "简介") {
+                                DetailDescriptionCard(title: title, genres: genres, overview: overview,
+                                                      director: director, palette: palette)
                             }
                         }
                         episodes(m)
                         if !trailers.isEmpty { trailerSection(m) }
                         if !cast.isEmpty { castSection(m) }
+                        if !facts.isEmpty || shareURL != nil {
+                            group(m, "影片详细信息") {
+                                DetailFactsCard(facts: facts, link: shareURL, palette: palette)
+                            }
+                        }
+                        if let related, !related.items.isEmpty {
+                            group(m, related.title, route: related.route) {
+                                DetailRelatedCard(related: related, palette: palette)
+                            }
+                        }
                     }
-                    .padding(.top, 24)
+                    .padding(.top, 28)
                     .padding(.bottom, m.shelfGap)
                     // 下面的内容留在安全区里（卡往右滑出去时从侧边那一列底下过去）
                     .padding(.leading, insets.leading)
                     .padding(.trailing, insets.trailing)
                 }
+                // 整页的颜色：头部下面从画面的主色开始，往下慢慢沉到同色相的深色（参考图）
+                .background(alignment: .top) {
+                    VStack(spacing: 0) {
+                        Color.clear.frame(height: heroH)
+                        LinearGradient(colors: [palette.base, palette.deep], startPoint: .top, endPoint: .bottom)
+                            .frame(height: max(600, fullH * 1.4))
+                    }
+                }
             }
             .scrollIndicators(.hidden)
+            .background(palette.deep)
             // 画面铺到状态栏、导航栏和侧边那一列底下（F6）；字和按钮还在安全区里（F7）
             .ignoresSafeArea(edges: [.top, .horizontal])
-            // C12：头部滚走了，片名才出现在导航栏里
             .onScrollGeometryChange(for: Bool.self) { g in
-                g.contentOffset.y + g.contentInsets.top > titleAt
+                g.contentOffset.y + g.contentInsets.top > pinAt
             } action: { _, v in
-                withAnimation(.easeOut(duration: 0.2)) { showTitle = v }
+                withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.42, dampingFraction: 0.86)) { showTitle = v }
+            }
+            // 钉在顶上的条：从上面滑下来（参考图的「取得」那一条）；片名在这条里，导航栏里不再写
+            .overlay(alignment: .top) {
+                DetailPinnedBar(title: title, thumb: thumb, playTitle: playTitle, playDisabled: playDisabled, palette: palette,
+                                topInset: barBottom, leading: insets.leading + m.margin, trailing: insets.trailing + m.margin,
+                                onPlay: onPlay)
+                    .offset(y: showTitle ? 0 : -(barBottom + 90))
+                    .opacity(showTitle ? 1 : 0)
+                    .allowsHitTesting(showTitle)
+                    .accessibilityHidden(!showTitle)
+                    .ignoresSafeArea(edges: [.top, .horizontal])
             }
         }
-        .background(Theme.bg)
+        .background(DetailPalette.from(edge).deep)
         .webToast($toast)
-        .navigationTitle(showTitle ? title : "")
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         // 全部演员：一张弹层，点演员在弹层里推进去，不叠第二层（C50、C56）
         .sheet(item: $castSheet) { r in CastSheet(people: cast, start: r.start) }
@@ -662,7 +746,9 @@ struct DetailScaffold<Episodes: View>: View {
         // 字块的顶边从栏底下 40 点开始淡，升到栏底上方 40 点时淡完（没滚动时字块离栏底远得多，是全亮的）
         let fadeFrom = barBottom - 40
         return ZStack(alignment: .bottomLeading) {
-            DetailHeroBackdrop(url: TMDBImage.url(pick, "w1280"), width: width, height: height, imageHeight: imageH)
+            DetailHeroBackdrop(url: TMDBImage.url(pick, "w1280"), width: width, height: height, imageHeight: imageH) { e in
+                if edge != e { withAnimation(.easeInOut(duration: 0.8)) { edge = e } }
+            }
                 // 下拉时以底边为准撑大，填满拉出来的空隙（跟着手指走：S10）
                 .stretchy()
                 .accessibilityHidden(true)
@@ -782,6 +868,19 @@ struct DetailScaffold<Episodes: View>: View {
 
     // MARK: 分区
 
+    /// 一组：粗体标题（可以带「›」）+ 一张卡；卡在展开的屏上最宽 720，不拉满一整行
+    private func group<Content: View>(_ m: DSMetrics, _ title: String, route: Route? = nil,
+                                      @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            DetailGroupTitle(title: title, route: route)
+            content()
+                .frame(maxWidth: 720, alignment: .leading)
+        }
+        .padding(.horizontal, m.margin)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+
     /// 预告片：一排 16:9 卡，和分集卡同一个样子（字压在渐进式模糊上）；点一张全屏放（从这一段开始，左右滑换下一段）
     private func trailerSection(_ m: DSMetrics) -> some View {
         DSSection(title: "预告片", metrics: m) {
@@ -825,6 +924,8 @@ struct DetailHeroBackdrop: View {
     let width: CGFloat
     let height: CGFloat
     let imageHeight: CGFloat
+    /// 取到画面底边的主色：告诉详情页，整页跟着染（DetailPalette）
+    var onEdge: (UIColor) -> Void = { _ in }
     @State private var shown: Shown?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -835,11 +936,12 @@ struct DetailHeroBackdrop: View {
     }
 
     /// 处理好的头部画面内存里已经有（再打开同一部片）：第一次画就直接是它，不闪底色、不再淡入
-    init(url: URL?, width: CGFloat, height: CGFloat, imageHeight: CGFloat) {
+    init(url: URL?, width: CGFloat, height: CGFloat, imageHeight: CGFloat, onEdge: @escaping (UIColor) -> Void = { _ in }) {
         self.url = url
         self.width = width
         self.height = height
         self.imageHeight = imageHeight
+        self.onEdge = onEdge
         if let url, let art = ImagePipeline.shared.cachedHeroArt(url, maxPixel: Self.pixels(width, imageHeight),
                                                                  aspect: width / max(1, imageHeight)) {
             _shown = State(initialValue: Shown(key: Self.key(url, width, imageHeight), art: art))
@@ -850,7 +952,8 @@ struct DetailHeroBackdrop: View {
     private static func key(_ url: URL?, _ w: CGFloat, _ h: CGFloat) -> String { "\(url?.absoluteString ?? "")#\(Int(w))x\(Int(h))" }
 
     var body: some View {
-        let tone = Color(uiColor: shown.map { ImageEffects.heroTone($0.art.edge) } ?? UIColor(white: 0.07, alpha: 1))
+        // 画面化进去的颜色就是整页的颜色（DetailPalette.base）：头部底下和下面的卡接得上
+        let tone = DetailPalette.baseColor(shown?.art.edge)
         let imgEnd = min(1, imageHeight / max(1, height))
         let key = Self.key(url, width, imageHeight)
         ZStack(alignment: .top) {
@@ -872,14 +975,11 @@ struct DetailHeroBackdrop: View {
             LinearGradient(stops: Self.dissolve(tone, from: imgEnd * 0.76, to: imgEnd), startPoint: .top, endPoint: .bottom)
             // 顶上浅浅压暗：状态栏和返回钮停在画面上也看得清（F34）
             LinearGradient(colors: [.black.opacity(0.38), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.18))
-            // 头部最后一小段融进页面的黑
-            LinearGradient(stops: [
-                .init(color: .clear, location: max(0, 1 - 48 / max(1, height))),
-                .init(color: Theme.bg, location: 1),
-            ], startPoint: .top, endPoint: .bottom)
         }
         .frame(width: width, height: height)
         .animation(.easeInOut(duration: 0.8), value: shown?.key)
+        .onAppear { if let s = shown { onEdge(s.art.edge) } }
+        .onChange(of: shown?.key) { _, _ in if let s = shown { onEdge(s.art.edge) } }
         .task(id: key) {
             guard let url else { return }
             if shown?.key == key { return }
