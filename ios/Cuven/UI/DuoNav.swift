@@ -5,9 +5,10 @@ import UIKit
 //
 // 标签栏横在底下时，iOS 26 会把 role: .search 那一格从胶囊里拎出来，单独放成旁边一颗圆钮。
 // 可 iPhone Duo 折起（外屏，横竖都算）和展开横拿时，系统把标签栏竖着放进侧边那一列（D5、D6），
-// 搜索就和主页 / 资料库 / 账户挤在同一枚胶囊里，SwiftUI 也没有办法把它拆开。
+// 搜索就和主页 / 资料库挤在同一枚胶囊里，SwiftUI 也没有办法把它拆开。
 // 用户要搜索单独一颗，所以只在这几种形态下收起系统标签栏，换成这里自己画的：
-//   · 一枚竖向 Liquid Glass 胶囊：主页 / 资料库 / 账户，只有图标；选中那一格垫一块更亮的玻璃，在格子之间滑过去；
+//   · 一枚竖向 Liquid Glass 胶囊：主页 / 资料库，只有图标；选中那一格垫一块更亮的玻璃，在格子之间滑过去；
+//     头像不在这里：用户要求从侧边导航里分出来，放在主页标题那一行的右边（HomeView）；
 //   · 下面隔 12 点，一颗单独的玻璃圆钮：搜索。
 // 展开竖拿和别的 iPhone 照旧用系统标签栏（横在底下的那一条本来就把搜索拆开了）。
 // 这是对 Designing for iPhone Duo「别改系统的摆放」（D7）的一处有意偏离，见 docs/ios-design.md「iPhone Duo」。
@@ -58,7 +59,7 @@ extension View {
 
 // MARK: - 导航本身
 
-/// 竖向玻璃导航：胶囊里是主页 / 资料库 / 账户，下面单独一颗搜索。
+/// 竖向玻璃导航：胶囊里是主页 / 资料库，下面单独一颗搜索（账户在主页右上的头像里）。
 /// 点一格就切过去（触感由 RootView 的 onChange 统一给）；再点一下当前那一格，这一格回到根页面（系统标签栏自带这个行为，自己画的要自己做）
 struct DuoNav: View {
     @Binding var tab: AppTab
@@ -87,7 +88,6 @@ struct DuoNav: View {
     private static let items: [Item] = [
         Item(tab: .home, symbol: "house.fill", label: "主页", id: "nav-home"),
         Item(tab: .library, symbol: "square.stack.fill", label: "资料库", id: "nav-library"),
-        Item(tab: .account, symbol: "person.crop.circle.fill", label: "账户", id: "nav-account"),
     ]
 
     var body: some View {

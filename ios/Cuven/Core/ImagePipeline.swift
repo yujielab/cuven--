@@ -166,7 +166,8 @@ enum ImageEffects {
         guard let cropped = cg.cropping(to: rect) else { return nil }
         let base = UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
         let edge = averageColor(cropped, bottom: 0.14) ?? UIColor(white: 0.08, alpha: 1)
-        let soft = bottomBlur(base, clearAbove: 0.42, fullBelow: 0.08) ?? base
+        // 渐进式模糊只在最下面那一截：画面高的 76% 起糊、97% 糊满，底边就是字标上沿（用户要求）
+        let soft = bottomBlur(base, clearAbove: 0.24, fullBelow: 0.03) ?? base
         return HeroArt(image: soft, edge: edge)
     }
 
@@ -404,7 +405,8 @@ struct LogoImage: View {
                     .frame(maxWidth: .infinity, alignment: alignment)
                     .modifier(InvertIf(on: dark))
                     .shadow(color: .black.opacity(0.55), radius: 12, y: 4)
-                    .transition(reduceMotion ? .opacity : .dsBlurFade(radius: 10))
+                    // 字标是透明底：用透明的模糊淡入，不然透明的地方会先糊成一块黑框
+                    .transition(reduceMotion ? .opacity : .dsBlurFadeClear(radius: 10))
             } else if failed || url == nil, let fallback {
                 Text(fallback)
                     .font(.system(size: height * 0.42, weight: .heavy))
