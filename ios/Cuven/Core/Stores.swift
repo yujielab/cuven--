@@ -877,6 +877,16 @@ final class AppModel {
         return nil
     }
 
+    /// 这个评分在片库里高过百分之几的电影（剧集就和剧集比）；有评分的不到 20 部就不算（数太少，说了也没意义）
+    func ratingPercentile(_ r: Double, series: Bool) -> Int? {
+        let all: [Double] = series
+            ? self.series.compactMap { seriesMetas[$0.path]?.rating }.filter { $0 > 0 }
+            : movies.compactMap { meta($0)?.rating }.filter { $0 > 0 }
+        guard all.count >= 20 else { return nil }
+        let below = all.reduce(0) { $0 + ($1 < r ? 1 : 0) }
+        return Int((Double(below) / Double(all.count) * 100).rounded(.down))
+    }
+
     /// 做得成精选卡吗（featuredArt 的便宜版：只看有没有，不拼地址；主页每次刷新都要对全片库问一遍）
     private func featuredReady(_ v: Video) -> Bool {
         let m = meta(v), a = appleArt(v)

@@ -41,11 +41,10 @@ struct MovieDetailView: View {
             onRestart: restartAction(meta),
             file: (path: video.path, name: video.name),
             shareURL: DetailText.tmdbPage(kind: "movie", id: meta?.id),
-            overview: meta?.overview,
+            about: aboutCards(meta),
             cast: meta?.cast ?? [],
             trailers: trailers,
-            trailerArt: trailerArt(meta),
-            infoRows: infoRows(meta)
+            trailerArt: trailerArt(meta)
         ) { _ in
             EmptyView()
         }
@@ -72,16 +71,36 @@ struct MovieDetailView: View {
         ])
     }
 
-    /// 「信息」：类型、年份、片长、评分、导演、格式；没有的项不写
-    private func infoRows(_ m: Meta?) -> [DetailInfoRow] {
-        [
+    /// 「简介」那一排：简介、评分、影片规格；原来页面最底下「信息」的几行（类型、上映、片长、导演、格式）并进影片规格的弹层
+    private func aboutCards(_ m: Meta?) -> [DetailAboutCard] {
+        var out: [DetailAboutCard] = []
+        if let o = m?.overview, !o.isEmpty {
+            out.append(.synopsis(title: model.title(video), genres: m?.genres ?? [], overview: o))
+        }
+        if let r = m?.rating, r > 0 {
+            out.append(.rating(r, percentile: model.ratingPercentile(r, series: false), pool: "电影"))
+        }
+        let spec = MediaSpec(name: video.name, size: video.size)
+        let runtime = Format.runtime(m?.runtime)
+        let year = model.year(video).map { String($0) }
+        let rows = [
             DetailInfoRow(label: "类型", value: (m?.genres ?? []).joined(separator: "、")),
-            DetailInfoRow(label: "年份", value: model.year(video).map { String($0) } ?? ""),
-            DetailInfoRow(label: "片长", value: Format.runtime(m?.runtime)),
-            DetailInfoRow(label: "评分", value: DetailText.rating(m?.rating) ?? ""),
+            DetailInfoRow(label: "上映", value: year ?? ""),
+            DetailInfoRow(label: "片长", value: runtime),
             DetailInfoRow(label: "导演", value: m?.director ?? ""),
-            DetailInfoRow(label: "格式", value: WebFormat.line(name: video.name)),
-        ].filter { !$0.value.isEmpty && $0.value != "—" }
+            DetailInfoRow(label: "分辨率", value: spec.resolution ?? ""),
+            DetailInfoRow(label: "动态范围", value: spec.range ?? ""),
+            DetailInfoRow(label: "视频", value: spec.video ?? ""),
+            DetailInfoRow(label: "音频", value: spec.audio ?? ""),
+            DetailInfoRow(label: "封装", value: spec.container ?? ""),
+            DetailInfoRow(label: "大小", value: spec.size ?? ""),
+            DetailInfoRow(label: "文件", value: video.name),
+        ].filter { !$0.value.isEmpty }
+        // 大字：分辨率 · 动态范围；文件名里读不出来就写片长
+        let title = spec.headline ?? (runtime.isEmpty ? (spec.container ?? "影片规格") : runtime)
+        let text = DetailText.line([spec.headline == nil ? nil : runtime, year, spec.video, spec.audio, spec.container, spec.size])
+        out.append(DetailAboutCard(id: "specs", title: title, caption: "影片规格", text: text, sheetTitle: "影片规格", rows: rows))
+        return out
     }
 
     /// 预告片卡的画面：剧照轮着用；没有剧照就是背景图
@@ -153,11 +172,10 @@ struct SeriesDetailView: View {
             onRestart: restartAction(next),
             file: next.map { (path: $0.file.path, name: $0.file.name) },
             shareURL: DetailText.tmdbPage(kind: "tv", id: current.tmdbId ?? meta?.id),
-            overview: meta?.overview,
+            about: aboutCards(meta),
             cast: meta?.cast ?? [],
             trailers: DetailText.playable(atv?.trailers),
-            trailerArt: trailerArt(meta),
-            infoRows: infoRows(meta)
+            trailerArt: trailerArt(meta)
         ) { m in
             episodes(m, fallbackArt: fallbackArt)
         }
@@ -357,24 +375,34 @@ struct SeriesDetailView: View {
         }
     }
 
-    private var audioLine: String? {
-        guard let langs = current.langs, !langs.isEmpty else { return nil }
-        var s = langs.joined(separator: "、")
-        if let a = current.audio, !a.isEmpty { s += "（" + (a == "Atmos" ? "Dolby Atmos" : a) + "）" }
-        return s
-    }
-
-    /// 「信息」：类型、年份、剧集（季 · 集数）、评分、导演、语言、格式；没有的项不写
-    private func infoRows(_ m: Meta?) -> [DetailInfoRow] {
-        [
+    /// 「简介」那一排：简介、评分、影片规格（季与集数、语言、分辨率、动态范围、音频、封装；原来「信息」的几行也在影片规格的弹层里）
+    private func aboutCards(_ m: Meta?) -> [DetailAboutCard] {
+        var out: [DetailAboutCard] = []
+        if let o = m?.overview, !o.isEmpty {
+            out.append(.synopsis(title: m?.title ?? current.name, genres: m?.genres ?? [], overview: o))
+        }
+        if let r = m?.rating, r > 0 {
+            out.append(.rating(r, percentile: model.ratingPercentile(r, series: true), pool: "剧集"))
+        }
+        let spec = MediaSpec.series(current, firstFile: files.first?.name)
+        let langs = (current.langs ?? []).joined(separator: "、")
+        let episodes = DetailText.line([current.seasonLabel, current.countLabel])
+        let rows = [
             DetailInfoRow(label: "类型", value: (m?.genres ?? []).joined(separator: "、")),
             DetailInfoRow(label: "年份", value: year(m) ?? ""),
-            DetailInfoRow(label: "剧集", value: DetailText.line([current.seasonLabel, current.countLabel])),
-            DetailInfoRow(label: "评分", value: DetailText.rating(m?.rating) ?? ""),
+            DetailInfoRow(label: "剧集", value: episodes),
             DetailInfoRow(label: "导演", value: m?.director ?? ""),
-            DetailInfoRow(label: "语言", value: audioLine ?? ""),
-            DetailInfoRow(label: "格式", value: WebFormat.line(series: current, firstFile: files.first?.name)),
-        ].filter { !$0.value.isEmpty && $0.value != "—" }
+            DetailInfoRow(label: "语言", value: langs),
+            DetailInfoRow(label: "分辨率", value: spec.resolution ?? ""),
+            DetailInfoRow(label: "动态范围", value: spec.range ?? ""),
+            DetailInfoRow(label: "视频", value: spec.video ?? ""),
+            DetailInfoRow(label: "音频", value: spec.audio ?? ""),
+            DetailInfoRow(label: "封装", value: spec.container ?? ""),
+        ].filter { !$0.value.isEmpty }
+        let title = spec.headline ?? (current.seasonLabel ?? "影片规格")
+        let text = DetailText.line([episodes, langs.isEmpty ? nil : langs, spec.audio, spec.container])
+        out.append(DetailAboutCard(id: "specs", title: title, caption: "影片规格", text: text, sheetTitle: "影片规格", rows: rows))
+        return out
     }
 
     private func trailerArt(_ m: Meta?) -> [String] {
@@ -463,12 +491,12 @@ struct DetailScaffold<Episodes: View>: View {
     let file: (path: String, name: String)?
     /// 「分享」：TMDB 上这一部的页面
     let shareURL: URL?
-    let overview: String?
+    /// 「简介」那一排卡：简介、评分、影片规格（DetailAbout.swift）
+    let about: [DetailAboutCard]
     let cast: [CastMember]
     let trailers: [Trailer]
     /// 预告片卡的画面（轮着用）
     let trailerArt: [String]
-    let infoRows: [DetailInfoRow]
     /// 分集那一段（电影没有）：拿到当前宽度的版面尺寸再排
     @ViewBuilder var episodes: (DSMetrics) -> Episodes
 
@@ -489,22 +517,20 @@ struct DetailScaffold<Episodes: View>: View {
             // 左下那一列字的顶边升到栏底下、快淡完时，片名出现在导航栏里（字块约高：字标 + 一行信息 + 按钮）
             let blockH: CGFloat = m.wide ? 192 : 168
             let titleAt: CGFloat = heroH - blockH - barBottom + 6
-            // 简介限一个好读的宽度：展开的 Duo 上不拉满一整行（F8）
-            let synopsisMax: CGFloat = m.wide ? 640 : .infinity
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     hero(m, height: heroH, barBottom: barBottom)
                     // 分区之间只靠同一种留白（F3、F12）
                     VStack(alignment: .leading, spacing: m.shelfGap) {
-                        if let o = overview, !o.isEmpty {
-                            DetailSynopsis(text: o)
-                                .frame(maxWidth: synopsisMax, alignment: .leading)
-                                .padding(.horizontal, m.margin)
+                        // 简介、评分、影片规格：一排卡（Apple TV 的简介卡）
+                        if !about.isEmpty {
+                            DSSection(title: "简介", metrics: m) {
+                                DetailAboutRow(cards: about, metrics: m)
+                            }
                         }
                         episodes(m)
                         if !trailers.isEmpty { trailerSection(m) }
                         if !cast.isEmpty { castSection(m) }
-                        if !infoRows.isEmpty { infoSection(m) }
                     }
                     .padding(.top, 24)
                     .padding(.bottom, m.shelfGap)
@@ -716,29 +742,6 @@ struct DetailScaffold<Episodes: View>: View {
         }
     }
 
-    /// 信息：几行左灰右白的字，不垫底板、不画线（F3）；展开时限宽，左右不隔太远（F8）
-    private func infoSection(_ m: DSMetrics) -> some View {
-        let maxW: CGFloat = m.wide ? 520 : .infinity
-        return DSSection(title: "信息", metrics: m) {
-            VStack(alignment: .leading, spacing: 12) {
-                ForEach(infoRows, id: \.self) { r in
-                    HStack(alignment: .firstTextBaseline, spacing: 16) {
-                        Text(r.label)
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 16)
-                        Text(r.value)
-                            .foregroundStyle(.primary)
-                            .multilineTextAlignment(.trailing)
-                    }
-                    .font(.subheadline)
-                    .accessibilityElement(children: .combine)
-                }
-            }
-            .frame(maxWidth: maxW, alignment: .leading)
-            .padding(.horizontal, m.margin)
-            .padding(.top, 8)
-        }
-    }
 }
 
 // MARK: - 小部件
@@ -767,50 +770,6 @@ struct DetailTrailerCard: View {
         .task(id: trailer.hls) {
             guard trailer.duration == nil, seconds == nil else { return }
             seconds = await TrailerLength.shared.seconds(trailer.hls)
-        }
-    }
-}
-
-/// 简介：Body、宽松行距（F21），次要色；三行后一枚「更多」，点了就地展开（F24：截断了就要能看全文）。
-/// 真被截断了才有「更多」：量一份不限行数的同一段字，比三行高才露出来
-struct DetailSynopsis: View {
-    let text: String
-    @State private var expanded = false
-    @State private var fullHeight: CGFloat = 0
-    @State private var shownHeight: CGFloat = 0
-
-    var body: some View {
-        let clipped = fullHeight > shownHeight + 1
-        VStack(alignment: .leading, spacing: 2) {
-            Text(text)
-                .font(.body.leading(.loose))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.leading)
-                .lineLimit(expanded ? nil : 3)
-                .fixedSize(horizontal: false, vertical: true)
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in shownHeight = h }
-                .background(alignment: .top) {
-                    Text(text)
-                        .font(.body.leading(.loose))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .hidden()
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in fullHeight = h }
-                }
-            if clipped || expanded {
-                Button {
-                    withAnimation(.smooth(duration: 0.35)) { expanded.toggle() }
-                } label: {
-                    Text(expanded ? "收起" : "更多")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        // 点得到的高度够 44（F74），版面上收回去
-                        .padding(.vertical, 12)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .padding(.vertical, -12)
-                .accessibilityIdentifier("synopsis-more")
-            }
         }
     }
 }
@@ -979,33 +938,3 @@ extension View {
     func webToast(_ text: Binding<String?>) -> some View { modifier(WebToast(text: text)) }
 }
 
-// MARK: - 「格式」那一格（网页版：扩展名 · 8K+ UHD（4K 片源）/ 高动态（1080p）· DV / HDR）
-
-enum WebFormat {
-    /// 电影：读文件名（规则照抄网页版 parse()）
-    static func line(name: String) -> String {
-        let ext = (name as NSString).pathExtension.uppercased()
-        func has(_ p: String) -> Bool { name.range(of: p, options: [.regularExpression, .caseInsensitive]) != nil }
-        let dv = has("DOLBY[. _-]?VISION|[. _-]DV[. _-]|[. _-]DoVi")
-        let hdr = !dv && has("HDR10\\+?|[. _-]HDR[. _-]")
-        let uhd = has("2160P|[. _-]4K[. _-]|UHD")
-        let hd = !uhd && has("1080P")
-        return compose(ext: ext, uhd: uhd, hd: hd, top: dv ? "DV" : (hdr ? "HDR" : nil))
-    }
-
-    /// 剧集：目录名解析出来的分辨率 / HDR（网页版 tvSeriesTags），扩展名取第一集
-    static func line(series s: Series, firstFile: String?) -> String {
-        let ext = ((firstFile ?? "") as NSString).pathExtension.uppercased()
-        let res = (s.res ?? "").uppercased()
-        let hdr = s.hdr ?? ""
-        return compose(ext: ext, uhd: res == "4K" || res == "8K", hd: !res.isEmpty && res != "4K" && res != "8K",
-                       top: hdr == "DV" ? "DV" : (hdr.isEmpty ? nil : "HDR"))
-    }
-
-    private static func compose(ext: String, uhd: Bool, hd: Bool, top: String?) -> String {
-        var s = ext
-        if uhd { s += " · 8K+ UHD" } else if hd { s += " · 高动态" }
-        if let top { s += (s.isEmpty ? "" : " · ") + top }
-        return s.isEmpty ? "—" : s
-    }
-}

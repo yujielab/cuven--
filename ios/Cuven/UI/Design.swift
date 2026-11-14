@@ -32,6 +32,8 @@ struct DSMetrics {
     var wideCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.15 : (width < 800 ? 2.2 : 3.3)) }
     /// 精选卡（3:4 的大号竖卡）：折起一屏一张多一截，展开两张多 / 三张多
     var featureCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.3 : (width < 800 ? 2.3 : 3.4)) }
+    /// 详情页「简介」那一排卡：折起一张多一截（Apple TV 的简介卡约占屏宽七成）
+    var aboutCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.4 : (width < 800 ? 2.4 : 3.4)) }
 
     /// 一屏看得见 visible 张（整数部分完整、小数部分是露出来的那一截）时每张多宽
     func cardWidth(visible v: CGFloat) -> CGFloat {

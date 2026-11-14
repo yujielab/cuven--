@@ -101,6 +101,18 @@ final class DuoDeviceTests: XCTestCase {
         } else {
             XCTFail("详情页没有「…」菜单")
         }
+        // 简介：一排卡（简介、评分、影片规格）；点简介卡弹出从卡上放大出来的系统弹层，右上关闭
+        if let about = reveal(app, app.buttons.matching(identifier: "about-synopsis"), swipes: 2) {
+            sleep(1)
+            snap("duo-03d-about")
+            about.tap(); sleep(2)
+            snap("duo-03e-about-sheet")
+            let close = app.buttons["about-close"].firstMatch
+            if close.waitForExistence(timeout: 3) { close.tap() } else { app.swipeDown() }
+            sleep(1)
+        } else {
+            print("DUO about card: none")
+        }
         // 预告片：一排 16:9 卡，字压在底部的渐进式模糊上（「正式预告」「▶ 2 分钟」），右下一颗「•••」
         if reveal(app, app.buttons.matching(identifier: "trailer-card"), swipes: 3) != nil {
             sleep(2)
