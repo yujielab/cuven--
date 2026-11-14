@@ -59,6 +59,8 @@ enum DemoData {
                                rating: 6 + Double(i % 7) * 0.5, type: "movie", runtime: 92 + i * 3, genres: genres[i % genres.count])
             meta.cast = cast(i)
             meta.director = people[(i + 5) % people.count]
+            // 剧照（资料库每章底下那一排、详情页）：本地画的几张横图
+            meta.stills = (0..<4).map { k in Still(url: url("backdrop", 200 + i * 4 + k), thumb: url("backdrop", 200 + i * 4 + k)) }
             metas[name] = meta
         }
         m.videos = videos

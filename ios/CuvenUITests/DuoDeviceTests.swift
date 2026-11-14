@@ -135,12 +135,15 @@ final class DuoDeviceTests: XCTestCase {
         }
         tab(app, "主页"); sleep(1)
 
-        // 资料库：展映——一部片一章，满屏画幅 → 收成 16:9，下面字标、一行信息、三行简介、播放 / 详情
+        // 资料库：展映（网页版同一套）——一部有预告片的电影一章：满屏画幅（一行信息 + 字标）→ 收成 16:9，
+        // 下面的介绍面板：简介、评分、导演与主演、播放 / 影片详情、一排剧照，章与章之间一道细线（底下不留一大块黑）
         tab(app, "资料库"); sleep(3)
         report(app, "library")
         snap("duo-05-library")
         app.swipeUp(); sleep(2); snap("duo-05f-library-shrink")
         app.swipeUp(); sleep(2); snap("duo-05g-library-intro")
+        app.swipeUp(); sleep(2); snap("duo-05i-library-next")
+        app.swipeDown(); sleep(1); app.swipeDown(); sleep(2)
         if let d = reveal(app, app.buttons.matching(identifier: "library-movie"), swipes: 2) {
             d.tap(); sleep(2)
             XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "资料库「详情」没进到详情页")
