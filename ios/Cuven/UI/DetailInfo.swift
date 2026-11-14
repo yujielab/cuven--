@@ -480,3 +480,83 @@ enum DetailFacts {
         return ("TMDB 评分", "满分 10 分")
     }
 }
+
+// MARK: - 剧照（参考图：游戏 App 详情页「挑戰」那一排）
+
+/// 一张剧照卡：4:3 的大卡、大圆角（约卡宽的 6.5%），画面下段渐进式模糊（离底 48% 起糊、26% 以下最糊），
+/// 上面压一层淡暗，再压一行标题（「第 3 幕」）和一行带符号的小字（「12 张剧照」）；整张卡点开看大图
+struct DetailStillCard: View {
+    let art: URL?
+    let title: String
+    let detail: String
+    let metrics: DSMetrics
+    let action: () -> Void
+
+    var body: some View {
+        let w = metrics.wideCardWidth
+        let h = (w * 0.75).rounded()
+        let radius: CGFloat = max(18, min(26, (w * 0.065).rounded()))
+        let pad: CGFloat = metrics.wide ? 20 : 16
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        Button(action: action) {
+            ZStack(alignment: .bottomLeading) {
+                DSParallaxArt(url: art, metrics: metrics, size: CGSize(width: w, height: h), effect: .bottomBlur)
+                LinearGradient(stops: DSMediaCardStyle.shade, startPoint: .top, endPoint: .bottom)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Label(detail, systemImage: "photo.stack")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+                .lineLimit(1)
+                // 字只在模糊那一段里：特大字号时也不冲出去
+                .dynamicTypeSize(...DynamicTypeSize.xLarge)
+                .padding(.horizontal, pad)
+                .padding(.bottom, pad)
+            }
+            .frame(width: w, height: h)
+            .clipShape(shape)
+            .contentShape(shape)
+        }
+        .buttonStyle(PressableStyle())
+        .accessibilityLabel("\(title)，剧照")
+        .accessibilityHint("查看大图")
+        .accessibilityIdentifier("still-card")
+    }
+}
+
+/// 剧照的大图：黑底，一张一屏、左右滑换下一张（底下页码点），标题是「第 N 幕」；
+/// 右上系统的关闭钮（C14、C53），也能下滑或捏合收回到那张卡（F57）
+struct DetailStillsViewer: View {
+    let stills: [URL?]
+    @State var index: Int
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            TabView(selection: $index) {
+                ForEach(Array(stills.enumerated()), id: \.offset) { i, url in
+                    RemoteImage(url: url, maxPixel: 2400, contentMode: .fit, placeholder: .clear)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .tag(i)
+                        .accessibilityLabel("第 \(i + 1) 幕")
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: stills.count > 1 ? .always : .never))
+            .background(Color.black)
+            .ignoresSafeArea()
+            .navigationTitle("第 \(index + 1) 幕")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(role: .close) { dismiss() }
+                        .accessibilityIdentifier("stills-close")
+                }
+            }
+        }
+        .environment(\.colorScheme, .dark)
+    }
+}

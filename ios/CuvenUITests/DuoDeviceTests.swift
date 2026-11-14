@@ -138,6 +138,18 @@ final class DuoDeviceTests: XCTestCase {
         } else {
             print("DUO trailer card: none")
         }
+        // 剧照：一排 4:3 大卡（参考图：游戏 App 详情页「挑戰」那一排），字压在下段的渐进式模糊上；点一张全屏看大图
+        if let still = reveal(app, app.buttons.matching(identifier: "still-card"), swipes: 2) {
+            sleep(2)
+            snap("duo-03f-detail-stills")
+            still.tap(); sleep(2)
+            snap("duo-03g-stills-viewer")
+            let close = app.buttons["stills-close"].firstMatch
+            if close.waitForExistence(timeout: 3) { close.tap() } else { app.swipeDown() }
+            sleep(2)
+        } else {
+            print("DUO still card: none")
+        }
         // 演员 ›：一张半屏 / 全屏的系统弹层，一行一位；点一行在弹层里推进那位演员（「在资料库中搜索」「在 TMDB 查看」）
         if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 3) {
             castLink.tap(); sleep(2)

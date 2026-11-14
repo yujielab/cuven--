@@ -48,7 +48,8 @@ struct MovieDetailView: View {
             thumb: TMDBImage.url(meta?.poster ?? meta?.posterClean, "w185"),
             cast: meta?.cast ?? [],
             trailers: trailers,
-            trailerArt: trailerArt(meta)
+            trailerArt: trailerArt(meta),
+            stills: DetailText.stills(meta)
         ) { _ in
             EmptyView()
         }
@@ -239,7 +240,8 @@ struct SeriesDetailView: View {
             thumb: TMDBImage.url(meta?.poster ?? meta?.posterClean, "w185"),
             cast: meta?.cast ?? [],
             trailers: DetailText.playable(atv?.trailers),
-            trailerArt: trailerArt(meta)
+            trailerArt: trailerArt(meta),
+            stills: DetailText.stills(meta)
         ) { m in
             episodes(m, fallbackArt: fallbackArt)
         }
@@ -589,6 +591,12 @@ struct DetailTrailerPick: Identifiable {
     var id: Int { index }
 }
 
+/// 点开的是第几张剧照
+struct DetailStillPick: Identifiable {
+    let index: Int
+    var id: Int { index }
+}
+
 /// 详情页头部用哪张画面、哪枚字标：定下来就不再换（免得先出一张、过一会儿又跳成另一张：用户要求）
 struct DetailArt: Equatable {
     /// 16:9 的无字背景（横着的屏用）
@@ -628,6 +636,8 @@ struct DetailScaffold<Episodes: View>: View {
     let trailers: [Trailer]
     /// 预告片卡的画面（轮着用）
     let trailerArt: [String]
+    /// 「剧照」那一排（TMDB 的剧照；两张以上才出这一段）
+    var stills: [String] = []
     /// 分集那一段（电影没有）：拿到当前宽度的版面尺寸再排
     @ViewBuilder var episodes: (DSMetrics) -> Episodes
 
@@ -637,6 +647,9 @@ struct DetailScaffold<Episodes: View>: View {
     @State private var toast: String?
     @State private var castSheet: CastSheetRequest?
     @State private var trailerPick: DetailTrailerPick?
+    @State private var stillPick: DetailStillPick?
+    /// 剧照大图从点的那张卡上放大出来
+    @Namespace private var stillsNS
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -666,6 +679,7 @@ struct DetailScaffold<Episodes: View>: View {
                         }
                         episodes(m)
                         if !trailers.isEmpty { trailerSection(m) }
+                        if stills.count >= 2 { stillsSection(m) }
                         if !cast.isEmpty { castSection(m) }
                         if !facts.isEmpty || shareURL != nil {
                             group(m, "影片详细信息") {
@@ -724,7 +738,15 @@ struct DetailScaffold<Episodes: View>: View {
         .fullScreenCover(item: $trailerPick) { p in
             TrailerPlayerView(movieTitle: title, trailers: trailers, start: p.index)
         }
+        // 剧照大图：全屏黑底，一张一屏、左右滑换；从点的那张卡上放大出来，下滑或捏合收回去（F57）
+        .fullScreenCover(item: $stillPick) { p in
+            DetailStillsViewer(stills: stillShown.map { TMDBImage.url($0, "w1280") }, index: p.index)
+                .navigationTransition(.zoom(sourceID: p.index, in: stillsNS))
+        }
     }
+
+    /// 那一排放出来的剧照（最多 12 张，和网页版一样）
+    private var stillShown: [String] { Array(stills.prefix(12)) }
 
     // MARK: 头部
 
@@ -888,6 +910,21 @@ struct DetailScaffold<Episodes: View>: View {
                 ForEach(Array(trailers.enumerated()), id: \.offset) { i, t in
                     DetailTrailerCard(trailer: t, art: t.image ?? (trailerArt.isEmpty ? nil : trailerArt[i % trailerArt.count]),
                                       metrics: m, onPlay: { trailerPick = DetailTrailerPick(index: i) })
+                }
+            }
+        }
+    }
+
+    /// 剧照（用户给的参考图：游戏 App 详情页「挑戰」那一排）：一排 4:3 的大卡、大圆角，画面下段渐进式模糊，
+    /// 「第 3 幕」和「▣ 12 张剧照」压在模糊上；点一张全屏看大图（从这张卡上放大出来，左右滑换下一张）
+    private func stillsSection(_ m: DSMetrics) -> some View {
+        let shown = stillShown
+        return DSSection(title: "剧照", metrics: m) {
+            DSShelf(metrics: m) {
+                ForEach(Array(shown.enumerated()), id: \.offset) { i, s in
+                    DetailStillCard(art: TMDBImage.url(s, "w1280"), title: "第 \(i + 1) 幕", detail: "\(shown.count) 张剧照",
+                                    metrics: m) { stillPick = DetailStillPick(index: i) }
+                        .matchedTransitionSource(id: i, in: stillsNS)
                 }
             }
         }
@@ -1127,6 +1164,11 @@ struct DetailEpisodePreview: View {
 
 /// 详情页的几句字
 enum DetailText {
+    /// 「剧照」那一排：TMDB 的剧照（大图地址，没有就用缩略图的）
+    static func stills(_ m: Meta?) -> [String] {
+        (m?.stills ?? []).compactMap { $0.url ?? $0.thumb }.filter { !$0.isEmpty }
+    }
+
     /// 几段字用「 · 」连起来，空的跳过
     static func line(_ parts: [String?]) -> String {
         parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
