@@ -93,6 +93,13 @@ final class DuoDeviceTests: XCTestCase {
         } else {
             XCTFail("详情页没有「…」菜单")
         }
+        // 预告片：一排 16:9 卡，字压在底部的渐进式模糊上（「正式预告」「▶ 2 分钟」），右下一颗「•••」
+        if reveal(app, app.buttons.matching(identifier: "trailer-card"), swipes: 3) != nil {
+            sleep(2)
+            snap("duo-03c-detail-trailers")
+        } else {
+            print("DUO trailer card: none")
+        }
         // 演员 ›：一张半屏 / 全屏的系统弹层，一行一位；点一行在弹层里推进那位演员（「在资料库中搜索」「在 TMDB 查看」）
         if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 3) {
             castLink.tap(); sleep(2)

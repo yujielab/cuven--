@@ -489,6 +489,9 @@ struct AtvLookup: Decodable, Sendable {
 struct Trailer: Decodable, Hashable, Identifiable, Sendable {
     var title: String?
     var hls: String
+    /// 时长（秒）和这一段自己的画面：Apple 给了才有（Worker 原样带过来）
+    var duration: Double? = nil
+    var image: String? = nil
     var id: String { hls }
 }
 

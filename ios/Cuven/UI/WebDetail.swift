@@ -120,6 +120,8 @@ struct SeriesDetailView: View {
     @State private var loading = true
     @State private var failed: String?
     @State private var atv: AtvLookup?
+    /// 分集菜单里「复制直链」之后底部那一句
+    @State private var toast: String?
 
     private var current: Series { picked ?? series }
 
@@ -159,6 +161,7 @@ struct SeriesDetailView: View {
         ) { m in
             episodes(m, fallbackArt: fallbackArt)
         }
+        .webToast($toast)
         .task(id: current.path) { await load() }
         .task(id: current.path) {
             atv = nil
@@ -187,7 +190,7 @@ struct SeriesDetailView: View {
                     // C66：先放占位卡，不留白屏；卡和真卡一样大，换上来时排不跳（C23）
                     DSShelf(metrics: m) {
                         ForEach(0..<3, id: \.self) { i in
-                            DSWideLockup(art: nil, title: "第 \(i + 1) 集", subtitle: "45 分钟", metrics: m, caption: true)
+                            DSMediaCard(art: nil, title: "第 \(i + 1) 集", detail: "45 分钟", metrics: m, action: {}) { EmptyView() }
                         }
                     }
                     .redacted(reason: .placeholder)
@@ -211,26 +214,58 @@ struct SeriesDetailView: View {
         }
     }
 
-    /// 一集：剧照 + 「第 1 集 · 集名」+ 片长（看完的写「已看」：F36 状态不只靠颜色）；看到一半的带进度条。
-    /// 点一下就放这一集（C88）；长按出菜单，预览里是这一集的整段简介（C21）
+    /// 一集：16:9 剧照，字压在底部的渐进式模糊上（Apple TV 的分集卡）：「第 1 集 · 集名」和「▶ 45 分钟」；
+    /// 看到一半是「▶ ▬▬ 剩余 12 分钟」，看完的写「已看」（F36：状态不只靠颜色）。点一下就放这一集（C88）；
+    /// 右下的「•••」和长按是同一份菜单，长按的预览是这一集的整段简介（C21）
     private func episodeCard(_ f: EpisodeFile, index i: Int, metrics m: DSMetrics, fallbackArt: String?) -> some View {
         let ep = f.ep.flatMap { info[$0] }
-        let fraction = model.playback.entry(f.path)?.fraction ?? 0
+        let entry = model.playback.entry(f.path)
+        let fraction = entry?.fraction ?? 0
         let done = fraction >= 0.9
+        let partial = !done && model.playback.resumePosition(f.path) != nil
         let art = TMDBImage.url(ep?.still ?? fallbackArt, "w780")
         let runtime = Format.runtime(ep?.runtime)
-        return Button { play(index: i) } label: {
-            DSWideLockup(art: art, title: Self.episodeTitle(f, ep),
-                         subtitle: DetailText.line([runtime, done ? "已看" : nil]),
-                         progress: done ? nil : fraction, metrics: m, caption: true)
+        let detail: String
+        if done {
+            detail = DetailText.line([runtime, "已看"])
+        } else if partial, let e = entry {
+            detail = "剩余 " + Format.runtime(max(1, Int((e.remaining / 60).rounded())))
+        } else {
+            detail = runtime
         }
-        .buttonStyle(PressableStyle())
-        .accessibilityIdentifier("episode-card")
+        return DSMediaCard(art: art, title: Self.episodeTitle(f, ep), detail: detail,
+                           progress: partial ? fraction : nil, metrics: m, identifier: "episode-card",
+                           action: { play(index: i) }) {
+            episodeMenu(f, index: i, done: done, partial: partial)
+        }
         .contextMenu {
-            Button(done ? "重看这一集" : "播放这一集", systemImage: "play.fill") { play(index: i) }
+            episodeMenu(f, index: i, done: done, partial: partial)
         } preview: {
             DetailEpisodePreview(art: art, kicker: DetailText.line([Self.badge(f), runtime]),
                                  title: Self.episodeName(ep) ?? Self.badge(f), overview: ep?.overview)
+        }
+    }
+
+    /// 一集的菜单（「•••」和长按共用）：播放 / 继续播放 / 重看，有进度时「从头播放」，「复制直链」（C45）
+    @ViewBuilder private func episodeMenu(_ f: EpisodeFile, index i: Int, done: Bool, partial: Bool) -> some View {
+        Button(done ? "重看这一集" : (partial ? "继续播放" : "播放这一集"), systemImage: "play.fill") { play(index: i) }
+        if partial {
+            Button("从头播放", systemImage: "arrow.counterclockwise") {
+                model.playback.finish(f.path)
+                play(index: i)
+            }
+        }
+        // 演示数据不连网：没有直链可复制
+        if !DemoData.enabled {
+            Button("复制直链", systemImage: "link") { copyLink(f) }
+        }
+    }
+
+    /// 「复制直链」：这一集签好名的 /stream 地址；复制完底部一句「直链已复制」
+    private func copyLink(_ f: EpisodeFile) {
+        Task { @MainActor in
+            await StreamLink.copy(path: f.path, name: f.name)
+            withAnimation(.snappy) { toast = "直链已复制" }
         }
     }
 
@@ -650,17 +685,13 @@ struct DetailScaffold<Episodes: View>: View {
 
     // MARK: 分区
 
-    /// 预告片：一排 16:9 卡，点一张全屏放（从这一段开始，左右滑换下一段）
+    /// 预告片：一排 16:9 卡，和分集卡同一个样子（字压在渐进式模糊上）；点一张全屏放（从这一段开始，左右滑换下一段）
     private func trailerSection(_ m: DSMetrics) -> some View {
         DSSection(title: "预告片", metrics: m) {
             DSShelf(metrics: m) {
                 ForEach(Array(trailers.enumerated()), id: \.offset) { i, t in
-                    Button { trailerPick = DetailTrailerPick(index: i) } label: {
-                        DSWideLockup(art: TMDBImage.url(trailerArt.isEmpty ? nil : trailerArt[i % trailerArt.count], "w780"),
-                                     title: t.title ?? "预告片", metrics: m, caption: true)
-                    }
-                    .buttonStyle(PressableStyle())
-                    .accessibilityIdentifier("trailer-card")
+                    DetailTrailerCard(trailer: t, art: t.image ?? (trailerArt.isEmpty ? nil : trailerArt[i % trailerArt.count]),
+                                      metrics: m, onPlay: { trailerPick = DetailTrailerPick(index: i) })
                 }
             }
         }
@@ -711,6 +742,34 @@ struct DetailScaffold<Episodes: View>: View {
 }
 
 // MARK: - 小部件
+
+/// 一段预告片：卡上是这一段自己的画面（Apple 给了就用，没给就轮着用剧照）、片名和「▶ 2 分钟」
+/// （时长 Apple 给了就用，没给就读一下这段预告片的播放列表：TrailerLength）；「•••」里是播放和分享
+struct DetailTrailerCard: View {
+    let trailer: Trailer
+    let art: String?
+    let metrics: DSMetrics
+    let onPlay: () -> Void
+    @State private var seconds: Double?
+
+    var body: some View {
+        let title = trailer.title.flatMap { $0.isEmpty ? nil : $0 }
+        DSMediaCard(art: TMDBImage.url(art, "w780"), title: title ?? "预告片",
+                    detail: TrailerLength.label(trailer.duration ?? seconds) ?? (title == nil ? nil : "预告片"),
+                    metrics: metrics, identifier: "trailer-card", action: onPlay) {
+            Button("播放", systemImage: "play.fill", action: onPlay)
+            if let url = URL(string: trailer.hls), url.scheme?.hasPrefix("http") == true {
+                ShareLink(item: url, subject: Text(title ?? "预告片")) {
+                    Label("分享", systemImage: "square.and.arrow.up")
+                }
+            }
+        }
+        .task(id: trailer.hls) {
+            guard trailer.duration == nil, seconds == nil else { return }
+            seconds = await TrailerLength.shared.seconds(trailer.hls)
+        }
+    }
+}
 
 /// 简介：Body、宽松行距（F21），次要色；三行后一枚「更多」，点了就地展开（F24：截断了就要能看全文）。
 /// 真被截断了才有「更多」：量一份不限行数的同一段字，比三行高才露出来
@@ -883,6 +942,8 @@ enum DetailText {
 /// 签好名的 /stream 直链（网页版 copyStreamLink），复制到剪贴板
 enum StreamLink {
     @MainActor static func copy(path: String, name: String) async {
+        // 演示数据不连网（截图、UI 测试）：不去签名
+        if DemoData.enabled { return }
         let sign = try? await APIClient.shared.streamSign(path: path)
         let url = APIClient.shared.streamURL(path: path, name: name, sign: sign)
         UIPasteboard.general.string = url.absoluteString

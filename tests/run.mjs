@@ -1157,6 +1157,38 @@ console.log('\n■ Apple TV 素材索引：片库里的电影优先用 Apple TV 
   H.uts.movies = []; H.uts.shows = []; H.uts.calls.length = 0;
 }
 
+console.log('\n■ Apple TV 预告片：Apple 给了时长和画面就带上（App 的预告片卡），没给就只有名字和地址');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const img = (w, h, tag) => ({ url: `https://is1.mock/${tag}/{w}x{h}{c}.{f}`, width: w, height: h });
+  const hls = n => `https://play.mock/${n}/master.m3u8`;
+  H.uts.movies = [{
+    id: 'umc.cmc.pumpkin', title: 'Pumpkin Patch', year: 2025,
+    search: { shelfImage: img(1920, 1080, 'pk-shelf'), shelfImageBackground: img(1920, 1080, 'pk-bg') },
+    details: { contentLogo: img(1000, 300, 'pk-logo') },
+    shelves: [{ items: [
+      { type: 'Preview', title: 'Official Trailer', duration: 148, images: { previewFrame: img(3840, 2160, 'pk-frame') },
+        playables: [{ assets: { hlsUrl: hls('t1') } }] },
+      { type: 'Preview', title: 'Teaser', playables: [{ assets: { hlsUrl: hls('t2') } }] },
+      { type: 'Preview', title: 'Clip (ms)', playables: [{ duration: 61000, assets: { hlsUrl: hls('t3') } }] },
+      { type: 'Preview', title: 'No stream', playables: [{ assets: {} }] },
+    ] }],
+  }];
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const r = await H.worker.fetch(new Request('https://w.test/api/atv/lookup?title=' + encodeURIComponent('Pumpkin Patch') + '&w=1280&f=jpg',
+    { headers: { Cookie: cookie } }), H.env, H.ctx);
+  const body = r.status === 200 ? await r.json() : null;
+  await settle();
+  const t = body?.trailers || [];
+  ok(r.status === 200 && t.length === 3, `只回放得了的三段（${r.status}，${t.length} 段）`);
+  ok(t[0]?.duration === 148 && t[0]?.image === 'https://is1.mock/pk-frame/1280x720sr.jpg',
+    `第一段带时长与 16:9 画面（${t[0]?.duration}，${t[0]?.image}）`);
+  ok(t[1] && !('duration' in t[1]) && !('image' in t[1]) && t[1].hls === hls('t2'), '没给时长和画面的那一段只有名字和地址');
+  ok(t[2]?.duration === 61, `毫秒的时长换成秒（${t[2]?.duration}）`);
+  H.uts.movies = []; H.uts.calls.length = 0;
+}
+
 console.log('\n■ ffmpeg 作为 HLS 客户端（HTTP）');
 {
   const srv = http.createServer(async (req, res) => {

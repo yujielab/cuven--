@@ -3991,6 +3991,22 @@ const atvOpts  = url => ({
   video: url.searchParams.get('video') === '1',
 });
 
+// 一段预告片：名字、HLS 地址；Apple 给了的话再带上时长（秒）和这一段自己的 16:9 画面（App 的预告片卡用）。
+// 字段不在就不带：不猜、不报错
+function atvTrailer(i) {
+  const p = i.playables?.[0] || {};
+  const t = { title: i.title, hls: p.assets.hlsUrl };
+  let d = [i.duration, p.duration, p.assets?.duration].map(Number).find(n => Number.isFinite(n) && n > 0);
+  if (d && d > 36000) d = d / 1000;                       // 万一是毫秒
+  if (d) t.duration = Math.round(d);
+  const pf = i.images?.previewFrame || p.assets?.previewFrame || p.images?.previewFrame || null;
+  if (pf?.url) {
+    const h = pf.width > 0 && pf.height > 0 ? Math.round(1280 * pf.height / pf.width) : 720;
+    t.image = atvFill(pf.url, 1280, h, 'jpg').replace('{c}', 'sr');
+  }
+  return t;
+}
+
 // 详情页附加信息：预告片（Trailers shelf → playables.hlsUrl）+ 标题 logo + 4:3 内容图
 // + 竖版全面屏图 contentImageTall（1680×3636，AR≈0.462，即 TV app 手机端 hero 官方素材；
 //   实测最近发行片 12/12 全覆盖，搜索层不给、只在详情层）
@@ -4001,7 +4017,7 @@ function atvParseExtras(json) {
     (s.items || []).some(i => i.type === 'Preview'));
   const trailers = (shelf?.items || [])
     .filter(i => i.type === 'Preview' && i.playables?.[0]?.assets?.hlsUrl)
-    .map(i => ({ title: i.title, hls: i.playables[0].assets.hlsUrl }));
+    .map(atvTrailer);
   const logo = logoT ? atvFill(logoT.url, 1000, Math.round(1000 * logoT.height / logoT.width), 'png') : null;
   return { trailers, logo, image43T: imgs.contentImage || null, imageTallT: imgs.contentImageTall || null };
 }
@@ -4141,7 +4157,7 @@ async function handleAtvLookup(url, env, ctx) {
   if (!id && !title) return jsonResponse({ error: '需要 ?title= 或 ?url= / ?id= 参数' }, 400);
 
   const cache = globalThis.caches?.default;
-  const ck = new Request(`${ATV_CACHE}/lookup?${id ? 'id=' + id + '&type=' + type : 'title=' + encodeURIComponent(title.toLowerCase())}&w=${o.w}&f=${o.f}&v=${o.video ? 1 : 0}`);
+  const ck = new Request(`${ATV_CACHE}/lookup?${id ? 'id=' + id + '&type=' + type : 'title=' + encodeURIComponent(title.toLowerCase())}&w=${o.w}&f=${o.f}&v=${o.video ? 2 : 0}`);   // v=2：预告片带上时长与画面
   const hit = cache && await cache.match(ck);
   if (hit) {
     t.mark('edge-hit');

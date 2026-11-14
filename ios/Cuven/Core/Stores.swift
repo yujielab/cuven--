@@ -739,6 +739,7 @@ final class AppModel {
 
     /// 资料库展映的预告片：Apple TV 上这部片的公开预告（订阅才看得了的花絮不要）
     func trailers(for v: Video) async -> [Trailer] {
+        if DemoData.enabled { return DemoData.trailers(for: v) }
         guard let r = await atv(for: v) else { return [] }
         return Self.playable(r.trailers)
     }

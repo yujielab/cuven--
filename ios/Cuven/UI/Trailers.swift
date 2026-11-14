@@ -7,6 +7,37 @@ import UIKit
 // 黑底，画面居中；顶上：关闭、「预告片」、声音开关；底下：片名、这一段的名字、翻页胶囊（当前那颗随播放进度填满）。
 // 左右滑换上一段 / 下一段，放完自动接下一段；点画面暂停 / 继续，往下滑关闭。预告片是 Apple TV 的 HLS，系统播放器直接能放。
 
+/// 预告片的时长：Apple 没给的，读一下这一段的 HLS 播放列表（AVURLAsset 只拉两个小小的 m3u8，不拉视频），按地址记在内存里
+actor TrailerLength {
+    static let shared = TrailerLength()
+    private var known: [String: Double] = [:]
+    private var pending: [String: Task<Double?, Never>] = [:]
+
+    func seconds(_ hls: String) async -> Double? {
+        if let v = known[hls] { return v }
+        // 演示数据不连网；不是 http 的地址也不读
+        guard !DemoData.enabled, let url = URL(string: hls), url.scheme?.hasPrefix("http") == true else { return nil }
+        if let t = pending[hls] { return await t.value }
+        let t = Task<Double?, Never> {
+            let asset = AVURLAsset(url: url)
+            guard let d = try? await asset.load(.duration) else { return nil }
+            let s = d.seconds
+            return s.isFinite && s > 0 ? s : nil
+        }
+        pending[hls] = t
+        let v = await t.value
+        pending[hls] = nil
+        if let v { known[hls] = v }
+        return v
+    }
+
+    /// 卡上第二行：「2 分钟」（不到一分钟算一分钟）
+    nonisolated static func label(_ s: Double?) -> String? {
+        guard let s, s.isFinite, s > 0 else { return nil }
+        return "\(max(1, Int((s / 60).rounded()))) 分钟"
+    }
+}
+
 @MainActor
 @Observable
 final class TrailerDeck {

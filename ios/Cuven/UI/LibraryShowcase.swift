@@ -562,7 +562,7 @@ final class ShowcaseTrailer {
         loadTask = Task { [weak self] in
             let list = await model.trailers(for: v)
             guard let self, !Task.isCancelled, self.path == v.path,
-                  let t = list.first, let url = URL(string: t.hls) else { return }
+                  let t = list.first, let url = URL(string: t.hls), url.scheme?.hasPrefix("http") == true else { return }
             self.attach(url)
         }
     }

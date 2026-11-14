@@ -32,7 +32,7 @@ export const imdb = { status: 403, calls: 0, title: null };
 /* iTunes Search：results 原样回给 /search（不设就 404，等于 iTunes 不可用） */
 export const itunes = { results: null, calls: 0 };
 /**
- * Apple TV（uts-api）替身：movies = [{ id, title, year, search: {搜索层 images}, details: {详情层 images} }]，
+ * Apple TV（uts-api）替身：movies = [{ id, title, year, search: {搜索层 images}, details: {详情层 images}, shelves: [详情层的货架（预告片）] }]，
  * shows 是同名的剧集（测「只认电影」）；fail = true 时一律 500；calls 记下每次请求（路径 + 搜索词）
  */
 export const uts = { movies: [], shows: [], fail: false, calls: [] };
@@ -200,7 +200,7 @@ globalThis.fetch = async (input, init = {}) => {
     }
     const mm = /^\/uts\/v3\/movies\/(.+)$/.exec(u.pathname);
     const mv = mm && uts.movies.find(x => x.id === mm[1]);
-    if (mv) return Response.json({ data: { content: { title: mv.title, images: mv.details || {} } } });
+    if (mv) return Response.json({ data: { content: { title: mv.title, images: mv.details || {} }, canvas: { shelves: mv.shelves || [] } } });
     return Response.json({ errors: [{ message: 'not found' }] }, { status: 404 });
   }
   if (u.host === 'itunes.apple.com' && itunes.results) {

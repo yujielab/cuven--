@@ -1,6 +1,15 @@
 import SwiftUI
 import UIKit
 import ImageIO
+import CoreImage
+import CoreImage.CIFilterBuiltins
+
+/// 解码以后再给图做一道处理（结果和原图分开缓存）
+enum ImageEffect: String, Hashable, Sendable {
+    case none
+    /// 底部一段渐进式模糊：上半张清楚，往下越来越糊（分集卡、预告片卡：字压在模糊上，Apple TV 的样子）
+    case bottomBlur
+}
 
 /// 图片：内存缓存（NSCache）+ 磁盘缓存（URLCache）+ 按显示尺寸降采样解码 —— 一屏几十张海报也不吃内存。
 actor ImagePipeline {
@@ -45,6 +54,18 @@ actor ImagePipeline {
         return img
     }
 
+    /// 处理过的图（见 ImageEffect）：先照常拿原图，再在后台做一次处理，按「地址 + 尺寸 + 处理」记在内存里
+    func image(_ url: URL, maxPixel: CGFloat, effect: ImageEffect) async -> UIImage? {
+        guard effect != .none else { return await image(url, maxPixel: maxPixel) }
+        let key = "\(url.absoluteString)#\(Int(maxPixel))#\(effect.rawValue)" as NSString
+        if let hit = memory.object(forKey: key) { return hit }
+        guard let base = await image(url, maxPixel: maxPixel) else { return nil }
+        let out = await Task.detached(priority: .userInitiated) { ImageEffects.apply(effect, to: base) }.value ?? base
+        let cost = Int(out.size.width * out.size.height * out.scale * out.scale * 4)
+        memory.setObject(out, forKey: key, cost: cost)
+        return out
+    }
+
     /// 只要原始字节（字标的明暗分析用，见 LogoTone）
     func data(_ url: URL) async -> Data? {
         if url.scheme == "demo" { return DemoData.render(url, maxPixel: 400)?.pngData() }
@@ -67,12 +88,50 @@ actor ImagePipeline {
     }
 }
 
+/// 图的后期处理（Core Image，在后台线程做；CIContext 线程安全，全 App 共用一个）
+enum ImageEffects {
+    nonisolated(unsafe) private static let context = CIContext(options: [.cacheIntermediates: false])
+
+    static func apply(_ effect: ImageEffect, to image: UIImage) -> UIImage? {
+        switch effect {
+        case .none: return image
+        case .bottomBlur: return bottomBlur(image)
+        }
+    }
+
+    /// 渐进式模糊：用一张竖向渐变当遮罩做「可变半径模糊」（CIMaskedVariableBlur：遮罩黑处不糊、白处糊到最大）。
+    /// 离底 48% 以上清楚，往下逐渐变糊，离底 26% 以下糊到最大（字就压在这一段上）；半径按图宽算，大小图糊得一样
+    static func bottomBlur(_ image: UIImage) -> UIImage? {
+        guard let cg = image.cgImage else { return nil }
+        let input = CIImage(cgImage: cg)
+        let r = input.extent
+        guard r.width > 8, r.height > 8 else { return nil }
+        // Core Image 的原点在左下：y 越小越靠底
+        let ramp = CIFilter.linearGradient()
+        ramp.point0 = CGPoint(x: r.midX, y: r.minY + r.height * 0.48)
+        ramp.color0 = CIColor.black
+        ramp.point1 = CGPoint(x: r.midX, y: r.minY + r.height * 0.26)
+        ramp.color1 = CIColor.white
+        guard let mask = ramp.outputImage?.cropped(to: r) else { return nil }
+        let blur = CIFilter.maskedVariableBlur()
+        // 先把边缘向外延展，糊的时候四边不会渗进透明、发暗
+        blur.inputImage = input.clampedToExtent()
+        blur.mask = mask
+        blur.radius = Float(max(4, r.width * 0.03))
+        guard let out = blur.outputImage?.cropped(to: r),
+              let done = context.createCGImage(out, from: r) else { return nil }
+        return UIImage(cgImage: done, scale: image.scale, orientation: image.imageOrientation)
+    }
+}
+
 /// 网络图片视图：加载前是一块暗色占位，加载完淡入
 struct RemoteImage: View {
     let url: URL?
     var maxPixel: CGFloat = 900
     var contentMode: ContentMode = .fill
     var placeholder: Color = Color.white.opacity(0.06)
+    /// 解码后的处理（分集卡、预告片卡底部的渐进式模糊）
+    var effect: ImageEffect = .none
 
     @State private var image: UIImage?
     @State private var loadedURL: URL?
@@ -91,7 +150,7 @@ struct RemoteImage: View {
         .task(id: url) {
             guard let url else { image = nil; return }
             if loadedURL != url { image = nil }
-            let img = await ImagePipeline.shared.image(url, maxPixel: maxPixel)
+            let img = await ImagePipeline.shared.image(url, maxPixel: maxPixel, effect: effect)
             guard !Task.isCancelled else { return }
             withAnimation(.easeOut(duration: 0.25)) { image = img }
             loadedURL = url

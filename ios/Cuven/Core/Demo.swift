@@ -41,6 +41,15 @@ enum DemoData {
         return s
     }
 
+    /// 演示用的两段「预告片」：只有画面、名字和时长（地址是 demo://，不连网，点开也放不出来），核对预告片卡的样子用
+    static func trailers(for v: Video) -> [Trailer] {
+        let seed = v.path.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xffff }
+        return [
+            Trailer(title: "正式预告", hls: "demo://trailer/\(seed)/1", duration: 148, image: url("backdrop", 300 + seed % 40)),
+            Trailer(title: "先导预告", hls: "demo://trailer/\(seed)/2", duration: 62, image: url("backdrop", 340 + seed % 40)),
+        ]
+    }
+
     @MainActor
     static func populate(_ m: AppModel) {
         let now = Date()

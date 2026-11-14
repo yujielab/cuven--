@@ -129,6 +129,8 @@ struct DSParallaxArt: View {
     let url: URL?
     let metrics: DSMetrics
     let size: CGSize
+    /// 解码后的处理：分集卡、预告片卡底部的渐进式模糊
+    var effect: ImageEffect = .none
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -137,7 +139,7 @@ struct DSParallaxArt: View {
         let span = size.width + metrics.gutter
         Color(white: 0.11)
             .overlay {
-                RemoteImage(url: url, maxPixel: size.width * 3, placeholder: .clear)
+                RemoteImage(url: url, maxPixel: size.width * 3, placeholder: .clear, effect: effect)
                     .frame(width: size.width + travel * 2, height: size.height)
                     .visualEffect { c, proxy in
                         // 卡在左边线右边（还没到）时画面偏左，滑过以后偏右：像一层在后面的画
@@ -226,7 +228,7 @@ struct DSPosterLockup: View {
 }
 
 /// 16:9 卡：画面 + 左下字标；可选进度条（F36：进度用形状表达，不只靠颜色）。
-/// caption：分集、预告片这种卡下的字本身就是内容（第 3 集 · 集名），才把字写出来
+/// 分集、预告片的卡是下面的 DSMediaCard（字压在渐进式模糊上）
 struct DSWideLockup: View {
     let art: URL?
     let title: String
@@ -235,7 +237,6 @@ struct DSWideLockup: View {
     let metrics: DSMetrics
     var width: CGFloat? = nil
     var logo: URL? = nil
-    var caption = false
 
     var body: some View {
         let w = width ?? metrics.wideCardWidth
@@ -260,26 +261,138 @@ struct DSWideLockup: View {
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            if caption {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    if let subtitle, !subtitle.isEmpty {
-                        Text(subtitle)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-                .frame(width: w, alignment: .leading)
-            }
         }
         .frame(width: w, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel([title, subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，"))
+    }
+}
+
+// MARK: - 分集卡 / 预告片卡（Apple TV 的样子：字压在渐进式模糊上）
+//
+// 16:9、圆角；画面底部一段渐进式模糊（上半张清楚，往下越来越糊：ImageEffect.bottomBlur，Core Image 算一次、缓存），
+// 再压一层很淡的暗（F34、C58：亮画面上白字也看得清）。两行白字直接压在模糊上：
+// 标题（Headline，一行，放不下截断）和「▶ 45 分钟」（看到一半：▶ + 一小段进度条 + 剩余时间：F36 进度用形状表达）；
+// 第二行右边一颗「•••」系统菜单（C45：更多操作收进菜单；点按区 44 点：F74）。整张卡点一下就放（C88）；
+// 按下时整张卡连同「•••」一起微缩、略压暗（和别的卡同一个手感）
+
+struct DSMediaCard<MenuItems: View>: View {
+    let art: URL?
+    let title: String
+    /// 第二行的字：「45 分钟」「剩余 12 分钟」「2 分钟」「预告片」
+    var detail: String? = nil
+    /// 看到一半：第二行在 ▶ 后面先放一小段进度条
+    var progress: Double? = nil
+    let metrics: DSMetrics
+    var width: CGFloat? = nil
+    /// 整张卡那颗按钮的无障碍标识（UI 测试用）
+    var identifier: String = ""
+    let action: () -> Void
+    @ViewBuilder var menu: () -> MenuItems
+
+    @State private var pressed = false
+
+    var body: some View {
+        let w = width ?? metrics.wideCardWidth
+        let h = (w * 9 / 16).rounded()
+        let radius: CGFloat = metrics.wide ? 18 : 14
+        // 字离左、下两边的距离；「•••」的点按区按它摆，三个点的右缘和字的边线对齐
+        let pad: CGFloat = metrics.wide ? 18 : 14
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        ZStack(alignment: .bottomTrailing) {
+            Button(action: action) {
+                ZStack(alignment: .bottomLeading) {
+                    DSParallaxArt(url: art, metrics: metrics, size: CGSize(width: w, height: h), effect: .bottomBlur)
+                    LinearGradient(stops: DSMediaCardStyle.shade, startPoint: .top, endPoint: .bottom)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        HStack(spacing: 6) {
+                            Image(systemName: "play.fill")
+                                .font(.caption2)
+                            if let p = progress, p > 0.01 {
+                                DSMiniProgress(value: p)
+                                    .frame(width: 32, height: 4)
+                            }
+                            if let detail, !detail.isEmpty {
+                                Text(detail)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.78))
+                        // 右边让给「•••」
+                        .padding(.trailing, 30)
+                    }
+                    // 字只在模糊那一段里：特大字号时也不冲出去
+                    .dynamicTypeSize(...DynamicTypeSize.xLarge)
+                    .padding(.horizontal, pad)
+                    .padding(.bottom, pad - 2)
+                    .frame(width: w, alignment: .leading)
+                }
+                .frame(width: w, height: h)
+                .clipShape(shape)
+                .contentShape(shape)
+            }
+            .buttonStyle(DSPressReporting(pressed: $pressed))
+            .accessibilityLabel([title, detail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，"))
+            .accessibilityIdentifier(identifier)
+
+            Menu {
+                menu()
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.white.opacity(0.78))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("更多")
+            .padding(.trailing, pad - 14)
+            .padding(.bottom, pad - 14)
+        }
+        .frame(width: w, height: h)
+        .scaleEffect(pressed ? 0.96 : 1)
+        .brightness(pressed ? -0.06 : 0)
+        .animation(.spring(response: 0.28, dampingFraction: 0.68), value: pressed)
+    }
+}
+
+enum DSMediaCardStyle {
+    /// 模糊那一段上的一层淡暗：离顶 42% 开始，到底 36%；alpha 走 smoothstep，OLED 上不起条带
+    static let shade: [Gradient.Stop] = (0...8).map { i in
+        let t = Double(i) / 8
+        let s = t * t * (3 - 2 * t)
+        return Gradient.Stop(color: .black.opacity(0.36 * s), location: 0.42 + 0.58 * t)
+    }
+}
+
+/// 第二行里那一小段进度条（底 30% 白、值 90% 白）
+struct DSMiniProgress: View {
+    let value: Double
+
+    var body: some View {
+        GeometryReader { g in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.3))
+                Capsule().fill(.white.opacity(0.9))
+                    .frame(width: max(3, g.size.width * min(1, max(0, value))))
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// 只把「按下了没有」报出去：缩放、压暗由卡片自己做（连同右下角那颗「•••」一起，不然点卡时只有画面缩、点点不动）
+struct DSPressReporting: ButtonStyle {
+    @Binding var pressed: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .onChange(of: configuration.isPressed) { _, p in pressed = p }
     }
 }
 
