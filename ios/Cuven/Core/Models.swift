@@ -182,6 +182,8 @@ struct Meta: Codable, Hashable, Sendable {
     var poster: String?
     var posterClean: String?
     var backdrop: String?
+    /// TMDB 上没有字的那张横版剧照（iso_639_1 为空的 backdrop；只在全量结果里，首页头图横拿时兜底用）
+    var backdropClean: String?
     var logo: String?
     var logoChecked: Bool?
     var overview: String?
@@ -194,7 +196,7 @@ struct Meta: Codable, Hashable, Sendable {
     var stills: [Still]?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, en, year, poster, posterClean, backdrop, logo, logoChecked, overview, rating, type, runtime, genres, cast, director, stills
+        case id, title, en, year, poster, posterClean, backdrop, backdropClean, logo, logoChecked, overview, rating, type, runtime, genres, cast, director, stills
         case originalTitle = "original_title"
         case releaseDate = "release_date"
     }
@@ -218,6 +220,7 @@ struct Meta: Codable, Hashable, Sendable {
         poster = c.str(.poster)
         posterClean = c.str(.posterClean)
         backdrop = c.str(.backdrop)
+        backdropClean = c.str(.backdropClean)
         logo = c.str(.logo)
         logoChecked = c.bool(.logoChecked)
         overview = c.str(.overview)
@@ -375,6 +378,16 @@ struct SeasonPayload: Codable, Sendable {
     }
 }
 
+/// 头图里的一部（首页最上面那张轮播）：无字的横图和字标两样都要有才上；竖版无字图可能没有（竖着的屏就把横图居中裁）
+struct HeroPick: Identifiable, Hashable {
+    let video: Video
+    var hero: Hero?
+    let wide: String
+    var tall: String?
+    let logo: String
+    var id: String { video.path }
+}
+
 // MARK: - 首页大图（/api/atv/hero：Apple TV 商店最新发行里、库里有的那些）
 
 struct Hero: Codable, Hashable, Identifiable, Sendable {
@@ -476,6 +489,9 @@ struct AtvLookup: Decodable, Sendable {
 struct Trailer: Decodable, Hashable, Identifiable, Sendable {
     var title: String?
     var hls: String
+    /// 时长（秒）和这一段自己的画面：Apple 给了才有（Worker 原样带过来）
+    var duration: Double? = nil
+    var image: String? = nil
     var id: String { hls }
 }
 
@@ -550,6 +566,8 @@ enum Shelf: Hashable {
     case genre(String)
     /// 主页的五个大类之一（引人入胜的剧情……）：电影和剧集都在里面
     case category(HomeCategory)
+    /// 精选电影：评分高的在前（主页今年 / 去年下面那排大号竖卡的全部）
+    case featured
 
     var title: String {
         switch self {
@@ -560,6 +578,7 @@ enum Shelf: Hashable {
         case .continueWatching: return "继续观看"
         case .genre(let g): return g
         case .category(let c): return c.title
+        case .featured: return "精选电影"
         }
     }
 
@@ -573,6 +592,7 @@ enum Shelf: Hashable {
         case .continueWatching: return "continue"
         case .genre(let g): return "genre-" + g
         case .category(let c): return "cat-" + c.rawValue
+        case .featured: return "featured"
         }
     }
 }

@@ -150,6 +150,16 @@ final class APIClient: @unchecked Sendable {
         return r
     }
 
+    // MARK: 在线字幕
+
+    private struct SubsWarm: Decodable {}
+
+    /// 详情页一打开就让后台先去找这部片的在线字幕（warm=1：后端立刻回，不等结果）。
+    /// 每部片都会有一条在线字幕备选；片子自带中文字幕时仍默认用自带的。播放时 HLS 主列表里就有它，不必等
+    func warmSubs(path: String) async {
+        let _: SubsWarm? = try? await get("/api/subs", [("path", path), ("warm", "1")], timeout: 15, fresh: true)
+    }
+
     // MARK: 播放
 
     func streamSign(path: String) async throws -> StreamSign {

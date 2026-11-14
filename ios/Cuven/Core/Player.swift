@@ -31,33 +31,9 @@ enum PlayError: LocalizedError {
 }
 
 /// AVPlayerViewController 直接全屏呈现（系统播放器：音轨 / 字幕 / 画中画 / AirPlay / 杜比视界都是系统的）。
-/// 点了「播放」就弹出来；过了两秒还没开播，才盖一层黑底 + 系统转圈的加载画面，开播那一刻就收起（C90、C68、C69）
+/// 点了「播放」就弹出来；从点下去到首帧出来，上面盖着和网页版一样的加载画面（PlayerLoadingOverlay：顶层窗口，用户要求）
 final class CuvenPlayerViewController: AVPlayerViewController {
     var onClose: (() -> Void)?
-    private let cover = PlayerLoadingCover()
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        if let host = contentOverlayView {
-            cover.frame = host.bounds
-            cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            host.addSubview(cover)
-        }
-    }
-
-    /// preparing：片源准备中；buffering：片源已挂上、等首帧（这两段都只是「还在等」，加载画面不分段报进度：C68）；
-    /// playing：开播，加载画面马上收起
-    enum Phase { case preparing, buffering, playing }
-
-    func setPhase(_ phase: Phase) {
-        loadViewIfNeeded()
-        cover.setPhase(phase)
-    }
-
-    func configureCover(title: String, artwork: URL?) {
-        loadViewIfNeeded()
-        cover.configure(title: title, artwork: artwork)
-    }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
@@ -65,7 +41,7 @@ final class CuvenPlayerViewController: AVPlayerViewController {
     }
 }
 
-// 加载画面（PlayerLoadingCover）在 UI/PlayerLoading.swift：超过两秒才出现的黑底 + 系统转圈 + 一行片名（C90）
+// 加载画面（PlayerLoadingOverlay）在 UI/PlayerLoading.swift：和网页版一样的极光 + Cuven max + 胶囊进度条 + 提示，顶层窗口
 
 @MainActor
 final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
@@ -96,8 +72,20 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         if DemoData.enabled { alert("演示模式", "演示数据没有片源，不能播放。"); return }
         Haptics.success()
         plog("tap")
+        PlayerLoadingOverlay.shared.onClose = { [weak self] in self?.cancelLoading() }
         presentPlayer(req)
         begin(req)
+    }
+
+    /// 加载画面上点了关闭：收起加载画面和播放器（播放器收起时走 closedByUser）
+    private func cancelLoading() {
+        plog("cancelled while loading")
+        PlayerLoadingOverlay.shared.hide()
+        if let vc = controller, vc.presentingViewController != nil, !inPiP {
+            vc.dismiss(animated: true)
+        } else {
+            closedByUser()
+        }
     }
 
     /// 开始准备一集（新点的，或者播完接着的下一集）
@@ -107,8 +95,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         lastWaitReason = nil
         loadToken += 1
         let token = loadToken
-        controller?.configureCover(title: coverTitle(req), artwork: TMDBImage.url(req.artwork, "w1280"))
-        controller?.setPhase(.preparing)
+        // 加载画面盖上（播完接下一集也盖：同一个样子）
+        PlayerLoadingOverlay.shared.show(title: coverTitle(req))
         Task { await start(req, token: token) }
     }
 
@@ -130,12 +118,14 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         let t0 = Date()
         let sign = try? await APIClient.shared.streamSign(path: req.path)
         plog("sign \(sign == nil ? "failed" : "ok") in \(Perf.ms(since: t0)) ms")
+        PlayerLoadingOverlay.shared.stage(.source)
         let isMKV = req.name.lowercased().hasSuffix(".mkv")
         if let hls = sign?.hls, !hls.isEmpty, let master = URL(string: APIClient.base + hls) {
             let info = master.deletingLastPathComponent().appendingPathComponent("info.json")
             let t1 = Date()
             let (status, body) = await APIClient.shared.hlsInfo(info)
             plog("source hls, info.json \(status) in \(Perf.ms(since: t1)) ms")
+            PlayerLoadingOverlay.shared.stage(.meta)
             if (200..<300).contains(status) && body?.ok != false { return master }
             if status >= 400 && status < 500 && status != 404 {
                 throw PlayError.unsupported(body?.error ?? "这个文件转不了 HLS（HTTP \(status)）")
@@ -181,14 +171,13 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
 
         if player == nil || (controller?.presentingViewController == nil && !inPiP) {
             presentPlayer(req)                       // 兜底：没弹出来（比如当时找不到能弹的页面）就现在弹
-            controller?.configureCover(title: coverTitle(req), artwork: TMDBImage.url(req.artwork, "w1280"))
         }
         guard let p = player else { return }
         pendingSeek = model?.playback.resumePosition(req.path)
         p.replaceCurrentItem(with: item)
         observe(item)
         controller?.player = p
-        controller?.setPhase(.buffering)
+        PlayerLoadingOverlay.shared.stage(.data)
         plog("attach after \(Perf.ms(since: tapAt)) ms")
         if pendingSeek == nil { p.play() }
     }
@@ -231,7 +220,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             if !startedPlaying {
                 startedPlaying = true
                 plog("playing after \(Perf.ms(since: tapAt)) ms")
-                controller?.setPhase(.playing)
+                PlayerLoadingOverlay.shared.finish()
             }
         case .waitingToPlayAtSpecifiedRate:
             let r = p.reasonForWaitingToPlay?.rawValue ?? "-"
@@ -275,6 +264,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         case .readyToPlay:
             let d = item.duration.seconds
             plog("ready after \(Perf.ms(since: tapAt)) ms, duration \(d.isFinite ? Int(d) : -1)")
+            PlayerLoadingOverlay.shared.stage(.ready)
             if let s = pendingSeek {
                 pendingSeek = nil
                 player?.seek(to: CMTime(seconds: s, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: CMTime(seconds: 1, preferredTimescale: 600)) { [weak self] _ in
@@ -325,6 +315,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     private func closedByUser() {
         guard !inPiP else { return }
         plog("closed")
+        PlayerLoadingOverlay.shared.hide()
         loadToken += 1
         saveProgress()
         player?.pause()
@@ -377,6 +368,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     /// 同一次出错可能同时来两个信号（状态 failed + 播放中断通知）：只提示一次
     private var closing = false
     private func closeThenAlert(_ title: String, _ message: String) {
+        PlayerLoadingOverlay.shared.hide()
         guard !closing else { return }
         if let vc = controller, vc.presentingViewController != nil, !inPiP {
             closing = true

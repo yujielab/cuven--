@@ -72,12 +72,20 @@ final class DuoDeviceTests: XCTestCase {
         report(app, "home")
         snap("duo-01-home")
         app.swipeUp(); sleep(2); snap("duo-02-home-rows")
-        app.swipeDown(); app.swipeDown(); sleep(1)
+        // 精选电影：今年 / 去年下面一排大号竖卡（评分高的在前）
+        if reveal(app, app.buttons.matching(identifier: "featured-card"), swipes: 3) != nil {
+            sleep(2)
+            snap("duo-02c-home-featured")
+        } else {
+            print("DUO featured card: none")
+        }
+        for _ in 0..<5 { app.swipeDown() }
+        sleep(1)
 
         // 详情：头图上此刻在屏上的那一页的「详情」（详情页从头图上放大出来）；返回是系统的返回钮（折起时在侧边那一列最上面）
-        let heroDetail = visible(app.buttons.matching(identifier: "hero-detail"))
+        let heroDetail = visible(app.buttons.matching(identifier: "hero-detail"), in: app)
         let poster = app.buttons["movie-card"].firstMatch
-        if heroDetail.exists && heroDetail.isHittable { heroDetail.tap() } else if poster.exists { poster.tap() }
+        if heroDetail.isOnScreen(in: app) { heroDetail.tapCenter() } else if poster.exists { poster.tap() }
         XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "没进到电影详情")
         sleep(2)
         report(app, "detail")
@@ -92,6 +100,25 @@ final class DuoDeviceTests: XCTestCase {
             sleep(1)
         } else {
             XCTFail("详情页没有「…」菜单")
+        }
+        // 简介：一排卡（简介、评分、影片规格）；点简介卡弹出从卡上放大出来的系统弹层，右上关闭
+        if let about = reveal(app, app.buttons.matching(identifier: "about-synopsis"), swipes: 2) {
+            sleep(1)
+            snap("duo-03d-about")
+            about.tap(); sleep(2)
+            snap("duo-03e-about-sheet")
+            let close = app.buttons["about-close"].firstMatch
+            if close.waitForExistence(timeout: 3) { close.tap() } else { app.swipeDown() }
+            sleep(1)
+        } else {
+            print("DUO about card: none")
+        }
+        // 预告片：一排 16:9 卡，字压在底部的渐进式模糊上（「正式预告」「▶ 2 分钟」），右下一颗「•••」
+        if reveal(app, app.buttons.matching(identifier: "trailer-card"), swipes: 3) != nil {
+            sleep(2)
+            snap("duo-03c-detail-trailers")
+        } else {
+            print("DUO trailer card: none")
         }
         // 演员 ›：一张半屏 / 全屏的系统弹层，一行一位；点一行在弹层里推进那位演员（「在资料库中搜索」「在 TMDB 查看」）
         if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 3) {
@@ -135,12 +162,15 @@ final class DuoDeviceTests: XCTestCase {
         }
         tab(app, "主页"); sleep(1)
 
-        // 资料库：展映——一部片一章，满屏画幅 → 收成 16:9，下面字标、一行信息、三行简介、播放 / 详情
+        // 资料库：展映（网页版同一套）——一部有预告片的电影一章：满屏画幅（一行信息 + 字标）→ 收成 16:9，
+        // 下面的介绍面板：简介、评分、导演与主演、播放 / 影片详情、一排剧照，章与章之间一道细线（底下不留一大块黑）
         tab(app, "资料库"); sleep(3)
         report(app, "library")
         snap("duo-05-library")
         app.swipeUp(); sleep(2); snap("duo-05f-library-shrink")
         app.swipeUp(); sleep(2); snap("duo-05g-library-intro")
+        app.swipeUp(); sleep(2); snap("duo-05i-library-next")
+        app.swipeDown(); sleep(1); app.swipeDown(); sleep(2)
         if let d = reveal(app, app.buttons.matching(identifier: "library-movie"), swipes: 2) {
             d.tap(); sleep(2)
             XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "资料库「详情」没进到详情页")
@@ -337,15 +367,15 @@ final class DuoDeviceTests: XCTestCase {
     private func reveal(_ app: XCUIApplication, _ q: XCUIElementQuery, swipes: Int = 6) -> XCUIElement? {
         for i in 0...swipes {
             let e = q.firstMatch
-            if e.exists && e.isHittable { return e }
+            if e.isOnScreen(in: app) { return e }
             if i < swipes { app.swipeUp(); sleep(1) }
         }
         return nil
     }
 
     /// 第一个真正在屏上的匹配项（切到别的标签后，上一页的同名按钮还留在层级里，只是看不见）
-    private func visible(_ q: XCUIElementQuery) -> XCUIElement {
+    private func visible(_ q: XCUIElementQuery, in app: XCUIApplication) -> XCUIElement {
         _ = q.firstMatch.waitForExistence(timeout: 5)
-        return q.allElementsBoundByIndex.first { $0.isHittable } ?? q.firstMatch
+        return q.allElementsBoundByIndex.first { $0.isOnScreen(in: app) } ?? q.firstMatch
     }
 }

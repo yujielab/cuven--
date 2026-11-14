@@ -944,7 +944,7 @@ async function handleSubsList(url, env, ctx) {
     };
   }));
 
-  // 没有简体中文的片子：带上 OpenSubtitles 自动找来的那一条（warm=1 只在后台开始查，立刻回）
+  // 每部片都带上 OpenSubtitles 找来的那一条当备选（自带简体中文时不抢默认；warm=1 只在后台开始查，立刻回）
   let pending = false;
   if (osOn(env)) {
     const os = await subsOnline(filePath, fileName, stem, subFiles, env, ctx,
@@ -1323,13 +1323,14 @@ async function osSave(env, key, rec) {
 const osFresh = (rec, allowEn) => !!rec && (rec.status === 'ok'
   || (Date.now() < (rec.retryAt || 0) && !(allowEn && rec.status === 'none' && !String(rec.langs || '').includes('en'))));
 
-/** 已有字幕里有没有简体。tracks：[{ id, lang, forced, sample() }]，sample 取一段文字认繁简 */
+/** 每部片都要一条在线字幕当备选（need 恒为 true）；own = 片子自带能用的简体中文（标了简体，或抽样认出是简体的「中文」）——
+ *  有自带的，在线那条只作备选：不默认打开、起播也不等它。tracks：[{ id, lang, forced, sample() }]，sample 取一段文字认繁简 */
 async function osNeed(sig, tracks) {
   if (OS_NEED.has(sig)) return OS_NEED.get(sig);
   const real = tracks.filter(t => !t.forced);
   let res;
-  if (!real.length) res = { need: true, allowEn: !tracks.length, trad: [] };
-  else if (real.some(t => t.lang === 'zh-Hans')) res = { need: false, trad: [] };
+  if (!real.length) res = { need: true, own: false, allowEn: !tracks.length, trad: [] };
+  else if (real.some(t => t.lang === 'zh-Hans')) res = { need: true, own: true, allowEn: false, trad: [] };
   else {
     const trad = [];
     let simp = false;
@@ -1337,7 +1338,7 @@ async function osNeed(sig, tracks) {
       const sc = zhScript(await Promise.resolve().then(t.sample).catch(() => ''));
       if (sc === 'hant') trad.push(t.id); else { simp = true; break; }
     }
-    res = simp ? { need: false, trad: [] } : { need: true, allowEn: false, trad };
+    res = simp ? { need: true, own: true, allowEn: false, trad: [] } : { need: true, own: false, allowEn: false, trad };
   }
   OS_NEED.set(sig, res);
   while (OS_NEED.size > 200) OS_NEED.delete(OS_NEED.keys().next().value);
@@ -1378,7 +1379,8 @@ async function osFor(env, ctx, file, tracks, waitMs) {
   let rec = await osLoad(env, key);
   if (!osFresh(rec, need.allowEn)) {
     osKick(env, ctx, key, { filePath: file.filePath, name: file.name, size: file.meta.size, read: file.read, fps: file.fps, dur: file.dur, allowEn: need.allowEn, refs: file.refs });
-    if (waitMs) rec = (await osAwait(key, waitMs, need.allowEn)) || rec;
+    // 自带简体中文的片子：在线那条只是备选，起播不等它（后台查完，下次打开主列表里就有）
+    if (waitMs && !need.own) rec = (await osAwait(key, waitMs, need.allowEn)) || rec;
   }
   return { rec: rec && rec.status === 'ok' ? rec : null, need, key, pending: OS_BUSY.has(key) };
 }
@@ -3989,6 +3991,22 @@ const atvOpts  = url => ({
   video: url.searchParams.get('video') === '1',
 });
 
+// 一段预告片：名字、HLS 地址；Apple 给了的话再带上时长（秒）和这一段自己的 16:9 画面（App 的预告片卡用）。
+// 字段不在就不带：不猜、不报错
+function atvTrailer(i) {
+  const p = i.playables?.[0] || {};
+  const t = { title: i.title, hls: p.assets.hlsUrl };
+  let d = [i.duration, p.duration, p.assets?.duration].map(Number).find(n => Number.isFinite(n) && n > 0);
+  if (d && d > 36000) d = d / 1000;                       // 万一是毫秒
+  if (d) t.duration = Math.round(d);
+  const pf = i.images?.previewFrame || p.assets?.previewFrame || p.images?.previewFrame || null;
+  if (pf?.url) {
+    const h = pf.width > 0 && pf.height > 0 ? Math.round(1280 * pf.height / pf.width) : 720;
+    t.image = atvFill(pf.url, 1280, h, 'jpg').replace('{c}', 'sr');
+  }
+  return t;
+}
+
 // 详情页附加信息：预告片（Trailers shelf → playables.hlsUrl）+ 标题 logo + 4:3 内容图
 // + 竖版全面屏图 contentImageTall（1680×3636，AR≈0.462，即 TV app 手机端 hero 官方素材；
 //   实测最近发行片 12/12 全覆盖，搜索层不给、只在详情层）
@@ -3999,7 +4017,7 @@ function atvParseExtras(json) {
     (s.items || []).some(i => i.type === 'Preview'));
   const trailers = (shelf?.items || [])
     .filter(i => i.type === 'Preview' && i.playables?.[0]?.assets?.hlsUrl)
-    .map(i => ({ title: i.title, hls: i.playables[0].assets.hlsUrl }));
+    .map(atvTrailer);
   const logo = logoT ? atvFill(logoT.url, 1000, Math.round(1000 * logoT.height / logoT.width), 'png') : null;
   return { trailers, logo, image43T: imgs.contentImage || null, imageTallT: imgs.contentImageTall || null };
 }
@@ -4139,7 +4157,7 @@ async function handleAtvLookup(url, env, ctx) {
   if (!id && !title) return jsonResponse({ error: '需要 ?title= 或 ?url= / ?id= 参数' }, 400);
 
   const cache = globalThis.caches?.default;
-  const ck = new Request(`${ATV_CACHE}/lookup?${id ? 'id=' + id + '&type=' + type : 'title=' + encodeURIComponent(title.toLowerCase())}&w=${o.w}&f=${o.f}&v=${o.video ? 1 : 0}`);
+  const ck = new Request(`${ATV_CACHE}/lookup?${id ? 'id=' + id + '&type=' + type : 'title=' + encodeURIComponent(title.toLowerCase())}&w=${o.w}&f=${o.f}&v=${o.video ? 2 : 0}`);   // v=2：预告片带上时长与画面
   const hit = cache && await cache.match(ck);
   if (hit) {
     t.mark('edge-hit');
@@ -4307,7 +4325,7 @@ async function handleAtvArt(request, url, env, ctx) {
 //    匹配安全网:片名折叠(容错撇号 / 逗号 / 弯引号 / 感叹号)+ 年份 ±1 消歧,
 //    同名不同片(重制版)宁缺毋错配。成品 R2 全局真源 + edge 双层,
 //    库候选集变化或超龄(6h)由 cron 重建。
-const ATV_HERO_VER = 6;                        // 升版一处改:R2 成品键 + edge 缓存键同步换代,双层缓存一并失效
+const ATV_HERO_VER = 7;                        // 升版一处改:R2 成品键 + edge 缓存键同步换代,双层缓存一并失效(v7:横图只用无字背景、必须有字标)
 const R2_ATV_HERO_KEY = `atv-hero-v${ATV_HERO_VER}.json`;   // { heroes(模板态), candHash, _ts }
 const ATV_HERO_POOL = 24;                      // wire 上限
 const ATV_HERO_CAND = 32;                      // 库内候选数(留余量吃掉商店未收录 / 年份不合)
@@ -4354,10 +4372,13 @@ async function atvHeroMatchOne(cand) {
 
   const dj = await utsGet(`/movies/${it.id}`);
   const imgs = dj?.data?.content?.images || {};
-  const land = imgs.posterArt || it.images?.shelfImageBackground || it.images?.shelfImage || null;   // 横版:详情页优先,搜索层兜底
+  // v7:横版只认搜索层的 shelfImageBackground(无字干净背景)。posterArt / shelfImage 常把片名印在画面上,
+  //    头图上再压一层字标就成了两份片名(展开的 iPhone Duo 横着看最明显)
+  const land = it.images?.shelfImageBackground || null;
   const tall = imgs.contentImageTall || null;                                                        // 竖版:仅详情页有
   const logoT = imgs.contentLogo;
-  if (!land && !tall) return null;
+  // 头图缺一不可:无字横图 + 字标(竖版图没有时前端拿横图居中裁)
+  if (!land || !logoT?.url) return null;
   return {
     source: 'appletv',
     id: it.id,
@@ -4745,7 +4766,7 @@ function tmdbCacheKey(q, year, full, kind) {
   const y = obj ? (q.year || '') : (year || '');
   const p = new URLSearchParams({ q: t.toLowerCase() });
   if (y) p.set('y', y);
-  if (full) p.set('f', '2');        // f=2：全量结果多了 logoChecked（见 fetchMetadata），旧的 f=1 那批不再读
+  if (full) p.set('f', '3');        // f=3：全量结果多了 backdropClean（f=2 起有 logoChecked，见 fetchMetadata）；只换全量这一档，简要结果的缓存不动
   if (kind) p.set('t', kind);       // type=tv / movie 各存一份：同名的电影与剧集不能互相顶掉
   return new Request(`${TMDB_CACHE}?${p}`);
 }
@@ -5178,6 +5199,10 @@ async function fetchMetadata(title, year, full, env, kind = '', budget = null) {
       const clean = (imgData.posters || []).filter(x => x.file_path && (!x.iso_639_1 || x.iso_639_1 === 'xx'))
         .sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0))[0];
       if (clean) out.posterClean = `https://image.tmdb.org/t/p/w780${clean.file_path}`;
+      // 没有字的横版剧照（iso_639_1 为空）：首页头图横着放时，Apple TV 没有无字背景就用它
+      const cleanBd = (imgData.backdrops || []).filter(x => x.file_path && !x.iso_639_1)
+        .sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0))[0];
+      if (cleanBd) out.backdropClean = `https://image.tmdb.org/t/p/w1280${cleanBd.file_path}`;
 
       // ── Stills：从 backdrops 提取剧照（用于详情页 caption-tile 画廊） ──
       // TMDB 的 backdrop 实际就是高清剧照，无水印、横版 16:9。
@@ -10907,10 +10932,11 @@ function hlsMaster(idx, xs, env, os) {
       : { uri: `${idh}/x${i}.m3u8`, lang: x.srclang || 'und', name: x.label, forced: false, hi: false }),
   ];
   if (os && os.rec) subs.push({ uri: `${idh}/o0.m3u8`, lang: os.rec.lang, name: os.rec.label, forced: false, hi: false, online: true });
-  // 默认显示中文字幕（简体优先）——与之前播放页自动挂第一条外挂字幕的行为一致。
+  // 默认显示哪一条：片子自带的中文优先（简体 > 中文），在线那条只兜底——自带里没有能用的中文才默认打开它；
+  // 自带的只有繁体时，在线找来的简体排在它前面（在线那条本来就是给它找的简体）。
   // 一条字幕都没有的片子，在线找来的那条（哪怕是英文）也默认打开 —— 本来就是为它找的
-  const rank = l => ({ 'zh-Hans': 1, zh: 2, 'zh-Hant': 3, yue: 4 }[l] || 9);
-  const best = subs.filter(s => !s.forced).sort((a, b) => rank(a.lang) - rank(b.lang))[0];
+  const rank = s => s.online ? (/^zh/.test(s.lang) ? 3 : 8) : ({ 'zh-Hans': 1, zh: 2, 'zh-Hant': 4, yue: 5 }[s.lang] || 9);
+  const best = subs.filter(s => !s.forced).sort((a, b) => rank(a) - rank(b))[0];
   const usedS = new Set();
   for (const s of subs) {
     let n = s.name || hlsLangName(s.lang);
@@ -10919,7 +10945,7 @@ function hlsMaster(idx, xs, env, os) {
     while (usedS.has(nn)) nn = `${n} (${i++})`;
     usedS.add(nn);
     const at = ['TYPE=SUBTITLES', 'GROUP-ID="sub"', `LANGUAGE="${hlsAttr(s.lang)}"`, `NAME="${hlsAttr(nn)}"`,
-      `DEFAULT=${best && s === best && (rank(s.lang) < 9 || s.online) ? 'YES' : 'NO'}`, 'AUTOSELECT=YES', `FORCED=${s.forced ? 'YES' : 'NO'}`];
+      `DEFAULT=${best && s === best && rank(s) < 9 ? 'YES' : 'NO'}`, 'AUTOSELECT=YES', `FORCED=${s.forced ? 'YES' : 'NO'}`];
     if (s.hi) at.push('CHARACTERISTICS="public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound"');
     at.push(`URI="${s.uri}"`);
     L.push(`#EXT-X-MEDIA:${at.join(',')}`);

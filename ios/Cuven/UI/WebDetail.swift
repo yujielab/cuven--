@@ -21,6 +21,8 @@ struct MovieDetailView: View {
     /// Apple TV 上对上的那一部：有就用它的无字背景、竖版全屏图、字标和预告片（对不上就是 TMDB 的）
     @State private var atv: AtvLookup?
     @State private var trailers: [Trailer] = []
+    /// 头部的画面和字标：定下来就不再换（DetailArt）
+    @State private var art: DetailArt?
 
     var body: some View {
         let meta = full ?? model.meta(video)
@@ -29,11 +31,7 @@ struct MovieDetailView: View {
 
         DetailScaffold(
             title: model.title(video),
-            // 画面：这一部的 Apple TV 查询（顺带预告片）先到就用它的；还没回来先用全片库的 Apple TV 素材，最后才是 TMDB
-            // （详情页的 TMDB 是全量结果，字标只有它有：放在最后兜底）
-            wideArt: atv?.background ?? model.backgroundArtString(video) ?? meta?.backdrop ?? meta?.poster,
-            tallArt: atv?.imageTall ?? model.tallArtString(video),
-            logo: atv?.logo ?? model.logoArtString(video) ?? meta?.logo,
+            art: art,
             metaLine: metaLine(meta),
             playTitle: resume ? "继续播放" : "播放",
             playID: "detail-play",
@@ -41,20 +39,67 @@ struct MovieDetailView: View {
             onRestart: restartAction(meta),
             file: (path: video.path, name: video.name),
             shareURL: DetailText.tmdbPage(kind: "movie", id: meta?.id),
-            overview: meta?.overview,
+            about: aboutCards(meta),
             cast: meta?.cast ?? [],
             trailers: trailers,
-            trailerArt: trailerArt(meta),
-            infoRows: infoRows(meta)
+            trailerArt: trailerArt(meta)
         ) { _ in
             EmptyView()
         }
         .task { full = await model.fullMeta(for: video) }
+        // 在线字幕：打开详情页时先让后台去找（不等），点播放时主列表里就有这一条备选
         .task(id: video.path) {
-            atv = await model.atv(for: video)
+            guard !DemoData.enabled else { return }
+            await APIClient.shared.warmSubs(path: video.path)
+        }
+        .task(id: video.path) {
+            // 画面和字标只定一次（用户要求：不先出一张、过一会儿又跳成另一张）：
+            // 这一部的 Apple TV 这次已经问过 → 全片库的 Apple TV 素材（本地就有）→ 等这一部的 Apple TV 最多 0.8 秒 → TMDB
+            if art == nil { art = quickArt() }
+            if art == nil {
+                let fallback = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 800_000_000)
+                    if !Task.isCancelled && art == nil { art = tmdbArt() }
+                }
+                atv = await model.atv(for: video)
+                fallback.cancel()
+                if art == nil { art = lookupArt(atv) ?? tmdbArt() }
+            } else {
+                atv = await model.atv(for: video)
+            }
             // 和资料库展映同一份：Apple TV 上的公开预告（订阅才看得了的不要）；atv 已经记在内存里，不再走网络
             trailers = await model.trailers(for: video)
         }
+        // TMDB 全量结果里才有字标的：原来没有字标（写的是片名）才补上；已经有字标就不换
+        .onChange(of: full?.logo) { _, l in
+            if let l, !l.isEmpty, art != nil, (art?.logo ?? "").isEmpty { art?.logo = l }
+        }
+    }
+
+    /// 本地马上就有的：这一部的 Apple TV 这次已经问过 → 全片库的 Apple TV 素材；都没有是 nil（再等一下）
+    private func quickArt() -> DetailArt? {
+        if let hit = model.atvCached(path: video.path) { return lookupArt(hit) ?? tmdbArt() }
+        if let a = model.appleArt(video), a.tall != nil || a.background != nil || a.wide != nil {
+            return tmdbArt()
+        }
+        return nil
+    }
+
+    /// 这一部的 Apple TV：竖版全屏图、无字背景、字标；缺的项按全片库的 Apple TV 素材、TMDB 补
+    private func lookupArt(_ r: AtvLookup?) -> DetailArt? {
+        guard let r else { return nil }
+        let m = full ?? model.meta(video)
+        return DetailArt(wide: r.background ?? model.backgroundArtString(video) ?? m?.backdrop ?? m?.poster,
+                         tall: r.imageTall ?? model.tallArtString(video),
+                         logo: r.logo ?? model.logoArtString(video) ?? m?.logo)
+    }
+
+    /// 全片库的 Apple TV 素材 → TMDB
+    private func tmdbArt() -> DetailArt {
+        let m = full ?? model.meta(video)
+        return DetailArt(wide: model.backgroundArtString(video) ?? m?.backdrop ?? m?.poster,
+                         tall: model.tallArtString(video),
+                         logo: model.logoArtString(video) ?? m?.logo)
     }
 
     /// 头部那一行：「科幻 · 2026 · 1 小时 32 分钟 · ★ 7.5」（F84：短、平实）
@@ -67,16 +112,36 @@ struct MovieDetailView: View {
         ])
     }
 
-    /// 「信息」：类型、年份、片长、评分、导演、格式；没有的项不写
-    private func infoRows(_ m: Meta?) -> [DetailInfoRow] {
-        [
+    /// 「简介」那一排：简介、评分、影片规格；原来页面最底下「信息」的几行（类型、上映、片长、导演、格式）并进影片规格的弹层
+    private func aboutCards(_ m: Meta?) -> [DetailAboutCard] {
+        var out: [DetailAboutCard] = []
+        if let o = m?.overview, !o.isEmpty {
+            out.append(.synopsis(title: model.title(video), genres: m?.genres ?? [], overview: o))
+        }
+        if let r = m?.rating, r > 0 {
+            out.append(.rating(r, percentile: model.ratingPercentile(r, series: false), pool: "电影"))
+        }
+        let spec = MediaSpec(name: video.name, size: video.size)
+        let runtime = Format.runtime(m?.runtime)
+        let year = model.year(video).map { String($0) }
+        let rows = [
             DetailInfoRow(label: "类型", value: (m?.genres ?? []).joined(separator: "、")),
-            DetailInfoRow(label: "年份", value: model.year(video).map { String($0) } ?? ""),
-            DetailInfoRow(label: "片长", value: Format.runtime(m?.runtime)),
-            DetailInfoRow(label: "评分", value: DetailText.rating(m?.rating) ?? ""),
+            DetailInfoRow(label: "上映", value: year ?? ""),
+            DetailInfoRow(label: "片长", value: runtime),
             DetailInfoRow(label: "导演", value: m?.director ?? ""),
-            DetailInfoRow(label: "格式", value: WebFormat.line(name: video.name)),
-        ].filter { !$0.value.isEmpty && $0.value != "—" }
+            DetailInfoRow(label: "分辨率", value: spec.resolution ?? ""),
+            DetailInfoRow(label: "动态范围", value: spec.range ?? ""),
+            DetailInfoRow(label: "视频", value: spec.video ?? ""),
+            DetailInfoRow(label: "音频", value: spec.audio ?? ""),
+            DetailInfoRow(label: "封装", value: spec.container ?? ""),
+            DetailInfoRow(label: "大小", value: spec.size ?? ""),
+            DetailInfoRow(label: "文件", value: video.name),
+        ].filter { !$0.value.isEmpty }
+        // 大字：分辨率 · 动态范围；文件名里读不出来就写片长
+        let title = spec.headline ?? (runtime.isEmpty ? (spec.container ?? "影片规格") : runtime)
+        let text = DetailText.line([spec.headline == nil ? nil : runtime, year, spec.video, spec.audio, spec.container, spec.size])
+        out.append(DetailAboutCard(id: "specs", title: title, caption: "影片规格", text: text, sheetTitle: "影片规格", rows: rows))
+        return out
     }
 
     /// 预告片卡的画面：剧照轮着用；没有剧照就是背景图
@@ -115,6 +180,10 @@ struct SeriesDetailView: View {
     @State private var loading = true
     @State private var failed: String?
     @State private var atv: AtvLookup?
+    /// 分集菜单里「复制直链」之后底部那一句
+    @State private var toast: String?
+    /// 头部的画面和字标：定下来就不再换（换季也不换：同一部剧）
+    @State private var art: DetailArt?
 
     private var current: Series { picked ?? series }
 
@@ -135,9 +204,7 @@ struct SeriesDetailView: View {
 
         DetailScaffold(
             title: meta?.title ?? current.name,
-            wideArt: atv?.background ?? meta?.backdrop ?? meta?.poster,
-            tallArt: atv?.imageTall,
-            logo: atv?.logo ?? meta?.logo,
+            art: art,
             metaLine: metaLine(meta),
             playTitle: playLabel(next),
             playID: "series-play",
@@ -146,20 +213,41 @@ struct SeriesDetailView: View {
             onRestart: restartAction(next),
             file: next.map { (path: $0.file.path, name: $0.file.name) },
             shareURL: DetailText.tmdbPage(kind: "tv", id: current.tmdbId ?? meta?.id),
-            overview: meta?.overview,
+            about: aboutCards(meta),
             cast: meta?.cast ?? [],
             trailers: DetailText.playable(atv?.trailers),
-            trailerArt: trailerArt(meta),
-            infoRows: infoRows(meta)
+            trailerArt: trailerArt(meta)
         ) { m in
             episodes(m, fallbackArt: fallbackArt)
         }
+        .webToast($toast)
         .task(id: current.path) { await load() }
         .task(id: current.path) {
             atv = nil
             await model.ensureSeriesMeta(current)
-            atv = await model.atv(for: current)
+            // 画面和字标只定一次：这部剧的 Apple TV 这次问过就直接用；没问过最多等 0.8 秒，等不到用 TMDB 的，之后不换
+            if art == nil, let hit = model.atvCached(path: current.path) { art = seriesArt(hit) }
+            if art == nil {
+                let fallback = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 800_000_000)
+                    if !Task.isCancelled && art == nil { art = seriesArt(nil) }
+                }
+                atv = await model.atv(for: current)
+                fallback.cancel()
+                if art == nil { art = seriesArt(atv) }
+            } else {
+                atv = await model.atv(for: current)
+            }
         }
+        .onChange(of: model.seriesMetas[current.path]?.logo) { _, l in
+            if let l, !l.isEmpty, art != nil, (art?.logo ?? "").isEmpty { art?.logo = l }
+        }
+    }
+
+    /// 这部剧的头部：Apple TV 的竖版全屏图、无字背景、字标优先，缺的用 TMDB 补
+    private func seriesArt(_ r: AtvLookup?) -> DetailArt {
+        let m = model.seriesMetas[current.path]
+        return DetailArt(wide: r?.background ?? m?.backdrop ?? m?.poster, tall: r?.imageTall, logo: r?.logo ?? m?.logo)
     }
 
     // MARK: 分集
@@ -182,7 +270,7 @@ struct SeriesDetailView: View {
                     // C66：先放占位卡，不留白屏；卡和真卡一样大，换上来时排不跳（C23）
                     DSShelf(metrics: m) {
                         ForEach(0..<3, id: \.self) { i in
-                            DSWideLockup(art: nil, title: "第 \(i + 1) 集", subtitle: "45 分钟", metrics: m, caption: true)
+                            DSMediaCard(art: nil, title: "第 \(i + 1) 集", detail: "45 分钟", metrics: m, action: {}) { EmptyView() }
                         }
                     }
                     .redacted(reason: .placeholder)
@@ -197,35 +285,77 @@ struct SeriesDetailView: View {
                         .padding(.vertical, 8)
                 }
             } else {
+                // 两种卡（用户要求）：这一季大半的集有简介就用长文案的方卡，不然用短文案的 16:9 卡；一排里样子统一
+                let long = files.filter { !(($0.ep.flatMap { info[$0]?.overview }) ?? "").isEmpty }.count * 2 >= files.count
                 DSShelf(metrics: m) {
                     ForEach(Array(files.enumerated()), id: \.element.id) { i, f in
-                        episodeCard(f, index: i, metrics: m, fallbackArt: fallbackArt)
+                        episodeCard(f, index: i, metrics: m, fallbackArt: fallbackArt, long: long)
                     }
                 }
             }
         }
     }
 
-    /// 一集：剧照 + 「第 1 集 · 集名」+ 片长（看完的写「已看」：F36 状态不只靠颜色）；看到一半的带进度条。
-    /// 点一下就放这一集（C88）；长按出菜单，预览里是这一集的整段简介（C21）
-    private func episodeCard(_ f: EpisodeFile, index i: Int, metrics m: DSMetrics, fallbackArt: String?) -> some View {
+    /// 一集：16:9 剧照，字压在底部的渐进式模糊上（Apple TV 的分集卡）：「第 1 集 · 集名」和「▶ 45 分钟」；
+    /// 看到一半是「▶ ▬▬ 剩余 12 分钟」，看完的写「已看」（F36：状态不只靠颜色）。点一下就放这一集（C88）；
+    /// 右下的「•••」和长按是同一份菜单，长按的预览是这一集的整段简介（C21）
+    private func episodeCard(_ f: EpisodeFile, index i: Int, metrics m: DSMetrics, fallbackArt: String?, long: Bool) -> some View {
         let ep = f.ep.flatMap { info[$0] }
-        let fraction = model.playback.entry(f.path)?.fraction ?? 0
+        let entry = model.playback.entry(f.path)
+        let fraction = entry?.fraction ?? 0
         let done = fraction >= 0.9
+        let partial = !done && model.playback.resumePosition(f.path) != nil
         let art = TMDBImage.url(ep?.still ?? fallbackArt, "w780")
         let runtime = Format.runtime(ep?.runtime)
-        return Button { play(index: i) } label: {
-            DSWideLockup(art: art, title: Self.episodeTitle(f, ep),
-                         subtitle: DetailText.line([runtime, done ? "已看" : nil]),
-                         progress: done ? nil : fraction, metrics: m, caption: true)
+        let detail: String
+        if done {
+            detail = DetailText.line([runtime, "已看"])
+        } else if partial, let e = entry {
+            detail = "剩余 " + Format.runtime(max(1, Int((e.remaining / 60).rounded())))
+        } else {
+            detail = runtime
         }
-        .buttonStyle(PressableStyle())
-        .accessibilityIdentifier("episode-card")
+        // 长文案：上面一行「第 2 集」、标题只写集名（没有集名就写「第 2 集」、上面那行不写），下面三行简介
+        let name = Self.episodeName(ep)
+        return DSMediaCard(art: art,
+                           title: long ? (name ?? Self.badge(f)) : Self.episodeTitle(f, ep),
+                           detail: detail,
+                           progress: partial ? fraction : nil,
+                           tall: long,
+                           kicker: long && name != nil ? Self.badge(f) : nil,
+                           overview: long ? ep?.overview : nil,
+                           metrics: m, identifier: "episode-card",
+                           action: { play(index: i) }) {
+            episodeMenu(f, index: i, done: done, partial: partial)
+        }
         .contextMenu {
-            Button(done ? "重看这一集" : "播放这一集", systemImage: "play.fill") { play(index: i) }
+            episodeMenu(f, index: i, done: done, partial: partial)
         } preview: {
             DetailEpisodePreview(art: art, kicker: DetailText.line([Self.badge(f), runtime]),
                                  title: Self.episodeName(ep) ?? Self.badge(f), overview: ep?.overview)
+        }
+    }
+
+    /// 一集的菜单（「•••」和长按共用）：播放 / 继续播放 / 重看，有进度时「从头播放」，「复制直链」（C45）
+    @ViewBuilder private func episodeMenu(_ f: EpisodeFile, index i: Int, done: Bool, partial: Bool) -> some View {
+        Button(done ? "重看这一集" : (partial ? "继续播放" : "播放这一集"), systemImage: "play.fill") { play(index: i) }
+        if partial {
+            Button("从头播放", systemImage: "arrow.counterclockwise") {
+                model.playback.finish(f.path)
+                play(index: i)
+            }
+        }
+        // 演示数据不连网：没有直链可复制
+        if !DemoData.enabled {
+            Button("复制直链", systemImage: "link") { copyLink(f) }
+        }
+    }
+
+    /// 「复制直链」：这一集签好名的 /stream 地址；复制完底部一句「直链已复制」
+    private func copyLink(_ f: EpisodeFile) {
+        Task { @MainActor in
+            await StreamLink.copy(path: f.path, name: f.name)
+            withAnimation(.snappy) { toast = "直链已复制" }
         }
     }
 
@@ -317,24 +447,34 @@ struct SeriesDetailView: View {
         }
     }
 
-    private var audioLine: String? {
-        guard let langs = current.langs, !langs.isEmpty else { return nil }
-        var s = langs.joined(separator: "、")
-        if let a = current.audio, !a.isEmpty { s += "（" + (a == "Atmos" ? "Dolby Atmos" : a) + "）" }
-        return s
-    }
-
-    /// 「信息」：类型、年份、剧集（季 · 集数）、评分、导演、语言、格式；没有的项不写
-    private func infoRows(_ m: Meta?) -> [DetailInfoRow] {
-        [
+    /// 「简介」那一排：简介、评分、影片规格（季与集数、语言、分辨率、动态范围、音频、封装；原来「信息」的几行也在影片规格的弹层里）
+    private func aboutCards(_ m: Meta?) -> [DetailAboutCard] {
+        var out: [DetailAboutCard] = []
+        if let o = m?.overview, !o.isEmpty {
+            out.append(.synopsis(title: m?.title ?? current.name, genres: m?.genres ?? [], overview: o))
+        }
+        if let r = m?.rating, r > 0 {
+            out.append(.rating(r, percentile: model.ratingPercentile(r, series: true), pool: "剧集"))
+        }
+        let spec = MediaSpec.series(current, firstFile: files.first?.name)
+        let langs = (current.langs ?? []).joined(separator: "、")
+        let episodes = DetailText.line([current.seasonLabel, current.countLabel])
+        let rows = [
             DetailInfoRow(label: "类型", value: (m?.genres ?? []).joined(separator: "、")),
             DetailInfoRow(label: "年份", value: year(m) ?? ""),
-            DetailInfoRow(label: "剧集", value: DetailText.line([current.seasonLabel, current.countLabel])),
-            DetailInfoRow(label: "评分", value: DetailText.rating(m?.rating) ?? ""),
+            DetailInfoRow(label: "剧集", value: episodes),
             DetailInfoRow(label: "导演", value: m?.director ?? ""),
-            DetailInfoRow(label: "语言", value: audioLine ?? ""),
-            DetailInfoRow(label: "格式", value: WebFormat.line(series: current, firstFile: files.first?.name)),
-        ].filter { !$0.value.isEmpty && $0.value != "—" }
+            DetailInfoRow(label: "语言", value: langs),
+            DetailInfoRow(label: "分辨率", value: spec.resolution ?? ""),
+            DetailInfoRow(label: "动态范围", value: spec.range ?? ""),
+            DetailInfoRow(label: "视频", value: spec.video ?? ""),
+            DetailInfoRow(label: "音频", value: spec.audio ?? ""),
+            DetailInfoRow(label: "封装", value: spec.container ?? ""),
+        ].filter { !$0.value.isEmpty }
+        let title = spec.headline ?? (current.seasonLabel ?? "影片规格")
+        let text = DetailText.line([episodes, langs.isEmpty ? nil : langs, spec.audio, spec.container])
+        out.append(DetailAboutCard(id: "specs", title: title, caption: "影片规格", text: text, sheetTitle: "影片规格", rows: rows))
+        return out
     }
 
     private func trailerArt(_ m: Meta?) -> [String] {
@@ -404,13 +544,19 @@ struct DetailTrailerPick: Identifiable {
     var id: Int { index }
 }
 
+/// 详情页头部用哪张画面、哪枚字标：定下来就不再换（免得先出一张、过一会儿又跳成另一张：用户要求）
+struct DetailArt: Equatable {
+    /// 16:9 的无字背景（横着的屏用）
+    var wide: String?
+    /// Apple TV 的竖版全屏图（竖着的屏用；没有就裁横图）
+    var tall: String?
+    var logo: String?
+}
+
 struct DetailScaffold<Episodes: View>: View {
     let title: String
-    /// 16:9 的无字背景（横拿、展开横拿用）
-    let wideArt: String?
-    /// Apple TV 的竖版全屏图：头部比宽还高（竖拿）时用它，铺满不用裁横图
-    let tallArt: String?
-    let logo: String?
+    /// 头部的画面和字标；nil 是还没定（只有底色，字标那一格空着，定了再模糊淡入）
+    let art: DetailArt?
     /// 「类型 · 年份 · 片长 · ★评分」
     let metaLine: String
     let playTitle: String
@@ -423,12 +569,12 @@ struct DetailScaffold<Episodes: View>: View {
     let file: (path: String, name: String)?
     /// 「分享」：TMDB 上这一部的页面
     let shareURL: URL?
-    let overview: String?
+    /// 「简介」那一排卡：简介、评分、影片规格（DetailAbout.swift）
+    let about: [DetailAboutCard]
     let cast: [CastMember]
     let trailers: [Trailer]
     /// 预告片卡的画面（轮着用）
     let trailerArt: [String]
-    let infoRows: [DetailInfoRow]
     /// 分集那一段（电影没有）：拿到当前宽度的版面尺寸再排
     @ViewBuilder var episodes: (DSMetrics) -> Episodes
 
@@ -441,38 +587,41 @@ struct DetailScaffold<Episodes: View>: View {
     var body: some View {
         GeometryReader { geo in
             let m = DSMetrics(width: geo.size.width)
-            // 整个窗口的高：把顶上的状态栏 / 导航栏、底下的标签栏加回来（画面从屏幕最顶上开始）
-            let fullH = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
-            let heroH = Self.heroHeight(width: geo.size.width, height: fullH)
+            let insets = geo.safeAreaInsets
+            // 整个窗口：把顶上的状态栏 / 导航栏、底下的标签栏、侧边那一列加回来（画面从屏幕最顶上开始、连同侧边那一列一起平铺）
+            let fullH = geo.size.height + insets.top + insets.bottom
+            let fullW = geo.size.width + insets.leading + insets.trailing
+            let heroH = Self.heroHeight(width: fullW, height: fullH)
             // 系统栏压住的那一截（展开横拿、外屏时栏在侧边一列，顶上几乎没有：D5、D6）
             let barBottom = geo.safeAreaInsets.top
             // 左下那一列字的顶边升到栏底下、快淡完时，片名出现在导航栏里（字块约高：字标 + 一行信息 + 按钮）
             let blockH: CGFloat = m.wide ? 192 : 168
             let titleAt: CGFloat = heroH - blockH - barBottom + 6
-            // 简介限一个好读的宽度：展开的 Duo 上不拉满一整行（F8）
-            let synopsisMax: CGFloat = m.wide ? 640 : .infinity
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    hero(m, height: heroH, barBottom: barBottom)
+                    hero(m, width: fullW, height: heroH, insets: insets, barBottom: barBottom)
                     // 分区之间只靠同一种留白（F3、F12）
                     VStack(alignment: .leading, spacing: m.shelfGap) {
-                        if let o = overview, !o.isEmpty {
-                            DetailSynopsis(text: o)
-                                .frame(maxWidth: synopsisMax, alignment: .leading)
-                                .padding(.horizontal, m.margin)
+                        // 简介、评分、影片规格：一排卡（Apple TV 的简介卡）
+                        if !about.isEmpty {
+                            DSSection(title: "简介", metrics: m) {
+                                DetailAboutRow(cards: about, metrics: m)
+                            }
                         }
                         episodes(m)
                         if !trailers.isEmpty { trailerSection(m) }
                         if !cast.isEmpty { castSection(m) }
-                        if !infoRows.isEmpty { infoSection(m) }
                     }
                     .padding(.top, 24)
                     .padding(.bottom, m.shelfGap)
+                    // 下面的内容留在安全区里（卡往右滑出去时从侧边那一列底下过去）
+                    .padding(.leading, insets.leading)
+                    .padding(.trailing, insets.trailing)
                 }
             }
             .scrollIndicators(.hidden)
-            // 画面铺到状态栏和导航栏底下（F6）；字和按钮还在安全区里（F7）
-            .ignoresSafeArea(edges: .top)
+            // 画面铺到状态栏、导航栏和侧边那一列底下（F6）；字和按钮还在安全区里（F7）
+            .ignoresSafeArea(edges: [.top, .horizontal])
             // C12：头部滚走了，片名才出现在导航栏里
             .onScrollGeometryChange(for: Bool.self) { g in
                 g.contentOffset.y + g.contentInsets.top > titleAt
@@ -494,88 +643,69 @@ struct DetailScaffold<Episodes: View>: View {
 
     // MARK: 头部
 
-    /// 竖拿约屏高的七成五（S15：65–75%）；横拿 16:9，但不高过屏幕的八成五，播放钮留在第一屏里（F1）
+    /// 头部一样高（用户要求：统一高度，比画面稍高）：竖着的屏九成屏高，横着的屏九成二；画面只占上面那一截
     static func heroHeight(width w: CGFloat, height h: CGFloat) -> CGFloat {
-        if h > w { return max(420, (h * 0.75).rounded()) }
-        return max(280, min((w * 9 / 16).rounded(), (h * 0.85).rounded()))
+        max(420, (h * (h > w ? 0.9 : 0.92)).rounded())
     }
 
-    private func hero(_ m: DSMetrics, height: CGFloat, barBottom: CGFloat) -> some View {
-        // 头部比宽还高就用竖版全屏图，否则用 16:9（和首页头图同一条规则：S15）
-        let tall = height > m.width
-        let art = tall ? (tallArt ?? wideArt) : (wideArt ?? tallArt)
-        let still = reduceMotion
+    private func hero(_ m: DSMetrics, width: CGFloat, height: CGFloat, insets: EdgeInsets, barBottom: CGFloat) -> some View {
+        // 头部比宽还高就用竖版全屏图，否则用 16:9（和首页头图同一条规则：S15）；画面占头部上面七成（横着的屏八成）
+        let tall = height > width
+        let imageH = (height * (tall ? 0.7 : 0.8)).rounded()
+        let pick = art.flatMap { tall ? ($0.tall ?? $0.wide) : ($0.wide ?? $0.tall) }
         // 字块的顶边从栏底下 40 点开始淡，升到栏底上方 40 点时淡完（没滚动时字块离栏底远得多，是全亮的）
         let fadeFrom = barBottom - 40
         return ZStack(alignment: .bottomLeading) {
-            Color.black
-                .overlay {
-                    RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1800, placeholder: .clear)
-                        .visualEffect { c, proxy in
-                            // 往上滚时画面比字走得慢一点（两层视差：S12；幅度小：F61）；「减弱动态效果」时不动（F59）
-                            let minY = proxy.frame(in: .scrollView(axis: .vertical)).minY
-                            return c.offset(y: still ? 0 : max(0, -minY) * 0.2)
-                        }
-                }
-                .overlay {
-                    // 顶上浅浅压暗：状态栏和返回钮停在画面上也看得清（F34）。是画面的一部分，跟着内容走，不是盖在栏下的渐暗（C27）
-                    LinearGradient(colors: [.black.opacity(0.4), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.2))
-                }
-                .overlay {
-                    if !tall {
-                        // 横拿时字在左下，左边再压暗一点（F34）
-                        LinearGradient(colors: [.black.opacity(0.55), .clear], startPoint: .leading, endPoint: UnitPoint(x: 0.6, y: 0.5))
-                    }
-                }
-                .overlay {
-                    // 底部渐暗，最后融进页面的黑：字在画面上的对比度靠它（F34、S17、C58）
-                    LinearGradient(stops: [
-                        .init(color: .clear, location: 0.4),
-                        .init(color: .black.opacity(0.6), location: 0.72),
-                        .init(color: .black, location: 1),
-                    ], startPoint: .top, endPoint: .bottom)
-                }
-                .clipped()
-                // 横拿时侧边那一列底下也是画面（镜像模糊：F6、S19）
-                .backgroundExtensionEffect()
-                .frame(height: height)
+            DetailHeroBackdrop(url: TMDBImage.url(pick, "w1280"), width: width, height: height, imageHeight: imageH)
                 // 下拉时以底边为准撑大，填满拉出来的空隙（跟着手指走：S10）
                 .stretchy()
                 .accessibilityHidden(true)
 
             heroInfo(m)
-                .padding(.horizontal, m.margin)
-                .padding(.bottom, 24)
+                .padding(.leading, insets.leading + m.margin)
+                .padding(.trailing, insets.trailing + m.margin)
+                .padding(.bottom, 32)
                 .visualEffect { c, proxy in
                     // 字块升到导航栏底下就淡出，片名交给导航栏（C12）；淡入淡出在「减弱动态效果」时也合适（F60）
                     let y = proxy.frame(in: .scrollView(axis: .vertical)).minY
                     return c.opacity(Double(max(0, min(1, (y - fadeFrom) / 80))))
                 }
         }
-        .frame(height: height)
+        .frame(width: width, height: height)
     }
 
     /// 左下一列：字标或片名、一行信息、播放 +「…」（F1、F2）
     private func heroInfo(_ m: DSMetrics) -> some View {
         let maxW: CGFloat = m.wide ? 560 : .infinity
+        let logoH: CGFloat = m.wide ? 96 : 72
         return VStack(alignment: .leading, spacing: 12) {
-            if let logo, !logo.isEmpty {
-                LogoImage(url: TMDBImage.url(logo, "w500"), height: m.wide ? 96 : 72, alignment: .leading,
-                          fallback: title, maxWidth: min(m.width * 0.7, 360))
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(title)
-                    .accessibilityAddTraits(.isHeader)
-            } else {
-                Text(title)
-                    .font(.largeTitle.bold())
-                    .foregroundStyle(.primary)
-                    .lineLimit(3)
-                    .accessibilityAddTraits(.isHeader)
+            // 字标那一格：画面和字标定下来之前空着（占住位置，下面的字不跳），定了模糊淡入；以后不再换
+            ZStack(alignment: .bottomLeading) {
+                if let art {
+                    if let logo = art.logo, !logo.isEmpty {
+                        LogoImage(url: TMDBImage.url(logo, "w500"), height: logoH, alignment: .leading,
+                                  fallback: title, maxWidth: min(m.width * 0.7, 360))
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel(title)
+                            .accessibilityAddTraits(.isHeader)
+                            .transition(.dsBlurFade)
+                    } else {
+                        Text(title)
+                            .font(.largeTitle.bold())
+                            .foregroundStyle(.white)
+                            .lineLimit(3)
+                            .accessibilityAddTraits(.isHeader)
+                            .transition(.dsBlurFade)
+                    }
+                } else {
+                    Color.clear.frame(height: logoH)
+                }
             }
+            .animation(.easeInOut(duration: 0.6), value: art)
             if !metaLine.isEmpty {
                 Text(metaLine)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.white.opacity(0.8))
                     .lineLimit(1)
             }
             HStack(spacing: 12) {
@@ -645,17 +775,13 @@ struct DetailScaffold<Episodes: View>: View {
 
     // MARK: 分区
 
-    /// 预告片：一排 16:9 卡，点一张全屏放（从这一段开始，左右滑换下一段）
+    /// 预告片：一排 16:9 卡，和分集卡同一个样子（字压在渐进式模糊上）；点一张全屏放（从这一段开始，左右滑换下一段）
     private func trailerSection(_ m: DSMetrics) -> some View {
         DSSection(title: "预告片", metrics: m) {
             DSShelf(metrics: m) {
                 ForEach(Array(trailers.enumerated()), id: \.offset) { i, t in
-                    Button { trailerPick = DetailTrailerPick(index: i) } label: {
-                        DSWideLockup(art: TMDBImage.url(trailerArt.isEmpty ? nil : trailerArt[i % trailerArt.count], "w780"),
-                                     title: t.title ?? "预告片", metrics: m, caption: true)
-                    }
-                    .buttonStyle(PressableStyle())
-                    .accessibilityIdentifier("trailer-card")
+                    DetailTrailerCard(trailer: t, art: t.image ?? (trailerArt.isEmpty ? nil : trailerArt[i % trailerArt.count]),
+                                      metrics: m, onPlay: { trailerPick = DetailTrailerPick(index: i) })
                 }
             }
         }
@@ -680,73 +806,117 @@ struct DetailScaffold<Episodes: View>: View {
         }
     }
 
-    /// 信息：几行左灰右白的字，不垫底板、不画线（F3）；展开时限宽，左右不隔太远（F8）
-    private func infoSection(_ m: DSMetrics) -> some View {
-        let maxW: CGFloat = m.wide ? 520 : .infinity
-        return DSSection(title: "信息", metrics: m) {
-            VStack(alignment: .leading, spacing: 12) {
-                ForEach(infoRows, id: \.self) { r in
-                    HStack(alignment: .firstTextBaseline, spacing: 16) {
-                        Text(r.label)
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 16)
-                        Text(r.value)
-                            .foregroundStyle(.primary)
-                            .multilineTextAlignment(.trailing)
-                    }
-                    .font(.subheadline)
-                    .accessibilityElement(children: .combine)
-                }
-            }
-            .frame(maxWidth: maxW, alignment: .leading)
-            .padding(.horizontal, m.margin)
-            .padding(.top, 8)
-        }
-    }
 }
 
 // MARK: - 小部件
 
-/// 简介：Body、宽松行距（F21），次要色；三行后一枚「更多」，点了就地展开（F24：截断了就要能看全文）。
-/// 真被截断了才有「更多」：量一份不限行数的同一段字，比三行高才露出来
-struct DetailSynopsis: View {
-    let text: String
-    @State private var expanded = false
-    @State private var fullHeight: CGFloat = 0
-    @State private var shownHeight: CGFloat = 0
+/// 详情页头部的底（用户要求）：画面铺满整个窗口宽（含 iPhone Duo 侧边那一列，不做镜像模糊），只占头部上面那一截；
+/// 画面下段渐进式模糊，慢慢化进从画面底边取出来的主色（压暗到白字看得清），这块颜色铺到头部底、最后一小段融进页面的黑。
+/// 画面裁好、糊好、取好色才出现，出现时模糊淡入；换图（转屏）也是模糊淡入，不会突然跳成另一张
+struct DetailHeroBackdrop: View {
+    let url: URL?
+    let width: CGFloat
+    let height: CGFloat
+    let imageHeight: CGFloat
+    @State private var shown: Shown?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private struct Shown: Equatable {
+        let key: String
+        let art: HeroArt
+        static func == (a: Shown, b: Shown) -> Bool { a.key == b.key }
+    }
+
+    /// 处理好的头部画面内存里已经有（再打开同一部片）：第一次画就直接是它，不闪底色、不再淡入
+    init(url: URL?, width: CGFloat, height: CGFloat, imageHeight: CGFloat) {
+        self.url = url
+        self.width = width
+        self.height = height
+        self.imageHeight = imageHeight
+        if let url, let art = ImagePipeline.shared.cachedHeroArt(url, maxPixel: Self.pixels(width, imageHeight),
+                                                                 aspect: width / max(1, imageHeight)) {
+            _shown = State(initialValue: Shown(key: Self.key(url, width, imageHeight), art: art))
+        }
+    }
+
+    private static func pixels(_ w: CGFloat, _ h: CGFloat) -> CGFloat { min(2400, max(w, h) * 3) }
+    private static func key(_ url: URL?, _ w: CGFloat, _ h: CGFloat) -> String { "\(url?.absoluteString ?? "")#\(Int(w))x\(Int(h))" }
 
     var body: some View {
-        let clipped = fullHeight > shownHeight + 1
-        VStack(alignment: .leading, spacing: 2) {
-            Text(text)
-                .font(.body.leading(.loose))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.leading)
-                .lineLimit(expanded ? nil : 3)
-                .fixedSize(horizontal: false, vertical: true)
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in shownHeight = h }
-                .background(alignment: .top) {
-                    Text(text)
-                        .font(.body.leading(.loose))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .hidden()
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in fullHeight = h }
+        let tone = Color(uiColor: shown.map { ImageEffects.heroTone($0.art.edge) } ?? UIColor(white: 0.07, alpha: 1))
+        let imgEnd = min(1, imageHeight / max(1, height))
+        let key = Self.key(url, width, imageHeight)
+        ZStack(alignment: .top) {
+            tone
+            ZStack {
+                if let s = shown {
+                    Image(uiImage: s.art.image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: width, height: imageHeight)
+                        .clipped()
+                        .id(s.key)
+                        .transition(reduceMotion ? .opacity : .dsBlurFade)
                 }
-            if clipped || expanded {
-                Button {
-                    withAnimation(.smooth(duration: 0.35)) { expanded.toggle() }
-                } label: {
-                    Text(expanded ? "收起" : "更多")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        // 点得到的高度够 44（F74），版面上收回去
-                        .padding(.vertical, 12)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .padding(.vertical, -12)
-                .accessibilityIdentifier("synopsis-more")
             }
+            .frame(width: width, height: imageHeight)
+            .clipped()
+            // 画面下段化进底色：配合画面里那段渐进式模糊，看不出接缝
+            LinearGradient(stops: Self.dissolve(tone, from: imgEnd * 0.58, to: imgEnd), startPoint: .top, endPoint: .bottom)
+            // 顶上浅浅压暗：状态栏和返回钮停在画面上也看得清（F34）
+            LinearGradient(colors: [.black.opacity(0.38), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.18))
+            // 头部最后一小段融进页面的黑
+            LinearGradient(stops: [
+                .init(color: .clear, location: max(0, 1 - 48 / max(1, height))),
+                .init(color: Theme.bg, location: 1),
+            ], startPoint: .top, endPoint: .bottom)
+        }
+        .frame(width: width, height: height)
+        .animation(.easeInOut(duration: 0.8), value: shown?.key)
+        .task(id: key) {
+            guard let url else { return }
+            if shown?.key == key { return }
+            let aspect = width / max(1, imageHeight)
+            guard let art = await ImagePipeline.shared.heroArt(url, maxPixel: Self.pixels(width, imageHeight), aspect: aspect),
+                  !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.8)) { shown = Shown(key: key, art: art) }
+        }
+    }
+
+    /// 由透明到底色的一段，alpha 走 smoothstep（OLED 上不起条带）
+    private static func dissolve(_ c: Color, from a: CGFloat, to b: CGFloat) -> [Gradient.Stop] {
+        (0...8).map { i in
+            let t = CGFloat(i) / 8
+            let s = t * t * (3 - 2 * t)
+            return Gradient.Stop(color: c.opacity(Double(s)), location: a + (b - a) * t)
+        }
+    }
+}
+
+/// 一段预告片：卡上是这一段自己的画面（Apple 给了就用，没给就轮着用剧照）、片名和「▶ 2 分钟」
+/// （时长 Apple 给了就用，没给就读一下这段预告片的播放列表：TrailerLength）；「•••」里是播放和分享
+struct DetailTrailerCard: View {
+    let trailer: Trailer
+    let art: String?
+    let metrics: DSMetrics
+    let onPlay: () -> Void
+    @State private var seconds: Double?
+
+    var body: some View {
+        let title = trailer.title.flatMap { $0.isEmpty ? nil : $0 }
+        DSMediaCard(art: TMDBImage.url(art, "w780"), title: title ?? "预告片",
+                    detail: TrailerLength.label(trailer.duration ?? seconds) ?? (title == nil ? nil : "预告片"),
+                    metrics: metrics, identifier: "trailer-card", action: onPlay) {
+            Button("播放", systemImage: "play.fill", action: onPlay)
+            if let url = URL(string: trailer.hls), url.scheme?.hasPrefix("http") == true {
+                ShareLink(item: url, subject: Text(title ?? "预告片")) {
+                    Label("分享", systemImage: "square.and.arrow.up")
+                }
+            }
+        }
+        .task(id: trailer.hls) {
+            guard trailer.duration == nil, seconds == nil else { return }
+            seconds = await TrailerLength.shared.seconds(trailer.hls)
         }
     }
 }
@@ -878,6 +1048,8 @@ enum DetailText {
 /// 签好名的 /stream 直链（网页版 copyStreamLink），复制到剪贴板
 enum StreamLink {
     @MainActor static func copy(path: String, name: String) async {
+        // 演示数据不连网（截图、UI 测试）：不去签名
+        if DemoData.enabled { return }
         let sign = try? await APIClient.shared.streamSign(path: path)
         let url = APIClient.shared.streamURL(path: path, name: name, sign: sign)
         UIPasteboard.general.string = url.absoluteString
@@ -913,33 +1085,3 @@ extension View {
     func webToast(_ text: Binding<String?>) -> some View { modifier(WebToast(text: text)) }
 }
 
-// MARK: - 「格式」那一格（网页版：扩展名 · 8K+ UHD（4K 片源）/ 高动态（1080p）· DV / HDR）
-
-enum WebFormat {
-    /// 电影：读文件名（规则照抄网页版 parse()）
-    static func line(name: String) -> String {
-        let ext = (name as NSString).pathExtension.uppercased()
-        func has(_ p: String) -> Bool { name.range(of: p, options: [.regularExpression, .caseInsensitive]) != nil }
-        let dv = has("DOLBY[. _-]?VISION|[. _-]DV[. _-]|[. _-]DoVi")
-        let hdr = !dv && has("HDR10\\+?|[. _-]HDR[. _-]")
-        let uhd = has("2160P|[. _-]4K[. _-]|UHD")
-        let hd = !uhd && has("1080P")
-        return compose(ext: ext, uhd: uhd, hd: hd, top: dv ? "DV" : (hdr ? "HDR" : nil))
-    }
-
-    /// 剧集：目录名解析出来的分辨率 / HDR（网页版 tvSeriesTags），扩展名取第一集
-    static func line(series s: Series, firstFile: String?) -> String {
-        let ext = ((firstFile ?? "") as NSString).pathExtension.uppercased()
-        let res = (s.res ?? "").uppercased()
-        let hdr = s.hdr ?? ""
-        return compose(ext: ext, uhd: res == "4K" || res == "8K", hd: !res.isEmpty && res != "4K" && res != "8K",
-                       top: hdr == "DV" ? "DV" : (hdr.isEmpty ? nil : "HDR"))
-    }
-
-    private static func compose(ext: String, uhd: Bool, hd: Bool, top: String?) -> String {
-        var s = ext
-        if uhd { s += " · 8K+ UHD" } else if hd { s += " · 高动态" }
-        if let top { s += (s.isEmpty ? "" : " · ") + top }
-        return s.isEmpty ? "—" : s
-    }
-}

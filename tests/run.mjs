@@ -445,11 +445,21 @@ console.log('\n■ OpenSubtitles 自动补字幕（模拟接口）');
   m = await master('/Movies/dv7.mkv');
   ok(calls('/download').length === 1 && !/o0\.m3u8/.test(m), '下载配额用完（406）：这次不加，记下等配额重置后再查');
 
-  // 已经有简体：一次都不查
+  // 已经有简体：也查一条在线的当备选，但默认仍是自带的那条（在线那条 DEFAULT=NO，起播也不等它）
   await clear(); reset();
-  await info('/Movies/hdr10_multi.mkv'); await master('/Movies/hdr10_multi.mkv'); await settle();
-  await info('/Movies/avc_zsub.mkv'); await master('/Movies/avc_zsub.mkv'); await settle();
-  ok(!H.os.calls.length, '已有简体中文（外挂 zh-Hans / 认作简体的「中文」）：不调用接口');
+  const hz = mh('avc_zsub.mkv');
+  H.os.subs = [{ id: 50, file_id: 1050, language: 'zh-cn', moviehash: hz, downloads: 10 }];
+  H.os.files = { 1050: { text: srt(SIMP, 12) } };
+  const t0 = Date.now();
+  m = await master('/Movies/avc_zsub.mkv');
+  const firstMs = Date.now() - t0;
+  await settle();
+  m = await master('/Movies/avc_zsub.mkv');
+  const ownLine = m.split('\n').find(l => /TYPE=SUBTITLES/.test(l) && /\/s0\.m3u8/.test(l)) || '';
+  const onLine = subLine(m, /o0\.m3u8/);
+  ok(calls('/subtitles').length > 0 && /DEFAULT=YES/.test(ownLine) && /NAME="简体中文（在线）"/.test(onLine) && /DEFAULT=NO/.test(onLine),
+    `已有简体（认作简体的「中文」内封）：也查一条在线的当备选，默认仍是自带的那条（自带 ${/DEFAULT=YES/.test(ownLine) ? '默认' : '不默认'}，在线 ${/DEFAULT=NO/.test(onLine) ? '备选' : onLine.slice(0, 60)}）`);
+  ok(firstMs < 2000, `自带简体的片子起播不等在线字幕（主列表 ${firstMs}ms）`);
 
   // 只标了「中文」、其实是繁体的外挂字幕：算缺简体；主列表里改标繁体，在线简体默认打开
   await clear(); reset();
@@ -1145,6 +1155,38 @@ console.log('\n■ Apple TV 素材索引：片库里的电影优先用 Apple TV 
   const bad = await art(null, '', 'POST', '{not json');
   ok(g.status === 405 && bad.status === 400, `GET 回 405、坏 JSON 回 400（${g.status} / ${bad.status}）`);
   H.uts.movies = []; H.uts.shows = []; H.uts.calls.length = 0;
+}
+
+console.log('\n■ Apple TV 预告片：Apple 给了时长和画面就带上（App 的预告片卡），没给就只有名字和地址');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const img = (w, h, tag) => ({ url: `https://is1.mock/${tag}/{w}x{h}{c}.{f}`, width: w, height: h });
+  const hls = n => `https://play.mock/${n}/master.m3u8`;
+  H.uts.movies = [{
+    id: 'umc.cmc.pumpkin', title: 'Pumpkin Patch', year: 2025,
+    search: { shelfImage: img(1920, 1080, 'pk-shelf'), shelfImageBackground: img(1920, 1080, 'pk-bg') },
+    details: { contentLogo: img(1000, 300, 'pk-logo') },
+    shelves: [{ items: [
+      { type: 'Preview', title: 'Official Trailer', duration: 148, images: { previewFrame: img(3840, 2160, 'pk-frame') },
+        playables: [{ assets: { hlsUrl: hls('t1') } }] },
+      { type: 'Preview', title: 'Teaser', playables: [{ assets: { hlsUrl: hls('t2') } }] },
+      { type: 'Preview', title: 'Clip (ms)', playables: [{ duration: 61000, assets: { hlsUrl: hls('t3') } }] },
+      { type: 'Preview', title: 'No stream', playables: [{ assets: {} }] },
+    ] }],
+  }];
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const r = await H.worker.fetch(new Request('https://w.test/api/atv/lookup?title=' + encodeURIComponent('Pumpkin Patch') + '&w=1280&f=jpg',
+    { headers: { Cookie: cookie } }), H.env, H.ctx);
+  const body = r.status === 200 ? await r.json() : null;
+  await settle();
+  const t = body?.trailers || [];
+  ok(r.status === 200 && t.length === 3, `只回放得了的三段（${r.status}，${t.length} 段）`);
+  ok(t[0]?.duration === 148 && t[0]?.image === 'https://is1.mock/pk-frame/1280x720sr.jpg',
+    `第一段带时长与 16:9 画面（${t[0]?.duration}，${t[0]?.image}）`);
+  ok(t[1] && !('duration' in t[1]) && !('image' in t[1]) && t[1].hls === hls('t2'), '没给时长和画面的那一段只有名字和地址');
+  ok(t[2]?.duration === 61, `毫秒的时长换成秒（${t[2]?.duration}）`);
+  H.uts.movies = []; H.uts.calls.length = 0;
 }
 
 console.log('\n■ ffmpeg 作为 HLS 客户端（HTTP）');

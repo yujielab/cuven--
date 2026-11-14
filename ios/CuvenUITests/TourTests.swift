@@ -78,6 +78,9 @@ final class TourTests: XCTestCase {
             play.tap()
             sleep(30)
             snap("10-player")
+            // 还没开播：加载画面（顶层窗口）还盖着，点它左上的关闭
+            let closeLoading = app.buttons["player-loading-close"]
+            if closeLoading.exists { closeLoading.tap(); sleep(2) }
             app.swipeDown(velocity: .fast)
             if !app.buttons["detail-play"].waitForExistence(timeout: 8) {
                 app.terminate()
@@ -141,6 +144,6 @@ final class TourTests: XCTestCase {
     /// 第一个真正在屏上的匹配项（切到别的标签后，上一页的同名按钮还留在层级里，只是看不见）
     private func visible(_ q: XCUIElementQuery) -> XCUIElement {
         _ = q.firstMatch.waitForExistence(timeout: 5)
-        return q.allElementsBoundByIndex.first { $0.isHittable } ?? q.firstMatch
+        return q.allElementsBoundByIndex.first { $0.isOnScreen(in: app) } ?? q.firstMatch
     }
 }

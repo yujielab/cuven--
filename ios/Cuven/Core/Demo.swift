@@ -41,6 +41,15 @@ enum DemoData {
         return s
     }
 
+    /// 演示用的两段「预告片」：只有画面、名字和时长（地址是 demo://，不连网，点开也放不出来），核对预告片卡的样子用
+    static func trailers(for v: Video) -> [Trailer] {
+        let seed = v.path.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xffff }
+        return [
+            Trailer(title: "正式预告", hls: "demo://trailer/\(seed)/1", duration: 148, image: url("backdrop", 300 + seed % 40)),
+            Trailer(title: "先导预告", hls: "demo://trailer/\(seed)/2", duration: 62, image: url("backdrop", 340 + seed % 40)),
+        ]
+    }
+
     @MainActor
     static func populate(_ m: AppModel) {
         let now = Date()
@@ -59,6 +68,8 @@ enum DemoData {
                                rating: 6 + Double(i % 7) * 0.5, type: "movie", runtime: 92 + i * 3, genres: genres[i % genres.count])
             meta.cast = cast(i)
             meta.director = people[(i + 5) % people.count]
+            // 剧照（资料库每章底下那一排、详情页）：本地画的几张横图
+            meta.stills = (0..<4).map { k in Still(url: url("backdrop", 200 + i * 4 + k), thumb: url("backdrop", 200 + i * 4 + k)) }
             metas[name] = meta
         }
         m.videos = videos

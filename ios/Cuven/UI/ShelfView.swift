@@ -58,6 +58,8 @@ struct ShelfView: View {
             return model.movies(inGenre: g).map { .movie($0) } + model.series(inGenre: g).map { .series($0) }
         case .category(let c):
             return model.categoryEntries(c)
+        case .featured:
+            return model.featuredMovies().map { .movie($0) }
         }
     }
 

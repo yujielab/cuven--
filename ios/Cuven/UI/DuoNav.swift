@@ -71,8 +71,8 @@ struct DuoNav: View {
     static let width: CGFloat = 52
     static let itemHeight: CGFloat = 48
     static let inset: CGFloat = 4
-    /// 胶囊和搜索圆钮之间
-    static let gap: CGFloat = 12
+    /// 胶囊和搜索圆钮之间（两块玻璃要看得出是分开的两样：F38）
+    static let gap: CGFloat = 14
     static let capsuleHeight: CGFloat = itemHeight * CGFloat(items.count) + inset * 2
     /// 整组的高：胶囊 + 间隔 + 圆钮（外面按它摆位置）
     static let height: CGFloat = capsuleHeight + gap + width
@@ -91,7 +91,8 @@ struct DuoNav: View {
     ]
 
     var body: some View {
-        GlassEffectContainer(spacing: Self.gap) {
+        // 容器的 spacing 是「多近就融成一块」的距离：给 0，胶囊和搜索圆钮各是各的，不会被系统并成一枚（用户要搜索单独一颗）
+        GlassEffectContainer(spacing: 0) {
             VStack(spacing: Self.gap) {
                 VStack(spacing: 0) {
                     ForEach(Self.items) { item in

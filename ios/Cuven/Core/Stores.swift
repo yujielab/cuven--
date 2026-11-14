@@ -169,6 +169,12 @@ struct FolderCache: Codable {
     var folders: [LibraryFolder]
 }
 
+/// 资料库要的：每部电影有没有 Apple TV 预告片（和详情页同一次查询），查过的时间也记下来，第二次打开直接知道
+struct TrailerIndex: Codable {
+    var known: [String: Bool] = [:]
+    var stamps: [String: Double] = [:]
+}
+
 /// 全片库 Apple TV 素材的本地那一份：对上的素材、各自问到的时间、Apple TV 上没有的（记下时间，过几天再问）
 struct AtvArtCache: Codable {
     var items: [String: AtvArt] = [:]
@@ -234,10 +240,13 @@ final class AppModel {
             dataVersion &+= 1
             phase = .ready
             metaReady = true
+            Task { await resolveHeroes() }
+            Task { await scanTrailers() }
             return
         }
         restore()
         phase = videos.isEmpty ? .loading : .ready
+        Task { await resolveHeroes() }
         Task { await refreshLibrary() }
         Task { await refreshSeries() }
         Task { await refreshHeroes() }
@@ -262,6 +271,9 @@ final class AppModel {
         if let a = DiskCache.load(AtvArtCache.self, "atv-art.json") {
             atvArtIndex = a.items; atvArtStamps = a.stamps; atvArtMisses = a.misses
         }
+        if let t = DiskCache.load(TrailerIndex.self, "trailer-index.json") {
+            trailerKnown = t.known; trailerStamps = t.stamps
+        }
         metaReady = !metas.isEmpty
         dataVersion &+= 1
         Perf.log("restore: \(videos.count) videos, \(metas.count) metas")
@@ -283,7 +295,11 @@ final class AppModel {
             DiskCache.save(FolderCache(root: libraryRoot, folders: lib.folders), "folders.json")
             metaRound = 0
             await loadMetas()
-            // 片名、年份齐了再去 Apple TV 对画面：放到后台，不让下拉刷新等它（一轮可能要一两分钟）
+            // 片名、年份齐了再挑头图（要按英文名去 Apple TV 查无字背景和字标）
+            await resolveHeroes()
+            // 资料库：后台查哪些电影有预告片（只放有的）
+            Task { await self.scanTrailers() }
+            // 再去 Apple TV 对全片库的画面：放到后台，不让下拉刷新等它（一轮可能要一两分钟）
             Task { await self.loadAtvArt() }
         } catch {
             if videos.isEmpty { phase = .failed(error.localizedDescription) }
@@ -377,6 +393,72 @@ final class AppModel {
         guard let list = try? await APIClient.shared.heroes(), !list.isEmpty else { return }
         heroes = list
         DiskCache.save(list, "heroes.json")
+        await resolveHeroes()
+    }
+
+    // MARK: 首页头图（只放拿到了无字背景 + 字标的，最多 5 部）
+
+    /// 挑好的头图（resolveHeroes 填）
+    private(set) var heroPicks: [HeroPick] = []
+    /// 至少挑过一轮了：之前头图位置先占着，不先放一张不合格的再换掉
+    private(set) var heroResolved = false
+    @ObservationIgnored private var heroResolving = false
+
+    /// 挑头图：候选是 Apple TV 头图池（/api/atv/hero）的顺序，再是最新加入的；每一部都要有
+    /// 无字的横图（Apple TV 无字背景 → TMDB 没有字的剧照）和字标（Apple → TMDB），两样缺一就不上；按候选顺序取前 5 部。
+    /// 片名要先认出来（Apple TV 按英文名查），所以元数据到了以后才挑
+    func resolveHeroes() async {
+        guard metaReady, !heroResolving else { return }
+        heroResolving = true
+        defer { heroResolving = false }
+        var seen = Set<String>()
+        var cands: [(video: Video, hero: Hero?)] = []
+        for h in heroes { if let v = video(path: h.path), seen.insert(v.path).inserted { cands.append((v, h)) } }
+        for v in newest where seen.insert(v.path).inserted { cands.append((v, nil)) }
+        cands = Array(cands.prefix(12))
+        if DemoData.enabled {
+            // 演示数据：合成的头图本来就是无字背景 + 字标
+            heroPicks = Array(cands.compactMap { c -> HeroPick? in
+                guard let h = c.hero, let w = h.background, let l = h.logo else { return nil }
+                return HeroPick(video: c.video, hero: h, wide: w, tall: h.poster, logo: l)
+            }.prefix(5))
+            heroResolved = true
+            return
+        }
+        let picked = await withTaskGroup(of: (Int, HeroPick?).self) { g in
+            for (i, c) in cands.enumerated() {
+                g.addTask { (i, await self.heroPick(c.video, hero: c.hero)) }
+            }
+            var out = [HeroPick?](repeating: nil, count: cands.count)
+            for await (i, p) in g { out[i] = p }
+            return out
+        }
+        let picks = Array(picked.compactMap { $0 }.prefix(5))
+        if picks != heroPicks { heroPicks = picks }
+        heroResolved = true
+        Perf.log("hero: \(picks.count) of \(cands.count) candidates have a clean background and a logo")
+    }
+
+    /// 一部能不能上头图：无字横图 + 字标都拿到才算（Apple TV 素材表 → 这一部的 Apple TV 查询 → TMDB 全量结果）
+    private func heroPick(_ v: Video, hero h: Hero?) async -> HeroPick? {
+        let a = appleArt(v)
+        var wide = Self.nonEmpty(a?.background)
+        var logo = Self.nonEmpty(h?.logo) ?? Self.nonEmpty(a?.logo)
+        var tall = Self.nonEmpty(h?.poster) ?? Self.nonEmpty(a?.tall)
+        // 片名还没认出来就先不查（Apple TV 按英文名查；查不到会记成「没有」，等元数据到了再挑）
+        if wide == nil || logo == nil || tall == nil, meta(v) != nil, let r = await atv(for: v) {
+            wide = wide ?? Self.nonEmpty(r.background)
+            logo = logo ?? Self.nonEmpty(r.logo)
+            tall = tall ?? Self.nonEmpty(r.imageTall)
+        }
+        if wide == nil || logo == nil {
+            let m = await fullMeta(for: v)
+            wide = wide ?? Self.nonEmpty(m?.backdropClean)
+            logo = logo ?? Self.nonEmpty(m?.logo)
+        }
+        guard let w = wide, let l = logo else { return nil }
+        return HeroPick(video: v, hero: h, wide: AppleImage.sized(w, width: 1920) ?? w,
+                        tall: tall.map { AppleImage.sized($0, width: 1290) ?? $0 }, logo: l)
     }
 
     /// 剧集的 TMDB（按剧集表认好的编号取，带字标 / 纯净海报 / 剧照）
@@ -419,11 +501,16 @@ final class AppModel {
     /// 电影详情：全量结果（字标、演员、纯净海报）
     func fullMeta(for v: Video) async -> Meta? {
         if DemoData.enabled { return metas[v.name] }
+        if let hit = fullMetaCache[v.name] { return hit }
         if let m = try? await APIClient.shared.metaBatch([v.name], full: true), let hit = m[v.name], let meta = hit {
+            fullMetaCache[v.name] = meta
             return meta
         }
         return metas[v.name]
     }
+
+    /// 全量结果（演员、剧照、字标）记在内存里：资料库一章章滑过去、来回看详情页，不再重复问
+    @ObservationIgnored private var fullMetaCache: [String: Meta] = [:]
 
     // MARK: 取用
 
@@ -486,9 +573,134 @@ final class AppModel {
         if DemoData.enabled { return nil }
         if let hit = atvCache[v.path] { return hit }
         let m = meta(v)
-        let r = await atvLookup(names: [m?.en, m?.originalTitle], year: year(v), type: "Movie")
-        atvCache[v.path] = .some(r)
+        let (r, transient) = await atvFetch(names: [m?.en, m?.originalTitle], year: year(v), type: "Movie")
+        // 网络断了 / 后端出错：这次算没有，但不记下来（下次再问）；确定没有（404、对不上）才记
+        if !transient { atvCache[v.path] = .some(r) }
         return r
+    }
+
+    /// 这一部（电影或剧集，按路径）的 Apple TV 这次打开 App 里已经问过了：.some(nil) 是问过、没有；nil 是还没问
+    func atvCached(path: String) -> AtvLookup?? { atvCache[path] }
+
+    // MARK: 资料库：只放有预告片的电影（Apple TV 上的公开预告，和详情页同一次查询）
+
+    /// path → 有没有预告片。查过的存在本地（trailer-index.json）：有的 30 天、没有的 7 天后再查一次
+    private(set) var trailerKnown: [String: Bool] = [:]
+    @ObservationIgnored private var trailerStamps: [String: Double] = [:]
+    /// 正在后台查（资料库空着的时候显示转圈）
+    private(set) var trailerScanning = false
+    /// 全片库都查过一轮了（本地记着的那份已经覆盖全片库，也算）：资料库这时开始首尾相接地循环；
+    /// 之后再查到新入库的，按顺序插进去，不会把整个资料库清空重来
+    private(set) var trailerScanDone = false
+    /// 上一轮查到一半连着出错（断网、后端出错），停下了：资料库空着的话要说清楚、给一颗重试
+    private(set) var trailerScanFailed = false
+
+    /// 资料库的顺序（网页版 lib-showcase 的 sortOrder）：上映新的在前；同一天按入库时间；再按片名。
+    /// 按 dataVersion 缓存（资料库每换一章都要读一次，全片库排一遍不便宜）
+    var showcaseOrder: [Video] {
+        let list = movies
+        if showcaseOrderVersion == dataVersion { return showcaseOrderCache }
+        let sorted = list.sorted { a, b in
+            let ra = releaseKey(a), rb = releaseKey(b)
+            if ra != rb { return ra > rb }
+            if a.addedKey != b.addedKey { return a.addedKey > b.addedKey }
+            return title(a).localizedCompare(title(b)) == .orderedAscending
+        }
+        showcaseOrderCache = sorted
+        showcaseOrderVersion = dataVersion
+        return sorted
+    }
+
+    @ObservationIgnored private var showcaseOrderCache: [Video] = []
+    @ObservationIgnored private var showcaseOrderVersion = -1
+
+    private func releaseKey(_ v: Video) -> String {
+        if let d = meta(v)?.releaseDate, !d.isEmpty { return d }
+        if let y = year(v) { return String(y) + "-07-01" }
+        return ""
+    }
+
+    /// 资料库里放的：按顺序，只要查到有预告片的。
+    /// 第一轮还在查的时候，还没查到的那一部后面先不放——查到了再往后接，不会插进已经滑过的位置；
+    /// 一轮查完以后，这次没问成的先跳过（下次再问）
+    var showcaseMovies: [Video] {
+        var out: [Video] = []
+        for v in showcaseOrder {
+            guard let has = trailerKnown[v.path] else {
+                if trailerScanDone { continue } else { break }
+            }
+            if has { out.append(v) }
+        }
+        return out
+    }
+
+    /// 后台按资料库的顺序一部一部查有没有预告片（4 部一起），边查边放出来
+    func scanTrailers() async {
+        if trailerScanning { return }
+        if DemoData.enabled {
+            // 演示数据不连网：都当有（画幅停在合成的剧照上，慢推镜）
+            for v in movies { trailerKnown[v.path] = true }
+            trailerScanDone = true
+            return
+        }
+        let order = showcaseOrder
+        // 片库还没载入：没什么可查的，也不算查完（不然资料库会拿半截清单开始循环）
+        guard !order.isEmpty else { return }
+        trailerScanning = true
+        trailerScanFailed = false
+        defer { trailerScanning = false }
+        // 本地记着的那份已经覆盖全片库（有的过期了也先照用，后台再问）：资料库直接按它放
+        if order.allSatisfy({ trailerKnown[$0.path] != nil }) { trailerScanDone = true }
+        let now = Date().timeIntervalSince1970
+        let todo = order.filter { v in
+            guard let has = trailerKnown[v.path], let t = trailerStamps[v.path] else { return true }
+            return now - t > (has ? 30 : 7) * 86_400
+        }
+        var i = 0, streak = 0
+        while i < todo.count {
+            let chunk = Array(todo[i..<min(i + 4, todo.count)])
+            let results = await withTaskGroup(of: (String, Bool?).self) { g in
+                for v in chunk { g.addTask { (v.path, await self.trailerProbe(v)) } }
+                var r: [(String, Bool?)] = []
+                for await x in g { r.append(x) }
+                return r
+            }
+            let stamp = Date().timeIntervalSince1970
+            for (p, has) in results {
+                guard let has else { streak += 1; continue }
+                if trailerKnown[p] != has { trailerKnown[p] = has }
+                trailerStamps[p] = stamp
+                streak = 0
+            }
+            i += chunk.count
+            if i % 24 == 0 { saveTrailerIndex() }
+            // 连着出错（断网、后端出错）：先停，下次打开资料库 / 刷新再接着查
+            if streak >= 8 || Task.isCancelled { break }
+        }
+        saveTrailerIndex()
+        // 被取消的（App 退出这一轮）不算出错，也不算查完
+        if Task.isCancelled { return }
+        trailerScanFailed = streak >= 8
+        trailerScanDone = true
+        Perf.log("trailers: \(trailerKnown.values.filter { $0 }.count) of \(trailerKnown.count) movies have one")
+    }
+
+    /// 这部有没有预告片：nil = 这次没问成（网络 / 后端出错），下次再问
+    private func trailerProbe(_ v: Video) async -> Bool? {
+        if let hit = atvCache[v.path] { return !Self.playable(hit?.trailers).isEmpty }
+        let m = meta(v)
+        let (r, transient) = await atvFetch(names: [m?.en, m?.originalTitle], year: year(v), type: "Movie")
+        if transient { return nil }
+        atvCache[v.path] = .some(r)
+        return !Self.playable(r?.trailers).isEmpty
+    }
+
+    static func playable(_ t: [Trailer]?) -> [Trailer] {
+        (t ?? []).filter { !$0.hls.isEmpty && !$0.hls.contains("/subscription/") }
+    }
+
+    private func saveTrailerIndex() {
+        DiskCache.save(TrailerIndex(known: trailerKnown, stamps: trailerStamps), "trailer-index.json")
     }
 
     /// 剧集：同样按英文名找，类型要是 Show
@@ -502,9 +714,22 @@ final class AppModel {
     }
 
     private func atvLookup(names: [String?], year: Int?, type: String) async -> AtvLookup? {
+        await atvFetch(names: names, year: year, type: type).0
+    }
+
+    /// 同上，另外说清楚「没有」是确定的（404、对不上）还是这次没问成（transient：网络断了、后端出错）
+    private func atvFetch(names: [String?], year: Int?, type: String) async -> (AtvLookup?, transient: Bool) {
         let latin = names.compactMap { $0 }
             .first { !$0.isEmpty && $0.range(of: "\\p{Han}", options: .regularExpression) == nil }
-        guard let name = latin, let r = try? await APIClient.shared.atvLookup(title: name) else { return nil }
+        guard let name = latin else { return (nil, false) }
+        let r: AtvLookup
+        do { r = try await APIClient.shared.atvLookup(title: name) }
+        catch APIError.http(let code, _) where code == 404 { return (nil, false) }
+        catch { return (nil, true) }
+        return (atvValidate(r, name: name, year: year, type: type), false)
+    }
+
+    private func atvValidate(_ r: AtvLookup, name: String, year: Int?, type: String) -> AtvLookup? {
         if let t = r.type, t != type { return nil }
         if let y = year, let ry = r.year, abs(y - ry) > 1 { return nil }
         // 搜索层同名的优先，没有同名就给排序第一条：片名得对得上才敢用它的图
@@ -517,8 +742,9 @@ final class AppModel {
 
     /// 资料库展映的预告片：Apple TV 上这部片的公开预告（订阅才看得了的花絮不要）
     func trailers(for v: Video) async -> [Trailer] {
+        if DemoData.enabled { return DemoData.trailers(for: v) }
         guard let r = await atv(for: v) else { return [] }
-        return (r.trailers ?? []).filter { !$0.hls.isEmpty && !$0.hls.contains("/subscription/") }
+        return Self.playable(r.trailers)
     }
 
     // MARK: 全片库的 Apple TV 素材（Apple TV 优先，TMDB 兜底）
@@ -640,6 +866,50 @@ final class AppModel {
         if let c = Self.nonEmpty(m?.posterClean), let logo { return (TMDBImage.url(c, size), logo) }
         if let p = Self.nonEmpty(a?.poster) { return (URL(string: AppleImage.sized(p, width: px) ?? p), nil) }
         return (TMDBImage.url(m?.poster ?? m?.posterClean, size), nil)
+    }
+
+    /// 精选卡的画面：无字的竖版画面 + 字标，两样都有才算（和头图同一个门槛：没有字标、只有印着片名的海报的不上）。
+    /// Apple TV 的竖版主视觉 → TMDB 纯净海报；卡大，要的图也大一档
+    func featuredArt(_ v: Video, width: CGFloat = 0) -> (url: URL?, logo: URL?)? {
+        let m = meta(v)
+        let a = appleArt(v)
+        guard let logo = (Self.nonEmpty(a?.logo) ?? Self.nonEmpty(m?.logo)).flatMap({ TMDBImage.url($0, "w500") }) else { return nil }
+        let px = Int(min(1600, max(600, width * 3)).rounded())
+        if let t = Self.nonEmpty(a?.tall) { return (URL(string: AppleImage.sized(t, width: px) ?? t), logo) }
+        if let c = Self.nonEmpty(m?.posterClean) { return (TMDBImage.url(c, "w780"), logo) }
+        return nil
+    }
+
+    /// 这个评分在片库里高过百分之几的电影（剧集就和剧集比）；有评分的不到 20 部就不算（数太少，说了也没意义）
+    func ratingPercentile(_ r: Double, series: Bool) -> Int? {
+        let all: [Double] = series
+            ? self.series.compactMap { seriesMetas[$0.path]?.rating }.filter { $0 > 0 }
+            : movies.compactMap { meta($0)?.rating }.filter { $0 > 0 }
+        guard all.count >= 20 else { return nil }
+        let below = all.reduce(0) { $0 + ($1 < r ? 1 : 0) }
+        return Int((Double(below) / Double(all.count) * 100).rounded(.down))
+    }
+
+    /// 做得成精选卡吗（featuredArt 的便宜版：只看有没有，不拼地址；主页每次刷新都要对全片库问一遍）
+    private func featuredReady(_ v: Video) -> Bool {
+        let m = meta(v), a = appleArt(v)
+        guard Self.nonEmpty(a?.logo) != nil || Self.nonEmpty(m?.logo) != nil else { return false }
+        return Self.nonEmpty(a?.tall) != nil || Self.nonEmpty(m?.posterClean) != nil
+    }
+
+    /// 主页「精选电影」：评分高的在前（同分的新上映在前、再按入库），只要做得成精选卡的、评分 6 分以上的
+    func featuredMovies(limit: Int = .max) -> [Video] {
+        var list: [(video: Video, rating: Double, release: String)] = []
+        for v in movies {
+            guard let r = meta(v)?.rating, r >= 6, featuredReady(v) else { continue }
+            list.append((v, r, meta(v)?.releaseDate ?? year(v).map { String($0) } ?? ""))
+        }
+        list.sort { a, b in
+            if a.rating != b.rating { return a.rating > b.rating }
+            if a.release != b.release { return a.release > b.release }
+            return a.video.addedKey > b.video.addedKey
+        }
+        return list.prefix(limit).map(\.video)
     }
 
     /// 剧集的海报卡：TMDB 纯净海报 + 字标 → 印着剧名的海报
