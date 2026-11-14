@@ -5,7 +5,7 @@ import SwiftUI
 // 和 Apple TV 的主页一样只有两样东西：最上面一张铺满的轮播头图（S15–S17），下面一排排海报（T23、S8）。
 // 头图几乎占满一屏，连同 iPhone Duo 侧边那一列一起平铺（画面在系统栏底下过去，不做镜像模糊：F6、S19），
 // 左上一行白色大字「Home」、右上一枚头像（点开账户与设置），页码点浮在画面底部。
-// 下面的顺序：继续观看（有才有）→ 今年 → 去年（电影和剧集一起，最新入库的在前）→ 五个大类（引人入胜的剧情、令人坐立难安、
+// 下面的顺序：继续观看（有才有）→ 今年 → 去年（电影和剧集一起，最新入库的在前）→ 精选电影 → 精选剧集 → 五个大类（引人入胜的剧情、令人坐立难安、
 // 科幻和奇幻之旅、动作演员就位、刺激犯罪与偷窃）。卡上只有画面：无字主视觉 + 官方字标，或本来就印着片名的海报，卡下不写字（T20、F80）。
 // 分区之间只靠留白（F3、F12、F38）。折起的外屏、展开的竖拿 / 横拿是同一套部件，只按可用宽度长大（S1、D2、F9）。
 
@@ -174,6 +174,7 @@ struct HomeView: View {
                 continueWatching(m)
                 ForEach(homeYears, id: \.self) { y in yearShelf(y, m) }
                 featuredShelf(m)
+                featuredSeriesShelf(m)
                 ForEach(HomeCategory.allCases) { c in categoryShelf(c, m) }
             }
         }
@@ -213,30 +214,59 @@ struct HomeView: View {
         }
     }
 
-    /// 精选电影：评分高的在前，一排大号竖卡（Apple TV 的精选卡）；标题「精选电影 ›」进全部（按评分的海报网格）
+    /// 精选电影：评分高的在前；照用户给的参考图（游戏 App 的合集页）做成一整块：立体海报封面 + 大标题 + 说明 + 一排带底栏的大卡；
+    /// 那排的标题点进全部（按评分的海报网格）
     @ViewBuilder
     private func featuredShelf(_ m: DSMetrics) -> some View {
         let items = model.featuredMovies(limit: 10)
         if !items.isEmpty {
-            DSSection(title: Shelf.featured.title, metrics: m, route: .shelf(.featured)) {
-                DSShelf(metrics: m) {
-                    ForEach(items, id: \.path) { v in featuredCard(v, m) }
-                }
+            // 照参考图（游戏 App 的合集页）：立体海报封面 + 大标题 + 一段说明，下面一排带底栏的大卡
+            FeaturedCollection(title: Shelf.featured.title, blurb: "Cuven 按评分为你挑出片库里最值得一看的电影。",
+                               rowTitle: "为您的口味量身定制的内容", rowRoute: .shelf(.featured),
+                               covers: items.prefix(3).map { model.coverArt($0) }, metrics: m) {
+                ForEach(items, id: \.path) { v in featuredCard(v, m) }
             }
         }
     }
 
-    /// 一张精选卡：点开是详情（从这张卡上放大出来），长按是播放 / 想看（C21）
+    /// 一张精选卡：整幅画面 + 底下的磨砂条（小海报、片名、「Cuven 独占 · 类型」、「查看」）；
+    /// 点开是详情（从这张卡上放大出来），长按是播放 / 想看（C21）
     private func featuredCard(_ v: Video, _ m: DSMetrics) -> some View {
         let w = m.featureCardWidth
-        let art = model.featuredArt(v, width: w)
-        // 用户要求：分类那一行写「为您的口味量身定制的内容」，评分那一行写「Cuven 独占」
         return ZoomLink(route: .movie(v), slot: "featured") {
-            DSFeatureCard(art: art?.url, logo: art?.logo, title: model.title(v),
-                          kicker: "为您的口味量身定制的内容", line: "Cuven 独占", width: w)
+            FeaturedCollectionCard(art: model.wideLockupArt(v).url, cover: model.coverArt(v), title: model.title(v),
+                                   subtitle: DetailText.line(["Cuven 独占", model.meta(v)?.genres?.first]), width: w)
         }
         .accessibilityIdentifier("featured-card")
         .movieMenu(v)
+    }
+
+    /// 精选剧集：和精选电影同一种样子，片库里评分最高的剧（一部剧只出一次）
+    @ViewBuilder
+    private func featuredSeriesShelf(_ m: DSMetrics) -> some View {
+        let items = model.featuredSeries(limit: 10)
+        if items.count >= 3 {
+            FeaturedCollection(title: "精选剧集", blurb: "Cuven 按评分为你挑出片库里最值得追的剧集。",
+                               rowTitle: "一集接一集停不下来", rowRoute: .shelf(.series),
+                               covers: items.prefix(3).map { s in
+                                   let sm = model.seriesMetas[s.path]
+                                   return TMDBImage.url(sm?.poster ?? sm?.posterClean, "w500")
+                               }, metrics: m) {
+                ForEach(items, id: \.path) { s in featuredSeriesCard(s, m) }
+            }
+        }
+    }
+
+    private func featuredSeriesCard(_ s: Series, _ m: DSMetrics) -> some View {
+        let w = m.featureCardWidth
+        let sm = model.seriesMetas[s.path]
+        return ZoomLink(route: .series(s), slot: "featured-tv") {
+            FeaturedCollectionCard(art: model.seriesWideArt(s).url, cover: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w342"),
+                                   title: sm?.title ?? s.name,
+                                   subtitle: DetailText.line(["Cuven 独占", sm?.genres?.first]), width: w)
+        }
+        .accessibilityIdentifier("featured-series-card")
+        .seriesMenu(s)
     }
 
     /// 五个大类之一：电影和剧集一起，新的在前；标题「›」进这一类的全部
