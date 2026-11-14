@@ -32,6 +32,8 @@ struct DSMetrics {
     var wideCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.15 : (width < 800 ? 2.2 : 3.3)) }
     /// 精选卡（3:4 的大号竖卡）：折起一屏一张多一截，展开两张多 / 三张多
     var featureCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.3 : (width < 800 ? 2.3 : 3.4)) }
+    /// 长文案的分集卡（方卡）：折起一屏将近两张，展开三张、四张
+    var episodeTallCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.9 : (width < 800 ? 2.9 : 4.1)) }
     /// 详情页「简介」那一排卡：折起一张多一截（Apple TV 的简介卡约占屏宽七成）
     var aboutCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.4 : (width < 800 ? 2.4 : 3.4)) }
 
@@ -288,6 +290,10 @@ struct DSMediaCard<MenuItems: View>: View {
     var detail: String? = nil
     /// 看到一半：第二行在 ▶ 后面先放一小段进度条
     var progress: Double? = nil
+    /// 长文案的样子（方卡，用户要求：短文案、长文案两种卡）：标题上面一行小字（「第 2 集」），下面三行简介
+    var tall = false
+    var kicker: String? = nil
+    var overview: String? = nil
     let metrics: DSMetrics
     var width: CGFloat? = nil
     /// 整张卡那颗按钮的无障碍标识（UI 测试用）
@@ -298,42 +304,23 @@ struct DSMediaCard<MenuItems: View>: View {
     @State private var pressed = false
 
     var body: some View {
-        let w = width ?? metrics.wideCardWidth
-        let h = (w * 9 / 16).rounded()
-        // 圆角跟着卡宽走（参考图那种大圆角：约卡宽的 4.5%，14–22 点）
-        let radius: CGFloat = max(14, min(22, (w * 0.045).rounded()))
+        let w = width ?? (tall ? metrics.episodeTallCardWidth : metrics.wideCardWidth)
+        let h = tall ? w : (w * 9 / 16).rounded()
+        // 圆角跟着卡宽走（参考图那种大圆角：约卡宽的 4.5%，14–22 点；方卡按 1.4 倍宽算，和 16:9 卡看着一样圆）
+        let radius: CGFloat = max(14, min(22, ((tall ? w * 1.4 : w) * 0.045).rounded()))
         // 字离左、下两边的距离；「•••」的点按区按它摆，三个点的右缘和字的边线对齐
         let pad: CGFloat = metrics.wide ? 18 : 14
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         ZStack(alignment: .bottomTrailing) {
             Button(action: action) {
                 ZStack(alignment: .bottomLeading) {
-                    DSParallaxArt(url: art, metrics: metrics, size: CGSize(width: w, height: h), effect: .bottomBlur)
-                    LinearGradient(stops: DSMediaCardStyle.shade, startPoint: .top, endPoint: .bottom)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(title)
-                            .font(.headline)
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                        HStack(spacing: 6) {
-                            Image(systemName: "play.fill")
-                                .font(.caption2)
-                            if let p = progress, p > 0.01 {
-                                DSMiniProgress(value: p)
-                                    .frame(width: 32, height: 4)
-                            }
-                            if let detail, !detail.isEmpty {
-                                Text(detail)
-                                    .lineLimit(1)
-                            }
-                        }
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.78))
-                        // 右边让给「•••」
-                        .padding(.trailing, 30)
+                    DSParallaxArt(url: art, metrics: metrics, size: CGSize(width: w, height: h), effect: tall ? .bottomBlurTall : .bottomBlur)
+                    LinearGradient(stops: tall ? DSMediaCardStyle.shadeTall : DSMediaCardStyle.shade, startPoint: .top, endPoint: .bottom)
+                    Group {
+                        if tall { longCopy } else { shortCopy }
                     }
                     // 字只在模糊那一段里：特大字号时也不冲出去
-                    .dynamicTypeSize(...DynamicTypeSize.xLarge)
+                    .dynamicTypeSize(...(tall ? DynamicTypeSize.large : DynamicTypeSize.xLarge))
                     .padding(.horizontal, pad)
                     .padding(.bottom, pad - 2)
                     .frame(width: w, alignment: .leading)
@@ -363,6 +350,65 @@ struct DSMediaCard<MenuItems: View>: View {
         .scaleEffect(pressed ? 0.96 : 1)
         .brightness(pressed ? -0.06 : 0)
         .animation(.spring(response: 0.28, dampingFraction: 0.68), value: pressed)
+    }
+
+    /// 短文案：标题一行 +「▶ 45 分钟」
+    private var shortCopy: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            detailRow(glyph: true)
+        }
+    }
+
+    /// 长文案（参考图）：「第 2 集」→ 集名 → 三行简介 →「42 分钟」
+    private var longCopy: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let kicker, !kicker.isEmpty {
+                Text(kicker)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .lineLimit(1)
+            }
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .padding(.top, 1)
+            if let overview, !overview.isEmpty {
+                Text(overview)
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.72))
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 3)
+            }
+            detailRow(glyph: false)
+                .padding(.top, 8)
+        }
+    }
+
+    /// 最后一行：（▶）+ 看到一半的一小段进度条 + 片长 / 剩余；右边让给「•••」
+    private func detailRow(glyph: Bool) -> some View {
+        HStack(spacing: 6) {
+            if glyph {
+                Image(systemName: "play.fill")
+                    .font(.caption2)
+            }
+            if let p = progress, p > 0.01 {
+                DSMiniProgress(value: p)
+                    .frame(width: 32, height: 4)
+            }
+            if let detail, !detail.isEmpty {
+                Text(detail)
+                    .lineLimit(1)
+            }
+        }
+        .font(.subheadline)
+        .foregroundStyle(.white.opacity(0.78))
+        .padding(.trailing, 30)
     }
 }
 
@@ -445,6 +491,12 @@ enum DSFeatureCardStyle {
 }
 
 enum DSMediaCardStyle {
+    /// 长文案方卡上的淡暗：离顶 36% 开始，到底 44%
+    static let shadeTall: [Gradient.Stop] = (0...8).map { i in
+        let t = Double(i) / 8
+        let s = t * t * (3 - 2 * t)
+        return Gradient.Stop(color: .black.opacity(0.44 * s), location: 0.36 + 0.64 * t)
+    }
     /// 模糊那一段上的一层淡暗：离顶 42% 开始，到底 36%；alpha 走 smoothstep，OLED 上不起条带
     static let shade: [Gradient.Stop] = (0...8).map { i in
         let t = Double(i) / 8
