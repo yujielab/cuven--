@@ -86,7 +86,6 @@ struct RootView: View {
         // 标签栏不在滚动时缩小：HIG 只在标签栏带附件（迷你播放器之类）时这么做（C10）；标签名一字一词（C8）
         .onChange(of: tab) { _, _ in Haptics.selection() }
         .onChange(of: model.searchRequest) { _, q in if q != nil { tab = .search } }
-        .environment(\.openAccount, { tab = .account })
         .fullScreenCover(isPresented: .constant(account.loginRequired && !account.isLoggedIn)) {
             LoginView()
                 .environment(model)

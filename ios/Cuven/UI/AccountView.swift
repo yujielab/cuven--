@@ -2,19 +2,7 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-// MARK: - 账户与设置（「账户」标签；主页 / 资料库右上角的头像也切到这里）
-
-/// 「打开账户页」：根视图注入，头像按钮调用
-private struct OpenAccountKey: EnvironmentKey {
-    static let defaultValue: () -> Void = {}
-}
-
-extension EnvironmentValues {
-    var openAccount: () -> Void {
-        get { self[OpenAccountKey.self] }
-        set { self[OpenAccountKey.self] = newValue }
-    }
-}
+// MARK: - 账户与设置（「账户」标签）
 
 /// 圆形头像：账户设置里的头像（默认头像或自己上传的），取不到就是首字母
 struct AvatarView: View {
@@ -41,18 +29,6 @@ struct AvatarView: View {
     private var initial: String {
         let n = account.displayName.trimmingCharacters(in: .whitespaces)
         return n.isEmpty ? "C" : String(n.prefix(1)).uppercased()
-    }
-}
-
-/// 头像按钮（自定义视图的工具栏项：在 iPhone Duo 上也留在横向的顶栏里，不进侧边那一列）
-struct AvatarButton: View {
-    @Environment(\.openAccount) private var openAccount
-
-    var body: some View {
-        Button(action: openAccount) { AvatarView(size: 34) }
-            .buttonStyle(.plain)
-            .accessibilityLabel("账户")
-            .accessibilityIdentifier("account-button")
     }
 }
 
