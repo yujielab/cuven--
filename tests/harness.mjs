@@ -31,6 +31,11 @@ export const tmdb = { calls: [], shows: [], movies: [], videos: {}, find: {}, fa
 export const imdb = { status: 403, calls: 0, title: null };
 /* iTunes Search：results 原样回给 /search（不设就 404，等于 iTunes 不可用） */
 export const itunes = { results: null, calls: 0 };
+/**
+ * Apple TV（uts-api）替身：movies = [{ id, title, year, search: {搜索层 images}, details: {详情层 images} }]，
+ * shows 是同名的剧集（测「只认电影」）；fail = true 时一律 500；calls 记下每次请求（路径 + 搜索词）
+ */
+export const uts = { movies: [], shows: [], fail: false, calls: [] };
 
 class MemCache {
   constructor() { this.m = new Map(); }
@@ -181,6 +186,22 @@ globalThis.fetch = async (input, init = {}) => {
     m = /^\/tv\/(\d+)\/credits$/.exec(p);
     if (m && show(m[1])) return Response.json({ cast: [], crew: [] });
     return Response.json({ status_message: 'not found' }, { status: 404 });
+  }
+  if (u.host === 'uts-api.itunes.apple.com') {
+    const term = u.searchParams.get('searchTerm') || '';
+    uts.calls.push(u.pathname + (term ? '?' + term : ''));
+    if (uts.fail) return new Response('upstream error', { status: 500 });
+    if (u.pathname === '/uts/v3/search') {
+      const fold = x => String(x || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+      const items = [...uts.shows.map(x => ({ ...x, type: 'Show' })), ...uts.movies.map(x => ({ ...x, type: 'Movie' }))]
+        .filter(x => fold(x.title).includes(fold(term)))
+        .map(x => ({ type: x.type, id: x.id, title: x.title, releaseDate: x.year ? `${x.year}-06-01T00:00:00Z` : undefined, images: x.search || {} }));
+      return Response.json({ data: { canvas: { shelves: [{ items }] } } });
+    }
+    const mm = /^\/uts\/v3\/movies\/(.+)$/.exec(u.pathname);
+    const mv = mm && uts.movies.find(x => x.id === mm[1]);
+    if (mv) return Response.json({ data: { content: { title: mv.title, images: mv.details || {} } } });
+    return Response.json({ errors: [{ message: 'not found' }] }, { status: 404 });
   }
   if (u.host === 'itunes.apple.com' && itunes.results) {
     itunes.calls++;

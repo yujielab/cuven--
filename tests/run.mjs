@@ -1053,6 +1053,100 @@ console.log('\n■ 外挂字幕 HLS 分段走整份清洗');
   } finally { fs.unlinkSync(S('sync_nosub.zh.srt')); await settle(); caches.default.m.clear(); }
 }
 
+console.log('\n■ Apple TV 素材索引：片库里的电影优先用 Apple TV 的图（POST /api/atv/art）');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const img = (w, h, tag) => ({ url: `https://is1.mock/${tag}/{w}x{h}sr.{f}`, width: w, height: h });
+  H.uts.movies = [
+    { id: 'umc.cmc.dune2', title: 'Dune: Part Two', year: 2024,
+      search: { shelfImage: img(1920, 1080, 'dune-shelf'), shelfImageBackground: img(1920, 1080, 'dune-bg') },
+      details: { coverArt: img(2000, 3000, 'dune-cover'), contentImageTall: img(1680, 3636, 'dune-tall'),
+                 contentLogo: img(1000, 300, 'dune-logo'), posterArt: img(3840, 2160, 'dune-poster16') } },
+    // 只有详情层的图（没有 2:3 海报、搜索层也没有背景）：竖版 + 16:9 带字（coverArt16X9）+ 干净背景（posterArt）
+    { id: 'umc.cmc.arrival', title: 'Arrival', year: 2016,
+      search: {}, details: { contentImageTall: img(1680, 3636, 'arr-tall'), coverArt16X9: img(1920, 1080, 'arr-16'), posterArt: img(1920, 1080, 'arr-bg') } },
+    { id: 'umc.cmc.solaris', title: 'Solaris', year: 1972, search: { shelfImage: img(1920, 1080, 'sol') }, details: {} },
+    ...Array.from({ length: 9 }, (_, i) => ({ id: 'umc.cmc.batch' + i, title: 'Batch Film ' + i, year: 2020,
+      search: { shelfImage: img(1920, 1080, 'b' + i) }, details: { contentLogo: img(800, 200, 'bl' + i) } })),
+    { id: 'umc.cmc.flaky', title: 'Flaky Film', year: 2021, search: { shelfImage: img(1920, 1080, 'flaky') }, details: {} },
+    { id: 'umc.cmc.twin', title: 'Twin Film', year: 2022, search: { shelfImage: img(1920, 1080, 'twin') }, details: {} },
+  ];
+  H.uts.shows = [{ id: 'umc.cmc.prophecy', title: 'Dune: Prophecy', year: 2024, search: { shelfImage: img(1920, 1080, 'show') } }];
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const art = async (items, qs = '?w=1280&pw=600&f=webp', method = 'POST', raw) => {
+    const r = await H.worker.fetch(new Request('https://w.test/api/atv/art' + qs, method === 'POST'
+      ? { method, body: raw ?? JSON.stringify({ items }), headers: { 'Content-Type': 'application/json', Cookie: cookie } }
+      : { method, headers: { Cookie: cookie } }), H.env, H.ctx);
+    const body = r.status === 200 ? await r.json() : null;
+    await settle();
+    return { status: r.status, body };
+  };
+  const searches = () => H.uts.calls.filter(c => c.startsWith('/uts/v3/search')).length;
+
+  H.uts.calls.length = 0;
+  const r1 = await art([
+    { k: '/Movies/Dune.Part.Two.2024.mkv', t: ['Dune: Part Two', 'Dune Part Two'], y: 2024 },
+    { k: '/Movies/Arrival.2016.mkv', t: ['Arrival'], y: 2016 },
+    { k: '/Movies/Unknown.2020.mkv', t: ['Totally Unknown Film'], y: 2020 },
+    { k: '/Movies/中文片.mkv', t: ['流浪地球'], y: 2019 },
+    { k: '/Movies/Solaris.2002.mkv', t: ['Solaris'], y: 2002 },
+    { k: '/Movies/Prophecy.2024.mkv', t: ['Dune: Prophecy'], y: 2024 },
+  ]);
+  const it = r1.body?.items || {};
+  const d = it['/Movies/Dune.Part.Two.2024.mkv'], a = it['/Movies/Arrival.2016.mkv'];
+  ok(r1.status === 200 && d && d.id === 'umc.cmc.dune2' && d.year === 2024
+    && d.poster === 'https://is1.mock/dune-cover/600x900sr.webp' && d.tall === 'https://is1.mock/dune-tall/600x1299sr.webp'
+    && d.wide === 'https://is1.mock/dune-shelf/1280x720sr.webp' && d.background === 'https://is1.mock/dune-bg/1280x720sr.webp'
+    && d.logo === 'https://is1.mock/dune-logo/1000x300sr.png',
+    `对上的电影：2:3 海报、竖版、16:9 带片名、16:9 背景、字标都按请求的尺寸展开（${JSON.stringify(d)}）`);
+  ok(a && a.poster === null && a.tall === 'https://is1.mock/arr-tall/600x1299sr.webp'
+    && a.wide === 'https://is1.mock/arr-16/1280x720sr.webp' && a.background === 'https://is1.mock/arr-bg/1280x720sr.webp' && a.logo === null,
+    '只有详情层的图：没有 2:3 海报就是 null，16:9 退到 coverArt16X9，背景退到 posterArt');
+  ok(!it['/Movies/Unknown.2020.mkv'] && !it['/Movies/Solaris.2002.mkv'] && !it['/Movies/Prophecy.2024.mkv'] && !it['/Movies/中文片.mkv']
+    && !(r1.body?.pending || []).length,
+    'Apple TV 上没有的、年份差太多的（2002 对 1972）、同名的是剧集不是电影、只有中文名的：都不回，也不算待查（前端用 TMDB）');
+  ok(!H.uts.calls.some(c => c.includes('流浪地球')), '只有中文名的不去搜（商店是英文区）');
+
+  const before = H.uts.calls.length;
+  const r2 = await art([
+    { k: '/Movies/Dune.Part.Two.2024.mkv', t: ['Dune: Part Two'], y: 2024 },
+    { k: '/Movies/Unknown.2020.mkv', t: ['Totally Unknown Film'], y: 2020 },
+    { k: '/Movies/Dune.Part.Two.2160p.mkv', t: ['Dune: Part Two'], y: 2024 },
+  ], '?w=1920&pw=400&f=jpg');
+  ok(H.uts.calls.length === before && r2.body.items['/Movies/Dune.Part.Two.2160p.mkv']?.poster === 'https://is1.mock/dune-cover/400x600sr.jpg'
+    && r2.body.items['/Movies/Dune.Part.Two.2024.mkv']?.wide === 'https://is1.mock/dune-shelf/1920x1080sr.jpg' && !r2.body.items['/Movies/Unknown.2020.mkv'],
+    '再问一次：对上的和没有的都记住了，不再打 Apple；同一部片的另一个版本直接用同一份；尺寸和格式按这次请求现场展开');
+
+  const batch = Array.from({ length: 9 }, (_, i) => ({ k: `/Movies/Batch.${i}.mkv`, t: ['Batch Film ' + i], y: 2020 }));
+  const s0 = searches();
+  const b1 = await art(batch);
+  const b2 = await art(batch);
+  ok(Object.keys(b1.body.items).length === 6 && b1.body.pending.length === 3
+    && Object.keys(b2.body.items).length === 9 && !b2.body.pending.length && searches() - s0 === 9
+    && b2.body.items['/Movies/Batch.8.mkv']?.logo === 'https://is1.mock/bl8/1000x250sr.png',
+    `一次最多新查 6 部，其余回 pending；再问一次补齐，每部只搜一次（${b1.body.pending.length} 待查 → ${b2.body.pending.length}，搜索 ${searches() - s0} 次）`);
+
+  H.uts.fail = true;
+  const f1 = await art([{ k: '/Movies/Flaky.mkv', t: ['Flaky Film'], y: 2021 }]);
+  H.uts.fail = false;
+  const f2 = await art([{ k: '/Movies/Flaky.mkv', t: ['Flaky Film'], y: 2021 }]);
+  ok(f1.body.pending.includes('/Movies/Flaky.mkv') && !f1.body.items['/Movies/Flaky.mkv'] && f2.body.items['/Movies/Flaky.mkv']?.wide,
+    'Apple 接口出错：这部回 pending（不记成「没有」），接口好了再问就对上');
+
+  const t0 = searches();
+  const tw = await art([
+    { k: '/Movies/Twin.A.mkv', t: ['Twin Film'], y: 2022 },
+    { k: '/Movies/Twin.B.mkv', t: ['Twin Film'], y: 2022 },
+  ]);
+  ok(tw.body.items['/Movies/Twin.A.mkv'] && tw.body.items['/Movies/Twin.B.mkv'] && searches() - t0 === 1, '同一批里同名同年的两个文件只搜一次，两个都回');
+
+  const g = await art(null, '', 'GET');
+  const bad = await art(null, '', 'POST', '{not json');
+  ok(g.status === 405 && bad.status === 400, `GET 回 405、坏 JSON 回 400（${g.status} / ${bad.status}）`);
+  H.uts.movies = []; H.uts.shows = []; H.uts.calls.length = 0;
+}
+
 console.log('\n■ ffmpeg 作为 HLS 客户端（HTTP）');
 {
   const srv = http.createServer(async (req, res) => {
