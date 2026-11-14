@@ -19,7 +19,7 @@ final class DuoDeviceTests: XCTestCase {
     }
 
     /// 隐私同意闸门（网页版 #pgSheet）：登录后没同意过就盖上。演示数据默认不出，这里用 -CuvenPrivacy YES 强制。
-    /// 弹层本身只有文案与合成内容；勾满三项、开通知（系统权限弹窗点「允许」，没弹就算了），「同意并进入」以后应当到主页
+    /// 弹层本身只有文案与合成内容；勾满三项，「同意并继续」以后应当到主页（通知权限挪到账户页的开关里）
     func testPrivacyGate() {
         XCUIDevice.shared.orientation = .portrait
         let app = launch(privacy: true)
