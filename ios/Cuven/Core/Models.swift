@@ -548,6 +548,8 @@ struct AtvArtQuery: Encodable, Hashable, Sendable {
 enum Shelf: Hashable {
     case newest, picks, series, watchlist, continueWatching
     case genre(String)
+    /// 主页的五个大类之一（引人入胜的剧情……）：电影和剧集都在里面
+    case category(HomeCategory)
 
     var title: String {
         switch self {
@@ -557,6 +559,7 @@ enum Shelf: Hashable {
         case .watchlist: return "想看"
         case .continueWatching: return "继续观看"
         case .genre(let g): return g
+        case .category(let c): return c.title
         }
     }
 
@@ -569,6 +572,53 @@ enum Shelf: Hashable {
         case .watchlist: return "watchlist"
         case .continueWatching: return "continue"
         case .genre(let g): return "genre-" + g
+        case .category(let c): return "cat-" + c.rawValue
         }
+    }
+}
+
+/// 主页一排里的一项：电影或剧集（今年、去年那两排，和五个大类，两样都有）
+enum HomeEntry: Identifiable, Hashable {
+    case movie(Video)
+    case series(Series)
+
+    var id: String {
+        switch self {
+        case .movie(let v): return "m:" + v.path
+        case .series(let s): return "s:" + s.path
+        }
+    }
+}
+
+/// 主页的五个大类（Apple TV 那种主题货架）：标题，和它认的 TMDB 类型名。
+/// 电影和剧集的类型名写法不一样（剧集是「科幻奇幻」「动作冒险」这种合写的，有时还是英文），按「含这几个字」认
+enum HomeCategory: String, CaseIterable, Identifiable, Hashable, Sendable {
+    case drama, tense, fantasy, action, crime
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .drama: return "引人入胜的剧情"
+        case .tense: return "令人坐立难安"
+        case .fantasy: return "科幻和奇幻之旅"
+        case .action: return "动作演员就位"
+        case .crime: return "刺激犯罪与偷窃"
+        }
+    }
+
+    var keywords: [String] {
+        switch self {
+        case .drama: return ["剧情", "Drama"]
+        case .tense: return ["惊悚", "悬疑", "恐怖", "Thriller", "Mystery", "Horror"]
+        case .fantasy: return ["科幻", "奇幻", "Sci-Fi", "Science Fiction", "Fantasy"]
+        case .action: return ["动作", "Action"]
+        case .crime: return ["犯罪", "Crime"]
+        }
+    }
+
+    func matches(_ genres: [String]?) -> Bool {
+        guard let genres, !genres.isEmpty else { return false }
+        return genres.contains { g in keywords.contains { g.localizedCaseInsensitiveContains($0) } }
     }
 }

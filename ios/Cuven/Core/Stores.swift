@@ -626,19 +626,46 @@ final class AppModel {
         DiskCache.save(AtvArtCache(items: atvArtIndex, stamps: atvArtStamps, misses: atvArtMisses), "atv-art.json")
     }
 
-    /// 海报卡（2:3）：Apple 带片名的海报 → Apple 竖版主视觉（卡里居中裁）+ 字标压在下面 → TMDB 海报。
-    /// 竖版主视觉上没有字，所以要有字标（Apple 的，没有就 TMDB 的）才用它；连字标都没有就退回 TMDB 那张带片名的海报。
+    /// 海报卡（2:3）：纯净画面 + 字标优先（卡下不写片名，画面自己说明是哪一部：T20）——
+    /// Apple 无字的竖版主视觉 + 字标 → TMDB 纯净海报 + 字标 → Apple 印着片名的海报 → TMDB 海报（印着片名）。
+    /// 字标先用 Apple 的、没有再用 TMDB 的；两样都没有就用印着片名的那张，免得卡上一个字都没有、认不出是哪一部。
     /// width 是卡宽（点）：Apple 的图按 点 × 3 要像素（F62），TMDB 的取 w342 / w500
     func posterArt(_ v: Video, width: CGFloat = 0) -> (url: URL?, logo: URL?) {
         let m = meta(v)
+        let a = appleArt(v)
         let px = width > 0 ? Int(min(1200, max(342, width * 3)).rounded()) : 0
-        if let a = appleArt(v) {
-            if let p = Self.nonEmpty(a.poster) { return (URL(string: AppleImage.sized(p, width: px) ?? p), nil) }
-            if let t = Self.nonEmpty(a.tall), let logo = Self.nonEmpty(a.logo) ?? Self.nonEmpty(m?.logo) {
-                return (URL(string: AppleImage.sized(t, width: px) ?? t), TMDBImage.url(logo, "w500"))
-            }
-        }
-        return (TMDBImage.url(m?.poster ?? m?.posterClean, width * 3 > 342 ? "w500" : "w342"), nil)
+        let size = width * 3 > 342 ? "w500" : "w342"
+        let logo = (Self.nonEmpty(a?.logo) ?? Self.nonEmpty(m?.logo)).flatMap { TMDBImage.url($0, "w500") }
+        if let t = Self.nonEmpty(a?.tall), let logo { return (URL(string: AppleImage.sized(t, width: px) ?? t), logo) }
+        if let c = Self.nonEmpty(m?.posterClean), let logo { return (TMDBImage.url(c, size), logo) }
+        if let p = Self.nonEmpty(a?.poster) { return (URL(string: AppleImage.sized(p, width: px) ?? p), nil) }
+        return (TMDBImage.url(m?.poster ?? m?.posterClean, size), nil)
+    }
+
+    /// 剧集的海报卡：TMDB 纯净海报 + 字标 → 印着剧名的海报
+    func seriesPosterArt(_ s: Series, width: CGFloat = 0) -> (url: URL?, logo: URL?) {
+        let m = seriesMetas[s.path]
+        let size = width * 3 > 342 ? "w500" : "w342"
+        if let c = Self.nonEmpty(m?.posterClean), let l = Self.nonEmpty(m?.logo) { return (TMDBImage.url(c, size), TMDBImage.url(l, "w500")) }
+        return (TMDBImage.url(m?.poster ?? m?.posterClean, size), nil)
+    }
+
+    /// 16:9 卡：Apple 无字背景 + 字标 → TMDB 剧照 + 字标 → Apple 带片名排版的 16:9 → TMDB 剧照
+    func wideLockupArt(_ v: Video) -> (url: URL?, logo: URL?) {
+        let m = meta(v)
+        let a = appleArt(v)
+        let logo = (Self.nonEmpty(a?.logo) ?? Self.nonEmpty(m?.logo)).flatMap { TMDBImage.url($0, "w500") }
+        if let b = Self.nonEmpty(a?.background), let logo { return (URL(string: b), logo) }
+        if let b = Self.nonEmpty(m?.backdrop), let logo { return (TMDBImage.url(b, "w780"), logo) }
+        if let w = Self.nonEmpty(a?.wide) { return (URL(string: w), nil) }
+        return (TMDBImage.url(m?.backdrop ?? m?.posterClean ?? m?.poster, "w780"), nil)
+    }
+
+    /// 剧集的 16:9 卡：TMDB 剧照 + 字标
+    func seriesWideArt(_ s: Series) -> (url: URL?, logo: URL?) {
+        let m = seriesMetas[s.path]
+        let logo = Self.nonEmpty(m?.logo).flatMap { TMDBImage.url($0, "w500") }
+        return (TMDBImage.url(m?.backdrop ?? m?.posterClean ?? m?.poster, "w780"), logo)
     }
 
     /// 列表行里的小图（行里已经写着片名，不压字标）：Apple 海报 → Apple 竖版主视觉 → TMDB 海报
@@ -693,6 +720,33 @@ final class AppModel {
         for s in series { for g in seriesMetas[s.path]?.genres ?? [] { n[g, default: 0] += 1 } }
         return n.map { (name: $0.key, count: $0.value) }
             .sorted { $0.count != $1.count ? $0.count > $1.count : $0.name < $1.name }
+    }
+
+    // MARK: 主页的分区：今年、去年的电影和剧集，然后五个大类
+
+    /// 剧集能上主页的卡：TMDB 取到了（有海报或剧照）
+    func seriesCardReady(_ s: Series) -> Bool {
+        guard let m = seriesMetas[s.path] else { return false }
+        return m.hasArt || !(m.backdrop ?? "").isEmpty
+    }
+
+    /// 某一年的电影和剧集，最新入库的在前（主页「2026」「2025」两排，年份页一样的顺序）
+    func homeYear(_ y: Int, limit: Int = .max) -> [HomeEntry] {
+        var out: [(key: String, entry: HomeEntry)] = movies(inYear: y).map { ($0.addedKey, .movie($0)) }
+        for s in seriesInYear(y) where seriesCardReady(s) { out.append((s.added ?? "", .series(s))) }
+        out.sort { $0.key > $1.key }
+        return out.prefix(limit).map(\.entry)
+    }
+
+    /// 五个大类之一：电影和剧集都算，新的年份在前、同一年按入库时间
+    func categoryEntries(_ c: HomeCategory, limit: Int = .max) -> [HomeEntry] {
+        var out: [(year: Int, key: String, entry: HomeEntry)] = []
+        for v in movies where c.matches(meta(v)?.genres) { out.append((year(v) ?? 0, v.addedKey, .movie(v))) }
+        for s in series where seriesCardReady(s) && c.matches(seriesMetas[s.path]?.genres) {
+            out.append((Int(s.year ?? "") ?? 0, s.added ?? "", .series(s)))
+        }
+        out.sort { $0.year != $1.year ? $0.year > $1.year : $0.key > $1.key }
+        return out.prefix(limit).map(\.entry)
     }
 
     func movies(inGenre g: String) -> [Video] { movies.filter { meta($0)?.genres?.contains(g) == true } }

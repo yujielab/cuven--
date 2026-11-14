@@ -25,8 +25,8 @@ final class DuoUnfoldedTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-32-unfolded-rows")
         app.swipeDown(); app.swipeDown(); sleep(1)
 
-        // 详情（头图的「详情」，没有就点「最新加入」的卡）
-        if let open = firstHittable(app, ["hero-detail", "newest-poster"]) {
+        // 详情（头图的「详情」，没有就点主页上的一张电影海报）
+        if let open = firstHittable(app, ["hero-detail", "movie-card"]) {
             open.tap()
             if app.buttons["detail-play"].waitForExistence(timeout: 8) {
                 sleep(2)
@@ -79,11 +79,12 @@ final class DuoUnfoldedTests: XCTestCase {
         return nil
     }
 
+    /// 展开竖拿是系统标签栏，展开横拿是 App 自己画在侧边那一列的导航（DuoNav）：都按 label 认，取点得到的那个
     private func tab(_ app: XCUIApplication, _ name: String) {
         let b = app.tabBars.buttons[name].firstMatch
-        if b.exists { b.tap(); return }
-        let any = app.buttons[name].firstMatch
-        if any.exists { any.tap() }
+        if b.exists && b.isHittable { b.tap(); return }
+        let q = app.buttons.matching(NSPredicate(format: "label == %@", name))
+        if let any = q.allElementsBoundByIndex.first(where: { $0.isHittable }) { any.tap() }
     }
 
     private func back(_ app: XCUIApplication) {
