@@ -579,6 +579,9 @@ final class AppModel {
         return r
     }
 
+    /// 这一部（电影或剧集，按路径）的 Apple TV 这次打开 App 里已经问过了：.some(nil) 是问过、没有；nil 是还没问
+    func atvCached(path: String) -> AtvLookup?? { atvCache[path] }
+
     // MARK: 资料库：只放有预告片的电影（Apple TV 上的公开预告，和详情页同一次查询）
 
     /// path → 有没有预告片。查过的存在本地（trailer-index.json）：有的 30 天、没有的 7 天后再查一次

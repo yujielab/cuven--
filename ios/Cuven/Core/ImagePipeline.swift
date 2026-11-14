@@ -4,6 +4,12 @@ import ImageIO
 import CoreImage
 import CoreImage.CIFilterBuiltins
 
+/// 详情页头部的画面：裁成画面区的宽高比、底下一段渐进式模糊；edge 是裁好以后最底下一条的平均色（头部下半截的底色）
+struct HeroArt: @unchecked Sendable {
+    let image: UIImage
+    let edge: UIColor
+}
+
 /// 解码以后再给图做一道处理（结果和原图分开缓存）
 enum ImageEffect: String, Hashable, Sendable {
     case none
@@ -19,6 +25,8 @@ actor ImagePipeline {
 
     private let memory = NSCache<NSString, UIImage>()
     private var inflight: [String: Task<UIImage?, Never>] = [:]
+    /// 详情页头部处理好的画面（按「地址 + 尺寸 + 宽高比」）
+    private var heroCache: [String: HeroArt] = [:]
     private let session: URLSession
 
     init() {
@@ -68,6 +76,17 @@ actor ImagePipeline {
         return out
     }
 
+    /// 详情页头部的画面：裁成画面区的宽高比、底下渐进式模糊，顺带取底边的主色；解码和处理都在后台，结果记在内存里
+    func heroArt(_ url: URL, maxPixel: CGFloat, aspect: CGFloat) async -> HeroArt? {
+        let key = "\(url.absoluteString)#\(Int(maxPixel))#\(Int((aspect * 100).rounded()))"
+        if let hit = heroCache[key] { return hit }
+        guard let base = await image(url, maxPixel: maxPixel) else { return nil }
+        guard let out = await Task.detached(priority: .userInitiated, operation: { ImageEffects.heroArt(base, aspect: aspect) }).value else { return nil }
+        if heroCache.count > 24 { heroCache.removeAll() }
+        heroCache[key] = out
+        return out
+    }
+
     /// 只要原始字节（字标的明暗分析用，见 LogoTone）
     func data(_ url: URL) async -> Data? {
         if url.scheme == "demo" { return DemoData.render(url, maxPixel: 400)?.pngData() }
@@ -100,6 +119,50 @@ enum ImageEffects {
         case .bottomBlur: return bottomBlur(image)
         case .featureCard: return featureCard(image)
         }
+    }
+
+    /// 详情页头部：裁成画面区的宽高比（很瘦的竖版主视觉从靠近顶上取、别的从偏上取，比画面区宽的左右居中），
+    /// 下段渐进式模糊（离底 42% 起，8% 以下糊到最大），再取最底下 14% 那一条的平均色
+    static func heroArt(_ image: UIImage, aspect: CGFloat) -> HeroArt? {
+        guard let cg = image.cgImage, aspect > 0 else { return nil }
+        let W = CGFloat(cg.width), H = CGFloat(cg.height)
+        guard W > 8, H > 8 else { return nil }
+        var rect = CGRect(x: 0, y: 0, width: W, height: H)
+        if W / H < aspect {
+            let h = (W / aspect).rounded(.down)
+            let slack = H - h
+            let y = (slack * (W / H < 0.6 ? 0.06 : 0.25)).rounded(.down)
+            rect = CGRect(x: 0, y: y, width: W, height: h)
+        } else if W / H > aspect {
+            let w = (H * aspect).rounded(.down)
+            rect = CGRect(x: ((W - w) / 2).rounded(.down), y: 0, width: w, height: H)
+        }
+        guard let cropped = cg.cropping(to: rect) else { return nil }
+        let base = UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
+        let edge = averageColor(cropped, bottom: 0.14) ?? UIColor(white: 0.08, alpha: 1)
+        let soft = bottomBlur(base, clearAbove: 0.42, fullBelow: 0.08) ?? base
+        return HeroArt(image: soft, edge: edge)
+    }
+
+    /// 一张图最底下那一条（占高的 bottom）的平均色
+    static func averageColor(_ cg: CGImage, bottom: CGFloat) -> UIColor? {
+        let img = CIImage(cgImage: cg)
+        let r = img.extent
+        let avg = CIFilter.areaAverage()
+        avg.inputImage = img
+        avg.extent = CGRect(x: r.minX, y: r.minY, width: r.width, height: max(1, r.height * bottom))
+        guard let out = avg.outputImage else { return nil }
+        var px = [UInt8](repeating: 0, count: 4)
+        context.render(out, toBitmap: &px, rowBytes: 4, bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                       format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        return UIColor(red: CGFloat(px[0]) / 255, green: CGFloat(px[1]) / 255, blue: CGFloat(px[2]) / 255, alpha: 1)
+    }
+
+    /// 头部下半截的底色：保留取到的色相，饱和度略提，亮度压到 0.34 以下（白字压在上面看得清：F34、C58）
+    static func heroTone(_ c: UIColor) -> UIColor {
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        guard c.getHue(&h, saturation: &s, brightness: &b, alpha: &a) else { return UIColor(white: 0.08, alpha: 1) }
+        return UIColor(hue: h, saturation: min(1, s * 1.08), brightness: min(b, 0.34), alpha: 1)
     }
 
     /// 精选卡：裁成 3:4。比 3:4 瘦的往高里裁——Apple TV 的竖版主视觉（约 0.46）人物多在上半截，从离顶 8% 处往下取；
