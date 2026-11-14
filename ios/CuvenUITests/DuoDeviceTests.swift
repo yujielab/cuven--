@@ -74,10 +74,10 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-02-home-rows")
         app.swipeDown(); app.swipeDown(); sleep(1)
 
-        // 详情：系统的返回钮（折起时在侧边那一列最上面）
-        let card = app.buttons["hero-card"].firstMatch
+        // 详情：头图上此刻在屏上的那一页的「详情」（详情页从头图上放大出来）；返回是系统的返回钮（折起时在侧边那一列最上面）
+        let heroDetail = visible(app.buttons.matching(identifier: "hero-detail"))
         let poster = app.buttons["newest-poster"].firstMatch
-        if card.waitForExistence(timeout: 5) { card.tap() } else if poster.exists { poster.tap() }
+        if heroDetail.exists && heroDetail.isHittable { heroDetail.tap() } else if poster.exists { poster.tap() }
         XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "没进到电影详情")
         sleep(2)
         report(app, "detail")
@@ -112,14 +112,12 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-04-detail-info")
         app.swipeUp(); sleep(2); snap("duo-04c-detail-tech")
         back(app)
-        // 主页往下：今日推荐、最新加入（横版卡）、Cuven TV（高卡）、按年份（年份条 + 剧集卡 + 竖版卡）
+        // 主页往下：继续观看、今日推荐（海报）、最新加入（16:9）、剧集（16:9 + 字标）、各年份（海报）——分区之间只靠留白
         app.swipeUp(); sleep(2); snap("duo-08-home-rows")
         app.swipeUp(); sleep(2); snap("duo-08b-home-tv")
         app.swipeUp(); sleep(2); snap("duo-08c-home-year")
         app.swipeUp(); sleep(2); snap("duo-08d-home-year-2")
-        // 「继续观看」只有一张时右边垫一张「没有更多了」（演示数据里正好一张）
-        print("DUO continue end card: \(app.staticTexts["没有更多了"].exists ? "shown" : "not found")")
-        // 首页最后一段「文件夹」：点进文件夹页（子文件夹一排 + 按年份分组的瀑布流）
+        // 首页最后一段「文件夹」：点进文件夹页（大标题、子文件夹一排、海报网格）
         if let folder = reveal(app, app.buttons.matching(identifier: "folder-card"), swipes: 8) {
             snap("duo-08e-home-folders")
             folder.tap(); sleep(2)
@@ -133,7 +131,7 @@ final class DuoDeviceTests: XCTestCase {
         for _ in 0..<14 { app.swipeDown() }
         sleep(1)
 
-        // 资料库：和网页版一样的展映——一部片一章，满屏画幅 → 收成 16:9、介绍面板压上来 → 剧照
+        // 资料库：展映——一部片一章，满屏画幅 → 收成 16:9，下面字标、一行信息、三行简介、播放 / 详情
         tab(app, "资料库"); sleep(3)
         report(app, "library")
         snap("duo-05-library")
@@ -141,14 +139,14 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-05g-library-intro")
         if let d = reveal(app, app.buttons.matching(identifier: "library-movie"), swipes: 2) {
             d.tap(); sleep(2)
-            XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "资料库「影片详情」没进到详情页")
+            XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "资料库「详情」没进到详情页")
             snap("duo-05h-library-detail")
             back(app)
         } else {
-            XCTFail("资料库没有「影片详情」")
+            XCTFail("资料库没有「详情」")
         }
 
-        // 剧集详情：主页「Cuven TV」那一排的高卡（资料库和网页版一样只放电影）
+        // 剧集详情：主页「剧集」那一排（资料库只放电影）
         tab(app, "主页"); sleep(2)
         if let s1 = reveal(app, app.buttons.matching(identifier: "series-card"), swipes: 4) {
             s1.tap(); sleep(3)
@@ -184,22 +182,22 @@ final class DuoDeviceTests: XCTestCase {
         for _ in 0..<6 { app.swipeDown() }
         sleep(1)
 
-        // 年份页：主页「2026 · 查看电影和剧集 ›」进去，一行一部；行尾「…」是和详情页同一张弹层
+        // 年份页：主页分区标题「2026 ›」进去——系统列表，一行一部（小海报、片名、一行灰字、›）；长按一行是系统菜单（播放 / 想看）
         tab(app, "主页"); sleep(2)
-        if let bar = reveal(app, app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'year-bar-'")), swipes: 6) {
-            bar.tap(); sleep(2)
+        if let title = reveal(app, app.buttons.matching(NSPredicate(format: "identifier MATCHES 'section-[0-9]{4}'")), swipes: 8) {
+            title.tap(); sleep(2)
             snap("duo-09-year")
-            let more = app.buttons["year-more"].firstMatch
-            if more.waitForExistence(timeout: 3) {
-                more.tap(); sleep(2)
-                snap("duo-09b-year-more")
-                let cancel = app.buttons["sheet-cancel"].firstMatch
-                if cancel.waitForExistence(timeout: 3) { cancel.tap() } else { app.swipeDown() }
-                sleep(1)
+            let row = app.buttons.matching(NSPredicate(format: "identifier IN {'year-movie', 'year-series'}")).firstMatch
+            if row.waitForExistence(timeout: 3) {
+                row.press(forDuration: 1.2); sleep(2)
+                snap("duo-09b-year-menu")
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.06)).tap(); sleep(1)
+            } else {
+                print("DUO year page: no rows")
             }
             back(app)
         } else {
-            XCTFail("主页没有年份条")
+            XCTFail("主页没有年份分区")
         }
         for _ in 0..<8 { app.swipeDown() }
         sleep(1)
@@ -209,7 +207,7 @@ final class DuoDeviceTests: XCTestCase {
         snap("duo-06-account")
 
         tab(app, "搜索"); sleep(2)
-        snap("duo-07a-search-home")          // 最近添加：两列竖版海报
+        snap("duo-07a-search-home")          // 最近添加：海报网格
         app.swipeDown(); sleep(1)
         let field = app.searchFields.firstMatch
         if field.waitForExistence(timeout: 5) {

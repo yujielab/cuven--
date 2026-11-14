@@ -362,6 +362,7 @@ struct DSHeroCarousel: View {
     @State private var touched = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    @Environment(\.zoomNamespace) private var zoomNamespace
 
     var body: some View {
         let tall = height > metrics.width
@@ -403,44 +404,57 @@ struct DSHeroCarousel: View {
         let still = reduceMotion
         let w = metrics.width
         return ZStack(alignment: .bottomLeading) {
-            // 后面一层：画面（翻页时只走 85%：比字慢，像在后面：S12）
-            Color.black
-                .overlay {
-                    RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1800, placeholder: .clear)
-                        .visualEffect { c, proxy in
-                            let x = proxy.frame(in: .scrollView(axis: .horizontal)).minX
-                            return c.offset(x: still ? 0 : -x * 0.15)
+            // 后面一层：画面 + 底部渐暗。整张画面也是去详情的链接——点画面和点「详情」一样（T31：头图里的每一项都能直接选），
+            // 详情页从这张画面上放大出来、返回时缩回去（F57：转场交代从哪来、回哪去）；
+            // 「详情」钮已经给旁白念了，这层不再重复（F75）
+            ZoomLink(route: p.detail, slot: "hero", press: false) {
+                ZStack {
+                    // 画面（翻页时只走 85%：比字慢，像在后面：S12）
+                    Color.black
+                        .overlay {
+                            RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1800, placeholder: .clear)
+                                .visualEffect { c, proxy in
+                                    let x = proxy.frame(in: .scrollView(axis: .horizontal)).minX
+                                    return c.offset(x: still ? 0 : -x * 0.15)
+                                }
                         }
+                        .clipped()
+                    // 底部渐暗：保证字的对比度（S17、F34）
+                    LinearGradient(stops: [
+                        .init(color: .clear, location: 0.45),
+                        .init(color: .black.opacity(0.55), location: 0.75),
+                        .init(color: .black.opacity(0.85), location: 1),
+                    ], startPoint: .top, endPoint: .bottom)
                 }
-                .clipped()
-            // 底部渐暗：保证字的对比度（S17、F34）
-            LinearGradient(stops: [
-                .init(color: .clear, location: 0.45),
-                .init(color: .black.opacity(0.55), location: 0.75),
-                .init(color: .black.opacity(0.85), location: 1),
-            ], startPoint: .top, endPoint: .bottom)
-            // 前面一层：字标、信息、按钮（左对齐：F1、F2）
+                .frame(width: w, height: height)
+                .contentShape(Rectangle())
+            }
+            .accessibilityHidden(true)
+            // 前面一层：字标、信息、按钮（左对齐：F1、F2）。字本身不接手势，点在字上也是点到后面的画面
             VStack(alignment: .leading, spacing: 12) {
-                if let logo = p.logo, !logo.isEmpty {
-                    LogoImage(url: TMDBImage.url(logo, "w500"), height: metrics.wide ? 96 : 72, alignment: .leading,
-                              fallback: p.title, maxWidth: min(w * 0.7, 360))
-                } else {
-                    Text(p.title)
-                        .font(metrics.wide ? .largeTitle.bold() : .title.bold())
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
+                Group {
+                    if let logo = p.logo, !logo.isEmpty {
+                        LogoImage(url: TMDBImage.url(logo, "w500"), height: metrics.wide ? 96 : 72, alignment: .leading,
+                                  fallback: p.title, maxWidth: min(w * 0.7, 360))
+                    } else {
+                        Text(p.title)
+                            .font(metrics.wide ? .largeTitle.bold() : .title.bold())
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                    }
+                    if !p.meta.isEmpty {
+                        Text(p.meta)
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.8))
+                            .lineLimit(1)
+                    }
                 }
-                if !p.meta.isEmpty {
-                    Text(p.meta)
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.8))
-                        .lineLimit(1)
-                }
+                .allowsHitTesting(false)
                 HStack(spacing: 12) {
                     Button(action: p.play) { Label(p.playTitle, systemImage: "play.fill") }
                         .buttonStyle(.dsPlay)
                         .accessibilityIdentifier("hero-play")
-                    NavigationLink(value: p.detail) { Text("详情") }
+                    detailLink(p)
                         .buttonStyle(.dsSecondary)
                         .accessibilityIdentifier("hero-detail")
                 }
@@ -451,6 +465,16 @@ struct DSHeroCarousel: View {
             .frame(maxWidth: min(w, 560), alignment: .leading)
         }
         .contentShape(Rectangle())
+    }
+
+    /// 「详情」推进和点画面同一个目标：详情页同样从这张画面上放大出来（F57）
+    @ViewBuilder
+    private func detailLink(_ p: DSHeroPage) -> some View {
+        if zoomNamespace != nil {
+            NavigationLink(value: ZoomTarget(route: p.detail, slot: "hero")) { Text("详情") }
+        } else {
+            NavigationLink(value: p.detail) { Text("详情") }
+        }
     }
 }
 
