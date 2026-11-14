@@ -2,16 +2,25 @@ import SwiftUI
 
 // MARK: - 整页清单（主页分区标题「›」进来的，账户里的「继续观看」「想看」，搜索里的某一类）
 //
-// 系统大标题（C13）+ 一张海报网格（T23）：电影和剧集一起，卡上只有画面（纯净画面 + 字标），卡下不写字（T20、F80）；
-// 「播放 / 想看」在长按菜单里（C21、C43、C45）。
+// 五个大类、某一类、精选电影、精选剧集是合集页（`CollectionPage`：照用户给的参考图，游戏 App 的合集页）；
+// 别的（想看、继续观看、最新加入……）是系统大标题（C13）+ 一张海报网格（T23）：电影和剧集一起，
+// 卡上只有画面（纯净画面 + 字标），卡下不写字（T20、F80）；「播放 / 想看」在长按菜单里（C21、C43、C45）。
 
 struct ShelfView: View {
     @Environment(AppModel.self) private var model
     let shelf: Shelf
 
     var body: some View {
+        if shelf.blurb != nil {
+            CollectionPage(shelf: shelf, entries: entries)
+        } else {
+            grid
+        }
+    }
+
+    private var grid: some View {
         let entries = self.entries
-        GeometryReader { geo in
+        return GeometryReader { geo in
             let insets = geo.safeAreaInsets
             let metrics = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing)
             ScrollView {
@@ -65,6 +74,8 @@ struct ShelfView: View {
             return model.categoryEntries(c)
         case .featured:
             return model.featuredMovies().map { .movie($0) }
+        case .featuredSeries:
+            return model.featuredSeries().map { .series($0) }
         }
     }
 

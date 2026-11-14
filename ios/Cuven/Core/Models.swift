@@ -568,6 +568,8 @@ enum Shelf: Hashable {
     case category(HomeCategory)
     /// 精选电影：评分高的在前（主页今年 / 去年下面那排大号竖卡的全部）
     case featured
+    /// 精选剧集：评分高的剧，一部剧只出一次（主页「精选剧集」那一块的全部）
+    case featuredSeries
 
     var title: String {
         switch self {
@@ -579,6 +581,19 @@ enum Shelf: Hashable {
         case .genre(let g): return g
         case .category(let c): return c.title
         case .featured: return "精选电影"
+        case .featuredSeries: return "精选剧集"
+        }
+    }
+
+    /// 合集式的整页（照游戏 App 的合集页：立体海报 + 大标题 + 这句说明 + 一列大卡）才有的那句说明；
+    /// 别的清单（想看、继续观看……）是 nil，仍是海报网格
+    var blurb: String? {
+        switch self {
+        case .category(let c): return c.blurb
+        case .genre(let g): return "片库里的\(g)电影和剧集，新入库的在前。"
+        case .featured: return "Cuven 按评分为你挑出片库里最值得一看的电影。"
+        case .featuredSeries: return "Cuven 按评分为你挑出片库里最值得追的剧集。"
+        default: return nil
         }
     }
 
@@ -593,6 +608,7 @@ enum Shelf: Hashable {
         case .genre(let g): return "genre-" + g
         case .category(let c): return "cat-" + c.rawValue
         case .featured: return "featured"
+        case .featuredSeries: return "featured-tv"
         }
     }
 }
@@ -624,6 +640,17 @@ enum HomeCategory: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .fantasy: return "科幻和奇幻之旅"
         case .action: return "动作演员就位"
         case .crime: return "刺激犯罪与偷窃"
+        }
+    }
+
+    /// 合集页标题下那一句灰字（参考图「試試這些輕鬆的小品遊戲」那一行）
+    var blurb: String {
+        switch self {
+        case .drama: return "慢慢看进去，跟着人物走完一段人生。"
+        case .tense: return "悬疑、惊悚与恐怖：关上灯，坐稳了。"
+        case .fantasy: return "穿过星海与异界，去看另一种世界。"
+        case .action: return "追车、格斗、爆破，一场接一场。"
+        case .crime: return "精心策划的劫案，和一场场猫鼠游戏。"
         }
     }
 
