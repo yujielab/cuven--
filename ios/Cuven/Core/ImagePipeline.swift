@@ -17,6 +17,8 @@ enum ImageEffect: String, Hashable, Sendable {
     case bottomBlur
     /// 精选卡：先裁成 3:4（很瘦的竖版主视觉留上面、海报居中），再把下半段渐进式地糊掉（字标和两行字压在上面）
     case featureCard
+    /// 长文案的分集卡（方卡）：糊的那一段更高（离底 64% 起，38% 以下最糊），集号、集名、三行简介都压在上面
+    case bottomBlurTall
 }
 
 /// 图片：内存缓存（NSCache）+ 磁盘缓存（URLCache）+ 按显示尺寸降采样解码 —— 一屏几十张海报也不吃内存。
@@ -118,6 +120,7 @@ enum ImageEffects {
         case .none: return image
         case .bottomBlur: return bottomBlur(image)
         case .featureCard: return featureCard(image)
+        case .bottomBlurTall: return bottomBlur(image, clearAbove: 0.64, fullBelow: 0.38)
         }
     }
 

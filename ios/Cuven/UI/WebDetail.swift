@@ -285,9 +285,11 @@ struct SeriesDetailView: View {
                         .padding(.vertical, 8)
                 }
             } else {
+                // 两种卡（用户要求）：这一季大半的集有简介就用长文案的方卡，不然用短文案的 16:9 卡；一排里样子统一
+                let long = files.filter { !(($0.ep.flatMap { info[$0]?.overview }) ?? "").isEmpty }.count * 2 >= files.count
                 DSShelf(metrics: m) {
                     ForEach(Array(files.enumerated()), id: \.element.id) { i, f in
-                        episodeCard(f, index: i, metrics: m, fallbackArt: fallbackArt)
+                        episodeCard(f, index: i, metrics: m, fallbackArt: fallbackArt, long: long)
                     }
                 }
             }
@@ -297,7 +299,7 @@ struct SeriesDetailView: View {
     /// 一集：16:9 剧照，字压在底部的渐进式模糊上（Apple TV 的分集卡）：「第 1 集 · 集名」和「▶ 45 分钟」；
     /// 看到一半是「▶ ▬▬ 剩余 12 分钟」，看完的写「已看」（F36：状态不只靠颜色）。点一下就放这一集（C88）；
     /// 右下的「•••」和长按是同一份菜单，长按的预览是这一集的整段简介（C21）
-    private func episodeCard(_ f: EpisodeFile, index i: Int, metrics m: DSMetrics, fallbackArt: String?) -> some View {
+    private func episodeCard(_ f: EpisodeFile, index i: Int, metrics m: DSMetrics, fallbackArt: String?, long: Bool) -> some View {
         let ep = f.ep.flatMap { info[$0] }
         let entry = model.playback.entry(f.path)
         let fraction = entry?.fraction ?? 0
@@ -313,8 +315,16 @@ struct SeriesDetailView: View {
         } else {
             detail = runtime
         }
-        return DSMediaCard(art: art, title: Self.episodeTitle(f, ep), detail: detail,
-                           progress: partial ? fraction : nil, metrics: m, identifier: "episode-card",
+        // 长文案：上面一行「第 2 集」、标题只写集名（没有集名就写「第 2 集」、上面那行不写），下面三行简介
+        let name = Self.episodeName(ep)
+        return DSMediaCard(art: art,
+                           title: long ? (name ?? Self.badge(f)) : Self.episodeTitle(f, ep),
+                           detail: detail,
+                           progress: partial ? fraction : nil,
+                           tall: long,
+                           kicker: long && name != nil ? Self.badge(f) : nil,
+                           overview: long ? ep?.overview : nil,
+                           metrics: m, identifier: "episode-card",
                            action: { play(index: i) }) {
             episodeMenu(f, index: i, done: done, partial: partial)
         }
