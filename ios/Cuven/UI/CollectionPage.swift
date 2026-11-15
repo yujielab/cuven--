@@ -6,7 +6,7 @@ import SwiftUI
 // · 整页最顶上一片主色（从排在最前那部的海报取），往下沉到黑；铺到状态栏、导航栏和侧边那一列底下；
 // · 三张立体海报封面斜着叠成一扇（和主页精选区同一套：第一次出现时弹开、在屏上时轻轻浮动、滚动时比字慢）；
 // · 大号粗体标题 + 一句灰字说明；导航栏里先不写字（只有返回钮），滚过大标题才把标题接上去；
-// · 下面一列大卡：宽银幕的画面，底下一条从画面取色的条——小海报、「Cuven 独占」、片名、简介的第一句、「查看」；
+// · 下面一列大卡：宽银幕的画面，底下一条从画面取色的条——小海报、「Cuven 独占」、片名、「年份 · 类型」、「查看」（简介只在详情页：用户要求）；
 //   点卡进详情（从卡上放大出来），长按是「播放 / 想看」菜单（C21、C45）。宽的屏一行两张、三张。
 
 struct CollectionPage: View {
@@ -83,7 +83,8 @@ struct CollectionPage: View {
         case .movie(let v):
             let meta = model.meta(v)
             let year: String? = model.year(v).map { String($0) }
-            let line: String = CollectionText.tagline(meta?.overview) ?? DetailText.line([year, meta?.genres?.first])
+            // 卡底那一行只写年份 · 类型（用户要求：简介只出现在详情页）
+            let line: String = DetailText.line([year, meta?.genres?.first])
             ZoomLink(route: .movie(v), slot: slot) {
                 CollectionCard(art: model.wideLockupArt(v).url, cover: model.thumbArt(v), title: model.title(v),
                                line: line, width: w)
@@ -92,7 +93,7 @@ struct CollectionPage: View {
             .movieMenu(v)
         case .series(let s):
             let sm = model.seriesMetas[s.path]
-            let line: String = CollectionText.tagline(sm?.overview) ?? DetailText.line([s.seasonLabel, sm?.genres?.first])
+            let line: String = DetailText.line([s.seasonLabel, sm?.genres?.first])
             ZoomLink(route: .series(s), slot: slot) {
                 CollectionCard(art: model.seriesWideArt(s).url, cover: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w185"),
                                title: sm?.title ?? s.name, line: line, width: w)
@@ -101,17 +102,6 @@ struct CollectionPage: View {
             .seriesMenu(s)
             .task { await model.ensureSeriesMeta(s) }
         }
-    }
-}
-
-enum CollectionText {
-    /// 简介的第一句（到第一个句号、问号、叹号或分号为止，不带那个标点）：卡上只放一行，像参考图卡底那句标语
-    static func tagline(_ overview: String?) -> String? {
-        guard let o = overview?.trimmingCharacters(in: .whitespacesAndNewlines), !o.isEmpty else { return nil }
-        let stops: Set<Character> = ["。", "！", "？", "；", "!", "?"]
-        guard let i = o.firstIndex(where: { stops.contains($0) }) else { return o }
-        let first = String(o[..<i]).trimmingCharacters(in: .whitespaces)
-        return first.isEmpty ? o : first
     }
 }
 

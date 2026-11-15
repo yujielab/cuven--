@@ -10,7 +10,7 @@ import AVFoundation
 //   ① 画幅：一块 16:9 先放大到铺满整屏，钉住不动；中间是一行「年份 · 类型 · 片长」和字标（没有字标就是片名），往上滚先淡出、压暗层跟着退；
 //      再往上滚，画幅收回成一整幅 16:9，下沿始终咬着介绍面板的上沿（网页版同一套几何：k = 间隙 / 16:9 的高，跟着手指走：F54、S10）。
 //      在屏幕中间那一章放它的预告片：静音、从第 10 秒起、循环；系统关了「自动播放视频预览」就停着等人点（F77、S17），右上角播放 / 暂停 + 进度环。
-//   ② 介绍面板（黑底，平口顶边压上来）：简介、评分、导演与主演、「播放」「影片详情」、一排剧照，章与章之间一道两头渐隐的细线（网页版的内容）。
+//   ② 介绍面板（黑底，平口顶边压上来）：评分、导演与主演（简介只在详情页：用户要求）、「播放」「影片详情」、一排剧照，章与章之间一道两头渐隐的细线（网页版的内容）。
 //   章的高度跟着介绍面板走（之前按画幅的行程定高，面板短的那一章底下会空出一大块黑）。
 // · 标题「资料库」与一句「Cuven 为你提供严格品质的影片」压在第一章的画面上、随页面滚走（网页版的 library-header）。
 
@@ -425,7 +425,7 @@ struct ShowcaseControl: View {
     }
 }
 
-/// 介绍面板（黑底，平口顶边压上来；网页版 sc-content）：简介、评分、导演与主演、「播放」「影片详情」、一排剧照，
+/// 介绍面板（黑底，平口顶边压上来；网页版 sc-content）：评分、导演与主演、「播放」「影片详情」、一排剧照（简介只在详情页：用户要求），
 /// 最底下一道两头渐隐的细线隔开下一章
 struct ShowcaseIntro: View {
     @Environment(AppModel.self) private var model
@@ -440,12 +440,8 @@ struct ShowcaseIntro: View {
         let resume = model.playback.resumePosition(video.path) != nil
         let stills = (meta?.stills ?? []).compactMap { s -> URL? in TMDBImage.url(s.url ?? s.thumb, "w780") }.prefix(10)
         VStack(alignment: .leading, spacing: 20) {
+            // 简介不放（用户要求：简介只出现在详情页，「影片详情」进去看）
             VStack(alignment: .leading, spacing: 14) {
-                Text((meta?.overview).flatMap { $0.isEmpty ? nil : $0 } ?? "这部影片暂时没有简介。")
-                    .font(.dsReading)
-                    .foregroundStyle(DSInk.secondary)
-                    .lineLimit(4)
-                    .frame(maxWidth: 620, alignment: .leading)
                 if let r = meta?.rating, r > 0 {
                     // 介绍下面那枚小胶囊：只留评分（网页版 sc-facts）
                     Text("评分 " + String(format: "%.1f", r))

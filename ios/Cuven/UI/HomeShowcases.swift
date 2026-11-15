@@ -7,7 +7,7 @@ import AVFoundation
 // · 底下是这一部的预告片（静音、从第 10 秒起、放完回到第 10 秒；和资料库同一个 ShowcaseTrailer），起来之前
 //   （或者没有预告片）是 Apple TV 的竖版主视觉（横着的屏用横版背景），预告片出画面时模糊淡入；
 // · 左上一行大号粗体「编辑推荐」；右上一颗播放 / 暂停 + 进度环（有预告片才出现：F77）；
-// · 底部一张从画面取色的圆角面板（用户要求矮 35%）：小海报 + 字标（没有字标写片名）、「科幻 · 2024」、简介的第一句（一行），右边「查看」胶囊；
+// · 底部一张从画面取色的圆角面板（用户要求矮 35%）：小海报 + 字标（没有字标写片名）、「科幻 · 2024」，右边「查看」胶囊（简介只在详情页：用户要求）；
 // · 整块点进详情（从这一块上放大出来）。只在屏上、这一页在前台时放；同一时刻全 App 只放一段（TrailerFocus）。
 // 每天换一部（AppModel.editorsPick：评分高、有字标和竖版画面、不和头图撞车，查到有预告片的优先）。
 
@@ -125,8 +125,7 @@ struct EditorsPick: View {
         let meta = model.meta(video)
         let year: String? = model.year(video).map { String($0) }
         let kicker = DetailText.line([meta?.genres?.first, year])
-        let line = CollectionText.tagline(meta?.overview)
-        // 用户要求：这块面板矮 35%（折起约 163 → 105 点）：小海报、字标小一号，简介只留一行，
+        // 用户要求：这块面板矮 35%（折起约 163 → 105 点）：小海报、字标小一号；简介不放（用户要求：简介只出现在详情页），
         // 「查看影片 ›」那一行收进右边一颗「查看」胶囊（和年份卡、精选卡同一个样子），上下边距 12
         let posterW: CGFloat = metrics.wide ? 60 : 52
         return HStack(alignment: .center, spacing: 12) {
@@ -140,12 +139,6 @@ struct EditorsPick: View {
                 }
                 LogoImage(url: model.wideLockupArt(video).logo, height: metrics.wide ? 34 : 28, alignment: .leading,
                           fallback: model.title(video), maxWidth: metrics.wide ? 260 : 180)
-                if let line {
-                    Text(line)
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.86))
-                        .lineLimit(1)
-                }
             }
             Spacer(minLength: 8)
             DSViewPill()
@@ -159,11 +152,11 @@ struct EditorsPick: View {
             .fill((tone ?? Color(white: 0.16)).opacity(0.94)))
     }
 
-    /// 旁白念的那一句：编辑推荐，片名，类型 · 年份，简介的第一句
+    /// 旁白念的那一句：编辑推荐，片名，类型 · 年份（简介只在详情页）
     private var spokenLabel: String {
         let meta = model.meta(video)
         let kicker = DetailText.line([meta?.genres?.first, model.year(video).map { String($0) }])
-        let parts: [String?] = ["编辑推荐", model.title(video), kicker, CollectionText.tagline(meta?.overview)]
+        let parts: [String?] = ["编辑推荐", model.title(video), kicker]
         return parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，")
     }
 
