@@ -63,8 +63,9 @@ struct ActorPage: View {
                 }
                 .background(alignment: .top) {
                     // 整页的颜色：照片下面从照片的主色开始，往下慢慢沉到同色相的深色
+                    // 从照片底边接上（照片底边已经化成 palette.base），接缝处同一个颜色，不起一道线
                     VStack(spacing: 0) {
-                        Color.clear.frame(height: photoH * 0.6)
+                        Color.clear.frame(height: photoH)
                         LinearGradient(colors: [palette.base, palette.deep], startPoint: .top, endPoint: .bottom)
                             .frame(height: max(900, fullH * 1.6))
                     }
@@ -386,8 +387,12 @@ struct ActorBioSheet: View {
         let photo = ActorText.photo(member, info: info)
         NavigationStack {
             GeometryReader { geo in
-                let w = geo.size.width
-                let photoH = (w * 1.05).rounded()
+                let insets = geo.safeAreaInsets
+                // 照片铺满整张弹层宽（连同 Duo 侧边那一列），字留在安全区里
+                let w = geo.size.width + insets.leading + insets.trailing
+                let photoH = (min(w, 700) * 1.05).rounded()
+                let lead = insets.leading + 24
+                let trail = insets.trailing + 24
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         ZStack(alignment: .bottomLeading) {
@@ -411,18 +416,21 @@ struct ActorBioSheet: View {
                                 .foregroundStyle(.white)
                                 .lineLimit(2)
                                 .minimumScaleFactor(0.7)
-                                .padding(.horizontal, 24)
+                                .padding(.leading, lead)
+                                .padding(.trailing, trail)
                                 .padding(.bottom, 18)
                                 .accessibilityAddTraits(.isHeader)
                         }
                         facts
-                            .padding(.horizontal, 24)
+                            .padding(.leading, lead)
+                            .padding(.trailing, trail)
                             .padding(.top, 6)
                         if let bio = info?.biography, !bio.isEmpty {
                             Text("关于")
                                 .font(.title2.bold())
                                 .foregroundStyle(.white)
-                                .padding(.horizontal, 24)
+                                .padding(.leading, lead)
+                                .padding(.trailing, trail)
                                 .padding(.top, 34)
                                 .accessibilityAddTraits(.isHeader)
                             Text(bio)
@@ -430,15 +438,25 @@ struct ActorBioSheet: View {
                                 .foregroundStyle(.white.opacity(0.9))
                                 .lineSpacing(5)
                                 .fixedSize(horizontal: false, vertical: true)
-                                .padding(.horizontal, 24)
+                                .padding(.leading, lead)
+                                .padding(.trailing, trail)
                                 .padding(.top, 12)
                         }
                     }
+                    .frame(width: w, alignment: .leading)
                     .padding(.bottom, 44)
+                    // 照片下面从 palette.base 接上，往下沉到深色：接缝处同一个颜色
+                    .background(alignment: .top) {
+                        VStack(spacing: 0) {
+                            palette.base.frame(height: photoH)
+                            LinearGradient(colors: [palette.base, palette.deep], startPoint: .top, endPoint: .bottom)
+                                .frame(height: max(700, geo.size.height))
+                        }
+                    }
                 }
                 .scrollIndicators(.hidden)
-                .background(LinearGradient(colors: [palette.base, palette.deep], startPoint: .top, endPoint: .bottom))
-                .ignoresSafeArea(edges: .top)
+                .background(palette.deep)
+                .ignoresSafeArea(edges: [.top, .horizontal])
             }
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {

@@ -374,7 +374,8 @@ struct HomeFinale: View {
         let tileW: CGFloat = metrics.wide ? 118 : 92
         let gap: CGFloat = metrics.wide ? 16 : 12
         let half = (posters.count + 1) / 2
-        let running = onScreen && !reduceMotion
+        // 演示数据只给 UI 测试用：海报墙不走（持续的动画会让 XCUITest 一直等不到 App 空闲）
+        let running = onScreen && !reduceMotion && !DemoData.enabled
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: gap) {
                 PosterMarquee(posters: Array(posters.prefix(half)), tileW: tileW, gap: gap, rightward: false, running: running)
@@ -408,7 +409,9 @@ struct HomeFinale: View {
     }
 }
 
-/// 一行海报，首尾相接地慢慢横着走（每秒约 16 点；一圈是这一行的长度，内容排三遍，接缝看不出来）
+/// 一行海报，首尾相接地慢慢横着走（每秒约 16 点；一圈是这一行的长度，内容排三遍，接缝看不出来）。
+/// 用 30 帧的 TimelineView 推（不是一直跑满屏幕刷新率的无限动画），海报那一排单独成一块、内容不变就不重算；
+/// 不在屏上、「减弱动态效果」、演示数据（UI 测试）时停
 struct PosterMarquee: View {
     let posters: [URL]
     let tileW: CGFloat
@@ -416,11 +419,27 @@ struct PosterMarquee: View {
     /// true 往右走，false 往左
     let rightward: Bool
     let running: Bool
-    @State private var phase = false
+    @State private var since = Date()
 
     var body: some View {
         let unit = (tileW + gap) * CGFloat(posters.count)
-        let seconds = max(8, Double(unit) / 16)
+        let row = PosterRow(posters: posters, tileW: tileW, gap: gap).equatable()
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !running || posters.count < 2)) { ctx in
+            let t = max(0, ctx.date.timeIntervalSince(since))
+            let travel = unit > 0 ? CGFloat((t * 16).truncatingRemainder(dividingBy: Double(unit))) : 0
+            row.offset(x: rightward ? travel - unit : -travel)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// 海报墙的一排（排三遍）：内容不变时 SwiftUI 不再重算它（Equatable），横移只是挪这一块
+struct PosterRow: View, Equatable {
+    let posters: [URL]
+    let tileW: CGFloat
+    let gap: CGFloat
+
+    var body: some View {
         let radius = (tileW * 0.16).rounded()
         HStack(spacing: gap) {
             ForEach(0..<(posters.count * 3), id: \.self) { i in
@@ -428,18 +447,6 @@ struct PosterMarquee: View {
                     .frame(width: tileW, height: (tileW * 1.5).rounded())
                     .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
-            }
-        }
-        .offset(x: rightward ? (phase ? 0 : -unit) : (phase ? -unit : 0))
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .onChange(of: running, initial: true) { _, on in
-            guard posters.count > 1 else { return }
-            if on {
-                withAnimation(.linear(duration: seconds).repeatForever(autoreverses: false)) { phase = true }
-            } else {
-                var t = Transaction()
-                t.disablesAnimations = true
-                withTransaction(t) { phase = false }
             }
         }
     }
