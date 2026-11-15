@@ -91,6 +91,10 @@ struct PrivacyGateView: View {
             let w = geo.size.width + geo.safeAreaInsets.leading + geo.safeAreaInsets.trailing
             let wide = w >= 520
             let sheetH = wide ? min(h * 0.9, 780) : h * 0.92
+            // 弹层铺满整个窗口时（折起的 iPhone Duo：连同侧边那一列），字和钮留在安全区里，
+            // 不再从那一列的时间、信号底下穿过去（F7；设计轮 2（并行·library））。居中的窄弹层碰不到那一列，不用让
+            let sideL = wide ? 0 : geo.safeAreaInsets.leading
+            let sideR = wide ? 0 : geo.safeAreaInsets.trailing
             ZStack(alignment: .bottom) {
                 // 压暗 + 模糊的底：挡住后面的主页，点它什么也不发生（必须同意才放行）
                 Rectangle()
@@ -101,7 +105,7 @@ struct PrivacyGateView: View {
                     .onTapGesture {}
                     .accessibilityHidden(true)
 
-                sheet(height: sheetH, bottomInset: geo.safeAreaInsets.bottom)
+                sheet(height: sheetH, bottomInset: geo.safeAreaInsets.bottom, sideL: sideL, sideR: sideR)
                     .frame(maxWidth: 520)
                     .clipShape(UnevenRoundedRectangle(topLeadingRadius: 28, bottomLeadingRadius: wide ? 28 : 0,
                                                       bottomTrailingRadius: wide ? 28 : 0, topTrailingRadius: 28, style: .continuous))
@@ -127,7 +131,7 @@ struct PrivacyGateView: View {
 
     // MARK: 弹层
 
-    private func sheet(height: CGFloat, bottomInset: CGFloat) -> some View {
+    private func sheet(height: CGFloat, bottomInset: CGFloat, sideL: CGFloat, sideR: CGFloat) -> some View {
         VStack(spacing: 0) {
             // 不画把手：把手表示可以拖着改高度，这张弹层拖不动（C51）。原来把手占的 22 点并进标题上方的留白
             ScrollView {
@@ -138,12 +142,13 @@ struct PrivacyGateView: View {
                     choices
                     Color.clear.frame(height: 8)
                 }
-                .padding(.horizontal, 24)
+                .padding(.leading, 24 + sideL)
+                .padding(.trailing, 24 + sideR)
             }
             .scrollIndicators(.hidden)
             .scrollBounceBehavior(.basedOnSize)
 
-            footer(bottomInset: bottomInset)
+            footer(bottomInset: bottomInset, sideL: sideL, sideR: sideR)
         }
         .frame(height: height)
         .frame(maxWidth: .infinity)
@@ -420,7 +425,7 @@ struct PrivacyGateView: View {
 
     // MARK: 底部：提示一行 + 唯一一颗醒目的「同意并继续」（C35、C81）
 
-    private func footer(bottomInset: CGFloat) -> some View {
+    private func footer(bottomInset: CGFloat, sideL: CGFloat, sideR: CGFloat) -> some View {
         let ready = missing == 0
         let hint = agreed ? "欢迎使用 Cuven TV+" : (ready ? "已完成全部必选项" : "请完成剩余 \(missing) 项以继续")
         return VStack(spacing: 0) {
@@ -450,7 +455,8 @@ struct PrivacyGateView: View {
             .animation(.easeOut(duration: 0.2), value: ready)
             .accessibilityIdentifier("pg-agree")
         }
-        .padding(.horizontal, 24)
+        .padding(.leading, 24 + sideL)
+        .padding(.trailing, 24 + sideR)
         .padding(.top, 14)
         .padding(.bottom, 14 + bottomInset)
         .background(

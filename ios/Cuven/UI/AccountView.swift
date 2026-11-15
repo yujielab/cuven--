@@ -150,16 +150,18 @@ struct AccountView: View {
             NavigationLink {
                 AccountProfileView(tint: tint)
             } label: {
+                // 玻璃胶囊照参考图 34 高；点按区撑到 44（F74；设计轮 2（并行·library）：以前只有 34），上面的留白相应少 5，看上去不变
                 Text("个人档案")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 18)
                     .frame(minHeight: 34)
                     .glassEffect(.regular.interactive(), in: Capsule())
+                    .frame(minHeight: 44)
                     .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .padding(.top, 14)
+            .padding(.top, 9)
             .accessibilityIdentifier("account-profile")
         }
         .frame(maxWidth: .infinity)
@@ -453,10 +455,11 @@ struct AccountGroup<Rows: View>: View {
                 .accessibilityAddTraits(.isHeader)
             AccountCard(content: rows)
             if let footer {
+                // 卡下的说明和卡里那一列符号同一条左边线（离卡边 20；以前 8，和什么都对不上：F2），灰度用全 App 的第三级（50% → 55%）
                 Text(footer)
                     .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.5))
-                    .padding(.horizontal, 8)
+                    .foregroundStyle(DSInk.tertiary)
+                    .padding(.horizontal, AccountMetrics.inset)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -476,50 +479,68 @@ struct AccountCard<Content: View>: View {
     }
 }
 
-/// 卡里的一行：左边一枚灰色符号，标题 + 一行灰色说明，右边「›」、开关或数值
+/// 卡里一行的几个距离（设计轮 2（并行·library））：行的左右内边距、符号那一列的宽、符号到字的间距。
+/// 细线和卡下的说明都按它们对齐，不再各写各的数
+enum AccountMetrics {
+    /// 卡边到符号（也是卡下说明的左边线）
+    static let inset: CGFloat = 20
+    /// 符号那一列（默认字号时；跟着动态字体放大）
+    static let iconColumn: CGFloat = 40
+    /// 符号到字
+    static let gap: CGFloat = 16
+}
+
+/// 卡里的一行：左边一枚灰色符号，标题 + 一行灰色说明，右边「›」、开关或数值。
+/// 符号和它那一列跟着动态字体放大（@ScaledMetric：以前写死 24 点，字放大了符号还是那么小：F23、F71）；
+/// 标题放不下时折成两行，不截断（F24）
 struct AccountRow<Trailing: View>: View {
     let icon: String
     let title: String
     var subtitle: String? = nil
     var titleColor: Color = .white
     @ViewBuilder var trailing: () -> Trailing
+    @ScaledMetric(relativeTo: .title3) private var iconSize: CGFloat = 24
+    @ScaledMetric(relativeTo: .title3) private var iconColumn: CGFloat = AccountMetrics.iconColumn
 
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: AccountMetrics.gap) {
             Image(systemName: icon)
-                .font(.system(size: 24, weight: .regular))
+                .font(.system(size: iconSize, weight: .regular))
                 .foregroundStyle(.white.opacity(0.6))
-                .frame(width: 40)
+                .frame(width: iconColumn)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.title3.weight(.medium))
                     .foregroundStyle(titleColor)
-                    .lineLimit(1)
+                    .lineLimit(2)
                 if let subtitle {
                     Text(subtitle)
                         .font(.callout)
-                        .foregroundStyle(.white.opacity(0.55))
+                        .foregroundStyle(DSInk.tertiary)
                         .lineLimit(2)
                 }
             }
             Spacer(minLength: 12)
             trailing()
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, AccountMetrics.inset)
         .padding(.vertical, 12)
         .frame(minHeight: subtitle == nil ? 66 : 78)
         .contentShape(Rectangle())
     }
 }
 
-/// 两行之间的细线（从卡的左边往里一点，一直到右边）
+/// 两行之间的细线：从字的左边线起头、一直到卡的右边（设计轮 2（并行·library）：以前从卡边往里 16 点起头，
+/// 比符号还靠左 4 点；系统分组列表的分隔线都从字那一列开始：F2、C30）
 struct AccountDivider: View {
+    @ScaledMetric(relativeTo: .title3) private var iconColumn: CGFloat = AccountMetrics.iconColumn
+
     var body: some View {
         Rectangle()
             .fill(Color.white.opacity(0.1))
             .frame(height: 0.5)
-            .padding(.leading, 16)
+            .padding(.leading, AccountMetrics.inset + iconColumn + AccountMetrics.gap)
     }
 }
 
@@ -542,7 +563,7 @@ struct AccountValue: View {
             .font(.callout)
             // 缓存大小这种会变的数：等宽数字，清掉以后不跳宽窄
             .monospacedDigit()
-            .foregroundStyle(.white.opacity(0.55))
+            .foregroundStyle(DSInk.tertiary)
             .lineLimit(1)
             .minimumScaleFactor(0.8)
     }

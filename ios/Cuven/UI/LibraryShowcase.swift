@@ -196,8 +196,14 @@ struct ShowcaseChapter: View {
     @State private var atv: AtvLookup?
     /// 全量的 TMDB（导演、主演、剧照）
     @State private var full: Meta?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        // 「减弱动态效果」（设计轮 2（并行·library）：F59、F60）：画幅不跟着滚动缩放，一直铺满、钉住，介绍面板从下面盖上来；
+        // 中间那一行信息和字标只淡出、不缩不挪。visualEffect 的闭包里只能拿值，先取出来
+        let still = reduceMotion
+        // 右上那颗钮出现 / 消失时淡入淡出（以前预告片一拿到就「啪」地冒出来）
+        let controlOn = isActive && trailer.loaded && trailer.path == video.path
         // 几何（网页版 measure / paint）：画幅先是一块 16:9（高不超过 74% 屏），放大到铺满；
         // 钉住的行程 = 一屏 + 面板压上来的那段 + 停一会儿；面板的顶边落在 contentTop
         let boxH = min(vw * 9 / 16, vh * 0.74)
@@ -227,7 +233,7 @@ struct ShowcaseChapter: View {
                         let y = proxy.frame(in: .scrollView(axis: .vertical)).minY - T
                         let pin = min(max(-y, 0), pinMax)
                         let gap = contentTop - pin - T
-                        let k = min(max(gap / boxH, 1), cover)
+                        let k = still ? cover : min(max(gap / boxH, 1), cover)
                         return content
                             .scaleEffect(k, anchor: .top)
                             .offset(y: pin)
@@ -255,14 +261,14 @@ struct ShowcaseChapter: View {
                         let pin = min(max(-y, 0), pinMax)
                         let cp = min(max((-y - H * 0.16) / (H * 0.36), 0), 1)
                         return content
-                            .scaleEffect(1 - 0.025 * cp)
-                            .offset(y: pin - 26 * cp)
+                            .scaleEffect(still ? 1 : 1 - 0.025 * cp)
+                            .offset(y: pin - (still ? 0 : 26 * cp))
                             .opacity(1 - cp)
                     }
                     .allowsHitTesting(false)
 
                 // 右上角：预告片的播放 / 暂停 + 进度环（拿到预告片才出现：F77 自动播放的预览要有看得见的停止钮）
-                if isActive && trailer.loaded && trailer.path == video.path {
+                if controlOn {
                     ShowcaseControl(trailer: trailer)
                         .padding(.top, top + 12)
                         .padding(.trailing, max(8, margin - 5) + trail)
@@ -277,6 +283,7 @@ struct ShowcaseChapter: View {
                 }
             }
             .frame(width: vw, height: portalH, alignment: .top)
+            .animation(DSMotion.fade, value: controlOn)
         }
         .clipped()
         .task(id: video.path) { atv = await model.atv(for: video) }
@@ -295,13 +302,16 @@ struct ShowcaseChapter: View {
     @ViewBuilder private func copy(_ m: Meta?) -> some View {
         let safeW = vw - lead - trail
         let w = min(safeW * 0.84, 460)
+        let line = eyebrow(m)
         VStack(spacing: 14) {
-            let line = eyebrow(m)
             if !line.isEmpty {
                 Text(line)
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.white.opacity(0.85))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    // 小字压在预告片上：再垫一层贴身的暗影，亮的画面上也读得清（F34、F72；设计轮 2（并行·library））
+                    .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
             }
             if let logo = atv?.logo ?? model.logoArtString(video), !logo.isEmpty {
                 LogoImage(url: TMDBImage.url(logo, "w500"), height: safeW >= 600 ? 120 : 96, fallback: model.title(video), maxWidth: w * 0.8)
@@ -316,6 +326,10 @@ struct ShowcaseChapter: View {
             }
         }
         .frame(width: w)
+        // 旁白：一章一个标题（片名 + 一行信息），转子里按「标题」一章一章跳（字标是图，以前念不出片名：F76）
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel([model.title(video), line].filter { !$0.isEmpty }.joined(separator: "，"))
+        .accessibilityAddTraits(.isHeader)
         .shadow(color: .black.opacity(0.3), radius: 10, y: 2)
         // 居中在安全区的正中（不是整个窗口的正中：不压到侧边那一列）
         .position(x: lead + safeW / 2, y: vh * 0.5)
@@ -477,6 +491,8 @@ struct ShowcaseIntro: View {
                         .font(.dsSectionTitle)
                         .foregroundStyle(.white)
                         .padding(.leading, metrics.margin + lead).padding(.trailing, metrics.margin + trail)
+                        // 剧照本身不念（只是画面、点不开）：标题告诉旁白有几张，不再念一个后面什么都没有的「剧照」（F76）
+                        .accessibilityLabel("剧照，\(stills.count) 张")
                         .accessibilityAddTraits(.isHeader)
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: metrics.gutter) {
@@ -496,6 +512,8 @@ struct ShowcaseIntro: View {
                     .contentMargins(.trailing, metrics.margin + trail, for: .scrollContent)
                     .scrollTargetBehavior(.viewAligned)
                 }
+                // 「剧照」是新的一组：钮到标题 20 → 28（标题到剧照 12），和「播放」那一行分得开（F3、F12）
+                .padding(.top, 8)
             }
 
             // 章与章之间：一道两头渐隐的细线（网页版 sc-rule）
