@@ -7,7 +7,7 @@ import AVFoundation
 // · 底下是这一部的预告片（静音、从第 10 秒起、放完回到第 10 秒；和资料库同一个 ShowcaseTrailer），起来之前
 //   （或者没有预告片）是 Apple TV 的竖版主视觉（横着的屏用横版背景），预告片出画面时模糊淡入；
 // · 左上一行大号粗体「编辑推荐」；右上一颗播放 / 暂停 + 进度环（有预告片才出现：F77）；
-// · 底部一张从画面取色的圆角面板：小海报 + 字标（没有字标写片名）、「科幻 · 2024」、简介的第一句、「查看影片 ›」；
+// · 底部一张从画面取色的圆角面板（用户要求矮 35%）：小海报 + 字标（没有字标写片名）、「科幻 · 2024」、简介的第一句（一行），右边「查看」胶囊；
 // · 整块点进详情（从这一块上放大出来）。只在屏上、这一页在前台时放；同一时刻全 App 只放一段（TrailerFocus）。
 // 每天换一部（AppModel.editorsPick：评分高、有字标和竖版画面、不和头图撞车，查到有预告片的优先）。
 
@@ -119,42 +119,43 @@ struct EditorsPick: View {
         let year: String? = model.year(video).map { String($0) }
         let kicker = DetailText.line([meta?.genres?.first, year])
         let line = CollectionText.tagline(meta?.overview)
-        return HStack(alignment: .center, spacing: 16) {
-            RemoteImage(url: model.thumbArt(video), maxPixel: 300)
-                .frame(width: 66, height: 99)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.white.opacity(0.16), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.3), radius: 6, y: 3)
-            VStack(alignment: .leading, spacing: 6) {
+        // 用户要求：这块面板矮 35%（折起约 163 → 105 点）：小海报、字标小一号，简介只留一行，
+        // 「查看影片 ›」那一行收进右边一颗「查看」胶囊（和年份卡、精选卡同一个样子），上下边距 12
+        let posterW: CGFloat = metrics.wide ? 60 : 52
+        return HStack(alignment: .center, spacing: 12) {
+            RemoteImage(url: model.thumbArt(video), maxPixel: 270)
+                .frame(width: posterW, height: (posterW * 1.5).rounded())
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.16), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.3), radius: 5, y: 2)
+            VStack(alignment: .leading, spacing: 3) {
                 if !kicker.isEmpty {
                     Text(kicker)
-                        .font(.subheadline.weight(.medium))
+                        .font(.footnote.weight(.medium))
                         .foregroundStyle(.white.opacity(0.78))
                         .lineLimit(1)
                 }
-                LogoImage(url: model.wideLockupArt(video).logo, height: metrics.wide ? 46 : 38, alignment: .leading,
-                          fallback: model.title(video), maxWidth: 220)
+                LogoImage(url: model.wideLockupArt(video).logo, height: metrics.wide ? 34 : 28, alignment: .leading,
+                          fallback: model.title(video), maxWidth: metrics.wide ? 260 : 180)
                 if let line {
                     Text(line)
-                        .font(.callout)
+                        .font(.subheadline)
                         .foregroundStyle(.white.opacity(0.86))
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(1)
                 }
-                HStack(spacing: 4) {
-                    Text("查看影片")
-                    Image(systemName: "chevron.forward")
-                        .font(.subheadline.weight(.bold))
-                }
-                .font(.headline)
-                .foregroundStyle(.white)
-                .padding(.top, 2)
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: 8)
+            Text("查看")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .frame(minHeight: 30)
+                .background(Capsule().fill(Color.white.opacity(0.18)))
         }
-        .padding(18)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: 560, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 30, style: .continuous)
+        .background(RoundedRectangle(cornerRadius: 24, style: .continuous)
             .fill((tone ?? Color(white: 0.16)).opacity(0.94)))
         .accessibilityElement(children: .combine)
     }
