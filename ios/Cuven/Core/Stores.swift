@@ -984,6 +984,14 @@ final class AppModel {
         return out
     }
 
+    /// 这一项有没有字标（Apple TV 的或 TMDB 的）：主页年份那两排只放有字标的（用户要求）
+    func hasLogo(_ e: HomeEntry) -> Bool {
+        switch e {
+        case .movie(let v): return wideLockupArt(v).logo != nil
+        case .series(let s): return seriesWideArt(s).logo != nil
+        }
+    }
+
     // MARK: 主页「编辑推荐」与结尾的海报墙
 
     @ObservationIgnored private var editorsPickCache: (day: Int, path: String)?
