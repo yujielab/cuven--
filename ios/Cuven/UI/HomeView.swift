@@ -236,28 +236,29 @@ struct HomeView: View {
         }
     }
 
-    /// 精选电影：评分高的在前；照用户给的参考图（游戏 App 的合集页）做成一整块：立体海报封面 + 大标题 + 说明 + 一排带底栏的大卡；
-    /// 那排的标题点进合集页（同样的立体海报和大标题，下面一列大卡）
+    /// 精选电影：评分高的在前。用户要求「整个精选电影区使用大卡片设计」（参考图：Apple TV「What We're Watching」）：
+    /// 不再是立体海报封面 + 大标题 + 说明 + 一排带底栏的卡，整个区就是分区标题「精选电影 ›」（点进合集页）+ 一排 3 : 4 的大竖卡
     @ViewBuilder
     private func featuredShelf(_ m: DSMetrics) -> some View {
         let items = model.featuredMovies(limit: 10)
         if !items.isEmpty {
-            // 照参考图（游戏 App 的合集页）：立体海报封面 + 大标题 + 一段说明，下面一排带底栏的大卡
-            FeaturedCollection(title: Shelf.featured.title, blurb: Shelf.featured.blurb ?? "",
-                               rowTitle: "为您的口味量身定制的内容", rowRoute: .shelf(.featured),
-                               covers: items.prefix(3).map { model.coverArt($0) }, metrics: m) {
-                ForEach(items, id: \.path) { v in featuredCard(v, m) }
+            DSSection(title: Shelf.featured.title, metrics: m, route: .shelf(.featured)) {
+                DSShelf(metrics: m) {
+                    ForEach(items, id: \.path) { v in featuredCard(v, m) }
+                }
             }
         }
     }
 
-    /// 一张精选卡：整幅画面 + 底下的磨砂条（小海报、片名、「Cuven 独占 · 类型」、「查看」）；
+    /// 一张大竖卡：无字的竖版画面 + 字标 + 「电影 · 年份 · 类型」（不放简介：简介只在详情页）；
     /// 点开是详情（从这张卡上放大出来），长按是播放 / 想看（C21）
     private func featuredCard(_ v: Video, _ m: DSMetrics) -> some View {
-        let w = m.featureCardWidth
+        let w = m.bigCardWidth
+        let art = model.featuredArt(v, width: w)
+        let genres = model.meta(v)?.genres ?? []
+        let line = DetailText.line(["电影", model.year(v).map { String($0) }, genres.first, genres.dropFirst().first])
         return ZoomLink(route: .movie(v), slot: "featured") {
-            FeaturedCollectionCard(art: model.wideLockupArt(v).url, cover: model.coverArt(v), title: model.title(v),
-                                   subtitle: DetailText.line(["Cuven 独占", model.meta(v)?.genres?.first]), width: w)
+            FeaturedBigCard(art: art?.url, logo: art?.logo, title: model.title(v), line: line, width: w)
         }
         .accessibilityIdentifier("featured-card")
         .movieMenu(v)
