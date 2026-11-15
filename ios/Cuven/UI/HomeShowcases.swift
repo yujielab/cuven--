@@ -166,8 +166,8 @@ struct EditorsPick: View {
 
 // MARK: - 主页「2026 ›」「2025 ›」（照用户给的参考图：游戏 App「Arcade 名人堂」那一排）
 //
-// 标题一行大号粗体 +「›」（点进年份页），下面一行灰字；一排卡：上面一行标语（简介的第一句），中间 16:9 的预告片，
-// 下面小海报、字标、片名、一行灰字，右边「查看」。同一排同一时刻只放一段：最靠左、整张露出来的那一张
+// 标题一行大号粗体 +「›」（点进年份页），下面一行灰字；一排卡：16:9 的预告片，
+// 下面小海报、字标、片名、一行灰字，右边「查看」（用户要求：卡上面不放简介；没有字标的不进这两排）。同一排同一时刻只放一段：最靠左、整张露出来的那一张
 // （静音、从第 10 秒起；这一排滑出屏幕、换页、正片盖上来就停；全 App 同一时刻只放一段：TrailerFocus）。
 // 没有预告片的那张停在横版背景上。
 
@@ -267,8 +267,7 @@ struct YearTrailerRow: View {
             let y: String? = model.year(v).map { String($0) }
             let sub = DetailText.line([y, meta?.genres?.first])
             ZoomLink(route: .movie(v), slot: "year-\(year)") {
-                YearTrailerCard(line: CollectionText.tagline(meta?.overview) ?? sub,
-                                still: TMDBImage.url(model.backgroundArtString(v), "w1280"),
+                YearTrailerCard(still: TMDBImage.url(model.backgroundArtString(v), "w1280"),
                                 cover: model.thumbArt(v), logo: model.wideLockupArt(v).logo,
                                 title: model.title(v), subtitle: sub, width: w, trailer: playing)
             }
@@ -279,8 +278,7 @@ struct YearTrailerRow: View {
             let art = model.seriesWideArt(s)
             let sub = DetailText.line([s.seasonLabel, sm?.genres?.first])
             ZoomLink(route: .series(s), slot: "year-\(year)") {
-                YearTrailerCard(line: CollectionText.tagline(sm?.overview) ?? sub,
-                                still: art.url, cover: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w185"), logo: art.logo,
+                YearTrailerCard(still: art.url, cover: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w185"), logo: art.logo,
                                 title: sm?.title ?? s.name, subtitle: sub, width: w, trailer: playing)
             }
             .accessibilityIdentifier("series-card")
@@ -290,10 +288,9 @@ struct YearTrailerRow: View {
     }
 }
 
-/// 年份那两排的一张卡：上面一行标语；中间 16:9 的画面（正在放的那一张，预告片出画面时从模糊里淡入）；
-/// 下面一行：小海报、字标、片名、一行灰字，右边蓝字「查看」（参考图卡底那一行）
+/// 年份那两排的一张卡：16:9 的画面（正在放的那一张，预告片出画面时从模糊里淡入）；
+/// 下面一行：小海报、字标、片名、一行灰字，右边蓝字「查看」（参考图卡底那一行）。上面不放简介（用户要求）
 struct YearTrailerCard: View {
-    let line: String
     let still: URL?
     let cover: URL?
     let logo: URL?
@@ -308,10 +305,6 @@ struct YearTrailerCard: View {
         let radius: CGFloat = max(16, min(24, (width * 0.06).rounded()))
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         VStack(alignment: .leading, spacing: 10) {
-            Text(line)
-                .font(.body.weight(.medium))
-                .foregroundStyle(.white.opacity(0.92))
-                .lineLimit(1)
             ZStack {
                 Color(white: 0.1)
                 RemoteImage(url: still, maxPixel: width * 3, placeholder: .clear)
@@ -357,7 +350,7 @@ struct YearTrailerCard: View {
         .frame(width: width, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([title, subtitle, line].filter { !$0.isEmpty }.joined(separator: "，"))
+        .accessibilityLabel([title, subtitle].filter { !$0.isEmpty }.joined(separator: "，"))
     }
 }
 

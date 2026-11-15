@@ -207,7 +207,8 @@ struct HomeView: View {
     /// 某一年（今年 / 去年）：电影和剧集一起，最新入库的在前；标题「2026 ›」进年份页（F86、T25）
     @ViewBuilder
     private func yearShelf(_ y: Int, _ m: DSMetrics) -> some View {
-        let items = model.homeYear(y, limit: 24)
+        // 用户要求：没有字标的不在这两排出现（年份页「2026 ›」里照样有）
+        let items = Array(model.homeYear(y).filter { model.hasLogo($0) }.prefix(24))
         if !items.isEmpty {
             // 用户要求（只改年份这两排），照游戏 App「Arcade 名人堂」：上面预告片，下面小海报 + 字标 + 片名
             YearTrailerRow(year: y, items: items, metrics: m)
