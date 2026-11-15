@@ -517,7 +517,7 @@ enum ActorText {
     }
 
     /// 一部作品在卡上要的东西：去哪、海报、片名、一行字、想看用的键和类型
-    static func item(_ w: ActorWork, model: AppModel)
+    @MainActor static func item(_ w: ActorWork, model: AppModel)
         -> (route: Route, poster: URL?, title: String, line: String, key: String, kind: WatchItem.Kind) {
         switch w.entry {
         case .movie(let v):
