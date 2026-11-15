@@ -29,11 +29,12 @@ struct DSMetrics {
     /// 卡与卡的间距：折起至少 18、展开至少 24（留白分组：F3、F12）
     var gutter: CGFloat { max(wide ? 24 : 18, (width * 48 / 1920).rounded()) }
     /// 排与排之间（T24「行距至少 100」按比例缩，再给标题留位：F12）；
-    /// 展开时再按高收一收（约屏高的 8.5%，至少 52）：展开横拿只有六百多点高，一屏要看得到不止一排
+    /// 展开时按屏高定（约屏高的 8.5%，52–58）：展开横拿只有六百多点高，一屏要看得到不止一排；
+    /// 展开竖拿也不比横拿松太多（以前按宽算是 66，比横拿的 55 还大：用户要求展开竖拿的间距也要合适）
     var shelfGap: CGFloat {
         let byWidth = max(wide ? 56 : 44, (width * 120 / 1920).rounded() + 24)
         guard wide, height > 0 else { return byWidth }
-        return min(byWidth, max(52, (height * 0.085).rounded()))
+        return min(byWidth, clamp((height * 0.085).rounded(), 52, 58))
     }
     /// 分区标题到那一排卡
     var titleGap: CGFloat { wide ? 16 : 12 }
@@ -78,8 +79,10 @@ struct DSMetrics {
         return ((width - margin - full * gutter) / max(1, v)).rounded(.down)
     }
 
-    /// 展开时一排卡多宽（D2、S6、S8）：一屏放 n 张整的、再露出下一张的 1/4 到 3/4，
+    /// 展开时一排卡多宽（D2、S6、S8）：一屏放 n 张整的、再露出下一张的一截，
     /// 在所有放法里挑卡宽最接近 target、又不小于 min 的那种。
+    /// 露出的那一截先只在 1/3 到 1/2 张里挑：每排右边露得一样多，看得出是「还能往右滑」，
+    /// 不会露出四分之三张、像被截断了（用户要求：展开竖拿时卡片要合适）；这样排不下才放宽到 0.15–0.85 张。
     /// aspect（卡高 ÷ 卡宽）和 extra（画面下面的字那一截）给了的话：矮的屏上一张卡连字不超过屏高的 60%
     func fit(target: CGFloat, min floor: CGFloat, aspect: CGFloat = 0, extra: CGFloat = 0) -> CGFloat {
         var target = target, floor = floor
@@ -89,16 +92,20 @@ struct DSMetrics {
             floor = min(floor, cap)
         }
         let avail = width - margin
-        var best: CGFloat = 0, bestErr = CGFloat.infinity, widest: CGFloat = 0
-        for n in 1...12 {
-            let room = avail - CGFloat(n) * gutter
-            guard room > 0 else { break }
-            let w = min(room / (CGFloat(n) + 0.25), max(room / (CGFloat(n) + 0.75), target))
-            widest = max(widest, w)
-            guard w >= floor else { continue }
-            if abs(w - target) < bestErr { bestErr = abs(w - target); best = w }
+        var widest: CGFloat = 0
+        for (lo, hi) in [(CGFloat(0.3), CGFloat(0.5)), (0.15, 0.85)] {
+            var best: CGFloat = 0, bestErr = CGFloat.infinity
+            for n in 1...12 {
+                let room = avail - CGFloat(n) * gutter
+                guard room > 0 else { break }
+                let w = min(room / (CGFloat(n) + lo), max(room / (CGFloat(n) + hi), target))
+                widest = max(widest, w)
+                guard w >= floor else { continue }
+                if abs(w - target) < bestErr { bestErr = abs(w - target); best = w }
+            }
+            if best > 0 { return best.rounded(.down) }
         }
-        return (best > 0 ? best : widest).rounded(.down)
+        return widest.rounded(.down)
     }
 
     private func clamp(_ v: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat { min(hi, max(lo, v)) }

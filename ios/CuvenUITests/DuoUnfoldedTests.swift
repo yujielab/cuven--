@@ -1,8 +1,11 @@
 import XCTest
+import UIKit
 
 /// 「iPhone Duo」展开：预览工作流先用 simctl 关掉外屏、打开内屏，再单独跑这一个类（别的时候不跑）。
 /// 看系统在内屏上把栏放在哪、内容怎么排。演示数据（-CuvenDemo YES），截图以 duo-3 开头，公开到 refs/ci/ios-preview-demo。
 /// 窗口还是外屏那么大（没切过去）就不截图，免得和折起的截图混在一起。
+/// 模拟器的 Duo 切不到内屏，所以工作流还在 iPad mini 上跑同一个类（竖拿 744 点宽，和展开竖拿的 669 点同一套「展开」版面）：
+/// 那几张以 duo-4 开头，用来核对展开时的卡片大小和间距
 final class DuoUnfoldedTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = true
@@ -22,8 +25,12 @@ final class DuoUnfoldedTests: XCTestCase {
             return
         }
         snap("duo-31-unfolded-home")
-        app.swipeUp(); sleep(2); snap("duo-32-unfolded-rows")
-        app.swipeDown(); app.swipeDown(); sleep(1)
+        // 主页一路往下：年份两排、精选电影、编辑推荐、精选剧集、五个大类、结尾（每一屏都看卡片大小和排距）
+        for i in 0..<9 {
+            app.swipeUp(); sleep(2)
+            snap("duo-32\(Array("abcdefghi")[i])-unfolded-rows")
+        }
+        toTop(app)
 
         // 详情（头图的「详情」，没有就点主页上的一张电影海报）
         if let open = firstHittable(app, ["hero-detail", "movie-card"]) {
@@ -47,6 +54,11 @@ final class DuoUnfoldedTests: XCTestCase {
             snap("duo-35-unfolded-landscape-library")
             tab(app, "主页"); sleep(3)
             snap("duo-36-unfolded-landscape-home")
+            for i in 0..<6 {
+                app.swipeUp(); sleep(2)
+                snap("duo-37\(Array("abcdef")[i])-unfolded-landscape-rows")
+            }
+            toTop(app)
         } else {
             print("DUO unfolded landscape: did not rotate")
         }
@@ -94,9 +106,16 @@ final class DuoUnfoldedTests: XCTestCase {
         sleep(2)
     }
 
+    /// 回到主页最上面：看到「Home」那一行的头像就停（多拉一下会触发下拉刷新）
+    private func toTop(_ app: XCUIApplication) {
+        for _ in 0..<16 where !app.buttons["home-account"].firstMatch.isOnScreen(in: app) { app.swipeDown() }
+        sleep(1)
+    }
+
+    /// iPad 上跑的那一遍：截图改成 duo-4 开头，和 Duo 自己的 duo-3 分开
     private func snap(_ name: String) {
         let a = XCTAttachment(screenshot: inner.screenshot())
-        a.name = name
+        a.name = UIDevice.current.userInterfaceIdiom == .pad ? name.replacingOccurrences(of: "duo-3", with: "duo-4") : name
         a.lifetime = .keepAlways
         add(a)
     }

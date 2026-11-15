@@ -15,7 +15,7 @@ struct EditorsPick: View {
     @Environment(AppModel.self) private var model
     let video: Video
     let metrics: DSMetrics
-    /// 窗口的高：竖着的屏这一块约是宽的 1.3 倍高，横着的屏 0.56 倍，最多窗口高的 82%
+    /// 窗口的高：折起的屏这一块约是宽的 1.3 倍高，展开竖拿 0.9 倍，横着的屏 0.56 倍，最多窗口高的 82%
     let fullHeight: CGFloat
     /// 竖着的这一块按高铺满、横向裁掉两边：画面被放大，要 1080 的码流才露出来（低码率的开头先停在海报画面上）
     @State private var trailer = ShowcaseTrailer(revealHeight: 1080)
@@ -23,13 +23,16 @@ struct EditorsPick: View {
     @State private var onScreen = false
 
     static func height(fullWidth w: CGFloat, fullHeight: CGFloat) -> CGFloat {
-        min(w < 600 ? w * 1.3 : w * 0.56, fullHeight * 0.82).rounded()
+        // 展开竖拿（宽过 600、又比宽高）：以前按横屏的 0.56 算，只有三百多点高，字和面板把画面盖满了
+        let ratio: CGFloat = w < 600 ? 1.3 : (fullHeight > w ? 0.9 : 0.56)
+        return min(w * ratio, fullHeight * 0.82).rounded()
     }
 
     var body: some View {
         let fullW = metrics.width + metrics.leadingInset + metrics.trailingInset
         let h = Self.height(fullWidth: fullW, fullHeight: fullHeight)
-        let still = stillArt(portrait: h > fullW * 0.9, fullWidth: fullW)
+        // 这一块接近方的或竖的（折起、展开竖拿）用竖版主视觉，扁的用横版背景
+        let still = stillArt(portrait: h >= fullW * 0.85, fullWidth: fullW)
         ZStack(alignment: .topTrailing) {
             ZoomLink(route: .movie(video), slot: "editors-pick", press: false) {
                 VStack(alignment: .leading, spacing: 0) {
