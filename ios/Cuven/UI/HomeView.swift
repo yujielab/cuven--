@@ -27,7 +27,7 @@ struct HomeView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         hero(m, fullWidth: fullWidth, fullHeight: fullHeight, insets: insets)
-                        shelves(m)
+                        shelves(m, fullHeight: fullHeight)
                             .padding(.top, m.wide ? 36 : 28)
                             // 货架留在安全区里（卡往右滑出去时从侧边那一列底下过去）
                             .padding(.leading, insets.leading)
@@ -146,9 +146,10 @@ struct HomeView: View {
         return [y, y - 1]
     }
 
-    /// 顺序：继续观看 → 今年 → 去年 → 精选电影 → 五个大类（docs/ios-design.md「主页」；F1：最要紧的在上）
+    /// 顺序：继续观看 → 今年 → 去年（预告片卡）→ 精选电影 → 编辑推荐 → 精选剧集 → 五个大类 → 结尾的海报墙
+    /// （docs/ios-design.md「主页」；F1：最要紧的在上）
     @ViewBuilder
-    private func shelves(_ m: DSMetrics) -> some View {
+    private func shelves(_ m: DSMetrics, fullHeight: CGFloat) -> some View {
         if model.movies.isEmpty {
             switch model.phase {
             case .failed(let msg):
@@ -174,8 +175,10 @@ struct HomeView: View {
                 continueWatching(m)
                 ForEach(homeYears, id: \.self) { y in yearShelf(y, m) }
                 featuredShelf(m)
+                editorsPickBlock(m, fullHeight: fullHeight)
                 featuredSeriesShelf(m)
                 ForEach(HomeCategory.allCases) { c in categoryShelf(c, m) }
+                finale(m)
             }
         }
     }
@@ -206,11 +209,26 @@ struct HomeView: View {
     private func yearShelf(_ y: Int, _ m: DSMetrics) -> some View {
         let items = model.homeYear(y, limit: 24)
         if !items.isEmpty {
-            DSSection(title: String(y), metrics: m, route: .year(y)) {
-                DSShelf(metrics: m) {
-                    ForEach(items) { e in posterCard(e, m, slot: "year-\(y)") }
-                }
-            }
+            // 用户要求（只改年份这两排），照游戏 App「Arcade 名人堂」：上面预告片，下面小海报 + 字标 + 片名
+            YearTrailerRow(year: y, items: items, metrics: m)
+        }
+    }
+
+    /// 编辑推荐（用户要求，照游戏 App「重磅更新」）：预告片铺满做底 + 「编辑推荐」+ 底部取色面板（海报、字标、简介）
+    @ViewBuilder
+    private func editorsPickBlock(_ m: DSMetrics, fullHeight: CGFloat) -> some View {
+        if let v = model.editorsPick() {
+            EditorsPick(video: v, metrics: m, fullHeight: fullHeight)
+        }
+    }
+
+    /// 主页结尾（用户要求，照游戏 App「Arcade」页的结尾）：两行慢慢走的海报墙、Cuven 字标、「显示所有影片」
+    @ViewBuilder
+    private func finale(_ m: DSMetrics) -> some View {
+        let posters = model.wallPosters(limit: 20)
+        if posters.count >= 8 {
+            HomeFinale(posters: posters, metrics: m)
+                .padding(.top, 8)
         }
     }
 

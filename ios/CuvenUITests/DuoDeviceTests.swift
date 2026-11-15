@@ -79,6 +79,13 @@ final class DuoDeviceTests: XCTestCase {
         } else {
             print("DUO featured card: none")
         }
+        // 编辑推荐（照游戏 App「重磅更新」）：预告片铺满做底、「编辑推荐」、底部取色面板（海报、字标、简介、查看影片 ›）
+        if reveal(app, app.buttons.matching(identifier: "editors-pick"), swipes: 4) != nil {
+            sleep(2)
+            snap("duo-02h-editors-pick")
+        } else {
+            print("DUO editors pick: none")
+        }
         if reveal(app, app.buttons.matching(identifier: "featured-series-card"), swipes: 4) != nil {
             sleep(2)
             snap("duo-02e-home-featured-tv")
@@ -175,7 +182,18 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-08d-home-year-2")
         // 五个大类（引人入胜的剧情……刺激犯罪与偷窃）在今年、去年两排下面
         app.swipeUp(); sleep(2); snap("duo-08e-home-categories")
-        for _ in 0..<14 { app.swipeDown() }
+        // 主页结尾（照游戏 App「Arcade」页的结尾）：两行慢慢走的海报墙、Cuven 字标、「显示所有影片」→ 全部影片
+        if let all = reveal(app, app.buttons.matching(identifier: "home-show-all"), swipes: 12) {
+            sleep(2)
+            snap("duo-08h-home-finale")
+            all.tap(); sleep(2)
+            snap("duo-08i-all")
+            back(app)
+        } else {
+            print("DUO home finale: none")
+        }
+        // 回到顶上：看到「Home」那一行的头像就停（多拉一下会触发下拉刷新）
+        for _ in 0..<30 where !app.buttons["home-account"].firstMatch.isOnScreen(in: app) { app.swipeDown() }
         sleep(1)
 
         // 「文件夹」一排在搜索页（没输入时）：点进文件夹页（大标题、子文件夹一排、海报网格）
