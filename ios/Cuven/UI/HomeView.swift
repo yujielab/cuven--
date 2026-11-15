@@ -28,6 +28,9 @@ struct HomeView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         hero(m, fullWidth: fullWidth, fullHeight: fullHeight, insets: insets)
                         shelves(m, fullHeight: fullHeight)
+                            // 宽度写死成内容区的宽：哪个孩子再宽（海报墙一排三千多点）也撑不开这一列，
+                            // 居中的东西（字标、按钮、精选区的立体海报）不会跑到屏幕外面去
+                            .frame(width: m.width, alignment: .leading)
                             .padding(.top, m.wide ? 36 : 28)
                             // 货架留在安全区里（卡往右滑出去时从侧边那一列底下过去）
                             .padding(.leading, insets.leading)
@@ -223,7 +226,7 @@ struct HomeView: View {
         }
     }
 
-    /// 主页结尾（用户要求，照游戏 App「Arcade」页的结尾）：两行慢慢走的海报墙、Cuven 字标、「显示所有影片」
+    /// 主页结尾（用户要求，照游戏 App「Arcade」页的结尾）：两行慢慢走的海报墙、Cuven 字标、「查看所有影片」
     @ViewBuilder
     private func finale(_ m: DSMetrics) -> some View {
         let posters = model.wallPosters(limit: 20)

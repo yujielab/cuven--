@@ -357,7 +357,7 @@ struct YearTrailerCard: View {
 // MARK: - 主页结尾（照用户给的参考图：游戏 App「Arcade」页的结尾）
 //
 // 两行圆角海报错开排着、慢慢横着走（上一行往左、下一行往右；不在屏上、「减弱动态效果」时停：F59），
-// 下面「Cuven max」字标，一颗胶囊「显示所有影片」进全部影片（电影和剧集一起的海报网格）
+// 下面「Cuven max」字标，一颗胶囊「查看所有影片」进全部影片（电影和剧集一起的海报网格）
 
 struct HomeFinale: View {
     let posters: [URL]
@@ -369,31 +369,33 @@ struct HomeFinale: View {
         let tileW: CGFloat = metrics.wide ? 118 : 92
         let gap: CGFloat = metrics.wide ? 16 : 12
         let half = (posters.count + 1) / 2
+        // 整个窗口宽（连同侧边那一列）：海报墙铺满它；字标和按钮在内容区（metrics.width）里居中
+        let fullW = metrics.width + metrics.leadingInset + metrics.trailingInset
         // 演示数据只给 UI 测试用：海报墙不走（持续的动画会让 XCUITest 一直等不到 App 空闲）
         let running = onScreen && !reduceMotion && !DemoData.enabled
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: gap) {
-                PosterMarquee(posters: Array(posters.prefix(half)), tileW: tileW, gap: gap, rightward: false, running: running)
-                PosterMarquee(posters: Array(posters.dropFirst(half)), tileW: tileW, gap: gap, rightward: true, running: running)
-                    .padding(.leading, -(tileW + gap) / 2)
+                PosterMarquee(posters: Array(posters.prefix(half)), tileW: tileW, gap: gap, rightward: false,
+                              shift: 0, running: running)
+                PosterMarquee(posters: Array(posters.dropFirst(half)), tileW: tileW, gap: gap, rightward: true,
+                              shift: -(tileW + gap) / 2, running: running)
             }
-            // minWidth + maxWidth 两头都给：一排海报有三千多点宽，只给 maxWidth 的话框会跟着孩子撑宽，
-            // 整个主页那一列跟着变成三千多点宽（居中的字标、按钮、精选区的立体海报都跑到屏幕外面去）
-            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            // 铺到侧边那一列底下
+            // 宽度写死：一排海报有三千多点宽，绝不能让它把这一块（和整个主页那一列）撑宽
+            .frame(width: fullW, alignment: .leading)
+            .clipped()
+            // 裁完再往两边伸：铺到侧边那一列底下，版面上仍只占内容区那么宽
             .padding(.leading, -metrics.leadingInset)
             .padding(.trailing, -metrics.trailingInset)
-            .clipped()
             .accessibilityHidden(true)
             CuvenWordmark()
                 .padding(.top, metrics.wide ? 40 : 32)
             NavigationLink(value: Route.shelf(.all)) {
-                Text("显示所有影片")
+                Text("查看所有影片")
                     .font(.headline)
                     .foregroundStyle(Theme.accent)
                     .frame(maxWidth: 360)
                     .frame(height: 54)
-                    .background(Capsule().fill(Color.white.opacity(0.1)))
+                    .background(Capsule().fill(Color.white.opacity(0.14)))
                     .contentShape(Capsule())
             }
             .buttonStyle(PressableStyle())
@@ -401,7 +403,7 @@ struct HomeFinale: View {
             .padding(.horizontal, metrics.margin)
             .accessibilityIdentifier("home-show-all")
         }
-        .frame(maxWidth: .infinity)
+        .frame(width: metrics.width)
         .onScrollVisibilityChange(threshold: 0.1) { onScreen = $0 }
     }
 }
@@ -415,6 +417,8 @@ struct PosterMarquee: View {
     let gap: CGFloat
     /// true 往右走，false 往左
     let rightward: Bool
+    /// 整排先错开多少（第二排错开半张，和第一排交错）
+    var shift: CGFloat = 0
     let running: Bool
     @State private var since = Date()
 
@@ -424,7 +428,7 @@ struct PosterMarquee: View {
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !running || posters.count < 2)) { ctx in
             let t = max(0, ctx.date.timeIntervalSince(since))
             let travel = unit > 0 ? CGFloat((t * 16).truncatingRemainder(dividingBy: Double(unit))) : 0
-            row.offset(x: rightward ? travel - unit : -travel)
+            row.offset(x: shift + (rightward ? travel - unit : -travel))
         }
         // 两头都给：框就是父视图给的宽，不跟着三千多点宽的那一排撑开（多出来的由外面 clipped 裁掉）
         .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
