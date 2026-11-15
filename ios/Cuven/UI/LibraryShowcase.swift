@@ -10,7 +10,7 @@ import AVFoundation
 //   ① 画幅：一块 16:9 先放大到铺满整屏，钉住不动；中间是一行「年份 · 类型 · 片长」和字标（没有字标就是片名），往上滚先淡出、压暗层跟着退；
 //      再往上滚，画幅收回成一整幅 16:9，下沿始终咬着介绍面板的上沿（网页版同一套几何：k = 间隙 / 16:9 的高，跟着手指走：F54、S10）。
 //      在屏幕中间那一章放它的预告片：静音、从第 10 秒起、循环；系统关了「自动播放视频预览」就停着等人点（F77、S17），右上角播放 / 暂停 + 进度环。
-//   ② 介绍面板（黑底，平口顶边压上来）：简介、评分、导演与主演、「播放」「影片详情」、一排剧照，章与章之间一道两头渐隐的细线（网页版的内容）。
+//   ② 介绍面板（黑底，平口顶边压上来）：评分、导演与主演（简介只在详情页：用户要求）、「播放」「影片详情」、一排剧照，章与章之间一道两头渐隐的细线（网页版的内容）。
 //   章的高度跟着介绍面板走（之前按画幅的行程定高，面板短的那一章底下会空出一大块黑）。
 // · 标题「资料库」与一句「Cuven 为你提供严格品质的影片」压在第一章的画面上、随页面滚走（网页版的 library-header）。
 
@@ -425,7 +425,7 @@ struct ShowcaseControl: View {
     }
 }
 
-/// 介绍面板（黑底，平口顶边压上来；网页版 sc-content）：简介、评分、导演与主演、「播放」「影片详情」、一排剧照，
+/// 介绍面板（黑底，平口顶边压上来；网页版 sc-content）：评分、导演与主演、「播放」「影片详情」、一排剧照（简介只在详情页：用户要求），
 /// 最底下一道两头渐隐的细线隔开下一章
 struct ShowcaseIntro: View {
     @Environment(AppModel.self) private var model
@@ -440,12 +440,8 @@ struct ShowcaseIntro: View {
         let resume = model.playback.resumePosition(video.path) != nil
         let stills = (meta?.stills ?? []).compactMap { s -> URL? in TMDBImage.url(s.url ?? s.thumb, "w780") }.prefix(10)
         VStack(alignment: .leading, spacing: 20) {
+            // 简介不放（用户要求：简介只出现在详情页，「影片详情」进去看）
             VStack(alignment: .leading, spacing: 14) {
-                Text((meta?.overview).flatMap { $0.isEmpty ? nil : $0 } ?? "这部影片暂时没有简介。")
-                    .font(.dsReading)
-                    .foregroundStyle(DSInk.secondary)
-                    .lineLimit(4)
-                    .frame(maxWidth: 620, alignment: .leading)
                 if let r = meta?.rating, r > 0 {
                     // 介绍下面那枚小胶囊：只留评分（网页版 sc-facts）
                     Text("评分 " + String(format: "%.1f", r))
@@ -575,6 +571,8 @@ final class ShowcaseTrailer {
     @ObservationIgnored private let revealHeight: CGFloat
     /// 这一段开始出画面的时间（到了起点、真的在走）；放了很久还没升上去就不等了（降一档要求再露）
     @ObservationIgnored private var playingSince: Date?
+    /// 露出来以后码流掉到下限以下的那一刻（网变差）：糊着超过两秒就退回清楚的静态画面
+    @ObservationIgnored private var lowSince: Date?
 
     init(revealHeight: CGFloat = 720) {
         self.revealHeight = revealHeight
@@ -624,6 +622,7 @@ final class ShowcaseTrailer {
         loaded = false
         showing = false
         playingSince = nil
+        lowSince = nil
         progress = 0
         paused = false
     }
@@ -698,13 +697,31 @@ final class ShowcaseTrailer {
         let d = item.duration.seconds
         if d.isFinite, d > start { progress = min(1, max(0, (t.seconds - start) / (d - start))) }
         let on = player.timeControlStatus == .playing && t.seconds >= start - 0.5
-        guard on, !showing else { return }
-        if playingSince == nil { playingSince = Date() }
         // 码流升到够清楚才露（presentationSize 是当前档位的画面大小）；放了 10 秒还没到，要求降到六成再露；
         // 一直很低（网太慢）就一直停在静态画面上——清楚的静态画面比糊的视频好看
         let h = item.presentationSize.height
+        let minH = revealHeight * 0.6
+        if showing {
+            // 露出来以后码流又掉到下限以下（网变差，用户截图里年份卡的画面糊成色块）：糊着超过两秒就淡回静态画面，等它再升上去
+            if h > 0 && h < minH {
+                if lowSince == nil { lowSince = Date() }
+                if Date().timeIntervalSince(lowSince ?? Date()) > 2 {
+                    showing = false
+                    playingSince = nil
+                    lowSince = nil
+                }
+            } else {
+                lowSince = nil
+            }
+            return
+        }
+        guard on else { return }
+        if playingSince == nil { playingSince = Date() }
         let waited = Date().timeIntervalSince(playingSince ?? Date())
-        if h >= revealHeight || (waited > 10 && h >= revealHeight * 0.6) { showing = true }
+        if h >= revealHeight || (waited > 10 && h >= minH) {
+            showing = true
+            lowSince = nil
+        }
     }
 }
 
