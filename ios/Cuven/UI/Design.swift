@@ -51,10 +51,12 @@ struct DSMetrics {
         return fit(target: clamp(width * 0.36, 283, 400), min: 250)
     }
     /// 年份那两排的预告片卡：16:9 画面下面还有一行小海报 + 字标 + 片名 + 灰字 +「查看」——
-    /// 展开时至少 300 点（约 320–420），片名不再只剩两三个字（用户截图：展开横拿时卡只有 229 点，片名、季数都被截断）
+    /// 展开时约 320–420 点，至少 270（窄于 300 时那一行收紧：YearTrailerCard），片名不再只剩两三个字
+    /// （用户截图：展开横拿时卡只有 229 点，片名、季数都被截断）。展开竖拿一屏两张多（约 275 点），
+    /// 不是一张半的大卡（iPad mini 竖拿的截图里一张半的年份卡太大、下面那一行空出一大截）
     var trailerCardWidth: CGFloat {
         guard wide else { return wideCardWidth }
-        return fit(target: clamp(width * 0.38, 320, 420), min: 300, aspect: 9.0 / 16, extra: 82)
+        return fit(target: clamp(width * 0.38, 320, 420), min: 270, aspect: 9.0 / 16, extra: 82)
     }
     /// 精选卡（带底栏的 5:4 大卡）：折起「一屏一张多一截」再大 30%（用户要求）；
     /// 展开约 340–460 点（底栏里小海报、片名、「Cuven 独占 · 类型」、「查看」放得下）
@@ -81,8 +83,8 @@ struct DSMetrics {
 
     /// 展开时一排卡多宽（D2、S6、S8）：一屏放 n 张整的、再露出下一张的一截，
     /// 在所有放法里挑卡宽最接近 target、又不小于 min 的那种。
-    /// 露出的那一截先只在 1/3 到 1/2 张里挑：每排右边露得一样多，看得出是「还能往右滑」，
-    /// 不会露出四分之三张、像被截断了（用户要求：展开竖拿时卡片要合适）；这样排不下才放宽到 0.15–0.85 张。
+    /// 露出的那一截先只在 0.15 到 1/2 张里挑（大卡露一小截，和折起时一张多一点的大卡一样；小卡露得多些）：
+    /// 看得出是「还能往右滑」，不会露出四分之三张、像被截断了（用户要求：展开竖拿时卡片要合适）；排不下才放宽到 0.85 张。
     /// aspect（卡高 ÷ 卡宽）和 extra（画面下面的字那一截）给了的话：矮的屏上一张卡连字不超过屏高的 60%
     func fit(target: CGFloat, min floor: CGFloat, aspect: CGFloat = 0, extra: CGFloat = 0) -> CGFloat {
         var target = target, floor = floor
@@ -93,7 +95,7 @@ struct DSMetrics {
         }
         let avail = width - margin
         var widest: CGFloat = 0
-        for (lo, hi) in [(CGFloat(0.3), CGFloat(0.5)), (0.15, 0.85)] {
+        for (lo, hi) in [(CGFloat(0.15), CGFloat(0.5)), (0.15, 0.85)] {
             var best: CGFloat = 0, bestErr = CGFloat.infinity
             for n in 1...12 {
                 let room = avail - CGFloat(n) * gutter

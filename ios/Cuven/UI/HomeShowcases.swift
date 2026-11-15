@@ -89,7 +89,10 @@ struct EditorsPick: View {
     private func media(still: URL?, pixel: CGFloat) -> some View {
         ZStack {
             Color(white: 0.08)
-            RemoteImage(url: still, maxPixel: pixel, placeholder: .clear)
+            // 图按 fill 铺，自己会比这一块大（竖版主视觉放进扁一点的块里，上下各多出一两百点）：
+            // 放在 Color.clear 的 overlay 里，这一层的大小就是这一块，下面的 clipped 才真的裁在块的边上——
+            // 以前多出来的那截画在上面一排精选卡的下半截上（展开竖拿、折起时卡底那条被盖住）
+            Color.clear.overlay { RemoteImage(url: still, maxPixel: pixel, placeholder: .clear) }
             if trailer.path == video.path {
                 VideoSurface(player: trailer.player, gravity: .resizeAspectFill, background: .clear)
                     .opacity(trailer.showing ? 1 : 0)
@@ -308,6 +311,8 @@ struct YearTrailerCard: View {
         let h = (width * 9 / 16).rounded()
         let radius: CGFloat = max(16, min(24, (width * 0.06).rounded()))
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        // 窄于 300 点（展开竖拿一屏两张多）：小海报、间距、「查看」都收一点，片名还能放七八个字
+        let compact = width < 300
         VStack(alignment: .leading, spacing: 10) {
             ZStack {
                 Color(white: 0.1)
@@ -323,11 +328,11 @@ struct YearTrailerCard: View {
             .frame(width: width, height: h)
             .clipShape(shape)
             .overlay(shape.strokeBorder(Color.white.opacity(0.06), lineWidth: 1))
-            HStack(spacing: 12) {
+            HStack(spacing: compact ? 10 : 12) {
                 RemoteImage(url: cover, maxPixel: 200)
-                    .frame(width: 48, height: 72)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+                    .frame(width: compact ? 40 : 48, height: compact ? 60 : 72)
+                    .clipShape(RoundedRectangle(cornerRadius: compact ? 9 : 10, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: compact ? 9 : 10, style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
                 VStack(alignment: .leading, spacing: 3) {
                     if logo != nil {
                         LogoImage(url: logo, height: 18, alignment: .leading, maxWidth: 120)
@@ -342,11 +347,11 @@ struct YearTrailerCard: View {
                     }
                 }
                 .lineLimit(1)
-                Spacer(minLength: 8)
+                Spacer(minLength: compact ? 6 : 8)
                 Text("查看")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Theme.accent)
-                    .padding(.horizontal, 18)
+                    .padding(.horizontal, compact ? 12 : 18)
                     .frame(minHeight: 32)
                     .background(Capsule().fill(Color.white.opacity(0.12)))
             }
