@@ -5,6 +5,7 @@
 #   · 真实片库的截图默认不上传，只有在 Actions 页手动运行并勾选「上传截图」时才上传，且 3 天后自动删除；
 #   · iPhone Duo 那几种形态用演示数据跑（DuoTests：片名、海报、字标都是本地合成的），这部分截图提交到
 #     refs/ci/ios-preview-demo（不是分支）：git fetch origin refs/ci/ios-preview-demo && git checkout FETCH_HEAD -- .
+#     展开版面在 iPad mini 上跑（ipad 任务，和主任务并行），截图提交到 refs/ci/ios-preview-ipad；
 #   · 每次运行先删掉以前公开出去的真实片库截图（refs/ci/ios-preview 引用与 ios-preview-* 产物）。
 name: iOS Preview
 
@@ -32,7 +33,8 @@ jobs:
     # iOS 27.1 SDK 才有 iPhone Duo 的系统行为（竖向栏移到侧边、内容铺到状态栏 / 摄像头那一列底下），
     # 也只有这个镜像里有「iPhone Duo」模拟器
     runs-on: xcode-27
-    timeout-minutes: 60
+    # Duo 那一步 30–45 分钟（主页元素多，每次查询都要拍整棵树的快照）；展开版面的 iPad 那一遍在下面单独的 ipad 任务里并行跑
+    timeout-minutes: 75
     steps:
       - name: 清理以前公开出去的截图
         env:
@@ -57,12 +59,12 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install xcodegen
           cd ios && xcodegen generate
 
-      - name: 选模拟器（iPhone Duo 跑 Duo 测试；最新 iOS 上最大的普通 iPhone 跑真实片库的走查；iPad mini 看展开的版面）
+      - name: 选模拟器（iPhone Duo 跑 Duo 测试；最新 iOS 上最大的普通 iPhone 跑真实片库的走查）
         run: |
           python3 - <<'PY' >> "$GITHUB_ENV"
           import json, re, subprocess, sys
           d = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '-j']))['devices']
-          phone = duo = ipad = None
+          phone = duo = None
           for rt, devs in d.items():
               m = re.search(r'iOS-(\d+)-(\d+)', rt)
               if not m:
@@ -70,12 +72,6 @@ jobs:
               ver = (int(m.group(1)), int(m.group(2)))
               for dv in devs:
                   n = dv['name']
-                  if n.startswith('iPad'):
-                      # 竖拿最窄的 iPad（mini，744 点）最接近 Duo 展开竖拿（669 点）；App 最低要 iOS 26
-                      score = ('mini' in n, ver, n)
-                      if ver >= (26, 0) and (ipad is None or score > ipad[0]):
-                          ipad = (score, dv['udid'], n, rt)
-                      continue
                   if not n.startswith('iPhone'):
                       continue
                   if 'Duo' in n:
@@ -92,9 +88,6 @@ jobs:
               print('使用模拟器（Duo）', duo[2], duo[3], file=sys.stderr)
           else:
               print('没有 iPhone Duo 模拟器', file=sys.stderr)
-          if ipad:
-              print('IPAD_UDID=' + ipad[1])
-              print('使用模拟器（展开版面）', ipad[2], ipad[3], file=sys.stderr)
           PY
 
       - name: 模拟器能力（折叠 / 姿态相关的 simctl 子命令）
@@ -148,20 +141,6 @@ jobs:
           xcrun simctl shutdown "$DUO_UDID"
           exit 0
 
-      - name: iPad mini（演示数据；Duo 的内屏切不过去，用它看展开竖拿 / 横拿的卡片和间距，不算失败）
-        if: env.IPAD_UDID != ''
-        run: |
-          set +e
-          xcrun simctl boot "$IPAD_UDID" 2>/dev/null; xcrun simctl bootstatus "$IPAD_UDID" -b > /dev/null 2>&1; sleep 15
-          xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
-            -destination "id=$IPAD_UDID" -only-testing:CuvenUITests/DuoUnfoldedTests \
-            -resultBundlePath "$RUNNER_TEMP/ipad.xcresult" > "$RUNNER_TEMP/ipad.log" 2>&1
-          code=$?
-          grep -E "Test Case|error:|XCTAssert|DUO " "$RUNNER_TEMP/ipad.log" | tail -40
-          echo "exit $code"
-          xcrun simctl shutdown "$IPAD_UDID"
-          exit 0
-
       - name: 走一遍（真实片库，普通 iPhone）
         if: always()
         run: |
@@ -171,7 +150,7 @@ jobs:
             -destination "id=$PHONE_UDID" -only-testing:CuvenUITests/TourTests \
             -resultBundlePath "$RUNNER_TEMP/ui.xcresult" > "$RUNNER_TEMP/test.log" 2>&1
           code=$?
-          grep -E "Test Case|passed|failed|error:|XCTAssert|Failing" "$RUNNER_TEMP/test.log" | tail -60
+          grep -E "Test Case|passed|failed|error:|XCTAssert|Failing|TOUR " "$RUNNER_TEMP/test.log" | tail -60
           echo "exit $code"
           if [ $code -ne 0 ]; then tail -40 "$RUNNER_TEMP/test.log"; fi
           [ "${DUO_EXIT:-0}" = "0" ] || { echo "iPhone Duo 测试没通过（exit $DUO_EXIT）"; exit 1; }
@@ -198,7 +177,7 @@ jobs:
         run: |
           OUT="$RUNNER_TEMP/demo"
           mkdir -p "$OUT/pub"
-          for r in duo duo-unfolded ipad; do
+          for r in duo duo-unfolded; do
             test -d "$RUNNER_TEMP/$r.xcresult" || continue
             mkdir -p "$OUT/$r"
             xcrun xcresulttool export attachments --path "$RUNNER_TEMP/$r.xcresult" --output-path "$OUT/$r" || true
@@ -215,7 +194,7 @@ jobs:
               elif isinstance(x, list):
                   for v in x:
                       walk(v, found)
-          for sub in ('duo', 'duo-unfolded', 'ipad'):
+          for sub in ('duo', 'duo-unfolded'):
               d = os.path.join(out, sub)
               manifest = os.path.join(d, 'manifest.json')
               if not os.path.exists(manifest):
@@ -226,9 +205,7 @@ jobs:
                   if not human.startswith('duo-'):
                       continue                  # 只发演示数据那几张，真实片库的截图不出这台机器
                   name = human.split('_')[0]
-                  # iPad 那几张宽一些（展开的版面要看得清卡片和间距）
-                  width = '900' if sub == 'ipad' else '600'
-                  subprocess.run(['sips', '-s', 'format', 'jpeg', '-s', 'formatOptions', '72', '--resampleWidth', width,
+                  subprocess.run(['sips', '-s', 'format', 'jpeg', '-s', 'formatOptions', '72', '--resampleWidth', '600',
                                   os.path.join(d, f), '--out', os.path.join(out, 'pub', name + '.jpg')], check=True, stdout=subprocess.DEVNULL)
                   print(name)
           PY
@@ -257,3 +234,115 @@ jobs:
           path: ${{ runner.temp }}/shots
           retention-days: 3
           if-no-files-found: ignore
+
+  # 展开竖拿 / 横拿的版面：Duo 的内屏在模拟器上切不过去，用 iPad mini（竖拿 744 点宽，和展开竖拿的 669 点同一套「展开」版面）
+  # 跑 DuoUnfoldedTests。单独一台机器和上面并行：放在上面那个任务里会把它拖过时限，截图也要等一个小时。
+  # 只用演示数据（-CuvenDemo YES），截图以 duo-4 开头，提交到 refs/ci/ios-preview-ipad
+  ipad:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 选 Xcode（装着的最新正式版 27.x）
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app | grep -E 'Xcode_[0-9]+\.[0-9]+(\.[0-9]+)?\.app$' | grep -viE 'beta|release_candidate|_rc' | sort -V | tail -1)
+          echo "使用 $XC"
+          sudo xcode-select -s "$XC"
+
+      - name: 生成工程（XcodeGen）
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install xcodegen
+          cd ios && xcodegen generate
+
+      - name: 选模拟器（iPad mini）
+        run: |
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import json, re, subprocess, sys
+          d = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '-j']))['devices']
+          ipad = None
+          for rt, devs in d.items():
+              m = re.search(r'iOS-(\d+)-(\d+)', rt)
+              if not m:
+                  continue
+              ver = (int(m.group(1)), int(m.group(2)))
+              for dv in devs:
+                  n = dv['name']
+                  # 竖拿最窄的 iPad（mini）最接近 Duo 展开竖拿；App 最低要 iOS 26
+                  if n.startswith('iPad') and ver >= (26, 0):
+                      score = ('mini' in n, ver, n)
+                      if ipad is None or score > ipad[0]:
+                          ipad = (score, dv['udid'], n, rt)
+          if ipad:
+              print('IPAD_UDID=' + ipad[1])
+              print('使用模拟器', ipad[2], ipad[3], file=sys.stderr)
+          else:
+              print('没有 iPad 模拟器', file=sys.stderr)
+          PY
+
+      - name: 编译测试包
+        if: env.IPAD_UDID != ''
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing -project ios/Cuven.xcodeproj -scheme Cuven -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/dd" > "$RUNNER_TEMP/build.log" 2>&1 || {
+              grep -E -B2 -A8 "error:|fatal error" "$RUNNER_TEMP/build.log" | head -300; tail -40 "$RUNNER_TEMP/build.log"; exit 1; }
+
+      - name: iPad mini（演示数据；看展开竖拿 / 横拿的卡片和间距，不算失败）
+        if: env.IPAD_UDID != ''
+        run: |
+          set +e
+          xcrun simctl boot "$IPAD_UDID" 2>/dev/null; xcrun simctl bootstatus "$IPAD_UDID" -b > /dev/null 2>&1; sleep 15
+          xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
+            -destination "id=$IPAD_UDID" -only-testing:CuvenUITests/DuoUnfoldedTests \
+            -resultBundlePath "$RUNNER_TEMP/ipad.xcresult" > "$RUNNER_TEMP/ipad.log" 2>&1
+          code=$?
+          grep -E "Test Case|error:|XCTAssert|DUO " "$RUNNER_TEMP/ipad.log" | tail -40
+          echo "exit $code"
+          xcrun simctl shutdown "$IPAD_UDID"
+          exit 0
+
+      - name: iPad 演示截图（只含合成内容）提交到 refs/ci/ios-preview-ipad
+        if: always() && env.IPAD_UDID != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          OUT="$RUNNER_TEMP/demo"
+          test -d "$RUNNER_TEMP/ipad.xcresult" || exit 0
+          mkdir -p "$OUT/pub" "$OUT/ipad"
+          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/ipad.xcresult" --output-path "$OUT/ipad" || true
+          python3 - "$OUT" <<'PY'
+          import json, os, subprocess, sys
+          out = sys.argv[1]
+          d = os.path.join(out, 'ipad')
+          manifest = os.path.join(d, 'manifest.json')
+          if not os.path.exists(manifest):
+              sys.exit(0)
+          found = []
+          def walk(x):
+              if isinstance(x, dict):
+                  if 'exportedFileName' in x:
+                      found.append((x.get('suggestedHumanReadableName') or '', x['exportedFileName']))
+                  for v in x.values():
+                      walk(v)
+              elif isinstance(x, list):
+                  for v in x:
+                      walk(v)
+          walk(json.load(open(manifest)))
+          for human, f in sorted(found):
+              if not human.startswith('duo-'):
+                  continue                  # 只发演示数据那几张
+              name = human.split('_')[0]
+              # 宽一些（展开的版面要看得清卡片和间距）
+              subprocess.run(['sips', '-s', 'format', 'jpeg', '-s', 'formatOptions', '72', '--resampleWidth', '900',
+                              os.path.join(d, f), '--out', os.path.join(out, 'pub', name + '.jpg')], check=True, stdout=subprocess.DEVNULL)
+              print(name)
+          PY
+          cd "$OUT/pub"
+          [ "$(ls | wc -l)" -gt 0 ] || exit 0
+          echo "${GITHUB_SHA} run ${{ github.run_number }}" > SOURCE
+          git init -q . && git checkout -q -b ipad
+          git add -A
+          git -c user.name=ios-preview -c user.email=ios-preview@users.noreply.github.com commit -qm "iOS iPad demo preview ${GITHUB_SHA::7}"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/ci/ios-preview-ipad
+          echo "已提交到 refs/ci/ios-preview-ipad"

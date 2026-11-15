@@ -37,32 +37,23 @@ final class TourTests: XCTestCase {
         app.swipeUp(); sleep(3); snap("04-home-2")
         app.swipeUp(); sleep(3); snap("05-home-3")
 
-        // 剧集卡 → 剧集详情
-        let series = app.buttons["series-card"].firstMatch
-        if series.waitForExistence(timeout: 5) {
-            series.tap()
+        // 剧集卡 → 剧集详情：一次快照看全部匹配项，点在屏上的那张（第一张剧集卡常在一排的屏幕外面）
+        if app.revealAndTap(["series-card", "featured-series-card"], swipes: 4) != nil {
             sleep(6)
             snap("06-series-detail")
             app.swipeUp(); sleep(3); snap("07-series-episodes")
             back()
         }
 
-        // 回到顶上：大图里「此刻在屏上」的那张的「详情」→ 电影详情（大图会自动翻页，不能拿第一张）
-        app.swipeDown(); app.swipeDown(); app.swipeDown(); app.swipeDown()
+        // 电影详情：先确认回到了主页（返回没生效时还停在剧集详情页，那一页的播放钮是 series-play），回到顶上，
+        // 点头图上此刻在屏上的「详情」（头图会自动翻页，不能拿第一张）；不在屏上就往下找一张在屏上、不在标签栏底下的电影卡。
+        // 一次快照看全部匹配项，点框的正中（不问 isHittable）
+        tapTab(["主页"])
         sleep(2)
-        let screen = app.windows.firstMatch.frame
-        func onScreen(_ e: XCUIElement) -> Bool {
-            let f = e.frame
-            return f.width > 0 && f.minX >= screen.minX - 1 && f.maxX <= screen.maxX + 1 && f.minY >= screen.minY && f.maxY <= screen.maxY
-        }
-        // 大图会自动翻页，按钮可能正跨在屏幕边上：往下滑一点，点第一张完整在屏上的电影海报
-        app.swipeUp()
-        sleep(2)
-        if let poster = app.buttons.matching(identifier: "movie-card").allElementsBoundByIndex.first(where: onScreen) {
-            poster.tap()
-        } else if let heroDetail = app.buttons.matching(identifier: "hero-detail").allElementsBoundByIndex.first(where: onScreen) {
-            heroDetail.tap()
-        }
+        app.scrollHomeToTop()
+        var opened = app.revealAndTap(["hero-detail"], swipes: 0)
+        if opened == nil { opened = app.revealAndTap(["movie-card"], swipes: 4) }
+        print("TOUR movie detail: tapped \(opened.map { "\($0)" } ?? "nothing")")
         let play = app.buttons["detail-play"].firstMatch
         XCTAssertTrue(play.waitForExistence(timeout: 20), "电影详情页没有播放钮")
         sleep(5)
@@ -132,16 +123,22 @@ final class TourTests: XCTestCase {
         }
     }
 
+    /// 系统返回钮（标识 BackButton；不一定在 navigationBars 里），都没有就从左边缘往右拖
     private func back() {
-        let nav = app.navigationBars.buttons.firstMatch
-        if nav.exists { nav.tap() } else { app.swipeRight() }
+        let sys = app.buttons["BackButton"].firstMatch
+        let nav = sys.exists ? sys : app.navigationBars.buttons.firstMatch
+        if nav.exists {
+            nav.tap()
+        } else {
+            let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
+            edge.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5)))
+        }
         sleep(2)
     }
 
     private func tapTab(_ names: [String]) {
+        for n in names where app.tapTab(named: n) { return }
         for n in names {
-            let b = app.tabBars.buttons[n]
-            if b.exists { b.tap(); return }
             let any = app.buttons[n]
             if any.exists { any.tap(); return }
         }

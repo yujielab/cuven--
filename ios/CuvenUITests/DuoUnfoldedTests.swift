@@ -30,17 +30,28 @@ final class DuoUnfoldedTests: XCTestCase {
             app.swipeUp(); sleep(2)
             snap("duo-32\(Array("abcdefghi")[i])-unfolded-rows")
         }
-        toTop(app)
+        app.scrollHomeToTop()
 
-        // 详情（头图的「详情」，没有就点主页上的一张电影海报）
-        if let open = firstHittable(app, ["hero-detail", "movie-card"]) {
-            open.tap()
+        // 详情（头图上此刻在屏上的「详情」，没有就点主页上一张在屏上的电影卡）。不问 isHittable：
+        // iPad 上头图翻页时问它会记一次「Failed to determine hittability」，整个测试就停在这里
+        let target = app.onScreenFrames(["hero-detail"]).first ?? app.onScreenFrames(["movie-card"]).first
+        if let f = target {
+            app.tap(at: CGPoint(x: f.midX, y: f.midY))
             if app.buttons["detail-play"].waitForExistence(timeout: 8) {
                 sleep(2)
                 report(app, "unfolded detail")
                 snap("duo-33-unfolded-detail")
+                // 往下一屏：简介、剧照、详细信息卡
+                app.swipeUp(); sleep(2)
+                snap("duo-33b-unfolded-detail-more")
+                app.swipeUp(); sleep(2)
+                snap("duo-33c-unfolded-detail-info")
                 back(app)
+            } else {
+                print("DUO unfolded detail: did not open")
             }
+        } else {
+            print("DUO unfolded detail: nothing to open")
         }
 
         tab(app, "资料库"); sleep(3)
@@ -58,7 +69,7 @@ final class DuoUnfoldedTests: XCTestCase {
                 app.swipeUp(); sleep(2)
                 snap("duo-37\(Array("abcdef")[i])-unfolded-landscape-rows")
             }
-            toTop(app)
+            app.scrollHomeToTop()
         } else {
             print("DUO unfolded landscape: did not rotate")
         }
@@ -84,19 +95,9 @@ final class DuoUnfoldedTests: XCTestCase {
         } ?? XCUIScreen.main
     }
 
-    private func firstHittable(_ app: XCUIApplication, _ ids: [String]) -> XCUIElement? {
-        for id in ids {
-            if let e = app.buttons.matching(identifier: id).allElementsBoundByIndex.first(where: { $0.isHittable }) { return e }
-        }
-        return nil
-    }
-
     /// 展开竖拿是系统标签栏，展开横拿是 App 自己画在侧边那一列的导航（DuoNav）：都按 label 认，取点得到的那个
     private func tab(_ app: XCUIApplication, _ name: String) {
-        let b = app.tabBars.buttons[name].firstMatch
-        if b.exists && b.isHittable { b.tap(); return }
-        let q = app.buttons.matching(NSPredicate(format: "label == %@", name))
-        if let any = q.allElementsBoundByIndex.first(where: { $0.isHittable }) { any.tap() }
+        if !app.tapTab(named: name) { print("DUO unfolded tab \(name): not on screen") }
     }
 
     private func back(_ app: XCUIApplication) {
@@ -104,12 +105,6 @@ final class DuoUnfoldedTests: XCTestCase {
         let nav = sys.exists ? sys : app.navigationBars.buttons.firstMatch
         if nav.exists { nav.tap() } else { app.swipeRight() }
         sleep(2)
-    }
-
-    /// 回到主页最上面：看到「Home」那一行的头像就停（多拉一下会触发下拉刷新）
-    private func toTop(_ app: XCUIApplication) {
-        for _ in 0..<16 where !app.buttons["home-account"].firstMatch.isOnScreen(in: app) { app.swipeDown() }
-        sleep(1)
     }
 
     /// iPad 上跑的那一遍：截图改成 duo-4 开头，和 Duo 自己的 duo-3 分开
