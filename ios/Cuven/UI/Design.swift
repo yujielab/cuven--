@@ -64,10 +64,10 @@ struct DSMetrics {
         guard wide else { return (cardWidth(visible: width < 500 ? 1.3 : 2.3) * 1.3).rounded(.down) }
         return fit(target: clamp(width * 0.4, 340, 460), min: 320, aspect: 0.8)
     }
-    /// 长文案的分集卡（方卡）：折起一屏将近两张；展开约 200–280 点（三行简介放得下）
+    /// 长文案的分集卡：比原来的方卡宽 30%、高不变（1.3 : 1；用户要求），折起约 222 点；展开约 260–364 点
     var episodeTallCardWidth: CGFloat {
-        guard wide else { return cardWidth(visible: width < 500 ? 1.9 : 2.9) }
-        return fit(target: clamp(width * 0.26, 200, 280), min: 190)
+        guard wide else { return (cardWidth(visible: width < 500 ? 1.9 : 2.9) * 1.3).rounded(.down) }
+        return fit(target: clamp(width * 0.34, 260, 364), min: 247)
     }
     /// 详情页「简介」那一排卡：折起一张多一截（Apple TV 的简介卡约占屏宽七成）；展开约 260–380 点
     var aboutCardWidth: CGFloat {
@@ -380,7 +380,7 @@ struct DSMediaCard<MenuItems: View>: View {
     var detail: String? = nil
     /// 看到一半：第二行在 ▶ 后面先放一小段进度条
     var progress: Double? = nil
-    /// 长文案的样子（方卡，用户要求：短文案、长文案两种卡）：标题上面一行小字（「第 2 集」），下面三行简介
+    /// 长文案的样子（1.3 : 1 的卡，用户要求：短文案、长文案两种卡）：标题上面一行小字（「第 2 集」），下面两行简介
     var tall = false
     var kicker: String? = nil
     var overview: String? = nil
@@ -395,7 +395,8 @@ struct DSMediaCard<MenuItems: View>: View {
 
     var body: some View {
         let w = width ?? (tall ? metrics.episodeTallCardWidth : metrics.wideCardWidth)
-        let h = tall ? w : (w * 9 / 16).rounded()
+        // 长文案的卡 1.3 : 1（用户要求：宽 30%、高不变；剧照是 16:9，也比方卡少裁两边）
+        let h = tall ? (w / 1.3).rounded() : (w * 9 / 16).rounded()
         // 圆角跟着卡宽走（参考图那种大圆角：约卡宽的 4.5%，14–22 点；方卡按 1.4 倍宽算，和 16:9 卡看着一样圆）
         let radius: CGFloat = max(14, min(22, ((tall ? w * 1.4 : w) * 0.045).rounded()))
         // 字离左、下两边的距离；「•••」的点按区按它摆，三个点的右缘和字的边线对齐
@@ -453,7 +454,7 @@ struct DSMediaCard<MenuItems: View>: View {
         }
     }
 
-    /// 长文案（参考图）：「第 2 集」→ 集名 → 三行简介 →「42 分钟」
+    /// 长文案（参考图）：「第 2 集」→ 集名 → 两行简介（用户要求折起来；整段在长按的预览里）→「42 分钟」
     private var longCopy: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let kicker, !kicker.isEmpty {
@@ -471,7 +472,7 @@ struct DSMediaCard<MenuItems: View>: View {
                 Text(overview)
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.72))
-                    .lineLimit(3)
+                    .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 3)
             }

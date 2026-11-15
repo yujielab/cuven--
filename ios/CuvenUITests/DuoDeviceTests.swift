@@ -79,7 +79,7 @@ final class DuoDeviceTests: XCTestCase {
         } else {
             print("DUO featured card: none")
         }
-        // 编辑推荐（照游戏 App「重磅更新」）：预告片铺满做底、「编辑推荐」、底部取色面板（海报、字标、简介、查看影片 ›）
+        // 编辑推荐（照游戏 App「重磅更新」）：预告片铺满做底、「编辑推荐」、底部取色面板（海报、字标、一行简介、「查看」胶囊）
         if reveal(app, app.buttons.matching(identifier: "editors-pick"), swipes: 4) != nil {
             sleep(2)
             snap("duo-02h-editors-pick")

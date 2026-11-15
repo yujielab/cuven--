@@ -9,7 +9,8 @@ import UIKit
 // · 下面一排大卡：标题「为您的口味量身定制的内容 ›」+ 灰字「向左滑动查看更多」，
 //   每张卡是整幅画面，底下一条磨砂的条：小海报、片名、「Cuven 独占 · 类型」、「查看」胶囊（参考图卡底那一条）。
 // 动效：海报第一次滑进屏幕时从叠在一起的一摞弹开成一扇（一张晚一点），之后在屏上时各自轻轻浮动（错开节拍，滑走就停）；
-// 整条带往上滚时海报比字慢一点（视差）；横滑的大卡停在左边线上（不放大、不压暗别的卡：用户早先的要求）。
+// 合集页里整条带往上滚时海报比字慢一点（视差）；主页上不做（用户要求：主页的立体海报不跟着滚动上下挪）。
+// 横滑的大卡停在左边线上（不放大、不压暗别的卡：用户早先的要求）。
 // 「减弱动态效果」打开时：不弹、不浮、没有视差，只淡入。
 
 struct FeaturedCollection<Cards: View>: View {
@@ -102,14 +103,15 @@ struct FeaturedCollectionHeader: View {
 
     var body: some View {
         let posterW = Self.posterWidth(metrics)
-        let lag: CGFloat = reduceMotion ? 0 : 0.08
+        // 视差只在合集页：主页的立体海报跟着整页走，不再上下错开（用户要求）
+        let lag: CGFloat = (reduceMotion || !page) ? 0 : 0.08
         VStack(alignment: .leading, spacing: 0) {
             if !covers.isEmpty {
                 PosterFan(covers: Array(covers.prefix(3)), width: posterW)
                     .frame(maxWidth: .infinity)
                     .frame(height: PosterFan.height(posterW))
                     .padding(.top, 22)
-                    // 整条带往上滚时海报比字慢一点（视差）
+                    // 合集页：整条带往上滚时海报比字慢一点（视差）；主页 lag 为 0，不挪
                     .visualEffect { c, proxy in
                         let y = proxy.frame(in: .scrollView(axis: .vertical)).minY
                         return c.offset(y: max(-28, min(28, -y * lag)))
