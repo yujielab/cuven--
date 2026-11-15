@@ -33,7 +33,7 @@ struct CastSheet: View {
                         }
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PressableStyle(scale: 0.98))
                     .accessibilityIdentifier("cast-row")
                 }
             }

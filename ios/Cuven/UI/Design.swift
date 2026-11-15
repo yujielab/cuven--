@@ -89,7 +89,7 @@ struct DSShelfTitle: View {
 
         if let route {
             NavigationLink(value: route) { label.contentShape(Rectangle()) }
-                .buttonStyle(.plain)
+                .buttonStyle(PressableStyle(scale: 0.98))
                 .accessibilityIdentifier("section-\(title)")
         } else {
             label

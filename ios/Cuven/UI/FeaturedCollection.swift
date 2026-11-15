@@ -61,7 +61,7 @@ struct FeaturedCollection<Cards: View>: View {
         .accessibilityAddTraits(.isHeader)
         if let rowRoute {
             NavigationLink(value: rowRoute) { label.contentShape(Rectangle()) }
-                .buttonStyle(.plain)
+                .buttonStyle(PressableStyle(scale: 0.98))
                 .accessibilityIdentifier("section-\(rowTitle)")
         } else {
             label

@@ -96,6 +96,8 @@ struct RootView: View {
             }
         }
         .environment(\.duoColumn, column)
+        // 换标签：一下选择触感（系统标签栏和侧边那一列自己画的导航都走这里）
+        .sensoryFeedback(.selection, trigger: tab)
         // 侧边一列的形态：自己画的导航，搜索单独一颗
         .overlay {
             if column {
