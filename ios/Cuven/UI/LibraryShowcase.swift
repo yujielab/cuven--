@@ -565,20 +565,26 @@ final class ShowcaseTrailer {
     }
 
     func mount(_ v: Video, model: AppModel) {
-        guard path != v.path else { return }
+        mount(key: v.path) { await model.trailers(for: v) }
+    }
+
+    /// 任意一部（电影、剧集）：key 认是哪一部（同一部再挂一次什么都不做），fetch 去拿它的预告片
+    func mount(key: String, fetch: @escaping () async -> [Trailer]) {
+        guard path != key else { return }
         unmount()
-        path = v.path
-        // F77、S17：系统「自动播放视频预览」关着时不自己放，停在那儿等人点右上角那颗钮
+        path = key
+        // F77、S17：系统「自动播放视频预览」关着时不自己放，停在那儿等人点那颗播放钮
         paused = !UIAccessibility.isVideoAutoplayEnabled
         loadTask = Task { [weak self] in
-            let list = await model.trailers(for: v)
-            guard let self, !Task.isCancelled, self.path == v.path,
+            let list = await fetch()
+            guard let self, !Task.isCancelled, self.path == key,
                   let t = list.first, let url = URL(string: t.hls), url.scheme?.hasPrefix("http") == true else { return }
             self.attach(url)
         }
     }
 
     func unmount() {
+        TrailerFocus.shared.drop(self)
         loadTask?.cancel()
         loadTask = nil
         if let o = timeObserver { player.removeTimeObserver(o); timeObserver = nil }
@@ -611,9 +617,17 @@ final class ShowcaseTrailer {
         sync()
     }
 
+    /// 想放（挂着片子、在屏上、没被暂停、正片没盖上来）：同一时刻只有最后一个想放的真的在放（TrailerFocus）
     private func sync() {
+        let wants = player.currentItem != nil && visible && !covered && !paused && !playerUp
+        if wants { TrailerFocus.shared.want(self) } else { TrailerFocus.shared.drop(self) }
+    }
+
+    /// TrailerFocus 定了谁放：放 / 停
+    fileprivate func apply(allowed: Bool) {
         guard player.currentItem != nil else { return }
-        if visible && !covered && !paused && !playerUp { player.play() } else { player.pause() }
+        let wants = visible && !covered && !paused && !playerUp
+        if wants && allowed { player.play() } else { player.pause() }
     }
 
     private func attach(_ url: URL) {
@@ -656,5 +670,37 @@ final class ShowcaseTrailer {
         if d.isFinite, d > start { progress = min(1, max(0, (t.seconds - start) / (d - start))) }
         let on = player.timeControlStatus == .playing && t.seconds >= start - 0.5
         if on && !showing { showing = true }
+    }
+}
+
+/// 同一时刻只放一段预告片（主页的年份那两排、编辑推荐，资料库）：最后一个想放的放，别的停在当前那一帧；
+/// 放着的那段滑走 / 换页 / 卸下了，再让还想放的那段里最近的一个接着放
+@MainActor
+final class TrailerFocus {
+    static let shared = TrailerFocus()
+
+    private final class Box {
+        weak var value: ShowcaseTrailer?
+        init(_ v: ShowcaseTrailer) { value = v }
+    }
+
+    /// 想放的，最近的在最后
+    private var queue: [Box] = []
+
+    func want(_ t: ShowcaseTrailer) {
+        queue.removeAll { $0.value == nil || $0.value === t }
+        queue.append(Box(t))
+        refresh()
+    }
+
+    func drop(_ t: ShowcaseTrailer) {
+        queue.removeAll { $0.value == nil || $0.value === t }
+        t.apply(allowed: false)
+        refresh()
+    }
+
+    private func refresh() {
+        let top = queue.last?.value
+        for b in queue { b.value?.apply(allowed: b.value === top) }
     }
 }

@@ -570,6 +570,8 @@ enum Shelf: Hashable {
     case featured
     /// 精选剧集：评分高的剧，一部剧只出一次（主页「精选剧集」那一块的全部）
     case featuredSeries
+    /// 全部影片：电影和剧集一起，新入库的在前（主页最底下「显示所有影片」）
+    case all
 
     var title: String {
         switch self {
@@ -582,6 +584,7 @@ enum Shelf: Hashable {
         case .category(let c): return c.title
         case .featured: return "精选电影"
         case .featuredSeries: return "精选剧集"
+        case .all: return "全部影片"
         }
     }
 
@@ -609,6 +612,7 @@ enum Shelf: Hashable {
         case .category(let c): return "cat-" + c.rawValue
         case .featured: return "featured"
         case .featuredSeries: return "featured-tv"
+        case .all: return "all"
         }
     }
 }

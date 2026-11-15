@@ -922,6 +922,42 @@ final class AppModel {
         return nil
     }
 
+    // MARK: 主页「编辑推荐」与结尾的海报墙
+
+    @ObservationIgnored private var editorsPickCache: (day: Int, path: String)?
+
+    /// 主页「编辑推荐」：每天换一部——评分 6.5 分以上、做得成精选卡（有字标和竖版画面）的电影，不和头图那几部撞车；
+    /// 查到有预告片的在前（没查过的也行：展示区自己去问，问不到就停在画面上），在排得最靠前的 12 部里按日子轮着挑。
+    /// 同一天打开几次都是同一部（头图定下来以后才记住，免得和后来定的头图撞车）
+    func editorsPick() -> Video? {
+        let day = Int(Date().timeIntervalSince1970 / 86_400)
+        if let c = editorsPickCache, c.day == day, let v = video(path: c.path) { return v }
+        let heroPaths = Set(heroPicks.map { $0.video.path })
+        var pool: [(video: Video, rating: Double, known: Int)] = []
+        for v in movies {
+            guard !heroPaths.contains(v.path), let r = meta(v)?.rating, r >= 6.5, featuredReady(v),
+                  trailerKnown[v.path] != false else { continue }
+            pool.append((v, r, trailerKnown[v.path] == true ? 1 : 0))
+        }
+        pool.sort { a, b in a.known != b.known ? a.known > b.known : a.rating > b.rating }
+        let top = Array(pool.prefix(12))
+        guard !top.isEmpty else { return nil }
+        let pick = top[day % top.count].video
+        if heroResolved { editorsPickCache = (day, pick.path) }
+        return pick
+    }
+
+    /// 主页最底下那面海报墙：最新入库的电影（印着片名的海报），最多 limit 张
+    func wallPosters(limit: Int = 20) -> [URL] {
+        var out: [URL] = []
+        for v in movies {
+            guard let u = coverArt(v) else { continue }
+            out.append(u)
+            if out.count >= limit { break }
+        }
+        return out
+    }
+
     /// 主页「精选剧集」：评分 6 分以上、有海报也有剧照的剧，评分高的在前（同分的新的在前）；同一部剧的几季只出一次
     func featuredSeries(limit: Int = .max) -> [Series] {
         var seen = Set<String>()

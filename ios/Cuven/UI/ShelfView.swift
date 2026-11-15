@@ -76,6 +76,12 @@ struct ShelfView: View {
             return model.featuredMovies().map { .movie($0) }
         case .featuredSeries:
             return model.featuredSeries().map { .series($0) }
+        case .all:
+            // 电影和剧集一起，新入库的在前
+            var out: [(key: String, entry: HomeEntry)] = model.movies.map { ($0.addedKey, .movie($0)) }
+            for s in model.series { out.append((s.added ?? "", .series(s))) }
+            out.sort { $0.key > $1.key }
+            return out.map(\.entry)
         }
     }
 
