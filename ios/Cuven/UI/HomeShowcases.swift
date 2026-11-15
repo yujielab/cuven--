@@ -190,9 +190,14 @@ struct YearTrailerRow: View {
     @State private var onScreen = false
 
     var body: some View {
+        if metrics.wide { spotlight } else { row }
+    }
+
+    /// 折起：一排卡（横着滑）
+    private var row: some View {
         // 展开时卡至少 300 点宽：下面那一行小海报 + 片名 + 灰字 +「查看」放得下（DSMetrics.trailerCardWidth）
         let w = metrics.trailerCardWidth
-        VStack(alignment: .leading, spacing: metrics.titleGap + 2) {
+        return VStack(alignment: .leading, spacing: metrics.titleGap + 2) {
             header
             DSShelf(metrics: metrics) {
                 ForEach(items) { e in
@@ -212,12 +217,58 @@ struct YearTrailerRow: View {
         .onDisappear { trailer.setVisible(false) }
     }
 
+    /// 展开（用户给的参考图：游戏 App 展开时「新作快報 ›」）：标题下面先一张横向大卡（WideLeadCard：左六成画面、预告片在这块里放，
+    /// 右四成从画面取色的一块），再两张一排的卡（画面 + 取色的底条：CollectionCard）；更多的在年份页（标题「2026 ›」）。
+    /// 横向大卡至少 300 点高（右边那一块放得下小海报、两行片名、灰字、「查看」），宽的 36%，不高过屏高的 55%
+    private var spotlight: some View {
+        let full = max(200, metrics.width - metrics.margin * 2)
+        let half = metrics.cardWidth(columns: 2)
+        let cap = metrics.height > 0 ? (metrics.height * 0.55).rounded() : 420
+        let leadH = min(max(300, (full * 0.36).rounded()), max(300, cap))
+        let rest = Array(items.dropFirst().prefix(2))
+        return VStack(alignment: .leading, spacing: metrics.titleGap + 2) {
+            header
+            VStack(alignment: .leading, spacing: metrics.gutter) {
+                if let lead = items.first {
+                    leadCard(lead, width: full, height: leadH)
+                }
+                if !rest.isEmpty {
+                    HStack(alignment: .top, spacing: metrics.gutter) {
+                        ForEach(rest) { e in halfCard(e, width: half) }
+                    }
+                }
+            }
+            .padding(.horizontal, metrics.margin)
+        }
+        .onScrollVisibilityChange(threshold: 0.35) { v in
+            onScreen = v
+            syncLead()
+        }
+        .onAppear { trailer.setVisible(true) }
+        .onDisappear { trailer.setVisible(false) }
+    }
+
+    /// 展开时放打头那一张的预告片（这一块在屏上时）
+    private func syncLead() {
+        guard onScreen, let e = items.first else {
+            trailer.setCovered(true)
+            return
+        }
+        mount(e)
+        trailer.setCovered(false)
+    }
+
     /// 放哪一张：这一排在屏上时，最靠左、整张露出来的那一张
     private func sync() {
         guard onScreen, let e = items.first(where: { shown.contains($0.id) }) else {
             trailer.setCovered(true)
             return
         }
+        mount(e)
+        trailer.setCovered(false)
+    }
+
+    private func mount(_ e: HomeEntry) {
         switch e {
         case .movie(let v):
             trailer.mount(v, model: model)
@@ -227,7 +278,6 @@ struct YearTrailerRow: View {
                 return AppModel.playable(hit?.trailers)
             }
         }
-        trailer.setCovered(false)
     }
 
     static func key(_ e: HomeEntry) -> String {
@@ -279,6 +329,144 @@ struct YearTrailerRow: View {
             .seriesMenu(s)
             .task { await model.ensureSeriesMeta(s) }
         }
+    }
+
+    // MARK: 展开：打头的横向大卡 + 两张一排的卡
+
+    @ViewBuilder private func leadCard(_ e: HomeEntry, width w: CGFloat, height h: CGFloat) -> some View {
+        let playing: ShowcaseTrailer? = trailer.path == Self.key(e) ? trailer : nil
+        switch e {
+        case .movie(let v):
+            let sub = DetailText.line([model.year(v).map { String($0) }, model.meta(v)?.genres?.first])
+            ZoomLink(route: .movie(v), slot: "year-\(year)") {
+                WideLeadCard(art: TMDBImage.url(model.backgroundArtString(v), "w1280"), cover: model.thumbArt(v),
+                             kicker: "电影", title: model.title(v), subtitle: sub, width: w, height: h, trailer: playing)
+            }
+            .accessibilityIdentifier("movie-card")
+            .movieMenu(v)
+        case .series(let s):
+            let sm = model.seriesMetas[s.path]
+            let sub = DetailText.line([s.seasonLabel, sm?.genres?.first])
+            ZoomLink(route: .series(s), slot: "year-\(year)") {
+                WideLeadCard(art: model.seriesWideArt(s).url, cover: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w185"),
+                             kicker: "剧集", title: sm?.title ?? s.name, subtitle: sub, width: w, height: h, trailer: playing)
+            }
+            .accessibilityIdentifier("series-card")
+            .seriesMenu(s)
+            .task { await model.ensureSeriesMeta(s) }
+        }
+    }
+
+    @ViewBuilder private func halfCard(_ e: HomeEntry, width w: CGFloat) -> some View {
+        switch e {
+        case .movie(let v):
+            let sub = DetailText.line([model.year(v).map { String($0) }, model.meta(v)?.genres?.first])
+            ZoomLink(route: .movie(v), slot: "year-\(year)") {
+                CollectionCard(art: TMDBImage.url(model.backgroundArtString(v), "w1280"), cover: model.thumbArt(v),
+                               title: model.title(v), line: sub, width: w, kicker: "电影")
+            }
+            .accessibilityIdentifier("movie-card")
+            .movieMenu(v)
+        case .series(let s):
+            let sm = model.seriesMetas[s.path]
+            let sub = DetailText.line([s.seasonLabel, sm?.genres?.first])
+            ZoomLink(route: .series(s), slot: "year-\(year)") {
+                CollectionCard(art: model.seriesWideArt(s).url, cover: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w185"),
+                               title: sm?.title ?? s.name, line: sub, width: w, kicker: "剧集")
+            }
+            .accessibilityIdentifier("series-card")
+            .seriesMenu(s)
+            .task { await model.ensureSeriesMeta(s) }
+        }
+    }
+}
+
+/// 展开时年份分区打头的那张横向大卡（用户给的参考图：游戏 App 展开时「新作快報」打头那张）：
+/// 左边六成是画面（这一排的预告片在这块里放：出画面时从模糊里淡入，和年份卡一样）；右边四成是从画面取色的一块
+/// （DSTint.panel，和合集卡、编辑推荐同一个取色）：小海报、一行小字（「电影」「剧集」）、大号片名（最多两行）、一行灰字（年份 · 类型）、
+/// 「查看」胶囊，竖着居中。整张卡点进详情；不放简介（用户要求：简介只出现在详情页）
+struct WideLeadCard: View {
+    let art: URL?
+    let cover: URL?
+    let kicker: String
+    let title: String
+    let subtitle: String
+    let width: CGFloat
+    let height: CGFloat
+    let trailer: ShowcaseTrailer?
+    @State private var tone: Color?
+
+    init(art: URL?, cover: URL?, kicker: String, title: String, subtitle: String,
+         width: CGFloat, height: CGFloat, trailer: ShowcaseTrailer? = nil) {
+        self.art = art
+        self.cover = cover
+        self.kicker = kicker
+        self.title = title
+        self.subtitle = subtitle
+        self.width = width
+        self.height = height
+        self.trailer = trailer
+    }
+
+    var body: some View {
+        let imageW = (width * 0.6).rounded()
+        let shape = RoundedRectangle(cornerRadius: DSRadius.feature, style: .continuous)
+        HStack(spacing: 0) {
+            // 画面用 Color.clear 撑出那一块的大小再盖上去：fill 的图不会把这一层撑大
+            Color.clear
+                .frame(width: imageW, height: height)
+                .overlay { RemoteImage(url: art, maxPixel: imageW * 3, placeholder: .clear) }
+                .overlay {
+                    if let trailer {
+                        VideoSurface(player: trailer.player, gravity: .resizeAspectFill, background: .clear)
+                            .opacity(trailer.showing ? 1 : 0)
+                            .blur(radius: trailer.showing ? 0 : 14)
+                            .animation(.easeInOut(duration: 0.8), value: trailer.showing)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .clipped()
+            VStack(alignment: .leading, spacing: 0) {
+                DSThumb(url: cover, width: 56)
+                Text(kicker)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(DSInk.secondary)
+                    .padding(.top, 16)
+                Text(title)
+                    .font(.title2.bold())
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .padding(.top, 2)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.callout)
+                        .foregroundStyle(DSInk.secondary)
+                        .lineLimit(1)
+                        .padding(.top, 4)
+                }
+                DSViewPill()
+                    .padding(.top, 16)
+            }
+            // 字压在固定高的一块上：字号最大到 xxLarge，两行片名 + 小海报 + 「查看」还放得下
+            .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+            .padding(.horizontal, 26)
+            .frame(width: width - imageW, height: height, alignment: .leading)
+            .background(tone ?? Color(white: 0.16))
+        }
+        .frame(width: width, height: height)
+        .background(DSFill.placeholder)
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
+        .contentShape(shape)
+        .task(id: art) { await loadTone() }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel([kicker, title, subtitle].filter { !$0.isEmpty }.joined(separator: "，"))
+    }
+
+    private func loadTone() async {
+        guard let art, let img = await ImagePipeline.shared.image(art, maxPixel: 64), let cg = img.cgImage,
+              let c = ImageEffects.averageColor(cg, bottom: 0.3), let t = DSTint.panel(c) else { return }
+        withAnimation(DSMotion.fade) { tone = t }
     }
 }
 

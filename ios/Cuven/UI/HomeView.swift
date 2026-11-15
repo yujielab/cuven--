@@ -268,7 +268,13 @@ struct HomeView: View {
     @ViewBuilder
     private func featuredSeriesShelf(_ m: DSMetrics) -> some View {
         let items = model.featuredSeries(limit: 10)
-        if items.count >= 3 {
+        if items.count >= 3 && m.wide {
+            // 展开（用户给的参考图：游戏 App 展开时「感受這些小品遊戲的獨特魅力」）：分区标题「精选剧集 ›」（点进合集页）
+            // + 两张一排的卡（画面 + 取色的底条：CollectionCard），排在最前的四部
+            DSSection(title: Shelf.featuredSeries.title, metrics: m, route: .shelf(.featuredSeries)) {
+                featuredSeriesGrid(Array(items.prefix(4)), m)
+            }
+        } else if items.count >= 3 {
             FeaturedCollection(title: Shelf.featuredSeries.title, blurb: Shelf.featuredSeries.blurb ?? "",
                                rowTitle: "一集接一集停不下来", rowRoute: .shelf(.featuredSeries),
                                covers: items.prefix(3).map { s in
@@ -278,6 +284,25 @@ struct HomeView: View {
                 ForEach(items, id: \.path) { s in featuredSeriesCard(s, m) }
             }
         }
+    }
+
+    /// 展开时精选剧集的那一片：两张一排、行距就是列距（和合集页一样）
+    private func featuredSeriesGrid(_ items: [Series], _ m: DSMetrics) -> some View {
+        let w = m.cardWidth(columns: 2)
+        let col = GridItem(.fixed(w), spacing: m.gutter, alignment: .top)
+        return LazyVGrid(columns: [col, col], alignment: .leading, spacing: m.gutter) {
+            ForEach(items, id: \.path) { s in
+                let sm = model.seriesMetas[s.path]
+                ZoomLink(route: .series(s), slot: "featured-tv") {
+                    CollectionCard(art: model.seriesWideArt(s).url, cover: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w185"),
+                                   title: sm?.title ?? s.name, line: DetailText.line([s.seasonLabel, sm?.genres?.first]), width: w)
+                }
+                .accessibilityIdentifier("featured-series-card")
+                .seriesMenu(s)
+                .task { await model.ensureSeriesMeta(s) }
+            }
+        }
+        .padding(.horizontal, m.margin)
     }
 
     private func featuredSeriesCard(_ s: Series, _ m: DSMetrics) -> some View {

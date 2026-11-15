@@ -115,8 +115,20 @@ struct CollectionCard: View {
     let title: String
     let line: String
     let width: CGFloat
+    /// 片名上面那一行小字（参考图「Apple Arcade」）：合集页是「Cuven 独占」，主页展开时的年份分区是「电影」「剧集」
+    let kicker: String
     /// 底条的颜色：画面最下面那一截的平均色，压暗、收一点饱和度（白字看得清）；取到之前是深灰
     @State private var tone: Color?
+
+    /// 写明的 init：tone 是 private，系统生成的那个只在这个文件里能用；主页展开时也要用这张卡
+    init(art: URL?, cover: URL?, title: String, line: String, width: CGFloat, kicker: String = "Cuven 独占") {
+        self.art = art
+        self.cover = cover
+        self.title = title
+        self.line = line
+        self.width = width
+        self.kicker = kicker
+    }
 
     var body: some View {
         let artH = (width / 1.85).rounded()
@@ -145,9 +157,11 @@ struct CollectionCard: View {
             // 设计轮 2：和主页精选卡底条同一个小海报（44 点宽，以前 42）
             DSThumb(url: cover, width: 44)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Cuven 独占")
-                    .font(.footnote)
-                    .foregroundStyle(DSInk.secondary)
+                if !kicker.isEmpty {
+                    Text(kicker)
+                        .font(.footnote)
+                        .foregroundStyle(DSInk.secondary)
+                }
                 Text(title)
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(.white)
