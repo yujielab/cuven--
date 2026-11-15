@@ -115,7 +115,7 @@ struct DetailGroupTitle: View {
     var body: some View {
         if let route {
             NavigationLink(value: route) { label(chevron: true) }
-                .buttonStyle(.plain)
+                .buttonStyle(PressableStyle(scale: 0.98))
         } else {
             label(chevron: false)
         }

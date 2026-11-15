@@ -1099,7 +1099,7 @@ struct DetailLinkHeader: View {
             .padding(.vertical, 10)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle(scale: 0.98))
         .padding(.vertical, -10)
         .padding(.horizontal, metrics.margin)
         .accessibilityAddTraits(.isHeader)

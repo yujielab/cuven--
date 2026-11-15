@@ -129,7 +129,7 @@ struct DuoNav: View {
                 }
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle(scale: 0.9))
         .accessibilityLabel(item.label)
         .accessibilityAddTraits(on ? .isSelected : [])
         .accessibilityIdentifier(item.id)
@@ -154,7 +154,7 @@ struct DuoNav: View {
                 }
                 .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle(scale: 0.9))
         .glassEffect(.regular.interactive(), in: Circle())
         .accessibilityLabel("搜索")
         .accessibilityAddTraits(on ? .isSelected : [])

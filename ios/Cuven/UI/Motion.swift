@@ -64,7 +64,25 @@ struct ZoomLink<Label: View>: View {
     }
 }
 
-/// 按下去略缩、略暗，松手带一点弹性回来（Apple TV 卡片的手感）
+/// 全 App 的动效令牌（docs/ios-design.md「动效规范」）：按压、切换、出现 / 消散、大块进出、淡入淡出各一种，
+/// 新写的动效都从这里取，同一类东西动起来是同一个手感；「减弱动态效果」打开时换成短淡入（F59）
+enum DSMotion {
+    /// 按下去略缩略暗、松手带弹性回来（卡片、按钮、标题链接）
+    static let press = Animation.spring(response: 0.28, dampingFraction: 0.68)
+    /// 小切换：开关、符号替换、选中的那块滑过去
+    static let snap = Animation.snappy(duration: 0.26)
+    /// 出现 / 消散：从略小、略糊里弹出来
+    static let appear = Animation.spring(response: 0.5, dampingFraction: 0.86)
+    /// 大块进出：钉住的条、弹层里的整页、名字和主按钮
+    static let hero = Animation.spring(response: 0.6, dampingFraction: 0.82)
+    /// 颜色和画面的淡入淡出（取色、预告片出画面）
+    static let fade = Animation.easeInOut(duration: 0.4)
+
+    /// 「减弱动态效果」打开时：一律换成短淡入，不弹、不缩放
+    static func adapt(_ a: Animation, reduce: Bool) -> Animation { reduce ? .easeInOut(duration: 0.2) : a }
+}
+
+/// 按下去略缩、略暗，松手带一点弹性回来（Apple TV 卡片的手感）；全 App 的按压反馈都是它（DSMotion.press）
 struct PressableStyle: ButtonStyle {
     var scale: CGFloat = 0.96
 
@@ -72,7 +90,7 @@ struct PressableStyle: ButtonStyle {
         configuration.label
             .scaleEffect(configuration.isPressed ? scale : 1)
             .brightness(configuration.isPressed ? -0.06 : 0)
-            .animation(.spring(response: 0.28, dampingFraction: 0.68), value: configuration.isPressed)
+            .animation(DSMotion.press, value: configuration.isPressed)
     }
 }
 

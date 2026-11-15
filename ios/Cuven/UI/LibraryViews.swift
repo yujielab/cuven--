@@ -290,7 +290,7 @@ struct SearchView: View {
                         .frame(minHeight: 44)
                         .contentShape(Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressableStyle(scale: 0.94))
                 .accessibilityAddTraits(s == shown ? .isSelected : [])
                 .accessibilityIdentifier("search-scope-\(s.id)")
             }
