@@ -17,7 +17,8 @@ struct EditorsPick: View {
     let metrics: DSMetrics
     /// 窗口的高：竖着的屏这一块约是宽的 1.3 倍高，横着的屏 0.56 倍，最多窗口高的 82%
     let fullHeight: CGFloat
-    @State private var trailer = ShowcaseTrailer()
+    /// 竖着的这一块按高铺满、横向裁掉两边：画面被放大，要 1080 的码流才露出来（低码率的开头先停在海报画面上）
+    @State private var trailer = ShowcaseTrailer(revealHeight: 1080)
     @State private var tone: Color?
     @State private var onScreen = false
 
@@ -175,7 +176,8 @@ struct YearTrailerRow: View {
     let year: Int
     let items: [HomeEntry]
     let metrics: DSMetrics
-    @State private var trailer = ShowcaseTrailer()
+    /// 卡上的画面约 490 像素高：码流升到 540 再露出来（开头那几秒的低码率画面糊，先停在横版背景上）
+    @State private var trailer = ShowcaseTrailer(revealHeight: 540)
     /// 横着这一排里整张露出来的卡
     @State private var shown: Set<String> = []
     /// 这一排在屏上（竖着滚）
@@ -382,7 +384,9 @@ struct HomeFinale: View {
                 PosterMarquee(posters: Array(posters.dropFirst(half)), tileW: tileW, gap: gap, rightward: true, running: running)
                     .padding(.leading, -(tileW + gap) / 2)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // minWidth + maxWidth 两头都给：一排海报有三千多点宽，只给 maxWidth 的话框会跟着孩子撑宽，
+            // 整个主页那一列跟着变成三千多点宽（居中的字标、按钮、精选区的立体海报都跑到屏幕外面去）
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             // 铺到侧边那一列底下
             .padding(.leading, -metrics.leadingInset)
             .padding(.trailing, -metrics.trailingInset)
@@ -429,7 +433,8 @@ struct PosterMarquee: View {
             let travel = unit > 0 ? CGFloat((t * 16).truncatingRemainder(dividingBy: Double(unit))) : 0
             row.offset(x: rightward ? travel - unit : -travel)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // 两头都给：框就是父视图给的宽，不跟着三千多点宽的那一排撑开（多出来的由外面 clipped 裁掉）
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
     }
 }
 

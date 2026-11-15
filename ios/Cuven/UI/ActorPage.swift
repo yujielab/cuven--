@@ -441,6 +441,14 @@ struct ActorBioSheet: View {
                                 .padding(.leading, lead)
                                 .padding(.trailing, trail)
                                 .padding(.top, 12)
+                        } else if info != nil {
+                            // TMDB 上中文、英文简介都是空的：说一声，不留一块空白
+                            Text("TMDB 上还没有这位演员的简介。")
+                                .font(.callout)
+                                .foregroundStyle(palette.ink2.opacity(0.75))
+                                .padding(.leading, lead)
+                                .padding(.trailing, trail)
+                                .padding(.top, 30)
                         }
                     }
                     .frame(width: w, alignment: .leading)
@@ -507,7 +515,8 @@ enum ActorText {
         let p = (info?.profilePath).flatMap { $0.isEmpty ? nil : $0 } ?? m.profilePath
         guard let p, !p.isEmpty else { return nil }
         if p.hasPrefix("http") || p.hasPrefix("demo:") { return URL(string: p) }
-        return URL(string: "https://image.tmdb.org/t/p/h632" + p)
+        // 原图（h632 只有 632 像素高，铺满整页宽要放大三倍多，糊）；按显示尺寸降采样解码，不吃内存
+        return URL(string: "https://image.tmdb.org/t/p/original" + p)
     }
 
     /// 照片底边那一截的平均色（整页跟着染）
