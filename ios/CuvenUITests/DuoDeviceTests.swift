@@ -36,7 +36,7 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(1)
         snap("duo-00d-privacy-2")
         for id in ["pg-privacy", "pg-cross", "pg-age"] {
-            if let row = reveal(app, id, swipes: 3) { row.tap(); usleep(300_000) } else { print("DUO privacy: \(id) not found") }
+            if let row = reveal(app, id, swipes: 6) { row.tap(); usleep(300_000) } else { print("DUO privacy: \(id) not found") }
         }
         snap("duo-00e-privacy-done")
         if agree.isEnabled {
