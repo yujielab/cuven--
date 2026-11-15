@@ -276,9 +276,10 @@ struct SearchView: View {
                     Haptics.selection()
                     withAnimation(.smooth(duration: 0.3)) { scope = s }
                 } label: {
+                    // 选中的那颗是白底（App 的 tint 是白色，accentColor 跟着它）：字换黑，不然白字压白底整颗看不见（设计轮 1）
                     Text(s.rawValue)
                         .font(.headline)
-                        .foregroundStyle(.white)
+                        .foregroundStyle(s == shown ? Color.black : Color.white)
                         .padding(.horizontal, 16)
                         .frame(height: 36)
                         .background {

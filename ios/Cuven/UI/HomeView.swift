@@ -336,10 +336,10 @@ struct HomeView: View {
         return (TMDBImage.url(e.artwork, "w780"), nil)
     }
 
-    /// 「第 3 集 · 还剩 22 分钟」/「还剩 1 小时 20 分钟」
+    /// 「第 3 集 · 剩余 22 分钟」/「剩余 1 小时 20 分钟」（和分集卡上同一个说法）
     private func remainingLabel(_ e: WatchEntry) -> String {
         let seconds = e.remaining.isFinite ? e.remaining : 0
-        let left = "还剩 " + Format.runtime(max(1, Int((seconds / 60).rounded(.up))))
+        let left = "剩余 " + Format.runtime(max(1, Int((seconds / 60).rounded(.up))))
         if e.seriesPath != nil, let s = e.subtitle, !s.isEmpty { return s + " · " + left }
         return left
     }

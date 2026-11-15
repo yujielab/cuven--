@@ -24,15 +24,17 @@ permissions:
   contents: write
   actions: write
 
-concurrency:
-  group: ios-preview-${{ github.ref }}
-  cancel-in-progress: true
+# 排队按任务分开：iPad 那一遍（约 20 分钟）只要最新的提交，新推送取消正在跑的；
+# 主任务（Duo 演示截图 + 真实片库走查，约一小时）不取消正在跑的，新推送排在后面、只留最新的一个——截图总能发出来
 
 jobs:
   preview:
     # iOS 27.1 SDK 才有 iPhone Duo 的系统行为（竖向栏移到侧边、内容铺到状态栏 / 摄像头那一列底下），
     # 也只有这个镜像里有「iPhone Duo」模拟器
     runs-on: xcode-27
+    concurrency:
+      group: ios-preview-main-${{ github.ref }}
+      cancel-in-progress: false
     # Duo 那一步 30–45 分钟（主页元素多，每次查询都要拍整棵树的快照）；展开版面的 iPad 那一遍在下面单独的 ipad 任务里并行跑
     timeout-minutes: 75
     steps:
@@ -240,6 +242,9 @@ jobs:
   # 只用演示数据（-CuvenDemo YES），截图以 duo-4 开头，提交到 refs/ci/ios-preview-ipad
   ipad:
     runs-on: xcode-27
+    concurrency:
+      group: ios-preview-ipad-${{ github.ref }}
+      cancel-in-progress: true
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

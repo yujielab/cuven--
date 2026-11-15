@@ -36,7 +36,7 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(1)
         snap("duo-00d-privacy-2")
         for id in ["pg-privacy", "pg-cross", "pg-age"] {
-            if let row = reveal(app, app.buttons.matching(identifier: id), swipes: 3) { row.tap(); usleep(300_000) } else { print("DUO privacy: \(id) not found") }
+            if let row = reveal(app, id, swipes: 3) { row.tap(); usleep(300_000) } else { print("DUO privacy: \(id) not found") }
         }
         snap("duo-00e-privacy-done")
         if agree.isEnabled {
@@ -73,20 +73,20 @@ final class DuoDeviceTests: XCTestCase {
         snap("duo-01-home")
         app.swipeUp(); sleep(2); snap("duo-02-home-rows")
         // 精选电影 / 精选剧集：今年 / 去年下面，照游戏 App 合集页的一整块（立体海报 + 大标题 + 一排带底栏的大卡）
-        if reveal(app, app.buttons.matching(identifier: "featured-card"), swipes: 5) != nil {
+        if reveal(app, "featured-card", swipes: 5) != nil {
             sleep(2)
             snap("duo-02c-home-featured")
         } else {
             print("DUO featured card: none")
         }
         // 编辑推荐（照游戏 App「重磅更新」）：预告片铺满做底、「编辑推荐」、底部取色面板（海报、字标、一行简介、「查看」胶囊）
-        if reveal(app, app.buttons.matching(identifier: "editors-pick"), swipes: 4) != nil {
+        if reveal(app, "editors-pick", swipes: 4) != nil {
             sleep(2)
             snap("duo-02h-editors-pick")
         } else {
             print("DUO editors pick: none")
         }
-        if reveal(app, app.buttons.matching(identifier: "featured-series-card"), swipes: 4) != nil {
+        if reveal(app, "featured-series-card", swipes: 4) != nil {
             sleep(2)
             snap("duo-02e-home-featured-tv")
             // 合集页（照游戏 App 的合集页）：那一排的标题「一集接一集停不下来 ›」点进去
@@ -107,9 +107,8 @@ final class DuoDeviceTests: XCTestCase {
         app.scrollHomeToTop(maxSwipes: 12)
 
         // 详情：头图上此刻在屏上的那一页的「详情」（详情页从头图上放大出来）；返回是系统的返回钮（折起时在侧边那一列最上面）
-        let heroDetail = visible(app.buttons.matching(identifier: "hero-detail"), in: app)
-        let poster = app.buttons["movie-card"].firstMatch
-        if heroDetail.isOnScreen(in: app) { heroDetail.tapCenter() } else if poster.exists { poster.tap() }
+        // 一次快照找在屏上的那一个，点它正中（逐个问 5 页头图的「详情」在主页上会「Timed out while evaluating UI query」）
+        if let target = reveal(app, "hero-detail", swipes: 0) ?? reveal(app, "movie-card", swipes: 4) { target.tap() }
         XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "没进到电影详情")
         sleep(2)
         report(app, "detail")
@@ -126,7 +125,7 @@ final class DuoDeviceTests: XCTestCase {
             XCTFail("详情页没有「…」菜单")
         }
         // 简介：一排卡（简介、评分、影片规格）；点简介卡弹出从卡上放大出来的系统弹层，右上关闭
-        if let about = reveal(app, app.buttons.matching(identifier: "about-synopsis"), swipes: 2) {
+        if let about = reveal(app, "about-synopsis", swipes: 2) {
             sleep(1)
             snap("duo-03d-about")
             about.tap(); sleep(2)
@@ -138,14 +137,14 @@ final class DuoDeviceTests: XCTestCase {
             print("DUO about card: none")
         }
         // 预告片：一排 16:9 卡，字压在底部的渐进式模糊上（「正式预告」「▶ 2 分钟」），右下一颗「•••」
-        if reveal(app, app.buttons.matching(identifier: "trailer-card"), swipes: 3) != nil {
+        if reveal(app, "trailer-card", swipes: 3) != nil {
             sleep(2)
             snap("duo-03c-detail-trailers")
         } else {
             print("DUO trailer card: none")
         }
         // 剧照：一排 4:3 大卡（参考图：游戏 App 详情页「挑戰」那一排），字压在下段的渐进式模糊上；点一张全屏看大图
-        if let still = reveal(app, app.buttons.matching(identifier: "still-card"), swipes: 2) {
+        if let still = reveal(app, "still-card", swipes: 2) {
             sleep(2)
             snap("duo-03f-detail-stills")
             still.tap(); sleep(2)
@@ -158,7 +157,7 @@ final class DuoDeviceTests: XCTestCase {
         }
         // 演员 ›：一张半屏 / 全屏的系统弹层，一行一位；点一行，弹层收起、推进那位演员的个人页（照 Apple Music 艺人页）：
         // 大照片 + 名字 + ⓘ ▶ 🔍、最新一部、库中作品；ⓘ 是简介弹层（来自、出生、类型、关于）
-        if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 3) {
+        if let castLink = reveal(app, "cast-link", swipes: 3) {
             castLink.tap(); sleep(2)
             snap("duo-04b-cast")
             let row = app.buttons["cast-row"].firstMatch
@@ -197,7 +196,7 @@ final class DuoDeviceTests: XCTestCase {
         // 五个大类（引人入胜的剧情……刺激犯罪与偷窃）在今年、去年两排下面
         app.swipeUp(); sleep(2); snap("duo-08e-home-categories")
         // 主页结尾（照游戏 App「Arcade」页的结尾）：两行慢慢走的海报墙、Cuven 字标、「查看所有影片」→ 全部影片
-        if let all = reveal(app, app.buttons.matching(identifier: "home-show-all"), swipes: 12) {
+        if let all = reveal(app, "home-show-all", swipes: 12) {
             sleep(2)
             snap("duo-08h-home-finale")
             all.tap(); sleep(2)
@@ -211,7 +210,7 @@ final class DuoDeviceTests: XCTestCase {
 
         // 「文件夹」一排在搜索页（没输入时）：点进文件夹页（大标题、子文件夹一排、海报网格）
         tab(app, "搜索"); sleep(2)
-        if let folder = reveal(app, app.buttons.matching(identifier: "folder-card"), swipes: 2) {
+        if let folder = reveal(app, "folder-card", swipes: 2) {
             snap("duo-08e-search-folders")
             folder.tap(); sleep(2)
             snap("duo-08f-folder")
@@ -232,7 +231,7 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-05g-library-intro")
         app.swipeUp(); sleep(2); snap("duo-05i-library-next")
         app.swipeDown(); sleep(1); app.swipeDown(); sleep(2)
-        if let d = reveal(app, app.buttons.matching(identifier: "library-movie"), swipes: 2) {
+        if let d = reveal(app, "library-movie", swipes: 2) {
             d.tap(); sleep(2)
             XCTAssertTrue(app.buttons["detail-play"].waitForExistence(timeout: 8), "资料库「详情」没进到详情页")
             snap("duo-05h-library-detail")
@@ -252,7 +251,7 @@ final class DuoDeviceTests: XCTestCase {
             app.swipeUp(); sleep(2)
             snap("duo-05c-series-episodes")
             // 长按分集卡：系统菜单，预览里是这一集的剧照、集名和整段简介；点菜单外面收起
-            if let ep = reveal(app, app.buttons.matching(identifier: "episode-card"), swipes: 1) {
+            if let ep = reveal(app, "episode-card", swipes: 1) {
                 ep.press(forDuration: 1.2); sleep(2)
                 snap("duo-05f-episode-more")
                 app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.06)).tap(); sleep(1)
@@ -260,7 +259,7 @@ final class DuoDeviceTests: XCTestCase {
                 print("DUO episode card: none")
             }
             // 季切换：「剧集」标题右边「第 1 季 ⌃⌄」点开是季的菜单，选第 2 季
-            if let seasonMenu = reveal(app, app.buttons.matching(identifier: "season-menu"), swipes: 1) {
+            if let seasonMenu = reveal(app, "season-menu", swipes: 1) {
                 seasonMenu.tap(); sleep(1)
                 snap("duo-05d-season-menu")
                 let s2 = app.buttons["第 2 季"].firstMatch
@@ -281,7 +280,7 @@ final class DuoDeviceTests: XCTestCase {
 
         // 年份页：主页分区标题「2026 ›」进去——系统列表，一行一部（小海报、片名、一行灰字、›）；长按一行是系统菜单（播放 / 想看）
         tab(app, "主页"); sleep(2)
-        if let title = reveal(app, app.buttons.matching(NSPredicate(format: "identifier MATCHES 'section-[0-9]{4}'")), swipes: 8) {
+        if let title = reveal(app, swipes: 8, where: { $0.identifier.range(of: "^section-[0-9]{4}$", options: .regularExpression) != nil }) {
             title.tap(); sleep(2)
             snap("duo-09-year")
             let row = app.buttons.matching(NSPredicate(format: "identifier IN {'year-movie', 'year-series'}")).firstMatch
@@ -332,7 +331,7 @@ final class DuoDeviceTests: XCTestCase {
 
         // 长按海报：菜单（播放 / 想看），预览是那张卡（放在最后：菜单没收起也不影响别的步骤）
         tab(app, "主页"); sleep(2)
-        if let poster = reveal(app, app.buttons.matching(identifier: "movie-card")) {
+        if let poster = reveal(app, "movie-card") {
             poster.press(forDuration: 1.2); sleep(2)
             snap("duo-10-menu")
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.06)).tap(); sleep(1)
@@ -405,10 +404,11 @@ final class DuoDeviceTests: XCTestCase {
     }
 
     private func tab(_ app: XCUIApplication, _ name: String) {
+        // 一次快照找在屏上的那一格（收起的系统标签栏还留在层级里，只是点不到）；找不到再按 label 点第一个
+        if app.tapTab(named: name) { return }
         let q = app.buttons.matching(NSPredicate(format: "label == %@", name))
         guard q.firstMatch.waitForExistence(timeout: 5) else { return }
-        let b = q.allElementsBoundByIndex.first { $0.isHittable } ?? q.firstMatch
-        b.tap()
+        q.firstMatch.tap()
     }
 
     /// 系统返回钮：竖在侧边时不在 navigationBars 里，按它的标识找
@@ -436,19 +436,20 @@ final class DuoDeviceTests: XCTestCase {
         add(a)
     }
 
-    /// 往上滑，直到第一个匹配项在屏上点得到（懒加载的排要滑到才会生成）。只看第一个：每问一次元素就是一次快照
-    private func reveal(_ app: XCUIApplication, _ q: XCUIElementQuery, swipes: Int = 6) -> XCUIElement? {
+    /// 往上滑，直到 match 选中的元素有一个在屏上（懒加载的排要滑到才会生成），给出它正中的点（点按、长按都用它）。
+    /// 一次快照看全部匹配项、不问 isHittable：逐个问元素每次都要重拍整棵树，主页上会「Timed out while evaluating UI query」，
+    /// 只看第一个又会漏掉一排里在屏幕右边外面的那张
+    private func reveal(_ app: XCUIApplication, swipes: Int = 6, where match: (XCUIElementSnapshot) -> Bool) -> XCUICoordinate? {
         for i in 0...swipes {
-            let e = q.firstMatch
-            if e.isOnScreen(in: app) { return e }
+            if let f = app.onScreenFrames(where: match).first {
+                return app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: f.midX, dy: f.midY))
+            }
             if i < swipes { app.swipeUp(); sleep(1) }
         }
         return nil
     }
 
-    /// 第一个真正在屏上的匹配项（切到别的标签后，上一页的同名按钮还留在层级里，只是看不见）
-    private func visible(_ q: XCUIElementQuery, in app: XCUIApplication) -> XCUIElement {
-        _ = q.firstMatch.waitForExistence(timeout: 5)
-        return q.allElementsBoundByIndex.first { $0.isOnScreen(in: app) } ?? q.firstMatch
+    private func reveal(_ app: XCUIApplication, _ id: String, swipes: Int = 6) -> XCUICoordinate? {
+        reveal(app, swipes: swipes) { $0.identifier == id }
     }
 }

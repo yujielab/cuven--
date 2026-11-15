@@ -36,30 +36,15 @@ struct FeaturedCollection<Cards: View>: View {
         }
     }
 
-    /// 「为您的口味量身定制的内容 ›」+ 灰字「向左滑动查看更多」（参考图：粗体大一号的标题，下面一行灰字）
+    /// 「为您的口味量身定制的内容 ›」+ 灰字「向左滑动查看更多」（参考图：粗体标题，下面一行灰字）。
+    /// 设计轮 1：和别的分区标题同一个部件、同一级（Title 2 粗体）：上面已经有大号的「精选电影」和说明，
+    /// 这一行不再在展开时放大到 Title 1 去和它抢；灰字从 Headline 半粗换成 Body 常规
     @ViewBuilder
     private var rowHeading: some View {
-        let label = VStack(alignment: .leading, spacing: 2) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(rowTitle)
-                    .font(metrics.wide ? .title.bold() : .title2.bold())
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                if rowRoute != nil {
-                    Image(systemName: "chevron.forward")
-                        .font(.title3.weight(.bold))
-                        .foregroundStyle(.white.opacity(0.55))
-                }
-                Spacer(minLength: 0)
-            }
-            Text("向左滑动查看更多")
-                .font(.headline)
-                .foregroundStyle(.white.opacity(0.5))
-        }
-        .padding(.horizontal, metrics.margin)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isHeader)
+        let label = DSSectionLabel(title: rowTitle, subtitle: "向左滑动查看更多", chevron: rowRoute != nil)
+            .padding(.horizontal, metrics.margin)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
         if let rowRoute {
             NavigationLink(value: rowRoute) { label.contentShape(Rectangle()) }
                 .buttonStyle(PressableStyle(scale: 0.98))
@@ -118,13 +103,13 @@ struct FeaturedCollectionHeader: View {
                     }
             }
             Text(title)
-                .font(.system(size: metrics.wide ? 44 : 36, weight: .heavy))
+                .font(.dsDisplay(wide: metrics.wide))
                 .foregroundStyle(.white)
                 .padding(.top, 22)
                 .accessibilityAddTraits(.isHeader)
             Text(blurb)
                 .font(.title3)
-                .foregroundStyle(.white.opacity(0.62))
+                .foregroundStyle(DSInk.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 560, alignment: .leading)
                 .padding(.top, 10)
@@ -350,7 +335,7 @@ struct FeaturedCollectionCard: View {
                     if !subtitle.isEmpty {
                         Text(subtitle)
                             .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.62))
+                            .foregroundStyle(DSInk.secondary)
                             .lineLimit(1)
                     }
                 }

@@ -107,14 +107,15 @@ struct DetailCardDivider: View {
     }
 }
 
-/// 一组的标题：粗体大字，可以带「›」点进去
+/// 一组的标题：粗体大字，可以带「›」点进去。设计轮 1：和「剧集」「预告片」「剧照」「演员」同一个部件（DSSectionLabel），
+/// 一页上不再两种标题交替出现
 struct DetailGroupTitle: View {
     let title: String
     var route: Route? = nil
 
     var body: some View {
         if let route {
-            NavigationLink(value: route) { label(chevron: true) }
+            NavigationLink(value: route) { label(chevron: true).contentShape(Rectangle()) }
                 .buttonStyle(PressableStyle(scale: 0.98))
         } else {
             label(chevron: false)
@@ -122,19 +123,9 @@ struct DetailGroupTitle: View {
     }
 
     private func label(chevron: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(title)
-                .font(.title2.bold())
-                .foregroundStyle(.white)
-                .lineLimit(1)
-            if chevron {
-                Image(systemName: "chevron.right")
-                    .font(.title3.weight(.bold))
-                    .foregroundStyle(.white.opacity(0.6))
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isHeader)
+        DSSectionLabel(title: title, chevron: chevron)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -158,8 +149,9 @@ struct DetailDescriptionCard: View {
                 Haptics.light()
                 open = card
             } label: {
+                // 五行简介：松一点的行距（F21：三行以上不用紧行距）
                 Text(overview)
-                    .font(.body)
+                    .font(.dsReading)
                     .foregroundStyle(palette.ink2)
                     .lineLimit(5)
                     .multilineTextAlignment(.leading)
@@ -271,6 +263,8 @@ struct DetailFactsCard: View {
                         .truncationMode(.middle)
                 }
             }
+            // 年份、片长、大小、百分比用等宽数字：一列行里的数字宽窄一致
+            .monospacedDigit()
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.leading, 10)
@@ -286,6 +280,7 @@ struct DetailFactsCard: View {
         case .rating(let r):
             Text(String(format: "%.1f", r))
                 .font(.system(size: 24, weight: .bold))
+                .monospacedDigit()
                 .foregroundStyle(.white)
                 .minimumScaleFactor(0.7)
                 .lineLimit(1)
@@ -520,7 +515,7 @@ struct DetailStillCard: View {
                         .foregroundStyle(.white)
                     Label(detail, systemImage: "photo.stack")
                         .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.85))
+                        .foregroundStyle(DSInk.secondary)
                 }
                 .lineLimit(1)
                 // 字只在模糊那一段里：特大字号时也不冲出去

@@ -159,14 +159,14 @@ struct CollectionCard: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Cuven 独占")
                     .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(DSInk.secondary)
                 Text(title)
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(.white)
                 if !line.isEmpty {
                     Text(line)
                         .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(DSInk.secondary)
                 }
             }
             .lineLimit(1)

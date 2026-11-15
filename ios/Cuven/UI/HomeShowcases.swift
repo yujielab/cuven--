@@ -37,7 +37,7 @@ struct EditorsPick: View {
             ZoomLink(route: .movie(video), slot: "editors-pick", press: false) {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("编辑推荐")
-                        .font(.system(size: metrics.wide ? 44 : 36, weight: .heavy))
+                        .font(.dsDisplay(wide: metrics.wide))
                         .foregroundStyle(.white)
                         .shadow(color: .black.opacity(0.35), radius: 12, y: 2)
                         .accessibilityAddTraits(.isHeader)
@@ -132,7 +132,7 @@ struct EditorsPick: View {
                 if !kicker.isEmpty {
                     Text(kicker)
                         .font(.footnote.weight(.medium))
-                        .foregroundStyle(.white.opacity(0.78))
+                        .foregroundStyle(DSInk.secondary)
                         .lineLimit(1)
                 }
                 LogoImage(url: model.wideLockupArt(video).logo, height: metrics.wide ? 34 : 28, alignment: .leading,
@@ -242,26 +242,13 @@ struct YearTrailerRow: View {
     private var header: some View {
         let current = Calendar.current.component(.year, from: Date())
         let sub = year == current ? "今年上映的新片与新剧" : "\(year) 年上映的电影和剧集"
+        // 设计轮 1：和别的分区标题同一个部件（DSSectionLabel），只是大一级；副标题从 Title 3 收成 Body，「2026」更突出
         return NavigationLink(value: Route.year(year)) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(String(year))
-                        .font(metrics.wide ? .largeTitle.bold() : .title.bold())
-                        .foregroundStyle(.white)
-                    Image(systemName: "chevron.forward")
-                        .font(.title3.weight(.bold))
-                        .foregroundStyle(.white.opacity(0.5))
-                    Spacer(minLength: 0)
-                }
-                Text(sub)
-                    .font(.title3)
-                    .foregroundStyle(.white.opacity(0.5))
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, metrics.margin)
-            .contentShape(Rectangle())
-            .accessibilityElement(children: .combine)
-            .accessibilityAddTraits(.isHeader)
+            DSSectionLabel(title: String(year), subtitle: sub, chevron: true, showcase: true, wide: metrics.wide)
+                .padding(.horizontal, metrics.margin)
+                .contentShape(Rectangle())
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isHeader)
         }
         .buttonStyle(PressableStyle(scale: 0.98))
         .accessibilityIdentifier("section-\(year)")
@@ -344,7 +331,7 @@ struct YearTrailerCard: View {
                     if !subtitle.isEmpty {
                         Text(subtitle)
                             .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.55))
+                            .foregroundStyle(DSInk.secondary)
                     }
                 }
                 .lineLimit(1)

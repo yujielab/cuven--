@@ -254,13 +254,14 @@ struct ActorPage: View {
         if let bio = info?.biography, !bio.isEmpty {
             VStack(alignment: .leading, spacing: 14) {
                 Text("关于")
-                    .font(.dsShelfTitle(wide: m.wide))
+                    .font(.dsSectionTitle)
                     .foregroundStyle(.white)
                     .accessibilityAddTraits(.isHeader)
                 Button { showBio = true } label: {
                     VStack(alignment: .leading, spacing: 10) {
+                        // 五行简介：松一点的行距（F21）
                         Text(bio)
-                            .font(.body)
+                            .font(.dsReading)
                             .foregroundStyle(.white.opacity(0.88))
                             .lineLimit(5)
                             .multilineTextAlignment(.leading)
@@ -364,7 +365,7 @@ struct ActorWorkCard: View {
                 if let role, !role.isEmpty {
                     Text("饰 " + role)
                         .font(.footnote)
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(DSInk.secondary)
                 }
             }
             .lineLimit(1)
@@ -427,7 +428,7 @@ struct ActorBioSheet: View {
                             .padding(.top, 6)
                         if let bio = info?.biography, !bio.isEmpty {
                             Text("关于")
-                                .font(.title2.bold())
+                                .font(.dsSectionTitle)
                                 .foregroundStyle(.white)
                                 .padding(.leading, lead)
                                 .padding(.trailing, trail)
