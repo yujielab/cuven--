@@ -9,14 +9,18 @@ import SwiftUI
 // 卡在排里不放大、不压暗别的卡：滑动时只有画面在卡里极轻地挪一点（S12：约 2%，几乎觉察不到 F61）；按下去略缩，是触感反馈（F55）。
 // 打开「减弱动态效果」：视差、自动翻页都停（F59、S24）。
 
-/// 版面尺寸：都从当前宽度算（F9、D4：看宽度和尺寸类别，不看机型）。
+/// 版面尺寸：都从当前宽度算（F9、D4：看宽度和尺寸类别，不看机型），矮的屏再看一眼高。
 /// 边距按 tvOS 的 80（以 1920 宽为准）缩到眼前的宽度、iPhone 至少 20（S3、S5）；卡与卡之间比 tvOS 的 40 再松一些，
-/// 排与排之间留足（T24），每排露出下一张的一截，告诉人还能往右滑（S8、I13）
+/// 排与排之间留足（T24），每排露出下一张的一截，告诉人还能往右滑（S8、I13）。
+/// 折起（窄于 600）沿用一屏几张的老规矩；展开（Duo 展开、iPad、横拿）按每种卡的目标宽来排（`fit`）：
+/// 屏越宽一排放得越多，卡只在目标附近小幅变化，不会像按档位排那样「屏更宽、卡反而更小」（用户要求：展开时卡片大小、间距、间隔随屏幕）
 struct DSMetrics {
     let width: CGFloat
     /// 两侧的安全区（iPhone Duo 侧边那一列）：横着的一排一直铺到它底下（dsBleedRow），字和网格留在安全区里
     var leadingInset: CGFloat = 0
     var trailingInset: CGFloat = 0
+    /// 安全区里能用的高；0 = 没给（只按宽算）。展开横拿、横拿的手机这种矮的屏，排距和大卡按它收一收
+    var height: CGFloat = 0
 
     /// 展开的 Duo、iPad、横拿：一排多放几张，字号上一级
     var wide: Bool { width >= 600 }
@@ -24,21 +28,49 @@ struct DSMetrics {
     var margin: CGFloat { max(20, (width * 80 / 1920).rounded()) }
     /// 卡与卡的间距：折起至少 18、展开至少 24（留白分组：F3、F12）
     var gutter: CGFloat { max(wide ? 24 : 18, (width * 48 / 1920).rounded()) }
-    /// 排与排之间（T24「行距至少 100」按比例缩，再给标题留位：F12）
-    var shelfGap: CGFloat { max(wide ? 56 : 44, (width * 120 / 1920).rounded() + 24) }
+    /// 排与排之间（T24「行距至少 100」按比例缩，再给标题留位：F12）；
+    /// 展开时再按高收一收（约屏高的 8.5%，至少 52）：展开横拿只有六百多点高，一屏要看得到不止一排
+    var shelfGap: CGFloat {
+        let byWidth = max(wide ? 56 : 44, (width * 120 / 1920).rounded() + 24)
+        guard wide, height > 0 else { return byWidth }
+        return min(byWidth, max(52, (height * 0.085).rounded()))
+    }
     /// 分区标题到那一排卡
     var titleGap: CGFloat { wide ? 16 : 12 }
 
-    /// 竖版海报宽：折起一排两张半、展开竖拿四张多、横拿六张多——最后那张露出一截（S6、S8）
-    var posterWidth: CGFloat { cardWidth(visible: width < 500 ? 2.6 : (width < 800 ? 4.4 : 6.4)) }
-    /// 16:9 卡宽：折起一张多一点，展开两张多（竖）/ 三张多（横）（S6）
-    var wideCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.15 : (width < 800 ? 2.2 : 3.3)) }
-    /// 精选卡（3:4 的大号竖卡）：在「一屏一张多一截 / 两张多 / 三张多」的基础上再大 30%（用户要求）
-    var featureCardWidth: CGFloat { (cardWidth(visible: width < 500 ? 1.3 : (width < 800 ? 2.3 : 3.4)) * 1.3).rounded(.down) }
-    /// 长文案的分集卡（方卡）：折起一屏将近两张，展开三张、四张
-    var episodeTallCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.9 : (width < 800 ? 2.9 : 4.1)) }
-    /// 详情页「简介」那一排卡：折起一张多一截（Apple TV 的简介卡约占屏宽七成）
-    var aboutCardWidth: CGFloat { cardWidth(visible: width < 500 ? 1.4 : (width < 800 ? 2.4 : 3.4)) }
+    /// 竖版海报宽：折起一排两张半；展开约 124–190 点（屏宽的 15%），Duo 展开竖拿四张多、横拿五张半（S6、S8）。
+    /// 只看宽：各页（有没有导航栏、键盘弹没弹出来）同一种卡一样大
+    var posterWidth: CGFloat {
+        guard wide else { return cardWidth(visible: width < 500 ? 2.6 : 4.4) }
+        return fit(target: clamp(width * 0.15, 124, 190), min: 112)
+    }
+    /// 16:9 卡宽（继续观看、资料库、预告片）：折起一张多一点；展开约 283–400 点（屏宽的 36%），Duo 展开两张半（S6）
+    var wideCardWidth: CGFloat {
+        guard wide else { return cardWidth(visible: width < 500 ? 1.15 : 2.2) }
+        return fit(target: clamp(width * 0.36, 283, 400), min: 250)
+    }
+    /// 年份那两排的预告片卡：16:9 画面下面还有一行小海报 + 字标 + 片名 + 灰字 +「查看」——
+    /// 展开时至少 300 点（约 320–420），片名不再只剩两三个字（用户截图：展开横拿时卡只有 229 点，片名、季数都被截断）
+    var trailerCardWidth: CGFloat {
+        guard wide else { return wideCardWidth }
+        return fit(target: clamp(width * 0.38, 320, 420), min: 300, aspect: 9.0 / 16, extra: 82)
+    }
+    /// 精选卡（带底栏的 5:4 大卡）：折起「一屏一张多一截」再大 30%（用户要求）；
+    /// 展开约 340–460 点（底栏里小海报、片名、「Cuven 独占 · 类型」、「查看」放得下）
+    var featureCardWidth: CGFloat {
+        guard wide else { return (cardWidth(visible: width < 500 ? 1.3 : 2.3) * 1.3).rounded(.down) }
+        return fit(target: clamp(width * 0.4, 340, 460), min: 320, aspect: 0.8)
+    }
+    /// 长文案的分集卡（方卡）：折起一屏将近两张；展开约 200–280 点（三行简介放得下）
+    var episodeTallCardWidth: CGFloat {
+        guard wide else { return cardWidth(visible: width < 500 ? 1.9 : 2.9) }
+        return fit(target: clamp(width * 0.26, 200, 280), min: 190)
+    }
+    /// 详情页「简介」那一排卡：折起一张多一截（Apple TV 的简介卡约占屏宽七成）；展开约 260–380 点
+    var aboutCardWidth: CGFloat {
+        guard wide else { return cardWidth(visible: width < 500 ? 1.4 : 2.4) }
+        return fit(target: clamp(width * 0.32, 260, 380), min: 240)
+    }
 
     /// 一屏看得见 visible 张（整数部分完整、小数部分是露出来的那一截）时每张多宽
     func cardWidth(visible v: CGFloat) -> CGFloat {
@@ -46,8 +78,42 @@ struct DSMetrics {
         return ((width - margin - full * gutter) / max(1, v)).rounded(.down)
     }
 
-    /// 网格：一行整数张，左右都是边距（年份页、清单、搜索、文件夹）
-    func gridColumns() -> Int { width < 500 ? 3 : (width < 800 ? 4 : 6) }
+    /// 展开时一排卡多宽（D2、S6、S8）：一屏放 n 张整的、再露出下一张的 1/4 到 3/4，
+    /// 在所有放法里挑卡宽最接近 target、又不小于 min 的那种。
+    /// aspect（卡高 ÷ 卡宽）和 extra（画面下面的字那一截）给了的话：矮的屏上一张卡连字不超过屏高的 60%
+    func fit(target: CGFloat, min floor: CGFloat, aspect: CGFloat = 0, extra: CGFloat = 0) -> CGFloat {
+        var target = target, floor = floor
+        if aspect > 0, height > 0 {
+            let cap = max(120, (height * 0.6 - extra) / aspect)
+            target = min(target, cap)
+            floor = min(floor, cap)
+        }
+        let avail = width - margin
+        var best: CGFloat = 0, bestErr = CGFloat.infinity, widest: CGFloat = 0
+        for n in 1...12 {
+            let room = avail - CGFloat(n) * gutter
+            guard room > 0 else { break }
+            let w = min(room / (CGFloat(n) + 0.25), max(room / (CGFloat(n) + 0.75), target))
+            widest = max(widest, w)
+            guard w >= floor else { continue }
+            if abs(w - target) < bestErr { bestErr = abs(w - target); best = w }
+        }
+        return (best > 0 ? best : widest).rounded(.down)
+    }
+
+    private func clamp(_ v: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat { min(hi, max(lo, v)) }
+
+    /// 网格：一行整数张，左右都是边距（年份页、清单、搜索、文件夹）。折起 3 / 4 张；展开按海报的目标宽排
+    func gridColumns() -> Int {
+        guard wide else { return width < 500 ? 3 : 4 }
+        let target = clamp(width * 0.15, 124, 190)
+        var best = 4, bestErr = CGFloat.infinity
+        for n in 3...10 {
+            let err = abs(cardWidth(columns: n) - target)
+            if err < bestErr { bestErr = err; best = n }
+        }
+        return best
+    }
     func gridCardWidth() -> CGFloat { cardWidth(columns: gridColumns()) }
 
     /// 一行正好 n 张、左右都是边距时每张多宽

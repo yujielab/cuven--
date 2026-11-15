@@ -15,7 +15,7 @@ struct YearView: View {
         let movies = entries.filter { if case .movie = $0 { return true } else { return false } }.count
         GeometryReader { geo in
             let insets = geo.safeAreaInsets
-            let metrics = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing)
+            let metrics = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing, height: geo.size.height)
             ScrollView {
                 if entries.isEmpty {
                     ContentUnavailableView("这一年还没有影片", systemImage: "film",

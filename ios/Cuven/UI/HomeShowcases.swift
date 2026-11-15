@@ -184,7 +184,8 @@ struct YearTrailerRow: View {
     @State private var onScreen = false
 
     var body: some View {
-        let w = metrics.wideCardWidth
+        // 展开时卡至少 300 点宽：下面那一行小海报 + 片名 + 灰字 +「查看」放得下（DSMetrics.trailerCardWidth）
+        let w = metrics.trailerCardWidth
         VStack(alignment: .leading, spacing: metrics.titleGap + 2) {
             header
             DSShelf(metrics: metrics) {

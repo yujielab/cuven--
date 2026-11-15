@@ -22,7 +22,7 @@ struct ShelfView: View {
         let entries = self.entries
         return GeometryReader { geo in
             let insets = geo.safeAreaInsets
-            let metrics = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing)
+            let metrics = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing, height: geo.size.height)
             ScrollView {
                 if entries.isEmpty {
                     emptyState.padding(.top, 60)

@@ -18,7 +18,7 @@ struct CollectionPage: View {
     var body: some View {
         GeometryReader { geo in
             let insets = geo.safeAreaInsets
-            let m = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing)
+            let m = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing, height: geo.size.height)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     FeaturedCollectionHeader(title: shelf.title, blurb: shelf.blurb ?? "", covers: covers,

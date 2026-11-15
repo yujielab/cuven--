@@ -158,6 +158,7 @@ struct SearchView: View {
                 // 系统栏竖在侧边（iPhone Duo 折起时 / 展开横拿时）：搜索框不挂在底部的标签栏上，得在标题下面一直显示
                 let sideBars = abs(geo.safeAreaInsets.leading - geo.safeAreaInsets.trailing) > 30
                 let insets = geo.safeAreaInsets
+                // 不带高：键盘弹出来时版面不跟着变
                 content(DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing))
                     .searchable(text: $query, placement: sideBars ? .navigationBarDrawer(displayMode: .always) : .automatic,
                                 prompt: "电影、剧集、年份")
