@@ -228,9 +228,10 @@ struct DetailFactsCard: View {
                         Text("在 TMDB 中查看")
                         Image(systemName: "arrow.up.right")
                     }
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, minHeight: 60)
+                    // 点按区还是 44 点（F74）
+                    .frame(maxWidth: .infinity, minHeight: 44)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(DetailRowPress())
@@ -239,33 +240,43 @@ struct DetailFactsCard: View {
         }
     }
 
+    /// 一条事实。用户要求整张卡矮一半（约 527 → 265 点）：左边一列 84 → 56 点、大号评分 / 徽章 / 符号小一号；
+    /// 主字和副字接成一行（「2026 年 · 第 1 季」「1080p · H.264」，文件名这种长的从中间省略），每行至少 34 点；
+    /// 评分那一行是两行小字：星星 +「TMDB 评分」，下面「高于片库里 91% 的剧集」
     private func row(_ f: DetailFact) -> some View {
-        HStack(spacing: 18) {
+        HStack(spacing: 12) {
             lead(f.lead)
-                .frame(width: 84)
-            VStack(alignment: .leading, spacing: 4) {
+                .frame(width: 56)
+            Group {
                 if case .rating(let r) = f.lead {
-                    DetailStars(value: r / 2)
-                }
-                Text(f.text)
-                    .font(.title3)
-                    .foregroundStyle(palette.ink2)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let sub = f.sub, !sub.isEmpty {
-                    Text(sub)
-                        .font(.callout)
-                        .foregroundStyle(palette.ink2.opacity(0.8))
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            DetailStars(value: r / 2, size: 12)
+                            Text(f.text)
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(palette.ink2)
+                        }
+                        if let sub = f.sub, !sub.isEmpty {
+                            Text(sub)
+                                .font(.footnote)
+                                .foregroundStyle(palette.ink2.opacity(0.8))
+                        }
+                    }
+                    .lineLimit(1)
+                } else {
+                    Text([f.text, f.sub ?? ""].filter { !$0.isEmpty }.joined(separator: " · "))
+                        .font(.subheadline)
+                        .foregroundStyle(palette.ink2)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.leading, 12)
-        .padding(.trailing, 20)
-        .padding(.vertical, 14)
-        .frame(minHeight: 78)
+        .padding(.leading, 10)
+        .padding(.trailing, 18)
+        .padding(.vertical, 7)
+        .frame(minHeight: 34)
         .accessibilityElement(children: .combine)
     }
 
@@ -274,22 +285,22 @@ struct DetailFactsCard: View {
         switch l {
         case .rating(let r):
             Text(String(format: "%.1f", r))
-                .font(.system(size: 38, weight: .bold))
+                .font(.system(size: 24, weight: .bold))
                 .foregroundStyle(.white)
                 .minimumScaleFactor(0.7)
                 .lineLimit(1)
         case .badge(let code):
             Text(code)
-                .font(.system(size: 19, weight: .bold))
+                .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(palette.badge)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
-                .padding(.horizontal, 7)
-                .frame(minWidth: 46, minHeight: 30)
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(palette.badge, lineWidth: 2.5))
+                .padding(.horizontal, 5)
+                .frame(minWidth: 32, minHeight: 20)
+                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(palette.badge, lineWidth: 1.5))
         case .symbol(let s):
             Image(systemName: s)
-                .font(.system(size: 30, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(.white)
         }
     }
@@ -298,6 +309,7 @@ struct DetailFactsCard: View {
 /// 五颗星（满分 5，半颗也画）
 struct DetailStars: View {
     let value: Double
+    var size: CGFloat = 17
 
     var body: some View {
         let v = (min(5, max(0, value)) * 2).rounded() / 2
@@ -307,7 +319,7 @@ struct DetailStars: View {
                 Image(systemName: d >= 1 ? "star.fill" : (d >= 0.5 ? "star.leadinghalf.filled" : "star"))
             }
         }
-        .font(.system(size: 17, weight: .semibold))
+        .font(.system(size: size, weight: .semibold))
         .foregroundStyle(.white)
         .accessibilityHidden(true)
     }
