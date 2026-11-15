@@ -648,6 +648,8 @@ struct DetailScaffold<Episodes: View>: View {
     @State private var castSheet: CastSheetRequest?
     @State private var trailerPick: DetailTrailerPick?
     @State private var stillPick: DetailStillPick?
+    /// 演员名单里点的那一位：收起弹层以后推进去
+    @State private var personPush: CastMember?
     /// 剧照大图从点的那张卡上放大出来
     @Namespace private var stillsNS
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -733,7 +735,17 @@ struct DetailScaffold<Episodes: View>: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         // 全部演员：一张弹层，点演员在弹层里推进去，不叠第二层（C50、C56）
-        .sheet(item: $castSheet) { r in CastSheet(people: cast, start: r.start) }
+        .sheet(item: $castSheet) { r in
+            CastSheet(people: cast) { m in
+                // 名单里点一位：先收起弹层，再在详情页这一栈里推进那位演员的个人页
+                castSheet = nil
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(380))
+                    personPush = m
+                }
+            }
+        }
+        .navigationDestination(item: $personPush) { m in ActorPage(member: m) }
         // 预告片：全屏，系统那一套手势和关闭（C49、S22）
         .fullScreenCover(item: $trailerPick) { p in
             TrailerPlayerView(movieTitle: title, trailers: trailers, start: p.index)
@@ -938,11 +950,11 @@ struct DetailScaffold<Episodes: View>: View {
                 castSheet = CastSheetRequest(start: nil)
             }
             DSShelf(metrics: m) {
-                ForEach(Array(cast.prefix(20).enumerated()), id: \.offset) { _, c in
-                    Button { castSheet = CastSheetRequest(start: c) } label: {
+                ForEach(Array(cast.prefix(20).enumerated()), id: \.offset) { i, c in
+                    // 点一位：推进这位演员的个人页（从这张圆照片上放大出来）
+                    ZoomLink(route: .person(c), slot: "cast-\(i)") {
                         DetailMonogram(member: c, diameter: d, metrics: m)
                     }
-                    .buttonStyle(PressableStyle())
                     .accessibilityIdentifier("cast-card")
                 }
             }

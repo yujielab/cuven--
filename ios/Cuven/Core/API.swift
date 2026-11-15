@@ -115,6 +115,13 @@ final class APIClient: @unchecked Sendable {
         return p.episodes
     }
 
+    // MARK: 演员
+
+    /// 演员个人页：简介、出生、出生地、全部作品的编号（老 Worker 没有这个接口：抛错，调用的地方当没有）
+    func person(id: Int) async throws -> PersonInfo {
+        try await get("/api/tmdb/person", [("id", String(id))], timeout: 15)
+    }
+
     // MARK: 首页大图
 
     func heroes() async throws -> [Hero] {

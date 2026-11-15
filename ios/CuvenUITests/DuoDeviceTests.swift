@@ -157,18 +157,33 @@ final class DuoDeviceTests: XCTestCase {
         } else {
             print("DUO still card: none")
         }
-        // 演员 ›：一张半屏 / 全屏的系统弹层，一行一位；点一行在弹层里推进那位演员（「在资料库中搜索」「在 TMDB 查看」）
+        // 演员 ›：一张半屏 / 全屏的系统弹层，一行一位；点一行，弹层收起、推进那位演员的个人页（照 Apple Music 艺人页）：
+        // 大照片 + 名字 + ⓘ ▶ 🔍、最新一部、库中作品；ⓘ 是简介弹层（来自、出生、类型、关于）
         if let castLink = reveal(app, app.buttons.matching(identifier: "cast-link"), swipes: 3) {
             castLink.tap(); sleep(2)
             snap("duo-04b-cast")
             let row = app.buttons["cast-row"].firstMatch
             if row.waitForExistence(timeout: 3) {
-                row.tap(); sleep(2)
+                row.tap(); sleep(3)
                 snap("duo-04e-actor")
+                app.swipeUp(); sleep(2)
+                snap("duo-04f-actor-works")
+                let info = app.buttons["actor-info"].firstMatch
+                if !info.isOnScreen(in: app) { app.swipeDown(); sleep(1) }
+                if info.waitForExistence(timeout: 3) && info.isHittable {
+                    info.tap(); sleep(2)
+                    snap("duo-04g-actor-bio")
+                    let close = app.buttons["actor-bio-close"].firstMatch
+                    if close.waitForExistence(timeout: 3) { close.tap() } else { app.swipeDown() }
+                    sleep(1)
+                } else {
+                    print("DUO actor info: not hittable")
+                }
+                back(app)
             } else {
                 print("DUO cast sheet: no rows")
+                closeSheet(app)
             }
-            closeSheet(app)
         } else {
             XCTFail("详情页没有「演员 ›」")
         }

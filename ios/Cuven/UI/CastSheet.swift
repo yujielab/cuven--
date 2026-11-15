@@ -3,8 +3,8 @@ import SwiftUI
 // MARK: - 演员弹层（规则编号见 docs/ios-design.md：C 是组件、F 是基础、T 是 tvOS）
 //
 // 一张 .medium / .large 的系统弹层（C50），带拉把（C51），能下滑关掉（C52），右上一颗 xmark（C14、C55）。
-// 里面是一个导航栈：名单一行一位（小圆照片 + 名字 + 角色，系统的「›」：C29、C31），点一位就在弹层里推进去，
-// 不再叠第二张弹层（C56）；从详情页那排圆形照片点进来的，直接停在那一位上，左上角还能返回名单。
+// 名单一行一位（小圆照片 + 名字 + 角色，「›」：C29、C31）；点一位，弹层收起，在详情页这一栈里推进那位演员的
+// 个人页（ActorPage：照 Apple Music 艺人页，不叠第二张弹层：C56）。详情页那排圆形照片直接推个人页，不经过名单。
 // 用系统的 List 和弹层底色，不自绘底板、描边和胶囊按钮（F51、C17）。
 
 /// 演员弹层从哪儿开始：nil 是名单；点了某一位就直接推到那一位（还能返回名单：C56）
@@ -15,20 +15,26 @@ struct CastSheetRequest: Identifiable {
 
 struct CastSheet: View {
     let people: [CastMember]
-    @State private var path: [CastMember]
+    /// 点了一位：交给详情页（收起弹层、推进那位演员的个人页）
+    let onOpen: (CastMember) -> Void
     @Environment(\.dismiss) private var dismiss
 
-    init(people: [CastMember], start: CastMember? = nil) {
-        self.people = people
-        _path = State(initialValue: start.map { [$0] } ?? [])
-    }
-
     var body: some View {
-        NavigationStack(path: $path) {
+        NavigationStack {
             List {
                 ForEach(Array(people.enumerated()), id: \.offset) { _, m in
-                    NavigationLink(value: m) { CastRow(member: m) }
-                        .accessibilityIdentifier("cast-row")
+                    Button { onOpen(m) } label: {
+                        HStack {
+                            CastRow(member: m)
+                            Spacer(minLength: 8)
+                            Image(systemName: "chevron.forward")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("cast-row")
                 }
             }
             .listStyle(.plain)
@@ -36,17 +42,12 @@ struct CastSheet: View {
             .navigationTitle("演员")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { closeButton }
-            .navigationDestination(for: CastMember.self) { m in
-                // 推进来的页面自己的 dismiss 只会退回名单；关整张弹层用这里的
-                ActorPanel(member: m, close: { dismiss() })
-                    .toolbar { closeButton }
-            }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
     }
 
-    /// 关掉整张弹层：系统的 xmark（C14）；推进去以后也在——左边是返回，右边是它
+    /// 关掉整张弹层：系统的 xmark（C14）
     private var closeButton: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             Button { dismiss() } label: {
@@ -102,61 +103,6 @@ struct CastPhoto: View {
         .frame(width: size, height: size)
         .clipShape(Circle())
         .accessibilityHidden(true)
-    }
-}
-
-// MARK: - 一位演员（在弹层里推进来的那一页）
-
-/// 大圆照片、名字、角色；下面两件事：在资料库里搜这位、去 TMDB 看（C29、C37：动词开头）。
-/// 名字已经写在页面上，导航栏不再重复标题（C12）
-struct ActorPanel: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.openURL) private var openURL
-    let member: CastMember
-    /// 关掉整张弹层
-    let close: () -> Void
-
-    var body: some View {
-        List {
-            Section {
-                VStack(spacing: 10) {
-                    CastPhoto(member: member, size: 120, large: true)
-                    Text(member.name.isEmpty ? "未知演员" : member.name)
-                        .font(.title2.bold())
-                        .foregroundStyle(.primary)
-                        .multilineTextAlignment(.center)
-                    if let ch = member.character, !ch.isEmpty {
-                        Text("饰 " + ch)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .listRowBackground(Color.clear)
-                .accessibilityElement(children: .combine)
-            }
-            Section {
-                Button {
-                    let name = member.name
-                    close()
-                    guard !name.isEmpty else { return }
-                    // 换到「搜索」标签并把名字填进去（详情页留在原来那个标签里）
-                    model.searchRequest = name
-                } label: {
-                    Label("在资料库中搜索", systemImage: "magnifyingglass")
-                }
-                .accessibilityIdentifier("actor-search")
-                Button {
-                    if let u = CastSheetText.tmdbPage(member) { openURL(u) }
-                } label: {
-                    Label("在 TMDB 查看", systemImage: "arrow.up.right.square")
-                }
-                .accessibilityIdentifier("actor-tmdb")
-            }
-        }
-        .listStyle(.insetGrouped)
-        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

@@ -1,0 +1,535 @@
+import SwiftUI
+
+// MARK: - 演员个人页（照用户给的参考图：Apple Music 的艺人页）
+//
+// · 最上面一大张人像（TMDB 的照片，铺满窗口宽、连同 iPhone Duo 侧边那一列），下段渐进式模糊，化进从照片取的底色，整页是这个颜色；
+// · 名字居中、大号特粗，压在模糊上；下面三颗：ⓘ（简介弹层）、白色大圆 ▶（放这位在片库里最新的一部电影）、
+//   🔍（换到搜索、在资料库里搜这位）；
+// · 一张卡：片库里最新的那一部（海报、上映日期、片名、「饰 角色」），右边一颗 ＋ 加入想看（再点是 ✓ 移出）；
+// · 「库中作品」：电影一排、剧集一排（海报 + 片名 + 演的谁），点进详情（从卡上放大出来）；
+// · 「关于」：简介前五行，点开是简介弹层（大照片、名字、来自、出生、类型、关于全文：参考图的「關於」页）。
+// 导航栏里先不写字，滚过名字才接上；右上分享（TMDB 的演员页）。所有出现都是模糊淡入，按下去略缩、松手回弹。
+
+struct ActorPage: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let member: CastMember
+    @State private var info: PersonInfo?
+    /// 照片底边的平均色：整页跟着染（DetailPalette）
+    @State private var edge: UIColor?
+    @State private var showBio = false
+    @State private var nameInBar = false
+    @State private var appeared = false
+
+    private var name: String {
+        let n = info?.name ?? member.name
+        return n.isEmpty ? "未知演员" : n
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let insets = geo.safeAreaInsets
+            let m = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing)
+            let fullW = geo.size.width + insets.leading + insets.trailing
+            let fullH = geo.size.height + insets.top + insets.bottom
+            let photoH = ActorText.photoHeight(width: fullW, height: fullH)
+            let works = model.works(of: member, info: info)
+            let palette = DetailPalette.from(edge)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    hero(m, works: works, width: fullW, height: photoH, palette: palette)
+                    VStack(alignment: .leading, spacing: m.shelfGap) {
+                        if let latest = works.first {
+                            latestCard(latest, m, palette: palette)
+                        }
+                        let movies = works.filter { if case .movie = $0.entry { return true } else { return false } }
+                        let shows = works.filter { if case .series = $0.entry { return true } else { return false } }
+                        if !movies.isEmpty { worksShelf("库中的电影", movies, m) }
+                        if !shows.isEmpty { worksShelf("库中的剧集", shows, m) }
+                        if works.isEmpty {
+                            Text(info == nil ? "正在查这位演员在片库里的作品…" : "片库里还没有这位演员的作品。")
+                                .font(.callout)
+                                .foregroundStyle(palette.ink2)
+                                .padding(.horizontal, m.margin)
+                                .transition(.dsBlurFade)
+                        }
+                        aboutCard(m, palette: palette)
+                    }
+                    .padding(.top, 26)
+                    .padding(.bottom, 44)
+                    .padding(.leading, insets.leading)
+                    .padding(.trailing, insets.trailing)
+                    .animation(.spring(response: 0.5, dampingFraction: 0.88), value: works.count)
+                }
+                .background(alignment: .top) {
+                    // 整页的颜色：照片下面从照片的主色开始，往下慢慢沉到同色相的深色
+                    VStack(spacing: 0) {
+                        Color.clear.frame(height: photoH * 0.6)
+                        LinearGradient(colors: [palette.base, palette.deep], startPoint: .top, endPoint: .bottom)
+                            .frame(height: max(900, fullH * 1.6))
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+            .background(palette.deep)
+            .ignoresSafeArea(edges: [.top, .horizontal])
+            .onScrollGeometryChange(for: Bool.self) { g in
+                g.contentOffset.y + g.contentInsets.top > photoH - 120
+            } action: { _, v in
+                withAnimation(.easeOut(duration: 0.2)) { nameInBar = v }
+            }
+            .animation(.easeInOut(duration: 0.6), value: edge)
+        }
+        .navigationTitle(nameInBar ? name : "")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .toolbar {
+            if let url = CastSheetText.tmdbPage(member) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    ShareLink(item: url, subject: Text(name)) {
+                        Label("分享", systemImage: "square.and.arrow.up")
+                    }
+                    .accessibilityIdentifier("actor-share")
+                }
+            }
+        }
+        .sheet(isPresented: $showBio) {
+            ActorBioSheet(member: member, info: info, palette: DetailPalette.from(edge))
+        }
+        .task(id: member.id) { info = await model.person(member) }
+        .task(id: ActorText.photo(member, info: info)) { edge = await ActorText.edgeColor(ActorText.photo(member, info: info)) }
+        .onAppear {
+            let anim: Animation = reduceMotion ? Animation.easeOut(duration: 0.2)
+                : Animation.spring(response: 0.6, dampingFraction: 0.82).delay(0.08)
+            withAnimation(anim) { appeared = true }
+        }
+    }
+
+    // MARK: 照片 + 名字 + 三颗钮
+
+    private func hero(_ m: DSMetrics, works: [ActorWork], width: CGFloat, height: CGFloat, palette: DetailPalette) -> some View {
+        let photo = ActorText.photo(member, info: info)
+        let firstMovie: Video? = works.lazy.compactMap { w -> Video? in
+            if case .movie(let v) = w.entry { return v } else { return nil }
+        }.first
+        return ZStack(alignment: .bottom) {
+            ZStack {
+                palette.base
+                Text(CastSheetText.initial(member.name))
+                    .font(.system(size: width * 0.3, weight: .heavy, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.18))
+                if photo != nil {
+                    // 人像是 2:3：按宽铺满、从顶上开始裁（脸在上面），下段渐进式模糊
+                    RemoteImage(url: photo, maxPixel: width * 3, placeholder: .clear, effect: .bottomBlur)
+                        .frame(width: width, height: width * 1.5)
+                        .frame(width: width, height: height, alignment: .top)
+                        .clipped()
+                }
+                // 化进底色：照片下面四成慢慢沉到页面的颜色
+                LinearGradient(stops: [.init(color: palette.base.opacity(0), location: 0.55),
+                                       .init(color: palette.base.opacity(0.65), location: 0.82),
+                                       .init(color: palette.base, location: 1)],
+                               startPoint: .top, endPoint: .bottom)
+            }
+            .frame(width: width, height: height)
+            .clipped()
+            .accessibilityHidden(true)
+
+            VStack(spacing: 22) {
+                Text(name)
+                    .font(.system(size: m.wide ? 52 : 40, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.7)
+                    .shadow(color: .black.opacity(0.25), radius: 10, y: 2)
+                    .accessibilityAddTraits(.isHeader)
+                HStack(spacing: m.wide ? 44 : 34) {
+                    ActorCircleButton(symbol: "info", size: 56, label: "简介", id: "actor-info") { showBio = true }
+                    ActorPlayButton(enabled: firstMovie != nil,
+                                    label: firstMovie.map { "播放《\(model.title($0))》" } ?? "片库里还没有这位演员的电影") {
+                        if let v = firstMovie { play(v) }
+                    }
+                    ActorCircleButton(symbol: "magnifyingglass", size: 56, label: "在资料库中搜索", id: "actor-search") {
+                        let n = name
+                        guard !n.isEmpty else { return }
+                        model.searchRequest = n
+                    }
+                }
+            }
+            .padding(.horizontal, m.margin)
+            .padding(.bottom, 26)
+            .scaleEffect(appeared ? 1 : 0.94)
+            .opacity(appeared ? 1 : 0)
+            .blur(radius: appeared ? 0 : 8)
+        }
+        .frame(width: width, height: height)
+    }
+
+    private func play(_ v: Video) {
+        PlayerCoordinator.shared.play(PlayRequest(path: v.path, name: v.name, title: model.title(v),
+                                                  subtitle: model.year(v).map { String($0) },
+                                                  artwork: model.backgroundArtString(v)), model: model)
+    }
+
+    // MARK: 最新的那一部（参考图「Rise Without A Sound - Single」那张卡）
+
+    private func latestCard(_ w: ActorWork, _ m: DSMetrics, palette: DetailPalette) -> some View {
+        let item = ActorText.item(w, model: model)
+        let saved = model.watchlist.contains(item.key)
+        return ZStack(alignment: .trailing) {
+            ZoomLink(route: item.route, slot: "actor-latest") {
+                HStack(spacing: 16) {
+                    RemoteImage(url: item.poster, maxPixel: 300)
+                        .frame(width: 76, height: 114)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.28), radius: 6, y: 3)
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let d = ActorText.longDate(w.date) {
+                            Text(d)
+                                .font(.subheadline)
+                                .foregroundStyle(palette.ink2)
+                        }
+                        Text(item.title)
+                            .font(.title3.weight(.bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                        Text(item.line)
+                            .font(.subheadline)
+                            .foregroundStyle(palette.ink2)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 56)
+                }
+                .padding(16)
+                .background(RoundedRectangle(cornerRadius: 30, style: .continuous).fill(Color.white.opacity(0.1)))
+                .overlay(RoundedRectangle(cornerRadius: 30, style: .continuous).strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+                .contentShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+            }
+            .accessibilityIdentifier("actor-latest")
+            Button {
+                model.watchlist.toggle(item.key, kind: item.kind)
+            } label: {
+                Image(systemName: saved ? "checkmark" : "plus")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .contentTransition(.symbolEffect(.replace))
+                    .frame(width: 46, height: 46)
+                    .background(Circle().fill(Color.white.opacity(0.18)))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(PressableStyle(scale: 0.9))
+            .sensoryFeedback(.selection, trigger: saved)
+            .padding(.trailing, 18)
+            .accessibilityLabel(saved ? "从想看中移除" : "加入想看")
+            .accessibilityIdentifier("actor-watchlist")
+        }
+        .frame(maxWidth: 720)
+        .padding(.horizontal, m.margin)
+        .animation(.snappy(duration: 0.25), value: saved)
+    }
+
+    // MARK: 库中作品
+
+    private func worksShelf(_ title: String, _ list: [ActorWork], _ m: DSMetrics) -> some View {
+        DSSection(title: title, metrics: m) {
+            DSShelf(metrics: m) {
+                ForEach(list) { w in
+                    let item = ActorText.item(w, model: model)
+                    ZoomLink(route: item.route, slot: "actor-\(title)") {
+                        ActorWorkCard(poster: item.poster, title: item.title, role: w.character, width: m.posterWidth)
+                    }
+                    .accessibilityIdentifier("actor-work")
+                }
+            }
+        }
+    }
+
+    // MARK: 关于
+
+    @ViewBuilder
+    private func aboutCard(_ m: DSMetrics, palette: DetailPalette) -> some View {
+        if let bio = info?.biography, !bio.isEmpty {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("关于")
+                    .font(.dsShelfTitle(wide: m.wide))
+                    .foregroundStyle(.white)
+                    .accessibilityAddTraits(.isHeader)
+                Button { showBio = true } label: {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(bio)
+                            .font(.body)
+                            .foregroundStyle(.white.opacity(0.88))
+                            .lineLimit(5)
+                            .multilineTextAlignment(.leading)
+                        Text("更多")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+                    .background(RoundedRectangle(cornerRadius: 26, style: .continuous).fill(Color.white.opacity(0.08)))
+                    .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+                }
+                .buttonStyle(PressableStyle(scale: 0.98))
+                .accessibilityHint("打开简介")
+                .accessibilityIdentifier("actor-about")
+            }
+            .frame(maxWidth: 720, alignment: .leading)
+            .padding(.horizontal, m.margin)
+            .transition(.dsBlurFade)
+        }
+    }
+}
+
+/// 照片下面那三颗里两边的小圆钮：玻璃圆、按下去略缩回弹、点一下轻触感
+struct ActorCircleButton: View {
+    let symbol: String
+    let size: CGFloat
+    let label: String
+    let id: String
+    let action: () -> Void
+    @State private var taps = 0
+
+    var body: some View {
+        Button {
+            taps += 1
+            action()
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: size * 0.38, weight: .semibold))
+                .foregroundStyle(.white)
+                .symbolEffect(.bounce, value: taps)
+                .frame(width: size, height: size)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(PressableStyle(scale: 0.9))
+        .sensoryFeedback(.impact(weight: .light), trigger: taps)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(id)
+    }
+}
+
+/// 中间那颗白色大圆 ▶（参考图）：没有可放的电影时变淡、点不了
+struct ActorPlayButton: View {
+    let enabled: Bool
+    let label: String
+    let action: () -> Void
+    @State private var taps = 0
+
+    var body: some View {
+        Button {
+            taps += 1
+            action()
+        } label: {
+            Image(systemName: "play.fill")
+                .font(.system(size: 30, weight: .bold))
+                .foregroundStyle(.black)
+                .offset(x: 2)
+                .symbolEffect(.bounce, value: taps)
+                .frame(width: 76, height: 76)
+                .background(Circle().fill(.white))
+                .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+                .contentShape(Circle())
+        }
+        .buttonStyle(PressableStyle(scale: 0.92))
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.45)
+        .sensoryFeedback(.impact(weight: .medium), trigger: taps)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier("actor-play")
+    }
+}
+
+/// 库中作品的一张：2:3 海报，下面片名和「饰 谁」
+struct ActorWorkCard: View {
+    let poster: URL?
+    let title: String
+    let role: String?
+    let width: CGFloat
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            RemoteImage(url: poster, maxPixel: width * 3)
+                .frame(width: width, height: (width * 1.5).rounded())
+                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous).strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                if let role, !role.isEmpty {
+                    Text("饰 " + role)
+                        .font(.footnote)
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+            }
+            .lineLimit(1)
+        }
+        .frame(width: width, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - 简介弹层（参考图「關於」页：大照片、名字、来自、出生、类型、关于全文）
+
+struct ActorBioSheet: View {
+    let member: CastMember
+    let info: PersonInfo?
+    let palette: DetailPalette
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let name = (info?.name).flatMap { $0.isEmpty ? nil : $0 } ?? (member.name.isEmpty ? "未知演员" : member.name)
+        let photo = ActorText.photo(member, info: info)
+        NavigationStack {
+            GeometryReader { geo in
+                let w = geo.size.width
+                let photoH = (w * 1.05).rounded()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ZStack(alignment: .bottomLeading) {
+                            ZStack {
+                                palette.base
+                                if photo != nil {
+                                    RemoteImage(url: photo, maxPixel: w * 3, placeholder: .clear, effect: .bottomBlur)
+                                        .frame(width: w, height: w * 1.5)
+                                        .frame(width: w, height: photoH, alignment: .top)
+                                        .clipped()
+                                }
+                                LinearGradient(stops: [.init(color: palette.base.opacity(0), location: 0.5),
+                                                       .init(color: palette.base, location: 1)],
+                                               startPoint: .top, endPoint: .bottom)
+                            }
+                            .frame(width: w, height: photoH)
+                            .clipped()
+                            .accessibilityHidden(true)
+                            Text(name)
+                                .font(.system(size: 40, weight: .heavy))
+                                .foregroundStyle(.white)
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.7)
+                                .padding(.horizontal, 24)
+                                .padding(.bottom, 18)
+                                .accessibilityAddTraits(.isHeader)
+                        }
+                        facts
+                            .padding(.horizontal, 24)
+                            .padding(.top, 6)
+                        if let bio = info?.biography, !bio.isEmpty {
+                            Text("关于")
+                                .font(.title2.bold())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 24)
+                                .padding(.top, 34)
+                                .accessibilityAddTraits(.isHeader)
+                            Text(bio)
+                                .font(.title3)
+                                .foregroundStyle(.white.opacity(0.9))
+                                .lineSpacing(5)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.horizontal, 24)
+                                .padding(.top, 12)
+                        }
+                    }
+                    .padding(.bottom, 44)
+                }
+                .scrollIndicators(.hidden)
+                .background(LinearGradient(colors: [palette.base, palette.deep], startPoint: .top, endPoint: .bottom))
+                .ignoresSafeArea(edges: .top)
+            }
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(role: .close) { dismiss() }
+                        .accessibilityIdentifier("actor-bio-close")
+                }
+            }
+        }
+        .presentationDetents([.large])
+        .presentationCornerRadius(34)
+    }
+
+    /// 来自 / 出生（两列）、类型（参考图）；没有的那一格不画
+    private var facts: some View {
+        var rows: [(String, String)] = []
+        if let p = info?.placeOfBirth, !p.isEmpty { rows.append(("来自", p)) }
+        if let d = ActorText.longDate(info?.birthday) { rows.append(("出生", d)) }
+        if let d = ActorText.longDate(info?.deathday) { rows.append(("逝世", d)) }
+        if let k = ActorText.department(info?.knownFor) { rows.append(("类型", k)) }
+        return LazyVGrid(columns: [GridItem(.flexible(), alignment: .topLeading), GridItem(.flexible(), alignment: .topLeading)],
+                         alignment: .leading, spacing: 18) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, r in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(r.0)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(palette.ink2.opacity(0.8))
+                    Text(r.1)
+                        .font(.title3)
+                        .foregroundStyle(.white)
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+}
+
+// MARK: - 小工具
+
+enum ActorText {
+    /// 照片区的高：人像按宽铺满，竖着的屏约宽的 1.25 倍高，最多窗口高的 72%（横着的屏也不会只剩一张脸）
+    static func photoHeight(width: CGFloat, height: CGFloat) -> CGFloat {
+        min(width * 1.25, max(380, height * 0.72)).rounded()
+    }
+
+    /// 大照片：先用 TMDB 的原图（Worker 给的 profile_path），没有就用演员表里的
+    static func photo(_ m: CastMember, info: PersonInfo?) -> URL? {
+        let p = (info?.profilePath).flatMap { $0.isEmpty ? nil : $0 } ?? m.profilePath
+        guard let p, !p.isEmpty else { return nil }
+        if p.hasPrefix("http") || p.hasPrefix("demo:") { return URL(string: p) }
+        return URL(string: "https://image.tmdb.org/t/p/h632" + p)
+    }
+
+    /// 照片底边那一截的平均色（整页跟着染）
+    static func edgeColor(_ url: URL?) async -> UIColor? {
+        guard let url, let img = await ImagePipeline.shared.image(url, maxPixel: 96), let cg = img.cgImage else { return nil }
+        return ImageEffects.averageColor(cg, bottom: 0.3)
+    }
+
+    /// 「1981-03-27」→「1981年3月27日」；只有年份就是「1981 年」
+    static func longDate(_ s: String?) -> String? {
+        guard let s, !s.isEmpty else { return nil }
+        let p = s.split(separator: "-").compactMap { Int($0) }
+        if p.count >= 3 { return "\(p[0])年\(p[1])月\(p[2])日" }
+        if let y = p.first { return "\(y) 年" }
+        return nil
+    }
+
+    /// TMDB 的部门名换成中文
+    static func department(_ s: String?) -> String? {
+        guard let s, !s.isEmpty else { return nil }
+        let map = ["Acting": "表演", "Directing": "导演", "Writing": "编剧", "Production": "制作", "Sound": "声音",
+                   "Camera": "摄影", "Editing": "剪辑", "Art": "美术", "Costume & Make-Up": "服装与化妆",
+                   "Visual Effects": "视觉效果", "Crew": "幕后", "Lighting": "灯光", "Creator": "创作"]
+        return map[s] ?? s
+    }
+
+    /// 一部作品在卡上要的东西：去哪、海报、片名、一行字、想看用的键和类型
+    static func item(_ w: ActorWork, model: AppModel)
+        -> (route: Route, poster: URL?, title: String, line: String, key: String, kind: WatchItem.Kind) {
+        switch w.entry {
+        case .movie(let v):
+            let mm = model.meta(v)
+            let kind = DetailText.line(["电影", mm?.genres?.first])
+            let line = w.character.flatMap { $0.isEmpty ? nil : "饰 " + $0 } ?? kind
+            return (.movie(v), model.thumbArt(v), model.title(v), line, v.path, .movie)
+        case .series(let s):
+            let sm = model.seriesMetas[s.path]
+            let kind = DetailText.line(["剧集", sm?.genres?.first])
+            let line = w.character.flatMap { $0.isEmpty ? nil : "饰 " + $0 } ?? kind
+            return (.series(s), TMDBImage.url(sm?.poster ?? sm?.posterClean, "w342"), sm?.title ?? s.name, line, s.path, .series)
+        }
+    }
+}

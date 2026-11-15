@@ -678,6 +678,8 @@ export default {
         case '/api/tv':          return cors(await handleTv(url, env, ctx));
         case '/api/tv/episodes': return cors(await handleTvEpisodes(url, env, ctx));
         case '/api/tmdb/season': return cors(await handleTmdbSeason(url, env, ctx));
+        // 演员个人页（App）：简介、出生、出生地 + 全部作品的编号（App 拿去和片库对）
+        case '/api/tmdb/person': return cors(await handleTmdbPerson(url, env, ctx));
         case '/api/tmdb-batch': return cors(await handleTmdbBatch(request, env, ctx));
         case '/api/imdb/video': return cors(await handleImdbVideo(url, env, ctx));
         // 播放页在签名过期或受控恢复前换取新直链；仍受 Cookie 鉴权保护。
@@ -5883,6 +5885,56 @@ async function handleTvEpisodes(url, env, ctx) {
 }
 
 /** TMDB 一季的分集：中文集名 / 简介 / 剧照 / 时长；中文简介缺的集补英文 */
+/* ── 演员个人页 ─────────────────────────────────────────────────────────────
+   GET /api/tmdb/person?id=123
+   → { id, name, biography, birthday, deathday, place_of_birth, known_for_department, profile_path,
+       credits: [{ id, media_type: 'movie' | 'tv', title, character, date }] }
+   简介先要中文，中文是空的回落英文；作品只回编号、片名、角色、日期（App 只拿它和片库里的 TMDB 编号对，
+   列出「库中作品」），按日期新的在前，最多 400 条。边缘缓存 7 天；出错不缓存。 */
+async function handleTmdbPerson(url, env, ctx) {
+  if (!env.TMDB_API_KEY) return jsonResponse({ error: 'TMDB_API_KEY not set' }, 503);
+  const id = parseInt(url.searchParams.get('id') || '', 10);
+  if (!(id > 0)) return jsonResponse({ error: 'bad id' }, 400);
+  const ck = new Request(`${TMDB_CACHE}person?id=${id}&v=1`);
+  const hit = await caches.default.match(ck).catch(() => null);
+  if (hit) return new Response(hit.body, { headers: hit.headers });
+  const get = path => fetchRetry(`https://api.themoviedb.org/3/person/${id}${path}`,
+    {}, { retries: 1, timeout: 8000 }).then(r => (r.ok ? r.json() : null)).catch(() => null);
+  const key = `api_key=${env.TMDB_API_KEY}`;
+  const [zh, credits] = await Promise.all([get(`?${key}&language=zh-CN`), get(`/combined_credits?${key}&language=zh-CN`)]);
+  if (!zh) return jsonResponse({ error: 'tmdb unavailable' }, 502, { 'Cache-Control': 'no-store' });
+  let biography = (zh.biography || '').trim();
+  if (!biography) {
+    const en = await get(`?${key}&language=en-US`);
+    biography = ((en && en.biography) || '').trim();
+  }
+  const seen = new Set();
+  const list = [];
+  for (const c of ((credits && credits.cast) || [])) {
+    if (!c || !c.id || (c.media_type !== 'movie' && c.media_type !== 'tv')) continue;
+    const k = c.media_type + ':' + c.id;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    list.push({
+      id: c.id, media_type: c.media_type,
+      title: c.title || c.name || '', character: c.character || '',
+      date: c.release_date || c.first_air_date || '',
+    });
+  }
+  list.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const payload = {
+    id, name: zh.name || '', biography,
+    birthday: zh.birthday || null, deathday: zh.deathday || null,
+    place_of_birth: zh.place_of_birth || null,
+    known_for_department: zh.known_for_department || null,
+    profile_path: zh.profile_path || null,
+    credits: list.slice(0, 400),
+  };
+  const res = jsonResponse(payload, 200, { 'Cache-Control': 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=2592000' });
+  ctx?.waitUntil?.(caches.default.put(ck, res.clone()));
+  return res;
+}
+
 async function handleTmdbSeason(url, env, ctx) {
   if (!env.TMDB_API_KEY) return jsonResponse({ error: 'TMDB_API_KEY not set' }, 503);
   const id = parseInt(url.searchParams.get('id') || '', 10);
