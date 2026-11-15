@@ -197,7 +197,7 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-08d-home-year-2")
         // 五个大类（引人入胜的剧情……刺激犯罪与偷窃）在今年、去年两排下面
         app.swipeUp(); sleep(2); snap("duo-08e-home-categories")
-        // 主页结尾（照游戏 App「Arcade」页的结尾）：两行慢慢走的海报墙、Cuven 字标、「显示所有影片」→ 全部影片
+        // 主页结尾（照游戏 App「Arcade」页的结尾）：两行慢慢走的海报墙、Cuven 字标、「查看所有影片」→ 全部影片
         if let all = reveal(app, app.buttons.matching(identifier: "home-show-all"), swipes: 12) {
             sleep(2)
             snap("duo-08h-home-finale")
