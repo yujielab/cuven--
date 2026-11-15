@@ -340,7 +340,7 @@ struct SeriesDetailView: View {
         } else {
             detail = runtime
         }
-        // 长文案：上面一行「第 2 集」、标题只写集名（没有集名就写「第 2 集」、上面那行不写），下面三行简介
+        // 长文案：上面一行「第 2 集」、标题只写集名（没有集名就写「第 2 集」、上面那行不写），下面两行简介（用户要求折起来，整段在长按的预览里）
         let name = Self.episodeName(ep)
         return DSMediaCard(art: art,
                            title: long ? (name ?? Self.badge(f)) : Self.episodeTitle(f, ep),

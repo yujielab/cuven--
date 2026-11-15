@@ -22,7 +22,7 @@ enum ImageEffect: String, Hashable, Sendable {
     case bottomBlur
     /// 精选卡：先裁成 3:4（很瘦的竖版主视觉留上面、海报居中），再把下半段渐进式地糊掉（字标和两行字压在上面）
     case featureCard
-    /// 长文案的分集卡（方卡）：糊的那一段更高（离底 64% 起，38% 以下最糊），集号、集名、三行简介都压在上面
+    /// 长文案的分集卡（1.3 : 1）：糊的那一段更高（离底 64% 起，38% 以下最糊），集号、集名、两行简介都压在上面
     case bottomBlurTall
 }
 
