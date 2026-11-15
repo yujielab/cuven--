@@ -69,8 +69,9 @@ struct CollectionPage: View {
         let avail = max(200, m.width - m.margin * 2)
         let n = avail >= 1100 ? 3 : (avail >= 620 ? 2 : 1)
         let w = ((avail - m.gutter * CGFloat(n - 1)) / CGFloat(n)).rounded(.down)
+        // 设计轮 2：行距就是列距（m.gutter），宽的屏上不再一个 24、一个按宽算
         return LazyVGrid(columns: Array(repeating: GridItem(.fixed(w), spacing: m.gutter, alignment: .top), count: n),
-                         alignment: .leading, spacing: m.wide ? 24 : 18) {
+                         alignment: .leading, spacing: m.gutter) {
             ForEach(entries) { e in card(e, width: w) }
         }
         .padding(.horizontal, m.margin)
@@ -129,11 +130,11 @@ struct CollectionCard: View {
 
     var body: some View {
         let artH = (width / 1.85).rounded()
-        let shape = RoundedRectangle(cornerRadius: 28, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: DSRadius.feature, style: .continuous)
         VStack(spacing: 0) {
             ZStack {
-                Color(white: 0.12)
-                RemoteImage(url: art, maxPixel: width * 3)
+                DSFill.placeholder
+                RemoteImage(url: art, maxPixel: width * 3, placeholder: .clear)
                     .frame(width: width, height: artH)
             }
             .frame(width: width, height: artH)
@@ -142,7 +143,7 @@ struct CollectionCard: View {
         }
         .frame(width: width)
         .clipShape(shape)
-        .overlay(shape.strokeBorder(Color.white.opacity(0.06), lineWidth: 1))
+        .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
         .contentShape(shape)
         .task(id: art) { await loadTone() }
         .accessibilityElement(children: .ignore)
@@ -151,11 +152,8 @@ struct CollectionCard: View {
 
     private var bar: some View {
         HStack(spacing: 14) {
-            RemoteImage(url: cover, maxPixel: 200)
-                .frame(width: 42, height: 63)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
+            // 设计轮 2：和主页精选卡底条同一个小海报（44 点宽，以前 42）
+            DSThumb(url: cover, width: 44)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Cuven 独占")
                     .font(.footnote)
@@ -171,12 +169,7 @@ struct CollectionCard: View {
             }
             .lineLimit(1)
             Spacer(minLength: 8)
-            Text("查看")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 18)
-                .frame(minHeight: 32)
-                .background(Capsule().fill(Color.white.opacity(0.2)))
+            DSViewPill()
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -184,12 +177,10 @@ struct CollectionCard: View {
         .background(tone ?? Color(white: 0.16))
     }
 
+    /// 设计轮 2：和编辑推荐的面板同一个取色（DSTint.panel）：亮度最高 0.42 → 0.36，亮的画面下面那条上灰字也有 4.5 : 1
     private func loadTone() async {
         guard let art, let img = await ImagePipeline.shared.image(art, maxPixel: 64), let cg = img.cgImage,
-              let c = ImageEffects.averageColor(cg, bottom: 0.3) else { return }
-        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        guard c.getHue(&h, saturation: &s, brightness: &b, alpha: &a) else { return }
-        let t = Color(hue: Double(h), saturation: Double(min(0.45, s)), brightness: Double(min(0.42, max(0.22, b * 0.72))))
-        withAnimation(.easeInOut(duration: 0.35)) { tone = t }
+              let c = ImageEffects.averageColor(cg, bottom: 0.3), let t = DSTint.panel(c) else { return }
+        withAnimation(DSMotion.fade) { tone = t }
     }
 }

@@ -29,8 +29,10 @@ struct FeaturedCollection<Cards: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             FeaturedCollectionHeader(title: title, blurb: blurb, covers: covers, metrics: metrics)
+            // 设计轮 2：说明到这一排的标题 60 / 68 → 42 / 46 点（头部底下本来留着 34 点给染色带淡出）：
+            // 以前比分区与分区之间（48 / 56–62）还远，这一排看着像另起的一个分区，而不是「精选电影」自己的那一排（F12：近的才是一组）
             rowHeading
-                .padding(.top, metrics.wide ? 34 : 26)
+                .padding(.top, metrics.wide ? 12 : 8)
             DSShelf(metrics: metrics) { cards() }
                 .padding(.top, metrics.titleGap)
         }
@@ -300,6 +302,9 @@ struct Poster3D: View {
         }
         .frame(width: width, height: h)
         .compositingGroup()
+        // 设计轮 2：两层影子——贴着的一层窄而实（左边那张压在中间那张上，叠的先后一眼看得出），
+        // 外面一层宽而柔（浮起来的高度）；以前只有一层宽的，叠在一起的边上糊成一片
+        .shadow(color: .black.opacity(0.32), radius: 3, x: 0, y: 2)
         .shadow(color: .black.opacity(0.45), radius: 16, x: 0, y: 14)
     }
 }
@@ -316,17 +321,13 @@ struct FeaturedCollectionCard: View {
 
     var body: some View {
         let h = (width * 0.8).rounded()
-        let shape = RoundedRectangle(cornerRadius: 28, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: DSRadius.feature, style: .continuous)
         ZStack(alignment: .bottom) {
-            Color(white: 0.12)
-            RemoteImage(url: art, maxPixel: width * 3)
+            DSFill.placeholder
+            RemoteImage(url: art, maxPixel: width * 3, placeholder: .clear)
                 .frame(width: width, height: h)
             HStack(spacing: 14) {
-                RemoteImage(url: cover, maxPixel: 200)
-                    .frame(width: 44, height: 66)
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(.white.opacity(0.15), lineWidth: 0.5))
-                    .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+                DSThumb(url: cover, width: 44)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.headline)
@@ -340,13 +341,10 @@ struct FeaturedCollectionCard: View {
                     }
                 }
                 Spacer(minLength: 8)
-                Text("查看")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 18)
-                    .frame(minHeight: 32)
-                    .background(Capsule().fill(Color.white.opacity(0.18)))
+                DSViewPill()
             }
+            // 底条压在固定高的卡上：字号最大到 xxxLarge（和分集卡一样封顶），不盖掉大半张画面
+            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .frame(width: width)
@@ -356,7 +354,7 @@ struct FeaturedCollectionCard: View {
         }
         .frame(width: width, height: h)
         .clipShape(shape)
-        .overlay(shape.strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+        .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
         .contentShape(shape)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel([title, subtitle].filter { !$0.isEmpty }.joined(separator: "，"))

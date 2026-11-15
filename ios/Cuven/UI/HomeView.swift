@@ -64,8 +64,8 @@ struct HomeView: View {
                 DSHeroCarousel(pages: pages, metrics: m, height: height, fullWidth: fullWidth,
                                leadingInset: insets.leading, trailingInset: insets.trailing)
             } else if (model.movies.isEmpty || !model.heroResolved) && !loadFailed {
-                // 还在载入 / 还在挑头图：先占住头图的位置，不留白屏（C66），也不先放一张不合格的
-                LinearGradient(colors: [Color(white: 0.12), Theme.bg], startPoint: .top, endPoint: .bottom)
+                // 还在载入 / 还在挑头图：先占住头图的位置，不留白屏（C66），也不先放一张不合格的（设计轮 2：和卡的占位同一种灰）
+                LinearGradient(colors: [DSFill.placeholder, Theme.bg], startPoint: .top, endPoint: .bottom)
                     .frame(width: fullWidth, height: height)
                     .accessibilityHidden(true)
             } else {
