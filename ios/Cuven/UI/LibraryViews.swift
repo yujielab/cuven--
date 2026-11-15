@@ -78,7 +78,9 @@ struct LibraryGridCard: View {
 
     var body: some View {
         let h = (width * 1.5).rounded()
-        Color(white: 0.11)
+        // 圆角取 DSRadius.card（海报这么窄是 12，和 DSPosterLockup 同一个数）
+        let shape = RoundedRectangle(cornerRadius: DSRadius.card(width), style: .continuous)
+        DSFill.placeholder
             .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: .clear) }
             .frame(width: width, height: h)
             .overlay {
@@ -91,8 +93,8 @@ struct LibraryGridCard: View {
                         .padding(.bottom, 8)
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(shape)
+            .contentShape(shape)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel([title, subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，"))
             // 看了一半的：底下那条进度旁白也念出来（「已看 40%」：F36 不只靠画面表达，F76；设计轮 2（并行·library））
@@ -513,7 +515,7 @@ struct SearchResultRow: View {
                 return model.seriesWideArt(s).url
             }
         }()
-        return Color(white: 0.11)
+        return DSFill.placeholder
             .overlay { RemoteImage(url: url, maxPixel: w * 3, placeholder: .clear) }
             .frame(width: w, height: h)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))

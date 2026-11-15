@@ -498,10 +498,11 @@ struct ShowcaseIntro: View {
                         LazyHStack(spacing: metrics.gutter) {
                             ForEach(Array(stills.enumerated()), id: \.offset) { _, url in
                                 let w = metrics.wideCardWidth
-                                Color(white: 0.11)
+                                // 圆角和别处同宽的 16:9 卡一样（DSRadius.card：折起 283 点宽是 16，以前写死 12）
+                                DSFill.placeholder
                                     .overlay { RemoteImage(url: url, maxPixel: w * 3, placeholder: .clear) }
                                     .frame(width: w, height: (w * 9 / 16).rounded())
-                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    .clipShape(RoundedRectangle(cornerRadius: DSRadius.card(w), style: .continuous))
                                     .accessibilityHidden(true)
                             }
                         }
