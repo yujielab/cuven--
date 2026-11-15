@@ -557,57 +557,324 @@ enum DetailFacts {
     }
 }
 
-// MARK: - 剧照（参考图：游戏 App 详情页「挑戰」那一排）
+// MARK: - 剧照（设计轮 2（并行·stills）：照用户给的参考图——apple.com HomePod mini 的「近看」那一块）
 
-/// 一张剧照卡：4:3 的大卡、大圆角（约卡宽的 6.5%），画面下段渐进式模糊（离底 34% 起糊、16% 以下最糊），
-/// 上面压一层淡暗，再压一行标题（「第 3 幕」）和一行带符号的小字（「12 张剧照」）；整张卡点开看大图
-struct DetailStillCard: View {
-    let art: URL?
+/// 剧照浏览台（用户给的参考图）：标题「剧照」下面一整块铺满窗口宽的画面（连同 iPhone Duo 侧边那一列：F6），
+/// 折起 4 : 3（Duo 折起约 466 × 350 点），展开也按 4 : 3、最多屏高的 60%；画面按 fill 铺满、底下一层淡暗，控件都留在安全区里（F7）。
+/// · 总览：第一张剧照，底部一排 Liquid Glass 胶囊「⊕ 第 N 幕」（浮在画面上的控件：F40），横着滑、从侧边那一列底下过；
+/// · 点一颗胶囊：画面原地换成那一张（交叉淡入、新的一张从 104% 落回原大；减弱动态效果时只淡入：F59），右上一颗玻璃 ✕ 回到总览；
+///   底部一张磨砂说明卡（粗体「第 N 幕。」接一句平实的说明，旁白念成一句）；两侧 ‹ › 的圆心落在内容区的边上、外面那一半被切掉
+///   （参考图），底边和说明卡齐平，一张一张换，到头的那一颗收起。画面有一截被顶上那条盖住或出了屏时，先把整块滚到可见区正中；
+/// · 这时点画面：全屏看完整的大图（DetailStillsViewer，从这块画面上放大出来、收回到这块画面上：F57）
+struct DetailStillsExplorer: View {
+    let stills: [URL?]
+    /// 片名（说明卡里那一句）
     let title: String
-    let detail: String
     let metrics: DSMetrics
-    let action: () -> Void
+
+    /// nil = 总览；有值 = 正在看第几张
+    @State private var focus: Int?
+    /// 全屏大图从第几张开始
+    @State private var pick: DetailStillPick?
+    /// 这块画面此刻有没有一截被顶上钉住的那条盖住、或者出了屏
+    @State private var offStage = false
+    /// 选了一张（胶囊、‹ ›）：一下选择触感；在大图里左右翻、回到总览不算（F41）
+    @State private var picks = 0
+    @Namespace private var zoomNS
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private static let stageID = "stills-stage"
+    /// 解码的上限和全屏大图同一个数：内存里是同一张，点开大图不再解码一遍（TMDB 的 w1280 本来就不到这么大）
+    private static let pixel: CGFloat = 2400
+
+    private var fullWidth: CGFloat { metrics.width + metrics.leadingInset + metrics.trailingInset }
+    /// 画面多高：4 : 3；展开时最多屏高的 60%（展开横拿只有六百多点高，上下文还要看得到）
+    private var stageHeight: CGFloat {
+        let byWidth = (fullWidth * 0.75).rounded()
+        guard metrics.wide, metrics.height > 0 else { return byWidth }
+        return max(240, min(byWidth, (metrics.height * 0.6).rounded()))
+    }
+    /// ✕、胶囊、说明卡离画面上下边
+    private var edge: CGFloat { metrics.wide ? 24 : 16 }
+    /// 换画面、换控件：DSMotion.appear 的弹簧；减弱动态效果时短淡入
+    private var change: Animation { DSMotion.adapt(DSMotion.appear, reduce: reduceMotion) }
+    private var imageTransition: AnyTransition {
+        reduceMotion ? .opacity : .asymmetric(insertion: .opacity.combined(with: .scale(scale: 1.04)), removal: .opacity)
+    }
+    private var controlsTransition: AnyTransition {
+        reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 10))
+    }
 
     var body: some View {
-        let w = metrics.wideCardWidth
-        let h = (w * 0.75).rounded()
-        let radius: CGFloat = max(18, min(26, (w * 0.065).rounded()))
-        let pad: CGFloat = metrics.wide ? 20 : 16
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        Button(action: action) {
-            ZStack(alignment: .bottomLeading) {
-                DSParallaxArt(url: art, metrics: metrics, size: CGSize(width: w, height: h), effect: .bottomBlur)
-                LinearGradient(stops: DSMediaCardStyle.shade, startPoint: .top, endPoint: .bottom)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.white)
-                    Label(detail, systemImage: "photo.stack")
-                        .font(.subheadline)
-                        .foregroundStyle(DSInk.secondary)
+        let m = metrics
+        let shown = min(focus ?? 0, max(0, stills.count - 1))
+        ScrollViewReader { proxy in
+            ZStack(alignment: .bottom) {
+                art(shown)
+                if let i = focus {
+                    focusControls(i)
+                        .transition(controlsTransition)
+                } else {
+                    pills(proxy)
+                        .transition(controlsTransition)
                 }
-                .lineLimit(1)
-                // 字只在模糊那一段里：特大字号时也不冲出去
-                .dynamicTypeSize(...DynamicTypeSize.xLarge)
-                .padding(.horizontal, pad)
-                .padding(.bottom, pad)
             }
-            .frame(width: w, height: h)
-            .clipShape(shape)
-            .contentShape(shape)
+            .frame(width: fullWidth, height: stageHeight)
+            .overlay(alignment: .topTrailing) {
+                if focus != nil {
+                    closeButton
+                        .padding(.top, edge)
+                        .padding(.trailing, m.margin + m.trailingInset)
+                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.8)))
+                }
+            }
+            .id(Self.stageID)
+            .onGeometryChange(for: Bool.self) { p in
+                // 上沿离屏顶不到屏高的 22%（顶上钉住的那条约 70–140 点高），或者下沿出了屏
+                let f = p.frame(in: .scrollView(axis: .vertical))
+                return m.height > 0 && (f.minY < m.height * 0.22 || f.maxY > m.height)
+            } action: { offStage = $0 }
+            // 画面铺到两侧安全区底下（侧边那一列）；这一块在页面里仍只占内容区那么宽
+            .padding(.leading, -m.leadingInset)
+            .padding(.trailing, -m.trailingInset)
         }
-        .buttonStyle(PressableStyle())
-        .accessibilityLabel("\(title)，剧照")
-        .accessibilityHint("查看大图")
+        .sensoryFeedback(.selection, trigger: picks)
+        .task(id: focus) { await prefetch(around: focus ?? 0) }
+        .fullScreenCover(item: $pick) { p in
+            DetailStillsViewer(stills: stills, index: p.index) { i in follow(i) }
+                .navigationTransition(.zoom(sourceID: Self.stageID, in: zoomNS))
+        }
+    }
+
+    // MARK: 画面
+
+    /// 画面：fill 铺满、裁在块的边上，底下一层淡暗（DSMediaCardStyle.shade：控件压在上面也分得开）；
+    /// 换一张时交叉淡入，新的一张从 104% 落回原大。看某一张时整块是一颗钮：点它全屏看完整的大图
+    private func art(_ i: Int) -> some View {
+        let open = focus != nil
+        let url: URL? = stills.indices.contains(i) ? stills[i] : nil
+        return Button {
+            pick = DetailStillPick(index: i)
+        } label: {
+            DSFill.placeholder
+                .overlay {
+                    ZStack {
+                        RemoteImage(url: url, maxPixel: Self.pixel, placeholder: .clear)
+                            .id(i)
+                            .transition(imageTransition)
+                    }
+                }
+                .overlay {
+                    LinearGradient(stops: DSMediaCardStyle.shade, startPoint: .top, endPoint: .bottom)
+                }
+                .clipped()
+                .contentShape(Rectangle())
+        }
+        // 按下去略暗一点（整块铺满的画面不缩放）
+        .buttonStyle(PressableStyle(scale: 1))
+        .disabled(!open)
+        .matchedTransitionSource(id: Self.stageID, in: zoomNS)
+        .accessibilityLabel("第 \(i + 1) 幕")
+        .accessibilityHint("全屏查看完整大图")
+        .accessibilityHidden(!open)
+    }
+
+    // MARK: 总览：一排胶囊
+
+    /// 底部一排玻璃胶囊（参考图「⊕ Touch controls」）：横着滑，第一颗停在左边线上（内容边距 = 边距 + 那一侧的安全区），
+    /// 滑过去时从侧边那一列底下过（和 dsBleedRow 同一个规矩：这一块本来就铺满了窗口宽，不用再往外撑）
+    private func pills(_ proxy: ScrollViewProxy) -> some View {
+        let m = metrics
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: m.wide ? 14 : 12) {
+                ForEach(stills.indices, id: \.self) { i in
+                    pill(i) { select(i, proxy: proxy) }
+                }
+            }
+            // 玻璃按下去会鼓起来一点：上下留出这点空，不被滚动区切掉
+            .padding(.vertical, 6)
+            .scrollTargetLayout()
+        }
+        .contentMargins(.leading, m.margin + m.leadingInset, for: .scrollContent)
+        .contentMargins(.trailing, m.margin + m.trailingInset, for: .scrollContent)
+        .scrollTargetBehavior(.viewAligned)
+        .scrollClipDisabled()
+        .padding(.bottom, edge - 6)
+    }
+
+    /// 一颗胶囊：⊕ +「第 N 幕」，折起 50、展开 56 点高（F74：至少 44）；Liquid Glass（浮在画面上的控件：F40），
+    /// 按下去是玻璃自带的回弹，不再叠一层缩放（动效规范）
+    private func pill(_ i: Int, action: @escaping () -> Void) -> some View {
+        let wide = metrics.wide
+        let labelFont: Font = wide ? .title3.weight(.semibold) : .headline
+        return Button(action: action) {
+            HStack(spacing: wide ? 12 : 10) {
+                Image(systemName: "plus.circle")
+                    .font(.title2)
+                    .accessibilityHidden(true)
+                Text("第 \(i + 1) 幕")
+                    .font(labelFont)
+                    .monospacedDigit()
+            }
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .padding(.leading, wide ? 16 : 14)
+            .padding(.trailing, wide ? 26 : 22)
+            .frame(minHeight: wide ? 56 : 50)
+            .glassEffect(.regular.interactive(), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .accessibilityLabel("第 \(i + 1) 幕")
+        .accessibilityHint("查看这张剧照")
         .accessibilityIdentifier("still-card")
+    }
+
+    // MARK: 看某一张：✕、说明卡、‹ ›
+
+    /// ✕：右上一颗玻璃圆（折起 44、展开 48 点），在安全区里，回到总览（关闭的角色、标准的 xmark：C14）
+    private var closeButton: some View {
+        let d: CGFloat = metrics.wide ? 48 : 44
+        return Button(role: .close) { close() } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: (d * 0.38).rounded(), weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: d, height: d)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("关闭")
+        .accessibilityIdentifier("stills-close")
+    }
+
+    /// 底部一张磨砂说明卡，两侧 ‹ ›：整组在安全区里，‹ › 外面那一半被安全区的边切掉（参考图里被屏幕边切掉的那样）
+    private func focusControls(_ i: Int) -> some View {
+        let m = metrics
+        let d: CGFloat = m.wide ? 64 : 56
+        // 说明卡让出 ‹ › 露出来的那一半，再空一点；展开时最宽 600（一行不至于太长）
+        let inset = d / 2 + (m.wide ? 12 : 10)
+        let cardMax: CGFloat = m.wide ? 600 : .infinity
+        return ZStack(alignment: .bottom) {
+            captionCard(i)
+                .frame(maxWidth: cardMax)
+                .padding(.horizontal, inset)
+            HStack(alignment: .bottom, spacing: 0) {
+                if i > 0 { paddle(forward: false, d: d) }
+                Spacer(minLength: 0)
+                if i < stills.count - 1 { paddle(forward: true, d: d) }
+            }
+        }
+        .frame(width: m.width)
+        .clipped()
+        .padding(.leading, m.leadingInset)
+        .padding(.trailing, m.trailingInset)
+        .padding(.bottom, edge)
+    }
+
+    /// 说明卡（参考图那张磨砂圆角卡）：一段话——粗体「第 N 幕。」接一句平实的说明（数据里没有每张剧照的说明，不编剧情）。
+    /// 画面上的字垫一层常规磨砂（深色），压在哪张剧照上都看得清（F34、F37）；圆角 24；旁白念成一句；
+    /// 不接点按：点到它等于点画面（看大图）
+    private func captionCard(_ i: Int) -> some View {
+        Text(Self.caption(index: i, count: stills.count, title: title, wide: metrics.wide))
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, metrics.wide ? 24 : 20)
+            .padding(.vertical, metrics.wide ? 20 : 16)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .environment(\.colorScheme, .dark)
+            .contentTransition(.opacity)
+            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .combine)
+    }
+
+    /// 「第 2 幕。《片名》的第 2 张剧照，共 12 张。轻点画面查看完整大图。」：一个 Text（不拼 Text + Text），
+    /// 开头粗体白字，后面常规、次一级的白（DSInk.secondary）
+    static func caption(index i: Int, count: Int, title: String, wide: Bool) -> AttributedString {
+        let base: Font = wide ? .title3 : .body
+        var lead = AttributedString("第 \(i + 1) 幕。")
+        lead.font = base.weight(.semibold)
+        lead.foregroundColor = Color.white
+        let name = title.isEmpty ? "这部影片" : "《\(title)》"
+        var rest = AttributedString("\(name)的第 \(i + 1) 张剧照，共 \(count) 张。轻点画面查看完整大图。")
+        rest.font = base
+        rest.foregroundColor = DSInk.secondary
+        lead.append(rest)
+        return lead
+    }
+
+    /// ‹ ›：玻璃圆（折起 56、展开 64 点），圆心落在内容区的边上、外面那一半被切掉（参考图）；
+    /// 符号在露出来的那一半正中，点得到的范围从边上往里 44 点（F74）
+    private func paddle(forward: Bool, d: CGFloat) -> some View {
+        Button { step(forward ? 1 : -1) } label: {
+            Image(systemName: forward ? "chevron.forward" : "chevron.backward")
+                .font(.system(size: (d * 0.34).rounded(), weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: d / 2, height: d)
+                .background(alignment: forward ? .leading : .trailing) {
+                    Color.clear
+                        .frame(width: d, height: d)
+                        .glassEffect(.regular.interactive(), in: Circle())
+                }
+                .frame(width: max(44, d / 2), height: d, alignment: forward ? .trailing : .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(forward ? "下一张" : "上一张")
+        .transition(.opacity)
+    }
+
+    // MARK: 动作
+
+    /// 点一颗胶囊：原地换成那一张；画面有一截被盖住或出了屏，先把整块滚到可见区正中（✕ 和说明卡都看得见）
+    private func select(_ i: Int, proxy: ScrollViewProxy) {
+        picks += 1
+        withAnimation(change) { focus = i }
+        guard offStage else { return }
+        withAnimation(DSMotion.adapt(DSMotion.hero, reduce: reduceMotion)) {
+            proxy.scrollTo(Self.stageID, anchor: .center)
+        }
+    }
+
+    /// ‹ ›：前一张 / 后一张
+    private func step(_ delta: Int) {
+        guard let i = focus, stills.indices.contains(i + delta) else { return }
+        picks += 1
+        withAnimation(change) { focus = i + delta }
+    }
+
+    /// ✕：回到总览（第一张 + 一排胶囊）
+    private func close() {
+        withAnimation(change) { focus = nil }
+    }
+
+    /// 大图里左右翻到哪一张，这里跟着换（不带动画、不给触感）：收回时缩回到同一张上
+    private func follow(_ i: Int) {
+        guard focus != nil, focus != i, stills.indices.contains(i) else { return }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) { focus = i }
+    }
+
+    /// 先把左右两张解码好放进内存：‹ ›、胶囊换过去时直接是它，不先闪一下底色
+    private func prefetch(around i: Int) async {
+        for j in [i + 1, i - 1, i + 2] where stills.indices.contains(j) {
+            guard !Task.isCancelled, let url = stills[j] else { continue }
+            _ = await ImagePipeline.shared.image(url, maxPixel: Self.pixel)
+        }
     }
 }
 
 /// 剧照的大图：黑底，一张一屏、左右滑换下一张（底下页码点），标题是「第 N 幕」；
-/// 右上系统的关闭钮（C14、C53），也能下滑或捏合收回到那张卡（F57）
+/// 右上系统的关闭钮（C14、C53），也能下滑或捏合收回到浏览台的画面上（F57）；翻到哪一张，浏览台跟着换
 struct DetailStillsViewer: View {
     let stills: [URL?]
     @State var index: Int
+    /// 翻到了第几张（浏览台跟着换，收回时缩回到同一张上）
+    var onIndex: (Int) -> Void = { _ in }
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -632,6 +899,7 @@ struct DetailStillsViewer: View {
                         .accessibilityIdentifier("stills-close")
                 }
             }
+            .onChange(of: index) { _, i in onIndex(i) }
         }
         .environment(\.colorScheme, .dark)
     }

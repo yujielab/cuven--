@@ -651,11 +651,8 @@ struct DetailScaffold<Episodes: View>: View {
     @State private var toast: String?
     @State private var castSheet: CastSheetRequest?
     @State private var trailerPick: DetailTrailerPick?
-    @State private var stillPick: DetailStillPick?
     /// 演员名单里点的那一位：收起弹层以后推进去
     @State private var personPush: CastMember?
-    /// 剧照大图从点的那张卡上放大出来
-    @Namespace private var stillsNS
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -755,14 +752,10 @@ struct DetailScaffold<Episodes: View>: View {
         .fullScreenCover(item: $trailerPick) { p in
             TrailerPlayerView(movieTitle: title, trailers: trailers, start: p.index)
         }
-        // 剧照大图：全屏黑底，一张一屏、左右滑换；从点的那张卡上放大出来，下滑或捏合收回去（F57）
-        .fullScreenCover(item: $stillPick) { p in
-            DetailStillsViewer(stills: stillShown.map { TMDBImage.url($0, "w1280") }, index: p.index)
-                .navigationTransition(.zoom(sourceID: p.index, in: stillsNS))
-        }
+        // 剧照大图（全屏黑底、从浏览台的画面上放大出来）由 DetailStillsExplorer 自己弹（DetailInfo.swift）
     }
 
-    /// 那一排放出来的剧照（最多 12 张，和网页版一样）
+    /// 剧照浏览台里放出来的剧照（最多 12 张，和网页版一样）
     private var stillShown: [String] { Array(stills.prefix(12)) }
 
     // MARK: 头部
@@ -937,18 +930,12 @@ struct DetailScaffold<Episodes: View>: View {
         }
     }
 
-    /// 剧照（用户给的参考图：游戏 App 详情页「挑戰」那一排）：一排 4:3 的大卡、大圆角，画面下段渐进式模糊，
-    /// 「第 3 幕」和「▣ 12 张剧照」压在模糊上；点一张全屏看大图（从这张卡上放大出来，左右滑换下一张）
+    /// 剧照（设计轮 2（并行·stills）：照用户给的参考图——apple.com HomePod mini 的「近看」那一块）：
+    /// 标题「剧照」下面一块铺满窗口宽的浏览台（连同侧边那一列）：一排玻璃胶囊挑一张、画面原地换过去，
+    /// 磨砂说明卡 + ‹ › 一张一张看，✕ 回总览；点画面全屏看完整的大图（DetailStillsExplorer）
     private func stillsSection(_ m: DSMetrics) -> some View {
-        let shown = stillShown
-        return DSSection(title: "剧照", metrics: m) {
-            DSShelf(metrics: m) {
-                ForEach(Array(shown.enumerated()), id: \.offset) { i, s in
-                    DetailStillCard(art: TMDBImage.url(s, "w1280"), title: "第 \(i + 1) 幕", detail: "\(shown.count) 张剧照",
-                                    metrics: m) { stillPick = DetailStillPick(index: i) }
-                        .matchedTransitionSource(id: i, in: stillsNS)
-                }
-            }
+        DSSection(title: "剧照", metrics: m) {
+            DetailStillsExplorer(stills: stillShown.map { TMDBImage.url($0, "w1280") }, title: title, metrics: m)
         }
     }
 
