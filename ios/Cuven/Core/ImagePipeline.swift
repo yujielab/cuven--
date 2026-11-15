@@ -22,7 +22,7 @@ enum ImageEffect: String, Hashable, Sendable {
     case bottomBlur
     /// 精选卡：先裁成 3:4（很瘦的竖版主视觉留上面、海报居中），再把下半段渐进式地糊掉（字标和两行字压在上面）
     case featureCard
-    /// 长文案的分集卡（1.3 : 1）：糊的那一段更高（离底 64% 起，38% 以下最糊），集号、集名、两行简介都压在上面
+    /// 长文案的分集卡（1.3 : 1）：糊的那一段更高（离底 46% 起，26% 以下最糊），两行简介和片长压在上面
     case bottomBlurTall
 }
 
@@ -143,12 +143,12 @@ enum ImageEffects {
         case .none: return image
         case .bottomBlur: return bottomBlur(image)
         case .featureCard: return featureCard(image)
-        case .bottomBlurTall: return bottomBlur(image, clearAbove: 0.64, fullBelow: 0.38)
+        case .bottomBlurTall: return bottomBlur(image, clearAbove: 0.46, fullBelow: 0.26)
         }
     }
 
     /// 详情页头部：裁成画面区的宽高比（很瘦的竖版主视觉从靠近顶上取、别的从偏上取，比画面区宽的左右居中），
-    /// 下段渐进式模糊（离底 42% 起，8% 以下糊到最大），再取最底下 14% 那一条的平均色
+    /// 下段渐进式模糊（离底 17% 起，2% 以下糊到最大），再取最底下 14% 那一条的平均色
     static func heroArt(_ image: UIImage, aspect: CGFloat) -> HeroArt? {
         guard let cg = image.cgImage, aspect > 0 else { return nil }
         let W = CGFloat(cg.width), H = CGFloat(cg.height)
@@ -166,8 +166,9 @@ enum ImageEffects {
         guard let cropped = cg.cropping(to: rect) else { return nil }
         let base = UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
         let edge = averageColor(cropped, bottom: 0.14) ?? UIColor(white: 0.08, alpha: 1)
-        // 渐进式模糊只在最下面那一截：画面高的 76% 起糊、97% 糊满，底边就是字标上沿（用户要求）
-        let soft = bottomBlur(base, clearAbove: 0.24, fullBelow: 0.03) ?? base
+        // 渐进式模糊只在最下面那一截：画面高的 83% 起糊、98% 糊满，底边就是字标上沿（用户要求；
+        // 后来用户要求所有渐进模糊再矮一些、轻一些：原来 76% 起糊）
+        let soft = bottomBlur(base, clearAbove: 0.17, fullBelow: 0.02) ?? base
         return HeroArt(image: soft, edge: edge)
     }
 
@@ -193,7 +194,7 @@ enum ImageEffects {
     }
 
     /// 精选卡：裁成 3:4。比 3:4 瘦的往高里裁——Apple TV 的竖版主视觉（约 0.46）人物多在上半截，从离顶 8% 处往下取；
-    /// 2:3 的纯净海报居中取；比 3:4 宽的左右居中取。裁好再把下半段糊掉（离底 46% 起，24% 以下糊到最大）
+    /// 2:3 的纯净海报居中取；比 3:4 宽的左右居中取。裁好再把下段糊掉（离底 34% 起，16% 以下糊到最大）
     static func featureCard(_ image: UIImage) -> UIImage? {
         guard let cg = image.cgImage else { return nil }
         let W = CGFloat(cg.width), H = CGFloat(cg.height)
@@ -211,12 +212,13 @@ enum ImageEffects {
         // CGImage 的裁切以左上为原点
         guard let cropped = cg.cropping(to: rect) else { return nil }
         let base = UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
-        return bottomBlur(base, clearAbove: 0.46, fullBelow: 0.24) ?? base
+        return bottomBlur(base, clearAbove: 0.34, fullBelow: 0.16) ?? base
     }
 
     /// 渐进式模糊：用一张竖向渐变当遮罩做「可变半径模糊」（CIMaskedVariableBlur：遮罩黑处不糊、白处糊到最大）。
-    /// 默认离底 48% 以上清楚，往下逐渐变糊，离底 26% 以下糊到最大（字就压在这一段上）；半径按图宽算，大小图糊得一样
-    static func bottomBlur(_ image: UIImage, clearAbove: CGFloat = 0.48, fullBelow: CGFloat = 0.26) -> UIImage? {
+    /// 默认离底 34% 以上清楚，往下逐渐变糊，离底 16% 以下糊到最大（字就压在这一段上）；半径按图宽算（宽的 1.8%），大小图糊得一样。
+    /// 用户要求所有位置的渐进模糊都矮一些、轻一些：原来离底 48% 起、26% 以下最糊，半径是宽的 3%
+    static func bottomBlur(_ image: UIImage, clearAbove: CGFloat = 0.34, fullBelow: CGFloat = 0.16) -> UIImage? {
         guard let cg = image.cgImage else { return nil }
         let input = CIImage(cgImage: cg)
         let r = input.extent
@@ -232,7 +234,7 @@ enum ImageEffects {
         // 先把边缘向外延展，糊的时候四边不会渗进透明、发暗
         blur.inputImage = input.clampedToExtent()
         blur.mask = mask
-        blur.radius = Float(max(4, r.width * 0.03))
+        blur.radius = Float(max(3, r.width * 0.018))
         guard let out = blur.outputImage?.cropped(to: r) else { return nil }
         // 按原图的色彩空间出图（Apple 的图有的是 Display P3：不压成 sRGB、不掉饱和度）；不是 RGB 的就用默认的
         let space = cg.colorSpace.flatMap { $0.model == .rgb ? $0 : nil }

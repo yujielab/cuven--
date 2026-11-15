@@ -1020,8 +1020,8 @@ struct DetailHeroBackdrop: View {
             }
             .frame(width: width, height: imageHeight)
             .clipped()
-            // 画面最下面那一段化进底色：和画面里那段渐进式模糊在同一截（画面高的 76% 起，到底边——也就是字标上沿），看不出接缝
-            LinearGradient(stops: Self.dissolve(tone, from: imgEnd * 0.76, to: imgEnd), startPoint: .top, endPoint: .bottom)
+            // 画面最下面那一段化进底色：和画面里那段渐进式模糊在同一截（画面高的 83% 起，到底边——也就是字标上沿），看不出接缝
+            LinearGradient(stops: Self.dissolve(tone, from: imgEnd * 0.83, to: imgEnd), startPoint: .top, endPoint: .bottom)
             // 顶上浅浅压暗：状态栏和返回钮停在画面上也看得清（F34）
             LinearGradient(colors: [.black.opacity(0.38), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.18))
         }
