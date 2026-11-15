@@ -30,6 +30,8 @@ struct CastSheet: View {
                             Image(systemName: "chevron.forward")
                                 .font(.footnote.weight(.semibold))
                                 .foregroundStyle(.tertiary)
+                                // 「›」只是样子：旁白念「周远，饰 老周，按钮」，不再多念一个「前进」
+                                .accessibilityHidden(true)
                         }
                         .contentShape(Rectangle())
                     }
@@ -47,13 +49,11 @@ struct CastSheet: View {
         .presentationDragIndicator(.visible)
     }
 
-    /// 关掉整张弹层：系统的 xmark（C14）
+    /// 关掉整张弹层：系统的关闭钮（C14；设计轮 2：和简介、剧照、演员简介的弹层同一颗 `role: .close`，以前是自己拼的 xmark）
     private var closeButton: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
-            Button { dismiss() } label: {
-                Label("关闭", systemImage: "xmark")
-            }
-            .accessibilityIdentifier("sheet-cancel")
+            Button(role: .close) { dismiss() }
+                .accessibilityIdentifier("sheet-cancel")
         }
     }
 }
@@ -77,6 +77,8 @@ struct CastRow: View {
                         .lineLimit(1)
                 }
             }
+            // 行间的线从名字那儿起、不从照片底下穿过去（设计轮 2；iOS 列表带图的行都这样：C29）
+            .alignmentGuide(.listRowSeparatorLeading) { d in d[.leading] }
         }
         .padding(.vertical, 2)
     }

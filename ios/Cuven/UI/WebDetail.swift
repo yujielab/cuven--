@@ -277,9 +277,10 @@ struct SeriesDetailView: View {
 
     // MARK: 分集
 
-    /// 「剧集」+ 右边的季菜单；下面一排 16:9 的分集卡（T23：标准的横排；S8：停在左侧基准线上）
+    /// 「剧集」+ 右边的季菜单；下面一排 16:9 的分集卡（T23：标准的横排；S8：停在左侧基准线上）。
+    /// 标题到卡和别的分区一样是 titleGap（设计轮 2：以前 6）
     private func episodes(_ m: DSMetrics, fallbackArt: String?) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: m.titleGap) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text("剧集")
                     .font(.dsSectionTitle)
@@ -401,12 +402,15 @@ struct SeriesDetailView: View {
                     .imageScale(.small)
             }
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(DSInk.secondary)
             // 点得到的高度够 44（F74），版面上收回去，标题行不因此变高（F12）
             .padding(.vertical, 12)
             .contentShape(Rectangle())
         }
         .padding(.vertical, -12)
+        // 旁白：「选择季，第 1 季」（以前念「第 1 季」再加上下箭头符号的名字）
+        .accessibilityLabel("选择季")
+        .accessibilityValue(Self.seasonName(current))
         .accessibilityIdentifier("season-menu")
     }
 
@@ -723,7 +727,8 @@ struct DetailScaffold<Episodes: View>: View {
                 DetailPinnedBar(title: title, thumb: thumb, playTitle: playTitle, playDisabled: playDisabled, palette: palette,
                                 topInset: barBottom, leading: insets.leading + m.margin, trailing: insets.trailing + m.margin,
                                 onPlay: onPlay)
-                    .offset(y: showTitle ? 0 : -(barBottom + 90))
+                    // 「减弱动态效果」时只淡入淡出、不从上面滑下来（F59；以前只换了曲线，照样滑 100 多点）
+                    .offset(y: showTitle || reduceMotion ? 0 : -(barBottom + 90))
                     .opacity(showTitle ? 1 : 0)
                     .allowsHitTesting(showTitle)
                     .accessibilityHidden(!showTitle)
@@ -834,6 +839,8 @@ struct DetailScaffold<Episodes: View>: View {
                     .font(.subheadline)
                     .foregroundStyle(DSInk.secondary)
                     .lineLimit(1)
+                    // 旁白不念「黑星」和间隔号：「爱情，2024，1 小时 38 分钟，评分 7.0」
+                    .accessibilityLabel(DetailText.spoken(metaLine))
             }
             HStack(spacing: 12) {
                 playButton(m)
@@ -859,7 +866,9 @@ struct DetailScaffold<Episodes: View>: View {
         .accessibilityIdentifier(playID)
     }
 
-    /// 「…」：系统菜单，符号是不带圈的 ellipsis（C11、C15、C45）；底是一层半透明材质，像 tvOS 没聚焦的钮（S17、C35）。
+    /// 「…」：系统菜单，符号是不带圈的 ellipsis（C11、C15、C45）；底是一层 Liquid Glass，像 tvOS 没聚焦的钮（S17、C35）。
+    /// 设计轮 2（并行·detail）：以前是 thinMaterial 的灰圆，在染了色的页面上发闷、按下也没有反馈；玻璃只给控件（F38），
+    /// 按下是玻璃自带的回弹，和钉住那一条的「播放」、演员页的圆钮同一种。
     /// 菜单项都带 SF Symbol（F50），常用的在前（C41）；没有的项不出现
     private var moreMenu: some View {
         Menu {
@@ -882,7 +891,7 @@ struct DetailScaffold<Episodes: View>: View {
                 .font(.headline)
                 .foregroundStyle(.white)
                 .frame(width: 48, height: 48)
-                .background(.thinMaterial, in: Circle())
+                .glassEffect(.regular.interactive(), in: Circle())
                 .environment(\.colorScheme, .dark)
                 .contentShape(Circle())
         }
@@ -902,10 +911,11 @@ struct DetailScaffold<Episodes: View>: View {
 
     // MARK: 分区
 
-    /// 一组：粗体标题（可以带「›」）+ 一张卡；卡在展开的屏上最宽 720，不拉满一整行
+    /// 一组：粗体标题（可以带「›」）+ 一张卡；卡在展开的屏上最宽 720，不拉满一整行。
+    /// 标题到卡和标题到一排卡同一个距离（设计轮 2）：titleGap + 4（一排卡上下各垫 4），折起 16、展开 20
     private func group<Content: View>(_ m: DSMetrics, _ title: String, route: Route? = nil,
                                       @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: m.titleGap + 4) {
             DetailGroupTitle(title: title, route: route)
             content()
                 .frame(maxWidth: 720, alignment: .leading)
@@ -942,10 +952,11 @@ struct DetailScaffold<Episodes: View>: View {
         }
     }
 
-    /// 演员：标题「演员 ›」点开全部名单；下面一排圆形照片（T21 monogram），点一位直接看那一位
+    /// 演员：标题「演员 ›」点开全部名单；下面一排圆形照片（T21 monogram），点一位直接看那一位。
+    /// 标题到照片和「预告片」「剧照」一样是 titleGap（设计轮 2：以前 6，比别的分区挤 6–10 点）
     private func castSection(_ m: DSMetrics) -> some View {
         let d = (m.posterWidth * 0.86).rounded()
-        return VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: m.titleGap) {
             DetailLinkHeader(title: "演员", metrics: m, id: "cast-link") {
                 castSheet = CastSheetRequest(start: nil)
             }
@@ -1095,6 +1106,7 @@ struct DetailLinkHeader: View {
         .padding(.vertical, -10)
         .padding(.horizontal, metrics.margin)
         .accessibilityAddTraits(.isHeader)
+        .accessibilityHint("查看全部")
         .accessibilityIdentifier(id)
     }
 }
@@ -1114,10 +1126,11 @@ struct DetailMonogram: View {
             VStack(spacing: 2) {
                 Text(member.name.isEmpty ? "未知演员" : member.name)
                     .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(.white)
+                // 角色和页上别的第二行同一级灰（DSInk.secondary 72%；以前是系统 .secondary，约 60%，染色的底上偏暗）
                 Text(role.isEmpty ? " " : role)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DSInk.secondary)
             }
             .lineLimit(1)
             .multilineTextAlignment(.center)
@@ -1176,6 +1189,11 @@ enum DetailText {
     /// 几段字用「 · 」连起来，空的跳过
     static func line(_ parts: [String?]) -> String {
         parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    /// 给旁白念的（设计轮 2）：「 · 」换成停顿，「★ 7.5」念成「评分 7.5」（不念「黑星」「间隔号」）
+    static func spoken(_ s: String) -> String {
+        s.replacingOccurrences(of: "★ ", with: "评分 ").replacingOccurrences(of: " · ", with: "，")
     }
 
     /// 「★ 7.5」：没有评分就是 nil

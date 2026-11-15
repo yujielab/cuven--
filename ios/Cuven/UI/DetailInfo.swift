@@ -34,11 +34,25 @@ struct DetailPalette: Equatable {
         var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         guard edge.getHue(&h, saturation: &s, brightness: &b, alpha: &a), s > 0.12 else { return .neutral }
         let sat = min(0.78, max(0.38, s * 1.15))
-        return DetailPalette(base: Color(hue: Double(h), saturation: Double(sat), brightness: 0.46),
+        // 设计轮 2（并行·detail）：同一个明度 0.46，黄、绿、青比蓝、紫、红亮三四倍——黄绿的页面上，
+        // 卡里的简介（浅色字压在 10% 白的卡上）和头部那一行灰字只有 3.3–3.6 : 1。按相对亮度封顶（≤ 0.10）：
+        // 亮的色相压深一点（黄 0.46 → 0.36、绿 → 0.40），蓝、紫、红、橙本来就够深、不变；钉住的条按同一个比例
+        let baseB = min(0.46, Self.brightnessCap(hue: h, saturation: sat))
+        return DetailPalette(base: Color(hue: Double(h), saturation: Double(sat), brightness: Double(baseB)),
                              deep: Color(hue: Double(h), saturation: Double(sat * 0.85), brightness: 0.09),
                              ink2: Color(hue: Double(h), saturation: 0.26, brightness: 0.98),
                              badge: Color(hue: Double(h), saturation: 0.3, brightness: 1),
-                             bar: Color(hue: Double(h), saturation: Double(sat), brightness: 0.52))
+                             bar: Color(hue: Double(h), saturation: Double(sat), brightness: Double(min(0.52, baseB * 1.13))))
+    }
+
+    /// 这个色相、饱和度下，相对亮度不超过 target 的最大明度（HSB 里三个通道都和明度成正比，线性亮度约是明度的 2.2 次方）
+    private static func brightnessCap(hue h: CGFloat, saturation s: CGFloat, luminance target: CGFloat = 0.10) -> CGFloat {
+        var r: CGFloat = 0, g: CGFloat = 0, bl: CGFloat = 0, a: CGFloat = 0
+        guard UIColor(hue: h, saturation: s, brightness: 1, alpha: 1).getRed(&r, green: &g, blue: &bl, alpha: &a) else { return 1 }
+        func linear(_ c: CGFloat) -> CGFloat { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+        let full = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(bl)
+        guard full > target else { return 1 }
+        return pow(target / full, 1 / 2.2)
     }
 
     /// 头部画面化进去的那个颜色（UIKit 版，给 DetailHeroBackdrop）
@@ -80,30 +94,47 @@ struct DetailRelated {
 
 // MARK: - 卡
 
+/// 详情页、演员页的卡都是这一种面（设计轮 2（并行·detail）：以前演员页的两张卡各是圆角 30 / 26、底 10% / 8%、边 12% / 没有；
+/// 卡里的字离边 24、22、18 三种，分隔线 20）。卡边、卡里的分隔线、钉住那一条的底线、小海报的细边是同一种亮度
+enum DetailSurface {
+    static let radius: CGFloat = 34
+    static let fill = Color.white.opacity(0.1)
+    /// 卡边、分隔线、底线、小海报的一圈细边
+    static let line = Color.white.opacity(0.14)
+    /// 卡里的字离左右两边（分隔线也从这儿起）
+    static let inset: CGFloat = 20
+}
+
 /// 圆角 34 的半透明卡（参考图）
 struct DetailCard<Content: View>: View {
     @ViewBuilder var content: () -> Content
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 34, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: DetailSurface.radius, style: .continuous)
+        let still = reduceMotion
         VStack(spacing: 0) { content() }
-            .background(shape.fill(Color.white.opacity(0.1)))
+            .background(shape.fill(DetailSurface.fill))
             .clipShape(shape)
-            .overlay(shape.strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
-            // 滑进屏幕时从 97% 长到原大、淡入（参考图的手感；「减弱动态效果」时系统会关掉）
+            .overlay(shape.strokeBorder(DetailSurface.line, lineWidth: 1))
+            // 滑进屏幕时从 97% 长到原大、淡入（参考图的手感）；「减弱动态效果」时只淡入、不缩放
+            // （F59；系统不会替 scrollTransition 关掉缩放，以前这里的注释说会）
             .scrollTransition(.animated(.smooth(duration: 0.35))) { c, phase in
-                c.opacity(phase.isIdentity ? 1 : 0.55).scaleEffect(phase.isIdentity ? 1 : 0.97)
+                c.opacity(phase.isIdentity ? 1 : 0.55).scaleEffect(phase.isIdentity || still ? 1 : 0.97)
             }
     }
 }
 
-/// 卡里两行之间的细线（左右各缩进 20）
+/// 卡里两行之间的细线：右边缩进 20；左边和这一行的字对齐（前面有图标、海报的行，线从字那儿起，像 iOS 的列表）
 struct DetailCardDivider: View {
+    var leading: CGFloat = DetailSurface.inset
+
     var body: some View {
         Rectangle()
-            .fill(Color.white.opacity(0.14))
+            .fill(DetailSurface.line)
             .frame(height: 0.5)
-            .padding(.horizontal, 20)
+            .padding(.leading, leading)
+            .padding(.trailing, DetailSurface.inset)
     }
 }
 
@@ -115,8 +146,14 @@ struct DetailGroupTitle: View {
 
     var body: some View {
         if let route {
-            NavigationLink(value: route) { label(chevron: true).contentShape(Rectangle()) }
-                .buttonStyle(PressableStyle(scale: 0.98))
+            NavigationLink(value: route) {
+                label(chevron: true)
+                    // 点得到的高度够 44（F74；Title 2 一行只有 28），版面上收回去，和别的组名一样高（同 DetailLinkHeader）
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PressableStyle(scale: 0.98))
+            .padding(.vertical, -10)
         } else {
             label(chevron: false)
         }
@@ -156,7 +193,8 @@ struct DetailDescriptionCard: View {
                     .lineLimit(5)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 24)
+                    // 设计轮 2：字离边 24 → 20，和下面的分隔线、「导演」一行、别的卡同一条线（以前线在 20、字在 24，差 4 点）
+                    .padding(.horizontal, DetailSurface.inset)
                     .padding(.top, 22)
                     .padding(.bottom, director == nil ? 22 : 18)
                     .contentShape(Rectangle())
@@ -187,7 +225,7 @@ struct DetailDescriptionCard: View {
                     }
                     Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 24)
+                .padding(.horizontal, DetailSurface.inset)
                 .padding(.vertical, 18)
                 .accessibilityElement(children: .combine)
             }
@@ -207,10 +245,15 @@ struct DetailFactsCard: View {
     let link: URL?
     let palette: DetailPalette
 
+    /// 行里左边那一列（徽章、符号）的左边距和宽、到字的间距；行间的线从字那儿起（10 + 56 + 12）
+    private static let leadPad: CGFloat = 10
+    private static let leadW: CGFloat = 56
+    private static let leadGap: CGFloat = 12
+
     var body: some View {
         DetailCard {
             ForEach(Array(facts.enumerated()), id: \.element.id) { i, f in
-                if i > 0 { DetailCardDivider() }
+                if i > 0 { DetailCardDivider(leading: Self.leadPad + Self.leadW + Self.leadGap) }
                 row(f)
             }
             if let link {
@@ -236,9 +279,9 @@ struct DetailFactsCard: View {
     /// 主字和副字接成一行（「2026 年 · 第 1 季」「1080p · H.264」，文件名这种长的从中间省略），每行至少 34 点；
     /// 评分那一行是两行小字：星星 +「TMDB 评分」，下面「高于片库里 91% 的剧集」
     private func row(_ f: DetailFact) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: Self.leadGap) {
             lead(f.lead)
-                .frame(width: 56)
+                .frame(width: Self.leadW)
             Group {
                 if case .rating(let r) = f.lead {
                     VStack(alignment: .leading, spacing: 2) {
@@ -267,11 +310,21 @@ struct DetailFactsCard: View {
             .monospacedDigit()
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.leading, 10)
-        .padding(.trailing, 18)
+        .padding(.leading, Self.leadPad)
+        .padding(.trailing, DetailSurface.inset)
         .padding(.vertical, 7)
         .frame(minHeight: 34)
-        .accessibilityElement(children: .combine)
+        // 旁白（设计轮 2）：以前把左边那一列也念进去——「8.0，TMDB 评分…」「4K，4K · 杜比视界」「日历，2024 年上映」；
+        // 现在评分念成一句「TMDB 评分 8.0 分，高于…」，徽章、符号是装饰（和右边的字重复），不念
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Self.spoken(f))
+    }
+
+    static func spoken(_ f: DetailFact) -> String {
+        var parts: [String] = [f.text]
+        if case .rating(let r) = f.lead { parts = [f.text + " " + String(format: "%.1f", r) + " 分"] }
+        if let sub = f.sub, !sub.isEmpty { parts.append(sub) }
+        return parts.joined(separator: "，")
     }
 
     @ViewBuilder
@@ -329,13 +382,14 @@ struct DetailRelatedCard: View {
     var body: some View {
         DetailCard {
             ForEach(Array(related.items.enumerated()), id: \.element.id) { i, item in
-                if i > 0 { DetailCardDivider() }
+                // 行间的线从片名那儿起（20 + 海报 52 + 16），不从海报底下穿过去（App Store 列表的样子）
+                if i > 0 { DetailCardDivider(leading: DetailSurface.inset + 52 + 16) }
                 NavigationLink(value: item.route) {
                     HStack(spacing: 16) {
                         RemoteImage(url: item.art, maxPixel: 240)
                             .frame(width: 52, height: 78)
                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(DetailSurface.line, lineWidth: 0.5))
                         VStack(alignment: .leading, spacing: 3) {
                             Text(item.title)
                                 .font(.title3.weight(.semibold))
@@ -356,11 +410,13 @@ struct DetailRelatedCard: View {
                             .frame(minHeight: 34)
                             .background(Capsule().fill(Color.white.opacity(0.16)))
                     }
-                    .padding(.horizontal, 22)
+                    .padding(.horizontal, DetailSurface.inset)
                     .padding(.vertical, 14)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(DetailRowPress())
+                // 旁白念片名和「2024，爱情」，不再把只是样子的「查看」也念一遍（点的是整行）
+                .accessibilityLabel(DetailText.spoken(DetailText.line([item.title, item.subtitle])))
                 .accessibilityIdentifier("related-card")
             }
         }
@@ -384,16 +440,18 @@ struct DetailPinnedBar: View {
     var body: some View {
         HStack(spacing: 14) {
             if let thumb {
+                // 设计轮 2：小海报按 2:3 整张放（以前裁成 40×40 的方块，海报上的字切掉半截），圆角跟着小一号
                 RemoteImage(url: thumb, maxPixel: 180)
-                    .frame(width: 40, height: 40)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+                    .frame(width: 30, height: 45)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(DetailSurface.line, lineWidth: 0.5))
                     .accessibilityHidden(true)
             }
             Text(title)
                 .font(.headline)
                 .foregroundStyle(.white)
                 .lineLimit(1)
+                .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
             Button(action: onPlay) {
                 Text(playTitle.count > 4 ? "播放" : playTitle)
@@ -402,13 +460,19 @@ struct DetailPinnedBar: View {
                     .padding(.horizontal, 22)
                     .frame(minHeight: 40)
                     .glassEffect(.regular.tint(palette.base.opacity(0.35)).interactive(), in: Capsule())
-                    .contentShape(Capsule())
+                    // 看得见的胶囊 40 高，点得到的 44（F74）
+                    .padding(.vertical, 2)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(playDisabled)
             .opacity(playDisabled ? 0.5 : 1)
+            // 胶囊上只写「播放」，旁白念整句（「继续看第 3 集」）
+            .accessibilityLabel(playTitle)
             .accessibilityIdentifier("detail-pinned-play")
         }
+        // 条高是定的：特大字号时字封顶在 xxxLarge，不冲出条（系统的导航栏也这样）
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .padding(.leading, leading)
         .padding(.trailing, trailing)
         .frame(height: 60)
@@ -416,11 +480,16 @@ struct DetailPinnedBar: View {
         .padding(.bottom, 6)
         .frame(maxWidth: .infinity)
         .background {
-            palette.bar
+            // 设计轮 2：带这一页颜色的磨砂（以前是一块实色）——底下滚过去的卡隐约透上来，条浮在内容上面、不像贴了一块色板；
+            // 色压得够厚（86%），白字照样清楚。底线和卡边同一种亮度（10% → 14%），影子轻一点
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .overlay { palette.bar.opacity(0.86) }
                 .overlay(alignment: .bottom) {
-                    Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5)
+                    Rectangle().fill(DetailSurface.line).frame(height: 0.5)
                 }
-                .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+                .shadow(color: .black.opacity(0.2), radius: 10, y: 3)
+                .environment(\.colorScheme, .dark)
         }
     }
 }
