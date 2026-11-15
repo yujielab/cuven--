@@ -104,8 +104,7 @@ final class DuoDeviceTests: XCTestCase {
             print("DUO featured series card: none")
         }
         // 回到顶上：看到「Home」那一行的头像就停（多拉一下会触发下拉刷新）
-        for _ in 0..<12 where !app.buttons["home-account"].firstMatch.isOnScreen(in: app) { app.swipeDown() }
-        sleep(1)
+        app.scrollHomeToTop(maxSwipes: 12)
 
         // 详情：头图上此刻在屏上的那一页的「详情」（详情页从头图上放大出来）；返回是系统的返回钮（折起时在侧边那一列最上面）
         let heroDetail = visible(app.buttons.matching(identifier: "hero-detail"), in: app)
@@ -208,8 +207,7 @@ final class DuoDeviceTests: XCTestCase {
             print("DUO home finale: none")
         }
         // 回到顶上：看到「Home」那一行的头像就停（多拉一下会触发下拉刷新）
-        for _ in 0..<30 where !app.buttons["home-account"].firstMatch.isOnScreen(in: app) { app.swipeDown() }
-        sleep(1)
+        app.scrollHomeToTop(maxSwipes: 30)
 
         // 「文件夹」一排在搜索页（没输入时）：点进文件夹页（大标题、子文件夹一排、海报网格）
         tab(app, "搜索"); sleep(2)
@@ -243,10 +241,13 @@ final class DuoDeviceTests: XCTestCase {
             XCTFail("资料库没有「详情」")
         }
 
-        // 剧集详情：主页今年 / 去年那两排里的剧集海报（资料库只放电影）
+        // 剧集详情：主页上第一张在屏上的剧集卡（今年 / 去年那两排、五个大类里的剧集，或者精选剧集的大卡；资料库只放电影）。
+        // 一次快照看全部匹配项：年份那两排一屏只露一张多，第一张剧集卡常在屏幕右边外面，只看它的话怎么往上滑都找不到
         tab(app, "主页"); sleep(2)
-        if let s1 = reveal(app, app.buttons.matching(identifier: "series-card"), swipes: 4) {
-            s1.tap(); sleep(3)
+        app.scrollHomeToTop(maxSwipes: 30)
+        if app.revealAndTap(["series-card", "featured-series-card"], swipes: 8) != nil {
+            if !app.buttons["series-play"].waitForExistence(timeout: 8) { print("DUO series detail: no series-play") }
+            sleep(2)
             snap("duo-05b-series")
             app.swipeUp(); sleep(2)
             snap("duo-05c-series-episodes")
@@ -273,7 +274,7 @@ final class DuoDeviceTests: XCTestCase {
             }
             back(app)
         } else {
-            XCTFail("主页没有剧集高卡")
+            XCTFail("主页上找不到剧集卡")
         }
         for _ in 0..<6 { app.swipeDown() }
         sleep(1)

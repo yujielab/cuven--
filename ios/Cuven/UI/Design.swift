@@ -759,27 +759,39 @@ struct DSHeroCarousel: View {
                     .accessibilityHidden(true)
             }
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 0) {
-                    ForEach(pages) { p in
-                        foreground(p, width: w)
-                            .frame(width: w, height: height, alignment: .bottomLeading)
-                            .id(p.id)
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(spacing: 0) {
+                        ForEach(pages) { p in
+                            foreground(p, width: w)
+                                .frame(width: w, height: height, alignment: .bottomLeading)
+                                .id(p.id)
+                        }
+                    }
+                    .scrollTargetLayout()
+                }
+                .scrollTargetBehavior(.paging)
+                .scrollPosition(id: $current)
+                // 翻页按整页宽对齐：不让系统按侧边那一列的安全区给它加内边距，否则每一页都错开一截（F6）
+                .contentMargins(.horizontal, 0, for: .scrollContent)
+                .ignoresSafeArea(.container, edges: .horizontal)
+                .frame(width: w, height: height)
+                // 真的左右翻了才算碰过（只是从这里开始竖着滑，不算）
+                .onScrollPhaseChange { _, phase in
+                    if phase == .interacting && !touched {
+                        touched = true
+                        pageStart = nil
                     }
                 }
-                .scrollTargetLayout()
-            }
-            .scrollTargetBehavior(.paging)
-            .scrollPosition(id: $current)
-            // 翻页按整页宽对齐：不让系统按侧边那一列的安全区给它加内边距，否则每一页都错开一截（F6）
-            .contentMargins(.horizontal, 0, for: .scrollContent)
-            .ignoresSafeArea(.container, edges: .horizontal)
-            .frame(width: w, height: height)
-            // 真的左右翻了才算碰过（只是从这里开始竖着滑，不算）
-            .onScrollPhaseChange { _, phase in
-                if phase == .interacting && !touched {
-                    touched = true
-                    pageStart = nil
+                // 窗口变宽 / 变窄（转屏、Duo 折起 / 展开）：每一页跟着变宽，滚到的位置却还停在旧宽度的整数倍上，
+                // 不在第一页时这一页会错开一截（iPad 竖拿转横拿后，第二页的字跑到了屏幕中间）。宽度一变就把这一页重新对齐
+                .onChange(of: w) { _, _ in
+                    guard let id = current ?? pages.first?.id else { return }
+                    DispatchQueue.main.async {
+                        var t = Transaction()
+                        t.disablesAnimations = true
+                        withTransaction(t) { proxy.scrollTo(id, anchor: .leading) }
+                    }
                 }
             }
 

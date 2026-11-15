@@ -46,6 +46,10 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 竖拿（首页、电影详情、资料库、剧集详情与分集、账户与设置、搜索）、横拿（首页、资料库），外加未登录时的登录页（再输一个不存在的用户名，确认连得上账户服务、提示「新用户」；只读查询，不写任何东西）。模拟器里的 Duo 有两块屏（外屏 466×678、内屏 669×951）：折起的测试跑完后，用 `simctl io … screenConfig` 关掉外屏、打开内屏，再跑一遍展开的（`DuoUnfoldedTests`，截图 `duo-3*`；窗口没切到内屏就不截）。用 `-CuvenDemo YES` 演示数据（片名、海报、字标都是本地合成的，
 不连服务器、不用登录、不能播放），这几张截图不含片库内容，提交到 `refs/ci/ios-preview-demo`（不是分支）：
 `git fetch origin refs/ci/ios-preview-demo && git checkout FETCH_HEAD -- .`
+模拟器的 Duo 切不到内屏，展开的版面另在 iPad mini 上跑同一个 `DuoUnfoldedTests`（竖拿 744 点宽，和展开竖拿同一套版面；主页、电影详情、资料库，再横拿看主页），
+这是工作流里单独的 `ipad` 任务，和上面并行（放在一起会超过时限），截图 `duo-4*`（同样只有演示数据）提交到 `refs/ci/ios-preview-ipad`。
+UI 测试找元素时拍一次快照、看全部匹配项是否在屏上（`UITestHelpers.swift` 的 `onScreenFrames` / `revealAndTap`），点框的正中，不问 `isHittable`：
+主页元素多，逐个问元素每次都要重拍整棵树；头图翻页时问 `isHittable` 会记一次失败并停下整个测试。
 
 ## MKV → HLS 链路
 
