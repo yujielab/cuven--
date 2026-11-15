@@ -87,7 +87,13 @@ struct FeaturedCollectionHeader: View {
     /// 排在最前那部的海报（带的颜色从它取）
     private var lead: URL? { covers.first.flatMap { $0 } }
 
-    static func posterWidth(_ m: DSMetrics) -> CGFloat { min(150, max(92, (m.width * 0.27).rounded())) }
+    /// 立体海报多宽：屏宽的 27%（92–150 点）；展开时整扇海报不高过屏高的 42%（展开横拿只有六百多点高，
+    /// 一扇 150 点的海报连字就占掉大半屏）
+    static func posterWidth(_ m: DSMetrics) -> CGFloat {
+        let byWidth = min(150, max(92, (m.width * 0.27).rounded()))
+        guard m.wide, m.height > 0 else { return byWidth }
+        return min(byWidth, max(92, ((m.height * 0.42 - 12) / 2.43).rounded(.down)))
+    }
 
     /// 大标题的底边离这一块顶上多远（合集页滚过它，才把标题接到导航栏里）
     static func titleBottom(_ m: DSMetrics) -> CGFloat {

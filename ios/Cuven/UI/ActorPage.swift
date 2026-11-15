@@ -29,7 +29,7 @@ struct ActorPage: View {
     var body: some View {
         GeometryReader { geo in
             let insets = geo.safeAreaInsets
-            let m = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing)
+            let m = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing, height: geo.size.height)
             let fullW = geo.size.width + insets.leading + insets.trailing
             let fullH = geo.size.height + insets.top + insets.bottom
             let photoH = ActorText.photoHeight(width: fullW, height: fullH)

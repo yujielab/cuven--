@@ -44,7 +44,7 @@ struct FolderView: View {
     var body: some View {
         GeometryReader { geo in
             let insets = geo.safeAreaInsets
-            let metrics = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing)
+            let metrics = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing, height: geo.size.height)
             ScrollView {
                 VStack(alignment: .leading, spacing: max(16, metrics.shelfGap - 14)) {
                     if loading && subfolders.isEmpty && videos.isEmpty {
