@@ -120,6 +120,9 @@ struct WelcomeView: View {
         .multilineTextAlignment(.center)
         .padding(.horizontal, 40)
         .frame(width: w)
+        // 旁白：问候和「欢迎回来 · 名字」一起念、当这一屏的标题（版面和文案照网页版不动：F76；设计轮 2（并行·library））
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
     }
 
     /// 网页版：5 点前 / 22 点后「Good Night」，12 点前「Good Morning」，18 点前「Good Afternoon」，再往后「Good Evening」

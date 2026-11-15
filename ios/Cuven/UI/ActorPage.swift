@@ -160,9 +160,10 @@ struct ActorPage: View {
             }
             .padding(.horizontal, m.margin)
             .padding(.bottom, 26)
-            .scaleEffect(appeared ? 1 : 0.94)
+            // 「减弱动态效果」时只淡入（F59；以前只把弹簧换成短曲线，照样从 94% 放大、从模糊里出来）
+            .scaleEffect(appeared || reduceMotion ? 1 : 0.94)
             .opacity(appeared ? 1 : 0)
-            .blur(radius: appeared ? 0 : 8)
+            .blur(radius: appeared || reduceMotion ? 0 : 8)
         }
         .frame(width: width, height: height)
     }
@@ -184,7 +185,7 @@ struct ActorPage: View {
                     RemoteImage(url: item.poster, maxPixel: 300)
                         .frame(width: 76, height: 114)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(DetailSurface.line, lineWidth: 0.5))
                         .shadow(color: .black.opacity(0.28), radius: 6, y: 3)
                     VStack(alignment: .leading, spacing: 4) {
                         if let d = ActorText.longDate(w.date) {
@@ -204,9 +205,10 @@ struct ActorPage: View {
                     Spacer(minLength: 56)
                 }
                 .padding(16)
-                .background(RoundedRectangle(cornerRadius: 30, style: .continuous).fill(Color.white.opacity(0.1)))
-                .overlay(RoundedRectangle(cornerRadius: 30, style: .continuous).strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
-                .contentShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+                // 设计轮 2（并行·detail）：和详情页的卡同一种面（圆角 30 → 34、细边 12% → 14%：DetailSurface）
+                .background(RoundedRectangle(cornerRadius: DetailSurface.radius, style: .continuous).fill(DetailSurface.fill))
+                .overlay(RoundedRectangle(cornerRadius: DetailSurface.radius, style: .continuous).strokeBorder(DetailSurface.line, lineWidth: 1))
+                .contentShape(RoundedRectangle(cornerRadius: DetailSurface.radius, style: .continuous))
             }
             .accessibilityIdentifier("actor-latest")
             Button {
@@ -252,7 +254,8 @@ struct ActorPage: View {
     @ViewBuilder
     private func aboutCard(_ m: DSMetrics, palette: DetailPalette) -> some View {
         if let bio = info?.biography, !bio.isEmpty {
-            VStack(alignment: .leading, spacing: 14) {
+            // 标题到卡和详情页的组一样（titleGap + 4：折起 16、展开 20；以前 14）
+            VStack(alignment: .leading, spacing: m.titleGap + 4) {
                 Text("关于")
                     .font(.dsSectionTitle)
                     .foregroundStyle(.white)
@@ -270,9 +273,11 @@ struct ActorPage: View {
                             .foregroundStyle(.white)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(20)
-                    .background(RoundedRectangle(cornerRadius: 26, style: .continuous).fill(Color.white.opacity(0.08)))
-                    .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+                    .padding(DetailSurface.inset)
+                    // 设计轮 2：和详情页的「简介」卡同一种面（圆角 26 → 34、底 8% → 10%、加 14% 的细边）
+                    .background(RoundedRectangle(cornerRadius: DetailSurface.radius, style: .continuous).fill(DetailSurface.fill))
+                    .overlay(RoundedRectangle(cornerRadius: DetailSurface.radius, style: .continuous).strokeBorder(DetailSurface.line, lineWidth: 1))
+                    .contentShape(RoundedRectangle(cornerRadius: DetailSurface.radius, style: .continuous))
                 }
                 .buttonStyle(PressableStyle(scale: 0.98))
                 .accessibilityHint("打开简介")

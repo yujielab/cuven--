@@ -78,7 +78,9 @@ struct LibraryGridCard: View {
 
     var body: some View {
         let h = (width * 1.5).rounded()
-        Color(white: 0.11)
+        // 圆角取 DSRadius.card（海报这么窄是 12，和 DSPosterLockup 同一个数）
+        let shape = RoundedRectangle(cornerRadius: DSRadius.card(width), style: .continuous)
+        DSFill.placeholder
             .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: .clear) }
             .frame(width: width, height: h)
             .overlay {
@@ -91,10 +93,17 @@ struct LibraryGridCard: View {
                         .padding(.bottom, 8)
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(shape)
+            .contentShape(shape)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel([title, subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，"))
+            // 看了一半的：底下那条进度旁白也念出来（「已看 40%」：F36 不只靠画面表达，F76；设计轮 2（并行·library））
+            .accessibilityValue(watched)
+    }
+
+    private var watched: String {
+        guard let p = progress, p > 0.01 else { return "" }
+        return "已看 \(Int((min(1, p) * 100).rounded()))%"
     }
 }
 
@@ -151,6 +160,7 @@ struct SearchView: View {
     @State private var query = ""
     @State private var scope: SearchScope = .all
     @Namespace private var scopeNS
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZoomStack {
@@ -235,10 +245,18 @@ struct SearchView: View {
     @ViewBuilder private func results(_ q: String, _ metrics: DSMetrics) -> some View {
         let hits = model.search(q)
         if hits.isEmpty {
-            // F87、F88：不怪人，说怎么办
-            ContentUnavailableView("没有找到「\(q)」", systemImage: "magnifyingglass",
-                                   description: Text("试试别的片名，或输入年份，比如 2026。"))
-                .padding(.top, 60)
+            // F87、F88：不怪人，说怎么办，再给一颗钮直接去做（设计轮 2（并行·library）：以前只有一句话；年份举今年的）
+            ContentUnavailableView {
+                Label("没有找到「\(q)」", systemImage: "magnifyingglass")
+            } description: {
+                Text("试试别的片名，或输入年份，比如 \(String(Calendar.current.component(.year, from: Date())))。")
+            } actions: {
+                NavigationLink(value: Route.shelf(.all)) {
+                    Text("浏览所有影片")
+                }
+                .accessibilityIdentifier("search-browse-all")
+            }
+            .padding(.top, 60)
         } else {
             let movies = hits.compactMap { h -> Video? in if case .movie(let v) = h.kind { return v } else { return nil } }
             let shows = hits.compactMap { h -> Series? in if case .series(let s) = h.kind { return s } else { return nil } }
@@ -260,60 +278,82 @@ struct SearchView: View {
                 .transition(.opacity)
                 .id(shown)
             }
-            .animation(.smooth(duration: 0.3), value: shown)
+            .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: shown)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 8)
             .padding(.bottom, 40)
         }
     }
 
-    /// 分类胶囊：选中的那颗填实（系统的强调色）、白字，别的只有字；换的时候那颗胶囊滑过去（F57）；点得到 44 高（F74）
+    /// 分类胶囊：选中的那颗填实（系统的强调色）、黑字，换的时候那颗胶囊滑过去（F57）；点得到 44 高（F74）。
+    /// 设计轮 2（并行·library）：
+    /// · 没选中的也是一颗胶囊（垫 12% 的白，和资料库的评分胶囊同一种底），一眼看得出是能点的钮，不再像一行散字；
+    /// · 第一颗的左沿落在边距线上（F2：以前整排往外出了 6 点，胶囊在边距线外、字在线里 10 点，哪条都对不上）；间距 6 → 8；
+    /// · 高 36 改成「至少 36」，字放大时胶囊跟着长高（F23，以前写死 36，大字号时字顶出胶囊）；
+    /// · 「减弱动态效果」时选中的那块不滑、原地淡入淡出（F60）
     private func scopeBar(_ scopes: [SearchScope], shown: SearchScope, _ metrics: DSMetrics) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             ForEach(scopes) { s in
+                let on = s == shown
                 Button {
-                    guard s != shown else { return }
+                    guard !on else { return }
                     Haptics.selection()
-                    withAnimation(.smooth(duration: 0.3)) { scope = s }
+                    withAnimation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion)) { scope = s }
                 } label: {
                     // 选中的那颗是白底（App 的 tint 是白色，accentColor 跟着它）：字换黑，不然白字压白底整颗看不见（设计轮 1）
                     Text(s.rawValue)
                         .font(.headline)
-                        .foregroundStyle(s == shown ? Color.black : Color.white)
+                        .foregroundStyle(on ? Color.black : Color.white)
                         .padding(.horizontal, 16)
-                        .frame(height: 36)
-                        .background {
-                            if s == shown {
-                                Capsule()
-                                    .fill(Color.accentColor)
-                                    .matchedGeometryEffect(id: "scope", in: scopeNS)
-                            }
-                        }
+                        .padding(.vertical, 7)
+                        .frame(minHeight: 36)
+                        .background { scopeChipFill(on) }
                         .frame(minHeight: 44)
                         .contentShape(Capsule())
                 }
                 .buttonStyle(PressableStyle(scale: 0.94))
-                .accessibilityAddTraits(s == shown ? .isSelected : [])
+                .accessibilityAddTraits(on ? .isSelected : [])
                 .accessibilityIdentifier("search-scope-\(s.id)")
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, metrics.margin - 6)
+        .padding(.horizontal, metrics.margin)
+    }
+
+    /// 一颗分类胶囊的底：12% 的白；选中的再盖一块白（滑过去的那一块）
+    @ViewBuilder private func scopeChipFill(_ on: Bool) -> some View {
+        ZStack {
+            Capsule().fill(Color.white.opacity(0.12))
+            if on {
+                if reduceMotion {
+                    Capsule().fill(Color.accentColor)
+                } else {
+                    Capsule()
+                        .fill(Color.accentColor)
+                        .matchedGeometryEffect(id: "scope", in: scopeNS)
+                }
+            }
+        }
     }
 
     /// 「全部」：和网页版一样，剧集一排 16:9 横卡、电影一排竖海报（卡型不同，一眼分得出）；最相关的那一类在上
+    /// 「N 个结果」是下面这些结果的说明，贴着它们（设计轮 2（并行·library）：到第一组的距离 排间距 44 → 标题间距 + 12 = 24，
+    /// 以前它和第一组隔得比两组之间还远，像飘在分类胶囊和结果中间：F3、F12）
     @ViewBuilder private func allResults(_ q: String, movies: [Video], shows: [Series], seriesFirst: Bool, _ metrics: DSMetrics) -> some View {
-        VStack(alignment: .leading, spacing: metrics.shelfGap) {
+        VStack(alignment: .leading, spacing: 0) {
             Text("「\(q)」· \(movies.count + shows.count) 个结果")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, metrics.margin)
-            if seriesFirst {
-                showsSection(shows, metrics)
-                moviesSection(movies, metrics)
-            } else {
-                moviesSection(movies, metrics)
-                showsSection(shows, metrics)
+                .padding(.bottom, metrics.titleGap + 12)
+            VStack(alignment: .leading, spacing: metrics.shelfGap) {
+                if seriesFirst {
+                    showsSection(shows, metrics)
+                    moviesSection(movies, metrics)
+                } else {
+                    moviesSection(movies, metrics)
+                    showsSection(shows, metrics)
+                }
             }
         }
     }
@@ -388,14 +428,15 @@ struct SearchResultRow: View {
                     HStack(spacing: 14) {
                         thumbnail(width: thumbW)
                         VStack(alignment: .leading, spacing: 3) {
+                            // 长片名、大字号时折成两行，不在滚动的列表里截断（F24；设计轮 2（并行·library））
                             Text(title)
                                 .font(.title3)
                                 .foregroundStyle(.primary)
-                                .lineLimit(1)
+                                .lineLimit(2)
                             Text(subtitle)
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                                .lineLimit(2)
                         }
                         Spacer(minLength: 0)
                     }
@@ -417,7 +458,10 @@ struct SearchResultRow: View {
                 .accessibilityLabel("更多")
             }
             .padding(.vertical, 10)
-            .padding(.horizontal, metrics.margin)
+            .padding(.leading, metrics.margin)
+            // 「•••」的点按区 44 往边距里伸，符号本身的右沿落在边距线上，和行间细线的右端对齐
+            // （设计轮 2（并行·library）：以前符号缩在边距线里 14 点：F2）
+            .padding(.trailing, max(4, metrics.margin - 14))
             if divider {
                 Divider()
                     .padding(.leading, metrics.margin + thumbW + 14)
@@ -471,7 +515,7 @@ struct SearchResultRow: View {
                 return model.seriesWideArt(s).url
             }
         }()
-        return Color(white: 0.11)
+        return DSFill.placeholder
             .overlay { RemoteImage(url: url, maxPixel: w * 3, placeholder: .clear) }
             .frame(width: w, height: h)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))

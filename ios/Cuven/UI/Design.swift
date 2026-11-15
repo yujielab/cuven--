@@ -157,6 +157,83 @@ enum DSInk {
     static let tertiary = Color.white.opacity(0.55)
 }
 
+// MARK: - 形状、底色、取色（设计轮 2（并行·home）：同一种东西同一种圆角、同一种底、同一种取色）
+
+/// 圆角：卡的圆角跟着卡宽走（约卡宽的 5.5%，12–22 点），同样宽的卡一样圆（F12）。
+/// 以前同是 16:9、折起 283 点宽的卡，继续观看 12、分集卡 14、年份卡 17 三种；海报（118–190 点）照旧是 12
+enum DSRadius {
+    static func card(_ width: CGFloat) -> CGFloat { min(22, max(12, (width * 0.055).rounded())) }
+    /// 带底条的大卡（精选那排、合集页；照参考图的大圆角）
+    static let feature: CGFloat = 28
+    /// 面板、底条里的小海报：宽的 20%（40–60 点宽 → 8–12 点）
+    static func thumb(_ width: CGFloat) -> CGFloat { (width * 0.2).rounded() }
+}
+
+/// 底色：画面没到之前卡的底、深色页面上卡的那圈细边
+enum DSFill {
+    /// 以前 0.08、0.1、0.11、0.12 四种灰，载入时一排排卡深浅不一
+    static let placeholder = Color(white: 0.11)
+    /// 以前 6%、8% 两种
+    static let hairline = Color.white.opacity(0.08)
+}
+
+/// 从画面取的底色（编辑推荐的面板、合集卡的底条同一个算法；以前一个亮度压到 0.2–0.38、一个 0.22–0.42）：
+/// 色相照画面，饱和度最多 0.45，亮度 0.2–0.36——白字 9 : 1 以上，72% 的灰字（DSInk.secondary）最亮的黄绿底上也有 4.5 : 1（F30、F72、C58）
+enum DSTint {
+    static func panel(_ c: UIColor) -> Color? {
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        guard c.getHue(&h, saturation: &s, brightness: &b, alpha: &a) else { return nil }
+        return Color(hue: Double(h), saturation: Double(min(0.45, s)), brightness: Double(min(0.36, max(0.2, b * 0.7))))
+    }
+}
+
+/// 面板、卡底条里的小海报（2:3）：同一种圆角（宽的 20%）、同一圈细边、同一团小影子。
+/// 以前编辑推荐、年份卡、精选卡、合集卡各写一份（细边 14–16% 白，影子三种，年份卡没有）
+struct DSThumb: View {
+    let url: URL?
+    let width: CGFloat
+    var maxPixel: CGFloat = 200
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: DSRadius.thumb(width), style: .continuous)
+        RemoteImage(url: url, maxPixel: maxPixel)
+            .frame(width: width, height: (width * 1.5).rounded())
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(.white.opacity(0.15), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+            .accessibilityHidden(true)
+    }
+}
+
+/// 卡和面板上的「查看」胶囊：只是样子（整张卡才是那颗按钮，点按区是整张卡：F74），不单独念给旁白。
+/// 以前四处各写一份：高 30 / 32、两边 12 / 16 / 18、底 12% / 18% / 20%。
+/// 压在画面、取色面板、磨砂条上（onArt）：白字、20% 白的底；在黑的页面上（年份卡下面那一行）：蓝字、12% 白的底
+/// （App Store「获取」那样；底再亮，蓝字的对比度反而掉到 4.5 : 1 以下）。宁可片名截断，胶囊不被挤扁
+struct DSViewPill: View {
+    var onArt = true
+    var compact = false
+
+    var body: some View {
+        Text("查看")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(onArt ? Color.white : Theme.accent)
+            .lineLimit(1)
+            .padding(.horizontal, compact ? 12 : 16)
+            .frame(minHeight: 32)
+            .background(Capsule().fill(Color.white.opacity(onArt ? 0.2 : 0.12)))
+            .fixedSize()
+            .accessibilityHidden(true)
+    }
+}
+
+extension View {
+    /// 分区标题这种矮的链接（一行 Title 2 约 28 点高）：点按区上下各多 8 点，够 44 点（F74）；
+    /// 外面再用 `.padding(.vertical, -8)` 收回去，版面一点不动
+    func dsTallHitArea() -> some View {
+        padding(.vertical, 8).contentShape(Rectangle())
+    }
+}
+
 // MARK: - 分区：标题 + 一排
 
 /// 分区标题的字（设计轮 1：全 App 的分区标题、组名都是它，只有两级）：标题、有去处时一个「›」、可选的一行副标题。
@@ -205,8 +282,10 @@ struct DSShelfTitle: View {
             .accessibilityAddTraits(.isHeader)
 
         if let route {
-            NavigationLink(value: route) { label.contentShape(Rectangle()) }
+            // 设计轮 2：点按区够 44 高（F74），版面不变
+            NavigationLink(value: route) { label.dsTallHitArea() }
                 .buttonStyle(PressableStyle(scale: 0.98))
+                .padding(.vertical, -8)
                 .accessibilityIdentifier("section-\(title)")
         } else {
             label
@@ -353,13 +432,15 @@ struct DSPosterLockup: View {
     var body: some View {
         let w = width ?? metrics.posterWidth
         let h = (w * 1.5).rounded()
+        // 设计轮 2：圆角取 DSRadius.card（海报这么宽仍是 12）
+        let shape = RoundedRectangle(cornerRadius: DSRadius.card(w), style: .continuous)
         DSParallaxArt(url: art, metrics: metrics, size: CGSize(width: w, height: h))
             .overlay {
                 if let logo { DSPosterLogo(logo: logo, size: CGSize(width: w, height: h), title: title) }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(shape)
             .frame(width: w, height: h)
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .contentShape(shape)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel([title, subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，"))
     }
@@ -398,7 +479,8 @@ struct DSWideLockup: View {
                         .padding(.bottom, 10)
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                // 设计轮 2：12 → DSRadius.card（折起 283 点宽 16），和同样宽的年份卡、分集卡一样圆
+                .clipShape(RoundedRectangle(cornerRadius: DSRadius.card(w), style: .continuous))
         }
         .frame(width: w, alignment: .leading)
         .contentShape(Rectangle())
@@ -439,8 +521,9 @@ struct DSMediaCard<MenuItems: View>: View {
         let w = width ?? (tall ? metrics.episodeTallCardWidth : metrics.wideCardWidth)
         // 长文案的卡 1.3 : 1（用户要求：宽 30%、高不变；剧照是 16:9，也比方卡少裁两边）
         let h = tall ? (w / 1.3).rounded() : (w * 9 / 16).rounded()
-        // 圆角跟着卡宽走（参考图那种大圆角：约卡宽的 4.5%，14–22 点；方卡按 1.4 倍宽算，和 16:9 卡看着一样圆）
-        let radius: CGFloat = max(14, min(22, ((tall ? w * 1.4 : w) * 0.045).rounded()))
+        // 圆角跟着卡宽走（参考图那种大圆角；方卡按 1.4 倍宽算，和 16:9 卡看着一样圆）。
+        // 设计轮 2：4.5%（14–22）→ 全 App 同一个 DSRadius.card（5.5%，12–22）：折起 16:9 卡 14 → 16，和继续观看、年份卡一样
+        let radius: CGFloat = DSRadius.card(tall ? w * 1.4 : w)
         // 字离左、下两边的距离；「•••」的点按区按它摆，三个点的右缘和字的边线对齐
         let pad: CGFloat = metrics.wide ? 18 : 14
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
@@ -696,7 +779,8 @@ struct DSPlayButtonStyle: ButtonStyle {
     }
 }
 
-/// 白色胶囊、按下缩一点
+/// 白色胶囊、按下缩一点。设计轮 2：按压和卡片、分区标题同一个手感（DSMotion.press：略缩到 0.96、略暗 6%），
+/// 以前是另一条弹簧（0.3 秒、阻尼 0.8）、按下变半透明
 private struct DSPlayChrome: ViewModifier {
     let pressed: Bool
 
@@ -704,8 +788,8 @@ private struct DSPlayChrome: ViewModifier {
         content
             .background(Color.white, in: Capsule())
             .scaleEffect(pressed ? 0.96 : 1)
-            .opacity(pressed ? 0.9 : 1)
-            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: pressed)
+            .brightness(pressed ? -0.06 : 0)
+            .animation(DSMotion.press, value: pressed)
             .contentShape(Capsule())
     }
 }
@@ -735,8 +819,10 @@ struct DSSecondaryButtonStyle: ButtonStyle {
             .frame(minHeight: 48)
             .background(.thinMaterial, in: Capsule())
             .environment(\.colorScheme, .dark)
+            // 设计轮 2：和「播放」、卡片同一个按压手感（DSMotion.press，略缩略暗）
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
-            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: configuration.isPressed)
+            .brightness(configuration.isPressed ? -0.06 : 0)
+            .animation(DSMotion.press, value: configuration.isPressed)
             .contentShape(Capsule())
     }
 }
@@ -878,7 +964,8 @@ struct DSHeroCarousel: View {
         let logoHeight = min(132, max(84, (w * 0.2).rounded()))
         let logoMaxWidth = (w * 0.45).rounded()
         return VStack(alignment: .leading, spacing: 14) {
-            Group {
+            // 字标和一行信息合成旁白的一个标题：字标是图，以前旁白只念得出「电影 · 2025 · 剧情」、念不出片名（设计轮 2；F76）
+            VStack(alignment: .leading, spacing: 14) {
                 if let logo = p.logo, !logo.isEmpty {
                     LogoImage(url: TMDBImage.url(logo, "w500"), height: logoHeight, alignment: .leading,
                               fallback: p.title, maxWidth: logoMaxWidth)
@@ -897,6 +984,9 @@ struct DSHeroCarousel: View {
                 }
             }
             .allowsHitTesting(false)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel([p.title, p.meta].filter { !$0.isEmpty }.joined(separator: "，"))
+            .accessibilityAddTraits(.isHeader)
             HStack(spacing: 12) {
                 // 「播放」比自然宽度宽 45%（用户要求）
                 Button(action: p.play) { Label(p.playTitle, systemImage: "play.fill") }
@@ -908,6 +998,9 @@ struct DSHeroCarousel: View {
             }
             .padding(.top, 4)
         }
+        // 设计轮 2：字号最大到 xxLarge。再大，加宽 45% 的「继续播放」和「详情」在折起的 Duo 上（可用约 324 点）一行放不下，
+        // 「详情」被挤到侧边那一列底下；画面上的字本来就有固定的地方（和分集卡、精选卡一样封顶；F23）
+        .dynamicTypeSize(...DynamicTypeSize.xxLarge)
         .padding(.leading, leadingInset + metrics.margin)
         .padding(.trailing, trailingInset + metrics.margin)
         // 下面给页码点留一行（S16）

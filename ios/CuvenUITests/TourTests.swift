@@ -70,8 +70,9 @@ final class TourTests: XCTestCase {
             sleep(30)
             snap("10-player")
             // 还没开播：加载画面（顶层窗口）还盖着，点它左上的关闭
+            // 加载画面正在收起时，关闭钮的框会缩到十几点：点不到也不算失败，按框的正中点（不问 isHittable）
             let closeLoading = app.buttons["player-loading-close"]
-            if closeLoading.exists { closeLoading.tap(); sleep(2) }
+            if closeLoading.exists, closeLoading.frame.width >= 30 { closeLoading.tapCenter(); sleep(2) }
             app.swipeDown(velocity: .fast)
             if !app.buttons["detail-play"].waitForExistence(timeout: 8) {
                 app.terminate()

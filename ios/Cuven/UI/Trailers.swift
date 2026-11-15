@@ -138,6 +138,7 @@ struct TrailerPlayerView: View {
     let movieTitle: String
     @State private var deck: TrailerDeck
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(movieTitle: String, trailers: [Trailer], start: Int) {
         self.movieTitle = movieTitle
@@ -162,6 +163,20 @@ struct TrailerPlayerView: View {
                         }
                     }
                 )
+                // 旁白（设计轮 2）：轻点、左右滑这些手势旁白用不了——画面是一个元素：念这一段的名字和「正在播放 / 已暂停」，
+                // 轻点两下暂停 / 继续，上下轻扫换下一段 / 上一段（F75、F76）
+                .accessibilityElement()
+                .accessibilityLabel(deck.current?.title ?? "预告片")
+                .accessibilityValue(deck.failed ? "放不了" : (deck.paused ? "已暂停" : "正在播放"))
+                .accessibilityHint(deck.trailers.count > 1 ? "轻点两下暂停或继续，上下轻扫换一段" : "轻点两下暂停或继续")
+                .accessibilityAction { deck.togglePause() }
+                .accessibilityAdjustableAction { direction in
+                    switch direction {
+                    case .increment: deck.go(deck.index + 1)
+                    case .decrement: deck.go(deck.index - 1)
+                    @unknown default: break
+                    }
+                }
                 .accessibilityIdentifier("trailer-video")
 
             if deck.failed {
@@ -179,7 +194,9 @@ struct TrailerPlayerView: View {
                     .frame(width: 72, height: 72)
                     .glassEffect(.regular, in: Circle())
                     .allowsHitTesting(false)
-                    .transition(.scale.combined(with: .opacity))
+                    .accessibilityHidden(true)
+                    // 「减弱动态效果」时只淡入淡出（F59）
+                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.scale.combined(with: .opacity))
             }
 
             VStack(spacing: 0) {

@@ -36,7 +36,7 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(1)
         snap("duo-00d-privacy-2")
         for id in ["pg-privacy", "pg-cross", "pg-age"] {
-            if let row = reveal(app, id, swipes: 3) { row.tap(); usleep(300_000) } else { print("DUO privacy: \(id) not found") }
+            if let row = reveal(app, id, swipes: 6) { row.tap(); usleep(300_000) } else { print("DUO privacy: \(id) not found") }
         }
         snap("duo-00e-privacy-done")
         if agree.isEnabled {
@@ -166,16 +166,17 @@ final class DuoDeviceTests: XCTestCase {
                 snap("duo-04e-actor")
                 app.swipeUp(); sleep(2)
                 snap("duo-04f-actor-works")
-                let info = app.buttons["actor-info"].firstMatch
-                if !info.isOnScreen(in: app) { app.swipeDown(); sleep(1) }
-                if info.waitForExistence(timeout: 3) && info.isHittable {
+                // ⓘ：一次快照找在屏上的那颗（演员页上逐个问元素、问 isHittable 会「Timed out while evaluating UI query」）
+                var info = reveal(app, "actor-info", swipes: 0)
+                if info == nil { app.swipeDown(); sleep(1); info = reveal(app, "actor-info", swipes: 0) }
+                if let info {
                     info.tap(); sleep(2)
                     snap("duo-04g-actor-bio")
                     let close = app.buttons["actor-bio-close"].firstMatch
                     if close.waitForExistence(timeout: 3) { close.tap() } else { app.swipeDown() }
                     sleep(1)
                 } else {
-                    print("DUO actor info: not hittable")
+                    print("DUO actor info: not on screen")
                 }
                 back(app)
             } else {
@@ -392,8 +393,7 @@ final class DuoDeviceTests: XCTestCase {
 
     /// 关掉弹层：点右上角系统的 xmark（标识 sheet-cancel），找不到就往下滑
     private func closeSheet(_ app: XCUIApplication) {
-        let cancel = app.buttons["sheet-cancel"].firstMatch
-        if cancel.waitForExistence(timeout: 3) && cancel.isHittable { cancel.tap() } else { app.swipeDown() }
+        if let cancel = reveal(app, "sheet-cancel", swipes: 0) { cancel.tap() } else { app.swipeDown() }
         sleep(1)
     }
 

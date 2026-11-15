@@ -21,6 +21,7 @@ struct EditorsPick: View {
     @State private var trailer = ShowcaseTrailer(revealHeight: 1080)
     @State private var tone: Color?
     @State private var onScreen = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static func height(fullWidth w: CGFloat, fullHeight: CGFloat) -> CGFloat {
         // 展开竖拿（宽过 600、又比宽高）：以前按横屏的 0.56 算，只有三百多点高，字和面板把画面盖满了
@@ -55,13 +56,19 @@ struct EditorsPick: View {
                         .padding(.trailing, -metrics.trailingInset)
                 }
                 .contentShape(Rectangle())
+                // 设计轮 2：旁白把整块念成一句「编辑推荐，片名，类型 · 年份，简介」。字标是图，以前念不出片名，
+                // 还多念一个「查看」；它也是一个标题，按标题跳的时候跳得到（F76）
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(spokenLabel)
             }
+            .accessibilityAddTraits(.isHeader)
             .accessibilityIdentifier("editors-pick")
             if trailer.loaded && trailer.path == video.path {
                 ShowcaseControl(trailer: trailer)
                     .padding(.trailing, metrics.margin - 6)
                     .padding(.top, metrics.wide ? 30 : 22)
-                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                    // 「减弱动态效果」时只淡入（F59）
+                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .scale(scale: 0.8)))
             }
         }
         .animation(.spring(response: 0.42, dampingFraction: 0.86), value: trailer.loaded)
@@ -88,7 +95,7 @@ struct EditorsPick: View {
 
     private func media(still: URL?, pixel: CGFloat) -> some View {
         ZStack {
-            Color(white: 0.08)
+            DSFill.placeholder
             // 图按 fill 铺，自己会比这一块大（竖版主视觉放进扁一点的块里，上下各多出一两百点）：
             // 放在 Color.clear 的 overlay 里，这一层的大小就是这一块，下面的 clipped 才真的裁在块的边上——
             // 以前多出来的那截画在上面一排精选卡的下半截上（展开竖拿、折起时卡底那条被盖住）
@@ -123,11 +130,7 @@ struct EditorsPick: View {
         // 「查看影片 ›」那一行收进右边一颗「查看」胶囊（和年份卡、精选卡同一个样子），上下边距 12
         let posterW: CGFloat = metrics.wide ? 60 : 52
         return HStack(alignment: .center, spacing: 12) {
-            RemoteImage(url: model.thumbArt(video), maxPixel: 270)
-                .frame(width: posterW, height: (posterW * 1.5).rounded())
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.16), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.3), radius: 5, y: 2)
+            DSThumb(url: model.thumbArt(video), width: posterW, maxPixel: 270)
             VStack(alignment: .leading, spacing: 3) {
                 if !kicker.isEmpty {
                     Text(kicker)
@@ -145,29 +148,30 @@ struct EditorsPick: View {
                 }
             }
             Spacer(minLength: 8)
-            Text("查看")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 16)
-                .frame(minHeight: 30)
-                .background(Capsule().fill(Color.white.opacity(0.18)))
+            DSViewPill()
         }
+        // 面板压在固定高的这一块画面上：字号最大到 xxxLarge（和分集卡、精选卡一样封顶），不把「编辑推荐」顶出去（F23）
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .frame(maxWidth: 560, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 24, style: .continuous)
             .fill((tone ?? Color(white: 0.16)).opacity(0.94)))
-        .accessibilityElement(children: .combine)
     }
 
-    /// 面板的颜色：画面最下面那一截的平均色，压暗、收一点饱和度（白字看得清）
+    /// 旁白念的那一句：编辑推荐，片名，类型 · 年份，简介的第一句
+    private var spokenLabel: String {
+        let meta = model.meta(video)
+        let kicker = DetailText.line([meta?.genres?.first, model.year(video).map { String($0) }])
+        let parts: [String?] = ["编辑推荐", model.title(video), kicker, CollectionText.tagline(meta?.overview)]
+        return parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，")
+    }
+
+    /// 面板的颜色：画面最下面那一截的平均色，压暗、收一点饱和度（白字看得清；设计轮 2：和合集卡的底条同一个 DSTint.panel）
     private func loadTone(_ url: URL?) async {
         guard let url, let img = await ImagePipeline.shared.image(url, maxPixel: 64), let cg = img.cgImage,
-              let c = ImageEffects.averageColor(cg, bottom: 0.3) else { return }
-        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        guard c.getHue(&h, saturation: &s, brightness: &b, alpha: &a) else { return }
-        let t = Color(hue: Double(h), saturation: Double(min(0.5, s)), brightness: Double(min(0.38, max(0.2, b * 0.7))))
-        withAnimation(.easeInOut(duration: 0.5)) { tone = t }
+              let c = ImageEffects.averageColor(cg, bottom: 0.3), let t = DSTint.panel(c) else { return }
+        withAnimation(DSMotion.fade) { tone = t }
     }
 }
 
@@ -297,13 +301,13 @@ struct YearTrailerCard: View {
 
     var body: some View {
         let h = (width * 9 / 16).rounded()
-        let radius: CGFloat = max(16, min(24, (width * 0.06).rounded()))
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        // 设计轮 2：圆角取 DSRadius.card（和上面继续观看那排一样宽的卡一样圆；以前 6%、16–24）
+        let shape = RoundedRectangle(cornerRadius: DSRadius.card(width), style: .continuous)
         // 窄于 300 点（展开竖拿一屏两张多）：小海报、间距、「查看」都收一点，片名还能放七八个字
         let compact = width < 300
         VStack(alignment: .leading, spacing: 10) {
             ZStack {
-                Color(white: 0.1)
+                DSFill.placeholder
                 RemoteImage(url: still, maxPixel: width * 3, placeholder: .clear)
                 if let trailer {
                     VideoSurface(player: trailer.player, gravity: .resizeAspectFill, background: .clear)
@@ -315,12 +319,9 @@ struct YearTrailerCard: View {
             }
             .frame(width: width, height: h)
             .clipShape(shape)
-            .overlay(shape.strokeBorder(Color.white.opacity(0.06), lineWidth: 1))
+            .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
             HStack(spacing: compact ? 10 : 12) {
-                RemoteImage(url: cover, maxPixel: 200)
-                    .frame(width: compact ? 40 : 48, height: compact ? 60 : 72)
-                    .clipShape(RoundedRectangle(cornerRadius: compact ? 9 : 10, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: compact ? 9 : 10, style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+                DSThumb(url: cover, width: compact ? 40 : 48)
                 VStack(alignment: .leading, spacing: 3) {
                     if logo != nil {
                         LogoImage(url: logo, height: 18, alignment: .leading, maxWidth: 120)
@@ -336,12 +337,8 @@ struct YearTrailerCard: View {
                 }
                 .lineLimit(1)
                 Spacer(minLength: compact ? 6 : 8)
-                Text("查看")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.accent)
-                    .padding(.horizontal, compact ? 12 : 18)
-                    .frame(minHeight: 32)
-                    .background(Capsule().fill(Color.white.opacity(0.12)))
+                // 在黑的页面上：蓝字、12% 白的底（DSViewPill）
+                DSViewPill(onArt: false, compact: compact)
             }
         }
         .frame(width: width, alignment: .leading)
@@ -387,12 +384,13 @@ struct HomeFinale: View {
             CuvenWordmark()
                 .padding(.top, metrics.wide ? 40 : 32)
             NavigationLink(value: Route.shelf(.all)) {
+                // 设计轮 2：高 54 → 48（和「播放」「详情」同一种胶囊钮的高）；底 14% → 12% 白（蓝字对比度 4.3 → 4.6 : 1）
                 Text("查看所有影片")
                     .font(.headline)
                     .foregroundStyle(Theme.accent)
                     .frame(maxWidth: 360)
-                    .frame(height: 54)
-                    .background(Capsule().fill(Color.white.opacity(0.14)))
+                    .frame(minHeight: 48)
+                    .background(Capsule().fill(Color.white.opacity(0.12)))
                     .contentShape(Capsule())
             }
             .buttonStyle(PressableStyle())

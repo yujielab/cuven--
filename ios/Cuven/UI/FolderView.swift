@@ -101,9 +101,15 @@ struct FolderView: View {
                 .padding(.top, subfolders.isEmpty ? 6 : 0)
         }
         if subfolders.isEmpty && shown.isEmpty && !loading {
-            ContentUnavailableView("空文件夹", systemImage: "folder",
-                                   description: Text("这个文件夹里还没有能播放的影片。"))
-                .padding(.top, 40)
+            // F88：空的时候说下一步，再给一颗钮直接去做（设计轮 2（并行·library）：刚放进去的片子，重新载入就能看到）
+            ContentUnavailableView {
+                Label("空文件夹", systemImage: "folder")
+            } description: {
+                Text("这个文件夹里还没有能播放的影片。刚放进去的影片，重新载入后会出现在这里。")
+            } actions: {
+                Button("重新载入") { Task { await load() } }
+            }
+            .padding(.top, 40)
         }
     }
 
