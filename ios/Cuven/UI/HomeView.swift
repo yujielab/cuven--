@@ -374,6 +374,7 @@ struct RouteView: View {
         case .series(let s): SeriesDetailView(series: s)
         case .year(let y): YearView(year: y)
         case .shelf(let s): ShelfView(shelf: s)
+        case .person(let m): ActorPage(member: m)
         }
     }
 }

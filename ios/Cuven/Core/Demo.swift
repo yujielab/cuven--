@@ -204,3 +204,21 @@ enum DemoData {
         }
     }
 }
+
+extension DemoData {
+    /// 演示数据里的演员简介：本地编的（不连网、不是真实的人）；作品不给编号，库中作品按演示片库的演员表找
+    static func person(_ m: CastMember) -> PersonInfo {
+        let seed = m.name.unicodeScalars.reduce(0) { $0 + Int($1.value) }
+        let places = ["中国 上海", "中国 北京", "中国 台北", "新加坡", "中国 香港", "中国 成都"]
+        let year = 1968 + seed % 30
+        let month = 1 + seed % 12
+        let day = 1 + seed % 27
+        let bio = "\(m.name.isEmpty ? "这位演员" : m.name)是演示数据里的一位演员，用来核对演员个人页的版面：照片、名字、简介、来自与出生都是本地生成的。"
+            + "从影以来塑造过许多让人记得住的角色，戏路宽，既能演细腻的文艺片，也能撑起节奏很快的类型片。"
+            + "这段文字故意写得长一些，好看出简介弹层里「关于」那一段的排版和行距。"
+        return PersonInfo(id: m.id ?? seed, name: m.name, biography: bio,
+                          birthday: String(format: "%04ld-%02ld-%02ld", year, month, day), deathday: nil,
+                          placeOfBirth: places[seed % places.count], knownFor: "Acting",
+                          profilePath: m.profilePath, credits: nil)
+    }
+}

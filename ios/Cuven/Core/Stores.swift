@@ -922,6 +922,68 @@ final class AppModel {
         return nil
     }
 
+    // MARK: 演员个人页
+
+    @ObservationIgnored private var personCache: [Int: PersonInfo] = [:]
+
+    /// 演员的简介、出生、作品编号：问一次记在内存里；演示数据给一份本地编的（不连网）；
+    /// 老 Worker 没有这个接口、或者出错，是 nil（页面照样出来：照片、名字、库中作品按演员表找）
+    func person(_ m: CastMember) async -> PersonInfo? {
+        guard let id = m.id else { return nil }
+        if let hit = personCache[id] { return hit }
+        if DemoData.enabled {
+            let p = DemoData.person(m)
+            personCache[id] = p
+            return p
+        }
+        guard let p = try? await APIClient.shared.person(id: id) else { return nil }
+        personCache[id] = p
+        return p
+    }
+
+    /// 这位演员在片库里的作品，日期新的在前、一部只出一次：
+    /// 有作品编号（新 Worker）就按编号对——电影对 TMDB 电影编号、剧集对剧集编号，全片库都对得上；
+    /// 没有就翻片库里的演员表（看过的详情页、简要结果里带的）
+    func works(of m: CastMember, info: PersonInfo?) -> [ActorWork] {
+        var out: [ActorWork] = []
+        var seen = Set<String>()
+        if let credits = info?.credits, !credits.isEmpty {
+            var movieIndex: [Int: Video] = [:]
+            for v in movies { if let id = meta(v)?.id, movieIndex[id] == nil { movieIndex[id] = v } }
+            var seriesIndex: [Int: Series] = [:]
+            for s in series { if let id = s.tmdbId ?? seriesMetas[s.path]?.id, seriesIndex[id] == nil { seriesIndex[id] = s } }
+            for c in credits {
+                if c.mediaType == "movie", let v = movieIndex[c.id], seen.insert("m\(c.id)").inserted {
+                    out.append(ActorWork(entry: .movie(v), character: c.character, date: c.date))
+                } else if c.mediaType == "tv", let s = seriesIndex[c.id], seen.insert("t\(c.id)").inserted {
+                    out.append(ActorWork(entry: .series(s), character: c.character, date: c.date))
+                }
+            }
+            return out
+        }
+        func role(_ cast: [CastMember]?) -> CastMember? {
+            cast?.first { c in
+                if let id = m.id, let cid = c.id { return id == cid }
+                return !m.name.isEmpty && c.name == m.name
+            }
+        }
+        for v in movies {
+            let mm = fullMetaCache[v.name] ?? meta(v)
+            if let c = role(mm?.cast), seen.insert("m:" + v.path).inserted {
+                out.append(ActorWork(entry: .movie(v), character: c.character, date: mm?.releaseDate ?? mm?.year))
+            }
+        }
+        for s in series {
+            let sm = seriesMetas[s.path]
+            let key = (s.tmdbId ?? sm?.id).map { "t\($0)" } ?? "n" + s.name
+            if let c = role(sm?.cast), seen.insert(key).inserted {
+                out.append(ActorWork(entry: .series(s), character: c.character, date: sm?.releaseDate ?? sm?.year ?? s.year))
+            }
+        }
+        out.sort { ($0.date ?? "") > ($1.date ?? "") }
+        return out
+    }
+
     // MARK: 主页「编辑推荐」与结尾的海报墙
 
     @ObservationIgnored private var editorsPickCache: (day: Int, path: String)?

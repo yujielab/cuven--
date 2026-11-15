@@ -465,6 +465,50 @@ enum Route: Hashable {
     case series(Series)
     case year(Int)
     case shelf(Shelf)
+    /// 演员个人页（照 Apple Music 的艺人页）
+    case person(CastMember)
+}
+
+/// 演员个人页（/api/tmdb/person）：简介、出生、出生地、全部作品的编号（App 拿去和片库对，列出「库中作品」）
+struct PersonInfo: Codable, Hashable, Sendable {
+    var id: Int
+    var name: String?
+    var biography: String?
+    var birthday: String?
+    var deathday: String?
+    var placeOfBirth: String?
+    var knownFor: String?
+    var profilePath: String?
+    var credits: [PersonCredit]?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, biography, birthday, deathday, credits
+        case placeOfBirth = "place_of_birth"
+        case knownFor = "known_for_department"
+        case profilePath = "profile_path"
+    }
+}
+
+/// 演员的一部作品（只要编号、类型、片名、角色、日期）
+struct PersonCredit: Codable, Hashable, Sendable {
+    var id: Int
+    var mediaType: String
+    var title: String?
+    var character: String?
+    var date: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, character, date
+        case mediaType = "media_type"
+    }
+}
+
+/// 演员在片库里的一部作品：哪一部、演的谁、上映 / 首播日期
+struct ActorWork: Identifiable, Hashable {
+    let entry: HomeEntry
+    let character: String?
+    let date: String?
+    var id: String { entry.id }
 }
 
 /// Apple TV 上这部片的预告片（/api/atv/lookup?video=1，HLS，系统播放器直接能放）
