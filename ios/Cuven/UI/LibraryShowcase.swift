@@ -575,6 +575,8 @@ final class ShowcaseTrailer {
     @ObservationIgnored private let revealHeight: CGFloat
     /// 这一段开始出画面的时间（到了起点、真的在走）；放了很久还没升上去就不等了（降一档要求再露）
     @ObservationIgnored private var playingSince: Date?
+    /// 露出来以后码流掉到下限以下的那一刻（网变差）：糊着超过两秒就退回清楚的静态画面
+    @ObservationIgnored private var lowSince: Date?
 
     init(revealHeight: CGFloat = 720) {
         self.revealHeight = revealHeight
@@ -624,6 +626,7 @@ final class ShowcaseTrailer {
         loaded = false
         showing = false
         playingSince = nil
+        lowSince = nil
         progress = 0
         paused = false
     }
@@ -698,13 +701,31 @@ final class ShowcaseTrailer {
         let d = item.duration.seconds
         if d.isFinite, d > start { progress = min(1, max(0, (t.seconds - start) / (d - start))) }
         let on = player.timeControlStatus == .playing && t.seconds >= start - 0.5
-        guard on, !showing else { return }
-        if playingSince == nil { playingSince = Date() }
         // 码流升到够清楚才露（presentationSize 是当前档位的画面大小）；放了 10 秒还没到，要求降到六成再露；
         // 一直很低（网太慢）就一直停在静态画面上——清楚的静态画面比糊的视频好看
         let h = item.presentationSize.height
+        let minH = revealHeight * 0.6
+        if showing {
+            // 露出来以后码流又掉到下限以下（网变差，用户截图里年份卡的画面糊成色块）：糊着超过两秒就淡回静态画面，等它再升上去
+            if h > 0 && h < minH {
+                if lowSince == nil { lowSince = Date() }
+                if Date().timeIntervalSince(lowSince ?? Date()) > 2 {
+                    showing = false
+                    playingSince = nil
+                    lowSince = nil
+                }
+            } else {
+                lowSince = nil
+            }
+            return
+        }
+        guard on else { return }
+        if playingSince == nil { playingSince = Date() }
         let waited = Date().timeIntervalSince(playingSince ?? Date())
-        if h >= revealHeight || (waited > 10 && h >= revealHeight * 0.6) { showing = true }
+        if h >= revealHeight || (waited > 10 && h >= minH) {
+            showing = true
+            lowSince = nil
+        }
     }
 }
 

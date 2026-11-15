@@ -520,9 +520,11 @@ enum ActorText {
     static func photo(_ m: CastMember, info: PersonInfo?) -> URL? {
         let p = (info?.profilePath).flatMap { $0.isEmpty ? nil : $0 } ?? m.profilePath
         guard let p, !p.isEmpty else { return nil }
-        if p.hasPrefix("http") || p.hasPrefix("demo:") { return URL(string: p) }
-        // 原图（h632 只有 632 像素高，铺满整页宽要放大三倍多，糊）；按显示尺寸降采样解码，不吃内存
-        return URL(string: "https://image.tmdb.org/t/p/original" + p)
+        if p.hasPrefix("demo:") { return URL(string: p) }
+        // TMDB 的一律换成原图：不光是路径，Worker 常给整条地址、还带着 w185 这样的小尺寸——以前整条地址原样用，
+        // 185 像素的头像铺满整页宽（放大七倍多）糊成色块（用户截图）。h632 也不够（放大三倍多）；按显示尺寸降采样解码，不吃内存
+        if p.hasPrefix("/") || p.contains("image.tmdb.org") { return TMDBImage.url(p, "original") }
+        return URL(string: p)
     }
 
     /// 照片底边那一截的平均色（整页跟着染）

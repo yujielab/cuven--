@@ -188,7 +188,9 @@ struct YearTrailerRow: View {
     let items: [HomeEntry]
     let metrics: DSMetrics
     /// 卡上的画面约 490 像素高：码流升到 540 再露出来（开头那几秒的低码率画面糊，先停在横版背景上）
-    @State private var trailer = ShowcaseTrailer(revealHeight: 540)
+    // 年份卡折起约 283 点宽（3 倍屏 850 像素）：至少 540 像素高的档位才露（放了 10 秒还没到 900，降到六成 = 540）；
+    // 以前 540 起、降到 324 就露，360p 的码流放大两倍多，糊成色块（用户截图）
+    @State private var trailer = ShowcaseTrailer(revealHeight: 900)
     /// 横着这一排里整张露出来的卡
     @State private var shown: Set<String> = []
     /// 这一排在屏上（竖着滚）

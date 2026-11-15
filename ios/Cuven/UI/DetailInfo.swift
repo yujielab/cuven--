@@ -559,13 +559,15 @@ enum DetailFacts {
 
 // MARK: - 剧照（设计轮 2（并行·stills）：照用户给的参考图——apple.com HomePod mini 的「近看」那一块）
 
-/// 剧照浏览台（用户给的参考图）：标题「剧照」下面一整块铺满窗口宽的画面（连同 iPhone Duo 侧边那一列：F6），
-/// 折起 4 : 3（Duo 折起约 466 × 350 点），展开也按 4 : 3、最多屏高的 60%；画面按 fill 铺满、底下一层淡暗，控件都留在安全区里（F7）。
-/// · 总览：第一张剧照，底部一排 Liquid Glass 胶囊「⊕ 第 N 幕」（浮在画面上的控件：F40），横着滑、从侧边那一列底下过；
-/// · 点一颗胶囊：画面原地换成那一张（交叉淡入、新的一张从 104% 落回原大；减弱动态效果时只淡入：F59），右上一颗玻璃 ✕ 回到总览；
-///   底部一张磨砂说明卡（粗体「第 N 幕。」接一句平实的说明，旁白念成一句）；两侧 ‹ › 的圆心落在内容区的边上、外面那一半被切掉
-///   （参考图），底边和说明卡齐平，一张一张换，到头的那一颗收起。画面有一截被顶上那条盖住或出了屏时，先把整块滚到可见区正中；
-/// · 这时点画面：全屏看完整的大图（DetailStillsViewer，从这块画面上放大出来、收回到这块画面上：F57）
+/// 剧照浏览台（用户给的参考图，用户又要求「交互设计和逻辑请参考 apple.com/homepod-mini」）：
+/// 标题「剧照」下面一整块画面，内容区那么宽（不铺到 Duo 侧边那一列底下：那一块止于页面的边，控件都贴着画面自己的边），
+/// 折起 1 : 1，展开 4 : 3、最多屏高的 60%；底下一层淡暗。
+/// · 总览（参考图的整台产品）：前几张剧照拼成的一面墙（2 × 2，展开 3 × 2），底部一排 Liquid Glass 胶囊「⊕ 第 N 幕」（F40），横着滑；
+///   点一颗胶囊或一格：近看那一张——
+/// · 近看：画面原地换成那一张、铺满（交叉淡入、从 104% 落回原大；减弱动态效果时只淡入：F59），画面右上角一颗玻璃 ✕ 回到总览；
+///   底部一张磨砂说明卡（粗体「第 N 幕。」接一句平实的说明，旁白念成一句）；两侧 ‹ › 的圆心落在画面的边上、外面那一半被切掉
+///   （参考图），一张一张换，到头的那一颗变暗、点不动（版面不跳）。画面有一截被顶上那条盖住或出了屏时，先把整块滚到可见区正中；
+///   这时点画面：全屏看完整的大图（DetailStillsViewer，从这块画面上放大出来、收回到这块画面上：F57）
 struct DetailStillsExplorer: View {
     let stills: [URL?]
     /// 片名（说明卡里那一句）
@@ -587,11 +589,15 @@ struct DetailStillsExplorer: View {
     /// 解码的上限和全屏大图同一个数：内存里是同一张，点开大图不再解码一遍（TMDB 的 w1280 本来就不到这么大）
     private static let pixel: CGFloat = 2400
 
-    private var fullWidth: CGFloat { metrics.width + metrics.leadingInset + metrics.trailingInset }
-    /// 画面多高：4 : 3；展开时最多屏高的 60%（展开横拿只有六百多点高，上下文还要看得到）
+    /// 画面多宽：内容区那么宽，不铺到 Duo 侧边那一列底下（用户：参照 apple.com HomePod mini——那一块止于页面的边，
+    /// ✕ 在画面自己的右上角、‹ › 被画面的边切掉一半；以前画面铺到侧边那一列底下，‹ › 和 ✕ 却停在内容边上，看着放错了地方）
+    private var stageWidth: CGFloat { metrics.width }
+    /// 画面多高：折起 1 : 1（参考图那一块是竖长的，剧照是 16:9，正方形两头各裁两成多）；
+    /// 展开 4 : 3、最多屏高的 60%（展开横拿只有六百多点高，上下文还要看得到）
     private var stageHeight: CGFloat {
-        let byWidth = (fullWidth * 0.75).rounded()
-        guard metrics.wide, metrics.height > 0 else { return byWidth }
+        guard metrics.wide else { return stageWidth.rounded() }
+        let byWidth = (stageWidth * 0.75).rounded()
+        guard metrics.height > 0 else { return byWidth }
         return max(240, min(byWidth, (metrics.height * 0.6).rounded()))
     }
     /// ✕、胶囊、说明卡离画面上下边
@@ -607,10 +613,9 @@ struct DetailStillsExplorer: View {
 
     var body: some View {
         let m = metrics
-        let shown = min(focus ?? 0, max(0, stills.count - 1))
         ScrollViewReader { proxy in
             ZStack(alignment: .bottom) {
-                art(shown)
+                art(proxy)
                 if let i = focus {
                     focusControls(i)
                         .transition(controlsTransition)
@@ -619,12 +624,13 @@ struct DetailStillsExplorer: View {
                         .transition(controlsTransition)
                 }
             }
-            .frame(width: fullWidth, height: stageHeight)
+            .frame(width: stageWidth, height: stageHeight)
             .overlay(alignment: .topTrailing) {
+                // ✕ 在画面自己的右上角（参考图）
                 if focus != nil {
                     closeButton
                         .padding(.top, edge)
-                        .padding(.trailing, m.margin + m.trailingInset)
+                        .padding(.trailing, edge)
                         .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.8)))
                 }
             }
@@ -634,9 +640,6 @@ struct DetailStillsExplorer: View {
                 let f = p.frame(in: .scrollView(axis: .vertical))
                 return m.height > 0 && (f.minY < m.height * 0.22 || f.maxY > m.height)
             } action: { offStage = $0 }
-            // 画面铺到两侧安全区底下（侧边那一列）；这一块在页面里仍只占内容区那么宽
-            .padding(.leading, -m.leadingInset)
-            .padding(.trailing, -m.trailingInset)
         }
         .sensoryFeedback(.selection, trigger: picks)
         .task(id: focus) { await prefetch(around: focus ?? 0) }
@@ -648,35 +651,78 @@ struct DetailStillsExplorer: View {
 
     // MARK: 画面
 
-    /// 画面：fill 铺满、裁在块的边上，底下一层淡暗（DSMediaCardStyle.shade：控件压在上面也分得开）；
-    /// 换一张时交叉淡入，新的一张从 104% 落回原大。看某一张时整块是一颗钮：点它全屏看完整的大图
-    private func art(_ i: Int) -> some View {
-        let open = focus != nil
+    /// 画面。总览：前几张剧照拼成一面墙（参考图的总览是整台产品，点进去才是近看）；
+    /// 看某一张：那一张铺满、裁在块的边上，换一张时交叉淡入、新的一张从 104% 落回原大。底下一层淡暗（控件压在上面也分得开）
+    private func art(_ proxy: ScrollViewProxy) -> some View {
+        ZStack {
+            if let i = focus {
+                still(i)
+                    .id(i)
+                    .transition(imageTransition)
+            } else {
+                mosaic(proxy)
+                    .transition(.opacity)
+            }
+        }
+        .frame(width: stageWidth, height: stageHeight)
+        .overlay {
+            LinearGradient(stops: DSMediaCardStyle.shade, startPoint: .top, endPoint: .bottom)
+                .allowsHitTesting(false)
+        }
+        .clipped()
+    }
+
+    /// 看某一张：整块是一颗钮，点它全屏看完整的大图（从这块画面上放大出来）
+    private func still(_ i: Int) -> some View {
         let url: URL? = stills.indices.contains(i) ? stills[i] : nil
         return Button {
             pick = DetailStillPick(index: i)
         } label: {
             DSFill.placeholder
-                .overlay {
-                    ZStack {
-                        RemoteImage(url: url, maxPixel: Self.pixel, placeholder: .clear)
-                            .id(i)
-                            .transition(imageTransition)
-                    }
-                }
-                .overlay {
-                    LinearGradient(stops: DSMediaCardStyle.shade, startPoint: .top, endPoint: .bottom)
-                }
+                .overlay { RemoteImage(url: url, maxPixel: Self.pixel, placeholder: .clear) }
                 .clipped()
                 .contentShape(Rectangle())
         }
         // 按下去略暗一点（整块铺满的画面不缩放）
         .buttonStyle(PressableStyle(scale: 1))
-        .disabled(!open)
         .matchedTransitionSource(id: Self.stageID, in: zoomNS)
         .accessibilityLabel("第 \(i + 1) 幕")
         .accessibilityHint("全屏查看完整大图")
-        .accessibilityHidden(!open)
+    }
+
+    /// 总览那面墙：四张以上拼成 2 × 2（展开、六张以上 3 × 2），只有两三张时一张一行；格子之间 2 点细缝。
+    /// 点一格等于点下面那一颗胶囊；旁白只念胶囊（格子藏起来，免得每张念两遍）
+    private func mosaic(_ proxy: ScrollViewProxy) -> some View {
+        let n = stills.count
+        let gap: CGFloat = 2
+        let cols = n >= 6 && metrics.wide ? 3 : (n >= 4 ? 2 : 1)
+        let rows = n >= 4 ? 2 : max(1, n)
+        let tw = ((stageWidth - CGFloat(cols - 1) * gap) / CGFloat(cols)).rounded(.down)
+        let th = ((stageHeight - CGFloat(rows - 1) * gap) / CGFloat(rows)).rounded(.down)
+        return VStack(spacing: gap) {
+            ForEach(0..<rows, id: \.self) { r in
+                HStack(spacing: gap) {
+                    ForEach(0..<cols, id: \.self) { c in
+                        tile(r * cols + c, size: CGSize(width: tw, height: th), proxy: proxy)
+                    }
+                }
+            }
+        }
+        .frame(width: stageWidth, height: stageHeight)
+        .background(Color.black)
+    }
+
+    private func tile(_ i: Int, size: CGSize, proxy: ScrollViewProxy) -> some View {
+        let url: URL? = stills.indices.contains(i) ? stills[i] : nil
+        return Button { select(i, proxy: proxy) } label: {
+            DSFill.placeholder
+                .overlay { RemoteImage(url: url, maxPixel: max(size.width, size.height) * 3, placeholder: .clear) }
+                .frame(width: size.width, height: size.height)
+                .clipped()
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableStyle(scale: 1))
+        .accessibilityHidden(true)
     }
 
     // MARK: 总览：一排胶囊
@@ -695,8 +741,8 @@ struct DetailStillsExplorer: View {
             .padding(.vertical, 6)
             .scrollTargetLayout()
         }
-        .contentMargins(.leading, m.margin + m.leadingInset, for: .scrollContent)
-        .contentMargins(.trailing, m.margin + m.trailingInset, for: .scrollContent)
+        .contentMargins(.leading, m.margin, for: .scrollContent)
+        .contentMargins(.trailing, m.margin, for: .scrollContent)
         .scrollTargetBehavior(.viewAligned)
         .scrollClipDisabled()
         .padding(.bottom, edge - 6)
@@ -760,16 +806,15 @@ struct DetailStillsExplorer: View {
             captionCard(i)
                 .frame(maxWidth: cardMax)
                 .padding(.horizontal, inset)
+            // ‹ › 一直在（到头了变暗、点不动），版面不跳
             HStack(alignment: .bottom, spacing: 0) {
-                if i > 0 { paddle(forward: false, d: d) }
+                paddle(forward: false, d: d, enabled: i > 0)
                 Spacer(minLength: 0)
-                if i < stills.count - 1 { paddle(forward: true, d: d) }
+                paddle(forward: true, d: d, enabled: i < stills.count - 1)
             }
         }
-        .frame(width: m.width)
+        .frame(width: stageWidth)
         .clipped()
-        .padding(.leading, m.leadingInset)
-        .padding(.trailing, m.trailingInset)
         .padding(.bottom, edge)
     }
 
@@ -791,15 +836,15 @@ struct DetailStillsExplorer: View {
             .accessibilityElement(children: .combine)
     }
 
-    /// 「第 2 幕。《片名》的第 2 张剧照，共 12 张。轻点画面查看完整大图。」：一个 Text（不拼 Text + Text），
+    /// 「第 2 幕。共 12 张剧照，轻点画面看完整大图。」：一个 Text（不拼 Text + Text），
     /// 开头粗体白字，后面常规、次一级的白（DSInk.secondary）
     static func caption(index i: Int, count: Int, title: String, wide: Bool) -> AttributedString {
         let base: Font = wide ? .title3 : .body
         var lead = AttributedString("第 \(i + 1) 幕。")
         lead.font = base.weight(.semibold)
         lead.foregroundColor = Color.white
-        let name = title.isEmpty ? "这部影片" : "《\(title)》"
-        var rest = AttributedString("\(name)的第 \(i + 1) 张剧照，共 \(count) 张。轻点画面查看完整大图。")
+        // 短一点：片名就在这一页上，不再念一遍
+        var rest = AttributedString("共 \(count) 张剧照，轻点画面看完整大图。")
         rest.font = base
         rest.foregroundColor = DSInk.secondary
         lead.append(rest)
@@ -808,7 +853,7 @@ struct DetailStillsExplorer: View {
 
     /// ‹ ›：玻璃圆（折起 56、展开 64 点），圆心落在内容区的边上、外面那一半被切掉（参考图）；
     /// 符号在露出来的那一半正中，点得到的范围从边上往里 44 点（F74）
-    private func paddle(forward: Bool, d: CGFloat) -> some View {
+    private func paddle(forward: Bool, d: CGFloat, enabled: Bool) -> some View {
         Button { step(forward ? 1 : -1) } label: {
             Image(systemName: forward ? "chevron.forward" : "chevron.backward")
                 .font(.system(size: (d * 0.34).rounded(), weight: .semibold))
@@ -823,8 +868,10 @@ struct DetailStillsExplorer: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.35)
+        .animation(change, value: enabled)
         .accessibilityLabel(forward ? "下一张" : "上一张")
-        .transition(.opacity)
     }
 
     // MARK: 动作
@@ -846,7 +893,7 @@ struct DetailStillsExplorer: View {
         withAnimation(change) { focus = i + delta }
     }
 
-    /// ✕：回到总览（第一张 + 一排胶囊）
+    /// ✕：回到总览（那面墙 + 一排胶囊）
     private func close() {
         withAnimation(change) { focus = nil }
     }
