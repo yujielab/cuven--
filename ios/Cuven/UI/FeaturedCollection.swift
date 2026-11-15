@@ -312,6 +312,55 @@ struct Poster3D: View {
 // MARK: - 下面那排大卡
 
 /// 一张大卡：整幅画面，底下一条磨砂的条（小海报、片名、一行灰字、「查看」）
+/// 精选电影的大竖卡（用户要求「整个精选电影区使用大卡片设计」，照 Apple TV「What We're Watching」）：3 : 4，
+/// 无字的竖版画面铺满（Apple TV 竖版主视觉 → TMDB 纯净海报：AppModel.featuredArt），下段压暗；
+/// 左下字标（没有字标写片名，卡宽的 17% 高）+ 一行「电影 · 年份 · 类型」。不放简介（用户要求：简介只出现在详情页）。
+/// 圆角 24、细边；在排里不放大、不压暗（用户要求），按下去是 PressableStyle 的那一下
+struct FeaturedBigCard: View {
+    let art: URL?
+    let logo: URL?
+    let title: String
+    let line: String
+    let width: CGFloat
+
+    var body: some View {
+        let h = (width * 4 / 3).rounded()
+        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+        let pad: CGFloat = width >= 330 ? 20 : 16
+        // 画面用 Color.clear 撑出卡的大小再盖上去：fill 的图不会把这一层撑大，字和渐暗都贴着卡的边
+        Color.clear
+            .frame(width: width, height: h)
+            .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: .clear) }
+            .overlay {
+                LinearGradient(stops: [.init(color: .black.opacity(0), location: 0.42),
+                                       .init(color: .black.opacity(0.55), location: 0.72),
+                                       .init(color: .black.opacity(0.82), location: 1)],
+                               startPoint: .top, endPoint: .bottom)
+            }
+            .overlay(alignment: .bottomLeading) {
+                VStack(alignment: .leading, spacing: 10) {
+                    LogoImage(url: logo, height: (width * 0.17).rounded(), alignment: .bottomLeading,
+                              fallback: title, maxWidth: width - pad * 2)
+                    if !line.isEmpty {
+                        Text(line)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(DSInk.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                // 字压在固定大小的画面上：字号最大到 xxxLarge（和别的大卡一样封顶）
+                .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+                .padding(pad)
+            }
+            .background(DSFill.placeholder)
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
+            .contentShape(shape)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel([title, line].filter { !$0.isEmpty }.joined(separator: "，"))
+    }
+}
+
 struct FeaturedCollectionCard: View {
     let art: URL?
     let cover: URL?

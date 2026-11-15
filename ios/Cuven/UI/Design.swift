@@ -64,6 +64,12 @@ struct DSMetrics {
         guard wide else { return (cardWidth(visible: width < 500 ? 1.3 : 2.3) * 1.3).rounded(.down) }
         return fit(target: clamp(width * 0.4, 340, 460), min: 320, aspect: 0.8)
     }
+    /// 精选电影的大竖卡（3 : 4，用户要求「整个精选电影区使用大卡片设计」，照 Apple TV「What We're Watching」）：
+    /// 折起和精选卡同宽（一屏一张、露出下一张一截，约 337 点）；展开按目标宽排（屏宽 30%，280–400），卡高不过屏高的 60%
+    var bigCardWidth: CGFloat {
+        guard wide else { return featureCardWidth }
+        return fit(target: clamp(width * 0.3, 280, 400), min: 260, aspect: 4.0 / 3)
+    }
     /// 长文案的分集卡：比原来的方卡宽 30%、高不变（1.3 : 1；用户要求），折起约 222 点；展开约 260–364 点
     var episodeTallCardWidth: CGFloat {
         guard wide else { return (cardWidth(visible: width < 500 ? 1.9 : 2.9) * 1.3).rounded(.down) }
