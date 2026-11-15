@@ -167,7 +167,7 @@ struct TrailerPlayerView: View {
             if deck.failed {
                 VStack(spacing: 10) {
                     Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 30))
-                    Text("这段预告片放不了").font(.system(size: 15, weight: .semibold))
+                    Text("这段预告片放不了").font(.subheadline.weight(.semibold))
                     if deck.index + 1 < deck.trailers.count {
                         Button("下一段") { deck.go(deck.index + 1) }.buttonStyle(.glass)
                     }
@@ -192,7 +192,7 @@ struct TrailerPlayerView: View {
                     .accessibilityLabel("关闭")
                     .accessibilityIdentifier("trailer-close")
                     Spacer()
-                    Text("预告片").font(.system(size: 17, weight: .semibold))
+                    Text("预告片").font(.headline)
                     Spacer()
                     Button { deck.toggleMute() } label: {
                         Image(systemName: deck.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
@@ -211,11 +211,11 @@ struct TrailerPlayerView: View {
 
                 VStack(spacing: 6) {
                     Text(movieTitle.uppercased())
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Theme.secondary)
                         .lineLimit(1)
                     Text(deck.current?.title ?? "预告片")
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(.headline)
                         .lineLimit(1)
                 }
                 .padding(.horizontal, 24)

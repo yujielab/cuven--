@@ -282,8 +282,8 @@ struct SeriesDetailView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text("剧集")
-                    .font(.dsShelfTitle(wide: m.wide))
-                    .foregroundStyle(.primary)
+                    .font(.dsSectionTitle)
+                    .foregroundStyle(.white)
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 8)
                 if seasons.count > 1 { seasonMenu }
@@ -832,7 +832,7 @@ struct DetailScaffold<Episodes: View>: View {
             if !metaLine.isEmpty {
                 Text(metaLine)
                     .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.8))
+                    .foregroundStyle(DSInk.secondary)
                     .lineLimit(1)
             }
             HStack(spacing: 12) {
@@ -1086,18 +1086,10 @@ struct DetailLinkHeader: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(title)
-                    .font(.dsShelfTitle(wide: metrics.wide))
-                    .foregroundStyle(.primary)
-                Image(systemName: "chevron.forward")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-            }
-            // 点得到的高度够 44（F74），版面上收回去，和别的分区标题一样高（F12）
-            .padding(.vertical, 10)
-            .contentShape(Rectangle())
+            DSSectionLabel(title: title, chevron: true)
+                // 点得到的高度够 44（F74），版面上收回去，和别的分区标题一样高（F12）
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
         }
         .buttonStyle(PressableStyle(scale: 0.98))
         .padding(.vertical, -10)
@@ -1226,7 +1218,7 @@ struct WebToast: ViewModifier {
         content.overlay(alignment: .bottom) {
             if let t = text {
                 Text(t)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 18)
                     .frame(height: 44)

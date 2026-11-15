@@ -132,14 +132,66 @@ struct DSMetrics {
     }
 }
 
-// MARK: - 文字（F15–F19：系统文字样式；展开时标题上一级，S4）
+// MARK: - 文字（F15–F19：系统文字样式；设计轮 1：同一种角色只用一种字、一种颜色）
 
 extension Font {
-    /// 分区标题：折起 Title 3 半粗，展开 Title 2 粗
-    static func dsShelfTitle(wide: Bool) -> Font { wide ? .title2.bold() : .title3.weight(.semibold) }
+    /// 分区标题（设计轮 1）：Title 2 粗体，折起、展开一样（App Store、游戏 App 的分区标题）。
+    /// 以前折起是 Title 3 半粗，详情页的组名却是 Title 2 粗体：同一页上「简介」「预告片」「剧照」「影片详细信息」两种标题交替出现
+    static let dsSectionTitle: Font = .title2.bold()
+    /// 大一级的分区标题：只给主页年份那两排「2026 ›」（折起 Title 1、展开 Large Title，粗体：S4 展开时上一级）
+    static func dsShowcaseTitle(wide: Bool) -> Font { wide ? .largeTitle.bold() : .title.bold() }
+    /// 分区标题下面那一行灰字（「今年上映的新片与新剧」「向左滑动查看更多」）：Body 常规，不再一个 Title 3、一个 Headline 半粗
+    static let dsSectionSubtitle: Font = .body
+    /// 压在画面上的大号展示标题（「编辑推荐」「精选电影」）：字的大小跟着那一块画面走，所以是定值
+    static func dsDisplay(wide: Bool) -> Font { .system(size: wide ? 44 : 36, weight: .heavy) }
+    /// 三行以上的正文（简介、关于）：松一点的行距，中文长段落读起来不串行（F21）
+    static let dsReading: Font = .body.leading(.loose)
+}
+
+/// 字的颜色（设计轮 1）：深色页面和画面上都是白字，层级靠透明度分三级，同一种角色用同一级（F18）。
+/// 以前同是「第二行」的灰字有 0.55、0.6、0.62、0.72、0.78、0.8、0.85 七种
+enum DSInk {
+    /// 次一级：一行信息（「电影 · 2026 · 科幻」）、卡和面板上的第二行（「2026 · 科幻」「▶ 45 分钟」）、说明
+    static let secondary = Color.white.opacity(0.72)
+    /// 再轻一级：分区标题下的副标题、标题后的「›」、提示
+    static let tertiary = Color.white.opacity(0.55)
 }
 
 // MARK: - 分区：标题 + 一排
+
+/// 分区标题的字（设计轮 1：全 App 的分区标题、组名都是它，只有两级）：标题、有去处时一个「›」、可选的一行副标题。
+/// 只管字；点不点、左右边距由外面那一层管（NavigationLink、Button）
+struct DSSectionLabel: View {
+    let title: String
+    var subtitle: String? = nil
+    var chevron = false
+    /// 大一级（主页年份那两排）
+    var showcase = false
+    var wide = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: showcase ? 8 : 6) {
+                Text(title)
+                    .font(showcase ? .dsShowcaseTitle(wide: wide) : .dsSectionTitle)
+                    .foregroundStyle(.white)
+                if chevron {
+                    // 「›」跟着标题的大小走，颜色退一级（以前有的 15 点、有的 20 点，灰度四种）
+                    Image(systemName: "chevron.forward")
+                        .font((showcase ? Font.title2 : Font.title3).weight(.semibold))
+                        .foregroundStyle(DSInk.tertiary)
+                        .accessibilityHidden(true)
+                }
+                Spacer(minLength: 0)
+            }
+            if let subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.dsSectionSubtitle)
+                    .foregroundStyle(DSInk.tertiary)
+            }
+        }
+    }
+}
 
 /// 分区标题（F2：和卡片同一条左边线；F86：不全大写）。有去处时后面一个「›」，整行可点
 struct DSShelfTitle: View {
@@ -148,19 +200,9 @@ struct DSShelfTitle: View {
     var route: Route? = nil
 
     var body: some View {
-        let label = HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(title)
-                .font(.dsShelfTitle(wide: metrics.wide))
-                .foregroundStyle(.primary)
-            if route != nil {
-                Image(systemName: "chevron.forward")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, metrics.margin)
-        .accessibilityAddTraits(.isHeader)
+        let label = DSSectionLabel(title: title, chevron: route != nil)
+            .padding(.horizontal, metrics.margin)
+            .accessibilityAddTraits(.isHeader)
 
         if let route {
             NavigationLink(value: route) { label.contentShape(Rectangle()) }
@@ -429,7 +471,7 @@ struct DSMediaCard<MenuItems: View>: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.subheadline.weight(.bold))
-                    .foregroundStyle(.white.opacity(0.78))
+                    .foregroundStyle(DSInk.secondary)
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
             }
@@ -460,7 +502,7 @@ struct DSMediaCard<MenuItems: View>: View {
             if let kicker, !kicker.isEmpty {
                 Text(kicker)
                     .font(.footnote.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(DSInk.secondary)
                     .lineLimit(1)
             }
             Text(title)
@@ -471,7 +513,7 @@ struct DSMediaCard<MenuItems: View>: View {
             if let overview, !overview.isEmpty {
                 Text(overview)
                     .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(DSInk.secondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 3)
@@ -498,7 +540,9 @@ struct DSMediaCard<MenuItems: View>: View {
             }
         }
         .font(.subheadline)
-        .foregroundStyle(.white.opacity(0.78))
+        // 片长、剩余时间用等宽数字：一排卡的「45 分钟」「剩余 12 分钟」数字宽窄一致，看完回来数字变了也不跳
+        .monospacedDigit()
+        .foregroundStyle(DSInk.secondary)
         .padding(.trailing, 30)
     }
 }
@@ -848,7 +892,7 @@ struct DSHeroCarousel: View {
                 if !p.meta.isEmpty {
                     Text(p.meta)
                         .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.8))
+                        .foregroundStyle(DSInk.secondary)
                         .lineLimit(1)
                 }
             }

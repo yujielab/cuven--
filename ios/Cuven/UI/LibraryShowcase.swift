@@ -161,7 +161,7 @@ struct ShowcaseHeader: View {
                 .accessibilityAddTraits(.isHeader)
             Text("Cuven 为你提供严格品质的影片")
                 .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.72))
+                .foregroundStyle(DSInk.secondary)
         }
         .padding(.top, top + 10)
         .padding(.horizontal, margin)
@@ -321,12 +321,13 @@ struct ShowcaseChapter: View {
         .position(x: lead + safeW / 2, y: vh * 0.5)
     }
 
-    /// 「2026 · 科幻 · 冒险 · 116 分钟」
+    /// 「2026 · 科幻 · 冒险 · 1 小时 56 分钟」
     private func eyebrow(_ m: Meta?) -> String {
         var parts: [String] = []
         if let y = model.year(video) { parts.append(String(y)) }
         if let g = m?.genres, !g.isEmpty { parts.append(g.prefix(2).joined(separator: " · ")) }
-        if let r = m?.runtime, r > 0 { parts.append("\(r) 分钟") }
+        // 片长和详情页同一种写法（设计轮 1：以前这里「116 分钟」、详情页「1 小时 56 分钟」）
+        if let r = m?.runtime, r > 0 { parts.append(Format.runtime(r)) }
         return parts.joined(separator: " · ")
     }
 }
@@ -427,8 +428,8 @@ struct ShowcaseIntro: View {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 14) {
                 Text((meta?.overview).flatMap { $0.isEmpty ? nil : $0 } ?? "这部影片暂时没有简介。")
-                    .font(.body.leading(.loose))
-                    .foregroundStyle(.secondary)
+                    .font(.dsReading)
+                    .foregroundStyle(DSInk.secondary)
                     .lineLimit(4)
                     .frame(maxWidth: 620, alignment: .leading)
                 if let r = meta?.rating, r > 0 {
@@ -444,7 +445,7 @@ struct ShowcaseIntro: View {
                 if !credits.isEmpty {
                     Text(credits)
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DSInk.secondary)
                         .lineLimit(2)
                 }
             }
@@ -473,8 +474,8 @@ struct ShowcaseIntro: View {
                 // 剧照：一排 16:9（网页版 sc-gallery），停在左边线上、右边露出下一张一截（S8）
                 VStack(alignment: .leading, spacing: metrics.titleGap) {
                     Text("剧照")
-                        .font(.dsShelfTitle(wide: metrics.wide))
-                        .foregroundStyle(.primary)
+                        .font(.dsSectionTitle)
+                        .foregroundStyle(.white)
                         .padding(.leading, metrics.margin + lead).padding(.trailing, metrics.margin + trail)
                         .accessibilityAddTraits(.isHeader)
                     ScrollView(.horizontal, showsIndicators: false) {

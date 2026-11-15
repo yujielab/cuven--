@@ -447,7 +447,7 @@ struct AccountGroup<Rows: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(title)
-                .font(.title2.bold())
+                .font(.dsSectionTitle)
                 .foregroundStyle(.white)
                 .padding(.leading, 2)
                 .accessibilityAddTraits(.isHeader)
@@ -540,6 +540,8 @@ struct AccountValue: View {
     var body: some View {
         Text(text)
             .font(.callout)
+            // 缓存大小这种会变的数：等宽数字，清掉以后不跳宽窄
+            .monospacedDigit()
             .foregroundStyle(.white.opacity(0.55))
             .lineLimit(1)
             .minimumScaleFactor(0.8)
