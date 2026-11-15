@@ -345,8 +345,11 @@ struct ShowcaseMedia: View {
         ZStack {
             RadialGradient(colors: [Color(red: 27 / 255, green: 39 / 255, blue: 64 / 255), Color(red: 10 / 255, green: 15 / 255, blue: 24 / 255), .black],
                            center: UnitPoint(x: 0.5, y: 0.38), startRadius: 0, endRadius: 400)
-            RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1280, placeholder: .clear)
-                .scaleEffect(drift ? 1.12 : 1.02)
+            // 放在 Color.clear 的 overlay 里：图按 fill 铺，比例不是正好 16:9 时也不会把这一层撑大、画到画幅外面去
+            Color.clear.overlay {
+                RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1280, placeholder: .clear)
+                    .scaleEffect(drift ? 1.12 : 1.02)
+            }
             if mine {
                 VideoSurface(player: trailer.player, gravity: .resizeAspectFill, background: .clear)
                     .opacity(trailer.showing ? 1 : 0)
