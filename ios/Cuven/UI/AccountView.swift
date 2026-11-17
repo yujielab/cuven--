@@ -39,7 +39,7 @@ struct AvatarView: View {
 ///   顶替以前那颗「个人档案」胶囊钮和它推进去的那一页（那一页的「登录方式」「登录时间」挪到「登录与安全」）；
 /// · 下面每一组是一行粗体的组名 + 一张圆角 26 的半透明卡，卡里一行一项：左边一枚灰色符号，标题 + 一行灰色说明，右边「›」、开关或数值；
 /// · 右上是系统的关闭钮（iOS 26 的玻璃圆钮），往上滚过头部，名字接到导航栏里。
-/// 内容：个人资料卡、观看、通知、播放、片库、存储、登录与安全、关于，最底下单独一张「退出登录」（先用系统的确认：C44、C47；文案照网页版）。
+/// 内容：个人资料卡、网络、使用洞察、观看、通知、播放、存储、登录与安全（「片库」「关于」两组用户要求移除），最底下单独一张「退出登录」（先用系统的确认：C44、C47；文案照网页版）。
 /// 「新片上架通知」打开的那一刻才向系统要权限（C78、C79）；系统里关着就多一行「打开设置」（C97）。
 struct AccountView: View {
     @Environment(AppModel.self) private var model
@@ -62,7 +62,6 @@ struct AccountView: View {
     @State private var notifyBlocked = false
     @State private var notifyAsking = false
     @State private var cacheSize: Int64 = DiskCache.size()
-    @State private var refreshing = false
     @State private var confirmSignOut = false
     /// 顶上那一截的颜色：头像的主色（取不到是紫色）
     @State private var tint = AccountPalette.fallback
@@ -89,10 +88,8 @@ struct AccountView: View {
                         watchingGroup
                         notifyGroup
                         playbackGroup
-                        libraryGroup
                         storageGroup
                         securityGroup
-                        aboutGroup
                         signOutGroup
                     }
                     // 名字下面直接是个人资料卡（没有组名），比以前到第一个组名（40）近一点
@@ -274,21 +271,7 @@ struct AccountView: View {
         .sensoryFeedback(.selection, trigger: subtitlePref)
     }
 
-    /// 片库：数量 + 刷新（慢的操作：右边换成转圈、写「正在刷新…」，不挡整屏：C39）
-    private var libraryGroup: some View {
-        AccountGroup(title: "片库") {
-            AccountRow(icon: "film.stack", title: "电影与剧集",
-                       subtitle: "电影 \(model.movies.count) 部 · 剧集 \(model.series.count) 部") { EmptyView() }
-            AccountDivider()
-            Button { refreshLibrary() } label: {
-                AccountRow(icon: "arrow.clockwise", title: refreshing ? "正在刷新…" : "刷新片库") {
-                    if refreshing { ProgressView() }
-                }
-            }
-            .buttonStyle(AccountRowPress())
-            .disabled(refreshing)
-        }
-    }
+    // 「片库」（片子数量、刷新片库）和「关于」（版本、片源、账户服务）两组用户要求移除；片库照常在主页下拉刷新
 
     private var storageGroup: some View {
         AccountGroup(title: "存储", footer: "清除缓存后，片库清单、海报和影片信息会重新下载。") {
@@ -324,16 +307,6 @@ struct AccountView: View {
         }
     }
 
-    private var aboutGroup: some View {
-        AccountGroup(title: "关于") {
-            AccountRow(icon: "info.circle", title: "版本") { AccountValue(Bundle.main.appVersion) }
-            AccountDivider()
-            AccountRow(icon: "antenna.radiowaves.left.and.right", title: "片源") { AccountValue("stream.cuven.online") }
-            AccountDivider()
-            AccountRow(icon: "person.badge.key", title: "账户服务") { AccountValue("check.cuven.us") }
-        }
-    }
-
     /// 退出登录单独一张卡、红字居中，点了先用系统的确认（C44、C47）
     @ViewBuilder
     private var signOutGroup: some View {
@@ -341,9 +314,9 @@ struct AccountView: View {
             AccountCard {
                 Button { confirmSignOut = true } label: {
                     Text("退出登录")
-                        .font(.title3.weight(.semibold))
+                        .font(.body.weight(.semibold))
                         .foregroundStyle(Color(red: 1, green: 0.42, blue: 0.38))
-                        .frame(maxWidth: .infinity, minHeight: 64)
+                        .frame(maxWidth: .infinity, minHeight: 54)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(AccountRowPress())
@@ -418,16 +391,7 @@ struct AccountView: View {
         openURL(url)
     }
 
-    // MARK: 片库与存储
-
-    private func refreshLibrary() {
-        refreshing = true
-        Task { @MainActor in
-            await model.refreshAll()
-            refreshing = false
-            cacheSize = DiskCache.size()
-        }
-    }
+    // MARK: 存储
 
     private func clearCache() {
         model.clearCaches()
