@@ -614,6 +614,42 @@ final class AppModel {
     @ObservationIgnored private var showcaseOrderCache: [Video] = []
     @ObservationIgnored private var showcaseOrderVersion = -1
 
+    // MARK: 片段合集（主页「探索片段合集」那一排、刷视频式浏览：ClipCollections.swift）
+
+    /// 一个片段合集里的片子（ClipCollections.swift）。两层缓存：
+    /// · 哪几部（认迪士尼 / 漫威 / DC 要把片名过一遍）：片库、剧集、剧集资料变了才重算；
+    /// · 排序（查到有预告片的在前）：预告片索引一变就重排，只是分三档，便宜
+    func clipEntries(_ c: ClipCollection) -> [HomeEntry] {
+        let list = movies
+        let membersKey = "\(dataVersion)-\(series.count)-\(seriesMetas.count)"
+        if clipMembersKey != membersKey {
+            clipMembers = [:]
+            clipOrdered = [:]
+            clipMembersKey = membersKey
+        }
+        let tier = trailerKnown.count
+        if clipOrderedTier != tier {
+            clipOrdered = [:]
+            clipOrderedTier = tier
+        }
+        if let hit = clipOrdered[c] { return hit }
+        let members: [HomeEntry]
+        if let m = clipMembers[c] {
+            members = m
+        } else {
+            members = ClipCollection.members(c, model: self, movies: list)
+            clipMembers[c] = members
+        }
+        let out = ClipCollection.ordered(members, model: self)
+        clipOrdered[c] = out
+        return out
+    }
+
+    @ObservationIgnored private var clipMembers: [ClipCollection: [HomeEntry]] = [:]
+    @ObservationIgnored private var clipMembersKey = ""
+    @ObservationIgnored private var clipOrdered: [ClipCollection: [HomeEntry]] = [:]
+    @ObservationIgnored private var clipOrderedTier = -1
+
     private func releaseKey(_ v: Video) -> String {
         if let d = meta(v)?.releaseDate, !d.isEmpty { return d }
         if let y = year(v) { return String(y) + "-07-01" }
