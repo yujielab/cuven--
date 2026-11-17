@@ -21,6 +21,9 @@ struct EditorsPick: View {
     @State private var trailer = ShowcaseTrailer(revealHeight: 1080)
     @State private var tone: Color?
     @State private var onScreen = false
+    /// 用户要求：预告片不自己放，右上一颗「播放预告」，按了才在背景里放
+    @State private var hasTrailer = false
+    @State private var started = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static func height(fullWidth w: CGFloat, fullHeight: CGFloat) -> CGFloat {
@@ -63,27 +66,51 @@ struct EditorsPick: View {
             }
             .accessibilityAddTraits(.isHeader)
             .accessibilityIdentifier("editors-pick")
-            if trailer.loaded && trailer.path == video.path {
-                ShowcaseControl(trailer: trailer)
-                    .padding(.trailing, metrics.margin - 6)
-                    .padding(.top, metrics.wide ? 30 : 22)
-                    // 「减弱动态效果」时只淡入（F59）
-                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .scale(scale: 0.8)))
+            Group {
+                if started && trailer.loaded && trailer.path == video.path {
+                    // 放起来了：播放 / 暂停 + 进度环
+                    ShowcaseControl(trailer: trailer)
+                } else if hasTrailer {
+                    // 用户要求：不自己放，按「播放预告」才在背景里放（按下到出画面之间胶囊里转圈）
+                    EditorsPickTrailerButton(loading: started) { startTrailer() }
+                }
             }
+            .padding(.trailing, metrics.margin - 6)
+            .padding(.top, metrics.wide ? 30 : 22)
+            // 「减弱动态效果」时只淡入（F59）
+            .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .scale(scale: 0.8)))
         }
         .animation(.spring(response: 0.42, dampingFraction: 0.86), value: trailer.loaded)
+        .animation(.spring(response: 0.42, dampingFraction: 0.86), value: hasTrailer)
+        .animation(.spring(response: 0.42, dampingFraction: 0.86), value: started)
         .onScrollVisibilityChange(threshold: 0.4) { visible in
             onScreen = visible
-            if visible { trailer.mount(video, model: model) }
+            // 不再一出现就挂上预告片：按了「播放预告」才挂；挂上以后滑出去停、滑回来接着放
             trailer.setCovered(!visible)
         }
         .onAppear { trailer.setVisible(true) }
         .onDisappear { trailer.setVisible(false) }
+        // 有没有预告片先问一下（只是清单，不下视频；和详情页同一次查询，查过的记着）：有才放那颗钮
+        .task(id: video.path) {
+            let list = await model.trailers(for: video)
+            hasTrailer = !list.isEmpty
+        }
         .onChange(of: video.path) {
+            // 每天换一部：回到「播放预告」
             trailer.unmount()
-            if onScreen { trailer.mount(video, model: model) }
+            started = false
+            hasTrailer = false
         }
         .task(id: still) { await loadTone(still) }
+    }
+
+    /// 按了「播放预告」：挂上这一部的预告片、马上放（不看系统「自动播放视频预览」——是人按的），出画面时从模糊里淡入
+    private func startTrailer() {
+        guard !started else { return }
+        Haptics.light()
+        started = true
+        trailer.mount(video, model: model, userStarted: true)
+        trailer.setCovered(!onScreen)
     }
 
     /// 预告片起来之前的画面：竖着的这一块用 Apple TV 的竖版主视觉（没有就横版背景），横着的用横版背景
@@ -174,6 +201,37 @@ struct EditorsPick: View {
 // 下面小海报、字标、片名、一行灰字，右边「查看」（用户要求：卡上面不放简介；没有字标的不进这两排）。同一排同一时刻只放一段：最靠左、整张露出来的那一张
 // （静音、从第 10 秒起；这一排滑出屏幕、换页、正片盖上来就停；全 App 同一时刻只放一段：TrailerFocus）。
 // 没有预告片的那张停在横版背景上。
+
+/// 编辑推荐右上那颗「▶ 播放预告」（用户要求：预告片不自己放，按了才在背景里放）：玻璃胶囊，看上去 36 高、点按区 44（F74）；
+/// 按下到出画面之间符号换成转圈，胶囊不变宽
+struct EditorsPickTrailerButton: View {
+    let loading: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                ZStack {
+                    Image(systemName: "play.fill").opacity(loading ? 0 : 1)
+                    if loading { ProgressView().controlSize(.mini).tint(.white) }
+                }
+                .frame(width: 14)
+                Text("播放预告")
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .frame(minHeight: 36)
+            .glassEffect(.regular.interactive(), in: Capsule())
+            .frame(minHeight: 44)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(loading)
+        .accessibilityLabel(loading ? "正在载入预告片" : "播放预告片")
+        .accessibilityIdentifier("editors-pick-trailer")
+    }
+}
 
 struct YearTrailerRow: View {
     @Environment(AppModel.self) private var model
