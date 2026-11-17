@@ -4768,7 +4768,9 @@ function tmdbCacheKey(q, year, full, kind) {
   const y = obj ? (q.year || '') : (year || '');
   const p = new URLSearchParams({ q: t.toLowerCase() });
   if (y) p.set('y', y);
-  if (full) p.set('f', '3');        // f=3：全量结果多了 backdropClean（f=2 起有 logoChecked，见 fetchMetadata）；只换全量这一档，简要结果的缓存不动
+  // f=4：全量结果多了 original_language / origin_country（f=3 起有 backdropClean，f=2 起有 logoChecked，见 fetchMetadata）。
+  // 只换全量这一档（详情页按需取，一部一次）；简要结果的缓存不动：一换就是整个片库重问 TMDB，新认的片自带，旧的过期后自然换上
+  if (full) p.set('f', '4');
   if (kind) p.set('t', kind);       // type=tv / movie 各存一份：同名的电影与剧集不能互相顶掉
   return new Request(`${TMDB_CACHE}?${p}`);
 }
@@ -5106,6 +5108,15 @@ async function handleImdbVideo(url, env, ctx) {
 
 // ── 核心：融合 TMDB + iTunes ──
 
+/** 出品国家 / 地区（ISO 3166-1 两位大写，最多 4 个）：剧集的搜索结果和详情都带 origin_country；
+ *  电影只在详情里有（origin_country，老数据只有 production_countries） */
+function tmdbCountries(d) {
+  if (!d) return [];
+  const list = Array.isArray(d.origin_country) && d.origin_country.length ? d.origin_country
+    : Array.isArray(d.production_countries) ? d.production_countries.map(p => p && p.iso_3166_1) : [];
+  return list.filter(x => typeof x === 'string' && /^[A-Z]{2}$/.test(x)).slice(0, 4);
+}
+
 /** 按编号取（剧集表里已经认好的那部、前端带回来的编号）：与 tmdbMatch 的返回同形 */
 async function mtById(type, id, env) {
   const r = await fetchRetry(`https://api.themoviedb.org/3/${type}/${encodeURIComponent(id)}?api_key=${env.TMDB_API_KEY}&language=zh-CN`, {}, { retries: 1, timeout: 6000 });
@@ -5133,6 +5144,10 @@ async function fetchMetadata(title, year, full, env, kind = '', budget = null) {
     title: c.zh || c.en || c.orig,
     en: c.en || '',
     original_title: c.orig || '',
+    /* 原始语言（TMDB 的 original_language：ISO 639-1，粤语记成 cn）与出品国家 / 地区（ISO 3166-1）——
+       App「首选音轨 · 自然」按它挑原声。搜索结果本来就带语言，不多花请求；电影的出品地区只在详情里有（全量结果补上） */
+    original_language: c.lang || '',
+    origin_country: tmdbCountries(c.raw),
     year: (c.date || '').slice(0, 4),
     release_date: c.date || null,
     poster: c.poster ? `https://image.tmdb.org/t/p/w342${c.poster}` : null,
@@ -5243,6 +5258,8 @@ async function fetchMetadata(title, year, full, env, kind = '', budget = null) {
       const d = await detailRes.value.json();
       out.runtime = d.runtime || d.episode_run_time?.[0] || null;
       out.genres = (d.genres || []).map(g => g.name).slice(0, 3);
+      if (!out.original_language && d.original_language) out.original_language = d.original_language;
+      if (!out.origin_country.length) out.origin_country = tmdbCountries(d);
       /* IMDb 编号 —— 预告片的唯一入口键。movie 详情自带 imdb_id，tv 只在
          external_ids 里给；两处都读，谁先有算谁 */
       out.imdb = d.imdb_id || d.external_ids?.imdb_id || null;

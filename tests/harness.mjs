@@ -129,6 +129,7 @@ globalThis.fetch = async (input, init = {}) => {
     if (tmdb.fail && tmdb.fail(p, q)) return Response.json({ status_message: 'Internal error' }, { status: 500 });
     const show = id => tmdb.shows.find(x => String(x.id) === String(id));
     const brief = x => ({ id: x.id, name: q.language === 'zh-CN' ? x.name : x.original, original_name: x.original, first_air_date: x.first,
+      original_language: x.lang || 'en', origin_country: x.countries || ['US'],
       poster_path: `/p${x.id}.jpg`, backdrop_path: `/b${x.id}.jpg`, overview: '', vote_average: 8 });
     if (p === '/search/tv') {
       const ql = (q.query || '').toLowerCase();
@@ -157,6 +158,7 @@ globalThis.fetch = async (input, init = {}) => {
       const x = tmdb.movies.find(z => String(z.id) === mm[1]);
       if (!x) return Response.json({ status_message: 'not found' }, { status: 404 });
       return Response.json({ ...movieBrief(x), runtime: 120, genres: [{ name: '剧情' }], imdb_id: 'tt' + x.id,
+        origin_country: x.countries || ['US'], production_countries: (x.countries || ['US']).map(c => ({ iso_3166_1: c, name: c })),
         alternative_titles: { titles: (x.aka || []).map(t => ({ iso_3166_1: 'JP', title: t })) },
         translations: { translations: [{ iso_639_1: 'zh', data: { title: x.title } }, { iso_639_1: 'en', data: { title: movieEn(x) } }] } });
     }

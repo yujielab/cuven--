@@ -78,6 +78,9 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     private var lastWaitReason: String?
     /// 正片用掉的流量（账户页「流量概览」的「视频播放」）：每 5 秒看一眼访问日志，换片 / 播完 / 关掉时结清
     private let usage = UsageTap(.video)
+    /// 账户页「首选音轨 · 自然」：这一集的原声语种（手上的），和手上的不是 TMDB 给的时候重新问的那一次（和取片源同时开始）
+    private var audioOrigin: TrackPrefs.Origin?
+    private var originRefresh: Task<TrackPrefs.Origin?, Never>?
 
     func play(_ req: PlayRequest, model: AppModel) {
         self.model = model
@@ -107,6 +110,15 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         lastWaitReason = nil
         loadToken += 1
         let token = loadToken
+        audioOrigin = nil
+        originRefresh = nil
+        if TrackPrefs.audio == .natural, let model {
+            let o = model.audioOrigin(name: req.name, seriesPath: req.seriesPath)
+            audioOrigin = o.origin
+            if !o.settled {
+                originRefresh = Task { await model.refreshAudioOrigin(name: req.name, seriesPath: req.seriesPath) }
+            }
+        }
         // 加载画面盖上（播完接下一集也盖：同一个样子）
         PlayerLoadingOverlay.shared.show(title: coverTitle(req))
         Task { await start(req, token: token) }
@@ -182,8 +194,10 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         item.externalMetadata = metadata(req)
         // 账户页「网络速度」：往前缓冲多少秒（100% 交给系统；80% → 90 秒）。改了从下一个片源起生效
         item.preferredForwardBufferDuration = NetworkSpeed.forwardBuffer()
-        // 账户页「首选音轨 / 首选字幕」：和播放器读播放列表同时进行，通常赶在首帧之前挑好（TrackPrefs.swift）
-        Task { @MainActor in await TrackPrefs.apply(to: item) }
+        // 账户页「首选音轨 / 首选字幕」：和播放器读播放列表同时进行，通常赶在首帧之前挑好（TrackPrefs.swift）。
+        // 「自然」带上这一集的原声语种
+        let origin = audioOrigin, refresh = originRefresh
+        Task { @MainActor in await TrackPrefs.apply(to: item, origin: origin, refresh: refresh) }
 
         if player == nil || (controller?.presentingViewController == nil && !inPiP) {
             presentPlayer(req)                       // 兜底：没弹出来（比如当时找不到能弹的页面）就现在弹

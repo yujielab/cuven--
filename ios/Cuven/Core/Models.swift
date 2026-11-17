@@ -194,11 +194,17 @@ struct Meta: Codable, Hashable, Sendable {
     var cast: [CastMember]?
     var director: String?
     var stills: [Still]?
+    /// TMDB 的原始语言（ISO 639-1；TMDB 把粤语记成 cn）：账户页「首选音轨 · 自然」按它挑原声。老 Worker / 存在本机的旧结果没有
+    var originalLanguage: String?
+    /// 出品国家 / 地区（ISO 3166-1；电影的只在全量结果里有）
+    var originCountry: [String]?
 
     enum CodingKeys: String, CodingKey {
         case id, title, en, year, poster, posterClean, backdrop, backdropClean, logo, logoChecked, overview, rating, type, runtime, genres, cast, director, stills
         case originalTitle = "original_title"
         case releaseDate = "release_date"
+        case originalLanguage = "original_language"
+        case originCountry = "origin_country"
     }
 
     init(id: Int? = nil, title: String? = nil, en: String? = nil, year: String? = nil, poster: String? = nil, posterClean: String? = nil,
@@ -231,6 +237,8 @@ struct Meta: Codable, Hashable, Sendable {
         cast = try? c.decodeIfPresent([CastMember].self, forKey: .cast)
         director = c.str(.director)
         stills = try? c.decodeIfPresent([Still].self, forKey: .stills)
+        originalLanguage = c.str(.originalLanguage)
+        originCountry = try? c.decodeIfPresent([String].self, forKey: .originCountry)
     }
 
     /// 有没有封面：海报或纯净海报，至少一张
