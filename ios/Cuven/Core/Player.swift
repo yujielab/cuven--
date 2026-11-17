@@ -182,6 +182,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         item.externalMetadata = metadata(req)
         // 账户页「网络速度」：往前缓冲多少秒（100% 交给系统；80% → 90 秒）。改了从下一个片源起生效
         item.preferredForwardBufferDuration = NetworkSpeed.forwardBuffer()
+        // 账户页「首选音轨 / 首选字幕」：和播放器读播放列表同时进行，通常赶在首帧之前挑好（TrackPrefs.swift）
+        Task { @MainActor in await TrackPrefs.apply(to: item) }
 
         if player == nil || (controller?.presentingViewController == nil && !inPiP) {
             presentPlayer(req)                       // 兜底：没弹出来（比如当时找不到能弹的页面）就现在弹
