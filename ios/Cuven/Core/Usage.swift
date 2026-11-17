@@ -263,15 +263,31 @@ final class UsageTap {
 // MARK: - 网络速度（账户页那条 45 根柱的滑块）
 
 /// 账户页「网络速度」：0…100，默认 80（和网页版的 settings.networkSpeed 同步，见 ProfileStore）。
-/// 在 iOS 上它真的管播放：正片往前缓冲多少秒；调到 25% 以下是省流量，预告片不自己放
+/// 在 iOS 上它真的管播放：正片往前缓冲多少秒；调到 25% 以下是省流量，预告片不自己放。
+/// 「自动调整」开着时用自动选的那个数（NetworkAuto）：存在另一个键里、只在本机——
+/// 手动设的那个照旧和网页版同步，不会被这台手机此刻的网络带着走
 enum NetworkSpeed {
     static let key = "cuven_network_speed"
+    /// 「自动调整」开着没有（只在本机）
+    static let autoKey = "cuven_network_speed_auto"
+    /// 「自动调整」最近一次选的百分比（-1 / 没有 = 还没测过）
+    static let autoValueKey = "cuven_network_speed_auto_value"
     static let defaultValue = 80
 
-    /// 现在的设置（没设过是 80）
-    static var current: Int {
+    /// 手动设的（没设过是 80）
+    static var manual: Int {
         guard let n = UserDefaults.standard.object(forKey: key) as? NSNumber else { return defaultValue }
         return min(100, max(0, n.intValue))
+    }
+
+    static var isAuto: Bool { UserDefaults.standard.bool(forKey: autoKey) }
+
+    /// 现在生效的：开着「自动调整」而且测过 → 自动选的；不然是手动设的
+    static var current: Int {
+        if isAuto, let n = UserDefaults.standard.object(forKey: autoValueKey) as? NSNumber, n.intValue >= 0 {
+            return min(100, n.intValue)
+        }
+        return manual
     }
 
     /// 正片的 preferredForwardBufferDuration：100% = 0（交给系统，不设上限）；其余 10 秒 + 每 1% 一秒（80% → 90 秒，0% → 10 秒）。

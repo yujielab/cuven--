@@ -18,6 +18,8 @@ struct CuvenApp: App {
         // 设置里不再有「触感」开关（系统「声音与触感」里已经有：C95）。以前在 App 里关掉过的，
         // 清掉那一项，Haptics.enabled 回到默认的开（系统里关了触感，系统自己会让它不震）
         UserDefaults.standard.removeObject(forKey: "haptics")
+        // 网络速度「自动调整」：开始看网络变化（换网络时重测；关着自动调整时只记下现在是什么网络）
+        NetworkAuto.shared.start()
         // 账户在这里建：登录状态（钥匙串里 30 天内的会话）一出来就决定要不要欢迎页，第一帧就盖上，不闪主页
         let acc = AccountStore()
         _account = State(initialValue: acc)
@@ -138,7 +140,10 @@ struct RootView: View {
         // 头像预先存在本机（用户要求）：一启动、一登录就在后台拉好存上，回到前台再看一眼有没有换（同一张 10 分钟内不重拉）
         .task(id: account.session?.username) { await account.refreshAvatar() }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { Task { @MainActor in await account.refreshAvatar() } }
+            if phase == .active {
+                Task { @MainActor in await account.refreshAvatar() }
+                NetworkAuto.shared.appBecameActive()
+            }
         }
     }
 }
