@@ -619,18 +619,12 @@ enum DetailFacts {
         guard let r = rating, r > 0 else { return nil }
         return r >= PremiumBar.minRating ? .high : r >= 6 ? .mid : .low
     }
-
-    /// 评分那一行的字：「TMDB 评分」，在片库里排得靠前时补一句
-    static func ratingText(percentile: Int?, pool: String) -> (String, String?) {
-        if let p = percentile, p >= 50 { return ("TMDB 评分", "高于片库里 \(p)% 的\(pool)") }
-        return ("TMDB 评分", "满分 10 分")
-    }
 }
 
 // MARK: - 剧照（用户要求：和预告片合成一组、同一横排，用间距分开；卡和预告片卡完全一样）
 
 /// 一张剧照卡：就是预告片卡那一种（`DSMediaCard`：16:9、大圆角，画面下段渐进式模糊 + 一层淡暗，
-/// 模糊上压「第 3 幕」和「▣ 12 张剧照」，右下「•••」），一排里高矮、圆角、字都和预告片一样；整张卡点开看大图
+/// 模糊上压「第 3 幕」和「▣ 剧照」（不写张数：用户要求全局去掉计数），右下「•••」），一排里高矮、圆角、字都和预告片一样；整张卡点开看大图
 struct DetailStillCard: View {
     let art: URL?
     let title: String

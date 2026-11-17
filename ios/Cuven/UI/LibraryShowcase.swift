@@ -487,8 +487,9 @@ struct ShowcaseIntro: View {
                         .font(.dsSectionTitle)
                         .foregroundStyle(.white)
                         .padding(.leading, metrics.margin + lead).padding(.trailing, metrics.margin + trail)
-                        // 剧照本身不念（只是画面、点不开）：标题告诉旁白有几张，不再念一个后面什么都没有的「剧照」（F76）
-                        .accessibilityLabel("剧照，\(stills.count) 张")
+                        // 剧照本身不念（只是画面、点不开）：标题后面补一句说明，不念一个后面什么都没有的「剧照」（F76）；
+                        // 不再念「N 张」（用户要求全局去掉计数）
+                        .accessibilityHint("一排剧照画面，只供观看")
                         .accessibilityAddTraits(.isHeader)
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: metrics.gutter) {

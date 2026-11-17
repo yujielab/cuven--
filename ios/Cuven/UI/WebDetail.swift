@@ -467,18 +467,16 @@ struct SeriesDetailView: View {
         }
     }
 
-    /// 「影片详细信息」那张卡（用户要求只留四行）：首播时间（和这一季）、每集时长（和集数）、流量能效（按这一季的分集平均）、推荐等级
+    /// 「影片详细信息」那张卡（用户要求只留四行）：首播时间（和这一季）、每集时长、流量能效（按这一季的分集平均）、推荐等级。
+    /// 不写「全 8 集」「更新至第 5 集」这类集数（用户要求全局去掉计数）；没有片长就不出时长那一行
     private func facts(_ m: Meta?) -> [DetailFact] {
         var out: [DetailFact] = []
         if let t = DetailFacts.releaseText(m?.releaseDate, year: year(m).flatMap { Int($0) }, verb: "首播") {
             out.append(DetailFact(id: "release", lead: .symbol("calendar"), text: t, sub: current.seasonLabel))
         }
         let per = Format.runtime(m?.runtime)
-        let count: String? = (current.episodes ?? 0) > 0 ? current.countLabel : nil
         if !per.isEmpty {
-            out.append(DetailFact(id: "runtime", lead: .symbol("clock.fill"), text: "每集约 \(per)", sub: count))
-        } else if let count {
-            out.append(DetailFact(id: "runtime", lead: .symbol("clock.fill"), text: count))
+            out.append(DetailFact(id: "runtime", lead: .symbol("clock.fill"), text: "每集约 \(per)"))
         }
         let sizes = files.compactMap(\.size).filter { $0 > 0 }
         let avg: Int64? = sizes.isEmpty ? nil : sizes.reduce(0, +) / Int64(sizes.count)
@@ -919,7 +917,7 @@ struct DetailScaffold<Episodes: View>: View {
                         .padding(.trailing, i == trailers.count - 1 && !shown.isEmpty ? groupGap : 0)
                 }
                 ForEach(Array(shown.enumerated()), id: \.offset) { i, s in
-                    DetailStillCard(art: TMDBImage.url(s, "w1280"), title: "第 \(i + 1) 幕", detail: "\(shown.count) 张剧照",
+                    DetailStillCard(art: TMDBImage.url(s, "w1280"), title: "第 \(i + 1) 幕", detail: "剧照",
                                     metrics: m) { stillPick = DetailStillPick(index: i) }
                         .matchedTransitionSource(id: i, in: stillsNS)
                 }

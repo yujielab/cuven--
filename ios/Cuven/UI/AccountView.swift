@@ -187,16 +187,16 @@ struct AccountView: View {
 
     // MARK: 各组
 
-    /// 观看：点进去是整页清单（在这一页里推进去）
+    /// 观看：点进去是整页清单（在这一页里推进去）。行里不写「共 N 部」（用户要求全局去掉影片计数）
     private var watchingGroup: some View {
         AccountGroup(title: "观看") {
             NavigationLink(value: Route.shelf(.continueWatching)) {
-                AccountRow(icon: "play.circle", title: "继续观看", subtitle: "共 \(model.playback.continueWatching.count) 部") { AccountChevron() }
+                AccountRow(icon: "play.circle", title: "继续观看") { AccountChevron() }
             }
             .buttonStyle(AccountRowPress())
             AccountDivider()
             NavigationLink(value: Route.shelf(.watchlist)) {
-                AccountRow(icon: "bookmark", title: "想看", subtitle: "共 \(model.watchlist.items.count) 部") { AccountChevron() }
+                AccountRow(icon: "bookmark", title: "想看") { AccountChevron() }
             }
             .buttonStyle(AccountRowPress())
             AccountDivider()
