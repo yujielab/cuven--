@@ -663,8 +663,7 @@ struct DetailScaffold<Episodes: View>: View {
                             }
                         }
                         episodes(m)
-                        if !trailers.isEmpty { trailerSection(m) }
-                        if stills.count >= 2 { stillsSection(m) }
+                        if !trailers.isEmpty || stills.count >= 2 { mediaSection(m) }
                         if !cast.isEmpty { castSection(m) }
                         if !facts.isEmpty || shareURL != nil {
                             group(m, "影片详细信息") {
@@ -901,25 +900,22 @@ struct DetailScaffold<Episodes: View>: View {
     }
 
 
-    /// 预告片：一排 16:9 卡，和分集卡同一个样子（字压在渐进式模糊上）；点一张全屏放（从这一段开始，左右滑换下一段）
-    private func trailerSection(_ m: DSMetrics) -> some View {
-        DSSection(title: "预告片", metrics: m) {
+    /// 预告片与剧照（用户要求：两样现在是同一种卡，合成一组、不再分开，同一横排里用间距分开）：
+    /// 先是预告片（点一张全屏放，从这一段开始，左右滑换下一段），隔一段宽一点的空（卡间距的 2.5 倍），再是剧照（点一张全屏看大图，
+    /// 从这张卡上放大出来）。卡都是 16:9、字压在渐进式模糊上（DSMediaCard），剧照两张以上才放、最多 12 张。
+    /// 那段空放在最后一张预告片的右边：滑到剧照时第一张剧照照样停在左边线上
+    private func mediaSection(_ m: DSMetrics) -> some View {
+        let shown = stills.count >= 2 ? stillShown : []
+        // 不叫 title：会把这一页的片名（self.title，全屏预告片的标题要用它）挡住
+        let sectionTitle = !trailers.isEmpty && !shown.isEmpty ? "预告片与剧照" : (trailers.isEmpty ? "剧照" : "预告片")
+        let groupGap = (m.gutter * 1.5).rounded()
+        return DSSection(title: sectionTitle, metrics: m) {
             DSShelf(metrics: m) {
                 ForEach(Array(trailers.enumerated()), id: \.offset) { i, t in
                     DetailTrailerCard(trailer: t, art: t.image ?? (trailerArt.isEmpty ? nil : trailerArt[i % trailerArt.count]),
                                       metrics: m, onPlay: { TrailerPlayerView.present(movieTitle: title, trailers: trailers, start: i) })
+                        .padding(.trailing, i == trailers.count - 1 && !shown.isEmpty ? groupGap : 0)
                 }
-            }
-        }
-    }
-
-    /// 剧照（用户给的参考图：游戏 App 详情页「挑戰」那一排；用户要求从 HomePod mini 式的浏览台退回这一版）：
-    /// 一排 4:3 的大卡、大圆角，画面下段渐进式模糊，「第 3 幕」和「▣ 12 张剧照」压在模糊上；
-    /// 点一张全屏看大图（从这张卡上放大出来，左右滑换下一张）
-    private func stillsSection(_ m: DSMetrics) -> some View {
-        let shown = stillShown
-        return DSSection(title: "剧照", metrics: m) {
-            DSShelf(metrics: m) {
                 ForEach(Array(shown.enumerated()), id: \.offset) { i, s in
                     DetailStillCard(art: TMDBImage.url(s, "w1280"), title: "第 \(i + 1) 幕", detail: "\(shown.count) 张剧照",
                                     metrics: m) { stillPick = DetailStillPick(index: i) }

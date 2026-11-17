@@ -615,10 +615,10 @@ enum DetailFacts {
     }
 }
 
-// MARK: - 剧照（参考图：游戏 App 详情页「挑戰」那一排；用户要求从 HomePod mini 式的浏览台退回这一版）
+// MARK: - 剧照（用户要求：和预告片合成一组、同一横排，用间距分开；卡和预告片卡完全一样）
 
-/// 一张剧照卡：4:3 的大卡、大圆角（约卡宽的 6.5%），画面下段渐进式模糊（离底 34% 起糊、16% 以下最糊），
-/// 上面压一层淡暗，再压一行标题（「第 3 幕」）和一行带符号的小字（「12 张剧照」）；整张卡点开看大图
+/// 一张剧照卡：就是预告片卡那一种（`DSMediaCard`：16:9、大圆角，画面下段渐进式模糊 + 一层淡暗，
+/// 模糊上压「第 3 幕」和「▣ 12 张剧照」，右下「•••」），一排里高矮、圆角、字都和预告片一样；整张卡点开看大图
 struct DetailStillCard: View {
     let art: URL?
     let title: String
@@ -627,37 +627,10 @@ struct DetailStillCard: View {
     let action: () -> Void
 
     var body: some View {
-        let w = metrics.wideCardWidth
-        let h = (w * 0.75).rounded()
-        let radius: CGFloat = max(18, min(26, (w * 0.065).rounded()))
-        let pad: CGFloat = metrics.wide ? 20 : 16
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        Button(action: action) {
-            ZStack(alignment: .bottomLeading) {
-                DSParallaxArt(url: art, metrics: metrics, size: CGSize(width: w, height: h), effect: .bottomBlur)
-                LinearGradient(stops: DSMediaCardStyle.shade, startPoint: .top, endPoint: .bottom)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.white)
-                    Label(detail, systemImage: "photo.stack")
-                        .font(.subheadline)
-                        .foregroundStyle(DSInk.secondary)
-                }
-                .lineLimit(1)
-                // 字只在模糊那一段里：特大字号时也不冲出去
-                .dynamicTypeSize(...DynamicTypeSize.xLarge)
-                .padding(.horizontal, pad)
-                .padding(.bottom, pad)
-            }
-            .frame(width: w, height: h)
-            .clipShape(shape)
-            .contentShape(shape)
+        DSMediaCard(art: art, title: title, detail: detail, glyph: "photo.on.rectangle",
+                    metrics: metrics, identifier: "still-card", action: action) {
+            Button("查看大图", systemImage: "arrow.up.left.and.arrow.down.right", action: action)
         }
-        .buttonStyle(PressableStyle())
-        .accessibilityLabel("\(title)，剧照")
-        .accessibilityHint("查看大图")
-        .accessibilityIdentifier("still-card")
     }
 }
 
