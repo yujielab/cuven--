@@ -5,6 +5,7 @@ import SwiftUI
 // 网页版账户页的第二、三张卡，样子换成这一页的（Apple「游戏」App 的个人页：组名 + 圆角 26 的半透明卡、白字、灰色说明，见 AccountView）：
 // · 网络速度：45 根竖条的波浪滑块（拇指那一处凹下去，左亮右暗），整条都能拖，拖的时候拇指上方一颗气泡写着数，每 5% 一下选择触感；
 //   旁白是一个可调的元素（上下轻扫 ±5%）。存在 cuven_network_speed（和网页版的 settings.networkSpeed 同步），在 iOS 上真的管播放（NetworkSpeed）。
+//   滑块下面一行「自动调整」（用户要求）：检测网络情况和速度、自动选百分比（NetworkAuto）；自动选的数只在本机，手动拖一下就关掉自动。
 // · 使用洞察 · 流量概览：网页版的数是随机的，这里是这台设备真的下载了多少（UsageMeter）：本月 / 日均 / 较上月、近 24 小时每小时一根柱、
 //   本月三类的构成。收起 / 展开存在 cuven_traffic_expanded（同步 settings.trafficExpanded）。
 
@@ -13,6 +14,8 @@ import SwiftUI
 /// 「网络」一组：标题 + 一张卡（「网络速度」那一行）+ 卡下一行说明这个设置在 iOS 上管什么。直接放进账户页的组里用
 struct NetworkSpeedCard: View {
     @AppStorage(NetworkSpeed.key) private var speed = NetworkSpeed.defaultValue
+    @AppStorage(NetworkSpeed.autoKey) private var auto = false
+    @AppStorage(NetworkSpeed.autoValueKey) private var autoValue = -1
 
     var body: some View {
         AccountGroup(title: "网络", footer: footer) {
@@ -20,19 +23,23 @@ struct NetworkSpeedCard: View {
         }
     }
 
-    /// 说真话：这个百分比在 iOS 上换成了什么
+    /// 说真话：这个百分比（开着自动调整就是自动选的那个）在 iOS 上换成了什么
     private var footer: String {
-        let p = min(100, max(0, speed))
-        if p >= 100 { return "100% 时，正片缓冲多少交给系统决定。改动从下一次播放开始生效。" }
+        let p = auto && autoValue >= 0 ? min(100, autoValue) : min(100, max(0, speed))
+        let tail = auto ? "自动调整开着时，换网络或隔半小时回到 App 会重新检测。改动从下一次播放开始生效。"
+                        : "改动从下一次播放开始生效。"
+        if p >= 100 { return "100% 时，正片缓冲多少交给系统决定。" + tail }
         let base = "正片最多提前缓冲约 \(Int(NetworkSpeed.forwardBuffer(p))) 秒"
-        if p < 25 { return base + "；低于 25% 时省流量，主页和资料库里的预告片不自动播放。" }
-        return base + "。改动从下一次播放开始生效。"
+        if p < 25 { return base + "；低于 25% 时省流量，主页和资料库里的预告片不自动播放。" + tail }
+        return base + "。" + tail
     }
 }
 
 /// 「网络速度」一行（不带卡、不带组名）：要放进别的组（比如「播放」）时用它，前面加一条 AccountDivider
 struct NetworkSpeedRow: View {
     @AppStorage(NetworkSpeed.key) private var speed = NetworkSpeed.defaultValue
+    @AppStorage(NetworkSpeed.autoKey) private var auto = false
+    @AppStorage(NetworkSpeed.autoValueKey) private var autoValue = -1
     /// 正在拖：松手才写回设置（拖一下不存几十次）
     @State private var dragValue: Int?
     @ScaledMetric(relativeTo: .title3) private var iconSize: CGFloat = 24
@@ -40,33 +47,44 @@ struct NetworkSpeedRow: View {
 
     static let hint = "调高可获得更流畅的体验；调低可减少流量消耗。"
 
-    private var stored: Int { min(100, max(0, speed)) }
+    /// 现在生效的：开着自动调整而且测过 → 自动选的；不然是手动设的
+    private var stored: Int { auto && autoValue >= 0 ? min(100, autoValue) : min(100, max(0, speed)) }
     private var shown: Int { dragValue ?? stored }
-    private var valueText: String { "\(stored)%" }
+    private var valueText: String { auto ? "\(stored)%，自动调整" : "\(stored)%" }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            header
-            NetworkWaveSlider(value: shown, dragging: dragValue != nil, onDrag: drag, onEnd: commit)
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                NetworkWaveSlider(value: shown, dragging: dragValue != nil, onDrag: drag, onEnd: commit)
+            }
+            // 每过一个 5% 一下选择触感；只在手指拖的时候（同步回来的值、自动调整选的值变了不震：F41）
+            .sensoryFeedback(.selection, trigger: shown) { old, new in
+                dragValue != nil && old / 5 != new / 5
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("网络速度")
+            .accessibilityValue(valueText)
+            .accessibilityHint(Self.hint)
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: setManual(min(100, stored + 5))
+                case .decrement: setManual(max(0, stored - 5))
+                @unknown default: break
+                }
+            }
+            // 自动调整（用户要求「添加自动调整按钮，自动检测网络情况和速度匹配合适的百分比」）：和「使用洞察」卡底下
+            // 「清除缓存」那一行同一个样子——一条细线，左边标题 + 一行灰字（检测到的网络、速度、延迟），右边一颗胶囊
+            Rectangle()
+                .fill(Color.white.opacity(0.1))
+                .frame(height: 0.5)
+                .padding(.top, 20)
+            NetworkAutoRow()
+                .padding(.top, 12)
         }
         .padding(.horizontal, AccountMetrics.inset)
         .padding(.top, 16)
-        .padding(.bottom, 20)
-        // 每过一个 5% 一下选择触感；只在手指拖的时候（同步回来的值变了不震：F41）
-        .sensoryFeedback(.selection, trigger: shown) { old, new in
-            dragValue != nil && old / 5 != new / 5
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("网络速度")
-        .accessibilityValue(valueText)
-        .accessibilityHint(Self.hint)
-        .accessibilityAdjustableAction { direction in
-            switch direction {
-            case .increment: speed = min(100, stored + 5)
-            case .decrement: speed = max(0, stored - 5)
-            @unknown default: break
-            }
-        }
+        .padding(.bottom, 16)
     }
 
     /// 符号、「网络速度」、右边的百分比；下面一行灰色提示（和账户页的行同一套字、同一条左边线）
@@ -86,6 +104,9 @@ struct NetworkSpeedRow: View {
                         .font(.title2.weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(.white)
+                        // 自动调整选了新的数：数字滚过去（手指拖的时候不滚，跟手）
+                        .contentTransition(.numericText(value: Double(shown)))
+                        .animation(dragValue == nil ? Animation.smooth(duration: 0.5) : nil, value: shown)
                 }
                 Text(Self.hint)
                     .font(.callout)
@@ -105,8 +126,85 @@ struct NetworkSpeedRow: View {
 
     private func commit() {
         guard let v = dragValue else { return }
-        speed = v
+        setManual(v)
         withAnimation(DSMotion.snap) { dragValue = nil }
+    }
+
+    /// 手动定一个数（拖滑块、旁白上下轻扫）：就是要自己定，自动调整跟着关掉
+    private func setManual(_ v: Int) {
+        if auto { NetworkAuto.shared.setEnabled(false, keepValue: false) }
+        speed = v
+    }
+}
+
+/// 「自动调整」一行：左边标题 + 一行灰字（关着：说这颗钮做什么；检测中；开着：检测到的网络、速度、延迟），
+/// 右边一颗胶囊——关着是玻璃「开启」，开着是白底「✓ 已开启」（选中的样子：C11），检测时胶囊里转圈、不变窄。
+/// 按「开启」马上测一次、测完给一下成功触感；按「已开启」关掉，停在现在的数上
+private struct NetworkAutoRow: View {
+    @AppStorage(NetworkSpeed.autoKey) private var auto = false
+    @State private var taps = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let engine = NetworkAuto.shared
+        let measuring = engine.phase == .measuring
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("自动调整")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.white)
+                Text(status(engine, measuring: measuring))
+                    .font(.subheadline)
+                    .monospacedDigit()
+                    .foregroundStyle(DSInk.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .contentTransition(.opacity)
+            }
+            .accessibilityElement(children: .combine)
+            Spacer(minLength: 8)
+            pill(measuring: measuring)
+        }
+        .animation(reduceMotion ? nil : Animation.snappy(duration: 0.3), value: auto)
+        .animation(reduceMotion ? nil : Animation.smooth(duration: 0.3), value: engine.phase)
+        .sensoryFeedback(.selection, trigger: taps)
+        .sensoryFeedback(.success, trigger: engine.userRuns)
+    }
+
+    private func status(_ engine: NetworkAuto, measuring: Bool) -> String {
+        if measuring { return "正在检测网络情况和速度…" }
+        guard auto else { return "按网络情况和速度，自动选合适的百分比" }
+        if engine.phase == .offline { return "未连接网络，连上后会重新检测" }
+        return engine.last?.summary ?? "开启后会马上检测一次"
+    }
+
+    private func pill(measuring: Bool) -> some View {
+        Button {
+            taps += 1
+            NetworkAuto.shared.setEnabled(!auto)
+        } label: {
+            ZStack {
+                HStack(spacing: 5) {
+                    if auto { Image(systemName: "checkmark").font(.footnote.weight(.bold)) }
+                    Text(auto ? "已开启" : "开启")
+                }
+                .opacity(measuring ? 0 : 1)
+                if measuring { ProgressView().controlSize(.small).tint(auto ? .black : .white) }
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(auto ? Color.black : Color.white)
+            .padding(.horizontal, 18)
+            .frame(minHeight: 34)
+            .background { if auto { Capsule().fill(Color.white) } }
+            .glassEffect(.regular.interactive(), in: Capsule())
+            .frame(minHeight: 44)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("自动调整网络速度")
+        .accessibilityValue(auto ? "已开启" : "已关闭")
+        .accessibilityAddTraits(auto ? .isSelected : [])
+        .accessibilityHint(auto ? "关掉以后停在现在的百分比" : "检测网络情况和速度，自动选合适的百分比")
+        .accessibilityIdentifier("account-network-auto")
     }
 }
 
@@ -160,7 +258,8 @@ private struct NetworkWaveSlider: View {
                     .frame(width: m.barWidth, height: Self.barsHeight * Self.heightFactor(Double(i), active))
             }
         }
-        .animation(reduceMotion ? nil : Animation.easeOut(duration: 0.1), value: value)
+        // 手指拖的时候跟手（0.1 秒）；自动调整、同步回来、旁白改的数慢一点滑过去
+        .animation(reduceMotion ? nil : (dragging ? Animation.easeOut(duration: 0.1) : Animation.smooth(duration: 0.55)), value: value)
     }
 
     /// 网页版的波形：离拇指越近越矮
