@@ -164,7 +164,7 @@ struct ActorPage: View {
         return ZStack(alignment: .trailing) {
             ZoomLink(route: item.route, slot: "actor-latest") {
                 HStack(spacing: 16) {
-                    RemoteImage(url: item.poster, maxPixel: 300)
+                    RemoteImage(url: item.thumb, maxPixel: 300)
                         .frame(width: 76, height: 114)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(DetailSurface.line, lineWidth: 0.5))
@@ -221,9 +221,9 @@ struct ActorPage: View {
         DSSection(title: title, metrics: m) {
             DSShelf(metrics: m) {
                 ForEach(list) { w in
-                    let item = ActorText.item(w, model: model)
+                    let item = ActorText.item(w, model: model, width: m.posterWidth)
                     ZoomLink(route: item.route, slot: "actor-\(title)") {
-                        ActorWorkCard(poster: item.poster, title: item.title, role: w.character, width: m.posterWidth)
+                        ActorWorkCard(poster: item.poster, logo: item.logo, title: item.title, role: w.character, width: m.posterWidth)
                     }
                     .accessibilityIdentifier("actor-work")
                 }
@@ -322,17 +322,22 @@ struct ActorNameCapsule: View {
     }
 }
 
-/// 库中作品的一张：2:3 海报，下面片名和「饰 谁」
+/// 库中作品的一张：2:3 海报（无字画面时下沿压字标，和主页的海报卡一样：DSPosterLogo），下面片名和「饰 谁」
 struct ActorWorkCard: View {
     let poster: URL?
+    var logo: URL? = nil
     let title: String
     let role: String?
     let width: CGFloat
 
     var body: some View {
+        let h = (width * 1.5).rounded()
         VStack(alignment: .leading, spacing: 8) {
             RemoteImage(url: poster, maxPixel: width * 3)
-                .frame(width: width, height: (width * 1.5).rounded())
+                .frame(width: width, height: h)
+                .overlay {
+                    if let logo { DSPosterLogo(logo: logo, size: CGSize(width: width, height: h), title: title) }
+                }
                 .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous).strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
             VStack(alignment: .leading, spacing: 2) {
@@ -523,20 +528,25 @@ enum ActorText {
         return map[s] ?? s
     }
 
-    /// 一部作品在卡上要的东西：去哪、海报、片名、一行字、想看用的键和类型
-    @MainActor static func item(_ w: ActorWork, model: AppModel)
-        -> (route: Route, poster: URL?, title: String, line: String, key: String, kind: WatchItem.Kind) {
+    /// 一部作品在卡上要的东西：去哪、海报（和主页海报卡同一个挑法：无字画面 + 字标，没有字标才是印着片名的海报）、
+    /// 字标、小图（最新那张卡上 76 点的小海报：印着片名的那张，字标压上去太小）、片名、一行字、想看用的键和类型。
+    /// 用户截图：「库中的电影」里的卡用的是无字的画，却没压字标——认不出是哪一部
+    @MainActor static func item(_ w: ActorWork, model: AppModel, width: CGFloat = 0)
+        -> (route: Route, poster: URL?, logo: URL?, thumb: URL?, title: String, line: String, key: String, kind: WatchItem.Kind) {
         switch w.entry {
         case .movie(let v):
             let mm = model.meta(v)
             let kind = DetailText.line(["电影", mm?.genres?.first])
             let line = w.character.flatMap { $0.isEmpty ? nil : "饰 " + $0 } ?? kind
-            return (.movie(v), model.thumbArt(v), model.title(v), line, v.path, .movie)
+            let art = model.posterArt(v, width: width)
+            return (.movie(v), art.url, art.logo, model.thumbArt(v), model.title(v), line, v.path, .movie)
         case .series(let s):
             let sm = model.seriesMetas[s.path]
             let kind = DetailText.line(["剧集", sm?.genres?.first])
             let line = w.character.flatMap { $0.isEmpty ? nil : "饰 " + $0 } ?? kind
-            return (.series(s), TMDBImage.url(sm?.poster ?? sm?.posterClean, "w342"), sm?.title ?? s.name, line, s.path, .series)
+            let art = model.seriesPosterArt(s, width: width)
+            return (.series(s), art.url, art.logo, TMDBImage.url(sm?.poster ?? sm?.posterClean, "w342"),
+                    sm?.title ?? s.name, line, s.path, .series)
         }
     }
 }
