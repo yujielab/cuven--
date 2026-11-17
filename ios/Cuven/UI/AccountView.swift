@@ -48,6 +48,9 @@ struct AccountView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(PlayerCoordinator.autoplayKey) private var autoplayNext = true
+    /// 首选音轨 / 首选字幕（用户要求，TrackPrefs.swift）
+    @AppStorage(TrackPrefs.audioKey) private var audioPref = TrackPrefs.Audio.auto.rawValue
+    @AppStorage(TrackPrefs.subtitleKey) private var subtitlePref = TrackPrefs.Subtitle.auto.rawValue
     /// 「新片上架通知」：自己选的开 / 关。系统那边的通知权限另看（notifyBlocked）
     @AppStorage(AccountView.notifyKey) private var notifyWanted = false
     /// 和账户设置同步的两个本机设置（网络速度、流量概览展开；「使用」那两张卡改它们）：一变就防抖存回账户
@@ -225,13 +228,48 @@ struct AccountView: View {
     }
 
     private var playbackGroup: some View {
-        AccountGroup(title: "播放") {
+        let audio = TrackPrefs.Audio(rawValue: audioPref) ?? .auto
+        let subtitle = TrackPrefs.Subtitle(rawValue: subtitlePref) ?? .auto
+        return AccountGroup(title: "播放", footer: "每一集开始时按这里选一次；播放中在播放器里换的不受影响。") {
             AccountRow(icon: "forward.end", title: "自动播放下一集", subtitle: "一集看完，接着放下一集") {
                 Toggle("自动播放下一集", isOn: $autoplayNext)
                     .labelsHidden()
                     .tint(.green)
             }
+            AccountDivider()
+            // 首选音轨 / 首选字幕（用户要求「允许设置字幕和音轨首选项」）：整行是一颗系统弹出菜单，勾着当前那一项（C11）
+            Menu {
+                Picker("首选音轨", selection: $audioPref) {
+                    ForEach(TrackPrefs.Audio.allCases) { Text($0.label).tag($0.rawValue) }
+                }
+            } label: {
+                AccountRow(icon: "waveform", title: "首选音轨", subtitle: audio.hint) {
+                    AccountMenuValue(audio.label)
+                }
+            }
+            .menuStyle(.button)
+            .buttonStyle(AccountRowPress())
+            .accessibilityLabel("首选音轨")
+            .accessibilityValue(audio.label)
+            .accessibilityHint(audio.hint)
+            AccountDivider()
+            Menu {
+                Picker("首选字幕", selection: $subtitlePref) {
+                    ForEach(TrackPrefs.Subtitle.allCases) { Text($0.label).tag($0.rawValue) }
+                }
+            } label: {
+                AccountRow(icon: "captions.bubble", title: "首选字幕", subtitle: subtitle.hint) {
+                    AccountMenuValue(subtitle.label)
+                }
+            }
+            .menuStyle(.button)
+            .buttonStyle(AccountRowPress())
+            .accessibilityLabel("首选字幕")
+            .accessibilityValue(subtitle.label)
+            .accessibilityHint(subtitle.hint)
         }
+        .sensoryFeedback(.selection, trigger: audioPref)
+        .sensoryFeedback(.selection, trigger: subtitlePref)
     }
 
     /// 片库：数量 + 刷新（慢的操作：右边换成转圈、写「正在刷新…」，不挡整屏：C39）
@@ -546,6 +584,22 @@ struct AccountValue: View {
             .foregroundStyle(DSInk.tertiary)
             .lineLimit(1)
             .minimumScaleFactor(0.8)
+    }
+}
+
+/// 行尾的弹出菜单：当前选的那一项 + 上下箭头（系统弹出按钮的样子）
+struct AccountMenuValue: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            AccountValue(text)
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.45))
+                .accessibilityHidden(true)
+        }
     }
 }
 
