@@ -362,51 +362,91 @@ struct DetailStars: View {
 
 // MARK: - 更多××
 
+/// 「更多××电影 ›」那张卡（用户要求改善视觉效果、高度宽度和设计）：
+/// · 窄屏（iPhone、折起的 Duo）：一列三行。海报 46 × 69（以前 52 × 78），片名 Headline、最多两行（以前 Title 3 一行，
+///   「Spider-Man…」「铁血战士：…」被截掉），下面一行「2021 · 动作 · ★ 8.2」，右边一颗小一号的「查看」（30 高）；一行约 90 点（以前约 106）。
+/// · 宽屏（展开的 Duo、iPad）：三部并排成一行（中间一条细竖线），「查看」放在字下面——整张卡从三行矮成一行，不再横着空出一大片。
+/// 整行（整格）点进详情；海报带一层细边和柔影
 struct DetailRelatedCard: View {
     let related: DetailRelated
     let palette: DetailPalette
+    var wide = false
+
+    private static let compactPoster = CGSize(width: 46, height: 69)
+    private static let widePoster = CGSize(width: 56, height: 84)
+    private static let gap: CGFloat = 14
 
     var body: some View {
         DetailCard {
-            ForEach(Array(related.items.enumerated()), id: \.element.id) { i, item in
-                // 行间的线从片名那儿起（20 + 海报 52 + 16），不从海报底下穿过去（App Store 列表的样子）
-                if i > 0 { DetailCardDivider(leading: DetailSurface.inset + 52 + 16) }
-                NavigationLink(value: item.route) {
-                    HStack(spacing: 16) {
-                        RemoteImage(url: item.art, maxPixel: 240)
-                            .frame(width: 52, height: 78)
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(DetailSurface.line, lineWidth: 0.5))
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(item.title)
-                                .font(.title3.weight(.semibold))
-                                .foregroundStyle(.white)
-                                .lineLimit(1)
-                            if !item.subtitle.isEmpty {
-                                Text(item.subtitle)
-                                    .font(.callout)
-                                    .foregroundStyle(palette.ink2)
-                                    .lineLimit(1)
-                            }
+            if wide {
+                HStack(alignment: .top, spacing: 0) {
+                    ForEach(Array(related.items.enumerated()), id: \.element.id) { i, item in
+                        if i > 0 {
+                            Rectangle().fill(DetailSurface.line).frame(width: 0.5).padding(.vertical, 20)
                         }
-                        Spacer(minLength: 8)
-                        Text("查看")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 18)
-                            .frame(minHeight: 34)
-                            .background(Capsule().fill(Color.white.opacity(0.16)))
+                        link(item) { tile(item, poster: Self.widePoster, pillBelow: true) }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(.horizontal, DetailSurface.inset)
-                    .padding(.vertical, 14)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(DetailRowPress())
-                // 旁白念片名和「2024，爱情」，不再把只是样子的「查看」也念一遍（点的是整行）
-                .accessibilityLabel(DetailText.spoken(DetailText.line([item.title, item.subtitle])))
-                .accessibilityIdentifier("related-card")
+            } else {
+                ForEach(Array(related.items.enumerated()), id: \.element.id) { i, item in
+                    // 行间的线从片名那儿起，不从海报底下穿过去（App Store 列表的样子）
+                    if i > 0 { DetailCardDivider(leading: DetailSurface.inset + Self.compactPoster.width + Self.gap) }
+                    link(item) { tile(item, poster: Self.compactPoster, pillBelow: false) }
+                }
             }
         }
+    }
+
+    private func link<L: View>(_ item: DetailRelatedItem, @ViewBuilder label: () -> L) -> some View {
+        NavigationLink(value: item.route) { label() }
+            .buttonStyle(DetailRowPress())
+            // 旁白念片名和「2024，爱情」，不再把只是样子的「查看」也念一遍（点的是整行）
+            .accessibilityLabel(DetailText.spoken(DetailText.line([item.title, item.subtitle])))
+            .accessibilityIdentifier("related-card")
+    }
+
+    private func tile(_ item: DetailRelatedItem, poster: CGSize, pillBelow: Bool) -> some View {
+        let shape = RoundedRectangle(cornerRadius: (poster.width * 0.19).rounded(), style: .continuous)
+        return HStack(alignment: pillBelow ? .top : .center, spacing: Self.gap) {
+            RemoteImage(url: item.art, maxPixel: 240)
+                .frame(width: poster.width, height: poster.height)
+                .clipShape(shape)
+                .overlay(shape.strokeBorder(DetailSurface.line, lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.28), radius: 5, y: 2)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title)
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !item.subtitle.isEmpty {
+                    Text(item.subtitle)
+                        .font(.subheadline)
+                        .monospacedDigit()
+                        .foregroundStyle(palette.ink2)
+                        .lineLimit(1)
+                }
+                if pillBelow { pill.padding(.top, 8) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if !pillBelow { pill }
+        }
+        .padding(.horizontal, pillBelow ? 18 : DetailSurface.inset)
+        .padding(.vertical, pillBelow ? 18 : 11)
+        .contentShape(Rectangle())
+    }
+
+    /// 「查看」：小一号（30 高、左右 14；以前 34 高、左右 18），只是样子——点的是整行
+    private var pill: some View {
+        Text("查看")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .frame(minHeight: 30)
+            .background(Capsule().fill(Color.white.opacity(0.16)))
+            .accessibilityHidden(true)
     }
 }
 

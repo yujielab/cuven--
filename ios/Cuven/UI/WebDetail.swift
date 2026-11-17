@@ -147,7 +147,7 @@ struct MovieDetailView: View {
         let items = model.related(to: video, limit: 3).map { v -> DetailRelatedItem in
             let mm = model.meta(v)
             return DetailRelatedItem(id: v.path, title: model.title(v),
-                                     subtitle: DetailText.line([model.year(v).map { String($0) }, mm?.genres?.first]),
+                                     subtitle: DetailText.line([model.year(v).map { String($0) }, mm?.genres?.first, DetailText.rating(mm?.rating)]),
                                      art: TMDBImage.url(mm?.poster ?? mm?.posterClean, "w342"), route: .movie(v))
         }
         guard !items.isEmpty else { return nil }
@@ -506,7 +506,7 @@ struct SeriesDetailView: View {
             if let mine, (s.tmdbId ?? sm?.id) == mine { continue }
             if s.name == current.name || !seen.insert(key).inserted { continue }
             items.append(DetailRelatedItem(id: s.path, title: sm?.title ?? s.name,
-                                           subtitle: DetailText.line([s.year, sm?.genres?.first]),
+                                           subtitle: DetailText.line([s.year, sm?.genres?.first, DetailText.rating(sm?.rating)]),
                                            art: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w342"), route: .series(s)))
             if items.count == 3 { break }
         }
@@ -673,7 +673,7 @@ struct DetailScaffold<Episodes: View>: View {
                         }
                         if let related, !related.items.isEmpty {
                             group(m, related.title, route: related.route) {
-                                DetailRelatedCard(related: related, palette: palette)
+                                DetailRelatedCard(related: related, palette: palette, wide: m.wide)
                             }
                         }
                     }
