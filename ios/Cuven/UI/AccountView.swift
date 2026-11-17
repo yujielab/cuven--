@@ -4,31 +4,29 @@ import UserNotifications
 
 // MARK: - 账户与设置（主页右上的头像点开）
 
-/// 圆形头像：账户设置里的头像（默认头像或自己上传的），取不到就是首字母
+/// 圆形头像：账户设置里的头像（默认头像或自己上传的），存在本机（AvatarCache），第一帧就是它。
+/// 用户要求「预先在设备上缓存头像，仅在确认没有头像时才回退成默认头像兜底，不要使用首字母」：
+/// 还不知道是哪张（第一次登录还没拉到、断网且本机没有）只画一个空的圆，不写首字母；默认头像要服务器确认没有才用（见 AvatarCache）
 struct AvatarView: View {
     @Environment(AccountStore.self) private var account
     var size: CGFloat = 34
 
     var body: some View {
+        let img = AvatarCache.shared.avatar(for: account.session?.username)
         ZStack {
-            Circle().fill(LinearGradient(colors: [Theme.accent, Color(red: 0.36, green: 0.27, blue: 1.0)],
-                                         startPoint: .topLeading, endPoint: .bottomTrailing))
-            Text(initial)
-                .font(.system(size: size * 0.42, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-            if let u = account.avatarURL {
-                RemoteImage(url: u, maxPixel: size * 3, placeholder: .clear)
+            Circle().fill(Color.white.opacity(0.12))
+            if let img {
+                Image(uiImage: img)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFill()
+                    .transition(.opacity)
             }
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
         .overlay(Circle().strokeBorder(.white.opacity(0.22), lineWidth: 0.5))
         .task(id: account.session?.username) { await account.refreshAvatar() }
-    }
-
-    private var initial: String {
-        let n = account.displayName.trimmingCharacters(in: .whitespaces)
-        return n.isEmpty ? "C" : String(n.prefix(1)).uppercased()
     }
 }
 
@@ -140,7 +138,7 @@ struct AccountView: View {
                 guard let s = account.session else { return }
                 await ProfileStore.shared.load(for: s.username, sessionEmail: s.email)
             }
-            .task(id: account.avatarURL) { await loadTint() }
+            .task(id: AvatarCache.shared.version) { loadTint() }
             .onChange(of: scenePhase) { _, phase in
                 // 从系统设置回来：通知权限可能变了
                 if phase == .active { Task { @MainActor in await refreshNotify() } }
@@ -327,10 +325,9 @@ struct AccountView: View {
         }
     }
 
-    /// 顶上那一截的颜色：取头像的平均色（只用色相，饱和度、亮度压到参考图那样）
-    private func loadTint() async {
-        guard let u = account.avatarURL,
-              let img = await ImagePipeline.shared.image(u, maxPixel: 96), let cg = img.cgImage,
+    /// 顶上那一截的颜色：取头像的平均色（只用色相，饱和度、亮度压到参考图那样）；头像就是本机存的那一张，不再下载
+    private func loadTint() {
+        guard let cg = AvatarCache.shared.avatar(for: account.session?.username)?.cgImage,
               let c = ImageEffects.averageColor(cg, bottom: 1) else { return }
         withAnimation(.easeInOut(duration: 0.6)) { tint = AccountPalette.tint(from: c) }
     }

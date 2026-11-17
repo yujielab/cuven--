@@ -139,16 +139,15 @@ struct WelcomeView: View {
         return g + " !"
     }
 
-    /// 132 的玻璃圆（白 6% + 模糊，1px 白 18% 描边，上沿一道高光，投影）；没头像是一个人形剪影，头像到了盖在上面
+    /// 132 的玻璃圆（白 6% + 模糊，1px 白 18% 描边，上沿一道高光，投影）；头像是本机存的那一张（AvatarCache），到了淡入。
+    /// 还不知道是哪张时只是空的玻璃圆：不画人形剪影、不写首字母，默认头像要服务器确认没有才用（用户要求）
     private func avatarView(size: CGFloat) -> some View {
         ZStack {
-            Image(systemName: "person.fill")
-                .resizable()
-                .scaledToFit()
-                .frame(height: size * 0.47)
-                .foregroundStyle(.white.opacity(0.5))
-            if let u = account.avatarURL {
-                RemoteImage(url: u, maxPixel: size * 3, placeholder: .clear)
+            if let img = AvatarCache.shared.avatar(for: account.session?.username) {
+                Image(uiImage: img)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFill()
                     .transition(.opacity)
             }
         }

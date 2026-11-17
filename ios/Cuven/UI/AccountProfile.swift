@@ -874,6 +874,12 @@ struct AvatarPickerSheet: View {
             return
         }
         account.applyAvatar(profile.avatarURL)
+        // 本机那一份马上换：上传的照片就是这份字节；选了默认头像就把那一张拉下来存上
+        // （演示数据存不了自己的照片，和网页版一样退回默认头像：照常按设置刷新）
+        switch pending {
+        case .photo(let p) where profile.syncEnabled: AvatarCache.shared.store(p.jpeg, for: account.displayName)
+        default: Task { await account.refreshAvatar(force: true) }
+        }
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         dismiss()
     }
