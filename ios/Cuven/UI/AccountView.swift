@@ -39,7 +39,7 @@ struct AvatarView: View {
 ///   顶替以前那颗「个人档案」胶囊钮和它推进去的那一页（那一页的「登录方式」「登录时间」挪到「登录与安全」）；
 /// · 下面每一组是一行粗体的组名 + 一张圆角 26 的半透明卡，卡里一行一项：左边一枚灰色符号，标题 + 一行灰色说明，右边「›」、开关或数值；
 /// · 右上是系统的关闭钮（iOS 26 的玻璃圆钮），往上滚过头部，名字接到导航栏里。
-/// 内容：个人资料卡、网络、使用洞察、观看、通知、播放、存储、登录与安全（「片库」「关于」两组用户要求移除），最底下单独一张「退出登录」（先用系统的确认：C44、C47；文案照网页版）。
+/// 内容：个人资料卡、网络、使用洞察（含「清除缓存」）、观看（含「清除继续观看」）、通知、播放、登录与安全（「片库」「关于」「存储」三组用户要求移除 / 并走），最底下单独一张「退出登录」（先用系统的确认：C44、C47；文案照网页版）。
 /// 「新片上架通知」打开的那一刻才向系统要权限（C78、C79）；系统里关着就多一行「打开设置」（C97）。
 struct AccountView: View {
     @Environment(AppModel.self) private var model
@@ -61,7 +61,6 @@ struct AccountView: View {
     /// 系统设置里 Cuven 的通知是关着的（拒绝过，或者后来到设置里关了）
     @State private var notifyBlocked = false
     @State private var notifyAsking = false
-    @State private var cacheSize: Int64 = DiskCache.size()
     @State private var confirmSignOut = false
     /// 顶上那一截的颜色：头像的主色（取不到是紫色）
     @State private var tint = AccountPalette.fallback
@@ -88,7 +87,6 @@ struct AccountView: View {
                         watchingGroup
                         notifyGroup
                         playbackGroup
-                        storageGroup
                         securityGroup
                         signOutGroup
                     }
@@ -201,6 +199,12 @@ struct AccountView: View {
                 AccountRow(icon: "bookmark", title: "想看", subtitle: "共 \(model.watchlist.items.count) 部") { AccountChevron() }
             }
             .buttonStyle(AccountRowPress())
+            AccountDivider()
+            // 以前在「存储」那一组；「清除缓存」挪进「使用洞察」那张卡以后，这一组只剩它，挪到这里和继续观看放在一起
+            Button { model.playback.clearAll() } label: {
+                AccountRow(icon: "clock.arrow.circlepath", title: "清除继续观看", titleColor: Color(red: 1, green: 0.42, blue: 0.38)) { EmptyView() }
+            }
+            .buttonStyle(AccountRowPress())
         }
     }
 
@@ -273,19 +277,6 @@ struct AccountView: View {
 
     // 「片库」（片子数量、刷新片库）和「关于」（版本、片源、账户服务）两组用户要求移除；片库照常在主页下拉刷新
 
-    private var storageGroup: some View {
-        AccountGroup(title: "存储", footer: "清除缓存后，片库清单、海报和影片信息会重新下载。") {
-            Button { clearCache() } label: {
-                AccountRow(icon: "internaldrive", title: "清除缓存", subtitle: "已用 \(cacheText)") { AccountChevron() }
-            }
-            .buttonStyle(AccountRowPress())
-            AccountDivider()
-            Button { model.playback.clearAll() } label: {
-                AccountRow(icon: "clock.arrow.circlepath", title: "清除继续观看", titleColor: Color(red: 1, green: 0.42, blue: 0.38)) { EmptyView() }
-            }
-            .buttonStyle(AccountRowPress())
-        }
-    }
 
     /// 面容 ID 快速登录的开关；下面两行（这次怎么登录的、什么时候）以前在「个人档案」那一页，那一页由个人资料卡顶替后挪到这里
     @ViewBuilder
@@ -389,22 +380,6 @@ struct AccountView: View {
     private func openNotificationSettings() {
         guard let url = URL(string: UIApplication.openNotificationSettingsURLString) else { return }
         openURL(url)
-    }
-
-    // MARK: 存储
-
-    private func clearCache() {
-        model.clearCaches()
-        cacheSize = DiskCache.size()
-        Task { @MainActor in
-            await model.refreshAll()
-            cacheSize = DiskCache.size()
-        }
-    }
-
-    private var cacheText: String {
-        let s = Format.size(cacheSize)
-        return s.isEmpty ? "0 MB" : s
     }
 
     // MARK: 登录

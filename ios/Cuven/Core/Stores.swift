@@ -1326,8 +1326,15 @@ final class AppModel {
         return hits.sorted { $0.score != $1.score ? $0.score > $1.score : $0.title < $1.title }.prefix(80).map { $0 }
     }
 
+    /// 清除缓存：片库清单与影片信息（Caches/cuven）、接口回包（URLCache.shared）、海报和剧照（图片管线的磁盘缓存，以前漏了）
     func clearCaches() {
         DiskCache.clear()
         URLCache.shared.removeAllCachedResponses()
+        ImagePipeline.shared.clearDisk()
+    }
+
+    /// 缓存一共占了多少：和 clearCaches 清的是同三样
+    static var cacheUsage: Int64 {
+        DiskCache.size() + Int64(URLCache.shared.currentDiskUsage) + ImagePipeline.shared.diskUsage
     }
 }
