@@ -155,10 +155,11 @@ struct MovieDetailView: View {
     }
 
     /// 预告片卡的画面：剧照轮着用；没有剧照就是背景图
+    /// 预告片卡的画面（Apple 给了这段预告片自己的画面就不用这个），见 DetailMediaArt.trailerArt
     private func trailerArt(_ m: Meta?) -> [String] {
         let stills = (m?.stills ?? []).compactMap { $0.url ?? $0.thumb }.filter { !$0.isEmpty }
-        if !stills.isEmpty { return stills }
-        return [atv?.background ?? model.backgroundArtString(video)].compactMap { $0 }
+        let wide = AppleImage.sized(atv?.background, width: 1280) ?? model.backgroundArtString(video)
+        return DetailMediaArt.trailerArt(wide: wide, stills: stills)
     }
 
     /// 「从头播放」：只在有进度时出现。先清掉这部的进度，播放器就从头开始
@@ -512,10 +513,11 @@ struct SeriesDetailView: View {
         return DetailRelated(title: "更多\(g)剧集", route: .shelf(.genre(g)), items: items)
     }
 
+    /// 预告片卡的画面（Apple 给了这段预告片自己的画面就不用这个），见 DetailMediaArt.trailerArt
     private func trailerArt(_ m: Meta?) -> [String] {
         let stills = (m?.stills ?? []).compactMap { $0.url ?? $0.thumb }.filter { !$0.isEmpty }
-        if !stills.isEmpty { return stills }
-        return [atv?.background ?? m?.backdrop].compactMap { $0 }
+        let wide = AppleImage.sized(atv?.background, width: 1280) ?? m?.backdropClean ?? m?.backdrop
+        return DetailMediaArt.trailerArt(wide: wide, stills: stills)
     }
 
     // MARK: 数据与播放
@@ -903,23 +905,29 @@ struct DetailScaffold<Episodes: View>: View {
     /// 预告片与剧照（用户要求：两样现在是同一种卡，合成一组、不再分开，同一横排里用间距分开）：
     /// 先是预告片（点一张全屏放，从这一段开始，左右滑换下一段），隔一段宽一点的空（卡间距的 2.5 倍），再是剧照（点一张全屏看大图，
     /// 从这张卡上放大出来）。卡都是 16:9、字压在渐进式模糊上（DSMediaCard），剧照两张以上才放、最多 12 张。
-    /// 那段空放在最后一张预告片的右边：滑到剧照时第一张剧照照样停在左边线上
+    /// 那段空放在最后一张预告片的右边：滑到剧照时第一张剧照照样停在左边线上。
+    /// 修（用户截图：这一排中间空出一张卡的位置、停的位置不对）：以前两样各一个 ForEach、都拿序号当 id，预告片 0 号和剧照 0 号
+    /// 在同一个 LazyHStack 里撞了 id——「第 1 幕」那张根本不画出来，按卡对齐的停位也跟着算错。现在一个 ForEach，id 是「t0」「s0」这样分开的
     private func mediaSection(_ m: DSMetrics) -> some View {
         let shown = stills.count >= 2 ? stillShown : []
         // 不叫 title：会把这一页的片名（self.title，全屏预告片的标题要用它）挡住
         let sectionTitle = !trailers.isEmpty && !shown.isEmpty ? "预告片与剧照" : (trailers.isEmpty ? "剧照" : "预告片")
         let groupGap = (m.gutter * 1.5).rounded()
+        let items = trailers.indices.map { DetailMediaItem.trailer($0) } + shown.indices.map { DetailMediaItem.still($0) }
         return DSSection(title: sectionTitle, metrics: m) {
             DSShelf(metrics: m) {
-                ForEach(Array(trailers.enumerated()), id: \.offset) { i, t in
-                    DetailTrailerCard(trailer: t, art: t.image ?? (trailerArt.isEmpty ? nil : trailerArt[i % trailerArt.count]),
-                                      metrics: m, onPlay: { TrailerPlayerView.present(movieTitle: title, trailers: trailers, start: i) })
-                        .padding(.trailing, i == trailers.count - 1 && !shown.isEmpty ? groupGap : 0)
-                }
-                ForEach(Array(shown.enumerated()), id: \.offset) { i, s in
-                    DetailStillCard(art: TMDBImage.url(s, "w1280"), title: "第 \(i + 1) 幕", detail: "剧照",
-                                    metrics: m) { stillPick = DetailStillPick(index: i) }
-                        .matchedTransitionSource(id: i, in: stillsNS)
+                ForEach(items) { item in
+                    switch item {
+                    case .trailer(let i):
+                        let t = trailers[i]
+                        DetailTrailerCard(trailer: t, art: t.image ?? (trailerArt.isEmpty ? nil : trailerArt[i % trailerArt.count]),
+                                          metrics: m, onPlay: { TrailerPlayerView.present(movieTitle: title, trailers: trailers, start: i) })
+                            .padding(.trailing, i == trailers.count - 1 && !shown.isEmpty ? groupGap : 0)
+                    case .still(let i):
+                        DetailStillCard(art: TMDBImage.url(shown[i], "w1280"), title: "第 \(i + 1) 幕", detail: "剧照",
+                                        metrics: m) { stillPick = DetailStillPick(index: i) }
+                            .matchedTransitionSource(id: i, in: stillsNS)
+                    }
                 }
             }
         }
@@ -1035,6 +1043,32 @@ struct DetailHeroBackdrop: View {
 
 /// 一段预告片：卡上是这一段自己的画面（Apple 给了就用，没给就轮着用剧照）、片名和「▶ 2 分钟」
 /// （时长 Apple 给了就用，没给就读一下这段预告片的播放列表：TrailerLength）；「•••」里是播放和分享
+/// 预告片与剧照那一排里的一张卡。两样在同一个 LazyHStack 里，id 必须分开（「t0」「s0」）：以前都用序号，同号的撞了，剧照不出来
+enum DetailMediaItem: Identifiable, Hashable {
+    case trailer(Int)
+    case still(Int)
+
+    var id: String {
+        switch self {
+        case .trailer(let i): return "t\(i)"
+        case .still(let i): return "s\(i)"
+        }
+    }
+}
+
+enum DetailMediaArt {
+    /// 预告片卡轮着用的画面（Apple 没给这段预告片画面时）。剧照现在和预告片在同一排，第一张预告片不能再借第一张剧照
+    /// （用户截图：同一张图在这一排里出现两次）：先用无字的横版背景，再用剧照那一段放不下的（第 shown + 1 张起），
+    /// 最后才从剧照末尾往前借；同一张只用一次
+    static func trailerArt(wide: String?, stills: [String], shown: Int = 12) -> [String] {
+        var out: [String] = []
+        var seen = Set<String>()
+        let pool = [wide].compactMap { $0 } + Array(stills.dropFirst(shown)) + Array(stills.prefix(shown).reversed())
+        for s in pool where !s.isEmpty && seen.insert(s).inserted { out.append(s) }
+        return out
+    }
+}
+
 struct DetailTrailerCard: View {
     let trailer: Trailer
     let art: String?
