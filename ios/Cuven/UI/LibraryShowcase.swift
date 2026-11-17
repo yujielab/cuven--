@@ -567,6 +567,8 @@ final class ShowcaseTrailer {
     @ObservationIgnored private var start: Double = 10
 
     @ObservationIgnored private var playerObservers: [NSObjectProtocol] = []
+    /// 预告片用掉的流量（账户页「流量概览」的「预告片」）：tick 里每 5 秒看一眼访问日志，卸下时结清
+    private let usage = UsageTap(.trailer)
     /// 码流（HLS 的档位）的画面至少这么高才露出来：开头几秒自适应码率还在最低档，画面糊，先停在静态画面上
     @ObservationIgnored private let revealHeight: CGFloat
     /// 这一段开始出画面的时间（到了起点、真的在走）；放了很久还没升上去就不等了（降一档要求再露）
@@ -599,8 +601,9 @@ final class ShowcaseTrailer {
         guard path != key else { return }
         unmount()
         path = key
-        // F77、S17：系统「自动播放视频预览」关着时不自己放，停在那儿等人点那颗播放钮
-        paused = !UIAccessibility.isVideoAutoplayEnabled
+        // F77、S17：系统「自动播放视频预览」关着时不自己放，停在那儿等人点那颗播放钮；
+        // 账户页「网络速度」调到 25% 以下（省流量）也一样
+        paused = !UIAccessibility.isVideoAutoplayEnabled || NetworkSpeed.dataSaver
         loadTask = Task { [weak self] in
             let list = await fetch()
             guard let self, !Task.isCancelled, self.path == key,
@@ -617,6 +620,7 @@ final class ShowcaseTrailer {
         if let o = endObserver { NotificationCenter.default.removeObserver(o); endObserver = nil }
         statusObservation = nil
         player.pause()
+        usage.flush(nil)
         player.replaceCurrentItem(with: nil)
         path = nil
         loaded = false
@@ -694,6 +698,7 @@ final class ShowcaseTrailer {
 
     private func tick(_ t: CMTime) {
         guard let item = player.currentItem else { return }
+        usage.sample(item)
         let d = item.duration.seconds
         if d.isFinite, d > start { progress = min(1, max(0, (t.seconds - start) / (d - start))) }
         let on = player.timeControlStatus == .playing && t.seconds >= start - 0.5

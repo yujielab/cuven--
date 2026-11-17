@@ -51,10 +51,17 @@ final class APIClient: @unchecked Sendable {
         }
     }
 
+    /// 发请求；回包的字节数记进流量（账户页「流量概览」的「图片与资料」，按解压后的大小，略偏大）
+    private func load(_ req: URLRequest) async throws -> (Data, URLResponse) {
+        let (data, resp) = try await session.data(for: req)
+        UsageMeter.shared.add(data.count, to: .data)
+        return (data, resp)
+    }
+
     func get<T: Decodable>(_ path: String, _ query: [(String, String)] = [], timeout: TimeInterval = 25, fresh: Bool = false) async throws -> T {
         var req = URLRequest(url: url(path, query), timeoutInterval: timeout)
         if fresh { req.cachePolicy = .reloadIgnoringLocalCacheData }
-        let (data, resp) = try await session.data(for: req)
+        let (data, resp) = try await load(req)
         try check(resp, data)
         return try decoder.decode(T.self, from: data)
     }
@@ -64,7 +71,7 @@ final class APIClient: @unchecked Sendable {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: json)
-        let (data, resp) = try await session.data(for: req)
+        let (data, resp) = try await load(req)
         try check(resp, data)
         return try decoder.decode(T.self, from: data)
     }
@@ -148,7 +155,7 @@ final class APIClient: @unchecked Sendable {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(AtvArtRequest(items: items))
-        let (data, resp) = try await session.data(for: req)
+        let (data, resp) = try await load(req)
         if let http = resp as? HTTPURLResponse, http.statusCode == 404 || http.statusCode == 405 {
             throw AtvArtUnavailable()
         }
@@ -177,7 +184,7 @@ final class APIClient: @unchecked Sendable {
     func hlsInfo(_ url: URL) async -> (status: Int, info: HLSInfo?) {
         var req = URLRequest(url: url, timeoutInterval: 20)
         req.cachePolicy = .reloadIgnoringLocalCacheData
-        guard let (data, resp) = try? await session.data(for: req), let http = resp as? HTTPURLResponse else { return (0, nil) }
+        guard let (data, resp) = try? await load(req), let http = resp as? HTTPURLResponse else { return (0, nil) }
         return (http.statusCode, try? decoder.decode(HLSInfo.self, from: data))
     }
 
