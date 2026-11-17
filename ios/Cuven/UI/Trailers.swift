@@ -48,6 +48,8 @@ final class TrailerDeck {
     private(set) var paused = false
     private(set) var muted = false
     let player = AVPlayer()
+    /// 全屏预告片用掉的流量（账户页「流量概览」的「预告片」，Usage.swift）：每 5 秒看一眼访问日志，换段、收起时结清
+    private let usage = UsageTap(.trailer)
 
     @ObservationIgnored private var timeObserver: Any?
     @ObservationIgnored private var itemObservers: [NSObjectProtocol] = []
@@ -72,6 +74,7 @@ final class TrailerDeck {
         player.pause()
         if let o = timeObserver { player.removeTimeObserver(o); timeObserver = nil }
         dropItemObservers()
+        usage.flush(nil)
         player.replaceCurrentItem(with: nil)
     }
 
@@ -113,6 +116,7 @@ final class TrailerDeck {
             guard it.status == .failed else { return }
             Task { @MainActor [weak self] in self?.failed = true }
         }
+        usage.flush(item)                            // 上一段最后那一截先结清
         player.replaceCurrentItem(with: item)
         player.isMuted = muted
         player.play()
@@ -125,6 +129,7 @@ final class TrailerDeck {
     }
 
     private func tick(_ t: CMTime) {
+        usage.sample(player.currentItem)
         guard let d = player.currentItem?.duration.seconds, d.isFinite, d > 0 else { return }
         progress = min(1, max(0, t.seconds / d))
     }

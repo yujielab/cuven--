@@ -1125,7 +1125,7 @@ final class AppModel {
             .sorted { $0.count != $1.count ? $0.count > $1.count : $0.name < $1.name }
     }
 
-    // MARK: 主页的分区：今年、去年的电影和剧集，然后五个大类
+    // MARK: 主页的分区：今年、去年的电影和剧集，然后四个大类
 
     /// 剧集能上主页的卡：TMDB 取到了（有海报或剧照）
     func seriesCardReady(_ s: Series) -> Bool {
@@ -1141,8 +1141,9 @@ final class AppModel {
         return out.prefix(limit).map(\.entry)
     }
 
-    /// 五个大类之一：电影和剧集都算，新的年份在前、同一年按入库时间
+    /// 四个大类之一：电影和剧集都算。动画、动作、喜剧按类型认，新的年份在前、同一年按入库时间；严苛品质区见 premiumEntries
     func categoryEntries(_ c: HomeCategory, limit: Int = .max) -> [HomeEntry] {
+        if c == .premium { return premiumEntries(limit: limit) }
         var out: [(year: Int, key: String, entry: HomeEntry)] = []
         for v in movies where c.matches(meta(v)?.genres) { out.append((year(v) ?? 0, v.addedKey, .movie(v))) }
         for s in series where seriesCardReady(s) && c.matches(seriesMetas[s.path]?.genres) {
@@ -1150,6 +1151,48 @@ final class AppModel {
         }
         out.sort { $0.year != $1.year ? $0.year > $1.year : $0.key > $1.key }
         return out.prefix(limit).map(\.entry)
+    }
+
+    /// 严苛品质区（用户要求「规格高评价好」）：片源规格够格（PremiumBar：4K 以上，再有杜比视界 / HDR、全景声 / 无损音轨或 REMUX）、
+    /// TMDB 评分 7.5 以上的电影和剧集。评分高的在前，同分规格高的在前，再按年份新的在前。
+    /// 电影看这部片的所有文件（同一个 TMDB 编号的各个版本），有一个版本够格就算；卡还是平常那张（最新入库的那个版本）
+    func premiumEntries(limit: Int = .max) -> [HomeEntry] {
+        var best: [Int: Int] = [:]
+        for v in videos {
+            guard let id = metas[v.name]?.id else { continue }
+            let sc = specScore(file: v.name)
+            if sc > best[id, default: 0] { best[id] = sc }
+        }
+        var out: [(rating: Double, score: Int, year: Int, entry: HomeEntry)] = []
+        for v in movies {
+            guard let m = meta(v), let r = m.rating, r >= PremiumBar.minRating else { continue }
+            let sc = m.id.flatMap { best[$0] } ?? specScore(file: v.name)
+            guard sc > 0 else { continue }
+            out.append((r, sc, year(v) ?? 0, .movie(v)))
+        }
+        for s in series where seriesCardReady(s) {
+            guard let r = seriesMetas[s.path]?.rating, r >= PremiumBar.minRating else { continue }
+            let remux = ([s.path] + (s.tags ?? [])).contains { $0.localizedCaseInsensitiveContains("remux") }
+            let sc = PremiumBar.score(MediaSpec.series(s, firstFile: nil), remux: remux)
+            guard sc > 0 else { continue }
+            out.append((r, sc, Int(s.year ?? "") ?? 0, .series(s)))
+        }
+        out.sort { a, b in
+            if a.rating != b.rating { return a.rating > b.rating }
+            if a.score != b.score { return a.score > b.score }
+            return a.year > b.year
+        }
+        return out.prefix(limit).map(\.entry)
+    }
+
+    /// 文件名 → 规格分（PremiumBar）。文件名不会变，读一次记下来（要跑十几个正则，主页每次重画都算一遍太费）
+    @ObservationIgnored private var specScores: [String: Int] = [:]
+
+    private func specScore(file name: String) -> Int {
+        if let sc = specScores[name] { return sc }
+        let sc = PremiumBar.score(MediaSpec(name: name), remux: name.localizedCaseInsensitiveContains("remux"))
+        specScores[name] = sc
+        return sc
     }
 
     func movies(inGenre g: String) -> [Video] { movies.filter { meta($0)?.genres?.contains(g) == true } }

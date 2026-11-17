@@ -608,7 +608,7 @@ struct AtvArtQuery: Encodable, Hashable, Sendable {
 enum Shelf: Hashable {
     case newest, picks, series, watchlist, continueWatching
     case genre(String)
-    /// 主页的五个大类之一（引人入胜的剧情……）：电影和剧集都在里面
+    /// 主页的四个大类之一（动画片区、动作片区、喜剧片区、严苛品质区）：电影和剧集都在里面
     case category(HomeCategory)
     /// 精选电影：评分高的在前（主页今年 / 去年下面那排大号竖卡的全部）
     case featured
@@ -661,7 +661,7 @@ enum Shelf: Hashable {
     }
 }
 
-/// 主页一排里的一项：电影或剧集（今年、去年那两排，和五个大类，两样都有）
+/// 主页一排里的一项：电影或剧集（今年、去年那两排，和四个大类，两样都有）
 enum HomeEntry: Identifiable, Hashable {
     case movie(Video)
     case series(Series)
@@ -674,46 +674,75 @@ enum HomeEntry: Identifiable, Hashable {
     }
 }
 
-/// 主页的五个大类（Apple TV 那种主题货架）：标题，和它认的 TMDB 类型名。
-/// 电影和剧集的类型名写法不一样（剧集是「科幻奇幻」「动作冒险」这种合写的，有时还是英文），按「含这几个字」认
+/// 主页的四个大类（用户要求「分类更新：动画片区、动作片区、喜剧片区、严苛品质区（规格高评价好）」）：标题、说明，和它认的 TMDB 类型名。
+/// 前三类按类型认：电影和剧集的类型名写法不一样（剧集是「动作冒险」这种合写的，有时还是英文），按「含这几个字」认；
+/// 严苛品质区不看类型，看片源规格和评分（PremiumBar、AppModel.premiumEntries）
 enum HomeCategory: String, CaseIterable, Identifiable, Hashable, Sendable {
-    case drama, tense, fantasy, action, crime
+    case animation, action, comedy, premium
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .drama: return "引人入胜的剧情"
-        case .tense: return "令人坐立难安"
-        case .fantasy: return "科幻和奇幻之旅"
-        case .action: return "动作演员就位"
-        case .crime: return "刺激犯罪与偷窃"
+        case .animation: return "动画片区"
+        case .action: return "动作片区"
+        case .comedy: return "喜剧片区"
+        case .premium: return "严苛品质区"
         }
     }
 
     /// 合集页标题下那一句灰字（参考图「試試這些輕鬆的小品遊戲」那一行）
     var blurb: String {
         switch self {
-        case .drama: return "慢慢看进去，跟着人物走完一段人生。"
-        case .tense: return "悬疑、惊悚与恐怖：关上灯，坐稳了。"
-        case .fantasy: return "穿过星海与异界，去看另一种世界。"
+        case .animation: return "一笔一画造出来的世界，大人小孩都能看。"
         case .action: return "追车、格斗、爆破，一场接一场。"
-        case .crime: return "精心策划的劫案，和一场场猫鼠游戏。"
+        case .comedy: return "轻松一下，笑着看完。"
+        case .premium: return "规格高、评价好：4K 高规格片源，评分 \(PremiumBar.ratingLabel) 分以上。"
         }
     }
 
+    /// 认哪些 TMDB 类型名（严苛品质区不按类型，是空的）
     var keywords: [String] {
         switch self {
-        case .drama: return ["剧情", "Drama"]
-        case .tense: return ["惊悚", "悬疑", "恐怖", "Thriller", "Mystery", "Horror"]
-        case .fantasy: return ["科幻", "奇幻", "Sci-Fi", "Science Fiction", "Fantasy"]
+        case .animation: return ["动画", "Animation"]
         case .action: return ["动作", "Action"]
-        case .crime: return ["犯罪", "Crime"]
+        case .comedy: return ["喜剧", "Comedy"]
+        case .premium: return []
         }
     }
 
     func matches(_ genres: [String]?) -> Bool {
         guard let genres, !genres.isEmpty else { return false }
         return genres.contains { g in keywords.contains { g.localizedCaseInsensitiveContains($0) } }
+    }
+}
+
+/// 严苛品质区的门槛（用户：「规格高评价好」）。规格从文件名读（MediaSpec，和详情页「影片详细信息」同一套认法），评分是 TMDB 的
+enum PremiumBar {
+    /// TMDB 评分（满分 10）不低于这个
+    static let minRating = 7.5
+    static var ratingLabel: String { String(format: "%.1f", minRating) }
+
+    /// 规格分：0 是不够格。要 4K 以上，再有高动态范围（杜比视界 / HDR10+ / HDR10 / HLG）、
+    /// 全景声或无损音轨（杜比全景声 / DTS:X / TrueHD / DTS-HD MA）、REMUX 至少一样；分越高规格越高（同分时排在前面）
+    static func score(_ spec: MediaSpec, remux: Bool) -> Int {
+        let base: Int
+        switch spec.resolution {
+        case "8K": base = 3
+        case "4K": base = 2
+        default: return 0
+        }
+        var extra = 0
+        switch spec.range {
+        case "杜比视界": extra += 3
+        case "HDR10+", "HDR10": extra += 2
+        case "HLG": extra += 1
+        default: break
+        }
+        let a = (spec.audio ?? "").lowercased()
+        if a.contains("全景声") || a.contains("atmos") || a.contains("dts:x") { extra += 2 }
+        else if a.contains("truehd") || a.contains("dts-hd") { extra += 1 }
+        if remux { extra += 1 }
+        return extra > 0 ? base + extra : 0
     }
 }

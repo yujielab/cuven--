@@ -25,7 +25,7 @@ final class DuoUnfoldedTests: XCTestCase {
             return
         }
         snap("duo-31-unfolded-home")
-        // 主页一路往下：年份两排、精选电影、编辑推荐、精选剧集、五个大类、结尾（每一屏都看卡片大小和排距）
+        // 主页一路往下：年份两排、精选电影、编辑推荐、精选剧集、四个大类、结尾（每一屏都看卡片大小和排距）
         for i in 0..<9 {
             app.swipeUp(); sleep(2)
             snap("duo-32\(Array("abcdefghi")[i])-unfolded-rows")
