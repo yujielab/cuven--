@@ -74,6 +74,7 @@ struct RootView: View {
     @Environment(AccountStore.self) private var account
     @Environment(\.horizontalSizeClass) private var hsc
     @Environment(\.verticalSizeClass) private var vsc
+    @Environment(\.scenePhase) private var scenePhase
     @State private var tab: AppTab = .home
     /// 窗口大小（连安全区一起）：认 iPhone Duo 的「侧边一列」形态
     @State private var window: CGSize = DuoLayout.initialWindowSize
@@ -134,6 +135,11 @@ struct RootView: View {
         // 登录以后才开始取片库（登录页盖着的时候不在后面下载整个片库）
         .onAppear { if !account.loginRequired || account.isLoggedIn { model.start() } }
         .onChange(of: account.isLoggedIn) { _, now in if now { model.start() } }
+        // 头像预先存在本机（用户要求）：一启动、一登录就在后台拉好存上，回到前台再看一眼有没有换（同一张 10 分钟内不重拉）
+        .task(id: account.session?.username) { await account.refreshAvatar() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { @MainActor in await account.refreshAvatar() } }
+        }
     }
 }
 

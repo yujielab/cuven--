@@ -107,6 +107,38 @@ actor ImagePipeline {
         return out
     }
 
+    /// 字标按这个尺寸取（最长边 900 像素：详情页最大的字标 320 点宽，3 倍屏下也够）
+    static let logoPixel: CGFloat = 900
+
+    /// 字标：解码好的原图 → 深色的反白、能显示 HDR 的屏上亮部扩展到 HDR（LogoHDR）；结果按「地址 + 明暗 + HDR」记在内存里
+    func logo(_ url: URL, dark: Bool) async -> UIImage? {
+        let hdr = LogoHDR.enabled
+        guard dark || hdr else { return await image(url, maxPixel: Self.logoPixel) }
+        let key = Self.logoKey(url, dark: dark, hdr: hdr)
+        if let hit = memory.object(forKey: key) { return hit }
+        guard let base = await image(url, maxPixel: Self.logoPixel) else { return nil }
+        let out = await Task.detached(priority: .userInitiated) { LogoHDR.process(base, invert: dark, hdr: hdr) }.value ?? base
+        memory.setObject(out, forKey: key, cost: Self.cost(out))
+        return out
+    }
+
+    /// 处理好的字标，内存里有就同步给（滑回来的卡、再打开的详情页，字标第一帧就在）
+    nonisolated func cachedLogo(_ url: URL, dark: Bool) -> UIImage? {
+        let hdr = LogoHDR.enabled
+        guard dark || hdr else { return cached(url, maxPixel: Self.logoPixel) }
+        return memory.object(forKey: Self.logoKey(url, dark: dark, hdr: hdr))
+    }
+
+    nonisolated private static func logoKey(_ url: URL, dark: Bool, hdr: Bool) -> NSString {
+        "\(url.absoluteString)#logo\(dark ? "-dark" : "")\(hdr ? "-hdr" : "")" as NSString
+    }
+
+    /// 一张图在内存里占多少（HDR 字标是 16 位浮点，一个像素 8 字节）
+    nonisolated private static func cost(_ img: UIImage) -> Int {
+        if let cg = img.cgImage { return cg.bytesPerRow * cg.height }
+        return Int(img.size.width * img.size.height * img.scale * img.scale * 4)
+    }
+
     /// 详情页头部的画面：裁成画面区的宽高比、底下渐进式模糊，顺带取底边的主色；解码和处理都在后台，结果记在内存里
     func heroArt(_ url: URL, maxPixel: CGFloat, aspect: CGFloat) async -> HeroArt? {
         if let hit = cachedHeroArt(url, maxPixel: maxPixel, aspect: aspect) { return hit }
@@ -404,7 +436,8 @@ final class LogoTone {
     }
 }
 
-/// 字标：统一高度、宽度跟着比例走（超出可用宽度才按宽收）；深色字标自动反白
+/// 字标：统一高度、宽度跟着比例走（超出可用宽度才按宽收）；深色字标自动反白。
+/// 走字标管线（ImagePipeline.logo → LogoHDR）：反白在管线里做；能显示 HDR 的屏上亮部扩展到 HDR，这里允许高动态范围显示
 struct LogoImage: View {
     let url: URL?
     var height: CGFloat
@@ -414,21 +447,20 @@ struct LogoImage: View {
     var maxWidth: CGFloat = .infinity
 
     @State private var image: UIImage?
-    @State private var dark = false
     @State private var failed = false
     @State private var loadedURL: URL?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// 内存里已经有这枚字标（明暗也判过了）：第一次画就直接是它
+    /// 内存里已经有这枚处理好的字标（明暗也判过了）：第一次画就直接是它
     init(url: URL?, height: CGFloat, alignment: Alignment = .center, fallback: String? = nil, maxWidth: CGFloat = .infinity) {
         self.url = url
         self.height = height
         self.alignment = alignment
         self.fallback = fallback
         self.maxWidth = maxWidth
-        if let url, let hit = ImagePipeline.shared.cached(url, maxPixel: 900), let d = LogoTone.shared.cached(url) {
+        LogoHDR.prepare()
+        if let url, let d = LogoTone.shared.cached(url), let hit = ImagePipeline.shared.cachedLogo(url, dark: d) {
             _image = State(initialValue: hit)
-            _dark = State(initialValue: d)
             _loadedURL = State(initialValue: url)
         }
     }
@@ -441,10 +473,11 @@ struct LogoImage: View {
                 let h = min(height, maxWidth / aspect)
                 Image(uiImage: image)
                     .resizable()
+                    // HDR 字标（LogoHDR）：允许高动态范围，白字比 SDR 白最多亮一倍；SDR 的字标不受影响
+                    .allowedDynamicRange(.high)
                     .aspectRatio(contentMode: .fit)
                     .frame(width: maxWidth.isFinite ? h * aspect : nil, height: h)
                     .frame(maxWidth: .infinity, alignment: alignment)
-                    .modifier(InvertIf(on: dark))
                     .shadow(color: .black.opacity(0.55), radius: 12, y: 4)
                     // 字标是透明底：用透明的模糊淡入，不然透明的地方会先糊成一块黑框
                     .transition(reduceMotion ? .opacity : .dsBlurFadeClear(radius: 10))
@@ -465,23 +498,16 @@ struct LogoImage: View {
             failed = false
             guard let url else { image = nil; return }
             if loadedURL == url, image != nil { return }
-            if let d = LogoTone.shared.cached(url) { dark = d }
-            let img = await ImagePipeline.shared.image(url, maxPixel: 900)
-            let d = await LogoTone.shared.isDark(url)      // 字节已在 URLCache 里，不再走网络
+            LogoHDR.prepare()
+            // 先取原图（字节顺带进了磁盘缓存），再判明暗（读的是缓存里的字节，不再走网络），最后走字标管线（反白 / HDR）
+            guard await ImagePipeline.shared.image(url, maxPixel: ImagePipeline.logoPixel) != nil else {
+                if !Task.isCancelled { failed = true }
+                return
+            }
+            let d = await LogoTone.shared.isDark(url)
+            let img = await ImagePipeline.shared.logo(url, dark: d)
             guard !Task.isCancelled else { return }
-            dark = d
             if let img { withAnimation(.easeOut(duration: 0.36)) { image = img }; loadedURL = url } else { failed = true }
-        }
-    }
-}
-
-private struct InvertIf: ViewModifier {
-    let on: Bool
-    func body(content: Content) -> some View {
-        if on {
-            content.colorInvert().hueRotation(.degrees(180))
-        } else {
-            content
         }
     }
 }

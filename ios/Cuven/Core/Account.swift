@@ -415,22 +415,37 @@ final class AccountStore {
         Keychain.delete(account: "session")
         session = nil
         avatarURL = nil
-        // 网页版 clearLogin：头像 / 设置的本机缓存一起清掉
+        // 网页版 clearLogin：头像 / 设置的本机缓存一起清掉（存在本机的头像图也删掉）
         ProfileStore.shared.reset()
+        AvatarCache.shared.clear()
     }
 
-    /// 头像：先读网页版账户页那一份设置（user.cuven.online；本机缓存先上屏），读不到再退回 check.cuven.us 的老路由
-    func refreshAvatar() async {
+    /// 头像：先读网页版账户页那一份设置（user.cuven.online；本机缓存先上屏），读不到再退回 check.cuven.us 的老路由；
+    /// 再把那张图拉下来存在本机（AvatarCache：用户要求「预先在设备上缓存头像，仅在确认没有头像时才回退成默认头像兜底」）。
+    /// 设置一个都没读到（断网之类）不算确认：本机已有头像就不动；本机没有才按缓存里的设置试着拉一次
+    func refreshAvatar(force: Bool = false) async {
         guard let name = session?.username else { return }
         let profile = ProfileStore.shared
         profile.bind(name)
-        guard profile.syncEnabled, session?.method != "demo" else { return }
-        if avatarURL == nil, let cached = profile.knownAvatarURL { avatarURL = cached }
-        if await profile.refreshSettings(for: name) {
-            if session?.username == name { avatarURL = profile.avatarURL }
+        let avatars = AvatarCache.shared
+        avatars.bind(name)
+        let fallback = ProfileAPI.presetURL(ProfileAvatar.defaultID)
+        guard profile.syncEnabled, session?.method != "demo" else {
+            // 演示数据：本地画的头像（选了几号就是几号；自己的照片存不了，是默认的），不连网
+            await avatars.refresh(profile.avatarURL ?? fallback, for: name, fallback: nil, force: force)
             return
         }
-        if let u = await AccountAPI.avatarURL(name), session?.username == name { avatarURL = u }
+        if avatarURL == nil, let cached = profile.knownAvatarURL { avatarURL = cached }
+        var confirmed: URL?
+        if await profile.refreshSettings(for: name) {
+            confirmed = profile.avatarURL
+        } else {
+            confirmed = await AccountAPI.avatarURL(name)
+        }
+        guard session?.username == name else { return }
+        if let confirmed { avatarURL = confirmed }
+        guard let target = confirmed ?? (avatars.avatar(for: name) == nil ? avatarURL : nil) else { return }
+        await avatars.refresh(target, for: name, fallback: fallback, force: force)
     }
 
     /// 账户页换了头像：主页右上、账户页头部跟着换
@@ -458,6 +473,7 @@ final class AccountStore {
         guard var s = session, !newName.isEmpty, s.username != newName else { return }
         let old = s.username
         s.username = newName
+        AvatarCache.shared.rename(from: old, to: newName)
         if faceIDUser == old { disableFaceID() }
         persist(s)
         UserDefaults.standard.removeObject(forKey: "cuven_emailmap_\(old)")
