@@ -17,7 +17,7 @@ import Observation
 //   POST /verify-code { email, code }       { ok, error: wrong_code | expired | too_many_attempts, attemptsLeft, message }
 //   POST /notify      { type, username, method }   账户邮件通知（即发即忘）
 //   GET  /settings/<用户名>                  { settings: { avatar: { type: default | custom, id } } }
-//   头像：/default/<id>、/user/<用户名>
+//   头像：/default/<id>、/user/<用户名>（现在先读网页版账户页的 user.cuven.online，读不到才退回这里：见 Profile.swift）
 // 账户档 v2：{ version: 2, auth: "password", username, email, pass: { algo, iter, salt, hash }, webauthn, created_at, updated_at }
 // 密码只在本机做 PBKDF2-SHA256（310000 轮，16 字节盐，base64url）比对，与网页版逐字节一致。
 
@@ -415,11 +415,66 @@ final class AccountStore {
         Keychain.delete(account: "session")
         session = nil
         avatarURL = nil
+        // 网页版 clearLogin：头像 / 设置的本机缓存一起清掉
+        ProfileStore.shared.reset()
     }
 
+    /// 头像：先读网页版账户页那一份设置（user.cuven.online；本机缓存先上屏），读不到再退回 check.cuven.us 的老路由
     func refreshAvatar() async {
-        guard let name = session?.username, session?.method != "demo" else { return }
-        if let u = await AccountAPI.avatarURL(name) { avatarURL = u }
+        guard let name = session?.username else { return }
+        let profile = ProfileStore.shared
+        profile.bind(name)
+        guard profile.syncEnabled, session?.method != "demo" else { return }
+        if avatarURL == nil, let cached = profile.knownAvatarURL { avatarURL = cached }
+        if await profile.refreshSettings(for: name) {
+            if session?.username == name { avatarURL = profile.avatarURL }
+            return
+        }
+        if let u = await AccountAPI.avatarURL(name), session?.username == name { avatarURL = u }
+    }
+
+    /// 账户页换了头像：主页右上、账户页头部跟着换
+    func applyAvatar(_ url: URL?) {
+        avatarURL = url
+    }
+
+    // MARK: 账户页改了电子邮件 / 姓名（账户页移植（网页版））
+
+    /// 改了电子邮件：钥匙串里的登录状态、面容 ID 快速登录存的那一份、登录用的「邮箱 → 用户名」对照（check.cuven.us）都换成新的
+    func updateEmail(_ raw: String) {
+        guard var s = session else { return }
+        let email = raw.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !email.isEmpty, email != s.email else { return }
+        s.email = email
+        persist(s)
+        let name = s.username
+        UserDefaults.standard.set(email, forKey: "cuven_emailmap_\(name)")
+        Task { await AccountAPI.putEmailMap(email, username: name) }
+    }
+
+    /// 改了姓名：登录状态换成新姓名；本机的面容 ID 快速登录是旧姓名的，关掉（网页版：改名后旧的面容数据清除、要重新录入）；
+    /// 登录用的「邮箱 → 用户名」对照指到新姓名
+    func applyRename(to newName: String) {
+        guard var s = session, !newName.isEmpty, s.username != newName else { return }
+        let old = s.username
+        s.username = newName
+        if faceIDUser == old { disableFaceID() }
+        persist(s)
+        UserDefaults.standard.removeObject(forKey: "cuven_emailmap_\(old)")
+        let email = s.email
+        if !email.isEmpty {
+            UserDefaults.standard.set(email, forKey: "cuven_emailmap_\(newName)")
+            Task { await AccountAPI.putEmailMap(email, username: newName) }
+        }
+        Task { await refreshAvatar() }
+    }
+
+    /// 写回钥匙串；本机为这个账户开着面容 ID 快速登录时，受保护的那一份也换掉（写入不用验面容；写不进去就关掉，免得登录时拿到旧的）
+    private func persist(_ s: AccountSession) {
+        guard let d = try? JSONEncoder().encode(s) else { return }
+        Keychain.set(d, account: "session")
+        session = s
+        if faceIDUser == s.username, !Keychain.set(d, account: "faceid", biometric: true) { disableFaceID() }
     }
 
     // MARK: 面容 ID 快速登录

@@ -189,12 +189,12 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-04-detail-info")
         app.swipeUp(); sleep(2); snap("duo-04c-detail-tech")
         back(app)
-        // 主页往下：继续观看（有才有）、今年、去年（电影和剧集的海报）、五个大类——卡上只有画面，分区之间只靠留白
+        // 主页往下：继续观看（有才有）、今年、去年（电影和剧集的海报）、四个大类——卡上只有画面，分区之间只靠留白
         app.swipeUp(); sleep(2); snap("duo-08-home-rows")
         app.swipeUp(); sleep(2); snap("duo-08b-home-tv")
         app.swipeUp(); sleep(2); snap("duo-08c-home-year")
         app.swipeUp(); sleep(2); snap("duo-08d-home-year-2")
-        // 五个大类（引人入胜的剧情……刺激犯罪与偷窃）在今年、去年两排下面
+        // 四个大类（动画片区、动作片区、喜剧片区、严苛品质区）在精选和编辑推荐下面
         app.swipeUp(); sleep(2); snap("duo-08e-home-categories")
         // 主页结尾（照游戏 App「Arcade」页的结尾）：两行慢慢走的海报墙、Cuven 字标、「查看所有影片」→ 全部影片
         if let all = reveal(app, "home-show-all", swipes: 12) {
@@ -241,7 +241,7 @@ final class DuoDeviceTests: XCTestCase {
             XCTFail("资料库没有「详情」")
         }
 
-        // 剧集详情：主页上第一张在屏上的剧集卡（今年 / 去年那两排、五个大类里的剧集，或者精选剧集的大卡；资料库只放电影）。
+        // 剧集详情：主页上第一张在屏上的剧集卡（今年 / 去年那两排、四个大类里的剧集，或者精选剧集的大卡；资料库只放电影）。
         // 一次快照看全部匹配项：年份那两排一屏只露一张多，第一张剧集卡常在屏幕右边外面，只看它的话怎么往上滑都找不到
         tab(app, "主页"); sleep(2)
         app.scrollHomeToTop(maxSwipes: 30)

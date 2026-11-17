@@ -79,7 +79,8 @@ final class PlayerLoadingOverlay {
         w.windowLevel = .alert + 1
         w.backgroundColor = .clear
         w.overrideUserInterfaceStyle = .dark
-        let host = UIHostingController(rootView: PlayerLoadingView(model: model) { [weak self] in self?.onClose?() })
+        // 方向和底下的播放器一样（除了 iPhone 展开一律横屏，VideoOrientation.swift）：两层窗口说的不一样，系统不知道听谁的
+        let host = VideoHostingController(rootView: PlayerLoadingView(model: model) { [weak self] in self?.onClose?() })
         host.view.backgroundColor = .clear
         w.rootViewController = host
         w.isHidden = false

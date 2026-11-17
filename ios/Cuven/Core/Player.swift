@@ -34,6 +34,16 @@ enum PlayError: LocalizedError {
 /// 点了「播放」就弹出来；从点下去到首帧出来，上面盖着和网页版一样的加载画面（PlayerLoadingOverlay：顶层窗口，用户要求）
 final class CuvenPlayerViewController: AVPlayerViewController {
     var onClose: (() -> Void)?
+    /// 方向（用户要求）：除了 iPhone 展开，一律横屏、只在左右两个横向之间转（VideoOrientation.swift）
+    private lazy var orientation = VideoOrientationLock()
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { orientation.mask }
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { orientation.preferred }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        orientation.refresh(self, after: coordinator)
+    }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
@@ -66,6 +76,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     private var tapAt = Date()
     private var startedPlaying = false
     private var lastWaitReason: String?
+    /// 正片用掉的流量（账户页「流量概览」的「视频播放」）：每 5 秒看一眼访问日志，换片 / 播完 / 关掉时结清
+    private let usage = UsageTap(.video)
 
     func play(_ req: PlayRequest, model: AppModel) {
         self.model = model
@@ -168,12 +180,15 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
 
         let item = AVPlayerItem(asset: AVURLAsset(url: url))
         item.externalMetadata = metadata(req)
+        // 账户页「网络速度」：往前缓冲多少秒（100% 交给系统；80% → 90 秒）。改了从下一个片源起生效
+        item.preferredForwardBufferDuration = NetworkSpeed.forwardBuffer()
 
         if player == nil || (controller?.presentingViewController == nil && !inPiP) {
             presentPlayer(req)                       // 兜底：没弹出来（比如当时找不到能弹的页面）就现在弹
         }
         guard let p = player else { return }
         pendingSeek = model?.playback.resumePosition(req.path)
+        usage.flush(item)                            // 旧片源最后那一截先结清
         p.replaceCurrentItem(with: item)
         observe(item)
         controller?.player = p
@@ -207,9 +222,17 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         }
         if timeObserver == nil {
             timeObserver = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 5, preferredTimescale: 1), queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.saveProgress() }
+                Task { @MainActor [weak self] in
+                    self?.saveProgress()
+                    self?.meterUsage()
+                }
             }
         }
+    }
+
+    /// 正片流量：看一眼当前片源收到了多少（时间回调本来就是 5 秒一次；节流放宽到 4 秒，免得抖一下就隔一次）
+    private func meterUsage() {
+        usage.sample(player?.currentItem, every: 4)
     }
 
     private func controlChanged(_ p: AVPlayer) {
@@ -303,6 +326,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     private func finished() {
         guard let req = current else { return }
         plog("ended")
+        usage.flush(player?.currentItem)
         model?.playback.finish(req.path)
         if autoplayNext, var next = req.queue.first {
             next.queue = Array(req.queue.dropFirst())
@@ -324,6 +348,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         timeObserver = nil
         controlObservation?.invalidate()
         controlObservation = nil
+        usage.flush(nil)
         player?.replaceCurrentItem(with: nil)
         player = nil
         controller = nil

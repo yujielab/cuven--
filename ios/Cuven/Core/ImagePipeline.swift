@@ -36,12 +36,16 @@ actor ImagePipeline {
     /// 详情页头部处理好的画面（按「地址 + 尺寸 + 宽高比」）
     nonisolated(unsafe) private let heroCache = NSCache<NSString, HeroArtBox>()
     private let session: URLSession
+    /// 磁盘缓存（URLSession 用的同一个）：命中的那次不算流量
+    private let diskCache: URLCache
 
     init() {
         memory.totalCostLimit = 160 << 20
         heroCache.countLimit = 24
         let cfg = URLSessionConfiguration.default
-        cfg.urlCache = URLCache(memoryCapacity: 24 << 20, diskCapacity: 600 << 20)
+        let cache = URLCache(memoryCapacity: 24 << 20, diskCapacity: 600 << 20)
+        diskCache = cache
+        cfg.urlCache = cache
         cfg.requestCachePolicy = .returnCacheDataElseLoad
         cfg.timeoutIntervalForRequest = 30
         cfg.httpMaximumConnectionsPerHost = 6
@@ -66,10 +70,13 @@ actor ImagePipeline {
             return img
         }
         if let t = inflight[key as String] { return await t.value }
-        let session = self.session
+        let session = self.session, cache = self.diskCache
         let task = Task.detached(priority: .userInitiated) { () -> UIImage? in
+            // 账户页「流量概览」：磁盘缓存里已经有的不算，只记真的走了网络的那次
+            let cached = cache.cachedResponse(for: URLRequest(url: url)) != nil
             guard let (data, resp) = try? await session.data(from: url),
                   let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
+            if !cached { UsageMeter.shared.add(data.count, to: .data) }
             return Self.decode(data, maxPixel: maxPixel)
         }
         inflight[key as String] = task
@@ -115,8 +122,10 @@ actor ImagePipeline {
     /// 只要原始字节（字标的明暗分析用，见 LogoTone）
     func data(_ url: URL) async -> Data? {
         if url.scheme == "demo" { return DemoData.render(url, maxPixel: 400)?.pngData() }
+        let cached = diskCache.cachedResponse(for: URLRequest(url: url)) != nil
         guard let (data, resp) = try? await session.data(from: url),
               let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
+        if !cached { UsageMeter.shared.add(data.count, to: .data) }
         return data
     }
 
