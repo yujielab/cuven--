@@ -460,6 +460,7 @@ private struct UsageHourlyChart: View {
     let risen: Bool
     @State private var picked: Int?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var typeSize
     @ScaledMetric(relativeTo: .caption2) private var axisHeight: CGFloat = 14
 
     private static let plotHeight: CGFloat = 108
@@ -597,7 +598,8 @@ private struct UsageHourlyChart: View {
         GeometryReader { geo in
             let slot = geo.size.width / 24
             ZStack(alignment: .topLeading) {
-                ForEach([0, 6, 12, 18], id: \.self) { i in
+                // 特大字号时五个字挤不下（折起时柱那一段约 254 点）：只写 0、12 两处和「现在」
+                ForEach(typeSize.isAccessibilitySize ? [0, 12] : [0, 6, 12, 18], id: \.self) { i in
                     if hours.indices.contains(i) {
                         Text(verbatim: "\(Self.hour(hours[i].start)):00")
                             .fixedSize()
