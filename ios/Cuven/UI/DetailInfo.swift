@@ -5,7 +5,7 @@ import UIKit
 //
 // · 整页染上画面的颜色：头部画面底边取出来的主色（DetailPalette），头部字下面那一截是它，往下慢慢沉到同色相的深色；
 // · 一组一行粗体标题 + 一张圆角 34 的半透明卡（10% 白、14% 白的细边），卡里的次要字是带这个颜色的浅色；
-// · 「简介」卡：几行简介（点开看全文，从卡上放大出来）、分隔线、「导演」一行（大号首字圆章 + 灰字「导演」+ 白字名字）；
+// · 「简介」卡：四行简介（点开看全文，从卡上放大出来）、分隔线、「导演」一行（小号首字圆章 + 灰字「导演」+ 白字名字）；
 // · 「影片详细信息」卡：用户要求只留上映时间、时长、流量能效（高 / 中 / 低）、推荐等级（高 / 中 / 低），不跳 TMDB；
 //   左边一列是符号或描边徽章（「高」「中」「低」），右边一行带颜色的字，行间细线；
 // · 「更多××电影 ›」卡：同类型的几部，一行一部（海报、片名、年份 · 类型、右边「查看」胶囊），整行点进详情；
@@ -188,17 +188,18 @@ struct DetailDescriptionCard: View {
                 Haptics.light()
                 open = card
             } label: {
-                // 五行简介：松一点的行距（F21：三行以上不用紧行距）
+                // 用户要求简介卡「宽度高度和设计优雅精致」：字 Body → Callout（17 → 16 点，仍是松行距：F21 三行以上不用紧行距），
+                // 五行 → 四行，上下留白收一点——卡矮了约四分之一，字那一栏一行能多放一两个字；点开看全文
                 Text(overview)
-                    .font(.dsReading)
+                    .font(.callout.leading(.loose))
                     .foregroundStyle(palette.ink2)
-                    .lineLimit(5)
+                    .lineLimit(4)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     // 设计轮 2：字离边 24 → 20，和下面的分隔线、「导演」一行、别的卡同一条线（以前线在 20、字在 24，差 4 点）
                     .padding(.horizontal, DetailSurface.inset)
-                    .padding(.top, 22)
-                    .padding(.bottom, director == nil ? 22 : 18)
+                    .padding(.top, 18)
+                    .padding(.bottom, director == nil ? 18 : 14)
                     .contentShape(Rectangle())
             }
             .buttonStyle(DetailRowPress())
@@ -208,27 +209,28 @@ struct DetailDescriptionCard: View {
             .accessibilityIdentifier("about-synopsis")
             if let director, !director.isEmpty {
                 DetailCardDivider()
-                HStack(spacing: 18) {
+                // 「导演」一行收小（用户要求精致）：首字圆章 58 → 38 点，「导演」Callout → Footnote，名字 Title 3 → Headline，上下 18 → 12
+                HStack(spacing: 12) {
                     Text(String(director.prefix(1)))
-                        .font(.system(size: 26, weight: .heavy, design: .rounded))
+                        .font(.system(size: 17, weight: .heavy, design: .rounded))
                         .foregroundStyle(palette.badge)
-                        .frame(width: 58, height: 58)
+                        .frame(width: 38, height: 38)
                         .background(Circle().fill(palette.badge.opacity(0.16)))
-                        .overlay(Circle().strokeBorder(palette.badge.opacity(0.5), lineWidth: 1.5))
+                        .overlay(Circle().strokeBorder(palette.badge.opacity(0.5), lineWidth: 1))
                         .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 1) {
                         Text("导演")
-                            .font(.callout)
+                            .font(.footnote)
                             .foregroundStyle(palette.ink2)
                         Text(director)
-                            .font(.title3.weight(.semibold))
+                            .font(.headline)
                             .foregroundStyle(.white)
                             .lineLimit(1)
                     }
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, DetailSurface.inset)
-                .padding(.vertical, 18)
+                .padding(.vertical, 12)
                 .accessibilityElement(children: .combine)
             }
         }
