@@ -6,8 +6,8 @@ import UIKit
 // · 整页染上画面的颜色：头部画面底边取出来的主色（DetailPalette），头部字下面那一截是它，往下慢慢沉到同色相的深色；
 // · 一组一行粗体标题 + 一张圆角 34 的半透明卡（10% 白、14% 白的细边），卡里的次要字是带这个颜色的浅色；
 // · 「简介」卡：四行简介（点开看全文，从卡上放大出来）、分隔线、「导演」一行（小号首字圆章 + 灰字「导演」+ 白字名字）；
-// · 「影片详细信息」卡：用户要求只留上映时间、时长、流量能效（高 / 中 / 低）、推荐等级（高 / 中 / 低），不跳 TMDB；
-//   左边一列是符号或描边徽章（「高」「中」「低」），右边一行带颜色的字，行间细线；
+// · 「影片详细信息」：用户要求只留上映时间、时长、流量能效（高 / 中 / 低）、推荐等级（高 / 中 / 低），不跳 TMDB；
+//   版式照用户给的天气 App 参考图——一块块正方形的方块（见下面 DetailStatsGrid）；
 // · 「更多××电影 ›」卡：同类型的几部，一行一部（海报、片名、年份 · 类型、右边「查看」胶囊），整行点进详情；
 // · 往上滚过头部，顶上钉住一条同色的条：海报、片名、「播放」胶囊（参考图里的「取得」）。
 // 动效：钉住的条从上面滑下来（弹簧），卡滑进屏幕时从 97% 长到原大、淡入。
@@ -57,25 +57,6 @@ struct DetailPalette: Equatable {
 
     /// 头部画面化进去的那个颜色（UIKit 版，给 DetailHeroBackdrop）
     static func baseColor(_ edge: UIColor?) -> Color { from(edge).base }
-}
-
-/// 「影片详细信息」里的一行
-struct DetailFact: Identifiable {
-    enum Lead {
-        /// 大号评分（右边是星星）
-        case rating(Double)
-        /// 描边徽章：「4K」「GB」「ZH」
-        case badge(String)
-        /// 大符号
-        case symbol(String)
-    }
-
-    let id: String
-    let lead: Lead
-    let text: String
-    var sub: String? = nil
-    /// 旁白念什么（左边那一列是「高 / 中 / 低」这种右边字里没有的值时，要念进去）
-    var spoken: String? = nil
 }
 
 /// 「更多××」那一张卡里的一部
@@ -241,124 +222,314 @@ struct DetailDescriptionCard: View {
     }
 }
 
-// MARK: - 影片详细信息卡
+// MARK: - 影片详细信息：天气 App 那种方块
+//
+// 用户要求「更新详情设计」，给的参考图是天气 App 的「降水 / 能见度 / 湿度 / 气压」那几块。内容还是用户定的四样
+// （上映时间、时长、流量能效（高 / 中 / 低）、推荐等级（高 / 中 / 低），不跳 TMDB），版式换成一块块正方形：
+// · 一块一样东西：左上一枚小符号 + 灰字标题；
+// · 上映、时长两块：大号的数（单位和数一样大，像「19 公里」）、下面一行小标题（「2026 年」「2 小时 25 分钟」），
+//   最底下一句平实的话（「3 个月前上映。」「现在开始看，约 23:05 看完。」——每分钟跟着现在的时间走）；
+// · 流量能效、推荐等级两块是刻度盘（像「气压」）：一圈 270° 的刻度，低在左下、高在右下，白色的指针停在这一部的位置
+//   （第一次出现时从「低」那一头转过去；减弱动态效果时直接停好），圆心里是大号的「高 / 中 / 低」和一行小字；
+//   刻度三等分正好是三档：能效按每小时下载量的对数排（4 GB、12 GB 两条线落在三分之一处），推荐按 TMDB 评分（6、7.5 两条线）；
+// · 正方形、圆角 24、和别的卡同一种面（10% 白、14% 白的细边）；窄屏一行两块，宽屏（展开的 Duo、iPad）一行四块。
 
-/// 用户要求只留四行：上映时间、时长、流量能效（高 / 中 / 低）、推荐等级（高 / 中 / 低），不再跳到 TMDB
-/// （以前还有评分星星、类型、画面、声音、文件，最底下「在 TMDB 中查看 ↗」）
-struct DetailFactsCard: View {
-    let facts: [DetailFact]
+/// 四块的数据（哪样没有就少一块）
+struct DetailStats {
+    struct Release {
+        /// 有完整的年月日
+        var date: Date?
+        var year: Int?
+        /// 「上映」「首播」
+        var verb: String
+        /// 剧集：「第 1 季」
+        var season: String?
+    }
+
+    struct Runtime {
+        var minutes: Int
+        /// 剧集：每一集
+        var perEpisode: Bool
+    }
+
+    struct Efficiency {
+        var level: DetailFacts.Level
+        /// 每小时大约下载多少 GB
+        var gbPerHour: Double
+    }
+
+    var release: Release?
+    var runtime: Runtime?
+    var efficiency: Efficiency?
+    /// TMDB 评分
+    var rating: Double?
+
+    var isEmpty: Bool { release == nil && runtime == nil && efficiency == nil && rating == nil }
+}
+
+/// 「影片详细信息」那几块
+struct DetailStatsGrid: View {
+    let stats: DetailStats
     let palette: DetailPalette
+    /// 宽的屏一行四块
+    let wide: Bool
 
-    /// 行里左边那一列（徽章、符号）的左边距和宽、到字的间距；行间的线从字那儿起（10 + 56 + 12）
-    private static let leadPad: CGFloat = 10
-    private static let leadW: CGFloat = 56
-    private static let leadGap: CGFloat = 12
+    private enum Tile: String, Identifiable {
+        case release, runtime, efficiency, rating
+        var id: String { rawValue }
+    }
+
+    /// 有哪几块（顺序是用户定的：上映、时长、流量能效、推荐等级）
+    private var tiles: [Tile] {
+        var out: [Tile] = []
+        if stats.release != nil { out.append(.release) }
+        if stats.runtime != nil { out.append(.runtime) }
+        if stats.efficiency != nil { out.append(.efficiency) }
+        if stats.rating != nil { out.append(.rating) }
+        return out
+    }
 
     var body: some View {
-        DetailCard {
-            ForEach(Array(facts.enumerated()), id: \.element.id) { i, f in
-                if i > 0 { DetailCardDivider(leading: Self.leadPad + Self.leadW + Self.leadGap) }
-                row(f)
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: wide ? 4 : 2)
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
+            ForEach(tiles) { t in
+                tile(t)
             }
         }
-    }
-
-    /// 一条事实。用户要求整张卡矮一半（约 527 → 265 点）：左边一列 84 → 56 点、大号评分 / 徽章 / 符号小一号；
-    /// 主字和副字接成一行（「2026 年 · 第 1 季」「1080p · H.264」，文件名这种长的从中间省略），每行至少 34 点；
-    /// 评分那一行是两行小字：星星 +「TMDB 评分」，下面「高于片库里 91% 的剧集」
-    private func row(_ f: DetailFact) -> some View {
-        HStack(spacing: Self.leadGap) {
-            lead(f.lead)
-                .frame(width: Self.leadW)
-            Group {
-                if case .rating(let r) = f.lead {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            DetailStars(value: r / 2, size: 12)
-                            Text(f.text)
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(palette.ink2)
-                        }
-                        if let sub = f.sub, !sub.isEmpty {
-                            Text(sub)
-                                .font(.footnote)
-                                .foregroundStyle(palette.ink2.opacity(0.8))
-                        }
-                    }
-                    .lineLimit(1)
-                } else {
-                    Text([f.text, f.sub ?? ""].filter { !$0.isEmpty }.joined(separator: " · "))
-                        .font(.subheadline)
-                        .foregroundStyle(palette.ink2)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-            // 年份、片长、大小、百分比用等宽数字：一列行里的数字宽窄一致
-            .monospacedDigit()
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.leading, Self.leadPad)
-        .padding(.trailing, DetailSurface.inset)
-        .padding(.vertical, 7)
-        .frame(minHeight: 34)
-        // 旁白（设计轮 2）：以前把左边那一列也念进去——「8.0，TMDB 评分…」「4K，4K · 杜比视界」「日历，2024 年上映」；
-        // 现在评分念成一句「TMDB 评分 8.0 分，高于…」，徽章、符号是装饰（和右边的字重复），不念
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Self.spoken(f))
-    }
-
-    static func spoken(_ f: DetailFact) -> String {
-        if let s = f.spoken { return s }
-        var parts: [String] = [f.text]
-        if case .rating(let r) = f.lead { parts = [f.text + " " + String(format: "%.1f", r) + " 分"] }
-        if let sub = f.sub, !sub.isEmpty { parts.append(sub) }
-        return parts.joined(separator: "，")
     }
 
     @ViewBuilder
-    private func lead(_ l: DetailFact.Lead) -> some View {
-        switch l {
-        case .rating(let r):
-            Text(String(format: "%.1f", r))
-                .font(.system(size: 24, weight: .bold))
-                .monospacedDigit()
-                .foregroundStyle(.white)
-                .minimumScaleFactor(0.7)
-                .lineLimit(1)
-        case .badge(let code):
-            Text(code)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(palette.badge)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-                .padding(.horizontal, 5)
-                .frame(minWidth: 32, minHeight: 20)
-                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(palette.badge, lineWidth: 1.5))
-        case .symbol(let s):
-            Image(systemName: s)
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.white)
+    private func tile(_ t: Tile) -> some View {
+        switch t {
+        case .release:
+            if let r = stats.release { DetailReleaseTile(release: r, palette: palette) }
+        case .runtime:
+            if let r = stats.runtime { DetailRuntimeTile(runtime: r, palette: palette) }
+        case .efficiency:
+            if let e = stats.efficiency {
+                DetailGaugeTile(symbol: "arrow.down.circle.fill", title: "流量能效", level: e.level,
+                                caption: DetailFacts.perHourText(e.gbPerHour),
+                                position: DetailFacts.efficiencyPosition(e.gbPerHour), palette: palette,
+                                spoken: "流量能效\(e.level.rawValue)，\(DetailFacts.perHourText(e.gbPerHour).replacingOccurrences(of: "/", with: "每"))")
+            }
+        case .rating:
+            if let r = stats.rating, let lv = DetailFacts.recommendation(r) {
+                let score = String(format: "%.1f", r)
+                DetailGaugeTile(symbol: "star.fill", title: "推荐等级", level: lv, caption: "TMDB \(score) 分",
+                                position: DetailFacts.ratingPosition(r), palette: palette,
+                                spoken: "推荐等级\(lv.rawValue)，TMDB 评分 \(score) 分")
+            }
         }
     }
 }
 
-/// 五颗星（满分 5，半颗也画）
-struct DetailStars: View {
-    let value: Double
-    var size: CGFloat = 17
+/// 一块方块的面：正方形、圆角 24、左上一枚小符号 + 灰字标题，下面是内容
+struct DetailStatTileChrome<Content: View>: View {
+    let symbol: String
+    let title: String
+    let palette: DetailPalette
+    @ViewBuilder var content: () -> Content
 
     var body: some View {
-        let v = (min(5, max(0, value)) * 2).rounded() / 2
-        HStack(spacing: 3) {
-            ForEach(0..<5, id: \.self) { i in
-                let d = v - Double(i)
-                Image(systemName: d >= 1 ? "star.fill" : (d >= 0.5 ? "star.leadinghalf.filled" : "star"))
+        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+        Color.clear
+            .aspectRatio(1, contentMode: .fit)
+            .overlay(alignment: .topLeading) {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 6) {
+                        Image(systemName: symbol)
+                        Text(title)
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(palette.ink2.opacity(0.72))
+                    .lineLimit(1)
+                    content()
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .background(shape.fill(DetailSurface.fill))
+            .overlay(shape.strokeBorder(DetailSurface.line, lineWidth: 1))
+            .clipShape(shape)
+            // 方块是定死的正方形：字放到很大也不冲出去
+            .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+    }
+}
+
+/// 文字方块里的大号数值（单位和数一样大，像天气的「19 公里」）、小标题、最底下一句话
+private struct DetailStatText: View {
+    let value: String
+    let sub: String?
+    let note: String?
+    @ScaledMetric(relativeTo: .largeTitle) private var valueSize: CGFloat = 36
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(value)
+                .font(.system(size: valueSize, weight: .regular))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.55)
+                .padding(.top, 8)
+            if let sub, !sub.isEmpty {
+                Text(sub)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            Spacer(minLength: 6)
+            if let note, !note.isEmpty {
+                Text(note)
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .lineLimit(3)
+                    .minimumScaleFactor(0.85)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .font(.system(size: size, weight: .semibold))
-        .foregroundStyle(.white)
-        .accessibilityHidden(true)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+/// 「上映」（剧集「首播」）：大号「7 月 29 日」，下面「2026 年」（剧集再带「第 1 季」），最底下「3 个月前上映。」
+struct DetailReleaseTile: View {
+    let release: DetailStats.Release
+    let palette: DetailPalette
+
+    var body: some View {
+        let cal = Calendar(identifier: .gregorian)
+        let parts: (value: String, sub: String?) = {
+            if let d = release.date {
+                let c = cal.dateComponents([.year, .month, .day], from: d)
+                let year = c.year.map { "\($0) 年" }
+                return ("\(c.month ?? 0) 月 \(c.day ?? 0) 日", [year, release.season].compactMap { $0 }.joined(separator: " · "))
+            }
+            return (release.year.map { "\($0) 年" } ?? "", release.season)
+        }()
+        let note = DetailFacts.releaseNote(release)
+        let when: String = [parts.sub ?? "", parts.value].filter { !$0.isEmpty }.joined(separator: " ")
+        let spoken: String = [release.verb, when, note ?? ""].filter { !$0.isEmpty }.joined(separator: "，")
+        DetailStatTileChrome(symbol: "calendar", title: release.verb, palette: palette) {
+            DetailStatText(value: parts.value, sub: parts.sub, note: note)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spoken)
+    }
+}
+
+/// 「时长」：大号「145 分钟」，下面「2 小时 25 分钟」（剧集是「每集」），最底下「现在开始看，约 23:05 看完。」（每分钟跟着走）
+struct DetailRuntimeTile: View {
+    let runtime: DetailStats.Runtime
+    let palette: DetailPalette
+
+    var body: some View {
+        let sub: String? = runtime.perEpisode ? "每集" : (runtime.minutes >= 60 ? Format.runtime(runtime.minutes) : nil)
+        TimelineView(.everyMinute) { context in
+            let end = context.date.addingTimeInterval(TimeInterval(runtime.minutes * 60))
+            let time = end.formatted(date: .omitted, time: .shortened)
+            let note = runtime.perEpisode ? "现在开始看这一集，约 \(time) 看完。" : "现在开始看，约 \(time) 看完。"
+            let length: String = runtime.perEpisode ? "每集 " + Format.runtime(runtime.minutes) : Format.runtime(runtime.minutes)
+            DetailStatTileChrome(symbol: "clock.fill", title: runtime.perEpisode ? "每集时长" : "时长", palette: palette) {
+                DetailStatText(value: "\(runtime.minutes) 分钟", sub: sub, note: note)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("时长，" + length + "，" + note)
+        }
+    }
+}
+
+/// 刻度盘方块（像天气的「气压」）：一圈 270° 的刻度、低在左下高在右下，白色指针停在 position（0…1），
+/// 圆心里大号的「高 / 中 / 低」和一行小字
+struct DetailGaugeTile: View {
+    let symbol: String
+    let title: String
+    let level: DetailFacts.Level
+    let caption: String
+    let position: Double
+    let palette: DetailPalette
+    let spoken: String
+
+    var body: some View {
+        DetailStatTileChrome(symbol: symbol, title: title, palette: palette) {
+            DetailGauge(position: position, palette: palette) {
+                VStack(spacing: 1) {
+                    Text(level.rawValue)
+                        .font(.title.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text(caption)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(palette.ink2.opacity(0.85))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+            }
+            .padding(.top, 8)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spoken)
+    }
+}
+
+/// 刻度盘：41 道刻度排成 270° 的弧，指针附近的几道亮一点；「低」「高」写在两头下面
+struct DetailGauge<Center: View>: View {
+    let position: Double
+    let palette: DetailPalette
+    @ViewBuilder var center: () -> Center
+    @State private var shown = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let p = min(1, max(0, position))
+        GeometryReader { geo in
+            let d = min(geo.size.width, geo.size.height)
+            let r = d / 2
+            ZStack {
+                Canvas { ctx, size in
+                    let c = CGPoint(x: size.width / 2, y: size.height / 2)
+                    let n = 41
+                    for i in 0..<n {
+                        let t = Double(i) / Double(n - 1)
+                        let a = Angle.degrees(135 + 270 * t).radians
+                        let near = abs(t - p) < 0.07
+                        let inner = r - (near ? 11 : 9)
+                        var path = Path()
+                        path.move(to: CGPoint(x: c.x + cos(a) * inner, y: c.y + sin(a) * inner))
+                        path.addLine(to: CGPoint(x: c.x + cos(a) * (r - 1), y: c.y + sin(a) * (r - 1)))
+                        ctx.stroke(path, with: .color(.white.opacity(near ? 0.55 : 0.2)),
+                                   style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    }
+                }
+                // 指针：一根白色的短棒，比刻度长一点、往外探出一点
+                Capsule()
+                    .fill(.white)
+                    .frame(width: 4, height: 15)
+                    .shadow(color: .black.opacity(0.3), radius: 2)
+                    .offset(y: -2)
+                    // 整块和刻度盘一样大：绕刻度盘的圆心转
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .rotationEffect(.degrees(270 * (shown || reduceMotion ? p : 0) - 135))
+                center()
+                    .padding(.horizontal, r * 0.3)
+                HStack {
+                    Text("低")
+                    Spacer(minLength: 0)
+                    Text("高")
+                }
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(palette.ink2.opacity(0.72))
+                .padding(.horizontal, r * 0.32)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+                .offset(y: 2)
+            }
+            .frame(width: d, height: d)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .onAppear {
+            guard !shown else { return }
+            if reduceMotion { shown = true; return }
+            withAnimation(.spring(response: 0.9, dampingFraction: 0.82).delay(0.15)) { shown = true }
+        }
     }
 }
 
@@ -595,23 +766,65 @@ enum DetailFacts {
         case high = "高", mid = "中", low = "低"
     }
 
-    /// 上映时间：有完整日期写到哪一天（「2026 年 7 月 29 日上映」），没有就写年份
-    static func releaseText(_ date: String?, year: Int?, verb: String = "上映") -> String? {
-        if let d = date, d.count >= 10 {
-            let p = d.prefix(10).split(separator: "-").compactMap { Int($0) }
-            if p.count == 3, p[0] > 1800 { return "\(p[0]) 年 \(p[1]) 月 \(p[2]) 日\(verb)" }
+    /// 「2026-07-29」→ 那一天（公历，当地正午：不会因为时区换到前一天）
+    static func day(_ s: String?) -> Date? {
+        guard let s, s.count >= 10 else { return nil }
+        let p = s.prefix(10).split(separator: "-").compactMap { Int($0) }
+        guard p.count == 3, p[0] > 1800 else { return nil }
+        return Calendar(identifier: .gregorian).date(from: DateComponents(year: p[0], month: p[1], day: p[2], hour: 12))
+    }
+
+    /// 上映那一块最底下的一句：「今天上映。」「还有 12 天上映。」「3 个月前上映。」「2 年前上映。」（剧集是「首播」）
+    static func releaseNote(_ r: DetailStats.Release, now: Date = Date()) -> String? {
+        let cal = Calendar(identifier: .gregorian)
+        let verb = r.verb
+        if let date = r.date {
+            let days = cal.dateComponents([.day], from: cal.startOfDay(for: now), to: cal.startOfDay(for: date)).day ?? 0
+            switch days {
+            case 0: return "今天\(verb)。"
+            case 1: return "明天\(verb)。"
+            case -1: return "昨天\(verb)。"
+            case 2..<45: return "还有 \(days) 天\(verb)。"
+            case 45...: return "大约 \(Int((Double(days) / 30.4).rounded())) 个月后\(verb)。"
+            case -44 ... -2: return "\(-days) 天前\(verb)。"
+            case -364 ... -45: return "\(Int((Double(-days) / 30.4).rounded())) 个月前\(verb)。"
+            default: return "\(-days / 365) 年前\(verb)。"
+            }
         }
-        return year.map { "\($0) 年\(verb)" }
+        guard let y = r.year else { return nil }
+        let thisYear = cal.component(.year, from: now)
+        switch y - thisYear {
+        case 0: return "今年\(verb)。"
+        case 1: return "明年\(verb)。"
+        case -1: return "去年\(verb)。"
+        case let d where d > 1: return "\(d) 年后\(verb)。"
+        default: return "\(thisYear - y) 年前\(verb)。"
+        }
     }
 
     /// 流量能效：放这一部每小时大约要下载多少——片源原样直通、不转码，就是文件大小 ÷ 片长。越省越高：
     /// 每小时 4 GB 以内（约 9 Mbps 以下）高，4–12 GB 中（4K 网络版多在这里），12 GB 以上低（4K 原盘）
-    static func efficiency(bytes: Int64?, minutes: Int?) -> (level: Level, perHour: String)? {
+    static func efficiency(bytes: Int64?, minutes: Int?) -> DetailStats.Efficiency? {
         guard let b = bytes, b > 0, let m = minutes, m > 0 else { return nil }
         let perHour = Double(b) / 1e9 / (Double(m) / 60)
         let level: Level = perHour <= 4 ? .high : perHour <= 12 ? .mid : .low
-        let shown = perHour < 1 ? "约 \(Int((perHour * 1000).rounded())) MB / 小时" : String(format: "约 %.1f GB / 小时", perHour)
-        return (level, shown)
+        return DetailStats.Efficiency(level: level, gbPerHour: perHour)
+    }
+
+    /// 「约 11.3 GB/小时」（1 GB 以下写 MB）
+    static func perHourText(_ gb: Double) -> String {
+        gb < 1 ? "约 \(Int((gb * 1000).rounded())) MB/小时" : String(format: "约 %.1f GB/小时", gb)
+    }
+
+    /// 能效刻度盘上的位置（0 低 … 1 高）：按每小时下载量的对数排，12 GB、4 GB 两条线正好在三分之一、三分之二处（36 GB 以上到头）
+    static func efficiencyPosition(_ gb: Double) -> Double {
+        guard gb > 0 else { return 1 }
+        return min(1, max(0, log(36 / gb) / log(27)))
+    }
+
+    /// 推荐刻度盘上的位置：TMDB 4.5 分以下到头，6 分、7.5 分两条线在三分之一、三分之二处，9 分以上到顶
+    static func ratingPosition(_ r: Double) -> Double {
+        min(1, max(0, (r - 4.5) / 4.5))
     }
 
     /// 推荐等级：TMDB 评分 7.5 以上高（和主页「严苛品质区」同一条线）、6 以上中、再低是低
