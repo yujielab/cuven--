@@ -5,7 +5,7 @@ import PhotosUI
 // MARK: - 账户页移植（网页版）：个人资料卡与三个弹层
 //
 // 网页版账户页（#scr-account）的第一张卡和它打开的弹层，按 iOS 账户页那一套（游戏 App 个人页：AccountCard / AccountRow）重做：
-// · 个人资料卡：头像、姓名、电子邮件、登录面容、订阅；第一次还没拿到资料时是一张闪光的骨架；
+// · 个人资料卡：头像、姓名、电子邮件、登录面容（网页版还有一行「订阅」，用户要求移除）；第一次还没拿到资料时是一张闪光的骨架；
 // · 头像选择（网页版 avt-*）：大头像 ↔ 2 / 3 / 2 蜂窝的七个默认头像，上传照片（系统照片选取器，压成 JPEG，最大 5 MB）；
 // · 电子邮件（em-*）：两步，6 格验证码，60 秒后才能重发；
 // · 更改姓名 / 重设登录面容（nm-*）：面容 ID（没有就用绑定邮箱的验证码）验证身份 → 新姓名（停 0.4 秒查重）→ 确认 → 完成。
@@ -119,11 +119,10 @@ struct ProfileStatusLine: View {
 // MARK: - 个人资料卡
 
 /// 个人资料卡（网页版账户页的第一张卡）：头像（整行可点，打开头像选择）、姓名「更改」、电子邮件「设置 / 更改」、
-/// 登录面容「重设」、订阅「管理」（订阅在网页上管，打开 www.cuven.us）。
+/// 登录面容「重设」。
 /// 第一次还没拿到账户资料时是一张闪光的骨架（网页版 acc-skeleton-overlay），拿到了从一点点模糊里淡入
 struct ProfileCard: View {
     @Environment(AccountStore.self) private var account
-    @Environment(\.openURL) private var openURL
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var present: (ProfileSheet) -> Void
 
@@ -170,11 +169,7 @@ struct ProfileCard: View {
                 ProfilePill(title: "重设", label: "重设登录面容") { present(.faceReset) }
                     .accessibilityIdentifier("account-face-reset")
             }
-            AccountDivider()
-            AccountRow(icon: "crown", title: "订阅", subtitle: "Max Core+ 尊享") {
-                ProfilePill(title: "管理", label: "管理订阅") { manage() }
-                    .accessibilityIdentifier("account-manage")
-            }
+            // 「订阅」那一行（Max Core+ 尊享 · 管理）用户要求移除
         }
     }
 
@@ -195,11 +190,6 @@ struct ProfileCard: View {
         return hasEmail ? emailValue : "未设置"
     }
 
-    /// 订阅在网页上管理（网页版 account:manage）
-    private func manage() {
-        guard let u = URL(string: "https://www.cuven.us") else { return }
-        openURL(u)
-    }
 }
 
 /// 骨架：五行的样子，字是灰块，一道光从左往右扫（网页版 accSkeletonShimmer，2 秒一趟）；「减弱动态效果」时不扫
@@ -213,8 +203,6 @@ private struct ProfileSkeleton: View {
             row("envelope", "电子邮件", "user@example.com")
             AccountDivider()
             row("faceid", "登录面容", "已录入")
-            AccountDivider()
-            row("crown", "订阅", "Max Core+ 尊享")
         }
         .redacted(reason: .placeholder)
         .modifier(ProfileShimmer())
