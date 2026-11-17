@@ -512,6 +512,32 @@ final class AppModel {
     /// 全量结果（演员、剧照、字标）记在内存里：资料库一章章滑过去、来回看详情页，不再重复问
     @ObservationIgnored private var fullMetaCache: [String: Meta] = [:]
 
+    // MARK: 「首选音轨 · 自然」：原声语种
+
+    /// 这一部的原声语种：先看详情页取过的全量结果，再看片库的简要结果（剧集看剧集的结果），TMDB 给了原始语言的那份优先。
+    /// settled = 是 TMDB 给的原始语言；不是（按原名猜的、或者不知道：老 Worker、存在本机的旧结果）就值得重新问一次
+    func audioOrigin(name: String, seriesPath: String?) -> (origin: TrackPrefs.Origin?, settled: Bool) {
+        let found: [Meta?] = seriesPath.map { [seriesMetas[$0]] } ?? [fullMetaCache[name], metas[name]]
+        for m in found { if let o = TrackPrefs.origin(of: m), o.fromTMDB { return (o, true) } }
+        for m in found { if let o = TrackPrefs.origin(of: m) { return (o, false) } }
+        return (nil, false)
+    }
+
+    /// 手上没有 TMDB 原始语言时重新问一次（电影问全量结果，剧集强制重取；这回打开 App 每部只问一次），问完再算
+    func refreshAudioOrigin(name: String, seriesPath: String?) async -> TrackPrefs.Origin? {
+        if !DemoData.enabled, originAsked.insert(seriesPath ?? name).inserted {
+            if let sp = seriesPath {
+                if let s = series.first(where: { $0.path == sp }) { await ensureSeriesMeta(s, force: true) }
+            } else if let r = try? await APIClient.shared.metaBatch([name], full: true), let hit = r[name], let meta = hit {
+                fullMetaCache[name] = meta
+            }
+        }
+        return audioOrigin(name: name, seriesPath: seriesPath).origin
+    }
+
+    /// 这回打开 App 已经为「自然」重新问过的（电影的文件名 / 剧集的目录）
+    @ObservationIgnored private var originAsked: Set<String> = []
+
     // MARK: 取用
 
     func meta(_ v: Video) -> Meta? { metas[v.name] }

@@ -795,7 +795,7 @@ console.log('\n■ 片名匹配：文件名 → TMDB（候选打分、校验、�
     { id: 842675, query: 'the wandering earth ii', q: ['流浪地球2'], title: '流浪地球2', en: 'The Wandering Earth II', original: '流浪地球2', lang: 'zh', date: '2023-01-22', pop: 40 },
     { id: 535167, query: 'the wandering earth', q: ['the wandering earth ii', '流浪地球2'], title: '流浪地球', en: 'The Wandering Earth', original: '流浪地球', lang: 'zh', date: '2019-02-05', pop: 90 },
     // 原名不是英文：只能靠英文名认
-    { id: 496243, query: 'parasite', title: '寄生虫', en: 'Parasite', original: '기생충', lang: 'ko', date: '2019-05-30' },
+    { id: 496243, query: 'parasite', title: '寄生虫', en: 'Parasite', original: '기생충', lang: 'ko', countries: ['KR'], date: '2019-05-30' },
     // 罗马音文件名：搜得到，但中英文名、原名都对不上 → 取别名表才认得出
     { id: 372058, query: 'kimi no na wa', title: '你的名字。', en: 'Your Name.', original: '君の名は。', lang: 'ja', date: '2016-08-26', aka: ['Kimi no Na wa.'] },
     // TMDB 上没有海报
@@ -814,6 +814,12 @@ console.log('\n■ 片名匹配：文件名 → TMDB（候选打分、校验、�
   r = await batch(['流浪地球2.The.Wandering.Earth.II.2023.2160p.WEB-DL.H265.mkv', 'Parasite.2019.1080p.mkv']);
   ok(r['流浪地球2.The.Wandering.Earth.II.2023.2160p.WEB-DL.H265.mkv']?.id === 842675 && r['Parasite.2019.1080p.mkv']?.id === 496243 && r['Parasite.2019.1080p.mkv']?.title === '寄生虫',
     `中英文名都用上：${r['流浪地球2.The.Wandering.Earth.II.2023.2160p.WEB-DL.H265.mkv']?.title}；原名是韩文的靠英文名认：${r['Parasite.2019.1080p.mkv']?.title}`);
+  const para = r['Parasite.2019.1080p.mkv'];
+  ok(para?.original_language === 'ko' && Array.isArray(para?.origin_country),
+    `简要结果带原始语言（${para?.original_language}，App「首选音轨 · 自然」按它挑原声；电影的搜索结果没有出品地区：${JSON.stringify(para?.origin_country)}）`);
+  const paraFull = await one('Parasite.2019.1080p.mkv', true);
+  ok(paraFull?.original_language === 'ko' && JSON.stringify(paraFull?.origin_country) === '["KR"]',
+    `全量结果从详情里补上出品地区：${paraFull?.original_language} / ${JSON.stringify(paraFull?.origin_country)}`);
   H.tmdb.calls.length = 0;
   r = await batch(['Kimi.no.Na.wa.2016.BluRay.1080p.mkv']);
   ok(r['Kimi.no.Na.wa.2016.BluRay.1080p.mkv']?.id === 372058 && H.tmdb.calls.some(c => c.path === '/movie/372058' && /alternative_titles/.test(c.q.append_to_response || '')),
@@ -856,6 +862,8 @@ console.log('\n■ 片名匹配：文件名 → TMDB（候选打分、校验、�
   // 单条接口：剧集按编号取（剧集表认好的那部）
   const byId = await (await H.call('/api/tmdb?id=7001&type=tv&logo=1', 'GET', { Cookie: cookie })).json();
   ok(byId && byId.id === 7001 && byId.type === 'tv' && byId.title === '某部冷门剧', `/api/tmdb?id=&type=tv：按编号取，不再按名字重认（${byId && byId.title}）`);
+  ok(byId?.original_language === 'en' && JSON.stringify(byId?.origin_country) === '["US"]',
+    `剧集带原始语言与出品地区：${byId?.original_language} / ${JSON.stringify(byId?.origin_country)}`);
   delete H.env.TMDB_API_KEY; H.tmdb.movies = []; H.tmdb.shows = [];
   await clear();
 }
