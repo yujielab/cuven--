@@ -149,7 +149,7 @@ struct HomeView: View {
         return [y, y - 1]
     }
 
-    /// 顺序：继续观看 → 今年 → 去年（预告片卡）→ 精选电影 → 编辑推荐 → 精选剧集 → 四个大类 → 结尾的海报墙
+    /// 顺序：继续观看 → 今年 → 探索片段合集 → 去年（预告片卡）→ 精选电影 → 编辑推荐 → 精选剧集 → 四个大类 → 结尾的海报墙
     /// （docs/ios-design.md「主页」；F1：最要紧的在上）
     @ViewBuilder
     private func shelves(_ m: DSMetrics, fullHeight: CGFloat) -> some View {
@@ -176,7 +176,11 @@ struct HomeView: View {
         } else {
             VStack(alignment: .leading, spacing: m.shelfGap) {
                 continueWatching(m)
-                ForEach(homeYears, id: \.self) { y in yearShelf(y, m) }
+                // 今年那一排下面是「探索片段合集」（用户要求：2026 年份下；ClipCollections.swift），再是去年
+                let years = homeYears
+                yearShelf(years[0], m)
+                ClipCollectionsShelf(metrics: m)
+                ForEach(years.dropFirst(), id: \.self) { y in yearShelf(y, m) }
                 featuredShelf(m)
                 editorsPickBlock(m, fullHeight: fullHeight)
                 featuredSeriesShelf(m)

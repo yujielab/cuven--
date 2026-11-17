@@ -70,6 +70,12 @@ struct DSMetrics {
         guard wide else { return featureCardWidth }
         return fit(target: clamp(width * 0.3, 280, 400), min: 260, aspect: 4.0 / 3)
     }
+    /// 片段合集的竖卡（9 : 16，用户要求，照 Apple TV「Explore Clip Collections」）：折起一屏两张多一截（约 140 点）；
+    /// 展开约 150–220 点（屏宽的 19%），卡高不过屏高的 60%
+    var clipCardWidth: CGFloat {
+        guard wide else { return cardWidth(visible: width < 500 ? 2.4 : 3.6) }
+        return fit(target: clamp(width * 0.19, 150, 220), min: 140, aspect: 16.0 / 9)
+    }
     /// 长文案的分集卡：比原来的方卡宽 30%、高不变（1.3 : 1；用户要求），折起约 222 点；展开约 260–364 点
     var episodeTallCardWidth: CGFloat {
         guard wide else { return (cardWidth(visible: width < 500 ? 1.9 : 2.9) * 1.3).rounded(.down) }
