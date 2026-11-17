@@ -43,7 +43,7 @@ struct MovieDetailView: View {
             genres: meta?.genres ?? [],
             overview: meta?.overview,
             director: meta?.director,
-            facts: facts(meta),
+            stats: stats(meta),
             related: related(meta),
             thumb: TMDBImage.url(meta?.poster ?? meta?.posterClean, "w185"),
             cast: meta?.cast ?? [],
@@ -119,26 +119,17 @@ struct MovieDetailView: View {
         ])
     }
 
-    /// 「影片详细信息」那张卡（用户要求只留四行）：上映时间、时长、流量能效（高 / 中 / 低）、推荐等级（高 / 中 / 低）
-    private func facts(_ m: Meta?) -> [DetailFact] {
-        var out: [DetailFact] = []
-        if let t = DetailFacts.releaseText(m?.releaseDate, year: model.year(video)) {
-            out.append(DetailFact(id: "release", lead: .symbol("calendar"), text: t))
-        }
-        let runtime = Format.runtime(m?.runtime)
-        if !runtime.isEmpty {
-            out.append(DetailFact(id: "runtime", lead: .symbol("clock.fill"), text: runtime))
-        }
-        if let e = DetailFacts.efficiency(bytes: video.size, minutes: m?.runtime) {
-            out.append(DetailFact(id: "efficiency", lead: .badge(e.level.rawValue), text: "流量能效", sub: e.perHour,
-                                  spoken: "流量能效\(e.level.rawValue)，\(e.perHour)"))
-        }
-        if let r = m?.rating, let lv = DetailFacts.recommendation(r) {
-            let score = String(format: "%.1f", r)
-            out.append(DetailFact(id: "recommend", lead: .badge(lv.rawValue), text: "推荐等级", sub: "TMDB \(score) 分",
-                                  spoken: "推荐等级\(lv.rawValue)，TMDB 评分 \(score) 分"))
-        }
-        return out
+    /// 「影片详细信息」那几块（用户要求只留四样）：上映时间、时长、流量能效（高 / 中 / 低）、推荐等级（高 / 中 / 低）；
+    /// 版式是天气 App 那种方块（DetailStatsGrid）
+    private func stats(_ m: Meta?) -> DetailStats {
+        var s = DetailStats()
+        let day = DetailFacts.day(m?.releaseDate)
+        let y = model.year(video)
+        if day != nil || y != nil { s.release = DetailStats.Release(date: day, year: y, verb: "上映", season: nil) }
+        if let r = m?.runtime, r > 0 { s.runtime = DetailStats.Runtime(minutes: r, perEpisode: false) }
+        s.efficiency = DetailFacts.efficiency(bytes: video.size, minutes: m?.runtime)
+        if let r = m?.rating, r > 0 { s.rating = r }
+        return s
     }
 
     /// 「更多××电影 ›」：同类型的几部（同的类型越多越靠前，再按评分）；标题点进这一类的全部
@@ -154,7 +145,6 @@ struct MovieDetailView: View {
         return DetailRelated(title: "更多\(g)电影", route: .shelf(.genre(g)), items: items)
     }
 
-    /// 预告片卡的画面：剧照轮着用；没有剧照就是背景图
     /// 预告片卡的画面（Apple 给了这段预告片自己的画面就不用这个），见 DetailMediaArt.trailerArt
     private func trailerArt(_ m: Meta?) -> [String] {
         let stills = (m?.stills ?? []).compactMap { $0.url ?? $0.thumb }.filter { !$0.isEmpty }
@@ -227,7 +217,7 @@ struct SeriesDetailView: View {
             genres: meta?.genres ?? [],
             overview: meta?.overview,
             director: meta?.director,
-            facts: facts(meta),
+            stats: stats(meta),
             related: related(meta),
             thumb: TMDBImage.url(meta?.poster ?? meta?.posterClean, "w185"),
             cast: meta?.cast ?? [],
@@ -468,29 +458,19 @@ struct SeriesDetailView: View {
         }
     }
 
-    /// 「影片详细信息」那张卡（用户要求只留四行）：首播时间（和这一季）、每集时长、流量能效（按这一季的分集平均）、推荐等级。
-    /// 不写「全 8 集」「更新至第 5 集」这类集数（用户要求全局去掉计数）；没有片长就不出时长那一行
-    private func facts(_ m: Meta?) -> [DetailFact] {
-        var out: [DetailFact] = []
-        if let t = DetailFacts.releaseText(m?.releaseDate, year: year(m).flatMap { Int($0) }, verb: "首播") {
-            out.append(DetailFact(id: "release", lead: .symbol("calendar"), text: t, sub: current.seasonLabel))
-        }
-        let per = Format.runtime(m?.runtime)
-        if !per.isEmpty {
-            out.append(DetailFact(id: "runtime", lead: .symbol("clock.fill"), text: "每集约 \(per)"))
-        }
+    /// 「影片详细信息」那几块（用户要求只留四样）：首播时间（和这一季）、每集时长、流量能效（按这一季的分集平均）、推荐等级；
+    /// 版式是天气 App 那种方块（DetailStatsGrid）。不写「全 8 集」「更新至第 5 集」这类集数（用户要求全局去掉计数）；没有片长就没有时长那一块
+    private func stats(_ m: Meta?) -> DetailStats {
+        var s = DetailStats()
+        let day = DetailFacts.day(m?.releaseDate)
+        let y = year(m).flatMap { Int($0) }
+        if day != nil || y != nil { s.release = DetailStats.Release(date: day, year: y, verb: "首播", season: current.seasonLabel) }
+        if let r = m?.runtime, r > 0 { s.runtime = DetailStats.Runtime(minutes: r, perEpisode: true) }
         let sizes = files.compactMap(\.size).filter { $0 > 0 }
         let avg: Int64? = sizes.isEmpty ? nil : sizes.reduce(0, +) / Int64(sizes.count)
-        if let e = DetailFacts.efficiency(bytes: avg, minutes: m?.runtime) {
-            out.append(DetailFact(id: "efficiency", lead: .badge(e.level.rawValue), text: "流量能效", sub: e.perHour,
-                                  spoken: "流量能效\(e.level.rawValue)，\(e.perHour)"))
-        }
-        if let r = m?.rating, let lv = DetailFacts.recommendation(r) {
-            let score = String(format: "%.1f", r)
-            out.append(DetailFact(id: "recommend", lead: .badge(lv.rawValue), text: "推荐等级", sub: "TMDB \(score) 分",
-                                  spoken: "推荐等级\(lv.rawValue)，TMDB 评分 \(score) 分"))
-        }
-        return out
+        s.efficiency = DetailFacts.efficiency(bytes: avg, minutes: m?.runtime)
+        if let r = m?.rating, r > 0 { s.rating = r }
+        return s
     }
 
     /// 「更多××剧集 ›」：同类型的几部剧（同一部剧的别的季不算，一部只出一次）
@@ -610,8 +590,8 @@ struct DetailScaffold<Episodes: View>: View {
     let genres: [String]
     let overview: String?
     let director: String?
-    /// 「影片详细信息」卡的几行（DetailInfo.swift）
-    let facts: [DetailFact]
+    /// 「影片详细信息」那几块（DetailInfo.swift 的 DetailStatsGrid）
+    let stats: DetailStats
     /// 「更多××」那一张卡
     let related: DetailRelated?
     /// 顶上钉住的那一条里的小海报
@@ -665,9 +645,9 @@ struct DetailScaffold<Episodes: View>: View {
                         episodes(m)
                         if !trailers.isEmpty || stills.count >= 2 { mediaSection(m) }
                         if !cast.isEmpty { castSection(m) }
-                        if !facts.isEmpty || shareURL != nil {
+                        if !stats.isEmpty {
                             group(m, "影片详细信息") {
-                                DetailFactsCard(facts: facts, palette: palette)
+                                DetailStatsGrid(stats: stats, palette: palette, wide: m.wide)
                             }
                         }
                         if let related, !related.items.isEmpty {
