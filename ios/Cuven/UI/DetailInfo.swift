@@ -456,6 +456,8 @@ struct DetailRelatedCard: View {
 struct DetailPinnedBar: View {
     let title: String
     let thumb: URL?
+    /// 这一部的字标（用户要求：条的左边有字标就只放字标；没有字标才是小海报 + 片名）
+    var logo: URL? = nil
     let playTitle: String
     let playDisabled: Bool
     let palette: DetailPalette
@@ -466,19 +468,27 @@ struct DetailPinnedBar: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            if let thumb {
-                // 设计轮 2：小海报按 2:3 整张放（以前裁成 40×40 的方块，海报上的字切掉半截），圆角跟着小一号
-                RemoteImage(url: thumb, maxPixel: 180)
-                    .frame(width: 30, height: 45)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(DetailSurface.line, lineWidth: 0.5))
-                    .accessibilityHidden(true)
+            if let logo {
+                // 字标（用户要求）：30 点高、靠左，最宽 200；深色字标照样自动反白（LogoImage）。取不到就写片名
+                LogoImage(url: logo, height: 30, alignment: .leading, fallback: title, maxWidth: 200)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(title)
+                    .accessibilityAddTraits(.isHeader)
+            } else {
+                if let thumb {
+                    // 设计轮 2：小海报按 2:3 整张放（以前裁成 40×40 的方块，海报上的字切掉半截），圆角跟着小一号
+                    RemoteImage(url: thumb, maxPixel: 180)
+                        .frame(width: 30, height: 45)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(DetailSurface.line, lineWidth: 0.5))
+                        .accessibilityHidden(true)
+                }
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .accessibilityAddTraits(.isHeader)
             }
-            Text(title)
-                .font(.headline)
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
             Button(action: onPlay) {
                 Text(playTitle.count > 4 ? "播放" : playTitle)

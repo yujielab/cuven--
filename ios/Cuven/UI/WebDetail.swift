@@ -702,7 +702,9 @@ struct DetailScaffold<Episodes: View>: View {
             }
             // 钉在顶上的条：从上面滑下来（参考图的「取得」那一条）；片名在这条里，导航栏里不再写
             .overlay(alignment: .top) {
-                DetailPinnedBar(title: title, thumb: thumb, playTitle: playTitle, playDisabled: playDisabled, palette: palette,
+                DetailPinnedBar(title: title, thumb: thumb,
+                                logo: art?.logo.flatMap { $0.isEmpty ? nil : TMDBImage.url($0, "w500") },
+                                playTitle: playTitle, playDisabled: playDisabled, palette: palette,
                                 topInset: barBottom, leading: insets.leading + m.margin, trailing: insets.trailing + m.margin,
                                 onPlay: onPlay)
                     // 「减弱动态效果」时只淡入淡出、不从上面滑下来（F59；以前只换了曲线，照样滑 100 多点）
