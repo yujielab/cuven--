@@ -34,10 +34,12 @@ struct AvatarView: View {
 
 /// 账户与设置（主页右上的头像点开，是一张弹层）。照用户给的参考图（Apple「游戏」App 的个人页）重做：
 /// · 底：从头像取主色（取不到用紫色）往下渐暗到深灰，顶上那一截是这个颜色；
-/// · 头部居中：88 点的圆头像（右下角一枚 Cuven 小图标）、大号粗体的名字、一颗「个人档案」胶囊钮（推进去看账户资料）；
+/// · 头部居中：88 点的圆头像（右下角一枚 Cuven 小图标；点它换头像）、大号粗体的名字；
+/// · 头部下面是个人资料卡（账户页移植（网页版）：头像、姓名、电子邮件、登录面容、订阅，见 AccountProfile.swift），
+///   顶替以前那颗「个人档案」胶囊钮和它推进去的那一页（那一页的「登录方式」「登录时间」挪到「登录与安全」）；
 /// · 下面每一组是一行粗体的组名 + 一张圆角 26 的半透明卡，卡里一行一项：左边一枚灰色符号，标题 + 一行灰色说明，右边「›」、开关或数值；
 /// · 右上是系统的关闭钮（iOS 26 的玻璃圆钮），往上滚过头部，名字接到导航栏里。
-/// 内容和以前一样：观看、通知、播放、片库、存储、登录与安全、关于，最底下单独一张「退出登录」（先用系统的确认：C44、C47）。
+/// 内容：个人资料卡、观看、通知、播放、片库、存储、登录与安全、关于，最底下单独一张「退出登录」（先用系统的确认：C44、C47；文案照网页版）。
 /// 「新片上架通知」打开的那一刻才向系统要权限（C78、C79）；系统里关着就多一行「打开设置」（C97）。
 struct AccountView: View {
     @Environment(AppModel.self) private var model
@@ -48,6 +50,11 @@ struct AccountView: View {
     @AppStorage(PlayerCoordinator.autoplayKey) private var autoplayNext = true
     /// 「新片上架通知」：自己选的开 / 关。系统那边的通知权限另看（notifyBlocked）
     @AppStorage(AccountView.notifyKey) private var notifyWanted = false
+    /// 和账户设置同步的两个本机设置（网络速度、流量概览展开；「使用」那两张卡改它们）：一变就防抖存回账户
+    @AppStorage(ProfileKeys.networkSpeed) private var networkSpeed = 80
+    @AppStorage(ProfileKeys.trafficExpanded) private var trafficExpanded = true
+    /// 个人资料卡、头部头像打开的弹层（头像、电子邮件、更改姓名、重设登录面容）
+    @State private var profileSheet: ProfileSheet?
     /// 系统设置里 Cuven 的通知是关着的（拒绝过，或者后来到设置里关了）
     @State private var notifyBlocked = false
     @State private var notifyAsking = false
@@ -69,6 +76,10 @@ struct AccountView: View {
                 VStack(spacing: 0) {
                     header
                     VStack(alignment: .leading, spacing: 34) {
+                        // 个人资料卡（账户页移植（网页版）：网页版账户页的第一张卡）
+                        ProfileCard { profileSheet = $0 }
+                        // MARK: 网络速度（usage agent）
+                        // MARK: 使用洞察（usage agent）
                         watchingGroup
                         notifyGroup
                         playbackGroup
@@ -78,7 +89,8 @@ struct AccountView: View {
                         aboutGroup
                         signOutGroup
                     }
-                    .padding(.top, 40)
+                    // 名字下面直接是个人资料卡（没有组名），比以前到第一个组名（40）近一点
+                    .padding(.top, 28)
                 }
                 .padding(.horizontal, 24)
                 .padding(.bottom, 44)
@@ -97,23 +109,34 @@ struct AccountView: View {
                         .accessibilityIdentifier("account-done")
                 }
             }
+            // 头部（头像 88 + 16 + 名字）约 150 点高：名字滚出去了才接到导航栏里（以前还有一颗胶囊，是 200）
             .onScrollGeometryChange(for: Bool.self) { g in
-                g.contentOffset.y + g.contentInsets.top > 200
+                g.contentOffset.y + g.contentInsets.top > 150
             } action: { _, v in
                 withAnimation(.easeOut(duration: 0.2)) { showName = v }
             }
-            .confirmationDialog("退出登录？", isPresented: $confirmSignOut, titleVisibility: .visible) {
+            // 文案照网页版的退出确认（logout-sheet）；仍是系统的确认（C44、C47）
+            .confirmationDialog("要退出登录吗？", isPresented: $confirmSignOut, titleVisibility: .visible) {
                 Button("退出登录", role: .destructive) {
                     dismiss()
                     // 登录层淡入（网页版鉴权层打开：0.28 秒 --silk-in）
                     withAnimation(.timingCurve(0.22, 0.68, 0.28, 1, duration: 0.28)) { account.signOut() }
                 }
             } message: {
-                Text("退出后需要重新登录才能观看。观看进度保留在这台设备上。")
+                Text("退出后，本机将不再保留当前登录状态。下次进入需要重新验证身份。")
             }
+            .sheet(item: $profileSheet) { ProfileSheetView(sheet: $0) }
+            // 网络速度、流量概览展开改了：0.8 秒内不再变就存回账户设置（服务器读回来写进本机时也会走到这里，值没变不发请求）
+            .onChange(of: networkSpeed) { _, _ in ProfileStore.shared.scheduleSave() }
+            .onChange(of: trafficExpanded) { _, _ in ProfileStore.shared.scheduleSave() }
             .task {
                 seedNotifyPreference()
                 await refreshNotify()
+            }
+            // 账户资料（设置、电子邮件）：每次打开都刷新，缓存先上屏（网页版每次进账户屏都刷新）
+            .task(id: account.session?.username) {
+                guard let s = account.session else { return }
+                await ProfileStore.shared.load(for: s.username, sessionEmail: s.email)
             }
             .task(id: account.avatarURL) { await loadTint() }
             .onChange(of: scenePhase) { _, phase in
@@ -126,20 +149,28 @@ struct AccountView: View {
 
     // MARK: 头部
 
-    /// 头像（右下角一枚 Cuven 小图标）、名字、「个人档案」胶囊钮
+    /// 头像（右下角一枚 Cuven 小图标；点它打开头像选择，和资料卡「头像」那一行同一个）、名字。
+    /// 以前名字下面还有一颗「个人档案」胶囊钮，推进去看用户名、电子邮件、登录方式与时间：
+    /// 现在由下面的个人资料卡顶替（登录方式、登录时间挪到「登录与安全」）
     private var header: some View {
         VStack(spacing: 0) {
-            AvatarView(size: 88)
-                .overlay(alignment: .bottomTrailing) {
-                    Image("BrandIcon")
-                        .resizable()
-                        .frame(width: 30, height: 30)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(.black.opacity(0.2), lineWidth: 0.5))
-                        .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
-                        .offset(x: 6, y: 4)
-                }
-                .accessibilityHidden(true)
+            Button { profileSheet = .avatar } label: {
+                AvatarView(size: 88)
+                    .overlay(alignment: .bottomTrailing) {
+                        Image("BrandIcon")
+                            .resizable()
+                            .frame(width: 30, height: 30)
+                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(.black.opacity(0.2), lineWidth: 0.5))
+                            .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+                            .offset(x: 6, y: 4)
+                            .accessibilityHidden(true)
+                    }
+            }
+            .buttonStyle(PressableStyle(scale: 0.96))
+            .accessibilityLabel("头像")
+            .accessibilityHint("更改个人形象")
+            .accessibilityIdentifier("account-header-avatar")
             Text(displayName)
                 .font(.largeTitle.bold())
                 .foregroundStyle(.white)
@@ -147,22 +178,6 @@ struct AccountView: View {
                 .minimumScaleFactor(0.6)
                 .padding(.top, 16)
                 .accessibilityAddTraits(.isHeader)
-            NavigationLink {
-                AccountProfileView(tint: tint)
-            } label: {
-                // 玻璃胶囊照参考图 34 高；点按区撑到 44（F74；设计轮 2（并行·library）：以前只有 34），上面的留白相应少 5，看上去不变
-                Text("个人档案")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 18)
-                    .frame(minHeight: 34)
-                    .glassEffect(.regular.interactive(), in: Capsule())
-                    .frame(minHeight: 44)
-                    .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 9)
-            .accessibilityIdentifier("account-profile")
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 6)
@@ -247,15 +262,22 @@ struct AccountView: View {
         }
     }
 
+    /// 面容 ID 快速登录的开关；下面两行（这次怎么登录的、什么时候）以前在「个人档案」那一页，那一页由个人资料卡顶替后挪到这里
     @ViewBuilder
     private var securityGroup: some View {
-        if account.loginRequired && account.biometryAvailable {
+        if let s = account.session {
             AccountGroup(title: "登录与安全") {
-                AccountRow(icon: biometrySymbol, title: "使用\(account.biometryName) 登录", subtitle: "下次轻点一下即可登录") {
-                    Toggle("使用\(account.biometryName) 登录", isOn: faceIDBinding)
-                        .labelsHidden()
-                        .tint(.green)
+                if account.loginRequired && account.biometryAvailable {
+                    AccountRow(icon: account.biometrySymbol, title: "使用\(account.biometryName) 登录", subtitle: "下次轻点一下即可登录") {
+                        Toggle("使用\(account.biometryName) 登录", isOn: faceIDBinding)
+                            .labelsHidden()
+                            .tint(.green)
+                    }
+                    AccountDivider()
                 }
+                AccountRow(icon: "key", title: "登录方式") { AccountValue(Self.methodName(s.method, bio: account.biometryName)) }
+                AccountDivider()
+                AccountRow(icon: "clock", title: "登录时间") { AccountValue(s.at.formatted(date: .abbreviated, time: .shortened)) }
             }
         }
     }
@@ -288,11 +310,14 @@ struct AccountView: View {
         }
     }
 
-    private var biometrySymbol: String {
-        switch account.biometryName {
-        case "触控 ID": return "touchid"
-        case "光学 ID": return "opticid"
-        default: return "faceid"
+    static func methodName(_ m: String, bio: String) -> String {
+        switch m {
+        case "password": return "密码"
+        case "email_otp": return "电子邮件验证码"
+        case "faceid": return bio
+        case "register": return "新建账户"
+        case "demo": return "演示"
+        default: return m
         }
     }
 
@@ -388,55 +413,8 @@ struct AccountView: View {
 
 }
 
-// MARK: - 个人档案（头部的胶囊钮推进去）
-
-/// 账户资料：用户名、电子邮件、这次怎么登录的、什么时候登录的。同一套底和卡
-struct AccountProfileView: View {
-    @Environment(AccountStore.self) private var account
-    let tint: Color
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 34) {
-                AccountGroup(title: "账户") {
-                    AccountRow(icon: "person", title: "用户名") { AccountValue(account.displayName.isEmpty ? "—" : account.displayName) }
-                    AccountDivider()
-                    AccountRow(icon: "envelope", title: "电子邮件") {
-                        AccountValue(account.session.map { $0.email.isEmpty ? "未设置" : $0.email } ?? "未设置")
-                    }
-                }
-                if let s = account.session {
-                    AccountGroup(title: "这次登录") {
-                        AccountRow(icon: "key", title: "登录方式") { AccountValue(Self.methodName(s.method, bio: account.biometryName)) }
-                        AccountDivider()
-                        AccountRow(icon: "clock", title: "登录时间") { AccountValue(s.at.formatted(date: .abbreviated, time: .shortened)) }
-                    }
-                }
-            }
-            .padding(.horizontal, 24)
-            .padding(.top, 12)
-            .padding(.bottom, 44)
-            .frame(maxWidth: 680)
-            .frame(maxWidth: .infinity)
-        }
-        .scrollIndicators(.hidden)
-        .background { AccountBackdrop(tint: tint).ignoresSafeArea() }
-        .navigationTitle("个人档案")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(.hidden, for: .navigationBar)
-    }
-
-    static func methodName(_ m: String, bio: String) -> String {
-        switch m {
-        case "password": return "密码"
-        case "email_otp": return "电子邮件验证码"
-        case "faceid": return bio
-        case "register": return "新建账户"
-        case "demo": return "演示"
-        default: return m
-        }
-    }
-}
+// 以前这里是「个人档案」那一页（头部胶囊钮推进去：用户名、电子邮件、登录方式、登录时间）。
+// 账户页移植（网页版）后由头部下面的个人资料卡顶替（AccountProfile.swift），登录方式与时间挪到「登录与安全」。
 
 // MARK: - 部件（参考图：Apple「游戏」App 的个人页）
 
