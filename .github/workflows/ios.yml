@@ -38,6 +38,15 @@ jobs:
           xcodebuild -version
           echo "iOS SDK $(xcrun --sdk iphoneos --show-sdk-version)"
 
+      - name: 确保 Metal 工具链（Xcode 26 起是单独下载的组件；新镜像上的 Xcode 27.2 没带，SkyFluid.metal 编不了）
+        run: |
+          if xcrun metal --version >/dev/null 2>&1; then
+            echo "Metal 工具链已就绪"
+          else
+            xcodebuild -downloadComponent MetalToolchain || sudo xcodebuild -downloadComponent MetalToolchain
+            xcrun metal --version
+          fi
+
       - name: 生成工程（XcodeGen）
         run: |
           HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install xcodegen
