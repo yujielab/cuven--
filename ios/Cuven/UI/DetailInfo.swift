@@ -308,14 +308,14 @@ struct DetailStatsGrid: View {
         case .efficiency:
             if let e = stats.efficiency {
                 DetailGaugeTile(symbol: "arrow.down.circle.fill", title: "流量能效", level: e.level,
-                                caption: DetailFacts.perHourText(e.gbPerHour),
+                                caption: DetailFacts.perHourCaption(e.gbPerHour),
                                 position: DetailFacts.efficiencyPosition(e.gbPerHour), palette: palette,
                                 spoken: "流量能效\(e.level.rawValue)，\(DetailFacts.perHourText(e.gbPerHour).replacingOccurrences(of: "/", with: "每"))")
             }
         case .rating:
             if let r = stats.rating, let lv = DetailFacts.recommendation(r) {
                 let score = String(format: "%.1f", r)
-                DetailGaugeTile(symbol: "star.fill", title: "推荐等级", level: lv, caption: "TMDB \(score) 分",
+                DetailGaugeTile(symbol: "star.fill", title: "推荐等级", level: lv, caption: "TMDB \(score)",
                                 position: DetailFacts.ratingPosition(r), palette: palette,
                                 spoken: "推荐等级\(lv.rawValue)，TMDB 评分 \(score) 分")
             }
@@ -323,7 +323,8 @@ struct DetailStatsGrid: View {
     }
 }
 
-/// 一块方块的面：正方形、圆角 24、左上一枚小符号 + 灰字标题，下面是内容
+/// 一块方块的面：正方形、圆角 22、左上一枚小符号 + 灰字标题（Footnote 半粗），下面是内容。
+/// 用户要求「优化间距和大小」（截图里大号的数顶到两边、刻度盘中间的小字压到刻度上）：字都小一号，留白照天气 App
 struct DetailStatTileChrome<Content: View>: View {
     let symbol: String
     let title: String
@@ -331,28 +332,30 @@ struct DetailStatTileChrome<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
         Color.clear
             .aspectRatio(1, contentMode: .fit)
             .overlay(alignment: .topLeading) {
                 VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 5) {
                         Image(systemName: symbol)
                         Text(title)
                     }
-                    .font(.subheadline.weight(.semibold))
+                    .font(.footnote.weight(.semibold))
                     .foregroundStyle(palette.ink2.opacity(0.72))
                     .lineLimit(1)
                     content()
                 }
-                .padding(16)
+                .padding(.horizontal, 16)
+                .padding(.top, 15)
+                .padding(.bottom, 16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             .background(shape.fill(DetailSurface.fill))
             .overlay(shape.strokeBorder(DetailSurface.line, lineWidth: 1))
             .clipShape(shape)
-            // 方块是定死的正方形：字放到很大也不冲出去
-            .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+            // 方块是定死的正方形：字放大也不冲出去（放到 xLarge 为止，再大的数按比例收）
+            .dynamicTypeSize(...DynamicTypeSize.xLarge)
     }
 }
 
@@ -361,7 +364,8 @@ private struct DetailStatText: View {
     let value: String
     let sub: String?
     let note: String?
-    @ScaledMetric(relativeTo: .largeTitle) private var valueSize: CGFloat = 36
+    /// 大号的数：30 点（以前 36，「7 月 29 日」「145 分钟」顶到方块两边）
+    @ScaledMetric(relativeTo: .largeTitle) private var valueSize: CGFloat = 30
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -369,20 +373,23 @@ private struct DetailStatText: View {
                 .font(.system(size: valueSize, weight: .regular))
                 .foregroundStyle(.white)
                 .lineLimit(1)
-                .minimumScaleFactor(0.55)
-                .padding(.top, 8)
+                .minimumScaleFactor(0.6)
+                .padding(.top, 7)
             if let sub, !sub.isEmpty {
+                // 小标题 Headline、白 85%（以前 Title 3 半粗，「2 小时 25 分钟」和上面的数一样抢眼）
                 Text(sub)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.white)
+                    .font(.headline)
+                    .foregroundStyle(.white.opacity(0.85))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+                    .minimumScaleFactor(0.75)
+                    .padding(.top, 1)
             }
             Spacer(minLength: 6)
             if let note, !note.isEmpty {
                 Text(note)
-                    .font(.callout)
+                    .font(.subheadline)
                     .foregroundStyle(.white)
+                    .lineSpacing(1)
                     .lineLimit(3)
                     .minimumScaleFactor(0.85)
                     .fixedSize(horizontal: false, vertical: true)
@@ -403,9 +410,10 @@ struct DetailReleaseTile: View {
             if let d = release.date {
                 let c = cal.dateComponents([.year, .month, .day], from: d)
                 let year = c.year.map { "\($0) 年" }
-                return ("\(c.month ?? 0) 月 \(c.day ?? 0) 日", [year, release.season].compactMap { $0 }.joined(separator: " · "))
+                // 大号的数里用细空格（U+2009）：照样隔开数字和汉字，不像普通空格那样把「7 月 29 日」拉散
+                return ("\(c.month ?? 0)\u{2009}月\u{2009}\(c.day ?? 0)\u{2009}日", [year, release.season].compactMap { $0 }.joined(separator: " · "))
             }
-            return (release.year.map { "\($0) 年" } ?? "", release.season)
+            return (release.year.map { "\($0)\u{2009}年" } ?? "", release.season)
         }()
         let note = DetailFacts.releaseNote(release)
         let when: String = [parts.sub ?? "", parts.value].filter { !$0.isEmpty }.joined(separator: " ")
@@ -428,13 +436,14 @@ struct DetailRuntimeTile: View {
         TimelineView(.everyMinute) { context in
             let end = context.date.addingTimeInterval(TimeInterval(runtime.minutes * 60))
             let time = end.formatted(date: .omitted, time: .shortened)
-            let note = runtime.perEpisode ? "现在开始看这一集，约 \(time) 看完。" : "现在开始看，约 \(time) 看完。"
+            // 在逗号后面断行（以前自己折，「约」和时间被拆在两行：截图「约 / 凌晨 2:05 看完」）
+            let note = (runtime.perEpisode ? "现在开始看这一集，" : "现在开始看，") + "\n约 \(time) 看完。"
             let length: String = runtime.perEpisode ? "每集 " + Format.runtime(runtime.minutes) : Format.runtime(runtime.minutes)
             DetailStatTileChrome(symbol: "clock.fill", title: runtime.perEpisode ? "每集时长" : "时长", palette: palette) {
-                DetailStatText(value: "\(runtime.minutes) 分钟", sub: sub, note: note)
+                DetailStatText(value: "\(runtime.minutes)\u{2009}分钟", sub: sub, note: note)
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("时长，" + length + "，" + note)
+            .accessibilityLabel("时长，" + length + "，" + note.replacingOccurrences(of: "\n", with: ""))
         }
     }
 }
@@ -449,22 +458,26 @@ struct DetailGaugeTile: View {
     let position: Double
     let palette: DetailPalette
     let spoken: String
+    @ScaledMetric(relativeTo: .title2) private var levelSize: CGFloat = 24
 
     var body: some View {
         DetailStatTileChrome(symbol: symbol, title: title, palette: palette) {
             DetailGauge(position: position, palette: palette) {
-                VStack(spacing: 1) {
+                // 圆心：「高 / 中 / 低」24 点半粗（以前 Title 28 点）、下面一行 Caption 2 的小字（以前 Caption、还带「约」「分」，
+                // 比刻度圈里面还宽，压到了刻度上：用户截图）
+                VStack(spacing: 2) {
                     Text(level.rawValue)
-                        .font(.title.weight(.semibold))
+                        .font(.system(size: levelSize, weight: .semibold))
                         .foregroundStyle(.white)
                     Text(caption)
-                        .font(.caption.weight(.medium))
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(palette.ink2.opacity(0.85))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.7)
+                        .minimumScaleFactor(0.6)
                 }
             }
-            .padding(.top, 8)
+            .padding(.top, 10)
+            .padding(.horizontal, 2)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(spoken)
@@ -510,13 +523,13 @@ struct DetailGauge<Center: View>: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .rotationEffect(.degrees(270 * (shown || reduceMotion ? p : 0) - 135))
                 center()
-                    .padding(.horizontal, r * 0.3)
+                    .padding(.horizontal, r * 0.32)
                 HStack {
                     Text("低")
                     Spacer(minLength: 0)
                     Text("高")
                 }
-                .font(.footnote.weight(.semibold))
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(palette.ink2.opacity(0.72))
                 .padding(.horizontal, r * 0.32)
                 .frame(maxHeight: .infinity, alignment: .bottom)
@@ -811,9 +824,14 @@ enum DetailFacts {
         return DetailStats.Efficiency(level: level, gbPerHour: perHour)
     }
 
-    /// 「约 11.3 GB/小时」（1 GB 以下写 MB）
+    /// 「约 11.3 GB/小时」（1 GB 以下写 MB）：旁白念的
     static func perHourText(_ gb: Double) -> String {
-        gb < 1 ? "约 \(Int((gb * 1000).rounded())) MB/小时" : String(format: "约 %.1f GB/小时", gb)
+        "约 " + perHourCaption(gb)
+    }
+
+    /// 刻度盘圆心下的那行小字：「11.3 GB/小时」（不带「约」，放得进刻度圈里面）
+    static func perHourCaption(_ gb: Double) -> String {
+        gb < 1 ? "\(Int((gb * 1000).rounded())) MB/小时" : String(format: "%.1f GB/小时", gb)
     }
 
     /// 能效刻度盘上的位置（0 低 … 1 高）：按每小时下载量的对数排，12 GB、4 GB 两条线正好在三分之一、三分之二处（36 GB 以上到头）
