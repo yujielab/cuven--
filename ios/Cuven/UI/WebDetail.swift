@@ -7,7 +7,7 @@ import UIKit
 // 字标（没有字标就是 Large Title 的片名）→ 一行信息「类型 · 年份 · 片长 · ★评分」（F18）→
 // 一颗白色「播放」+ 一颗「…」系统菜单（从头播放、复制直链、分享：S17、C11、C15、C35、C45）。
 // 下面照用户给的参考图（Apple「游戏」App 的详情页，DetailInfo.swift）：整页染上画面的颜色，一组一行粗体标题 + 一张半透明大圆角卡——
-// 简介（几行 + 导演）→ 分集（剧集）→ 预告片（有才有）→ 演员（圆形照片：T21）→ 影片详细信息（评分、类型、年份、片长、画面、声音、大小）
+// 简介（几行 + 导演）→ 分集（剧集）→ 预告片（有才有）→ 演员（圆形照片：T21）→ 影片详细信息（上映时间、时长、流量能效、推荐等级）
 // → 更多同类型的几部；往上滚过头部，顶上钉住一条：海报、片名、「播放」。
 // 不放玻璃卡、印章、法务行、剧照「第 N 幕」、分隔线（F38、F80、F84）；导航栏不垫底、不压自制的渐暗，
 // 系统的滚动边缘效果就够（C17、C27）；头部滚走了片名才出现在导航栏里（C12）。
@@ -119,33 +119,24 @@ struct MovieDetailView: View {
         ])
     }
 
-    /// 「影片详细信息」那张卡的几行（参考图：左边大号评分 / 描边徽章 / 大符号，右边一行带颜色的字）
+    /// 「影片详细信息」那张卡（用户要求只留四行）：上映时间、时长、流量能效（高 / 中 / 低）、推荐等级（高 / 中 / 低）
     private func facts(_ m: Meta?) -> [DetailFact] {
         var out: [DetailFact] = []
-        if let r = m?.rating, r > 0 {
-            let (t, sub) = DetailFacts.ratingText(percentile: model.ratingPercentile(r, series: false), pool: "电影")
-            out.append(DetailFact(id: "rating", lead: .rating(r), text: t, sub: sub))
-        }
-        if let g = m?.genres, !g.isEmpty {
-            out.append(DetailFact(id: "genre", lead: .symbol(DetailFacts.genreSymbol(g.first)), text: g.joined(separator: "、")))
-        }
-        if let y = model.year(video) {
-            out.append(DetailFact(id: "year", lead: .symbol("calendar"), text: "\(y) 年上映"))
+        if let t = DetailFacts.releaseText(m?.releaseDate, year: model.year(video)) {
+            out.append(DetailFact(id: "release", lead: .symbol("calendar"), text: t))
         }
         let runtime = Format.runtime(m?.runtime)
         if !runtime.isEmpty {
             out.append(DetailFact(id: "runtime", lead: .symbol("clock.fill"), text: runtime))
         }
-        let spec = MediaSpec(name: video.name, size: video.size)
-        if let res = spec.resolution {
-            out.append(DetailFact(id: "video", lead: .badge(res == "1080p" || res == "720p" ? "HD" : res),
-                                  text: spec.headline ?? res, sub: spec.video))
+        if let e = DetailFacts.efficiency(bytes: video.size, minutes: m?.runtime) {
+            out.append(DetailFact(id: "efficiency", lead: .badge(e.level.rawValue), text: "流量能效", sub: e.perHour,
+                                  spoken: "流量能效\(e.level.rawValue)，\(e.perHour)"))
         }
-        if let audio = spec.audio {
-            out.append(DetailFact(id: "audio", lead: .symbol("speaker.wave.3.fill"), text: audio))
-        }
-        if let size = spec.size {
-            out.append(DetailFact(id: "size", lead: .badge(DetailFacts.sizeBadge(size)), text: size, sub: video.name))
+        if let r = m?.rating, let lv = DetailFacts.recommendation(r) {
+            let score = String(format: "%.1f", r)
+            out.append(DetailFact(id: "recommend", lead: .badge(lv.rawValue), text: "推荐等级", sub: "TMDB \(score) 分",
+                                  spoken: "推荐等级\(lv.rawValue)，TMDB 评分 \(score) 分"))
         }
         return out
     }
@@ -476,34 +467,29 @@ struct SeriesDetailView: View {
         }
     }
 
-    /// 「影片详细信息」那张卡的几行：评分、类型、年份与季、集数、语言、画面、声音
+    /// 「影片详细信息」那张卡（用户要求只留四行）：首播时间（和这一季）、每集时长（和集数）、流量能效（按这一季的分集平均）、推荐等级
     private func facts(_ m: Meta?) -> [DetailFact] {
         var out: [DetailFact] = []
-        if let r = m?.rating, r > 0 {
-            let (t, sub) = DetailFacts.ratingText(percentile: model.ratingPercentile(r, series: true), pool: "剧集")
-            out.append(DetailFact(id: "rating", lead: .rating(r), text: t, sub: sub))
+        if let t = DetailFacts.releaseText(m?.releaseDate, year: year(m).flatMap { Int($0) }, verb: "首播") {
+            out.append(DetailFact(id: "release", lead: .symbol("calendar"), text: t, sub: current.seasonLabel))
         }
-        if let g = m?.genres, !g.isEmpty {
-            out.append(DetailFact(id: "genre", lead: .symbol(DetailFacts.genreSymbol(g.first)), text: g.joined(separator: "、")))
+        let per = Format.runtime(m?.runtime)
+        let count: String? = (current.episodes ?? 0) > 0 ? current.countLabel : nil
+        if !per.isEmpty {
+            out.append(DetailFact(id: "runtime", lead: .symbol("clock.fill"), text: "每集约 \(per)", sub: count))
+        } else if let count {
+            out.append(DetailFact(id: "runtime", lead: .symbol("clock.fill"), text: count))
         }
-        if let y = year(m) {
-            out.append(DetailFact(id: "year", lead: .symbol("calendar"), text: "\(y) 年", sub: current.seasonLabel))
+        let sizes = files.compactMap(\.size).filter { $0 > 0 }
+        let avg: Int64? = sizes.isEmpty ? nil : sizes.reduce(0, +) / Int64(sizes.count)
+        if let e = DetailFacts.efficiency(bytes: avg, minutes: m?.runtime) {
+            out.append(DetailFact(id: "efficiency", lead: .badge(e.level.rawValue), text: "流量能效", sub: e.perHour,
+                                  spoken: "流量能效\(e.level.rawValue)，\(e.perHour)"))
         }
-        if (current.episodes ?? 0) > 0 {
-            out.append(DetailFact(id: "episodes", lead: .symbol("rectangle.stack.fill"), text: current.countLabel))
-        }
-        let langs = (current.langs ?? []).filter { !$0.isEmpty }
-        if let first = langs.first {
-            out.append(DetailFact(id: "lang", lead: .badge(DetailFacts.languageBadge(first)),
-                                  text: langs.count > 1 ? "\(first)和其他 \(langs.count - 1) 种" : first))
-        }
-        let spec = MediaSpec.series(current, firstFile: files.first?.name)
-        if let res = spec.resolution {
-            out.append(DetailFact(id: "video", lead: .badge(res == "1080p" || res == "720p" ? "HD" : res),
-                                  text: spec.headline ?? res, sub: spec.video))
-        }
-        if let audio = spec.audio {
-            out.append(DetailFact(id: "audio", lead: .symbol("speaker.wave.3.fill"), text: audio))
+        if let r = m?.rating, let lv = DetailFacts.recommendation(r) {
+            let score = String(format: "%.1f", r)
+            out.append(DetailFact(id: "recommend", lead: .badge(lv.rawValue), text: "推荐等级", sub: "TMDB \(score) 分",
+                                  spoken: "推荐等级\(lv.rawValue)，TMDB 评分 \(score) 分"))
         }
         return out
     }
@@ -682,7 +668,7 @@ struct DetailScaffold<Episodes: View>: View {
                         if !cast.isEmpty { castSection(m) }
                         if !facts.isEmpty || shareURL != nil {
                             group(m, "影片详细信息") {
-                                DetailFactsCard(facts: facts, link: shareURL, palette: palette)
+                                DetailFactsCard(facts: facts, palette: palette)
                             }
                         }
                         if let related, !related.items.isEmpty {

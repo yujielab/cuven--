@@ -6,8 +6,8 @@ import UIKit
 // · 整页染上画面的颜色：头部画面底边取出来的主色（DetailPalette），头部字下面那一截是它，往下慢慢沉到同色相的深色；
 // · 一组一行粗体标题 + 一张圆角 34 的半透明卡（10% 白、14% 白的细边），卡里的次要字是带这个颜色的浅色；
 // · 「简介」卡：几行简介（点开看全文，从卡上放大出来）、分隔线、「导演」一行（大号首字圆章 + 灰字「导演」+ 白字名字）；
-// · 「影片详细信息」卡：左边一列是大号评分 / 描边徽章（4K、GB、ZH…）/ 大符号，右边一行带颜色的字，行间细线，
-//   最底下居中一行「在 TMDB 中查看 ↗」；
+// · 「影片详细信息」卡：用户要求只留上映时间、时长、流量能效（高 / 中 / 低）、推荐等级（高 / 中 / 低），不跳 TMDB；
+//   左边一列是符号或描边徽章（「高」「中」「低」），右边一行带颜色的字，行间细线；
 // · 「更多××电影 ›」卡：同类型的几部，一行一部（海报、片名、年份 · 类型、右边「查看」胶囊），整行点进详情；
 // · 往上滚过头部，顶上钉住一条同色的条：海报、片名、「播放」胶囊（参考图里的「取得」）。
 // 动效：钉住的条从上面滑下来（弹簧），卡滑进屏幕时从 97% 长到原大、淡入。
@@ -74,6 +74,8 @@ struct DetailFact: Identifiable {
     let lead: Lead
     let text: String
     var sub: String? = nil
+    /// 旁白念什么（左边那一列是「高 / 中 / 低」这种右边字里没有的值时，要念进去）
+    var spoken: String? = nil
 }
 
 /// 「更多××」那一张卡里的一部
@@ -239,10 +241,10 @@ struct DetailDescriptionCard: View {
 
 // MARK: - 影片详细信息卡
 
+/// 用户要求只留四行：上映时间、时长、流量能效（高 / 中 / 低）、推荐等级（高 / 中 / 低），不再跳到 TMDB
+/// （以前还有评分星星、类型、画面、声音、文件，最底下「在 TMDB 中查看 ↗」）
 struct DetailFactsCard: View {
     let facts: [DetailFact]
-    /// 「在 TMDB 中查看 ↗」
-    let link: URL?
     let palette: DetailPalette
 
     /// 行里左边那一列（徽章、符号）的左边距和宽、到字的间距；行间的线从字那儿起（10 + 56 + 12）
@@ -255,22 +257,6 @@ struct DetailFactsCard: View {
             ForEach(Array(facts.enumerated()), id: \.element.id) { i, f in
                 if i > 0 { DetailCardDivider(leading: Self.leadPad + Self.leadW + Self.leadGap) }
                 row(f)
-            }
-            if let link {
-                if !facts.isEmpty { DetailCardDivider() }
-                Link(destination: link) {
-                    HStack(spacing: 8) {
-                        Text("在 TMDB 中查看")
-                        Image(systemName: "arrow.up.right")
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    // 点按区还是 44 点（F74）
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(DetailRowPress())
-                .accessibilityIdentifier("detail-tmdb")
             }
         }
     }
@@ -321,6 +307,7 @@ struct DetailFactsCard: View {
     }
 
     static func spoken(_ f: DetailFact) -> String {
+        if let s = f.spoken { return s }
         var parts: [String] = [f.text]
         if case .rating(let r) = f.lead { parts = [f.text + " " + String(format: "%.1f", r) + " 分"] }
         if let sub = f.sub, !sub.isEmpty { parts.append(sub) }
@@ -548,6 +535,37 @@ enum DetailFacts {
         if l.contains("西") || l.contains("es") { return "ES" }
         if l.contains("德") || l.contains("de") { return "DE" }
         return String(lang.prefix(2)).uppercased()
+    }
+
+    // MARK: 用户要求的四行：上映时间、时长、流量能效、推荐等级
+
+    enum Level: String {
+        case high = "高", mid = "中", low = "低"
+    }
+
+    /// 上映时间：有完整日期写到哪一天（「2026 年 7 月 29 日上映」），没有就写年份
+    static func releaseText(_ date: String?, year: Int?, verb: String = "上映") -> String? {
+        if let d = date, d.count >= 10 {
+            let p = d.prefix(10).split(separator: "-").compactMap { Int($0) }
+            if p.count == 3, p[0] > 1800 { return "\(p[0]) 年 \(p[1]) 月 \(p[2]) 日\(verb)" }
+        }
+        return year.map { "\($0) 年\(verb)" }
+    }
+
+    /// 流量能效：放这一部每小时大约要下载多少——片源原样直通、不转码，就是文件大小 ÷ 片长。越省越高：
+    /// 每小时 4 GB 以内（约 9 Mbps 以下）高，4–12 GB 中（4K 网络版多在这里），12 GB 以上低（4K 原盘）
+    static func efficiency(bytes: Int64?, minutes: Int?) -> (level: Level, perHour: String)? {
+        guard let b = bytes, b > 0, let m = minutes, m > 0 else { return nil }
+        let perHour = Double(b) / 1e9 / (Double(m) / 60)
+        let level: Level = perHour <= 4 ? .high : perHour <= 12 ? .mid : .low
+        let shown = perHour < 1 ? "约 \(Int((perHour * 1000).rounded())) MB / 小时" : String(format: "约 %.1f GB / 小时", perHour)
+        return (level, shown)
+    }
+
+    /// 推荐等级：TMDB 评分 7.5 以上高（和主页「严苛品质区」同一条线）、6 以上中、再低是低
+    static func recommendation(_ rating: Double?) -> Level? {
+        guard let r = rating, r > 0 else { return nil }
+        return r >= PremiumBar.minRating ? .high : r >= 6 ? .mid : .low
     }
 
     /// 评分那一行的字：「TMDB 评分」，在片库里排得靠前时补一句
