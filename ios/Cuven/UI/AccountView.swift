@@ -70,6 +70,7 @@ struct AccountView: View {
     @State private var showName = false
 
     static let notifyKey = "cuven_notify_new_titles"
+    @Environment(\.horizontalSizeClass) private var hsc
 
     private var displayName: String { account.displayName.isEmpty ? "访客" : account.displayName }
 
@@ -97,7 +98,8 @@ struct AccountView: View {
                     // 名字下面直接是个人资料卡（没有组名），比以前到第一个组名（40）近一点
                     .padding(.top, 28)
                 }
-                .padding(.horizontal, 24)
+                // 卡更宽一点（用户要求卡片更精致）：窄屏（iPhone、折起的 Duo）左右 24 → 16 点，和系统分组列表一样；宽屏照旧 24
+                .padding(.horizontal, hsc == .compact ? 16 : 24)
                 .padding(.bottom, 44)
                 .frame(maxWidth: 680)
                 .frame(maxWidth: .infinity)
@@ -484,12 +486,12 @@ struct AccountGroup<Rows: View>: View {
     }
 }
 
-/// 圆角 26 的半透明卡：一层 7% 的白、一圈 9% 白的细边
+/// 圆角 24 的半透明卡：一层 7% 的白、一圈 9% 白的细边（行矮了以后圆角跟着收一点：26 → 24）
 struct AccountCard<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 26, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
         VStack(spacing: 0) { content() }
             .background(shape.fill(Color.white.opacity(0.07)))
             .clipShape(shape)
@@ -502,10 +504,10 @@ struct AccountCard<Content: View>: View {
 enum AccountMetrics {
     /// 卡边到符号（也是卡下说明的左边线）
     static let inset: CGFloat = 20
-    /// 符号那一列（默认字号时；跟着动态字体放大）
-    static let iconColumn: CGFloat = 40
-    /// 符号到字
-    static let gap: CGFloat = 16
+    /// 符号那一列（默认字号时；跟着动态字体放大）。用户要求卡片更精致：40 → 32
+    static let iconColumn: CGFloat = 32
+    /// 符号到字（16 → 14）
+    static let gap: CGFloat = 14
 }
 
 /// 卡里的一行：左边一枚灰色符号，标题 + 一行灰色说明，右边「›」、开关或数值。
@@ -516,35 +518,42 @@ struct AccountRow<Trailing: View>: View {
     let title: String
     var subtitle: String? = nil
     var titleColor: Color = .white
+    /// 说明最多几行；电子邮件、姓名这种一个值的写 1（放不下从中间省略，不在地址中间折行：用户截图）
+    var subtitleLines: Int = 2
+    var subtitleTruncation: Text.TruncationMode = .tail
     @ViewBuilder var trailing: () -> Trailing
-    @ScaledMetric(relativeTo: .title3) private var iconSize: CGFloat = 24
+    @ScaledMetric(relativeTo: .title3) private var iconSize: CGFloat = 21
     @ScaledMetric(relativeTo: .title3) private var iconColumn: CGFloat = AccountMetrics.iconColumn
 
     var body: some View {
+        // 用户要求个人信息页的卡片「在视觉上优雅精致」：标题 Title 3 → Body 半粗（20 → 17 点）、说明 Callout → Subheadline，
+        // 符号 24 → 21、符号列 40 → 32、间距 16 → 14，一行 66 / 78 → 54 / 64 点高——
+        // 字那一列宽出 16 点，折起的 Duo 上邮箱、「用于登录的面容数据」不再折成两行，整张卡矮了约四分之一
         HStack(spacing: AccountMetrics.gap) {
             Image(systemName: icon)
                 .font(.system(size: iconSize, weight: .regular))
                 .foregroundStyle(.white.opacity(0.6))
                 .frame(width: iconColumn)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.title3.weight(.medium))
+                    .font(.body.weight(.semibold))
                     .foregroundStyle(titleColor)
                     .lineLimit(2)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.callout)
+                        .font(.subheadline)
                         .foregroundStyle(DSInk.tertiary)
-                        .lineLimit(2)
+                        .lineLimit(subtitleLines)
+                        .truncationMode(subtitleTruncation)
                 }
             }
             Spacer(minLength: 12)
             trailing()
         }
         .padding(.horizontal, AccountMetrics.inset)
-        .padding(.vertical, 12)
-        .frame(minHeight: subtitle == nil ? 66 : 78)
+        .padding(.vertical, 10)
+        .frame(minHeight: subtitle == nil ? 54 : 64)
         .contentShape(Rectangle())
     }
 }

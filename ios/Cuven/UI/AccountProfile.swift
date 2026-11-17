@@ -148,18 +148,19 @@ struct ProfileCard: View {
         VStack(spacing: 0) {
             Button { present(.avatar) } label: {
                 AccountRow(icon: "person.crop.circle", title: "头像", subtitle: "个人形象") {
-                    AvatarView(size: 44)
+                    AvatarView(size: 40)
                 }
             }
             .buttonStyle(AccountRowPress())
             .accessibilityIdentifier("account-avatar")
             AccountDivider()
-            AccountRow(icon: "person.text.rectangle", title: "姓名", subtitle: nameText) {
+            AccountRow(icon: "person.text.rectangle", title: "姓名", subtitle: nameText, subtitleLines: 1) {
                 ProfilePill(title: "更改", label: "更改姓名") { present(.rename) }
                     .accessibilityIdentifier("account-name-edit")
             }
             AccountDivider()
-            AccountRow(icon: "envelope", title: "电子邮件", subtitle: emailText) {
+            // 地址一行放下，放不下从中间省略（以前在「gmail.」后面折成两行：用户截图）
+            AccountRow(icon: "envelope", title: "电子邮件", subtitle: emailText, subtitleLines: 1, subtitleTruncation: .middle) {
                 ProfilePill(title: hasEmail ? "更改" : "设置", label: hasEmail ? "更改电子邮件" : "设置电子邮件",
                             prominent: !hasEmail) { present(.email) }
                     .accessibilityIdentifier("account-email-edit")
@@ -224,9 +225,9 @@ private struct ProfileSkeleton: View {
     private func row(_ icon: String, _ title: String, _ subtitle: String, round: Bool = false) -> some View {
         AccountRow(icon: icon, title: title, subtitle: subtitle) {
             if round {
-                Circle().fill(Color.white.opacity(0.12)).frame(width: 44, height: 44)
+                Circle().fill(Color.white.opacity(0.12)).frame(width: 40, height: 40)
             } else {
-                Capsule().fill(Color.white.opacity(0.12)).frame(width: 62, height: 32)
+                Capsule().fill(Color.white.opacity(0.12)).frame(width: 56, height: 30)
             }
         }
     }
@@ -256,7 +257,7 @@ private struct ProfileShimmer: ViewModifier {
     }
 }
 
-/// 行尾的玻璃胶囊（网页版 acc-glass-btn）：看上去 32 高，点按区撑到 44（F74）；
+/// 行尾的玻璃胶囊（网页版 acc-glass-btn）：看上去 30 高（用户要求卡片更精致：32 → 30、左右 16 → 13），点按区撑到 44（F74）；
 /// 没设电子邮件时是一颗蓝色的「设置」（网页版 acc-email-cta）
 struct ProfilePill: View {
     let title: String
@@ -270,8 +271,8 @@ struct ProfilePill: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
-                .padding(.horizontal, 16)
-                .frame(minHeight: 32)
+                .padding(.horizontal, 13)
+                .frame(minHeight: 30)
                 .glassEffect(glass, in: Capsule())
                 .frame(minHeight: 44)
                 .contentShape(Capsule())
