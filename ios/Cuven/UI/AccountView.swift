@@ -78,8 +78,10 @@ struct AccountView: View {
                     VStack(alignment: .leading, spacing: 34) {
                         // 个人资料卡（账户页移植（网页版）：网页版账户页的第一张卡）
                         ProfileCard { profileSheet = $0 }
-                        // MARK: 网络速度（usage agent）
-                        // MARK: 使用洞察（usage agent）
+                        // 网络速度（网页版的第二张卡：45 根竖条的滑块，在 iOS 上管正片缓冲多少秒，AccountUsage.swift）
+                        NetworkSpeedCard()
+                        // 使用洞察 · 流量概览（网页版的第三张卡；数是这台设备真的下载了多少，不是网页版的随机数）
+                        UsageInsightsCard()
                         watchingGroup
                         notifyGroup
                         playbackGroup
