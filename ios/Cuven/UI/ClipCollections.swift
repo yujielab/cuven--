@@ -257,21 +257,38 @@ enum ClipFranchise {
 extension AppModel {
     /// 片段合集用的竖版画面（卡、刷视频那一屏的底）：Apple TV 无字的竖版主视觉 → TMDB 纯净海报 → 海报 → 横版剧照。
     /// width 是要显示的宽（点）：Apple 的图按 宽 × 3 要像素
-    func clipArt(_ e: HomeEntry, width: CGFloat) -> URL? {
+    /// 竖版画面的候选，按顺序（刷视频页用 RemoteImageChain 一张张试：前面那张取不到就换下一张）：
+    /// Apple TV 竖版主视觉 → TMDB 纯净海报 → Apple 海报 → TMDB 海报 → 横版的无字背景 / 剧照 → TMDB 剧照。
+    /// full：这一部的全量结果（纯净海报、无字横版剧照、剧照都在里面；片库的简要结果没有）
+    func clipArtCandidates(_ e: HomeEntry, width: CGFloat, full: Meta? = nil) -> [URL] {
         func some(_ s: String?) -> String? { (s?.isEmpty ?? true) ? nil : s }
         let px = Int(min(1600, max(450, width * 3)).rounded())
         let size = width * 3 > 500 ? "w780" : "w500"
+        var out: [URL] = []
+        func add(_ u: URL?) { if let u, !out.contains(u) { out.append(u) } }
+        func apple(_ s: String?, _ w: Int) { if let s = some(s) { add(URL(string: AppleImage.sized(s, width: w) ?? s)) } }
+        func tmdb(_ a: String?, _ b: String?, _ size: String) { add(TMDBImage.url(some(a) ?? some(b), size)) }
         switch e {
         case .movie(let v):
             let a = appleArt(v), m = meta(v)
-            if let t = some(a?.tall) { return URL(string: AppleImage.sized(t, width: px) ?? t) }
-            if let c = some(m?.posterClean) { return TMDBImage.url(c, size) }
-            if let p = some(a?.poster) { return URL(string: AppleImage.sized(p, width: px) ?? p) }
-            return TMDBImage.url(some(m?.poster) ?? some(m?.backdrop), size)
+            apple(a?.tall, px)
+            tmdb(full?.posterClean, m?.posterClean, size)
+            apple(a?.poster, px)
+            tmdb(full?.poster, m?.poster, size)
+            tmdb(full?.backdropClean, m?.backdropClean, "w1280")
+            apple(a?.background, 1920)
+            tmdb(full?.backdrop, m?.backdrop, "w1280")
+            apple(a?.wide, 1920)
+            for st in (full?.stills ?? m?.stills ?? []).prefix(2) { tmdb(st.url, st.thumb, "w1280") }
         case .series(let s):
-            let m = seriesMetas[s.path]
-            return TMDBImage.url(some(m?.posterClean) ?? some(m?.poster) ?? some(m?.backdrop), size)
+            let m = seriesMetas[s.path] ?? full
+            tmdb(m?.posterClean, nil, size)
+            tmdb(m?.poster, nil, size)
+            tmdb(m?.backdropClean, nil, "w1280")
+            tmdb(m?.backdrop, nil, "w1280")
+            for st in (m?.stills ?? []).prefix(2) { tmdb(st.url, st.thumb, "w1280") }
         }
+        return out
     }
 
     /// 有没有竖版画面（选主页卡的封面：没有的不拿来当封面）
@@ -344,7 +361,7 @@ struct ClipCollectionsShelf: View {
                             Haptics.light()
                             open = cover.collection
                         } label: {
-                            ClipCollectionCard(title: cover.collection.title, art: model.clipArt(cover.entry, width: w), width: w)
+                            ClipCollectionCard(title: cover.collection.title, arts: model.clipArtCandidates(cover.entry, width: w), width: w)
                         }
                         .buttonStyle(PressableStyle())
                         .matchedTransitionSource(id: cover.collection, in: ns)
@@ -366,7 +383,8 @@ struct ClipCollectionsShelf: View {
 /// 左下大号粗体的分类名压在模糊上
 struct ClipCollectionCard: View {
     let title: String
-    let art: URL?
+    /// 画面的候选（前面那张取不到就换下一张：RemoteImageChain）
+    let arts: [URL]
     let width: CGFloat
 
     var body: some View {
@@ -375,7 +393,7 @@ struct ClipCollectionCard: View {
         Color.clear
             .frame(width: width, height: h)
             // 画面先裁成 9 : 16、下段渐进式模糊（ImageEffect.clipCard，后台算一次、缓存），糊的那一段正好垫在分类名下面
-            .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: Color(white: 0.12), effect: .clipCard) }
+            .overlay { RemoteImageChain(urls: arts, maxPixel: width * 3, placeholder: Color(white: 0.12), effect: .clipCard) }
             .overlay {
                 // 糊过以后只要很淡的一层暗：白字看得清（C58），画面颜色还在
                 LinearGradient(stops: [.init(color: .black.opacity(0), location: 0.5),
@@ -587,6 +605,8 @@ struct ClipFeedPage: View {
     let onInfo: () -> Void
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// 这一部的全量结果（纯净海报、无字横版剧照、剧照）：底图多几张候选
+    @State private var full: Meta?
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 30, style: .continuous)
@@ -598,8 +618,9 @@ struct ClipFeedPage: View {
             // （用户截图：按钮只剩上半截、进度条不见了，顶上的分类名也没了）
             Color(white: 0.06)
                 .overlay {
-                    RemoteImage(url: model.clipArt(entry, width: g.size.width),
-                                maxPixel: max(g.size.width, g.size.height) * 3, placeholder: .clear)
+                    // 用户截图：整页黑着——以前只试一张竖版画面，它取不到就什么都没有。现在按顺序试几张（RemoteImageChain）
+                    RemoteImageChain(urls: model.clipArtCandidates(entry, width: g.size.width, full: full),
+                                     maxPixel: max(g.size.width, g.size.height) * 3)
                 }
                 .overlay {
                     if showing {
@@ -651,6 +672,10 @@ struct ClipFeedPage: View {
         .padding(.horizontal, 8)
         .padding(.top, insetTop + 6)
         .padding(.bottom, insetBottom + 6)
+        // 滑到这一页才问（懒加载的一页一页来）；问过的在内存里，滑回来不再问
+        .task(id: ClipFeedView.key(entry)) {
+            if case .movie(let v) = entry, full == nil { full = await model.fullMeta(for: v) }
+        }
     }
 
     private func bottom(width: CGFloat, playing: Bool) -> some View {

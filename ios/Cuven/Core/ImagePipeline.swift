@@ -457,6 +457,68 @@ struct RemoteImage: View {
     }
 }
 
+/// 按顺序试几张图：前面那张取不到（地址失效、服务器出错、解不开）就换下一张；全都取不到就留着占位。
+/// 用户截图：刷视频页整页黑着——那一部只试一张竖版画面，它取不到时没有退路（片库里的片子都有 TMDB 海报，却轮不到它）。
+/// 候选换了（比如全量结果到了，多了纯净海报）：从头再试，排在前面的取到了才换上去；画面上那张本来就是第一张就不动
+struct RemoteImageChain: View {
+    let urls: [URL]
+    let maxPixel: CGFloat
+    let contentMode: ContentMode
+    let placeholder: Color
+    /// 解码后的处理（合集竖卡底部的渐进式模糊）
+    let effect: ImageEffect
+
+    @State private var image: UIImage?
+    @State private var shown: URL?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(urls: [URL], maxPixel: CGFloat, contentMode: ContentMode = .fill, placeholder: Color = .clear,
+         effect: ImageEffect = .none) {
+        self.urls = urls
+        self.maxPixel = maxPixel
+        self.contentMode = contentMode
+        self.placeholder = placeholder
+        self.effect = effect
+        // 内存里已经有第一张：第一帧就是它（滑回来的那一页不闪）
+        if maxPixel >= RemoteImage.minPixel, let first = urls.first,
+           let hit = ImagePipeline.shared.cached(first, maxPixel: maxPixel, effect: effect) {
+            _image = State(initialValue: hit)
+            _shown = State(initialValue: first)
+        }
+    }
+
+    private struct LoadKey: Equatable {
+        let urls: [URL]
+        let pixel: Int
+    }
+
+    var body: some View {
+        ZStack {
+            placeholder
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: contentMode)
+                    .transition(reduceMotion ? .opacity : .dsBlurFade(radius: 8))
+            }
+        }
+        .task(id: LoadKey(urls: urls, pixel: maxPixel.isFinite ? Int(maxPixel) : 0)) {
+            guard maxPixel.isFinite, maxPixel >= RemoteImage.minPixel else { return }
+            for url in urls {
+                // 排在它前面的都取不到，它已经在画面上了：不用再取
+                if url == shown, image != nil { return }
+                if let img = await ImagePipeline.shared.image(url, maxPixel: maxPixel, effect: effect) {
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.easeOut(duration: 0.32)) { image = img }
+                    shown = url
+                    return
+                }
+                if Task.isCancelled { return }
+            }
+        }
+    }
+}
+
 /// 深色字标自动反白（与网页版同一套判断）：
 /// 读一张缩小的字标，只看实心像素（alpha ≥ 0.5），按相对亮度分暗墨（< 0.13）与亮墨（> 0.30）；
 /// 暗墨七成以上、亮墨不到一成，才算深色字标 —— 贴在压暗的画面上看不见，要反相（再把色相转半圈，彩色点缀保留色相）。
