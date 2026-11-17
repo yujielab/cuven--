@@ -34,6 +34,16 @@ enum PlayError: LocalizedError {
 /// 点了「播放」就弹出来；从点下去到首帧出来，上面盖着和网页版一样的加载画面（PlayerLoadingOverlay：顶层窗口，用户要求）
 final class CuvenPlayerViewController: AVPlayerViewController {
     var onClose: (() -> Void)?
+    /// 方向（用户要求）：除了 iPhone 展开，一律横屏、只在左右两个横向之间转（VideoOrientation.swift）
+    private lazy var orientation = VideoOrientationLock()
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { orientation.mask }
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { orientation.preferred }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        orientation.refresh(self, after: coordinator)
+    }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)

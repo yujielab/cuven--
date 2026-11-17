@@ -589,12 +589,6 @@ struct DetailInfoRow: Hashable {
     let value: String
 }
 
-/// 全屏放第几段预告片（fullScreenCover(item:) 要一个能区分的值）
-struct DetailTrailerPick: Identifiable {
-    let index: Int
-    var id: Int { index }
-}
-
 /// 点开的是第几张剧照
 struct DetailStillPick: Identifiable {
     let index: Int
@@ -650,7 +644,6 @@ struct DetailScaffold<Episodes: View>: View {
     @State private var edge: UIColor?
     @State private var toast: String?
     @State private var castSheet: CastSheetRequest?
-    @State private var trailerPick: DetailTrailerPick?
     /// 演员名单里点的那一位：收起弹层以后推进去
     @State private var personPush: CastMember?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -748,10 +741,7 @@ struct DetailScaffold<Episodes: View>: View {
             }
         }
         .navigationDestination(item: $personPush) { m in ActorPage(member: m) }
-        // 预告片：全屏，系统那一套手势和关闭（C49、S22）
-        .fullScreenCover(item: $trailerPick) { p in
-            TrailerPlayerView(movieTitle: title, trailers: trailers, start: p.index)
-        }
+        // 预告片：全屏（C49、S22），由 TrailerPlayerView.present 用 UIKit 弹——好管方向：除了 iPhone 展开一律横屏（用户要求）
         // 剧照大图（全屏黑底、从浏览台的画面上放大出来）由 DetailStillsExplorer 自己弹（DetailInfo.swift）
     }
 
@@ -924,7 +914,7 @@ struct DetailScaffold<Episodes: View>: View {
             DSShelf(metrics: m) {
                 ForEach(Array(trailers.enumerated()), id: \.offset) { i, t in
                     DetailTrailerCard(trailer: t, art: t.image ?? (trailerArt.isEmpty ? nil : trailerArt[i % trailerArt.count]),
-                                      metrics: m, onPlay: { trailerPick = DetailTrailerPick(index: i) })
+                                      metrics: m, onPlay: { TrailerPlayerView.present(movieTitle: title, trailers: trailers, start: i) })
                 }
             }
         }

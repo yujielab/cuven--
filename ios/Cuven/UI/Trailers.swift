@@ -136,13 +136,38 @@ final class TrailerDeck {
 
 struct TrailerPlayerView: View {
     let movieTitle: String
+    /// 用 UIKit 弹出来时（present）由它收起；没给就走 SwiftUI 的 dismiss
+    var close: (() -> Void)?
     @State private var deck: TrailerDeck
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    init(movieTitle: String, trailers: [Trailer], start: Int) {
+    init(movieTitle: String, trailers: [Trailer], start: Int, close: (() -> Void)? = nil) {
         self.movieTitle = movieTitle
+        self.close = close
         _deck = State(initialValue: TrailerDeck(trailers: trailers, index: start))
+    }
+
+    /// 全屏放预告片：用 UIKit 弹一层 VideoHostingController，好管方向——除了 iPhone 展开一律横屏、
+    /// 只在左右两个横向之间转（用户要求，VideoOrientation.swift；SwiftUI 的 fullScreenCover 管不了方向）
+    @MainActor
+    static func present(movieTitle: String, trailers: [Trailer], start: Int) {
+        guard !trailers.isEmpty, let top = UIApplication.topViewController() else { return }
+        let host = VideoHostingController(rootView: AnyView(EmptyView()))
+        host.rootView = AnyView(
+            TrailerPlayerView(movieTitle: movieTitle, trailers: trailers, start: min(max(0, start), trailers.count - 1)) { [weak host] in
+                host?.dismiss(animated: true)
+            }
+            .tint(.white)
+        )
+        host.view.backgroundColor = .black
+        host.overrideUserInterfaceStyle = .dark
+        host.modalPresentationStyle = .fullScreen
+        top.present(host, animated: true)
+    }
+
+    private func leave() {
+        if let close { close() } else { dismiss() }
     }
 
     var body: some View {
@@ -159,7 +184,7 @@ struct TrailerPlayerView: View {
                         if abs(dx) > abs(dy) {
                             if dx < -50 { deck.go(deck.index + 1) } else if dx > 50 { deck.go(deck.index - 1) }
                         } else if dy > 110 {
-                            dismiss()
+                            leave()
                         }
                     }
                 )
@@ -201,7 +226,7 @@ struct TrailerPlayerView: View {
 
             VStack(spacing: 0) {
                 HStack {
-                    Button { dismiss() } label: {
+                    Button { leave() } label: {
                         Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).frame(width: 46, height: 46)
                     }
                     .buttonStyle(.glass)
