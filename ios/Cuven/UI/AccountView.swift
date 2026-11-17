@@ -35,11 +35,11 @@ struct AvatarView: View {
 /// 账户与设置（主页右上的头像点开，是一张弹层）。照用户给的参考图（Apple「游戏」App 的个人页）重做：
 /// · 底：从头像取主色（取不到用紫色）往下渐暗到深灰，顶上那一截是这个颜色；
 /// · 头部居中：88 点的圆头像（右下角一枚 Cuven 小图标；点它换头像）、大号粗体的名字；
-/// · 头部下面是个人资料卡（账户页移植（网页版）：头像、姓名、电子邮件、登录面容、订阅，见 AccountProfile.swift），
+/// · 头部下面是个人资料卡（账户页移植（网页版）：头像、姓名、电子邮件、登录面容，见 AccountProfile.swift；「订阅」那一行用户要求移除），
 ///   顶替以前那颗「个人档案」胶囊钮和它推进去的那一页（那一页的「登录方式」「登录时间」挪到「登录与安全」）；
 /// · 下面每一组是一行粗体的组名 + 一张圆角 26 的半透明卡，卡里一行一项：左边一枚灰色符号，标题 + 一行灰色说明，右边「›」、开关或数值；
 /// · 右上是系统的关闭钮（iOS 26 的玻璃圆钮），往上滚过头部，名字接到导航栏里。
-/// 内容：个人资料卡、观看、通知、播放、片库、存储、登录与安全、关于，最底下单独一张「退出登录」（先用系统的确认：C44、C47；文案照网页版）。
+/// 内容：个人资料卡、网络、使用洞察（含「清除缓存」）、观看（含「清除继续观看」）、通知、播放、登录与安全（「片库」「关于」「存储」三组用户要求移除 / 并走），最底下单独一张「退出登录」（先用系统的确认：C44、C47；文案照网页版）。
 /// 「新片上架通知」打开的那一刻才向系统要权限（C78、C79）；系统里关着就多一行「打开设置」（C97）。
 struct AccountView: View {
     @Environment(AppModel.self) private var model
@@ -61,8 +61,6 @@ struct AccountView: View {
     /// 系统设置里 Cuven 的通知是关着的（拒绝过，或者后来到设置里关了）
     @State private var notifyBlocked = false
     @State private var notifyAsking = false
-    @State private var cacheSize: Int64 = DiskCache.size()
-    @State private var refreshing = false
     @State private var confirmSignOut = false
     /// 顶上那一截的颜色：头像的主色（取不到是紫色）
     @State private var tint = AccountPalette.fallback
@@ -70,6 +68,7 @@ struct AccountView: View {
     @State private var showName = false
 
     static let notifyKey = "cuven_notify_new_titles"
+    @Environment(\.horizontalSizeClass) private var hsc
 
     private var displayName: String { account.displayName.isEmpty ? "访客" : account.displayName }
 
@@ -88,16 +87,14 @@ struct AccountView: View {
                         watchingGroup
                         notifyGroup
                         playbackGroup
-                        libraryGroup
-                        storageGroup
                         securityGroup
-                        aboutGroup
                         signOutGroup
                     }
                     // 名字下面直接是个人资料卡（没有组名），比以前到第一个组名（40）近一点
                     .padding(.top, 28)
                 }
-                .padding(.horizontal, 24)
+                // 卡更宽一点（用户要求卡片更精致）：窄屏（iPhone、折起的 Duo）左右 24 → 16 点，和系统分组列表一样；宽屏照旧 24
+                .padding(.horizontal, hsc == .compact ? 16 : 24)
                 .padding(.bottom, 44)
                 .frame(maxWidth: 680)
                 .frame(maxWidth: .infinity)
@@ -190,16 +187,22 @@ struct AccountView: View {
 
     // MARK: 各组
 
-    /// 观看：点进去是整页清单（在这一页里推进去）
+    /// 观看：点进去是整页清单（在这一页里推进去）。行里不写「共 N 部」（用户要求全局去掉影片计数）
     private var watchingGroup: some View {
         AccountGroup(title: "观看") {
             NavigationLink(value: Route.shelf(.continueWatching)) {
-                AccountRow(icon: "play.circle", title: "继续观看", subtitle: "共 \(model.playback.continueWatching.count) 部") { AccountChevron() }
+                AccountRow(icon: "play.circle", title: "继续观看") { AccountChevron() }
             }
             .buttonStyle(AccountRowPress())
             AccountDivider()
             NavigationLink(value: Route.shelf(.watchlist)) {
-                AccountRow(icon: "bookmark", title: "想看", subtitle: "共 \(model.watchlist.items.count) 部") { AccountChevron() }
+                AccountRow(icon: "bookmark", title: "想看") { AccountChevron() }
+            }
+            .buttonStyle(AccountRowPress())
+            AccountDivider()
+            // 以前在「存储」那一组；「清除缓存」挪进「使用洞察」那张卡以后，这一组只剩它，挪到这里和继续观看放在一起
+            Button { model.playback.clearAll() } label: {
+                AccountRow(icon: "clock.arrow.circlepath", title: "清除继续观看", titleColor: Color(red: 1, green: 0.42, blue: 0.38)) { EmptyView() }
             }
             .buttonStyle(AccountRowPress())
         }
@@ -272,35 +275,8 @@ struct AccountView: View {
         .sensoryFeedback(.selection, trigger: subtitlePref)
     }
 
-    /// 片库：数量 + 刷新（慢的操作：右边换成转圈、写「正在刷新…」，不挡整屏：C39）
-    private var libraryGroup: some View {
-        AccountGroup(title: "片库") {
-            AccountRow(icon: "film.stack", title: "电影与剧集",
-                       subtitle: "电影 \(model.movies.count) 部 · 剧集 \(model.series.count) 部") { EmptyView() }
-            AccountDivider()
-            Button { refreshLibrary() } label: {
-                AccountRow(icon: "arrow.clockwise", title: refreshing ? "正在刷新…" : "刷新片库") {
-                    if refreshing { ProgressView() }
-                }
-            }
-            .buttonStyle(AccountRowPress())
-            .disabled(refreshing)
-        }
-    }
+    // 「片库」（片子数量、刷新片库）和「关于」（版本、片源、账户服务）两组用户要求移除；片库照常在主页下拉刷新
 
-    private var storageGroup: some View {
-        AccountGroup(title: "存储", footer: "清除缓存后，片库清单、海报和影片信息会重新下载。") {
-            Button { clearCache() } label: {
-                AccountRow(icon: "internaldrive", title: "清除缓存", subtitle: "已用 \(cacheText)") { AccountChevron() }
-            }
-            .buttonStyle(AccountRowPress())
-            AccountDivider()
-            Button { model.playback.clearAll() } label: {
-                AccountRow(icon: "clock.arrow.circlepath", title: "清除继续观看", titleColor: Color(red: 1, green: 0.42, blue: 0.38)) { EmptyView() }
-            }
-            .buttonStyle(AccountRowPress())
-        }
-    }
 
     /// 面容 ID 快速登录的开关；下面两行（这次怎么登录的、什么时候）以前在「个人档案」那一页，那一页由个人资料卡顶替后挪到这里
     @ViewBuilder
@@ -322,16 +298,6 @@ struct AccountView: View {
         }
     }
 
-    private var aboutGroup: some View {
-        AccountGroup(title: "关于") {
-            AccountRow(icon: "info.circle", title: "版本") { AccountValue(Bundle.main.appVersion) }
-            AccountDivider()
-            AccountRow(icon: "antenna.radiowaves.left.and.right", title: "片源") { AccountValue("stream.cuven.online") }
-            AccountDivider()
-            AccountRow(icon: "person.badge.key", title: "账户服务") { AccountValue("check.cuven.us") }
-        }
-    }
-
     /// 退出登录单独一张卡、红字居中，点了先用系统的确认（C44、C47）
     @ViewBuilder
     private var signOutGroup: some View {
@@ -339,9 +305,9 @@ struct AccountView: View {
             AccountCard {
                 Button { confirmSignOut = true } label: {
                     Text("退出登录")
-                        .font(.title3.weight(.semibold))
+                        .font(.body.weight(.semibold))
                         .foregroundStyle(Color(red: 1, green: 0.42, blue: 0.38))
-                        .frame(maxWidth: .infinity, minHeight: 64)
+                        .frame(maxWidth: .infinity, minHeight: 54)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(AccountRowPress())
@@ -416,31 +382,6 @@ struct AccountView: View {
         openURL(url)
     }
 
-    // MARK: 片库与存储
-
-    private func refreshLibrary() {
-        refreshing = true
-        Task { @MainActor in
-            await model.refreshAll()
-            refreshing = false
-            cacheSize = DiskCache.size()
-        }
-    }
-
-    private func clearCache() {
-        model.clearCaches()
-        cacheSize = DiskCache.size()
-        Task { @MainActor in
-            await model.refreshAll()
-            cacheSize = DiskCache.size()
-        }
-    }
-
-    private var cacheText: String {
-        let s = Format.size(cacheSize)
-        return s.isEmpty ? "0 MB" : s
-    }
-
     // MARK: 登录
 
     private var faceIDBinding: Binding<Bool> {
@@ -484,12 +425,12 @@ struct AccountGroup<Rows: View>: View {
     }
 }
 
-/// 圆角 26 的半透明卡：一层 7% 的白、一圈 9% 白的细边
+/// 圆角 24 的半透明卡：一层 7% 的白、一圈 9% 白的细边（行矮了以后圆角跟着收一点：26 → 24）
 struct AccountCard<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 26, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
         VStack(spacing: 0) { content() }
             .background(shape.fill(Color.white.opacity(0.07)))
             .clipShape(shape)
@@ -502,10 +443,10 @@ struct AccountCard<Content: View>: View {
 enum AccountMetrics {
     /// 卡边到符号（也是卡下说明的左边线）
     static let inset: CGFloat = 20
-    /// 符号那一列（默认字号时；跟着动态字体放大）
-    static let iconColumn: CGFloat = 40
-    /// 符号到字
-    static let gap: CGFloat = 16
+    /// 符号那一列（默认字号时；跟着动态字体放大）。用户要求卡片更精致：40 → 32
+    static let iconColumn: CGFloat = 32
+    /// 符号到字（16 → 14）
+    static let gap: CGFloat = 14
 }
 
 /// 卡里的一行：左边一枚灰色符号，标题 + 一行灰色说明，右边「›」、开关或数值。
@@ -516,35 +457,42 @@ struct AccountRow<Trailing: View>: View {
     let title: String
     var subtitle: String? = nil
     var titleColor: Color = .white
+    /// 说明最多几行；电子邮件、姓名这种一个值的写 1（放不下从中间省略，不在地址中间折行：用户截图）
+    var subtitleLines: Int = 2
+    var subtitleTruncation: Text.TruncationMode = .tail
     @ViewBuilder var trailing: () -> Trailing
-    @ScaledMetric(relativeTo: .title3) private var iconSize: CGFloat = 24
+    @ScaledMetric(relativeTo: .title3) private var iconSize: CGFloat = 21
     @ScaledMetric(relativeTo: .title3) private var iconColumn: CGFloat = AccountMetrics.iconColumn
 
     var body: some View {
+        // 用户要求个人信息页的卡片「在视觉上优雅精致」：标题 Title 3 → Body 半粗（20 → 17 点）、说明 Callout → Subheadline，
+        // 符号 24 → 21、符号列 40 → 32、间距 16 → 14，一行 66 / 78 → 54 / 64 点高——
+        // 字那一列宽出 16 点，折起的 Duo 上邮箱、「用于登录的面容数据」不再折成两行，整张卡矮了约四分之一
         HStack(spacing: AccountMetrics.gap) {
             Image(systemName: icon)
                 .font(.system(size: iconSize, weight: .regular))
                 .foregroundStyle(.white.opacity(0.6))
                 .frame(width: iconColumn)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.title3.weight(.medium))
+                    .font(.body.weight(.semibold))
                     .foregroundStyle(titleColor)
                     .lineLimit(2)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.callout)
+                        .font(.subheadline)
                         .foregroundStyle(DSInk.tertiary)
-                        .lineLimit(2)
+                        .lineLimit(subtitleLines)
+                        .truncationMode(subtitleTruncation)
                 }
             }
             Spacer(minLength: 12)
             trailing()
         }
         .padding(.horizontal, AccountMetrics.inset)
-        .padding(.vertical, 12)
-        .frame(minHeight: subtitle == nil ? 66 : 78)
+        .padding(.vertical, 10)
+        .frame(minHeight: subtitle == nil ? 54 : 64)
         .contentShape(Rectangle())
     }
 }

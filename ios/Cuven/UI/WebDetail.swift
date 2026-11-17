@@ -7,7 +7,7 @@ import UIKit
 // 字标（没有字标就是 Large Title 的片名）→ 一行信息「类型 · 年份 · 片长 · ★评分」（F18）→
 // 一颗白色「播放」+ 一颗「…」系统菜单（从头播放、复制直链、分享：S17、C11、C15、C35、C45）。
 // 下面照用户给的参考图（Apple「游戏」App 的详情页，DetailInfo.swift）：整页染上画面的颜色，一组一行粗体标题 + 一张半透明大圆角卡——
-// 简介（几行 + 导演）→ 分集（剧集）→ 预告片（有才有）→ 演员（圆形照片：T21）→ 影片详细信息（评分、类型、年份、片长、画面、声音、大小）
+// 简介（几行 + 导演）→ 分集（剧集）→ 预告片（有才有）→ 演员（圆形照片：T21）→ 影片详细信息（上映时间、时长、流量能效、推荐等级）
 // → 更多同类型的几部；往上滚过头部，顶上钉住一条：海报、片名、「播放」。
 // 不放玻璃卡、印章、法务行、剧照「第 N 幕」、分隔线（F38、F80、F84）；导航栏不垫底、不压自制的渐暗，
 // 系统的滚动边缘效果就够（C17、C27）；头部滚走了片名才出现在导航栏里（C12）。
@@ -119,33 +119,24 @@ struct MovieDetailView: View {
         ])
     }
 
-    /// 「影片详细信息」那张卡的几行（参考图：左边大号评分 / 描边徽章 / 大符号，右边一行带颜色的字）
+    /// 「影片详细信息」那张卡（用户要求只留四行）：上映时间、时长、流量能效（高 / 中 / 低）、推荐等级（高 / 中 / 低）
     private func facts(_ m: Meta?) -> [DetailFact] {
         var out: [DetailFact] = []
-        if let r = m?.rating, r > 0 {
-            let (t, sub) = DetailFacts.ratingText(percentile: model.ratingPercentile(r, series: false), pool: "电影")
-            out.append(DetailFact(id: "rating", lead: .rating(r), text: t, sub: sub))
-        }
-        if let g = m?.genres, !g.isEmpty {
-            out.append(DetailFact(id: "genre", lead: .symbol(DetailFacts.genreSymbol(g.first)), text: g.joined(separator: "、")))
-        }
-        if let y = model.year(video) {
-            out.append(DetailFact(id: "year", lead: .symbol("calendar"), text: "\(y) 年上映"))
+        if let t = DetailFacts.releaseText(m?.releaseDate, year: model.year(video)) {
+            out.append(DetailFact(id: "release", lead: .symbol("calendar"), text: t))
         }
         let runtime = Format.runtime(m?.runtime)
         if !runtime.isEmpty {
             out.append(DetailFact(id: "runtime", lead: .symbol("clock.fill"), text: runtime))
         }
-        let spec = MediaSpec(name: video.name, size: video.size)
-        if let res = spec.resolution {
-            out.append(DetailFact(id: "video", lead: .badge(res == "1080p" || res == "720p" ? "HD" : res),
-                                  text: spec.headline ?? res, sub: spec.video))
+        if let e = DetailFacts.efficiency(bytes: video.size, minutes: m?.runtime) {
+            out.append(DetailFact(id: "efficiency", lead: .badge(e.level.rawValue), text: "流量能效", sub: e.perHour,
+                                  spoken: "流量能效\(e.level.rawValue)，\(e.perHour)"))
         }
-        if let audio = spec.audio {
-            out.append(DetailFact(id: "audio", lead: .symbol("speaker.wave.3.fill"), text: audio))
-        }
-        if let size = spec.size {
-            out.append(DetailFact(id: "size", lead: .badge(DetailFacts.sizeBadge(size)), text: size, sub: video.name))
+        if let r = m?.rating, let lv = DetailFacts.recommendation(r) {
+            let score = String(format: "%.1f", r)
+            out.append(DetailFact(id: "recommend", lead: .badge(lv.rawValue), text: "推荐等级", sub: "TMDB \(score) 分",
+                                  spoken: "推荐等级\(lv.rawValue)，TMDB 评分 \(score) 分"))
         }
         return out
     }
@@ -156,7 +147,7 @@ struct MovieDetailView: View {
         let items = model.related(to: video, limit: 3).map { v -> DetailRelatedItem in
             let mm = model.meta(v)
             return DetailRelatedItem(id: v.path, title: model.title(v),
-                                     subtitle: DetailText.line([model.year(v).map { String($0) }, mm?.genres?.first]),
+                                     subtitle: DetailText.line([model.year(v).map { String($0) }, mm?.genres?.first, DetailText.rating(mm?.rating)]),
                                      art: TMDBImage.url(mm?.poster ?? mm?.posterClean, "w342"), route: .movie(v))
         }
         guard !items.isEmpty else { return nil }
@@ -476,34 +467,27 @@ struct SeriesDetailView: View {
         }
     }
 
-    /// 「影片详细信息」那张卡的几行：评分、类型、年份与季、集数、语言、画面、声音
+    /// 「影片详细信息」那张卡（用户要求只留四行）：首播时间（和这一季）、每集时长、流量能效（按这一季的分集平均）、推荐等级。
+    /// 不写「全 8 集」「更新至第 5 集」这类集数（用户要求全局去掉计数）；没有片长就不出时长那一行
     private func facts(_ m: Meta?) -> [DetailFact] {
         var out: [DetailFact] = []
-        if let r = m?.rating, r > 0 {
-            let (t, sub) = DetailFacts.ratingText(percentile: model.ratingPercentile(r, series: true), pool: "剧集")
-            out.append(DetailFact(id: "rating", lead: .rating(r), text: t, sub: sub))
+        if let t = DetailFacts.releaseText(m?.releaseDate, year: year(m).flatMap { Int($0) }, verb: "首播") {
+            out.append(DetailFact(id: "release", lead: .symbol("calendar"), text: t, sub: current.seasonLabel))
         }
-        if let g = m?.genres, !g.isEmpty {
-            out.append(DetailFact(id: "genre", lead: .symbol(DetailFacts.genreSymbol(g.first)), text: g.joined(separator: "、")))
+        let per = Format.runtime(m?.runtime)
+        if !per.isEmpty {
+            out.append(DetailFact(id: "runtime", lead: .symbol("clock.fill"), text: "每集约 \(per)"))
         }
-        if let y = year(m) {
-            out.append(DetailFact(id: "year", lead: .symbol("calendar"), text: "\(y) 年", sub: current.seasonLabel))
+        let sizes = files.compactMap(\.size).filter { $0 > 0 }
+        let avg: Int64? = sizes.isEmpty ? nil : sizes.reduce(0, +) / Int64(sizes.count)
+        if let e = DetailFacts.efficiency(bytes: avg, minutes: m?.runtime) {
+            out.append(DetailFact(id: "efficiency", lead: .badge(e.level.rawValue), text: "流量能效", sub: e.perHour,
+                                  spoken: "流量能效\(e.level.rawValue)，\(e.perHour)"))
         }
-        if (current.episodes ?? 0) > 0 {
-            out.append(DetailFact(id: "episodes", lead: .symbol("rectangle.stack.fill"), text: current.countLabel))
-        }
-        let langs = (current.langs ?? []).filter { !$0.isEmpty }
-        if let first = langs.first {
-            out.append(DetailFact(id: "lang", lead: .badge(DetailFacts.languageBadge(first)),
-                                  text: langs.count > 1 ? "\(first)和其他 \(langs.count - 1) 种" : first))
-        }
-        let spec = MediaSpec.series(current, firstFile: files.first?.name)
-        if let res = spec.resolution {
-            out.append(DetailFact(id: "video", lead: .badge(res == "1080p" || res == "720p" ? "HD" : res),
-                                  text: spec.headline ?? res, sub: spec.video))
-        }
-        if let audio = spec.audio {
-            out.append(DetailFact(id: "audio", lead: .symbol("speaker.wave.3.fill"), text: audio))
+        if let r = m?.rating, let lv = DetailFacts.recommendation(r) {
+            let score = String(format: "%.1f", r)
+            out.append(DetailFact(id: "recommend", lead: .badge(lv.rawValue), text: "推荐等级", sub: "TMDB \(score) 分",
+                                  spoken: "推荐等级\(lv.rawValue)，TMDB 评分 \(score) 分"))
         }
         return out
     }
@@ -520,7 +504,7 @@ struct SeriesDetailView: View {
             if let mine, (s.tmdbId ?? sm?.id) == mine { continue }
             if s.name == current.name || !seen.insert(key).inserted { continue }
             items.append(DetailRelatedItem(id: s.path, title: sm?.title ?? s.name,
-                                           subtitle: DetailText.line([s.year, sm?.genres?.first]),
+                                           subtitle: DetailText.line([s.year, sm?.genres?.first, DetailText.rating(sm?.rating)]),
                                            art: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w342"), route: .series(s)))
             if items.count == 3 { break }
         }
@@ -644,6 +628,9 @@ struct DetailScaffold<Episodes: View>: View {
     @State private var edge: UIColor?
     @State private var toast: String?
     @State private var castSheet: CastSheetRequest?
+    /// 点开的是第几张剧照（全屏大图，从那张卡上放大出来）
+    @State private var stillPick: DetailStillPick?
+    @Namespace private var stillsNS
     /// 演员名单里点的那一位：收起弹层以后推进去
     @State private var personPush: CastMember?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -674,17 +661,16 @@ struct DetailScaffold<Episodes: View>: View {
                             }
                         }
                         episodes(m)
-                        if !trailers.isEmpty { trailerSection(m) }
-                        if stills.count >= 2 { stillsSection(m) }
+                        if !trailers.isEmpty || stills.count >= 2 { mediaSection(m) }
                         if !cast.isEmpty { castSection(m) }
                         if !facts.isEmpty || shareURL != nil {
                             group(m, "影片详细信息") {
-                                DetailFactsCard(facts: facts, link: shareURL, palette: palette)
+                                DetailFactsCard(facts: facts, palette: palette)
                             }
                         }
                         if let related, !related.items.isEmpty {
                             group(m, related.title, route: related.route) {
-                                DetailRelatedCard(related: related, palette: palette)
+                                DetailRelatedCard(related: related, palette: palette, wide: m.wide)
                             }
                         }
                     }
@@ -714,7 +700,9 @@ struct DetailScaffold<Episodes: View>: View {
             }
             // 钉在顶上的条：从上面滑下来（参考图的「取得」那一条）；片名在这条里，导航栏里不再写
             .overlay(alignment: .top) {
-                DetailPinnedBar(title: title, thumb: thumb, playTitle: playTitle, playDisabled: playDisabled, palette: palette,
+                DetailPinnedBar(title: title, thumb: thumb,
+                                logo: art?.logo.flatMap { $0.isEmpty ? nil : TMDBImage.url($0, "w500") },
+                                playTitle: playTitle, playDisabled: playDisabled, palette: palette,
                                 topInset: barBottom, leading: insets.leading + m.margin, trailing: insets.trailing + m.margin,
                                 onPlay: onPlay)
                     // 「减弱动态效果」时只淡入淡出、不从上面滑下来（F59；以前只换了曲线，照样滑 100 多点）
@@ -742,7 +730,11 @@ struct DetailScaffold<Episodes: View>: View {
         }
         .navigationDestination(item: $personPush) { m in ActorPage(member: m) }
         // 预告片：全屏（C49、S22），由 TrailerPlayerView.present 用 UIKit 弹——好管方向：除了 iPhone 展开一律横屏（用户要求）
-        // 剧照大图（全屏黑底、从浏览台的画面上放大出来）由 DetailStillsExplorer 自己弹（DetailInfo.swift）
+        // 剧照：全屏黑底的大图，从点的那张卡上放大出来、收回到那张卡上（F57）
+        .fullScreenCover(item: $stillPick) { p in
+            DetailStillsViewer(stills: stillShown.map { TMDBImage.url($0, "w1280") }, index: p.index)
+                .navigationTransition(.zoom(sourceID: p.index, in: stillsNS))
+        }
     }
 
     /// 剧照浏览台里放出来的剧照（最多 12 张，和网页版一样）
@@ -908,24 +900,28 @@ struct DetailScaffold<Episodes: View>: View {
     }
 
 
-    /// 预告片：一排 16:9 卡，和分集卡同一个样子（字压在渐进式模糊上）；点一张全屏放（从这一段开始，左右滑换下一段）
-    private func trailerSection(_ m: DSMetrics) -> some View {
-        DSSection(title: "预告片", metrics: m) {
+    /// 预告片与剧照（用户要求：两样现在是同一种卡，合成一组、不再分开，同一横排里用间距分开）：
+    /// 先是预告片（点一张全屏放，从这一段开始，左右滑换下一段），隔一段宽一点的空（卡间距的 2.5 倍），再是剧照（点一张全屏看大图，
+    /// 从这张卡上放大出来）。卡都是 16:9、字压在渐进式模糊上（DSMediaCard），剧照两张以上才放、最多 12 张。
+    /// 那段空放在最后一张预告片的右边：滑到剧照时第一张剧照照样停在左边线上
+    private func mediaSection(_ m: DSMetrics) -> some View {
+        let shown = stills.count >= 2 ? stillShown : []
+        // 不叫 title：会把这一页的片名（self.title，全屏预告片的标题要用它）挡住
+        let sectionTitle = !trailers.isEmpty && !shown.isEmpty ? "预告片与剧照" : (trailers.isEmpty ? "剧照" : "预告片")
+        let groupGap = (m.gutter * 1.5).rounded()
+        return DSSection(title: sectionTitle, metrics: m) {
             DSShelf(metrics: m) {
                 ForEach(Array(trailers.enumerated()), id: \.offset) { i, t in
                     DetailTrailerCard(trailer: t, art: t.image ?? (trailerArt.isEmpty ? nil : trailerArt[i % trailerArt.count]),
                                       metrics: m, onPlay: { TrailerPlayerView.present(movieTitle: title, trailers: trailers, start: i) })
+                        .padding(.trailing, i == trailers.count - 1 && !shown.isEmpty ? groupGap : 0)
+                }
+                ForEach(Array(shown.enumerated()), id: \.offset) { i, s in
+                    DetailStillCard(art: TMDBImage.url(s, "w1280"), title: "第 \(i + 1) 幕", detail: "剧照",
+                                    metrics: m) { stillPick = DetailStillPick(index: i) }
+                        .matchedTransitionSource(id: i, in: stillsNS)
                 }
             }
-        }
-    }
-
-    /// 剧照（设计轮 2（并行·stills）：照用户给的参考图——apple.com HomePod mini 的「近看」那一块）：
-    /// 标题「剧照」下面一块铺满窗口宽的浏览台（连同侧边那一列）：一排玻璃胶囊挑一张、画面原地换过去，
-    /// 磨砂说明卡 + ‹ › 一张一张看，✕ 回总览；点画面全屏看完整的大图（DetailStillsExplorer）
-    private func stillsSection(_ m: DSMetrics) -> some View {
-        DSSection(title: "剧照", metrics: m) {
-            DetailStillsExplorer(stills: stillShown.map { TMDBImage.url($0, "w1280") }, title: title, metrics: m)
         }
     }
 

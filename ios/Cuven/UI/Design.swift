@@ -508,6 +508,8 @@ struct DSMediaCard<MenuItems: View>: View {
     let title: String
     /// 第二行的字：「45 分钟」「剩余 12 分钟」「2 分钟」「预告片」
     var detail: String? = nil
+    /// 第二行前面那个小符号：默认 ▶；剧照卡是一摞照片（和预告片同一排，用户要求合成一组）
+    var glyph: String = "play.fill"
     /// 看到一半：第二行在 ▶ 后面先放一小段进度条
     var progress: Double? = nil
     /// 长文案的样子（1.3 : 1 的卡，用户要求：短文案、长文案两种卡）：标题上面一行小字（「第 2 集」），下面两行简介
@@ -616,7 +618,7 @@ struct DSMediaCard<MenuItems: View>: View {
     private func detailRow(glyph: Bool) -> some View {
         HStack(spacing: 6) {
             if glyph {
-                Image(systemName: "play.fill")
+                Image(systemName: self.glyph)
                     .font(.caption2)
             }
             if let p = progress, p > 0.01 {

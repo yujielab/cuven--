@@ -243,9 +243,14 @@ struct UsageInsightsCard: View {
     @State private var summary: UsageSummary?
     @State private var taps = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(AppModel.self) private var model
+    /// 缓存占了多少（AppModel.cacheUsage：片库清单与影片信息、接口回包、海报和剧照）
+    @State private var cacheBytes: Int64 = AppModel.cacheUsage
+    @State private var clearing = false
+    @State private var cleared = 0
 
     var body: some View {
-        AccountGroup(title: "使用洞察", footer: expanded ? footer : nil) {
+        AccountGroup(title: "使用洞察", footer: footer) {
             VStack(alignment: .leading, spacing: 0) {
                 header
                 if expanded, let summary {
@@ -253,6 +258,13 @@ struct UsageInsightsCard: View {
                         .padding(.top, 20)
                         .transition(.opacity)
                 }
+                // 清除缓存（用户要求：从「存储」那一组挪进这张卡、改成胶囊钮）：收起时也在
+                Rectangle()
+                    .fill(Color.white.opacity(0.1))
+                    .frame(height: 0.5)
+                    .padding(.top, 20)
+                cacheRow
+                    .padding(.top, 12)
             }
             .padding(.horizontal, AccountMetrics.inset)
             .padding(.top, 18)
@@ -318,14 +330,79 @@ struct UsageInsightsCard: View {
         .accessibilityLabel(expanded ? "收起流量概览" : "展开流量概览")
     }
 
-    /// 卡下一行：统计的是什么、从哪天起（演示模式直说是示例数）
+    /// 卡下一行：统计的是什么、从哪天起（演示模式直说是示例数）；清除缓存会怎样（以前写在「存储」那一组下面）
     private var footer: String {
-        if DemoData.enabled { return "演示模式：上面是固定的示例数，不是真实流量。" }
+        let cache = "清除缓存后，片库清单、海报和影片信息会重新下载。"
+        guard expanded else { return cache }
+        if DemoData.enabled { return "演示模式：上面是固定的示例数，不是真实流量。" + cache }
         var s = "只统计这台设备上 Cuven 实际下载的流量（缓存里已有的不算），记录只保存在本机。"
         if let since = summary?.since {
             s += "从 \(since.formatted(.dateTime.month().day())) 开始记录。"
         }
-        return s
+        return s + cache
+    }
+
+    // MARK: 清除缓存
+
+    /// 左边「缓存」+ 占了多少，右边一颗和「收起 / 展开」同一种玻璃胶囊「清除缓存」
+    private var cacheRow: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("缓存")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.white)
+                Text(clearing ? "正在清除…" : "已用 \(cacheText)")
+                    .font(.subheadline)
+                    .monospacedDigit()
+                    .foregroundStyle(DSInk.tertiary)
+                    .contentTransition(.numericText())
+            }
+            .accessibilityElement(children: .combine)
+            Spacer(minLength: 8)
+            clearPill
+        }
+        .onAppear { cacheBytes = AppModel.cacheUsage }
+    }
+
+    private var clearPill: some View {
+        Button { clearCache() } label: {
+            ZStack {
+                // 转圈时胶囊不变窄
+                Text("清除缓存").opacity(clearing ? 0 : 1)
+                if clearing { ProgressView().controlSize(.small).tint(.white) }
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 18)
+            .frame(minHeight: 34)
+            .glassEffect(.regular.interactive(), in: Capsule())
+            .frame(minHeight: 44)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(clearing)
+        .sensoryFeedback(.success, trigger: cleared)
+        .accessibilityLabel("清除缓存")
+        .accessibilityHint("清除后，片库清单、海报和影片信息会重新下载")
+        .accessibilityIdentifier("account-clear-cache")
+    }
+
+    private var cacheText: String {
+        let s = Format.size(cacheBytes)
+        return s.isEmpty ? "0 MB" : s
+    }
+
+    /// 清掉三样缓存，再把片库重新取一遍（和以前「存储」里那一行一样），完了给一下成功触感
+    private func clearCache() {
+        clearing = true
+        model.clearCaches()
+        withAnimation(.snappy) { cacheBytes = AppModel.cacheUsage }
+        Task { @MainActor in
+            await model.refreshAll()
+            withAnimation(.snappy) { cacheBytes = AppModel.cacheUsage }
+            clearing = false
+            cleared += 1
+        }
     }
 }
 

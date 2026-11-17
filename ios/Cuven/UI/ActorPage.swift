@@ -106,13 +106,10 @@ struct ActorPage: View {
         }
     }
 
-    // MARK: 照片 + 名字 + 三颗钮
+    // MARK: 照片 + 一排：ⓘ · 名字 · 🔍
 
     private func hero(_ m: DSMetrics, works: [ActorWork], width: CGFloat, height: CGFloat, palette: DetailPalette) -> some View {
         let photo = ActorText.photo(member, info: info)
-        let firstMovie: Video? = works.lazy.compactMap { w -> Video? in
-            if case .movie(let v) = w.entry { return v } else { return nil }
-        }.first
         return ZStack(alignment: .bottom) {
             ZStack {
                 palette.base
@@ -136,21 +133,12 @@ struct ActorPage: View {
             .clipped()
             .accessibilityHidden(true)
 
-            VStack(spacing: 22) {
-                Text(name)
-                    .font(.system(size: m.wide ? 52 : 40, weight: .heavy))
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.7)
-                    .shadow(color: .black.opacity(0.25), radius: 10, y: 2)
-                    .accessibilityAddTraits(.isHeader)
-                HStack(spacing: m.wide ? 44 : 34) {
+            // 用户要求：名字包进一颗 Liquid Glass 胶囊，放在原来中间那颗白色播放钮的位置（照片上不再另写一行大字，
+            // 播放钮拿掉：最新的那一部就在下面那张卡里，点进去播放）。三样同一种玻璃、同样 56 点高，排成一排
+            GlassEffectContainer(spacing: 14) {
+                HStack(spacing: m.wide ? 22 : 14) {
                     ActorCircleButton(symbol: "info", size: 56, label: "简介", id: "actor-info") { showBio = true }
-                    ActorPlayButton(enabled: firstMovie != nil,
-                                    label: firstMovie.map { "播放《\(model.title($0))》" } ?? "片库里还没有这位演员的电影") {
-                        if let v = firstMovie { play(v) }
-                    }
+                    ActorNameCapsule(name: name, wide: m.wide)
                     ActorCircleButton(symbol: "magnifyingglass", size: 56, label: "在资料库中搜索", id: "actor-search") {
                         let n = name
                         guard !n.isEmpty else { return }
@@ -166,12 +154,6 @@ struct ActorPage: View {
             .blur(radius: appeared || reduceMotion ? 0 : 8)
         }
         .frame(width: width, height: height)
-    }
-
-    private func play(_ v: Video) {
-        PlayerCoordinator.shared.play(PlayRequest(path: v.path, name: v.name, title: model.title(v),
-                                                  subtitle: model.year(v).map { String($0) },
-                                                  artwork: model.backgroundArtString(v)), model: model)
     }
 
     // MARK: 最新的那一部（参考图「Rise Without A Sound - Single」那张卡）
@@ -319,34 +301,24 @@ struct ActorCircleButton: View {
     }
 }
 
-/// 中间那颗白色大圆 ▶（参考图）：没有可放的电影时变淡、点不了
-struct ActorPlayButton: View {
-    let enabled: Bool
-    let label: String
-    let action: () -> Void
-    @State private var taps = 0
+/// 演员名：一颗 Liquid Glass 胶囊（用户要求，取代中间那颗白色播放钮），和两边的圆钮一样 56 点高、同一种玻璃。
+/// 名字一行写下（粗体，折起 22 点、展开 26 点），太长就缩小（最小七成），胶囊跟着名字宽、最宽不挤掉两边的钮。
+/// 只是名字、不是按钮：旁白念成这一页的标题
+struct ActorNameCapsule: View {
+    let name: String
+    let wide: Bool
 
     var body: some View {
-        Button {
-            taps += 1
-            action()
-        } label: {
-            Image(systemName: "play.fill")
-                .font(.system(size: 30, weight: .bold))
-                .foregroundStyle(.black)
-                .offset(x: 2)
-                .symbolEffect(.bounce, value: taps)
-                .frame(width: 76, height: 76)
-                .background(Circle().fill(.white))
-                .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
-                .contentShape(Circle())
-        }
-        .buttonStyle(PressableStyle(scale: 0.92))
-        .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.45)
-        .sensoryFeedback(.impact(weight: .medium), trigger: taps)
-        .accessibilityLabel(label)
-        .accessibilityIdentifier("actor-play")
+        Text(name)
+            .font(.system(size: wide ? 26 : 22, weight: .bold))
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .padding(.horizontal, wide ? 28 : 22)
+            .frame(minWidth: 56, minHeight: 56)
+            .glassEffect(.regular, in: Capsule())
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier("actor-name")
     }
 }
 

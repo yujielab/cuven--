@@ -301,13 +301,6 @@ struct Series: Codable, Hashable, Identifiable, Sendable {
     }
 
     var name: String { title ?? zh ?? en ?? folder ?? "剧集" }
-    /// 「全 8 集」/「更新至第 5 集 / 共 10 集」
-    var countLabel: String {
-        let n = episodes ?? 0
-        if full == true || complete == true { return "全 \(n) 集" }
-        if let t = total, t > n { return "更新至第 \(n) 集 / 共 \(t) 集" }
-        return "更新至第 \(n) 集"
-    }
 }
 
 struct TVPayload: Codable, Sendable {

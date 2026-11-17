@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - 某一年（首页「2026 ›」进来）
 //
-// 系统大标题「2026 年」、副标题「N 部影片」（C13；iOS 26 的 navigationSubtitle），下面一张海报网格（T23）：
+// 系统大标题「2026 年」，下面一张海报网格（T23）。不写「N 部影片」这类计数（用户要求全局去掉影片计数）：
 // 电影和剧集一起，最新入库的在前；卡上只有画面（纯净画面 + 字标），卡下不写字（T20、F80）。
 // 「播放 / 想看」在长按菜单里（C21、C43、C45）。
 
@@ -12,7 +12,6 @@ struct YearView: View {
 
     var body: some View {
         let entries = model.homeYear(year)
-        let movies = entries.filter { if case .movie = $0 { return true } else { return false } }.count
         GeometryReader { geo in
             let insets = geo.safeAreaInsets
             let metrics = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing, height: geo.size.height)
@@ -35,15 +34,6 @@ struct YearView: View {
         }
         .background(Theme.bg)
         .navigationTitle(Text(verbatim: "\(year) 年"))
-        .navigationSubtitle(Self.subtitle(movies: movies, series: entries.count - movies))
         .navigationBarTitleDisplayMode(.large)
-    }
-
-    /// 「12 部影片」；有剧集时「12 部电影、2 部剧集」
-    static func subtitle(movies: Int, series: Int) -> String {
-        if movies == 0 && series == 0 { return "" }
-        if series == 0 { return "\(movies) 部影片" }
-        if movies == 0 { return "\(series) 部剧集" }
-        return "\(movies) 部电影、\(series) 部剧集"
     }
 }

@@ -30,8 +30,6 @@ enum DetailAboutStyle {
     /// 卡的底色：深色页面上的「二级底」（#1C1C1E）
     static let card = Color(white: 0.11)
     static let radius: CGFloat = 14
-    /// 评分卡那颗星
-    static let star = Color(red: 1.0, green: 0.78, blue: 0.24)
 }
 
 /// 「简介」那一排
@@ -319,13 +317,5 @@ extension DetailAboutCard {
     static func synopsis(title: String, genres: [String], overview: String) -> DetailAboutCard {
         DetailAboutCard(id: "synopsis", title: title, caption: genres.joined(separator: " · "),
                         text: overview, sheetTitle: "简介")
-    }
-
-    /// 评分卡：「★ 7.5」「TMDB 评分」，正文说清满分多少、在片库里排在哪（高过一半以上才说）
-    static func rating(_ r: Double, percentile: Int?, pool: String) -> DetailAboutCard {
-        var text = "TMDB 观众打分，满分 10 分。"
-        if let p = percentile, p >= 50 { text += "高于片库里 \(p)% 的\(pool)。" }
-        return DetailAboutCard(id: "rating", title: String(format: "%.1f", r), symbol: "star.fill",
-                               symbolColor: DetailAboutStyle.star, caption: "TMDB 评分", text: text)
     }
 }

@@ -487,8 +487,9 @@ struct ShowcaseIntro: View {
                         .font(.dsSectionTitle)
                         .foregroundStyle(.white)
                         .padding(.leading, metrics.margin + lead).padding(.trailing, metrics.margin + trail)
-                        // 剧照本身不念（只是画面、点不开）：标题告诉旁白有几张，不再念一个后面什么都没有的「剧照」（F76）
-                        .accessibilityLabel("剧照，\(stills.count) 张")
+                        // 剧照本身不念（只是画面、点不开）：标题后面补一句说明，不念一个后面什么都没有的「剧照」（F76）；
+                        // 不再念「N 张」（用户要求全局去掉计数）
+                        .accessibilityHint("一排剧照画面，只供观看")
                         .accessibilityAddTraits(.isHeader)
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: metrics.gutter) {
@@ -592,18 +593,19 @@ final class ShowcaseTrailer {
         ]
     }
 
-    func mount(_ v: Video, model: AppModel) {
-        mount(key: v.path) { await model.trailers(for: v) }
+    /// userStarted：是人按了「播放预告」才挂上的（主页编辑推荐）：照样放，不看系统「自动播放视频预览」和省流量
+    func mount(_ v: Video, model: AppModel, userStarted: Bool = false) {
+        mount(key: v.path, userStarted: userStarted) { await model.trailers(for: v) }
     }
 
     /// 任意一部（电影、剧集）：key 认是哪一部（同一部再挂一次什么都不做），fetch 去拿它的预告片
-    func mount(key: String, fetch: @escaping () async -> [Trailer]) {
+    func mount(key: String, userStarted: Bool = false, fetch: @escaping () async -> [Trailer]) {
         guard path != key else { return }
         unmount()
         path = key
         // F77、S17：系统「自动播放视频预览」关着时不自己放，停在那儿等人点那颗播放钮；
-        // 账户页「网络速度」调到 25% 以下（省流量）也一样
-        paused = !UIAccessibility.isVideoAutoplayEnabled || NetworkSpeed.dataSaver
+        // 账户页「网络速度」调到 25% 以下（省流量）也一样。人明明白白按了播放就放
+        paused = userStarted ? false : (!UIAccessibility.isVideoAutoplayEnabled || NetworkSpeed.dataSaver)
         loadTask = Task { [weak self] in
             let list = await fetch()
             guard let self, !Task.isCancelled, self.path == key,

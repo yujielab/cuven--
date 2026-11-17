@@ -36,8 +36,8 @@ actor ImagePipeline {
     /// 详情页头部处理好的画面（按「地址 + 尺寸 + 宽高比」）
     nonisolated(unsafe) private let heroCache = NSCache<NSString, HeroArtBox>()
     private let session: URLSession
-    /// 磁盘缓存（URLSession 用的同一个）：命中的那次不算流量
-    private let diskCache: URLCache
+    /// 磁盘缓存（URLSession 用的同一个）：命中的那次不算流量。URLCache 本身线程安全：账户页同步查大小、清掉
+    nonisolated(unsafe) private let diskCache: URLCache
 
     init() {
         memory.totalCostLimit = 160 << 20
@@ -51,6 +51,12 @@ actor ImagePipeline {
         cfg.httpMaximumConnectionsPerHost = 6
         session = URLSession(configuration: cfg)
     }
+
+    /// 海报、剧照这些图在磁盘上占了多少（账户页「使用洞察」里的「清除缓存」）
+    nonisolated var diskUsage: Int64 { Int64(diskCache.currentDiskUsage) }
+
+    /// 清掉磁盘上的图；内存里的留着，屏上正显示的图不闪（再要的时候重新下载）
+    nonisolated func clearDisk() { diskCache.removeAllCachedResponses() }
 
     /// 内存里已经有的（不等、不解码）：视图第一次画就直接用——滑回来的卡、再打开的详情页不会先闪一下占位再淡入
     nonisolated func cached(_ url: URL, maxPixel: CGFloat, effect: ImageEffect = .none) -> UIImage? {

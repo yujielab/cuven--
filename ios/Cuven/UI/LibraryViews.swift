@@ -337,11 +337,12 @@ struct SearchView: View {
     }
 
     /// 「全部」：和网页版一样，剧集一排 16:9 横卡、电影一排竖海报（卡型不同，一眼分得出）；最相关的那一类在上
-    /// 「N 个结果」是下面这些结果的说明，贴着它们（设计轮 2（并行·library）：到第一组的距离 排间距 44 → 标题间距 + 12 = 24，
+    /// 「「q」的搜索结果」是下面这些结果的说明，贴着它们（设计轮 2（并行·library）：到第一组的距离 排间距 44 → 标题间距 + 12 = 24，
     /// 以前它和第一组隔得比两组之间还远，像飘在分类胶囊和结果中间：F3、F12）
     @ViewBuilder private func allResults(_ q: String, movies: [Video], shows: [Series], seriesFirst: Bool, _ metrics: DSMetrics) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("「\(q)」· \(movies.count + shows.count) 个结果")
+            // 不写「N 个结果」（用户要求全局去掉影片计数）
+            Text("「\(q)」的搜索结果")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, metrics.margin)

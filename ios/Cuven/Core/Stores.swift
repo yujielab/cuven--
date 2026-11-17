@@ -880,16 +880,6 @@ final class AppModel {
         return nil
     }
 
-    /// 这个评分在片库里高过百分之几的电影（剧集就和剧集比）；有评分的不到 20 部就不算（数太少，说了也没意义）
-    func ratingPercentile(_ r: Double, series: Bool) -> Int? {
-        let all: [Double] = series
-            ? self.series.compactMap { seriesMetas[$0.path]?.rating }.filter { $0 > 0 }
-            : movies.compactMap { meta($0)?.rating }.filter { $0 > 0 }
-        guard all.count >= 20 else { return nil }
-        let below = all.reduce(0) { $0 + ($1 < r ? 1 : 0) }
-        return Int((Double(below) / Double(all.count) * 100).rounded(.down))
-    }
-
     /// 做得成精选卡吗（featuredArt 的便宜版：只看有没有，不拼地址；主页每次刷新都要对全片库问一遍）
     private func featuredReady(_ v: Video) -> Bool {
         let m = meta(v), a = appleArt(v)
@@ -1319,15 +1309,23 @@ final class AppModel {
             var s = score([se.title, se.zh, se.en, m?.title, m?.en, se.folder])
             if s == 0, se.year == q { s = 40 }
             guard s > 0 else { continue }
-            let sub = [se.year, se.seasonLabel, se.countLabel].compactMap { $0 }.joined(separator: " · ")
+            // 不写集数（用户要求全局去掉计数）
+            let sub = [se.year, se.seasonLabel].compactMap { $0 }.joined(separator: " · ")
             hits.append(SearchHit(kind: .series(se), title: se.name, subtitle: sub,
                                   image: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), score: s + 1))
         }
         return hits.sorted { $0.score != $1.score ? $0.score > $1.score : $0.title < $1.title }.prefix(80).map { $0 }
     }
 
+    /// 清除缓存：片库清单与影片信息（Caches/cuven）、接口回包（URLCache.shared）、海报和剧照（图片管线的磁盘缓存，以前漏了）
     func clearCaches() {
         DiskCache.clear()
         URLCache.shared.removeAllCachedResponses()
+        ImagePipeline.shared.clearDisk()
+    }
+
+    /// 缓存一共占了多少：和 clearCaches 清的是同三样
+    static var cacheUsage: Int64 {
+        DiskCache.size() + Int64(URLCache.shared.currentDiskUsage) + ImagePipeline.shared.diskUsage
     }
 }
