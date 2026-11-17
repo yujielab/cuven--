@@ -1133,7 +1133,14 @@ struct DSBlurFadeImage: View {
     private struct Shown: Equatable {
         let url: URL
         let image: UIImage
+        /// 按多大取的（尺寸变大了才换更清楚的，见 RemoteImage）
+        var pixel: CGFloat
         static func == (a: Shown, b: Shown) -> Bool { a.url == b.url }
+    }
+
+    private struct LoadKey: Equatable {
+        let url: URL?
+        let pixel: Int
     }
 
     /// 内存里已经有：第一次画就直接是它（回到主页时头图不再淡入一遍）
@@ -1141,8 +1148,8 @@ struct DSBlurFadeImage: View {
         self.url = url
         self.maxPixel = maxPixel
         self.duration = duration
-        if let url, let hit = ImagePipeline.shared.cached(url, maxPixel: maxPixel) {
-            _shown = State(initialValue: Shown(url: url, image: hit))
+        if let url, maxPixel >= RemoteImage.minPixel, let hit = ImagePipeline.shared.cached(url, maxPixel: maxPixel) {
+            _shown = State(initialValue: Shown(url: url, image: hit, pixel: maxPixel))
         }
     }
 
@@ -1156,11 +1163,16 @@ struct DSBlurFadeImage: View {
                     .transition(reduceMotion ? .opacity : .dsBlurFade)
             }
         }
-        .task(id: url) {
-            guard let url else { return }
-            if shown?.url == url { return }
+        // 地址或尺寸变了才取：还没量出尺寸（0）先不取；同一张图尺寸变大了换更清楚的、原地换不再淡入（见 RemoteImage）
+        .task(id: LoadKey(url: url, pixel: maxPixel.isFinite ? Int(maxPixel) : 0)) {
+            guard let url, maxPixel.isFinite, maxPixel >= RemoteImage.minPixel else { return }
+            if let s = shown, s.url == url, s.pixel >= maxPixel * 0.8 { return }
             guard let img = await ImagePipeline.shared.image(url, maxPixel: maxPixel), !Task.isCancelled else { return }
-            withAnimation(.easeInOut(duration: duration)) { shown = Shown(url: url, image: img) }
+            if shown?.url == url {
+                shown = Shown(url: url, image: img, pixel: maxPixel)
+            } else {
+                withAnimation(.easeInOut(duration: duration)) { shown = Shown(url: url, image: img, pixel: maxPixel) }
+            }
         }
     }
 }
