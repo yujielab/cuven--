@@ -253,7 +253,11 @@ enum ImageEffects {
     }
 }
 
-/// 网络图片视图：加载前是一块暗色占位，加载完淡入
+/// 网络图片视图：加载前是一块暗色占位，加载完淡入。
+/// 按要显示的尺寸（maxPixel）取图；尺寸后来变大了就换一张更清楚的（同一张图原地换、不再淡入一遍）。
+/// 用户截图：主页年份卡的画面、演员简介弹层的照片有时糊成一片色块——那是一张 64 像素的小图被放大了：
+/// 这些地方按量出来的宽算 maxPixel，弹层、懒加载的一排第一次排版时宽常常还是 0，以前就按 0（解码时兜到 64 像素）取了，
+/// 之后量出真的宽，地址没变就不再取。现在没量出尺寸之前不取，尺寸变大了重取
 struct RemoteImage: View {
     let url: URL?
     let maxPixel: CGFloat
@@ -264,7 +268,12 @@ struct RemoteImage: View {
 
     @State private var image: UIImage?
     @State private var loadedURL: URL?
+    /// 现在这张是按多大取的（换了更大的尺寸才重取）
+    @State private var loadedPixel: CGFloat = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// 比这还小，是还没量出尺寸（第一次排版前的 0）：先不取
+    static let minPixel: CGFloat = 48
 
     /// 内存里已经有这张图：第一次画就直接是它（不闪占位、不再淡入一遍）
     init(url: URL?, maxPixel: CGFloat = 900, contentMode: ContentMode = .fill,
@@ -274,9 +283,15 @@ struct RemoteImage: View {
         self.contentMode = contentMode
         self.placeholder = placeholder
         self.effect = effect
-        let hit = url.flatMap { ImagePipeline.shared.cached($0, maxPixel: maxPixel, effect: effect) }
+        let hit = maxPixel < Self.minPixel ? nil : url.flatMap { ImagePipeline.shared.cached($0, maxPixel: maxPixel, effect: effect) }
         _image = State(initialValue: hit)
         _loadedURL = State(initialValue: hit == nil ? nil : url)
+        _loadedPixel = State(initialValue: hit == nil ? 0 : maxPixel)
+    }
+
+    private struct LoadKey: Equatable {
+        let url: URL?
+        let pixel: Int
     }
 
     var body: some View {
@@ -291,14 +306,23 @@ struct RemoteImage: View {
                     .transition(reduceMotion ? .opacity : .dsBlurFade(radius: 8))
             }
         }
-        .task(id: url) {
-            guard let url else { image = nil; return }
-            if loadedURL == url, image != nil { return }
-            if loadedURL != url { image = nil }
+        .task(id: LoadKey(url: url, pixel: maxPixel.isFinite ? Int(maxPixel) : 0)) {
+            guard let url else { image = nil; loadedURL = nil; loadedPixel = 0; return }
+            guard maxPixel.isFinite, maxPixel >= Self.minPixel else { return }
+            let sameURL = loadedURL == url && image != nil
+            // 手里这张够清楚（尺寸变小、或者只大了一点点）：不重取
+            if sameURL, loadedPixel >= maxPixel * 0.8 { return }
+            if !sameURL { image = nil }
             let img = await ImagePipeline.shared.image(url, maxPixel: maxPixel, effect: effect)
             guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.32)) { image = img }
-            loadedURL = url
+            if sameURL {
+                // 同一张图换成更清楚的：原地换，不再淡入（取不到就留着原来那张）
+                if let img { image = img; loadedPixel = maxPixel }
+            } else {
+                withAnimation(.easeOut(duration: 0.32)) { image = img }
+                loadedURL = url
+                loadedPixel = img == nil ? 0 : maxPixel
+            }
         }
     }
 }
