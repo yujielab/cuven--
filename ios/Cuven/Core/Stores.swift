@@ -1097,13 +1097,14 @@ final class AppModel {
         return (TMDBImage.url(m?.backdrop ?? m?.posterClean ?? m?.poster, "w780"), logo)
     }
 
-    /// 列表行里的小图（行里已经写着片名，不压字标）：Apple 海报 → Apple 竖版主视觉 → TMDB 海报
+    /// 小海报（列表行、合集卡和年份卡的底条、编辑推荐的面板）：Apple 海报 → TMDB 海报 → TMDB 纯净海报 → Apple 竖版主视觉。
+    /// 竖版主视觉排到最后（用户截图：小海报上半截是画、下半截是一大块纯色——那种图下面是给字留的空，裁成 2:3 只剩那一块）
     func thumbArt(_ v: Video) -> URL? {
-        if let a = appleArt(v), let s = Self.nonEmpty(a.poster) ?? Self.nonEmpty(a.tall) {
-            return URL(string: AppleImage.sized(s, width: 200) ?? s)
-        }
-        let m = meta(v)
-        return TMDBImage.url(m?.poster ?? m?.posterClean, "w185")
+        let a = appleArt(v), m = meta(v)
+        if let p = Self.nonEmpty(a?.poster) { return URL(string: AppleImage.sized(p, width: 200) ?? p) }
+        if let p = Self.nonEmpty(m?.poster) ?? Self.nonEmpty(m?.posterClean) { return TMDBImage.url(p, "w185") }
+        if let t = Self.nonEmpty(a?.tall) { return URL(string: AppleImage.sized(t, width: 200) ?? t) }
+        return nil
     }
 
     /// 16:9 卡：Apple 带片名排版的 16:9 → Apple 无字背景 → TMDB 横版剧照 → TMDB 海报

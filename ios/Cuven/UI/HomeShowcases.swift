@@ -35,8 +35,8 @@ struct EditorsPick: View {
     var body: some View {
         let fullW = metrics.width + metrics.leadingInset + metrics.trailingInset
         let h = Self.height(fullWidth: fullW, fullHeight: fullHeight)
-        // 这一块接近方的或竖的（折起、展开竖拿）用竖版主视觉，扁的用横版背景
-        let still = stillArt(portrait: h >= fullW * 0.85, fullWidth: fullW)
+        // 预告片放起来之前是剧照（用户要求「未播放预告片时要有剧照兜底」）
+        let still = stillArt(fullWidth: fullW)
         ZStack(alignment: .topTrailing) {
             ZoomLink(route: .movie(video), slot: "editors-pick", press: false) {
                 VStack(alignment: .leading, spacing: 0) {
@@ -113,11 +113,17 @@ struct EditorsPick: View {
         trailer.setCovered(!onScreen)
     }
 
-    /// 预告片起来之前的画面：竖着的这一块用 Apple TV 的竖版主视觉（没有就横版背景），横着的用横版背景
-    private func stillArt(portrait: Bool, fullWidth: CGFloat) -> URL? {
-        let wide = TMDBImage.url(model.backgroundArtString(video), "w1280")
-        guard portrait else { return wide }
-        return model.featuredArt(video, width: fullWidth)?.url ?? wide
+    /// 预告片起来之前（没按「播放预告」时）的画面——剧照（用户要求「未播放预告片时要有剧照兜底」）：
+    /// Apple TV 无字的横版背景 → TMDB 横版剧照（无字的那张优先）→ TMDB 剧照里的第一张 → Apple 带片名的 16:9 → 竖版主视觉。
+    /// 以前竖着的这一块用竖版主视觉：那种图下半截是给字留的一大片纯色，按 fill 裁进这一块常常只剩那一片（用户截图：整块空着）
+    private func stillArt(fullWidth: CGFloat) -> URL? {
+        let a = model.appleArt(video), m = model.meta(video)
+        func some(_ s: String?) -> String? { (s?.isEmpty ?? true) ? nil : s }
+        if let b = some(a?.background) { return URL(string: AppleImage.sized(b, width: 1920) ?? b) }
+        if let b = some(m?.backdropClean) ?? some(m?.backdrop) { return TMDBImage.url(b, "w1280") }
+        if let s = m?.stills?.lazy.compactMap({ some($0.url) ?? some($0.thumb) }).first { return TMDBImage.url(s, "w1280") }
+        if let w = some(a?.wide) { return URL(string: AppleImage.sized(w, width: 1920) ?? w) }
+        return model.featuredArt(video, width: fullWidth)?.url
     }
 
     private func media(still: URL?, pixel: CGFloat) -> some View {
