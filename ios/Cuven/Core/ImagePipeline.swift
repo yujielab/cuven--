@@ -24,6 +24,11 @@ enum ImageEffect: String, Hashable, Sendable {
     case featureCard
     /// 长文案的分集卡（1.3 : 1）：糊的那一段更高（离底 46% 起，26% 以下最糊），两行简介和片长压在上面
     case bottomBlurTall
+    /// 片段合集的竖卡（9 : 16，用户要求加渐进式模糊）：先裁成 9 : 16，再把下段糊掉（离底 36% 起，16% 以下最糊），分类名压在上面
+    case clipCard
+    /// 精选电影的大竖卡（3 : 4，用户要求「内部四周向内的渐进式模糊」）：先裁成 3 : 4，四边往里渐进式地糊，
+    /// 中间清楚；底下那一截糊得高一点（字标和一行字压在上面）
+    case bigCard
 }
 
 /// 图片：内存缓存（NSCache）+ 磁盘缓存（URLCache）+ 按显示尺寸降采样解码 —— 一屏几十张海报也不吃内存。
@@ -191,7 +196,94 @@ enum ImageEffects {
         case .bottomBlur: return bottomBlur(image)
         case .featureCard: return featureCard(image)
         case .bottomBlurTall: return bottomBlur(image, clearAbove: 0.46, fullBelow: 0.26)
+        case .clipCard: return clipCard(image)
+        case .bigCard: return bigCard(image)
         }
+    }
+
+    /// 精选电影的大竖卡：裁成 3 : 4（和精选卡同一个裁法：很瘦的竖版主视觉从离顶 8% 往下取，2:3 海报居中取），
+    /// 再四边往里糊——左右各 14%、顶上 12% 由糊到清楚，底下离底 14% 以下最糊、36% 以上清楚
+    static func bigCard(_ image: UIImage) -> UIImage? {
+        guard let cg = image.cgImage else { return nil }
+        let W = CGFloat(cg.width), H = CGFloat(cg.height)
+        guard W > 8, H > 8 else { return nil }
+        let aspect: CGFloat = 3.0 / 4.0
+        var rect = CGRect(x: 0, y: 0, width: W, height: H)
+        if W / H < aspect {
+            let h = (W / aspect).rounded(.down)
+            let y = W / H < 0.6 ? min(H - h, (H * 0.08).rounded(.down)) : ((H - h) / 2).rounded(.down)
+            rect = CGRect(x: 0, y: y, width: W, height: h)
+        } else if W / H > aspect {
+            let w = (H * aspect).rounded(.down)
+            rect = CGRect(x: ((W - w) / 2).rounded(.down), y: 0, width: w, height: H)
+        }
+        guard let cropped = cg.cropping(to: rect) else { return nil }
+        let base = UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
+        return edgeBlur(base, side: 0.14, top: 0.12, bottomFull: 0.14, bottomClear: 0.36) ?? base
+    }
+
+    /// 四边往里的渐进式模糊：遮罩是四条线性渐变取最大（边上白 = 糊到最大，往里到 side / top / bottomClear 处变黑 = 清楚），
+    /// 用可变半径模糊按遮罩糊；半径按图宽算（宽的 2.6%），大小图糊得一样
+    static func edgeBlur(_ image: UIImage, side: CGFloat, top: CGFloat, bottomFull: CGFloat, bottomClear: CGFloat) -> UIImage? {
+        guard let cg = image.cgImage else { return nil }
+        let input = CIImage(cgImage: cg)
+        let r = input.extent
+        guard r.width > 8, r.height > 8 else { return nil }
+        func ramp(_ edge: CGPoint, _ inner: CGPoint) -> CIImage? {
+            let g = CIFilter.linearGradient()
+            g.point0 = edge
+            g.color0 = CIColor.white
+            g.point1 = inner
+            g.color1 = CIColor.black
+            return g.outputImage?.cropped(to: r)
+        }
+        // Core Image 的原点在左下：y 小的是底边
+        let parts: [CIImage?] = [
+            ramp(CGPoint(x: r.minX, y: r.midY), CGPoint(x: r.minX + r.width * side, y: r.midY)),
+            ramp(CGPoint(x: r.maxX, y: r.midY), CGPoint(x: r.maxX - r.width * side, y: r.midY)),
+            ramp(CGPoint(x: r.midX, y: r.maxY), CGPoint(x: r.midX, y: r.maxY - r.height * top)),
+            ramp(CGPoint(x: r.midX, y: r.minY + r.height * bottomFull), CGPoint(x: r.midX, y: r.minY + r.height * bottomClear)),
+        ]
+        let ramps = parts.compactMap { $0 }
+        guard ramps.count == 4 else { return nil }
+        var mask = ramps[0]
+        for m in ramps.dropFirst() {
+            let mx = CIFilter.maximumCompositing()
+            mx.inputImage = m
+            mx.backgroundImage = mask
+            guard let out = mx.outputImage else { return nil }
+            mask = out
+        }
+        let blur = CIFilter.maskedVariableBlur()
+        // 先把边缘向外延展，糊的时候四边不会渗进透明、发暗
+        blur.inputImage = input.clampedToExtent()
+        blur.mask = mask.cropped(to: r)
+        blur.radius = Float(max(4, r.width * 0.026))
+        guard let out = blur.outputImage?.cropped(to: r) else { return nil }
+        let space = cg.colorSpace.flatMap { $0.model == .rgb ? $0 : nil }
+        guard let done = space.flatMap({ context.createCGImage(out, from: r, format: .RGBA8, colorSpace: $0) })
+                ?? context.createCGImage(out, from: r) else { return nil }
+        return UIImage(cgImage: done, scale: image.scale, orientation: image.imageOrientation)
+    }
+
+    /// 片段合集的竖卡：裁成 9 : 16（比它瘦的 Apple TV 竖版主视觉从离顶 6% 往下取，人物多在上半截；
+    /// 比它宽的 2:3 海报左右居中取），再把下段渐进式地糊掉——不管画面原来是什么比例，糊的那一段都落在卡的同一个高度上
+    static func clipCard(_ image: UIImage) -> UIImage? {
+        guard let cg = image.cgImage else { return nil }
+        let W = CGFloat(cg.width), H = CGFloat(cg.height)
+        guard W > 8, H > 8 else { return nil }
+        let aspect: CGFloat = 9.0 / 16.0
+        var rect = CGRect(x: 0, y: 0, width: W, height: H)
+        if W / H < aspect {
+            let h = (W / aspect).rounded(.down)
+            rect = CGRect(x: 0, y: min(H - h, (H * 0.06).rounded(.down)), width: W, height: h)
+        } else if W / H > aspect {
+            let w = (H * aspect).rounded(.down)
+            rect = CGRect(x: ((W - w) / 2).rounded(.down), y: 0, width: w, height: H)
+        }
+        guard let cropped = cg.cropping(to: rect) else { return nil }
+        let base = UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
+        return bottomBlur(base, clearAbove: 0.36, fullBelow: 0.16) ?? base
     }
 
     /// 详情页头部：裁成画面区的宽高比（很瘦的竖版主视觉从靠近顶上取、别的从偏上取，比画面区宽的左右居中），

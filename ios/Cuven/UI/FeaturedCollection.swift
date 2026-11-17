@@ -327,14 +327,16 @@ struct FeaturedBigCard: View {
         let h = (width * 4 / 3).rounded()
         let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
         let pad: CGFloat = width >= 330 ? 20 : 16
-        // 画面用 Color.clear 撑出卡的大小再盖上去：fill 的图不会把这一层撑大，字和渐暗都贴着卡的边
+        // 画面用 Color.clear 撑出卡的大小再盖上去：fill 的图不会把这一层撑大，字和渐暗都贴着卡的边。
+        // 用户要求「内部四周向内的渐进式模糊」：画面先裁成 3 : 4、四边往里渐进式地糊（ImageEffect.bigCard，后台算一次、缓存），
+        // 中间清楚；糊过的底边上字标和一行字看得清，压暗跟着淡一点
         Color.clear
             .frame(width: width, height: h)
-            .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: .clear) }
+            .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: .clear, effect: .bigCard) }
             .overlay {
-                LinearGradient(stops: [.init(color: .black.opacity(0), location: 0.42),
-                                       .init(color: .black.opacity(0.55), location: 0.72),
-                                       .init(color: .black.opacity(0.82), location: 1)],
+                LinearGradient(stops: [.init(color: .black.opacity(0), location: 0.45),
+                                       .init(color: .black.opacity(0.4), location: 0.74),
+                                       .init(color: .black.opacity(0.72), location: 1)],
                                startPoint: .top, endPoint: .bottom)
             }
             .overlay(alignment: .bottomLeading) {

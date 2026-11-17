@@ -411,6 +411,8 @@ struct DSWideLogo: View {
     let logo: URL
     let size: CGSize
     var title: String? = nil
+    /// 字标真画出来有多高（继续观看的百分比气泡要浮在它上面）
+    var onLogoHeight: ((CGFloat) -> Void)? = nil
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -420,6 +422,7 @@ struct DSWideLogo: View {
             ], startPoint: .top, endPoint: .bottom)
             LogoImage(url: logo, height: (size.height * 0.22).rounded(), alignment: .leading,
                       fallback: title, maxWidth: (size.width * 0.5).rounded())
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { onLogoHeight?($0) }
                 .padding(.leading, (size.width * 0.06).rounded())
                 .padding(.bottom, (size.height * 0.1).rounded())
         }
@@ -468,27 +471,28 @@ struct DSWideLockup: View {
     let metrics: DSMetrics
     var width: CGFloat? = nil
     var logo: URL? = nil
+    /// 字标真画出来有多高（宽的字标比它那一格矮得多）：百分比气泡浮在字标上面
+    @State private var logoHeight: CGFloat = 0
 
     var body: some View {
         let w = width ?? metrics.wideCardWidth
         let h = (w * 9 / 16).rounded()
+        // 气泡的尖角离进度条多高：有字标就浮在字标上沿上面（用户画的那样，不压字标），没有字标就贴着进度条
+        let lift: CGFloat = logo == nil || logoHeight <= 0
+            ? 3 : max(3, (h * 0.1).rounded() + logoHeight - 14 + 4)
         VStack(alignment: .leading, spacing: 10) {
             DSParallaxArt(url: art, metrics: metrics, size: CGSize(width: w, height: h))
                 .overlay {
-                    if let logo { DSWideLogo(logo: logo, size: CGSize(width: w, height: h), title: title) }
+                    if let logo {
+                        DSWideLogo(logo: logo, size: CGSize(width: w, height: h), title: title) { logoHeight = $0 }
+                    }
                 }
                 .overlay(alignment: .bottom) {
                     if let p = progress, p > 0.01 {
-                        // 进度：底部一条细的胶囊（F36）
-                        GeometryReader { g in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(.white.opacity(0.3))
-                                Capsule().fill(.white).frame(width: max(4, g.size.width * min(1, p)))
-                            }
-                        }
-                        .frame(height: 4)
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 10)
+                        // 进度：底部一条细的胶囊（F36），上面一颗液态玻璃的百分比气泡（用户要求），尖角指着看到的地方
+                        DSPercentProgress(value: p, lift: lift)
+                            .padding(.horizontal, 12)
+                            .padding(.bottom, 10)
                     }
                 }
                 // 设计轮 2：12 → DSRadius.card（折起 283 点宽 16），和同样宽的年份卡、分集卡一样圆
@@ -497,7 +501,99 @@ struct DSWideLockup: View {
         .frame(width: w, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([title, subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，"))
+        .accessibilityLabel(spokenLabel)
+    }
+
+    /// 旁白：片名，剩余时间，已看百分之几
+    private var spokenLabel: String {
+        var parts: [String] = [title]
+        if let s = subtitle, !s.isEmpty { parts.append(s) }
+        if let p = progress, p > 0.01 { parts.append("已看 \(DSPercentProgress.percent(p))%") }
+        return parts.joined(separator: "，")
+    }
+}
+
+/// 继续观看的进度（用户要求「添加一个液态玻璃百分比进度条显示器」）：底部一条 4 点高的细胶囊，
+/// 走过的那一段白色；上面一颗液态玻璃的小气泡写着「32%」，底下一个小尖角指着看到的那个点。
+/// 气泡在两头不出界（靠边时气泡停在边上，尖角照样指着真正的位置）；气泡和尖角是一个形状，玻璃连成一整块
+struct DSPercentProgress: View {
+    let value: Double
+    /// 气泡的尖角离进度条上沿多高（卡上有字标时浮在字标上面）
+    var lift: CGFloat = 3
+
+    static func percent(_ v: Double) -> Int { Int((min(1, max(0, v)) * 100).rounded()) }
+
+    var body: some View {
+        let p = min(1, max(0, value))
+        GeometryReader { g in
+            let w = g.size.width
+            let x = w * p
+            let bw = DSProgressBubble.width
+            let left = min(max(x - bw / 2, 0), max(0, w - bw))
+            Capsule()
+                .fill(Color.white.opacity(0.3))
+                .overlay(alignment: .leading) {
+                    Capsule().fill(Color.white).frame(width: max(4, x))
+                }
+                .overlay(alignment: .bottomLeading) {
+                    DSProgressBubble(text: "\(Self.percent(p))%", tailX: x - left)
+                        .offset(x: left, y: -(g.size.height + lift))
+                }
+        }
+        .frame(height: 4)
+        .animation(.snappy(duration: 0.3), value: lift)
+        .accessibilityHidden(true)
+    }
+}
+
+/// 百分比气泡：液态玻璃（iOS 26 glassEffect），胶囊 + 底下的小尖角
+struct DSProgressBubble: View {
+    let text: String
+    /// 尖角在气泡里的横向位置（从气泡左边算）
+    let tailX: CGFloat
+
+    static let width: CGFloat = 46
+    static let height: CGFloat = 22
+    static let tail: CGFloat = 5
+
+    var body: some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .frame(width: Self.width, height: Self.height)
+            .padding(.bottom, Self.tail)
+            .glassEffect(.regular, in: DSBubbleShape(tailX: tailX, tail: Self.tail))
+            .shadow(color: .black.opacity(0.25), radius: 4, y: 2)
+            // 气泡是定死大小的：字放大也不撑破
+            .dynamicTypeSize(...DynamicTypeSize.xLarge)
+    }
+}
+
+/// 胶囊 + 底边一个朝下的小尖角（合成一个形状：玻璃不会在接缝处断开）
+struct DSBubbleShape: Shape {
+    var tailX: CGFloat
+    var tail: CGFloat
+
+    var animatableData: CGFloat {
+        get { tailX }
+        set { tailX = newValue }
+    }
+
+    func path(in r: CGRect) -> Path {
+        let h = max(1, r.height - tail)
+        let body = Path(roundedRect: CGRect(x: r.minX, y: r.minY, width: r.width, height: h),
+                        cornerRadius: h / 2, style: .continuous)
+        // 尖角不进圆头那一段：靠边时贴着圆头的内侧
+        let tx = min(max(r.minX + tailX, r.minX + h / 2), r.maxX - h / 2)
+        var tri = Path()
+        tri.move(to: CGPoint(x: tx - tail, y: r.minY + h - 1))
+        tri.addLine(to: CGPoint(x: tx, y: r.maxY))
+        tri.addLine(to: CGPoint(x: tx + tail, y: r.minY + h - 1))
+        tri.closeSubpath()
+        return Path(body.cgPath.union(tri.cgPath))
     }
 }
 

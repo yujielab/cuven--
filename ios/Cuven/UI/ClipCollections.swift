@@ -362,7 +362,8 @@ struct ClipCollectionsShelf: View {
     }
 }
 
-/// 一张合集竖卡（参考图）：9 : 16、圆角、一圈细边；整幅画面，下段压暗，左下大号粗体的分类名
+/// 一张合集竖卡（参考图）：9 : 16、圆角、一圈细边；整幅画面，下段渐进式模糊（用户要求）再压一层淡暗，
+/// 左下大号粗体的分类名压在模糊上
 struct ClipCollectionCard: View {
     let title: String
     let art: URL?
@@ -373,11 +374,13 @@ struct ClipCollectionCard: View {
         let shape = RoundedRectangle(cornerRadius: min(22, max(16, (width * 0.13).rounded())), style: .continuous)
         Color.clear
             .frame(width: width, height: h)
-            .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: Color(white: 0.12)) }
+            // 画面先裁成 9 : 16、下段渐进式模糊（ImageEffect.clipCard，后台算一次、缓存），糊的那一段正好垫在分类名下面
+            .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: Color(white: 0.12), effect: .clipCard) }
             .overlay {
-                LinearGradient(stops: [.init(color: .black.opacity(0), location: 0.42),
-                                       .init(color: .black.opacity(0.35), location: 0.7),
-                                       .init(color: .black.opacity(0.7), location: 1)],
+                // 糊过以后只要很淡的一层暗：白字看得清（C58），画面颜色还在
+                LinearGradient(stops: [.init(color: .black.opacity(0), location: 0.5),
+                                       .init(color: .black.opacity(0.2), location: 0.75),
+                                       .init(color: .black.opacity(0.45), location: 1)],
                                startPoint: .top, endPoint: .bottom)
             }
             .overlay(alignment: .bottomLeading) {
@@ -417,7 +420,7 @@ struct ClipFeedView: View {
                 let column = ins.trailing >= 40
                 ZStack {
                     Color.black.ignoresSafeArea()
-                    feed(column: column)
+                    feed(column: column, insets: ins)
                     controls(column: column, insets: ins)
                 }
             }
@@ -441,12 +444,14 @@ struct ClipFeedView: View {
     private var index: Int { entries.firstIndex { $0.id == current } ?? 0 }
     private var currentEntry: HomeEntry? { entries.isEmpty ? nil : entries[min(index, entries.count - 1)] }
 
-    private func feed(column: Bool) -> some View {
+    /// 一页就是整个屏的高（上下的安全区也算在页里，卡自己往里让）：以前滚动区自己伸到底下的安全区里，
+    /// 页却只有安全区那么高，底下总露出下一张卡的一截（用户截图）
+    private func feed(column: Bool, insets ins: EdgeInsets) -> some View {
         ScrollView(.vertical) {
             LazyVStack(spacing: 0) {
                 ForEach(entries) { e in
                     ClipFeedPage(entry: e, collection: collection, active: current == e.id, trailer: trailer,
-                                 roomForControls: !column) {
+                                 roomForControls: !column, insetTop: ins.top, insetBottom: ins.bottom) {
                         path.append(Self.route(e))
                     }
                     .containerRelativeFrame([.horizontal, .vertical])
@@ -457,6 +462,7 @@ struct ClipFeedView: View {
         .scrollTargetBehavior(.paging)
         .scrollPosition(id: $current)
         .scrollIndicators(.hidden)
+        .ignoresSafeArea(edges: .vertical)
     }
 
     @ViewBuilder
@@ -575,6 +581,9 @@ struct ClipFeedPage: View {
     let trailer: ShowcaseTrailer
     /// 没有侧边那一列：右上角有关闭、分享，分类名往下让一点
     let roomForControls: Bool
+    /// 上下的安全区：页铺满整个屏，卡往里让这么多
+    var insetTop: CGFloat = 0
+    var insetBottom: CGFloat = 0
     let onInfo: () -> Void
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -584,57 +593,64 @@ struct ClipFeedPage: View {
         let playing = active && trailer.path == ClipFeedView.key(entry)
         let showing = playing && trailer.showing
         GeometryReader { g in
-            ZStack {
-                Color(white: 0.06)
-                RemoteImage(url: model.clipArt(entry, width: g.size.width),
-                            maxPixel: max(g.size.width, g.size.height) * 3, placeholder: .clear)
-                if showing {
-                    VideoSurface(player: trailer.player, gravity: .resizeAspectFill, background: .clear)
-                        .transition(.opacity)
-                        .accessibilityHidden(true)
+            // 一块定死大小的底，画面、预告片、压暗、字和按钮全放在它的 overlay 里：fill 的图比卡大也撑不大这一层。
+            // 以前放在 ZStack 里，竖版主视觉按 fill 铺开比卡高一截，把整列字一起撑高、上下各被裁掉一截
+            // （用户截图：按钮只剩上半截、进度条不见了，顶上的分类名也没了）
+            Color(white: 0.06)
+                .overlay {
+                    RemoteImage(url: model.clipArt(entry, width: g.size.width),
+                                maxPixel: max(g.size.width, g.size.height) * 3, placeholder: .clear)
+                }
+                .overlay {
+                    if showing {
+                        VideoSurface(player: trailer.player, gravity: .resizeAspectFill, background: .clear)
+                            .transition(.opacity)
+                            .accessibilityHidden(true)
+                    }
                 }
                 // 上下两段压暗：顶上的分类名、底下的字标和按钮压在上面看得清（C58）
-                LinearGradient(stops: [.init(color: .black.opacity(0.45), location: 0),
-                                       .init(color: .black.opacity(0), location: 0.22)],
-                               startPoint: .top, endPoint: .bottom)
-                    .allowsHitTesting(false)
-                LinearGradient(stops: [.init(color: .black.opacity(0), location: 0.5),
-                                       .init(color: .black.opacity(0.5), location: 0.78),
-                                       .init(color: .black.opacity(0.8), location: 1)],
-                               startPoint: .top, endPoint: .bottom)
-                    .allowsHitTesting(false)
-                if playing && trailer.paused {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 34, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 76, height: 76)
-                        .glassEffect(.regular, in: Circle())
-                        .transition(.scale(scale: 0.8).combined(with: .opacity))
-                        .allowsHitTesting(false)
+                .overlay {
+                    LinearGradient(stops: [.init(color: .black.opacity(0.45), location: 0),
+                                           .init(color: .black.opacity(0), location: 0.22),
+                                           .init(color: .black.opacity(0), location: 0.5),
+                                           .init(color: .black.opacity(0.5), location: 0.78),
+                                           .init(color: .black.opacity(0.8), location: 1)],
+                                   startPoint: .top, endPoint: .bottom)
                 }
-                VStack(spacing: 0) {
+                .overlay {
+                    if playing && trailer.paused {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 34, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 76, height: 76)
+                            .glassEffect(.regular, in: Circle())
+                            .transition(.scale(scale: 0.8).combined(with: .opacity))
+                    }
+                }
+                .overlay(alignment: .top) {
                     Text(collection.title)
                         .font(.headline)
                         .foregroundStyle(.white)
                         .shadow(color: .black.opacity(0.4), radius: 6, y: 1)
                         .padding(.top, roomForControls ? 30 : 22)
                         .accessibilityAddTraits(.isHeader)
-                    Spacer(minLength: 0)
+                }
+                .overlay(alignment: .bottom) {
                     bottom(width: g.size.width, playing: playing)
                 }
-            }
-            .frame(width: g.size.width, height: g.size.height)
-            // 轻点画面：暂停 / 接着放（刷短视频的习惯）
-            .contentShape(Rectangle())
-            .onTapGesture {
-                guard playing, trailer.loaded else { return }
-                withAnimation(.snappy(duration: 0.25)) { trailer.togglePause() }
-            }
-            .animation(reduceMotion ? .easeInOut(duration: 0.2) : .easeInOut(duration: 0.5), value: showing)
+                .frame(width: g.size.width, height: g.size.height)
+                // 轻点画面：暂停 / 接着放（刷短视频的习惯）
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard playing, trailer.loaded else { return }
+                    withAnimation(.snappy(duration: 0.25)) { trailer.togglePause() }
+                }
+                .animation(reduceMotion ? .easeInOut(duration: 0.2) : .easeInOut(duration: 0.5), value: showing)
         }
         .clipShape(shape)
         .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(.top, insetTop + 6)
+        .padding(.bottom, insetBottom + 6)
     }
 
     private func bottom(width: CGFloat, playing: Bool) -> some View {
@@ -709,7 +725,8 @@ struct ClipFeedPage: View {
         case .movie(let v): r = model.meta(v)?.rating
         case .series(let s): r = model.seriesMetas[s.path]?.rating
         }
-        guard let r, r >= 8 else { return nil }
+        // 9.6 分以上多半是没几个人打的分（截图里一部恐怖片「TMDB 10.0」）：不当高分佳作
+        guard let r, r >= 8, r < 9.6 else { return nil }
         return String(format: "TMDB %.1f · 高分佳作", r)
     }
 
