@@ -24,6 +24,8 @@ enum ImageEffect: String, Hashable, Sendable {
     case featureCard
     /// 长文案的分集卡（1.3 : 1）：糊的那一段更高（离底 46% 起，26% 以下最糊），两行简介和片长压在上面
     case bottomBlurTall
+    /// 片段合集的竖卡（9 : 16，用户要求加渐进式模糊）：先裁成 9 : 16，再把下段糊掉（离底 36% 起，16% 以下最糊），分类名压在上面
+    case clipCard
 }
 
 /// 图片：内存缓存（NSCache）+ 磁盘缓存（URLCache）+ 按显示尺寸降采样解码 —— 一屏几十张海报也不吃内存。
@@ -191,7 +193,28 @@ enum ImageEffects {
         case .bottomBlur: return bottomBlur(image)
         case .featureCard: return featureCard(image)
         case .bottomBlurTall: return bottomBlur(image, clearAbove: 0.46, fullBelow: 0.26)
+        case .clipCard: return clipCard(image)
         }
+    }
+
+    /// 片段合集的竖卡：裁成 9 : 16（比它瘦的 Apple TV 竖版主视觉从离顶 6% 往下取，人物多在上半截；
+    /// 比它宽的 2:3 海报左右居中取），再把下段渐进式地糊掉——不管画面原来是什么比例，糊的那一段都落在卡的同一个高度上
+    static func clipCard(_ image: UIImage) -> UIImage? {
+        guard let cg = image.cgImage else { return nil }
+        let W = CGFloat(cg.width), H = CGFloat(cg.height)
+        guard W > 8, H > 8 else { return nil }
+        let aspect: CGFloat = 9.0 / 16.0
+        var rect = CGRect(x: 0, y: 0, width: W, height: H)
+        if W / H < aspect {
+            let h = (W / aspect).rounded(.down)
+            rect = CGRect(x: 0, y: min(H - h, (H * 0.06).rounded(.down)), width: W, height: h)
+        } else if W / H > aspect {
+            let w = (H * aspect).rounded(.down)
+            rect = CGRect(x: ((W - w) / 2).rounded(.down), y: 0, width: w, height: H)
+        }
+        guard let cropped = cg.cropping(to: rect) else { return nil }
+        let base = UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
+        return bottomBlur(base, clearAbove: 0.36, fullBelow: 0.16) ?? base
     }
 
     /// 详情页头部：裁成画面区的宽高比（很瘦的竖版主视觉从靠近顶上取、别的从偏上取，比画面区宽的左右居中），

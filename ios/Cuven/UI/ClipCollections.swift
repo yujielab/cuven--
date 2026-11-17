@@ -362,7 +362,8 @@ struct ClipCollectionsShelf: View {
     }
 }
 
-/// 一张合集竖卡（参考图）：9 : 16、圆角、一圈细边；整幅画面，下段压暗，左下大号粗体的分类名
+/// 一张合集竖卡（参考图）：9 : 16、圆角、一圈细边；整幅画面，下段渐进式模糊（用户要求）再压一层淡暗，
+/// 左下大号粗体的分类名压在模糊上
 struct ClipCollectionCard: View {
     let title: String
     let art: URL?
@@ -373,11 +374,13 @@ struct ClipCollectionCard: View {
         let shape = RoundedRectangle(cornerRadius: min(22, max(16, (width * 0.13).rounded())), style: .continuous)
         Color.clear
             .frame(width: width, height: h)
-            .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: Color(white: 0.12)) }
+            // 画面先裁成 9 : 16、下段渐进式模糊（ImageEffect.clipCard，后台算一次、缓存），糊的那一段正好垫在分类名下面
+            .overlay { RemoteImage(url: art, maxPixel: width * 3, placeholder: Color(white: 0.12), effect: .clipCard) }
             .overlay {
-                LinearGradient(stops: [.init(color: .black.opacity(0), location: 0.42),
-                                       .init(color: .black.opacity(0.35), location: 0.7),
-                                       .init(color: .black.opacity(0.7), location: 1)],
+                // 糊过以后只要很淡的一层暗：白字看得清（C58），画面颜色还在
+                LinearGradient(stops: [.init(color: .black.opacity(0), location: 0.5),
+                                       .init(color: .black.opacity(0.2), location: 0.75),
+                                       .init(color: .black.opacity(0.45), location: 1)],
                                startPoint: .top, endPoint: .bottom)
             }
             .overlay(alignment: .bottomLeading) {
