@@ -8,6 +8,9 @@ import UIKit
 // · 品牌区（上 24% 屏高，118…250）：居中的「Cuven max」圆体字标；打开时、登录成功时，蓝色光晕和光环从字标往外扩。
 // · 下面一整张白色面板（上圆角 40）：「Cuven 账户」小字标 → 左对齐大标题 → 浅灰填充的输入框 → 黑色胶囊主按钮 → 分割线 + 账户体系说明。
 //   宽屏（宽 ≥ 640 且高 ≥ 540）收成居中的一张卡；矮横屏（高 ≤ 539）品牌区压扁、字标排成一行、内容收在 560 宽里。
+//   iPhone Duo 折起（用户要求「折叠状态下仅显示红色区域内容」）：只留白色面板里的表单——「Cuven 账户」、标题、输入框、
+//   主按钮和下面那一行；不画品牌区（流体、字标、脉冲），也不要账户体系说明。白色面板从屏顶铺满、不要圆角，返回钮放进面板里，
+//   状态栏藏起来（App 是深色的，白字落在白底上看不见；整屏只剩这张表单）。
 // · 六页（登录 / 电子邮件 / 验证码 / 设定密码 / 面容 ID / 完成）在同一张面板里交叉淡入淡出，页容器的高度跟着当前页走（0.5 秒）。
 // · 输入法弹起：面板整体上移（品牌区让出来），底边骑在键盘上沿。
 // · 入场：面板 0.72 秒从屏底滑上来，字标从模糊里放大浮出，内容逐行浮起；
@@ -790,7 +793,8 @@ struct LoginView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            // 第一帧（流程还没建好）垫的底：iPhone Duo 折起时整页是白色的表单，垫白的，不先闪一下黑
+            (DuoLayout.isFolded(window: DuoLayout.initialWindowSize) ? Color.white : Color.black).ignoresSafeArea()
             if let flow { LoginScreen(flow: flow) }
         }
         .onAppear {
@@ -808,6 +812,8 @@ private struct LoginMetrics {
     let H: CGFloat
     let safe: EdgeInsets
     let kb: CGFloat
+    /// iPhone Duo 折起：只显示表单（见文件头）
+    var folded = false
 
     /// @media (min-width: 640px) and (min-height: 540px)：居中的一张卡
     var wide: Bool { W >= 640 && H >= 540 }
@@ -815,6 +821,7 @@ private struct LoginMetrics {
     var short: Bool { W > H && H <= 539 }
     /// --cvl-head：面板上沿离屏顶（含状态栏）
     var head: CGFloat {
+        if folded { return safe.top }
         if wide { return min(280, max(170, H * 0.27)) }
         if short { return max(84, H * 0.22) }
         return min(250, max(118, H * 0.24))
@@ -824,10 +831,10 @@ private struct LoginMetrics {
     /// 字标与脉冲的圆心：安全区以下的品牌区正中
     var headCenterY: CGFloat { safe.top + (head - safe.top) / 2 }
     var titleSize: CGFloat { min(33, max(27, W * 0.078)) }
-    var dockTop: CGFloat { max(safe.top + (wide ? 72 : 64), head - kb) }
+    var dockTop: CGFloat { folded ? 0 : max(safe.top + (wide ? 72 : 64), head - kb) }
     var cardWidth: CGFloat { min(480, W - 48) }
     var cardMaxHeight: CGFloat { max(160, H - head - 40) }
-    var padTop: CGFloat { wide ? 40 : (short ? 24 : 34) }
+    var padTop: CGFloat { folded ? max(safe.top, 16) + 8 : (wide ? 40 : (short ? 24 : 34)) }
     var padLeading: CGFloat { wide ? 40 : max(24, safe.leading + 16) }
     var padTrailing: CGFloat { wide ? 40 : max(24, safe.trailing + 16) }
     var padBottom: CGFloat { wide ? 36 : 30 + safe.bottom }
@@ -855,7 +862,8 @@ private struct LoginScreen: View {
             let H = geo.size.height + ins.top + ins.bottom
             let overlap = keyboardTop == .greatestFiniteMagnitude ? 0 : max(0, H - keyboardTop)
             // 网页版：48 点以下当作地址栏抖动，不算键盘
-            let m = LoginMetrics(W: W, H: H, safe: ins, kb: overlap > 48 ? overlap : 0)
+            let m = LoginMetrics(W: W, H: H, safe: ins, kb: overlap > 48 ? overlap : 0,
+                                 folded: DuoLayout.isFolded(window: CGSize(width: W, height: H)))
             let _ = fxTick
             let running = Date() < fxEnd
             TimelineView(.animation(paused: !running)) { tl in
@@ -864,6 +872,8 @@ private struct LoginScreen: View {
             .frame(width: W, height: H)
             .position(x: geo.size.width / 2 + (ins.trailing - ins.leading) / 2,
                       y: geo.size.height / 2 + (ins.bottom - ins.top) / 2)
+            // iPhone Duo 折起：整屏只剩白色的表单，状态栏藏起来（App 是深色的，状态栏的白字落在白底上看不见）
+            .statusBarHidden(m.folded)
         }
         .ignoresSafeArea(.keyboard)
         .onAppear {
@@ -931,26 +941,32 @@ private struct LoginScreen: View {
 
     private func stage(_ m: LoginMetrics, _ fx: LoginFx) -> some View {
         ZStack(alignment: .topLeading) {
-            Color.black
-                .frame(width: m.W, height: m.H)
-            SkyFluidView(size: CGSize(width: m.W, height: m.H), drawHeight: fluidHeight(m), still: reduceMotion)
-                .opacity(fx.fluid)
-            // 品牌区压一点暗，白色字标在流体最亮的那一刻也读得清
-            LinearGradient(stops: [.init(color: .black.opacity(0.34), location: 0),
-                                   .init(color: .black.opacity(0.16), location: 0.26),
-                                   .init(color: .black.opacity(0.30), location: 1)],
-                           startPoint: .top, endPoint: .bottom)
-                .frame(width: m.W, height: m.H)
-                .opacity(fx.scrim)
-                .allowsHitTesting(false)
-            pulses(m, fx)
-            head(m, fx)
-            if flow.navShowsBack {
-                Button { flow.navTapped() } label: { LoginNavGlyph() }
-                    .buttonStyle(LoginNavStyle())
-                    .accessibilityLabel("返回")
-                    .accessibilityIdentifier("login-back")
-                    .offset(x: 16, y: m.safe.top + 12)
+            if m.folded {
+                // iPhone Duo 折起：只有白色面板里的表单（品牌区、脉冲、字标都不画；返回钮在面板里）
+                Color.white
+                    .frame(width: m.W, height: m.H)
+            } else {
+                Color.black
+                    .frame(width: m.W, height: m.H)
+                SkyFluidView(size: CGSize(width: m.W, height: m.H), drawHeight: fluidHeight(m), still: reduceMotion)
+                    .opacity(fx.fluid)
+                // 品牌区压一点暗，白色字标在流体最亮的那一刻也读得清
+                LinearGradient(stops: [.init(color: .black.opacity(0.34), location: 0),
+                                       .init(color: .black.opacity(0.16), location: 0.26),
+                                       .init(color: .black.opacity(0.30), location: 1)],
+                               startPoint: .top, endPoint: .bottom)
+                    .frame(width: m.W, height: m.H)
+                    .opacity(fx.scrim)
+                    .allowsHitTesting(false)
+                pulses(m, fx)
+                head(m, fx)
+                if flow.navShowsBack {
+                    Button { flow.navTapped() } label: { LoginNavGlyph() }
+                        .buttonStyle(LoginNavStyle())
+                        .accessibilityLabel("返回")
+                        .accessibilityIdentifier("login-back")
+                        .offset(x: 16, y: m.safe.top + 12)
+                }
             }
             dock(m, fx)
         }
@@ -1045,14 +1061,15 @@ private struct LoginScreen: View {
         } else {
             let top = m.dockTop
             let h = max(1, m.H - top - m.kb)
-            let shape = UnevenRoundedRectangle(topLeadingRadius: 40, bottomLeadingRadius: 0, bottomTrailingRadius: 0,
-                                               topTrailingRadius: 40, style: .circular)
+            let radius: CGFloat = m.folded ? 0 : 40
+            let shape = UnevenRoundedRectangle(topLeadingRadius: radius, bottomLeadingRadius: 0, bottomTrailingRadius: 0,
+                                               topTrailingRadius: radius, style: .circular)
             ZStack(alignment: .top) {
                 // 白底一直铺到屏幕外：键盘起落的那一瞬，面板和键盘之间也不会露出流体
                 shape
                     .fill(Color.white)
                     .frame(width: m.W, height: m.H - top + 80)
-                    .shadow(color: .black.opacity(0.28), radius: 22, y: -12)
+                    .shadow(color: .black.opacity(m.folded ? 0 : 0.28), radius: 22, y: -12)
                 ScrollView(.vertical) {
                     sheetContent(m, fx)
                 }
@@ -1068,12 +1085,27 @@ private struct LoginScreen: View {
 
     private func sheetContent(_ m: LoginMetrics, _ fx: LoginFx) -> some View {
         VStack(alignment: .leading, spacing: 0) {
+            if m.folded {
+                // 折起时品牌区不画，返回钮放在面板最上面这一行（深色的那一种）；这一行总留着，换页时下面不跳
+                ZStack(alignment: .leading) {
+                    if flow.navShowsBack {
+                        Button { flow.navTapped() } label: { LoginNavGlyph(onLight: true) }
+                            .buttonStyle(LoginNavStyle(onLight: true))
+                            .accessibilityLabel("返回")
+                            .accessibilityIdentifier("login-back")
+                            .transition(.opacity)
+                    }
+                }
+                .frame(height: 44)
+                .padding(.bottom, 10)
+                .animation(CSSBezier.easeOut.animation(0.2), value: flow.navShowsBack)
+            }
             LoginMark()
                 .padding(.top, 2)
                 .padding(.bottom, m.short ? 18 : 30)
             panes(m, fx)
-            // 账户体系说明：只在输入账户 / 电子邮件这两页出现
-            if flow.pane == .signin || flow.pane == .email {
+            // 账户体系说明：只在输入账户 / 电子邮件这两页出现（iPhone Duo 折起时不要：用户要求只留表单）
+            if !m.folded && (flow.pane == .signin || flow.pane == .email) {
                 LoginFooter()
                     .padding(.top, 32)
             }
@@ -2098,9 +2130,12 @@ private struct LoginEyeStyle: ButtonStyle {
 
 /// 左上角的返回：40 点圆、16% 白 + 模糊底、18 点的「‹」（线宽 2.2 / 24）；按下缩到 0.92、底色 26%
 private struct LoginNavGlyph: View {
+    /// 放在白色面板上（iPhone Duo 折起）：黑色的箭头
+    var onLight = false
+
     var body: some View {
         LoginGlyph(kind: .back)
-            .stroke(Color.white, style: StrokeStyle(lineWidth: 2.2 * 18 / 24, lineCap: .round, lineJoin: .round))
+            .stroke(onLight ? Color.black : Color.white, style: StrokeStyle(lineWidth: 2.2 * 18 / 24, lineCap: .round, lineJoin: .round))
             .frame(width: 18, height: 18)
             .frame(width: 40, height: 40)
             .contentShape(Circle())
@@ -2108,10 +2143,14 @@ private struct LoginNavGlyph: View {
 }
 
 private struct LoginNavStyle: ButtonStyle {
+    /// 放在白色面板上（iPhone Duo 折起）：浅灰的圆底，和输入框同一种灰
+    var onLight = false
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .background(Circle().fill(Color.white.opacity(configuration.isPressed ? 0.26 : 0.16)))
-            .background(.ultraThinMaterial, in: Circle())
+            .background(Circle().fill(onLight ? Color.black.opacity(configuration.isPressed ? 0.12 : 0.06)
+                                              : Color.white.opacity(configuration.isPressed ? 0.26 : 0.16)))
+            .background(onLight ? AnyShapeStyle(Color.clear) : AnyShapeStyle(.ultraThinMaterial), in: Circle())
             .scaleEffect(configuration.isPressed ? 0.92 : 1)
             .animation(CSSBezier.easeOut.animation(0.18), value: configuration.isPressed)
     }

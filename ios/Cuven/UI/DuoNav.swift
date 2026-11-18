@@ -24,6 +24,14 @@ enum DuoLayout {
         return short < 600 || window.width > window.height
     }
 
+    /// iPhone Duo 折起（外屏，横竖都算）：短边超过 440 点（别的 iPhone 都到不了）、不到 600 点（展开是 600 以上）
+    @MainActor
+    static func isFolded(window: CGSize) -> Bool {
+        guard UIDevice.current.userInterfaceIdiom == .phone else { return false }
+        let short = min(window.width, window.height)
+        return short > 440 && short < 600
+    }
+
     /// 第一次排版之前先按窗口场景估一个大小（排完按真实的更正），免得第一帧先露出系统标签栏再换掉
     @MainActor
     static var initialWindowSize: CGSize {
