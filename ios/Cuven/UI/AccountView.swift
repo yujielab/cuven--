@@ -19,27 +19,30 @@ struct AccountTopBar: View {
 
     var body: some View {
         let bar = max(52, height)
-        ZStack(alignment: .top) {
+        HStack(spacing: 10) {
+            AvatarView(size: 30)
+            Text(name)
+                .font(.headline)
+                .foregroundStyle(.white)
+                .lineLimit(1)
+        }
+        .frame(height: 44)
+        // 和下面那一列卡同一个宽、同一个左边（那一列最宽 680、居中；都在安全区里排）
+        .padding(.horizontal, leading)
+        .frame(maxWidth: 680, alignment: .leading)
+        .frame(maxWidth: .infinity)
+        // 和系统标题同一行：贴着导航栏那一截的下沿（上面那点是弹层顶边留的空）
+        .padding(.top, bar - 44)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+        .frame(maxWidth: .infinity, alignment: .top)
+        .background(alignment: .top) {
+            // 底铺满整张弹层的宽：iPhone Duo「侧边一列」的形态，右边那一列（系统时间、信号、关闭钮，约 84 点的安全区）
+            // 底下也是同一块渐进式模糊。以前只铺到安全区边上，那一列露出没压过的底色，顶上一条竖着的硬边（用户截图圈出来的）
             DSProgressiveBar(tint: tint, tintOpacity: 0.55, solid: bar / (bar + 36))
                 .frame(height: bar + 36)
-            HStack(spacing: 10) {
-                AvatarView(size: 30)
-                Text(name)
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-            }
-            .frame(height: 44)
-            // 和下面那一列卡同一个宽、同一个左边（那一列最宽 680、居中）
-            .padding(.horizontal, leading)
-            .frame(maxWidth: 680, alignment: .leading)
-            .frame(maxWidth: .infinity)
-            // 和系统标题同一行：贴着导航栏那一截的下沿（上面那点是弹层顶边留的空）
-            .padding(.top, bar - 44)
-            .accessibilityElement(children: .combine)
-            .accessibilityAddTraits(.isHeader)
+                .ignoresSafeArea(edges: .horizontal)
         }
-        .frame(maxWidth: .infinity, alignment: .top)
         .allowsHitTesting(false)
     }
 }
