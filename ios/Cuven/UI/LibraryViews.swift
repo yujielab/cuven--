@@ -213,7 +213,7 @@ struct SearchView: View {
         if recent.isEmpty && model.folders.isEmpty {
             // F88：空的时候告诉人下一步
             ContentUnavailableView("搜索电影、剧集", systemImage: "magnifyingglass",
-                                   description: Text("输入片名或年份，结果会随着输入出现。"))
+                                   description: Text("输入片名或年份。"))
                 .padding(.top, 60)
         } else {
             VStack(alignment: .leading, spacing: metrics.shelfGap) {
@@ -247,9 +247,9 @@ struct SearchView: View {
         if hits.isEmpty {
             // F87、F88：不怪人，说怎么办，再给一颗钮直接去做（设计轮 2（并行·library）：以前只有一句话；年份举今年的）
             ContentUnavailableView {
-                Label("没有找到「\(q)」", systemImage: "magnifyingglass")
+                Label("没有找到“\(q)”", systemImage: "magnifyingglass")
             } description: {
-                Text("试试别的片名，或输入年份，比如 \(String(Calendar.current.component(.year, from: Date())))。")
+                Text("请尝试其他片名或年份。")
             } actions: {
                 NavigationLink(value: Route.shelf(.all)) {
                     Text("浏览所有影片")
@@ -342,7 +342,7 @@ struct SearchView: View {
     @ViewBuilder private func allResults(_ q: String, movies: [Video], shows: [Series], seriesFirst: Bool, _ metrics: DSMetrics) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             // 不写「N 个结果」（用户要求全局去掉影片计数）
-            Text("「\(q)」的搜索结果")
+            Text("“\(q)”的搜索结果")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, metrics.margin)
@@ -367,7 +367,7 @@ struct SearchView: View {
     /// 电影：竖海报一排（纯净画面 + 字标，卡下不写字：T20）
     @ViewBuilder private func moviesSection(_ list: [Video], _ metrics: DSMetrics) -> some View {
         if !list.isEmpty {
-            DSSection(title: "电影 · \(list.count)", metrics: metrics) {
+            DSSection(title: "电影", metrics: metrics) {
                 DSShelf(metrics: metrics) {
                     ForEach(list) { v in
                         let art = model.posterArt(v, width: metrics.posterWidth)
@@ -386,7 +386,7 @@ struct SearchView: View {
     /// 剧集：16:9 横卡一排（画面 + 字标），和电影的竖海报分开（网页版 search-tv-rail）
     @ViewBuilder private func showsSection(_ list: [Series], _ metrics: DSMetrics) -> some View {
         if !list.isEmpty {
-            DSSection(title: "剧集 · \(list.count)", metrics: metrics) {
+            DSSection(title: "剧集", metrics: metrics) {
                 DSShelf(metrics: metrics) {
                     ForEach(list) { s in
                         let art = model.seriesWideArt(s)

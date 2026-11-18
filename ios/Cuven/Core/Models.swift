@@ -672,9 +672,9 @@ enum Shelf: Hashable {
     var blurb: String? {
         switch self {
         case .category(let c): return c.blurb
-        case .genre(let g): return "片库里的\(g)电影和剧集，新入库的在前。"
-        case .featured: return "Cuven 按评分为你挑出片库里最值得一看的电影。"
-        case .featuredSeries: return "Cuven 按评分为你挑出片库里最值得追的剧集。"
+        case .genre(let g): return "\(g)电影和剧集，最新加入的在前。"
+        case .featured: return "片库中评分最高的电影。"
+        case .featuredSeries: return "片库中评分最高的剧集。"
         default: return nil
         }
     }
@@ -732,7 +732,7 @@ enum HomeCategory: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .animation: return "一笔一画造出来的世界，大人小孩都能看。"
         case .action: return "追车、格斗、爆破，一场接一场。"
         case .comedy: return "轻松一下，笑着看完。"
-        case .premium: return "规格高、评价好：4K 高规格片源，评分 \(PremiumBar.ratingLabel) 分以上。"
+        case .premium: return "4K 画质，评分 \(PremiumBar.ratingLabel) 分以上。"
         }
     }
 

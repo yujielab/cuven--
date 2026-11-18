@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSFaceIDUsageDescription</key>
-	<string>用面容 ID 快速登录 Cuven max。面容数据只在这台设备的安全隔区里比对，Cuven 不会接触。</string>
+	<string>使用面容 ID 快速登录 Cuven max。你的面容数据仅存储在此设备上，Cuven 无法访问。</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>

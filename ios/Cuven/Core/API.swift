@@ -6,9 +6,29 @@ enum APIError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .http(let code, let msg): return msg ?? "服务器返回 \(code)"
-        case .badResponse: return "服务器回包无法识别"
+        case .http: return "服务暂时不可用，请稍后再试。"
+        case .badResponse: return "出了点问题，请稍后再试。"
         }
+    }
+}
+
+/// 给人看的错误说明：发行版不露技术细节（HTTP 状态码、服务器的原话、系统的英文错误），只说怎么了、该怎么办
+enum FriendlyError {
+    static func message(_ error: Error) -> String {
+        let e = error as NSError
+        if e.domain == NSURLErrorDomain {
+            switch e.code {
+            case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost, NSURLErrorDataNotAllowed:
+                return "网络连接已断开，请检查网络后重试。"
+            case NSURLErrorTimedOut:
+                return "连接超时，请稍后再试。"
+            case NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost, NSURLErrorDNSLookupFailed:
+                return "无法连接服务器，请稍后再试。"
+            default:
+                break
+            }
+        }
+        return "请稍后再试。"
     }
 }
 

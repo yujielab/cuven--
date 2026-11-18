@@ -88,7 +88,7 @@ final class LoginFlow {
     private(set) var focusRequest = FocusRequest()
 
     // ⑥ 完成
-    private(set) var doneTitle = "已登录 Cuven Max"
+    private(set) var doneTitle = "已登录 Cuven max"
     private(set) var doneSub = "欢迎回来"
     private(set) var successAt: Date?
     private(set) var successFrom: Pane = .signin
@@ -212,7 +212,7 @@ final class LoginFlow {
             let n = await AccountAPI.lookupEmail(raw)
             guard my == seq else { return }
             guard let n else { set(.signin, "无法连接账户服务，请检查网络", .bad); return }
-            if n.isEmpty { set(.signin, "未找到绑定此邮箱的账户 · 可改用用户名登录", .bad); return }
+            if n.isEmpty { set(.signin, "未找到使用此电子邮件的账户，可改用用户名登录", .bad); return }
             name = n
         }
         let r = await AccountAPI.fetchRecord(name)
@@ -222,11 +222,11 @@ final class LoginFlow {
             set(.signin, "无法连接账户服务，请检查网络", .bad)
         case .missing:
             if byEmail {
-                set(.signin, "未找到绑定此邮箱的账户 · 可改用用户名登录", .bad)
+                set(.signin, "未找到使用此电子邮件的账户，可改用用户名登录", .bad)
             } else {
                 mode = .register
                 user = name
-                set(.signin, "新用户 — 将建立您的账户", .found)
+                set(.signin, "新用户，将为你创建账户", .found)
             }
         case .found(let rec):
             guard let rec else { set(.signin, "读取账户资料失败，请稍后再试", .bad); return }
@@ -237,7 +237,7 @@ final class LoginFlow {
                 // 打的是邮箱 → 直接走验证码，不问密码（旧版账户也一样）
                 mode = .otp
                 otpEmail = raw.lowercased()
-                set(.signin, "以 \(name) 的身份登录 · 验证码将发送至此邮箱", .found)
+                set(.signin, "以 \(name) 的身份登录，验证码将发送至此电子邮件", .found)
             } else if rec.hasPass {
                 mode = .login
                 set(.signin, "以 \(name) 的身份登录", .found)
@@ -245,7 +245,7 @@ final class LoginFlow {
             } else {
                 // 旧版账户：用邮箱验证码验明身份，登录后设定密码完成升级
                 mode = .legacy
-                set(.signin, "旧版账户 · 请用邮箱验证码登录", .found)
+                set(.signin, "请使用电子邮件验证码登录", .found)
             }
         }
     }
@@ -255,7 +255,7 @@ final class LoginFlow {
         case .idle: return "继续"
         case .login: return "登录"
         case .otp: return "发送验证码"
-        case .legacy: return "邮箱验证登录"
+        case .legacy: return "使用验证码登录"
         case .register: return "建立账户"
         }
     }
@@ -324,7 +324,7 @@ final class LoginFlow {
         guard !busy else { return }
         busy = true
         spinning = .signin
-        set(.signin, "请在系统弹窗中完成\(bioVerb)验证…")
+        set(.signin, "请完成\(bioVerb)验证…")
         let (session, outcome) = await account.faceIDSession()
         busy = false
         spinning = nil
@@ -362,7 +362,7 @@ final class LoginFlow {
         switch intent {
         case .login: return "电子邮件登录"
         case .register: return "验证电子邮件"
-        case .legacy: return "旧版账户登录"
+        case .legacy: return "使用验证码登录"
         case .forgot: return "重设密码"
         }
     }
@@ -370,8 +370,8 @@ final class LoginFlow {
     var emailSubtitle: String {
         switch intent {
         case .login: return "输入账户绑定的电子邮件，我们将发送 6 位验证码"
-        case .register: return "输入您的电子邮件以绑定账户，我们将发送 6 位验证码"
-        case .legacy: return "此账户建立于旧版本 · 验证绑定的电子邮件后即可登录"
+        case .register: return "输入你的电子邮件以绑定账户，我们将发送 6 位验证码"
+        case .legacy: return "验证账户绑定的电子邮件后即可登录"
         case .forgot: return "验证账户绑定的电子邮件后，即可设定新密码"
         }
     }
@@ -418,7 +418,7 @@ final class LoginFlow {
         ctx = c
         busy = true
         spinning = p
-        set(p, i == .register ? "正在检查邮箱…" : "正在查找账户…")
+        set(p, i == .register ? "正在检查电子邮件…" : "正在查找账户…")
         func fail(_ msg: String) {
             busy = false
             spinning = nil
@@ -431,7 +431,7 @@ final class LoginFlow {
             otpUser = c.name
         case .legacy, .forgot:
             if found.isEmpty { fail("此电子邮件未绑定任何账户，请确认拼写"); return }
-            if found != c.name { fail("此邮箱绑定的是其他账户"); return }
+            if found != c.name { fail("此电子邮件绑定的是其他账户"); return }
             otpUser = c.name
         case .login:
             if found.isEmpty { fail("此电子邮件未绑定任何账户"); return }
@@ -566,9 +566,9 @@ final class LoginFlow {
     var passTitle: String { passMode == .renew ? "设定新密码" : "设定密码" }
     var passSubtitle: String {
         switch passMode {
-        case .register: return "至少 8 个字元，需包含字母与数字"
-        case .upgrade: return "为账户设定密码，下次即可直接密码登录"
-        case .renew: return "验证成功 · 请设定新的登录密码"
+        case .register: return "至少 8 个字符，需包含字母和数字"
+        case .upgrade: return "设定密码后，下次可直接用密码登录"
+        case .renew: return "验证成功，请设定新密码"
         }
     }
     var passButton: String {
@@ -596,7 +596,7 @@ final class LoginFlow {
 
     /// 边打边核对（网页版 pwValidate：提示是灰字，不是红字）
     private func pwValidate() {
-        if !pw1.isEmpty && !PasswordHash.isStrong(pw1) { set(.password, "至少 8 个字元，需包含字母与数字") }
+        if !pw1.isEmpty && !PasswordHash.isStrong(pw1) { set(.password, "至少 8 个字符，需包含字母和数字") }
         else if !pw2.isEmpty && pw1 != pw2 { set(.password, "两次输入的密码不一致") }
         else { set(.password, "") }
     }
@@ -606,7 +606,7 @@ final class LoginFlow {
         let name = ctx.name, prev = ctx.record
         busy = true
         spinning = .password
-        set(.password, "正在加密…")
+        set(.password, "正在保存…")
         let pass = await PasswordHash.make(pw1)
         let rec = AccountRecord.build(name: name, email: ctx.email, pass: pass, previous: prev)
         if passMode == .register {
@@ -646,7 +646,7 @@ final class LoginFlow {
     var faceTitle: String { "启用\(bio)" }
     var faceSubtitle: String {
         let data = bio == "触控 ID" ? "指纹数据" : (bio == "光学 ID" ? "虹膜数据" : "面容数据")
-        return "下次轻点一下即可登录。\(data)只保存在此设备的安全隔区，Cuven 不会接触。"
+        return "下次轻点即可登录。\(data)仅存储在此设备上，Cuven 无法访问。"
     }
 
     private func openFace(_ rec: AccountRecord) {
@@ -676,7 +676,7 @@ final class LoginFlow {
         }
         faceBusy = true
         spinning = .faceID
-        set(.faceID, "请在系统弹窗中完成\(bioVerb)验证…")
+        set(.faceID, "请完成\(bioVerb)验证…")
         let session = AccountSession(username: name, email: (rec.email ?? "").lowercased(), method: "register", at: Date())
         let outcome = await account.enableFaceID(for: session)
         faceBusy = false
@@ -712,13 +712,13 @@ final class LoginFlow {
         spinning = nil
         faceSaving = false
         guard (200..<300).contains(code) else {
-            set(p, "保存失败（\(code == 0 ? "网络错误" : String(code))）· 请重试", .bad)
+            set(p, code == 0 ? "网络连接异常，请重试" : "保存失败，请重试", .bad)
             return
         }
         if let e = rec.email, !e.isEmpty { Task { await AccountAPI.putEmailMap(e, username: name) } }
         AccountAPI.notify("welcome", username: name)
         succeed(name, email: rec.email ?? "", method: "register", kind: .register,
-                title: "账户已建立", sub: "欢迎加入 Cuven Max，\(name)")
+                title: "账户已创建", sub: "欢迎加入 Cuven max，\(name)")
     }
 
     // MARK: ⑥ 完成
@@ -729,7 +729,7 @@ final class LoginFlow {
         user = name
         UserDefaults.standard.set(name, forKey: "cuven_last_user")
         if !email.isEmpty { UserDefaults.standard.set(email.lowercased(), forKey: "cuven_email") }
-        doneTitle = title ?? "已登录 Cuven Max"
+        doneTitle = title ?? "已登录 Cuven max"
         doneSub = sub ?? "欢迎回来，\(name)"
         successFrom = pane
         successAt = Date()
@@ -1872,7 +1872,7 @@ private struct LoginFooter: View {
                 .cssLineHeight(28, size: 20, weight: .bold)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 30)
-            Text("一个 Cuven 账户即可登录 Cuven max、Cuven TV 以及 Cuven 的其他服务。观看进度、收藏与偏好随账户同步，换一台设备也能接着看。")
+            Text("一个 Cuven 账户即可使用 Cuven max、Cuven TV 及其他 Cuven 服务。")
                 .font(.system(size: 16))
                 .foregroundStyle(LoginInk.footText)
                 .cssLineHeight(26.4, size: 16, weight: .regular)

@@ -179,7 +179,7 @@ struct AccountView: View {
                     withAnimation(.timingCurve(0.22, 0.68, 0.28, 1, duration: 0.28)) { account.signOut() }
                 }
             } message: {
-                Text("退出后，本机将不再保留当前登录状态。下次进入需要重新验证身份。")
+                Text("退出后，下次使用需要重新登录。")
             }
             .sheet(item: $profileSheet) { ProfileSheetView(sheet: $0) }
             // 网络速度、流量概览展开改了：0.8 秒内不再变就存回账户设置（服务器读回来写进本机时也会走到这里，值没变不发请求）
@@ -225,7 +225,7 @@ struct AccountView: View {
             }
             .buttonStyle(PressableStyle(scale: 0.96))
             .accessibilityLabel("头像")
-            .accessibilityHint("更改个人形象")
+            .accessibilityHint("更改头像")
             .accessibilityIdentifier("account-header-avatar")
             Text(displayName)
                 .font(.largeTitle.bold())
@@ -267,7 +267,7 @@ struct AccountView: View {
     private var notifyGroup: some View {
         AccountGroup(title: "通知") {
             AccountRow(icon: "bell", title: "新片上架通知",
-                       subtitle: notifyWanted && notifyBlocked ? "系统设置里关掉了 Cuven 的通知" : "有新影片入库时提醒你") {
+                       subtitle: notifyWanted && notifyBlocked ? "已在“设置”中关闭通知" : "有新影片上架时通知你") {
                 Toggle("新片上架通知", isOn: notifyBinding)
                     .labelsHidden()
                     .tint(.green)
@@ -287,8 +287,8 @@ struct AccountView: View {
     private var playbackGroup: some View {
         let audio = TrackPrefs.Audio(rawValue: audioPref) ?? .auto
         let subtitle = TrackPrefs.Subtitle(rawValue: subtitlePref) ?? .auto
-        return AccountGroup(title: "播放", footer: "每一集开始时按这里选一次；播放中在播放器里换的不受影响。") {
-            AccountRow(icon: "forward.end", title: "自动播放下一集", subtitle: "一集看完，接着放下一集") {
+        return AccountGroup(title: "播放", footer: "每集开始时自动应用，播放时仍可在播放器中更改。") {
+            AccountRow(icon: "forward.end", title: "自动播放下一集", subtitle: "看完自动继续") {
                 Toggle("自动播放下一集", isOn: $autoplayNext)
                     .labelsHidden()
                     .tint(.green)

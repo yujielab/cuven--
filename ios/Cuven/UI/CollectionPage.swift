@@ -24,8 +24,8 @@ struct CollectionPage: View {
                     FeaturedCollectionHeader(title: shelf.title, blurb: shelf.blurb ?? "", covers: covers,
                                              metrics: m, page: true)
                     if entries.isEmpty {
-                        ContentUnavailableView("这里还没有影片", systemImage: "film",
-                                               description: Text("片库里有了这一类的电影或剧集，会出现在这里。"))
+                        ContentUnavailableView("暂无影片", systemImage: "film",
+                                               description: Text("这一类的电影和剧集会显示在这里。"))
                             .frame(maxWidth: .infinity)
                             .padding(.top, 12)
                     } else {

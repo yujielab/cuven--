@@ -55,7 +55,7 @@ struct FolderView: View {
                     } else if let failed, subfolders.isEmpty, videos.isEmpty {
                         // F87：不怪人，说怎么办（再试一次）
                         ContentUnavailableView {
-                            Label("没能打开这个文件夹", systemImage: "exclamationmark.triangle")
+                            Label("无法打开此文件夹", systemImage: "exclamationmark.triangle")
                         } description: {
                             Text(failed)
                         } actions: {
@@ -105,7 +105,7 @@ struct FolderView: View {
             ContentUnavailableView {
                 Label("空文件夹", systemImage: "folder")
             } description: {
-                Text("这个文件夹里还没有能播放的影片。刚放进去的影片，重新载入后会出现在这里。")
+                Text("此文件夹中没有可播放的影片。")
             } actions: {
                 Button("重新载入") { Task { await load() } }
             }
@@ -132,7 +132,7 @@ struct FolderView: View {
             loading = false
             await model.ensureMetas(for: r.videos)
         } catch {
-            failed = error.localizedDescription
+            failed = FriendlyError.message(error)
             loading = false
         }
     }

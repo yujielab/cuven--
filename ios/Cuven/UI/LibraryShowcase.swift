@@ -117,7 +117,7 @@ struct LibraryView: View {
     @ViewBuilder private var emptyState: some View {
         if case .failed(let message) = model.phase {
             ContentUnavailableView {
-                Label("没能载入资料库", systemImage: "wifi.exclamationmark")
+                Label("无法载入资料库", systemImage: "wifi.exclamationmark")
             } description: {
                 Text(message)
             } actions: {
@@ -129,17 +129,17 @@ struct LibraryView: View {
                 .frame(maxWidth: .infinity)
         } else if model.trailerScanFailed {
             ContentUnavailableView {
-                Label("没能查到预告片", systemImage: "wifi.exclamationmark")
+                Label("无法载入预告片", systemImage: "wifi.exclamationmark")
             } description: {
-                Text("资料库只放有预告片的电影。网络恢复后再试一次。")
+                Text("请检查网络连接后重试。")
             } actions: {
                 Button("重试") { Task { await model.scanTrailers() } }
             }
         } else {
             ContentUnavailableView {
-                Label("还没有带预告片的电影", systemImage: "film.stack")
+                Label("暂无影片", systemImage: "film.stack")
             } description: {
-                Text("资料库只放有预告片的电影。片库里有了这样的电影，会一部一章地出现在这里。")
+                Text("带预告片的电影会显示在这里。")
             } actions: {
                 Button("重新载入") { Task { await model.refreshAll() } }
             }
@@ -159,7 +159,7 @@ struct ShowcaseHeader: View {
                 .font(.largeTitle.bold())
                 .foregroundStyle(.white)
                 .accessibilityAddTraits(.isHeader)
-            Text("Cuven 为你提供严格品质的影片")
+            Text("Cuven 精选的高品质影片")
                 .font(.subheadline)
                 .foregroundStyle(DSInk.secondary)
         }
@@ -489,7 +489,7 @@ struct ShowcaseIntro: View {
                         .padding(.leading, metrics.margin + lead).padding(.trailing, metrics.margin + trail)
                         // 剧照本身不念（只是画面、点不开）：标题后面补一句说明，不念一个后面什么都没有的「剧照」（F76）；
                         // 不再念「N 张」（用户要求全局去掉计数）
-                        .accessibilityHint("一排剧照画面，只供观看")
+                        .accessibilityHint("剧照")
                         .accessibilityAddTraits(.isHeader)
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: metrics.gutter) {

@@ -71,10 +71,11 @@ struct HomeView: View {
             } else {
                 Color.clear.frame(width: fullWidth, height: max(insets.top, 12) + 64)
             }
-            // 最上面一行：左边白字「Home」（Apple TV 主页那样的大标题，压在画面上、跟着头图一起滚走：C13、F34），
+            // 最上面一行：左边白字「主页」（Apple TV 主页那样的大标题，压在画面上、跟着头图一起滚走：C13、F34；
+            // 发行前从英文「Home」改成中文，和标签栏的「主页」一致），
             // 右边一枚头像（玻璃圈里的圆头像），点开是账户与设置——头像不再放在侧边导航里（用户要求）
             HStack(alignment: .center, spacing: 12) {
-                Text("Home")
+                Text("主页")
                     .font(.largeTitle.bold())
                     .foregroundStyle(.white)
                     .shadow(color: .black.opacity(0.35), radius: 10, y: 2)
@@ -158,7 +159,7 @@ struct HomeView: View {
             case .failed(let msg):
                 // 连不上：说清楚哪里不对、该怎么办（F87）；按钮是动词（F85）
                 ContentUnavailableView {
-                    Label("连不上服务器", systemImage: "wifi.exclamationmark")
+                    Label("无法连接服务器", systemImage: "wifi.exclamationmark")
                 } description: {
                     Text(msg)
                 } actions: {

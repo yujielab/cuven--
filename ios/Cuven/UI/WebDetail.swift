@@ -181,8 +181,6 @@ struct SeriesDetailView: View {
     @State private var loading = true
     @State private var failed: String?
     @State private var atv: AtvLookup?
-    /// 分集菜单里「复制直链」之后底部那一句
-    @State private var toast: String?
     /// 头部的画面和字标：定下来就不再换（换季也不换：同一部剧）
     @State private var art: DetailArt?
 
@@ -227,7 +225,6 @@ struct SeriesDetailView: View {
         ) { m in
             episodes(m, fallbackArt: fallbackArt)
         }
-        .webToast($toast)
         .task(id: current.path) { await load() }
         .task(id: current.path) {
             atv = nil
@@ -286,7 +283,7 @@ struct SeriesDetailView: View {
                     .accessibilityHidden(true)
                 } else {
                     // F87：说清楚怎么了，不怪人
-                    Text(failed ?? "暂无可播放文件")
+                    Text(failed ?? "暂无可播放的剧集")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, m.margin)
@@ -344,7 +341,7 @@ struct SeriesDetailView: View {
         }
     }
 
-    /// 一集的菜单（「•••」和长按共用）：播放 / 继续播放 / 重看，有进度时「从头播放」，「复制直链」（C45）
+    /// 一集的菜单（「•••」和长按共用）：播放 / 继续播放 / 重看，有进度时「从头播放」（C45）
     @ViewBuilder private func episodeMenu(_ f: EpisodeFile, index i: Int, done: Bool, partial: Bool) -> some View {
         Button(done ? "重看这一集" : (partial ? "继续播放" : "播放这一集"), systemImage: "play.fill") { play(index: i) }
         if partial {
@@ -352,18 +349,6 @@ struct SeriesDetailView: View {
                 model.playback.finish(f.path)
                 play(index: i)
             }
-        }
-        // 演示数据不连网：没有直链可复制
-        if !DemoData.enabled {
-            Button("复制直链", systemImage: "link") { copyLink(f) }
-        }
-    }
-
-    /// 「复制直链」：这一集签好名的 /stream 地址；复制完底部一句「直链已复制」
-    private func copyLink(_ f: EpisodeFile) {
-        Task { @MainActor in
-            await StreamLink.copy(path: f.path, name: f.name)
-            withAnimation(.snappy) { toast = "直链已复制" }
         }
     }
 
@@ -444,7 +429,7 @@ struct SeriesDetailView: View {
 
     private func playLabel(_ next: (file: EpisodeFile, label: String)?) -> String {
         if let next { return next.label }
-        return loading ? "播放第 1 集" : "暂无可播放文件"
+        return loading ? "播放第 1 集" : "暂无可播放的剧集"
     }
 
     /// 「从头播放」：要放的那一集有进度时才有，清掉它的进度再放
@@ -518,7 +503,7 @@ struct SeriesDetailView: View {
             let list = try await APIClient.shared.episodes(seriesPath: current.path)
             files = list.sorted { ($0.ep ?? Int.max, $0.name) < ($1.ep ?? Int.max, $1.name) }
         } catch {
-            failed = "分集清单没取到：\(error.localizedDescription)"
+            failed = "无法载入剧集。" + FriendlyError.message(error)
         }
         loading = false
         if let id = current.tmdbId ?? model.seriesMetas[current.path]?.id, let s = current.season {
@@ -608,7 +593,6 @@ struct DetailScaffold<Episodes: View>: View {
     @State private var showTitle = false
     /// 头部画面底边的主色：整页跟着染（DetailPalette）
     @State private var edge: UIColor?
-    @State private var toast: String?
     @State private var castSheet: CastSheetRequest?
     /// 点开的是第几张剧照（全屏大图，从那张卡上放大出来）
     @State private var stillPick: DetailStillPick?
@@ -696,7 +680,6 @@ struct DetailScaffold<Episodes: View>: View {
             }
         }
         .background(DetailPalette.from(edge).deep)
-        .webToast($toast)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         // 全部演员：一张弹层，点演员在弹层里推进去，不叠第二层（C50、C56）
@@ -835,10 +818,6 @@ struct DetailScaffold<Episodes: View>: View {
                 Button("从头播放", systemImage: "arrow.counterclockwise", action: onRestart)
                     .accessibilityIdentifier("detail-restart")
             }
-            if file != nil {
-                Button("复制直链", systemImage: "link") { copyLink() }
-                    .accessibilityIdentifier("detail-copy")
-            }
             if let shareURL {
                 ShareLink(item: shareURL, subject: Text(title)) {
                     Label("分享", systemImage: "square.and.arrow.up")
@@ -854,18 +833,9 @@ struct DetailScaffold<Episodes: View>: View {
                 .environment(\.colorScheme, .dark)
                 .contentShape(Circle())
         }
-        .disabled(onRestart == nil && file == nil && shareURL == nil)
+        .disabled(onRestart == nil && shareURL == nil)
         .accessibilityLabel("更多")
         .accessibilityIdentifier("detail-more")
-    }
-
-    /// 「复制直链」：签好名的 /stream 地址（可在 VLC 等播放器里打开）；复制完底部一句「直链已复制」
-    private func copyLink() {
-        guard let file else { return }
-        Task { @MainActor in
-            await StreamLink.copy(path: file.path, name: file.name)
-            withAnimation(.snappy) { toast = "直链已复制" }
-        }
     }
 
     // MARK: 分区
@@ -1203,45 +1173,4 @@ enum DetailText {
     }
 }
 
-// MARK: - 复制直链与底部提示（详情页「…」菜单里的「复制直链」用）
-
-/// 签好名的 /stream 直链（网页版 copyStreamLink），复制到剪贴板
-enum StreamLink {
-    @MainActor static func copy(path: String, name: String) async {
-        // 演示数据不连网（截图、UI 测试）：不去签名
-        if DemoData.enabled { return }
-        let sign = try? await APIClient.shared.streamSign(path: path)
-        let url = APIClient.shared.streamURL(path: path, name: name, sign: sign)
-        UIPasteboard.general.string = url.absoluteString
-        Haptics.success()
-    }
-}
-
-/// 页面底部一枚玻璃小胶囊（「直链已复制」），1.6 秒后自己退
-struct WebToast: ViewModifier {
-    @Binding var text: String?
-
-    func body(content: Content) -> some View {
-        content.overlay(alignment: .bottom) {
-            if let t = text {
-                Text(t)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 18)
-                    .frame(height: 44)
-                    .glassEffect(.regular, in: Capsule())
-                    .padding(.bottom, 24)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .task(id: t) {
-                        try? await Task.sleep(nanoseconds: 1_600_000_000)
-                        withAnimation(.easeOut(duration: 0.3)) { text = nil }
-                    }
-            }
-        }
-    }
-}
-
-extension View {
-    func webToast(_ text: Binding<String?>) -> some View { modifier(WebToast(text: text)) }
-}
 

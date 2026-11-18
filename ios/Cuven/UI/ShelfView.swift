@@ -89,14 +89,14 @@ struct ShelfView: View {
     @ViewBuilder private var emptyState: some View {
         switch shelf {
         case .watchlist:
-            ContentUnavailableView("想看还是空的", systemImage: "plus.circle",
-                                   description: Text("长按海报，选「加入想看」，片子就会出现在这里。"))
+            ContentUnavailableView("还没有想看的影片", systemImage: "plus.circle",
+                                   description: Text("长按海报并选择“加入想看”，影片会显示在这里。"))
         case .continueWatching:
-            ContentUnavailableView("还没有看到一半的", systemImage: "play.circle",
-                                   description: Text("看过 30 秒以上、还没看完的电影和剧集会出现在这里。"))
+            ContentUnavailableView("没有正在观看的内容", systemImage: "play.circle",
+                                   description: Text("开始观看但还没看完的电影和剧集会显示在这里。"))
         default:
-            ContentUnavailableView("这里还没有影片", systemImage: "film",
-                                   description: Text("片库里有了这一类的电影或剧集，会出现在这里。"))
+            ContentUnavailableView("暂无影片", systemImage: "film",
+                                   description: Text("这一类的电影和剧集会显示在这里。"))
         }
     }
 }

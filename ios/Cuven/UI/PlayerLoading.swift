@@ -177,9 +177,8 @@ struct PlayerLoadingView: View {
 
     private enum TipPhase { case shown, leaving, entering }
 
-    /// 和网页版同一组提示
-    private static let tips = ["请保持屏幕亮起", "正在渲染绚烂颜色", "正在预热画面质量", "正在添加全景声系统", "正在为您的设备优化",
-                               "正在量身定制体验", "正为您添加动态字幕", "一切几乎就绪", "还需要一小会", "即将完成"]
+    /// 轮着出的提示：只说真的在做的事（发行前改过：以前那组「正在添加全景声系统」「正为您添加动态字幕」不一定是真的）
+    private static let tips = ["正在连接", "正在载入画面", "正在准备音轨和字幕", "正在缓冲", "即将开始"]
     static let ink = Color(red: 10 / 255, green: 9 / 255, blue: 15 / 255)
     private static let tipCurve = Animation.timingCurve(0.4, 0, 0.2, 1, duration: 0.52)
 
@@ -290,8 +289,8 @@ struct PlayerLoadingView: View {
             guard !Task.isCancelled else { return }
             let next: String
             if tip >= Self.tips.count - 1 {
-                // 十句都轮完了还没开播（约 24 秒）：不再停在「即将完成」，如实说网络的情况
-                next = LoaderNet.shared.offline ? "网络已断开，恢复后自动继续" : "网络较慢，正在为您缓冲"
+                // 五句都轮完了还没开播（约 12 秒）：不再停在「即将开始」，如实说网络的情况
+                next = LoaderNet.shared.offline ? "网络已断开，恢复后自动继续" : "网络较慢，正在缓冲…"
                 if tipText == next { continue }
             } else {
                 tip += 1

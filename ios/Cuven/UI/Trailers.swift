@@ -197,8 +197,8 @@ struct TrailerPlayerView: View {
                 // 轻点两下暂停 / 继续，上下轻扫换下一段 / 上一段（F75、F76）
                 .accessibilityElement()
                 .accessibilityLabel(deck.current?.title ?? "预告片")
-                .accessibilityValue(deck.failed ? "放不了" : (deck.paused ? "已暂停" : "正在播放"))
-                .accessibilityHint(deck.trailers.count > 1 ? "轻点两下暂停或继续，上下轻扫换一段" : "轻点两下暂停或继续")
+                .accessibilityValue(deck.failed ? "无法播放" : (deck.paused ? "已暂停" : "正在播放"))
+                .accessibilityHint(deck.trailers.count > 1 ? "轻点两下以暂停或继续，上下轻扫以切换" : "轻点两下以暂停或继续")
                 .accessibilityAction { deck.togglePause() }
                 .accessibilityAdjustableAction { direction in
                     switch direction {
@@ -212,7 +212,7 @@ struct TrailerPlayerView: View {
             if deck.failed {
                 VStack(spacing: 10) {
                     Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 30))
-                    Text("这段预告片放不了").font(.subheadline.weight(.semibold))
+                    Text("无法播放此预告片").font(.subheadline.weight(.semibold))
                     if deck.index + 1 < deck.trailers.count {
                         Button("下一段") { deck.go(deck.index + 1) }.buttonStyle(.glass)
                     }
