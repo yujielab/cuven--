@@ -62,18 +62,17 @@ struct NetworkCheck: Codable, Equatable, Sendable {
     /// 演示数据：不连网，只按网络类型估
     var demo = false
 
-    /// 账户页那一行：「Wi‑Fi · 约 86 Mbps · 延迟 23 ms」
+    /// 账户页那一行：「Wi‑Fi · 86 Mbps」（延迟只用来挑百分比，不写给人看）
     var summary: String {
         var parts = [path.label]
         if path.constrained { parts.append("低数据模式") }
         if let mbps {
-            parts.append(mbps < 10 ? String(format: "约 %.1f Mbps", mbps) : "约 \(Int(mbps.rounded())) Mbps")
+            parts.append(mbps < 10 ? String(format: "%.1f Mbps", mbps) : "\(Int(mbps.rounded())) Mbps")
         } else if demo {
             parts.append("演示数据不测速")
         } else if !path.constrained {
-            parts.append("没测出速度")
+            parts.append("无法测速")
         }
-        if let rttMs { parts.append("延迟 \(Int(rttMs.rounded())) ms") }
         return parts.joined(separator: " · ")
     }
 }

@@ -215,7 +215,7 @@ enum ProfileAPI {
         guard code > 0 else { return offline }
         let parsed = data.flatMap { try? JSONDecoder().decode(AccountAPI.CodeReply.self, from: $0) }
         if (200..<300).contains(code) { return parsed ?? offline }
-        return parsed ?? AccountAPI.CodeReply(ok: false, error: "http_\(code)", message: "服务器响应异常", attemptsLeft: nil)
+        return parsed ?? AccountAPI.CodeReply(ok: false, error: "http_\(code)", message: "服务暂时不可用，请稍后再试", attemptsLeft: nil)
     }
 
     static func sendCode(_ email: String) async -> AccountAPI.CodeReply {
@@ -497,13 +497,13 @@ final class ProfileStore {
         case .photo(let jpeg):
             let code = await ProfileAPI.uploadAvatar(name, jpeg: jpeg)
             guard (200..<300).contains(code) else {
-                return code == 0 ? "未能保存，请再试一次" : "照片上传失败 (\(code))"
+                return code == 0 ? "未能保存，请再试一次" : "照片上传失败，请再试一次"
             }
             avatar = .custom
         }
         let body = outgoing(avatar: avatar)
         let (code, saved) = await ProfileAPI.saveSettings(name, body)
-        guard let saved else { return code == 0 ? "未能保存，请再试一次" : "设置未能保存 (\(code))" }
+        guard let saved else { return code == 0 ? "未能保存，请再试一次" : "设置未能保存，请再试一次" }
         guard username == name else { return nil }
         settings = saved
         if saved.avatar.isCustom { avatarBust = Int(Date().timeIntervalSince1970) }

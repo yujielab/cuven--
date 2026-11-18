@@ -304,7 +304,7 @@ final class AppModel {
             // 再去 Apple TV 对全片库的画面：放到后台，不让下拉刷新等它（一轮可能要一两分钟）
             Task { await self.loadAtvArt() }
         } catch {
-            if videos.isEmpty { phase = .failed(error.localizedDescription) }
+            if videos.isEmpty { phase = .failed(FriendlyError.message(error)) }
             freezeFresh()   // 没连上：就按上次存下的片库算
         }
     }

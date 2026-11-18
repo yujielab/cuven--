@@ -45,9 +45,9 @@ enum TrackPrefs {
         /// 账户页那一行下面的灰字
         var hint: String {
             switch self {
-            case .auto: return "片源默认的那条，通常是原声"
-            case .natural: return "先放影片原产地的语言，没有就用英语"
-            default: return "有\(label)音轨就先放它，没有就用片源默认的"
+            case .auto: return "影片默认音轨，通常是原声"
+            case .natural: return "优先原产地语言，其次英语"
+            default: return "优先\(label)，没有时用默认音轨"
             }
         }
 
@@ -82,9 +82,9 @@ enum TrackPrefs {
 
         var hint: String {
             switch self {
-            case .auto: return "片子自带的中文优先，没有再用在线字幕"
+            case .auto: return "优先影片自带的中文字幕，其次在线字幕"
             case .off: return "不显示字幕"
-            default: return "有\(label)字幕就先选它，没有就照默认的"
+            default: return "优先\(label)字幕，没有时自动选择"
             }
         }
 

@@ -958,7 +958,7 @@ async function handleSubsList(url, env, ctx) {
       const qs = new URLSearchParams({ path: filePath, os: '1' });
       if (sign) { qs.set('exp', String(sign.exp)); qs.set('sig', sign.sig); }
       qs.set('v', `${(os.rec.src && os.rec.src.file) || ''}.${syncId(os.rec.sync)}`);   // 换了字幕或对齐：链接跟着变，浏览器不会拿旧时间
-      subs.push({ name: os.rec.label, path: filePath, ext: '.vtt', srclang: os.rec.lang, label: os.rec.label, online: true,
+      subs.push({ name: osLabel(os.rec), path: filePath, ext: '.vtt', srclang: os.rec.lang, label: osLabel(os.rec), online: true,
         url: `/api/subs/vtt?${qs.toString()}` });
     }
     pending = !!(os && !os.rec && os.pending);                 // 还在查：别让浏览器缓存这份「还没有」
@@ -1057,8 +1057,8 @@ const OS_STD_FPS = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60];
 const OS_LANGS = {
   'zh-cn': { lang: 'zh-Hans', label: '简体中文（在线）', score: 40 },
   ze: { lang: 'zh-Hans', label: '简英双语（在线）', score: 34 },
-  'zh-tw': { lang: 'zh-Hans', label: '简体中文（在线 · 繁转简）', score: 30, toSimp: true },
-  en: { lang: 'en', label: 'English（在线）', score: -20 },      // 只在没有像样的中文时才用：有对齐以后，哈希不一致的中文也能对上时间
+  'zh-tw': { lang: 'zh-Hans', label: '简体中文（在线）', score: 30, toSimp: true },   // 繁体逐字转成了简体：名字照样叫简体
+  en: { lang: 'en', label: '英文（在线）', score: -20 },      // 只在没有像样的中文时才用：有对齐以后，哈希不一致的中文也能对上时间
 };
 const OS_MEM = new Map();                           // 记录键 → 记录（进程内，最近 24 条）
 const OS_BUSY = new Map();                          // 记录键 → 开始时刻（同一 isolate 不重复查）
@@ -1067,6 +1067,8 @@ let osAuth = null;                                  // { token, base, exp, user 
 let osLoginBad = null;                              // 上一次登录失败：{ fp, status, message, at, until }（见 osLogin；在线字幕状态拿它说清是哪一项不对）
 
 const osOn = env => !!(env && env.OPENSUBTITLES_API_KEY) && env.OPENSUBTITLES_DISABLE !== '1';
+/** 在线字幕在播放器菜单里的名字：按语种现算（存下的老记录里是旧名字，比如以前的「在线 · 繁转简」） */
+const osLabel = rec => (rec && rec.src && OS_LANGS[rec.src.language] && OS_LANGS[rec.src.language].label) || (rec && rec.label) || '在线字幕';
 /** 用户名（去掉前后空格：从别处粘过来常带一个） */
 const osUser = env => String((env && env.OPENSUBTITLES_USERNAME) || '').trim();
 const osIdentity = (filePath, meta) => `${filePath}|${meta.content_hash || meta.rev || meta.size}`;
@@ -9361,14 +9363,13 @@ function hlsTxConfig(a, t, first) {
   if (t.strip) a.strip = hlsB64(t.strip);
 }
 
-const HLS_CODEC_LABEL = { aac: 'AAC', ac3: 'Dolby Digital', eac3: 'Dolby Digital Plus', flac: 'FLAC', alac: 'ALAC' };
 function hlsChLabel(ch) { return ch === 8 ? '7.1' : ch === 6 ? '5.1' : ch === 2 ? '立体声' : ch === 1 ? '单声道' : `${ch}ch`; }
-const HLS_TX_LABEL = { 1: 'DTS', 2: 'TrueHD', 3: 'MLP', 4: 'Opus', 5: 'Vorbis', 12: 'MP2', 13: 'MP3' };
+/** 音轨在播放器菜单里的名字：轨道自己的名字（没有就用语种），后面只加声道（5.1 / 7.1 / 立体声）和全景声。
+ *  不写编码名，也不写「DTS → Dolby Digital」这种转码细节（发行版不给人看：人只关心哪种语言、几声道） */
 function hlsAudioLabel(a) {
   let s = a.name || hlsLangName(a.lang);
-  const hasCodec = /(dd|ac-?3|e-?ac-?3|dolby|aac|flac|alac|atmos|truehd|dts|pcm|opus|vorbis|mp3)/i.test(a.name || '');
-  if (a.tx) s += ` · ${HLS_TX_LABEL[a.tx.kind] || 'PCM'} → Dolby Digital ${hlsChLabel(a.ch)}`;
-  else if (!hasCodec) s += ` · ${HLS_CODEC_LABEL[a.codec] || a.codec} ${hlsChLabel(a.ch)}${a.joc ? ' Atmos' : ''}`;
+  const hasSpec = /(dd|ac-?3|e-?ac-?3|dolby|aac|flac|alac|atmos|truehd|dts|pcm|opus|vorbis|mp3|[257]\.1|stereo|立体声|单声道|全景声)/i.test(a.name || '');
+  if (!hasSpec) s += ` · ${hlsChLabel(a.ch)}${a.joc && !a.tx ? ' · 杜比全景声' : ''}`;
   if (a.commentary && !/comment|评论|解说/i.test(s)) s += '（评论音轨）';
   return s;
 }
@@ -11182,7 +11183,7 @@ function hlsMaster(idx, xs, env, os) {
       ? { uri: `${idh}/x${i}.m3u8`, lang: 'zh-Hant', name: '繁体中文', forced: false, hi: false }
       : { uri: `${idh}/x${i}.m3u8`, lang: x.srclang || 'und', name: x.label, forced: false, hi: false }),
   ];
-  if (os && os.rec) subs.push({ uri: `${idh}/o0.m3u8`, lang: os.rec.lang, name: os.rec.label, forced: false, hi: false, online: true });
+  if (os && os.rec) subs.push({ uri: `${idh}/o0.m3u8`, lang: os.rec.lang, name: osLabel(os.rec), forced: false, hi: false, online: true });
   // 默认显示哪一条：片子自带的中文优先（简体 > 中文），在线那条只兜底——自带里没有能用的中文才默认打开它；
   // 自带的只有繁体时，在线找来的简体排在它前面（在线那条本来就是给它找的简体）。
   // 一条字幕都没有的片子，在线找来的那条（哪怕是英文）也默认打开 —— 本来就是为它找的
@@ -11699,7 +11700,7 @@ function hlsInfo(idx, xs, env, os) {
     subtitles: idx.subs.map(s => ({ lang: s.lang, name: s.name, format: s.fmt, forced: s.forced })),
     sidecarSubtitles: xs.length,
     // 在线字幕（已经查到的话）与它的自动对齐结果：参照是谁、整体偏移 / 速度比 / 分段、对齐前后对上的比例
-    online: os && os.status === 'ok' ? { lang: os.lang, label: os.label, release: os.src && os.src.release, hashMatch: !!(os.src && os.src.hash),
+    online: os && os.status === 'ok' ? { lang: os.lang, label: osLabel(os), release: os.src && os.src.release, hashMatch: !!(os.src && os.src.hash),
       sync: os.sync ? { applied: !!os.sync.applied, why: os.sync.why, ref: os.sync.ref || null, scale: os.sync.scale, segs: os.sync.segs,
         before: os.sync.before, after: os.sync.after, chance: os.sync.chance, cv: os.sync.cv ?? null } : null } : null,
     audioUnsupportedOnly: idx.muxed < 0 && idx.audio.length > 0 && !(txOn && idx.audio.some(a => a.mode === 'tx')),

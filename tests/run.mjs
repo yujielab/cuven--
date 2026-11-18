@@ -426,7 +426,7 @@ console.log('\n■ OpenSubtitles 自动补字幕（模拟接口）');
   ok(calls('/subtitles').every(c => c.q.languages === 'ze,zh-cn,zh-tw'), '已有英文字幕：只找中文');
   m = await master('/Movies/subscan.mkv');
   const v1 = await vtt('/Movies/subscan.mkv', m, 0);
-  ok(/NAME="简体中文（在线 · 繁转简）"/.test(subLine(m, /o0/)) && v1.includes('这个问题很简单') && !v1.includes('這個'), `只有繁体：转成简体再给（${(v1.split('\n').find(l => /问题/.test(l)) || '').slice(0, 20)}）`);
+  ok(/NAME="简体中文（在线）"/.test(subLine(m, /o0/)) && v1.includes('这个问题很简单') && !v1.includes('這個'), `只有繁体：转成简体再给（${(v1.split('\n').find(l => /问题/.test(l)) || '').slice(0, 20)}）`);
 
   // 找不到：记下来，7 天内不再查
   await clear(); reset();

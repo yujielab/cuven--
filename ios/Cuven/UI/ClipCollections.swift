@@ -366,7 +366,7 @@ struct ClipCollectionsShelf: View {
                         .buttonStyle(PressableStyle())
                         .matchedTransitionSource(id: cover.collection, in: ns)
                         .accessibilityLabel(cover.collection.title)
-                        .accessibilityHint("像刷短视频一样上下滑着看")
+                        .accessibilityHint("上下滑动，随心浏览")
                         .accessibilityIdentifier("clip-collection-\(cover.collection.rawValue)")
                     }
                 }

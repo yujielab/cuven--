@@ -17,8 +17,8 @@ struct YearView: View {
             let metrics = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing, height: geo.size.height)
             ScrollView {
                 if entries.isEmpty {
-                    ContentUnavailableView("这一年还没有影片", systemImage: "film",
-                                           description: Text("片库里加入这一年的电影或剧集后，会出现在这里。"))
+                    ContentUnavailableView("暂无影片", systemImage: "film",
+                                           description: Text("这一年的电影和剧集会显示在这里。"))
                         .padding(.top, 60)
                 } else {
                     EntryGrid(entries: entries, metrics: metrics, slot: "year-\(year)", movieID: "year-movie", seriesID: "year-series")

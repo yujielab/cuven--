@@ -176,7 +176,7 @@ struct PrivacyGateView: View {
                 .foregroundStyle(.white)
                 .modifier(Rise(on: shown, delay: 0.42, reduce: reduceMotion))
                 .accessibilityAddTraits(.isHeader)
-            Text("Cuven TV+ 在为您呈现高画质影片的同时，同样用心保护您的个人信息。")
+            Text("Cuven max 在为您呈现高画质影片的同时，也用心保护您的个人信息。")
                 .font(.system(size: 16))
                 .lineSpacing(16 * 0.55 - 4)
                 .foregroundStyle(Self.text2)
@@ -195,7 +195,7 @@ struct PrivacyGateView: View {
 
     /// 四条要点：16 号 500，行间一条白 8% 的线，依次升上来（0.56 / 0.62 / 0.68 / 0.74 秒）
     private var points: some View {
-        let items = ["只收集必需的信息", "仅在有正当依据时使用", "您始终掌控自己的信息", "端到端加密保护传输"]
+        let items = ["只收集必需的信息", "仅在有正当依据时使用", "您始终掌控自己的信息", "传输全程加密"]
         return VStack(spacing: 0) {
             ForEach(items.indices, id: \.self) { i in
                 Text(items[i])
@@ -277,7 +277,7 @@ struct PrivacyGateView: View {
             proseHeading("儿童个人信息")
             proseText("Cuven 深知保护儿童个人信息的重要性；在中国大陆，我们对儿童的定义是未满 14 周岁的个人。Cuven 将根据其隐私权政策处理儿童个人信息。Cuven 还将儿童个人信息视为敏感个人信息，依法遵守敏感个人信息的特定规则。")
             proseHeading("数据传输安全")
-            proseText("您的个人信息在传输过程中采用端到端加密，借助 Cuven 自研的网络架构保障其安全。")
+            proseText("您的个人信息在传输过程中全程加密。")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -335,7 +335,7 @@ struct PrivacyGateView: View {
                 .tracking(-0.38)
                 .foregroundStyle(.white)
                 .padding(.bottom, 4)
-            Text("以下均为使用 Cuven TV+ 所必需。我们不会预先替您勾选任何一项。")
+            Text("以下各项均为使用 Cuven max 所必需，我们不会替您预先勾选。")
                 .font(.system(size: 13))
                 .lineSpacing(2)
                 .foregroundStyle(Self.text2)
@@ -427,7 +427,7 @@ struct PrivacyGateView: View {
 
     private func footer(bottomInset: CGFloat, sideL: CGFloat, sideR: CGFloat) -> some View {
         let ready = missing == 0
-        let hint = agreed ? "欢迎使用 Cuven TV+" : (ready ? "已完成全部必选项" : "请完成剩余 \(missing) 项以继续")
+        let hint = agreed ? "欢迎使用 Cuven max" : (ready ? "已完成全部必选项" : "请完成剩余 \(missing) 项以继续")
         return VStack(spacing: 0) {
             Text(hint)
                 .font(.system(size: 12))

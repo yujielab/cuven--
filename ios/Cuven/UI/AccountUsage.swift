@@ -26,12 +26,12 @@ struct NetworkSpeedCard: View {
     /// 说真话：这个百分比（开着自动调整就是自动选的那个）在 iOS 上换成了什么
     private var footer: String {
         let p = auto && autoValue >= 0 ? min(100, autoValue) : min(100, max(0, speed))
-        let tail = auto ? "自动调整开着时，换网络或隔半小时回到 App 会重新检测。改动从下一次播放开始生效。"
-                        : "改动从下一次播放开始生效。"
-        if p >= 100 { return "100% 时，正片缓冲多少交给系统决定。" + tail }
-        let base = "正片最多提前缓冲约 \(Int(NetworkSpeed.forwardBuffer(p))) 秒"
-        if p < 25 { return base + "；低于 25% 时省流量，主页和资料库里的预告片不自动播放。" + tail }
-        return base + "。" + tail
+        let tail = auto ? "开启自动调整后，网络变化时会重新检测。更改将在下次播放时生效。"
+                        : "更改将在下次播放时生效。"
+        if p >= 100 { return "设为 100% 时，由系统决定缓冲时长。" + tail }
+        let base = "最多提前缓冲约 \(Int(NetworkSpeed.forwardBuffer(p))) 秒。"
+        if p < 25 { return base + "低于 25% 时，预告片不会自动播放。" + tail }
+        return base + tail
     }
 }
 
@@ -45,7 +45,7 @@ struct NetworkSpeedRow: View {
     @ScaledMetric(relativeTo: .title3) private var iconSize: CGFloat = 24
     @ScaledMetric(relativeTo: .title3) private var iconColumn: CGFloat = AccountMetrics.iconColumn
 
-    static let hint = "调高可获得更流畅的体验；调低可减少流量消耗。"
+    static let hint = "调高更流畅，调低更省流量。"
 
     /// 现在生效的：开着自动调整而且测过 → 自动选的；不然是手动设的
     private var stored: Int { auto && autoValue >= 0 ? min(100, autoValue) : min(100, max(0, speed)) }
@@ -171,10 +171,10 @@ private struct NetworkAutoRow: View {
     }
 
     private func status(_ engine: NetworkAuto, measuring: Bool) -> String {
-        if measuring { return "正在检测网络情况和速度…" }
-        guard auto else { return "按网络情况和速度，自动选合适的百分比" }
-        if engine.phase == .offline { return "未连接网络，连上后会重新检测" }
-        return engine.last?.summary ?? "开启后会马上检测一次"
+        if measuring { return "正在检测网络…" }
+        guard auto else { return "根据网络状况自动调整" }
+        if engine.phase == .offline { return "未连接网络" }
+        return engine.last?.summary ?? "即将检测"
     }
 
     private func pill(measuring: Bool) -> some View {
@@ -203,7 +203,7 @@ private struct NetworkAutoRow: View {
         .accessibilityLabel("自动调整网络速度")
         .accessibilityValue(auto ? "已开启" : "已关闭")
         .accessibilityAddTraits(auto ? .isSelected : [])
-        .accessibilityHint(auto ? "关掉以后停在现在的百分比" : "检测网络情况和速度，自动选合适的百分比")
+        .accessibilityHint(auto ? "关闭后保持当前设置" : "根据网络状况自动调整")
         .accessibilityIdentifier("account-network-auto")
     }
 }
@@ -401,7 +401,7 @@ struct UsageInsightsCard: View {
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(.white)
                     .accessibilityAddTraits(.isHeader)
-                Text("查看近期流量结构与网络表现，让体验始终保持顺畅。")
+                Text("了解近期的流量使用情况。")
                     .font(.callout)
                     .foregroundStyle(DSInk.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -431,12 +431,12 @@ struct UsageInsightsCard: View {
 
     /// 卡下一行：统计的是什么、从哪天起（演示模式直说是示例数）；清除缓存会怎样（以前写在「存储」那一组下面）
     private var footer: String {
-        let cache = "清除缓存后，片库清单、海报和影片信息会重新下载。"
+        let cache = "清除后，片库、海报和影片信息将重新下载。"
         guard expanded else { return cache }
-        if DemoData.enabled { return "演示模式：上面是固定的示例数，不是真实流量。" + cache }
-        var s = "只统计这台设备上 Cuven 实际下载的流量（缓存里已有的不算），记录只保存在本机。"
+        if DemoData.enabled { return "演示模式：以上为示例数据。" + cache }
+        var s = "仅统计 Cuven 在此设备上使用的流量，记录只保存在本机。"
         if let since = summary?.since {
-            s += "从 \(since.formatted(.dateTime.month().day())) 开始记录。"
+            s += "自 \(since.formatted(.dateTime.month().day())) 起统计。"
         }
         return s + cache
     }
@@ -482,7 +482,7 @@ struct UsageInsightsCard: View {
         .disabled(clearing)
         .sensoryFeedback(.success, trigger: cleared)
         .accessibilityLabel("清除缓存")
-        .accessibilityHint("清除后，片库清单、海报和影片信息会重新下载")
+        .accessibilityHint("清除后，片库、海报和影片信息将重新下载。")
         .accessibilityIdentifier("account-clear-cache")
     }
 
@@ -796,9 +796,9 @@ private struct UsageHourlyChart: View {
 
     private var spokenSummary: String {
         guard sum > 0, let top = hours.indices.max(by: { hours[$0].total < hours[$1].total }) else {
-            return "这 24 小时没有用流量"
+            return "过去 24 小时未使用流量"
         }
-        return "共 \(UsageFormat.text(sum))，最多的是 \(Self.hour(hours[top].start)) 点那一小时，\(UsageFormat.text(hours[top].total))"
+        return "共 \(UsageFormat.text(sum))，\(Self.hour(hours[top].start)) 点最多，为 \(UsageFormat.text(hours[top].total))"
     }
 
     private static func hour(_ d: Date) -> Int {
@@ -926,10 +926,10 @@ private struct UsageEmptyState: View {
                 .font(.system(size: 28, weight: .regular))
                 .foregroundStyle(DSInk.tertiary)
                 .accessibilityHidden(true)
-            Text("还没有流量记录")
+            Text("暂无流量记录")
                 .font(.headline)
                 .foregroundStyle(.white)
-            Text("播放影片、预告片或浏览片库后，这里会按小时显示这台设备实际用掉的流量。")
+            Text("播放或浏览后，这里会按小时显示流量使用情况。")
                 .font(.callout)
                 .foregroundStyle(DSInk.tertiary)
                 .multilineTextAlignment(.center)
@@ -993,9 +993,9 @@ enum UsageFormat {
     }
 
     static func spokenTrend(_ t: Double?) -> String {
-        guard let t, t.isFinite else { return "没有上个月的数据" }
+        guard let t, t.isFinite else { return "暂无上月数据" }
         let n = Int(min(999, abs(t)).rounded())
-        if n == 0 { return "和上个月差不多" }
+        if n == 0 { return "与上月持平" }
         return (t > 0 ? "日均多 " : "日均少 ") + "\(n)%"
     }
 

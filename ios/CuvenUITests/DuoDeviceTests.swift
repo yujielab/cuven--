@@ -139,12 +139,12 @@ final class DuoDeviceTests: XCTestCase {
         sleep(2)
         report(app, "detail")
         snap("duo-03-detail")
-        // 「…」：播放钮旁边的系统菜单（从头播放 / 复制直链 / 分享）；点菜单外面收起
+        // 「…」：播放钮旁边的系统菜单（从头播放 / 分享）；点菜单外面收起
         let more = app.buttons["detail-more"].firstMatch
         if more.waitForExistence(timeout: 3) {
             more.tap(); sleep(2)
             snap("duo-03b-detail-more")
-            XCTAssertTrue(app.buttons["detail-copy"].firstMatch.exists, "「…」菜单里没有「复制直链」")
+            XCTAssertTrue(app.buttons["detail-share"].firstMatch.exists, "「…」菜单里没有「分享」")
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.06)).tap()
             sleep(1)
         } else {
@@ -466,7 +466,7 @@ final class DuoDeviceTests: XCTestCase {
         if field.exists {
             field.tap()
             field.typeText("cuvenciprobe\(Int(Date().timeIntervalSince1970) % 100000)")
-            let newUser = app.staticTexts["新用户 — 将建立您的账户"]
+            let newUser = app.staticTexts["新用户，将为你创建账户"]
             XCTAssertTrue(newUser.waitForExistence(timeout: 20), "账户服务查不到或读不懂（应当提示新用户）")
             if subtitle.exists { snap("duo-22-login-lookup") }
         }

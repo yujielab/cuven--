@@ -24,8 +24,10 @@ struct PlayRequest {
 }
 
 enum PlayError: LocalizedError {
+    /// 这个文件放不了。带着的是服务器给的技术原因：只记进诊断日志，不给人看
     case unsupported(String)
-    var errorDescription: String? {
+    var errorDescription: String? { "此视频的格式不受支持。" }
+    var detail: String {
         switch self { case .unsupported(let m): return m }
     }
 }
@@ -86,7 +88,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
 
     func play(_ req: PlayRequest, model: AppModel) {
         self.model = model
-        if DemoData.enabled { alert("演示模式", "演示数据没有片源，不能播放。"); return }
+        if DemoData.enabled { alert("演示模式", "演示模式下无法播放。"); return }
         Haptics.success()
         plog("tap")
         PlayerLoadingOverlay.shared.onClose = { [weak self] in self?.cancelLoading() }
@@ -133,8 +135,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             show(url, req)
         } catch {
             guard token == loadToken else { return }
-            plog("resolve failed", error: true)
-            closeThenAlert("无法播放", error.localizedDescription)
+            plog("resolve failed\((error as? PlayError).map { ": " + $0.detail } ?? "")", error: true)
+            closeThenAlert("无法播放", (error as? PlayError)?.errorDescription ?? PlayerErrorText.message(error) ?? FriendlyError.message(error))
         }
     }
 
@@ -329,7 +331,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
                 }
             }
         case .failed:
-            let msg = item.error?.localizedDescription ?? "未知错误"
+            let msg = "此视频暂时无法播放，请稍后再试。"
             let code = (item.error as NSError?).map { "\($0.domain) \($0.code)" } ?? "-"
             // 底下那一层错误、播放器错误日志的最后一条（只记域和代码：说明文字里可能带着地址）
             let under = ((item.error as NSError?)?.userInfo[NSUnderlyingErrorKey] as? NSError).map { " ← \($0.domain) \($0.code)" } ?? ""
@@ -345,7 +347,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     private func interrupted(_ err: NSError?) {
         plog("interrupted: \(err.map { "\($0.domain) \($0.code)" } ?? "-")", error: true)
         saveProgress()
-        closeThenAlert("播放中断", PlayerErrorText.message(err) ?? err?.localizedDescription ?? "网络或片源出了问题，进度已保存，可以稍后接着看。")
+        closeThenAlert("播放中断", PlayerErrorText.message(err) ?? "播放进度已保存，稍后可以继续观看。")
     }
 
     private func saveProgress() {
@@ -492,9 +494,9 @@ enum PlayerErrorText {
             if x.domain == AVFoundationErrorDomain, let code = AVError.Code(rawValue: x.code) {
                 switch code {
                 case .noCompatibleAlternatesForExternalDisplay:
-                    return "现在用的屏幕放不了这部片子的画面格式（4K / HDR）。断开外接显示器或隔空播放，在这台设备上播放试试。"
+                    return "当前显示屏不支持这部影片的画面格式（4K 或 HDR）。请断开外接显示器或隔空播放后再试。"
                 case .decoderNotFound, .decodeFailed, .undecodableMediaData, .fileFormatNotRecognized:
-                    return "这台设备解不了这部片子的视频格式。"
+                    return "这台设备不支持这部影片的视频格式。"
                 default:
                     break
                 }
@@ -502,9 +504,9 @@ enum PlayerErrorText {
             if x.domain == NSURLErrorDomain {
                 switch x.code {
                 case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost:
-                    return "网络断了。连上网络后再试。"
+                    return "网络连接已断开。请连接网络后再试。"
                 case NSURLErrorTimedOut:
-                    return "连接片源超时。稍后再试。"
+                    return "连接超时。请稍后再试。"
                 default:
                     break
                 }

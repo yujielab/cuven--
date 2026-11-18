@@ -47,7 +47,7 @@ struct ActorPage: View {
                         if !movies.isEmpty { worksShelf("库中的电影", movies, m) }
                         if !shows.isEmpty { worksShelf("库中的剧集", shows, m) }
                         if works.isEmpty {
-                            Text(info == nil ? "正在查这位演员在片库里的作品…" : "片库里还没有这位演员的作品。")
+                            Text(info == nil ? "正在载入…" : "片库中暂无此演员的作品。")
                                 .font(.callout)
                                 .foregroundStyle(palette.ink2)
                                 .padding(.horizontal, m.margin)
@@ -426,7 +426,7 @@ struct ActorBioSheet: View {
                                 .padding(.top, 12)
                         } else if info != nil {
                             // TMDB 上中文、英文简介都是空的：说一声，不留一块空白
-                            Text("TMDB 上还没有这位演员的简介。")
+                            Text("暂无简介。")
                                 .font(.callout)
                                 .foregroundStyle(palette.ink2.opacity(0.75))
                                 .padding(.leading, lead)

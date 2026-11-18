@@ -136,7 +136,7 @@ struct WelcomeView: View {
         case ..<22: g = "Good Evening"
         default: g = "Good Night"
         }
-        return g + " !"
+        return g + "!"
     }
 
     /// 132 的玻璃圆（白 6% + 模糊，1px 白 18% 描边，上沿一道高光，投影）；头像是本机存的那一张（AvatarCache），到了淡入。

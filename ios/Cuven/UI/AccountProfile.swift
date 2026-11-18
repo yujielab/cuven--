@@ -627,7 +627,7 @@ struct AvatarPickerSheet: View {
             if case .some(.photo) = pending { return "轻点“完成”保存这张照片。" }
             return "轻点“完成”保存所选形象。"
         }
-        return "为账户选择清晰、自然的显示形象。"
+        return "选择一个头像，或上传一张照片。"
     }
 
     private var buttonTitle: String { editing || changed ? "完成" : "更改头像" }
@@ -1120,8 +1120,7 @@ struct EmailChangeSheet: View {
                     if put == 409 {
                         status = .error("此电子邮件已绑定其他账户，请换一个地址")
                     } else {
-                        let detail = put == 0 ? "网络异常" : "HTTP \(put)"
-                        status = .error("已验证，但云端保存失败（\(detail)），请再试一次")
+                        status = .error(put == 0 ? "网络连接异常，请再试一次" : "未能保存，请再试一次")
                     }
                     return
                 }
@@ -1273,7 +1272,7 @@ struct IdentitySheet: View {
         if accountName.isEmpty { return "未检测到登录账户。请先登录后，再进行此操作。" }
         if mode == .faceReset && !bioAvailable { return "这台设备没有可用的\(bioName)，暂时无法重设登录面容。" }
         if !bioAvailable && boundEmail.isEmpty {
-            return "此设备不支持面容 ID 验证，且账户未绑定电子邮件，暂时无法验证身份。请先在账户设置中绑定电子邮件。"
+            return "暂时无法验证身份。请先为账户绑定电子邮件。"
         }
         return mode == .rename ? "更改姓名会影响你的登录名与账户数据，请先验证你的身份。" : "重设登录面容前，请先验证你的身份。"
     }
@@ -1304,7 +1303,7 @@ struct IdentitySheet: View {
             ProfilePrimaryButton(title: "使用\(bioName) 验证", symbol: account.biometrySymbol, busy: busy) { faceID() }
                 .padding(.top, 8)
             if !boundEmail.isEmpty {
-                ProfileLinkButton(title: "改用邮箱验证码验证") {
+                ProfileLinkButton(title: "改用电子邮件验证码") {
                     verifyStatus = .empty
                     enterOtp()
                 }
@@ -1349,14 +1348,14 @@ struct IdentitySheet: View {
         ready = true
         // 设备不支持面容 ID、有绑定邮箱 → 直接改用邮箱验证码
         guard canVerify, !bioAvailable, !boundEmail.isEmpty else { return }
-        verifyStatus = .info("此设备不支持面容 ID，已改用邮箱验证码验证身份。")
+        verifyStatus = .info("已改用电子邮件验证码验证身份。")
         enterOtp()
     }
 
     private func faceID() {
         guard !busy else { return }
         busy = true
-        verifyStatus = .info("请在系统弹窗中完成面容验证…")
+        verifyStatus = .info("请按提示完成验证…")
         let reason = mode == .rename ? "验证身份以更改姓名" : "验证身份以重设登录面容"
         Task { @MainActor in
             let outcome = await IdentityCheck.biometric(reason: reason)
@@ -1371,7 +1370,7 @@ struct IdentitySheet: View {
                 verifyStatus = .error("已取消验证")
                 failures += 1
             case .failed, .unavailable:
-                let tail = boundEmail.isEmpty ? "" : "，或改用邮箱验证码"
+                let tail = boundEmail.isEmpty ? "" : "，或改用电子邮件验证码"
                 verifyStatus = .error("\(bioName) 验证未通过，请重试" + tail)
                 failures += 1
             }
@@ -1459,7 +1458,7 @@ struct IdentitySheet: View {
 
     private var nameStep: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("身份已确认。输入新的姓名 — 它将成为你的登录名与账户标识。")
+            Text("身份已验证。新的姓名也将作为你的登录名。")
                 .font(.subheadline)
                 .foregroundStyle(DSInk.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1528,16 +1527,16 @@ struct IdentitySheet: View {
     private var confirmText: AttributedString {
         if mode == .rename {
             return ProfileText.rich([("将把姓名从 ", false), (accountName, true), (" 更改为 ", false), (newName, true),
-                                     ("。头像、电子邮件与账户设置会自动迁移。", false)])
+                                     ("。头像、电子邮件和设置会一并保留。", false)])
         }
         return ProfileText.rich([("即将重设 ", false), (accountName, true), (" 的登录面容。", false)])
     }
 
     private var confirmWarning: String {
         if mode == .rename {
-            return "出于安全考虑，更改姓名后旧的面容数据将被清除，需要重新录入面容才能继续使用面容登录。"
+            return "为了安全，更改姓名后需要重新录入面容，才能继续使用面容登录。"
         }
-        return "接下来按系统提示完成一次\(bioName) 验证即可生效；本机旧的面容登录凭据将被覆盖。"
+        return "按提示完成\(bioName) 验证后即可生效。"
     }
 
     private var confirmStep: some View {
@@ -1568,7 +1567,7 @@ struct IdentitySheet: View {
         if mode == .faceReset {
             // 重设 = 验证过身份以后，为这个账户重新开一次本机的面容 ID 登录
             busy = true
-            confirmStatus = .info("请在系统弹窗中完成面容验证…")
+            confirmStatus = .info("请按提示完成验证…")
             Task { @MainActor in
                 let outcome = await account.enableFaceID()
                 busy = false
@@ -1658,7 +1657,7 @@ struct IdentitySheet: View {
             return
         }
         busy = true
-        doneStatus = .info("请在系统弹窗中完成面容验证…")
+        doneStatus = .info("请按提示完成验证…")
         Task { @MainActor in
             let outcome = await account.enableFaceID()
             busy = false
