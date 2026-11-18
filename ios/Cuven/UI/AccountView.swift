@@ -56,6 +56,8 @@ struct AccountView: View {
     @AppStorage(ProfileKeys.trafficExpanded) private var trafficExpanded = true
     /// 个人资料卡、头部头像打开的弹层（头像、电子邮件、更改姓名、重设登录面容）
     @State private var profileSheet: ProfileSheet?
+    /// 在线字幕服务的状态（「播放」里「首选字幕」下面那一行）：每次打开账户页问一次（后端缓存 10 分钟）
+    @State private var subsProbe = SubsStatusProbe()
     /// 系统设置里 Cuven 的通知是关着的（拒绝过，或者后来到设置里关了）
     @State private var notifyBlocked = false
     @State private var notifyAsking = false
@@ -268,6 +270,9 @@ struct AccountView: View {
             .accessibilityLabel("首选字幕")
             .accessibilityValue(subtitle.label)
             .accessibilityHint(subtitle.hint)
+            AccountDivider()
+            // 在线字幕服务的状态（用户要求）：正常 / 额度用完 / 账号不对 / 连不上 / 没开启；点一下重新检测（AccountSubsStatus.swift）
+            SubsStatusRow(probe: subsProbe)
         }
         .sensoryFeedback(.selection, trigger: audioPref)
         .sensoryFeedback(.selection, trigger: subtitlePref)

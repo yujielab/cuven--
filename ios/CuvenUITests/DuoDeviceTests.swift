@@ -389,6 +389,13 @@ final class DuoDeviceTests: XCTestCase {
             } else {
                 print("DUO audio menu: none")
             }
+            // 在线字幕服务的状态：「首选字幕」下面那一行（演示数据：合成的「正常 · 今天还能下载 96 / 100 条」）
+            if app.bringIntoBand(where: { $0.identifier == "account-subs-status" }) != nil {
+                sleep(1)
+                snap("duo-06e-subs-status")
+            } else {
+                print("DUO subs status: none")
+            }
             let done = app.buttons["account-done"].firstMatch
             if done.waitForExistence(timeout: 3) { done.tap() } else { app.swipeDown() }
             sleep(1)
