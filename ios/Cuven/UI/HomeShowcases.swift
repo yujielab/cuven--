@@ -604,6 +604,9 @@ struct HomeFinale: View {
     let posters: [URL]
     let metrics: DSMetrics
     @State private var onScreen = false
+    /// 第一次滑到这里才把两排海报建出来。主页这一列不是懒加载的：以前一启动就把这里六十张海报（每排排三遍）连同下载都做了，
+    /// 占了启动时一半的图片视图（CI 诊断：头一秒 265 次图片渲染），人多半还没滑到这里
+    @State private var built = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -615,11 +618,18 @@ struct HomeFinale: View {
         // 演示数据只给 UI 测试用：海报墙不走（持续的动画会让 XCUITest 一直等不到 App 空闲）
         let running = onScreen && !reduceMotion && !DemoData.enabled
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: gap) {
-                PosterMarquee(posters: Array(posters.prefix(half)), tileW: tileW, gap: gap, rightward: false,
-                              shift: 0, running: running)
-                PosterMarquee(posters: Array(posters.dropFirst(half)), tileW: tileW, gap: gap, rightward: true,
-                              shift: -(tileW + gap) / 2, running: running)
+            Group {
+                if built {
+                    VStack(alignment: .leading, spacing: gap) {
+                        PosterMarquee(posters: Array(posters.prefix(half)), tileW: tileW, gap: gap, rightward: false,
+                                      shift: 0, running: running)
+                        PosterMarquee(posters: Array(posters.dropFirst(half)), tileW: tileW, gap: gap, rightward: true,
+                                      shift: -(tileW + gap) / 2, running: running)
+                    }
+                } else {
+                    // 还没滑到：先占住两排海报一样的高（PosterRow 一张高 tileW × 1.5），版面不跳
+                    Color.clear.frame(height: (tileW * 1.5).rounded() * 2 + gap)
+                }
             }
             // 宽度写死：一排海报有三千多点宽，绝不能让它把这一块（和整个主页那一列）撑宽
             .frame(width: fullW, alignment: .leading)
@@ -646,7 +656,10 @@ struct HomeFinale: View {
             .accessibilityIdentifier("home-show-all")
         }
         .frame(width: metrics.width)
-        .onScrollVisibilityChange(threshold: 0.1) { onScreen = $0 }
+        .onScrollVisibilityChange(threshold: 0.1) { v in
+            onScreen = v
+            if v { built = true }
+        }
     }
 }
 

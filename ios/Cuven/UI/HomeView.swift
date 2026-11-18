@@ -42,7 +42,7 @@ struct HomeView: View {
                 .background(Theme.bg)
                 // 头图从屏幕最上沿、连同侧边那一列一起铺满（F6、S19）
                 .ignoresSafeArea(edges: [.top, .horizontal])
-                .refreshable { await model.refreshAll() }
+                .settledRefreshable { await model.refreshAll() }
             }
             .background(Theme.bg)
             .toolbar(.hidden, for: .navigationBar)

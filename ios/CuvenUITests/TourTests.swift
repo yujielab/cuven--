@@ -99,8 +99,8 @@ final class TourTests: XCTestCase {
         // 账户与设置：主页标题那一行右边的头像（不再是一个标签）
         tapTab(["主页"])
         sleep(2)
-        for _ in 0..<6 { app.swipeDown() }
-        sleep(1)
+        // 停在最上面就不再拉（连着往下甩会在顶上触发下拉刷新，真实片库整库重新拉一遍）
+        app.scrollHomeToTop(maxSwipes: 12)
         let avatar = app.buttons["home-account"].firstMatch
         if avatar.waitForExistence(timeout: 5) {
             avatar.tap()

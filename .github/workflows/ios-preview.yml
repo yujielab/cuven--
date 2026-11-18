@@ -138,7 +138,7 @@ jobs:
               -resultBundlePath "$RUNNER_TEMP/duo.xcresult" > "$RUNNER_TEMP/duo.log" 2>&1
             code=$?
           fi
-          grep -E "Test Case|passed|failed|error:|XCTAssert|Failing|DUO " "$RUNNER_TEMP/duo.log" | tail -60
+          grep -E "Test Case|passed|failed|error:|XCTAssert|Failing|DUO |SNAP " "$RUNNER_TEMP/duo.log" | tail -200
           echo "exit $code"
           if [ $code -ne 0 ]; then tail -40 "$RUNNER_TEMP/duo.log"; fi
           echo "DUO_EXIT=$code" >> "$GITHUB_ENV"
@@ -356,7 +356,7 @@ jobs:
               -resultBundlePath "$RUNNER_TEMP/ipad.xcresult" > "$RUNNER_TEMP/ipad.log" 2>&1
             code=$?
           fi
-          grep -E "Test Case|error:|XCTAssert|DUO " "$RUNNER_TEMP/ipad.log" | tail -40
+          grep -E "Test Case|error:|XCTAssert|DUO |SNAP " "$RUNNER_TEMP/ipad.log" | tail -80
           echo "exit $code"
           xcrun simctl shutdown "$IPAD_UDID"
           exit 0
