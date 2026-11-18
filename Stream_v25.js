@@ -578,7 +578,7 @@
  * 邮件（v17）—— 与登录 Worker cuven-core 共用凭据，无需新建任何绑定
  *   Secret  RESEND_API_KEY = <与 cuven-core 相同的 Resend key>
  *   Var     MAIL_FROM = "Cuven Stream <noreply@cuven.online>"
- *   Var     MAIL_TO   = "yujie.lab@gmail.com"（可省，代码内默认即此）
+ *   Var     MAIL_TO   = 收件地址（必填才发信；代码里不写默认收件人）
  */
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2780,11 +2780,10 @@ async function handleRefreshCache(env, ctx) {
 //    DUPE_MAX_DELETE = "50"  单轮删除上限
 //    RESEND_API_KEY  与登录 Worker（cuven-core）共用同一个 key
 //    MAIL_FROM       默认 'Cuven Stream <noreply@cuven.online>'（域名已验证）
-//    MAIL_TO         默认 yujie.lab@gmail.com
+//    MAIL_TO         收件地址（没配就不发信，只记一行日志；代码里不写默认收件人）
 //    MAIL_TZ         默认 Europe/Paris（邮件里的时间按此排版）
 
 const DUPE_R2_KEY   = 'dupes-v1.json';
-const DUPE_MAIL_TO  = 'yujie.lab@gmail.com';   // env.MAIL_TO 可覆盖
 const DUPE_MAIL_FROM = 'stream@cuven.us';      // env.MAIL_FROM 可覆盖
 const DUPE_MAIL_MAX_ROWS = 60;                 // 邮件里最多列多少组，其余"另有 N 组"
 
@@ -3104,7 +3103,11 @@ const MAIL_BLUE = '#0047bb';
 const MAIL_FROM_DEFAULT = 'Cuven Stream <noreply@cuven.online>';
 
 async function sendMail(env, to, { subject, html, text }) {
-  const rcpt = to || env.MAIL_TO || DUPE_MAIL_TO;
+  const rcpt = to || env.MAIL_TO;
+  if (!rcpt) {
+    console.error('MAIL_TO missing');
+    return { ok: false, to: null, error: 'MAIL_TO 未配置（收件地址放在 Worker 的变量里）' };
+  }
   if (!env.RESEND_API_KEY) {
     console.error('RESEND_API_KEY missing');
     return { ok: false, to: rcpt, error: 'RESEND_API_KEY 未配置（与登录 Worker 同一个 key）' };
@@ -3314,7 +3317,7 @@ async function dupeMail(env, report, prune) {
   const subject = prune
     ? `Cuven Stream · 已清理 ${prune.deleted.length} 个重复文件，释放 ${fmtSize(prune.freed)} / Duplicates cleaned`
     : `Cuven Stream · ${s.groups} 组重复影片，可释放 ${fmtSize(s.reclaim)} / Duplicates found`;
-  return sendMail(env, env.MAIL_TO || DUPE_MAIL_TO, {
+  return sendMail(env, env.MAIL_TO, {
     subject,
     html: dupeMailHTML(report, prune),
     text: dupeMailText(report, prune),
