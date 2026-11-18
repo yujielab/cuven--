@@ -13,10 +13,12 @@ struct HomeView: View {
     @Environment(AppModel.self) private var model
     /// 右上头像点开的账户与设置（用户要求：头像从侧边导航里拿出来，放在主页标题这一行的右边）
     @State private var showAccount = false
+    /// 这一栈推进去的页（分享来的链接打开详情页时往里推）
+    @State private var path = NavigationPath()
 
     var body: some View {
         let _ = Perf.count("home")
-        ZoomStack {
+        ZoomStack(path: $path) {
             GeometryReader { geo in
                 let insets = geo.safeAreaInsets
                 // 内容区的宽（不算侧边那一列）：边距、卡宽、排间距都从它算（F9、D4、S3、S5、S6）；
@@ -48,6 +50,12 @@ struct HomeView: View {
             .toolbar(.hidden, for: .navigationBar)
         }
         .sheet(isPresented: $showAccount) { AccountView() }
+        // 分享来的链接（cuven://movie/…）：推进那一部的详情页
+        .onChange(of: model.openRequest) { _, r in
+            guard let r else { return }
+            model.openRequest = nil
+            path.append(r)
+        }
     }
 
     // MARK: 头图

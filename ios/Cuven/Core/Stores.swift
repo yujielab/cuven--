@@ -197,6 +197,12 @@ final class AppModel {
     var metaReady = false
     /// 演员弹层「在资料库中搜索」：要搜的词。根视图看到就换到「搜索」标签，搜索页填进搜索框后清掉
     var searchRequest: String?
+    /// 打开分享来的链接（DeepLink）：要推进的那一页；主页推进去以后清掉
+    var openRequest: Route?
+    /// 分享来的链接在片库里找不到：说一声
+    var linkMissing = false
+    /// 片库还没载入时来的链接：载入了再找
+    @ObservationIgnored private var pendingLink: DeepLink.Target?
     /// 片库根下一级的文件夹（首页最后那排「文件夹」）；libraryRoot 是 /api/all 回包里的根目录，进文件夹时换成相对路径
     var folders: [LibraryFolder] = []
     @ObservationIgnored var libraryRoot = ""
@@ -555,6 +561,31 @@ final class AppModel {
     }
 
     func video(path: String) -> Video? { videos.first { $0.path == path } }
+
+    /// 分享来的链接（cuven://movie/…）：找到这一部就推进它的详情页；片库还没载入就先记着
+    func openLink(_ url: URL) {
+        guard let t = DeepLink.parse(url) else { return }
+        if let v = resolveLink(t) {
+            openRequest = .movie(v)
+        } else if movies.isEmpty {
+            pendingLink = t
+        } else {
+            linkMissing = true
+        }
+    }
+
+    /// 片库载入了：之前记着的链接再找一次
+    func retryPendingLink() {
+        guard let t = pendingLink, !movies.isEmpty else { return }
+        pendingLink = nil
+        if let v = resolveLink(t) { openRequest = .movie(v) } else { linkMissing = true }
+    }
+
+    private func resolveLink(_ t: DeepLink.Target) -> Video? {
+        if let id = t.tmdbID, let v = movies.first(where: { meta($0)?.id == id }) { return v }
+        if let p = t.pathID, let v = videos.first(where: { PrecacheFiles.id(for: $0.path) == p }) { return v }
+        return nil
+    }
 
     /// 派生清单按 dataVersion 缓存。先读一下 videos / metas：调用它的视图照样会跟着这两样刷新
     private func derive() {

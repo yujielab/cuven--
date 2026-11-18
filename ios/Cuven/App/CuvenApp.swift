@@ -63,10 +63,7 @@ struct CuvenApp: App {
         .backgroundTask(.urlSession(Precache.sessionID)) {
             await Precache.shared.handleBackgroundWake()
         }
-        // 整部下载：一样（Downloads）
-        .backgroundTask(.urlSession(Downloads.sessionID)) {
-            await Downloads.shared.handleBackgroundWake()
-        }
+
     }
 }
 
@@ -124,6 +121,17 @@ struct RootView: View {
         // 标签栏不在滚动时缩小：HIG 只在标签栏带附件（迷你播放器之类）时这么做（C10）；标签名一字一词（C8）
         .onChange(of: tab) { _, _ in Haptics.selection() }
         .onChange(of: model.searchRequest) { _, q in if q != nil { tab = .search } }
+        // 分享来的链接（隔空投送的 cuven://movie/…）：切到主页、推进那一部的详情页（DeepLink）
+        .onOpenURL { url in
+            tab = .home
+            model.openLink(url)
+        }
+        .onChange(of: model.movies.count) { _, _ in model.retryPendingLink() }
+        .alert("没有找到这部影片", isPresented: Binding(get: { model.linkMissing }, set: { model.linkMissing = $0 })) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text("你的片库里没有这部影片。")
+        }
         // 没登录：登录层整屏盖在最上面（和网页版的鉴权层一样：冷启动第一帧就盖着，不闪主页；
         // 登录成功淡出 0.2 秒，退出登录时 0.28 秒淡入）。盖着的时候底下的标签页不给读屏念
         .accessibilityHidden(showsLogin)
@@ -147,9 +155,8 @@ struct RootView: View {
             if !account.loginRequired || account.isLoggedIn { model.start() }
             // 编辑推荐预告片的后台下载：一启动就接上（上次没下完的接着下，App 不在时下完的这时交回来）
             TrailerCache.shared.start()
-            // 弱网预先缓存（详情页「预先画面质量处理」）、整部下载（详情页「下载」）的后台下载：一样接上
+            // 弱网预先缓存（详情页「预先画面质量处理」「下载」）的后台下载：一样接上
             Precache.shared.boot()
-            Downloads.shared.boot()
         }
         .onChange(of: account.isLoggedIn) { _, now in if now { model.start() } }
         // 头像预先存在本机（用户要求）：一启动、一登录就在后台拉好存上，回到前台再看一眼有没有换（同一张 10 分钟内不重拉）

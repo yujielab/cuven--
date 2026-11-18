@@ -27,21 +27,31 @@ extension EnvironmentValues {
 /// 每个标签页的导航栈：带缩放转场的命名空间，登记两种推进目标
 struct ZoomStack<Content: View>: View {
     @Namespace private var ns
+    /// 要从外面推页（分享来的链接打开详情页：HomeView）时给一个路径
+    var path: Binding<NavigationPath>? = nil
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        NavigationStack {
-            content()
-                // iPhone Duo「侧边一列」的形态：推进去的每一页也要收起系统标签栏（不然推进去它又回来了，见 DuoNav.swift）
-                .duoHidesTabBar()
-                // 每一页顶上导航栏底下的滚动边缘都是柔和的（渐进式模糊，用户要求不许有硬边界线）
-                .dsSoftTopEdge()
-                .navigationDestination(for: Route.self) { RouteView(route: $0).duoHidesTabBar().dsSoftTopEdge() }
-                .navigationDestination(for: ZoomTarget.self) { t in
-                    RouteView(route: t.route).navigationTransition(.zoom(sourceID: t, in: ns)).duoHidesTabBar().dsSoftTopEdge()
-                }
+        Group {
+            if let path {
+                NavigationStack(path: path) { root }
+            } else {
+                NavigationStack { root }
+            }
         }
         .environment(\.zoomNamespace, ns)
+    }
+
+    private var root: some View {
+        content()
+            // iPhone Duo「侧边一列」的形态：推进去的每一页也要收起系统标签栏（不然推进去它又回来了，见 DuoNav.swift）
+            .duoHidesTabBar()
+            // 每一页顶上导航栏底下的滚动边缘都是柔和的（渐进式模糊，用户要求不许有硬边界线）
+            .dsSoftTopEdge()
+            .navigationDestination(for: Route.self) { RouteView(route: $0).duoHidesTabBar().dsSoftTopEdge() }
+            .navigationDestination(for: ZoomTarget.self) { t in
+                RouteView(route: t.route).navigationTransition(.zoom(sourceID: t, in: ns)).duoHidesTabBar().dsSoftTopEdge()
+            }
     }
 }
 
