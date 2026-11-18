@@ -446,14 +446,48 @@ struct StreamSign: Codable, Sendable {
     }
 }
 
-struct HLSInfo: Codable, Sendable {
+struct HLSInfo: Decodable, Sendable {
     var ok: Bool?
     var error: String?
-    enum CodingKeys: String, CodingKey { case ok, error }
+    /// 视频轨的格式（诊断日志用：放不了的时候知道是哪种格式；不含片名与地址）
+    var video: HLSVideoInfo?
+    enum CodingKeys: String, CodingKey { case ok, error, video }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         ok = c.bool(.ok)
         error = c.str(.error)
+        video = try? c.decodeIfPresent(HLSVideoInfo.self, forKey: .video)
+    }
+}
+
+/// info.json 里视频轨的几样：编码（HLS 的 CODECS）、动态范围（SDR / PQ / HLG）、尺寸、杜比视界档位
+struct HLSVideoInfo: Decodable, Sendable {
+    var codecs: String?
+    var range: String?
+    var width: Int?
+    var height: Int?
+    var dvProfile: Int?
+
+    private enum Keys: String, CodingKey { case codecs, range, width, height, dolbyVision }
+    private enum DVKeys: String, CodingKey { case profile }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        codecs = c.str(.codecs)
+        range = c.str(.range)
+        width = c.int(.width)
+        height = c.int(.height)
+        dvProfile = (try? c.nestedContainer(keyedBy: DVKeys.self, forKey: .dolbyVision)).flatMap { $0.int(.profile) }
+    }
+
+    /// 诊断日志里的一段：「hvc1.2.4.L153.B0 PQ 3840x2160 dv8」
+    var summary: String {
+        var parts: [String] = []
+        if let codecs, !codecs.isEmpty { parts.append(codecs) }
+        if let range, !range.isEmpty { parts.append(range) }
+        if let width, let height { parts.append("\(width)x\(height)") }
+        if let dvProfile { parts.append("dv\(dvProfile)") }
+        return parts.joined(separator: " ")
     }
 }
 

@@ -72,7 +72,7 @@ struct LibraryView: View {
                 .scrollIndicators(.hidden)
                 .ignoresSafeArea(edges: [.top, .horizontal])
                 .background(Color.black)
-                .refreshable {
+                .settledRefreshable {
                     await model.refreshAll()
                     // 下拉刷新以后重新按上映日期排（人就在最上面，不会跳）
                     joined = []

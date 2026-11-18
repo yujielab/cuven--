@@ -169,3 +169,38 @@ extension View {
     func movieMenu(_ v: Video) -> some View { modifier(MovieMenu(video: v)) }
     func seriesMenu(_ s: Series) -> some View { modifier(SeriesMenu(series: s)) }
 }
+
+// MARK: - 下拉刷新
+
+/// 系统的下拉刷新（.refreshable），只多管一件事：转圈至少转 0.8 秒，并且等手松开了才收。
+/// 刷新瞬间就做完的时候（演示数据什么也不用做、没网立刻失败），系统会在手还按着、转圈刚出来时就收它，
+/// UIRefreshControl 就卡在「刷新中」：转圈一直在、整页被往下顶着一截，再怎么拉也不动
+/// （CI 的折叠屏截图里一卡半个小时；XCUITest 也一直等不到 App 空闲，每一步都要等两分钟）
+private struct SettledRefresh: ViewModifier {
+    let action: () async -> Void
+    /// 手还在屏上拖着（滚动阶段 .interacting）
+    @State private var dragging = false
+
+    func body(content: Content) -> some View {
+        content
+            .onScrollPhaseChange { _, phase in dragging = phase == .interacting || phase == .tracking }
+            .refreshable {
+                let start = ContinuousClock.now
+                await action()
+                try? await Task.sleep(until: start + .milliseconds(800), clock: .continuous)
+                // 手还按着就再等等（最多 5 秒），松了手再收
+                var waited = 0
+                while dragging && waited < 50 {
+                    try? await Task.sleep(for: .milliseconds(100))
+                    waited += 1
+                }
+            }
+    }
+}
+
+extension View {
+    /// 用它代替 .refreshable（见 SettledRefresh）
+    func settledRefreshable(_ action: @escaping () async -> Void) -> some View {
+        modifier(SettledRefresh(action: action))
+    }
+}

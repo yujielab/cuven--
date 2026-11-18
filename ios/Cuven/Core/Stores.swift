@@ -261,6 +261,7 @@ final class AppModel {
     }
 
     private func restore() {
+        let t0 = Date()
         if let v = DiskCache.load([Video].self, "library.json") { videos = v }
         if let m = DiskCache.load([String: Meta].self, "metas.json") { metas = m }
         if let h = DiskCache.load([String].self, "hidden.json") { hidden = Set(h) }
@@ -276,7 +277,8 @@ final class AppModel {
         }
         metaReady = !metas.isEmpty
         dataVersion &+= 1
-        Perf.log("restore: \(videos.count) videos, \(metas.count) metas")
+        // 读本地缓存要多久（启动时在主线程上：CI 的二次启动看这一行）
+        Perf.log("restore: \(videos.count) videos, \(metas.count) metas in \(Perf.ms(since: t0)) ms")
     }
 
     func refreshLibrary() async {

@@ -148,7 +148,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             let info = master.deletingLastPathComponent().appendingPathComponent("info.json")
             let t1 = Date()
             let (status, body) = await APIClient.shared.hlsInfo(info)
-            plog("source hls, info.json \(status) in \(Perf.ms(since: t1)) ms")
+            // 视频格式也记下（编码、动态范围、尺寸、杜比视界档位；不含片名与地址）：放不了的时候知道是哪种格式
+            plog("source hls, info.json \(status) in \(Perf.ms(since: t1)) ms\(body?.video.map { " (\($0.summary))" } ?? "")")
             PlayerLoadingOverlay.shared.stage(.meta)
             if (200..<300).contains(status) && body?.ok != false { return master }
             if status >= 400 && status < 500 && status != 404 {
@@ -313,8 +314,11 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         case .failed:
             let msg = item.error?.localizedDescription ?? "未知错误"
             let code = (item.error as NSError?).map { "\($0.domain) \($0.code)" } ?? "-"
-            plog("failed: \(code)", error: true)
-            closeThenAlert("播放失败", msg)
+            // 底下那一层错误、播放器错误日志的最后一条（只记域和代码：说明文字里可能带着地址）
+            let under = ((item.error as NSError?)?.userInfo[NSUnderlyingErrorKey] as? NSError).map { " ← \($0.domain) \($0.code)" } ?? ""
+            let last = item.errorLog()?.events.last.map { " · log \($0.errorDomain) \($0.errorStatusCode)" } ?? ""
+            plog("failed: \(code)\(under)\(last)", error: true)
+            closeThenAlert("播放失败", PlayerErrorText.message(item.error) ?? msg)
         default:
             break
         }
@@ -324,7 +328,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     private func interrupted(_ err: NSError?) {
         plog("interrupted: \(err.map { "\($0.domain) \($0.code)" } ?? "-")", error: true)
         saveProgress()
-        closeThenAlert("播放中断", err?.localizedDescription ?? "网络或片源出了问题，进度已保存，可以稍后接着看。")
+        closeThenAlert("播放中断", PlayerErrorText.message(err) ?? err?.localizedDescription ?? "网络或片源出了问题，进度已保存，可以稍后接着看。")
     }
 
     private func saveProgress() {
@@ -458,4 +462,37 @@ extension Notification.Name {
     /// 播放器盖上来 / 关掉：资料库那段静音预告片跟着停 / 接着放
     static let cuvenPlayerPresented = Notification.Name("cuven.player.presented")
     static let cuvenPlayerClosed = Notification.Name("cuven.player.closed")
+}
+
+/// 放不了的时候给人看的话（F87：说清楚哪里不行、该怎么办）。常见的几种按错误码说；认不出来的返回 nil，用系统的说明。
+/// 系统的说明常常只有一句「无法完成操作」：比如 CI 的模拟器上 4K HDR（HEVC 10 bit、PQ）的片子报 AVFoundation -11868
+///（没有这块屏幕放得了的码流），外接显示器、隔空播放到不支持 HDR 的电视上也是这一个
+enum PlayerErrorText {
+    static func message(_ error: Error?) -> String? {
+        guard let e = error as NSError? else { return nil }
+        // 外面一层常常是笼统的 AVFoundation 错误，真正的原因（网络断了、超时）在底下那一层
+        for x in [e, e.userInfo[NSUnderlyingErrorKey] as? NSError].compactMap({ $0 }) {
+            if x.domain == AVFoundationErrorDomain, let code = AVError.Code(rawValue: x.code) {
+                switch code {
+                case .noCompatibleAlternatesForExternalDisplay:
+                    return "现在用的屏幕放不了这部片子的画面格式（4K / HDR）。断开外接显示器或隔空播放，在这台设备上播放试试。"
+                case .decoderNotFound, .decodeFailed, .undecodableMediaData, .fileFormatNotRecognized:
+                    return "这台设备解不了这部片子的视频格式。"
+                default:
+                    break
+                }
+            }
+            if x.domain == NSURLErrorDomain {
+                switch x.code {
+                case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost:
+                    return "网络断了。连上网络后再试。"
+                case NSURLErrorTimedOut:
+                    return "连接片源超时。稍后再试。"
+                default:
+                    break
+                }
+            }
+        }
+        return nil
+    }
 }
