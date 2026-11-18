@@ -563,14 +563,19 @@ final class AppModel {
         guard derivedVersion != dataVersion else { return }
         derivedVersion = dataVersion
         let t0 = Date()
-        // 能显示的电影：有 TMDB、有海报；同一部片（同一个 TMDB 编号）只留最新入库的那个文件
-        var seen = Set<Int>()
+        // 能显示的电影：有 TMDB、有海报。同一部片（同一个 TMDB 编号）有几个文件时只放规格最高的那一个
+        // （用户要求「有重复影片时自动隐藏，仅展示较高规格」：分辨率 → 动态范围 → 音轨 → REMUX → 文件大；都一样的留最新入库的）。
+        // 排在这部片最新入库的那个文件的位置上（「最新加入」的先后不跟着变）；别的版本在详情页里照样找得到（versions）
+        var slot: [Int: Int] = [:]
         var out: [Video] = []
         for v in videos {
             guard let m = metas[v.name], m.hasArt, m.type != "tv" else { continue }
             if let id = m.id {
-                if seen.contains(id) { continue }
-                seen.insert(id)
+                if let i = slot[id] {
+                    if Self.higherSpec(v, than: out[i]) { out[i] = v }
+                    continue
+                }
+                slot[id] = out.count
             }
             out.append(v)
         }
@@ -584,6 +589,17 @@ final class AppModel {
     var movies: [Video] {
         derive()
         return cachedMovies
+    }
+
+    /// 同一部片的两个文件比规格：a 比 b 高才换（一样高的不换：留着先排到的、最新入库的那个）
+    static func higherSpec(_ a: Video, than b: Video) -> Bool {
+        let ra = specRank(a.name), rb = specRank(b.name)
+        if ra != rb { return ra > rb }
+        return (a.size ?? 0) > (b.size ?? 0)
+    }
+
+    static func specRank(_ name: String) -> Int {
+        MediaSpec(name: name).rank + (name.localizedCaseInsensitiveContains("remux") ? 1 : 0)
     }
 
     /// 同一部片的所有文件（4K / 1080p 等不同版本）
@@ -1046,7 +1062,7 @@ final class AppModel {
         }
     }
 
-    // MARK: 主页「编辑推荐」与结尾的海报墙
+    // MARK: 主页「编辑推荐」与结尾的字标卡
 
     @ObservationIgnored private var editorsPickCache: (day: Int, path: String)?
 
@@ -1071,12 +1087,19 @@ final class AppModel {
         return pick
     }
 
-    /// 主页最底下那面海报墙：最新入库的电影（印着片名的海报），最多 limit 张
-    func wallPosters(limit: Int = 20) -> [URL] {
-        var out: [URL] = []
+    /// 主页最底下那两排横着走的 16:9 卡（用户要求照 Apple TV+ 那一页的结尾：横版、带片名字标）：最新入库的电影，
+    /// Apple 带片名排版的 16:9 成品图优先（字标印在图上，排得最好看）；没有就用无字背景 + 字标；两样都没有的不放。最多 limit 张
+    func finaleTiles(limit: Int = 24) -> [FinaleTile] {
+        var out: [FinaleTile] = []
         for v in movies {
-            guard let u = coverArt(v) else { continue }
-            out.append(u)
+            let a = appleArt(v), m = meta(v)
+            if let w = Self.nonEmpty(a?.wide) {
+                out.append(FinaleTile(id: v.path, art: URL(string: AppleImage.sized(w, width: 960) ?? w), logo: nil))
+            } else if let logo = (Self.nonEmpty(a?.logo) ?? Self.nonEmpty(m?.logo)).flatMap({ TMDBImage.url($0, "w500") }),
+                      let bg = Self.nonEmpty(a?.background).flatMap({ URL(string: AppleImage.sized($0, width: 960) ?? $0) })
+                        ?? TMDBImage.url(Self.nonEmpty(m?.backdropClean) ?? Self.nonEmpty(m?.backdrop), "w780") {
+                out.append(FinaleTile(id: v.path, art: bg, logo: logo))
+            }
             if out.count >= limit { break }
         }
         return out
@@ -1210,7 +1233,7 @@ final class AppModel {
 
     /// 严苛品质区（用户要求「规格高评价好」）：片源规格够格（PremiumBar：4K 以上，再有杜比视界 / HDR、全景声 / 无损音轨或 REMUX）、
     /// TMDB 评分 7.5 以上的电影和剧集。评分高的在前，同分规格高的在前，再按年份新的在前。
-    /// 电影看这部片的所有文件（同一个 TMDB 编号的各个版本），有一个版本够格就算；卡还是平常那张（最新入库的那个版本）
+    /// 电影看这部片的所有文件（同一个 TMDB 编号的各个版本），有一个版本够格就算；卡还是平常那张（规格最高的那个版本）
     func premiumEntries(limit: Int = .max) -> [HomeEntry] {
         var best: [Int: Int] = [:]
         for v in videos {

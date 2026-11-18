@@ -7,6 +7,8 @@ import AVFoundation
 // · 底下是这一部的预告片（静音、从第 10 秒起、放完回到第 10 秒；和资料库同一个 ShowcaseTrailer），起来之前
 //   （或者没有预告片）是 Apple TV 的竖版主视觉（横着的屏用横版背景），预告片出画面时模糊淡入；
 // · 左上一行大号粗体「编辑推荐」；右上一颗播放 / 暂停 + 进度环（有预告片才出现：F77）；
+// · 预告片（用户要求）：本机下好了（TrailerCache：主页一知道这一部的预告片就在后台下）一出现就放；没下好的在屏上停留超过 3 秒才放；
+//   系统「自动播放视频预览」关着、省流量时不自己放，右上「播放预告」按了才放；
 // · 底部一张从画面取色的圆角面板（用户要求矮 35%）：小海报 + 字标（没有字标写片名）、「科幻 · 2024」，右边「查看」胶囊（简介只在详情页：用户要求）；
 // · 整块点进详情（从这一块上放大出来）。只在屏上、这一页在前台时放；同一时刻全 App 只放一段（TrailerFocus）。
 // 每天换一部（AppModel.editorsPick：评分高、有字标和竖版画面、不和头图撞车，查到有预告片的优先）。
@@ -17,13 +19,16 @@ struct EditorsPick: View {
     let metrics: DSMetrics
     /// 窗口的高：折起的屏这一块约是宽的 1.3 倍高，展开竖拿 0.9 倍，横着的屏 0.56 倍，最多窗口高的 82%
     let fullHeight: CGFloat
-    /// 竖着的这一块按高铺满、横向裁掉两边：画面被放大，要 1080 的码流才露出来（低码率的开头先停在海报画面上）
+    /// 竖着的这一块按高铺满、横向裁掉两边：码流到 1080 马上露，放了 2 秒到六成、4 秒不管多少都露；本机那份一放就露（ShowcaseTrailer.tick）
     @State private var trailer = ShowcaseTrailer(revealHeight: 1080)
     @State private var tone: Color?
     @State private var onScreen = false
-    /// 用户要求：预告片不自己放，右上一颗「播放预告」，按了才在背景里放
+    /// 有预告片（右上那颗「播放预告」才出现）；hls 是那一段（问本机有没有下好）
     @State private var hasTrailer = false
+    @State private var trailerHLS: String?
     @State private var started = false
+    /// 停留计时：在屏上超过 3 秒、本机还没有下好的，到点从网上放（用户要求）
+    @State private var dwell: Task<Void, Never>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static func height(fullWidth w: CGFloat, fullHeight: CGFloat) -> CGFloat {
@@ -67,12 +72,12 @@ struct EditorsPick: View {
             .accessibilityAddTraits(.isHeader)
             .accessibilityIdentifier("editors-pick")
             Group {
-                if started && trailer.loaded && trailer.path == video.path {
-                    // 放起来了：播放 / 暂停 + 进度环
+                if started && trailer.showing && trailer.path == video.path {
+                    // 画面真的出来了：播放 / 暂停 + 进度环（以前一拿到预告片就换成这颗，画面还没出来，背景还是剧照：用户截图）
                     ShowcaseControl(trailer: trailer)
                 } else if hasTrailer {
-                    // 用户要求：不自己放，按「播放预告」才在背景里放（按下到出画面之间胶囊里转圈）
-                    EditorsPickTrailerButton(loading: started) { startTrailer() }
+                    // 还没放：按「播放预告」马上放；放起来到出画面之间胶囊里转圈
+                    EditorsPickTrailerButton(loading: started && !trailer.paused && trailer.path == video.path) { startTrailer(userStarted: true) }
                 }
             }
             .padding(.trailing, metrics.margin - 6)
@@ -80,37 +85,78 @@ struct EditorsPick: View {
             // 「减弱动态效果」时只淡入（F59）
             .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .scale(scale: 0.8)))
         }
-        .animation(.spring(response: 0.42, dampingFraction: 0.86), value: trailer.loaded)
+        .animation(.spring(response: 0.42, dampingFraction: 0.86), value: trailer.showing)
         .animation(.spring(response: 0.42, dampingFraction: 0.86), value: hasTrailer)
         .animation(.spring(response: 0.42, dampingFraction: 0.86), value: started)
         .onScrollVisibilityChange(threshold: 0.4) { visible in
             onScreen = visible
-            // 不再一出现就挂上预告片：按了「播放预告」才挂；挂上以后滑出去停、滑回来接着放
+            // 挂上以后滑出去停、滑回来接着放；还没挂的：本机有就放，没有就从现在起算 3 秒
             trailer.setCovered(!visible)
+            autoplay()
         }
-        .onAppear { trailer.setVisible(true) }
-        .onDisappear { trailer.setVisible(false) }
-        // 有没有预告片先问一下（只是清单，不下视频；和详情页同一次查询，查过的记着）：有才放那颗钮
+        .onAppear { trailer.setVisible(true); autoplay() }
+        .onDisappear { trailer.setVisible(false); cancelDwell() }
+        // 有没有预告片先问一下（只是清单；和详情页同一次查询，查过的记着）：有才放那颗钮，
+        // 同时交给 TrailerCache 在后台下到本机（空闲时才下、只在 Wi-Fi）
         .task(id: video.path) {
             let list = await model.trailers(for: video)
             hasTrailer = !list.isEmpty
+            trailerHLS = list.first?.hls
+            if let hls = trailerHLS { TrailerCache.shared.want(key: video.path, hls: hls) }
+            autoplay()
         }
         .onChange(of: video.path) {
             // 每天换一部：回到「播放预告」
+            cancelDwell()
             trailer.unmount()
             started = false
             hasTrailer = false
+            trailerHLS = nil
         }
         .task(id: still) { await loadTone(still) }
     }
 
-    /// 按了「播放预告」：挂上这一部的预告片、马上放（不看系统「自动播放视频预览」——是人按的），出画面时从模糊里淡入
-    private func startTrailer() {
-        guard !started else { return }
-        Haptics.light()
+    /// 挂上这一部的预告片、放起来，出画面时从模糊里淡入。userStarted：按了「播放预告」（不看系统「自动播放视频预览」——是人按的）；
+    /// 已经挂上但停着（自动挂上时系统不让自动放）按了也放
+    private func startTrailer(userStarted: Bool) {
+        cancelDwell()
+        // 已经挂着这一部（停着的按了就放）；挂过但没放成（预告片打不开，卸下了）按了再挂一次
+        if started && trailer.path == video.path {
+            if userStarted && trailer.paused { trailer.togglePause() }
+            return
+        }
+        if started && !userStarted { return }
+        if userStarted { Haptics.light() }
         started = true
-        trailer.mount(video, model: model, userStarted: true)
+        trailer.mount(video, model: model, userStarted: userStarted)
         trailer.setCovered(!onScreen)
+    }
+
+    /// 自己放（用户要求）：本机下好了，一出现就放；没下好，在屏上停留超过 3 秒才放。
+    /// 系统「自动播放视频预览」关着、省流量时不自己放（F77、S17），只等人按「播放预告」
+    private func autoplay() {
+        guard hasTrailer, !started, onScreen, UIAccessibility.isVideoAutoplayEnabled, !NetworkSpeed.dataSaver else {
+            if !onScreen { cancelDwell() }
+            return
+        }
+        if let hls = trailerHLS, TrailerCache.shared.localURL(key: video.path, hls: hls) != nil {
+            startTrailer(userStarted: false)
+            return
+        }
+        guard dwell == nil else { return }
+        let path = video.path
+        dwell = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            dwell = nil
+            guard onScreen, !started, video.path == path else { return }
+            startTrailer(userStarted: false)
+        }
+    }
+
+    private func cancelDwell() {
+        dwell?.cancel()
+        dwell = nil
     }
 
     /// 预告片起来之前（没按「播放预告」时）的画面——剧照（用户要求「未播放预告片时要有剧照兜底」）：
@@ -338,6 +384,7 @@ struct YearTrailerRow: View {
             let sub = DetailText.line([model.year(v).map { String($0) }, model.meta(v)?.genres?.first])
             ZoomLink(route: .movie(v), slot: "year-\(year)") {
                 WideLeadCard(art: TMDBImage.url(model.backgroundArtString(v), "w1280"), cover: model.thumbArt(v),
+                             logo: model.wideLockupArt(v).logo,
                              kicker: "电影", title: model.title(v), subtitle: sub, width: w, height: h)
             }
             .accessibilityIdentifier("movie-card")
@@ -347,6 +394,7 @@ struct YearTrailerRow: View {
             let sub = DetailText.line([s.seasonLabel, sm?.genres?.first])
             ZoomLink(route: .series(s), slot: "year-\(year)") {
                 WideLeadCard(art: model.seriesWideArt(s).url, cover: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w185"),
+                             logo: model.seriesWideArt(s).logo,
                              kicker: "剧集", title: sm?.title ?? s.name, subtitle: sub, width: w, height: h)
             }
             .accessibilityIdentifier("series-card")
@@ -380,12 +428,15 @@ struct YearTrailerRow: View {
 }
 
 /// 展开时年份分区打头的那张横向大卡（用户给的参考图：游戏 App 展开时「新作快報」打头那张）：
-/// 左边六成是剧照（只放剧照，不放预告片：用户要求）；右边四成是从画面取色的一块
-/// （DSTint.panel，和合集卡、编辑推荐同一个取色）：小海报、一行小字（「电影」「剧集」）、大号片名（最多两行）、一行灰字（年份 · 类型）、
-/// 「查看」胶囊，竖着居中。整张卡点进详情；不放简介（用户要求：简介只出现在详情页）
+/// 左边六成是剧照（只放剧照，不放预告片：用户要求），右边沿渐变融进右边四成那一块从画面取色的底（DSTint.panel，和合集卡、编辑推荐同一个取色）。
+/// 右边那一块（用户要求「海报旁边添加字标，放大展示，限制高度和最大宽度；调整文字大小，优化设计和布局」）：
+/// 上面一行小海报 + 旁边放大的字标（高不过这一块的 24%、最多 84 点，宽不过 260 点，按比例收）；
+/// 下面贴底一组字：一行小字（「电影」「剧集」）、片名（有字标时一行 Title 3，没有字标时两行 Title 2，名字就靠它）、一行灰字（年份 · 类型）、「查看」胶囊。
+/// 整张卡点进详情；不放简介（用户要求：简介只出现在详情页）
 struct WideLeadCard: View {
     let art: URL?
     let cover: URL?
+    let logo: URL?
     let kicker: String
     let title: String
     let subtitle: String
@@ -393,9 +444,10 @@ struct WideLeadCard: View {
     let height: CGFloat
     @State private var tone: Color?
 
-    init(art: URL?, cover: URL?, kicker: String, title: String, subtitle: String, width: CGFloat, height: CGFloat) {
+    init(art: URL?, cover: URL?, logo: URL? = nil, kicker: String, title: String, subtitle: String, width: CGFloat, height: CGFloat) {
         self.art = art
         self.cover = cover
+        self.logo = logo
         self.kicker = kicker
         self.title = title
         self.subtitle = subtitle
@@ -405,39 +457,55 @@ struct WideLeadCard: View {
 
     var body: some View {
         let imageW = (width * 0.6).rounded()
+        let panelW = width - imageW
+        let pad: CGFloat = panelW >= 360 ? 28 : 24
+        let thumbW: CGFloat = panelW >= 360 ? 68 : 60
+        let logoH = min(84, (height * 0.24).rounded())
+        let logoW = min(260, max(80, panelW - pad * 2 - thumbW - 18))
+        let fill = tone ?? Color(white: 0.16)
         let shape = RoundedRectangle(cornerRadius: DSRadius.feature, style: .continuous)
         HStack(spacing: 0) {
-            // 画面用 Color.clear 撑出那一块的大小再盖上去：fill 的图不会把这一层撑大
+            // 画面用 Color.clear 撑出那一块的大小再盖上去：fill 的图不会把这一层撑大；右边 56 点渐变成右边那一块的底色，接缝看不出来
             Color.clear
                 .frame(width: imageW, height: height)
                 .overlay { RemoteImage(url: art, maxPixel: imageW * 3, placeholder: .clear) }
+                .overlay(alignment: .trailing) {
+                    LinearGradient(colors: [fill.opacity(0), fill], startPoint: .leading, endPoint: .trailing)
+                        .frame(width: 56)
+                }
                 .clipped()
             VStack(alignment: .leading, spacing: 0) {
-                DSThumb(url: cover, width: 56)
+                HStack(alignment: .center, spacing: 18) {
+                    DSThumb(url: cover, width: thumbW, maxPixel: 300)
+                    if logo != nil {
+                        LogoImage(url: logo, height: logoH, alignment: .leading, maxWidth: logoW)
+                            .frame(maxWidth: logoW, alignment: .leading)
+                    }
+                }
+                Spacer(minLength: 14)
                 Text(kicker)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.footnote.weight(.semibold))
                     .foregroundStyle(DSInk.secondary)
-                    .padding(.top, 16)
                 Text(title)
-                    .font(.title2.bold())
+                    .font(logo != nil ? .title3.bold() : .title2.bold())
                     .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .padding(.top, 2)
+                    .lineLimit(logo != nil ? 1 : 2)
+                    .padding(.top, 3)
                 if !subtitle.isEmpty {
                     Text(subtitle)
-                        .font(.callout)
+                        .font(.subheadline)
                         .foregroundStyle(DSInk.secondary)
                         .lineLimit(1)
-                        .padding(.top, 4)
+                        .padding(.top, 3)
                 }
                 DSViewPill()
-                    .padding(.top, 16)
+                    .padding(.top, 14)
             }
-            // 字压在固定高的一块上：字号最大到 xxLarge，两行片名 + 小海报 + 「查看」还放得下
+            // 字压在固定高的一块上：字号最大到 xxLarge，小海报 + 字标、片名、灰字、「查看」还放得下
             .dynamicTypeSize(...DynamicTypeSize.xxLarge)
-            .padding(.horizontal, 26)
-            .frame(width: width - imageW, height: height, alignment: .leading)
-            .background(tone ?? Color(white: 0.16))
+            .padding(pad)
+            .frame(width: panelW, height: height, alignment: .topLeading)
+            .background(fill)
         }
         .frame(width: width, height: height)
         .background(DSFill.placeholder)
@@ -508,65 +576,91 @@ struct YearTrailerCard: View {
     }
 }
 
-// MARK: - 主页结尾（照用户给的参考图：游戏 App「Arcade」页的结尾）
+// MARK: - 主页结尾（照用户给的参考图：Apple TV+ 那一页的结尾）
 //
-// 两行圆角海报错开排着、慢慢横着走（上一行往左、下一行往右；不在屏上、「减弱动态效果」时停：F59），
-// 下面「Cuven max」字标，一颗胶囊「查看所有影片」进全部影片（电影和剧集一起的海报网格）
+// 两排 16:9 的卡（带片名字标：Apple 带片名排版的成品图，没有的用无字背景 + 字标：AppModel.finaleTiles），
+// 上一排往左、下一排往右，慢慢横着走（不在屏上、「减弱动态效果」、按了暂停时停：F59）；
+// 下面正中一颗描边的胶囊「查看全部影片 ›」进全部影片（电影和剧集一起的海报网格），同一行最右边一颗圆的暂停 / 继续
+// （参考图：会自己动的内容要停得下来）；手机（折起）上再加一颗铺满宽的白色「立即观看」（参考图手机版的「Stream now」），
+// 直接放今天的编辑推荐
+
+/// 结尾那两排里的一张：画面 +（片名没有印在图上时）字标
+struct FinaleTile: Hashable, Identifiable {
+    let id: String
+    let art: URL?
+    let logo: URL?
+}
 
 struct HomeFinale: View {
-    let posters: [URL]
+    @Environment(AppModel.self) private var model
+    let tiles: [FinaleTile]
     let metrics: DSMetrics
     @State private var onScreen = false
-    /// 第一次滑到这里才把两排海报建出来。主页这一列不是懒加载的：以前一启动就把这里六十张海报（每排排三遍）连同下载都做了，
-    /// 占了启动时一半的图片视图（CI 诊断：头一秒 265 次图片渲染），人多半还没滑到这里
+    /// 第一次滑到这里才把两排卡建出来。主页这一列不是懒加载的：一启动就建会把这里几十张图连同下载都做了，人多半还没滑到这里
     @State private var built = false
+    /// 人按了暂停（右边那颗圆钮）
+    @State private var userPaused = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let tileW: CGFloat = metrics.wide ? 118 : 92
+        let tileW: CGFloat = metrics.wide ? 300 : 220
+        let tileH = (tileW * 9 / 16).rounded()
         let gap: CGFloat = metrics.wide ? 16 : 12
-        let half = (posters.count + 1) / 2
-        // 整个窗口宽（连同侧边那一列）：海报墙铺满它；字标和按钮在内容区（metrics.width）里居中
+        let half = (tiles.count + 1) / 2
+        // 整个窗口宽（连同侧边那一列）：两排卡铺满它；按钮在内容区（metrics.width）里
         let fullW = metrics.width + metrics.leadingInset + metrics.trailingInset
-        // 演示数据只给 UI 测试用：海报墙不走（持续的动画会让 XCUITest 一直等不到 App 空闲）
-        let running = onScreen && !reduceMotion && !DemoData.enabled
+        // 演示数据只给 UI 测试用：不走（持续的动画会让 XCUITest 一直等不到 App 空闲）；「减弱动态效果」时也不走，暂停钮就不出
+        let canMove = !reduceMotion && !DemoData.enabled
+        let running = onScreen && canMove && !userPaused
         VStack(spacing: 0) {
             Group {
                 if built {
                     VStack(alignment: .leading, spacing: gap) {
-                        PosterMarquee(posters: Array(posters.prefix(half)), tileW: tileW, gap: gap, rightward: false,
-                                      shift: 0, running: running)
-                        PosterMarquee(posters: Array(posters.dropFirst(half)), tileW: tileW, gap: gap, rightward: true,
-                                      shift: -(tileW + gap) / 2, running: running)
+                        TileMarquee(tiles: Array(tiles.prefix(half)), tileW: tileW, gap: gap, rightward: false,
+                                    shift: 0, running: running)
+                        TileMarquee(tiles: Array(tiles.dropFirst(half)), tileW: tileW, gap: gap, rightward: true,
+                                    shift: -(tileW + gap) / 2, running: running)
                     }
                 } else {
-                    // 还没滑到：先占住两排海报一样的高（PosterRow 一张高 tileW × 1.5），版面不跳
-                    Color.clear.frame(height: (tileW * 1.5).rounded() * 2 + gap)
+                    // 还没滑到：先占住两排卡一样的高，版面不跳
+                    Color.clear.frame(height: tileH * 2 + gap)
                 }
             }
-            // 宽度写死：一排海报有三千多点宽，绝不能让它把这一块（和整个主页那一列）撑宽
+            // 宽度写死：一排卡有几千点宽，绝不能让它把这一块（和整个主页那一列）撑宽
             .frame(width: fullW, alignment: .leading)
             .clipped()
             // 裁完再往两边伸：铺到侧边那一列底下，版面上仍只占内容区那么宽
             .padding(.leading, -metrics.leadingInset)
             .padding(.trailing, -metrics.trailingInset)
             .accessibilityHidden(true)
-            CuvenWordmark()
-                .padding(.top, metrics.wide ? 40 : 32)
-            NavigationLink(value: Route.shelf(.all)) {
-                // 设计轮 2：高 54 → 48（和「播放」「详情」同一种胶囊钮的高）；底 14% → 12% 白（蓝字对比度 4.3 → 4.6 : 1）
-                Text("查看所有影片")
-                    .font(.headline)
-                    .foregroundStyle(Theme.accent)
-                    .frame(maxWidth: 360)
-                    .frame(minHeight: 48)
-                    .background(Capsule().fill(Color.white.opacity(0.12)))
-                    .contentShape(Capsule())
+            ZStack {
+                NavigationLink(value: Route.shelf(.all)) { lineupPill }
+                    .buttonStyle(PressableStyle())
+                    .accessibilityIdentifier("home-show-all")
+                if canMove {
+                    HStack {
+                        Spacer(minLength: 0)
+                        pauseButton
+                    }
+                }
             }
-            .buttonStyle(PressableStyle())
-            .padding(.top, 18)
             .padding(.horizontal, metrics.margin)
-            .accessibilityIdentifier("home-show-all")
+            .padding(.top, metrics.wide ? 32 : 26)
+            if !metrics.wide, let pick = model.editorsPick() {
+                Button { watchNow(pick) } label: {
+                    Text("立即观看")
+                        .font(.headline)
+                        .foregroundStyle(.black)
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .background(Capsule().fill(Color.white))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(PressableStyle())
+                .padding(.horizontal, metrics.margin)
+                .padding(.top, 20)
+                .accessibilityHint("播放今天的编辑推荐")
+                .accessibilityIdentifier("home-watch-now")
+            }
         }
         .frame(width: metrics.width)
         .onScrollVisibilityChange(threshold: 0.1) { v in
@@ -574,13 +668,56 @@ struct HomeFinale: View {
             if v { built = true }
         }
     }
+
+    /// 「查看全部影片 ›」：描边的胶囊（参考图「See full lineup ›」），看上去 44 高
+    private var lineupPill: some View {
+        HStack(spacing: 5) {
+            Text("查看全部影片")
+            Image(systemName: "chevron.right")
+                .font(.subheadline.weight(.semibold))
+        }
+        .font(.headline)
+        .foregroundStyle(.white)
+        .lineLimit(1)
+        .padding(.horizontal, 22)
+        .frame(minHeight: 44)
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.55), lineWidth: 1))
+        .contentShape(Capsule())
+    }
+
+    /// 暂停 / 继续两排卡的走动：看上去 36 点的圆，点按区 44（F74）
+    private var pauseButton: some View {
+        Button {
+            Haptics.light()
+            userPaused.toggle()
+        } label: {
+            Image(systemName: userPaused ? "play.fill" : "pause.fill")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 36, height: 36)
+                .background(Circle().fill(Color.white.opacity(0.16)))
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(userPaused ? "继续播放滚动画面" : "暂停滚动画面")
+        .accessibilityIdentifier("home-finale-pause")
+    }
+
+    /// 「立即观看」：直接放今天的编辑推荐（看了一半的从上次的地方接着放）
+    private func watchNow(_ v: Video) {
+        PlayerCoordinator.shared.play(PlayRequest(path: v.path, name: v.name, title: model.title(v),
+                                                  subtitle: model.year(v).map { String($0) },
+                                                  artwork: model.backgroundArtString(v)), model: model)
+    }
 }
 
-/// 一行海报，首尾相接地慢慢横着走（每秒约 16 点；一圈是这一行的长度，内容排三遍，接缝看不出来）。
-/// 用 30 帧的 TimelineView 推（不是一直跑满屏幕刷新率的无限动画），海报那一排单独成一块、内容不变就不重算；
-/// 不在屏上、「减弱动态效果」、演示数据（UI 测试）时停
-struct PosterMarquee: View {
-    let posters: [URL]
+/// 一排 16:9 的卡，首尾相接地慢慢横着走（每秒约 16 点；一圈是这一行的长度，内容排三遍，接缝看不出来）。
+/// 用 30 帧的 TimelineView 推（不是一直跑满屏幕刷新率的无限动画），卡那一排单独成一块、内容不变就不重算；
+/// 停下（不在屏上、按了暂停）再走时从停下的地方接着走，不跳
+struct TileMarquee: View {
+    let tiles: [FinaleTile]
     let tileW: CGFloat
     let gap: CGFloat
     /// true 往右走，false 往左
@@ -589,51 +726,53 @@ struct PosterMarquee: View {
     var shift: CGFloat = 0
     let running: Bool
     @State private var since = Date()
+    /// 之前几段走过的时间（秒）
+    @State private var elapsed: Double = 0
 
     var body: some View {
-        let unit = (tileW + gap) * CGFloat(posters.count)
-        let row = PosterRow(posters: posters, tileW: tileW, gap: gap).equatable()
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !running || posters.count < 2)) { ctx in
-            let t = max(0, ctx.date.timeIntervalSince(since))
+        let unit = (tileW + gap) * CGFloat(tiles.count)
+        let row = TileRow(tiles: tiles, tileW: tileW, gap: gap).equatable()
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !running || tiles.count < 2)) { ctx in
+            let t = elapsed + (running ? max(0, ctx.date.timeIntervalSince(since)) : 0)
             let travel = unit > 0 ? CGFloat((t * 16).truncatingRemainder(dividingBy: Double(unit))) : 0
             row.offset(x: shift + (rightward ? travel - unit : -travel))
         }
-        // 两头都给：框就是父视图给的宽，不跟着三千多点宽的那一排撑开（多出来的由外面 clipped 裁掉）
+        // 两头都给：框就是父视图给的宽，不跟着几千点宽的那一排撑开（多出来的由外面 clipped 裁掉）
         .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        .onAppear { if running { since = Date() } }
+        .onChange(of: running) { _, now in
+            if now { since = Date() } else { elapsed += max(0, Date().timeIntervalSince(since)) }
+        }
     }
 }
 
-/// 海报墙的一排（排三遍）：内容不变时 SwiftUI 不再重算它（Equatable），横移只是挪这一块
-struct PosterRow: View, Equatable {
-    let posters: [URL]
+/// 结尾的一排（排三遍）：内容不变时 SwiftUI 不再重算它（Equatable），横移只是挪这一块。
+/// 片名没印在图上的那张：底下压一点暗，正中偏下放字标
+struct TileRow: View, Equatable {
+    let tiles: [FinaleTile]
     let tileW: CGFloat
     let gap: CGFloat
 
     var body: some View {
-        let radius = (tileW * 0.16).rounded()
+        let h = (tileW * 9 / 16).rounded()
+        let shape = RoundedRectangle(cornerRadius: DSRadius.card(tileW), style: .continuous)
         HStack(spacing: gap) {
-            ForEach(0..<(posters.count * 3), id: \.self) { i in
-                RemoteImage(url: posters[i % posters.count], maxPixel: tileW * 3)
-                    .frame(width: tileW, height: (tileW * 1.5).rounded())
-                    .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+            ForEach(0..<(tiles.count * 3), id: \.self) { i in
+                let t = tiles[i % tiles.count]
+                ZStack(alignment: .bottom) {
+                    Color(white: 0.12)
+                    RemoteImage(url: t.art, maxPixel: tileW * 3)
+                        .frame(width: tileW, height: h)
+                    if let logo = t.logo {
+                        LinearGradient(colors: [.black.opacity(0), .black.opacity(0.5)], startPoint: .center, endPoint: .bottom)
+                        LogoImage(url: logo, height: (h * 0.28).rounded(), maxWidth: (tileW * 0.62).rounded())
+                            .padding(.bottom, (h * 0.1).rounded())
+                    }
+                }
+                .frame(width: tileW, height: h)
+                .clipShape(shape)
+                .overlay(shape.strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
             }
         }
-    }
-}
-
-/// 「Cuven max」字标（登录页同一套字：圆体，Cuven 中等、max 特粗）
-struct CuvenWordmark: View {
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 5) {
-            Text("Cuven")
-                .font(.system(size: 24, weight: .medium, design: .rounded))
-            Text("max")
-                .font(.system(size: 28, weight: .heavy, design: .rounded))
-                .tracking(-0.8)
-        }
-        .foregroundStyle(.white)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Cuven max")
     }
 }

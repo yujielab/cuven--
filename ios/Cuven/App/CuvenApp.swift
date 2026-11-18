@@ -135,7 +135,11 @@ struct RootView: View {
             }
         }
         // 登录以后才开始取片库（登录页盖着的时候不在后面下载整个片库）
-        .onAppear { if !account.loginRequired || account.isLoggedIn { model.start() } }
+        .onAppear {
+            if !account.loginRequired || account.isLoggedIn { model.start() }
+            // 编辑推荐预告片的后台下载：一启动就接上（上次没下完的接着下，App 不在时下完的这时交回来）
+            TrailerCache.shared.start()
+        }
         .onChange(of: account.isLoggedIn) { _, now in if now { model.start() } }
         // 头像预先存在本机（用户要求）：一启动、一登录就在后台拉好存上，回到前台再看一眼有没有换（同一张 10 分钟内不重拉）
         .task(id: account.session?.username) { await account.refreshAvatar() }

@@ -286,6 +286,29 @@ struct MediaSpec {
         return name[r].replacingOccurrences(of: " ", with: ".")
     }
 
+    /// 同一部片几个版本比高低（重复的影片只展示规格较高的那个：AppModel.higherSpec）：分辨率 → 动态范围 → 音轨。认不出分辨率的排在 720p 下面
+    var rank: Int {
+        let res: Int
+        switch resolution {
+        case "8K": res = 5
+        case "4K": res = 4
+        case "1080p": res = 3
+        case "720p": res = 2
+        default: res = 1
+        }
+        let hdr: Int
+        switch range {
+        case "杜比视界": hdr = 4
+        case "HDR10+": hdr = 3
+        case "HDR10": hdr = 2
+        case "HLG": hdr = 1
+        default: hdr = 0
+        }
+        let a = (audio ?? "").lowercased()
+        let sound = a.contains("全景声") || a.contains("dts:x") ? 3 : (a.contains("truehd") || a.contains("dts-hd") ? 2 : (a.isEmpty ? 0 : 1))
+        return res * 1000 + hdr * 100 + sound * 10
+    }
+
     /// 卡上的大字：「4K · 杜比视界」；什么都认不出就是 nil
     var headline: String? {
         let s = [resolution, range].compactMap { $0 }.joined(separator: " · ")

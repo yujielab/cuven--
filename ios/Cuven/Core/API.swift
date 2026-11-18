@@ -186,12 +186,18 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: 在线字幕
 
-    private struct SubsWarm: Decodable {}
+    private struct SubsWarm: Decodable {
+        struct Item: Decodable { var online: Bool? }
+        var subs: [Item]?
+    }
 
     /// 详情页一打开就让后台先去找这部片的在线字幕（warm=1：后端立刻回，不等结果）。
-    /// 每部片都会有一条在线字幕备选；片子自带中文字幕时仍默认用自带的。播放时 HLS 主列表里就有它，不必等
+    /// 每部片都会有一条在线字幕备选；片子自带中文字幕时仍默认用自带的。播放时 HLS 主列表里就有它，不必等。
+    /// 已经找好的（回包里有在线那一条）记在本机，之后再打开不再问（用户要求「自动缓存已经获取的字幕避免触发拉取」：SubsReady）
     func warmSubs(path: String) async {
-        let _: SubsWarm? = try? await get("/api/subs", [("path", path), ("warm", "1")], timeout: 15, fresh: true)
+        if SubsReady.has(path) { return }
+        let r: SubsWarm? = try? await get("/api/subs", [("path", path), ("warm", "1")], timeout: 15, fresh: true)
+        if r?.subs?.contains(where: { $0.online == true }) == true { SubsReady.mark(path) }
     }
 
     /// 在线字幕服务的状态（账户页「播放」里「在线字幕」那一行）。fresh：点了那一行重新检测（后端 1 分钟内最多真问一次 OpenSubtitles）
@@ -237,5 +243,27 @@ struct MetaBatch: Decodable {
                 items[k.stringValue] = .some(m)
             }
         }
+    }
+}
+
+/// 在线字幕已经找好的片子（本机记着：路径 → 记下的时间）。后端那条记录按文件存在 R2，每部片只用一次 OpenSubtitles 的下载配额；
+/// 这里再省掉每次打开详情页都去问一遍（后端要列一次目录、拿一次临时链接）。30 天后再问一次（换了文件、换了字幕也跟得上），最多记 3000 部
+enum SubsReady {
+    private static let key = "subs-ready.v1"
+    private static let ttl: Double = 30 * 86_400
+    private static let cap = 3000
+
+    static func has(_ path: String) -> Bool {
+        guard let d = UserDefaults.standard.dictionary(forKey: key) as? [String: Double], let t = d[path] else { return false }
+        return Date().timeIntervalSince1970 - t < ttl
+    }
+
+    static func mark(_ path: String) {
+        var d = (UserDefaults.standard.dictionary(forKey: key) as? [String: Double]) ?? [:]
+        d[path] = Date().timeIntervalSince1970
+        if d.count > cap {
+            for k in d.sorted(by: { $0.value < $1.value }).prefix(d.count - cap).map(\.key) { d.removeValue(forKey: k) }
+        }
+        UserDefaults.standard.set(d, forKey: key)
     }
 }
