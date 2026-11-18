@@ -219,8 +219,16 @@ final class DuoDeviceTests: XCTestCase {
         if let clip = reveal(app, swipes: 6, where: { $0.identifier.hasPrefix("clip-collection-") }) {
             sleep(2)
             snap("duo-08j-clip-collections")
+            // 侧边那一列的中线：主页侧边导航（和系统的时间、信号、返回钮同一条线）
+            let railX = app.onScreenFrames(skipBars: false) { $0.identifier.hasPrefix("nav-") }.first?.midX
             clip.tap(); sleep(4)
             snap("duo-08k-clip-feed")
+            // 刷视频页的关闭钮要对着同一条线（用户截图：以前偏外约 6 点，没和状态栏对齐）
+            let closeX = app.onScreenFrames(skipBars: false) { $0.identifier == "clip-feed-close" }.first?.midX
+            print("DUO clip feed rail: nav \(railX.map { "\($0)" } ?? "none") close \(closeX.map { "\($0)" } ?? "none")")
+            if let railX, let closeX {
+                XCTAssertEqual(closeX, railX, accuracy: 2, "刷视频页的关闭钮没对着侧边那一列的中线")
+            }
             app.swipeUp(); sleep(4)
             snap("duo-08l-clip-feed-2")
             if let close = reveal(app, "clip-feed-close", swipes: 0) { close.tap() } else { app.swipeDown() }
