@@ -88,14 +88,10 @@ final class DuoDeviceTests: XCTestCase {
             print("DUO refresh: avatar not found")
         }
         app.swipeUp(); sleep(2); snap("duo-02-home-rows")
-        // 年份卡（今年那一排）：画面右上角一个预告片进度圆环；不再自动播放，按住放、松手停、过 3 秒回到剧照，
-        // 按住不进详情页；点一下照常进详情（用户要求）。演示数据的预告片放不了（本地合成，不连网），这里只看手势和圆环
+        // 年份卡（今年那一排）：只放剧照（用户要求，不放预告片）；点一下进详情（从卡上放大出来）
         if let card = reveal(app, "movie-card", swipes: 2) {
             sleep(1)
-            snap("duo-02i-year-ring")
-            card.press(forDuration: 2.0); sleep(1)
-            snap("duo-02j-year-hold")
-            XCTAssertFalse(app.buttons["detail-play"].exists, "按住年份卡不该进详情页")
+            snap("duo-02i-year-card")
             card.tap()
             if app.buttons["detail-play"].waitForExistence(timeout: 8) { back(app) } else { XCTFail("点年份卡没进详情页") }
             sleep(1)
@@ -421,8 +417,7 @@ final class DuoDeviceTests: XCTestCase {
             if b.exists && b.isHittable { b.tap(); sleep(1); break }
         }
 
-        // 长按海报：菜单（播放 / 想看），预览是那张卡（放在最后：菜单没收起也不影响别的步骤）。
-        // 年份卡的长按改成了放预告片，这里长按精选电影的大卡
+        // 长按海报：菜单（播放 / 想看），预览是那张卡（放在最后：菜单没收起也不影响别的步骤）
         tab(app, "主页"); sleep(2)
         if let poster = reveal(app, "featured-card") {
             poster.press(forDuration: 1.2); sleep(2)

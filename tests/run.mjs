@@ -642,6 +642,19 @@ console.log('\n■ 在线字幕服务状态：/api/subs/status（App 账户页�
   s = await get('?fresh=1');
   ok(s.body.cached === true && n('/infos/user') === n1 + 1, '1 分钟内再点：不重复去问（节流）');
 
+  /* 存着的 User Access Token 被对方作废（改了密码、在别处登出）：401 → 丢掉旧的、自动重新登录一次、换上新 token 再试 */
+  await clear();
+  const l0 = n('/login');
+  H.os.token = 'tok-os-2';
+  s = await get();
+  const lastUser = H.os.calls.filter(c => c.path === '/infos/user').pop();
+  ok(s.body.state === 'ok' && n('/login') === l0 + 1 && lastUser && lastUser.auth === 'Bearer tok-os-2',
+    `token 被作废：401 以后自动重新登录一次，换上新 token 再问（${lastUser && lastUser.auth}）`);
+  await clear();
+  s = await get();
+  ok(s.body.state === 'ok' && n('/login') === l0 + 1, '换上的新 token 记住了：下一次直接用，不再登录');
+  H.os.token = 'tok-os';
+
   await clear(); H.os.remaining = 0;
   s = await get();
   ok(s.body.state === 'quota' && s.body.remaining === 0, '今天的下载额度用完（/infos/user 说剩 0）：state=quota');

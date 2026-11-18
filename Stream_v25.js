@@ -1140,10 +1140,27 @@ function osError(status, what, extra) {
   return Object.assign(e, extra || {});
 }
 async function osCall(env, auth, path, init = {}) {
-  const headers = { 'Api-Key': env.OPENSUBTITLES_API_KEY, 'User-Agent': env.OPENSUBTITLES_UA || OS_UA, Accept: 'application/json' };
-  if (init.body) headers['Content-Type'] = 'application/json';
-  if (auth && auth.token) headers.Authorization = `Bearer ${auth.token}`;
-  return fetchRetry(`${(auth && auth.base) || OS_API}${path}`, { ...init, headers }, { retries: 1, timeout: 12_000 });
+  const send = a => {
+    const headers = { 'Api-Key': env.OPENSUBTITLES_API_KEY, 'User-Agent': env.OPENSUBTITLES_UA || OS_UA, Accept: 'application/json' };
+    if (init.body) headers['Content-Type'] = 'application/json';
+    if (a && a.token) headers.Authorization = `Bearer ${a.token}`;
+    return fetchRetry(`${(a && a.base) || OS_API}${path}`, { ...init, headers }, { retries: 1, timeout: 12_000 });
+  };
+  const res = await send(auth);
+  // 登录换来的 User Access Token 被对方作废了（改了密码、在别处登出、提前过期）：丢掉存着的那个（进程内和 R2 里的），
+  // 用账号密码重新登录一次、换上新 token 再试这一次——不用等到 20 小时后自己过期。新 token 写回 auth，同一次查询后面的请求也用它
+  if (res.status === 401 && auth && auth.token) {
+    await osDrop(res);
+    osAuth = null;
+    await r2PutJson(env, OS_R2 + 'token.json', { exp: 0 });
+    const fresh = await osLogin(env).catch(() => null);
+    if (fresh && fresh.token) {
+      Object.assign(auth, fresh);
+      return send(auth);
+    }
+    return jsonResponse({ message: 'unauthorized' }, 401);
+  }
+  return res;
 }
 async function osDrop(res) { try { if (res && res.body) await res.body.cancel(); } catch {} }
 

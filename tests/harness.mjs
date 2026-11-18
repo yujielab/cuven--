@@ -19,7 +19,7 @@ export const net = { chunkDelayMs: 0, fail: null };
  * OpenSubtitles 替身：登录 / 搜索 / 下载。subs 是候选（按 moviehash / tmdb_id / query 命中），
  * files 是 file_id → { text } 或 { bytes }；quota=true 时下载回 406；calls 记下每一次请求
  */
-export const os = { calls: [], subs: [], files: {}, quota: false, loginOk: true, remaining: 99, down: false };
+export const os = { calls: [], subs: [], files: {}, quota: false, loginOk: true, remaining: 99, down: false, token: 'tok-os' };
 /**
  * 剧集目录替身：entries 是 Dropbox 风格的文件条目（path_display / name / size / server_modified），
  * 递归列 /ram2 时按 pageSize 分页（0 = 一页给完）；lists 记下 list_folder 被调了几次
@@ -102,13 +102,13 @@ globalThis.fetch = async (input, init = {}) => {
     if (!req.headers.get('api-key')) return Response.json({ message: 'missing api key' }, { status: 401 });
     if (os.down) return Response.json({ message: 'service unavailable' }, { status: 503 });
     if (p === '/infos/user') {
-      if (req.headers.get('authorization') !== 'Bearer tok-os') return Response.json({ message: 'unauthorized' }, { status: 401 });
+      if (req.headers.get('authorization') !== `Bearer ${os.token}`) return Response.json({ message: 'unauthorized' }, { status: 401 });
       return Response.json({ data: { allowed_downloads: 100, remaining_downloads: os.remaining, downloads_count: 100 - os.remaining,
         level: 'Sub leecher', user_id: 4242, vip: false, ext_installed: false } });
     }
     if (p === '/infos/formats') return Response.json({ data: { output_formats: ['srt', 'vtt', 'ass'] } });
     if (p === '/login') {
-      return os.loginOk ? Response.json({ token: 'tok-os', base_url: 'api.opensubtitles.com', user: { allowed_downloads: 100 } })
+      return os.loginOk ? Response.json({ token: os.token, base_url: 'api.opensubtitles.com', user: { allowed_downloads: 100 } })
         : Response.json({ message: 'bad credentials' }, { status: 401 });
     }
     if (p === '/subtitles') {
