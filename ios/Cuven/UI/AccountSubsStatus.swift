@@ -4,8 +4,11 @@ import SwiftUI
 //
 // 在线字幕是 Worker 去 OpenSubtitles 找的（没有中文字幕的片子自动补一条）。这一行告诉人它现在好不好用：
 // 正常（今天还能下载几条、响应多快）/ 今天的下载额度用完了（几点恢复）/ 账号或 API Key 不对 / 连不上 / 服务器没开启。
-// 数据来自后端 /api/subs/status：后端缓存 10 分钟；点这一行重新检测（后端 1 分钟内最多真问一次 OpenSubtitles）。
-// 后端只回状态和数字，不带账号名。演示数据不连网，给一份合成的「正常」。
+// 数据来自后端 /api/subs/status：后端缓存 10 分钟（Worker 里改了账号、密码、API Key 就不用旧结果）；
+// 点这一行重新检测（后端 1 分钟内最多真问一次 OpenSubtitles）。
+// 登录被拒时后端说清是哪一项（reason：login 用户名或密码 / key API Key；emailUser 用户名填成了邮箱——OpenSubtitles 的接口只认用户名），
+// 这一行把「怎么改」整段写出来，不截断（用户截图：只看到「OpenSubtitles 的账号、密码或 A…」，不知道该改哪个）。
+// 后端只回状态和数字（外加对方自己说的原因，去掉了账号、密码），不带账号名。演示数据不连网，给一份合成的「正常」。
 
 /// /api/subs/status 的回包
 struct SubsServiceStatus: Decodable, Equatable, Sendable {
@@ -19,6 +22,12 @@ struct SubsServiceStatus: Decodable, Equatable, Sendable {
     var allowed: Int?
     var resetAt: String?
     var message: String?
+    /// state 是 auth / error 时是哪一项：login 用户名或密码不对 / key API Key 不对 / rate 登录被限流
+    var reason: String?
+    /// 用户名里有 @（填成了邮箱）
+    var emailUser: Bool?
+    /// OpenSubtitles 自己说的原因（「Error, invalid username/password」这类；后端已去掉账号、密码、API Key）
+    var osMessage: String?
 }
 
 @MainActor @Observable
@@ -58,9 +67,12 @@ final class SubsStatusProbe {
     }
 }
 
-/// 「在线字幕」那一行：左边符号 + 标题 + 一行说明，右边一颗状态胶囊（颜色圆点 + 两三个字）；检测时换成转圈。点整行重新检测
+/// 「在线字幕」那一行：和 AccountRow 一样的符号列、字号、边距；状态胶囊（颜色圆点 + 两三个字）放在标题那一行的右边，
+/// 检测时换成转圈；说明占满整行、不限行数——出问题时那段「怎么改」有三四行，放在胶囊左边那一窄条里会被截断。点整行重新检测
 struct SubsStatusRow: View {
     let probe: SubsStatusProbe
+    @ScaledMetric(relativeTo: .title3) private var iconSize: CGFloat = 21
+    @ScaledMetric(relativeTo: .title3) private var iconColumn: CGFloat = AccountMetrics.iconColumn
 
     var body: some View {
         let look = SubsStatusLook(probe.outcome)
@@ -68,20 +80,49 @@ struct SubsStatusRow: View {
             Haptics.light()
             Task { await probe.load(fresh: true) }
         } label: {
-            AccountRow(icon: "captions.bubble.fill", title: "在线字幕", subtitle: probe.outcome == nil ? "正在检测…" : look.detail) {
-                Group {
-                    if probe.checking {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(.white)
-                    } else if probe.outcome != nil {
-                        SubsStatusBadge(text: look.badge, color: look.color)
-                            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            HStack(spacing: AccountMetrics.gap) {
+                Image(systemName: "captions.bubble.fill")
+                    .font(.system(size: iconSize, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .frame(width: iconColumn)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text("在线字幕")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        Group {
+                            if probe.checking {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .tint(.white)
+                            } else if probe.outcome != nil {
+                                SubsStatusBadge(text: look.badge, color: look.color)
+                                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                            }
+                        }
+                        .frame(minWidth: 44, minHeight: 26, alignment: .trailing)
+                        .animation(DSMotion.snap, value: probe.checking)
+                    }
+                    Text(probe.outcome == nil ? "正在检测…" : look.detail)
+                        .font(.subheadline)
+                        .foregroundStyle(DSInk.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let said = look.said {
+                        Text(verbatim: "OpenSubtitles：\(said)")
+                            .font(.footnote)
+                            .foregroundStyle(DSInk.tertiary.opacity(0.8))
+                            .lineLimit(3)
                     }
                 }
-                .frame(minWidth: 44, alignment: .trailing)
-                .animation(DSMotion.snap, value: probe.checking)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .padding(.horizontal, AccountMetrics.inset)
+            .padding(.vertical, 10)
+            .frame(minHeight: 64)
+            .contentShape(Rectangle())
         }
         .buttonStyle(AccountRowPress())
         .disabled(probe.checking)
@@ -122,6 +163,8 @@ private struct SubsStatusLook {
     var badge = "未知"
     var color = Color.gray
     var detail = ""
+    /// OpenSubtitles 自己说的原因（出问题时才有，放在说明底下一小行）
+    var said: String?
     var isGood = false
 
     init(_ outcome: SubsStatusProbe.Outcome?) {
@@ -157,12 +200,29 @@ private struct SubsStatusLook {
                 }
             case "auth":
                 badge = "需要设置"; color = .orange
-                detail = "OpenSubtitles 的账号、密码或 API Key 不对，请检查 Worker 里的设置"
+                said = s.osMessage
+                switch s.reason {
+                case "key"?:
+                    detail = "API Key 不对：到 opensubtitles.com 的 API 页面重新复制，填进 Worker 的 OPENSUBTITLES_API_KEY，再点这里重新检测"
+                case "login"? where s.emailUser == true:
+                    // 用户截图：用户名填的是邮箱。OpenSubtitles 的接口只认用户名（网站能用邮箱登录，接口不行）
+                    detail = "用户名填成了邮箱：OpenSubtitles 的接口只认用户名。把 Worker 里的 OPENSUBTITLES_USERNAME 换成你在 opensubtitles.com 的用户名，再点这里重新检测。在此之前，在线字幕只用 API Key 下载，每天能下的很少"
+                case "login"?:
+                    detail = "登录不上：用户名或密码不对。要用 opensubtitles.com 的账号（opensubtitles.org 的旧账号不通用），用户名不是邮箱；改好后点这里重新检测。在此之前，在线字幕只用 API Key 下载，每天能下的很少"
+                default:
+                    // 旧版后端没有 reason
+                    detail = "OpenSubtitles 的用户名、密码或 API Key 不对：检查 Worker 里的 OPENSUBTITLES_USERNAME、OPENSUBTITLES_PASSWORD、OPENSUBTITLES_API_KEY（用户名不是邮箱）"
+                }
             case "off":
                 badge = "未开启"; color = .gray
                 detail = "服务器没开启在线字幕（没配 OpenSubtitles）：只用片子自带和同目录的字幕"
+            case "error" where s.reason == "rate":
+                badge = "限流中"; color = .orange
+                said = s.osMessage
+                detail = "OpenSubtitles 暂时不让登录（请求太频繁），过一会儿自动恢复；已经找到的字幕照常能用"
             default:
                 badge = "不可用"; color = .red
+                said = s.osMessage
                 // 后端给的原因：timeout / unreachable / HTTP 503 / login HTTP 503
                 let why: String
                 switch s.message {

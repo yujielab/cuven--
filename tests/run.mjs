@@ -617,6 +617,8 @@ console.log('\n■ 在线字幕服务状态：/api/subs/status（App 账户页�
     return { status: r.status, cc: r.headers.get('cache-control'), body };
   };
   const n = p => H.os.calls.filter(c => c.path === p).length;
+  // 测试台的缓存不会过期：去掉 1 分钟节流那条（当作已经过了 1 分钟）。缓存键带配置的指纹，按前缀找
+  const dropFresh = () => { for (const k of [...caches.default.m.keys()]) if (k.startsWith('https://cache.internal/opensubs-status-v2/') && k.endsWith('/fresh')) caches.default.m.delete(k); };
   await clear(); H.os.calls.length = 0;
 
   let s = await get();
@@ -635,8 +637,7 @@ console.log('\n■ 在线字幕服务状态：/api/subs/status（App 账户页�
   const n1 = n('/infos/user');
   s = await get();
   ok(s.body.cached === true && n('/infos/user') === n1, '10 分钟内再问：用缓存，不再去问 OpenSubtitles');
-  // 测试台的缓存不会过期：去掉那条 1 分钟的，当作已经过了 1 分钟
-  await caches.default.delete('https://cache.internal/opensubs-status-v1/fresh');
+  dropFresh();
   s = await get('?fresh=1');
   ok(!s.body.cached && n('/infos/user') === n1 + 1 && s.body.state === 'ok', '点「重新检测」（fresh=1，上一次真问已过 1 分钟）：真去问一次');
   s = await get('?fresh=1');
@@ -664,13 +665,54 @@ console.log('\n■ 在线字幕服务状态：/api/subs/status（App 账户页�
   ok(s.body.state === 'error' && /503/.test(s.body.message || ''), `OpenSubtitles 出问题（503）：state=error（${s.body.message}）`);
   H.os.down = false;
 
-  await clear(); H.env.OPENSUBTITLES_USERNAME = 'nobody'; H.os.loginOk = false;
+  /* 登录被拒：说清是哪一项不对；同一组错账号不反复去登录；改了 Worker 里的任何一项马上重新检测 */
+  await clear(); H.env.OPENSUBTITLES_USERNAME = ' someone@example.com '; H.env.OPENSUBTITLES_PASSWORD = 'pw-secret-1'; H.os.loginOk = false;
+  const lg0 = n('/login');
   s = await get();
-  ok(s.body.state === 'auth', `账号或密码不对（登录 401）：state=auth（${s.body.message}）`);
+  const lastLogin = H.os.calls.filter(c => c.path === '/login').pop();
+  ok(s.body.state === 'auth' && s.body.reason === 'login' && s.body.emailUser === true && n('/login') === lg0 + 1
+    && lastLogin && lastLogin.body && lastLogin.body.username === 'someone@example.com',
+    `用户名填成了邮箱、登录被拒：state=auth、reason=login、emailUser=true（用户名去掉了前后空格再登录）`);
+  ok(/invalid username\/password/.test(s.body.osMessage || '') && !/someone@example\.com|pw-secret-1|test-key/.test(JSON.stringify(s.body)),
+    `对方说的原因带回来（${s.body.osMessage}），但拿掉了用户名、密码、API Key`);
+  await clear();
+  s = await get();
+  ok(s.body.state === 'auth' && s.body.reason === 'login' && n('/login') === lg0 + 1,
+    '同一组错账号 15 分钟内不再去登录（反复试错没有用，还会被 OpenSubtitles 暂时锁住）：状态照样说清原因');
+  const hp = await (await H.call('/health')).text();
+  ok(/账号登录被拒（HTTP 401）/.test(hp) && !/invalid|example\.com|pw-secret/.test(hp) && n('/login') === lg0 + 1,
+    '健康页（不用登录就能打开）：只说「账号登录被拒」，不写对方的原因、不提用户名，也不为这一页去登录');
+  dropFresh();
+  s = await get('?fresh=1');
+  ok(s.body.state === 'auth' && n('/login') === lg0 + 2, '点「重新检测」（fresh=1）：不管失败记录，真去登录一次');
+  H.env.OPENSUBTITLES_USERNAME = 'nobody';
+  s = await get();
+  ok(!s.body.cached && s.body.state === 'auth' && s.body.reason === 'login' && s.body.emailUser === false && n('/login') === lg0 + 3,
+    '改了 Worker 里的用户名：不用旧缓存（缓存键带配置的指纹），马上重新登录；不是邮箱就不报 emailUser');
+  H.os.loginOk = true;
+  s = await get();
+  ok(s.body.state === 'auth' && n('/login') === lg0 + 3, '（配置没变的 10 分钟内还是那个结果）');
+  H.env.OPENSUBTITLES_USERNAME = 'u'; H.env.OPENSUBTITLES_PASSWORD = 'p';
+  s = await get();
+  ok(s.body.state === 'ok' && s.body.remaining === 50, `改对了：下一问就是「正常」（${s.body.state}，还能下 ${s.body.remaining} 条）`);
+
+  await clear(); H.env.OPENSUBTITLES_API_KEY = 'bad-key'; H.env.OPENSUBTITLES_USERNAME = 'u3';
+  s = await get();
+  ok(s.body.state === 'auth' && s.body.reason === 'key' && /consume/.test(s.body.osMessage || ''),
+    `API Key 不对（登录 403，单独用 API Key 问也 403）：reason=key（${s.body.osMessage}）`);
+  delete H.env.OPENSUBTITLES_USERNAME; delete H.env.OPENSUBTITLES_PASSWORD;
+  s = await get();
+  ok(s.body.state === 'auth' && s.body.reason === 'key' && s.body.account === false, '只有 API Key、而且不对：reason=key');
+  H.env.OPENSUBTITLES_API_KEY = 'test-key'; H.env.OPENSUBTITLES_USERNAME = 'u4'; H.env.OPENSUBTITLES_PASSWORD = 'p';
+
   await clear(); H.os.down = true;
   s = await get();
-  ok(s.body.state === 'error', `登录时 OpenSubtitles 出问题（503）：算连不上，不说账号不对（${s.body.message}）`);
-  H.os.down = false; H.os.loginOk = true;
+  ok(s.body.state === 'error' && !s.body.reason && /503/.test(s.body.message || ''), `登录时 OpenSubtitles 出问题（503）：算连不上，不说账号不对（${s.body.message}）`);
+  H.os.down = false;
+  await clear(); H.env.OPENSUBTITLES_USERNAME = 'u5'; H.os.loginRate = true;
+  s = await get();
+  ok(s.body.state === 'error' && s.body.reason === 'rate', `登录被限流（429）：state=error、reason=rate（${s.body.osMessage}）`);
+  H.os.loginRate = false; H.env.OPENSUBTITLES_USERNAME = 'u';
 
   await clear(); delete H.env.OPENSUBTITLES_USERNAME; delete H.env.OPENSUBTITLES_PASSWORD;
   const f0 = n('/infos/formats');

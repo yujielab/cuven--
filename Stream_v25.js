@@ -1064,9 +1064,11 @@ const OS_MEM = new Map();                           // 记录键 → 记录（�
 const OS_BUSY = new Map();                          // 记录键 → 开始时刻（同一 isolate 不重复查）
 const OS_NEED = new Map();                          // 字幕组合 → 要不要补（进程内）
 let osAuth = null;                                  // { token, base, exp, user }
-let osLoginFail = 0;                                // 上一次登录失败的 HTTP 状态（在线字幕状态拿它分「账号不对」和「连不上」）
+let osLoginBad = null;                              // 上一次登录失败：{ fp, status, message, at, until }（见 osLogin；在线字幕状态拿它说清是哪一项不对）
 
 const osOn = env => !!(env && env.OPENSUBTITLES_API_KEY) && env.OPENSUBTITLES_DISABLE !== '1';
+/** 用户名（去掉前后空格：从别处粘过来常带一个） */
+const osUser = env => String((env && env.OPENSUBTITLES_USERNAME) || '').trim();
 const osIdentity = (filePath, meta) => `${filePath}|${meta.content_hash || meta.rev || meta.size}`;
 
 /* ── 繁 → 简（逐字；OpenCC TSCharacters，Apache-2.0，只收字形不同的 4105 对）──
@@ -1164,16 +1166,52 @@ async function osCall(env, auth, path, init = {}) {
 }
 async function osDrop(res) { try { if (res && res.body) await res.body.cancel(); } catch {} }
 
-/** 登录换 token（24 小时有效，这里只信 20 小时）：进程内 → R2 → 登录。登录失败就只用 API Key */
-async function osLogin(env) {
-  const user = env.OPENSUBTITLES_USERNAME, pass = env.OPENSUBTITLES_PASSWORD;
+/** API Key + 用户名 + 密码的指纹（SHA-256 的前 16 位，倒推不出原值）：登录失败的记录、在线字幕状态的缓存都按它分——
+ *  Worker 里改了任何一项，指纹就变，下一次马上重新登录、重新检测，不用等旧结果过期 */
+let osFpMemo = null;
+async function osFingerprint(env) {
+  const src = [env.OPENSUBTITLES_API_KEY || '', osUser(env), env.OPENSUBTITLES_PASSWORD || ''].join('\n');
+  if (osFpMemo && osFpMemo.src === src) return osFpMemo.fp;
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('cuven-os|' + src));
+  const fp = [...new Uint8Array(d)].slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join('');
+  osFpMemo = { src, fp };
+  return fp;
+}
+
+/** 对方回的错误原因（「Error, invalid username/password」这类）：拿掉账号、密码、API Key 本身，压成一行，最多 160 个字 */
+function osErrText(j, env) {
+  let m = '';
+  if (j && typeof j.message === 'string') m = j.message;
+  else if (j && Array.isArray(j.errors)) m = j.errors.filter(x => typeof x === 'string').join('; ');
+  m = m.replace(/\s+/g, ' ').trim();
+  for (const v of [env.OPENSUBTITLES_PASSWORD, osUser(env), env.OPENSUBTITLES_API_KEY]) if (v && String(v).length >= 3) m = m.split(String(v)).join('…');
+  return m.slice(0, 160) || null;
+}
+
+/** 登录换 token（24 小时有效，这里只信 20 小时）：进程内 → R2 → 登录。登录失败就只用 API Key。
+ *  失败了记下来（进程内 + R2，按 osFingerprint）：账号、密码、API Key 被拒的 15 分钟内、对方出问题（429、5xx）的 2 分钟内
+ *  不再去登录——拿同一组错账号反复去试没有用，OpenSubtitles 还会把反复试错的登录暂时锁住。
+ *  retry：不管失败记录、真去登录一次（在线字幕状态里人点了「重新检测」；那边 1 分钟内最多一次） */
+async function osLogin(env, { retry = false } = {}) {
+  const user = osUser(env), pass = env.OPENSUBTITLES_PASSWORD;
   if (!user || !pass) return null;
-  if (osAuth && osAuth.user === user && osAuth.exp > Date.now()) return osAuth;
+  const now = Date.now();
+  if (osAuth && osAuth.user === user && osAuth.exp > now) return osAuth;
+  const fp = await osFingerprint(env);
+  if (!retry && osLoginBad && osLoginBad.fp === fp && osLoginBad.until > now) return null;
   const saved = await r2GetJson(env, OS_R2 + 'token.json');
-  if (saved && saved.token && saved.user === user && saved.exp > Date.now()) return (osAuth = saved);
+  if (saved && saved.token && saved.user === user && saved.exp > now) return (osAuth = saved);
+  if (!retry && saved && saved.fail && saved.fail.fp === fp && saved.fail.until > now) { osLoginBad = saved.fail; return null; }
   const res = await osCall(env, null, '/login', { method: 'POST', body: JSON.stringify({ username: user, password: pass }) });
-  if (!res.ok) { await osDrop(res); osLoginFail = res.status; console.error('opensubtitles login: HTTP', res.status); return null; }
-  osLoginFail = 0;
+  if (!res.ok) {
+    const j = await res.json().catch(() => null);
+    const rejected = [400, 401, 403].includes(res.status);
+    osLoginBad = { fp, status: res.status, message: osErrText(j, env), at: now, until: now + (rejected ? 15 * 60e3 : 2 * 60e3) };
+    console.error('opensubtitles login: HTTP', res.status, osLoginBad.message || '');
+    await r2PutJson(env, OS_R2 + 'token.json', { exp: 0, fail: osLoginBad });
+    return null;
+  }
+  osLoginBad = null;
   const j = await res.json().catch(() => ({}));
   if (!j.token) return null;
   const host = String(j.base_url || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
@@ -1227,13 +1265,13 @@ async function osDownload(env, auth, c, fps) {
   if (res.status === 406 || res.status === 429) {
     const j = await res.json().catch(() => ({}));
     const resetAt = Date.parse(j.reset_time_utc || '') || 0;
-    osNoteDownload(0, resetAt || Date.now() + OS_RETRY.quota);
+    await osNoteDownload(env, 0, resetAt || Date.now() + OS_RETRY.quota);
     throw osError(res.status, 'download quota', { quota: true, resetAt });
   }
   if (!res.ok) { await osDrop(res); throw osError(res.status, 'download'); }
   const j = await res.json().catch(() => ({}));
   if (!j.link) throw osError(502, 'download link');
-  osNoteDownload(Number.isFinite(+j.remaining) && j.remaining !== '' ? +j.remaining : null, Date.parse(j.reset_time_utc || '') || 0);
+  await osNoteDownload(env, Number.isFinite(+j.remaining) && j.remaining !== '' ? +j.remaining : null, Date.parse(j.reset_time_utc || '') || 0);
   const f = await fetchRetry(j.link, {}, { retries: 1, timeout: 15_000 });
   if (!f.ok) { await osDrop(f); throw osError(f.status, 'file'); }
   return { text: decodeSubtitleBytes(new Uint8Array(await f.arrayBuffer())), fpsFix: body.in_fps ? [body.in_fps, body.out_fps] : null, remaining: j.remaining };
@@ -1324,42 +1362,67 @@ async function osRun(env, job) {
 //  配没配、用账号还是只有 API Key、现在连不连得上、多快、今天还能下几条、额度什么时候恢复：
 //  · 配了账号：登录（和查字幕同一个 token），问 /infos/user —— 剩余下载次数按账号算；
 //    只有 API Key：问 /infos/formats（最轻的一个接口，只看通不通），剩余次数用最近一次真实下载回报的。
+//  · 登录被拒时说清是哪一项不对（reason）：单独用 API Key 再问一下 /infos/formats——通了就是用户名、密码不对（login），
+//    不通是 API Key 不对（key）；用户名里有 @ 的另报 emailUser（OpenSubtitles 的接口只认用户名、不认邮箱），
+//    对方自己说的原因放 osMessage（去掉账号、密码、API Key 本身）。登录被限流（429）：state=error、reason=rate。
 //  · 真实下载留下的结果也算进来（osNote）：下载回报的剩余次数；额度用完时的恢复时间。
 //  · 回的只有状态和数字，不带账号名、用户编号。
-//  · 结果在边缘缓存 10 分钟；?fresh=1（App 里点那一行）不用缓存，但同一个实例 1 分钟内最多真问一次；
+//  · 结果在边缘缓存 10 分钟，缓存键带 API Key + 账号 + 密码的指纹（osFingerprint）：Worker 里改了任何一项，下一问就是新结果；
+//    ?fresh=1（App 里点那一行）不用缓存、登录失败的记录也不管，但 1 分钟内最多真问一次；
 //    真实下载碰到额度用完时把缓存作废，下次一问就是「额度用完」。
 //  state：ok 正常 / quota 今天的下载额度用完了 / auth 账号或 API Key 不对 / error 连不上、接口出错 / off 没配
-const OS_STATUS_CACHE = 'https://cache.internal/opensubs-status-v1';
-const OS_STATUS_FRESH = 'https://cache.internal/opensubs-status-v1/fresh';   // ?fresh=1 的节流：1 分钟
+const OS_STATUS_CACHE = 'https://cache.internal/opensubs-status-v2/';
 const OS_STATUS_TTL = 600;
 let osNote = null;                                  // 最近一次真实下载：{ at, remaining, resetAt }
 
-function osNoteDownload(remaining, resetAt) {
+/** 这一套配置的两条状态缓存：平时 10 分钟那条、?fresh=1 的 1 分钟节流那条 */
+async function osStatusKeys(env) {
+  const fp = await osFingerprint(env);
+  return { cache: OS_STATUS_CACHE + fp, fresh: OS_STATUS_CACHE + fp + '/fresh' };
+}
+
+async function osNoteDownload(env, remaining, resetAt) {
   osNote = { at: Date.now(), remaining, resetAt: resetAt || 0 };
   if (remaining === 0) {
-    caches.default.delete(OS_STATUS_CACHE).catch(() => {});
-    caches.default.delete(OS_STATUS_FRESH).catch(() => {});
+    const k = await osStatusKeys(env).catch(() => null);
+    if (k) await Promise.all([caches.default.delete(k.cache), caches.default.delete(k.fresh)]).catch(() => {});
   }
 }
 
-async function osProbeStatus(env) {
+async function osProbeStatus(env, fresh = false) {
   const now = Date.now();
-  const st = { state: 'ok', configured: true, account: !!env.OPENSUBTITLES_USERNAME,
+  const user = osUser(env);
+  const st = { state: 'ok', configured: true, account: !!user,
     latency: null, remaining: null, allowed: null, resetAt: null, checkedAt: now };
+  /** 被拒了：拿对方回包里的原因 */
+  const said = async res => { const j = await res.json().catch(() => null); return osErrText(j, env); };
   try {
     let auth = null;
-    if (env.OPENSUBTITLES_USERNAME && env.OPENSUBTITLES_PASSWORD) {
-      auth = await osLogin(env);            // 连不上会抛出去，落到下面的 error
+    if (user && env.OPENSUBTITLES_PASSWORD) {
+      auth = await osLogin(env, { retry: fresh });   // 连不上会抛出去，落到下面的 error
       if (!auth) {
-        // 400 / 401 / 403：账号或密码、API Key 不对；别的（5xx、429）是对方出问题
-        const bad = [400, 401, 403].includes(osLoginFail);
-        return { ...st, state: bad ? 'auth' : 'error', message: `login HTTP ${osLoginFail || '?'}` };
+        const bad = osLoginBad || {};
+        const out = { ...st, message: `login HTTP ${bad.status || '?'}`, osMessage: bad.message || null };
+        if (bad.status === 429) return { ...out, state: 'error', reason: 'rate' };
+        // 不是 400 / 401 / 403：对方出问题（5xx），不说账号不对
+        if (![400, 401, 403].includes(bad.status)) return { ...out, state: 'error' };
+        // 登录被拒：单独用 API Key 问一下最轻的接口——通了是用户名、密码不对；不通是 API Key 不对
+        const t0 = Date.now();
+        const k = await osCall(env, null, '/infos/formats');
+        out.latency = Date.now() - t0;
+        if (k.status === 401 || k.status === 403) return { ...out, state: 'auth', reason: 'key', osMessage: (await said(k)) || out.osMessage };
+        await osDrop(k);
+        return { ...out, state: 'auth', reason: 'login', emailUser: user.includes('@') };
       }
     }
     const t0 = Date.now();
     const res = await osCall(env, auth, auth ? '/infos/user' : '/infos/formats');
     st.latency = Date.now() - t0;
-    if (res.status === 401 || res.status === 403) { await osDrop(res); return { ...st, state: 'auth', message: `HTTP ${res.status}` }; }
+    if (res.status === 401 || res.status === 403) {
+      // 只有 API Key 时被拒：API Key 不对；登录了还被拒（token 换过一次也不行）：按账号不对算
+      return { ...st, state: 'auth', reason: auth ? 'login' : 'key', message: `HTTP ${res.status}`, osMessage: await said(res) };
+    }
+    if (res.status === 429) { await osDrop(res); return { ...st, state: 'error', reason: 'rate', message: 'HTTP 429' }; }
     if (!res.ok) { await osDrop(res); return { ...st, state: 'error', message: `HTTP ${res.status}` }; }
     const j = await res.json().catch(() => null);
     if (auth) {
@@ -1380,21 +1443,32 @@ async function osProbeStatus(env) {
   }
 }
 
+/** 诊断页（/health，不用登录就能打开）那一行：配没配、用账号还是只有 API Key；这个实例上次用这一套配置登录被拒了就照实说，
+ *  但不写对方的原因、不提用户名长什么样（那些只在要登录的 /api/subs/status，也就是 App 账户页「在线字幕」那一行里）；不为这一页去登录 */
+async function osFeatLine(env) {
+  if (!osOn(env)) return '— 未配置';
+  if (!osUser(env) || !env.OPENSUBTITLES_PASSWORD) return '⚠️ 只有 API Key（下载配额按共享出口 IP 算）';
+  const fp = await osFingerprint(env).catch(() => null);
+  const bad = osLoginBad && osLoginBad.fp === fp && [400, 401, 403].includes(osLoginBad.status) ? osLoginBad : null;
+  return bad ? `⚠️ 账号登录被拒（HTTP ${bad.status}），现在只用 API Key：原因看 App 账户页「在线字幕」那一行` : '✅ 账号登录';
+}
+
 async function handleSubsStatus(url, env, ctx) {
   const noStore = { 'Cache-Control': 'no-store' };
   if (!osOn(env)) return jsonResponse({ state: 'off', configured: false, account: false, checkedAt: Date.now() }, 200, noStore);
   const fresh = url.searchParams.get('fresh') === '1';
+  const keys = await osStatusKeys(env);
   // 平时用 10 分钟内的结果；点了「重新检测」（fresh=1）也是 1 分钟内最多真问一次
-  const hit = await caches.default.match(fresh ? OS_STATUS_FRESH : OS_STATUS_CACHE).catch(() => null);
+  const hit = await caches.default.match(fresh ? keys.fresh : keys.cache).catch(() => null);
   if (hit) {
     const body = await hit.json().catch(() => null);
     if (body) return jsonResponse({ ...body, cached: true }, 200, noStore);
   }
-  const body = await osProbeStatus(env);
+  const body = await osProbeStatus(env, fresh);
   const save = (key, ttl) => caches.default.put(key, new Response(JSON.stringify(body), {
     headers: { 'Content-Type': 'application/json', 'Cache-Control': `max-age=${ttl}` },
   })).catch(() => {});
-  const put = Promise.all([save(OS_STATUS_CACHE, OS_STATUS_TTL), save(OS_STATUS_FRESH, 60)]);
+  const put = Promise.all([save(keys.cache, OS_STATUS_TTL), save(keys.fresh, 60)]);
   if (ctx && ctx.waitUntil) ctx.waitUntil(put); else await put;
   return jsonResponse(body, 200, noStore);
 }
@@ -3504,7 +3578,7 @@ async function handleHealth(env, request) {
     c.extras = [
       ['DTS / TrueHD', tx],
       ['TMDB', env.TMDB_API_KEY ? '✅' : '❌ 未配 TMDB_API_KEY（海报、中文片名、剧集、预告片都靠它）'],
-      ['OpenSubtitles', !osOn(env) ? '— 未配置' : env.OPENSUBTITLES_USERNAME ? '✅ 账号登录' : '⚠️ 只有 API Key（下载配额按共享出口 IP 算）'],
+      ['OpenSubtitles', await osFeatLine(env)],
       ['剧集目录', `${tvRoot(env) || '/'}${tvMem && tvMem.root === tvRoot(env) ? ` · ${tvMem.series.length} 部` : ''}`],
       ['访问保护', env.AUTH_SECRET ? '✅ 需要登录' : '⚠️ 未开启（知道地址就能浏览和播放）'],
     ];

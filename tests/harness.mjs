@@ -19,7 +19,7 @@ export const net = { chunkDelayMs: 0, fail: null };
  * OpenSubtitles 替身：登录 / 搜索 / 下载。subs 是候选（按 moviehash / tmdb_id / query 命中），
  * files 是 file_id → { text } 或 { bytes }；quota=true 时下载回 406；calls 记下每一次请求
  */
-export const os = { calls: [], subs: [], files: {}, quota: false, loginOk: true, remaining: 99, down: false, token: 'tok-os' };
+export const os = { calls: [], subs: [], files: {}, quota: false, loginOk: true, loginRate: false, remaining: 99, down: false, token: 'tok-os' };
 /**
  * 剧集目录替身：entries 是 Dropbox 风格的文件条目（path_display / name / size / server_modified），
  * 递归列 /ram2 时按 pageSize 分页（0 = 一页给完）；lists 记下 list_folder 被调了几次
@@ -100,6 +100,8 @@ globalThis.fetch = async (input, init = {}) => {
     os.calls.push({ method: req.method, path: p, search: u.search.slice(1), q: Object.fromEntries(u.searchParams), body,
       key: req.headers.get('api-key'), ua: req.headers.get('user-agent'), auth: req.headers.get('authorization') });
     if (!req.headers.get('api-key')) return Response.json({ message: 'missing api key' }, { status: 401 });
+    // API Key 不对：OpenSubtitles 一律 403
+    if (req.headers.get('api-key') === 'bad-key') return Response.json({ message: 'You cannot consume this service' }, { status: 403 });
     if (os.down) return Response.json({ message: 'service unavailable' }, { status: 503 });
     if (p === '/infos/user') {
       if (req.headers.get('authorization') !== `Bearer ${os.token}`) return Response.json({ message: 'unauthorized' }, { status: 401 });
@@ -108,8 +110,10 @@ globalThis.fetch = async (input, init = {}) => {
     }
     if (p === '/infos/formats') return Response.json({ data: { output_formats: ['srt', 'vtt', 'ass'] } });
     if (p === '/login') {
+      if (os.loginRate) return Response.json({ message: 'Throttle limit reached. Retry later.' }, { status: 429 });
+      // 被拒时回包里带上用户名（测 Worker 回给 App 之前把它拿掉）
       return os.loginOk ? Response.json({ token: os.token, base_url: 'api.opensubtitles.com', user: { allowed_downloads: 100 } })
-        : Response.json({ message: 'bad credentials' }, { status: 401 });
+        : Response.json({ message: `Error, invalid username/password (${body && body.username})`, status: 401 }, { status: 401 });
     }
     if (p === '/subtitles') {
       const q = Object.fromEntries(u.searchParams), langs = (q.languages || '').split(',');
