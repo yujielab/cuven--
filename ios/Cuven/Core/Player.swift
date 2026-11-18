@@ -65,6 +65,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     private var player: AVPlayer?
     private var controller: CuvenPlayerViewController?
     private var current: PlayRequest?
+    /// 播到了片尾的那一部（收起时据此问要不要移除预处理数据）
+    private var endedPath: String?
     private var timeObserver: Any?
     private var itemObservers: [NSObjectProtocol] = []
     private var statusObservation: NSKeyValueObservation?
@@ -110,6 +112,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     /// 开始准备一集（新点的，或者播完接着的下一集）
     private func begin(_ req: PlayRequest) {
         tapAt = Date()
+        endedPath = nil
         startedPlaying = false
         lastWaitReason = nil
         loadToken += 1
@@ -382,6 +385,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             next.queue = Array(req.queue.dropFirst())
             begin(next)
         } else {
+            endedPath = req.path
             controller?.dismiss(animated: true)
         }
     }
@@ -389,6 +393,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     private func closedByUser() {
         guard !inPiP else { return }
         plog("closed")
+        // 看完了（播到片尾，或者看到 97% 以后自己关掉）：先记下是哪一部，收拾完再问要不要移除预处理数据
+        let watched = watchedThrough()
         PlayerLoadingOverlay.shared.hide()
         loadToken += 1
         saveProgress()
@@ -404,6 +410,44 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         controller = nil
         current = nil
         NotificationCenter.default.post(name: .cuvenPlayerClosed, object: nil)
+        if let watched { askRemovePrecache(path: watched.path, title: watched.title) }
+    }
+
+    /// 这一部算不算看完了：播到了片尾，或者真的放起来以后、看过 97% 才自己关掉。
+    /// 出错被关掉的（closing）不算：那时候已经有一个出错的提示要弹
+    private func watchedThrough() -> (path: String, title: String)? {
+        guard let req = current, !closing else { return nil }
+        if endedPath == req.path { return (req.path, req.title) }
+        guard startedPlaying, let p = player, let item = p.currentItem else { return nil }
+        let pos = p.currentTime().seconds, dur = item.duration.seconds
+        guard pos.isFinite, dur.isFinite, dur > 0, pos / dur > 0.97 else { return nil }
+        return (req.path, req.title)
+    }
+
+    /// 用户要求：看完以后，这一部有预处理数据（弱网预先缓存、下载）就问要不要移除，腾出空间。
+    /// 等播放器收起来再问；「保留」什么都不动
+    private func askRemovePrecache(path: String, title: String) {
+        guard let it = Precache.shared.item(path: path), it.bytes > 0 else { return }
+        let size = ByteCountFormatter.string(fromByteCount: it.bytes, countStyle: .file)
+        plog("ask to remove precache")
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            // 这半秒里又开始放别的了、或者已经有别的提示在屏上：不问了
+            guard let self, self.controller == nil, !self.inPiP,
+                  Precache.shared.item(path: path) != nil,
+                  let top = UIApplication.topViewController(), !(top is UIAlertController) else { return }
+            let a = UIAlertController(title: "移除预处理数据？",
+                                      message: "《\(title)》已看完。移除后可释放 \(size) 空间，再看时会从网络播放。",
+                                      preferredStyle: .alert)
+            a.addAction(UIAlertAction(title: "保留", style: .cancel))
+            a.addAction(UIAlertAction(title: "移除", style: .destructive) { _ in
+                Task { @MainActor in
+                    Precache.shared.delete(path: path)
+                    Haptics.success()
+                }
+            })
+            top.present(a, animated: true)
+        }
     }
 
     private func detachItem() {
