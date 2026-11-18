@@ -23,15 +23,19 @@ struct NetworkSpeedCard: View {
         }
     }
 
-    /// 说真话：这个百分比（开着自动调整就是自动选的那个）在 iOS 上换成了什么
+    /// 说真话：这个百分比（开着自动调整就是自动选的那个）在 iOS 上换成了什么：正片缓冲多久、编辑推荐的预告片缓存成哪一档（TrailerCache.Tier）
     private var footer: String {
         let p = auto && autoValue >= 0 ? min(100, autoValue) : min(100, max(0, speed))
         let tail = auto ? "开启自动调整后，网络变化时会重新检测。更改将在下次播放时生效。"
                         : "更改将在下次播放时生效。"
-        if p >= 100 { return "设为 100% 时，由系统决定缓冲时长。" + tail }
-        let base = "最多提前缓冲约 \(Int(NetworkSpeed.forwardBuffer(p))) 秒。"
-        if p < 25 { return base + "低于 25% 时，预告片不会自动播放。" + tail }
-        return base + tail
+        if p >= 100 { return "设为 100% 时，由系统决定缓冲时长，预告片以最高画质（4K / HDR）缓存。" + tail }
+        let base = "最多提前缓冲约 \(Int(NetworkSpeed.forwardBuffer(p))) 秒"
+        switch TrailerCache.Tier.of(p) {
+        case .p1080?: return base + "，预告片以 1080p 缓存。" + tail
+        case .p720?: return base + "，预告片以 720p 缓存。" + tail
+        case .p540?: return base + "，预告片以 540p 缓存。" + tail
+        default: return base + "。低于 25% 时，预告片不会自动播放，也不会缓存。" + tail
+        }
     }
 }
 
@@ -209,7 +213,7 @@ private struct NetworkAutoRow: View {
 }
 
 /// 45 根竖条的波浪滑块（网页版 buildSliderBars / updateWave）：离拇指 d 根的竖条高 1 − 0.85·e^(−d²/8)（拇指那儿最矮 15%），
-/// 拇指和它左边的亮、右边的暗；整条都能拖，按下就跳到手指那儿（网页版 pointerdown 同样）
+/// 拉满（100%）时 45 根一样高（94% 起凹得越来越浅）；拇指和它左边的亮、右边的暗；整条都能拖，按下就跳到手指那儿（网页版 pointerdown 同样）
 private struct NetworkWaveSlider: View {
     let value: Int
     let dragging: Bool
@@ -255,17 +259,19 @@ private struct NetworkWaveSlider: View {
             ForEach(0..<Self.count, id: \.self) { i in
                 Capsule()
                     .fill(i <= lit ? Color.white.opacity(0.92) : Color.white.opacity(0.2))
-                    .frame(width: m.barWidth, height: Self.barsHeight * Self.heightFactor(Double(i), active))
+                    .frame(width: m.barWidth, height: Self.barsHeight * Self.heightFactor(Double(i), active, value: value))
             }
         }
         // 手指拖的时候跟手（0.1 秒）；自动调整、同步回来、旁白改的数慢一点滑过去
         .animation(reduceMotion ? nil : (dragging ? Animation.easeOut(duration: 0.1) : Animation.smooth(duration: 0.55)), value: value)
     }
 
-    /// 网页版的波形：离拇指越近越矮
-    private static func heightFactor(_ i: Double, _ active: Double) -> CGFloat {
+    /// 网页版的波形：离拇指越近越矮（拇指那儿最矮 15%）。拉满时不凹（用户要求「100% 时所有柱状高度应该一致」）：
+    /// 从 94% 起凹得越来越浅，到 100% 正好平——拖到头时是慢慢抹平的，不是一下子跳平
+    private static func heightFactor(_ i: Double, _ active: Double, value: Int) -> CGFloat {
         let d = i - active
-        return CGFloat(1 - 0.85 * exp(-(d * d) / 8))
+        let depth = 0.85 * min(1, max(0, Double(100 - value) / 6))
+        return CGFloat(1 - depth * exp(-(d * d) / 8))
     }
 }
 
