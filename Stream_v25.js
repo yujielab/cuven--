@@ -687,6 +687,8 @@ export default {
         // v24：外挂字幕自动发现与 SRT/ASS -> WebVTT 实时转换
         case '/api/subs':        return cors(await handleSubsList(url, env, ctx));
         case '/api/subs/vtt':    return cors(await handleSubVtt(url, env, ctx));
+        // 在线字幕服务的状态（App 账户页「播放」里「在线字幕」那一行）
+        case '/api/subs/status': return cors(await handleSubsStatus(url, env, ctx));
         case '/api/now-playing':        return cors(await handleNowPlaying(url, env, ctx));
         case '/api/atv/hero':           return cors(await handleAtvHero(url, env, ctx));
         case '/api/atv/lookup':         return cors(await handleAtvLookup(url, env, ctx));
@@ -1062,6 +1064,7 @@ const OS_MEM = new Map();                           // 记录键 → 记录（�
 const OS_BUSY = new Map();                          // 记录键 → 开始时刻（同一 isolate 不重复查）
 const OS_NEED = new Map();                          // 字幕组合 → 要不要补（进程内）
 let osAuth = null;                                  // { token, base, exp, user }
+let osLoginFail = 0;                                // 上一次登录失败的 HTTP 状态（在线字幕状态拿它分「账号不对」和「连不上」）
 
 const osOn = env => !!(env && env.OPENSUBTITLES_API_KEY) && env.OPENSUBTITLES_DISABLE !== '1';
 const osIdentity = (filePath, meta) => `${filePath}|${meta.content_hash || meta.rev || meta.size}`;
@@ -1152,7 +1155,8 @@ async function osLogin(env) {
   const saved = await r2GetJson(env, OS_R2 + 'token.json');
   if (saved && saved.token && saved.user === user && saved.exp > Date.now()) return (osAuth = saved);
   const res = await osCall(env, null, '/login', { method: 'POST', body: JSON.stringify({ username: user, password: pass }) });
-  if (!res.ok) { await osDrop(res); console.error('opensubtitles login: HTTP', res.status); return null; }
+  if (!res.ok) { await osDrop(res); osLoginFail = res.status; console.error('opensubtitles login: HTTP', res.status); return null; }
+  osLoginFail = 0;
   const j = await res.json().catch(() => ({}));
   if (!j.token) return null;
   const host = String(j.base_url || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
@@ -1205,11 +1209,14 @@ async function osDownload(env, auth, c, fps) {
   const res = await osCall(env, auth, '/download', { method: 'POST', body: JSON.stringify(body) });
   if (res.status === 406 || res.status === 429) {
     const j = await res.json().catch(() => ({}));
-    throw osError(res.status, 'download quota', { quota: true, resetAt: Date.parse(j.reset_time_utc || '') || 0 });
+    const resetAt = Date.parse(j.reset_time_utc || '') || 0;
+    osNoteDownload(0, resetAt || Date.now() + OS_RETRY.quota);
+    throw osError(res.status, 'download quota', { quota: true, resetAt });
   }
   if (!res.ok) { await osDrop(res); throw osError(res.status, 'download'); }
   const j = await res.json().catch(() => ({}));
   if (!j.link) throw osError(502, 'download link');
+  osNoteDownload(Number.isFinite(+j.remaining) && j.remaining !== '' ? +j.remaining : null, Date.parse(j.reset_time_utc || '') || 0);
   const f = await fetchRetry(j.link, {}, { retries: 1, timeout: 15_000 });
   if (!f.ok) { await osDrop(f); throw osError(f.status, 'file'); }
   return { text: decodeSubtitleBytes(new Uint8Array(await f.arrayBuffer())), fpsFix: body.in_fps ? [body.in_fps, body.out_fps] : null, remaining: j.remaining };
@@ -1292,6 +1299,87 @@ async function osRun(env, job) {
     console.error('opensubtitles:', job.filePath, e && e.message);
     return { ...base, status: 'error', retryAt: Date.now() + OS_RETRY.error };
   }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  在线字幕服务的状态：/api/subs/status（App 账户页「播放」里「首选字幕」下面那一行「在线字幕」）
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  配没配、用账号还是只有 API Key、现在连不连得上、多快、今天还能下几条、额度什么时候恢复：
+//  · 配了账号：登录（和查字幕同一个 token），问 /infos/user —— 剩余下载次数按账号算；
+//    只有 API Key：问 /infos/formats（最轻的一个接口，只看通不通），剩余次数用最近一次真实下载回报的。
+//  · 真实下载留下的结果也算进来（osNote）：下载回报的剩余次数；额度用完时的恢复时间。
+//  · 回的只有状态和数字，不带账号名、用户编号。
+//  · 结果在边缘缓存 10 分钟；?fresh=1（App 里点那一行）不用缓存，但同一个实例 1 分钟内最多真问一次；
+//    真实下载碰到额度用完时把缓存作废，下次一问就是「额度用完」。
+//  state：ok 正常 / quota 今天的下载额度用完了 / auth 账号或 API Key 不对 / error 连不上、接口出错 / off 没配
+const OS_STATUS_CACHE = 'https://cache.internal/opensubs-status-v1';
+const OS_STATUS_FRESH = 'https://cache.internal/opensubs-status-v1/fresh';   // ?fresh=1 的节流：1 分钟
+const OS_STATUS_TTL = 600;
+let osNote = null;                                  // 最近一次真实下载：{ at, remaining, resetAt }
+
+function osNoteDownload(remaining, resetAt) {
+  osNote = { at: Date.now(), remaining, resetAt: resetAt || 0 };
+  if (remaining === 0) {
+    caches.default.delete(OS_STATUS_CACHE).catch(() => {});
+    caches.default.delete(OS_STATUS_FRESH).catch(() => {});
+  }
+}
+
+async function osProbeStatus(env) {
+  const now = Date.now();
+  const st = { state: 'ok', configured: true, account: !!env.OPENSUBTITLES_USERNAME,
+    latency: null, remaining: null, allowed: null, resetAt: null, checkedAt: now };
+  try {
+    let auth = null;
+    if (env.OPENSUBTITLES_USERNAME && env.OPENSUBTITLES_PASSWORD) {
+      auth = await osLogin(env);            // 连不上会抛出去，落到下面的 error
+      if (!auth) {
+        // 400 / 401 / 403：账号或密码、API Key 不对；别的（5xx、429）是对方出问题
+        const bad = [400, 401, 403].includes(osLoginFail);
+        return { ...st, state: bad ? 'auth' : 'error', message: `login HTTP ${osLoginFail || '?'}` };
+      }
+    }
+    const t0 = Date.now();
+    const res = await osCall(env, auth, auth ? '/infos/user' : '/infos/formats');
+    st.latency = Date.now() - t0;
+    if (res.status === 401 || res.status === 403) { await osDrop(res); return { ...st, state: 'auth', message: `HTTP ${res.status}` }; }
+    if (!res.ok) { await osDrop(res); return { ...st, state: 'error', message: `HTTP ${res.status}` }; }
+    const j = await res.json().catch(() => null);
+    if (auth) {
+      const d = (j && j.data) || {};
+      if (Number.isFinite(+d.remaining_downloads) && d.remaining_downloads !== null) st.remaining = +d.remaining_downloads;
+      if (Number.isFinite(+d.allowed_downloads) && d.allowed_downloads !== null) st.allowed = +d.allowed_downloads;
+    } else if (osNote && osNote.remaining != null && now - osNote.at < 24 * 3600e3) {
+      st.remaining = osNote.remaining;
+    }
+    const quotaUntil = osNote && osNote.remaining === 0 && osNote.resetAt > now ? osNote.resetAt : 0;
+    if (st.remaining === 0 || (quotaUntil && st.remaining == null)) {
+      st.state = 'quota';
+      if (quotaUntil) st.resetAt = new Date(quotaUntil).toISOString();
+    }
+    return st;
+  } catch (e) {
+    return { ...st, state: 'error', message: (e && e.name === 'AbortError') ? 'timeout' : 'unreachable' };
+  }
+}
+
+async function handleSubsStatus(url, env, ctx) {
+  const noStore = { 'Cache-Control': 'no-store' };
+  if (!osOn(env)) return jsonResponse({ state: 'off', configured: false, account: false, checkedAt: Date.now() }, 200, noStore);
+  const fresh = url.searchParams.get('fresh') === '1';
+  // 平时用 10 分钟内的结果；点了「重新检测」（fresh=1）也是 1 分钟内最多真问一次
+  const hit = await caches.default.match(fresh ? OS_STATUS_FRESH : OS_STATUS_CACHE).catch(() => null);
+  if (hit) {
+    const body = await hit.json().catch(() => null);
+    if (body) return jsonResponse({ ...body, cached: true }, 200, noStore);
+  }
+  const body = await osProbeStatus(env);
+  const save = (key, ttl) => caches.default.put(key, new Response(JSON.stringify(body), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': `max-age=${ttl}` },
+  })).catch(() => {});
+  const put = Promise.all([save(OS_STATUS_CACHE, OS_STATUS_TTL), save(OS_STATUS_FRESH, 60)]);
+  if (ctx && ctx.waitUntil) ctx.waitUntil(put); else await put;
+  return jsonResponse(body, 200, noStore);
 }
 
 async function osKeyOf(identity) {

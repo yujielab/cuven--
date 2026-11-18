@@ -174,6 +174,11 @@ final class APIClient: @unchecked Sendable {
         let _: SubsWarm? = try? await get("/api/subs", [("path", path), ("warm", "1")], timeout: 15, fresh: true)
     }
 
+    /// 在线字幕服务的状态（账户页「播放」里「在线字幕」那一行）。fresh：点了那一行重新检测（后端 1 分钟内最多真问一次 OpenSubtitles）
+    func subsStatus(fresh: Bool) async throws -> SubsServiceStatus {
+        try await get("/api/subs/status", fresh ? [("fresh", "1")] : [], timeout: 20, fresh: true)
+    }
+
     // MARK: 播放
 
     func streamSign(path: String) async throws -> StreamSign {

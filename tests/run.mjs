@@ -604,6 +604,99 @@ console.log('\n■ OpenSubtitles 自动补字幕（模拟接口）');
   for (const k of ['OPENSUBTITLES_API_KEY', 'OPENSUBTITLES_USERNAME', 'OPENSUBTITLES_PASSWORD']) delete H.env[k];
 }
 
+console.log('\n■ 在线字幕服务状态：/api/subs/status（App 账户页「首选字幕」下面那一行）');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const clear = async () => { await settle(); caches.default.m.clear(); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const get = async (q = '') => {
+    const r = await H.call('/api/subs/status' + q, 'GET', { Cookie: cookie });
+    const body = await r.json();
+    await settle();
+    return { status: r.status, cc: r.headers.get('cache-control'), body };
+  };
+  const n = p => H.os.calls.filter(c => c.path === p).length;
+  await clear(); H.os.calls.length = 0;
+
+  let s = await get();
+  ok(s.status === 200 && s.body.state === 'off' && s.body.configured === false && !H.os.calls.length,
+    '没配 OPENSUBTITLES_API_KEY：state=off，不去问 OpenSubtitles');
+  const anon = await H.call('/api/subs/status');
+  ok(anon.status === 401, '没登录的请求：和别的接口一样回登录页（401）');
+
+  H.env.OPENSUBTITLES_API_KEY = 'test-key'; H.env.OPENSUBTITLES_USERNAME = 'u'; H.env.OPENSUBTITLES_PASSWORD = 'p';
+  H.os.remaining = 87; H.os.loginOk = true; H.os.down = false;
+  s = await get();
+  ok(s.body.state === 'ok' && s.body.account === true && s.body.remaining === 87 && s.body.allowed === 100
+    && Number.isFinite(s.body.latency) && s.cc === 'no-store',
+    `配了账号：问 /infos/user，正常，今天还能下 ${s.body.remaining} / ${s.body.allowed} 条，响应 ${s.body.latency} ms`);
+  ok(!/4242|"u"|user_?id|level|leecher/i.test(JSON.stringify(s.body)), '回的只有状态和数字，不带账号名、用户编号、等级');
+  const n1 = n('/infos/user');
+  s = await get();
+  ok(s.body.cached === true && n('/infos/user') === n1, '10 分钟内再问：用缓存，不再去问 OpenSubtitles');
+  // 测试台的缓存不会过期：去掉那条 1 分钟的，当作已经过了 1 分钟
+  await caches.default.delete('https://cache.internal/opensubs-status-v1/fresh');
+  s = await get('?fresh=1');
+  ok(!s.body.cached && n('/infos/user') === n1 + 1 && s.body.state === 'ok', '点「重新检测」（fresh=1，上一次真问已过 1 分钟）：真去问一次');
+  s = await get('?fresh=1');
+  ok(s.body.cached === true && n('/infos/user') === n1 + 1, '1 分钟内再点：不重复去问（节流）');
+
+  await clear(); H.os.remaining = 0;
+  s = await get();
+  ok(s.body.state === 'quota' && s.body.remaining === 0, '今天的下载额度用完（/infos/user 说剩 0）：state=quota');
+
+  await clear(); H.os.remaining = 50; H.os.down = true;
+  s = await get();
+  ok(s.body.state === 'error' && /503/.test(s.body.message || ''), `OpenSubtitles 出问题（503）：state=error（${s.body.message}）`);
+  H.os.down = false;
+
+  await clear(); H.env.OPENSUBTITLES_USERNAME = 'nobody'; H.os.loginOk = false;
+  s = await get();
+  ok(s.body.state === 'auth', `账号或密码不对（登录 401）：state=auth（${s.body.message}）`);
+  await clear(); H.os.down = true;
+  s = await get();
+  ok(s.body.state === 'error', `登录时 OpenSubtitles 出问题（503）：算连不上，不说账号不对（${s.body.message}）`);
+  H.os.down = false; H.os.loginOk = true;
+
+  await clear(); delete H.env.OPENSUBTITLES_USERNAME; delete H.env.OPENSUBTITLES_PASSWORD;
+  const f0 = n('/infos/formats');
+  s = await get();
+  ok(s.body.state === 'ok' && s.body.account === false && n('/infos/formats') === f0 + 1 && s.body.allowed === null,
+    `只有 API Key：问 /infos/formats 看通不通；每日额度按出口 IP 算、不知道就不写，剩余次数只用最近一次真实下载回报的（${s.body.remaining}）`);
+
+  /* 真实下载留下的结果：只有 API Key 时，剩余次数看最近一次真实下载回报的；
+     下载碰到额度用完（406）：状态缓存当场作废，下一问就是 quota，带上恢复时间 */
+  const mh = f => {
+    const b = fs.readFileSync(path.join(H.SAMPLES, f));
+    let h = BigInt(b.length);
+    for (const part of [b.subarray(0, 65536), b.subarray(b.length - 65536)]) for (let i = 0; i < 65536; i += 8) h += part.readBigUInt64LE(i);
+    return (h & 0xFFFFFFFFFFFFFFFFn).toString(16).padStart(16, '0');
+  };
+  const info = async f => (await H.call(`/hls/${H.token(f)}/info.json`)).json();
+  const cue = '1\n00:00:00,500 --> 00:00:01,000\n测试\n';
+  await clear(); H.os.quota = false;
+  H.os.subs = [{ id: 90, file_id: 1090, language: 'zh-cn', moviehash: mh('hevc_inband.mkv') }];
+  H.os.files = { 1090: { text: cue } };
+  await info('/Movies/hevc_inband.mkv'); await settle();
+  ok(n('/download') >= 1, '（准备）只有 API Key 也去下载了一条');
+  await clear();
+  s = await get();
+  ok(s.body.state === 'ok' && s.body.remaining === 99, `只有 API Key：剩余次数用最近一次真实下载回报的（${s.body.remaining}）`);
+  H.os.quota = true;
+  H.os.subs = [{ id: 91, file_id: 1091, language: 'zh-cn', moviehash: mh('avc_inband.mkv') }];
+  H.os.files = { 1091: { text: cue } };
+  await info('/Movies/avc_inband.mkv'); await settle();
+  s = await get();
+  const reset = Date.parse(s.body.resetAt || '');
+  ok(s.body.state === 'quota' && s.body.remaining === 0 && reset > Date.now() && reset < Date.now() + 2 * 3600e3,
+    `真实下载碰到额度用完：缓存当场作废，状态马上变 quota，恢复时间 ${s.body.resetAt}`);
+  H.os.quota = false; H.os.subs = []; H.os.files = {};
+  await clear();
+  for (const k of ['OPENSUBTITLES_API_KEY', 'OPENSUBTITLES_USERNAME', 'OPENSUBTITLES_PASSWORD']) delete H.env[k];
+  H.os.remaining = 99; H.os.calls.length = 0;
+}
+
 console.log('\n■ 剧集：/api/tv、/api/tv/episodes、/api/tmdb/season、/api/tmdb?type=tv');
 {
   const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
