@@ -20,7 +20,7 @@ struct CastSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
+        SoftNavigationStack {
             List {
                 ForEach(Array(people.enumerated()), id: \.offset) { _, m in
                     Button { onOpen(m) } label: {

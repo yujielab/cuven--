@@ -434,7 +434,7 @@ struct ProfileSheetFrame<Content: View>: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
+        SoftNavigationStack {
             ScrollView {
                 content()
                     .padding(.horizontal, 24)
@@ -567,7 +567,7 @@ struct AvatarPickerSheet: View {
     private var saved: ProfileAvatar { profile.settings.avatar }
 
     var body: some View {
-        NavigationStack {
+        SoftNavigationStack {
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
                 header

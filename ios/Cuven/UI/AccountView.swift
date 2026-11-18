@@ -7,6 +7,43 @@ import UserNotifications
 /// 圆形头像：账户设置里的头像（默认头像或自己上传的），存在本机（AvatarCache），第一帧就是它。
 /// 用户要求「预先在设备上缓存头像，仅在确认没有头像时才回退成默认头像兜底，不要使用首字母」：
 /// 还不知道是哪张（第一次登录还没拉到、断网且本机没有）只画一个空的圆，不写首字母；默认头像要服务器确认没有才用（见 AvatarCache）
+/// 账户页滚过头部以后顶上那一截（用户要求「这个位置换成头像 + 名字」「顶部导航栏用渐进式模糊，不允许有硬边界线」）：
+/// 底是渐进式模糊（DSProgressiveBar：头像取的主色压在磨砂上，从上往下淡掉、多淡出 36 点，没有底线），
+/// 左边 30 点的圆头像 + 名字，和下面卡片的左边对齐，竖着在导航栏那一行里。不接点按（底下照样能滚、能点）
+struct AccountTopBar: View {
+    let name: String
+    /// 导航栏那一截的高（滚动区顶部的安全区）
+    let height: CGFloat
+    let leading: CGFloat
+    let tint: Color
+
+    var body: some View {
+        let bar = max(52, height)
+        ZStack(alignment: .top) {
+            DSProgressiveBar(tint: tint, tintOpacity: 0.55, solid: bar / (bar + 36))
+                .frame(height: bar + 36)
+            HStack(spacing: 10) {
+                AvatarView(size: 30)
+                Text(name)
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+            }
+            .frame(height: 44)
+            // 和下面那一列卡同一个宽、同一个左边（那一列最宽 680、居中）
+            .padding(.horizontal, leading)
+            .frame(maxWidth: 680, alignment: .leading)
+            .frame(maxWidth: .infinity)
+            // 和系统标题同一行：贴着导航栏那一截的下沿（上面那点是弹层顶边留的空）
+            .padding(.top, bar - 44)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+        }
+        .frame(maxWidth: .infinity, alignment: .top)
+        .allowsHitTesting(false)
+    }
+}
+
 struct AvatarView: View {
     @Environment(AccountStore.self) private var account
     var size: CGFloat = 34
@@ -58,6 +95,8 @@ struct AccountView: View {
     @State private var profileSheet: ProfileSheet?
     /// 在线字幕服务的状态（「播放」里「首选字幕」下面那一行）：每次打开账户页问一次（后端缓存 10 分钟）
     @State private var subsProbe = SubsStatusProbe()
+    /// 顶上导航栏那一截有多高（滚动区顶部的安全区）：滚过头部以后「头像 + 名字」那一行放在这一截里
+    @State private var navTop: CGFloat = 56
     /// 系统设置里 Cuven 的通知是关着的（拒绝过，或者后来到设置里关了）
     @State private var notifyBlocked = false
     @State private var notifyAsking = false
@@ -101,7 +140,11 @@ struct AccountView: View {
             }
             .scrollIndicators(.hidden)
             .background { AccountBackdrop(tint: tint).ignoresSafeArea() }
-            .navigationTitle(showName ? displayName : "")
+            // 系统导航栏底下的滚动边缘不画（不要「硬」的那种实色底 + 硬边，用户截图）：顶上那一截由下面的 AccountTopBar 自己画渐进式模糊
+            .scrollEdgeEffectHidden(true, for: .top)
+            .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.top } action: { navTop = $0 }
+            // 标题不交给系统：滚过头部以后顶上是「头像 + 名字」（AccountTopBar，用户要求），系统那一行只留关闭钮
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
@@ -116,6 +159,14 @@ struct AccountView: View {
                 g.contentOffset.y + g.contentInsets.top > 150
             } action: { _, v in
                 withAnimation(.easeOut(duration: 0.2)) { showName = v }
+            }
+            // 顶上那一截：滚过头部以后，渐进式模糊的底 + 左边「头像 + 名字」（用户要求：以前这里只有名字，底下是一块实色、一条硬边）
+            .overlay(alignment: .top) {
+                if showName {
+                    AccountTopBar(name: displayName, height: navTop, leading: hsc == .compact ? 16 : 24, tint: tint)
+                        .ignoresSafeArea(edges: .top)
+                        .transition(.opacity)
+                }
             }
             // 文案照网页版的退出确认（logout-sheet）；仍是系统的确认（C44、C47）
             .confirmationDialog("要退出登录吗？", isPresented: $confirmSignOut, titleVisibility: .visible) {
