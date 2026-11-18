@@ -24,6 +24,8 @@ struct MovieDetailView: View {
     @State private var trailers: [Trailer] = []
     /// 头部的画面和字标：定下来就不再换（DetailArt）
     @State private var art: DetailArt?
+    /// 预先缓存开不了（空间不够、演示数据）时说一声
+    @State private var precacheAlert: PrecacheAlert?
 
     var body: some View {
         let meta = full ?? model.meta(video)
@@ -47,9 +49,16 @@ struct MovieDetailView: View {
             cast: meta?.cast ?? [],
             trailers: trailers,
             trailerArt: trailerArt(meta),
-            stills: DetailText.stills(meta)
+            stills: DetailText.stills(meta),
+            precache: precacheState(meta)
         ) { _ in
             EmptyView()
+        }
+        .alert(precacheAlert?.title ?? "", isPresented: Binding(get: { precacheAlert != nil }, set: { if !$0 { precacheAlert = nil } }),
+               presenting: precacheAlert) { _ in
+            Button("好", role: .cancel) {}
+        } message: { a in
+            Text(a.message)
         }
         .task { full = await model.fullMeta(for: video) }
         // 在线字幕：打开详情页时先让后台去找（不等），点播放时主列表里就有这一条备选
@@ -78,6 +87,40 @@ struct MovieDetailView: View {
         // TMDB 全量结果里才有字标的：原来没有字标（写的是片名）才补上；已经有字标就不换
         .onChange(of: full?.logo) { _, l in
             if let l, !l.isEmpty, art != nil, (art?.logo ?? "").isEmpty { art?.logo = l }
+        }
+    }
+
+    /// 弱网预先缓存（用户要求）：已经在缓存 / 缓存过的 → 「立即播放」+ 圆形进度钮；网络不好或网络速度低于 50% → 「预先画面质量处理」；
+    /// 都不是 → nil（平常的「播放」）
+    private func precacheState(_ meta: Meta?) -> DetailPrecache? {
+        let pre = Precache.shared
+        let item = pre.item(path: video.path)
+        guard item != nil || pre.suggested(name: video.name, size: video.size, runtime: meta?.runtime) else { return nil }
+        let path = video.path
+        return DetailPrecache(
+            mode: item == nil ? .suggest : .active,
+            phase: item?.phase,
+            progress: item?.progress ?? 0,
+            bytes: item?.bytes ?? 0,
+            onStart: { startPrecache(meta) },
+            onPause: { Precache.shared.pause(path: path) },
+            onResume: { Precache.shared.resume(path: path) },
+            onDelete: { Precache.shared.delete(path: path) })
+    }
+
+    private func startPrecache(_ meta: Meta?) {
+        let r = Precache.shared.start(path: video.path, name: video.name, title: model.title(video), size: video.size,
+                                      runtime: meta?.runtime, resume: model.playback.resumePosition(video.path))
+        switch r {
+        case .started:
+            Haptics.light()
+        case .noSpace(let needed):
+            Haptics.error()
+            let gb = max(1, Int((Double(needed) / 1_000_000_000).rounded(.up)))
+            precacheAlert = PrecacheAlert(title: "iPhone 储存空间不足",
+                                          message: "预先缓存这部影片需要至少 \(gb) GB 可用空间。请在「设置」>「通用」>「iPhone 储存空间」中清理后再试。")
+        case .unavailable:
+            precacheAlert = PrecacheAlert(title: "无法预先缓存", message: "演示模式下无法缓存影片。")
         }
     }
 
@@ -579,6 +622,8 @@ struct DetailScaffold<Episodes: View>: View {
     let trailerArt: [String]
     /// 「剧照」那一排（TMDB 的剧照；两张以上才出这一段）
     var stills: [String] = []
+    /// 弱网预先缓存（电影才有）：有就把「播放」换成「预先画面质量处理」/「立即播放」+ 圆形进度钮（PrecachePlayRow）
+    var precache: DetailPrecache? = nil
     /// 分集那一段（电影没有）：拿到当前宽度的版面尺寸再排
     @ViewBuilder var episodes: (DSMetrics) -> Episodes
 
@@ -777,7 +822,12 @@ struct DetailScaffold<Episodes: View>: View {
                     .accessibilityLabel(DetailText.spoken(metaLine))
             }
             HStack(spacing: 12) {
-                playButton(m)
+                if let precache {
+                    // 网络不好 / 网络速度低于 50%：「预先画面质量处理」，按了变成「立即播放」+ 右边一颗圆形进度钮（用户要求）
+                    PrecachePlayRow(precache: precache, wide: m.wide, playID: playID, playDisabled: playDisabled, onPlay: onPlay)
+                } else {
+                    playButton(m)
+                }
                 // 「…」里只剩「从头播放」：有进度才出现（发行版不再有「分享」「复制直链」这类站外操作）
                 if onRestart != nil { moreMenu }
             }

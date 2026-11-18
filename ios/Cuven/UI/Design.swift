@@ -411,8 +411,6 @@ struct DSWideLogo: View {
     let logo: URL
     let size: CGSize
     var title: String? = nil
-    /// 字标真画出来有多高（继续观看的百分比气泡要浮在它上面）
-    var onLogoHeight: ((CGFloat) -> Void)? = nil
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -422,7 +420,6 @@ struct DSWideLogo: View {
             ], startPoint: .top, endPoint: .bottom)
             LogoImage(url: logo, height: (size.height * 0.22).rounded(), alignment: .leading,
                       fallback: title, maxWidth: (size.width * 0.5).rounded())
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { onLogoHeight?($0) }
                 .padding(.leading, (size.width * 0.06).rounded())
                 .padding(.bottom, (size.height * 0.1).rounded())
         }
@@ -471,26 +468,23 @@ struct DSWideLockup: View {
     let metrics: DSMetrics
     var width: CGFloat? = nil
     var logo: URL? = nil
-    /// 字标真画出来有多高（宽的字标比它那一格矮得多）：百分比气泡浮在字标上面
-    @State private var logoHeight: CGFloat = 0
 
     var body: some View {
         let w = width ?? metrics.wideCardWidth
         let h = (w * 9 / 16).rounded()
-        // 气泡的尖角离进度条多高：有字标就浮在字标上沿上面（用户画的那样，不压字标），没有字标就贴着进度条
-        let lift: CGFloat = logo == nil || logoHeight <= 0
-            ? 3 : max(3, (h * 0.1).rounded() + logoHeight - 14 + 4)
         VStack(alignment: .leading, spacing: 10) {
             DSParallaxArt(url: art, metrics: metrics, size: CGSize(width: w, height: h))
                 .overlay {
                     if let logo {
-                        DSWideLogo(logo: logo, size: CGSize(width: w, height: h), title: title) { logoHeight = $0 }
+                        DSWideLogo(logo: logo, size: CGSize(width: w, height: h), title: title)
                     }
                 }
                 .overlay(alignment: .bottom) {
                     if let p = progress, p > 0.01 {
-                        // 进度：底部一条细的胶囊（F36），上面一颗液态玻璃的百分比气泡（用户要求），尖角指着看到的地方
-                        DSPercentProgress(value: p, lift: lift)
+                        // 进度：底部一条细的胶囊（F36），上面一颗液态玻璃的百分比气泡（用户要求），尖角指着看到的地方。
+                        // 气泡一直贴着进度条（用户要求「百分比遮挡字标没关系，因为是透明的」）：以前有字标时浮到字标上沿上面，
+                        // 两行的字标一高，气泡离进度条一大截，尖角指的不知道是哪儿
+                        DSPercentProgress(value: p)
                             .padding(.horizontal, 12)
                             .padding(.bottom, 10)
                     }
@@ -518,7 +512,7 @@ struct DSWideLockup: View {
 /// 气泡在两头不出界（靠边时气泡停在边上，尖角照样指着真正的位置）；气泡和尖角是一个形状，玻璃连成一整块
 struct DSPercentProgress: View {
     let value: Double
-    /// 气泡的尖角离进度条上沿多高（卡上有字标时浮在字标上面）
+    /// 气泡的尖角离进度条上沿多高
     var lift: CGFloat = 3
 
     static func percent(_ v: Double) -> Int { Int((min(1, max(0, v)) * 100).rounded()) }
