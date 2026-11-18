@@ -148,7 +148,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             let info = master.deletingLastPathComponent().appendingPathComponent("info.json")
             let t1 = Date()
             let (status, body) = await APIClient.shared.hlsInfo(info)
-            plog("source hls, info.json \(status) in \(Perf.ms(since: t1)) ms")
+            // 视频格式也记下（编码、动态范围、尺寸、杜比视界档位；不含片名与地址）：放不了的时候知道是哪种格式
+            plog("source hls, info.json \(status) in \(Perf.ms(since: t1)) ms\(body?.video.map { " (\($0.summary))" } ?? "")")
             PlayerLoadingOverlay.shared.stage(.meta)
             if (200..<300).contains(status) && body?.ok != false { return master }
             if status >= 400 && status < 500 && status != 404 {
@@ -313,7 +314,10 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         case .failed:
             let msg = item.error?.localizedDescription ?? "未知错误"
             let code = (item.error as NSError?).map { "\($0.domain) \($0.code)" } ?? "-"
-            plog("failed: \(code)", error: true)
+            // 底下那一层错误、播放器错误日志的最后一条（只记域和代码：说明文字里可能带着地址）
+            let under = ((item.error as NSError?)?.userInfo[NSUnderlyingErrorKey] as? NSError).map { " ← \($0.domain) \($0.code)" } ?? ""
+            let last = item.errorLog()?.events.last.map { " · log \($0.errorDomain) \($0.errorStatusCode)" } ?? ""
+            plog("failed: \(code)\(under)\(last)", error: true)
             closeThenAlert("播放失败", msg)
         default:
             break

@@ -136,28 +136,40 @@ final class DuoDeviceTests: XCTestCase {
         } else {
             print("DUO about card: none")
         }
-        // 预告片：一排 16:9 卡，字压在底部的渐进式模糊上（「正式预告」「▶ 2 分钟」），右下一颗「•••」
-        if reveal(app, "trailer-card", swipes: 3) != nil {
+        // 预告片与剧照：同一横排，先预告片、再剧照（16:9 卡，字压在底部的渐进式模糊上，右下一颗「•••」）；点剧照全屏看大图。
+        // 剧照在这一排右边、屏幕外：横着往左滑出来。以前往上滑着找剧照，把「演员 ›」滑过了头，测试报「详情页没有『演员 ›』」
+        if let media = reveal(app, "trailer-card", swipes: 3) ?? reveal(app, "still-card", swipes: 0) {
             sleep(2)
             snap("duo-03c-detail-trailers")
+            var still = reveal(app, "still-card", swipes: 0)
+            for _ in 0..<4 where still == nil {
+                media.press(forDuration: 0.05, thenDragTo: media.withOffset(CGVector(dx: -240, dy: 0)))
+                sleep(1)
+                still = reveal(app, "still-card", swipes: 0)
+            }
+            if let still {
+                sleep(1)
+                snap("duo-03f-detail-stills")
+                still.tap(); sleep(2)
+                snap("duo-03g-stills-viewer")
+                let close = app.buttons["stills-close"].firstMatch
+                if close.waitForExistence(timeout: 3) { close.tap() } else { app.swipeDown() }
+                sleep(2)
+            } else {
+                print("DUO still card: none")
+            }
         } else {
-            print("DUO trailer card: none")
-        }
-        // 剧照：一排 4:3 大卡（参考图：游戏 App 详情页「挑戰」那一排），字压在下段的渐进式模糊上；点一张全屏看大图
-        if let still = reveal(app, "still-card", swipes: 2) {
-            sleep(2)
-            snap("duo-03f-detail-stills")
-            still.tap(); sleep(2)
-            snap("duo-03g-stills-viewer")
-            let close = app.buttons["stills-close"].firstMatch
-            if close.waitForExistence(timeout: 3) { close.tap() } else { app.swipeDown() }
-            sleep(2)
-        } else {
-            print("DUO still card: none")
+            print("DUO trailer / still card: none")
         }
         // 演员 ›：一张半屏 / 全屏的系统弹层，一行一位；点一行，弹层收起、推进那位演员的个人页（照 Apple Music 艺人页）：
         // 大照片 + 名字 + ⓘ ▶ 🔍、最新一部、库中作品；ⓘ 是简介弹层（来自、出生、类型、关于）
-        if let castLink = reveal(app, "cast-link", swipes: 3) {
+        // 往上滑着找；滑过了头（上面几排比预想的高）就往回滑着找
+        var castLink = reveal(app, "cast-link", swipes: 4)
+        for _ in 0..<6 where castLink == nil {
+            app.swipeDown(); sleep(1)
+            castLink = reveal(app, "cast-link", swipes: 0)
+        }
+        if let castLink {
             castLink.tap(); sleep(2)
             snap("duo-04b-cast")
             let row = app.buttons["cast-row"].firstMatch
@@ -189,6 +201,21 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-04-detail-info")
         app.swipeUp(); sleep(2); snap("duo-04c-detail-tech")
         back(app)
+        // 探索片段合集（今年那一排下面一排 9:16 竖卡）：点开是刷视频式的影片浏览，上下滑换一部
+        app.scrollHomeToTop(maxSwipes: 12)
+        if let clip = reveal(app, swipes: 6, where: { $0.identifier.hasPrefix("clip-collection-") }) {
+            sleep(2)
+            snap("duo-08j-clip-collections")
+            clip.tap(); sleep(4)
+            snap("duo-08k-clip-feed")
+            app.swipeUp(); sleep(4)
+            snap("duo-08l-clip-feed-2")
+            if let close = reveal(app, "clip-feed-close", swipes: 0) { close.tap() } else { app.swipeDown() }
+            sleep(2)
+        } else {
+            print("DUO clip collections: none")
+        }
+        app.scrollHomeToTop(maxSwipes: 12)
         // 主页往下：继续观看（有才有）、今年、去年（电影和剧集的海报）、四个大类——卡上只有画面，分区之间只靠留白
         app.swipeUp(); sleep(2); snap("duo-08-home-rows")
         app.swipeUp(); sleep(2); snap("duo-08b-home-tv")
@@ -305,6 +332,24 @@ final class DuoDeviceTests: XCTestCase {
         if avatar.waitForExistence(timeout: 5) {
             avatar.tap(); sleep(2)
             snap("duo-06-account")
+            // 网络速度：滑块下面「自动调整」那一行（演示数据不测速，只按网络类型估）；开一下看结果，再关回去（停在现在的数上）
+            if let auto = reveal(app, "account-network-auto", swipes: 4) {
+                sleep(1)
+                snap("duo-06b-account-network")
+                auto.tap(); sleep(3)
+                snap("duo-06c-account-network-auto")
+                auto.tap(); sleep(1)
+            } else {
+                print("DUO network auto: none")
+            }
+            // 首选音轨：系统弹出菜单（自动 / 自然 / 国语 / 粤语 / 英语 / 日语 / 韩语）；点菜单外面收起
+            if let audio = reveal(app, swipes: 3, where: { $0.elementType == .button && $0.label == "首选音轨" }) {
+                audio.tap(); sleep(2)
+                snap("duo-06d-audio-menu")
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.06)).tap(); sleep(1)
+            } else {
+                print("DUO audio menu: none")
+            }
             let done = app.buttons["account-done"].firstMatch
             if done.waitForExistence(timeout: 3) { done.tap() } else { app.swipeDown() }
             sleep(1)

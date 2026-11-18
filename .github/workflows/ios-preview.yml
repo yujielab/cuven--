@@ -126,6 +126,18 @@ jobs:
             -destination "id=$DUO_UDID" -only-testing:CuvenUITests/DuoDeviceTests \
             -resultBundlePath "$RUNNER_TEMP/duo.xcresult" > "$RUNNER_TEMP/duo.log" 2>&1
           code=$?
+          # 测试运行器没起来（模拟器的无障碍服务没就绪：「failed to initialize for UI testing」「Timed out waiting for AX loaded
+          # notification」）不是 App 的问题：重启这台模拟器、再跑一次（以前这一下就让整次 Duo 截图全空）
+          if [ $code -ne 0 ] && grep -qE "failed to initialize for UI testing|Timed out waiting for AX loaded" "$RUNNER_TEMP/duo.log"; then
+            echo "测试运行器没起来：重启模拟器再跑一次"
+            xcrun simctl shutdown "$DUO_UDID" 2>/dev/null; sleep 5
+            xcrun simctl boot "$DUO_UDID" 2>/dev/null; xcrun simctl bootstatus "$DUO_UDID" -b > /dev/null 2>&1; sleep 20
+            rm -rf "$RUNNER_TEMP/duo.xcresult"
+            xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
+              -destination "id=$DUO_UDID" -only-testing:CuvenUITests/DuoDeviceTests \
+              -resultBundlePath "$RUNNER_TEMP/duo.xcresult" > "$RUNNER_TEMP/duo.log" 2>&1
+            code=$?
+          fi
           grep -E "Test Case|passed|failed|error:|XCTAssert|Failing|DUO " "$RUNNER_TEMP/duo.log" | tail -60
           echo "exit $code"
           if [ $code -ne 0 ]; then tail -40 "$RUNNER_TEMP/duo.log"; fi
@@ -161,6 +173,18 @@ jobs:
             -destination "id=$PHONE_UDID" -only-testing:CuvenUITests/TourTests \
             -resultBundlePath "$RUNNER_TEMP/ui.xcresult" > "$RUNNER_TEMP/test.log" 2>&1
           code=$?
+          # 测试运行器没起来（模拟器的无障碍服务没就绪：「failed to initialize for UI testing」「Timed out waiting for AX loaded
+          # notification」）不是 App 的问题：重启这台模拟器、再跑一次（以前这一下就让整次 Duo 截图全空）
+          if [ $code -ne 0 ] && grep -qE "failed to initialize for UI testing|Timed out waiting for AX loaded" "$RUNNER_TEMP/test.log"; then
+            echo "测试运行器没起来：重启模拟器再跑一次"
+            xcrun simctl shutdown "$PHONE_UDID" 2>/dev/null; sleep 5
+            xcrun simctl boot "$PHONE_UDID" 2>/dev/null; xcrun simctl bootstatus "$PHONE_UDID" -b > /dev/null 2>&1; sleep 20
+            rm -rf "$RUNNER_TEMP/ui.xcresult"
+            xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
+              -destination "id=$PHONE_UDID" -only-testing:CuvenUITests/TourTests \
+              -resultBundlePath "$RUNNER_TEMP/ui.xcresult" > "$RUNNER_TEMP/test.log" 2>&1
+            code=$?
+          fi
           grep -E "Test Case|passed|failed|error:|XCTAssert|Failing|TOUR " "$RUNNER_TEMP/test.log" | tail -60
           echo "exit $code"
           if [ $code -ne 0 ]; then tail -40 "$RUNNER_TEMP/test.log"; fi
@@ -320,6 +344,18 @@ jobs:
             -destination "id=$IPAD_UDID" -only-testing:CuvenUITests/DuoUnfoldedTests \
             -resultBundlePath "$RUNNER_TEMP/ipad.xcresult" > "$RUNNER_TEMP/ipad.log" 2>&1
           code=$?
+          # 测试运行器没起来（模拟器的无障碍服务没就绪：「failed to initialize for UI testing」「Timed out waiting for AX loaded
+          # notification」）不是 App 的问题：重启这台模拟器、再跑一次（以前这一下就让整次 Duo 截图全空）
+          if [ $code -ne 0 ] && grep -qE "failed to initialize for UI testing|Timed out waiting for AX loaded" "$RUNNER_TEMP/ipad.log"; then
+            echo "测试运行器没起来：重启模拟器再跑一次"
+            xcrun simctl shutdown "$IPAD_UDID" 2>/dev/null; sleep 5
+            xcrun simctl boot "$IPAD_UDID" 2>/dev/null; xcrun simctl bootstatus "$IPAD_UDID" -b > /dev/null 2>&1; sleep 20
+            rm -rf "$RUNNER_TEMP/ipad.xcresult"
+            xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
+              -destination "id=$IPAD_UDID" -only-testing:CuvenUITests/DuoUnfoldedTests \
+              -resultBundlePath "$RUNNER_TEMP/ipad.xcresult" > "$RUNNER_TEMP/ipad.log" 2>&1
+            code=$?
+          fi
           grep -E "Test Case|error:|XCTAssert|DUO " "$RUNNER_TEMP/ipad.log" | tail -40
           echo "exit $code"
           xcrun simctl shutdown "$IPAD_UDID"

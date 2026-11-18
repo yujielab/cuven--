@@ -122,6 +122,15 @@ final class TourTests: XCTestCase {
             sleep(3)
             snap("13-search")
         }
+
+        // 二次启动：带着刚才存下的真实片库缓存（真机上每次打开都是这样）。只等、不查元素——UI 测试每查一次元素，
+        // App 都要在主线程上拍整棵无障碍树，那段时间的「main blocked」是测试自己造成的；这 15 秒里的卡顿才是 App 的。
+        // 诊断日志里看「restore: … in N ms」（读本地缓存要多久）和这一段的 main blocked
+        app.terminate()
+        sleep(2)
+        app.launch()
+        sleep(15)
+        print("TOUR warm launch: waited 15 s")
     }
 
     /// 系统返回钮（标识 BackButton；不一定在 navigationBars 里），都没有就从左边缘往右拖
