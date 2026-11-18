@@ -7,9 +7,9 @@ import AVFoundation
 // 打开后显示为图 3 4 5 的类似刷视频逻辑的影片浏览新界面」。参考图是 Apple TV App 的「Explore Clip Collections」：
 // · 主页 2026 那一排下面一排 9 : 16 的竖卡：整幅画面、下段压暗，左下大号粗体的分类名；在排里不放大、不压暗；
 // · 点开（从卡上放大出来）：一部一屏，上下滑换一部（分页对齐，像刷短视频）。每一屏是一张大圆角卡：
-//   后面是这一部的预告片（静音、从第 10 秒起、循环；起来之前是竖版主视觉），顶上分类名，
+//   后面是这一部的预告片（静音、从第 10 秒起、循环；起来之前是竖版主视觉），顶上不写分类名（用户要求移除），
 //   底下字标（HDR）、一行「电影 · 2026 · 科幻」、「加入想看」玻璃胶囊和 ⓘ（推进详情页），最底下一条预告片进度；
-//   轻点画面暂停 / 接着放；右边（iPhone Duo 折起是侧边那一列）关闭、分享，下面一串竖着的页码点。
+//   轻点画面暂停 / 接着放；右边（iPhone Duo 折起是侧边那一列，对着状态栏的中线）关闭、分享，下面一串竖着的页码点。
 // 分类：电视剧 = 全部剧集；动漫 = TMDB「动画」；电影 = 全部电影；纪录片 = TMDB「纪录」；
 // 迪士尼 / 漫威 / DC = 按片名认（ClipFranchise：Worker 给的 TMDB 资料里没有出品公司）。
 // 每个合集里查到有预告片的在前（刷起来都是会动的），再按上映年份新的在前、同一年按入库时间；最多 80 部。
@@ -469,7 +469,7 @@ struct ClipFeedView: View {
             LazyVStack(spacing: 0) {
                 ForEach(entries) { e in
                     ClipFeedPage(entry: e, collection: collection, active: current == e.id, trailer: trailer,
-                                 roomForControls: !column, insetTop: ins.top, insetBottom: ins.bottom) {
+                                 insetTop: ins.top, insetBottom: ins.bottom) {
                         path.append(Self.route(e))
                     }
                     .containerRelativeFrame([.horizontal, .vertical])
@@ -486,13 +486,16 @@ struct ClipFeedView: View {
     @ViewBuilder
     private func controls(column: Bool, insets ins: EdgeInsets) -> some View {
         if column {
+            // 对着系统状态栏那一列的中线（DuoRail：主页侧边导航量到的）。以前按这一层自己读到的右侧安全区（84 点）居中，
+            // 比状态栏的时间、信号偏外约 6 点（用户截图：控件对齐）
+            let rail = DuoRail.shared.fromTrailing ?? ins.trailing / 2
             VStack(spacing: 14) {
                 closeButton
                 if let e = currentEntry { shareButton(e) }
                 ClipFeedDots(count: entries.count, index: index)
                     .padding(.top, 34)
             }
-            .frame(width: ins.trailing)
+            .frame(width: rail * 2)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             .padding(.top, ins.top + 168)
             .ignoresSafeArea()
@@ -590,15 +593,13 @@ struct ClipFeedView: View {
     }
 }
 
-/// 一屏：一张大圆角卡。底是竖版主视觉，正对着时预告片起来就盖上去（淡入）；顶上分类名，
+/// 一屏：一张大圆角卡。底是竖版主视觉，正对着时预告片起来就盖上去（淡入）；顶上不写分类名（用户要求移除），
 /// 底下（参考图）：高分的一颗胶囊、字标、「电影 · 2026 · 科幻」、「加入想看」+ ⓘ、预告片进度
 struct ClipFeedPage: View {
     let entry: HomeEntry
     let collection: ClipCollection
     let active: Bool
     let trailer: ShowcaseTrailer
-    /// 没有侧边那一列：右上角有关闭、分享，分类名往下让一点
-    let roomForControls: Bool
     /// 上下的安全区：页铺满整个屏，卡往里让这么多
     var insetTop: CGFloat = 0
     var insetBottom: CGFloat = 0
@@ -629,7 +630,7 @@ struct ClipFeedPage: View {
                             .accessibilityHidden(true)
                     }
                 }
-                // 上下两段压暗：顶上的分类名、底下的字标和按钮压在上面看得清（C58）
+                // 上下两段压暗：顶上的关闭、分享（没有侧边那一列时在卡的右上角），底下的字标和按钮压在上面看得清（C58）
                 .overlay {
                     LinearGradient(stops: [.init(color: .black.opacity(0.45), location: 0),
                                            .init(color: .black.opacity(0), location: 0.22),
@@ -647,14 +648,6 @@ struct ClipFeedPage: View {
                             .glassEffect(.regular, in: Circle())
                             .transition(.scale(scale: 0.8).combined(with: .opacity))
                     }
-                }
-                .overlay(alignment: .top) {
-                    Text(collection.title)
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                        .shadow(color: .black.opacity(0.4), radius: 6, y: 1)
-                        .padding(.top, roomForControls ? 30 : 22)
-                        .accessibilityAddTraits(.isHeader)
                 }
                 .overlay(alignment: .bottom) {
                     bottom(width: g.size.width, playing: playing)

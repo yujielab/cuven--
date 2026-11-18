@@ -32,6 +32,16 @@ enum DuoLayout {
     }
 }
 
+/// 侧边那一列的中线离窗口边多远：系统的时间、信号、返回钮和 DuoNav 都对着这条线（CI 截图量过：折起竖拿离右边 48.5 点）。
+/// DuoNavLayer 排版时把它量到的记在这里。全屏盖上来的页面（刷视频页）要对着同一条线摆自己的钮：
+/// 那一层自己读到的右侧安全区只有 84 点，按它居中离右边 42 点，比状态栏偏外约 6 点（用户截图：控件没和状态栏对齐）
+@MainActor @Observable
+final class DuoRail {
+    static let shared = DuoRail()
+    /// 中线离后缘多远；还没量过、或者那一列在前缘时是 nil
+    var fromTrailing: CGFloat?
+}
+
 private struct DuoColumnKey: EnvironmentKey {
     static let defaultValue = false
 }
@@ -186,6 +196,13 @@ struct DuoNavLayer: View {
                 let y = full.size.height - max(bottom, 16) - DuoNav.height / 2
                 DuoNav(tab: $tab, reselect: reselect)
                     .position(x: x, y: y)
+                    // 记下这条线（DuoRail）：列在前缘时记负数，只认后缘的
+                    .onChange(of: onLeading ? -strip : strip, initial: true) { _, v in
+                        let rail: CGFloat? = v > 0 ? v / 2 : nil
+                        guard DuoRail.shared.fromTrailing != rail else { return }
+                        DuoRail.shared.fromTrailing = rail
+                        Perf.log("duo rail \(Int(abs(v))) pt column on the \(v > 0 ? "trailing" : "leading") edge")
+                    }
             }
             .ignoresSafeArea()
         }
