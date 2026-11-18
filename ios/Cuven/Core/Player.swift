@@ -155,15 +155,22 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             // 视频格式也记下（编码、动态范围、尺寸、杜比视界档位；不含片名与地址）：放不了的时候知道是哪种格式
             plog("source hls, info.json \(status) in \(Perf.ms(since: t1)) ms\(body?.video.map { " (\($0.summary))" } ?? "")")
             PlayerLoadingOverlay.shared.stage(.meta)
-            if (200..<300).contains(status) && body?.ok != false { return master }
+            if (200..<300).contains(status) && body?.ok != false { return await precached(req, master) ?? master }
             if status >= 400 && status < 500 && status != 404 {
                 throw PlayError.unsupported(body?.error ?? "这个文件转不了 HLS（HTTP \(status)）")
             }
-            if isMKV { return master }            // info.json 没取到（网络抖动）：让播放器自己试
+            if isMKV { return await precached(req, master) ?? master }   // info.json 没取到（网络抖动）：让播放器自己试
         }
         if isMKV { throw PlayError.unsupported("服务器没有为这个 MKV 提供 HLS，iPhone 无法直接播放 MKV") }
         plog("source direct")
         return APIClient.shared.streamURL(path: req.path, name: req.name, sign: sign)
+    }
+
+    /// 这部片有弱网预先缓存（详情页「预先画面质量处理」）：从本机代理放——下好的从本机出、没有的边取边存，并接着往后缓存
+    private func precached(_ req: PlayRequest, _ master: URL) async -> URL? {
+        guard let local = await Precache.shared.playbackURL(path: req.path, upstreamMaster: master) else { return nil }
+        plog("source precache")
+        return local
     }
 
     /// 点了就弹：系统播放器先出来（加载封面在上面），片源准备好再挂上
@@ -197,8 +204,10 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
 
         let item = AVPlayerItem(asset: AVURLAsset(url: url))
         item.externalMetadata = metadata(req)
-        // 账户页「网络速度」：往前缓冲多少秒（100% 交给系统；80% → 90 秒）。改了从下一个片源起生效
-        item.preferredForwardBufferDuration = NetworkSpeed.forwardBuffer()
+        // 账户页「网络速度」：往前缓冲多少秒（100% 交给系统；80% → 90 秒）。改了从下一个片源起生效。
+        // 从本机代理放（预先缓存）：缓冲交给系统——下好的那截从本机读，不费流量
+        let proxied = url.host == "127.0.0.1"
+        item.preferredForwardBufferDuration = proxied ? 0 : NetworkSpeed.forwardBuffer()
         // 账户页「首选音轨 / 首选字幕」：和播放器读播放列表同时进行，通常赶在首帧之前挑好并选上（「自动」也选：
         // 字幕打开服务器标成默认的那条、音轨是片源默认的那条，不交给系统按手机语言挑；TrackPrefs.swift）。
         // 「自然」带上这一集的原声语种
@@ -214,6 +223,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             presentPlayer(req)                       // 兜底：没弹出来（比如当时找不到能弹的页面）就现在弹
         }
         guard let p = player else { return }
+        // 本机代理的地址只在这台手机上有效：这时不投屏到别的设备（AirPlay 那头取不到 127.0.0.1）
+        p.allowsExternalPlayback = !proxied
         pendingSeek = model?.playback.resumePosition(req.path)
         usage.flush(item)                            // 旧片源最后那一截先结清
         p.replaceCurrentItem(with: item)
