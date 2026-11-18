@@ -124,11 +124,4 @@ enum CastSheetText {
         return URL(string: "https://image.tmdb.org/t/p/w500" + p)
     }
 
-    /// TMDB 的演员页；没有编号就按名字搜
-    static func tmdbPage(_ m: CastMember) -> URL? {
-        if let id = m.id { return URL(string: "https://www.themoviedb.org/person/\(id)") }
-        var c = URLComponents(string: "https://www.themoviedb.org/search")
-        c?.queryItems = [URLQueryItem(name: "query", value: m.name)]
-        return c?.url
-    }
 }

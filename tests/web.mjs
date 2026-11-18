@@ -292,7 +292,7 @@ await closed(page);
 console.log('\n■ 文件弹层');
 await page.evaluate(() => openSheetForFile('/Movies/long.mp4', 'Long.Test.2024.1080p.mp4'));
 const sheet = await page.evaluate(() => document.getElementById('sheetBody').textContent);
-ok(/播放/.test(sheet) && /复制直链/.test(sheet) && !/Infuse 中打开/.test(sheet), `弹层：${sheet.replace(/\s+/g, ' ').trim().slice(0, 50)}`);
+ok(/播放/.test(sheet) && !/复制直链/.test(sheet) && !/Infuse 中打开/.test(sheet) && !/undefined/.test(sheet), `弹层只有站内播放，没有「复制直链」这类站外操作：${sheet.replace(/\s+/g, ' ').trim().slice(0, 50)}`);
 await page.evaluate(() => closeSheet());
 
 console.log('\n■ 展厅预告片');
@@ -1280,12 +1280,12 @@ console.log('\n■ 年份页：一行一部的列表（竖版小海报 + 中文�
     ok(mv.every(x => /\/w185\//.test(x.img)), `小海报取 w185（${(mv[0] && mv[0].img.split('/t/p/')[1]) || ''}），不拉卡片那种大图`);
     ok(tvr.length === 1 && tvr[0].title === '幕府将军' && /集/.test(tvr[0].sub) && Math.abs(tvr[0].ratio - 1.5) < 0.05,
       `剧集一组排在电影下面：${tvr[0] && tvr[0].title}（${tvr[0] && tvr[0].sub}）`);
-    /* 「…」：电影是文件弹层（播放 / 复制直链），不会顺带点开详情 */
+    /* 「…」：电影是文件弹层（只有播放，没有「复制直链」这类站外操作），不会顺带点开详情 */
     await yp.click('#yearList .yl-row:first-child .yl-more');
     await yp.waitForTimeout(500);
     const sh1 = await yp.evaluate(() => ({ on: document.getElementById('sheetMenu').classList.contains('on'), text: document.getElementById('sheetBody').textContent,
       detail: document.getElementById('detailView').classList.contains('on') }));
-    ok(sh1.on && /播放/.test(sh1.text) && /复制直链/.test(sh1.text) && !sh1.detail, '电影的「…」：弹出「播放 / 复制直链」，不点开详情');
+    ok(sh1.on && /播放/.test(sh1.text) && !/复制直链/.test(sh1.text) && !sh1.detail, '电影的「…」：弹出「播放」（没有「复制直链」），不点开详情');
     await yp.evaluate(() => closeSheet());
     await yp.waitForTimeout(400);
     /* 剧集的「…」：「从第 1 集看起 / 查看分集」，查看分集进剧集详情 */

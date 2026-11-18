@@ -139,17 +139,17 @@ final class DuoDeviceTests: XCTestCase {
         sleep(2)
         report(app, "detail")
         snap("duo-03-detail")
-        // 「…」：播放钮旁边的系统菜单（从头播放 / 分享）；点菜单外面收起
+        // 「…」：有进度时播放钮旁边才有的系统菜单（从头播放）；点菜单外面收起。
+        // 发行版不再有「分享」「复制直链」这类站外操作
         let more = app.buttons["detail-more"].firstMatch
         if more.waitForExistence(timeout: 3) {
             more.tap(); sleep(2)
             snap("duo-03b-detail-more")
-            XCTAssertTrue(app.buttons["detail-share"].firstMatch.exists, "「…」菜单里没有「分享」")
+            XCTAssertTrue(app.buttons["detail-restart"].firstMatch.exists, "「…」菜单里没有「从头播放」")
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.06)).tap()
             sleep(1)
-        } else {
-            XCTFail("详情页没有「…」菜单")
         }
+        XCTAssertFalse(app.buttons["detail-share"].exists, "详情页不该再有「分享」")
         // 简介：一排卡（简介、评分、影片规格）；点简介卡弹出从卡上放大出来的系统弹层，右上关闭
         // 先挪到屏幕中间再点：以前卡的正中压在钉在顶上的标题条底下，点下去是「回到顶上」，弹层没出来，
         // 后面「关闭」找不到就往下甩，在页面最上面这一甩把详情页拖回了主页——后面的预告片、演员全找不到

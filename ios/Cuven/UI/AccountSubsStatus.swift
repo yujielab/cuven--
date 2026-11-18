@@ -88,7 +88,7 @@ struct SubsStatusRow: View {
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 8) {
-                        Text("在线字幕")
+                        Text("智能字幕")
                             .font(.body.weight(.semibold))
                             .foregroundStyle(.white)
                             .lineLimit(1)
@@ -121,7 +121,7 @@ struct SubsStatusRow: View {
         .buttonStyle(AccountRowPress())
         .disabled(probe.checking)
         .sensoryFeedback(look.isGood ? .success : .warning, trigger: probe.rechecks)
-        .accessibilityLabel("在线字幕")
+        .accessibilityLabel("智能字幕")
         .accessibilityValue(probe.outcome == nil ? "正在检测" : "\(look.badge)，\(look.detail)")
         .accessibilityHint("重新检测")
         .accessibilityIdentifier("account-subs-status")
