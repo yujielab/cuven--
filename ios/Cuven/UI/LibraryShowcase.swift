@@ -556,6 +556,8 @@ final class ShowcaseTrailer {
     private(set) var showing = false
     private(set) var progress: Double = 0
     private(set) var paused = false
+    /// 问过了，这一部没有放得了的预告片（年份卡的进度圆环这时不出）
+    private(set) var missing = false
     private var visible = true
     private var covered = false
     /// 正片播放器盖在上面（全屏）：预告片停着
@@ -608,8 +610,11 @@ final class ShowcaseTrailer {
         paused = userStarted ? false : (!UIAccessibility.isVideoAutoplayEnabled || NetworkSpeed.dataSaver)
         loadTask = Task { [weak self] in
             let list = await fetch()
-            guard let self, !Task.isCancelled, self.path == key,
-                  let t = list.first, let url = URL(string: t.hls), url.scheme?.hasPrefix("http") == true else { return }
+            guard let self, !Task.isCancelled, self.path == key else { return }
+            guard let t = list.first, let url = URL(string: t.hls), url.scheme?.hasPrefix("http") == true else {
+                self.missing = true
+                return
+            }
             self.attach(url)
         }
     }
@@ -631,6 +636,22 @@ final class ShowcaseTrailer {
         lowSince = nil
         progress = 0
         paused = false
+        missing = false
+    }
+
+    /// 按住放、松手停（主页年份卡：用户要求不再自动播放）
+    func setPaused(_ on: Bool) {
+        guard paused != on else { return }
+        paused = on
+        sync()
+    }
+
+    /// 回到剧照：画面淡回静态图；片子还挂着、停在原处，再按住从这里接着放（进度圆环记着放到哪了）。
+    /// 再放的时候码流早就升上去了，一走就重新露出来
+    func rest() {
+        showing = false
+        playingSince = nil
+        lowSince = nil
     }
 
     func togglePause() {

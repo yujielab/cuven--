@@ -248,10 +248,10 @@ struct YearTrailerRow: View {
     // 年份卡折起约 283 点宽（3 倍屏 850 像素）：至少 540 像素高的档位才露（放了 10 秒还没到 900，降到六成 = 540）；
     // 以前 540 起、降到 324 就露，360p 的码流放大两倍多，糊成色块（用户截图）
     @State private var trailer = ShowcaseTrailer(revealHeight: 900)
-    /// 横着这一排里整张露出来的卡
-    @State private var shown: Set<String> = []
     /// 这一排在屏上（竖着滚）
     @State private var onScreen = false
+    /// 松手 3 秒后回到剧照（用户要求）；3 秒内又按住就取消
+    @State private var restTask: Task<Void, Never>?
 
     var body: some View {
         if metrics.wide { spotlight } else { row }
@@ -264,13 +264,7 @@ struct YearTrailerRow: View {
         return VStack(alignment: .leading, spacing: metrics.titleGap + 2) {
             header
             DSShelf(metrics: metrics) {
-                ForEach(items) { e in
-                    card(e, width: w)
-                        .onScrollVisibilityChange(threshold: 0.7) { v in
-                            if v { shown.insert(e.id) } else { shown.remove(e.id) }
-                            sync()
-                        }
-                }
+                ForEach(items) { e in card(e, width: w) }
             }
         }
         .onScrollVisibilityChange(threshold: 0.35) { v in
@@ -306,38 +300,77 @@ struct YearTrailerRow: View {
         }
         .onScrollVisibilityChange(threshold: 0.35) { v in
             onScreen = v
-            syncLead()
+            sync()
         }
         .onAppear { trailer.setVisible(true) }
         .onDisappear { trailer.setVisible(false) }
     }
 
-    /// 展开时放打头那一张的预告片（这一块在屏上时）
-    private func syncLead() {
-        guard onScreen, let e = items.first else {
-            trailer.setCovered(true)
-            return
-        }
-        mount(e)
-        trailer.setCovered(false)
+    /// 不再自动播放（用户要求）：这一排滑出屏幕时停下，回来也不自己放；按住哪张放哪张（startHold）
+    private func sync() {
+        trailer.setCovered(!onScreen)
     }
 
-    /// 放哪一张：这一排在屏上时，最靠左、整张露出来的那一张
-    private func sync() {
-        guard onScreen, let e = items.first(where: { shown.contains($0.id) }) else {
-            trailer.setCovered(true)
-            return
-        }
+    /// 按住一张卡（长按成立）：挂上这一张的预告片、放（同一张再按住就从停下的地方接着放）
+    private func startHold(_ e: HomeEntry) {
+        restTask?.cancel()
+        restTask = nil
+        Haptics.light()
         mount(e)
         trailer.setCovered(false)
+        trailer.setPaused(false)
+    }
+
+    /// 松手：停在这一帧；3 秒内没再按住，淡回剧照
+    private func endHold() {
+        trailer.setPaused(true)
+        restTask?.cancel()
+        restTask = Task { @MainActor [trailer] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            trailer.rest()
+        }
+    }
+
+    private func hold(_ e: HomeEntry) -> HoldPlay {
+        HoldPlay(start: { startHold(e) }, end: { endHold() })
+    }
+
+    /// 读屏：卡上多一个动作「播放预告片 / 停止预告片」（按住这个手势读屏用不了）
+    private func playing(_ e: HomeEntry) -> Bool {
+        trailer.path == Self.key(e) && !trailer.paused && !trailer.missing
+    }
+
+    private func toggle(_ e: HomeEntry) {
+        if playing(e) { endHold() } else { startHold(e) }
+    }
+
+    /// 右上角的进度圆环：这一张正挂着预告片就跟着它走（圆环自己读进度，一秒四次只重画它，不重画整排）；
+    /// 没挂着、但知道有预告片的，出一个空圈（按住就放）；问过了没有的，不出
+    private func ring(_ e: HomeEntry) -> TrailerRingSource? {
+        if trailer.path == Self.key(e) { return trailer.missing ? nil : .live(trailer) }
+        return hasTrailer(e) ? .idle : nil
+    }
+
+    /// 知道有预告片：电影查过（资料库那一轮），剧集这次打开 App 问过 Apple TV；演示数据都当有
+    private func hasTrailer(_ e: HomeEntry) -> Bool {
+        if DemoData.enabled { return true }
+        switch e {
+        case .movie(let v):
+            return model.trailerKnown[v.path] == true
+        case .series(let s):
+            guard let cached = model.atvCached(path: s.path), let hit = cached else { return false }
+            return !AppModel.playable(hit.trailers).isEmpty
+        }
     }
 
     private func mount(_ e: HomeEntry) {
+        // 是人按住了才放：不看系统「自动播放视频预览」和省流量
         switch e {
         case .movie(let v):
-            trailer.mount(v, model: model)
+            trailer.mount(v, model: model, userStarted: true)
         case .series(let s):
-            trailer.mount(key: Self.key(e)) { @MainActor [model] in
+            trailer.mount(key: Self.key(e), userStarted: true) { @MainActor [model] in
                 let hit = await model.atv(for: s)
                 return AppModel.playable(hit?.trailers)
             }
@@ -374,23 +407,24 @@ struct YearTrailerRow: View {
             let meta = model.meta(v)
             let y: String? = model.year(v).map { String($0) }
             let sub = DetailText.line([y, meta?.genres?.first])
-            ZoomLink(route: .movie(v), slot: "year-\(year)") {
+            // 长按不再是菜单：按住放预告片（用户要求）。播放 / 想看在详情页里
+            ZoomLink(route: .movie(v), slot: "year-\(year)", hold: hold(e)) {
                 YearTrailerCard(still: TMDBImage.url(model.backgroundArtString(v), "w1280"),
                                 cover: model.thumbArt(v), logo: model.wideLockupArt(v).logo,
-                                title: model.title(v), subtitle: sub, width: w, trailer: playing)
+                                title: model.title(v), subtitle: sub, width: w, trailer: playing, ring: ring(e))
             }
             .accessibilityIdentifier("movie-card")
-            .movieMenu(v)
+            .accessibilityAction(named: Text(self.playing(e) ? "停止预告片" : "播放预告片")) { toggle(e) }
         case .series(let s):
             let sm = model.seriesMetas[s.path]
             let art = model.seriesWideArt(s)
             let sub = DetailText.line([s.seasonLabel, sm?.genres?.first])
-            ZoomLink(route: .series(s), slot: "year-\(year)") {
+            ZoomLink(route: .series(s), slot: "year-\(year)", hold: hold(e)) {
                 YearTrailerCard(still: art.url, cover: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w185"), logo: art.logo,
-                                title: sm?.title ?? s.name, subtitle: sub, width: w, trailer: playing)
+                                title: sm?.title ?? s.name, subtitle: sub, width: w, trailer: playing, ring: ring(e))
             }
             .accessibilityIdentifier("series-card")
-            .seriesMenu(s)
+            .accessibilityAction(named: Text(self.playing(e) ? "停止预告片" : "播放预告片")) { toggle(e) }
             .task { await model.ensureSeriesMeta(s) }
         }
     }
@@ -402,21 +436,23 @@ struct YearTrailerRow: View {
         switch e {
         case .movie(let v):
             let sub = DetailText.line([model.year(v).map { String($0) }, model.meta(v)?.genres?.first])
-            ZoomLink(route: .movie(v), slot: "year-\(year)") {
+            ZoomLink(route: .movie(v), slot: "year-\(year)", hold: hold(e)) {
                 WideLeadCard(art: TMDBImage.url(model.backgroundArtString(v), "w1280"), cover: model.thumbArt(v),
-                             kicker: "电影", title: model.title(v), subtitle: sub, width: w, height: h, trailer: playing)
+                             kicker: "电影", title: model.title(v), subtitle: sub, width: w, height: h, trailer: playing,
+                             ring: ring(e))
             }
             .accessibilityIdentifier("movie-card")
-            .movieMenu(v)
+            .accessibilityAction(named: Text(self.playing(e) ? "停止预告片" : "播放预告片")) { toggle(e) }
         case .series(let s):
             let sm = model.seriesMetas[s.path]
             let sub = DetailText.line([s.seasonLabel, sm?.genres?.first])
-            ZoomLink(route: .series(s), slot: "year-\(year)") {
+            ZoomLink(route: .series(s), slot: "year-\(year)", hold: hold(e)) {
                 WideLeadCard(art: model.seriesWideArt(s).url, cover: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w185"),
-                             kicker: "剧集", title: sm?.title ?? s.name, subtitle: sub, width: w, height: h, trailer: playing)
+                             kicker: "剧集", title: sm?.title ?? s.name, subtitle: sub, width: w, height: h, trailer: playing,
+                             ring: ring(e))
             }
             .accessibilityIdentifier("series-card")
-            .seriesMenu(s)
+            .accessibilityAction(named: Text(self.playing(e) ? "停止预告片" : "播放预告片")) { toggle(e) }
             .task { await model.ensureSeriesMeta(s) }
         }
     }
@@ -458,10 +494,11 @@ struct WideLeadCard: View {
     let width: CGFloat
     let height: CGFloat
     let trailer: ShowcaseTrailer?
+    let ring: TrailerRingSource?
     @State private var tone: Color?
 
     init(art: URL?, cover: URL?, kicker: String, title: String, subtitle: String,
-         width: CGFloat, height: CGFloat, trailer: ShowcaseTrailer? = nil) {
+         width: CGFloat, height: CGFloat, trailer: ShowcaseTrailer? = nil, ring: TrailerRingSource? = nil) {
         self.art = art
         self.cover = cover
         self.kicker = kicker
@@ -470,6 +507,7 @@ struct WideLeadCard: View {
         self.width = width
         self.height = height
         self.trailer = trailer
+        self.ring = ring
     }
 
     var body: some View {
@@ -490,6 +528,9 @@ struct WideLeadCard: View {
                     }
                 }
                 .clipped()
+                .overlay(alignment: .topTrailing) {
+                    if let ring { TrailerRing(source: ring).padding(14) }
+                }
             VStack(alignment: .leading, spacing: 0) {
                 DSThumb(url: cover, width: 56)
                 Text(kicker)
@@ -534,6 +575,80 @@ struct WideLeadCard: View {
     }
 }
 
+/// 年份卡上的预告片进度圆环挂哪一段：还没放过（空圈）/ 正挂着的那一段（跟着它走）
+enum TrailerRingSource {
+    case idle
+    case live(ShowcaseTrailer)
+}
+
+/// 年份卡画面右上角的预告片进度圆环（用户要求）：深色半透明的小圆底上一圈细白环，放了多少走多少；
+/// 还没放 / 停着的时候中间一个小三角（按住就放），刚按住、预告片还没出画面时一小段弧在转。不接点按，读屏不念（卡上有「播放预告片」动作）
+struct TrailerRing: View {
+    let source: TrailerRingSource
+    var size: CGFloat = 30
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private enum Phase { case idle, loading, playing, paused }
+
+    var body: some View {
+        let (progress, phase) = state
+        let line: CGFloat = 2.5
+        let inset: CGFloat = 4
+        ZStack {
+            Circle().fill(Color.black.opacity(0.32))
+            Circle().inset(by: inset).stroke(Color.white.opacity(0.3), lineWidth: line)
+            if phase == .loading {
+                TrailerRingSpinner(inset: inset, line: line, still: reduceMotion)
+            } else if progress > 0 {
+                Circle().inset(by: inset)
+                    .trim(from: 0, to: min(1, progress))
+                    .stroke(Color.white, style: StrokeStyle(lineWidth: line, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.linear(duration: 0.25), value: progress)
+            }
+            if phase == .idle || phase == .paused {
+                Image(systemName: "play.fill")
+                    .font(.system(size: (size * 0.3).rounded(), weight: .bold))
+                    .foregroundStyle(.white)
+                    .offset(x: 1)
+                    .transition(.opacity)
+            }
+        }
+        .frame(width: size, height: size)
+        .animation(DSMotion.snap, value: phase)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private var state: (Double, Phase) {
+        switch source {
+        case .idle:
+            return (0, .idle)
+        case .live(let t):
+            return (t.progress, t.paused ? .paused : (t.showing ? .playing : .loading))
+        }
+    }
+}
+
+/// 刚按住、预告片还在载入 / 码流还没升上来时：一小段弧在圈上转（减弱动态效果时不转）
+private struct TrailerRingSpinner: View {
+    let inset: CGFloat
+    let line: CGFloat
+    let still: Bool
+    @State private var spin = false
+
+    var body: some View {
+        Circle().inset(by: inset)
+            .trim(from: 0, to: 0.26)
+            .stroke(Color.white, style: StrokeStyle(lineWidth: line, lineCap: .round))
+            .rotationEffect(.degrees(spin ? 270 : -90))
+            .onAppear {
+                guard !still else { return }
+                withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) { spin = true }
+            }
+    }
+}
+
 /// 年份那两排的一张卡：16:9 的画面（正在放的那一张，预告片出画面时从模糊里淡入）；
 /// 下面一行：小海报、字标、片名、一行灰字，右边蓝字「查看」（参考图卡底那一行）。上面不放简介（用户要求）
 struct YearTrailerCard: View {
@@ -545,6 +660,8 @@ struct YearTrailerCard: View {
     let width: CGFloat
     /// 这一张正在放：那一段的播放器（nil = 只放画面）
     let trailer: ShowcaseTrailer?
+    /// 右上角的预告片进度圆环（用户要求；nil = 没有预告片，不出）
+    var ring: TrailerRingSource? = nil
 
     var body: some View {
         let h = (width * 9 / 16).rounded()
@@ -567,6 +684,9 @@ struct YearTrailerCard: View {
             .frame(width: width, height: h)
             .clipShape(shape)
             .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
+            .overlay(alignment: .topTrailing) {
+                if let ring { TrailerRing(source: ring).padding(compact ? 8 : 10) }
+            }
             HStack(spacing: compact ? 10 : 12) {
                 DSThumb(url: cover, width: compact ? 40 : 48)
                 VStack(alignment: .leading, spacing: 3) {

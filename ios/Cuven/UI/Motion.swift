@@ -49,18 +49,75 @@ struct ZoomLink<Label: View>: View {
     let route: Route
     let slot: String
     var press = true
+    /// 按住放预告片（主页年份卡）：点一下照样进详情，按住不进
+    var hold: HoldPlay? = nil
     @ViewBuilder var label: () -> Label
 
     var body: some View {
         let target = ZoomTarget(route: route, slot: slot)
         if let ns {
-            NavigationLink(value: target) { label() }
-                .buttonStyle(PressableStyle(scale: press ? 0.96 : 1))
+            styled(NavigationLink(value: target) { label() })
                 .matchedTransitionSource(id: target, in: ns)
         } else {
-            NavigationLink(value: route) { label() }
-                .buttonStyle(PressableStyle(scale: press ? 0.96 : 1))
+            styled(NavigationLink(value: route) { label() })
         }
+    }
+
+    @ViewBuilder private func styled<V: View>(_ link: V) -> some View {
+        if let hold {
+            link.buttonStyle(HoldToPlayStyle(hold: hold))
+        } else {
+            link.buttonStyle(PressableStyle(scale: press ? 0.96 : 1))
+        }
+    }
+}
+
+/// 按住开始、松手（或被滑动打断）结束
+struct HoldPlay {
+    let start: () -> Void
+    let end: () -> Void
+}
+
+/// 卡片按钮：快点一下 = 照常（推进详情）；按住 0.35 秒 = 开始放预告片，一直按着一直放，松手停，而且不进详情页（用户要求）。
+/// 长按后面接一个 DragGesture 跟着手指：长按成立以后松手 / 被系统打断，GestureState 自己回到 .none，就知道该停了。
+/// 手指一动（滑动这一排、上下滚）长按就不成立，交给滚动视图；按下去还没到 0.35 秒时和别的卡一样略缩略暗，开始放了就回到原大
+struct HoldToPlayStyle: PrimitiveButtonStyle {
+    let hold: HoldPlay
+
+    func makeBody(configuration: Configuration) -> some View {
+        HoldToPlayBody(configuration: configuration, hold: hold)
+    }
+}
+
+private enum HoldTouch: Equatable { case none, down, held }
+
+private struct HoldToPlayBody: View {
+    let configuration: PrimitiveButtonStyleConfiguration
+    let hold: HoldPlay
+    @GestureState private var touch: HoldTouch = .none
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let press = LongPressGesture(minimumDuration: 0.35, maximumDistance: 10)
+            .sequenced(before: DragGesture(minimumDistance: 0))
+            .updating($touch) { value, state, _ in
+                switch value {
+                case .first(true): state = .down
+                case .second(true, _): state = .held
+                default: state = .none
+                }
+            }
+        // 长按没成立（很快就松手）才算点一下
+        let tap = TapGesture().onEnded { configuration.trigger() }
+        configuration.label
+            .scaleEffect(touch == .down ? 0.96 : 1)
+            .brightness(touch == .down ? -0.06 : 0)
+            .animation(DSMotion.adapt(DSMotion.press, reduce: reduceMotion), value: touch)
+            .contentShape(Rectangle())
+            .gesture(press.exclusively(before: tap))
+            .onChange(of: touch) { old, new in
+                if new == .held { hold.start() } else if old == .held { hold.end() }
+            }
     }
 }
 
