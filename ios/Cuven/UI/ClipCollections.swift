@@ -443,7 +443,7 @@ struct ClipFeedView: View {
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
-            .navigationDestination(for: Route.self) { RouteView(route: $0) }
+            .navigationDestination(for: Route.self) { RouteView(route: $0).dsSoftTopEdge() }
         }
         .onAppear {
             if current == nil { current = entries.first?.id }

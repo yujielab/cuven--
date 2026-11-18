@@ -1312,3 +1312,45 @@ extension AnyTransition {
                   identity: DSBlurFade(on: false, radius: radius, opaque: false))
     }
 }
+
+// MARK: - 顶栏的底：渐进式模糊（用户要求：所有顶部导航栏都用渐进式模糊，不允许有硬边界线）
+
+/// 钉在顶上的条、自己画的顶栏用它当底：两层磨砂从上往下淡掉（上面那层更厚、淡得更早），再压一层这一页的颜色同样往下淡——
+/// 越往下越清楚，最底下完全透明，没有底线、没有一条硬边。solid：从顶上到这个比例是满的（条上的字和钮压在这一段里，看得清），
+/// 下面那一截慢慢淡掉；给它的高要比条本身高出一截（那一截就是淡出去的部分）。
+/// 系统的导航栏用系统自己的柔和滚动边缘（`dsSoftTopEdge()`），也是渐进式模糊
+struct DSProgressiveBar: View {
+    var tint: Color = .black
+    var tintOpacity: Double = 0.6
+    var solid: CGFloat = 0.55
+
+    var body: some View {
+        let s = min(max(solid, 0), 0.95)
+        let fade = LinearGradient(stops: [
+            .init(color: .black, location: 0),
+            .init(color: .black, location: s),
+            .init(color: .clear, location: 1),
+        ], startPoint: .top, endPoint: .bottom)
+        let core = LinearGradient(stops: [
+            .init(color: .black, location: 0),
+            .init(color: .black, location: s * 0.6),
+            .init(color: .clear, location: min(1, s + 0.2)),
+        ], startPoint: .top, endPoint: .bottom)
+        ZStack {
+            Rectangle().fill(.ultraThinMaterial).mask(fade)
+            Rectangle().fill(.thinMaterial).mask(core)
+            Rectangle().fill(tint).opacity(tintOpacity).mask(fade)
+        }
+        .environment(\.colorScheme, .dark)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+extension View {
+    /// 系统导航栏底下的滚动边缘一律用柔和的那种（iOS 26 的渐进式模糊）：内容滑到栏下面慢慢糊掉、淡掉，
+    /// 不要「硬」的那种（一块实色底 + 一条硬边，用户截图里账户页顶上那一条就是）
+    func dsSoftTopEdge() -> some View {
+        scrollEdgeEffectStyle(.soft, for: .top)
+    }
+}

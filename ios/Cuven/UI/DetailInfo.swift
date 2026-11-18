@@ -78,7 +78,7 @@ struct DetailRelated {
 // MARK: - 卡
 
 /// 详情页、演员页的卡都是这一种面（设计轮 2（并行·detail）：以前演员页的两张卡各是圆角 30 / 26、底 10% / 8%、边 12% / 没有；
-/// 卡里的字离边 24、22、18 三种，分隔线 20）。卡边、卡里的分隔线、钉住那一条的底线、小海报的细边是同一种亮度
+/// 卡里的字离边 24、22、18 三种，分隔线 20）。卡边、卡里的分隔线、小海报的细边是同一种亮度（钉住那一条没有底线：渐进式模糊淡出去）
 enum DetailSurface {
     static let radius: CGFloat = 34
     static let fill = Color.white.opacity(0.1)
@@ -702,17 +702,12 @@ struct DetailPinnedBar: View {
         .padding(.top, topInset)
         .padding(.bottom, 6)
         .frame(maxWidth: .infinity)
-        .background {
-            // 设计轮 2：带这一页颜色的磨砂（以前是一块实色）——底下滚过去的卡隐约透上来，条浮在内容上面、不像贴了一块色板；
-            // 色压得够厚（86%），白字照样清楚。底线和卡边同一种亮度（10% → 14%），影子轻一点
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .overlay { palette.bar.opacity(0.86) }
-                .overlay(alignment: .bottom) {
-                    Rectangle().fill(DetailSurface.line).frame(height: 0.5)
-                }
-                .shadow(color: .black.opacity(0.2), radius: 10, y: 3)
-                .environment(\.colorScheme, .dark)
+        .background(alignment: .top) {
+            // 渐进式模糊（用户要求：顶部的条不许有硬边界线）：带这一页颜色的磨砂从上往下淡掉，条底下再多淡出 40 点，
+            // 没有底线、没有影子。条本身那一段颜色压得够厚（86%），白字和「播放」照样清楚
+            let barH = topInset + 66
+            DSProgressiveBar(tint: palette.bar, tintOpacity: 0.86, solid: barH / (barH + 40))
+                .frame(height: barH + 40)
         }
     }
 }
@@ -881,7 +876,7 @@ struct DetailStillsViewer: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
+        SoftNavigationStack {
             TabView(selection: $index) {
                 ForEach(Array(stills.enumerated()), id: \.offset) { i, url in
                     RemoteImage(url: url, maxPixel: 2400, contentMode: .fit, placeholder: .clear)

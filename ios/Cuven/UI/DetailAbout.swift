@@ -160,7 +160,7 @@ struct DetailAboutSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
+        SoftNavigationStack {
             Group {
                 if card.rows.isEmpty {
                     ScrollView {

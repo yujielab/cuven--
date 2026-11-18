@@ -34,9 +34,11 @@ struct ZoomStack<Content: View>: View {
             content()
                 // iPhone Duo「侧边一列」的形态：推进去的每一页也要收起系统标签栏（不然推进去它又回来了，见 DuoNav.swift）
                 .duoHidesTabBar()
-                .navigationDestination(for: Route.self) { RouteView(route: $0).duoHidesTabBar() }
+                // 每一页顶上导航栏底下的滚动边缘都是柔和的（渐进式模糊，用户要求不许有硬边界线）
+                .dsSoftTopEdge()
+                .navigationDestination(for: Route.self) { RouteView(route: $0).duoHidesTabBar().dsSoftTopEdge() }
                 .navigationDestination(for: ZoomTarget.self) { t in
-                    RouteView(route: t.route).navigationTransition(.zoom(sourceID: t, in: ns)).duoHidesTabBar()
+                    RouteView(route: t.route).navigationTransition(.zoom(sourceID: t, in: ns)).duoHidesTabBar().dsSoftTopEdge()
                 }
         }
         .environment(\.zoomNamespace, ns)
@@ -259,5 +261,15 @@ extension View {
     /// 用它代替 .refreshable（见 SettledRefresh）
     func settledRefreshable(_ action: @escaping () async -> Void) -> some View {
         modifier(SettledRefresh(action: action))
+    }
+}
+
+/// 弹层里的导航栈：和主导航栈一样，顶栏底下的滚动边缘一律柔和（渐进式模糊，用户要求不许有硬边界线）
+struct SoftNavigationStack<Content: View>: View {
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        NavigationStack { content().dsSoftTopEdge() }
+            .dsSoftTopEdge()
     }
 }

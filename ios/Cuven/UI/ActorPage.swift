@@ -368,7 +368,7 @@ struct ActorBioSheet: View {
     var body: some View {
         let name = (info?.name).flatMap { $0.isEmpty ? nil : $0 } ?? (member.name.isEmpty ? "未知演员" : member.name)
         let photo = ActorText.photo(member, info: info)
-        NavigationStack {
+        SoftNavigationStack {
             GeometryReader { geo in
                 let insets = geo.safeAreaInsets
                 // 照片铺满整张弹层宽（连同 Duo 侧边那一列），字留在安全区里
