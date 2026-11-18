@@ -81,6 +81,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     /// 账户页「首选音轨 · 自然」：这一集的原声语种（手上的），和手上的不是 TMDB 给的时候重新问的那一次（和取片源同时开始）
     private var audioOrigin: TrackPrefs.Origin?
     private var originRefresh: Task<TrackPrefs.Origin?, Never>?
+    /// 这一集按首选项挑好的字幕和音轨（「可以播了」「开播了」时拿它对一遍，被系统的自动选择改掉了就改回来）
+    private var trackPicks: TrackPrefs.Picks?
 
     func play(_ req: PlayRequest, model: AppModel) {
         self.model = model
@@ -195,10 +197,16 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         item.externalMetadata = metadata(req)
         // 账户页「网络速度」：往前缓冲多少秒（100% 交给系统；80% → 90 秒）。改了从下一个片源起生效
         item.preferredForwardBufferDuration = NetworkSpeed.forwardBuffer()
-        // 账户页「首选音轨 / 首选字幕」：和播放器读播放列表同时进行，通常赶在首帧之前挑好（TrackPrefs.swift）。
+        // 账户页「首选音轨 / 首选字幕」：和播放器读播放列表同时进行，通常赶在首帧之前挑好并选上（「自动」也选：
+        // 字幕打开服务器标成默认的那条、音轨是片源默认的那条，不交给系统按手机语言挑；TrackPrefs.swift）。
         // 「自然」带上这一集的原声语种
         let origin = audioOrigin, refresh = originRefresh
-        Task { @MainActor in await TrackPrefs.apply(to: item, origin: origin, refresh: refresh) }
+        let picks = TrackPrefs.Picks()
+        trackPicks = picks
+        Task { @MainActor in
+            await TrackPrefs.apply(to: item, picks: picks, origin: origin, refresh: refresh)
+            plog("tracks: \(picks.summary)")
+        }
 
         if player == nil || (controller?.presentingViewController == nil && !inPiP) {
             presentPlayer(req)                       // 兜底：没弹出来（比如当时找不到能弹的页面）就现在弹
@@ -260,6 +268,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             if !startedPlaying {
                 startedPlaying = true
                 plog("playing after \(Perf.ms(since: tapAt)) ms")
+                reassertTracks(p.currentItem, at: "playing")
                 PlayerLoadingOverlay.shared.finish()
             }
         case .waitingToPlayAtSpecifiedRate:
@@ -271,6 +280,13 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         default:
             break
         }
+    }
+
+    /// 首选的字幕和音轨：片源「可以播了」、真正开播这两个时刻再对一遍。系统的自动选择（按手机语言挑音轨、只开强制字幕）
+    /// 可能在片源准备好时又改一遍，被改掉了就改回来。开播以后人在播放器里手动换的不再动
+    private func reassertTracks(_ item: AVPlayerItem?, at moment: String) {
+        guard let item, item === player?.currentItem, let picks = trackPicks else { return }
+        if TrackPrefs.reassert(picks, on: item) { plog("tracks re-applied at \(moment): \(picks.summary)") }
     }
 
     private func observe(_ item: AVPlayerItem) {
@@ -305,6 +321,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             let d = item.duration.seconds
             plog("ready after \(Perf.ms(since: tapAt)) ms, duration \(d.isFinite ? Int(d) : -1)")
             PlayerLoadingOverlay.shared.stage(.ready)
+            reassertTracks(item, at: "ready")
             if let s = pendingSeek {
                 pendingSeek = nil
                 player?.seek(to: CMTime(seconds: s, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: CMTime(seconds: 1, preferredTimescale: 600)) { [weak self] _ in
