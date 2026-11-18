@@ -407,7 +407,7 @@ console.log('\n■ OpenSubtitles 自动补字幕（模拟接口）');
     `挑中哈希命中的那条（不是下载量 9 万的、也不是机翻的），帧率 25 → 23.976 换算：${JSON.stringify(dl[0] && dl[0].body)}`);
   m = await master('/Movies/dv81.mkv');
   const line = subLine(m, /o0\.m3u8/);
-  ok(/LANGUAGE="zh-Hans"/.test(line) && /NAME="简体中文（在线）"/.test(line) && /DEFAULT=YES/.test(line), `主列表多了一条在线简体中文，默认打开：${line.replace(/^#EXT-X-MEDIA:/, '').slice(0, 120)}`);
+  ok(/LANGUAGE="zh-Hans"/.test(line) && /NAME="简体中文-\(智能\)"/.test(line) && /DEFAULT=YES/.test(line), `主列表多了一条在线简体中文，默认打开：${line.replace(/^#EXT-X-MEDIA:/, '').slice(0, 120)}`);
   const v0 = await vtt('/Movies/dv81.mkv', m, 0);
   ok(/^WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:900000/.test(v0) && v0.includes('这是第1句简体字幕'), '在线字幕分段：带时间映射，内容是下载来的那一份');
   H.os.calls.length = 0;
@@ -426,7 +426,7 @@ console.log('\n■ OpenSubtitles 自动补字幕（模拟接口）');
   ok(calls('/subtitles').every(c => c.q.languages === 'ze,zh-cn,zh-tw'), '已有英文字幕：只找中文');
   m = await master('/Movies/subscan.mkv');
   const v1 = await vtt('/Movies/subscan.mkv', m, 0);
-  ok(/NAME="简体中文（在线）"/.test(subLine(m, /o0/)) && v1.includes('这个问题很简单') && !v1.includes('這個'), `只有繁体：转成简体再给（${(v1.split('\n').find(l => /问题/.test(l)) || '').slice(0, 20)}）`);
+  ok(/NAME="简体中文-\(智能\)"/.test(subLine(m, /o0/)) && v1.includes('这个问题很简单') && !v1.includes('這個'), `只有繁体：转成简体再给（${(v1.split('\n').find(l => /问题/.test(l)) || '').slice(0, 20)}）`);
 
   // 找不到：记下来，7 天内不再查
   await clear(); reset();
@@ -457,7 +457,7 @@ console.log('\n■ OpenSubtitles 自动补字幕（模拟接口）');
   m = await master('/Movies/avc_zsub.mkv');
   const ownLine = m.split('\n').find(l => /TYPE=SUBTITLES/.test(l) && /\/s0\.m3u8/.test(l)) || '';
   const onLine = subLine(m, /o0\.m3u8/);
-  ok(calls('/subtitles').length > 0 && /DEFAULT=YES/.test(ownLine) && /NAME="简体中文（在线）"/.test(onLine) && /DEFAULT=NO/.test(onLine),
+  ok(calls('/subtitles').length > 0 && /DEFAULT=YES/.test(ownLine) && /NAME="简体中文-\(智能\)"/.test(onLine) && /DEFAULT=NO/.test(onLine),
     `已有简体（认作简体的「中文」内封）：也查一条在线的当备选，默认仍是自带的那条（自带 ${/DEFAULT=YES/.test(ownLine) ? '默认' : '不默认'}，在线 ${/DEFAULT=NO/.test(onLine) ? '备选' : onLine.slice(0, 60)}）`);
   ok(firstMs < 2000, `自带简体的片子起播不等在线字幕（主列表 ${firstMs}ms）`);
 

@@ -84,16 +84,6 @@ struct ActorPage: View {
         .navigationTitle(nameInBar ? name : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
-        .toolbar {
-            if let url = CastSheetText.tmdbPage(member) {
-                ToolbarItem(placement: .topBarTrailing) {
-                    ShareLink(item: url, subject: Text(name)) {
-                        Label("分享", systemImage: "square.and.arrow.up")
-                    }
-                    .accessibilityIdentifier("actor-share")
-                }
-            }
-        }
         .sheet(isPresented: $showBio) {
             ActorBioSheet(member: member, info: info, palette: DetailPalette.from(edge))
         }

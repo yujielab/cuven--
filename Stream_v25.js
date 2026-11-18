@@ -1055,10 +1055,11 @@ const OS_WAIT_MS = 2500;                            // 主列表最多等后台�
 const OS_LIST_WAIT_MS = 6000;                       // /api/subs 等得久一点（不挡起播）
 const OS_STD_FPS = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60];
 const OS_LANGS = {
-  'zh-cn': { lang: 'zh-Hans', label: '简体中文（在线）', score: 40 },
-  ze: { lang: 'zh-Hans', label: '简英双语（在线）', score: 34 },
-  'zh-tw': { lang: 'zh-Hans', label: '简体中文（在线）', score: 30, toSimp: true },   // 繁体逐字转成了简体：名字照样叫简体
-  en: { lang: 'en', label: '英文（在线）', score: -20 },      // 只在没有像样的中文时才用：有对齐以后，哈希不一致的中文也能对上时间
+  // 播放器菜单里的名字：「简体中文-(智能)」这样的写法（用户要求；在线找来、自动对齐、清洗过的那条，叫「智能」字幕）
+  'zh-cn': { lang: 'zh-Hans', label: '简体中文-(智能)', score: 40 },
+  ze: { lang: 'zh-Hans', label: '简英双语-(智能)', score: 34 },
+  'zh-tw': { lang: 'zh-Hans', label: '简体中文-(智能)', score: 30, toSimp: true },   // 繁体逐字转成了简体：名字照样叫简体
+  en: { lang: 'en', label: '英文-(智能)', score: -20 },      // 只在没有像样的中文时才用：有对齐以后，哈希不一致的中文也能对上时间
 };
 const OS_MEM = new Map();                           // 记录键 → 记录（进程内，最近 24 条）
 const OS_BUSY = new Map();                          // 记录键 → 开始时刻（同一 isolate 不重复查）
@@ -1067,8 +1068,8 @@ let osAuth = null;                                  // { token, base, exp, user 
 let osLoginBad = null;                              // 上一次登录失败：{ fp, status, message, at, until }（见 osLogin；在线字幕状态拿它说清是哪一项不对）
 
 const osOn = env => !!(env && env.OPENSUBTITLES_API_KEY) && env.OPENSUBTITLES_DISABLE !== '1';
-/** 在线字幕在播放器菜单里的名字：按语种现算（存下的老记录里是旧名字，比如以前的「在线 · 繁转简」） */
-const osLabel = rec => (rec && rec.src && OS_LANGS[rec.src.language] && OS_LANGS[rec.src.language].label) || (rec && rec.label) || '在线字幕';
+/** 在线字幕在播放器菜单里的名字：按语种现算（存下的老记录里是旧名字，比如以前的「（在线 · 繁转简）」） */
+const osLabel = rec => (rec && rec.src && OS_LANGS[rec.src.language] && OS_LANGS[rec.src.language].label) || '智能字幕';
 /** 用户名（去掉前后空格：从别处粘过来常带一个） */
 const osUser = env => String((env && env.OPENSUBTITLES_USERNAME) || '').trim();
 const osIdentity = (filePath, meta) => `${filePath}|${meta.content_hash || meta.rev || meta.size}`;

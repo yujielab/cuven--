@@ -491,7 +491,6 @@ struct ClipFeedView: View {
             let rail = DuoRail.shared.fromTrailing ?? ins.trailing / 2
             VStack(spacing: 14) {
                 closeButton
-                if let e = currentEntry { shareButton(e) }
                 ClipFeedDots(count: entries.count, index: index)
                     .padding(.top, 34)
             }
@@ -502,7 +501,6 @@ struct ClipFeedView: View {
         } else {
             ZStack(alignment: .topTrailing) {
                 HStack(spacing: 12) {
-                    if let e = currentEntry { shareButton(e) }
                     closeButton
                 }
                 .padding(.top, 18)
@@ -529,29 +527,6 @@ struct ClipFeedView: View {
         .glassEffect(.regular.interactive(), in: Circle())
         .accessibilityLabel("关闭")
         .accessibilityIdentifier("clip-feed-close")
-    }
-
-    @ViewBuilder
-    private func shareButton(_ e: HomeEntry) -> some View {
-        let title = model.clipTitle(e)
-        Group {
-            if let url = Self.shareURL(e, model: model) {
-                ShareLink(item: url, subject: Text(title)) { shareGlyph }
-            } else {
-                ShareLink(item: title) { shareGlyph }
-            }
-        }
-        .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: Circle())
-        .accessibilityLabel("分享")
-    }
-
-    private var shareGlyph: some View {
-        Image(systemName: "square.and.arrow.up")
-            .font(.title3.weight(.semibold))
-            .foregroundStyle(.white)
-            .frame(width: 48, height: 48)
-            .contentShape(Circle())
     }
 
     /// 正对着的那一部挂上预告片（剧集去 Apple TV 查）；是人点开来刷的：不看系统「自动播放视频预览」和省流量，照样放
@@ -582,15 +557,6 @@ struct ClipFeedView: View {
         }
     }
 
-    /// 分享：TMDB 上这一部的页面（和详情页的分享一样）；没有编号就分享片名
-    static func shareURL(_ e: HomeEntry, model: AppModel) -> URL? {
-        switch e {
-        case .movie(let v):
-            return model.meta(v)?.id.flatMap { URL(string: "https://www.themoviedb.org/movie/\($0)") }
-        case .series(let s):
-            return (s.tmdbId ?? model.seriesMetas[s.path]?.id).flatMap { URL(string: "https://www.themoviedb.org/tv/\($0)") }
-        }
-    }
 }
 
 /// 一屏：一张大圆角卡。底是竖版主视觉，正对着时预告片起来就盖上去（淡入）；顶上不写分类名（用户要求移除），
@@ -743,9 +709,9 @@ struct ClipFeedPage: View {
         case .movie(let v): r = model.meta(v)?.rating
         case .series(let s): r = model.seriesMetas[s.path]?.rating
         }
-        // 9.6 分以上多半是没几个人打的分（截图里一部恐怖片「TMDB 10.0」）：不当高分佳作
+        // 9.6 分以上多半是没几个人打的分（截图里一部恐怖片 10.0 分）：不当高分佳作
         guard let r, r >= 8, r < 9.6 else { return nil }
-        return String(format: "TMDB %.1f · 高分佳作", r)
+        return String(format: "%.1f 分 · 高分佳作", r)
     }
 
     private var watchKey: (key: String, kind: WatchItem.Kind) {

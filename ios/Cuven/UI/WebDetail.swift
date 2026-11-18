@@ -5,7 +5,7 @@ import UIKit
 //
 // 头部：全幅画面（竖拿用 Apple TV 的竖版全屏图，横拿 16:9：S15），往下渐暗（F34），字压在左下（F1、F2）：
 // 字标（没有字标就是 Large Title 的片名）→ 一行信息「类型 · 年份 · 片长 · ★评分」（F18）→
-// 一颗白色「播放」+ 一颗「…」系统菜单（从头播放、复制直链、分享：S17、C11、C15、C35、C45）。
+// 一颗白色「播放」+ 有进度时一颗「…」系统菜单（从头播放：S17、C11、C15、C35、C45；发行版不再有站外操作）。
 // 下面照用户给的参考图（Apple「游戏」App 的详情页，DetailInfo.swift）：整页染上画面的颜色，一组一行粗体标题 + 一张半透明大圆角卡——
 // 简介（几行 + 导演）→ 分集（剧集）→ 预告片（有才有）→ 演员（圆形照片：T21）→ 影片详细信息（上映时间、时长、流量能效、推荐等级）
 // → 更多同类型的几部；往上滚过头部，顶上钉住一条：海报、片名、「播放」。
@@ -38,8 +38,6 @@ struct MovieDetailView: View {
             playID: "detail-play",
             onPlay: { play(meta) },
             onRestart: restartAction(meta),
-            file: (path: video.path, name: video.name),
-            shareURL: DetailText.tmdbPage(kind: "movie", id: meta?.id),
             genres: meta?.genres ?? [],
             overview: meta?.overview,
             director: meta?.director,
@@ -210,8 +208,6 @@ struct SeriesDetailView: View {
             playDisabled: next == nil,
             onPlay: { if let next, let i = files.firstIndex(of: next.file) { play(index: i) } },
             onRestart: restartAction(next),
-            file: next.map { (path: $0.file.path, name: $0.file.name) },
-            shareURL: DetailText.tmdbPage(kind: "tv", id: current.tmdbId ?? meta?.id),
             genres: meta?.genres ?? [],
             overview: meta?.overview,
             director: meta?.director,
@@ -567,10 +563,6 @@ struct DetailScaffold<Episodes: View>: View {
     let onPlay: () -> Void
     /// 「从头播放」：有进度才有
     var onRestart: (() -> Void)? = nil
-    /// 「复制直链」对着的文件（剧集是下一集）
-    let file: (path: String, name: String)?
-    /// 「分享」：TMDB 上这一部的页面
-    let shareURL: URL?
     /// 「简介」卡：类型（弹层里用）、整段简介、导演
     let genres: [String]
     let overview: String?
@@ -786,7 +778,8 @@ struct DetailScaffold<Episodes: View>: View {
             }
             HStack(spacing: 12) {
                 playButton(m)
-                moreMenu
+                // 「…」里只剩「从头播放」：有进度才出现（发行版不再有「分享」「复制直链」这类站外操作）
+                if onRestart != nil { moreMenu }
             }
             .padding(.top, 4)
         }
@@ -818,12 +811,6 @@ struct DetailScaffold<Episodes: View>: View {
                 Button("从头播放", systemImage: "arrow.counterclockwise", action: onRestart)
                     .accessibilityIdentifier("detail-restart")
             }
-            if let shareURL {
-                ShareLink(item: shareURL, subject: Text(title)) {
-                    Label("分享", systemImage: "square.and.arrow.up")
-                }
-                .accessibilityIdentifier("detail-share")
-            }
         } label: {
             Image(systemName: "ellipsis")
                 .font(.headline)
@@ -833,7 +820,6 @@ struct DetailScaffold<Episodes: View>: View {
                 .environment(\.colorScheme, .dark)
                 .contentShape(Circle())
         }
-        .disabled(onRestart == nil && shareURL == nil)
         .accessibilityLabel("更多")
         .accessibilityIdentifier("detail-more")
     }
@@ -994,7 +980,7 @@ struct DetailHeroBackdrop: View {
 }
 
 /// 一段预告片：卡上是这一段自己的画面（Apple 给了就用，没给就轮着用剧照）、片名和「▶ 2 分钟」
-/// （时长 Apple 给了就用，没给就读一下这段预告片的播放列表：TrailerLength）；「•••」里是播放和分享
+/// （时长 Apple 给了就用，没给就读一下这段预告片的播放列表：TrailerLength）；「•••」里是播放
 /// 预告片与剧照那一排里的一张卡。两样在同一个 LazyHStack 里，id 必须分开（「t0」「s0」）：以前都用序号，同号的撞了，剧照不出来
 enum DetailMediaItem: Identifiable, Hashable {
     case trailer(Int)
@@ -1034,11 +1020,6 @@ struct DetailTrailerCard: View {
                     detail: TrailerLength.label(trailer.duration ?? seconds) ?? (title == nil ? nil : "预告片"),
                     metrics: metrics, identifier: "trailer-card", action: onPlay) {
             Button("播放", systemImage: "play.fill", action: onPlay)
-            if let url = URL(string: trailer.hls), url.scheme?.hasPrefix("http") == true {
-                ShareLink(item: url, subject: Text(title ?? "预告片")) {
-                    Label("分享", systemImage: "square.and.arrow.up")
-                }
-            }
         }
         .task(id: trailer.hls) {
             guard trailer.duration == nil, seconds == nil else { return }
@@ -1159,12 +1140,6 @@ enum DetailText {
     static func rating(_ r: Double?) -> String? {
         guard let r, r > 0 else { return nil }
         return String(format: "★ %.1f", r)
-    }
-
-    /// TMDB 上这一部的页面（「…」里的「分享」）
-    static func tmdbPage(kind: String, id: Int?) -> URL? {
-        guard let id else { return nil }
-        return URL(string: "https://www.themoviedb.org/\(kind)/\(id)")
     }
 
     /// 放得了的预告片：和 AppModel.trailers(for:) 同一条规矩（订阅才看得了的不要）

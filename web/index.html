@@ -14265,7 +14265,7 @@ function ylMeta(el, d) {
     : ylMovieMeta(d);
   if (t && g.textContent !== t) g.textContent = t;
 }
-/** 「…」：电影是原来那张文件弹层（播放 / 复制直链），剧集是「继续看 / 查看分集」 */
+/** 「…」：电影是原来那张文件弹层（播放），剧集是「继续看 / 查看分集」 */
 function ylBind(scope) {
   (scope || document).querySelectorAll('.yl-more').forEach(b => {
     if (b.dataset.bound) return; b.dataset.bound = '1';
@@ -18255,7 +18255,7 @@ async function openComingSoonDetail(c){
       <h3>影片信息</h3>
       <div class="detail-row"><span class="label">类型</span><span class="value">${esc(typeLabel)} · ${esc(genres)}</span></div>
       ${releaseTxt ? `<div class="detail-row"><span class="label">上映</span><span class="value">${esc(releaseTxt)}</span></div>` : ''}
-      ${art.rating ? `<div class="detail-row"><span class="label">评分</span><span class="value">★ ${parseFloat(art.rating).toFixed(1)} <span style="color:var(--text-3);font-size:12px">TMDB</span></span></div>` : ''}
+      ${art.rating ? `<div class="detail-row"><span class="label">评分</span><span class="value">★ ${parseFloat(art.rating).toFixed(1)}</span></div>` : ''}
       <div class="detail-row"><span class="label">状态</span><span class="value">即将加入 Cuven TV</span></div>
     </div>
     <div class="detail-info-extra">
@@ -20145,7 +20145,7 @@ async function openDetail(path, name, opts) {
       <div class="detail-row"><span class="label">类型</span><span class="value">${esc(typeLabel)} · ${esc(genres)}</span></div>
       ${series ? `<div class="detail-row"><span class="label">剧集</span><span class="value">${esc([series.seasonLabel, tvCountLabel(series)].filter(Boolean).join(' · '))}</span></div>` : ''}
       <div class="detail-row"><span class="label">格式</span><span class="value">${esc(e)}${tags.includes('4K') ? ' · 8K+ UHD' : (tags.includes('HD') ? ' · 高动态' : '')}${top ? ' · ' + top : ''}</span></div>
-      ${art.rating ? `<div class="detail-row"><span class="label">评分</span><span class="value">★ ${parseFloat(art.rating).toFixed(1)} <span style="color:var(--text-3);font-size:12px">TMDB</span>${isCuvenPick(art.rating) ? cuvenSealHTML() : ''}</span></div>` : ''}
+      ${art.rating ? `<div class="detail-row"><span class="label">评分</span><span class="value">★ ${parseFloat(art.rating).toFixed(1)}${isCuvenPick(art.rating) ? cuvenSealHTML() : ''}</span></div>` : ''}
     </div>
     <div class="detail-info-extra">
       <div class="detail-info-section-title">尖端色彩和画面质量技术</div>
@@ -20325,10 +20325,6 @@ function openActorSheet(actor) {
     '<button class="sheet-btn" onclick="searchByActor()">' +
       '<div class="si" style="color:var(--blue)"><i class="ph ph-magnifying-glass"></i></div>' +
       '<div><div class="sl">在资料库中搜索</div><div class="sd">查找该演员在你库中的作品</div></div>' +
-    '</button>' +
-    '<button class="sheet-btn" onclick="openTmdbActor()">' +
-      '<div class="si" style="color:var(--green)"><i class="ph ph-arrow-square-out"></i></div>' +
-      '<div><div class="sl">在 TMDB 查看</div><div class="sd">演员档案 · 传记 · 完整作品年表</div></div>' +
     '</button>';
   openSheet();
 }
@@ -20379,16 +20375,6 @@ function searchByActor() {
     si.value = name;
     si.dispatchEvent(new Event('input', { bubbles: true }));
   }, 350);
-}
-
-function openTmdbActor() {
-  if (!state.selectedActor) return;
-  const a = state.selectedActor;
-  const url = a.id
-    ? 'https://www.themoviedb.org/person/' + encodeURIComponent(a.id)
-    : 'https://www.themoviedb.org/search?query=' + encodeURIComponent(a.name || '');
-  window.open(url, '_blank', 'noopener,noreferrer');
-  closeSheet();
 }
 
 let _detailSelfPop = 0;
@@ -21339,8 +21325,7 @@ function openSheetForFile(path, name) {
   const title = showTitle(name);
   $('sheetBody').innerHTML = '<div class="sheet-title">' + esc(title || name) + '</div>' +
     
-    '<button class="sheet-btn" onclick="playVideo(state.selectedFile.path, state.selectedFile.name)"><div class="si" style="color:var(--orange)"><i class="ph-fill ph-play-circle"></i></div><div><div class="sl">播放</div><div class="sd">' + (Player.appleHls ? '站内播放 · 杜比视界 · HDR · 多音轨字幕' : '站内播放') + '</div></div></button>' +
-    '<button class="sheet-btn" onclick="copyFileLink()"><div class="si" style="color:var(--blue)"><i class="ph ph-link"></i></div><div><div class="sl">复制直链</div><div class="sd">在 VLC 等其它播放器中打开</div></div></button>';
+    '<button class="sheet-btn" onclick="playVideo(state.selectedFile.path, state.selectedFile.name)"><div class="si" style="color:var(--orange)"><i class="ph-fill ph-play-circle"></i></div><div><div class="sl">播放</div><div class="sd">' + (Player.appleHls ? '站内播放 · 杜比视界 · HDR · 多音轨字幕' : '站内播放') + '</div></div></button>';
   openSheet();
 }
 function openSheet() {
@@ -21940,7 +21925,7 @@ const Player = (() => {
   function fail(msg) {
     loaderHide();
     leaveFs(true);
-    showState(msg, true, [['复制直链', () => cur && copyStreamLink(cur.path, cur.name)], ['重试', () => cur && retry(), true]]);
+    showState(msg, true, [['重试', () => cur && retry(), true]]);
   }
 
   /* ── 加载画面：点下去到真正开播之间，盖在播放层上 ——
@@ -22417,7 +22402,7 @@ const Player = (() => {
     if (code === 1 || !v.getAttribute('src')) return;
     if (code === 4 && !cur.playedOnce) {
       fail(cur.mode === 'direct' && /\.mkv$/i.test(cur.name || '')
-        ? '这个浏览器解不了这部片的音视频格式。可以在 iPhone / iPad / Mac 的 Safari 里播放，或复制直链用 VLC 等播放器打开'
+        ? '此浏览器不支持这部影片的格式。请在 iPhone、iPad 或 Mac 的 Safari 中播放'
         : '这台设备无法解码这个视频');
       return;
     }
@@ -22532,29 +22517,6 @@ function playVideo(path, name, opts) {
   if ($('sheetMenu')?.classList.contains('on')) closeSheet();
   Player.open(Object.assign({ path, name }, opts || {}));
 }
-
-/* 外部播放器用的直链（VLC / Infuse 等仍可用，只是不再依赖它们）。
-   Safari 的剪贴板写入要求在手势内发生 —— 签名得异步取，所以交给
-   ClipboardItem 的 Promise；没有 ClipboardItem 的浏览器取到再写。 */
-async function copyStreamLink(path, name) {
-  const urlP = streamSign(path).then(s => streamUrlFor(path, name, s));
-  try {
-    if (window.ClipboardItem && navigator.clipboard?.write) {
-      await navigator.clipboard.write([new ClipboardItem({ 'text/plain': urlP.then(u => new Blob([u], { type: 'text/plain' })) })]);
-    } else {
-      await navigator.clipboard.writeText(await urlP);
-    }
-    toast('直链已复制');
-  } catch (_) {
-    try { prompt('直链（可在其它播放器中打开）', await urlP); } catch (_) {}
-  }
-}
-function copyFileLink() {
-  const f = state.selectedFile;
-  if ($('sheetMenu')?.classList.contains('on')) closeSheet();
-  if (f) copyStreamLink(f.path, f.name);
-}
-
 
 /* 切换编排：关键不在动效本身，而在「何时恢复滚动位置」。
    必须与视图变可见落在同一帧 —— 晚一帧就是 297px 的瞬移。

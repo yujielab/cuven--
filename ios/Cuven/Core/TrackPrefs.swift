@@ -82,7 +82,7 @@ enum TrackPrefs {
 
         var hint: String {
             switch self {
-            case .auto: return "优先影片自带的中文字幕，其次在线字幕"
+            case .auto: return "优先影片自带的中文字幕，其次智能字幕"
             case .off: return "不显示字幕"
             default: return "优先\(label)字幕，没有时自动选择"
             }
@@ -220,9 +220,9 @@ enum TrackPrefs {
         o.hasMediaCharacteristic(.containsOnlyForcedSubtitles)
     }
 
-    /// Worker 在线找来的那条（名字里写着「在线」）
+    /// Worker 在线找来的那条：名字是「简体中文-(智能)」这样的（还没重新部署的旧 Worker 写的是「（在线）」）
     static func isOnline(_ o: AVMediaSelectionOption) -> Bool {
-        o.displayName.contains("在线")
+        o.displayName.contains("(智能)") || o.displayName.contains("（在线")
     }
 
     /// 诊断里写的：语种标签 + 在线 / 强制，不写轨道名

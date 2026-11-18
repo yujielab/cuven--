@@ -315,9 +315,9 @@ struct DetailStatsGrid: View {
         case .rating:
             if let r = stats.rating, let lv = DetailFacts.recommendation(r) {
                 let score = String(format: "%.1f", r)
-                DetailGaugeTile(symbol: "star.fill", title: "推荐等级", level: lv, caption: "TMDB \(score)",
+                DetailGaugeTile(symbol: "star.fill", title: "推荐等级", level: lv, caption: "\(score) 分",
                                 position: DetailFacts.ratingPosition(r), palette: palette,
-                                spoken: "推荐等级\(lv.rawValue)，TMDB 评分 \(score) 分")
+                                spoken: "推荐等级\(lv.rawValue)，评分 \(score) 分")
             }
         }
     }
