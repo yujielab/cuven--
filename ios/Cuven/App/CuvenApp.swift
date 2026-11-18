@@ -63,6 +63,10 @@ struct CuvenApp: App {
         .backgroundTask(.urlSession(Precache.sessionID)) {
             await Precache.shared.handleBackgroundWake()
         }
+        // 整部下载：一样（Downloads）
+        .backgroundTask(.urlSession(Downloads.sessionID)) {
+            await Downloads.shared.handleBackgroundWake()
+        }
     }
 }
 
@@ -143,8 +147,9 @@ struct RootView: View {
             if !account.loginRequired || account.isLoggedIn { model.start() }
             // 编辑推荐预告片的后台下载：一启动就接上（上次没下完的接着下，App 不在时下完的这时交回来）
             TrailerCache.shared.start()
-            // 弱网预先缓存（详情页「预先画面质量处理」）的后台下载：一样接上
+            // 弱网预先缓存（详情页「预先画面质量处理」）、整部下载（详情页「下载」）的后台下载：一样接上
             Precache.shared.boot()
+            Downloads.shared.boot()
         }
         .onChange(of: account.isLoggedIn) { _, now in if now { model.start() } }
         // 头像预先存在本机（用户要求）：一启动、一登录就在后台拉好存上，回到前台再看一眼有没有换（同一张 10 分钟内不重拉）

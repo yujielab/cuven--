@@ -24,8 +24,10 @@ struct MovieDetailView: View {
     @State private var trailers: [Trailer] = []
     /// 头部的画面和字标：定下来就不再换（DetailArt）
     @State private var art: DetailArt?
-    /// 预先缓存开不了（空间不够、演示数据）时说一声
+    /// 预先缓存、下载开不了（空间不够、演示数据）时说一声
     @State private var precacheAlert: PrecacheAlert?
+    /// 还没下载就按了「分享」：先问要不要下载
+    @State private var askDownload = false
 
     var body: some View {
         let meta = full ?? model.meta(video)
@@ -54,11 +56,26 @@ struct MovieDetailView: View {
         ) { _ in
             EmptyView()
         }
+        // 「下载」「分享」（用户要求：iPhone Duo 侧边那一列返回钮下面；别的 iPhone 在右上角）：分享的是下好的文件，可以直接隔空投送
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                DetailDownloadButton(video: video, title: model.title(video), year: model.year(video), alert: $precacheAlert)
+                DetailShareButton(video: video, title: model.title(video), askDownload: $askDownload)
+            }
+        }
         .alert(precacheAlert?.title ?? "", isPresented: Binding(get: { precacheAlert != nil }, set: { if !$0 { precacheAlert = nil } }),
                presenting: precacheAlert) { _ in
             Button("好", role: .cancel) {}
         } message: { a in
             Text(a.message)
+        }
+        .alert("下载后才能分享", isPresented: $askDownload) {
+            Button("下载") {
+                Task { precacheAlert = await DetailDownloadStarter.start(video: video, title: model.title(video), year: model.year(video)) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("下载完成后，可以通过隔空投送分享给附近的人。")
         }
         .task { full = await model.fullMeta(for: video) }
         // 在线字幕：打开详情页时先让后台去找（不等），点播放时主列表里就有这一条备选
