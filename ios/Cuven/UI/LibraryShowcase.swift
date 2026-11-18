@@ -560,6 +560,12 @@ final class ShowcaseTrailer {
     private var covered = false
     /// 正片播放器盖在上面（全屏）：预告片停着
     private var playerUp = false
+    /// App 退到后台：预告片停着（后台只让编辑推荐那一段接着下载：TrailerCache）
+    private var background = false
+    /// 放的是本机那份（TrailerCache 下好的）：一开始就清楚，一放就露；不占网，不挡后台下载
+    @ObservationIgnored private var local = false
+    /// 码流还没升到下限就先露了（等了几秒还低）：之后不再因为码流低淡回静态画面，免得一闪一闪
+    @ObservationIgnored private var relaxed = false
 
     @ObservationIgnored private var loadTask: Task<Void, Never>?
     @ObservationIgnored private var timeObserver: Any?
@@ -582,6 +588,8 @@ final class ShowcaseTrailer {
         player.isMuted = true
         player.preventsDisplaySleepDuringVideoPlayback = false
         player.actionAtItemEnd = .pause
+        // 静音的背景画面不显示字幕：不照系统「字幕与隐藏式字幕」的设置自动选字幕，也就不去网上拉字幕（attach 里再明确关掉一次）
+        player.appliesMediaSelectionCriteriaAutomatically = false
         let nc = NotificationCenter.default
         playerObservers = [
             nc.addObserver(forName: .cuvenPlayerPresented, object: nil, queue: .main) { [weak self] _ in
@@ -589,6 +597,12 @@ final class ShowcaseTrailer {
             },
             nc.addObserver(forName: .cuvenPlayerClosed, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor [weak self] in self?.playerUp = false; self?.sync() }
+            },
+            nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.background = true; self?.sync() }
+            },
+            nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.background = false; self?.sync() }
             },
         ]
     }
@@ -610,12 +624,18 @@ final class ShowcaseTrailer {
             let list = await fetch()
             guard let self, !Task.isCancelled, self.path == key,
                   let t = list.first, let url = URL(string: t.hls), url.scheme?.hasPrefix("http") == true else { return }
-            self.attach(url)
+            // 本机有下好的（编辑推荐：TrailerCache）就放本机那份
+            if let file = TrailerCache.shared.localURL(key: key, hls: t.hls) {
+                self.attach(file, local: true)
+            } else {
+                self.attach(url, local: false)
+            }
         }
     }
 
     func unmount() {
         TrailerFocus.shared.drop(self)
+        TrailerCache.shared.trailer(self, streaming: false)
         loadTask?.cancel()
         loadTask = nil
         if let o = timeObserver { player.removeTimeObserver(o); timeObserver = nil }
@@ -629,6 +649,8 @@ final class ShowcaseTrailer {
         showing = false
         playingSince = nil
         lowSince = nil
+        local = false
+        relaxed = false
         progress = 0
         paused = false
     }
@@ -653,18 +675,21 @@ final class ShowcaseTrailer {
 
     /// 想放（挂着片子、在屏上、没被暂停、正片没盖上来）：同一时刻只有最后一个想放的真的在放（TrailerFocus）
     private func sync() {
-        let wants = player.currentItem != nil && visible && !covered && !paused && !playerUp
+        let wants = player.currentItem != nil && visible && !covered && !paused && !playerUp && !background
         if wants { TrailerFocus.shared.want(self) } else { TrailerFocus.shared.drop(self) }
     }
 
     /// TrailerFocus 定了谁放：放 / 停
     fileprivate func apply(allowed: Bool) {
         guard player.currentItem != nil else { return }
-        let wants = visible && !covered && !paused && !playerUp
+        let wants = visible && !covered && !paused && !playerUp && !background
         if wants && allowed { player.play() } else { player.pause() }
+        // 从网上放着的时候，编辑推荐的后台下载让一让（TrailerCache）；放本机那份不占网，不用让
+        TrailerCache.shared.trailer(self, streaming: wants && allowed && !local)
     }
 
-    private func attach(_ url: URL) {
+    private func attach(_ url: URL, local: Bool) {
+        self.local = local
         let item = AVPlayerItem(url: url)
         item.preferredForwardBufferDuration = 6
         statusObservation = item.observe(\.status) { [weak self] it, _ in
@@ -676,6 +701,7 @@ final class ShowcaseTrailer {
                     // 预告片开头那几秒基本都是发行方厂标、分级卡：从第 10 秒进（太短的片子从头）
                     self.start = duration.isFinite && duration > 25 ? 10 : 0
                     self.loaded = true
+                    self.hideSubtitles(it)
                     self.player.seek(to: CMTime(seconds: self.start, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .positiveInfinity) { _ in
                         Task { @MainActor [weak self] in self?.sync() }
                     }
@@ -704,11 +730,12 @@ final class ShowcaseTrailer {
         let d = item.duration.seconds
         if d.isFinite, d > start { progress = min(1, max(0, (t.seconds - start) / (d - start))) }
         let on = player.timeControlStatus == .playing && t.seconds >= start - 0.5
-        // 码流升到够清楚才露（presentationSize 是当前档位的画面大小）；放了 10 秒还没到，要求降到六成再露；
-        // 一直很低（网太慢）就一直停在静态画面上——清楚的静态画面比糊的视频好看
+        // 什么时候露（presentationSize 是当前档位的画面大小）：见下面「guard on」那一段
         let h = item.presentationSize.height
         let minH = revealHeight * 0.6
         if showing {
+            // 本机那份、或者是等不及码流先露的：不再淡回去（用户要求：预告片在放，背景就不能还是剧照）
+            if local || relaxed { return }
             // 露出来以后码流又掉到下限以下（网变差，用户截图里年份卡的画面糊成色块）：糊着超过两秒就淡回静态画面，等它再升上去
             if h > 0 && h < minH {
                 if lowSince == nil { lowSince = Date() }
@@ -722,12 +749,25 @@ final class ShowcaseTrailer {
             }
             return
         }
-        guard on else { return }
+        guard on, h > 0 else { return }
         if playingSince == nil { playingSince = Date() }
         let waited = Date().timeIntervalSince(playingSince ?? Date())
-        if h >= revealHeight || (waited > 10 && h >= minH) {
+        // 用户截图：预告片已经在放（右上角是暂停钮），背景却一直是剧照——以前要等码流升到 1080（或 10 秒后 648）才露，
+        // 网慢的时候一直等不到。现在：本机那份一放就露；从网上放的，码流够清楚马上露，放了 2 秒到了六成也露，
+        // 放了 4 秒不管多少都露（这时不再因为码流低退回剧照）
+        if local || h >= revealHeight || (waited > 2 && h >= minH) || waited > 4 {
             showing = true
+            relaxed = !local && h < minH
             lowSince = nil
+        }
+    }
+
+    /// 关掉字幕：静音的背景画面上不压字，也不去拉字幕的播放列表
+    private func hideSubtitles(_ item: AVPlayerItem) {
+        Task { [weak self] in
+            guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) else { return }
+            guard let self, self.player.currentItem === item else { return }
+            item.select(nil, in: group)
         }
     }
 }

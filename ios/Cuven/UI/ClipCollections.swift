@@ -291,6 +291,35 @@ extension AppModel {
         return out
     }
 
+    /// 大屏（展开的 Duo、iPad：一屏比 600 点宽）刷视频那一屏的底：只要无字的横版画面（用户要求「应该读取剧照或 Apple TV 横版无水印背景，
+    /// 不能有 logo 和不清晰背景」）——Apple TV 无字背景 → TMDB 无字剧照 → TMDB 剧照 → TMDB 横版剧照；
+    /// 不用海报、不用 Apple 带片名的 16:9（片名印在图上），竖版主视觉（放大到一屏宽就糊）只在一张横图都没有时兜底。
+    /// pixel：这一屏按 fill 铺开要多宽的像素（横图按高铺满时比屏宽得多）；TMDB 的图过了 1280 就要原图
+    func clipWideArtCandidates(_ e: HomeEntry, pixel: Int, full: Meta? = nil) -> [URL] {
+        func some(_ s: String?) -> String? { (s?.isEmpty ?? true) ? nil : s }
+        let size = pixel > 1280 ? "original" : "w1280"
+        var out: [URL] = []
+        func add(_ u: URL?) { if let u, !out.contains(u) { out.append(u) } }
+        func apple(_ s: String?, _ w: Int) { if let s = some(s) { add(URL(string: AppleImage.sized(s, width: w) ?? s)) } }
+        func tmdb(_ a: String?, _ b: String?) { add(TMDBImage.url(some(a) ?? some(b), size)) }
+        switch e {
+        case .movie(let v):
+            let a = appleArt(v), m = meta(v)
+            apple(a?.background, pixel)
+            tmdb(full?.backdropClean, m?.backdropClean)
+            for st in (full?.stills ?? m?.stills ?? []).prefix(3) { tmdb(st.url, st.thumb) }
+            tmdb(full?.backdrop, m?.backdrop)
+            apple(a?.tall, min(pixel, 2400))
+        case .series(let s):
+            let m = seriesMetas[s.path] ?? full
+            tmdb(m?.backdropClean, nil)
+            for st in (m?.stills ?? []).prefix(3) { tmdb(st.url, st.thumb) }
+            tmdb(m?.backdrop, nil)
+            tmdb(m?.posterClean, nil)
+        }
+        return out
+    }
+
     /// 有没有竖版画面（选主页卡的封面：没有的不拿来当封面）
     func hasClipArt(_ e: HomeEntry) -> Bool {
         func some(_ s: String?) -> Bool { !(s?.isEmpty ?? true) }
@@ -585,9 +614,16 @@ struct ClipFeedPage: View {
             // （用户截图：按钮只剩上半截、进度条不见了，顶上的分类名也没了）
             Color(white: 0.06)
                 .overlay {
-                    // 用户截图：整页黑着——以前只试一张竖版画面，它取不到就什么都没有。现在按顺序试几张（RemoteImageChain）
-                    RemoteImageChain(urls: model.clipArtCandidates(entry, width: g.size.width, full: full),
-                                     maxPixel: max(g.size.width, g.size.height) * 3)
+                    // 用户截图：整页黑着——以前只试一张竖版画面，它取不到就什么都没有。现在按顺序试几张（RemoteImageChain）。
+                    // 大屏（比 600 点宽）只用无字的横版画面（clipWideArtCandidates：用户要求不能有 logo、不能糊），
+                    // 按 fill 铺满一屏要的宽（横图按高铺：屏高 × 16/9）× 2.5 倍像素，最多 3840
+                    if g.size.width >= 600 {
+                        let px = min(3840, (max(g.size.width, g.size.height * 16 / 9) * 2.5).rounded())
+                        RemoteImageChain(urls: model.clipWideArtCandidates(entry, pixel: Int(px), full: full), maxPixel: px)
+                    } else {
+                        RemoteImageChain(urls: model.clipArtCandidates(entry, width: g.size.width, full: full),
+                                         maxPixel: max(g.size.width, g.size.height) * 3)
+                    }
                 }
                 .overlay {
                     if showing {

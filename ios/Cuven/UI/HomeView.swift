@@ -28,7 +28,7 @@ struct HomeView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         hero(m, fullWidth: fullWidth, fullHeight: fullHeight, insets: insets)
                         shelves(m, fullHeight: fullHeight)
-                            // 宽度写死成内容区的宽：哪个孩子再宽（海报墙一排三千多点）也撑不开这一列，
+                            // 宽度写死成内容区的宽：哪个孩子再宽（结尾的字标卡一排几千点）也撑不开这一列，
                             // 居中的东西（字标、按钮、精选区的立体海报）不会跑到屏幕外面去
                             .frame(width: m.width, alignment: .leading)
                             .padding(.top, m.wide ? 36 : 28)
@@ -150,7 +150,7 @@ struct HomeView: View {
         return [y, y - 1]
     }
 
-    /// 顺序：继续观看 → 今年 → 探索片段合集 → 去年（预告片卡）→ 精选电影 → 编辑推荐 → 精选剧集 → 四个大类 → 结尾的海报墙
+    /// 顺序：继续观看 → 今年 → 探索片段合集 → 去年（预告片卡）→ 精选电影 → 编辑推荐 → 精选剧集 → 四个大类 → 结尾（两排字标卡 + 查看全部影片）
     /// （docs/ios-design.md「主页」；F1：最要紧的在上）
     @ViewBuilder
     private func shelves(_ m: DSMetrics, fullHeight: CGFloat) -> some View {
@@ -231,12 +231,12 @@ struct HomeView: View {
         }
     }
 
-    /// 主页结尾（用户要求，照游戏 App「Arcade」页的结尾）：两行慢慢走的海报墙、Cuven 字标、「查看所有影片」
+    /// 主页结尾（用户要求，照 Apple TV+ 那一页的结尾）：两排反向慢慢走的 16:9 字标卡、「查看全部影片 ›」+ 暂停，手机上再加「立即观看」
     @ViewBuilder
     private func finale(_ m: DSMetrics) -> some View {
-        let posters = model.wallPosters(limit: 20)
-        if posters.count >= 8 {
-            HomeFinale(posters: posters, metrics: m)
+        let tiles = model.finaleTiles(limit: 20)
+        if tiles.count >= 8 {
+            HomeFinale(tiles: tiles, metrics: m)
                 .padding(.top, 8)
         }
     }
@@ -269,17 +269,12 @@ struct HomeView: View {
         .movieMenu(v)
     }
 
-    /// 精选剧集：和精选电影同一种样子，片库里评分最高的剧（一部剧只出一次）
+    /// 精选剧集：片库里评分最高的剧（一部剧只出一次）。折起、展开都是同一个样子（用户要求：展开时也是和折起一样的可滑动列表，
+    /// 不再是两张一排的 2×2 网格）：立体海报 + 大标题 + 说明，下面一排横着滑的大卡
     @ViewBuilder
     private func featuredSeriesShelf(_ m: DSMetrics) -> some View {
         let items = model.featuredSeries(limit: 10)
-        if items.count >= 3 && m.wide {
-            // 展开（用户给的参考图：游戏 App 展开时「感受這些小品遊戲的獨特魅力」）：分区标题「精选剧集 ›」（点进合集页）
-            // + 两张一排的卡（画面 + 取色的底条：CollectionCard），排在最前的四部
-            DSSection(title: Shelf.featuredSeries.title, metrics: m, route: .shelf(.featuredSeries)) {
-                featuredSeriesGrid(Array(items.prefix(4)), m)
-            }
-        } else if items.count >= 3 {
+        if items.count >= 3 {
             FeaturedCollection(title: Shelf.featuredSeries.title, blurb: Shelf.featuredSeries.blurb ?? "",
                                rowTitle: "一集接一集停不下来", rowRoute: .shelf(.featuredSeries),
                                covers: items.prefix(3).map { s in
@@ -289,25 +284,6 @@ struct HomeView: View {
                 ForEach(items, id: \.path) { s in featuredSeriesCard(s, m) }
             }
         }
-    }
-
-    /// 展开时精选剧集的那一片：两张一排、行距就是列距（和合集页一样）
-    private func featuredSeriesGrid(_ items: [Series], _ m: DSMetrics) -> some View {
-        let w = m.cardWidth(columns: 2)
-        let col = GridItem(.fixed(w), spacing: m.gutter, alignment: .top)
-        return LazyVGrid(columns: [col, col], alignment: .leading, spacing: m.gutter) {
-            ForEach(items, id: \.path) { s in
-                let sm = model.seriesMetas[s.path]
-                ZoomLink(route: .series(s), slot: "featured-tv") {
-                    CollectionCard(art: model.seriesWideArt(s).url, cover: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w185"),
-                                   title: sm?.title ?? s.name, line: DetailText.line([s.seasonLabel, sm?.genres?.first]), width: w)
-                }
-                .accessibilityIdentifier("featured-series-card")
-                .seriesMenu(s)
-                .task { await model.ensureSeriesMeta(s) }
-            }
-        }
-        .padding(.horizontal, m.margin)
     }
 
     private func featuredSeriesCard(_ s: Series, _ m: DSMetrics) -> some View {
@@ -322,14 +298,16 @@ struct HomeView: View {
         .seriesMenu(s)
     }
 
-    /// 四个大类之一：电影和剧集一起（动画、动作、喜剧新的在前，严苛品质区评分高的在前）；标题「›」进这一类的全部
+    /// 四个大类之一：电影和剧集一起（动画、动作、喜剧新的在前，严苛品质区评分高的在前）；标题「›」进这一类的全部。
+    /// 展开时海报比别处大 10%（用户要求，只在展开时）
     @ViewBuilder
     private func categoryShelf(_ c: HomeCategory, _ m: DSMetrics) -> some View {
         let items = model.categoryEntries(c, limit: 20)
+        let w = m.wide ? (m.posterWidth * 1.1).rounded(.down) : m.posterWidth
         if !items.isEmpty {
             DSSection(title: c.title, metrics: m, route: .shelf(.category(c))) {
                 DSShelf(metrics: m) {
-                    ForEach(items) { e in posterCard(e, m, slot: "cat-\(c.rawValue)") }
+                    ForEach(items) { e in posterCard(e, m, width: w, slot: "cat-\(c.rawValue)") }
                 }
             }
         }
@@ -337,21 +315,21 @@ struct HomeView: View {
 
     /// 一张海报卡：纯净画面 + 字标（AppModel.posterArt / seriesPosterArt 定先后），长按是播放 / 想看（C21）
     @ViewBuilder
-    private func posterCard(_ e: HomeEntry, _ m: DSMetrics, slot: String) -> some View {
+    private func posterCard(_ e: HomeEntry, _ m: DSMetrics, width w: CGFloat, slot: String) -> some View {
         switch e {
         case .movie(let v):
-            let art = model.posterArt(v, width: m.posterWidth)
+            let art = model.posterArt(v, width: w)
             ZoomLink(route: .movie(v), slot: slot) {
                 DSPosterLockup(art: art.url, title: model.title(v), subtitle: model.year(v).map { String($0) },
-                               metrics: m, logo: art.logo)
+                               metrics: m, width: w, logo: art.logo)
             }
             .accessibilityIdentifier("movie-card")
             .movieMenu(v)
         case .series(let s):
-            let art = model.seriesPosterArt(s, width: m.posterWidth)
+            let art = model.seriesPosterArt(s, width: w)
             ZoomLink(route: .series(s), slot: slot) {
                 DSPosterLockup(art: art.url, title: model.seriesMetas[s.path]?.title ?? s.name, subtitle: s.seasonLabel,
-                               metrics: m, logo: art.logo)
+                               metrics: m, width: w, logo: art.logo)
             }
             .accessibilityIdentifier("series-card")
             .seriesMenu(s)

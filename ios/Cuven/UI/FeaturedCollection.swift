@@ -75,11 +75,13 @@ struct FeaturedCollectionHeader: View {
     /// 排在最前那部的海报（带的颜色从它取）
     private var lead: URL? { covers.first.flatMap { $0 } }
 
-    /// 立体海报多宽：屏宽的 27%（92–150 点）；展开时整扇海报不高过屏高的 42%（展开横拿只有六百多点高，
-    /// 一扇 150 点的海报连字就占掉大半屏）
+    /// 立体海报多宽。折起（用户要求「放大，左右的边距应该一致」）：一扇的外沿（算上斜放、透视和厚度约 ±1.55 个海报宽）
+    /// 正好落在左右两边的页边距上——和上面「精选剧集」大标题同一条左边线，右边留一样宽；
+    /// 展开：屏宽的 27%（92–150 点），整扇海报不高过屏高的 42%（展开横拿只有六百多点高，一扇 150 点的海报连字就占掉大半屏）
     static func posterWidth(_ m: DSMetrics) -> CGFloat {
+        guard m.wide else { return max(92, ((m.width - m.margin * 2) / PosterFan.spanRatio).rounded(.down)) }
         let byWidth = min(150, max(92, (m.width * 0.27).rounded()))
-        guard m.wide, m.height > 0 else { return byWidth }
+        guard m.height > 0 else { return byWidth }
         return min(byWidth, max(92, ((m.height * 0.42 - 12) / 2.43).rounded(.down)))
     }
 
@@ -203,6 +205,8 @@ struct PosterFan: View {
 
     /// 一扇占的高：上沿约 -1.06、下沿约 +1.37 个海报宽（算上斜放、透视和厚度），再留浮动的上下 5 点
     static func height(_ width: CGFloat) -> CGFloat { (width * 2.43).rounded() + 12 }
+    /// 一扇占的宽（三张时）：左右外沿各约 1.55 个海报宽（-1.54 / +1.56：两边差不到 2%，看着就是居中的）
+    static let spanRatio: CGFloat = 3.1
 
     var body: some View {
         // 浮动很慢（5 点、五六秒一个来回），每秒 30 帧就够顺
@@ -215,9 +219,9 @@ struct PosterFan: View {
                 }
             }
         }
-        // 右边那张低、上下不对称：整扇往上挪一点，在框里居中
+        // 右边那张低、上下不对称：整扇往上挪一点，在框里居中；框就是一扇看上去那么宽（左右外沿），外面居中时左右留得一样宽
         .offset(y: -width * 0.15)
-        .frame(width: width * 2.9)
+        .frame(width: width * Self.spanRatio)
         .onScrollVisibilityChange(threshold: 0.2) { visible in
             onScreen = visible
             if visible, !fanned { fanned = true }

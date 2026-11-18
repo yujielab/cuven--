@@ -260,7 +260,7 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-08d-home-year-2")
         // 四个大类（动画片区、动作片区、喜剧片区、严苛品质区）在精选和编辑推荐下面
         app.swipeUp(); sleep(2); snap("duo-08e-home-categories")
-        // 主页结尾（照游戏 App「Arcade」页的结尾）：两行慢慢走的海报墙、Cuven 字标、「查看所有影片」→ 全部影片
+        // 主页结尾（照 Apple TV+ 那一页的结尾）：两排反向走的 16:9 字标卡、「查看全部影片 ›」+ 暂停钮（手机上还有「立即观看」）→ 全部影片
         if let all = reveal(app, "home-show-all", swipes: 12) {
             sleep(2)
             snap("duo-08h-home-finale")
