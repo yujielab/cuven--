@@ -710,7 +710,9 @@ struct DetailScaffold<Episodes: View>: View {
                 }
             }
         }
-        .navigationDestination(item: $personPush) { m in ActorPage(member: m) }
+        // 推进去的每一页都要挂 duoHidesTabBar：以前这里没挂，iPhone Duo「侧边一列」的形态里一进演员页系统标签栏就回来了，
+        // 回到详情页也不再藏，和侧边导航叠成两份（用户截图）
+        .navigationDestination(item: $personPush) { m in ActorPage(member: m).duoHidesTabBar() }
         // 预告片：全屏（C49、S22），由 TrailerPlayerView.present 用 UIKit 弹——好管方向：除了 iPhone 展开一律横屏（用户要求）
         // 剧照：全屏黑底的大图，从点的那张卡上放大出来、收回到那张卡上（F57）
         .fullScreenCover(item: $stillPick) { p in

@@ -59,7 +59,59 @@ struct DuoHidesTabBar: ViewModifier {
     @Environment(\.duoColumn) private var column
 
     func body(content: Content) -> some View {
-        content.toolbar(column ? .hidden : .automatic, for: .tabBar)
+        content
+            .toolbar(column ? .hidden : .automatic, for: .tabBar)
+            .background { TabBarGuard(hidden: column) }
+    }
+}
+
+/// UIKit 那一层再按一下：「侧边一列」的形态里系统标签栏一律藏住。只靠 SwiftUI 的 .toolbar(.hidden, for: .tabBar)，
+/// 系统会把它带回来，和侧边导航叠成两份（用户截图：展开横拿，详情页右下角两套导航错开叠着）——
+/// 推进去的页面没挂上面那个修饰（以前详情页里点演员推进的演员页就没挂），回来以后它不再自己藏；转屏、展开 / 合上换了窗口大小也可能。
+/// 所以每一页出现、转完屏、形态一变，都看一眼 UITabBarController：该藏没藏就藏；不是这几种形态却藏着，就放出来
+/// （这个 App 只在这几种形态里藏系统标签栏）
+private struct TabBarGuard: UIViewControllerRepresentable {
+    let hidden: Bool
+
+    func makeUIViewController(context: Context) -> Probe { Probe() }
+
+    func updateUIViewController(_ vc: Probe, context: Context) {
+        vc.hidden = hidden
+        vc.apply()
+    }
+
+    final class Probe: UIViewController {
+        var hidden = false
+
+        override func loadView() {
+            let v = UIView()
+            v.isUserInteractionEnabled = false
+            v.accessibilityElementsHidden = true
+            view = v
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            apply()
+        }
+
+        override func viewWillTransition(to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator) {
+            super.viewWillTransition(to: size, with: coordinator)
+            coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.apply() }
+            }
+        }
+
+        /// 排到下一轮再看：SwiftUI 这一轮自己也在改标签栏，等它改完
+        func apply() {
+            Task { @MainActor [weak self] in
+                guard let self, self.viewIfLoaded?.window != nil, let tabs = self.tabBarController else { return }
+                if tabs.isTabBarHidden != self.hidden {
+                    tabs.setTabBarHidden(self.hidden, animated: false)
+                    Perf.log("tab bar \(self.hidden ? "hidden" : "shown") by the guard")
+                }
+            }
+        }
     }
 }
 

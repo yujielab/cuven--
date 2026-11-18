@@ -203,6 +203,10 @@ final class DuoDeviceTests: XCTestCase {
             if row.waitForExistence(timeout: 3) {
                 row.tap(); sleep(3)
                 snap("duo-04e-actor")
+                // 侧边一列的形态里系统标签栏一直藏着：以前演员页没挂 duoHidesTabBar，一进来系统标签栏就回来了，
+                // 回到详情页也不再藏，和侧边导航叠成两份（用户截图）
+                report(app, "actor")
+                XCTAssertFalse(app.tabBars.firstMatch.exists, "演员页上系统标签栏又出来了（和侧边导航叠成两份）")
                 app.swipeUp(); sleep(2)
                 snap("duo-04f-actor-works")
                 // ⓘ：一次快照找在屏上的那颗（演员页上逐个问元素、问 isHittable 会「Timed out while evaluating UI query」）
@@ -218,6 +222,8 @@ final class DuoDeviceTests: XCTestCase {
                     print("DUO actor info: not on screen")
                 }
                 back(app)
+                report(app, "detail-after-actor")
+                XCTAssertFalse(app.tabBars.firstMatch.exists, "从演员页回到详情页，系统标签栏又出来了（和侧边导航叠成两份）")
             } else {
                 print("DUO cast sheet: no rows")
                 closeSheet(app)
