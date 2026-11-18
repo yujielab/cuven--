@@ -359,6 +359,7 @@ struct YearTrailerRow: View {
                 YearTrailerCard(still: TMDBImage.url(model.backgroundArtString(v), "w1280"),
                                 cover: model.thumbArt(v), logo: model.wideLockupArt(v).logo,
                                 title: model.title(v), subtitle: sub, width: w)
+                    .downloadBadge(v.path, inset: 10)
             }
             .accessibilityIdentifier("movie-card")
             .movieMenu(v)
@@ -386,6 +387,7 @@ struct YearTrailerRow: View {
                 WideLeadCard(art: TMDBImage.url(model.backgroundArtString(v), "w1280"), cover: model.thumbArt(v),
                              logo: model.wideLockupArt(v).logo,
                              kicker: "电影", title: model.title(v), subtitle: sub, width: w, height: h)
+                    .downloadBadge(v.path, inset: 14, size: 26)
             }
             .accessibilityIdentifier("movie-card")
             .movieMenu(v)
@@ -410,6 +412,7 @@ struct YearTrailerRow: View {
             ZoomLink(route: .movie(v), slot: "year-\(year)") {
                 CollectionCard(art: TMDBImage.url(model.backgroundArtString(v), "w1280"), cover: model.thumbArt(v),
                                title: model.title(v), line: sub, width: w, kicker: "电影")
+                    .downloadBadge(v.path, inset: 12)
             }
             .accessibilityIdentifier("movie-card")
             .movieMenu(v)

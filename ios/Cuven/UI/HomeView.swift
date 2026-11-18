@@ -13,10 +13,12 @@ struct HomeView: View {
     @Environment(AppModel.self) private var model
     /// 右上头像点开的账户与设置（用户要求：头像从侧边导航里拿出来，放在主页标题这一行的右边）
     @State private var showAccount = false
+    /// 这一栈推进去的页（分享来的链接打开详情页时往里推）
+    @State private var path = NavigationPath()
 
     var body: some View {
         let _ = Perf.count("home")
-        ZoomStack {
+        ZoomStack(path: $path) {
             GeometryReader { geo in
                 let insets = geo.safeAreaInsets
                 // 内容区的宽（不算侧边那一列）：边距、卡宽、排间距都从它算（F9、D4、S3、S5、S6）；
@@ -48,6 +50,12 @@ struct HomeView: View {
             .toolbar(.hidden, for: .navigationBar)
         }
         .sheet(isPresented: $showAccount) { AccountView() }
+        // 分享来的链接（cuven://movie/…）：推进那一部的详情页
+        .onChange(of: model.openRequest) { _, r in
+            guard let r else { return }
+            model.openRequest = nil
+            path.append(r)
+        }
     }
 
     // MARK: 头图
@@ -203,6 +211,7 @@ struct HomeView: View {
                         Button { resume(e) } label: {
                             DSWideLockup(art: art.url, title: e.title, subtitle: remainingLabel(e),
                                          progress: e.fraction, metrics: m, logo: art.logo)
+                                .downloadBadge(e.seriesPath == nil ? e.path : nil, inset: 10)
                         }
                         .buttonStyle(PressableStyle())
                         .accessibilityIdentifier("continue-card")
@@ -264,6 +273,7 @@ struct HomeView: View {
         let line = DetailText.line(["电影", model.year(v).map { String($0) }, genres.first, genres.dropFirst().first])
         return ZoomLink(route: .movie(v), slot: "featured") {
             FeaturedBigCard(art: art?.url, logo: art?.logo, title: model.title(v), line: line, width: w)
+                .downloadBadge(v.path, inset: 14, size: 26)
         }
         .accessibilityIdentifier("featured-card")
         .movieMenu(v)
@@ -322,6 +332,8 @@ struct HomeView: View {
             ZoomLink(route: .movie(v), slot: slot) {
                 DSPosterLockup(art: art.url, title: model.title(v), subtitle: model.year(v).map { String($0) },
                                metrics: m, width: w, logo: art.logo)
+                    // 这一部在下载 / 下好了：海报右上角一颗下载角标（用户要求）
+                    .downloadBadge(v.path)
             }
             .accessibilityIdentifier("movie-card")
             .movieMenu(v)

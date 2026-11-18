@@ -20,6 +20,8 @@ import UserNotifications
 // · 缓存到 25%（能缓存的上限的四分之一）时发一条通知（用户要求）：「《影片名》现已可供观看，预先品质处理已经完成。」——
 //   App 开着时也弹横幅；正在放这一部时不发（人已经在看）；每部只发一次。按「预先画面质量处理」时才问通知权限（系统还没问过的话）。
 //   退到后台时先只把到 25% 的那一截排给系统：系统下完这一批就叫醒 App，通知按时发出去，再排后面的；
+// · 详情页的「下载」（用户要求「下载指的是预先缓存 100%」）是同一套：整部从头到尾都下（不受一半的上限、不按续播位置裁掉前面），
+//   不算在「最多 3 部」里、不会被挤掉，播放时也不删看过的；空间要放得下整部（文件大小 + 留着的那一截）；
 // · 演示数据（UI 测试）时不下。
 
 /// 预先缓存的文件放在哪：Library/Caches/Precache/<影片>/<idh>/…（系统空间吃紧时可以清掉；不进 iCloud 备份）
@@ -209,8 +211,15 @@ final class Precache {
         var title: String?
         /// 25% 的那条通知发过了
         var notified: Bool?
+        /// 详情页的「下载」：整部都下（预先缓存 100%）
+        var full: Bool?
 
-        var progress: Double { target > 0 ? min(1, Double(bytes) / Double(target)) : 0 }
+        var isFull: Bool { full == true }
+
+        var progress: Double {
+            if phase == .done && isFull { return 1 }
+            return target > 0 ? min(1, Double(bytes) / Double(target)) : 0
+        }
         /// 到了能看的那一截（25%）
         var ready: Bool { target > 0 && Double(bytes) >= Double(target) * Precache.readyFraction }
     }
@@ -315,18 +324,49 @@ final class Precache {
         let fileSize = max(0, size ?? 0)
         let budget = Self.budget(fileSize: fileSize, runtime: runtime, others: plannedRemaining(excluding: id))
         guard budget.target > 0 else { return .noSpace(needed: budget.needed) }
-        // 最多 3 部：满了把最久没用的那部（不是正在放的那部）删掉
-        while items.count >= Self.maxItems,
-              let old = items.values.filter({ $0.id != playingID }).min(by: { $0.used < $1.used }) {
+        // 最多 3 部（「下载」的整部不算、也不会被挤掉）：满了把最久没用的那部（不是正在放的那部）删掉
+        while items.values.filter({ !$0.isFull }).count >= Self.maxItems,
+              let old = items.values.filter({ $0.id != playingID && !$0.isFull }).min(by: { $0.used < $1.used }) {
             remove(old.id)
         }
         let now = Date().timeIntervalSince1970
         let from = max(0, resume ?? 0)
         items[id] = Item(id: id, path: path, name: name, size: fileSize, target: budget.target, start: from, cursor: from,
-                         phase: .preparing, created: now, used: now, idh: nil, title: title, notified: nil)
+                         phase: .preparing, created: now, used: now, idh: nil, title: title, notified: nil, full: nil)
         try? FileManager.default.createDirectory(at: PrecacheFiles.dir(id), withIntermediateDirectories: true)
         save()
         Perf.log("precache: start (target \(budget.target >> 20) MB)")
+        kick(id)
+        return .started
+    }
+
+    /// 详情页的「下载」：整部都下（预先缓存 100%）。已经在预先缓存的那一部，升级成整部（前面没下的也补上）
+    func download(path: String, name: String, title: String, size: Int64?, runtime: Int?) -> StartResult {
+        guard !DemoData.enabled else { return .unavailable }
+        boot()
+        PrecacheNotice.requestPermission()
+        let id = PrecacheFiles.id(for: path)
+        let fileSize = max(0, size ?? items[id]?.size ?? 0)
+        let space = Self.freeSpace()
+        let reserve = max(Int64(5) << 30, space.total / 10)
+        let have = items[id]?.bytes ?? 0
+        let need = max(0, fileSize - have) + reserve + plannedRemaining(excluding: id)
+        if fileSize > 0, space.total > 0, space.free < need { return .noSpace(needed: need) }
+        let now = Date().timeIntervalSince1970
+        if var it = items[id] {
+            it.full = true
+            it.target = max(it.target, fileSize)
+            it.start = 0
+            if it.phase != .downloading { it.phase = .queued }
+            it.used = now
+            items[id] = it
+        } else {
+            items[id] = Item(id: id, path: path, name: name, size: fileSize, target: max(1, fileSize), start: 0, cursor: 0,
+                             phase: .preparing, created: now, used: now, idh: nil, title: title, notified: nil, full: true)
+            try? FileManager.default.createDirectory(at: PrecacheFiles.dir(id), withIntermediateDirectories: true)
+        }
+        save()
+        Perf.log("precache: download (\(fileSize >> 20) MB)")
         kick(id)
         return .started
     }
@@ -649,6 +689,17 @@ final class Precache {
     private func nextFiles(_ id: String, limit: Int) -> [String] {
         guard let plan = plans[id], let it = items[id], limit > 0 else { return [] }
         let have = cached[id] ?? [], busy = inflight[id] ?? [], bad = failures[id] ?? [:]
+        if it.isFull {
+            // 整部：先从播放到的地方往后，再补前面的；不按上限停
+            let after = plan.files.filter { $0.start < 0 || $0.end > it.cursor - 8 }
+            let before = plan.files.filter { $0.start >= 0 && $0.end <= it.cursor - 8 }
+            var out: [String] = []
+            for f in after + before where !have.contains(f.rel) && !busy.contains(f.rel) && (bad[f.rel] ?? 0) < 3 {
+                out.append(f.rel)
+                if out.count >= limit { break }
+            }
+            return out
+        }
         let avg = averageFileSize(id)
         var budget = it.target - it.bytes - Int64(busy.count) * avg
         var out: [String] = []
@@ -699,6 +750,17 @@ final class Precache {
     private func reconcile(_ id: String) {
         guard var it = items[id], let plan = plans[id] else { return }
         guard it.phase != .paused, it.phase != .noSpace, it.phase != .preparing else { return }
+        if it.isFull {
+            // 整部：每个文件都有了才算下完（不按字节数：重封装以后和原文件大小差一点）；不删看过的
+            let have = cached[id] ?? []
+            let missing = plan.files.contains { !have.contains($0.rel) && (failures[id]?[$0.rel] ?? 0) < 3 }
+            if !missing, inflight[id]?.isEmpty ?? true {
+                if items[id]?.phase != .done { Perf.log("precache: download done (\(it.bytes >> 20) MB)") }
+                it.phase = .done
+            }
+            items[id] = it
+            return
+        }
         if it.bytes >= it.target {
             if id == playingID {
                 // 动态的窗口：删掉已经看过的（播放位置往前 30 秒以前的），腾出一成半再接着往后下
