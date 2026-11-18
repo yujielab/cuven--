@@ -120,3 +120,58 @@ struct DownloadRing: View {
         .animation(.easeInOut(duration: 0.4), value: progress)
     }
 }
+
+// MARK: - 下载角标（用户给的两张图：下载中一圈进度、下好了一颗灰底黑箭头的圆）
+//
+// 主页的海报封面右上角、详情页那一行信息的右端：这一部在下载时是一圈进度（暗圈 + 白色的一段，刚开始是一个白点），
+// 下好了是一颗浅灰的圆、里面一个黑色的 ↓；暂停了 / 断了是那一圈淡一点。没有下载就什么都不画
+
+struct DownloadBadge: View {
+    let path: String
+    var size: CGFloat = 22
+
+    var body: some View {
+        if let it = Downloads.shared.item(path: path) {
+            Group {
+                if it.state == .done {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: size * 0.5, weight: .bold))
+                        .foregroundStyle(.black)
+                        .frame(width: size, height: size)
+                        .background(Circle().fill(Color(white: 0.72)))
+                } else {
+                    let p = max(0.001, min(1, it.progress))
+                    ZStack {
+                        Circle().fill(Color.black.opacity(0.45))
+                        Circle().stroke(Color.white.opacity(0.22), lineWidth: size * 0.14)
+                        // 刚开始那一点也看得见：圆头的线，进度为 0 时就是一个白点
+                        Circle()
+                            .trim(from: 0, to: p)
+                            .stroke(Color.white, style: StrokeStyle(lineWidth: size * 0.14, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                    }
+                    .padding(size * 0.07)
+                    .frame(width: size, height: size)
+                    .opacity(it.state == .downloading ? 1 : 0.6)
+                    .animation(.easeInOut(duration: 0.4), value: p)
+                }
+            }
+            .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
+            .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            .accessibilityHidden(true)
+        }
+    }
+}
+
+extension View {
+    /// 卡的右上角压一颗下载角标（这一部没在下载、没下好就什么都没有）
+    func downloadBadge(_ path: String?, inset: CGFloat = 8, size: CGFloat = 22) -> some View {
+        overlay(alignment: .topTrailing) {
+            if let path {
+                DownloadBadge(path: path, size: size)
+                    .padding(inset)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+}

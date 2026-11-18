@@ -203,6 +203,7 @@ struct HomeView: View {
                         Button { resume(e) } label: {
                             DSWideLockup(art: art.url, title: e.title, subtitle: remainingLabel(e),
                                          progress: e.fraction, metrics: m, logo: art.logo)
+                                .downloadBadge(e.seriesPath == nil ? e.path : nil, inset: 10)
                         }
                         .buttonStyle(PressableStyle())
                         .accessibilityIdentifier("continue-card")
@@ -264,6 +265,7 @@ struct HomeView: View {
         let line = DetailText.line(["电影", model.year(v).map { String($0) }, genres.first, genres.dropFirst().first])
         return ZoomLink(route: .movie(v), slot: "featured") {
             FeaturedBigCard(art: art?.url, logo: art?.logo, title: model.title(v), line: line, width: w)
+                .downloadBadge(v.path, inset: 14, size: 26)
         }
         .accessibilityIdentifier("featured-card")
         .movieMenu(v)
@@ -322,6 +324,8 @@ struct HomeView: View {
             ZoomLink(route: .movie(v), slot: slot) {
                 DSPosterLockup(art: art.url, title: model.title(v), subtitle: model.year(v).map { String($0) },
                                metrics: m, width: w, logo: art.logo)
+                    // 这一部在下载 / 下好了：海报右上角一颗下载角标（用户要求）
+                    .downloadBadge(v.path)
             }
             .accessibilityIdentifier("movie-card")
             .movieMenu(v)

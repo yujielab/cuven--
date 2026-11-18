@@ -52,7 +52,8 @@ struct MovieDetailView: View {
             trailers: trailers,
             trailerArt: trailerArt(meta),
             stills: DetailText.stills(meta),
-            precache: precacheState(meta)
+            precache: precacheState(meta),
+            downloadPath: video.path
         ) { _ in
             EmptyView()
         }
@@ -641,6 +642,8 @@ struct DetailScaffold<Episodes: View>: View {
     var stills: [String] = []
     /// 弱网预先缓存（电影才有）：有就把「播放」换成「预先画面质量处理」/「立即播放」+ 圆形进度钮（PrecachePlayRow）
     var precache: DetailPrecache? = nil
+    /// 下载角标看哪一部（电影才有）：在下载 / 下好了，那一行信息的右端一颗角标
+    var downloadPath: String? = nil
     /// 分集那一段（电影没有）：拿到当前宽度的版面尺寸再排
     @ViewBuilder var episodes: (DSMetrics) -> Episodes
 
@@ -830,13 +833,20 @@ struct DetailScaffold<Episodes: View>: View {
                 }
             }
             .animation(.easeInOut(duration: 0.6), value: art)
-            if !metaLine.isEmpty {
-                Text(metaLine)
-                    .font(.subheadline)
-                    .foregroundStyle(DSInk.secondary)
-                    .lineLimit(1)
-                    // 旁白不念「黑星」和间隔号：「爱情，2024，1 小时 38 分钟，评分 7.0」
-                    .accessibilityLabel(DetailText.spoken(metaLine))
+            // 一行信息；这一部在下载 / 下好了，右端一颗下载角标（用户要求：详情页合适的角落）
+            if !metaLine.isEmpty || downloadPath != nil {
+                HStack(alignment: .center, spacing: 8) {
+                    if !metaLine.isEmpty {
+                        Text(metaLine)
+                            .font(.subheadline)
+                            .foregroundStyle(DSInk.secondary)
+                            .lineLimit(1)
+                            // 旁白不念「黑星」和间隔号：「爱情，2024，1 小时 38 分钟，评分 7.0」
+                            .accessibilityLabel(DetailText.spoken(metaLine))
+                    }
+                    Spacer(minLength: 8)
+                    if let downloadPath { DownloadBadge(path: downloadPath, size: 24) }
+                }
             }
             HStack(spacing: 12) {
                 if let precache {
