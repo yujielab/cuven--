@@ -109,8 +109,8 @@ struct MovieDetailView: View {
     }
 
     private func startPrecache(_ meta: Meta?) {
-        let r = Precache.shared.start(path: video.path, name: video.name, size: video.size, runtime: meta?.runtime,
-                                      resume: model.playback.resumePosition(video.path))
+        let r = Precache.shared.start(path: video.path, name: video.name, title: model.title(video), size: video.size,
+                                      runtime: meta?.runtime, resume: model.playback.resumePosition(video.path))
         switch r {
         case .started:
             Haptics.light()

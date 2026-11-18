@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import UserNotifications
 
 // MARK: - 弱网预先缓存（详情页「预先画面质量处理」）
 //
@@ -16,6 +17,9 @@ import UIKit
 //   系统叫醒 App 时（CuvenApp 的 backgroundTask）再排下一截；
 // · 边看边下：「立即播放」走本机的代理（PrecacheServer：只听 127.0.0.1），有的分段从本机出，没有的去 Worker 取、边转给播放器边存下；
 //   代理看到播放器要到第几段，下载就跟到那儿往后接着下；存满了（50%）就把已经看过的那几段删掉腾地方，一直往后滚（动态的窗口）；
+// · 缓存到 25%（能缓存的上限的四分之一）时发一条通知（用户要求）：「《影片名》现已可供观看，预先品质处理已经完成。」——
+//   App 开着时也弹横幅；正在放这一部时不发（人已经在看）；每部只发一次。按「预先画面质量处理」时才问通知权限（系统还没问过的话）。
+//   退到后台时先只把到 25% 的那一截排给系统：系统下完这一批就叫醒 App，通知按时发出去，再排后面的；
 // · 演示数据（UI 测试）时不下。
 
 /// 预先缓存的文件放在哪：Library/Caches/Precache/<影片>/<idh>/…（系统空间吃紧时可以清掉；不进 iCloud 备份）
@@ -201,8 +205,14 @@ final class Precache {
         var used: Double
         /// Worker 的索引编号（播放列表的目录名）：文件换了 / 引擎升级了它就变，旧的分段作废
         var idh: String?
+        /// 通知里的片名（中文名）
+        var title: String?
+        /// 25% 的那条通知发过了
+        var notified: Bool?
 
         var progress: Double { target > 0 ? min(1, Double(bytes) / Double(target)) : 0 }
+        /// 到了能看的那一截（25%）
+        var ready: Bool { target > 0 && Double(bytes) >= Double(target) * Precache.readyFraction }
     }
 
     enum StartResult: Equatable {
@@ -231,6 +241,8 @@ final class Precache {
     }
 
     static let sessionID = "us.cuven.tv.precache"
+    /// 缓存到上限的这么多就算「能看了」：发通知（用户要求 25%）
+    nonisolated static let readyFraction = 0.25
     private static let indexName = "index.json"
     private static let maxItems = 3
     private static let perItem = 3
@@ -287,10 +299,11 @@ final class Precache {
         return Double(size) * 8 / (Double(runtime) * 60) / 1_000_000
     }
 
-    /// 按了「预先画面质量处理」：算好空间就开始下（从续播的位置往后）
-    func start(path: String, name: String, size: Int64?, runtime: Int?, resume: Double?) -> StartResult {
+    /// 按了「预先画面质量处理」：算好空间就开始下（从续播的位置往后）。title：通知里的片名
+    func start(path: String, name: String, title: String, size: Int64?, runtime: Int?, resume: Double?) -> StartResult {
         guard !DemoData.enabled else { return .unavailable }
         boot()
+        PrecacheNotice.requestPermission()
         let id = PrecacheFiles.id(for: path)
         if var it = items[id] {
             if it.phase != .downloading { it.phase = .queued }
@@ -310,7 +323,7 @@ final class Precache {
         let now = Date().timeIntervalSince1970
         let from = max(0, resume ?? 0)
         items[id] = Item(id: id, path: path, name: name, size: fileSize, target: budget.target, start: from, cursor: from,
-                         phase: .preparing, created: now, used: now, idh: nil)
+                         phase: .preparing, created: now, used: now, idh: nil, title: title, notified: nil)
         try? FileManager.default.createDirectory(at: PrecacheFiles.dir(id), withIntermediateDirectories: true)
         save()
         Perf.log("precache: start (target \(budget.target >> 20) MB)")
@@ -379,9 +392,21 @@ final class Precache {
         guard items[id] != nil else { return }
         if cached[id, default: []].insert(rel).inserted {
             items[id]?.bytes += size
+            notifyIfReady(id)
             saveSoon()
         }
         reconcile(id)
+    }
+
+    /// 到了 25%：发「现已可供观看」的通知（每部一次；正在放这一部时不发，只记下发过了）
+    private func notifyIfReady(_ id: String) {
+        guard let it = items[id], it.notified != true, it.ready else { return }
+        items[id]?.notified = true
+        if playingID != id {
+            PrecacheNotice.ready(id: id, title: it.title ?? FileName.title(it.name))
+            Perf.log("precache: ready notice")
+        }
+        save()
     }
 
     // MARK: 后台
@@ -416,6 +441,7 @@ final class Precache {
         guard !started, !DemoData.enabled else { return }
         started = true
         PrecacheFiles.emptyTrash()
+        PrecacheNotice.install()
         let cfg = URLSessionConfiguration.background(withIdentifier: Self.sessionID)
         cfg.isDiscretionary = false
         cfg.sessionSendsLaunchEvents = true
@@ -655,7 +681,15 @@ final class Precache {
         let picked = networkGood ? Array(active.prefix(Self.maxItems)) : Array(active.prefix(1))
         for it in picked {
             guard let base = bases[it.id]?.url else { continue }
-            let room = Self.backgroundBatch - (inflight[it.id]?.count ?? 0)
+            var room = Self.backgroundBatch - (inflight[it.id]?.count ?? 0)
+            // 还没到 25%：这一批只排到 25%——系统下完一批才叫醒 App，这样「现已可供观看」的通知能按时发出去
+            if it.notified != true, it.target > 0 {
+                let short = Int64(Double(it.target) * Self.readyFraction) - it.bytes
+                if short > 0 {
+                    let n = Int((Double(short) / Double(max(1, averageFileSize(it.id)))).rounded(.up)) + 1
+                    room = min(room, max(1, n - (inflight[it.id]?.count ?? 0)))
+                }
+            }
             for rel in nextFiles(it.id, limit: room) { enqueue(session, id: it.id, base: base, rel: rel) }
             if items[it.id]?.phase != .downloading { items[it.id]?.phase = .downloading }
         }
@@ -702,7 +736,10 @@ final class Precache {
             return
         }
         if !failed, status == 200, size >= 0 {
-            if cached[id, default: []].insert(rel).inserted { items[id]?.bytes += size }
+            if cached[id, default: []].insert(rel).inserted {
+                items[id]?.bytes += size
+                notifyIfReady(id)
+            }
             failures[id]?[rel] = nil
             errorStreak = 0
             checkSpace()
@@ -867,5 +904,40 @@ enum PrecacheEvents {
 
     static func relayed(id: String, rel: String, size: Int64) {
         Task { @MainActor in Precache.shared.relayed(id: id, rel: rel, size: size) }
+    }
+}
+
+/// 「现已可供观看」的通知（本机通知，不经服务器）
+enum PrecacheNotice {
+    private static let presenter = PrecacheNoticePresenter()
+
+    /// App 开着时也弹横幅（不设的话前台收不到）
+    static func install() {
+        UNUserNotificationCenter.current().delegate = presenter
+    }
+
+    /// 按「预先画面质量处理」时：系统还没问过就问一次（拒绝过的不再问，通知就不发）
+    static func requestPermission() {
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let s = await center.notificationSettings()
+            guard s.authorizationStatus == .notDetermined else { return }
+            _ = try? await center.requestAuthorization(options: [.alert, .sound])
+        }
+    }
+
+    static func ready(id: String, title: String) {
+        let c = UNMutableNotificationContent()
+        c.body = "《\(title)》现已可供观看，预先品质处理已经完成。"
+        c.sound = .default
+        c.threadIdentifier = "precache"
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "precache-\(id)", content: c, trigger: nil))
+    }
+}
+
+final class PrecacheNoticePresenter: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .list, .sound])
     }
 }
