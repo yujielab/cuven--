@@ -37,7 +37,7 @@ App 上显示成五步进度。代码见 [`worker.js`](worker.js)，测试见 [`
 
 ## App 接口
 
-不需要口令。请求类的接口要带 `x-cuven-user`，值是 `encodeURIComponent(用户名)`。这个用户名要在 check.cuven.us 上真有这个账户档，核对过的缓存 7 天。
+不需要口令。请求类的接口要带 `x-cuven-user`，值是 `encodeURIComponent(用户名)`。这个用户名要在 check.cuven.us 上查得到（`/check/<用户名>` 回 `exists: true`，和 App 登录时同一个接口），核对过的缓存 7 天。
 
 | 接口 | 回包 |
 | --- | --- |

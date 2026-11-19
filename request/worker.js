@@ -824,17 +824,18 @@ function pickFor(m, id){
   return best;
 }
 
-/* ── 账户：用户名得真实存在（check.cuven.us 上有这个账户档）── */
+/* ── 账户：用户名得真实存在（check.cuven.us 上查得到）── */
 async function userOK(env, name){
   if (!name || name.length > 64 || /[\/\\\x00-\x1f]/.test(name)) return false;
   const k = 'u:' + name.toLowerCase();
   if (await kvGet(env, k)) return true;
   const c = context(env, CFG_DEF, 4);
-  const r = await xfetch(c, base(env, 'ACCOUNT_BASE', 'https://check.cuven.us') + '/file/' + encodeURIComponent('username_' + name + '.json'), {}, 10000);
+  /* 和 App 登录时同一个接口：/check/<用户名> → { exists }（老账户可能没有 username_ 账户档，不能拿它判断） */
+  const r = await xfetch(c, base(env, 'ACCOUNT_BASE', 'https://check.cuven.us') + '/check/' + encodeURIComponent(name), {}, 10000);
   if (r.status === 404) return false;
   if (!r.ok) throw err('暂时核对不了账户，稍后再试', { status: 503 });
   const j = await readJSON(r);
-  const ok = !!(j && j.username && String(j.username).toLowerCase() === name.toLowerCase());
+  const ok = !!(j && j.exists === true);
   if (ok) await kvPut(env, k, 1, 7 * DAY);
   return ok;
 }

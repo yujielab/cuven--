@@ -135,8 +135,8 @@ globalThis.fetch = async (url, init = {}) => {
   }
   /* 账户 */
   if (u.host === 'check.cuven.us'){
-    const name = decodeURIComponent(p.replace('/file/', '')).replace(/^username_|\.json$/g, '');
-    return ['alice', 'bob', '小明'].includes(name) ? J({ version: 2, username: name }) : J({ error: 'nf' }, 404);
+    const name = decodeURIComponent(p.replace('/check/', ''));
+    return J(['alice', 'bob', '小明'].includes(name) ? { exists: true, data: { username: name } } : { exists: false });
   }
   /* PikPak */
   if (u.host === 'user.mypikpak.com'){
