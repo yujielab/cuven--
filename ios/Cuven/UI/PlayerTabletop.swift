@@ -24,9 +24,10 @@ import CuvenLighting
 // （用户真机反馈过曝）；画面层中途接上时原地精确跳一下重新接上。收起时把播放器还给系统播放器。
 // 退到后台时面板这一层自动进画中画。
 //
-// 「全屏」：这一次半折里回到系统播放器（画面铺满、系统控件）；合上 / 摊平以后再半折，又是上下两块。
-// 「锁定」：除了这颗锁，面板上的按钮都变暗、点不动（放在桌上看的时候不会碰到）；再点锁解开。
-// 「画中画」：面板这一层画面进画中画，播放器收起回到 App；点画中画里的「还原」再弹回来（PlayerCoordinator）。
+// 面板：最上面一条 Touch Bar（PlayerToolbar.swift），下面液态玻璃的信息区（PlayerInfoDeck.swift：简介 / InSight / 继续观看 / 推荐）。
+// 「全屏」：这一次半折里回到系统播放器（画面铺满、系统控件），方向回到原来的规则；合上 / 摊平以后再半折，又是上下两块。
+// 「锁定屏幕」：这一页的方向锁在按下时的方向，转动设备不跟着转（CuvenPlayerViewController）；再按解开。
+// 「小窗口」：面板这一层画面进画中画，播放器收起回到 App；点画中画里的「还原」再弹回来（PlayerCoordinator）。
 
 /// 折痕：横着的（桌面）或竖着的（书本）
 enum TabletopFold {
@@ -171,6 +172,34 @@ enum TabletopPreview {
             m.subtitle = "第 2 集 · 别回头"
             m.artwork = "demo://backdrop/41"
             m.hasNext = true
+            // 下面那块的演示内容（截图里每个标签都有东西）
+            m.info = PlayerInfo(heading: "别回头",
+                                overview: "雨夜的老街上，一盏没灭的灯把三个陌生人留在了同一家面馆。谁也不肯先开口，"
+                                    + "直到墙上的钟停在了十一点十一分。",
+                                facts: ["剧情", "第 1 季", "第 2 集", "48 分钟"],
+                                badges: ["4K", "杜比视界", "杜比全景声"],
+                                cast: (1...6).map { n in
+                                    PlayerCastItem(id: "demo-\(n)", name: ["林夏", "周屿", "陈默", "许知", "宋青", "顾远"][n - 1],
+                                                   role: ["沈灯", "阿岚", "老板", "邮差", "警员", "旅人"][n - 1],
+                                                   photo: URL(string: "demo://face/\(n)"))
+                                },
+                                canGoToShow: true)
+            m.continueItems = (0..<5).map { n in
+                PlayerShelfItem(id: "demo-continue-\(n)", title: ["远山", "盐湖", "北站", "潮汐", "白夜"][n],
+                                subtitle: ["剩余 1 小时 4 分钟", "剩余 1 小时 58 分钟", "第 5 集 · 剩余 43 分钟",
+                                           "剩余 7 分钟", "第 2 集 · 剩余 20 分钟"][n],
+                                art: URL(string: "demo://backdrop/\(60 + n)"), progress: [0.3, 0.1, 0.05, 0.9, 0.5][n])
+            }
+            m.recommendations = (0..<4).map { n in
+                PlayerShelfItem(id: "demo-recommend-\(n)", title: ["Stick", "灯塔", "晚潮", "回声"][n],
+                                subtitle: ["喜剧 · 2025", "悬疑 · 2024", "剧情 · 2023", "科幻 · 2025"][n],
+                                art: URL(string: "demo://backdrop/\(80 + n)"), rating: ["7.6", "8.1", "7.2", "6.9"][n],
+                                watchKey: "demo-recommend-\(n)")
+            }
+            m.onToggleWatchlist = { [weak m] item in
+                guard let m, let key = item.watchKey else { return }
+                if m.watchlisted.contains(key) { m.watchlisted.remove(key) } else { m.watchlisted.insert(key) }
+            }
             // 不锁方向（不用 VideoHostingController）：iPad 竖着是桌面（横着的折痕），横过来是书本（竖着的折痕）
             let vc = UIHostingController(rootView: TabletopPlayerLayer(model: m))
             vc.view.backgroundColor = .black

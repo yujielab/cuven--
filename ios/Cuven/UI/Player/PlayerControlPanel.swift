@@ -3,20 +3,20 @@ import CuvenLighting
 import SwiftUI
 import UIKit
 
-// MARK: - 控制面板：四排卡片 + 底下那一层 Metal 光影
+// MARK: - 控制面板：最上面一条 Touch Bar + 下面液态玻璃的信息区，底下一层 Metal 光影
 //
-// 卡片的位置由 PlayerPanelGrid 按「离折痕多远」排：桌面时是四行，书本时转成四列（参照 Netflix 在 iPhone Duo 上
-// 「跟着你动」的控制）；换姿态时每一块从旧位置形变过去。
+// 用户要求：面板第一行改成 MacBook Touch Bar 那样的一条（PlayerToolbar.swift：可滑动、点了无缝展开，集成字幕、音轨、
+// 声音、播放 / 暂停、锁定屏幕、前进、后退、进度条、亮度、全屏、小窗口），下面参照 Apple TV 的信息面板重新设计
+// （PlayerInfoDeck.swift：简介 / InSight / 继续观看 / 推荐，液态玻璃）。桌面、书本两种姿态同一个排法（上面一条、下面一块）。
 //
-// 卡片的「面」由 CuvenLighting 的 MetalRenderer 画（深色半透明材质、画面投来的光、镜面反射、高光、边缘光，
-// 卡片之间的黑底上还有一点从画面那边漏下来的光），SwiftUI 只画上面的 SF Symbols、文字和点按区。
-// 每块卡片用 .litCard(...) 把自己在面板里的位置和形状报给渲染器（只在排版变了时报，不是每帧）；
-// 按下 / 松开由 LitTileStyle 报给渲染器，卡面和符号一起缩到 0.97、卡面略亮。
-// 光影的样子跟着影院光影的设置走（标准 / 影院 / 沉浸 + 微调），切换时渲染器在约 0.6 秒里平滑过渡。
-// 没有 Metal（或着色器没编过）时退回 SwiftUI 画的深灰卡片，样子和交互都一样。
+// Touch Bar 键的「面」由 CuvenLighting 的 MetalRenderer 画（深色半透明材质、画面投来的光、隔着折痕映过来的画面、
+// 高光、边缘光），SwiftUI 只画上面的符号、文字和点按区。每颗键用 .litCard(...) 把自己在面板里的位置和形状报给渲染器
+// （只在排版变了时报，不是每帧）；按下 / 松开由 LitTileStyle 报给渲染器，键面和符号一起缩到 0.97、键面略亮。
+// 下面那块是液态玻璃，玻璃底下透出来的是同一层光影（画面映在面板上的光）。
+// 没有 Metal（或着色器没编过）时退回 SwiftUI 画的深灰键，样子和交互都一样。
 //
-// 闲置（放着、5 秒没碰）：符号、文字和卡面（玻璃）一起淡出，画面映在面板上的光一直在、更新慢一些（省电）；
-// 碰一下面板，卡面从 92% 长回原大、符号淡入，高光跟着回来——版面本身不动。
+// 闲置（放着、5 秒没碰）：符号、文字、Touch Bar 的键（玻璃）和下面那块一起淡出，画面映在面板上的光一直在、更新慢一些
+// （省电）；碰一下面板，键从 92% 长回原大、符号淡入——版面本身不动。
 
 /// 面板里的尺寸
 enum PlayerPanelStyle {
@@ -214,14 +214,6 @@ extension View {
         modifier(LitCardModifier(id: id, emphasis: emphasis, lit: lit, radius: radius, group: group, active: active))
     }
 
-    /// 锁定时：变暗、点不动
-    func playerLockable(_ locked: Bool) -> some View {
-        self
-            .opacity(locked ? 0.3 : 1)
-            .allowsHitTesting(!locked)
-            .disabled(locked)
-            .animation(.snappy(duration: 0.26), value: locked)
-    }
 }
 
 /// 没有 Metal 时的卡面：深灰圆角块 + 一圈很淡的边
@@ -294,8 +286,6 @@ struct PlayerControlPanel: View {
     let geometry: LightingGeometry
     /// 卡片区在整片控制面里的边距（光铺满整片，卡片排在里面）
     var content = EdgeInsets()
-    /// 折痕在面板的哪一边（桌面：上边；书本：旁边）——格子跟着转
-    var foldEdge: PanelFoldEdge = .top
     var options = PlayerLightingOptions()
     var onDiagnostics: ((LightingDiagnostics) -> Void)?
     var onPalette: ((SampledPalette) -> Void)?
@@ -307,8 +297,9 @@ struct PlayerControlPanel: View {
         GeometryReader { geo in
             let inner = CGSize(width: max(0, geo.size.width - content.leading - content.trailing),
                                height: max(0, geo.size.height - content.top - content.bottom))
-            let grid = PlayerPanelGrid(size: inner, foldEdge: foldEdge, tools: PlayerToolTile.tools(for: model))
-            let columns = grid.isColumns
+            // Touch Bar 的高：面板高的 17%，52…64 点；下面那块拿剩下的（太矮就不放，只留 Touch Bar）
+            let barHeight = min(64, max(52, (inner.height * 0.17).rounded()))
+            let deckHeight = inner.height - barHeight - 18
             let shown = model.controlsVisible
             ZStack(alignment: .topLeading) {
                 if host.isAvailable {
@@ -318,42 +309,22 @@ struct PlayerControlPanel: View {
                 } else {
                     Color.black
                 }
-                ZStack(alignment: .topLeading) {
-                    place(grid, .close) { PlayerCloseTile(model: model) }
-                    place(grid, .title) { PlayerTitleCard(model: model, vertical: columns) }
-                    place(grid, .pip) { PlayerPiPTile(model: model) }
-                    place(grid, .lock) { PlayerLockTile(model: model) }
-                    place(grid, .back) { PlayerTransportTile(model: model, kind: .back) }
-                    place(grid, .play) { PlayerTransportTile(model: model, kind: .play) }
-                    place(grid, .forward) { PlayerTransportTile(model: model, kind: .forward) }
-                    place(grid, .timeline) {
-                        PlaybackTimeline(model: model, vertical: columns)
-                            .litCard("timeline", emphasis: 0.25)
-                            .playerLockable(model.locked)
-                    }
-                    // 第四排和亮度 / 音量那一条互相形变：卡片在渲染器里融成一条、再分开，符号淡入淡出
-                    if model.tray == nil {
-                        ForEach(PlayerToolTile.tools(for: model), id: \.self) { t in
-                            // 只淡入淡出：卡面的收拢、融合在渲染器里做（缩放会以整片面板为中心，块会跑偏）
-                            place(grid, t) { PlayerToolTile(model: model, tile: t) }
-                                .transition(.opacity)
-                        }
-                    }
-                    if let kind = model.tray {
-                        place(grid, .tray) {
-                            PlayerTray(model: model, kind: kind, vertical: columns)
-                                .playerLockable(model.locked)
-                        }
-                        .id(kind)
-                        .transition(.opacity)
+                // 系统音量要经过一个 MPVolumeView 设（Touch Bar 的音量滑杆）；它在屏上时系统的音量提示也不弹
+                HiddenVolumeView()
+                    .frame(width: 2, height: 2)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 18) {
+                    PlayerTouchBar(model: model, height: barHeight)
+                    if deckHeight >= 120 {
+                        PlayerInfoDeck(model: model)
+                            .frame(height: deckHeight, alignment: .top)
                     }
                 }
-                .frame(width: inner.width, height: inner.height, alignment: .topLeading)
-                .animation(.spring(response: 0.42, dampingFraction: 0.88), value: model.tray)
-                .animation(reduceMotion ? nil : .spring(response: 0.5, dampingFraction: 0.86), value: grid)
+                .frame(width: inner.width, height: inner.height, alignment: .top)
                 .padding(content)
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
-                // 符号和文字：淡出时略往下沉，回来时从下面一点淡入、升回原位（卡面由渲染器收拢、淡出）
+                // 符号、文字、玻璃：淡出时略往下沉，回来时从下面一点淡入、升回原位（键面由渲染器收拢、淡出）
                 .opacity(shown ? 1 : 0)
                 .offset(y: shown || reduceMotion ? 0 : 6)
                 .allowsHitTesting(shown)
@@ -386,8 +357,7 @@ struct PlayerControlPanel: View {
         .onChange(of: player.map(ObjectIdentifier.init), initial: true) { _, _ in host.attach(player: player) }
         .onChange(of: model.controlsVisible, initial: true) { _, visible in host.setIdle(!visible) }
         .task(id: model.artwork) {
-            // 剧照小一点就够（光影只取 256 × 144）
-            // 剧照的地址可能是 TMDB 的相对路径（「/xxx.jpg」）、完整地址或演示数据的 demo://
+            // 剧照的地址可能是 TMDB 的相对路径（「/xxx.jpg」）、完整地址或演示数据的 demo://；小一点就够（光影只取 256 × 144）
             guard let url = TMDBImage.url(model.artwork, "w300") else { host.setStill(nil); return }
             let image = await ImagePipeline.shared.image(url, maxPixel: 480)
             guard !Task.isCancelled else { return }
@@ -395,77 +365,8 @@ struct PlayerControlPanel: View {
         }
     }
 
-    /// 把一块放到格子给它的位置上（格子里没有这一块就不放）
-    @ViewBuilder
-    private func place<V: View>(_ grid: PlayerPanelGrid, _ tile: PlayerTile, @ViewBuilder _ view: () -> V) -> some View {
-        if let r = grid.frame(tile) {
-            view()
-                .frame(width: r.width, height: r.height)
-                .position(x: r.midX, y: r.midY)
-        }
-    }
-
     private struct FoldKey: Equatable {
         var simulated: Double?
         var hardware: Double?
-    }
-}
-
-// MARK: 第二排：后退 10 秒 | 播放 / 暂停 | 前进 10 秒（三块一样大的方块，参照图；中间那块反射最强）
-
-struct PlayerTransportTile: View {
-    enum Kind { case back, play, forward }
-
-    let model: CuvenPlayerViewModel
-    let kind: Kind
-
-    var body: some View {
-        GeometryReader { geo in
-            let side = min(geo.size.width, geo.size.height)
-            Button(action: action) {
-                switch kind {
-                case .back:
-                    PlayerIcon("gobackward.10", size: min(40, (side * 0.32).rounded()), weight: .light)
-                case .forward:
-                    PlayerIcon("goforward.10", size: min(40, (side * 0.32).rounded()), weight: .light)
-                case .play:
-                    PlayerIcon(model.playing ? "pause.fill" : "play.fill", size: min(46, (side * 0.36).rounded()), weight: .bold)
-                        .contentTransition(.symbolEffect(.replace.magic(fallback: .replace)))
-                        .animation(.spring(response: 0.36, dampingFraction: 0.86), value: model.playing)
-                }
-            }
-            .buttonStyle(LitTileStyle(id: id))
-            .frame(width: geo.size.width, height: geo.size.height)
-        }
-        .litCard(id, emphasis: kind == .play ? 1 : 0.6)
-        .accessibilityLabel(label)
-        .accessibilityIdentifier(identifier)
-        .playerLockable(model.locked)
-    }
-
-    private var id: String {
-        switch kind {
-        case .back: "back"
-        case .play: "play"
-        case .forward: "forward"
-        }
-    }
-
-    private var identifier: String { "player-\(id)" }
-
-    private var label: String {
-        switch kind {
-        case .back: "后退 10 秒"
-        case .play: model.playing ? "暂停" : "播放"
-        case .forward: "前进 10 秒"
-        }
-    }
-
-    private func action() {
-        switch kind {
-        case .back: model.skip(-10)
-        case .play: model.togglePlay()
-        case .forward: model.skip(10)
-        }
     }
 }

@@ -349,42 +349,17 @@ struct HomeView: View {
         }
     }
 
-    /// 继续观看的画面：电影按片库里的那一部取（Apple TV 无字背景 + 字标优先：AppModel.wideLockupArt）；
-    /// 剧集用这部剧的剧照 + 字标（集的剧照上认不出是哪一部）；都找不到就用存进度时记下的那张
+    /// 继续观看的画面、剩余时间、接着放：和半折面板下面那块同一套（PlayerPanelData、PlayerCoordinator.resume）
     private func continueArt(_ e: WatchEntry) -> (url: URL?, logo: URL?) {
-        if let sp = e.seriesPath, let s = model.series.first(where: { $0.path == sp }) { return model.seriesWideArt(s) }
-        if e.seriesPath == nil, let v = model.video(path: e.path) { return model.wideLockupArt(v) }
-        return (TMDBImage.url(e.artwork, "w780"), nil)
+        PlayerPanelData.continueArt(e, model: model)
     }
 
-    /// 「第 3 集 · 剩余 22 分钟」/「剩余 1 小时 20 分钟」（和分集卡上同一个说法）
     private func remainingLabel(_ e: WatchEntry) -> String {
-        let seconds = e.remaining.isFinite ? e.remaining : 0
-        let left = "剩余 " + Format.runtime(max(1, Int((seconds / 60).rounded(.up))))
-        if e.seriesPath != nil, let s = e.subtitle, !s.isEmpty { return s + " · " + left }
-        return left
+        PlayerPanelData.remainingLabel(e)
     }
 
     private func resume(_ e: WatchEntry) {
-        if let sp = e.seriesPath, model.series.contains(where: { $0.path == sp }) {
-            // 剧集：接着放这一集，后面的几集排进队列
-            Task {
-                let files = (try? await APIClient.shared.episodes(seriesPath: sp)) ?? []
-                let sorted = files.sorted { ($0.ep ?? 0) < ($1.ep ?? 0) }
-                let idx = sorted.firstIndex { $0.path == e.path }
-                let queue = idx.map { Array(sorted[($0 + 1)...]) } ?? []
-                let title = e.title
-                PlayerCoordinator.shared.play(PlayRequest(path: e.path, name: e.name, title: title, subtitle: e.subtitle, artwork: e.artwork,
-                                                          seriesPath: sp, episode: e.episode,
-                                                          queue: queue.map { f in
-                                                              PlayRequest(path: f.path, name: f.name, title: title,
-                                                                          subtitle: f.ep.map { "第 \($0) 集" }, artwork: e.artwork,
-                                                                          seriesPath: sp, episode: f.ep)
-                                                          }), model: model)
-            }
-        } else {
-            PlayerCoordinator.shared.play(PlayRequest(path: e.path, name: e.name, title: e.title, subtitle: e.subtitle, artwork: e.artwork), model: model)
-        }
+        PlayerCoordinator.shared.resume(e, model: model)
     }
 }
 

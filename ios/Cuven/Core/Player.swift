@@ -41,12 +41,35 @@ final class CuvenPlayerViewController: AVPlayerViewController {
     /// iPhone Duo 半折（横着的折痕）时：上面画面、下面控制面板（用户要求；UI/PlayerTabletop.swift）
     private(set) lazy var tabletop = TabletopPlayerHost()
 
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { orientation.mask }
+    /// 半折面板上的「锁定屏幕」：锁在按下时的方向，转动设备不跟着转（用户要求）。解开、点「全屏」、合上 / 摊平时回到原来的规则
+    private var lockedOrientation: UIInterfaceOrientation? {
+        didSet { if lockedOrientation != oldValue { setNeedsUpdateOfSupportedInterfaceOrientations() } }
+    }
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        if let o = lockedOrientation, let m = Self.mask(o) { return m }
+        return orientation.mask
+    }
     override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { orientation.preferred }
+
+    private static func mask(_ o: UIInterfaceOrientation) -> UIInterfaceOrientationMask? {
+        switch o {
+        case .portrait: .portrait
+        case .portraitUpsideDown: .portraitUpsideDown
+        case .landscapeLeft: .landscapeLeft
+        case .landscapeRight: .landscapeRight
+        default: nil
+        }
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         tabletop.install(in: self) { on in plog("tabletop \(on ? "on" : "off")") }
+        tabletop.model.onOrientationLock = { [weak self] on in
+            guard let self else { return }
+            self.lockedOrientation = on ? self.view.window?.windowScene?.effectiveGeometry.interfaceOrientation : nil
+            plog("orientation lock \(on ? "on" : "off")")
+        }
     }
 
     /// 片源挂上来：半折时画面交给面板那一层（这一层不接），别的时候照常
@@ -152,9 +175,74 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         }
         // 加载画面盖上（播完接下一集也盖：同一个样子）
         PlayerLoadingOverlay.shared.show(title: coverTitle(req))
-        // 半折时的控制面板：片名卡、「下一集」跟着换
+        // 半折时的控制面板：片名、「下一集」、下面那块（简介 / InSight / 继续观看 / 推荐）跟着换
         controller?.tabletop.show(req)
+        configurePanel(req)
         Task { await start(req, token: token) }
+    }
+
+    /// 半折面板下面那块的内容和按钮（PlayerPanelData）：简介、演员、继续观看、推荐；剧集的分集标题和简介晚一点补上
+    private func configurePanel(_ req: PlayRequest) {
+        guard let vm = controller?.tabletop.model, let model else { return }
+        let info = PlayerPanelData.info(for: req, model: model)
+        vm.info = info
+        vm.continueItems = PlayerPanelData.continueItems(excluding: req, model: model)
+        vm.recommendations = PlayerPanelData.recommendations(for: req, model: model)
+        vm.watchlisted = Set(model.watchlist.items.map(\.key))
+        vm.deckTab = .about
+        let route = PlayerPanelData.route(for: req, model: model)
+        vm.onGoToShow = { [weak self, weak model] in
+            guard let route else { return }
+            self?.goToShow(route, model: model)
+        }
+        vm.onPlayItem = { [weak self, weak model] item in
+            guard let self, let model, let e = model.playback.entry(item.id) else { return }
+            plog("panel continue watching")
+            self.resume(e, model: model)
+        }
+        vm.onToggleWatchlist = { [weak model, weak vm] item in
+            guard let model, let key = item.watchKey else { return }
+            model.watchlist.toggle(key, kind: .movie)
+            vm?.watchlisted = Set(model.watchlist.items.map(\.key))
+        }
+        let token = loadToken
+        Task { [weak self, weak model] in
+            guard let model, let better = await PlayerPanelData.refine(info, for: req, model: model) else { return }
+            guard let self, self.loadToken == token else { return }
+            self.controller?.tabletop.model.info = better
+        }
+    }
+
+    /// 「前往节目」：收起播放器，推进这一部的详情页
+    private func goToShow(_ route: Route, model: AppModel?) {
+        plog("go to show")
+        if let vc = controller, vc.presentingViewController != nil {
+            vc.dismiss(animated: true) { model?.openRequest = route }
+        } else {
+            model?.openRequest = route
+        }
+    }
+
+    /// 接着放「继续观看」里的一部（主页那一排、半折面板下面那块都用）：剧集接着放这一集，后面的几集排进队列
+    func resume(_ e: WatchEntry, model: AppModel) {
+        if let sp = e.seriesPath, model.series.contains(where: { $0.path == sp }) {
+            Task {
+                let files = (try? await APIClient.shared.episodes(seriesPath: sp)) ?? []
+                let sorted = files.sorted { ($0.ep ?? 0) < ($1.ep ?? 0) }
+                let idx = sorted.firstIndex { $0.path == e.path }
+                let queue = idx.map { Array(sorted[($0 + 1)...]) } ?? []
+                let title = e.title
+                play(PlayRequest(path: e.path, name: e.name, title: title, subtitle: e.subtitle, artwork: e.artwork,
+                                 seriesPath: sp, episode: e.episode,
+                                 queue: queue.map { f in
+                                     PlayRequest(path: f.path, name: f.name, title: title,
+                                                 subtitle: f.ep.map { "第 \($0) 集" }, artwork: e.artwork,
+                                                 seriesPath: sp, episode: f.ep)
+                                 }), model: model)
+            }
+        } else {
+            play(PlayRequest(path: e.path, name: e.name, title: e.title, subtitle: e.subtitle, artwork: e.artwork), model: model)
+        }
     }
 
     private func start(_ req: PlayRequest, token: Int) async {
@@ -255,6 +343,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         if player == nil || (controller?.presentingViewController == nil && !inPiP) {
             presentPlayer(req)                       // 兜底：没弹出来（比如当时找不到能弹的页面）就现在弹
             controller?.tabletop.show(req)
+            configurePanel(req)
         }
         guard let p = player else { return }
         // 本机代理的地址只在这台手机上有效：这时不投屏到别的设备（AirPlay 那头取不到 127.0.0.1）

@@ -76,7 +76,7 @@ final class DuoUnfoldedTests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
-    /// 半折的播放面板（PlayerTabletop.swift）：桌面——上面画面、下面控制；横过来是书本——右页画面、左页控制（四列）。
+    /// 半折的播放面板（PlayerTabletop.swift）：上面画面、下面一条 Touch Bar + 液态玻璃的信息区；横过来是书本（右页画面、左页控制）。
     /// 模拟器折不了、演示数据也放不了片，所以用 -CuvenTabletop YES 弹一个假的播放页，折痕固定在屏正中。
     /// 截 duo-38*（iPad 上是 duo-48*）；外屏大小不截
     func testTabletopPanel() {
@@ -93,32 +93,57 @@ final class DuoUnfoldedTests: XCTestCase {
         let size = report(app, "tabletop")
         guard size.width > 500, size.height > size.width else { return }
         snap("duo-38-tabletop")
-        // 锁定：别的按钮都变暗、点不动，锁那一块亮起来
-        if let f = app.onScreenFrames(["player-lock"]).first {
-            app.tap(at: CGPoint(x: f.midX, y: f.midY)); sleep(1)
+        // 锁定屏幕方向：那一颗亮起来（白底黑锁）
+        if tapID(app, "player-lock") {
             snap("duo-38b-tabletop-locked")
-            app.tap(at: CGPoint(x: f.midX, y: f.midY)); sleep(1)
+            tapID(app, "player-lock")
         }
-        // 亮度：第四排融成一条滑杆
-        if let f = app.onScreenFrames(["player-brightness"]).first {
-            app.tap(at: CGPoint(x: f.midX, y: f.midY)); sleep(1)
-            snap("duo-38c-tabletop-brightness")
+        // 亮度：这颗键长成一整条滑杆，⊗ 收起
+        if tapID(app, "player-brightness") {
+            snap("duo-38c-touchbar-brightness")
+            tapID(app, "player-close")
         }
-        // 书本：横过来，折痕变成竖的——左页控制、右页画面，卡片转成四列（亮度那一条也竖过来）
+        // ‹：展开整条控制条；字幕展开成一排选项；⊗ 一层层收回
+        if tapID(app, "player-more") {
+            snap("duo-38f-touchbar-strip")
+            if tapID(app, "player-subtitles") {
+                snap("duo-38g-touchbar-subtitles")
+                tapID(app, "player-close")
+            }
+            tapID(app, "player-close")
+        }
+        // 下面那块的几个标签
+        for (tab, tag) in [("insight", "h"), ("continueWatching", "i"), ("recommend", "j")] {
+            if tapID(app, "deck-tab-\(tab)") { snap("duo-38\(tag)-deck-\(tab)") }
+        }
+        tapID(app, "deck-tab-about")
+        // 书本：横过来，折痕变成竖的——左页控制、右页画面
         XCUIDevice.shared.orientation = .landscapeLeft
         sleep(3)
         let wide = report(app, "book")
         if wide.width > wide.height {
-            snap("duo-38d-book-brightness")
-            if let f = app.onScreenFrames(["player-tray-close"]).first {
-                app.tap(at: CGPoint(x: f.midX, y: f.midY)); sleep(1)
-            }
             snap("duo-38e-book")
+            if tapID(app, "player-more") {
+                snap("duo-38d-book-strip")
+                tapID(app, "player-close")
+            }
         } else {
             print("DUO book: did not rotate")
         }
         XCUIDevice.shared.orientation = .portrait
         sleep(1)
+    }
+
+    /// 点屏上标识为 id 的那个元素正中（找不到就记一笔、返回 false）
+    @discardableResult
+    private func tapID(_ app: XCUIApplication, _ id: String) -> Bool {
+        guard let f = app.onScreenFrames([id]).first else {
+            print("DUO tabletop: \(id) not on screen")
+            return false
+        }
+        app.tap(at: CGPoint(x: f.midX, y: f.midY))
+        sleep(1)
+        return true
     }
 
     /// 光影实验室（PlayerLab.swift）：放内置的测试画面，四段场景各截一张，看卡片上的光跟着画面变（火是暖的、海是冷的、

@@ -1,16 +1,17 @@
 import AVFoundation
 import AVKit
 import CuvenLighting
+import MediaPlayer
 import SwiftUI
 import UIKit
 
 // MARK: - 播放面板的状态（MVVM 的 ViewModel）
 //
 // 半折播放器（PlayerTabletop.swift）和光影实验室（PlayerLab.swift）共用：
-//   · 正在放什么：片名、第几集、画面、后面还有没有下一集；
-//   · 播放状态：放着没有、位置、时长、速度——面板出来时每 0.25 秒跟播放器对一次（只有值变了才写，SwiftUI 不会每帧刷新）；
-//   · 面板自己的状态：锁定、第四行展开的滑杆、拖进度条、闲置时符号淡出；
-//   · 画中画、截取画面、铰链角度（iOS 27.1 的 onHingeChange 喂进来）。光影的模式和微调在 CinematicLightingSettings。
+//   · 正在放什么：片名、第几集、画面、后面还有没有下一集，下面那块（简介 / InSight / 继续观看 / 推荐）的内容；
+//   · 播放状态：放着没有、位置、时长、音量——面板出来时每 0.25 秒跟播放器对一次（只有值变了才写，SwiftUI 不会每帧刷新）；
+//   · 面板自己的状态：Touch Bar 现在展开成哪一样、屏幕方向锁、拖进度条、闲置时淡出；
+//   · 画中画、铰链角度（iOS 27.1 的 onHingeChange 喂进来）。光影的模式和微调在 CinematicLightingSettings。
 // 光影引擎本身（CuvenLighting 框架）不在这里：面板把播放器、卡片位置、设置交给它，它自己按显示刷新率画。
 
 @MainActor
@@ -40,16 +41,21 @@ final class CuvenPlayerViewModel {
     private(set) var rate: Float = 1
     /// 拖着进度条时指着的位置（松手才跳过去）
     var scrub: Double?
-    var locked = false
-    /// 第四行展开成一条滑杆：亮度 / 音量
-    var tray: Tray?
+    /// 「锁定屏幕」：这一页的方向锁在按下时的方向，转动设备不跟着转（用户要求）
+    private(set) var orientationLocked = false
+    /// Touch Bar 现在是哪一样（默认是播放那一排；展开成控制条、滑杆、进度条、字幕 / 音轨的选项）
+    private(set) var bar: TouchBarMode = .media
+    /// 展开的东西收起时回到哪一样
+    @ObservationIgnored private var barReturn: TouchBarMode = .media
     var brightness: Double = 0.5
+    /// 系统音量（和侧边的音量键同一个）
+    private(set) var volume: Double = 0.5
     private(set) var audioNames: [String] = []
     private(set) var subtitleNames: [String] = []
     private(set) var audioPick = -1
     /// -1：字幕关着
     private(set) var subtitlePick = -1
-    /// 闲置 5 秒（放着、没锁、没在拖、没展开滑杆）：符号淡出，卡片上的光照常
+    /// 闲置 5 秒（放着、没在拖、Touch Bar 没展开滑杆 / 选项）：符号和卡片淡出，面板上画面的光照常
     private(set) var controlsVisible = true
     private(set) var pipPossible = false
     private(set) var pipActive = false
@@ -57,9 +63,13 @@ final class CuvenPlayerViewModel {
     /// 铰链读数（度）：系统报了才有
     var hardwareFold: Double?
 
-    enum Tray { case brightness, volume }
-
-    static let rates: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 2]
+    // Touch Bar 下面那块（PlayerInfoDeck）：PlayerCoordinator 每开始一集写一次
+    var info = PlayerInfo()
+    var continueItems: [PlayerShelfItem] = []
+    var recommendations: [PlayerShelfItem] = []
+    /// 想看里有的（推荐卡上「＋ 想看」/「已在想看」）
+    var watchlisted: Set<String> = []
+    var deckTab: PlayerDeckTab = .about
 
     @ObservationIgnored weak var player: AVPlayer?
     @ObservationIgnored var onClose: (() -> Void)?
@@ -69,6 +79,12 @@ final class CuvenPlayerViewModel {
     @ObservationIgnored var onPiPWillStart: (() -> Void)?
     @ObservationIgnored var onPiPDidStop: (() -> Void)?
     @ObservationIgnored var onPiPRestore: ((@escaping (Bool) -> Void) -> Void)?
+    /// 「锁定屏幕」：锁 / 解开这一页的方向（CuvenPlayerViewController 接着）
+    @ObservationIgnored var onOrientationLock: ((Bool) -> Void)?
+    /// 下面那块的按钮：前往节目、放继续观看里的一部、加进 / 移出想看
+    @ObservationIgnored var onGoToShow: (() -> Void)?
+    @ObservationIgnored var onPlayItem: ((PlayerShelfItem) -> Void)?
+    @ObservationIgnored var onToggleWatchlist: ((PlayerShelfItem) -> Void)?
     /// 截图用（DEBUG 的 -CuvenTabletop）：不接播放器，按钮只改面板上的样子
     @ObservationIgnored var preview = false
     /// 设置页里的预览：符号一直显示（不进闲置）
@@ -84,6 +100,7 @@ final class CuvenPlayerViewModel {
     @ObservationIgnored private weak var timePlayer: AVPlayer?
     @ObservationIgnored private var statusObservation: NSKeyValueObservation?
     @ObservationIgnored private var itemObservation: NSKeyValueObservation?
+    @ObservationIgnored private var volumeObservation: NSKeyValueObservation?
     @ObservationIgnored private var audioGroup: AVMediaSelectionGroup?
     @ObservationIgnored private var legibleGroup: AVMediaSelectionGroup?
     @ObservationIgnored private var audioOptions: [AVMediaSelectionOption] = []
@@ -100,7 +117,9 @@ final class CuvenPlayerViewModel {
         update()
     }
 
+    /// 「全屏」：退出半折的版面回到系统播放器全屏，方向回到原来的规则（解开这里的方向锁）
     func goFullscreen() {
+        setOrientationLock(false)
         fullscreen = true
         update()
     }
@@ -120,8 +139,9 @@ final class CuvenPlayerViewModel {
         let now = standalone || (fold != nil && !fullscreen)
         guard now != active else { return }
         active = now
-        tray = nil
-        locked = false
+        bar = .media
+        barReturn = .media
+        if !now { setOrientationLock(false) }
         scrub = nil
         controlsVisible = true
         if now { bind(); poke() } else { unbind(); idleTask?.cancel() }
@@ -132,6 +152,14 @@ final class CuvenPlayerViewModel {
 
     private func bind() {
         brightness = Double(Self.screen?.brightness ?? 0.5)
+        volume = SystemVolume.current
+        volumeObservation = AVAudioSession.sharedInstance().observe(\.outputVolume, options: [.new]) { [weak self] s, _ in
+            let v = Double(s.outputVolume)
+            Task { @MainActor [weak self] in
+                guard let self, abs(self.volume - v) > 0.001 else { return }
+                self.volume = v
+            }
+        }
         if preview {
             playing = true
             duration = 2_700
@@ -170,6 +198,8 @@ final class CuvenPlayerViewModel {
     }
 
     private func unbind() {
+        volumeObservation?.invalidate()
+        volumeObservation = nil
         if let t = timeToken { timePlayer?.removeTimeObserver(t) }
         timeToken = nil
         timePlayer = nil
@@ -234,8 +264,11 @@ final class CuvenPlayerViewModel {
         idleTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(5))
             guard let self, !Task.isCancelled else { return }
-            if self.playing, !self.locked, self.tray == nil, self.scrub == nil, !self.settingsOpen {
+            if self.playing, self.scrub == nil, !self.settingsOpen, !self.bar.holdsAttention {
                 self.controlsVisible = false
+                // 再叫回来时是播放那一排
+                self.bar = .media
+                self.barReturn = .media
             }
         }
     }
@@ -269,18 +302,25 @@ final class CuvenPlayerViewModel {
         p.seek(to: CMTime(seconds: x, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
-    func setRate(_ r: Float) {
-        rate = r
+    /// 「从头开始」
+    func restart() {
+        Haptics.light()
         poke()
-        guard !preview, let p = player else { return }
-        // defaultRate：之后每次 play() 都用这个速度（暂停时改了，接着放也是它）
-        p.defaultRate = r
-        if p.timeControlStatus != .paused { p.rate = r }
+        seek(to: 0)
+        if preview { playing = true; return }
+        player?.play()
     }
 
     func setBrightness(_ v: Double) {
-        brightness = v
-        Self.screen?.brightness = CGFloat(v)
+        let x = min(max(v, 0), 1)
+        brightness = x
+        Self.screen?.brightness = CGFloat(x)
+    }
+
+    func setVolume(_ v: Double) {
+        let x = min(max(v, 0), 1)
+        volume = x
+        if !preview { SystemVolume.set(x) }
     }
 
     func selectAudio(_ i: Int) {
@@ -301,17 +341,46 @@ final class CuvenPlayerViewModel {
         syncPicks()
     }
 
-    func toggleLock() {
+    /// 「锁定屏幕」：方向锁在现在这个方向（再按解开）
+    func toggleOrientationLock() {
         Haptics.light()
-        locked.toggle()
-        tray = nil
+        setOrientationLock(!orientationLocked)
         poke()
     }
 
-    func toggleTray(_ t: Tray) {
+    private func setOrientationLock(_ on: Bool) {
+        guard on != orientationLocked else { return }
+        orientationLocked = on
+        onOrientationLock?(on)
+    }
+
+    // MARK: Touch Bar
+
+    /// 展开一样（控制条、滑杆、进度条、字幕 / 音轨的选项）；从播放那一排或控制条展开的，收起时回到那里
+    func openBar(_ m: TouchBarMode) {
+        guard m != bar else { return }
+        if bar == .media || bar == .strip { barReturn = bar }
+        if m == .slider(.brightness) { brightness = Double(Self.screen?.brightness ?? CGFloat(brightness)) }
+        if m == .slider(.volume) { volume = SystemVolume.current }
         Haptics.selection()
-        if t == .brightness { brightness = Double(Self.screen?.brightness ?? CGFloat(brightness)) }
-        tray = tray == t ? nil : t
+        bar = m
+        poke()
+    }
+
+    /// ⊗：收起（控制条回到播放那一排；别的回到展开它的那一样）
+    func closeBar() {
+        Haptics.selection()
+        bar = bar == .strip ? .media : barReturn
+        if bar != .strip { barReturn = .media }
+        poke()
+    }
+
+    // MARK: 下面那块
+
+    func selectDeckTab(_ t: PlayerDeckTab) {
+        guard t != deckTab else { return }
+        Haptics.selection()
+        deckTab = t
         poke()
     }
 
@@ -342,4 +411,60 @@ final class CuvenPlayerViewModel {
     }
 
     private static var screen: UIScreen? { VideoOrientation.activeScene?.screen }
+}
+
+/// Touch Bar 的几种样子（PlayerTouchBar）
+enum TouchBarMode: Equatable {
+    /// 播放那一排：关闭 | 后退、播放 / 暂停、前进 | 进度条 | ‹ 收起的控制条
+    case media
+    /// 控制条展开：⊗ | 字幕、音轨 | 亮度、音量 | 小窗口、全屏、锁定
+    case strip
+    /// 亮度 / 音量展开成一条滑杆
+    case slider(Slider)
+    /// 进度条展开成整条
+    case scrub
+    /// 字幕 / 音轨展开成一排选项
+    case choices(Choice)
+
+    enum Slider: Equatable { case brightness, volume }
+    enum Choice: Equatable { case subtitles, audio }
+
+    /// 正在调的：不进闲置
+    var holdsAttention: Bool {
+        switch self {
+        case .media, .strip: false
+        case .slider, .scrub, .choices: true
+        }
+    }
+}
+
+/// 系统音量：读 AVAudioSession 的 outputVolume；设只能经过一个 MPVolumeView（面板里藏着一个，见 HiddenVolumeView）
+@MainActor
+enum SystemVolume {
+    private static weak var view: MPVolumeView?
+
+    static var current: Double { Double(AVAudioSession.sharedInstance().outputVolume) }
+
+    static func register(_ v: MPVolumeView) { view = v }
+
+    static func set(_ x: Double) {
+        guard let slider = view?.subviews.compactMap({ $0 as? UISlider }).first else { return }
+        slider.setValue(Float(x), animated: false)
+        slider.sendActions(for: .valueChanged)
+    }
+}
+
+/// 面板里藏着的那个 MPVolumeView：系统音量要经过它设；它在屏上时系统的音量提示也不弹出来
+struct HiddenVolumeView: UIViewRepresentable {
+    func makeUIView(context: Context) -> MPVolumeView {
+        let v = MPVolumeView(frame: CGRect(x: 0, y: 0, width: 2, height: 2))
+        v.alpha = 0.011
+        v.isUserInteractionEnabled = false
+        SystemVolume.register(v)
+        return v
+    }
+
+    func updateUIView(_ v: MPVolumeView, context: Context) {
+        SystemVolume.register(v)
+    }
 }

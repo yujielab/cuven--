@@ -7,15 +7,26 @@ import UIKit
 // MARK: - Cuven 播放器：画面 + 控制面板（面板的卡片由画面打光）
 //
 // 跟着设备的姿态走（参照 Netflix 在 iPhone Duo 上的播放器：全屏、书本、桌面几种摆法，控制始终够得着），同一套面板：
-//   · tabletop(折痕)：半折立在桌上（横着的折痕）——折痕上面是画面，下面是控制面，卡片排成四行；
-//   · book(折痕)：横拿半折像一本书（竖着的折痕）——右页是画面，左页是控制面（Netflix 样机的摆法），
-//     同一套卡片转成四列，离折痕最近的一列是关闭 / 信息卡 / 画中画 / 锁定，进度条竖着走；
+//   · tabletop(折痕)：半折立在桌上（横着的折痕）——折痕上面是画面，下面是控制面（上面一条 Touch Bar、下面信息区）；
+//   · book(折痕)：横拿半折像一本书（竖着的折痕）——右页是画面，左页是控制面（Netflix 样机的摆法），同一个排法；
 //     这两种按半折的几何算光：画面立在面板旁边，默认 105°，系统报了铰链角度就用真的（画面映在面板上的样子跟着变）；
 //   · stacked / sideBySide：实验室、设置页预览里竖着 / 横着的普通屏，按半折立着的 115° 模拟（横着时和书本一样左控右画）。
-// 「全屏」回到系统播放器（画面铺满、系统控件）。
+// 「全屏」回到系统播放器（画面铺满、系统控件），方向回到原来的规则。
 // 控制面那一块是整片的（满宽、从折痕一直到屏幕边），光铺在整片上、四边都羽化，不会有硬边界；
 // 卡片排在里面，留出安全区和 8 点边距。换姿态、转屏时卡片在渲染器里用弹簧从旧位置形变到新位置。
 // 画面由 AVPlayerLayer 画（硬件解码、HDR、画中画都是系统的）；同一个 AVPlayer 另由光影引擎取小帧分析。
+
+/// 折痕在控制面的哪一边
+enum PanelFoldEdge: Equatable {
+    /// 桌面：画面在上
+    case top
+    /// 书本：画面在右页，面板在左页（Netflix 样机的摆法）
+    case trailing
+    /// 书本：画面在左页，面板在右页
+    case leading
+
+    var isColumns: Bool { self != .top }
+}
 
 enum CuvenPlayerLayout: Equatable {
     case tabletop(CGRect)
@@ -53,7 +64,7 @@ struct CuvenPlayerView: View {
                         .offset(x: parts.video.minX, y: parts.video.minY)
                         .accessibilityHidden(true)
                     PlayerControlPanel(model: model, player: player, geometry: parts.lighting, content: parts.content,
-                                       foldEdge: parts.foldEdge, options: options, onDiagnostics: onDiagnostics, onPalette: onPalette)
+                                       options: options, onDiagnostics: onDiagnostics, onPalette: onPalette)
                         .frame(width: parts.panel.width, height: parts.panel.height)
                         .offset(x: parts.panel.minX, y: parts.panel.minY)
                 }
