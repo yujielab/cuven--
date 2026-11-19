@@ -118,8 +118,10 @@ final class DuoUnfoldedTests: XCTestCase {
             return
         }
         sleep(2)
-        let size = report(app, "lab")
-        guard size.width > 500 else { return }
+        report(app, "lab")
+        // 实验室里 windows.firstMatch 有时是一个 0×0 的系统窗口（CI 记到过）：按屏幕大小判断是不是内屏 / iPad
+        let screen = inner.screenshot().image.size
+        guard min(screen.width, screen.height) > 500 else { return }
         let scenes = ["fire", "ocean", "night", "neon"]
         for (i, name) in scenes.enumerated() {
             if let f = app.onScreenFrames(["lab-scene-\(i)"]).first {

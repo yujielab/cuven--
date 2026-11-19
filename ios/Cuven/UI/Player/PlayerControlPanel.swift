@@ -34,7 +34,7 @@ struct PlayerLightingOptions: Equatable {
 /// SwiftUI 这边握着的渲染器把手：卡片、设置、几何、播放器先记在这里，渲染器（重新）建起来时一次交过去
 @MainActor
 final class LightingHost {
-    static let space = "cuven-lighting-surface"
+    nonisolated static let space = "cuven-lighting-surface"
 
     /// 这台设备能用 Metal 光影（着色器都编好了）
     let isAvailable: Bool = MetalRenderer.shaderFailures.isEmpty
