@@ -1,0 +1,26 @@
+# 用 wrangler 部署时的配置（也可以在 Cloudflare 面板里手动建，步骤见 README.md）
+name = "cuven-request"
+main = "worker.js"
+compatibility_date = "2025-09-01"
+
+routes = [{ pattern = "tj.cuven.us", custom_domain = true }]
+
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cuven-request"
+database_id = "填 wrangler d1 create cuven-request 打印出来的 id"
+
+[vars]
+LB_BASE = "https://lb.cuven.us"
+TRANSFER_BASE = "https://transfer.cuven.us"
+STREAM_BASE = "https://stream.cuven.online"
+ACCOUNT_BASE = "https://check.cuven.us"
+AUTO_DIR = "auto"
+
+# 机密（不要写在这里）：
+#   wrangler secret put ADMIN_KEY   控制面板口令
+#   wrangler secret put LB_GATE     影片库 Worker 的 GATE
+#   wrangler secret put LINK_KEY    传输 Worker 的 LINK_KEY

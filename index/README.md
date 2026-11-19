@@ -1,7 +1,18 @@
-# Cuven ᴿ 索引库 Worker（v6.9）
+# Cuven ᴿ 索引库 Worker（v7.0）
 
 论坛（电影 fid=44 / 剧集 fid=2）→ TMDB 认定 → R2 索引；对照片库总账（Stream 写的 `Received.json`）标出「库中已有」，
 目录默认只显示缺片；片单里的种子由浏览器攒齐、本地打成一个 zip。代码：[`worker.js`](worker.js)。
+
+## v7.0：给「请求添加」用的接口
+
+[请求添加 Worker](../request/README.md)（tj.cuven.us）调用这两条，都走原来的 GATE 口令（`x-gate`）：
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/link/versions?src=movie\|tv&id=<TMDB>[&season=N]` | 一部片、或剧集的一季，按规格排好的全部版本（最多 16 个），排序同详情页（分辨率 → 动态范围 → 片源 → 体积）。剧集只要这一季的整季包：「全 N 集 / 全集 / 完结」排在前面，只有单集或一段的不要。`total` 是标题里写的总集数（认中文数字），`own` 表示片库里有没有。 |
+| `POST /api/pikpush` | 原来的推送接口。回包每部多带 `file` / `fileName`：PikPak 里这个云下载落成的文件或文件夹，请求添加拿它去盯进度、做清洗。 |
+
+请求添加按 `versions` 的顺序一个一个试：上一个没下完或不完整，就推下一个。PikPak 账号仍然是这里的 `PIKPAK_USER` / `PIKPAK_PASS`，请求添加控制面板里填的必须是同一个账号。
 
 ## v6 改了什么
 
