@@ -26,6 +26,7 @@ public final class MetalShaderLibrary {
     let gaussianBlur: (any MTLComputePipelineState)?
     let projectIrradiance: (any MTLComputePipelineState)?
     let surface: (any MTLRenderPipelineState)?
+    let backdrop: (any MTLRenderPipelineState)?
     let specular: (any MTLRenderPipelineState)?
     let composite: (any MTLRenderPipelineState)?
 
@@ -106,6 +107,8 @@ public final class MetalShaderLibrary {
         // Premultiplied "over" for the cards; additive for the highlights; the composite overwrites
         surface = render("surface", vertex: "cuven_surfaceVertex", fragment: "cuven_surfaceFragment",
                          format: Self.offscreenFormat, blend: (.one, .oneMinusSourceAlpha))
+        backdrop = render("backdrop", vertex: "cuven_compositeVertex", fragment: "cuven_backdropFragment",
+                          format: Self.offscreenFormat, blend: (.one, .oneMinusSourceAlpha))
         specular = render("specular", vertex: "cuven_surfaceVertex", fragment: "cuven_specularFragment",
                           format: Self.offscreenFormat, blend: (.one, .one))
         composite = render("composite", vertex: "cuven_compositeVertex", fragment: "cuven_compositeFragment",

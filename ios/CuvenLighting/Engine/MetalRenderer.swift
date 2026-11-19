@@ -6,21 +6,22 @@ import QuartzCore
 import UIKit
 import os
 
-/// The render loop of the reflective control surfaces.
+/// The render loop of the reflective control surfaces (Cinematic Reflection Mode).
 ///
-/// Owns the lighting engine, the three passes (surfaces → highlights → composite) and the MTKView they draw into.
-/// The host (SwiftUI, through a UIViewRepresentable) only hands over the player, the layout geometry, the cards and
-/// the settings; nothing here updates SwiftUI state per frame — diagnostics and the sampled palette are delivered
-/// through callbacks a few times a second.
+/// Owns the lighting engine, the adaptive quality controller, the three passes (surfaces → highlights → composite)
+/// and the MTKView they draw into. The host (SwiftUI, through a UIViewRepresentable) only hands over the player,
+/// the layout geometry, the cards, the mode and the idle state; nothing here updates SwiftUI state per frame —
+/// diagnostics and the sampled palette are delivered through callbacks a few times a second.
 ///
-/// Per display frame (60 Hz; 30 Hz when the device is warm or in Low Power Mode):
-///   · ease spatial state, on/off mix, press and idle animations;
-///   · every 1/30 s (1/15 s warm; never when critical): pull a new video frame if there is one and encode the
-///     analysis, then re-project the irradiance (also when the layout or the fold angle changed);
-///   · draw the cards, the highlights, composite into the drawable.
-///   Frames where nothing changed (paused video, no animation) are skipped entirely.
+/// Per display frame (60 Hz; 30 Hz when idle, warm, in Low Power Mode or on battery saver):
+///   · resolve the profile (preset × tuning × adaptive quality × idle), ease the look toward it;
+///   · when an analysis is due (Cinematic 24 Hz, Immersive 30 Hz; half of that idle or reduced; never in Standard
+///     or when the device is critically hot): pull a new video frame if there is one and encode the analysis,
+///     then re-project the irradiance (also when the layout or the fold angle changed);
+///   · draw the backdrop and the cards, the highlights, composite into the drawable.
+///   Frames where nothing changed (paused video, no animation, Standard at rest) are skipped entirely.
 /// At most three frames are in flight; if the GPU falls behind, the frame is skipped rather than blocking the main
-/// thread. Everything stops in the background (no GPU work is allowed there) and resumes on return.
+/// thread — the video itself is never waited on. Everything stops in the background (no GPU work is allowed there).
 @MainActor
 public final class MetalRenderer: NSObject {
     public let view: LightingSurfaceView
@@ -28,12 +29,13 @@ public final class MetalRenderer: NSObject {
     /// Called ~4×/s with what the analysis saw (only while set: the read-back costs nothing when nil)
     public var onPalette: ((SampledPalette) -> Void)?
 
-    public var settings: LightingSettings {
-        get { engine.settings }
+    /// Preset + tuning. Changing it mid-playback cross-fades the look (~0.6 s)
+    public var mode: CinematicReflectionMode {
+        get { engine.mode }
         set {
-            let spatialChanged = newValue.spatialResponse != engine.settings.spatialResponse
-            engine.settings = newValue
-            if spatialChanged { engine.spatial.isEnabled = newValue.spatialResponse && isActive }
+            guard newValue != engine.mode else { return }
+            engine.mode = newValue
+            adaptive.resetClock()
             needsRender = true
         }
     }
@@ -52,11 +54,22 @@ public final class MetalRenderer: NSObject {
         }
     }
 
+    /// Controls hidden: keep the ambient light, quiet the highlights, update at a lower rate
+    public var isIdle: Bool {
+        get { engine.idle }
+        set {
+            guard newValue != engine.idle else { return }
+            engine.idle = newValue
+            needsRender = true
+        }
+    }
+
     public var spatial: SpatialResponseEngine { engine.spatial }
 
     private let shaders: MetalShaderLibrary
     private let pool: TexturePool
     private let engine: DynamicLightingEngine
+    private let adaptive: AdaptiveLightingController
     private let surfaces: ReflectiveSurfaceRenderer
     private let highlights: SpecularHighlightRenderer
     private let compositor: LightingCompositor
@@ -67,18 +80,17 @@ public final class MetalRenderer: NSObject {
     private var specularTarget: (any MTLTexture)?
     private var targetSize = (0, 0)
 
-    private var quality: LightingQuality = .high
     private var isActive = false
     private var isForeground = true
     private var needsRender = true
     private var lastDraw: CFTimeInterval = 0
-    private var lastQualityCheck: CFTimeInterval = 0
     private var lastPublish: CFTimeInterval = 0
     private var lastPalette: CFTimeInterval = 0
     private var displayTicks = TickCounter()
     private var lightingTicks = TickCounter()
     private var skipped = 0
     private var cpuMilliseconds: Double = 0
+    private var gpuMilliseconds: Double = 0
     private var lastSpatial = SpatialResponseEngine.State()
     private var lastSize = CGSize.zero
 
@@ -103,6 +115,7 @@ public final class MetalRenderer: NSObject {
         self.shaders = shaders
         self.pool = pool
         self.engine = engine
+        self.adaptive = AdaptiveLightingController(device: shaders.device)
         self.surfaces = ReflectiveSurfaceRenderer(shaders: shaders)
         self.highlights = SpecularHighlightRenderer(shaders: shaders)
         self.compositor = LightingCompositor(shaders: shaders)
@@ -159,7 +172,6 @@ public final class MetalRenderer: NSObject {
     func windowChanged(inWindow: Bool) {
         isActive = inWindow
         if inWindow {
-            if engine.settings.spatialResponse { engine.spatial.start() }
             view.isPaused = !isForeground
             needsRender = true
         } else {
@@ -171,7 +183,7 @@ public final class MetalRenderer: NSObject {
     @objc private func didEnterBackground() {
         isForeground = false
         view.isPaused = true
-        quality = .suspended
+        adaptive.setBackground()
         engine.spatial.stop()
         engine.frames.flush()
         pool.purge()
@@ -179,12 +191,8 @@ public final class MetalRenderer: NSObject {
 
     @objc private func willEnterForeground() {
         isForeground = true
-        quality = .high
-        lastQualityCheck = 0
-        if isActive {
-            view.isPaused = false
-            if engine.settings.spatialResponse { engine.spatial.start() }
-        }
+        adaptive.resetClock()
+        if isActive { view.isPaused = false }
         needsRender = true
     }
 
@@ -193,22 +201,16 @@ public final class MetalRenderer: NSObject {
         pool.purge()
     }
 
-    private func updateQuality(now: CFTimeInterval) {
-        guard now - lastQualityCheck > 1 else { return }
-        lastQualityCheck = now
-        guard isForeground else { quality = .suspended; return }
-        let info = ProcessInfo.processInfo
-        let next: LightingQuality
-        switch info.thermalState {
-        case .critical: next = .minimal
-        case .serious: next = .reduced
-        default: next = info.isLowPowerModeEnabled ? .reduced : .high
-        }
-        if next != quality {
-            quality = next
-            view.preferredFramesPerSecond = next == .high ? 60 : 30
-            lightingLog.info("lighting quality \(next.rawValue, privacy: .public)")
-        }
+    /// Quality level, profile, sensors and display rate for this frame
+    private func updatePacing(now: CFTimeInterval) {
+        adaptive.update(now: now, foreground: isForeground, mode: engine.mode, gpuMilliseconds: gpuMilliseconds,
+                        sourceSize: engine.frames.presentationSize)
+        engine.resolve(quality: adaptive.quality)
+        let p = engine.profile
+        let fps = engine.idle ? p.idleDisplayFPS : p.displayFPS
+        if view.preferredFramesPerSecond != fps { view.preferredFramesPerSecond = fps }
+        // Core Motion only while something uses it (Standard and spatial-off never start the sensors)
+        if isActive && isForeground && engine.wantsMotion { engine.spatial.start() } else { engine.spatial.stop() }
     }
 
     // MARK: Frame
@@ -217,8 +219,8 @@ public final class MetalRenderer: NSObject {
         let now = CACurrentMediaTime()
         let dt = lastDraw == 0 ? 1.0 / 60 : min(now - lastDraw, 0.1)
         lastDraw = now
-        updateQuality(now: now)
-        guard quality != .suspended else { return }
+        updatePacing(now: now)
+        guard adaptive.quality != .suspended else { return }
 
         let size = view.bounds.size
         guard size.width > 1, size.height > 1 else { return }
@@ -229,11 +231,10 @@ public final class MetalRenderer: NSObject {
         engine.spatial.update(dt: dt, layoutFoldDegrees: engine.geometry.layoutFoldDegrees, orientation: orientation)
         engine.step(dt: dt)
         surfaces.step(dt: dt)
-        let analysisDue = engine.analysisDue(now: now, quality: quality)
-        let spatialMoved = engine.spatial.state != lastSpatial
+        let analysisDue = engine.analysisDue(now: now)
+        let spatialMoved = engine.lightingMix > 0 && engine.spatial.state != lastSpatial
         if size != lastSize { needsRender = true; lastSize = size }
-        let mixAnimating = engine.lightingMix > 0 && engine.lightingMix < 1
-        guard needsRender || analysisDue || spatialMoved || surfaces.isAnimating || mixAnimating else {
+        guard needsRender || analysisDue || spatialMoved || surfaces.isAnimating || engine.isEasing else {
             publish(now: now)
             return
         }
@@ -255,14 +256,13 @@ public final class MetalRenderer: NSObject {
             return
         }
 
-        let uniforms = engine.uniforms(viewSize: size, scale: scale, time: now, dt: dt,
-                                       quality: quality, cardCount: surfaces.instances.count)
+        let uniforms = engine.uniforms(viewSize: size, scale: scale, time: now, dt: dt, cardCount: surfaces.instances.count)
         var holder: CVMetalTexture?
         if analysisDue {
             holder = engine.encodeAnalysis(now: now, commandBuffer: commandBuffer, uniforms: uniforms)
             if holder != nil { lightingTicks.tick(now) }
         } else {
-            engine.frames.syncItem()
+            engine.syncSource()
         }
         engine.encodeProjection(commandBuffer: commandBuffer, uniforms: uniforms, viewSize: size, force: holder != nil)
 
@@ -272,7 +272,7 @@ public final class MetalRenderer: NSObject {
                         irradiance: engine.irradiance ?? placeholder, near: near, far: far)
         highlights.encode(commandBuffer: commandBuffer, target: specularTarget, uniforms: uniforms,
                           instances: surfaces.instances, scene: engine.analysis.scene,
-                          enabled: engine.lightingMix > 0.001 && engine.analysis.hasData)
+                          enabled: engine.lightingMix > 0.001 && engine.analysis.hasData && uniforms.look2.w > 0.5)
         compositor.encode(commandBuffer: commandBuffer, drawable: drawable.texture, surface: surfaceTarget, specular: specularTarget)
         commandBuffer.present(drawable)
 
@@ -318,6 +318,7 @@ public final class MetalRenderer: NSObject {
 
     private func publish(now: CFTimeInterval) {
         let taken = stats.take()
+        gpuMilliseconds = taken.gpu
         if let palette = taken.palette { onPalette?(palette) }
         guard now - lastPublish >= 0.5, let onDiagnostics else { return }
         lastPublish = now
@@ -328,10 +329,20 @@ public final class MetalRenderer: NSObject {
         d.cpuMilliseconds = cpuMilliseconds
         d.skippedFrames = skipped
         d.textureBytes = pool.allocatedBytes
-        d.quality = quality
+        d.quality = adaptive.quality
+        d.adaptation = adaptive.adaptation
+        d.gpuTier = adaptive.gpuTier
         d.thermalState = ProcessInfo.processInfo.thermalState
         d.hasVideo = engine.frames.hasVideo
         d.foldDegrees = engine.spatial.foldDegrees
+        d.preset = engine.mode.preset
+        d.targetAnalysisHz = engine.profile.analysisEnabled ? engine.targetAnalysisHz : 0
+        d.idle = engine.idle
+        d.tilt = engine.spatial.state.tilt
+        d.spatialIntensity = engine.spatial.state.intensity
+        d.effectiveIntensity = engine.intensity
+        d.effectiveSpecular = engine.look.y
+        d.lightingMix = engine.lightingMix
         onDiagnostics(d)
     }
 }

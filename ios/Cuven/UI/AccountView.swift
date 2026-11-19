@@ -86,8 +86,8 @@ struct AccountView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(PlayerCoordinator.autoplayKey) private var autoplayNext = true
-    /// 半折播放器的画面光影（CuvenLighting：画面里的光映在控制卡片上）
-    @AppStorage(CuvenPlayerViewModel.lightingKey) private var playerLighting = true
+    /// 影院光影（半折播放器：画面里的光映在控制卡片上）的模式，这一行显示当前是哪一种
+    @State private var lightingSettings = CinematicLightingSettings.shared
     /// 首选音轨 / 首选字幕（用户要求，TrackPrefs.swift）
     @AppStorage(TrackPrefs.audioKey) private var audioPref = TrackPrefs.Audio.auto.rawValue
     @AppStorage(TrackPrefs.subtitleKey) private var subtitlePref = TrackPrefs.Subtitle.auto.rawValue
@@ -296,11 +296,20 @@ struct AccountView: View {
                     .tint(.green)
             }
             AccountDivider()
-            AccountRow(icon: "light.max", title: "画面光影", subtitle: "半折播放时，画面里的光映在控制面板上") {
-                Toggle("画面光影", isOn: $playerLighting)
-                    .labelsHidden()
-                    .tint(.green)
+            // 影院光影：标准 / 影院 / 沉浸 + 微调 + 实时预览（CinematicLightingView.swift）
+            Button {
+                CinematicLightingPage.present()
+            } label: {
+                AccountRow(icon: "light.max", title: "影院光影", subtitle: "半折播放时，画面里的光映在控制面板上") {
+                    HStack(spacing: 8) {
+                        AccountValue(lightingSettings.mode.preset.title)
+                        AccountChevron()
+                    }
+                }
             }
+            .buttonStyle(AccountRowPress())
+            .accessibilityValue(lightingSettings.mode.preset.title)
+            .accessibilityIdentifier("account-cinematic-lighting")
             AccountDivider()
             // 光影实验室：用本机视频或内置的测试画面看光影效果、调参数、看帧率（PlayerLab.swift）
             Button {

@@ -9,7 +9,7 @@ import UIKit
 // 三种摆法，同一套面板：
 //   · folded(折痕)：iPhone Duo 半折立在桌上——折痕上面是画面，下面是面板（参照 Netflix 在半折时的样子）；
 //     光影按半折的几何算：画面立在面板后面，默认 105°，系统报了铰链角度就用真的；
-//   · stacked：竖着的普通屏（实验室）——画面在上、面板在下，中间留一道「虚拟折痕」，默认摊平 180°；
+//   · stacked：竖着的普通屏（实验室、设置页预览）——画面在上、面板在下，中间留一道「虚拟折痕」，按半折立着的 115° 算光；
 //   · sideBySide：横着的屏（实验室）——画面在左、面板在右，折痕竖着。
 // 画面由 AVPlayerLayer 画（硬件解码、HDR、画中画都是系统的）；同一个 AVPlayer 另由光影引擎取小帧分析，
 // 两者互不影响。面板换摆法、转屏时用弹簧过渡。
@@ -89,7 +89,8 @@ struct PlayerLayoutParts: Equatable {
             panel = CGRect(x: insets.leading + g, y: top, width: w - insets.leading - insets.trailing - g * 2,
                            height: max(0, bottom - top))
             hinge = CGPoint(x: w / 2, y: insets.top + vh + gap / 2)
-            fold = 180
+            // 实验室 / 设置页预览：模拟半折立着的几何，效果和半折时一致
+            fold = 115
         case .sideBySide:
             let usable = w - insets.leading - insets.trailing
             let vw = (usable * 0.58).rounded()
@@ -100,7 +101,8 @@ struct PlayerLayoutParts: Equatable {
                            height: max(0, h - insets.top - max(insets.bottom, g) - g * 2))
             hinge = CGPoint(x: insets.leading + vw + gap / 2, y: h / 2)
             away = CGVector(dx: 1, dy: 0)
-            fold = 180
+            // 实验室 / 设置页预览：模拟半折立着的几何，效果和半折时一致
+            fold = 115
         }
         // 很宽的屏上面板不超过 720 点，居中
         if panel.width > 720 {

@@ -109,7 +109,7 @@ fragment float4 cuven_surfaceFragment(cuven::SurfaceVaryings in [[stage_in]],
         // Diffuse light arriving from the picture
         const float2 irrSize = float2(float(irradiance.get_width()), float(irradiance.get_height()));
         const float3 E = irradiance.sample(linearClamp, in.panelPoint * u.panel.z / irrSize).rgb;
-        const float3 diffuse = E * (0.42f + 0.18f * c.shape.z);
+        const float3 diffuse = E * (0.42f + 0.18f * c.shape.z) * u.look.x;
 
         // Mirror reflection of the picture
         float3 reflection = float3(0.0f);
@@ -130,8 +130,10 @@ fragment float4 cuven_surfaceFragment(cuven::SurfaceVaryings in [[stage_in]],
                     const float3 soft = farMap.sample(linearClamp, saturate(uv)).rgb;
                     const float cosV = saturate(dot(N, V));
                     const float fresnel = 0.06f + 0.94f * pow(1.0f - cosV, 5.0f);
-                    const float rough = saturate(t / 900.0f + (1.0f - gloss) * 0.6f);
-                    reflection = mix(sharp, soft, rough) * fresnel * inside * u.material.z * (0.7f + 0.6f * c.shape.z);
+                    // Reflection blur (Cinematic Reflection Mode) plus distance: far hits look rougher
+                    const float rough = saturate(mix(t / 1400.0f, 1.0f, u.look.w) + (1.0f - gloss) * 0.3f);
+                    reflection = mix(sharp, soft, rough) * fresnel * inside * u.material.z * (0.7f + 0.6f * c.shape.z)
+                        * (1.0f - 0.35f * u.look2.z);
                 }
             }
         }
@@ -139,7 +141,9 @@ fragment float4 cuven_surfaceFragment(cuven::SurfaceVaryings in [[stage_in]],
         // Edge light: a thin band just inside the rim, strongest on the edge that faces the screen
         const float rim = smoothstep(-2.4f, -0.3f, sd) * (1.0f - smoothstep(-0.3f, 0.7f, sd));
         const float facing = saturate(dot(edge, -g.away) * 0.75f + 0.35f);
-        const float3 rimLight = (E * 1.8f + reflection * 1.2f) * rim * facing;
+        // Fresnel-inspired: the bevel turns away from the eye, so the rim catches more at grazing angles
+        const float edgeFresnel = 0.6f + 1.6f * pow(1.0f - saturate(dot(N, V)), 3.0f);
+        const float3 rimLight = (E * 1.8f + reflection * 1.2f) * rim * facing * edgeFresnel * u.look.z;
 
         light = (diffuse + reflection + rimLight) * mixL;
     }
@@ -154,4 +158,23 @@ fragment float4 cuven_surfaceFragment(cuven::SurfaceVaryings in [[stage_in]],
     }
     const float alpha = coverage * c.tint.x;
     return float4(color * alpha, alpha);
+}
+
+/// The black panel between the cards: a faint pool of the picture's light near the screen, fading away from it.
+/// It follows the irradiance (colour and position), so it is never a uniform glow; drawn first, under the cards.
+fragment float4 cuven_backdropFragment(cuven::ScreenVaryings in [[stage_in]],
+                                       constant CuvenFrameUniforms &u [[buffer(0)]],
+                                       texture2d<float> irradiance [[texture(0)]])
+{
+    constexpr sampler linearClamp(coord::normalized, address::clamp_to_edge, filter::linear);
+    const float level = u.look2.y * u.material.x * u.material.y;
+    if (level <= 0.0005f) { discard_fragment(); }
+    const float2 p = in.uv * u.panel.xy;
+    const float2 irrSize = float2(float(irradiance.get_width()), float(irradiance.get_height()));
+    const float3 E = irradiance.sample(linearClamp, p * u.panel.z / irrSize).rgb;
+    const cuven::Geometry g = cuven::geometry(u);
+    const float away = max(dot(p - g.hingePoint, g.away), 0.0f);
+    const float falloff = exp(-away / max(u.panel.y * 0.45f, 1.0f));
+    const float3 c = cuven::softCap(E * (level * 0.35f * falloff), u.material.w * 0.35f);
+    return float4(c, 0.0f);
 }

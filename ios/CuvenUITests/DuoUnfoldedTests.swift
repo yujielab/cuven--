@@ -124,17 +124,45 @@ final class DuoUnfoldedTests: XCTestCase {
         guard min(screen.width, screen.height) > 500 else { return }
         let scenes = ["fire", "ocean", "night", "neon"]
         for (i, name) in scenes.enumerated() {
-            if let f = app.onScreenFrames(["lab-scene-\(i)"]).first {
-                app.tap(at: CGPoint(x: f.midX, y: f.midY))
-            }
-            sleep(2)
+            labTap(app, "lab-scene-\(i)")
+            sleep(1)
             snap("duo-39\(Array("abcd")[i])-lab-\(name)")
         }
+        // 三种光影模式，都在火光那一段上看（影院是默认）
+        for (preset, tag) in [("standard", "f"), ("immersive", "g")] {
+            labTap(app, "lab-scene-0")
+            labTap(app, "lighting-preset-\(preset)")
+            sleep(1)
+            snap("duo-39\(tag)-lab-\(preset)")
+        }
+        labTap(app, "lighting-preset-cinematic")
+        // 闲置：5 秒不碰，符号淡出，卡上的光留着（从海面开始等，截到的时候正好放到霓虹）
+        labTap(app, "lab-scene-1")
+        sleep(7)
+        snap("duo-39h-lab-idle")
+        labTap(app, "lab-scene-0")
         XCUIDevice.shared.orientation = .landscapeLeft
         sleep(3)
         snap("duo-39e-lab-landscape")
         XCUIDevice.shared.orientation = .portrait
         sleep(1)
+    }
+
+    /// 实验室下半截是可以滚的设置：要点的那一项不在屏上就往上推一点再找
+    private func labTap(_ app: XCUIApplication, _ id: String) {
+        // 先往下翻两下，再往回翻三下
+        for step in 0..<6 {
+            if let f = app.onScreenFrames([id]).first {
+                app.tap(at: CGPoint(x: f.midX, y: f.midY))
+                return
+            }
+            guard step < 5 else { break }
+            let down = step < 2
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.92 : 0.74))
+            from.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.78 : 0.92)))
+            sleep(1)
+        }
+        print("DUO lab: \(id) not on screen")
     }
 
     @discardableResult

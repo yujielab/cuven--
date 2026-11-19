@@ -9,22 +9,17 @@ using namespace metal;
 // → linear-to-sRGB encode for the 8-bit drawable, with ±½ LSB interleaved-gradient-noise dither so the dark
 // gradients of the cards do not band. The background stays pure black.
 
-struct CompositeVaryings {
-    float4 position [[position]];
-    float2 uv;
-};
-
-vertex CompositeVaryings cuven_compositeVertex(uint vid [[vertex_id]])
+vertex cuven::ScreenVaryings cuven_compositeVertex(uint vid [[vertex_id]])
 {
     // One triangle that covers the whole target: (−1,−1), (3,−1), (−1,3)
     const float2 p = float2(float((vid << 1) & 2u), float(vid & 2u));
-    CompositeVaryings out;
+    cuven::ScreenVaryings out;
     out.position = float4(p * 2.0f - 1.0f, 0.0f, 1.0f);
     out.uv = float2(p.x, 1.0f - p.y);
     return out;
 }
 
-fragment float4 cuven_compositeFragment(CompositeVaryings in [[stage_in]],
+fragment float4 cuven_compositeFragment(cuven::ScreenVaryings in [[stage_in]],
                                         texture2d<float> surface [[texture(0)]],
                                         texture2d<float> specular [[texture(1)]])
 {

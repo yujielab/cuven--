@@ -10,7 +10,7 @@ import UIKit
 //   · 正在放什么：片名、第几集、画面、后面还有没有下一集；
 //   · 播放状态：放着没有、位置、时长、速度——面板出来时每 0.25 秒跟播放器对一次（只有值变了才写，SwiftUI 不会每帧刷新）；
 //   · 面板自己的状态：锁定、第四行展开的滑杆、拖进度条、闲置时符号淡出；
-//   · 画中画、截取画面、光影开关与强度（存在本机）、铰链角度（iOS 27.1 的 onHingeChange 喂进来）。
+//   · 画中画、截取画面、铰链角度（iOS 27.1 的 onHingeChange 喂进来）。光影的模式和微调在 CinematicLightingSettings。
 // 光影引擎本身（CuvenLighting 框架）不在这里：面板把播放器、卡片位置、设置交给它，它自己按显示刷新率画。
 
 @MainActor
@@ -53,17 +53,12 @@ final class CuvenPlayerViewModel {
     /// 截取画面进行中
     private(set) var capturing = false
 
-    /// 光影：开关和强度存在本机（账户与设置、实验室里都能改）
-    private(set) var lightingEnabled: Bool
-    private(set) var lightingIntensity: Double
     /// 铰链读数（度）：系统报了才有
     var hardwareFold: Double?
 
     enum Tray { case brightness, volume }
 
     static let rates: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 2]
-    nonisolated static let lightingKey = "player_lighting"
-    nonisolated static let intensityKey = "player_lighting_intensity"
 
     @ObservationIgnored weak var player: AVPlayer?
     @ObservationIgnored var onClose: (() -> Void)?
@@ -75,6 +70,10 @@ final class CuvenPlayerViewModel {
     @ObservationIgnored var onPiPRestore: ((@escaping (Bool) -> Void) -> Void)?
     /// 截图用（DEBUG 的 -CuvenTabletop）：不接播放器，按钮只改面板上的样子
     @ObservationIgnored var preview = false
+    /// 设置页里的预览：符号一直显示（不进闲置）
+    @ObservationIgnored var keepsControlsVisible = false
+    /// 光影设置开着（剧集信息卡点开的弹窗）：不进闲置
+    @ObservationIgnored private var settingsOpen = false
     @ObservationIgnored weak var pipController: AVPictureInPictureController?
 
     @ObservationIgnored private var standalone = false
@@ -87,12 +86,6 @@ final class CuvenPlayerViewModel {
     @ObservationIgnored private var audioOptions: [AVMediaSelectionOption] = []
     @ObservationIgnored private var subtitleOptions: [AVMediaSelectionOption] = []
     @ObservationIgnored private var idleTask: Task<Void, Never>?
-
-    init() {
-        let d = UserDefaults.standard
-        lightingEnabled = d.object(forKey: Self.lightingKey) as? Bool ?? true
-        lightingIntensity = d.object(forKey: Self.intensityKey) as? Double ?? 0.85
-    }
 
     // MARK: 折痕 / 启用
 
@@ -234,14 +227,19 @@ final class CuvenPlayerViewModel {
     func poke() {
         if !controlsVisible { controlsVisible = true }
         idleTask?.cancel()
-        guard active, !preview else { return }
+        guard active, !preview, !keepsControlsVisible else { return }
         idleTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(5))
             guard let self, !Task.isCancelled else { return }
-            if self.playing, !self.locked, self.tray == nil, self.scrub == nil {
+            if self.playing, !self.locked, self.tray == nil, self.scrub == nil, !self.settingsOpen {
                 self.controlsVisible = false
             }
         }
+    }
+
+    func setSettingsOpen(_ open: Bool) {
+        settingsOpen = open
+        poke()
     }
 
     // MARK: 按钮
@@ -312,16 +310,6 @@ final class CuvenPlayerViewModel {
         if t == .brightness { brightness = Double(Self.screen?.brightness ?? CGFloat(brightness)) }
         tray = tray == t ? nil : t
         poke()
-    }
-
-    func setLightingEnabled(_ on: Bool) {
-        lightingEnabled = on
-        UserDefaults.standard.set(on, forKey: Self.lightingKey)
-    }
-
-    func setLightingIntensity(_ v: Double) {
-        lightingIntensity = min(max(v, 0), 1.5)
-        UserDefaults.standard.set(lightingIntensity, forKey: Self.intensityKey)
     }
 
     // MARK: 画中画（面板自己那一层画面；系统播放器那一层的画中画照旧由系统处理）

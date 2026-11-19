@@ -30,6 +30,8 @@ typedef struct {
     vector_float4 eye;        // xyz: viewer position in hinge space (pt); w: unused
     vector_float4 material;   // x: intensity; y: lighting mix 0…1 (animated on/off); z: reflectivity; w: readability cap (linear luminance)
     vector_float4 analysis;   // x: dt since the previous lighting update (s); y, z: projection grid size; w: exposure
+    vector_float4 look;       // Cinematic Reflection Mode — x: ambient; y: specular; z: edge glow; w: reflection blur 0…1
+    vector_float4 look2;      // x: second highlight layer 0…1; y: backdrop spill; z: idle 0…1; w: light count 0…4
 } CuvenFrameUniforms;
 
 typedef struct {
@@ -65,6 +67,12 @@ struct SurfaceVaryings {
     float2 local;              // pt, relative to the card centre (before the press scale)
     float2 panelPoint;         // pt, panel space
     uint card [[flat]];
+};
+
+/// Full-target triangle (composite and backdrop passes): uv origin top-left
+struct ScreenVaryings {
+    float4 position [[position]];
+    float2 uv;
 };
 
 inline float luma(float3 c) { return dot(c, float3(0.2126f, 0.7152f, 0.0722f)); }

@@ -99,8 +99,15 @@ final class ReflectiveSurfaceRenderer {
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
         encoder.label = "card surfaces"
         defer { encoder.endEncoding() }
-        guard let pipeline = shaders.surface, !instances.isEmpty else { return }
         var u = uniforms
+        // The panel behind the cards: a faint pool of the picture's light near the screen (Cinematic / Immersive)
+        if let backdrop = shaders.backdrop, u.look2.y * u.material.x * u.material.y > 0.0005 {
+            encoder.setRenderPipelineState(backdrop)
+            encoder.setFragmentBytes(&u, length: MemoryLayout<GPUFrameUniforms>.stride, index: 0)
+            encoder.setFragmentTexture(irradiance, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        }
+        guard let pipeline = shaders.surface, !instances.isEmpty else { return }
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBytes(&u, length: MemoryLayout<GPUFrameUniforms>.stride, index: 0)
         encoder.setFragmentBytes(&u, length: MemoryLayout<GPUFrameUniforms>.stride, index: 0)

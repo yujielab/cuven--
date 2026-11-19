@@ -75,9 +75,9 @@ struct PlayerLabView: View {
     @State private var player: AVPlayer?
     @State private var sourceName = ""
     @State private var isTestPattern = false
-    @State private var options = PlayerLightingOptions()
     @State private var simulateHinge = false
-    @State private var hingeDegrees = 110.0
+    @State private var hingeDegrees = 115.0
+    @State private var showsDiagnostics = true
     @State private var diagnostics = LightingDiagnostics()
     @State private var palette: SampledPalette?
     @State private var memoryMB = 0.0
@@ -134,8 +134,7 @@ struct PlayerLabView: View {
     // MARK: 播放器那一块
 
     private func stage(layout: CuvenPlayerLayout) -> some View {
-        var opts = options
-        opts.simulatedFold = simulateHinge ? hingeDegrees : nil
+        let opts = PlayerLightingOptions(simulatedFold: simulateHinge ? hingeDegrees : nil)
         return CuvenPlayerView(model: model, player: player, layout: layout, options: opts,
                                onDiagnostics: { diagnostics = $0 },
                                onPalette: { palette = $0 })
@@ -210,38 +209,23 @@ struct PlayerLabView: View {
                 }
             }
 
-            section("光影") {
-                Toggle("动态光影", isOn: Binding(get: { model.lightingEnabled }, set: { model.setLightingEnabled($0) }))
-                    .accessibilityIdentifier("lab-lighting")
-                labeledSlider("强度", value: Binding(get: { model.lightingIntensity }, set: { model.setLightingIntensity($0) }),
-                              range: 0...1.5, format: "%.2f")
-                labeledSlider("反射", value: Binding(get: { Double(options.reflectivity) }, set: { options.reflectivity = Float($0) }),
-                              range: 0...1, format: "%.2f")
-                Toggle("空间响应（陀螺仪）", isOn: $options.spatialResponse)
+            section("影院光影") {
+                // 和播放器里、账户与设置里是同一块设置（存在本机）
+                CinematicLightingView(compact: true)
                 Toggle("模拟铰链角度", isOn: $simulateHinge)
+                    .tint(.green)
+                    .accessibilityIdentifier("lab-simulate-hinge")
                 if simulateHinge {
                     labeledSlider("铰链", value: $hingeDegrees, range: 30...180, format: "%.0f°")
                 }
             }
 
-            section("性能") {
-                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
-                    metric("画面帧率", String(format: "%.0f fps", diagnostics.displayFPS))
-                    metric("光影更新", String(format: "%.0f 次/秒", diagnostics.lightingFPS))
-                    metric("GPU", String(format: "%.2f ms", diagnostics.gpuMilliseconds))
-                    metric("CPU 编码", String(format: "%.2f ms", diagnostics.cpuMilliseconds))
-                    metric("档位", qualityName(diagnostics.quality))
-                    metric("热状态", thermalName(diagnostics.thermalState))
-                    metric("纹理", String(format: "%.1f MB", Double(diagnostics.textureBytes) / 1_048_576))
-                    metric("内存", String(format: "%.0f MB", memoryMB))
-                    metric("跳过的帧", "\(diagnostics.skippedFrames)")
-                    metric("折叠角度", String(format: "%.0f°%@", diagnostics.foldDegrees, model.hardwareFold != nil ? "（铰链）" : ""))
-                }
-                .font(.footnote.monospacedDigit())
-                if !MetalRenderer.shaderFailures.isEmpty {
-                    Text("Metal 不可用：\(MetalRenderer.shaderFailures.joined(separator: "；"))")
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
+            section("开发者诊断") {
+                Toggle("显示诊断", isOn: $showsDiagnostics)
+                    .tint(.green)
+                if showsDiagnostics {
+                    LightingDiagnosticsPanel(diagnostics: diagnostics, palette: palette, memoryMB: memoryMB,
+                                             hardwareFold: model.hardwareFold)
                 }
             }
 
@@ -275,32 +259,6 @@ struct PlayerLabView: View {
             Text(String(format: format, value.wrappedValue))
                 .font(.footnote.monospacedDigit())
                 .frame(width: 48, alignment: .trailing)
-        }
-    }
-
-    private func metric(_ name: String, _ value: String) -> some View {
-        GridRow {
-            Text(name).foregroundStyle(DSInk.secondary)
-            Text(value)
-        }
-    }
-
-    private func qualityName(_ q: LightingQuality) -> String {
-        switch q {
-        case .high: return "高（30 次/秒 · 60 fps）"
-        case .reduced: return "省电（15 次/秒 · 30 fps）"
-        case .minimal: return "过热（光影冻结）"
-        case .suspended: return "后台（暂停）"
-        }
-    }
-
-    private func thermalName(_ s: ProcessInfo.ThermalState) -> String {
-        switch s {
-        case .nominal: return "正常"
-        case .fair: return "微热"
-        case .serious: return "偏热"
-        case .critical: return "过热"
-        @unknown default: return "—"
         }
     }
 
@@ -373,7 +331,8 @@ struct PlayerLabView: View {
 
     private func jump(toScene index: Int) {
         guard let p = player else { return }
-        let t = (Double(index) + 0.35) * TestPatternVideo.sceneDuration
+        model.poke()
+        let t = (Double(index) + 0.12) * TestPatternVideo.sceneDuration
         p.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         p.play()
     }
@@ -387,7 +346,7 @@ struct PlayerLabView: View {
 }
 
 /// 16 × 9 分区的颜色（线性转回显示用的 sRGB）+ 追踪到的光源（圈的大小 = 光源半径）
-private struct PaletteView: View {
+struct PaletteView: View {
     let palette: SampledPalette?
 
     var body: some View {
@@ -421,5 +380,113 @@ private struct PaletteView: View {
     static func display(_ r: Float, _ g: Float, _ b: Float) -> Color {
         func encode(_ v: Float) -> Double { Double(pow(max(min(v, 1), 0), 1 / 2.2)) }
         return Color(red: encode(r), green: encode(g), blue: encode(b))
+    }
+}
+
+// MARK: - 开发者诊断（实验室里）：当前模式、取样频率、帧率、GPU 时间、主色、光源区域、反射强度、热状态、空间响应
+
+struct LightingDiagnosticsPanel: View {
+    let diagnostics: LightingDiagnostics
+    let palette: SampledPalette?
+    let memoryMB: Double
+    let hardwareFold: Double?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
+                metric("光影模式", diagnostics.preset.title + (diagnostics.idle ? "（闲置）" : ""))
+                metric("视频取样", String(format: "%.0f / %d 次/秒", diagnostics.lightingFPS, diagnostics.targetAnalysisHz))
+                metric("画面帧率", String(format: "%.0f fps", diagnostics.displayFPS))
+                metric("GPU", String(format: "%.2f ms", diagnostics.gpuMilliseconds))
+                metric("CPU 编码", String(format: "%.2f ms", diagnostics.cpuMilliseconds))
+                metric("档位", Self.qualityName(diagnostics.quality) + Self.adaptationNote(diagnostics.adaptation))
+                metric("GPU 等级", ["A13 及更早", "A14–A16", "A17 及以后"][min(max(diagnostics.gpuTier, 0), 2)])
+                metric("热状态", Self.thermalName(diagnostics.thermalState))
+                metric("反射强度", String(format: "%.2f（混合 %.2f · 高光 %.2f）", diagnostics.effectiveIntensity,
+                                         diagnostics.lightingMix, diagnostics.effectiveSpecular))
+                metric("空间响应", String(format: "倾斜 x %+.2f · y %+.2f · 强度 ×%.2f", diagnostics.tilt.x, diagnostics.tilt.y,
+                                         diagnostics.spatialIntensity))
+                metric("折叠角度", String(format: "%.0f°%@", diagnostics.foldDegrees, hardwareFold != nil ? "（铰链）" : ""))
+                metric("纹理", String(format: "%.1f MB", Double(diagnostics.textureBytes) / 1_048_576))
+                metric("内存", String(format: "%.0f MB", memoryMB))
+                metric("跳过的帧", "\(diagnostics.skippedFrames)")
+            }
+            .font(.footnote.monospacedDigit())
+
+            if let p = palette {
+                Text("主色与光源区域")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(DSInk.secondary)
+                HStack(spacing: 8) {
+                    swatch(PaletteView.display(p.average.x, p.average.y, p.average.z), "平均")
+                    ForEach(p.lights.indices, id: \.self) { i in
+                        let l = p.lights[i]
+                        swatch(PaletteView.display(l.color.x, l.color.y, l.color.z),
+                               String(format: "(%.2f, %.2f)", l.position.x, l.position.y))
+                    }
+                }
+                Text(String(format: "平均亮度 %.3f · 转场 %.2f · 光源 %d 个", p.average.w, p.sceneChange, p.lights.count))
+                    .font(.footnote.monospacedDigit())
+                    .foregroundStyle(DSInk.secondary)
+            }
+            if !MetalRenderer.shaderFailures.isEmpty {
+                Text("Metal 不可用：\(MetalRenderer.shaderFailures.joined(separator: "；"))")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .accessibilityIdentifier("lab-diagnostics")
+    }
+
+    private func metric(_ name: String, _ value: String) -> some View {
+        GridRow {
+            Text(name).foregroundStyle(DSInk.secondary)
+            Text(value)
+        }
+    }
+
+    private func swatch(_ color: Color, _ caption: String) -> some View {
+        VStack(spacing: 4) {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(color)
+                .frame(width: 44, height: 30)
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(DSFill.hairline, lineWidth: 1))
+            Text(caption)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(DSInk.tertiary)
+        }
+    }
+
+    static func qualityName(_ q: LightingQuality) -> String {
+        switch q {
+        case .high: return "完整"
+        case .reduced: return "降档（取样减半 · 30 fps）"
+        case .minimal: return "冻结（过热）"
+        case .suspended: return "暂停（后台）"
+        }
+    }
+
+    static func adaptationNote(_ a: LightingAdaptation) -> String {
+        switch a {
+        case .none: return ""
+        case .background: return "：在后台"
+        case .thermalCritical: return "：过热"
+        case .thermalSerious: return "：偏热"
+        case .lowPowerMode: return "：低电量模式"
+        case .lowBattery: return "：电量低于 20%"
+        case .olderGPU: return "：GPU 较旧"
+        case .heavySource: return "：画面超过 4K"
+        case .overBudget: return "：GPU 用时超预算"
+        }
+    }
+
+    static func thermalName(_ s: ProcessInfo.ThermalState) -> String {
+        switch s {
+        case .nominal: return "正常"
+        case .fair: return "微热"
+        case .serious: return "偏热"
+        case .critical: return "过热"
+        @unknown default: return "—"
+        }
     }
 }

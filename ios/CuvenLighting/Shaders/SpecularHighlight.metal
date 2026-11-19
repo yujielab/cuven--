@@ -35,7 +35,8 @@ fragment float4 cuven_specularFragment(cuven::SurfaceVaryings in [[stage_in]],
     const float3 ns = cuven::screenNormal(g);
 
     float3 sum = float3(0.0f);
-    for (uint k = 0; k < CUVEN_MAX_LIGHTS; ++k) {
+    const uint count = min(uint(max(u.look2.w, 0.0f) + 0.5f), uint(CUVEN_MAX_LIGHTS));
+    for (uint k = 0; k < count; ++k) {
         const CuvenLightSource source = scene->lights[k];
         const float presence = source.color.a;
         if (presence < 0.01f) { continue; }
@@ -45,14 +46,19 @@ fragment float4 cuven_specularFragment(cuven::SurfaceVaryings in [[stage_in]],
         toLight *= rsqrt(dist2);
         const float3 H = normalize(toLight + V);
         const float shininess = mix(260.0f, 36.0f, saturate(source.position.z * 4.0f));
-        const float lobe = pow(saturate(dot(N, H)), shininess) * (shininess + 8.0f) / (8.0f * M_PI_F);
+        const float nh = saturate(dot(N, H));
+        const float lobe = pow(nh, shininess) * (shininess + 8.0f) / (8.0f * M_PI_F);
+        // Immersive: a second, much broader layer — the soft sheen around the sparkle
+        const float wide = shininess * 0.12f;
+        const float lobe2 = pow(nh, wide) * (wide + 8.0f) / (8.0f * M_PI_F) * 0.35f * u.look2.x;
         const float emission = saturate(dot(ns, -toLight) * 0.6f + 0.4f);
         const float attenuation = 1.0f / (1.0f + dist2 / (700.0f * 700.0f));
-        sum += source.color.rgb * (source.position.w * presence * lobe * emission * attenuation);
+        sum += source.color.rgb * (source.position.w * presence * (lobe + lobe2) * emission * attenuation);
     }
 
     const bool lit = c.shape.w > 0.5f;
-    sum *= mixL * 0.10f * (0.6f + 0.8f * c.tint.y) * c.tint.x * (lit ? 0.3f : 1.0f);
+    // Specular strength of the preset; idle keeps the ambient light but quiets the highlights
+    sum *= mixL * 0.10f * (0.6f + 0.8f * c.tint.y) * c.tint.x * (lit ? 0.3f : 1.0f) * u.look.y * (1.0f - 0.6f * u.look2.z);
     sum = cuven::softCap(sum, u.material.w * 0.5f);
     return float4(sum * coverage, 0.0f);
 }

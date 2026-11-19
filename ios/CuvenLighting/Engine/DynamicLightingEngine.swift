@@ -4,10 +4,13 @@ import Foundation
 import Metal
 import simd
 
-/// The lighting model: turns the analysed video and the spatial state into what the surfaces need —
-/// the per-frame uniforms and a quarter-resolution irradiance texture of the panel.
+/// The lighting model: turns the analysed video, the spatial state and the Cinematic Reflection Mode into what the
+/// surfaces need — the per-frame uniforms and a quarter-resolution irradiance texture of the panel.
 ///
-/// Independent of any view: it is driven by MetalRenderer, owns no UI, and talks in points and textures.
+/// Presets do not switch pipelines: one pipeline runs with the numbers of a LightingProfile, and the look the
+/// shaders receive is eased toward the current profile (τ ≈ 0.22 s, so a switch settles in ~0.6 s). Standard
+/// fades the video light out and then stops analysing altogether.
+/// Independent of any view: driven by MetalRenderer, owns no UI, talks in points and textures.
 @MainActor
 final class DynamicLightingEngine {
     private let shaders: MetalShaderLibrary
@@ -20,10 +23,19 @@ final class DynamicLightingEngine {
     /// Quarter resolution of the panel, in texels per point
     let irradianceScale: Float = 0.25
 
-    var settings = LightingSettings()
+    var mode = CinematicReflectionMode()
     var geometry = LightingGeometry(videoContainer: .zero, hingePoint: .zero)
-    /// Lighting on/off cross-fade, 0…1 (≈ 0.4 s)
+    /// Controls hidden: lower analysis rate, highlights quieter, ambient light kept
+    var idle = false
+    private(set) var profile = LightingProfile.base(for: .cinematic)
+
+    /// Eased look (what the shaders get)
     private(set) var lightingMix: Float = 0
+    private(set) var look = SIMD4<Float>.zero        // ambient, specular, edge, blur
+    private(set) var look2 = SIMD4<Float>.zero       // layers, backdrop, idle, light count
+    private(set) var intensity: Float = 0
+    private(set) var mirror: Float = 0
+    private(set) var spatialAmount: Float = 0
     private var lastAnalysis: CFTimeInterval = 0
     private var projectedSignature: [Float] = []
     private var sourceGeneration = -1
@@ -45,8 +57,48 @@ final class DynamicLightingEngine {
         return AVMakeRect(aspectRatio: size, insideRect: container)
     }
 
-    func uniforms(viewSize: CGSize, scale: CGFloat, time: CFTimeInterval, dt: Double,
-                  quality: LightingQuality, cardCount: Int) -> GPUFrameUniforms {
+    /// Resolve the profile for this frame's quality level
+    func resolve(quality: LightingQuality) {
+        profile = mode.profile(quality: quality)
+        frames.setSampleSize(width: profile.sampleWidth, height: profile.sampleHeight)
+    }
+
+    var wantsMotion: Bool { profile.spatial > 0.001 }
+
+    /// Still moving toward the profile
+    private(set) var isEasing = true
+
+    /// Ease the look toward the profile
+    func step(dt: Double) {
+        let k = Float(1 - exp(-dt / 0.22))
+        let kMix = Float(1 - exp(-dt / 0.16))
+        let p = profile
+        let mixTarget: Float = p.analysisEnabled && analysis.hasData ? 1 : 0
+        let lookTarget = SIMD4<Float>(p.ambient, p.specular, p.edgeGlow, p.blur)
+        let look2Target = SIMD4<Float>(p.multiLayer, p.backdrop, idle ? 1 : 0, Float(p.lightCount))
+        var moving = false
+        func ease(_ v: inout Float, _ t: Float, _ k: Float) {
+            v += (t - v) * k
+            if abs(t - v) < 0.002 { v = t } else { moving = true }
+        }
+        func ease4(_ v: inout SIMD4<Float>, _ t: SIMD4<Float>) {
+            v += (t - v) * k
+            if simd_reduce_max(simd_abs(t - v)) < 0.002 { v = t } else { moving = true }
+        }
+        ease(&lightingMix, mixTarget, kMix)
+        ease(&intensity, p.intensity, k)
+        ease(&mirror, p.mirror, k)
+        ease(&spatialAmount, p.spatial, k)
+        ease4(&look, lookTarget)
+        // Light count steps immediately (slots fade on their own); the rest eases
+        var l2 = look2
+        l2.w = look2Target.w
+        ease4(&l2, look2Target)
+        look2 = l2
+        isEasing = moving
+    }
+
+    func uniforms(viewSize: CGSize, scale: CGFloat, time: CFTimeInterval, dt: Double, cardCount: Int) -> GPUFrameUniforms {
         let s = spatial.state
         let picture = pictureRect
         var away = SIMD2<Float>(Float(geometry.awayFromHinge.dx), Float(geometry.awayFromHinge.dy))
@@ -62,13 +114,12 @@ final class DynamicLightingEngine {
         // Distance from the hinge to the far edge of the panel (the edge nearest the viewer)
         let corners = [SIMD2<Float>(0, 0), SIMD2<Float>(size.x, 0), SIMD2<Float>(0, size.y), size]
         let farEdge = corners.map { simd_dot($0 - hinge, away) }.max() ?? size.y
-        let tilt = settings.spatialResponse ? s.tilt : .zero
+        let tilt = s.tilt * spatialAmount
         let eye = SIMD4<Float>(centerAlong + tilt.x * 260,
                                max(farEdge, 1) + 520 - tilt.y * 160,
                                620 + tilt.y * 220,
                                0)
 
-        let grid: SIMD2<Float> = quality == .high ? SIMD2(32, 18) : SIMD2(16, 9)
         var u = GPUFrameUniforms()
         u.viewport = SIMD4(Float(viewSize.width * scale), Float(viewSize.height * scale), Float(scale),
                            Float(time.truncatingRemainder(dividingBy: 3600)))
@@ -78,33 +129,27 @@ final class DynamicLightingEngine {
         u.hinge = SIMD4(hinge.x, hinge.y, s.foldRadians, 46)
         u.axes = SIMD4(along.x, along.y, away.x, away.y)
         u.eye = eye
-        let intensity = settings.intensity * (settings.spatialResponse ? s.intensity : 1)
-        u.material = SIMD4(intensity, lightingMix, settings.reflectivity, settings.readabilityCap)
-        u.analysis = SIMD4(Float(dt), grid.x, grid.y, 3.2)
+        let spatialIntensity = 1 + (s.intensity - 1) * spatialAmount
+        u.material = SIMD4(intensity * spatialIntensity, lightingMix, mirror, profile.readabilityCap)
+        u.analysis = SIMD4(Float(dt), Float(profile.gridColumns), Float(profile.gridRows), 3.2)
+        u.look = look
+        u.look2 = look2
         return u
     }
 
-    /// Ease the on/off mix
-    func step(dt: Double) {
-        let target: Float = settings.isEnabled && analysis.hasData ? 1 : 0
-        let k = Float(1 - exp(-dt / 0.14))
-        lightingMix += (target - lightingMix) * k
-        if abs(target - lightingMix) < 0.002 { lightingMix = target }
-    }
+    /// Analysis updates per second right now
+    var targetAnalysisHz: Int { idle ? profile.idleAnalysisHz : profile.analysisHz }
 
     /// Is a new analysis due now?
-    func analysisDue(now: CFTimeInterval, quality: LightingQuality) -> Bool {
-        guard settings.isEnabled, quality == .high || quality == .reduced else { return false }
-        let hz = quality == .high ? max(settings.lightingFPS, 1) : max(settings.lightingFPS / 2, 1)
+    func analysisDue(now: CFTimeInterval) -> Bool {
+        let hz = targetAnalysisHz
+        guard profile.analysisEnabled, hz > 0 else { return false }
         return now - lastAnalysis >= 1.0 / Double(hz) - 0.002
     }
 
     /// Pull a frame and encode the analysis; returns the CVMetalTexture to keep alive until the GPU is done
     func encodeAnalysis(now: CFTimeInterval, commandBuffer: any MTLCommandBuffer, uniforms: GPUFrameUniforms) -> CVMetalTexture? {
-        if frames.syncItem() || frames.sourceGeneration != sourceGeneration {
-            sourceGeneration = frames.sourceGeneration
-            analysis.reset()
-        }
+        syncSource()
         guard let frame = frames.nextFrame(hostTime: now) else { return nil }
         var u = uniforms
         u.analysis.x = Float(min(max(now - lastAnalysis, 1.0 / 120), 0.25))
@@ -113,9 +158,17 @@ final class DynamicLightingEngine {
         return frame.holder
     }
 
+    /// Follow the player's current item (a new source fades its light in from black)
+    func syncSource() {
+        if frames.syncItem() || frames.sourceGeneration != sourceGeneration {
+            sourceGeneration = frames.sourceGeneration
+            analysis.reset()
+        }
+    }
+
     /// Re-project the irradiance when the light map, the layout or the fold changed
     func encodeProjection(commandBuffer: any MTLCommandBuffer, uniforms: GPUFrameUniforms, viewSize: CGSize, force: Bool) {
-        guard analysis.hasData, let pipeline = shaders.projectIrradiance, let near = analysis.near else { return }
+        guard analysis.hasData, lightingMix > 0.0005, let pipeline = shaders.projectIrradiance, let near = analysis.near else { return }
         let w = max(Int((Float(viewSize.width) * irradianceScale).rounded(.up)), 1)
         let h = max(Int((Float(viewSize.height) * irradianceScale).rounded(.up)), 1)
         if irradiance == nil || irradianceSize != (w, h) {

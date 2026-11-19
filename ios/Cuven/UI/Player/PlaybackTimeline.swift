@@ -1,43 +1,51 @@
 import SwiftUI
 
-// MARK: - 进度条（参照图第三行）：红色进度、可拖的圆点、当前时间 / 总时长
+// MARK: - 进度条：细、轻，Cuven 蓝的已播放部分，中性灰的剩余部分，一颗小圆点，左边当前时间、右边总时长
 //
-// 拖动时圆点放大（18 → 26 点），时间跟着手指走，松手才跳过去（不在拖的路上一直 seek）；
+// 播放时进度每 0.25 秒更新一次，中间用线性动画补平，看起来是连续走的；拖动时圆点从 14 点放大到 22 点，
+// 时间跟着手指走，松手才跳过去（不在拖的路上一直 seek）。整条只占一行，点按区是整行的高度。
 // 旁白：「播放进度」，值是「已播放 x，共 y」，上下扫动前进 / 后退 10 秒。
 
 enum PlayerPalette {
-    /// 参照图的红色进度条
-    static let progress = Color(red: 0.898, green: 0.035, blue: 0.078)
-    static let track = Color.white.opacity(0.28)
+    /// 已播放：Cuven 的蓝（Theme.accent）
+    static let progress = Theme.accent
+    static let track = Color.white.opacity(0.24)
 }
 
 struct PlaybackTimeline: View {
     let model: CuvenPlayerViewModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let duration = model.duration
         let at = model.scrub ?? model.position
         let fraction = duration > 0 ? min(1, max(0, at / duration)) : 0
         let dragging = model.scrub != nil
-        HStack(spacing: 20) {
+        HStack(spacing: 14) {
+            Text(duration > 0 ? Self.clock(at) : "--:--")
+                .font(.system(size: 13, weight: .medium).monospacedDigit())
+                .foregroundStyle(.white)
+                .fixedSize()
             GeometryReader { geo in
                 let w = geo.size.width
-                let knob: CGFloat = dragging ? 26 : 18
+                let knob: CGFloat = dragging ? 22 : 14
                 ZStack(alignment: .leading) {
                     Capsule()
                         .fill(PlayerPalette.track)
-                        .frame(height: 4)
+                        .frame(height: 3)
                     Capsule()
                         .fill(PlayerPalette.progress)
-                        .frame(width: max(4, w * fraction), height: 4)
+                        .frame(width: max(3, w * fraction), height: 3)
                     Circle()
-                        .fill(PlayerPalette.progress)
+                        .fill(Color.white)
                         .frame(width: knob, height: knob)
-                        .shadow(color: .black.opacity(0.4), radius: 3, y: 1)
+                        .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
                         .offset(x: w * fraction - knob / 2)
-                        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: dragging)
                 }
                 .frame(width: w, height: geo.size.height)
+                // 播放中的进度在两次更新之间线性补平；拖动时跟手、不加动画
+                .animation(dragging || reduceMotion ? nil : .linear(duration: 0.25), value: fraction)
+                .animation(.spring(response: 0.25, dampingFraction: 0.85), value: dragging)
                 .contentShape(Rectangle())
                 .gesture(
                     DragGesture(minimumDistance: 0)
@@ -54,13 +62,12 @@ struct PlaybackTimeline: View {
                         }
                 )
             }
-            Text(duration > 0 ? "\(Self.clock(at)) / \(Self.clock(duration))" : "--:-- / --:--")
-                .font(.system(size: 15, weight: .medium).monospacedDigit())
-                .foregroundStyle(.white)
+            Text(duration > 0 ? Self.clock(duration) : "--:--")
+                .font(.system(size: 13, weight: .medium).monospacedDigit())
+                .foregroundStyle(DSInk.secondary)
                 .fixedSize()
         }
-        .padding(.leading, 24)
-        .padding(.trailing, 22)
+        .padding(.horizontal, 20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("播放进度")

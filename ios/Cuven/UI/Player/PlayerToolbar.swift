@@ -5,7 +5,7 @@ import UIKit
 
 // MARK: - 面板的第一行和第四行（参照图）
 //
-// 第一行：关闭 | 剧集信息卡（小画面 + 片名 + 第几集）| 画中画 | 锁定
+// 第一行：关闭 | 剧集信息卡（Cuven 字标 + 片名 + 第几集 + ›，点开是影院光影设置）| 画中画 | 锁定
 // 第四行：截取画面 | 播放速度 | 亮度 | 音量 | 音频与字幕 | 下一集（剧集后面还有才有）| 全屏（半折时才有）
 // 亮度、音量点开时第四行展开成一条滑杆，右边「×」收起。
 
@@ -59,45 +59,69 @@ struct PlayerTopBar: View {
     }
 }
 
-/// 剧集信息卡：小画面 + 片名 + 第几集（只是看的，不是按钮；参照图里那家的字标换成这一集的画面）
+/// 剧集信息卡：Cuven 字标 + 片名 + 第几集 + 一个淡淡的「›」。点开是影院光影的设置（精简版，下面的面板就是预览）
 struct PlayerTitleCard: View {
     let model: CuvenPlayerViewModel
     let height: CGFloat
+    @State private var showsLighting = false
 
     var body: some View {
-        let thumbH = min(44, max(28, height - 32))
-        HStack(spacing: 14) {
-            if let url = Self.thumbURL(model.artwork) {
-                RemoteImage(url: url, maxPixel: 240, placeholder: DSFill.placeholder)
-                    .frame(width: (thumbH * 16 / 9).rounded(), height: thumbH)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(DSFill.hairline, lineWidth: 0.5))
-                    .accessibilityHidden(true)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(model.title)
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                if let s = model.subtitle, !s.isEmpty {
-                    Text(s)
-                        .font(.subheadline)
-                        .foregroundStyle(DSInk.secondary)
+        Button {
+            model.poke()
+            showsLighting = true
+        } label: {
+            HStack(spacing: 14) {
+                CuvenBrandMark()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(model.title)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                    if let s = model.subtitle, !s.isEmpty {
+                        Text(s)
+                            .font(.subheadline)
+                            .foregroundStyle(DSInk.secondary)
+                    }
                 }
+                .lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(DSInk.tertiary)
             }
-            .lineLimit(1)
-            Spacer(minLength: 0)
+            .padding(.horizontal, 16)
         }
-        .padding(.horizontal, 16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .buttonStyle(LitTileStyle(id: "title"))
+        .popover(isPresented: $showsLighting) {
+            ScrollView {
+                CinematicLightingView(compact: true)
+                    .padding(20)
+            }
+            .frame(minWidth: 320, idealWidth: 380, maxWidth: 420, minHeight: 320, idealHeight: 460)
+            .background(Color(white: 0.08))
+            .presentationCompactAdaptation(.popover)
+            .preferredColorScheme(.dark)
+        }
+        .onChange(of: showsLighting) { _, open in model.setSettingsOpen(open) }
         .accessibilityElement(children: .combine)
+        .accessibilityLabel([model.title, model.subtitle].compactMap { $0 }.joined(separator: "，"))
+        .accessibilityHint("打开影院光影设置")
         .accessibilityIdentifier("player-title")
     }
+}
 
-    /// Apple 图床按宽度要小图，TMDB 换小一档；本机视频 / 演示数据原样
-    static func thumbURL(_ raw: String?) -> URL? {
-        guard let raw, !raw.isEmpty else { return nil }
-        if raw.hasPrefix("file://") { return URL(string: raw) }
-        return TMDBImage.url(AppleImage.sized(raw, width: 240), "w300")
+/// Cuven 的小字标（和登录页、加载画面同一套：圆体，「Cuven」中等粗、「max」特粗而大）
+struct CuvenBrandMark: View {
+    var body: some View {
+        VStack(spacing: -3) {
+            Text("Cuven")
+                .font(.system(size: 9, weight: .medium, design: .rounded))
+            Text("max")
+                .font(.system(size: 16, weight: .heavy, design: .rounded))
+                .tracking(-0.7)
+        }
+        .foregroundStyle(.white)
+        .fixedSize()
+        .accessibilityHidden(true)
     }
 }
 

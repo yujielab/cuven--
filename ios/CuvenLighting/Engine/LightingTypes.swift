@@ -44,23 +44,6 @@ public struct LightingGeometry: Sendable, Equatable {
     }
 }
 
-public struct LightingSettings: Sendable, Equatable {
-    /// Video-driven light on the cards (off: the plain dark material stays)
-    public var isEnabled = true
-    /// 0…1.5
-    public var intensity: Float = 0.85
-    /// Mirror reflection strength 0…1
-    public var reflectivity: Float = 0.6
-    /// Highest linear luminance light may push a dark card to (keeps white symbols at ≥ 4.5 : 1)
-    public var readabilityCap: Float = 0.12
-    /// Core Motion / hinge driven reflection direction
-    public var spatialResponse = true
-    /// Lighting analysis rate; the composite runs at the display rate
-    public var lightingFPS: Int = 30
-
-    public init() {}
-}
-
 public enum LightingQuality: String, Sendable {
     /// 30 Hz lighting, 60 Hz composite, 32 × 18 projection grid
     case high
@@ -84,6 +67,21 @@ public struct LightingDiagnostics: Sendable, Equatable {
     public var hasVideo = false
     public var foldDegrees: Double = 180
     public var shaderError: String?
+    /// Cinematic Reflection Mode
+    public var preset: LightingPreset = .cinematic
+    public var adaptation: LightingAdaptation = .none
+    /// Target analysis rate right now (after idle / adaptive)
+    public var targetAnalysisHz: Int = 0
+    /// Controls hidden: lower rates, ambient light kept
+    public var idle = false
+    /// Device tilt against the resting posture (screen axes, −1…1) and the resulting light factor
+    public var tilt: SIMD2<Float> = .zero
+    public var spatialIntensity: Float = 1
+    /// Effective look after easing (what the shaders get this frame)
+    public var effectiveIntensity: Float = 0
+    public var effectiveSpecular: Float = 0
+    public var lightingMix: Float = 0
+    public var gpuTier = 0
 
     public init() {}
 }
@@ -121,6 +119,8 @@ struct GPUFrameUniforms {
     var eye = SIMD4<Float>.zero
     var material = SIMD4<Float>.zero
     var analysis = SIMD4<Float>.zero
+    var look = SIMD4<Float>.zero
+    var look2 = SIMD4<Float>.zero
 }
 
 struct GPUCardInstance {
@@ -141,7 +141,7 @@ enum GPULayout {
     static let cellsBytes = MemoryLayout<SIMD4<Float>>.stride * 288
 
     static func check() {
-        assert(MemoryLayout<GPUFrameUniforms>.stride == 128, "CuvenFrameUniforms layout drifted")
+        assert(MemoryLayout<GPUFrameUniforms>.stride == 160, "CuvenFrameUniforms layout drifted")
         assert(MemoryLayout<GPUCardInstance>.stride == 48, "CuvenCardInstance layout drifted")
     }
 }

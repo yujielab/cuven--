@@ -29,8 +29,18 @@ public final class VideoFrameProcessor {
     /// Increments every time the player switches to another item
     public private(set) var sourceGeneration = 0
 
-    static let width = 256
-    static let height = 144
+    /// Size the decoder's scaler delivers frames at (the preset's sample size; changing it swaps the output
+    /// on the same item without resetting the light)
+    private(set) var sampleWidth = 256
+    private(set) var sampleHeight = 144
+    private var needsNewOutput = false
+
+    func setSampleSize(width: Int, height: Int) {
+        guard width != sampleWidth || height != sampleHeight else { return }
+        sampleWidth = width
+        sampleHeight = height
+        needsNewOutput = true
+    }
 
     init(textureCache: CVMetalTextureCache) {
         self.textureCache = textureCache
@@ -48,13 +58,15 @@ public final class VideoFrameProcessor {
     @discardableResult
     func syncItem() -> Bool {
         let current = player?.currentItem
-        guard current !== item else { return false }
+        let sameItem = current === item
+        guard !sameItem || needsNewOutput else { return false }
+        needsNewOutput = false
         detach()
         if let current {
             let attributes: [String: any Sendable] = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: Self.width,
-                kCVPixelBufferHeightKey as String: Self.height,
+                kCVPixelBufferWidthKey as String: sampleWidth,
+                kCVPixelBufferHeightKey as String: sampleHeight,
                 kCVPixelBufferMetalCompatibilityKey as String: true,
                 kCVPixelBufferIOSurfacePropertiesKey as String: [String: any Sendable](),
             ]
@@ -64,6 +76,7 @@ public final class VideoFrameProcessor {
             output = o
             item = current
         }
+        guard !sameItem else { return false }
         sourceGeneration += 1
         framesSinceSourceChange = 0
         return true
