@@ -10,7 +10,7 @@ import UIKit
 // 用户要求做一个能实际运行的演示：放本机视频（相册 / 文件）或内置的测试画面（火光、海面、夜色、霓虹），
 // 看卡片上的光跟着画面走；开关动态光影、调光影强度和反射、开关空间响应（Core Motion）、模拟铰链角度，
 // 看帧率 / GPU 时间 / 内存 / 降档状态，以及分析出来的 16 × 9 分区颜色和追踪到的光源。
-// 入口：账户与设置 →「播放」→「光影实验室」；Debug 构建认 -CuvenPlayerLab YES（自动放测试画面，UI 测试截图用）。
+// 入口：账户页的「光影实验室」一行已按用户要求移除；只有 Debug 构建认 -CuvenPlayerLab YES（自动放测试画面，UI 测试截图用）。
 
 @MainActor
 enum PlayerLab {
@@ -210,8 +210,8 @@ struct PlayerLabView: View {
             }
 
             section("影院光影") {
-                // 和播放器里、账户与设置里是同一块设置（存在本机）
-                CinematicLightingView(compact: true)
+                // 只有三种模式能换（参数固定）；和播放器 Touch Bar 上的「光效」是同一个设置（存在本机）
+                LightingModePicker()
                 Toggle("模拟铰链角度", isOn: $simulateHinge)
                     .tint(.green)
                     .accessibilityIdentifier("lab-simulate-hinge")

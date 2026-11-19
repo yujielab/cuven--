@@ -107,12 +107,9 @@ final class DuoUnfoldedTests: XCTestCase {
             tapID(app, "player-lock")
         }
         swipeBar(app, dx: -640)
-        // 光效：点一下是完整的光影设置
-        if tapID(app, "player-effects", pause: 1.5) {
-            snap("duo-38k-touchbar-effects")
-            app.tap(at: CGPoint(x: 20, y: 60))
-            sleep(1)
-        }
+        // 光效：点一下换下一种模式，展开一下看到换成了哪个（只有三种模式能换，参数固定）
+        if tapID(app, "player-effects", pause: 0.5) { snap("duo-38k-touchbar-effects") }
+        sleep(2)
         // 最底下那块的三个标签
         for (tab, tag) in [("insight", "h"), ("continueWatching", "i"), ("recommend", "j")] {
             if tapID(app, "deck-tab-\(tab)") { snap("duo-38\(tag)-deck-\(tab)") }

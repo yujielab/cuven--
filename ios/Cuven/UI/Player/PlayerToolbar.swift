@@ -12,7 +12,8 @@ import UIKit
 //     手指左右滑，白色的高亮跟着走，松开就选它、收回；
 //   · 形变时这颗按需要长宽（最多是看得见的宽度的 80%），把别的胶囊推开、调暗，整条挪到让它居中；松开时都回去。
 // 点一下：锁定 = 这一页的方向锁在现在的方向（亮起来）；全屏 = 退出半折回到系统播放器全屏、方向回到原来的规则；
-// 声音 = 静音 / 取消静音；字幕 = 关 / 开回原来那条；光效 = 打开影院光影的完整设置；亮度、音轨看一眼（展开 1.6 秒再收回）。
+// 声音 = 静音 / 取消静音；字幕 = 关 / 开回原来那条；光效 = 换下一种模式（展开 1.6 秒让你看到换成了哪个）；
+// 亮度、音轨看一眼（展开 1.6 秒再收回）。光影只有这三种模式能换，参数是固定的（CinematicReflectionMode）。
 // 进度条：在那条线上按住拖，松手才跳过去。
 
 /// Touch Bar 上的每一颗
@@ -88,7 +89,6 @@ struct PlayerTouchBar: View {
     @State private var peeking = false
     @State private var scrubbing = false
     @State private var track: CGRect = .zero
-    @State private var showsEffects = false
     @GestureState private var pressed: TouchBarKey?
     @Namespace private var pickSpace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -167,18 +167,6 @@ struct PlayerTouchBar: View {
                 // 长按的手指抬起来了（或者被打断）：收回（「看一眼」的自己到时间收）
                 if now == nil, morph != nil, !peeking { end() }
             }
-            .popover(isPresented: $showsEffects,
-                     attachmentAnchor: .rect(.rect(effectsAnchor(lay, shown: shown, top: top)))) {
-                ScrollView {
-                    CinematicLightingView(compact: true)
-                        .padding(20)
-                }
-                .frame(minWidth: 320, idealWidth: 380, maxWidth: 420, minHeight: 320, idealHeight: 460)
-                .background(Color(white: 0.08))
-                .presentationCompactAdaptation(.popover)
-                .preferredColorScheme(.dark)
-            }
-            .onChange(of: showsEffects) { _, open in model.setSettingsOpen(open) }
         }
         .frame(height: Self.height(pill: pillHeight))
         .accessibilityElement(children: .contain)
@@ -203,11 +191,6 @@ struct PlayerTouchBar: View {
     private func rubberBand(_ o: CGFloat, content: CGFloat, _ W: CGFloat) -> CGFloat {
         let c = clamp(o, content: content, W)
         return c + (o - c) * 0.35
-    }
-
-    private func effectsAnchor(_ g: TouchBarGeometry, shown: CGFloat, top: CGFloat) -> CGRect {
-        guard let f = g.frames[.effects] else { return .zero }
-        return CGRect(x: f.minX + shown, y: top, width: f.width, height: f.height)
     }
 
     // MARK: 形变
@@ -305,9 +288,9 @@ struct PlayerTouchBar: View {
         case .volume: model.toggleMute()
         case .subtitles: model.toggleSubtitles()
         case .effects:
-            Haptics.selection()
-            model.poke()
-            showsEffects = true
+            // 换下一种模式，展开一下让人看到换成了哪个
+            settings.cyclePreset()
+            peek(k)
         case .brightness, .audio: peek(k)
         default: break
         }
@@ -579,7 +562,7 @@ struct PlayerTouchBar: View {
         .accessibilityLabel(k == .subtitles ? "字幕" : k == .audio ? "音轨" : "光效")
         .accessibilityValue(names.indices.contains(current) ? names[current] : "")
         .accessibilityHint(k == .subtitles ? "点按开关字幕，长按后左右滑动选择"
-                           : k == .audio ? "长按后左右滑动选择音轨" : "点按打开光影设置，长按后左右滑动选择模式")
+                           : k == .audio ? "长按后左右滑动选择音轨" : "点按换下一种光影模式，长按后左右滑动选择")
         .accessibilityAdjustableAction { direction in
             let n = names.count
             guard n > 0 else { return }

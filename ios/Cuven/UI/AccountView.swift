@@ -87,7 +87,6 @@ struct AccountView: View {
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(PlayerCoordinator.autoplayKey) private var autoplayNext = true
     /// 影院光影（半折播放器：画面里的光映在控制卡片上）的模式，这一行显示当前是哪一种
-    @State private var lightingSettings = CinematicLightingSettings.shared
     /// 首选音轨 / 首选字幕（用户要求，TrackPrefs.swift）
     @AppStorage(TrackPrefs.audioKey) private var audioPref = TrackPrefs.Audio.auto.rawValue
     @AppStorage(TrackPrefs.subtitleKey) private var subtitlePref = TrackPrefs.Subtitle.auto.rawValue
@@ -296,30 +295,7 @@ struct AccountView: View {
                     .tint(.green)
             }
             AccountDivider()
-            // 影院光影：标准 / 影院 / 沉浸 + 微调 + 实时预览（CinematicLightingView.swift）
-            Button {
-                CinematicLightingPage.present()
-            } label: {
-                AccountRow(icon: "light.max", title: "影院光影", subtitle: "半折播放时，画面里的光映在控制面板上") {
-                    HStack(spacing: 8) {
-                        AccountValue(lightingSettings.mode.preset.title)
-                        AccountChevron()
-                    }
-                }
-            }
-            .buttonStyle(AccountRowPress())
-            .accessibilityValue(lightingSettings.mode.preset.title)
-            .accessibilityIdentifier("account-cinematic-lighting")
-            AccountDivider()
-            // 光影实验室：用本机视频或内置的测试画面看光影效果、调参数、看帧率（PlayerLab.swift）
-            Button {
-                PlayerLab.present()
-            } label: {
-                AccountRow(icon: "sparkles.tv", title: "光影实验室", subtitle: "用本机视频试试画面光影") { AccountChevron() }
-            }
-            .buttonStyle(AccountRowPress())
-            .accessibilityIdentifier("account-lighting-lab")
-            AccountDivider()
+            // 「影院光影」「光影实验室」两行按用户要求移除（参数固定，模式在播放器 Touch Bar 的「光效」上换）
             // 首选音轨 / 首选字幕（用户要求「允许设置字幕和音轨首选项」）：整行是一颗系统弹出菜单，勾着当前那一项（C11）
             Menu {
                 Picker("首选音轨", selection: $audioPref) {
