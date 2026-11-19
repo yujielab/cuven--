@@ -118,7 +118,10 @@ struct TabletopPlayerLayer: View {
             ZStack {
                 if model.active, let f = model.fold {
                     // 横着的折痕：画面在上、控制在下；竖着的：画面在右页、控制在左页（卡片转成一列一列的）。换姿态时卡片形变过去
-                    CuvenPlayerView(model: model, player: model.player, layout: f.width > f.height ? .tabletop(f) : .book(f))
+                    // 这一层忽略了安全区（画面要铺到屏边），安全区由这里量好交下去：书本时面板占满整页的高，
+                    // 上面的卡片要让开状态栏（CI 截图里第一排压在了状态栏下面）
+                    CuvenPlayerView(model: model, player: model.player, layout: f.width > f.height ? .tabletop(f) : .book(f),
+                                    safeInsets: full.safeAreaInsets)
                         .transition(.opacity.combined(with: .scale(scale: 0.98)))
                 }
             }

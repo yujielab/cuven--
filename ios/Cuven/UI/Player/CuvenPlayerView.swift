@@ -28,6 +28,8 @@ struct CuvenPlayerView: View {
     let model: CuvenPlayerViewModel
     let player: AVPlayer?
     let layout: CuvenPlayerLayout
+    /// 外面已经忽略了安全区时，由外面量好交进来（和这里自己量到的取大的）
+    var safeInsets = EdgeInsets()
     var options = PlayerLightingOptions()
     var onDiagnostics: ((LightingDiagnostics) -> Void)?
     var onPalette: ((SampledPalette) -> Void)?
@@ -39,8 +41,10 @@ struct CuvenPlayerView: View {
             let sf = safe.frame(in: .global)
             GeometryReader { full in
                 let ff = full.frame(in: .global)
-                let insets = EdgeInsets(top: max(0, sf.minY - ff.minY), leading: max(0, sf.minX - ff.minX),
-                                        bottom: max(0, ff.maxY - sf.maxY), trailing: max(0, ff.maxX - sf.maxX))
+                let insets = EdgeInsets(top: max(safeInsets.top, sf.minY - ff.minY, 0),
+                                        leading: max(safeInsets.leading, sf.minX - ff.minX, 0),
+                                        bottom: max(safeInsets.bottom, ff.maxY - sf.maxY, 0),
+                                        trailing: max(safeInsets.trailing, ff.maxX - sf.maxX, 0))
                 let parts = PlayerLayoutParts(layout: layout, size: full.size, insets: insets)
                 ZStack(alignment: .topLeading) {
                     Color.black
