@@ -49,6 +49,15 @@ public struct LightingGeometry: Sendable, Equatable {
     }
 }
 
+/// Dynamic range of the video source, as far as it is known
+public enum LightingSourceRange: Sendable, Equatable {
+    case unknown
+    /// Standard range: frames can be tapped for the lighting
+    case sdr
+    /// HDR10 / HLG / Dolby Vision: never tapped (the lighting reads the still image)
+    case hdr
+}
+
 public enum LightingQuality: String, Sendable {
     /// 30 Hz lighting, 60 Hz composite, 32 × 18 projection grid
     case high

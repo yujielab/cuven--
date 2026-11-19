@@ -45,6 +45,20 @@ public final class MetalRenderer: NSObject {
         set { engine.frames.player = newValue; needsRender = true }
     }
 
+    /// What the host knows about the source's dynamic range (the server's stream info, the file name). HDR and
+    /// Dolby Vision items are never tapped — a video output on them changes the picture on screen — and are lit from
+    /// the still image instead (VideoFrameProcessor)
+    public var sourceRange: LightingSourceRange {
+        get { engine.frames.rangeHint }
+        set { engine.frames.rangeHint = newValue; needsRender = true }
+    }
+
+    /// The title's artwork: what the lighting reads while the video itself cannot be tapped
+    public func setStillImage(_ image: CGImage?) {
+        engine.frames.setStill(image)
+        needsRender = true
+    }
+
     public var geometry: LightingGeometry {
         get { engine.geometry }
         set {
@@ -257,7 +271,7 @@ public final class MetalRenderer: NSObject {
         }
 
         let uniforms = engine.uniforms(viewSize: size, scale: scale, time: now, dt: dt, cardCount: surfaces.instances.count)
-        var holder: CVMetalTexture?
+        var holder: AnyObject?
         if analysisDue {
             holder = engine.encodeAnalysis(now: now, commandBuffer: commandBuffer, uniforms: uniforms)
             if holder != nil { lightingTicks.tick(now) }

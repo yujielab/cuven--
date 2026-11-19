@@ -183,6 +183,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             let (status, body) = await APIClient.shared.hlsInfo(info)
             // 视频格式也记下（编码、动态范围、尺寸、杜比视界档位；不含片名与地址）：放不了的时候知道是哪种格式
             plog("source hls, info.json \(status) in \(Perf.ms(since: t1)) ms\(body?.video.map { " (\($0.summary))" } ?? "")")
+            // 半折面板的光影：HDR / 杜比视界的片子不取画面的帧（见 VideoFrameProcessor）
+            controller?.tabletop.updateRange(from: body?.video)
             PlayerLoadingOverlay.shared.stage(.meta)
             if (200..<300).contains(status) && body?.ok != false { return await precached(req, master) ?? master }
             if status >= 400 && status < 500 && status != 404 {

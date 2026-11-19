@@ -45,7 +45,7 @@ final class DynamicLightingEngine {
         self.shaders = shaders
         self.pool = pool
         self.analysis = analysis
-        self.frames = VideoFrameProcessor(textureCache: shaders.textureCache)
+        self.frames = VideoFrameProcessor(textureCache: shaders.textureCache, device: shaders.device)
         self.spatial = SpatialResponseEngine()
     }
 
@@ -147,8 +147,8 @@ final class DynamicLightingEngine {
         return now - lastAnalysis >= 1.0 / Double(hz) - 0.002
     }
 
-    /// Pull a frame and encode the analysis; returns the CVMetalTexture to keep alive until the GPU is done
-    func encodeAnalysis(now: CFTimeInterval, commandBuffer: any MTLCommandBuffer, uniforms: GPUFrameUniforms) -> CVMetalTexture? {
+    /// Pull a frame (or the still) and encode the analysis; returns what to keep alive until the GPU is done
+    func encodeAnalysis(now: CFTimeInterval, commandBuffer: any MTLCommandBuffer, uniforms: GPUFrameUniforms) -> AnyObject? {
         syncSource()
         guard let frame = frames.nextFrame(hostTime: now) else { return nil }
         var u = uniforms

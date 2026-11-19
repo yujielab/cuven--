@@ -53,6 +53,8 @@ final class LightingHost {
     private var idle = false
     private var simulatedFold: Double?
     private var hardwareFold: Double?
+    private var sourceRange: LightingSourceRange = .unknown
+    private var still: CGImage?
     var onDiagnostics: ((LightingDiagnostics) -> Void)? {
         didSet { renderer?.onDiagnostics = onDiagnostics }
     }
@@ -66,6 +68,8 @@ final class LightingHost {
             r.mode = mode
             if let geometry { r.geometry = geometry }
             r.player = player
+            r.sourceRange = sourceRange
+            r.setStillImage(still)
             r.isIdle = idle
             r.onDiagnostics = onDiagnostics
             r.onPalette = onPalette
@@ -111,6 +115,18 @@ final class LightingHost {
     func attach(player: AVPlayer?) {
         self.player = player
         renderer?.player = player
+    }
+
+    /// HDR / 杜比视界：不取画面的帧，光影读剧照
+    func setSourceRange(_ range: LightingSourceRange) {
+        sourceRange = range
+        renderer?.sourceRange = range
+    }
+
+    /// 这一集的剧照：取不了画面的帧时（HDR、片源还没认出来）光影读它
+    func setStill(_ image: CGImage?) {
+        still = image
+        renderer?.setStillImage(image)
     }
 
     /// 闲置：卡片（玻璃）收拢、淡出，只留画面映在面板上的环境光；高光安静一点、更新慢一点
@@ -366,8 +382,17 @@ struct PlayerControlPanel: View {
         .onChange(of: FoldKey(simulated: options.simulatedFold, hardware: model.hardwareFold), initial: true) { _, k in
             host.setFold(simulated: k.simulated, hardware: k.hardware)
         }
+        .onChange(of: model.sourceRange, initial: true) { _, r in host.setSourceRange(r) }
         .onChange(of: player.map(ObjectIdentifier.init), initial: true) { _, _ in host.attach(player: player) }
         .onChange(of: model.controlsVisible, initial: true) { _, visible in host.setIdle(!visible) }
+        .task(id: model.artwork) {
+            // 剧照小一点就够（光影只取 256 × 144）
+            // 剧照的地址可能是 TMDB 的相对路径（「/xxx.jpg」）、完整地址或演示数据的 demo://
+            guard let url = TMDBImage.url(model.artwork, "w300") else { host.setStill(nil); return }
+            let image = await ImagePipeline.shared.image(url, maxPixel: 480)
+            guard !Task.isCancelled else { return }
+            host.setStill(image?.cgImage)
+        }
     }
 
     /// 把一块放到格子给它的位置上（格子里没有这一块就不放）

@@ -1,5 +1,6 @@
 import AVFoundation
 import AVKit
+import CuvenLighting
 import SwiftUI
 import UIKit
 
@@ -20,6 +21,9 @@ final class CuvenPlayerViewModel {
     var subtitle: String?
     var artwork: String?
     var hasNext = false
+    /// 片源的动态范围（服务器的 info.json、文件名）：HDR / 杜比视界的片子光影不取画面的帧（取了会改变屏上的画面：
+    /// 用户真机截图，杜比视界 5 变成一片绿和品红），改用这一集的剧照打光
+    var sourceRange: LightingSourceRange = .unknown
 
     /// 横着的折痕（半折）；没有：nil
     private(set) var fold: CGRect?

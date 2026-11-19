@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import AVKit
 import AVFoundation
+import CuvenLighting
 
 // MARK: - 半折（桌面形态）的播放器：上面画面、下面控制面板
 //
@@ -102,6 +103,25 @@ final class TabletopPlayerHost {
         model.subtitle = req.subtitle
         model.artwork = req.artwork
         model.hasNext = !req.queue.isEmpty
+        // 文件名先给一个判断（「杜比视界」「HDR」）；拿到服务器的 info.json 以后 PlayerCoordinator 再更新
+        model.sourceRange = Self.range(fromName: req.name)
+    }
+
+    /// 文件名里写着杜比视界 / HDR：当 HDR；没写：不知道（交给光影引擎自己从片源认）
+    static func range(fromName name: String) -> LightingSourceRange {
+        let specs = FileName.specs(name)
+        return specs.contains(where: { $0 == "杜比视界" || $0.hasPrefix("HDR") }) ? .hdr : .unknown
+    }
+
+    /// 服务器 info.json 里的视频轨：PQ / HLG 或带杜比视界档位是 HDR，SDR 是 SDR；文件名说是 HDR 的不改回去
+    func updateRange(from video: HLSVideoInfo?) {
+        guard let video else { return }
+        let range = (video.range ?? "").uppercased()
+        if video.dvProfile != nil || range == "PQ" || range == "HLG" || range.contains("HDR") {
+            model.sourceRange = .hdr
+        } else if range == "SDR", model.sourceRange != .hdr {
+            model.sourceRange = .sdr
+        }
     }
 }
 
