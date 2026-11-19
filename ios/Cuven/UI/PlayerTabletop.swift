@@ -504,7 +504,10 @@ private struct TabletopTopRow: View {
                 TabletopTitleCard(model: model, height: height)
                     .tabletopLockable(model.locked)
 
+                // 系统的选择器按自己的大小画图标（铺满整块时图标有 70 点高：CI 截图）：给它 36 点见方，图标约 25 点，
+                // 和别的块上的符号差不多大
                 AirPlayButton()
+                    .frame(width: 36, height: 36)
                     .frame(width: unit)
                     .frame(maxHeight: .infinity)
                     .background(TabletopTileBackground(pressed: false))
