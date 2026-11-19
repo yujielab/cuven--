@@ -7,11 +7,13 @@ import UIKit
 // MARK: - Cuven 播放器：画面 + 控制面板（面板的卡片由画面打光）
 //
 // 跟着设备的姿态走（参照 Netflix 在 iPhone Duo 上的播放器：全屏、书本、桌面几种摆法，控制始终够得着），同一套面板：
-//   · tabletop(折痕)：半折立在桌上（横着的折痕）——折痕上面是画面，下面是控制面；
-//   · book(折痕)：横拿半折像一本书（竖着的折痕）——左页是画面，右页是控制面；
-//     这两种按半折的几何算光：画面立在面板旁边，默认 105°，系统报了铰链角度就用真的（光的方向跟着铰链角度变）；
-//   · stacked / sideBySide：实验室、设置页预览里竖着 / 横着的普通屏，按半折立着的 115° 模拟。
-// 控制面那一块是整片的（满宽、从折痕一直到屏幕底），光铺在整片上、四边都羽化，不会有硬边界；
+//   · tabletop(折痕)：半折立在桌上（横着的折痕）——折痕上面是画面，下面是控制面，卡片排成四行；
+//   · book(折痕)：横拿半折像一本书（竖着的折痕）——右页是画面，左页是控制面（Netflix 样机的摆法），
+//     同一套卡片转成四列，离折痕最近的一列是关闭 / 信息卡 / 画中画 / 锁定，进度条竖着走；
+//     这两种按半折的几何算光：画面立在面板旁边，默认 105°，系统报了铰链角度就用真的（画面映在面板上的样子跟着变）；
+//   · stacked / sideBySide：实验室、设置页预览里竖着 / 横着的普通屏，按半折立着的 115° 模拟（横着时和书本一样左控右画）。
+// 「全屏」回到系统播放器（画面铺满、系统控件）。
+// 控制面那一块是整片的（满宽、从折痕一直到屏幕边），光铺在整片上、四边都羽化，不会有硬边界；
 // 卡片排在里面，留出安全区和 8 点边距。换姿态、转屏时卡片在渲染器里用弹簧从旧位置形变到新位置。
 // 画面由 AVPlayerLayer 画（硬件解码、HDR、画中画都是系统的）；同一个 AVPlayer 另由光影引擎取小帧分析。
 
@@ -47,7 +49,7 @@ struct CuvenPlayerView: View {
                         .offset(x: parts.video.minX, y: parts.video.minY)
                         .accessibilityHidden(true)
                     PlayerControlPanel(model: model, player: player, geometry: parts.lighting, content: parts.content,
-                                       options: options, onDiagnostics: onDiagnostics, onPalette: onPalette)
+                                       foldEdge: parts.foldEdge, options: options, onDiagnostics: onDiagnostics, onPalette: onPalette)
                         .frame(width: parts.panel.width, height: parts.panel.height)
                         .offset(x: parts.panel.minX, y: parts.panel.minY)
                 }
@@ -65,8 +67,10 @@ struct PlayerLayoutParts: Equatable {
     var video: CGRect
     /// 控制面：整片（光铺满它，四边羽化）
     var panel: CGRect
-    /// 卡片区在控制面里的边距（安全区 + 8 点，太宽时两边再收，卡片区最宽 720）
+    /// 卡片区在控制面里的边距（安全区 + 8 点；沿折痕太长时两头再收，卡片区沿折痕最长 720）
     var content: EdgeInsets
+    /// 折痕在控制面的哪一边
+    var foldEdge: PanelFoldEdge
     var lighting: LightingGeometry
 
     init(layout: CuvenPlayerLayout, size: CGSize, insets: EdgeInsets) {
@@ -81,13 +85,16 @@ struct PlayerLayoutParts: Equatable {
             panel = CGRect(x: 0, y: f.maxY, width: w, height: max(0, h - f.maxY))
             content = EdgeInsets(top: g, leading: insets.leading + g, bottom: max(insets.bottom, g) + g, trailing: insets.trailing + g)
             hinge = CGPoint(x: w / 2, y: f.midY)
+            foldEdge = .top
             fold = 105
         case .book(let f):
-            video = CGRect(x: 0, y: 0, width: max(0, f.minX), height: h)
-            panel = CGRect(x: f.maxX, y: 0, width: max(0, w - f.maxX), height: h)
-            content = EdgeInsets(top: max(insets.top, g) + g, leading: g, bottom: max(insets.bottom, g) + g, trailing: insets.trailing + g)
+            // 左页控制、右页画面
+            panel = CGRect(x: 0, y: 0, width: max(0, f.minX), height: h)
+            video = CGRect(x: f.maxX, y: 0, width: max(0, w - f.maxX), height: h)
+            content = EdgeInsets(top: max(insets.top, g) + g, leading: insets.leading + g, bottom: max(insets.bottom, g) + g, trailing: g)
             hinge = CGPoint(x: f.midX, y: h / 2)
-            away = CGVector(dx: 1, dy: 0)
+            away = CGVector(dx: -1, dy: 0)
+            foldEdge = .trailing
             fold = 105
         case .stacked:
             let usable = h - insets.top - insets.bottom
@@ -97,26 +104,37 @@ struct PlayerLayoutParts: Equatable {
             panel = CGRect(x: 0, y: insets.top + vh + gap, width: w, height: max(0, h - insets.top - vh - gap))
             content = EdgeInsets(top: g, leading: insets.leading + g, bottom: max(insets.bottom, g) + g, trailing: insets.trailing + g)
             hinge = CGPoint(x: w / 2, y: insets.top + vh + gap / 2)
+            foldEdge = .top
             // 实验室 / 设置页预览：模拟半折立着的几何，效果和半折时一致
             fold = 115
         case .sideBySide:
+            // 和书本一样：左边控制、右边画面
             let usable = w - insets.leading - insets.trailing
             let vw = (usable * 0.58).rounded()
-            video = CGRect(x: insets.leading, y: insets.top, width: vw, height: h - insets.top - insets.bottom)
             let gap: CGFloat = 20
-            let left = insets.leading + vw + gap
-            panel = CGRect(x: left, y: 0, width: max(0, w - left), height: h)
-            content = EdgeInsets(top: insets.top + g, leading: g, bottom: max(insets.bottom, g) + g, trailing: insets.trailing + g)
-            hinge = CGPoint(x: insets.leading + vw + gap / 2, y: h / 2)
-            away = CGVector(dx: 1, dy: 0)
+            video = CGRect(x: w - insets.trailing - vw, y: insets.top, width: vw, height: h - insets.top - insets.bottom)
+            panel = CGRect(x: 0, y: 0, width: max(0, video.minX - gap), height: h)
+            content = EdgeInsets(top: insets.top + g, leading: insets.leading + g, bottom: max(insets.bottom, g) + g, trailing: g)
+            hinge = CGPoint(x: video.minX - gap / 2, y: h / 2)
+            away = CGVector(dx: -1, dy: 0)
+            foldEdge = .trailing
             fold = 115
         }
-        // 很宽的控制面上卡片区不超过 720 点，居中
-        let contentWidth = panel.width - content.leading - content.trailing
-        if contentWidth > 720 {
-            let extra = (contentWidth - 720) / 2
-            content.leading += extra
-            content.trailing += extra
+        // 沿折痕很长的控制面上卡片区不超过 720 点，居中
+        if foldEdge.isColumns {
+            let along = panel.height - content.top - content.bottom
+            if along > 720 {
+                let extra = (along - 720) / 2
+                content.top += extra
+                content.bottom += extra
+            }
+        } else {
+            let along = panel.width - content.leading - content.trailing
+            if along > 720 {
+                let extra = (along - 720) / 2
+                content.leading += extra
+                content.trailing += extra
+            }
         }
         // 光影引擎在控制面自己的坐标里算：画面和折痕换算到控制面的原点
         lighting = LightingGeometry(videoContainer: video.offsetBy(dx: -panel.minX, dy: -panel.minY),

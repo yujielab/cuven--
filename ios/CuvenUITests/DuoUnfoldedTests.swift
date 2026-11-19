@@ -76,8 +76,9 @@ final class DuoUnfoldedTests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
-    /// 半折（桌面形态）的播放面板：上面画面、下面控制面板（PlayerTabletop.swift）。模拟器折不了、演示数据也放不了片，
-    /// 所以用 -CuvenTabletop YES 弹一个假的播放页，折痕固定在屏正中。截 duo-38*（iPad 上是 duo-48*）；外屏大小不截
+    /// 半折的播放面板（PlayerTabletop.swift）：桌面——上面画面、下面控制；横过来是书本——右页画面、左页控制（四列）。
+    /// 模拟器折不了、演示数据也放不了片，所以用 -CuvenTabletop YES 弹一个假的播放页，折痕固定在屏正中。
+    /// 截 duo-38*（iPad 上是 duo-48*）；外屏大小不截
     func testTabletopPanel() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
@@ -98,11 +99,26 @@ final class DuoUnfoldedTests: XCTestCase {
             snap("duo-38b-tabletop-locked")
             app.tap(at: CGPoint(x: f.midX, y: f.midY)); sleep(1)
         }
-        // 亮度：第四行展开成一条滑杆
+        // 亮度：第四排融成一条滑杆
         if let f = app.onScreenFrames(["player-brightness"]).first {
             app.tap(at: CGPoint(x: f.midX, y: f.midY)); sleep(1)
             snap("duo-38c-tabletop-brightness")
         }
+        // 书本：横过来，折痕变成竖的——左页控制、右页画面，卡片转成四列（亮度那一条也竖过来）
+        XCUIDevice.shared.orientation = .landscapeLeft
+        sleep(3)
+        let wide = report(app, "book")
+        if wide.width > wide.height {
+            snap("duo-38d-book-brightness")
+            if let f = app.onScreenFrames(["player-tray-close"]).first {
+                app.tap(at: CGPoint(x: f.midX, y: f.midY)); sleep(1)
+            }
+            snap("duo-38e-book")
+        } else {
+            print("DUO book: did not rotate")
+        }
+        XCUIDevice.shared.orientation = .portrait
+        sleep(1)
     }
 
     /// 光影实验室（PlayerLab.swift）：放内置的测试画面，四段场景各截一张，看卡片上的光跟着画面变（火是暖的、海是冷的、

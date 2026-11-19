@@ -38,14 +38,15 @@ ios/CuvenLighting/
     VideoSampling.metal            视频帧 → 64×36 光照图
     LuminanceAnalysis.metal        分区统计 / 转场检测；四个光源的挑选与追踪
     ColorExtraction.metal          时间平滑；可分离高斯模糊
-    ReflectionProjection.metal     辐照度投影；卡片材质（漫反射、菲涅耳镜面反射、边缘光）
+    ReflectionProjection.metal     辐照度投影 + 隔着折痕映过来的画面（跟着铰链角度变）；卡片材质（漫反射、菲涅耳镜面反射、边缘光）
     SpecularHighlight.metal        归一化 Blinn–Phong 高光
     FinalCompositor.metal          合成、sRGB 编码、抖动
 ios/Cuven/UI/Player/
-  CuvenPlayerView.swift            画面 + 面板，三种摆法（半折 / 竖拿 / 横拿），AVPlayerLayer + 画中画，铰链读数
-  PlayerControlPanel.swift         四行卡片；LightingHost（SwiftUI ↔ 渲染器）；卡片位置 / 按下状态上报
-  PlayerToolbar.swift              第一行、第四行、亮度 / 音量滑杆
-  PlaybackTimeline.swift           Cuven 蓝的细进度条、可拖圆点、当前时间 / 总时长
+  CuvenPlayerView.swift            画面 + 面板，四种摆法（桌面 / 书本 / 竖拿 / 横拿），AVPlayerLayer + 画中画，铰链读数
+  PlayerPanelGrid.swift            卡片的格子：按离折痕多远排，桌面成行、书本成列
+  PlayerControlPanel.swift         按格子摆卡片；LightingHost（SwiftUI ↔ 渲染器）；卡片位置 / 按下状态上报；第二排三块
+  PlayerToolbar.swift              第一排、第四排的每一块，亮度 / 音量滑杆（横竖都行）
+  PlaybackTimeline.swift           Cuven 蓝的细进度条、可拖圆点、当前时间 / 总时长（书本时竖着走）
   PlayerViewModel.swift            CuvenPlayerViewModel（MVVM）
   PlayerLab.swift                  光影实验室（含开发者诊断）
   CinematicLightingSettings.swift  影院光影的设置（存在本机，迁移旧开关）
@@ -56,12 +57,14 @@ ios/Cuven/UI/PlayerTabletop.swift  折痕检测、挂进系统播放器
 
 ## 界面（照参照图）
 
-四行深灰圆角卡片，块间距 8 点，圆角 19。行高按参照图的比例 77 : 142 : 51 : 51 分配。
+四排深灰圆角方块，块间距 8 点，圆角 19。排的厚度按参照图的比例 77 : 142 : 51 : 51 分配。从折痕往外：
 
 1. 关闭 | 剧集信息卡（Cuven 字标 + 片名 + 第几集 + ›，点开是光影设置；参照图里那家的字标不用）| 画中画 | 锁定
-2. 后退 10 秒 | 播放 / 暂停 | 前进 10 秒（三颗圆的，中间最大）
+2. 后退 10 秒 | 播放 / 暂停 | 前进 10 秒（三块一样大的方块，和参照图一样；中间那块反射最强）
 3. 细的 Cuven 蓝进度条 + 可拖的小圆点，左边当前时间、右边总时长
 4. 播放速度 | 亮度 | 音量 | 音频与字幕 | 下一集（剧集后面还有才有）| 全屏（半折时才有）（用户要求去掉「截取画面」）
+
+桌面时这四排是四行；书本时同一套方块转成四列（见下面「参照 Netflix / Mux 的重做」）。
 
 - **底色与符号**：纯黑底，SF Symbols 由 SwiftUI 画在 Metal 卡面之上，所以符号始终清晰。
 - **按下**：符号和卡面一起缩到 0.97；卡面的弹簧动画由渲染器跑，和 SwiftUI 同步。
@@ -72,13 +75,14 @@ ios/Cuven/UI/PlayerTabletop.swift  折痕检测、挂进系统播放器
 
 摆法：
 
-| 摆法 | 什么时候 | 画面 | 面板 | 默认折叠角度 |
-| --- | --- | --- | --- | --- |
-| `folded` | 半折（`reservedRegions(kind: .division)` 里生效、横着的折痕） | 折痕以上 | 折痕以下 | 105°，有铰链读数就用读数 |
-| `stacked` | 实验室，竖着的屏 | 上（16:9） | 下 | 180°（摊平） |
-| `sideBySide` | 实验室，横着的屏 | 左 58% | 右 | 180° |
+| 摆法 | 什么时候 | 画面 | 面板 | 卡片 | 默认折叠角度 |
+| --- | --- | --- | --- | --- | --- |
+| `tabletop` | 半折，横着的折痕（桌面） | 折痕以上 | 折痕以下 | 四行 | 105°，有铰链读数就用读数 |
+| `book` | 半折，竖着的折痕（书本） | 右页 | 左页 | 四列 | 105°，有铰链读数就用读数 |
+| `stacked` | 实验室、设置页预览，竖着的屏 | 上（16:9） | 下 | 四行 | 115°（模拟） |
+| `sideBySide` | 实验室，横着的屏 | 右 58% | 左 | 四列 | 115°（模拟） |
 
-其余情况（摊平、合上、横拿半折、普通 iPhone）照旧用系统播放器（`AVPlayerViewController`）。
+其余情况（摊平、合上、普通 iPhone）照旧用系统播放器（`AVPlayerViewController`）；面板上的「全屏」也回到系统播放器。
 
 ## 真机反馈后的重做（姿态、形变、无硬边、闲置、过曝）
 
@@ -86,7 +90,7 @@ ios/Cuven/UI/PlayerTabletop.swift  折痕检测、挂进系统播放器
 
 - **姿态**：
   - **桌面**：横着的折痕，画面在上、控制在下。
-  - **书本**：竖着的折痕，左页是画面、右页是控制。这一种是新加的。
+  - **书本**：竖着的折痕，一页画面、一页控制（参照 Netflix 样机改成了右页画面、左页控制，见下一节）。
   - **其余**：摊平、合上照旧用系统播放器。
   - **换姿态**：同一套卡片在渲染器里从旧位置形变到新位置。
 - **无缝形变**（用户要求：所有交互控件支持无缝形变和动效）：
@@ -105,6 +109,29 @@ ios/Cuven/UI/PlayerTabletop.swift  折痕检测、挂进系统播放器
   - **后台不摘画面**：面板这一层退到后台不再摘掉画面，由它自动进画中画。
   - **分析用的帧单独转 SDR**：光影取样明确要 SDR Rec. 709 的输出，HDR / 杜比视界的片子只给分析用的那一份做色调映射，不影响屏幕上的画面。
   - 这几条是按现象推断的修法，还要在真机上确认。
+
+## 参照 Netflix / Mux 的重做（用户要求「完全重做参考」）
+
+参照的两篇：Netflix 的「a mobile experience that moves with you」（附带的 Makers 视频里有 iPhone Duo 播放器的样机和模拟器画面），
+Mux 的「What the iPhone Duo means for web development」（用 Video.js 在网页上复刻了同一个界面）。从里面取的：
+
+- **控制跟着姿态动**（Netflix：「adapting seamlessly no matter how you're watching — full screen, book pose, tent pose or
+  tabletop — so they stay within reach」）：
+  - 卡片的位置由 `PlayerPanelGrid` 在「沿折痕、离折痕」两个方向上算一次，再按折痕在面板的哪一边换到屏上。
+  - **桌面**：四行，第一行贴着折痕。
+  - **书本**：同一套方块转 90° 成四列，离折痕最近的一列是关闭 / 信息卡 / 画中画 / 锁定；沿折痕从上往下就是桌面时从左往右的顺序。
+    跟 Netflix 样机一样左页控制、右页画面。信息卡竖排（字标、片名、集数从上往下），进度条竖着走（从上往下播，当前时间在上、总时长在下），
+    亮度 / 音量那一条也竖过来（往上是大，滑杆在 UIKit 里转 90°，拖动跟着转）。
+  - **换姿态**：每一块从旧位置形变到新位置（卡面由渲染器的弹簧带过去，符号和字由 SwiftUI 的弹簧带过去；信息卡、进度条换排法用 `AnyLayout`，字跟着滑过去）。
+  - **全屏**：回到系统播放器。**帐篷姿态**：向内折的屏立成帐篷时内屏朝外看不到，这一种不做。
+- **方块，不是圆**：参照图（模拟器和真机都是）第二排是三块一样大的圆角方块，所以后退 / 播放 / 前进改回方块，播放那块的强调最高（反射最强）。
+- **画面映在面板上**（Netflix：「a subtle, reflective glow to the controls that responds to the angle of the hinge」；
+  Mux 的做法：把画面上下翻过来、模糊、离折痕越远越淡，垫在控制后面）：
+  - 投影那一步（`cuven_projectIrradiance`）里，面板上离折痕 d 的一点看回去，取画面里离它近边 d·k 的那一点——画面的下沿贴着折痕，天空在更远处，像一面镜子。
+  - 贴着折痕的地方取清楚一点的光图，越远越取模糊的（光泽面的反射），离折痕越远越淡，超出画面两边的地方渐渐没了。
+  - **跟着铰链角度变**：立到 90° 左右镜像是 1 : 1、最亮；往平里打开，映像往折痕那边收（k 变大）、变淡；合得比 90° 还小，映像往外伸一点。
+  - 强度跟着模式的反射（标准不开；影院约 0.4；沉浸约 0.68），方块上亮、方块之间的黑底上只剩约五分之一（漏光），都是同一张图，所以没有硬边。
+  - 原来的「弥散光」（取画面在旁边那一段的几种深度平均）由这个代替：同样是画面自己的颜色、同样柔和，但有了上下的结构。
 
 ## 影院光影（Cinematic Reflection Mode）
 

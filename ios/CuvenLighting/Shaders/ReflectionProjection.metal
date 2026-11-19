@@ -13,10 +13,15 @@ using namespace metal;
 //   real panels leak light at grazing angles, and it keeps the flat, unfolded layout lit a little). The squared
 //   distance gives the attenuation: cards near the hinge glow more, a lamp at the left edge lights the left cards.
 //   Multiple sources, their colour and their position all come out of the same sum — no averaged colour anywhere.
-//   On top of that, the diffuse wash (弥散光): every point of the panel takes the widely blurred colours of the part of
-//   the picture directly beside it (three depths into the picture, near edge weighted most) and the wash spreads from
-//   the edge nearest the screen, fading with distance — the panel reads as softly lit by the scene above it, in the
-//   scene's own colours (a cyan sea washes cyan, three street lamps leave three warm pools), never as a uniform glow.
+//   On top of that, the reflective glow (the Netflix iPhone Duo reference: "a subtle, reflective glow to the controls
+//   that responds to the angle of the hinge"; Mux's reproduction: the picture flipped across the fold, blurred, faded
+//   away from it). Every point of the panel looks back across the hinge at the mirrored point of the picture: a point d
+//   away from the fold shows the picture d·k up from its near edge, so the bottom of the scene lies against the fold
+//   and the sky further out. Sharp right at the fold, blurrier with distance (glossy), fading away from the fold and
+//   thinning beyond the picture's sides. The hinge drives it: folded to ~90° the mirror is 1 : 1 and at full strength;
+//   opening toward flat the reflection compresses toward the fold (k grows) and fades, as a real reflection would;
+//   closing past 90° it stretches a little further out. It is diffuse light in the scene's own colours (a cyan sea
+//   washes cyan, three street lamps leave three warm pools), never a uniform glow.
 //
 // cuven_surfaceVertex / cuven_surfaceFragment (render, full resolution) — the material of every control card:
 //   dark translucent base with a soft sheen · diffuse light from the irradiance texture · a Fresnel-weighted mirror
@@ -57,33 +62,35 @@ kernel void cuven_projectIrradiance(texture2d<float, access::sample> lightmap [[
     }
     E *= cellArea * u.analysis.w / M_PI_F;
 
-    // Diffuse wash (弥散光)
+    // Reflective glow: the picture mirrored across the fold
     const float2 rel = p - g.hingePoint;
     const float s = dot(rel, g.along);
     const float awayDist = max(dot(rel, g.away), 0.0f);
-    // How far the picture starts from the hinge, and how deep it is, measured along the away axis
+    // Where the picture starts beside the hinge (its near edge), measured along the away axis
     const float2 c0 = g.videoRect.xy - g.hingePoint;
     const float2 c1 = c0 + float2(g.videoRect.z, 0.0f);
     const float2 c2 = c0 + float2(0.0f, g.videoRect.w);
     const float2 c3 = c0 + g.videoRect.zw;
     const float d0 = -dot(c0, g.away), d1 = -dot(c1, g.away), d2 = -dot(c2, g.away), d3 = -dot(c3, g.away);
     const float nearEdge = max(min(min(d0, d1), min(d2, d3)), 0.0f);
-    const float depth = max(max(max(d0, d1), max(d2, d3)) - nearEdge, 1.0f);
-    const float3 depths = float3(0.06f, 0.3f, 0.65f);
-    const float3 weights = float3(0.5f, 0.32f, 0.18f);
-    float3 wash = float3(0.0f);
-    float side = 1.0f;
-    for (int k = 0; k < 3; ++k) {
-        const float h = nearEdge + depth * depths[k];
-        const float2 uv = cuven::panelToUV(g.hingePoint + s * g.along - h * g.away, g);
-        // Beyond the picture's sides the wash thins out instead of smearing its edge colour across
-        const float2 outside = max(max(-uv, uv - 1.0f), float2(0.0f)) * g.videoRect.zw;
-        side = min(side, exp(-length(outside) / 140.0f));
-        wash += farMap.sample(linearClamp, saturate(uv), level(0.0f)).rgb * weights[k];
-    }
     const float panelExtent = max(abs(dot(u.panel.xy, abs(g.away))), 1.0f);
-    const float fall = exp(-awayDist / (panelExtent * 0.6f));
-    E += wash * (0.8f * fall * side);
+    const float foldDeg = g.fold * (180.0f / M_PI_F);
+    const float opening = smoothstep(95.0f, 178.0f, foldDeg);           // 0 upright … 1 flat
+    const float closing = 1.0f - smoothstep(55.0f, 92.0f, foldDeg);     // 0 upright … 1 leaning over the panel
+    const float k = mix(1.0f, 2.6f, opening) * mix(1.0f, 0.8f, closing);
+    const float strength = mix(1.0f, 0.12f, opening);
+    const float h = nearEdge + awayDist * k;
+    const float2 uv = cuven::panelToUV(g.hingePoint + s * g.along - h * g.away, g);
+    // Beyond the picture's far edge and its sides the reflection thins out instead of smearing its edge colour across
+    const float2 outside = max(max(-uv, uv - 1.0f), float2(0.0f)) * g.videoRect.zw;
+    const float side = exp(-length(outside) / 160.0f);
+    const float2 suv = saturate(uv);
+    // Glossy: sharp against the fold, rougher further out (and with the mode's reflection blur)
+    const float rough = saturate(awayDist / (panelExtent * 0.45f) + u.look.w * 0.5f);
+    const float3 mirrored = mix(lightmap.sample(linearClamp, suv, level(0.0f)).rgb,
+                                farMap.sample(linearClamp, suv, level(0.0f)).rgb, rough);
+    const float fade = exp(-awayDist / (panelExtent * 0.55f));
+    E += mirrored * (0.9f * u.material.z * strength * fade * side);
 
     irradiance.write(float4(E, 1.0f), gid);
 }
@@ -207,12 +214,15 @@ fragment float4 cuven_backdropFragment(cuven::ScreenVaryings in [[stage_in]],
     const float3 E = irradiance.sample(linearClamp, p * u.panel.z / irrSize).rgb;
     const cuven::Geometry g = cuven::geometry(u);
     const float away = max(dot(p - g.hingePoint, g.away), 0.0f);
-    const float falloff = exp(-away / max(u.panel.y * 0.45f, 1.0f));
-    // Feathered on every edge of the surface: the light never ends in a hard line (the surface spans the whole
-    // lower half; its top edge meets the fold, its sides the screen edges)
+    const float extent = max(abs(dot(u.panel.xy, abs(g.away))), 1.0f);
+    const float falloff = exp(-away / (extent * 0.45f));
+    // Feathered on every edge of the surface: the light never ends in a hard line (the surface spans a whole half of
+    // the screen; the edge that meets the fold gets the widest feather, the others meet the screen edges)
     const float2 size = u.panel.xy;
-    const float feather = smoothstep(0.0f, 40.0f, p.x) * smoothstep(0.0f, 40.0f, size.x - p.x)
-                        * smoothstep(0.0f, 56.0f, p.y) * smoothstep(0.0f, 40.0f, size.y - p.y);
+    const float4 widths = float4(40.0f, 40.0f, 40.0f, 40.0f)
+        + float4(max(-g.away.x, 0.0f), max(g.away.x, 0.0f), max(g.away.y, 0.0f), max(-g.away.y, 0.0f)) * 16.0f;
+    const float feather = smoothstep(0.0f, widths.x, size.x - p.x) * smoothstep(0.0f, widths.y, p.x)
+                        * smoothstep(0.0f, widths.z, p.y) * smoothstep(0.0f, widths.w, size.y - p.y);
     // Idle: the cards are gone, the ambient light carries the panel a little more
     const float idleBoost = 1.0f + 0.35f * u.look2.z;
     const float3 c = cuven::softCap(E * (level * 0.6f * falloff * feather * idleBoost), u.material.w * 0.45f);

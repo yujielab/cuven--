@@ -34,7 +34,8 @@ public struct LightingGeometry: Sendable, Equatable {
     public var videoContainer: CGRect
     /// A point on the hinge line
     public var hingePoint: CGPoint
-    /// Unit vector from the hinge toward the panel: (0, 1) when the video is above, (1, 0) when it is on the left
+    /// Unit vector from the hinge toward the panel: (0, 1) when the video is above, (1, 0) when it is on the left,
+    /// (−1, 0) when it is on the right (book pose with the controls on the left page)
     public var awayFromHinge: CGVector
     /// Fold angle the layout implies when no hardware reading or simulation is active (180° = flat)
     public var layoutFoldDegrees: Double
