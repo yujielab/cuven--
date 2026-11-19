@@ -3,14 +3,18 @@ import SwiftUI
 // MARK: - 请求添加：按钮 → 五步进度卡（同一块液态玻璃变形过去）
 //
 // 片库里没有的那部（影片库索引里有），详情页的「播放」换成一颗「请求添加」：白色的玻璃胶囊。按下去，这块玻璃原地长成一张
-// 矩形的玻璃卡（GlassEffectContainer + glassEffectID：系统把两个形状当成同一块玻璃来变形，不是淡出淡入两样东西），卡上是
+// 矩形的玻璃卡（同一个视图、同一块玻璃，圆角和大小跟着版面一起动画，不是淡出淡入两样东西：见 RequestMorphControl），卡上是
 // 「STEP 3 OF 5」「40% Complete」（绿）、五段胶囊进度（走完的实心绿、正在走的绿边 + 走了多少、没到的暗）和五步的名字：
 // 已请求 → 待传输（已经到 PikPak 了）→ 预处理中（清洗）→ 正在传输 → 等待工作人员的最终发行。
 
 private let requestGreen = Color(red: 0.19, green: 0.82, blue: 0.35)
 private let requestRed = Color(red: 1.0, green: 0.27, blue: 0.23)
 
-/// 头部那颗按钮 / 那张卡
+/// 头部那颗按钮 / 那张卡。
+/// 是同一个视图、同一块玻璃：按钮时高 48、圆角 24（正好是胶囊），卡时圆角 26、高度跟着内容。玻璃挂在一直在的那个框上，
+/// 框的大小随版面一起动画——玻璃的边、上面的片名和那一行信息在同一个动画里一起走，不会有一刻卡先铺满、盖住上面的字
+/// （第一版用两个视图 + glassEffectID 变形：截图里变形到一半，玻璃已经是卡的大小，片名还在往上走）。
+/// 里面的字交叉淡入淡出，裁在玻璃里面。
 struct RequestMorphControl: View {
     let status: RequestStatus?
     let buttonTitle: String
@@ -18,38 +22,44 @@ struct RequestMorphControl: View {
     let enabled: Bool
     let wide: Bool
     let onTap: () -> Void
-    @Namespace private var glassNS
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        GlassEffectContainer(spacing: 24) {
+        let card = status != nil
+        let shape = RoundedRectangle(cornerRadius: card ? 26 : 24, style: .continuous)
+        let maxW: CGFloat? = card ? (wide ? 520 : .infinity) : (wide ? nil : .infinity)
+        ZStack(alignment: .topLeading) {
             if let status {
                 RequestProgressCard(status: status)
-                    .frame(maxWidth: wide ? 520 : .infinity, alignment: .leading)
-                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-                    .glassEffectID("request", in: glassNS)
-                    .environment(\.colorScheme, .dark)
-                    .accessibilityIdentifier("request-card")
+                    .transition(.opacity)
             } else {
-                Button(action: onTap) {
-                    Label(buttonTitle, systemImage: buttonSymbol)
-                        .font(.headline)
-                        .foregroundStyle(enabled ? Color.black : Color.white.opacity(0.75))
-                        .lineLimit(1)
-                        .padding(.horizontal, 22)
-                        .frame(minWidth: wide ? 180 : 0, maxWidth: wide ? nil : .infinity, minHeight: 48)
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(PressableStyle(scale: 0.96))
-                .glassEffect(enabled ? .regular.tint(.white.opacity(0.92)).interactive() : .regular, in: Capsule())
-                .glassEffectID("request", in: glassNS)
-                .environment(\.colorScheme, .dark)
-                .disabled(!enabled)
-                .accessibilityIdentifier("request-add")
+                Label(buttonTitle, systemImage: buttonSymbol)
+                    .font(.headline)
+                    .foregroundStyle(enabled ? Color.black : Color.white.opacity(0.75))
+                    .lineLimit(1)
+                    .padding(.horizontal, 22)
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .transition(.opacity)
             }
         }
-        .animation(DSMotion.adapt(.spring(response: 0.6, dampingFraction: 0.8), reduce: reduceMotion), value: status == nil)
+        .frame(minWidth: wide ? 180 : 0, maxWidth: maxW, alignment: .topLeading)
+        .fixedSize(horizontal: wide && !card, vertical: false)
+        .clipShape(shape)
+        .contentShape(shape)
+        .glassEffect(card ? .regular : (enabled ? .regular.tint(.white.opacity(0.92)).interactive() : .regular), in: shape)
+        .environment(\.colorScheme, .dark)
+        .onTapGesture { if !card && enabled { onTap() } }
+        .accessibilityElement(children: card ? .contain : .combine)
+        .accessibilityAddTraits(card ? [] : .isButton)
+        .accessibilityAction { if !card && enabled { onTap() } }
+        .accessibilityIdentifier(card ? "request-card" : "request-add")
+        // 按钮 ↔ 卡的那一下由详情页用 morph 这条曲线包起来（版面和玻璃同一个动画）；这里只管卡里的进度更新
         .animation(DSMotion.adapt(.smooth(duration: 0.45), reduce: reduceMotion), value: status)
+    }
+
+    /// 按钮 ↔ 卡：详情页改状态时用这一条（整个头部的版面一起走）
+    static func morph(reduce: Bool) -> Animation {
+        DSMotion.adapt(.spring(response: 0.55, dampingFraction: 0.84), reduce: reduce)
     }
 }
 
@@ -160,6 +170,7 @@ struct CatalogDetailView: View {
     /// 刚按下去、服务器还没回话：先把卡变出来（第 1 步），回话了换成真的
     @State private var pending: RequestStatus?
     @State private var alert: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var store: RequestStore { RequestStore.shared }
     private var seasonKey: Int { title.kind == .tv ? (season > 0 ? season : (detail?.season ?? 0)) : 0 }
@@ -378,7 +389,9 @@ struct CatalogDetailView: View {
         let s = seasonKey
         busy = true
         Haptics.light()
-        withAnimation { pending = RequestStatus(id: -1, title: title, season: s, step: 1, pct: 0, note: "正在提交请求…") }
+        withAnimation(RequestMorphControl.morph(reduce: reduceMotion)) {
+            pending = RequestStatus(id: -1, title: title, season: s, step: 1, pct: 0, note: "正在提交请求…")
+        }
         Task { @MainActor in
             defer { busy = false }
             do {
@@ -386,7 +399,7 @@ struct CatalogDetailView: View {
                 pending = nil
                 Haptics.success()
             } catch {
-                withAnimation { pending = nil }
+                withAnimation(RequestMorphControl.morph(reduce: reduceMotion)) { pending = nil }
                 alert = error.localizedDescription
                 Haptics.error()
             }
