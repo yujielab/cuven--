@@ -635,6 +635,8 @@ struct DetailScaffold<Episodes: View>: View {
     var precache: DetailPrecache? = nil
     /// 下载角标看哪一部（电影才有）：在下载 / 下好了，那一行信息的右端一颗角标
     var downloadPath: String? = nil
+    /// 换掉「播放」的那一块（片库里没有的那部：「请求添加」按钮 / 五步进度卡，RequestViews.swift）
+    var customAction: AnyView? = nil
     /// 分集那一段（电影没有）：拿到当前宽度的版面尺寸再排
     @ViewBuilder var episodes: (DSMetrics) -> Episodes
 
@@ -840,7 +842,9 @@ struct DetailScaffold<Episodes: View>: View {
                 }
             }
             HStack(spacing: 12) {
-                if let precache {
+                if let customAction {
+                    customAction
+                } else if let precache {
                     // 网络不好 / 网络速度低于 50%：「预先画面质量处理」，按了变成「立即播放」+ 右边一颗圆形进度钮（用户要求）
                     PrecachePlayRow(precache: precache, wide: m.wide, playID: playID, playDisabled: playDisabled, onPlay: onPlay)
                 } else {

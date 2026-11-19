@@ -76,6 +76,32 @@ final class DuoUnfoldedTests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    /// 请求添加（RequestViews.swift）：演示数据里推进一部片库里没有的剧集（-CuvenRequestPreview YES），
+    /// 截「请求添加」按钮、按下去那一下（玻璃正在变形）、变形完的五步进度卡（演示里 1.6 秒后走到第 3 步 40%）。
+    /// 截 duo-3q-*（iPad 上是 duo-4q-*）；外屏大小不截
+    func testRequestCard() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-CuvenDemo", "YES", "-CuvenRequestPreview", "YES"]
+        app.launch()
+        let add = app.buttons["request-add"]
+        guard add.waitForExistence(timeout: 15) else {
+            print("DUO request: detail did not open")
+            return
+        }
+        sleep(2)
+        let size = report(app, "request")
+        guard size.width > 500 else { return }
+        snap("duo-3q-request-a-button")
+        add.tap()
+        usleep(250_000)
+        snap("duo-3q-request-b-morph")
+        sleep(3)
+        snap("duo-3q-request-c-card")
+        app.swipeUp(); sleep(2)
+        snap("duo-3q-request-d-sections")
+    }
+
     /// 半折的播放面板（PlayerTabletop.swift）：上面画面、下面一条液态玻璃的 Touch Bar（左右滑，长按展开），
     /// 最底下 InSight / 继续观看 / 推荐；横过来是书本（右页画面、左页控制）。
     /// 模拟器折不了、演示数据也放不了片，所以用 -CuvenTabletop YES 弹一个假的播放页，折痕固定在屏正中。

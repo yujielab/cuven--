@@ -245,18 +245,11 @@ struct SearchView: View {
     @ViewBuilder private func results(_ q: String, _ metrics: DSMetrics) -> some View {
         let hits = model.search(q)
         if hits.isEmpty {
+            // 片库里没有：看影片库索引里有没有（「可请求添加」）；也没有才说「没有找到」——
             // F87、F88：不怪人，说怎么办，再给一颗钮直接去做（设计轮 2（并行·library）：以前只有一句话；年份举今年的）
-            ContentUnavailableView {
-                Label("没有找到“\(q)”", systemImage: "magnifyingglass")
-            } description: {
-                Text("请尝试其他片名或年份。")
-            } actions: {
-                NavigationLink(value: Route.shelf(.all)) {
-                    Text("浏览所有影片")
-                }
-                .accessibilityIdentifier("search-browse-all")
-            }
-            .padding(.top, 60)
+            RequestableSearchSection(query: q, metrics: metrics, showEmpty: true)
+                .padding(.top, 8)
+                .padding(.bottom, 40)
         } else {
             let movies = hits.compactMap { h -> Video? in if case .movie(let v) = h.kind { return v } else { return nil } }
             let shows = hits.compactMap { h -> Series? in if case .series(let s) = h.kind { return s } else { return nil } }
@@ -268,7 +261,11 @@ struct SearchView: View {
                 Group {
                     switch shown {
                     case .all:
-                        allResults(q, movies: movies, shows: shows, seriesFirst: Self.isSeries(hits[0]), metrics)
+                        VStack(alignment: .leading, spacing: metrics.shelfGap) {
+                            allResults(q, movies: movies, shows: shows, seriesFirst: Self.isSeries(hits[0]), metrics)
+                            // 片库之外、影片库索引里对得上的（用户要求：缺的片也搜得到，详情页里请求添加）
+                            RequestableSearchSection(query: q, metrics: metrics)
+                        }
                     case .movies:
                         resultList(movies.map { .movie($0) }, metrics)
                     case .shows:

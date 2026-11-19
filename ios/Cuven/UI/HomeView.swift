@@ -193,9 +193,12 @@ struct HomeView: View {
                 featuredShelf(m)
                 editorsPickBlock(m, fullHeight: fullHeight)
                 featuredSeriesShelf(m)
+                // 影片库里有、片库里还没有的（用户要求：主页一排「可请求添加」）
+                RequestableShelf(metrics: m)
                 ForEach(HomeCategory.allCases) { c in categoryShelf(c, m) }
                 finale(m)
             }
+            .task { await RequestStore.shared.loadShelf() }
         }
     }
 
@@ -375,6 +378,7 @@ struct RouteView: View {
         case .year(let y): YearView(year: y)
         case .shelf(let s): ShelfView(shelf: s)
         case .person(let m): ActorPage(member: m)
+        case .catalog(let t): CatalogDetailView(title: t)
         }
     }
 }

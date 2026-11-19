@@ -63,6 +63,10 @@ struct CuvenApp: App {
         .backgroundTask(.urlSession(Precache.sessionID)) {
             await Precache.shared.handleBackgroundWake()
         }
+        // 请求添加：App 不在前台时系统偶尔叫醒一次，看看进度有没有变，变了发本机通知（RequestStore）
+        .backgroundTask(.appRefresh(RequestStore.refreshTask)) {
+            await RequestStore.shared.handleBackgroundRefresh()
+        }
 
     }
 }
@@ -162,15 +166,22 @@ struct RootView: View {
             TabletopPreview.presentIfRequested()
             // -CuvenPlayerLab YES：打开光影实验室并放测试画面（PlayerLab.swift）
             PlayerLab.presentIfRequested()
+            // -CuvenRequestPreview YES：推进一部「可请求添加」的剧集详情页（RequestViews.swift）
+            RequestPreview.presentIfRequested(model)
             #endif
         }
         .onChange(of: account.isLoggedIn) { _, now in if now { model.start() } }
         // 头像预先存在本机（用户要求）：一启动、一登录就在后台拉好存上，回到前台再看一眼有没有换（同一张 10 分钟内不重拉）
         .task(id: account.session?.username) { await account.refreshAvatar() }
+        // 请求添加的进度：登录了就开始轮询（换账户、退出登录时换掉）
+        .task(id: account.session?.username) { RequestStore.shared.start(user: account.session?.username) }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task { @MainActor in await account.refreshAvatar() }
                 NetworkAuto.shared.appBecameActive()
+                RequestStore.shared.appBecameActive()
+            } else if phase == .background {
+                RequestStore.shared.scheduleBackgroundRefresh()
             }
         }
     }
