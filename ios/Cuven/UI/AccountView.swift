@@ -86,6 +86,8 @@ struct AccountView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(PlayerCoordinator.autoplayKey) private var autoplayNext = true
+    /// 半折播放器的画面光影（CuvenLighting：画面里的光映在控制卡片上）
+    @AppStorage(CuvenPlayerViewModel.lightingKey) private var playerLighting = true
     /// 首选音轨 / 首选字幕（用户要求，TrackPrefs.swift）
     @AppStorage(TrackPrefs.audioKey) private var audioPref = TrackPrefs.Audio.auto.rawValue
     @AppStorage(TrackPrefs.subtitleKey) private var subtitlePref = TrackPrefs.Subtitle.auto.rawValue
@@ -293,6 +295,21 @@ struct AccountView: View {
                     .labelsHidden()
                     .tint(.green)
             }
+            AccountDivider()
+            AccountRow(icon: "light.max", title: "画面光影", subtitle: "半折播放时，画面里的光映在控制面板上") {
+                Toggle("画面光影", isOn: $playerLighting)
+                    .labelsHidden()
+                    .tint(.green)
+            }
+            AccountDivider()
+            // 光影实验室：用本机视频或内置的测试画面看光影效果、调参数、看帧率（PlayerLab.swift）
+            Button {
+                PlayerLab.present()
+            } label: {
+                AccountRow(icon: "sparkles.tv", title: "光影实验室", subtitle: "用本机视频试试画面光影") { AccountChevron() }
+            }
+            .buttonStyle(AccountRowPress())
+            .accessibilityIdentifier("account-lighting-lab")
             AccountDivider()
             // 首选音轨 / 首选字幕（用户要求「允许设置字幕和音轨首选项」）：整行是一颗系统弹出菜单，勾着当前那一项（C11）
             Menu {

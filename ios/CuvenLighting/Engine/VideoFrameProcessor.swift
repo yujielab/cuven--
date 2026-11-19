@@ -51,12 +51,12 @@ public final class VideoFrameProcessor {
         guard current !== item else { return false }
         detach()
         if let current {
-            let attributes: [String: Any] = [
+            let attributes: [String: any Sendable] = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
                 kCVPixelBufferWidthKey as String: Self.width,
                 kCVPixelBufferHeightKey as String: Self.height,
                 kCVPixelBufferMetalCompatibilityKey as String: true,
-                kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
+                kCVPixelBufferIOSurfacePropertiesKey as String: [String: any Sendable](),
             ]
             let o = AVPlayerItemVideoOutput(pixelBufferAttributes: attributes)
             o.suppressesPlayerRendering = false

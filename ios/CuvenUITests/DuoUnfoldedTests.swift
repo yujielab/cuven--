@@ -83,7 +83,7 @@ final class DuoUnfoldedTests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-CuvenDemo", "YES", "-CuvenTabletop", "YES"]
         app.launch()
-        let close = app.buttons["tabletop-close"]
+        let close = app.buttons["player-close"]
         guard close.waitForExistence(timeout: 15) else {
             print("DUO tabletop: panel did not appear")
             return
@@ -93,16 +93,46 @@ final class DuoUnfoldedTests: XCTestCase {
         guard size.width > 500, size.height > size.width else { return }
         snap("duo-38-tabletop")
         // 锁定：别的按钮都变暗、点不动，锁那一块亮起来
-        if let f = app.onScreenFrames(["tabletop-lock"]).first {
+        if let f = app.onScreenFrames(["player-lock"]).first {
             app.tap(at: CGPoint(x: f.midX, y: f.midY)); sleep(1)
             snap("duo-38b-tabletop-locked")
             app.tap(at: CGPoint(x: f.midX, y: f.midY)); sleep(1)
         }
         // 亮度：第四行展开成一条滑杆
-        if let f = app.onScreenFrames(["tabletop-brightness"]).first {
+        if let f = app.onScreenFrames(["player-brightness"]).first {
             app.tap(at: CGPoint(x: f.midX, y: f.midY)); sleep(1)
             snap("duo-38c-tabletop-brightness")
         }
+    }
+
+    /// 光影实验室（PlayerLab.swift）：放内置的测试画面，四段场景各截一张，看卡片上的光跟着画面变（火是暖的、海是冷的、
+    /// 夜里只有局部的光、霓虹是分开的几种颜色）；再横过来截一张。截 duo-39*（iPad 上 duo-49*）；外屏大小不截
+    func testPlayerLab() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-CuvenDemo", "YES", "-CuvenPlayerLab", "YES"]
+        app.launch()
+        guard app.staticTexts["lab-ready"].waitForExistence(timeout: 40) else {
+            print("DUO lab: test pattern did not start")
+            snap("duo-39z-lab-not-ready")
+            return
+        }
+        sleep(2)
+        let size = report(app, "lab")
+        guard size.width > 500 else { return }
+        let scenes = ["fire", "ocean", "night", "neon"]
+        for (i, name) in scenes.enumerated() {
+            if let f = app.onScreenFrames(["lab-scene-\(i)"]).first {
+                app.tap(at: CGPoint(x: f.midX, y: f.midY))
+            }
+            sleep(2)
+            snap("duo-39\(Array("abcd")[i])-lab-\(name)")
+        }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        sleep(3)
+        snap("duo-39e-lab-landscape")
+        XCUIDevice.shared.orientation = .portrait
+        sleep(1)
     }
 
     @discardableResult

@@ -502,6 +502,31 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         itemObservers = []
     }
 
+    // MARK: 半折面板自己的画中画（CuvenPlayerView 那一层画面；系统播放器的画中画在下面）
+
+    /// 开始：收起播放器回到 App，画面在画中画里接着放（收起时不当作「关掉」）
+    func panelPictureInPictureWillStart() {
+        inPiP = true
+        plog("panel pip start")
+        if let vc = controller, vc.presentingViewController != nil { vc.dismiss(animated: true) }
+    }
+
+    /// 结束：点了「还原」的话播放器已经弹回来了；直接关掉画中画的，收拾干净
+    func panelPictureInPictureDidStop() {
+        inPiP = false
+        plog("panel pip stop")
+        if controller?.presentingViewController == nil { closedByUser() }
+    }
+
+    /// 画中画里点了「还原」：把播放器弹回来
+    func panelPictureInPictureRestore(_ completion: @escaping (Bool) -> Void) {
+        if let vc = controller, vc.presentingViewController == nil, let top = UIApplication.topViewController() {
+            top.present(vc, animated: true) { completion(true) }
+        } else {
+            completion(true)
+        }
+    }
+
     // MARK: 画中画
 
     nonisolated func playerViewControllerWillStartPictureInPicture(_ playerViewController: AVPlayerViewController) {

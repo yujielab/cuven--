@@ -160,6 +160,8 @@ struct RootView: View {
             #if DEBUG
             // UI 测试 / 截图：-CuvenTabletop YES 弹出半折播放面板的演示页（PlayerTabletop.swift）
             TabletopPreview.presentIfRequested()
+            // -CuvenPlayerLab YES：打开光影实验室并放测试画面（PlayerLab.swift）
+            PlayerLab.presentIfRequested()
             #endif
         }
         .onChange(of: account.isLoggedIn) { _, now in if now { model.start() } }
