@@ -168,7 +168,8 @@ final class DynamicLightingEngine {
 
     /// Re-project the irradiance when the light map, the layout or the fold changed
     func encodeProjection(commandBuffer: any MTLCommandBuffer, uniforms: GPUFrameUniforms, viewSize: CGSize, force: Bool) {
-        guard analysis.hasData, lightingMix > 0.0005, let pipeline = shaders.projectIrradiance, let near = analysis.near else { return }
+        guard analysis.hasData, lightingMix > 0.0005, let pipeline = shaders.projectIrradiance,
+              let near = analysis.near, let far = analysis.far else { return }
         let w = max(Int((Float(viewSize.width) * irradianceScale).rounded(.up)), 1)
         let h = max(Int((Float(viewSize.height) * irradianceScale).rounded(.up)), 1)
         if irradiance == nil || irradianceSize != (w, h) {
@@ -188,6 +189,7 @@ final class DynamicLightingEngine {
         encoder.setComputePipelineState(pipeline)
         encoder.setTexture(near, index: 0)
         encoder.setTexture(irradiance, index: 1)
+        encoder.setTexture(far, index: 2)
         encoder.setBytes(&u, length: MemoryLayout<GPUFrameUniforms>.stride, index: 0)
         dispatch(encoder, pipeline, grid: MTLSize(width: w, height: h, depth: 1))
         encoder.endEncoding()

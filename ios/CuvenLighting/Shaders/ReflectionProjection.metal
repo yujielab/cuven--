@@ -13,6 +13,10 @@ using namespace metal;
 //   real panels leak light at grazing angles, and it keeps the flat, unfolded layout lit a little). The squared
 //   distance gives the attenuation: cards near the hinge glow more, a lamp at the left edge lights the left cards.
 //   Multiple sources, their colour and their position all come out of the same sum — no averaged colour anywhere.
+//   On top of that, the diffuse wash (弥散光): every point of the panel takes the widely blurred colours of the part of
+//   the picture directly beside it (three depths into the picture, near edge weighted most) and the wash spreads from
+//   the edge nearest the screen, fading with distance — the panel reads as softly lit by the scene above it, in the
+//   scene's own colours (a cyan sea washes cyan, three street lamps leave three warm pools), never as a uniform glow.
 //
 // cuven_surfaceVertex / cuven_surfaceFragment (render, full resolution) — the material of every control card:
 //   dark translucent base with a soft sheen · diffuse light from the irradiance texture · a Fresnel-weighted mirror
@@ -22,6 +26,7 @@ using namespace metal;
 
 kernel void cuven_projectIrradiance(texture2d<float, access::sample> lightmap [[texture(0)]],
                                     texture2d<float, access::write> irradiance [[texture(1)]],
+                                    texture2d<float, access::sample> farMap [[texture(2)]],
                                     constant CuvenFrameUniforms &u [[buffer(0)]],
                                     uint2 gid [[thread_position_in_grid]])
 {
@@ -50,7 +55,37 @@ kernel void cuven_projectIrradiance(texture2d<float, access::sample> lightmap [[
             E += L * (emit * receive / d2);
         }
     }
-    irradiance.write(float4(E * (cellArea * u.analysis.w / M_PI_F), 1.0f), gid);
+    E *= cellArea * u.analysis.w / M_PI_F;
+
+    // Diffuse wash (弥散光)
+    const float2 rel = p - g.hingePoint;
+    const float s = dot(rel, g.along);
+    const float awayDist = max(dot(rel, g.away), 0.0f);
+    // How far the picture starts from the hinge, and how deep it is, measured along the away axis
+    const float2 c0 = g.videoRect.xy - g.hingePoint;
+    const float2 c1 = c0 + float2(g.videoRect.z, 0.0f);
+    const float2 c2 = c0 + float2(0.0f, g.videoRect.w);
+    const float2 c3 = c0 + g.videoRect.zw;
+    const float d0 = -dot(c0, g.away), d1 = -dot(c1, g.away), d2 = -dot(c2, g.away), d3 = -dot(c3, g.away);
+    const float nearEdge = max(min(min(d0, d1), min(d2, d3)), 0.0f);
+    const float depth = max(max(max(d0, d1), max(d2, d3)) - nearEdge, 1.0f);
+    const float3 depths = float3(0.06f, 0.3f, 0.65f);
+    const float3 weights = float3(0.5f, 0.32f, 0.18f);
+    float3 wash = float3(0.0f);
+    float side = 1.0f;
+    for (int k = 0; k < 3; ++k) {
+        const float h = nearEdge + depth * depths[k];
+        const float2 uv = cuven::panelToUV(g.hingePoint + s * g.along - h * g.away, g);
+        // Beyond the picture's sides the wash thins out instead of smearing its edge colour across
+        const float2 outside = max(max(-uv, uv - 1.0f), float2(0.0f)) * g.videoRect.zw;
+        side = min(side, exp(-length(outside) / 140.0f));
+        wash += farMap.sample(linearClamp, saturate(uv), level(0.0f)).rgb * weights[k];
+    }
+    const float panelExtent = max(abs(dot(u.panel.xy, abs(g.away))), 1.0f);
+    const float fall = exp(-awayDist / (panelExtent * 0.6f));
+    E += wash * (0.8f * fall * side);
+
+    irradiance.write(float4(E, 1.0f), gid);
 }
 
 vertex cuven::SurfaceVaryings cuven_surfaceVertex(uint vid [[vertex_id]],
@@ -175,6 +210,6 @@ fragment float4 cuven_backdropFragment(cuven::ScreenVaryings in [[stage_in]],
     const cuven::Geometry g = cuven::geometry(u);
     const float away = max(dot(p - g.hingePoint, g.away), 0.0f);
     const float falloff = exp(-away / max(u.panel.y * 0.45f, 1.0f));
-    const float3 c = cuven::softCap(E * (level * 0.35f * falloff), u.material.w * 0.35f);
+    const float3 c = cuven::softCap(E * (level * 0.6f * falloff), u.material.w * 0.4f);
     return float4(c, 0.0f);
 }
