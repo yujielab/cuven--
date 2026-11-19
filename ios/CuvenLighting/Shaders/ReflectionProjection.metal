@@ -225,6 +225,8 @@ fragment float4 cuven_backdropFragment(cuven::ScreenVaryings in [[stage_in]],
                         * smoothstep(0.0f, widths.z, p.y) * smoothstep(0.0f, widths.w, size.y - p.y);
     // Idle: the cards are gone, the ambient light carries the panel a little more
     const float idleBoost = 1.0f + 0.35f * u.look2.z;
-    const float3 c = cuven::softCap(E * (level * 0.6f * falloff * feather * idleBoost), u.material.w * 0.45f);
+    // The controls are Liquid Glass now (no Metal card faces): this light under the glass is the whole effect, so it may
+    // come up further, still capped well below the white symbols
+    const float3 c = cuven::softCap(E * (level * 0.75f * falloff * feather * idleBoost), u.material.w * 0.8f);
     return float4(c, 0.0f);
 }

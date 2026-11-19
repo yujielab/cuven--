@@ -52,13 +52,13 @@ public struct LightingProfile: Sendable, Equatable {
             return LightingProfile(analysisEnabled: true, analysisHz: 24, idleAnalysisHz: 12,
                                    sampleWidth: 256, sampleHeight: 144, gridColumns: 16, gridRows: 9, lightCount: 2,
                                    intensity: 0.9, ambient: 1.0, mirror: 0.45, specular: 0.65, edgeGlow: 0.8, blur: 0.6,
-                                   multiLayer: 0, backdrop: 0.3, spatial: 0.5, readabilityCap: 0.12,
+                                   multiLayer: 0, backdrop: 0.6, spatial: 0.5, readabilityCap: 0.12,
                                    displayFPS: 60, idleDisplayFPS: 30)
         case .immersive:
             return LightingProfile(analysisEnabled: true, analysisHz: 30, idleAnalysisHz: 15,
                                    sampleWidth: 384, sampleHeight: 216, gridColumns: 32, gridRows: 18, lightCount: 4,
                                    intensity: 1.0, ambient: 1.15, mirror: 0.75, specular: 1.0, edgeGlow: 1.0, blur: 0.35,
-                                   multiLayer: 1, backdrop: 0.5, spatial: 1.0, readabilityCap: 0.13,
+                                   multiLayer: 1, backdrop: 0.85, spatial: 1.0, readabilityCap: 0.13,
                                    displayFPS: 60, idleDisplayFPS: 30)
         }
     }

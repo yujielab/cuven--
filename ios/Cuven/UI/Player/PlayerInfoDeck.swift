@@ -1,27 +1,22 @@
 import SwiftUI
 
-// MARK: - Touch Bar 下面那块：简介 / InSight / 继续观看 / 推荐（液态玻璃）
+// MARK: - 面板最底下那一块：InSight / 继续观看 / 推荐（液态玻璃，只左右滑）
 //
-// 用户要求：「参考图 5-6-7 保持液态玻璃设计重新设计 touch bar 下方空间」（参照 Apple TV App 播放器里的信息面板）：
-//   · 一排胶囊标签：选中的是白底黑字，其余是液态玻璃（白字）；
-//   · 简介：这一集的标题、简介、「类型 · 时长」和规格徽标（4K、杜比视界、杜比全景声……），右边两颗玻璃胶囊
-//     「从头开始」「前往节目」（剧集后面还有时再多一颗「下一集」）；窄的时候按钮排到下面；
-//   · InSight：这一部的演员（头像、名字、角色）；
-//   · 继续观看：别的看到一半的（画面 + 字标 + 进度 + 剩余时间），点了接着放；
-//   · 推荐：一次一部，大字标居中、「类型 · 年份」和评分，下面「＋ 想看」「跳过」两颗白胶囊（参照图 7）。
-// 没有内容的标签不出（比如本机视频没有演员表）。面板闲置时和 Touch Bar 一起淡出。
+// 用户要求：「移除简介并将蓝色区域下移做为控制面板的最底位置设计，并限制最大高度（所有内容和子选项页面仅允许横向滑动）」：
+//   · 一排胶囊标签（选中的白底黑字，其余液态玻璃），最右边两颗玻璃圆钮：小窗口、关闭；
+//   · 下面一排卡，只左右滑（没有往下翻的页）：
+//       InSight——这一部的演员（头像、名字、角色）；
+//       继续观看——剧集后面还有时打头一张「下一集」，接着是别的看到一半的（画面 + 字标 + 进度 + 剩余），点了接着放；
+//       推荐——同类型的片子（画面 + 字标 + 类型 · 年份 + 评分），右上角一颗玻璃圆钮「＋」加进想看（已在想看是「✓」），点卡放它；
+//   · 整块贴在面板最底下，高度有上限（PlayerDeckLayout）。没有内容的标签不出。面板闲置时和 Touch Bar 一起淡出。
 
-/// 简介那一页的内容（PlayerCoordinator 每开始一集按片库和 TMDB 填一次，剧集的分集标题、简介晚一点补上）
+/// 演员表等（PlayerCoordinator 每开始一集按片库和 TMDB 填一次）
 struct PlayerInfo: Equatable {
-    /// 这一集的标题（剧集：分集标题；电影：片名）
     var heading = ""
     var overview: String?
-    /// 「犯罪 · 54 分钟」那一行
     var facts: [String] = []
-    /// 规格徽标：4K、杜比视界、HDR、杜比全景声……
     var badges: [String] = []
     var cast: [PlayerCastItem] = []
-    /// 片库里找得到这一部（「前往节目」能去）
     var canGoToShow = false
 }
 
@@ -49,11 +44,10 @@ struct PlayerShelfItem: Equatable, Identifiable {
 }
 
 enum PlayerDeckTab: String, CaseIterable, Hashable {
-    case about, insight, continueWatching, recommend
+    case insight, continueWatching, recommend
 
     var title: String {
         switch self {
-        case .about: "简介"
         case .insight: "InSight"
         case .continueWatching: "继续观看"
         case .recommend: "推荐"
@@ -61,54 +55,77 @@ enum PlayerDeckTab: String, CaseIterable, Hashable {
     }
 }
 
+/// 这一块的尺寸：标签那一排 38 点，下面一排卡最高 150 点（整块最高 200 点）
+enum PlayerDeckLayout {
+    static let tabHeight: CGFloat = 38
+    static let spacing: CGFloat = 12
+    static let maxCardHeight: CGFloat = 150
+    static var maxHeight: CGFloat { tabHeight + spacing + maxCardHeight }
+}
+
 struct PlayerInfoDeck: View {
     let model: CuvenPlayerViewModel
+    /// 这一块能用的高（不超过 PlayerDeckLayout.maxHeight）
+    let height: CGFloat
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var tabs: [PlayerDeckTab] {
-        var t: [PlayerDeckTab] = [.about]
+        var t: [PlayerDeckTab] = []
         if !model.info.cast.isEmpty { t.append(.insight) }
-        if !model.continueItems.isEmpty { t.append(.continueWatching) }
+        if !model.continueItems.isEmpty || model.hasNext { t.append(.continueWatching) }
         if !model.recommendations.isEmpty { t.append(.recommend) }
         return t
     }
 
     var body: some View {
         let tabs = self.tabs
-        let tab = tabs.contains(model.deckTab) ? model.deckTab : .about
-        VStack(alignment: .leading, spacing: 14) {
+        let tab = tabs.contains(model.deckTab) ? model.deckTab : tabs.first
+        let cardHeight = min(PlayerDeckLayout.maxCardHeight, height - PlayerDeckLayout.tabHeight - PlayerDeckLayout.spacing)
+        VStack(alignment: .leading, spacing: PlayerDeckLayout.spacing) {
             GlassEffectContainer(spacing: 10) {
                 HStack(spacing: 10) {
-                    ForEach(tabs, id: \.self) { t in
-                        DeckTabPill(title: t.title, selected: t == tab) { model.selectDeckTab(t) }
-                            .accessibilityIdentifier("deck-tab-\(t.rawValue)")
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            ForEach(tabs, id: \.self) { t in
+                                DeckTabPill(title: t.title, selected: t == tab) { model.selectDeckTab(t) }
+                                    .accessibilityIdentifier("deck-tab-\(t.rawValue)")
+                            }
+                        }
                     }
-                    Spacer(minLength: 0)
-                    DeckLightingButton(model: model)
+                    .scrollClipDisabled()
+                    DeckCircleButton(symbol: "pip.enter", label: "小窗口", hint: "画中画，回到主屏幕接着看",
+                                     id: "player-pip", enabled: model.pipPossible) { model.startPiP() }
+                    DeckCircleButton(symbol: "xmark", label: "关闭", hint: nil, id: "player-close", enabled: true) {
+                        Haptics.light()
+                        model.onClose?()
+                    }
                 }
+                .frame(height: PlayerDeckLayout.tabHeight)
             }
-            ZStack(alignment: .topLeading) {
-                switch tab {
-                case .about:
-                    DeckAbout(model: model).transition(.deckPage)
-                case .insight:
-                    DeckInSight(cast: model.info.cast).transition(.deckPage)
-                case .continueWatching:
-                    DeckContinue(model: model).transition(.deckPage)
-                case .recommend:
-                    DeckRecommend(model: model).transition(.deckPage)
+            if let tab, cardHeight >= 90 {
+                ZStack(alignment: .topLeading) {
+                    switch tab {
+                    case .insight:
+                        DeckInSight(cast: model.info.cast, height: cardHeight).transition(.deckPage)
+                    case .continueWatching:
+                        DeckContinue(model: model, height: cardHeight).transition(.deckPage)
+                    case .recommend:
+                        DeckRecommend(model: model, height: cardHeight).transition(.deckPage)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .frame(height: cardHeight, alignment: .topLeading)
+                .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.9), value: tab)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.9), value: tab)
         }
+        .frame(maxWidth: .infinity, alignment: .bottomLeading)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("player-deck")
     }
 }
 
 private extension AnyTransition {
-    /// 换标签：新的一页从右边一点淡进来，旧的淡出
+    /// 换标签：新的一排从右边一点淡进来，旧的淡出
     static var deckPage: AnyTransition {
         .asymmetric(insertion: .opacity.combined(with: .offset(x: 14)), removal: .opacity)
     }
@@ -128,7 +145,7 @@ private struct DeckTabPill: View {
                 .lineLimit(1)
                 .fixedSize()
                 .padding(.horizontal, 18)
-                .frame(height: 38)
+                .frame(height: PlayerDeckLayout.tabHeight)
                 .background {
                     if selected { Capsule().fill(Color.white) }
                 }
@@ -141,39 +158,29 @@ private struct DeckTabPill: View {
     }
 }
 
-/// 标签那一排最右边的 ✦：影院光影的设置（精简版，下面的面板就是预览）
-private struct DeckLightingButton: View {
-    let model: CuvenPlayerViewModel
-    @State private var open = false
+/// 标签那一排右边的玻璃圆钮（小窗口、关闭）
+private struct DeckCircleButton: View {
+    let symbol: String
+    let label: String
+    let hint: String?
+    let id: String
+    let enabled: Bool
+    let action: () -> Void
 
     var body: some View {
-        Button {
-            Haptics.selection()
-            model.poke()
-            open = true
-        } label: {
-            Image(systemName: "sparkles")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 38, height: 38)
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(enabled ? Color.white : Color.white.opacity(0.35))
+                .frame(width: PlayerDeckLayout.tabHeight, height: PlayerDeckLayout.tabHeight)
                 .contentShape(Circle())
         }
-        .buttonStyle(PressableStyle(scale: 0.92))
+        .buttonStyle(PressableStyle(scale: 0.9))
         .glassEffect(.regular.interactive(), in: Circle())
-        .popover(isPresented: $open) {
-            ScrollView {
-                CinematicLightingView(compact: true)
-                    .padding(20)
-            }
-            .frame(minWidth: 320, idealWidth: 380, maxWidth: 420, minHeight: 320, idealHeight: 460)
-            .background(Color(white: 0.08))
-            .presentationCompactAdaptation(.popover)
-            .preferredColorScheme(.dark)
-        }
-        .onChange(of: open) { _, o in model.setSettingsOpen(o) }
-        .accessibilityLabel("影院光影")
-        .accessibilityHint("调整面板上画面的光影")
-        .accessibilityIdentifier("deck-lighting")
+        .disabled(!enabled)
+        .accessibilityLabel(label)
+        .accessibilityHint(hint ?? "")
+        .accessibilityIdentifier(id)
     }
 }
 
@@ -182,6 +189,7 @@ private struct DeckGlass<S: Shape>: ViewModifier {
     let enabled: Bool
     let shape: S
 
+    @ViewBuilder
     func body(content: Content) -> some View {
         if enabled {
             content.glassEffect(.regular.interactive(), in: shape)
@@ -191,155 +199,21 @@ private struct DeckGlass<S: Shape>: ViewModifier {
     }
 }
 
-/// 玻璃胶囊按钮（从头开始、前往节目、下一集）
-private struct DeckGlassButton: View {
-    let title: String
-    let systemImage: String
-    var id: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 17, weight: .semibold))
-                Text(title)
-                    .font(.system(size: 17, weight: .semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 18)
-            .frame(maxWidth: .infinity)
-            .frame(height: 48)
-            .contentShape(Capsule())
-        }
-        .buttonStyle(PressableStyle(scale: 0.96))
-        .glassEffect(.regular.interactive(), in: Capsule())
-        .accessibilityIdentifier(id)
-    }
-}
-
-// MARK: 简介（参照图 5）
-
-private struct DeckAbout: View {
-    let model: CuvenPlayerViewModel
-
-    var body: some View {
-        GeometryReader { geo in
-            let wide = geo.size.width >= 520
-            let info = model.info
-            let layout = wide ? AnyLayout(HStackLayout(alignment: .top, spacing: 24))
-                              : AnyLayout(VStackLayout(alignment: .leading, spacing: 14))
-            layout {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(info.heading.isEmpty ? model.title : info.heading)
-                        .font(.system(size: 22, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                    if let o = info.overview, !o.isEmpty {
-                        Text(o)
-                            .font(.system(size: 15))
-                            .foregroundStyle(.white.opacity(0.9))
-                            .lineLimit(wide ? 5 : 3)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    DeckFacts(facts: info.facts, badges: info.badges)
-                        .padding(.top, 4)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                GlassEffectContainer(spacing: 12) {
-                    let buttons = wide ? AnyLayout(VStackLayout(spacing: 12)) : AnyLayout(HStackLayout(spacing: 10))
-                    buttons {
-                        DeckGlassButton(title: "从头开始", systemImage: "play.fill", id: "deck-restart") { model.restart() }
-                        if model.hasNext {
-                            DeckGlassButton(title: "下一集", systemImage: "forward.end.fill", id: "deck-next") {
-                                Haptics.light()
-                                model.onNext?()
-                            }
-                        }
-                        if info.canGoToShow {
-                            DeckGlassButton(title: "前往节目", systemImage: "info.circle", id: "deck-show") {
-                                Haptics.light()
-                                model.onGoToShow?()
-                            }
-                        }
-                    }
-                }
-                .frame(width: wide ? min(260, geo.size.width * 0.36) : nil)
-            }
-            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
-        }
-    }
-}
-
-/// 「犯罪 · 54 分钟」+ 规格徽标（4K 实心，别的描边，和参照图一样）
-private struct DeckFacts: View {
-    let facts: [String]
-    let badges: [String]
-
-    var body: some View {
-        // 一行放得下就一行（参照图）；放不下时徽标换到下一行，字不被截掉
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                factsText
-                badgeRow
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                factsText
-                badgeRow
-            }
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    @ViewBuilder private var factsText: some View {
-        if !facts.isEmpty {
-            Text(facts.joined(separator: " · "))
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(.white.opacity(0.6))
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private var badgeRow: some View {
-        HStack(spacing: 8) {
-            ForEach(badges.prefix(4), id: \.self) { b in
-                let solid = b == "4K" || b == "8K"
-                Text(b)
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(solid ? Color.black : Color.white.opacity(0.75))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background {
-                        let shape = RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        if solid {
-                            shape.fill(Color.white.opacity(0.72))
-                        } else {
-                            shape.strokeBorder(Color.white.opacity(0.6), lineWidth: 1.2)
-                        }
-                    }
-                    .fixedSize()
-            }
-        }
-    }
-}
-
 // MARK: InSight（演员）
 
 private struct DeckInSight: View {
     let cast: [PlayerCastItem]
+    let height: CGFloat
 
     var body: some View {
+        let photo = min(68, max(40, height - 72))
         ScrollView(.horizontal, showsIndicators: false) {
             GlassEffectContainer(spacing: 12) {
                 HStack(spacing: 12) {
                     ForEach(cast) { c in
                         VStack(spacing: 8) {
                             RemoteImage(url: c.photo, maxPixel: 240, placeholder: Color.white.opacity(0.08))
-                                .frame(width: 68, height: 68)
+                                .frame(width: photo, height: photo)
                                 .clipShape(Circle())
                                 .overlay(Circle().strokeBorder(.white.opacity(0.15), lineWidth: 0.5))
                             VStack(spacing: 2) {
@@ -355,53 +229,108 @@ private struct DeckInSight: View {
                             .lineLimit(1)
                             .multilineTextAlignment(.center)
                         }
-                        .padding(.vertical, 14)
                         .padding(.horizontal, 10)
-                        .frame(width: 124)
+                        .frame(width: 124, height: height)
                         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
                         .accessibilityElement(children: .combine)
                     }
                 }
-                .padding(.vertical, 2)
             }
         }
         .scrollClipDisabled()
     }
 }
 
-// MARK: 继续观看（参照图 6）
+// MARK: 继续观看（打头一张「下一集」）
 
 private struct DeckContinue: View {
     let model: CuvenPlayerViewModel
+    let height: CGFloat
 
     var body: some View {
-        GeometryReader { geo in
-            // 卡宽：放得下两张半左右，最宽 280；高按 16:9，不超过这一页的高
-            let w = min(280, max(180, (geo.size.width - 28) / 2.4), (geo.size.height - 4) * 16 / 9).rounded()
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 14) {
-                    ForEach(model.continueItems) { item in
-                        Button {
-                            Haptics.light()
-                            model.onPlayItem?(item)
-                        } label: {
-                            ContinueCard(item: item, width: w)
-                        }
-                        .buttonStyle(PressableStyle(scale: 0.97))
-                        .accessibilityLabel([item.title, item.subtitle].compactMap { $0 }.joined(separator: "，"))
-                        .accessibilityHint("接着放")
+        let w = (height * 16 / 9).rounded()
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 14) {
+                if model.hasNext {
+                    Button {
+                        Haptics.light()
+                        model.onNext?()
+                    } label: {
+                        ShelfCard(item: PlayerShelfItem(id: "next", title: model.title, subtitle: model.nextLabel ?? "下一集",
+                                                        art: TMDBImage.url(model.artwork, "w780")),
+                                  width: w, badge: "下一集")
                     }
+                    .buttonStyle(PressableStyle(scale: 0.97))
+                    .accessibilityLabel("下一集，\(model.nextLabel ?? "")")
+                    .accessibilityIdentifier("deck-next")
                 }
-                .padding(.vertical, 2)
+                ForEach(model.continueItems) { item in
+                    Button {
+                        Haptics.light()
+                        model.onPlayItem?(item)
+                    } label: {
+                        ShelfCard(item: item, width: w)
+                    }
+                    .buttonStyle(PressableStyle(scale: 0.97))
+                    .accessibilityLabel([item.title, item.subtitle].compactMap { $0 }.joined(separator: "，"))
+                    .accessibilityHint("接着放")
+                }
             }
-            .scrollClipDisabled()
         }
+        .scrollClipDisabled()
     }
 }
 
-private struct ContinueCard: View {
+// MARK: 推荐（右上角 ＋ 加进想看）
+
+private struct DeckRecommend: View {
+    let model: CuvenPlayerViewModel
+    let height: CGFloat
+
+    var body: some View {
+        let w = (height * 16 / 9).rounded()
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 14) {
+                ForEach(model.recommendations) { item in
+                    let saved = item.watchKey.map { model.watchlisted.contains($0) } ?? false
+                    Button {
+                        Haptics.light()
+                        model.onOpenRecommendation?(item)
+                    } label: {
+                        ShelfCard(item: item, width: w)
+                    }
+                    .buttonStyle(PressableStyle(scale: 0.97))
+                    .overlay(alignment: .topTrailing) {
+                        Button {
+                            Haptics.success()
+                            model.onToggleWatchlist?(item)
+                        } label: {
+                            Image(systemName: saved ? "checkmark" : "plus")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(.white)
+                                .contentTransition(.symbolEffect(.replace.magic(fallback: .replace)))
+                                .frame(width: 32, height: 32)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(PressableStyle(scale: 0.9))
+                        .glassEffect(.regular.interactive(), in: Circle())
+                        .padding(8)
+                        .accessibilityLabel(saved ? "从想看移除" : "加入想看")
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel(item.title)
+                }
+            }
+        }
+        .scrollClipDisabled()
+    }
+}
+
+/// 一张 16:9 的卡：画面 + 字标（没有就写片名）+ 进度 / 说明 + 评分；左上角可以有一颗小标（「下一集」）
+private struct ShelfCard: View {
     let item: PlayerShelfItem
     let width: CGFloat
+    var badge: String?
 
     var body: some View {
         let h = (width * 9 / 16).rounded()
@@ -409,9 +338,9 @@ private struct ContinueCard: View {
         ZStack(alignment: .bottomLeading) {
             RemoteImage(url: item.art, maxPixel: 720)
                 .frame(width: width, height: h)
-            LinearGradient(stops: [.init(color: .clear, location: 0.35), .init(color: .black.opacity(0.75), location: 1)],
+            LinearGradient(stops: [.init(color: .clear, location: 0.3), .init(color: .black.opacity(0.78), location: 1)],
                            startPoint: .top, endPoint: .bottom)
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 if let logo = item.logo {
                     LogoImage(url: logo, height: (h * 0.2).rounded(), alignment: .leading, fallback: item.title,
                               maxWidth: (width * 0.55).rounded())
@@ -422,20 +351,28 @@ private struct ContinueCard: View {
                         .lineLimit(1)
                 }
                 HStack(spacing: 8) {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 11, weight: .bold))
                     if let p = item.progress {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 10, weight: .bold))
                         Capsule()
                             .fill(.white.opacity(0.3))
-                            .frame(width: 44, height: 4)
+                            .frame(width: 40, height: 4)
                             .overlay(alignment: .leading) {
-                                Capsule().fill(.white).frame(width: max(4, 44 * p), height: 4)
+                                Capsule().fill(.white).frame(width: max(4, 40 * p), height: 4)
                             }
                     }
                     if let s = item.subtitle {
                         Text(s)
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: 12, weight: .semibold))
                             .lineLimit(1)
+                    }
+                    if let r = item.rating {
+                        Text("★ \(r)")
+                            .font(.system(size: 11, weight: .bold))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.6), lineWidth: 1))
                     }
                 }
                 .foregroundStyle(.white)
@@ -443,108 +380,19 @@ private struct ContinueCard: View {
             .padding(12)
         }
         .frame(width: width, height: h)
+        .overlay(alignment: .topLeading) {
+            if let badge {
+                Text(badge)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Color.white))
+                    .padding(10)
+            }
+        }
         .clipShape(shape)
         .overlay(shape.strokeBorder(.white.opacity(0.14), lineWidth: 0.6))
         .contentShape(shape)
-    }
-}
-
-// MARK: 推荐（参照图 7）：一次一部，「＋ 想看」「跳过」
-
-private struct DeckRecommend: View {
-    let model: CuvenPlayerViewModel
-    @State private var index = 0
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        let items = model.recommendations
-        if items.isEmpty {
-            EmptyView()
-        } else {
-            let item = items[index % items.count]
-            let saved = item.watchKey.map { model.watchlisted.contains($0) } ?? false
-            GeometryReader { geo in
-                VStack(spacing: 14) {
-                    Spacer(minLength: 0)
-                    ZStack {
-                        if let logo = item.logo {
-                            LogoImage(url: logo, height: min(76, geo.size.height * 0.28).rounded(), fallback: item.title,
-                                      maxWidth: (geo.size.width * 0.6).rounded())
-                        } else {
-                            Text(item.title)
-                                .font(.system(size: 34, weight: .heavy))
-                                .foregroundStyle(.white)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.6)
-                        }
-                    }
-                    .id(item.id)
-                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.94)))
-                    HStack(spacing: 10) {
-                        if let s = item.subtitle {
-                            Text(s)
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.6))
-                        }
-                        if let r = item.rating {
-                            Text("★ \(r)")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(.white.opacity(0.75))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                    .strokeBorder(Color.white.opacity(0.6), lineWidth: 1.2))
-                        }
-                    }
-                    .lineLimit(1)
-                    HStack(spacing: 16) {
-                        WhitePill(title: saved ? "已在想看" : "想看", systemImage: saved ? "checkmark" : "plus",
-                                  id: "deck-watchlist") {
-                            Haptics.success()
-                            model.onToggleWatchlist?(item)
-                        }
-                        WhitePill(title: "跳过", systemImage: nil, id: "deck-skip") {
-                            Haptics.selection()
-                            model.poke()
-                            withAnimation(.spring(response: 0.4, dampingFraction: 0.88)) { index += 1 }
-                        }
-                    }
-                    .frame(maxWidth: 420)
-                    Spacer(minLength: 0)
-                }
-                .frame(width: geo.size.width, height: geo.size.height)
-            }
-            .accessibilityElement(children: .contain)
-        }
-    }
-}
-
-/// 参照图 7 的白胶囊（黑字）
-private struct WhitePill: View {
-    let title: String
-    let systemImage: String?
-    let id: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                if let systemImage {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 18, weight: .bold))
-                        .contentTransition(.symbolEffect(.replace.magic(fallback: .replace)))
-                }
-                Text(title)
-                    .font(.system(size: 18, weight: .bold))
-                    .contentTransition(.interpolate)
-            }
-            .foregroundStyle(.black)
-            .frame(maxWidth: .infinity)
-            .frame(height: 50)
-            .background(Capsule().fill(Color.white))
-            .contentShape(Capsule())
-        }
-        .buttonStyle(PressableStyle(scale: 0.96))
-        .accessibilityIdentifier(id)
     }
 }

@@ -189,7 +189,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         vm.continueItems = PlayerPanelData.continueItems(excluding: req, model: model)
         vm.recommendations = PlayerPanelData.recommendations(for: req, model: model)
         vm.watchlisted = Set(model.watchlist.items.map(\.key))
-        vm.deckTab = .about
+        vm.deckTab = .continueWatching
         let route = PlayerPanelData.route(for: req, model: model)
         vm.onGoToShow = { [weak self, weak model] in
             guard let route else { return }
@@ -199,6 +199,12 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             guard let self, let model, let e = model.playback.entry(item.id) else { return }
             plog("panel continue watching")
             self.resume(e, model: model)
+        }
+        vm.onOpenRecommendation = { [weak self, weak model] item in
+            guard let self, let model, let v = model.video(path: item.id) else { return }
+            plog("panel recommendation")
+            self.play(PlayRequest(path: v.path, name: v.name, title: model.title(v), artwork: model.backgroundArtString(v)),
+                      model: model)
         }
         vm.onToggleWatchlist = { [weak model, weak vm] item in
             guard let model, let key = item.watchKey else { return }

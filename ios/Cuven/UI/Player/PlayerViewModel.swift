@@ -10,7 +10,7 @@ import UIKit
 // 半折播放器（PlayerTabletop.swift）和光影实验室（PlayerLab.swift）共用：
 //   · 正在放什么：片名、第几集、画面、后面还有没有下一集，下面那块（简介 / InSight / 继续观看 / 推荐）的内容；
 //   · 播放状态：放着没有、位置、时长、音量——面板出来时每 0.25 秒跟播放器对一次（只有值变了才写，SwiftUI 不会每帧刷新）；
-//   · 面板自己的状态：Touch Bar 现在展开成哪一样、屏幕方向锁、拖进度条、闲置时淡出；
+//   · 面板自己的状态：Touch Bar 上正长按展开着哪一颗、屏幕方向锁、拖进度条、静音、闲置时淡出；
 //   · 画中画、铰链角度（iOS 27.1 的 onHingeChange 喂进来）。光影的模式和微调在 CinematicLightingSettings。
 // 光影引擎本身（CuvenLighting 框架）不在这里：面板把播放器、卡片位置、设置交给它，它自己按显示刷新率画。
 
@@ -22,6 +22,8 @@ final class CuvenPlayerViewModel {
     var subtitle: String?
     var artwork: String?
     var hasNext = false
+    /// 下一集叫什么（「第 3 集」）：继续观看那一排打头的「下一集」卡
+    var nextLabel: String?
     /// 片源的动态范围（服务器的 info.json、文件名）：HDR / 杜比视界的片子光影不取画面的帧（取了会改变屏上的画面：
     /// 用户真机截图，杜比视界 5 变成一片绿和品红），改用这一集的剧照打光
     var sourceRange: LightingSourceRange = .unknown
@@ -43,11 +45,13 @@ final class CuvenPlayerViewModel {
     var scrub: Double?
     /// 「锁定屏幕」：这一页的方向锁在按下时的方向，转动设备不跟着转（用户要求）
     private(set) var orientationLocked = false
-    /// Touch Bar 现在是哪一样（默认是播放那一排；展开成控制条、滑杆、进度条、字幕 / 音轨的选项）
-    private(set) var bar: TouchBarMode = .media
-    /// 展开的东西收起时回到哪一样
-    @ObservationIgnored private var barReturn: TouchBarMode = .media
+    /// Touch Bar 上正长按展开着的那一颗（长按 → 展开 → 滑动选择 / 调整 → 松开 → 收回）；展开着不进闲置
+    private(set) var barMorph: TouchBarKey?
     var brightness: Double = 0.5
+    /// 声音那一颗点一下：静音（这个播放器的，不动系统音量）
+    private(set) var muted = false
+    /// 字幕那一颗点一下关掉、再点一下开回关之前那一条
+    @ObservationIgnored private var lastSubtitlePick = 0
     /// 系统音量（和侧边的音量键同一个）
     private(set) var volume: Double = 0.5
     private(set) var audioNames: [String] = []
@@ -69,7 +73,7 @@ final class CuvenPlayerViewModel {
     var recommendations: [PlayerShelfItem] = []
     /// 想看里有的（推荐卡上「＋ 想看」/「已在想看」）
     var watchlisted: Set<String> = []
-    var deckTab: PlayerDeckTab = .about
+    var deckTab: PlayerDeckTab = .continueWatching
 
     @ObservationIgnored weak var player: AVPlayer?
     @ObservationIgnored var onClose: (() -> Void)?
@@ -85,6 +89,8 @@ final class CuvenPlayerViewModel {
     @ObservationIgnored var onGoToShow: (() -> Void)?
     @ObservationIgnored var onPlayItem: ((PlayerShelfItem) -> Void)?
     @ObservationIgnored var onToggleWatchlist: ((PlayerShelfItem) -> Void)?
+    /// 点了推荐里的一部：放它
+    @ObservationIgnored var onOpenRecommendation: ((PlayerShelfItem) -> Void)?
     /// 截图用（DEBUG 的 -CuvenTabletop）：不接播放器，按钮只改面板上的样子
     @ObservationIgnored var preview = false
     /// 设置页里的预览：符号一直显示（不进闲置）
@@ -139,8 +145,7 @@ final class CuvenPlayerViewModel {
         let now = standalone || (fold != nil && !fullscreen)
         guard now != active else { return }
         active = now
-        bar = .media
-        barReturn = .media
+        barMorph = nil
         if !now { setOrientationLock(false) }
         scrub = nil
         controlsVisible = true
@@ -264,11 +269,8 @@ final class CuvenPlayerViewModel {
         idleTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(5))
             guard let self, !Task.isCancelled else { return }
-            if self.playing, self.scrub == nil, !self.settingsOpen, !self.bar.holdsAttention {
+            if self.playing, self.scrub == nil, !self.settingsOpen, self.barMorph == nil {
                 self.controlsVisible = false
-                // 再叫回来时是播放那一排
-                self.bar = .media
-                self.barReturn = .media
             }
         }
     }
@@ -320,7 +322,31 @@ final class CuvenPlayerViewModel {
     func setVolume(_ v: Double) {
         let x = min(max(v, 0), 1)
         volume = x
+        if muted { setMuted(false) }
         if !preview { SystemVolume.set(x) }
+    }
+
+    func toggleMute() {
+        Haptics.light()
+        setMuted(!muted)
+        poke()
+    }
+
+    private func setMuted(_ on: Bool) {
+        muted = on
+        if !preview { player?.isMuted = on }
+    }
+
+    /// 字幕关 ↔ 开（开回关之前那一条；以前没开过就开第一条）
+    func toggleSubtitles() {
+        Haptics.selection()
+        if subtitlePick >= 0 {
+            lastSubtitlePick = subtitlePick
+            selectSubtitle(-1)
+        } else if !subtitleNames.isEmpty {
+            selectSubtitle(min(lastSubtitlePick, subtitleNames.count - 1))
+        }
+        poke()
     }
 
     func selectAudio(_ i: Int) {
@@ -356,22 +382,12 @@ final class CuvenPlayerViewModel {
 
     // MARK: Touch Bar
 
-    /// 展开一样（控制条、滑杆、进度条、字幕 / 音轨的选项）；从播放那一排或控制条展开的，收起时回到那里
-    func openBar(_ m: TouchBarMode) {
-        guard m != bar else { return }
-        if bar == .media || bar == .strip { barReturn = bar }
-        if m == .slider(.brightness) { brightness = Double(Self.screen?.brightness ?? CGFloat(brightness)) }
-        if m == .slider(.volume) { volume = SystemVolume.current }
-        Haptics.selection()
-        bar = m
-        poke()
-    }
-
-    /// ⊗：收起（控制条回到播放那一排；别的回到展开它的那一样）
-    func closeBar() {
-        Haptics.selection()
-        bar = bar == .strip ? .media : barReturn
-        if bar != .strip { barReturn = .media }
+    /// Touch Bar 上开始 / 结束长按展开（PlayerTouchBar 报过来）
+    func setBarMorph(_ k: TouchBarKey?) {
+        guard k != barMorph else { return }
+        barMorph = k
+        if k == .brightness { brightness = Double(Self.screen?.brightness ?? CGFloat(brightness)) }
+        if k == .volume { volume = SystemVolume.current }
         poke()
     }
 
@@ -411,31 +427,6 @@ final class CuvenPlayerViewModel {
     }
 
     private static var screen: UIScreen? { VideoOrientation.activeScene?.screen }
-}
-
-/// Touch Bar 的几种样子（PlayerTouchBar）
-enum TouchBarMode: Equatable {
-    /// 播放那一排：关闭 | 后退、播放 / 暂停、前进 | 进度条 | ‹ 收起的控制条
-    case media
-    /// 控制条展开：⊗ | 字幕、音轨 | 亮度、音量 | 小窗口、全屏、锁定
-    case strip
-    /// 亮度 / 音量展开成一条滑杆
-    case slider(Slider)
-    /// 进度条展开成整条
-    case scrub
-    /// 字幕 / 音轨展开成一排选项
-    case choices(Choice)
-
-    enum Slider: Equatable { case brightness, volume }
-    enum Choice: Equatable { case subtitles, audio }
-
-    /// 正在调的：不进闲置
-    var holdsAttention: Bool {
-        switch self {
-        case .media, .strip: false
-        case .slider, .scrub, .choices: true
-        }
-    }
 }
 
 /// 系统音量：读 AVAudioSession 的 outputVolume；设只能经过一个 MPVolumeView（面板里藏着一个，见 HiddenVolumeView）

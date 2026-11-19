@@ -3,20 +3,16 @@ import CuvenLighting
 import SwiftUI
 import UIKit
 
-// MARK: - 控制面板：最上面一条 Touch Bar + 下面液态玻璃的信息区，底下一层 Metal 光影
+// MARK: - 控制面板：最上面一条液态玻璃的 Touch Bar + 最底下的卡片区，底下一层 Metal 光影
 //
-// 用户要求：面板第一行改成 MacBook Touch Bar 那样的一条（PlayerToolbar.swift：可滑动、点了无缝展开，集成字幕、音轨、
-// 声音、播放 / 暂停、锁定屏幕、前进、后退、进度条、亮度、全屏、小窗口），下面参照 Apple TV 的信息面板重新设计
-// （PlayerInfoDeck.swift：简介 / InSight / 继续观看 / 推荐，液态玻璃）。桌面、书本两种姿态同一个排法（上面一条、下面一块）。
+// 照用户的设计图：Touch Bar（PlayerToolbar.swift）是一排液态玻璃胶囊，左右滑，长按 → 形变 → 滑动选择或调整 → 松开 → 还原；
+// 卡片区（PlayerInfoDeck.swift：InSight / 继续观看 / 推荐，只左右滑）贴在面板最底下，最高 200 点。桌面、书本两种姿态同一个排法。
 //
-// Touch Bar 键的「面」由 CuvenLighting 的 MetalRenderer 画（深色半透明材质、画面投来的光、隔着折痕映过来的画面、
-// 高光、边缘光），SwiftUI 只画上面的符号、文字和点按区。每颗键用 .litCard(...) 把自己在面板里的位置和形状报给渲染器
-// （只在排版变了时报，不是每帧）；按下 / 松开由 LitTileStyle 报给渲染器，键面和符号一起缩到 0.97、键面略亮。
-// 下面那块是液态玻璃，玻璃底下透出来的是同一层光影（画面映在面板上的光）。
-// 没有 Metal（或着色器没编过）时退回 SwiftUI 画的深灰键，样子和交互都一样。
+// 底下那层由 CuvenLighting 的 MetalRenderer 画：画面里的光按位置和颜色投到面板上，隔着折痕映过来的画面，四边羽化；
+// 液态玻璃把这层光透出来。下面的 LightingHost / LitCardModifier / LitTileStyle 是给 Metal 画的卡面用的（实验室、以后的样式），
+// 现在的面板不报卡片。
 //
-// 闲置（放着、5 秒没碰）：符号、文字、Touch Bar 的键（玻璃）和下面那块一起淡出，画面映在面板上的光一直在、更新慢一些
-// （省电）；碰一下面板，键从 92% 长回原大、符号淡入——版面本身不动。
+// 闲置（放着、5 秒没碰）：Touch Bar 和卡片区一起淡出，面板上画面的光一直在、更新慢一些（省电）；碰一下就回来。
 
 /// 面板里的尺寸
 enum PlayerPanelStyle {
@@ -297,9 +293,11 @@ struct PlayerControlPanel: View {
         GeometryReader { geo in
             let inner = CGSize(width: max(0, geo.size.width - content.leading - content.trailing),
                                height: max(0, geo.size.height - content.top - content.bottom))
-            // Touch Bar 的高：面板高的 17%，52…64 点；下面那块拿剩下的（太矮就不放，只留 Touch Bar）
-            let barHeight = min(64, max(52, (inner.height * 0.17).rounded()))
-            let deckHeight = inner.height - barHeight - 18
+            // Touch Bar：胶囊高 = 面板高的 13%（46…56 点），整条铺满面板的宽（两头的胶囊伸出屏外，左右滑）；
+            // 下面那块贴在最底下，最高 PlayerDeckLayout.maxHeight，太矮就不放
+            let pill = min(56, max(46, (inner.height * 0.13).rounded()))
+            let barHeight = PlayerTouchBar.height(pill: pill)
+            let deckHeight = min(PlayerDeckLayout.maxHeight, inner.height - barHeight - 20)
             let shown = model.controlsVisible
             ZStack(alignment: .topLeading) {
                 if host.isAvailable {
@@ -309,21 +307,25 @@ struct PlayerControlPanel: View {
                 } else {
                     Color.black
                 }
-                // 系统音量要经过一个 MPVolumeView 设（Touch Bar 的音量滑杆）；它在屏上时系统的音量提示也不弹
+                // 系统音量要经过一个 MPVolumeView 设（声音那颗的滑杆）；它在屏上时系统的音量提示也不弹
                 HiddenVolumeView()
                     .frame(width: 2, height: 2)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 18) {
-                    PlayerTouchBar(model: model, height: barHeight)
-                    if deckHeight >= 120 {
-                        PlayerInfoDeck(model: model)
-                            .frame(height: deckHeight, alignment: .top)
+                VStack(spacing: 0) {
+                    PlayerTouchBar(model: model, pillHeight: pill,
+                                   insets: EdgeInsets(top: 0, leading: content.leading, bottom: 0, trailing: content.trailing))
+                        .padding(.top, content.top)
+                    Spacer(minLength: 20)
+                    if deckHeight >= PlayerDeckLayout.tabHeight {
+                        PlayerInfoDeck(model: model, height: deckHeight)
+                            .frame(height: deckHeight, alignment: .bottom)
+                            .padding(.leading, content.leading)
+                            .padding(.trailing, content.trailing)
                     }
                 }
-                .frame(width: inner.width, height: inner.height, alignment: .top)
-                .padding(content)
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                .padding(.bottom, content.bottom)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
                 // 符号、文字、玻璃：淡出时略往下沉，回来时从下面一点淡入、升回原位（键面由渲染器收拢、淡出）
                 .opacity(shown ? 1 : 0)
                 .offset(y: shown || reduceMotion ? 0 : 6)

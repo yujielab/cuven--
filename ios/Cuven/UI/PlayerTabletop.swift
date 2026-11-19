@@ -24,7 +24,8 @@ import CuvenLighting
 // （用户真机反馈过曝）；画面层中途接上时原地精确跳一下重新接上。收起时把播放器还给系统播放器。
 // 退到后台时面板这一层自动进画中画。
 //
-// 面板：最上面一条 Touch Bar（PlayerToolbar.swift），下面液态玻璃的信息区（PlayerInfoDeck.swift：简介 / InSight / 继续观看 / 推荐）。
+// 面板：最上面一条液态玻璃的 Touch Bar（PlayerToolbar.swift：左右滑，长按展开），最底下一块（PlayerInfoDeck.swift：
+// InSight / 继续观看 / 推荐，只左右滑；右边是小窗口、关闭）。
 // 「全屏」：这一次半折里回到系统播放器（画面铺满、系统控件），方向回到原来的规则；合上 / 摊平以后再半折，又是上下两块。
 // 「锁定屏幕」：这一页的方向锁在按下时的方向，转动设备不跟着转（CuvenPlayerViewController）；再按解开。
 // 「小窗口」：面板这一层画面进画中画，播放器收起回到 App；点画中画里的「还原」再弹回来（PlayerCoordinator）。
@@ -104,6 +105,7 @@ final class TabletopPlayerHost {
         model.subtitle = req.subtitle
         model.artwork = req.artwork
         model.hasNext = !req.queue.isEmpty
+        model.nextLabel = req.queue.first.map { $0.subtitle ?? $0.title }
         // 文件名先给一个判断（「杜比视界」「HDR」）；拿到服务器的 info.json 以后 PlayerCoordinator 再更新
         model.sourceRange = Self.range(fromName: req.name)
     }
@@ -178,6 +180,7 @@ enum TabletopPreview {
             m.subtitle = "第 2 集 · 别回头"
             m.artwork = "demo://backdrop/41"
             m.hasNext = true
+            m.nextLabel = "第 3 集 · 灯下"
             // 下面那块的演示内容（截图里每个标签都有东西）
             m.info = PlayerInfo(heading: "别回头",
                                 overview: "雨夜的老街上，一盏没灭的灯把三个陌生人留在了同一家面馆。谁也不肯先开口，"
