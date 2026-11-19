@@ -278,7 +278,8 @@ jobs:
     concurrency:
       group: ios-preview-ipad-${{ github.ref }}
       cancel-in-progress: true
-    timeout-minutes: 30
+    # 半折面板的测试多了几步（Touch Bar 展开 / 滑动、卡片区的标签）：30 分钟不够，整个作业被掐掉、一张截图都没留下
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -342,6 +343,7 @@ jobs:
           xcrun simctl boot "$IPAD_UDID" 2>/dev/null; xcrun simctl bootstatus "$IPAD_UDID" -b > /dev/null 2>&1; sleep 15
           xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
             -destination "id=$IPAD_UDID" -only-testing:CuvenUITests/DuoUnfoldedTests \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 600 \
             -resultBundlePath "$RUNNER_TEMP/ipad.xcresult" > "$RUNNER_TEMP/ipad.log" 2>&1
           code=$?
           # 测试运行器没起来（模拟器的无障碍服务没就绪：「failed to initialize for UI testing」「Timed out waiting for AX loaded
@@ -353,6 +355,7 @@ jobs:
             rm -rf "$RUNNER_TEMP/ipad.xcresult"
             xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
               -destination "id=$IPAD_UDID" -only-testing:CuvenUITests/DuoUnfoldedTests \
+              -test-timeouts-enabled YES -default-test-execution-time-allowance 600 \
               -resultBundlePath "$RUNNER_TEMP/ipad.xcresult" > "$RUNNER_TEMP/ipad.log" 2>&1
             code=$?
           fi
