@@ -23,7 +23,7 @@ fragment float4 cuven_specularFragment(cuven::SurfaceVaryings in [[stage_in]],
     const float2 ext = c.rect.zw * 0.5f;
     const float radius = min(c.shape.x, min(ext.x, ext.y));
     const float sd = cuven::roundedRectSDF(in.local, ext, radius);
-    const float pxPerPt = u.viewport.z * 0.5f * (1.0f - 0.03f * c.shape.y);
+    const float pxPerPt = u.viewport.z * 0.5f * cuven::cardScale(c);
     const float coverage = saturate(0.5f - sd * pxPerPt);
     if (coverage <= 0.0f) { discard_fragment(); }
 
@@ -56,9 +56,9 @@ fragment float4 cuven_specularFragment(cuven::SurfaceVaryings in [[stage_in]],
         sum += source.color.rgb * (source.position.w * presence * (lobe + lobe2) * emission * attenuation);
     }
 
-    const bool lit = c.shape.w > 0.5f;
-    // Specular strength of the preset; idle keeps the ambient light but quiets the highlights
-    sum *= mixL * 0.10f * (0.6f + 0.8f * c.tint.y) * c.tint.x * (lit ? 0.3f : 1.0f) * u.look.y * (1.0f - 0.6f * u.look2.z);
+    // Specular strength of the preset; lit cards (the lock) take less; idle keeps the ambient light, quiets highlights
+    sum *= mixL * 0.10f * (0.6f + 0.8f * c.tint.y) * c.tint.x * mix(1.0f, 0.3f, saturate(c.shape.w)) * u.look.y
+         * (1.0f - 0.6f * u.look2.z);
     sum = cuven::softCap(sum, u.material.w * 0.5f);
     return float4(sum * coverage, 0.0f);
 }

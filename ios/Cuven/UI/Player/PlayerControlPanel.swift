@@ -109,10 +109,10 @@ final class LightingHost {
         renderer?.player = player
     }
 
-    /// 闲置：卡面暗一点、高光安静一点、更新慢一点；环境光照常
+    /// 闲置：卡片（玻璃）收拢、淡出，只留画面映在面板上的环境光；高光安静一点、更新慢一点
     func setIdle(_ on: Bool) {
         idle = on
-        opacity = on ? 0.72 : 1
+        opacity = on ? 0 : 1
         renderer?.isIdle = on
         renderer?.setSurfaceOpacity(opacity)
     }
@@ -164,6 +164,10 @@ struct LitCardModifier: ViewModifier {
     var emphasis: Float = 0.5
     var lit = false
     var radius: CGFloat = PlayerPanelStyle.radius
+    /// 同一组的卡片互相形变（第四行的工具 ↔ 亮度 / 音量那一条）
+    var group: String?
+    /// 状态一变就离场 / 进场（不等 SwiftUI 的淡出做完：卡片的形变要和符号同时开始）
+    var active = true
     @Environment(\.lightingHost) private var host
     @State private var frame: CGRect = .zero
 
@@ -175,17 +179,19 @@ struct LitCardModifier: ViewModifier {
                 }
             }
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(LightingHost.space)) } action: { frame = $0 }
-            .onChange(of: LightingCard(id: id, frame: frame, cornerRadius: radius, emphasis: emphasis, isLit: lit),
+            .onChange(of: active ? LightingCard(id: id, frame: frame, cornerRadius: radius, emphasis: emphasis, isLit: lit,
+                                                morphGroup: group) : nil,
                       initial: true) { _, card in
-                host?.setCard(card)
+                if let card { host?.setCard(card) } else { host?.removeCard(id: id) }
             }
             .onDisappear { host?.removeCard(id: id) }
     }
 }
 
 extension View {
-    func litCard(_ id: String, emphasis: Float = 0.5, lit: Bool = false, radius: CGFloat = PlayerPanelStyle.radius) -> some View {
-        modifier(LitCardModifier(id: id, emphasis: emphasis, lit: lit, radius: radius))
+    func litCard(_ id: String, emphasis: Float = 0.5, lit: Bool = false, radius: CGFloat = PlayerPanelStyle.radius,
+                 group: String? = nil, active: Bool = true) -> some View {
+        modifier(LitCardModifier(id: id, emphasis: emphasis, lit: lit, radius: radius, group: group, active: active))
     }
 
     /// 锁定时：变暗、点不动
@@ -266,6 +272,8 @@ struct PlayerControlPanel: View {
     let model: CuvenPlayerViewModel
     let player: AVPlayer?
     let geometry: LightingGeometry
+    /// 卡片区在整片控制面里的边距（光铺满整片，卡片排在里面）
+    var content = EdgeInsets()
     var options = PlayerLightingOptions()
     var onDiagnostics: ((LightingDiagnostics) -> Void)?
     var onPalette: ((SampledPalette) -> Void)?
@@ -276,7 +284,9 @@ struct PlayerControlPanel: View {
     var body: some View {
         GeometryReader { geo in
             let g = PlayerPanelStyle.gap
-            let avail = max(0, geo.size.height - g * 3)
+            let inner = CGSize(width: max(0, geo.size.width - content.leading - content.trailing),
+                               height: max(0, geo.size.height - content.top - content.bottom))
+            let avail = max(0, inner.height - g * 3)
             // 参照图四行的比例 77 : 142 : 51 : 51；面板很高（iPad）时多出来的都给中间那行
             let top = min(84, max(52, avail * 0.22))
             let bar = min(58, max(44, avail * 0.16))
@@ -299,17 +309,27 @@ struct PlayerControlPanel: View {
                         .litCard("timeline", emphasis: 0.25)
                         .frame(height: bar)
                         .playerLockable(model.locked)
-                    Group {
+                    // 第四行和亮度 / 音量那一条互相形变：卡片在渲染器里融成一条、再分开，符号淡入淡出
+                    ZStack {
                         switch model.tray {
-                        case .brightness: PlayerTray(model: model, kind: .brightness)
-                        case .volume: PlayerTray(model: model, kind: .volume)
-                        case nil: PlayerBottomBar(model: model)
+                        case .brightness:
+                            PlayerTray(model: model, kind: .brightness)
+                                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                        case .volume:
+                            PlayerTray(model: model, kind: .volume)
+                                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                        case nil:
+                            PlayerBottomBar(model: model)
+                                .transition(.opacity.combined(with: .scale(scale: 0.96)))
                         }
                     }
                     .frame(height: bar)
+                    .animation(.spring(response: 0.42, dampingFraction: 0.88), value: model.tray)
                     .playerLockable(model.locked)
                 }
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+                .frame(width: inner.width, height: inner.height, alignment: .top)
+                .padding(content)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
                 // 符号和文字：淡出时略往下沉，回来时从下面一点淡入、升回原位；卡面（Metal）不动
                 .opacity(shown ? 1 : 0)
                 .offset(y: shown || reduceMotion ? 0 : 6)
@@ -368,7 +388,8 @@ struct PlayerTransport: View {
                 circle(id: "play", size: big, emphasis: 1, label: model.playing ? "暂停" : "播放", identifier: "player-play",
                        action: { model.togglePlay() }) {
                     PlayerIcon(model.playing ? "pause.fill" : "play.fill", size: (big * 0.32).rounded(), weight: .bold)
-                        .contentTransition(.symbolEffect(.replace))
+                        .contentTransition(.symbolEffect(.replace.magic(fallback: .replace)))
+                        .animation(.spring(response: 0.36, dampingFraction: 0.86), value: model.playing)
                 }
                 Spacer(minLength: 0)
                 circle(id: "forward", size: small, emphasis: 0.6, label: "前进 10 秒", identifier: "player-forward",

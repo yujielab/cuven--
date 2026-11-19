@@ -148,21 +148,15 @@ final class DuoUnfoldedTests: XCTestCase {
         sleep(1)
     }
 
-    /// 实验室下半截是可以滚的设置：要点的那一项不在屏上就往上推一点再找
+    /// 实验室里按标识点元素。这里 windows.firstMatch 是一个 0×0 的系统窗口，按窗口框算「在不在屏上」的
+    /// onScreenFrames 什么都找不到（CI 记到过：点击全落空，截到的场景、模式都不对）；交给 XCUITest 自己找、自己滚到可见再点
     private func labTap(_ app: XCUIApplication, _ id: String) {
-        // 先往下翻两下，再往回翻三下
-        for step in 0..<6 {
-            if let f = app.onScreenFrames([id]).first {
-                app.tap(at: CGPoint(x: f.midX, y: f.midY))
-                return
-            }
-            guard step < 5 else { break }
-            let down = step < 2
-            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.92 : 0.74))
-            from.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.78 : 0.92)))
-            sleep(1)
+        let e = app.descendants(matching: .any).matching(identifier: id).firstMatch
+        guard e.waitForExistence(timeout: 3) else {
+            print("DUO lab: \(id) not found")
+            return
         }
-        print("DUO lab: \(id) not on screen")
+        e.tap()
     }
 
     @discardableResult

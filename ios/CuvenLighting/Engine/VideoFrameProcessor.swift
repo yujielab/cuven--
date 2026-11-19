@@ -63,14 +63,21 @@ public final class VideoFrameProcessor {
         needsNewOutput = false
         detach()
         if let current {
-            let attributes: [String: any Sendable] = [
+            // Explicit SDR Rec. 709 output: HDR10 / Dolby Vision sources are tone-mapped for this copy only;
+            // the picture on screen keeps its own HDR path untouched
+            let settings: [String: any Sendable] = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
                 kCVPixelBufferWidthKey as String: sampleWidth,
                 kCVPixelBufferHeightKey as String: sampleHeight,
                 kCVPixelBufferMetalCompatibilityKey as String: true,
                 kCVPixelBufferIOSurfacePropertiesKey as String: [String: any Sendable](),
+                AVVideoColorPropertiesKey: [
+                    AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                    AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                    AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+                ] as [String: any Sendable],
             ]
-            let o = AVPlayerItemVideoOutput(pixelBufferAttributes: attributes)
+            let o = AVPlayerItemVideoOutput(outputSettings: settings)
             o.suppressesPlayerRendering = false
             current.add(o)
             output = o

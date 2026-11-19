@@ -6,7 +6,7 @@ import UIKit
 // MARK: - 面板的第一行和第四行（参照图）
 //
 // 第一行：关闭 | 剧集信息卡（Cuven 字标 + 片名 + 第几集 + ›，点开是影院光影设置）| 画中画 | 锁定
-// 第四行：截取画面 | 播放速度 | 亮度 | 音量 | 音频与字幕 | 下一集（剧集后面还有才有）| 全屏（半折时才有）
+// 第四行：播放速度 | 亮度 | 音量 | 音频与字幕 | 下一集（剧集后面还有才有）| 全屏（半折时才有）
 // 亮度、音量点开时第四行展开成一条滑杆，右边「×」收起。
 
 struct PlayerTopBar: View {
@@ -48,6 +48,8 @@ struct PlayerTopBar: View {
                 Button(action: { model.toggleLock() }) {
                     PlayerIcon(model.locked ? "lock.fill" : "lock.open", size: 21, weight: .medium,
                                color: model.locked ? .black : .white)
+                        .contentTransition(.symbolEffect(.replace.magic(fallback: .replace)))
+                        .animation(.spring(response: 0.36, dampingFraction: 0.86), value: model.locked)
                 }
                 .buttonStyle(LitTileStyle(id: "lock", lit: model.locked))
                 .litCard("lock", emphasis: 0.4, lit: model.locked)
@@ -130,19 +132,6 @@ struct PlayerBottomBar: View {
 
     var body: some View {
         HStack(spacing: PlayerPanelStyle.gap) {
-            Button(action: capture) {
-                if model.capturing {
-                    ProgressView().tint(.white)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    PlayerIcon("scissors", size: 20)
-                }
-            }
-            .buttonStyle(LitTileStyle(id: "clip"))
-            .litCard("clip", emphasis: 0.35)
-            .accessibilityLabel("截取画面")
-            .accessibilityIdentifier("player-clip")
-
             Menu {
                 Picker("播放速度", selection: Binding(get: { model.rate }, set: { model.setRate($0) })) {
                     ForEach(CuvenPlayerViewModel.rates, id: \.self) { r in
@@ -155,7 +144,7 @@ struct PlayerBottomBar: View {
             }
             .menuStyle(.button)
             .buttonStyle(LitTileStyle(id: "speed"))
-            .litCard("speed", emphasis: 0.35)
+            .litCard("speed", emphasis: 0.35, group: "tools", active: model.tray == nil)
             .accessibilityLabel("播放速度")
             .accessibilityValue(Self.rateLabel(model.rate))
             .accessibilityIdentifier("player-speed")
@@ -164,7 +153,7 @@ struct PlayerBottomBar: View {
                 PlayerIcon("sun.max", size: 21)
             }
             .buttonStyle(LitTileStyle(id: "brightness"))
-            .litCard("brightness", emphasis: 0.35)
+            .litCard("brightness", emphasis: 0.35, group: "tools", active: model.tray == nil)
             .accessibilityLabel("亮度")
             .accessibilityIdentifier("player-brightness")
 
@@ -172,7 +161,7 @@ struct PlayerBottomBar: View {
                 PlayerIcon("speaker.wave.2", size: 21)
             }
             .buttonStyle(LitTileStyle(id: "volume"))
-            .litCard("volume", emphasis: 0.35)
+            .litCard("volume", emphasis: 0.35, group: "tools", active: model.tray == nil)
             .accessibilityLabel("音量")
             .accessibilityIdentifier("player-volume")
 
@@ -197,7 +186,7 @@ struct PlayerBottomBar: View {
             }
             .menuStyle(.button)
             .buttonStyle(LitTileStyle(id: "tracks"))
-            .litCard("tracks", emphasis: 0.35)
+            .litCard("tracks", emphasis: 0.35, group: "tools", active: model.tray == nil)
             .accessibilityLabel("音频与字幕")
             .accessibilityIdentifier("player-tracks")
 
@@ -209,7 +198,7 @@ struct PlayerBottomBar: View {
                     PlayerIcon("forward.end", size: 21)
                 }
                 .buttonStyle(LitTileStyle(id: "next"))
-                .litCard("next", emphasis: 0.35)
+                .litCard("next", emphasis: 0.35, group: "tools", active: model.tray == nil)
                 .accessibilityLabel("下一集")
                 .accessibilityIdentifier("player-next")
             }
@@ -222,21 +211,10 @@ struct PlayerBottomBar: View {
                     PlayerIcon("arrow.up.left.and.arrow.down.right", size: 20)
                 }
                 .buttonStyle(LitTileStyle(id: "fullscreen"))
-                .litCard("fullscreen", emphasis: 0.35)
+                .litCard("fullscreen", emphasis: 0.35, group: "tools", active: model.tray == nil)
                 .accessibilityLabel("全屏")
                 .accessibilityIdentifier("player-fullscreen")
             }
-        }
-    }
-
-    private func capture() {
-        model.poke()
-        Task { @MainActor in
-            guard let image = await model.captureFrame() else {
-                Haptics.error()
-                return
-            }
-            SharePresenter.present(image)
         }
     }
 
@@ -282,8 +260,7 @@ struct PlayerTray: View {
         .padding(.leading, 20)
         .padding(.trailing, 6)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .litCard("tray", emphasis: 0.3)
-        .transition(.opacity)
+        .litCard("tray", emphasis: 0.3, group: "tools", active: model.tray != nil)
     }
 }
 
@@ -296,18 +273,4 @@ struct SystemVolumeSlider: UIViewRepresentable {
     }
 
     func updateUIView(_ v: MPVolumeView, context: Context) {}
-}
-
-/// 截下来的画面交给系统分享面板（存到照片、隔空投送、信息……）
-@MainActor
-enum SharePresenter {
-    static func present(_ image: UIImage) {
-        guard let top = UIApplication.topViewController() else { return }
-        let sheet = UIActivityViewController(activityItems: [image], applicationActivities: nil)
-        if let pop = sheet.popoverPresentationController {
-            pop.sourceView = top.view
-            pop.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.maxY - 80, width: 1, height: 1)
-        }
-        top.present(sheet, animated: true)
-    }
 }

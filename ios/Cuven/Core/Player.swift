@@ -47,18 +47,12 @@ final class CuvenPlayerViewController: AVPlayerViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         tabletop.install(in: self) { on in plog("tabletop \(on ? "on" : "off")") }
-        // 退到后台（画中画接手）、拉下控制中心时先摘掉半折面板那一层画面，回来再接上
-        let nc = NotificationCenter.default
-        nc.addObserver(self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
-        nc.addObserver(self, selector: #selector(appDidBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
     }
 
-    @objc private func appWillResignActive() {
-        tabletop.model.visible = false
-    }
-
-    @objc private func appDidBecomeActive() {
-        tabletop.model.visible = viewIfLoaded?.window != nil
+    /// 片源挂上来：半折时画面交给面板那一层（这一层不接），别的时候照常
+    func attach(_ p: AVPlayer) {
+        tabletop.model.player = p
+        if !tabletop.model.active { player = p }
     }
 
     override func viewDidLayoutSubviews() {
@@ -267,7 +261,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         usage.flush(item)                            // 旧片源最后那一截先结清
         p.replaceCurrentItem(with: item)
         observe(item)
-        controller?.player = p
+        controller?.attach(p)
         PlayerLoadingOverlay.shared.stage(.data)
         plog("attach after \(Perf.ms(since: tapAt)) ms")
         if pendingSeek == nil { p.play() }

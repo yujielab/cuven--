@@ -1,6 +1,5 @@
 import AVFoundation
 import AVKit
-import CoreImage
 import SwiftUI
 import UIKit
 
@@ -50,8 +49,6 @@ final class CuvenPlayerViewModel {
     private(set) var controlsVisible = true
     private(set) var pipPossible = false
     private(set) var pipActive = false
-    /// 截取画面进行中
-    private(set) var capturing = false
 
     /// 铰链读数（度）：系统报了才有
     var hardwareFold: Double?
@@ -72,6 +69,8 @@ final class CuvenPlayerViewModel {
     @ObservationIgnored var preview = false
     /// 设置页里的预览：符号一直显示（不进闲置）
     @ObservationIgnored var keepsControlsVisible = false
+    /// 退到后台时由面板这一层画面自动进画中画（半折播放时：那时系统播放器那一层不接画面）
+    @ObservationIgnored var automaticPictureInPicture = false
     /// 光影设置开着（剧集信息卡点开的弹窗）：不进闲置
     @ObservationIgnored private var settingsOpen = false
     @ObservationIgnored weak var pipController: AVPictureInPictureController?
@@ -336,34 +335,6 @@ final class CuvenPlayerViewModel {
 
     func pipRestore(_ completion: @escaping (Bool) -> Void) {
         if let onPiPRestore { onPiPRestore(completion) } else { completion(true) }
-    }
-
-    // MARK: 截取画面（剪刀）：取这一帧的原始分辨率画面，交给系统分享面板（存到照片、隔空投送……）
-
-    func captureFrame() async -> UIImage? {
-        guard !capturing, let p = player, let item = p.currentItem else { return nil }
-        capturing = true
-        defer { capturing = false }
-        Haptics.light()
-        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-        ])
-        item.add(output)
-        defer { item.remove(output) }
-        // 停着的时候不会再解码新的一帧：原地精确跳一下，逼它把这一帧送到新的输出上
-        if p.timeControlStatus == .paused {
-            _ = await p.seek(to: p.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero)
-        }
-        for _ in 0..<40 {
-            let t = p.timeControlStatus == .paused ? p.currentTime() : output.itemTime(forHostTime: CACurrentMediaTime())
-            if let buffer = output.copyPixelBuffer(forItemTime: t, itemTimeForDisplay: nil) {
-                let image = CIImage(cvPixelBuffer: buffer)
-                guard let cg = CIContext(options: [.cacheIntermediates: false]).createCGImage(image, from: image.extent) else { return nil }
-                return UIImage(cgImage: cg)
-            }
-            try? await Task.sleep(for: .milliseconds(30))
-        }
-        return nil
     }
 
     private static var screen: UIScreen? { VideoOrientation.activeScene?.screen }

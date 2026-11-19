@@ -13,13 +13,17 @@ public struct LightingCard: Sendable, Equatable {
     public var emphasis: Float
     /// A white "on" surface (the screen lock while it is engaged)
     public var isLit: Bool
+    /// Cards in the same group melt into each other when one leaves as another arrives
+    public var morphGroup: String?
 
-    public init(id: String, frame: CGRect, cornerRadius: CGFloat = 19, emphasis: Float = 0.5, isLit: Bool = false) {
+    public init(id: String, frame: CGRect, cornerRadius: CGFloat = 19, emphasis: Float = 0.5, isLit: Bool = false,
+                morphGroup: String? = nil) {
         self.id = id
         self.frame = frame
         self.cornerRadius = cornerRadius
         self.emphasis = emphasis
         self.isLit = isLit
+        self.morphGroup = morphGroup
     }
 }
 

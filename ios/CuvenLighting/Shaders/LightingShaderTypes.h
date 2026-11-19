@@ -77,6 +77,11 @@ struct ScreenVaryings {
 
 inline float luma(float3 c) { return dot(c, float3(0.2126f, 0.7152f, 0.0722f)); }
 
+/// A card's drawn scale: 0.97 when pressed, growing from 0.92 as it appears (tint.z = appear 0…1)
+inline float cardScale(CuvenCardInstance c) {
+    return (1.0f - 0.03f * c.shape.y) * mix(0.92f, 1.0f, saturate(c.tint.z));
+}
+
 /// Video (Rec. 709 / sRGB-like transfer) → linear light. Polynomial fit of the sRGB curve; plenty for lighting.
 inline float3 toLinear(float3 c) { return c * (c * (c * 0.305306011f + 0.682171111f) + 0.012522878f); }
 

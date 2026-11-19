@@ -17,23 +17,26 @@ import AVFoundation
 // 别的 iPhone / iPad 一律照旧用系统播放器。版面跟着折痕排、不看铰链角度（D12）；铰链角度只用来算光的方向。
 // 合上或摊平时折痕不再生效，面板淡出、系统播放器的控件回来（D3：两种版面同一个播放状态）。
 //
-// 画面：系统播放器自己的画面铺满整屏、会横跨折痕，所以半折时这里另挂一层 AVPlayerLayer 接同一个 AVPlayer
-// （一个播放器可以同时画到几层上，只解码一次），盖住底下系统播放器的画面和控件（showsPlaybackControls 关掉）；
-// 面板收起、播放器不在屏上、App 退到后台时这一层先摘掉（面板自己的画中画在放时除外）。
+// 画面：系统播放器自己的画面铺满整屏、会横跨折痕，所以半折时这里另挂一层 AVPlayerLayer 接这个 AVPlayer，
+// 同时系统播放器那一层放开播放器（vc.player = nil）——同一时间只有一层画面在显示，HDR / 杜比视界的显示不会乱
+// （用户真机反馈过曝）；画面层中途接上时原地精确跳一下重新接上。收起时把播放器还给系统播放器。
+// 退到后台时面板这一层自动进画中画。
 //
 // 「全屏」：这一次半折里回到系统播放器（画面铺满、系统控件）；合上 / 摊平以后再半折，又是上下两块。
 // 「锁定」：除了这颗锁，面板上的按钮都变暗、点不动（放在桌上看的时候不会碰到）；再点锁解开。
 // 「画中画」：面板这一层画面进画中画，播放器收起回到 App；点画中画里的「还原」再弹回来（PlayerCoordinator）。
 
-/// 折痕：只认横着的那一种
+/// 折痕：横着的（桌面）或竖着的（书本）
 enum TabletopFold {
-    /// 半折、横着的折痕在屏里的位置（含系统要求留的边距）；没有：nil
-    static func horizontal(in proxy: GeometryProxy) -> CGRect? {
+    /// 半折时折痕在屏里的位置（含系统要求留的边距）；没有：nil。横着的 → 桌面，竖着的 → 书本
+    static func detect(in proxy: GeometryProxy) -> CGRect? {
         if #available(iOS 27.1, *) {
             // 只取生效的（半折时才有）：平着展开时那一块还在，但不生效、宽或高是 0
-            guard let f = proxy.reservedRegions(kind: .division).first?.frame,
-                  f.width > f.height, f.minY > 0, f.maxY < proxy.size.height else { return nil }
-            return f
+            guard let f = proxy.reservedRegions(kind: .division).first?.frame else { return nil }
+            let size = proxy.size
+            if f.width > f.height, f.minY > 0, f.maxY < size.height { return f }
+            if f.height > f.width, f.minX > 0, f.maxX < size.width { return f }
+            return nil
         }
         return nil
     }
@@ -65,9 +68,16 @@ final class TabletopPlayerHost {
         h.didMove(toParent: vc)
         host = h
         model.onClose = { [weak vc] in vc?.dismiss(animated: true) }
-        model.onActiveChange = { [weak vc, weak h] on in
+        model.automaticPictureInPicture = true
+        model.onActiveChange = { [weak vc, weak h, weak model = self.model] on in
             h?.view.isUserInteractionEnabled = on
             vc?.showsPlaybackControls = !on
+            // 同一时间只有一层画面接着播放器（用户真机反馈：半折时画面过曝）——半折时交给面板这一层，
+            // 系统播放器那一层先放开；收起时还回去，再原地精确跳一下让它重新接上
+            if let vc, let p = model?.player {
+                vc.player = on ? nil : p
+                if !on { PlayerVideoSurface.resync(p) }
+            }
             onActiveChange(on)
         }
         // 面板的画中画：开始时收起播放器回到 App，「还原」时弹回来，关掉画中画时收拾干净
@@ -100,10 +110,11 @@ struct TabletopPlayerLayer: View {
 
     var body: some View {
         GeometryReader { full in
-            let fold = model.preview ? TabletopFold.preview(full.size) : TabletopFold.horizontal(in: full)
+            let fold = model.preview ? TabletopFold.preview(full.size) : TabletopFold.detect(in: full)
             ZStack {
                 if model.active, let f = model.fold {
-                    CuvenPlayerView(model: model, player: model.player, layout: .folded(f))
+                    // 横着的折痕：画面在上、控制在下；竖着的：画面在左页、控制在右页。换姿态时卡片形变过去
+                    CuvenPlayerView(model: model, player: model.player, layout: f.width > f.height ? .tabletop(f) : .book(f))
                         .transition(.opacity.combined(with: .scale(scale: 0.98)))
                 }
             }

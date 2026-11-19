@@ -6,16 +6,18 @@ import UIKit
 
 // MARK: - Cuven 播放器：画面 + 控制面板（面板的卡片由画面打光）
 //
-// 三种摆法，同一套面板：
-//   · folded(折痕)：iPhone Duo 半折立在桌上——折痕上面是画面，下面是面板（参照 Netflix 在半折时的样子）；
-//     光影按半折的几何算：画面立在面板后面，默认 105°，系统报了铰链角度就用真的；
-//   · stacked：竖着的普通屏（实验室、设置页预览）——画面在上、面板在下，中间留一道「虚拟折痕」，按半折立着的 115° 算光；
-//   · sideBySide：横着的屏（实验室）——画面在左、面板在右，折痕竖着。
-// 画面由 AVPlayerLayer 画（硬件解码、HDR、画中画都是系统的）；同一个 AVPlayer 另由光影引擎取小帧分析，
-// 两者互不影响。面板换摆法、转屏时用弹簧过渡。
+// 跟着设备的姿态走（参照 Netflix 在 iPhone Duo 上的播放器：全屏、书本、桌面几种摆法，控制始终够得着），同一套面板：
+//   · tabletop(折痕)：半折立在桌上（横着的折痕）——折痕上面是画面，下面是控制面；
+//   · book(折痕)：横拿半折像一本书（竖着的折痕）——左页是画面，右页是控制面；
+//     这两种按半折的几何算光：画面立在面板旁边，默认 105°，系统报了铰链角度就用真的（光的方向跟着铰链角度变）；
+//   · stacked / sideBySide：实验室、设置页预览里竖着 / 横着的普通屏，按半折立着的 115° 模拟。
+// 控制面那一块是整片的（满宽、从折痕一直到屏幕底），光铺在整片上、四边都羽化，不会有硬边界；
+// 卡片排在里面，留出安全区和 8 点边距。换姿态、转屏时卡片在渲染器里用弹簧从旧位置形变到新位置。
+// 画面由 AVPlayerLayer 画（硬件解码、HDR、画中画都是系统的）；同一个 AVPlayer 另由光影引擎取小帧分析。
 
 enum CuvenPlayerLayout: Equatable {
-    case folded(CGRect)
+    case tabletop(CGRect)
+    case book(CGRect)
     case stacked
     case sideBySide
 }
@@ -44,13 +46,13 @@ struct CuvenPlayerView: View {
                         .frame(width: parts.video.width, height: parts.video.height)
                         .offset(x: parts.video.minX, y: parts.video.minY)
                         .accessibilityHidden(true)
-                    PlayerControlPanel(model: model, player: player, geometry: parts.lighting, options: options,
-                                       onDiagnostics: onDiagnostics, onPalette: onPalette)
+                    PlayerControlPanel(model: model, player: player, geometry: parts.lighting, content: parts.content,
+                                       options: options, onDiagnostics: onDiagnostics, onPalette: onPalette)
                         .frame(width: parts.panel.width, height: parts.panel.height)
                         .offset(x: parts.panel.minX, y: parts.panel.minY)
                 }
                 .frame(width: full.size.width, height: full.size.height, alignment: .topLeading)
-                .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.86), value: parts)
+                .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.88), value: parts)
             }
             .ignoresSafeArea()
         }
@@ -58,36 +60,42 @@ struct CuvenPlayerView: View {
     }
 }
 
-/// 画面、面板各在哪，光影的几何（全部是这一层里的点）
+/// 画面、控制面（整片）、卡片区在控制面里的边距、光影的几何（全部是这一层里的点）
 struct PlayerLayoutParts: Equatable {
     var video: CGRect
+    /// 控制面：整片（光铺满它，四边羽化）
     var panel: CGRect
+    /// 卡片区在控制面里的边距（安全区 + 8 点，太宽时两边再收，卡片区最宽 720）
+    var content: EdgeInsets
     var lighting: LightingGeometry
 
     init(layout: CuvenPlayerLayout, size: CGSize, insets: EdgeInsets) {
         let g = PlayerPanelStyle.gap
         let w = size.width, h = size.height
-        var hinge: CGPoint
+        let hinge: CGPoint
         var away = CGVector(dx: 0, dy: 1)
-        var fold: Double
+        let fold: Double
         switch layout {
-        case .folded(let f):
+        case .tabletop(let f):
             video = CGRect(x: 0, y: 0, width: w, height: max(0, f.minY))
-            let top = f.maxY + g
-            let bottom = h - max(insets.bottom, g) - g
-            panel = CGRect(x: insets.leading + g, y: top, width: w - insets.leading - insets.trailing - g * 2,
-                           height: max(0, bottom - top))
+            panel = CGRect(x: 0, y: f.maxY, width: w, height: max(0, h - f.maxY))
+            content = EdgeInsets(top: g, leading: insets.leading + g, bottom: max(insets.bottom, g) + g, trailing: insets.trailing + g)
             hinge = CGPoint(x: w / 2, y: f.midY)
+            fold = 105
+        case .book(let f):
+            video = CGRect(x: 0, y: 0, width: max(0, f.minX), height: h)
+            panel = CGRect(x: f.maxX, y: 0, width: max(0, w - f.maxX), height: h)
+            content = EdgeInsets(top: max(insets.top, g) + g, leading: g, bottom: max(insets.bottom, g) + g, trailing: insets.trailing + g)
+            hinge = CGPoint(x: f.midX, y: h / 2)
+            away = CGVector(dx: 1, dy: 0)
             fold = 105
         case .stacked:
             let usable = h - insets.top - insets.bottom
             let vh = min(w * 9 / 16, usable * 0.42).rounded()
             video = CGRect(x: 0, y: insets.top, width: w, height: vh)
             let gap: CGFloat = 20
-            let top = insets.top + vh + gap
-            let bottom = h - max(insets.bottom, g) - g
-            panel = CGRect(x: insets.leading + g, y: top, width: w - insets.leading - insets.trailing - g * 2,
-                           height: max(0, bottom - top))
+            panel = CGRect(x: 0, y: insets.top + vh + gap, width: w, height: max(0, h - insets.top - vh - gap))
+            content = EdgeInsets(top: g, leading: insets.leading + g, bottom: max(insets.bottom, g) + g, trailing: insets.trailing + g)
             hinge = CGPoint(x: w / 2, y: insets.top + vh + gap / 2)
             // 实验室 / 设置页预览：模拟半折立着的几何，效果和半折时一致
             fold = 115
@@ -97,19 +105,20 @@ struct PlayerLayoutParts: Equatable {
             video = CGRect(x: insets.leading, y: insets.top, width: vw, height: h - insets.top - insets.bottom)
             let gap: CGFloat = 20
             let left = insets.leading + vw + gap
-            panel = CGRect(x: left, y: insets.top + g, width: max(0, w - insets.trailing - g - left),
-                           height: max(0, h - insets.top - max(insets.bottom, g) - g * 2))
+            panel = CGRect(x: left, y: 0, width: max(0, w - left), height: h)
+            content = EdgeInsets(top: insets.top + g, leading: g, bottom: max(insets.bottom, g) + g, trailing: insets.trailing + g)
             hinge = CGPoint(x: insets.leading + vw + gap / 2, y: h / 2)
             away = CGVector(dx: 1, dy: 0)
-            // 实验室 / 设置页预览：模拟半折立着的几何，效果和半折时一致
             fold = 115
         }
-        // 很宽的屏上面板不超过 720 点，居中
-        if panel.width > 720 {
-            panel.origin.x += (panel.width - 720) / 2
-            panel.size.width = 720
+        // 很宽的控制面上卡片区不超过 720 点，居中
+        let contentWidth = panel.width - content.leading - content.trailing
+        if contentWidth > 720 {
+            let extra = (contentWidth - 720) / 2
+            content.leading += extra
+            content.trailing += extra
         }
-        // 光影引擎在面板自己的坐标里算：画面和折痕换算到面板的原点
+        // 光影引擎在控制面自己的坐标里算：画面和折痕换算到控制面的原点
         lighting = LightingGeometry(videoContainer: video.offsetBy(dx: -panel.minX, dy: -panel.minY),
                                     hingePoint: CGPoint(x: hinge.x - panel.minX, y: hinge.y - panel.minY),
                                     awayFromHinge: away, layoutFoldDegrees: fold)
@@ -128,11 +137,28 @@ struct PlayerVideoSurface: UIViewRepresentable {
         let v = PlayerLayerUIView()
         v.playerLayer.player = player
         context.coordinator.attach(to: v.playerLayer)
+        if let player { Self.resync(player) }
         return v
     }
 
     func updateUIView(_ v: PlayerLayerUIView, context: Context) {
-        if v.playerLayer.player !== player { v.playerLayer.player = player }
+        if v.playerLayer.player !== player {
+            v.playerLayer.player = player
+            if let player { Self.resync(player) }
+        }
+    }
+
+    /// 这一层画面在播放中途接上（半折、从后台回来）：原地精确跳一下，让解码和显示从关键帧重新走一遍。
+    /// HDR / 杜比视界的片子中途换到一个新的画面层上，不重走一遍可能显示得发白、过曝（用户真机反馈：
+    /// 重新播放就正常，退到后台再回来又过曝）。刚开始放（2 秒以内）的不跳
+    static func resync(_ player: AVPlayer) {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard let item = player.currentItem, item.status == .readyToPlay else { return }
+            let t = player.currentTime()
+            guard t.isValid, t.seconds.isFinite, t.seconds > 2 else { return }
+            _ = await player.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
     }
 
     static func dismantleUIView(_ v: PlayerLayerUIView, coordinator: PictureInPictureBridge) {
@@ -170,7 +196,8 @@ final class PictureInPictureBridge: NSObject, AVPictureInPictureControllerDelega
         guard AVPictureInPictureController.isPictureInPictureSupported(),
               let c = AVPictureInPictureController(playerLayer: layer) else { return }
         c.delegate = self
-        c.canStartPictureInPictureAutomaticallyFromInline = false
+        // 半折播放：系统播放器那一层这时不接画面，退到后台由这一层自动进画中画
+        c.canStartPictureInPictureAutomaticallyFromInline = model?.automaticPictureInPicture ?? false
         controller = c
         model?.pipController = c
         possibleObservation = c.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] c, _ in

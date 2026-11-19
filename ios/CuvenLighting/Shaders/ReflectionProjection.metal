@@ -95,7 +95,7 @@ vertex cuven::SurfaceVaryings cuven_surfaceVertex(uint vid [[vertex_id]],
 {
     const CuvenCardInstance c = cards[iid];
     const float2 corner = float2(float(vid & 1u), float((vid >> 1) & 1u));
-    const float scale = 1.0f - 0.03f * c.shape.y;               // 0.97 when fully pressed
+    const float scale = cuven::cardScale(c);                     // pressed 0.97 · appearing from 0.92
     const float2 center = c.rect.xy + c.rect.zw * 0.5f;
     const float2 ext = c.rect.zw * 0.5f * scale + 3.0f;          // margin for the rim and anti-aliasing
     const float2 p = center + (corner * 2.0f - 1.0f) * ext;
@@ -121,7 +121,7 @@ fragment float4 cuven_surfaceFragment(cuven::SurfaceVaryings in [[stage_in]],
     const float2 ext = c.rect.zw * 0.5f;
     const float radius = min(c.shape.x, min(ext.x, ext.y));
     const float sd = cuven::roundedRectSDF(in.local, ext, radius);
-    const float pxPerPt = u.viewport.z * (1.0f - 0.03f * c.shape.y);
+    const float pxPerPt = u.viewport.z * cuven::cardScale(c);
     const float coverage = saturate(0.5f - sd * pxPerPt);
     if (coverage <= 0.0f) { discard_fragment(); }
 
@@ -131,12 +131,13 @@ fragment float4 cuven_surfaceFragment(cuven::SurfaceVaryings in [[stage_in]],
     const float3 P = cuven::panelToHinge(in.panelPoint, g);
     const float3 V = normalize(u.eye.xyz - P);
 
-    // Material: dark translucent surface, a touch lighter toward the upper middle like the reference cards
-    const bool lit = c.shape.w > 0.5f;
+    // Material: dark translucent surface, a touch lighter toward the upper middle like the reference cards.
+    // The lit state (the lock) is a continuous 0…1 so switching it cross-fades instead of flipping.
+    const float litAmount = saturate(c.shape.w);
     const float2 n = in.local / max(ext, float2(1.0f));
     const float sheen = 1.0f + 0.22f * saturate(1.0f - length(float2(n.x * 0.75f, n.y + 0.35f)));
-    float3 base = lit ? float3(0.80f) : float3(0.0130f) * sheen;
-    base += float3(lit ? -0.06f : 0.010f) * c.shape.y;      // pressed: a dark card lifts, a lit card dims
+    const float3 darkBase = float3(0.0130f) * sheen + float3(0.010f) * c.shape.y;   // pressed: a dark card lifts
+    const float3 litBase = float3(0.80f) - float3(0.06f) * c.shape.y;              // pressed: a lit card dims
 
     const float mixL = u.material.x * u.material.y;
     float3 light = float3(0.0f);
@@ -185,12 +186,9 @@ fragment float4 cuven_surfaceFragment(cuven::SurfaceVaryings in [[stage_in]],
 
     // A faint static hairline so a card still reads in a black scene
     const float border = smoothstep(-1.4f, -0.2f, sd) * (1.0f - smoothstep(-0.2f, 0.6f, sd));
-    float3 color;
-    if (lit) {
-        color = base + light * 0.35f;
-    } else {
-        color = cuven::softCap(base + light, u.material.w) + float3(0.022f) * border;
-    }
+    const float3 darkColor = cuven::softCap(darkBase + light, u.material.w) + float3(0.022f) * border;
+    const float3 litColor = litBase + light * 0.35f;
+    const float3 color = mix(darkColor, litColor, litAmount);
     const float alpha = coverage * c.tint.x;
     return float4(color * alpha, alpha);
 }
@@ -210,6 +208,13 @@ fragment float4 cuven_backdropFragment(cuven::ScreenVaryings in [[stage_in]],
     const cuven::Geometry g = cuven::geometry(u);
     const float away = max(dot(p - g.hingePoint, g.away), 0.0f);
     const float falloff = exp(-away / max(u.panel.y * 0.45f, 1.0f));
-    const float3 c = cuven::softCap(E * (level * 0.6f * falloff), u.material.w * 0.4f);
+    // Feathered on every edge of the surface: the light never ends in a hard line (the surface spans the whole
+    // lower half; its top edge meets the fold, its sides the screen edges)
+    const float2 size = u.panel.xy;
+    const float feather = smoothstep(0.0f, 40.0f, p.x) * smoothstep(0.0f, 40.0f, size.x - p.x)
+                        * smoothstep(0.0f, 56.0f, p.y) * smoothstep(0.0f, 40.0f, size.y - p.y);
+    // Idle: the cards are gone, the ambient light carries the panel a little more
+    const float idleBoost = 1.0f + 0.35f * u.look2.z;
+    const float3 c = cuven::softCap(E * (level * 0.6f * falloff * feather * idleBoost), u.material.w * 0.45f);
     return float4(c, 0.0f);
 }
