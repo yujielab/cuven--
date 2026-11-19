@@ -312,6 +312,11 @@ struct PlayerControlPanel: View {
                     .frame(width: 2, height: 2)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
+                // 面板上空的地方：点一下，Touch Bar 上点开着的那一颗收回
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.collapseBar() }
+                    .accessibilityHidden(true)
                 VStack(spacing: 0) {
                     PlayerTouchBar(model: model, pillHeight: pill,
                                    insets: EdgeInsets(top: 0, leading: content.leading, bottom: 0, trailing: content.trailing))

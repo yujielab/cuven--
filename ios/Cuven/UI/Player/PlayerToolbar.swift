@@ -11,9 +11,11 @@ import UIKit
 //   · 长按字幕 / 音轨 / 光效：长成一排选项（字幕：关 + 各条字幕；音轨：各条音轨；光效：标准 / 影院 / 沉浸），
 //     手指左右滑，白色的高亮跟着走，松开就选它、收回；
 //   · 形变时这颗按需要长宽（最多是看得见的宽度的 80%），把别的胶囊推开、调暗，整条挪到让它居中；松开时都回去。
-// 点一下：锁定 = 这一页的方向锁在现在的方向（亮起来）；全屏 = 退出半折回到系统播放器全屏、方向回到原来的规则；
-// 声音 = 静音 / 取消静音；字幕 = 关 / 开回原来那条；光效 = 换下一种模式（展开 1.6 秒让你看到换成了哪个）；
-// 亮度、音轨看一眼（展开 1.6 秒再收回）。光影只有这三种模式能换，参数是固定的（CinematicReflectionMode）。
+// 也可以点（用户要求）：点按 → 形变 → 点按或滑动选择 → 还原。点一下亮度 / 声音 / 字幕 / 音轨 / 光效，它展开着不收；
+// 再点滑杆上的某一处（或按住拖）就调到那儿，点某个选项（或按住滑过去）就选它，手指抬起来就收回。
+// 声音展开时点左边的喇叭是静音 / 取消静音。点别处（面板空的地方、调暗的胶囊）或者 4 秒没动：不改，收回。
+// 锁定 = 这一页的方向锁在现在的方向（亮起来）；全屏 = 退出半折回到系统播放器全屏、方向回到原来的规则。
+// 光影只有这三种模式能换，参数是固定的（CinematicReflectionMode）。
 // 进度条：在那条线上按住拖，松手才跳过去。
 
 /// Touch Bar 上的每一颗
@@ -85,8 +87,13 @@ struct PlayerTouchBar: View {
     @State private var startValue: Double = 0
     @State private var startIndex = 0
     @State private var pick = 0
-    /// 点一下「看一眼」展开着（1.6 秒后自己收回）
-    @State private var peeking = false
+    /// 点一下展开的（等着点或滑来选；长按展开的松手就收）
+    @State private var sticky = false
+    /// 点开以后多久没动就收回（每动一下重新算）
+    @State private var stickyToken = 0
+    /// 点开以后这一下是按在左边的符号上（声音：静音）
+    @State private var stickyTouch = false
+    @State private var iconPress = false
     @State private var scrubbing = false
     @State private var track: CGRect = .zero
     @GestureState private var pressed: TouchBarKey?
@@ -112,6 +119,10 @@ struct PlayerTouchBar: View {
             let shown = morph.flatMap { lay.frames[$0] }.map { clamp(W / 2 - $0.midX, content: lay.contentWidth, W) } ?? restOffset
             let top = Self.progressZone + 6
             ZStack(alignment: .topLeading) {
+                // 点开着时点这一条上空的地方、调暗的胶囊：不改，收回
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { if sticky { cancel() } }
                 if let t = lay.frames[.transport] {
                     progressLine
                         .frame(width: t.width, height: Self.progressZone)
@@ -122,12 +133,14 @@ struct PlayerTouchBar: View {
                     ZStack(alignment: .topLeading) {
                         ForEach(TouchBarGeometry.order, id: \.self) { k in
                             let f = lay.frames[k] ?? .zero
-                            pill(k, visible: W)
+                            pill(k, visible: W, frame: CGRect(x: f.minX + shown, y: top, width: f.width, height: h))
                                 .frame(width: f.width, height: h)
                                 .glassEffect(glass(k), in: Capsule())
                                 .scaleEffect(pressed == k && morph == nil && !reduceMotion ? 0.95 : 1)
                                 .offset(x: f.minX + shown, y: top)
                                 .opacity(morph != nil && morph != k ? 0.3 : 1)
+                                // 展开着时调暗的那些不接点按：点上去只是收回（下面那层接）
+                                .allowsHitTesting(morph == nil || morph == k)
                         }
                     }
                 }
@@ -164,9 +177,11 @@ struct PlayerTouchBar: View {
                     }
             )
             .onChange(of: pressed) { _, now in
-                // 长按的手指抬起来了（或者被打断）：收回（「看一眼」的自己到时间收）
-                if now == nil, morph != nil, !peeking { end() }
+                // 长按的手指抬起来了（或者被打断）：选上、收回（点开的等着点或滑来选）
+                if now == nil, morph != nil, !sticky { end() }
             }
+            // 面板上空的地方点了一下：点开的收回
+            .onChange(of: model.barCollapseRequest) { _, _ in if sticky { cancel() } }
         }
         .frame(height: Self.height(pill: pillHeight))
         .accessibilityElement(children: .contain)
@@ -221,8 +236,9 @@ struct PlayerTouchBar: View {
         }
     }
 
-    private func begin(_ k: TouchBarKey) {
-        if let m = morph, m != k { end() }
+    private func begin(_ k: TouchBarKey, sticky open: Bool = false) {
+        if let m = morph, m != k { end(commit: !sticky) }
+        sticky = open
         guard morph != k else { return }
         Haptics.light()
         model.setBarMorph(k)
@@ -257,10 +273,10 @@ struct PlayerTouchBar: View {
         model.poke()
     }
 
-    /// 松开：选项按高亮的那一个选上；收回
-    private func end() {
+    /// 松开：选项按高亮的那一个选上；收回（commit 为假：不改，直接收回）
+    private func end(commit: Bool = true) {
         guard let k = morph else { return }
-        if pick != startIndex {
+        if commit, pick != startIndex {
             switch k {
             case .subtitles: model.selectSubtitle(pick - 1)
             case .audio: if model.audioNames.indices.contains(pick) { model.selectAudio(pick) }
@@ -268,48 +284,96 @@ struct PlayerTouchBar: View {
             default: break
             }
         }
-        peeking = false
+        sticky = false
+        stickyTouch = false
+        iconPress = false
         morph = nil
         model.setBarMorph(nil)
     }
 
-    /// 点一下：亮度、音轨展开 1.6 秒「看一眼」
-    private func peek(_ k: TouchBarKey) {
-        begin(k)
-        peeking = true
+    private func cancel() { end(commit: false) }
+
+    /// 点一下：展开着不收，等着点或滑来选（4 秒没动就收回）
+    private func openSticky(_ k: TouchBarKey) {
+        if morph == k, sticky { cancel(); return }
+        begin(k, sticky: true)
+        armAutoCollapse()
+    }
+
+    private func armAutoCollapse() {
+        stickyToken += 1
+        let token = stickyToken
         Task { @MainActor in
-            try? await Task.sleep(for: .seconds(1.6))
-            if peeking, morph == k, pressed == nil { end() }
+            try? await Task.sleep(for: .seconds(4))
+            if sticky, stickyToken == token, !stickyTouch { cancel() }
         }
     }
 
-    private func quick(_ k: TouchBarKey) {
-        switch k {
-        case .volume: model.toggleMute()
-        case .subtitles: model.toggleSubtitles()
-        case .effects:
-            // 换下一种模式，展开一下让人看到换成了哪个
-            settings.cyclePreset()
-            peek(k)
-        case .brightness, .audio: peek(k)
-        default: break
-        }
-    }
-
-    /// 长按 → 形变 → 滑动 → 松开（松开由 pressed 复位收回）；早早松开算点一下
+    /// 长按 → 形变 → 滑动 → 松开（松开由 pressed 复位收回）；早早松开算点一下（点开）
     private func morphGesture(_ k: TouchBarKey, visible W: CGFloat) -> some Gesture {
         LongPressGesture(minimumDuration: 0.28, maximumDistance: 10)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("touchbar")))
             .updating($pressed) { _, state, _ in state = k }
             .onChanged { v in
                 guard case .second(true, let drag) = v else { return }
-                if morph != k || peeking {
-                    peeking = false
-                    begin(k)
-                }
+                if morph != k { begin(k) }
                 if let drag { adjust(k, dx: drag.translation.width, visible: W) }
             }
-            .exclusively(before: TapGesture().onEnded { quick(k) })
+            .exclusively(before: TapGesture().onEnded { openSticky(k) })
+    }
+
+    /// 点开以后：点哪儿 / 滑到哪儿就是哪儿（按手指在展开的那一颗上的位置），抬起来就选上、收回。
+    /// frame：展开的那一颗在这一条（"touchbar"）里的位置
+    private func stickyGesture(_ k: TouchBarKey, frame: CGRect) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named("touchbar"))
+            .onChanged { v in
+                if !stickyTouch {
+                    stickyTouch = true
+                    iconPress = v.startLocation.x - frame.minX < iconZone(k)
+                }
+                let moved = hypot(v.translation.width, v.translation.height) > 6
+                if iconPress, !moved { return }
+                iconPress = false
+                follow(k, x: v.location.x, frame: frame)
+                model.poke()
+            }
+            .onEnded { v in
+                let moved = hypot(v.translation.width, v.translation.height) > 6
+                if iconPress, !moved {
+                    // 按在左边的符号上：声音是静音 / 取消静音，别的是不改、收回
+                    if k == .volume { model.toggleMute() }
+                    cancel()
+                    return
+                }
+                follow(k, x: v.location.x, frame: frame)
+                end()
+            }
+    }
+
+    /// 左边那个符号占多宽（点它不算选）
+    private func iconZone(_ k: TouchBarKey) -> CGFloat {
+        k == .brightness || k == .volume ? 50 : 46
+    }
+
+    /// 手指在展开的那一颗上的位置 → 滑杆的大小 / 高亮的选项
+    private func follow(_ k: TouchBarKey, x: CGFloat, frame: CGRect) {
+        switch k {
+        case .brightness, .volume:
+            // 滑杆从左边 56 点起、到右边 62 点止（见 level）
+            let v = Double((x - frame.minX - 56) / max(frame.width - 118, 1))
+            if k == .brightness { model.setBrightness(v) } else { model.setVolume(v) }
+        default:
+            // 选项从左边 48 点起，一样宽、隔 4 点，右边留 6 点（见 options）
+            let n = labels(k).count
+            guard n > 0 else { return }
+            let segment = max(1, (frame.width - 48 - 6 - 4 * CGFloat(n - 1)) / CGFloat(n))
+            let rel = x - frame.minX - 48
+            let i = min(n - 1, max(0, Int(rel / (segment + 4))))
+            if i != pick {
+                Haptics.selection()
+                pick = i
+            }
+        }
     }
 
     // MARK: 胶囊
@@ -320,7 +384,8 @@ struct PlayerTouchBar: View {
     }
 
     @ViewBuilder
-    private func pill(_ k: TouchBarKey, visible W: CGFloat) -> some View {
+    private func pill(_ k: TouchBarKey, visible W: CGFloat, frame: CGRect) -> some View {
+        let open = morph == k && sticky
         switch k {
         case .lock:
             Button { model.toggleOrientationLock() } label: {
@@ -349,11 +414,13 @@ struct PlayerTouchBar: View {
         case .brightness, .volume:
             level(k)
                 .contentShape(Capsule())
-                .gesture(morphGesture(k, visible: W))
+                .gesture(morphGesture(k, visible: W), including: open ? .none : .all)
+                .simultaneousGesture(stickyGesture(k, frame: frame), including: open ? .all : .none)
         case .subtitles, .audio, .effects:
             options(k)
                 .contentShape(Capsule())
-                .gesture(morphGesture(k, visible: W))
+                .gesture(morphGesture(k, visible: W), including: open ? .none : .all)
+                .simultaneousGesture(stickyGesture(k, frame: frame), including: open ? .all : .none)
         }
     }
 
@@ -492,12 +559,17 @@ struct PlayerTouchBar: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(isBrightness ? "亮度" : (model.muted ? "声音，已静音" : "声音"))
         .accessibilityValue("\(Int((value * 100).rounded()))%")
-        .accessibilityHint(isBrightness ? "长按后左右滑动调整" : "点按静音，长按后左右滑动调整音量")
+        .accessibilityHint(isBrightness ? "点按或长按展开，左右滑动调整" : "点按或长按展开，左右滑动调整音量")
         .accessibilityAdjustableAction { direction in
             let d = direction == .increment ? 0.1 : -0.1
             if isBrightness { model.setBrightness(value + d) } else { model.setVolume(value + d) }
         }
-        .accessibilityAction { quick(k) }
+        .accessibilityAction { openSticky(k) }
+        .accessibilityActions {
+            if !isBrightness {
+                Button(model.muted ? "取消静音" : "静音") { model.toggleMute() }
+            }
+        }
         .accessibilityIdentifier(isBrightness ? "player-brightness" : "player-volume")
     }
 
@@ -561,8 +633,8 @@ struct PlayerTouchBar: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(k == .subtitles ? "字幕" : k == .audio ? "音轨" : "光效")
         .accessibilityValue(names.indices.contains(current) ? names[current] : "")
-        .accessibilityHint(k == .subtitles ? "点按开关字幕，长按后左右滑动选择"
-                           : k == .audio ? "长按后左右滑动选择音轨" : "点按换下一种光影模式，长按后左右滑动选择")
+        .accessibilityHint(k == .subtitles ? "点按或长按展开，选择字幕"
+                           : k == .audio ? "点按或长按展开，选择音轨" : "点按或长按展开，选择光影模式")
         .accessibilityAdjustableAction { direction in
             let n = names.count
             guard n > 0 else { return }
@@ -574,7 +646,7 @@ struct PlayerTouchBar: View {
             default: break
             }
         }
-        .accessibilityAction { quick(k) }
+        .accessibilityAction { openSticky(k) }
         .accessibilityIdentifier(k == .subtitles ? "player-subtitles" : k == .audio ? "player-audio" : "player-effects")
     }
 }

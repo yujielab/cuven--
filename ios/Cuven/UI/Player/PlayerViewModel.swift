@@ -45,7 +45,7 @@ final class CuvenPlayerViewModel {
     var scrub: Double?
     /// 「锁定屏幕」：这一页的方向锁在按下时的方向，转动设备不跟着转（用户要求）
     private(set) var orientationLocked = false
-    /// Touch Bar 上正长按展开着的那一颗（长按 → 展开 → 滑动选择 / 调整 → 松开 → 收回）；展开着不进闲置
+    /// Touch Bar 上展开着的那一颗（长按 → 展开 → 滑动 → 松开；或者点按 → 展开 → 点按 / 滑动选 → 收回）；展开着不进闲置
     private(set) var barMorph: TouchBarKey?
     var brightness: Double = 0.5
     /// 声音那一颗点一下：静音（这个播放器的，不动系统音量）
@@ -381,6 +381,14 @@ final class CuvenPlayerViewModel {
     }
 
     // MARK: Touch Bar
+
+    /// Touch Bar 上点开着的那一颗：面板上空的地方点一下就收回（PlayerTouchBar 看着这个数）
+    private(set) var barCollapseRequest = 0
+
+    func collapseBar() {
+        guard barMorph != nil else { return }
+        barCollapseRequest += 1
+    }
 
     /// Touch Bar 上开始 / 结束长按展开（PlayerTouchBar 报过来）
     func setBarMorph(_ k: TouchBarKey?) {

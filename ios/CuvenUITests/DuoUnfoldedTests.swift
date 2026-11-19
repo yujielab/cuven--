@@ -94,11 +94,11 @@ final class DuoUnfoldedTests: XCTestCase {
         let size = report(app, "tabletop")
         guard size.width > 500, size.height > size.width else { return }
         snap("duo-38-tabletop")
-        // 亮度、音轨：点一下展开 1.6 秒「看一眼」（长按 → 滑 → 松开 是同一个样子）
-        if tapID(app, "player-brightness", pause: 0.5) { snap("duo-38c-touchbar-brightness") }
-        sleep(2)
-        if tapID(app, "player-audio", pause: 0.5) { snap("duo-38g-touchbar-audio") }
-        sleep(2)
+        // 点按 → 展开着（等着点或滑来选；长按 → 滑 → 松开 是同一个样子）；点面板上空的地方收回
+        if tapID(app, "player-brightness", pause: 0.6) { snap("duo-38c-touchbar-brightness") }
+        collapseBar(app)
+        if tapID(app, "player-audio", pause: 0.6) { snap("duo-38g-touchbar-audio") }
+        collapseBar(app)
         // 往右滑：左边的锁定、全屏露出来；锁定亮起来
         swipeBar(app, dx: 320)
         snap("duo-38f-touchbar-scrolled")
@@ -107,9 +107,9 @@ final class DuoUnfoldedTests: XCTestCase {
             tapID(app, "player-lock")
         }
         swipeBar(app, dx: -640)
-        // 光效：点一下换下一种模式，展开一下看到换成了哪个（只有三种模式能换，参数固定）
-        if tapID(app, "player-effects", pause: 0.5) { snap("duo-38k-touchbar-effects") }
-        sleep(2)
+        // 光效：点开是三种模式（只有模式能换，参数固定）；点面板上空的地方收回、不改
+        if tapID(app, "player-effects", pause: 0.6) { snap("duo-38k-touchbar-effects") }
+        collapseBar(app)
         // 最底下那块的三个标签
         for (tab, tag) in [("insight", "h"), ("continueWatching", "i"), ("recommend", "j")] {
             if tapID(app, "deck-tab-\(tab)") { snap("duo-38\(tag)-deck-\(tab)") }
@@ -138,6 +138,13 @@ final class DuoUnfoldedTests: XCTestCase {
         app.tap(at: CGPoint(x: f.midX, y: f.midY))
         usleep(UInt32(pause * 1_000_000))
         return true
+    }
+
+    /// 点 Touch Bar 下面、卡片区上面那片空的地方：点开着的那一颗收回
+    private func collapseBar(_ app: XCUIApplication) {
+        guard let f = app.onScreenFrames(["player-touchbar"]).first else { return }
+        app.tap(at: CGPoint(x: f.midX, y: f.maxY + 36))
+        sleep(1)
     }
 
     /// 在 Touch Bar 上左右滑（dx > 0 往右）
