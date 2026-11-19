@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - 进度条用到的颜色和念法
 //
-// 进度条本身在 Touch Bar 里（PlayerToolbar.swift 的 TouchBarScrubber）：细、轻，Cuven 蓝的已播放部分，中性灰的剩余部分，
+// 进度条本身在 Touch Bar 里（PlayerToolbar.swift：播放那颗胶囊上面那一条）：细、轻，Cuven 蓝的已播放部分，中性灰的剩余部分，
 // 一颗小圆点；播放时每 0.25 秒更新一次、中间线性补平；拖动时圆点放大、时间跟着手指走，松手才跳过去。
 // 旁白：「播放进度」，值是「已播放 x，共 y」，上下扫动前进 / 后退 10 秒。
 
