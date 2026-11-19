@@ -244,8 +244,8 @@ private struct DeckAbout: View {
                             .lineLimit(wide ? 5 : 3)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    if wide { Spacer(minLength: 6) }
                     DeckFacts(facts: info.facts, badges: info.badges)
+                        .padding(.top, 4)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -280,13 +280,32 @@ private struct DeckFacts: View {
     let badges: [String]
 
     var body: some View {
-        HStack(spacing: 8) {
-            if !facts.isEmpty {
-                Text(facts.joined(separator: " · "))
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.6))
-                    .lineLimit(1)
+        // 一行放得下就一行（参照图）；放不下时徽标换到下一行，字不被截掉
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                factsText
+                badgeRow
             }
+            VStack(alignment: .leading, spacing: 6) {
+                factsText
+                badgeRow
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder private var factsText: some View {
+        if !facts.isEmpty {
+            Text(facts.joined(separator: " · "))
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.white.opacity(0.6))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var badgeRow: some View {
+        HStack(spacing: 8) {
             ForEach(badges.prefix(4), id: \.self) { b in
                 let solid = b == "4K" || b == "8K"
                 Text(b)
@@ -305,7 +324,6 @@ private struct DeckFacts: View {
                     .fixedSize()
             }
         }
-        .accessibilityElement(children: .combine)
     }
 }
 

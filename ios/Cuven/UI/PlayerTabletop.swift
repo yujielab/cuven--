@@ -134,22 +134,28 @@ struct TabletopPlayerLayer: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        GeometryReader { full in
-            let fold = model.preview ? TabletopFold.preview(full.size) : TabletopFold.detect(in: full)
-            ZStack {
-                if model.active, let f = model.fold {
-                    // 横着的折痕：画面在上、控制在下；竖着的：画面在右页、控制在左页（卡片转成一列一列的）。换姿态时卡片形变过去
-                    // 这一层忽略了安全区（画面要铺到屏边），安全区由这里量好交下去：书本时面板占满整页的高，
-                    // 上面的卡片要让开状态栏（CI 截图里第一排压在了状态栏下面）
-                    CuvenPlayerView(model: model, player: model.player, layout: f.width > f.height ? .tabletop(f) : .book(f),
-                                    safeInsets: full.safeAreaInsets)
-                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+        // 外面一层守着安全区、里面一层铺满：两层的框一比就是四边的安全区。直接问忽略了安全区的那一层，
+        // 它报的安全区是 0（CI 截图：书本时第一排键还压在状态栏下面）
+        GeometryReader { safe in
+            let sf = safe.frame(in: .global)
+            GeometryReader { full in
+                let ff = full.frame(in: .global)
+                let insets = EdgeInsets(top: max(0, sf.minY - ff.minY), leading: max(0, sf.minX - ff.minX),
+                                        bottom: max(0, ff.maxY - sf.maxY), trailing: max(0, ff.maxX - sf.maxX))
+                let fold = model.preview ? TabletopFold.preview(full.size) : TabletopFold.detect(in: full)
+                ZStack {
+                    if model.active, let f = model.fold {
+                        // 横着的折痕：画面在上、控制在下；竖着的：画面在右页、控制在左页。换姿态时键形变过去
+                        CuvenPlayerView(model: model, player: model.player, layout: f.width > f.height ? .tabletop(f) : .book(f),
+                                        safeInsets: insets)
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    }
                 }
+                .frame(width: full.size.width, height: full.size.height)
+                .onChange(of: fold, initial: true) { _, f in model.setFold(f) }
             }
-            .frame(width: full.size.width, height: full.size.height)
-            .onChange(of: fold, initial: true) { _, f in model.setFold(f) }
+            .ignoresSafeArea()
         }
-        .ignoresSafeArea()
         // 半折 / 摊平时整层淡入淡出，带一点弹簧（「减弱动态效果」时直接换：I9）
         .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.88), value: model.active)
     }
