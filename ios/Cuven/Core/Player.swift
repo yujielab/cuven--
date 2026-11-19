@@ -38,9 +38,38 @@ final class CuvenPlayerViewController: AVPlayerViewController {
     var onClose: (() -> Void)?
     /// 方向（用户要求）：除了 iPhone 展开，一律横屏、只在左右两个横向之间转（VideoOrientation.swift）
     private lazy var orientation = VideoOrientationLock()
+    /// iPhone Duo 半折（横着的折痕）时：上面画面、下面控制面板（用户要求；UI/PlayerTabletop.swift）
+    private(set) lazy var tabletop = TabletopPlayerHost()
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask { orientation.mask }
     override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { orientation.preferred }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        tabletop.install(in: self) { on in plog("tabletop \(on ? "on" : "off")") }
+        // 退到后台（画中画接手）、拉下控制中心时先摘掉半折面板那一层画面，回来再接上
+        let nc = NotificationCenter.default
+        nc.addObserver(self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
+        nc.addObserver(self, selector: #selector(appDidBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
+    }
+
+    @objc private func appWillResignActive() {
+        tabletop.model.visible = false
+    }
+
+    @objc private func appDidBecomeActive() {
+        tabletop.model.visible = viewIfLoaded?.window != nil
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        tabletop.keepOnTop()
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        tabletop.model.visible = true
+    }
 
     override func viewWillTransition(to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
@@ -49,6 +78,7 @@ final class CuvenPlayerViewController: AVPlayerViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        tabletop.model.visible = false
         if isBeingDismissed || presentingViewController == nil { onClose?() }
     }
 }
@@ -128,6 +158,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         }
         // 加载画面盖上（播完接下一集也盖：同一个样子）
         PlayerLoadingOverlay.shared.show(title: coverTitle(req))
+        // 半折时的控制面板：片名卡、「下一集」跟着换
+        controller?.tabletop.show(req)
         Task { await start(req, token: token) }
     }
 
@@ -194,6 +226,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         vc.delegate = self
         vc.modalPresentationStyle = .fullScreen
         vc.onClose = { [weak self] in self?.closedByUser() }
+        vc.tabletop.model.player = p
+        vc.tabletop.model.onNext = { [weak self] in self?.playNext() }
         controller = vc
         plog("present")
         NotificationCenter.default.post(name: .cuvenPlayerPresented, object: nil)
@@ -224,6 +258,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
 
         if player == nil || (controller?.presentingViewController == nil && !inPiP) {
             presentPlayer(req)                       // 兜底：没弹出来（比如当时找不到能弹的页面）就现在弹
+            controller?.tabletop.show(req)
         }
         guard let p = player else { return }
         // 本机代理的地址只在这台手机上有效：这时不投屏到别的设备（AirPlay 那头取不到 127.0.0.1）
@@ -388,6 +423,16 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             endedPath = req.path
             controller?.dismiss(animated: true)
         }
+    }
+
+    /// 半折面板上的「下一集」：这一集的进度照常存着（没看完不清），接着放下一集（播放器不关，盖上加载画面）
+    private func playNext() {
+        guard let req = current, var next = req.queue.first else { return }
+        plog("next by user")
+        saveProgress()
+        usage.flush(player?.currentItem)
+        next.queue = Array(req.queue.dropFirst())
+        begin(next)
     }
 
     private func closedByUser() {

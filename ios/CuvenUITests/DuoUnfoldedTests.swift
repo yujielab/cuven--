@@ -76,6 +76,35 @@ final class DuoUnfoldedTests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    /// 半折（桌面形态）的播放面板：上面画面、下面控制面板（PlayerTabletop.swift）。模拟器折不了、演示数据也放不了片，
+    /// 所以用 -CuvenTabletop YES 弹一个假的播放页，折痕固定在屏正中。截 duo-38*（iPad 上是 duo-48*）；外屏大小不截
+    func testTabletopPanel() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-CuvenDemo", "YES", "-CuvenTabletop", "YES"]
+        app.launch()
+        let close = app.buttons["tabletop-close"]
+        guard close.waitForExistence(timeout: 15) else {
+            print("DUO tabletop: panel did not appear")
+            return
+        }
+        sleep(2)
+        let size = report(app, "tabletop")
+        guard size.width > 500, size.height > size.width else { return }
+        snap("duo-38-tabletop")
+        // 锁定：别的按钮都变暗、点不动，锁那一块亮起来
+        if let f = app.onScreenFrames(["tabletop-lock"]).first {
+            app.tap(at: CGPoint(x: f.midX, y: f.midY)); sleep(1)
+            snap("duo-38b-tabletop-locked")
+            app.tap(at: CGPoint(x: f.midX, y: f.midY)); sleep(1)
+        }
+        // 亮度：第四行展开成一条滑杆
+        if let f = app.onScreenFrames(["tabletop-brightness"]).first {
+            app.tap(at: CGPoint(x: f.midX, y: f.midY)); sleep(1)
+            snap("duo-38c-tabletop-brightness")
+        }
+    }
+
     @discardableResult
     private func report(_ app: XCUIApplication, _ tag: String) -> CGSize {
         let w = app.windows.firstMatch.frame.size

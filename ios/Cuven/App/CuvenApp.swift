@@ -157,6 +157,10 @@ struct RootView: View {
             TrailerCache.shared.start()
             // 弱网预先缓存（详情页「预先画面质量处理」「下载」）的后台下载：一样接上
             Precache.shared.boot()
+            #if DEBUG
+            // UI 测试 / 截图：-CuvenTabletop YES 弹出半折播放面板的演示页（PlayerTabletop.swift）
+            TabletopPreview.presentIfRequested()
+            #endif
         }
         .onChange(of: account.isLoggedIn) { _, now in if now { model.start() } }
         // 头像预先存在本机（用户要求）：一启动、一登录就在后台拉好存上，回到前台再看一眼有没有换（同一张 10 分钟内不重拉）
