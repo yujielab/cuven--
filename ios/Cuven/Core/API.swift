@@ -51,8 +51,8 @@ final class APIClient: @unchecked Sendable {
     }
 
     /// 拼 URL。查询值里的「+」要转成 %2B：后端按 URLSearchParams 解，裸的 + 会被当成空格
-    func url(_ path: String, _ query: [(String, String)] = []) -> URL {
-        var comps = URLComponents(string: Self.base + path)!
+    func url(_ path: String, _ query: [(String, String)] = [], base: String = APIClient.base) -> URL {
+        var comps = URLComponents(string: base + path)!
         if !query.isEmpty {
             comps.queryItems = query.map { URLQueryItem(name: $0.0, value: $0.1) }
             comps.percentEncodedQuery = comps.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
@@ -220,13 +220,14 @@ final class APIClient: @unchecked Sendable {
     }
 
     /// 直链：文件名只是装饰，后端只认 ?path=。MP4 / MOV 带 safari=1（后端的 FourCC 热修补）
-    func streamURL(path: String, name: String, sign: StreamSign?) -> URL {
+    /// base：影片走哪个入口（Cuven Pass Pro 开着时是加速节点；签名只盖路径，换主机名照样有效）
+    func streamURL(path: String, name: String, sign: StreamSign?, base: String = APIClient.base) -> URL {
         let ext = (name as NSString).pathExtension.lowercased()
         var q: [(String, String)] = [("path", path)]
         if let exp = sign?.exp, let sig = sign?.sig, !exp.isEmpty, !sig.isEmpty { q += [("exp", exp), ("sig", sig)] }
         if ["mp4", "m4v", "mov"].contains(ext) { q.append(("safari", "1")) }
         let file = "Cuven." + (ext.isEmpty ? "mp4" : ext)
-        return url("/stream/" + file, q)
+        return url("/stream/" + file, q, base: base)
     }
 }
 
