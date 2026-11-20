@@ -11,6 +11,7 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 | `ios/` | 原生 iOS App「Cuven max」（SwiftUI，不是网页套壳），直连同一个 Worker；GitHub Actions 打 IPA，见下文 |
 | `audio-tx/` | 可选的 DTS / TrueHD → AC-3 转码 Worker |
 | `index/` | Cuven ᴿ 索引库 Worker（论坛 → TMDB → R2 索引，对照片库标出缺片），说明与测试见 [`index/README.md`](index/README.md) |
+| `transfer/` | 传输 Worker（transfer.cuven.us）：PikPak → Dropbox 的传输面板 + 给请求添加用的 `/api/link/*`（52x 自动重试、逐个文件核对），说明与测试见 [`transfer/README.md`](transfer/README.md) |
 | `request/` | 请求添加 Worker（tj.cuven.us）：App 里点「请求添加」→ 影片库推到 PikPak → 云下载 → 清洗 → 传到 Dropbox → 等工作人员发行，说明、部署与测试见 [`request/README.md`](request/README.md) |
 | `tests/` | 回归测试：Worker（`run.mjs`）与前端（`web.mjs`） |
 
