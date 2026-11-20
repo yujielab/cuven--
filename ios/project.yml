@@ -30,6 +30,29 @@ targets:
         CODE_SIGN_STYLE: Automatic
         ENABLE_PREVIEWS: YES
         SWIFT_EMIT_LOC_STRINGS: NO
+    dependencies:
+      - target: CuvenLighting
+  # 视频驱动的控制面板光影（Metal + AVFoundation）。单独一个框架、用 Swift 6 语言模式（App 本身还是 Swift 5 模式）；
+  # 不依赖 SwiftUI，App 那边用 UIViewRepresentable 把 LightingSurfaceView 挂进去。设计见 docs/ios-lighting.md
+  CuvenLighting:
+    type: framework
+    platform: iOS
+    sources:
+      - path: CuvenLighting
+        excludes:
+          - "**/*.h"
+      # 着色器共用的结构体：.metal 文件按相对路径 #include，不进头文件阶段
+      - path: CuvenLighting/Shaders/LightingShaderTypes.h
+        buildPhase: none
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        PRODUCT_BUNDLE_IDENTIFIER: us.cuven.lighting
+        PRODUCT_NAME: CuvenLighting
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+        DEFINES_MODULE: YES
+        CODE_SIGN_STYLE: Automatic
   # 模拟器里走一遍主要页面并截图（.github/workflows/ios-preview.yml 用），不进 IPA
   CuvenUITests:
     type: bundle.ui-testing

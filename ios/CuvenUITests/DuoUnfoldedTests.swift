@@ -76,6 +76,172 @@ final class DuoUnfoldedTests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    /// 请求添加（RequestViews.swift）：演示数据里推进一部片库里没有的剧集（-CuvenRequestPreview YES），
+    /// 截「请求添加」按钮、按下去那一下（玻璃正在变形）、变形完的五步进度卡（演示里 1.6 秒后走到第 3 步 40%）。
+    /// 截 duo-3q-*（iPad 上是 duo-4q-*）；外屏大小不截
+    func testRequestCard() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-CuvenDemo", "YES", "-CuvenRequestPreview", "YES"]
+        app.launch()
+        let add = app.buttons["request-add"]
+        guard add.waitForExistence(timeout: 15) else {
+            print("DUO request: detail did not open")
+            return
+        }
+        sleep(2)
+        let size = report(app, "request")
+        guard size.width > 500 else { return }
+        snap("duo-3q-request-a-button")
+        add.tap()
+        usleep(250_000)
+        snap("duo-3q-request-b-morph")
+        sleep(3)
+        snap("duo-3q-request-c-card")
+        app.swipeUp(); sleep(2)
+        snap("duo-3q-request-d-sections")
+    }
+
+    /// 半折的播放面板（PlayerTabletop.swift）：上面画面、下面一条液态玻璃的 Touch Bar（左右滑，长按展开），
+    /// 最底下 InSight / 继续观看 / 推荐；横过来是书本（右页画面、左页控制）。
+    /// 模拟器折不了、演示数据也放不了片，所以用 -CuvenTabletop YES 弹一个假的播放页，折痕固定在屏正中。
+    /// 截 duo-38*（iPad 上是 duo-48*）；外屏大小不截
+    func testTabletopPanel() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-CuvenDemo", "YES", "-CuvenTabletop", "YES"]
+        app.launch()
+        let close = app.buttons["player-close"]
+        guard close.waitForExistence(timeout: 15) else {
+            print("DUO tabletop: panel did not appear")
+            return
+        }
+        sleep(2)
+        let size = report(app, "tabletop")
+        guard size.width > 500, size.height > size.width else { return }
+        snap("duo-38-tabletop")
+        // 点按 → 展开着（等着点或滑来选；长按 → 滑 → 松开 是同一个样子）；点面板上空的地方收回
+        if tapID(app, "player-brightness", pause: 0.6) { snap("duo-38c-touchbar-brightness") }
+        collapseBar(app)
+        if tapID(app, "player-audio", pause: 0.6) { snap("duo-38g-touchbar-audio") }
+        collapseBar(app)
+        // 往右滑：左边的锁定、全屏露出来；锁定亮起来
+        swipeBar(app, dx: 320)
+        snap("duo-38f-touchbar-scrolled")
+        if tapID(app, "player-lock") {
+            snap("duo-38b-tabletop-locked")
+            tapID(app, "player-lock")
+        }
+        swipeBar(app, dx: -640)
+        // 光效：点开是三种模式（只有模式能换，参数固定）；点面板上空的地方收回、不改
+        if tapID(app, "player-effects", pause: 0.6) { snap("duo-38k-touchbar-effects") }
+        collapseBar(app)
+        // 最底下那块的三个标签
+        for (tab, tag) in [("insight", "h"), ("continueWatching", "i"), ("recommend", "j")] {
+            if tapID(app, "deck-tab-\(tab)") { snap("duo-38\(tag)-deck-\(tab)") }
+        }
+        // 书本：横过来，折痕变成竖的——左页控制、右页画面
+        XCUIDevice.shared.orientation = .landscapeLeft
+        sleep(3)
+        let wide = report(app, "book")
+        if wide.width > wide.height {
+            snap("duo-38e-book")
+            if tapID(app, "player-volume", pause: 0.5) { snap("duo-38d-book-volume") }
+        } else {
+            print("DUO book: did not rotate")
+        }
+        XCUIDevice.shared.orientation = .portrait
+        sleep(1)
+    }
+
+    /// 点屏上标识为 id 的那个元素正中（找不到就记一笔、返回 false）
+    @discardableResult
+    private func tapID(_ app: XCUIApplication, _ id: String, pause: Double = 1) -> Bool {
+        guard let f = app.onScreenFrames([id]).first else {
+            print("DUO tabletop: \(id) not on screen")
+            return false
+        }
+        app.tap(at: CGPoint(x: f.midX, y: f.midY))
+        usleep(UInt32(pause * 1_000_000))
+        return true
+    }
+
+    /// 点 Touch Bar 下面、卡片区上面那片空的地方：点开着的那一颗收回
+    private func collapseBar(_ app: XCUIApplication) {
+        guard let f = app.onScreenFrames(["player-touchbar"]).first else { return }
+        app.tap(at: CGPoint(x: f.midX, y: f.maxY + 36))
+        sleep(1)
+    }
+
+    /// 在 Touch Bar 上左右滑（dx > 0 往右）
+    private func swipeBar(_ app: XCUIApplication, dx: CGFloat) {
+        guard let f = app.onScreenFrames(["player-touchbar"]).first else {
+            print("DUO tabletop: touch bar not on screen")
+            return
+        }
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let y = f.maxY - 20
+        let x0 = dx > 0 ? f.minX + f.width * 0.25 : f.minX + f.width * 0.75
+        let start = origin.withOffset(CGVector(dx: x0, dy: y))
+        let end = origin.withOffset(CGVector(dx: x0 + dx, dy: y))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        sleep(1)
+    }
+
+    /// 光影实验室（PlayerLab.swift）：放内置的测试画面，四段场景各截一张，看卡片上的光跟着画面变（火是暖的、海是冷的、
+    /// 夜里只有局部的光、霓虹是分开的几种颜色）；再横过来截一张。截 duo-39*（iPad 上 duo-49*）；外屏大小不截
+    func testPlayerLab() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-CuvenDemo", "YES", "-CuvenPlayerLab", "YES"]
+        app.launch()
+        guard app.staticTexts["lab-ready"].waitForExistence(timeout: 40) else {
+            print("DUO lab: test pattern did not start")
+            snap("duo-39z-lab-not-ready")
+            return
+        }
+        sleep(2)
+        report(app, "lab")
+        // 实验室里 windows.firstMatch 有时是一个 0×0 的系统窗口（CI 记到过）：按屏幕大小判断是不是内屏 / iPad
+        let screen = inner.screenshot().image.size
+        guard min(screen.width, screen.height) > 500 else { return }
+        let scenes = ["fire", "ocean", "night", "neon"]
+        for (i, name) in scenes.enumerated() {
+            labTap(app, "lab-scene-\(i)")
+            sleep(1)
+            snap("duo-39\(Array("abcd")[i])-lab-\(name)")
+        }
+        // 三种光影模式，都在火光那一段上看（影院是默认）
+        for (preset, tag) in [("standard", "f"), ("immersive", "g")] {
+            labTap(app, "lab-scene-0")
+            labTap(app, "lighting-preset-\(preset)")
+            sleep(1)
+            snap("duo-39\(tag)-lab-\(preset)")
+        }
+        labTap(app, "lighting-preset-cinematic")
+        // 闲置：5 秒不碰，符号淡出，卡上的光留着（从海面开始等，截到的时候正好放到霓虹）
+        labTap(app, "lab-scene-1")
+        sleep(7)
+        snap("duo-39h-lab-idle")
+        labTap(app, "lab-scene-0")
+        XCUIDevice.shared.orientation = .landscapeLeft
+        sleep(3)
+        snap("duo-39e-lab-landscape")
+        XCUIDevice.shared.orientation = .portrait
+        sleep(1)
+    }
+
+    /// 实验室里按标识点元素。这里 windows.firstMatch 是一个 0×0 的系统窗口，按窗口框算「在不在屏上」的
+    /// onScreenFrames 什么都找不到（CI 记到过：点击全落空，截到的场景、模式都不对）；交给 XCUITest 自己找、自己滚到可见再点
+    private func labTap(_ app: XCUIApplication, _ id: String) {
+        let e = app.descendants(matching: .any).matching(identifier: id).firstMatch
+        guard e.waitForExistence(timeout: 3) else {
+            print("DUO lab: \(id) not found")
+            return
+        }
+        e.tap()
+    }
+
     @discardableResult
     private func report(_ app: XCUIApplication, _ tag: String) -> CGSize {
         let w = app.windows.firstMatch.frame.size

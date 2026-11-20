@@ -86,6 +86,24 @@ jobs:
           path: Cuven-unsigned.ipa
           if-no-files-found: error
 
+      # 用户要求「完成 IPA 时推送 IPA 包给我」：云端会话拿不到 Actions 产物的下载地址（每次落在不同的存储主机上），
+      # 所以同一个 IPA 再提交到 refs/ci/ios-ipa/<分支>（不是分支；只留最新一次），会话里 git fetch 就能取：
+      #   git fetch origin refs/ci/ios-ipa/<分支> && git show FETCH_HEAD:Cuven-unsigned.ipa > Cuven-unsigned.ipa
+      - name: IPA 提交到 refs/ci/ios-ipa/<分支>
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          OUT="$RUNNER_TEMP/ipa-ref"
+          mkdir -p "$OUT"
+          cp Cuven-unsigned.ipa "$OUT/"
+          cd "$OUT"
+          echo "${GITHUB_SHA} build ${{ github.run_number }}" > SOURCE
+          git init -q . && git checkout -q -b ipa
+          git add -A
+          git -c user.name=ios-ipa -c user.email=ios-ipa@users.noreply.github.com commit -qm "Cuven IPA ${GITHUB_SHA::7} build ${{ github.run_number }}"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:"refs/ci/ios-ipa/${GITHUB_REF_NAME}"
+          echo "已提交到 refs/ci/ios-ipa/${GITHUB_REF_NAME}"
+
       - name: 编译日志（失败时）
         if: failure()
         uses: actions/upload-artifact@v4

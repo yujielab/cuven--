@@ -502,6 +502,8 @@ enum Route: Hashable {
     case shelf(Shelf)
     /// 演员个人页（照 Apple Music 的艺人页）
     case person(CastMember)
+    /// 影片库索引里有、片库里没有的那部：详情页的「播放」换成「请求添加」（RequestViews.swift）
+    case catalog(CatalogTitle)
 }
 
 /// 演员个人页（/api/tmdb/person）：简介、出生、出生地、全部作品的编号（App 拿去和片库对，列出「库中作品」）

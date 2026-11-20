@@ -86,6 +86,7 @@ struct AccountView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(PlayerCoordinator.autoplayKey) private var autoplayNext = true
+    /// 影院光影（半折播放器：画面里的光映在控制卡片上）的模式，这一行显示当前是哪一种
     /// 首选音轨 / 首选字幕（用户要求，TrackPrefs.swift）
     @AppStorage(TrackPrefs.audioKey) private var audioPref = TrackPrefs.Audio.auto.rawValue
     @AppStorage(TrackPrefs.subtitleKey) private var subtitlePref = TrackPrefs.Subtitle.auto.rawValue
@@ -294,6 +295,7 @@ struct AccountView: View {
                     .tint(.green)
             }
             AccountDivider()
+            // 「影院光影」「光影实验室」两行按用户要求移除（参数固定，模式在播放器 Touch Bar 的「光效」上换）
             // 首选音轨 / 首选字幕（用户要求「允许设置字幕和音轨首选项」）：整行是一颗系统弹出菜单，勾着当前那一项（C11）
             Menu {
                 Picker("首选音轨", selection: $audioPref) {

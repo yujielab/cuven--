@@ -1,4 +1,7 @@
 /**
+ * [v7.0] 接「请求添加」Worker（tj.cuven.us，见 request/）：GET /api/link/versions?src=movie|tv&id=<tmdb>[&season=N]
+ *   一部片 / 一季按规格排好的全部版本（剧集只要整季包，total = 标题里写的总集数）；/api/pikpush 的回包多带
+ *   file / fileName（PikPak 里这个云下载落成的文件或文件夹），请求添加拿它去做清洗。都走原来的 GATE 口令（x-gate）。
  * Cuven ᴿ 索引库 · v6.9 —— 推送到 PikPak：片单直接建云下载任务，存到指定的文件夹
  * ══════════════════════════════════════════════════════════════════
  *   变量 PIKPAK_USER / PIKPAK_PASS；/api/pikpak（状态 / 列文件夹 / 建文件夹）、/api/pikpush（一次 4 部）。见 pkAuth、pkPush。
@@ -5706,6 +5709,20 @@ function packOf(t){
   return /共\s*\d+\s*[集话話]/.test(t) ? 'full' : 'unk';
 }
 const packLabel = (t) => ((String(t).match(/全\s*[0-9一二三四五六七八九十百]+\s*[集话話期回]|全集|完结/) || [])[0] || '').replace(/\s+/g, '');
+/** [v7.0] 标题里写的总集数：「全10集」「全十二集」「共 8 集」→ 数字；没写 → 0（交给传输那边按文件夹名再认一遍） */
+function packTotal(t){
+  const m = String(t || '').match(/(?:全|共)\s*([0-9一二三四五六七八九十百零两]+)\s*[集话話期回]/);
+  if (!m) return 0;
+  if (/^\d+$/.test(m[1])) return +m[1];
+  const D = { 零:0, 一:1, 二:2, 两:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9 };
+  let n = 0, cur = 0;
+  for (const ch of m[1]){
+    if (ch === '百'){ n += (cur || 1) * 100; cur = 0; }
+    else if (ch === '十'){ n += (cur || 1) * 10; cur = 0; }
+    else cur = D[ch] ?? 0;
+  }
+  return n + cur;
+}
 /** 单集 / 一段的集数范围（「第 123-127 集」→ 123..127，「更新至第 12 集」→ 12..12） */
 function epRange(t){
   t = String(t || '');
@@ -6402,7 +6419,9 @@ async function pkPush(env, parent, items, ctx){
       const t = j.task || {};
       ok++;
       out.push({ tid: it.tid, ok: 1, task: String(t.id || ''), name: String(t.name || t.file_name || m.name || it.name || '').slice(0, 160),
-                 phase: String(t.phase || ''), btih: m.btih });
+                 phase: String(t.phase || ''), btih: m.btih,
+                 /* [v7.0] 「请求添加」要盯着这个下载落成的文件（夹）做清洗 */
+                 file: String(t.file_id || ''), fileName: String(t.file_name || '').slice(0, 200) });
     } catch (e){
       if (e.budget){ out.push({ tid: it.tid, ok: 0, retry: 1 }); continue; }
       /* 账号层面的问题：这一批后面的、以及浏览器手里剩下的都不用再试了 */
@@ -6555,6 +6574,33 @@ export default {
         return json({ ...r, max: GRAB_MAX });
       }
       /* [v6.9] PikPak：状态 / 列文件夹 / 建文件夹（轻）；推送建云下载任务（重，走子请求预算） */
+      /* [v7.0] 给「请求添加」Worker（tj.cuven.us）用：一部片 / 剧集的一季，按规格排好的全部版本。
+         电影：按片源分（betterRow：分辨率 → 动态范围 → 片源 → 体积）排；剧集：只要这一季的整季包
+         （全 N 集 / 全集 / 完结 在前，标题没写的在后，单集 / 一段的不要），total 是标题里写的总集数。
+         请求添加按这个顺序一个一个试：上一个没下完 / 不完整，就推下一个。 */
+      if (p==='/api/link/versions'){
+        const id = String(Q.get('id') || '');
+        const { movies, state } = await loadIndex(env);
+        const m = movies.m?.[id];
+        if (!m) return json({ error:'索引里没有这部影片' }, 404);
+        const ver = state.ver || 0;
+        const rows = collapse((await movieRows(env, movies, id, ver, state)).map(decorate));
+        let items = rows.map(r => ({ tid:r.tid, sid:r.sid, title:r.title, score:r.score, mb:r.mb||0, size:r.size||'',
+          labels:r.labels||[], res:specRes(r.spec), sn:r.sn||0 }));
+        let seasons = [], season = 0;
+        if (isTV()){
+          seasons = [...new Set(items.map(x => x.sn || 1))].sort((a, b) => a - b);
+          season = parseInt(Q.get('season') || '0', 10) || seasons[seasons.length - 1] || 1;
+          items = items.filter(x => (x.sn || 1) === season)
+            .map(x => ({ ...x, pack: packOf(x.title), total: packTotal(x.title) }))
+            .filter(x => x.pack !== 'part')
+            .sort((a, b) => (a.pack === 'full' ? 0 : 1) - (b.pack === 'full' ? 0 : 1));
+        }
+        const lib = await libLoad(env, cx).catch(() => null);
+        return json({ id:+id, src:SRC.id, title:m[F.N], original:m[F.O], year:m[F.Y], poster:m[F.P],
+          own: libHasId(movies, ver, lib, id), seasons, season, items: items.slice(0, 16) });
+      }
+
       if (p==='/api/pikpak' || p==='/api/pikpush'){
         const pkFail = (e) => { if (!e.pk) throw e; return json({ error: e.message, pk: 1, conf: e.conf ? 1 : 0, auth: e.auth ? 1 : 0, captcha: e.captcha ? 1 : 0 }, e.conf ? 400 : 502); };
         const body = request.method === 'POST' ? await request.json().catch(() => null) : null;

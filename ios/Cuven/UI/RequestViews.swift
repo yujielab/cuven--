@@ -1,0 +1,510 @@
+import SwiftUI
+
+// MARK: - 请求添加：按钮 → 五步进度卡（同一块液态玻璃变形过去）
+//
+// 片库里没有的那部（影片库索引里有），详情页的「播放」换成一颗「请求添加」：白色的玻璃胶囊。按下去，这块玻璃原地长成一张
+// 矩形的玻璃卡（同一个视图、同一块玻璃，圆角和大小跟着版面一起动画，不是淡出淡入两样东西：见 RequestMorphControl），卡上是
+// 「STEP 3 OF 5」「40% Complete」（绿）、五段胶囊进度（走完的实心绿、正在走的绿边 + 走了多少、没到的暗）和五步的名字：
+// 等待制片商 → 等待回应 → 等待品质管理 → 等待传输 → 最终发行审批（用户定的说法），底下一行固定的说明。
+// 内部在做什么（推到 PikPak、清洗、传到 Dropbox、哪个版本、出了什么错）不显示，服务器给 App 的也不带。
+
+private let requestGreen = Color(red: 0.19, green: 0.82, blue: 0.35)
+private let requestRed = Color(red: 1.0, green: 0.27, blue: 0.23)
+
+/// 头部那颗按钮 / 那张卡。
+/// 是同一个视图、同一块玻璃：按钮时高 48、圆角 24（正好是胶囊），卡时圆角 26、高度跟着内容。玻璃挂在一直在的那个框上，
+/// 框的大小随版面一起动画——玻璃的边、上面的片名和那一行信息在同一个动画里一起走，不会有一刻卡先铺满、盖住上面的字
+/// （第一版用两个视图 + glassEffectID 变形：截图里变形到一半，玻璃已经是卡的大小，片名还在往上走）。
+/// 里面的字交叉淡入淡出，裁在玻璃里面。
+struct RequestMorphControl: View {
+    let status: RequestStatus?
+    let buttonTitle: String
+    let buttonSymbol: String
+    let enabled: Bool
+    let wide: Bool
+    let onTap: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let card = status != nil
+        let shape = RoundedRectangle(cornerRadius: card ? 26 : 24, style: .continuous)
+        let maxW: CGFloat? = card ? (wide ? 520 : .infinity) : (wide ? nil : .infinity)
+        ZStack(alignment: .topLeading) {
+            if let status {
+                RequestProgressCard(status: status)
+                    .transition(.opacity)
+            } else {
+                Label(buttonTitle, systemImage: buttonSymbol)
+                    .font(.headline)
+                    .foregroundStyle(enabled ? Color.black : Color.white.opacity(0.75))
+                    .lineLimit(1)
+                    .padding(.horizontal, 22)
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .transition(.opacity)
+            }
+        }
+        .frame(minWidth: wide ? 180 : 0, maxWidth: maxW, alignment: .topLeading)
+        .fixedSize(horizontal: wide && !card, vertical: false)
+        .clipShape(shape)
+        .contentShape(shape)
+        .glassEffect(card ? .regular : (enabled ? .regular.tint(.white.opacity(0.92)).interactive() : .regular), in: shape)
+        .environment(\.colorScheme, .dark)
+        .onTapGesture { if !card && enabled { onTap() } }
+        .accessibilityElement(children: card ? .contain : .combine)
+        .accessibilityAddTraits(card ? [] : .isButton)
+        .accessibilityAction { if !card && enabled { onTap() } }
+        .accessibilityIdentifier(card ? "request-card" : "request-add")
+        // 按钮 ↔ 卡的那一下由详情页用 morph 这条曲线包起来（版面和玻璃同一个动画）；这里只管卡里的进度更新
+        .animation(DSMotion.adapt(.smooth(duration: 0.45), reduce: reduceMotion), value: status)
+    }
+
+    /// 按钮 ↔ 卡：详情页改状态时用这一条（整个头部的版面一起走）
+    static func morph(reduce: Bool) -> Animation {
+        DSMotion.adapt(.spring(response: 0.55, dampingFraction: 0.84), reduce: reduce)
+    }
+}
+
+/// 卡里的内容：STEP X OF 5 · N% Complete · 五段胶囊 · 五步的名字 · 一行给用户的说明。
+/// 用户要求：不展示用户不该知道的内容——内部在做什么（推到 PikPak、清洗、传到 Dropbox、哪个版本、出了什么错）一律不显示，
+/// 服务器给 App 的进度里也不再带这些（只在控制面板里看得到）
+struct RequestProgressCard: View {
+    let status: RequestStatus
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("STEP \(status.step) OF \(status.steps)")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+                Spacer(minLength: 8)
+                Text(trailing)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(trailingColor)
+                    .monospacedDigit()
+                    .contentTransition(.numericText(value: Double(status.pct)))
+            }
+            RequestSegments(status: status)
+            HStack(alignment: .top, spacing: 6) {
+                ForEach(0..<RequestStatus.labels.count, id: \.self) { i in
+                    let reached = status.state == .done || i + 1 <= status.step
+                    Text(RequestStatus.labels[i])
+                        .font(.caption2.weight(i + 1 == status.step ? .semibold : .regular))
+                        .foregroundStyle(reached ? Color.white : DSInk.tertiary)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.85)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            Text(footnote)
+                .font(.footnote)
+                .foregroundStyle(DSInk.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(18)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("请求添加，第 \(status.step) 步，共 \(status.steps) 步：\(RequestStatus.labels[max(0, min(4, status.step - 1))])。\(trailing)。\(footnote)")
+    }
+
+    /// 卡底下那一行小字（进行中的是用户定的说法）
+    private var footnote: String {
+        switch status.state {
+        case .active: return "您可以返回，我们将在影片就绪时提醒您。添加流程一般不会超过一个小时。"
+        case .done: return "影片已就绪，现在可以观看。"
+        case .failed: return "暂时无法添加这部影片，请稍后再试。"
+        case .cancelled: return "这次添加已取消。"
+        }
+    }
+
+    private var trailing: String {
+        switch status.state {
+        case .active, .done: return "\(status.pct)% Complete"
+        case .failed: return "未能添加"
+        case .cancelled: return "已取消"
+        }
+    }
+
+    private var trailingColor: Color {
+        switch status.state {
+        case .active, .done: return requestGreen
+        case .failed: return requestRed
+        case .cancelled: return DSInk.tertiary
+        }
+    }
+}
+
+/// 五段胶囊：走完的实心绿；正在走的绿边，里面按这一步走了多少填上；没到的暗
+struct RequestSegments: View {
+    let status: RequestStatus
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(1...max(1, status.steps), id: \.self) { i in segment(i) }
+        }
+        .frame(height: 8)
+    }
+
+    private func segment(_ i: Int) -> some View {
+        let done = status.state == .done || i < status.step
+        let current = !done && i == status.step
+        let tint = status.state == .failed ? requestRed : requestGreen
+        return GeometryReader { g in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(done ? 0 : 0.14))
+                if done {
+                    Capsule().fill(requestGreen)
+                } else if current {
+                    if status.stepProgress > 0 {
+                        Capsule().fill(tint)
+                            .frame(width: max(8, g.size.width * status.stepProgress))
+                    }
+                    Capsule().strokeBorder(tint, lineWidth: 1.5)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 详情页（影片库索引里有、片库里没有的那部）
+
+struct CatalogDetailView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(AccountStore.self) private var account
+    let title: CatalogTitle
+    @State private var meta: Meta?
+    @State private var detail: CatalogDetail?
+    @State private var art: DetailArt?
+    /// 剧集：选的是哪一季（0 = 还没定，用服务器挑的最新一季）
+    @State private var season = 0
+    @State private var loading = true
+    @State private var busy = false
+    /// 刚按下去、服务器还没回话：先把卡变出来（第 1 步），回话了换成真的
+    @State private var pending: RequestStatus?
+    @State private var alert: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var store: RequestStore { RequestStore.shared }
+    private var seasonKey: Int { title.kind == .tv ? (season > 0 ? season : (detail?.season ?? 0)) : 0 }
+    private var ownedSeasons: Set<Int> { title.kind == .tv ? (model.ownedSeasons[title.id] ?? []) : [] }
+
+    var body: some View {
+        let status = pending ?? store.status(src: title.kind.rawValue, id: title.id, season: seasonKey)
+        let owned = title.kind == .tv && ownedSeasons.contains(seasonKey)
+        let available = (detail?.count ?? 0) > 0 && !owned
+        DetailScaffold(
+            title: displayTitle,
+            art: art,
+            metaLine: metaLine,
+            playTitle: status == nil ? "请求添加" : "已请求",
+            playID: "request-pinned",
+            playDisabled: status != nil || !available || busy,
+            onPlay: { request() },
+            genres: meta?.genres ?? [],
+            overview: meta?.overview,
+            director: meta?.director,
+            stats: stats,
+            related: nil,
+            thumb: TMDBImage.url(meta?.poster ?? meta?.posterClean ?? title.poster, "w185"),
+            cast: meta?.cast ?? [],
+            trailers: [],
+            trailerArt: [],
+            stills: DetailText.stills(meta),
+            customAction: AnyView(
+                RequestMorphControl(status: status, buttonTitle: buttonTitle(available: available, owned: owned),
+                                    buttonSymbol: available ? "plus" : (owned ? "checkmark" : "clock"),
+                                    enabled: available && !busy, wide: false, onTap: { request() })
+            )
+        ) { m in
+            sections(m)
+        }
+        .task(id: title) { await load() }
+        .alert("无法请求添加", isPresented: Binding(get: { alert != nil }, set: { if !$0 { alert = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(alert ?? "")
+        }
+    }
+
+    private var displayTitle: String {
+        if let t = meta?.title, !t.isEmpty { return t }
+        return title.title
+    }
+
+    private func buttonTitle(available: Bool, owned: Bool) -> String {
+        if owned { return "已在片库中" }
+        if available { return busy ? "正在提交…" : "请求添加" }
+        return loading ? "正在查询…" : "暂无可用资源"
+    }
+
+    private var metaLine: String {
+        DetailText.line([
+            title.kind == .tv ? "剧集" : "电影",
+            meta?.genres?.first,
+            (meta?.year ?? title.year).isEmpty ? nil : (meta?.year ?? title.year),
+            title.kind == .movie ? Format.runtime(meta?.runtime) : nil,
+            DetailText.rating(meta?.rating),
+        ])
+    }
+
+    private var stats: DetailStats {
+        var s = DetailStats()
+        let day = DetailFacts.day(meta?.releaseDate)
+        let y = Int(meta?.year ?? title.year)
+        if day != nil || y != nil {
+            s.release = DetailStats.Release(date: day, year: y, verb: title.kind == .tv ? "首播" : "上映", season: nil)
+        }
+        if let r = meta?.runtime, r > 0 { s.runtime = DetailStats.Runtime(minutes: r, perEpisode: title.kind == .tv) }
+        if let r = meta?.rating, r > 0 { s.rating = r }
+        return s
+    }
+
+    // MARK: 下面一段：选季（剧集）。用户要求：不放「资源」那张卡（规格、版本数、怎么下载都是用户不该知道的）
+
+    @ViewBuilder
+    private func sections(_ m: DSMetrics) -> some View {
+        if title.kind == .tv, let d = detail, !d.seasons.isEmpty {
+            group(m, "季") {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(d.seasons, id: \.self) { n in seasonChip(n) }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
+    }
+
+    private func seasonChip(_ n: Int) -> some View {
+        let on = n == seasonKey
+        let st = store.status(src: "tv", id: title.id, season: n)
+        return Button {
+            guard !on else { return }
+            Haptics.selection()
+            withAnimation(DSMotion.snap) { season = n; pending = nil }
+            Task { await reload(season: n) }
+        } label: {
+            HStack(spacing: 6) {
+                Text("第 \(n) 季").font(.subheadline.weight(.semibold))
+                if ownedSeasons.contains(n) {
+                    Image(systemName: "checkmark.circle.fill").font(.caption)
+                } else if let st {
+                    Text(st.state == .done ? "已就绪" : st.state == .failed ? "未能添加" : "\(st.pct)%")
+                        .font(.caption.weight(.semibold)).monospacedDigit()
+                        .foregroundStyle(on ? Color.black.opacity(0.6) : (st.state == .failed ? requestRed : requestGreen))
+                }
+            }
+            .foregroundStyle(on ? Color.black : Color.white)
+            .padding(.horizontal, 14)
+            .frame(minHeight: 36)
+            .background(Capsule().fill(on ? Color.white : Color.white.opacity(0.12)))
+            .frame(minHeight: 44)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(PressableStyle(scale: 0.94))
+        .accessibilityAddTraits(on ? .isSelected : [])
+        .accessibilityIdentifier("request-season-\(n)")
+    }
+
+    /// 和详情页别的分区同一个样子：粗体标题 + 内容，展开的屏上最宽 720
+    private func group<Content: View>(_ m: DSMetrics, _ name: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: m.titleGap + 4) {
+            DetailGroupTitle(title: name)
+            content().frame(maxWidth: 720, alignment: .leading)
+        }
+        .padding(.horizontal, m.margin)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: 载入、请求
+
+    private func load() async {
+        if DemoData.enabled { loadDemo(); return }
+        let fallback = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(900))
+            if !Task.isCancelled && art == nil { art = DetailArt(wide: title.poster, tall: title.poster, logo: nil) }
+        }
+        async let m = APIClient.shared.tmdb(query: title.title, year: title.year.isEmpty ? nil : title.year,
+                                            type: title.kind == .tv ? "tv" : "movie", id: title.id, full: true)
+        async let d = RequestAPI.detail(title, season: nil)
+        let mm = (try? await m) ?? nil
+        meta = mm
+        fallback.cancel()
+        if art == nil || art?.logo == nil {
+            art = DetailArt(wide: mm?.backdropClean ?? mm?.backdrop ?? mm?.poster ?? title.poster,
+                            tall: mm?.posterClean ?? mm?.poster ?? title.poster, logo: mm?.logo)
+        }
+        let dd = try? await d
+        detail = dd
+        loading = false
+        if let dd {
+            store.merge(dd.req)
+            for (_, r) in dd.reqs { store.merge(r) }
+        }
+    }
+
+    private func reload(season n: Int) async {
+        guard !DemoData.enabled else { return }
+        loading = true
+        if let dd = try? await RequestAPI.detail(title, season: n) {
+            detail = dd
+            store.merge(dd.req)
+        }
+        loading = false
+    }
+
+    private func request() {
+        guard !busy, pending == nil else { return }
+        if !DemoData.enabled && !account.isLoggedIn { alert = "登录后才能请求添加。"; return }
+        let s = seasonKey
+        busy = true
+        Haptics.light()
+        withAnimation(RequestMorphControl.morph(reduce: reduceMotion)) {
+            pending = RequestStatus(id: -1, title: title, season: s, step: 1, pct: 0, note: "正在提交请求…")
+        }
+        Task { @MainActor in
+            defer { busy = false }
+            do {
+                _ = try await store.request(title, season: s)
+                pending = nil
+                Haptics.success()
+            } catch {
+                withAnimation(RequestMorphControl.morph(reduce: reduceMotion)) { pending = nil }
+                alert = error.localizedDescription
+                Haptics.error()
+            }
+        }
+    }
+
+    /// 演示数据（截图用）：本地的画面和简介，三个版本，剧集两季
+    private func loadDemo() {
+        var m = Meta(id: title.id, title: title.title, en: "The Long Night", year: title.year,
+                     poster: title.poster, posterClean: title.poster, backdrop: "demo://backdrop/12",
+                     overview: "演示数据：影片库索引里有、片库里还没有的一部。按「请求添加」以后，这块玻璃会变成五步进度卡。",
+                     rating: 8.1, type: title.kind.rawValue, runtime: 52, genres: ["剧情", "悬疑"])
+        m.director = "林夏"
+        meta = m
+        art = DetailArt(wide: "demo://backdrop/12", tall: "demo://poster/12", logo: nil)
+        detail = CatalogDetail(demo: title, seasons: title.kind == .tv ? [1, 2] : [], count: 3,
+                               best: RequestStatus.Spec(res: "2160p", labels: ["4K", "杜比视界"], size: "58.6 GB"))
+        loading = false
+    }
+}
+
+// MARK: - 目录卡（主页「可请求添加」、搜索结果）
+
+struct CatalogPosterLink: View {
+    let item: CatalogItem
+    let metrics: DSMetrics
+    let slot: String
+
+    var body: some View {
+        let st = RequestStore.shared.anyStatus(src: item.src, id: item.id) ?? item.req
+        ZoomLink(route: .catalog(item.catalogTitle), slot: slot) {
+            DSPosterLockup(art: TMDBImage.url(item.poster, "w342"), title: item.title,
+                           subtitle: [item.src == "tv" ? "剧集" : "电影", item.year].filter { !$0.isEmpty }.joined(separator: "，"),
+                           metrics: metrics)
+                .overlay(alignment: .bottomLeading) {
+                    if let st { badge(st).padding(8) }
+                }
+        }
+        .accessibilityIdentifier("catalog-card")
+    }
+
+    private func badge(_ s: RequestStatus) -> some View {
+        let text = s.state == .done ? "已就绪" : s.state == .failed ? "未能添加" : s.stage == "release" ? "发行审批" : "已请求 \(s.pct)%"
+        return Text(text)
+            .font(.caption2.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(s.state == .failed ? requestRed : .white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .glassEffect(.regular, in: Capsule())
+            .environment(\.colorScheme, .dark)
+    }
+}
+
+/// 主页：「可请求添加」一排（影片库里最新收录、片库里还没有的；数据由 RequestStore.loadShelf 取）
+struct RequestableShelf: View {
+    @Environment(AppModel.self) private var model
+    let metrics: DSMetrics
+
+    var body: some View {
+        let movies = model.ownedMovieIDs, shows = model.ownedSeasons
+        let items = Array(RequestStore.shared.shelf.filter { !model.owns($0, movies: movies, shows: shows) }.prefix(20))
+        if !items.isEmpty {
+            DSSection(title: "可请求添加", metrics: metrics) {
+                DSShelf(metrics: metrics) {
+                    ForEach(items, id: \.uid) { it in CatalogPosterLink(item: it, metrics: metrics, slot: "home-request") }
+                }
+            }
+        }
+    }
+}
+
+/// 搜索：片库之外，影片库索引里对得上的（「可请求添加」）。showEmpty：片库里一部都没搜到时，这里也没有就说「没有找到」
+struct RequestableSearchSection: View {
+    @Environment(AppModel.self) private var model
+    let query: String
+    let metrics: DSMetrics
+    var showEmpty = false
+    /// nil = 还在查
+    @State private var items: [CatalogItem]?
+
+    var body: some View {
+        content
+            .task(id: query) {
+                items = nil
+                guard !DemoData.enabled else { items = []; return }
+                try? await Task.sleep(for: .milliseconds(450))     // 打字时不每个字都去问
+                guard !Task.isCancelled else { return }
+                let r = try? await RequestAPI.catalog(src: "all", query: query)
+                guard !Task.isCancelled else { return }
+                items = r ?? []
+                for i in r ?? [] { if let s = i.req { RequestStore.shared.merge(s) } }
+            }
+    }
+
+    @ViewBuilder private var content: some View {
+        let movies = model.ownedMovieIDs, shows = model.ownedSeasons
+        let list = (items ?? []).filter { !model.owns($0, movies: movies, shows: shows) }
+        if !list.isEmpty {
+            DSSection(title: "可请求添加", metrics: metrics) {
+                DSShelf(metrics: metrics) {
+                    ForEach(list.prefix(24), id: \.uid) { it in CatalogPosterLink(item: it, metrics: metrics, slot: "search-request") }
+                }
+            }
+        } else if showEmpty && items != nil {
+            ContentUnavailableView {
+                Label("没有找到“\(query)”", systemImage: "magnifyingglass")
+            } description: {
+                Text("请尝试其他片名或年份。")
+            } actions: {
+                NavigationLink(value: Route.shelf(.all)) {
+                    Text("浏览所有影片")
+                }
+                .accessibilityIdentifier("search-browse-all")
+            }
+            .padding(.top, 60)
+        } else if showEmpty {
+            ProgressView().frame(maxWidth: .infinity, minHeight: 240)
+        } else {
+            Color.clear.frame(height: 0)
+        }
+    }
+}
+
+// MARK: - 截图用：演示数据里推进一部「可请求添加」的剧集详情页（-CuvenRequestPreview YES）
+
+#if DEBUG
+@MainActor
+enum RequestPreview {
+    static func presentIfRequested(_ model: AppModel) {
+        guard DemoData.enabled, UserDefaults.standard.bool(forKey: "CuvenRequestPreview") else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1500))
+            model.openRequest = .catalog(CatalogTitle(kind: .tv, id: 1399, title: "长夜将明", year: "2025", poster: "demo://poster/12"))
+        }
+    }
+}
+#endif
