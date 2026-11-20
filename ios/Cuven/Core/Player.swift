@@ -134,6 +134,10 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     private var originRefresh: Task<TrackPrefs.Origin?, Never>?
     /// 这一集按首选项挑好的字幕和音轨（「可以播了」「开播了」时拿它对一遍，被系统的自动选择改掉了就改回来）
     private var trackPicks: TrackPrefs.Picks?
+    /// 这一集的片源走的是 Cuven Pass Pro 的加速节点
+    private var sourceViaPass = false
+    /// 这一集已经从加速节点改走过普通线路（只改一次）
+    private var passFallbackTried = false
 
     func play(_ req: PlayRequest, model: AppModel) {
         self.model = model
@@ -164,6 +168,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         lastWaitReason = nil
         loadToken += 1
         let token = loadToken
+        passFallbackTried = false
         audioOrigin = nil
         originRefresh = nil
         if TrackPrefs.audio == .natural, let model {
@@ -265,13 +270,18 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
 
     /// 片源：后端给了 HLS（MKV 实时重封装）就走 HLS —— 先看 info.json：能放才放，4xx 带着原因报错；
     /// 其余走直链（MP4 / MOV 带 safari=1）
-    private func resolve(_ req: PlayRequest) async throws -> URL {
+    /// direct：不走 Cuven Pass Pro（加速节点出错后改走普通线路）
+    private func resolve(_ req: PlayRequest, direct: Bool = false) async throws -> URL {
         let t0 = Date()
         let sign = try? await APIClient.shared.streamSign(path: req.path)
-        plog("sign \(sign == nil ? "failed" : "ok") in \(Perf.ms(since: t0)) ms")
+        // Cuven Pass Pro：影片走加速节点（开着、节点能用时）；签名、资料照旧直连 Worker
+        let route: (base: String, viaPass: Bool)
+        if direct { route = (APIClient.base, false) } else { route = await PassPro.shared.mediaBase() }
+        sourceViaPass = route.viaPass
+        plog("sign \(sign == nil ? "failed" : "ok") in \(Perf.ms(since: t0)) ms\(route.viaPass ? ", via pass pro" : "")")
         PlayerLoadingOverlay.shared.stage(.source)
         let isMKV = req.name.lowercased().hasSuffix(".mkv")
-        if let hls = sign?.hls, !hls.isEmpty, let master = URL(string: APIClient.base + hls) {
+        if let hls = sign?.hls, !hls.isEmpty, let master = URL(string: route.base + hls) {
             let info = master.deletingLastPathComponent().appendingPathComponent("info.json")
             let t1 = Date()
             let (status, body) = await APIClient.shared.hlsInfo(info)
@@ -288,7 +298,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         }
         if isMKV { throw PlayError.unsupported("服务器没有为这个 MKV 提供 HLS，iPhone 无法直接播放 MKV") }
         plog("source direct")
-        return APIClient.shared.streamURL(path: req.path, name: req.name, sign: sign)
+        return APIClient.shared.streamURL(path: req.path, name: req.name, sign: sign, base: route.base)
     }
 
     /// 这部片有弱网预先缓存（详情页「预先画面质量处理」）：从本机代理放——下好的从本机出、没有的边取边存，并接着往后缓存
@@ -477,6 +487,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             let under = ((item.error as NSError?)?.userInfo[NSUnderlyingErrorKey] as? NSError).map { " ← \($0.domain) \($0.code)" } ?? ""
             let last = item.errorLog()?.events.last.map { " · log \($0.errorDomain) \($0.errorStatusCode)" } ?? ""
             plog("failed: \(code)\(under)\(last)", error: true)
+            if fallBackFromPass("failed") { return }
             closeThenAlert("播放失败", PlayerErrorText.message(item.error) ?? msg)
         default:
             break
@@ -486,8 +497,31 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     /// 播到一半断了（网络断、片源出错）：关掉播放器，说一声
     private func interrupted(_ err: NSError?) {
         plog("interrupted: \(err.map { "\($0.domain) \($0.code)" } ?? "-")", error: true)
+        if fallBackFromPass("interrupted") { return }
         saveProgress()
         closeThenAlert("播放中断", PlayerErrorText.message(err) ?? "播放进度已保存，稍后可以继续观看。")
+    }
+
+    /// Cuven Pass Pro 的加速节点出错（起播失败、播到一半断了）：节点 10 分钟内不再用，这一集从当前位置改走普通线路接着放。
+    /// 每集只改一次；改了以后还出错，照常报错
+    private func fallBackFromPass(_ why: String) -> Bool {
+        guard sourceViaPass, !passFallbackTried, let req = current else { return false }
+        passFallbackTried = true
+        PassPro.shared.markDown()
+        plog("pass pro \(why), switching to the direct route")
+        let token = loadToken
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let url = try await self.resolve(req, direct: true)
+                guard token == self.loadToken, self.controller != nil || self.inPiP else { return }
+                self.show(url, req)          // show 先存下当前进度，新片源从这里接着放
+            } catch {
+                guard token == self.loadToken else { return }
+                self.closeThenAlert("无法播放", (error as? PlayError)?.errorDescription ?? PlayerErrorText.message(error) ?? FriendlyError.message(error))
+            }
+        }
+        return true
     }
 
     private func saveProgress() {

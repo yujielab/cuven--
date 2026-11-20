@@ -107,6 +107,8 @@ final class NetworkAuto {
     }
 
     var enabled: Bool { NetworkSpeed.isAuto }
+    /// 现在是不是按流量计费的网络（蜂窝、个人热点）：测速别下太多（Cuven Pass Pro 的测速对比也看它）
+    var metered: Bool { path?.metered ?? false }
 
     /// 启动时调一次：开始看网络变化
     func start() {
@@ -243,17 +245,18 @@ enum NetworkProbe {
 
     /// 延迟（三次空请求取最快的：第一次常带着建连接、握手）+ 下载速度（256 KB 起、每级 ×4，最多 maxBytes；
     /// 哪一级花了 2 秒以上就够准了，不再加大）。探针不通：两样都是 nil
-    static func run(maxBytes: Int) async -> (mbps: Double?, rttMs: Double?) {
+    /// base：打哪个入口（默认 Worker 直连；Cuven Pass Pro 的测速对比也打加速节点，节点把探针转给 Worker）
+    static func run(maxBytes: Int, base entry: String = APIClient.base) async -> (mbps: Double?, rttMs: Double?) {
         var rtt: Double?
         for _ in 0..<3 {
-            guard case .ok(let s, _) = await fetch(0) else { return (nil, nil) }
+            guard case .ok(let s, _) = await fetch(0, base: entry) else { return (nil, nil) }
             rtt = min(rtt ?? s, s)
         }
         let base = rtt ?? 0
         var mbps: Double?
         var size = 256 << 10
         while !Task.isCancelled {
-            switch await fetch(size) {
+            switch await fetch(size, base: entry) {
             case .ok(let s, let n) where n == size:
                 // 扣掉一来一回的延迟才是传输的时间（扣多了也至少算一半）
                 mbps = Double(n) * 8 / max(s - base, s * 0.5) / 1_000_000
@@ -270,8 +273,8 @@ enum NetworkProbe {
         return (mbps, base * 1000)
     }
 
-    private static func fetch(_ bytes: Int) async -> Outcome {
-        let url = APIClient.shared.url("/api/edge/ping", [("b", String(bytes))])
+    private static func fetch(_ bytes: Int, base: String) async -> Outcome {
+        guard let url = URL(string: base + "/api/edge/ping?b=\(bytes)") else { return .failed }
         let req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)
         let clock = ContinuousClock()
         let t0 = clock.now
