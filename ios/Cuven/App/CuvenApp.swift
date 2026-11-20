@@ -174,7 +174,14 @@ struct RootView: View {
         // 头像预先存在本机（用户要求）：一启动、一登录就在后台拉好存上，回到前台再看一眼有没有换（同一张 10 分钟内不重拉）
         .task(id: account.session?.username) { await account.refreshAvatar() }
         // 请求添加的进度：登录了就开始轮询（换账户、退出登录时换掉）
-        .task(id: account.session?.username) { RequestStore.shared.start(user: account.session?.username) }
+        .task(id: account.session?.username) {
+            // 有请求刚发行：刷新片库，详情页的「立即播放」马上找得到这部
+            RequestStore.shared.onReleased = { [model] in
+                await model.refreshLibrary()
+                await model.refreshSeries()
+            }
+            RequestStore.shared.start(user: account.session?.username)
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task { @MainActor in await account.refreshAvatar() }

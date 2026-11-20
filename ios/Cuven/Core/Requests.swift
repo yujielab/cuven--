@@ -292,6 +292,9 @@ final class RequestStore {
     @ObservationIgnored private var refreshing = false
     /// 连着问失败几次（没网、服务器出错）：轮询按 2 的倍数放慢，最慢 10 分钟一次
     @ObservationIgnored private var failures = 0
+    /// 有请求刚发行：片库里多了这部，让 App 刷新片库（RootView 接上 AppModel）。同一时间只刷一次
+    @ObservationIgnored var onReleased: (() async -> Void)?
+    @ObservationIgnored private var releaseRefresh: Task<Void, Never>?
     /// 上次看到的每一条是什么状态（id → "stage|state"）：变了才发通知；存在本机，App 重开后照样比得出来
     @ObservationIgnored private var seen: [Int: String]
     private static let seenKey = "cuven_requests_seen"
@@ -387,10 +390,20 @@ final class RequestStore {
         let name = s.title.isEmpty ? "这部影片" : "《\(s.title)》" + (s.season > 0 ? "第 \(s.season) 季" : "")
         if s.state == .done {
             RequestNotice.post(id: s.id, body: "\(name)已就绪，现在可以观看了。")
+            refreshLibraryAfterRelease()
         } else if s.state == .failed {
             RequestNotice.post(id: s.id, body: "\(name)暂时无法添加，请稍后再试。")
         } else if s.stage == "release" && !before.hasPrefix("release|") {
             RequestNotice.post(id: s.id, body: "\(name)已进入最终发行审批，就绪后会再提醒您。")
+        }
+    }
+
+    /// 刚发行的那部要能马上「立即播放」：刷新一次片库（几条同时发行也只刷一次）
+    private func refreshLibraryAfterRelease() {
+        guard releaseRefresh == nil, let hook = onReleased else { return }
+        releaseRefresh = Task { [weak self] in
+            await hook()
+            self?.releaseRefresh = nil
         }
     }
 
@@ -413,9 +426,14 @@ final class RequestStore {
         merge(s)
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(1600))
-            var next = RequestStatus(id: s.id, title: t, season: season, step: 3, pct: 40, note: "整理并核对整季")
+            var next = RequestStatus(id: s.id, title: t, season: season, step: 3, pct: 40, note: "")
             next.stage = "check"
             merge(next)
+            /* 再过一会儿走完（截图：卡停在 100%，再收回成「立即播放」） */
+            try? await Task.sleep(for: .milliseconds(3000))
+            var done = RequestStatus(id: s.id, title: t, season: season, step: 5, pct: 100, note: "", state: .done)
+            done.stage = "done"
+            merge(done)
         }
         return s
     }
@@ -478,7 +496,7 @@ extension AppModel {
     var ownedSeasons: [Int: Set<Int>] {
         var out: [Int: Set<Int>] = [:]
         for s in series {
-            guard let id = seriesMetas[s.path]?.id else { continue }
+            guard let id = s.tmdbId ?? seriesMetas[s.path]?.id else { continue }
             out[id, default: []].insert(s.season ?? 1)
         }
         return out
