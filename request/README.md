@@ -75,6 +75,7 @@ PikPak 密码用 ADMIN_KEY 派生的密钥（AES-GCM）加密后存进 D1。换�
 ### Cloudflare 面板
 
 1. **建 D1**：存储和数据库 → D1 → 创建，名字叫 `cuven-request`。表不用手动建，Worker 第一次运行时会自己建。
+   表名都带 `tj_` 前缀（`tj_req` / `tj_kv` / `tj_log`），和别的 Worker 共用一个库也不会撞名（1.0 用的是 `req` / `kv` / `log`，库里原来就有一张 `kv` 时会报 `no such column: exp`，1.1 修了）。
 2. **建 Worker**：Workers 和 Pages → 创建 → Hello World，名字叫 `cuven-request`。把 `worker.js` 的全部内容粘进去，然后部署。
 3. **设置 → 绑定**：添加 D1 数据库，变量名填 `DB`，选第 1 步建的库。
 4. **设置 → 变量和机密**，三个都选「密钥」：

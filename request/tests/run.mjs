@@ -171,6 +171,13 @@ globalThis.fetch = async (url, init = {}) => {
 };
 
 const env = { DB: new D1(), ADMIN_KEY: 'admin-secret', LB_GATE: 'gate', LINK_KEY: 'link' };
+/* 用户实测：D1 库是共用的，里面原来就有别人的 kv（没有 exp 列）、log（列也不一样）——
+   v1.0 的 CREATE TABLE IF NOT EXISTS 跳过它们，一查就是 no such column: exp。
+   现在表名带 tj_ 前缀，别人的表一点不碰；tj_kv 万一是缺列的老样子，自己补上 */
+env.DB.db.exec("CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT)");
+env.DB.db.exec("INSERT INTO kv (k, v) VALUES ('theirs', 'keep me')");
+env.DB.db.exec("CREATE TABLE log (id INTEGER PRIMARY KEY, line TEXT)");
+env.DB.db.exec("CREATE TABLE tj_kv (k TEXT PRIMARY KEY, v TEXT)");
 const worker = (await import(pathToFileURL(path.join(HERE, '..', 'worker.js')).href)).default;
 const call = async (method, p, { body, user, admin } = {}) => {
   const h = { 'content-type': 'application/json' };
@@ -191,7 +198,7 @@ const one = async (id) => (await call('GET', '/admin/api/state', { admin: true }
   ok(s1 === 401, '面板：错口令 401');
   const [s2, st] = await call('POST', '/admin/api/cfg', { admin: true, body: { pkUser: 'pk@x.com', pkPass: 'pkpass', grp: 'Cuven®' } });
   ok(s2 === 200 && st.cfg.pkSet && st.cfg.pkUser === 'pk***@x.com', '面板：保存 PikPak 账号（只回打码的）', st.cfg);
-  const raw = env.DB.db.prepare("SELECT v FROM kv WHERE k = 'cfg'").get().v;
+  const raw = env.DB.db.prepare("SELECT v FROM tj_kv WHERE k = 'cfg'").get().v;
   ok(!raw.includes('pkpass') && raw.includes('pkPassEnc'), 'D1 里的 PikPak 密码是加密的');
   const [, pk] = await call('POST', '/admin/api/pk', { admin: true, body: {} });
   ok(pk.ok === 1 && pk.auto && pk.auto.same === 1, '面板：测试 PikPak 登录 + /auto 对得上', pk);
@@ -360,7 +367,7 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   const [, a] = await call('POST', '/app/requests', { user: 'bob', body: { src: 'movie', id: 800 } });
   const id800 = a.request.id;
   /* 只推进这一条：把别的往后推 */
-  env.DB.db.prepare('UPDATE req SET next = ? WHERE id != ?').run(Date.now() + 86400000 * 9, id800);
+  env.DB.db.prepare('UPDATE tj_req SET next = ? WHERE id != ?').run(Date.now() + 86400000 * 9, id800);
   await tick();
   const t = [...W.tasks.values()].find(x => x.file_name.includes('1080p.BluRay'));
   W.tasks.get(t.id).phase = 'PHASE_TYPE_ERROR';
@@ -377,13 +384,23 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
 /* ── PikPak 没配账号：下载那一步停下来等，不报错不换规格 ── */
 {
   await call('POST', '/admin/api/cfg', { admin: true, body: { pkClear: true } });
-  env.DB.db.prepare("UPDATE req SET next = 0 WHERE stage = 'download'").run();
+  env.DB.db.prepare("UPDATE tj_req SET next = 0 WHERE stage = 'download'").run();
   const before = W.push.length;
   await tick(); await tick();          // 这一轮刚推送进 download 的，下一轮才走到要 PikPak 的那一步
   const st = (await call('GET', '/admin/api/state', { admin: true }))[1];
   const dl = st.reqs.filter(r => r.stage === 'download');
   ok(dl.length && dl.every(r => /PikPak 账号/.test(r.note)) && W.push.length >= before, '没配 PikPak：等，不换规格', dl.map(r => r.note));
   ok(!st.cfg.pkSet, '清掉了 PikPak 账号');
+}
+
+/* ── 共用的 D1：别人的表原样不动，自己的表缺的列补上了 ── */
+{
+  const theirs = env.DB.db.prepare("SELECT v FROM kv WHERE k = 'theirs'").get();
+  const kvCols = env.DB.db.prepare('PRAGMA table_info(kv)').all().map(c => c.name);
+  const logCols = env.DB.db.prepare('PRAGMA table_info(log)').all().map(c => c.name);
+  ok(theirs && theirs.v === 'keep me' && kvCols.join() === 'k,v' && logCols.join() === 'id,line', '共用的 D1：别人的 kv / log 表一点没动', { kvCols, logCols });
+  const tjCols = env.DB.db.prepare('PRAGMA table_info(tj_kv)').all().map(c => c.name);
+  ok(tjCols.includes('exp'), '缺 exp 列的 tj_kv 自己补上了', tjCols);
 }
 
 console.log(`\n请求添加 Worker：${pass} 项通过，${failN} 项失败`);

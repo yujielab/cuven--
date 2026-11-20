@@ -1,5 +1,8 @@
 /**
- * Cuven 请求添加 Worker（tj.cuven.us）v1.0
+ * Cuven 请求添加 Worker（tj.cuven.us）v1.1
+ *
+ * v1.1：D1 的表名都带 tj_ 前缀（tj_req / tj_kv / tj_log）。库和别的 Worker 共用、里面已经有叫 kv 的表时，
+ *       v1.0 报 no such column: exp。建表后再对一遍列，缺的补上。
  *
  * App 里点「请求添加」→ 这里排队 → 每分钟的定时任务一步一步往前推：
  *
@@ -20,7 +23,7 @@
  * App 轮询 /app/requests 显示进度（STEP X OF 5、百分比），状态一变就发本地通知。
  *
  * 绑定 / 变量（Cloudflare 面板 → Worker → 设置）：
- *   DB             D1 数据库（表自己建，不用跑迁移）
+ *   DB             D1 数据库（表自己建，不用跑迁移；表名带 tj_ 前缀，可以和别的 Worker 共用一个库）
  *   ADMIN_KEY      控制面板口令（密钥）。PikPak 密码用它派生的密钥加密后存进 D1，换口令要重新填一次 PikPak 密码
  *   LB_GATE        影片库 Worker 的 GATE 口令（密钥）
  *   LINK_KEY       传输 Worker 的 LINK_KEY（密钥）
@@ -44,7 +47,7 @@
  * 控制面板接口（x-admin-key: ADMIN_KEY）：/admin/api/state · cfg · pk · links · req · add · tick
  */
 
-const VER = 'tj 1.0';
+const VER = 'tj 1.1';
 const MIN = 60000, HOUR = 3600000, DAY = 86400000;
 const LIMIT = {
   userActive: 5,          // 一个用户同时进行中的请求
@@ -83,44 +86,68 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 /* ══════════════════════════════════════════════════════════════════
    D1
    ══════════════════════════════════════════════════════════════════ */
+/* 表名都带 tj_ 前缀：D1 库可能和别的 Worker 共用，里面已经有 kv / log / req 这种常见名字的表
+   （用户实测：库里原来就有一张没有 exp 列的 kv，CREATE TABLE IF NOT EXISTS 跳过了它，查询报 no such column: exp）。
+   建表之后再对一遍列：缺的列补上（以后加列也走这里），不碰别人的表。 */
 const SCHEMA = [
-  `CREATE TABLE IF NOT EXISTS req (
+  `CREATE TABLE IF NOT EXISTS tj_req (
      id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL, tmdb INTEGER NOT NULL, season INTEGER NOT NULL DEFAULT 0,
      title TEXT, year TEXT, poster TEXT, users TEXT NOT NULL DEFAULT '[]', stage TEXT NOT NULL, pct REAL NOT NULL DEFAULT 0,
      note TEXT, data TEXT NOT NULL DEFAULT '{}', created INTEGER, updated INTEGER, since INTEGER,
      next INTEGER NOT NULL DEFAULT 0, rev INTEGER NOT NULL DEFAULT 0)`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS req_live ON req(src, tmdb, season) WHERE stage NOT IN ('done','failed','cancelled')`,
-  `CREATE INDEX IF NOT EXISTS req_next ON req(next)`,
-  `CREATE INDEX IF NOT EXISTS req_tmdb ON req(tmdb)`,
-  `CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT, exp INTEGER NOT NULL DEFAULT 0)`,
-  `CREATE TABLE IF NOT EXISTS log (id INTEGER PRIMARY KEY AUTOINCREMENT, rid INTEGER, at INTEGER, msg TEXT)`,
+  `CREATE TABLE IF NOT EXISTS tj_kv (k TEXT PRIMARY KEY, v TEXT, exp INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS tj_log (id INTEGER PRIMARY KEY AUTOINCREMENT, rid INTEGER, at INTEGER, msg TEXT)`,
+];
+/** 每张表应该有的列（补列用：ALTER TABLE ADD COLUMN 加不了主键，主键列只能建表时有） */
+const COLUMNS = {
+  tj_req: [['src', "TEXT NOT NULL DEFAULT ''"], ['tmdb', 'INTEGER NOT NULL DEFAULT 0'], ['season', 'INTEGER NOT NULL DEFAULT 0'],
+           ['title', 'TEXT'], ['year', 'TEXT'], ['poster', 'TEXT'], ['users', "TEXT NOT NULL DEFAULT '[]'"],
+           ['stage', "TEXT NOT NULL DEFAULT 'queued'"], ['pct', 'REAL NOT NULL DEFAULT 0'], ['note', 'TEXT'],
+           ['data', "TEXT NOT NULL DEFAULT '{}'"], ['created', 'INTEGER'], ['updated', 'INTEGER'], ['since', 'INTEGER'],
+           ['next', 'INTEGER NOT NULL DEFAULT 0'], ['rev', 'INTEGER NOT NULL DEFAULT 0']],
+  tj_kv: [['v', 'TEXT'], ['exp', 'INTEGER NOT NULL DEFAULT 0']],
+  tj_log: [['rid', 'INTEGER'], ['at', 'INTEGER'], ['msg', 'TEXT']],
+};
+const INDEXES = [
+  `CREATE UNIQUE INDEX IF NOT EXISTS tj_req_live ON tj_req(src, tmdb, season) WHERE stage NOT IN ('done','failed','cancelled')`,
+  `CREATE INDEX IF NOT EXISTS tj_req_next ON tj_req(next)`,
+  `CREATE INDEX IF NOT EXISTS tj_req_tmdb ON tj_req(tmdb)`,
 ];
 let SCHEMA_OK = false;
 async function db(env){
   if (!env.DB) throw err('没绑 D1：Worker 设置 → 绑定 → D1 数据库，变量名 DB', { conf: 1 });
-  if (!SCHEMA_OK){ await env.DB.batch(SCHEMA.map(s => env.DB.prepare(s))); SCHEMA_OK = true; }
+  if (SCHEMA_OK) return env.DB;
+  await env.DB.batch(SCHEMA.map(s => env.DB.prepare(s)));
+  const add = [];
+  for (const [table, cols] of Object.entries(COLUMNS)){
+    const have = new Set(((await env.DB.prepare('PRAGMA table_info(' + table + ')').all()).results || []).map(c => c.name));
+    for (const [name, type] of cols) if (!have.has(name)) add.push('ALTER TABLE ' + table + ' ADD COLUMN ' + name + ' ' + type);
+  }
+  if (add.length) await env.DB.batch(add.map(s => env.DB.prepare(s)));
+  await env.DB.batch(INDEXES.map(s => env.DB.prepare(s)));
+  SCHEMA_OK = true;
   return env.DB;
 }
 async function kvGet(env, k){
-  const r = await (await db(env)).prepare('SELECT v, exp FROM kv WHERE k = ?').bind(k).first();
+  const r = await (await db(env)).prepare('SELECT v, exp FROM tj_kv WHERE k = ?').bind(k).first();
   if (!r || (r.exp && r.exp < now())) return null;
   try { return JSON.parse(r.v); } catch { return null; }
 }
 async function kvPut(env, k, v, ttl){
-  await (await db(env)).prepare('INSERT INTO kv (k, v, exp) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, exp = excluded.exp')
+  await (await db(env)).prepare('INSERT INTO tj_kv (k, v, exp) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, exp = excluded.exp')
     .bind(k, JSON.stringify(v), ttl ? now() + ttl : 0).run();
 }
-async function kvDel(env, k){ await (await db(env)).prepare('DELETE FROM kv WHERE k = ?').bind(k).run(); }
+async function kvDel(env, k){ await (await db(env)).prepare('DELETE FROM tj_kv WHERE k = ?').bind(k).run(); }
 /** 一轮只跑一个：定时任务和面板上的「立即跑一轮」撞上时后来的直接走 */
 async function lease(env, k, ms){
   const t = now();
   const r = await (await db(env)).prepare(
-    'INSERT INTO kv (k, v, exp) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, exp = excluded.exp WHERE kv.exp < ?')
+    'INSERT INTO tj_kv (k, v, exp) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, exp = excluded.exp WHERE tj_kv.exp < ?')
     .bind(k, '1', t + ms, t).run();
   return !!(r.meta && r.meta.changes);
 }
 async function logMsg(env, rid, msg){
-  try { await (await db(env)).prepare('INSERT INTO log (rid, at, msg) VALUES (?, ?, ?)').bind(rid || 0, now(), String(msg).slice(0, 500)).run(); } catch {}
+  try { await (await db(env)).prepare('INSERT INTO tj_log (rid, at, msg) VALUES (?, ?, ?)').bind(rid || 0, now(), String(msg).slice(0, 500)).run(); } catch {}
 }
 
 function rowOf(x){
@@ -131,13 +158,13 @@ function rowOf(x){
   return { ...x, d, users };
 }
 async function getReq(env, id){
-  return rowOf(await (await db(env)).prepare('SELECT * FROM req WHERE id = ?').bind(id).first());
+  return rowOf(await (await db(env)).prepare('SELECT * FROM tj_req WHERE id = ?').bind(id).first());
 }
 /** 存一条：rev 对得上才写（面板上刚取消 / 重试过的，这一轮推进的结果作废） */
 async function saveReq(env, r){
   const t = now();
   const res = await (await db(env)).prepare(
-    `UPDATE req SET title = ?, year = ?, poster = ?, users = ?, stage = ?, pct = ?, note = ?, data = ?, updated = ?, since = ?,
+    `UPDATE tj_req SET title = ?, year = ?, poster = ?, users = ?, stage = ?, pct = ?, note = ?, data = ?, updated = ?, since = ?,
        next = ?, rev = rev + 1 WHERE id = ? AND rev = ?`)
     .bind(r.title || '', r.year || '', r.poster || '', JSON.stringify(r.users || []), r.stage, +r.pct || 0, r.note || '',
           JSON.stringify(r.d || {}), t, r.since || t, r.next || 0, r.id, r.rev).run();
@@ -758,7 +785,7 @@ async function tick(env, opt = {}){
   const out = { done: 0, steps: [] };
   if (cfg.paused && !opt.force) return { paused: 1 };
   const d = await db(env);
-  const rows = (await d.prepare(`SELECT * FROM req WHERE stage IN (${ACTIVE.map(() => '?').join(',')}) AND next <= ? ORDER BY next ASC LIMIT ?`)
+  const rows = (await d.prepare(`SELECT * FROM tj_req WHERE stage IN (${ACTIVE.map(() => '?').join(',')}) AND next <= ? ORDER BY next ASC LIMIT ?`)
     .bind(...ACTIVE, t, LIMIT.perTick).all()).results || [];
   for (const x of rows){
     if (now() - c.t0 > LIMIT.tickMs || c.n >= c.max - 3) break;
@@ -770,7 +797,7 @@ async function tick(env, opt = {}){
     out.done++;
     if (r.stage !== from) await logMsg(env, r.id, STAGE_TEXT[from] + ' → ' + STAGE_TEXT[r.stage]);
   }
-  if (Math.random() < 0.03) await d.prepare('DELETE FROM log WHERE id < (SELECT MAX(id) - 4000 FROM log)').run().catch(() => {});
+  if (Math.random() < 0.03) await d.prepare('DELETE FROM tj_log WHERE id < (SELECT MAX(id) - 4000 FROM tj_log)').run().catch(() => {});
   out.fetches = c.n; out.ms = now() - c.t0;
   return out;
 }
@@ -805,7 +832,7 @@ function view(r){
 async function latestFor(env, src, ids){
   ids = [...new Set(ids.map(Number).filter(n => n > 0))].slice(0, 90);     // D1 一条语句最多绑 100 个参数
   if (!ids.length) return new Map();
-  const res = await (await db(env)).prepare(`SELECT * FROM req WHERE src = ? AND tmdb IN (${ids.map(() => '?').join(',')}) ORDER BY id DESC`)
+  const res = await (await db(env)).prepare(`SELECT * FROM tj_req WHERE src = ? AND tmdb IN (${ids.map(() => '?').join(',')}) ORDER BY id DESC`)
     .bind(src, ...ids).all();
   const m = new Map();
   for (const x of res.results || []){
@@ -850,28 +877,28 @@ async function createReq(env, user, body, admin){
   const cfg = await loadCfg(env);
   const t = now();
   /* 同一部 / 同一季已经在进行中：跟上 */
-  const live = rowOf(await d.prepare(`SELECT * FROM req WHERE src = ? AND tmdb = ? AND season = ? AND stage NOT IN ('done','failed','cancelled')`)
+  const live = rowOf(await d.prepare(`SELECT * FROM tj_req WHERE src = ? AND tmdb = ? AND season = ? AND stage NOT IN ('done','failed','cancelled')`)
     .bind(src, id, season).first());
   if (live){
     if (!live.users.includes(user)){
-      await d.prepare('UPDATE req SET users = ?, rev = rev + 1, updated = ? WHERE id = ?').bind(JSON.stringify([...live.users, user].slice(-50)), t, live.id).run();
+      await d.prepare('UPDATE tj_req SET users = ?, rev = rev + 1, updated = ? WHERE id = ?').bind(JSON.stringify([...live.users, user].slice(-50)), t, live.id).run();
       live.users.push(user);
     }
     return json({ request: view(live), joined: 1 });
   }
   /* 刚失败过：一天之内用户不能重开（面板上随时能重试） */
   if (!admin){
-    const last = rowOf(await d.prepare(`SELECT * FROM req WHERE src = ? AND tmdb = ? AND season = ? AND stage = 'failed' ORDER BY id DESC LIMIT 1`)
+    const last = rowOf(await d.prepare(`SELECT * FROM tj_req WHERE src = ? AND tmdb = ? AND season = ? AND stage = 'failed' ORDER BY id DESC LIMIT 1`)
       .bind(src, id, season).first());
     if (last && t - (last.updated || 0) < LIMIT.refail){
       if (!last.users.includes(user))
-        await d.prepare('UPDATE req SET users = ? WHERE id = ?').bind(JSON.stringify([...last.users, user].slice(-50)), last.id).run();
+        await d.prepare('UPDATE tj_req SET users = ? WHERE id = ?').bind(JSON.stringify([...last.users, user].slice(-50)), last.id).run();
       return json({ request: view(last), failedRecently: 1 });
     }
-    const mine = await d.prepare(`SELECT COUNT(*) AS n FROM req WHERE stage NOT IN ('done','failed','cancelled','release')
-      AND EXISTS (SELECT 1 FROM json_each(req.users) WHERE value = ?)`).bind(user).first();
+    const mine = await d.prepare(`SELECT COUNT(*) AS n FROM tj_req WHERE stage NOT IN ('done','failed','cancelled','release')
+      AND EXISTS (SELECT 1 FROM json_each(tj_req.users) WHERE value = ?)`).bind(user).first();
     if ((mine && mine.n) >= cfg.userCap) return json({ error: '你同时进行中的请求已经有 ' + cfg.userCap + ' 个了，等它们传完再来', cap: 'user' }, 429);
-    const all = await d.prepare(`SELECT COUNT(*) AS n FROM req WHERE stage NOT IN ('done','failed','cancelled','release')`).first();
+    const all = await d.prepare(`SELECT COUNT(*) AS n FROM tj_req WHERE stage NOT IN ('done','failed','cancelled','release')`).first();
     if ((all && all.n) >= cfg.globalCap) return json({ error: '现在排队的请求太多了，稍后再来', cap: 'global' }, 429);
   }
   /* 先问一遍影片库：有资源才收下（顺便拿到片名和海报） */
@@ -886,7 +913,7 @@ async function createReq(env, user, body, admin){
   const data = { vers: v.items.map(x => ({ tid: x.tid, t: String(x.title || '').slice(0, 200), mb: x.mb || 0, size: x.size || '',
                    res: x.res || '', labels: (x.labels || []).slice(0, 6), total: x.total || 0 })), versAt: t, tried: [] };
   try {
-    const res = await d.prepare(`INSERT INTO req (src, tmdb, season, title, year, poster, users, stage, pct, note, data, created, updated, since, next)
+    const res = await d.prepare(`INSERT INTO tj_req (src, tmdb, season, title, year, poster, users, stage, pct, note, data, created, updated, since, next)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?)`)
       .bind(src, id, season, v.title || '', String(v.year || ''), v.poster || '', JSON.stringify([user]), STAGE_TEXT.queued,
             JSON.stringify(data), t, t, t, t).run();
@@ -895,7 +922,7 @@ async function createReq(env, user, body, admin){
     return json({ request: view(r), created: 1 });
   } catch (e){
     /* 两个人同时点：唯一索引挡住了后来的，跟上先来的那条 */
-    const again = rowOf(await d.prepare(`SELECT * FROM req WHERE src = ? AND tmdb = ? AND season = ? AND stage NOT IN ('done','failed','cancelled')`)
+    const again = rowOf(await d.prepare(`SELECT * FROM tj_req WHERE src = ? AND tmdb = ? AND season = ? AND stage NOT IN ('done','failed','cancelled')`)
       .bind(src, id, season).first());
     if (again) return json({ request: view(again), joined: 1 });
     throw e;
@@ -957,7 +984,7 @@ async function appDetail(env, Q){
 }
 async function appRequests(env, user){
   const t = now();
-  const res = await (await db(env)).prepare(`SELECT * FROM req WHERE EXISTS (SELECT 1 FROM json_each(req.users) WHERE value = ?)
+  const res = await (await db(env)).prepare(`SELECT * FROM tj_req WHERE EXISTS (SELECT 1 FROM json_each(tj_req.users) WHERE value = ?)
       AND (stage NOT IN ('done','failed','cancelled') OR updated > ?) ORDER BY id DESC LIMIT 60`).bind(user, t - 30 * DAY).all();
   return json({ items: (res.results || []).map(x => view(rowOf(x))), at: t });
 }
@@ -975,10 +1002,10 @@ function safeEq(a, b){
 async function adminState(env){
   const d = await db(env);
   const cfg = await loadCfg(env);
-  const reqs = ((await d.prepare('SELECT * FROM req ORDER BY (stage IN (\'done\',\'failed\',\'cancelled\')), id DESC LIMIT 200').all()).results || [])
+  const reqs = ((await d.prepare('SELECT * FROM tj_req ORDER BY (stage IN (\'done\',\'failed\',\'cancelled\')), id DESC LIMIT 200').all()).results || [])
     .map(x => { const r = rowOf(x); return { ...view(r), users: r.users, item: r.d.item || '', cur: r.d.cur ? r.d.cur.t : '', tried: (r.d.tried || []).length,
       vers: (r.d.vers || []).length, next: r.next || 0, since: r.since || 0, errs: r.d.errs || 0, check: r.d.check || null }; });
-  const logs = ((await d.prepare('SELECT * FROM log ORDER BY id DESC LIMIT 200').all()).results || []);
+  const logs = ((await d.prepare('SELECT * FROM tj_log ORDER BY id DESC LIMIT 200').all()).results || []);
   const tok = await kvGet(env, 'pk:tok');
   return { ver: VER, now: now(),
     cfg: { pkUser: mask(cfg.pkUser), pkSet: !!(cfg.pkUser && cfg.pkPass), tpl: cfg.tpl, lang: cfg.lang, grp: cfg.grp,
@@ -994,7 +1021,7 @@ async function adminReq(env, body){
   const cfg = await loadCfg(env);
   const c = context(env, cfg, 20);
   if (act === 'delete'){
-    await (await db(env)).prepare('DELETE FROM req WHERE id = ?').bind(r.id).run();
+    await (await db(env)).prepare('DELETE FROM tj_req WHERE id = ?').bind(r.id).run();
     await logMsg(env, r.id, '面板：删除');
     return json({ ok: 1 });
   }
@@ -1010,7 +1037,7 @@ async function adminReq(env, body){
     /* 失败 / 取消的：从出事的那一步重来（推送之前的就从头来，试过的规格清零） */
     const from = ENDED.includes(r.stage) ? (r.d.lastStage || 'queued') : r.stage;
     if (r.stage === 'done') return json({ error: '已经发行了' }, 400);
-    const live = await (await db(env)).prepare(`SELECT id FROM req WHERE src = ? AND tmdb = ? AND season = ? AND id != ? AND stage NOT IN ('done','failed','cancelled')`)
+    const live = await (await db(env)).prepare(`SELECT id FROM tj_req WHERE src = ? AND tmdb = ? AND season = ? AND id != ? AND stage NOT IN ('done','failed','cancelled')`)
       .bind(r.src, r.tmdb, r.season, r.id).first();
     if (live) return json({ error: '同一部 / 同一季已经有一条在进行中（#' + live.id + '）' }, 409);
     if (from === 'queued'){ r.d.tried = []; delete r.d.versAt; }
@@ -1103,7 +1130,7 @@ export default {
         if (op === 'tick') return json(await tick(env, { force: true }));
         if (op === 'log'){
           const rid = parseInt(Q.get('id') || '0', 10) || 0;
-          const rows = (await (await db(env)).prepare('SELECT * FROM log WHERE rid = ? ORDER BY id DESC LIMIT 200').bind(rid).all()).results || [];
+          const rows = (await (await db(env)).prepare('SELECT * FROM tj_log WHERE rid = ? ORDER BY id DESC LIMIT 200').bind(rid).all()).results || [];
           return json({ items: rows });
         }
         return json({ error: 'not found' }, 404);
