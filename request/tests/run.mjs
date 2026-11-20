@@ -124,7 +124,13 @@ globalThis.fetch = async (url, init = {}) => {
       case 'job': return J({ error: '', speed: 2097152, ...jobOf(body.jobid) });
       case 'jobs': return J({ jobs: Object.fromEntries(body.ids.map(id => [id, { error: '', speed: 1, ...jobOf(id) }])) });
       case 'stop': (W.stopped = W.stopped || []).push(body.jobid); return J({ ok: 1 });
-      case 'verify': return J({ ok: W.verifyOK ? 1 : 0, src: { count: 1, bytes: 9 }, dst: { count: W.verifyOK ? 1 : 0, bytes: 9 } });
+      case 'verify': {
+        if (W.verifyDown){ W.verifyDown--; return J({ error: '核对时列 Dropbox 那边失败：HTTP 524', side: 'dst' }, 502); }
+        const good = W.verifySeq && W.verifySeq.length ? W.verifySeq.shift() : W.verifyOK;
+        return J(good
+          ? { ok: 1, src: { count: 2, bytes: 9 }, dst: { count: 3, bytes: 10 }, missing: [], missingCount: 0, differ: [], differCount: 0, extra: 1 }
+          : { ok: 0, src: { count: 2, bytes: 9 }, dst: { count: 1, bytes: 4 }, missing: ['E02.mkv'], missingCount: 1, differ: [], differCount: 0, extra: 0 });
+      }
       case 'purge': W.exists.add(body.item); return J({ ok: 1 });
       case 'exists': return Array.isArray(body.items)
         ? J({ exists: Object.fromEntries(body.items.map(n => [n, W.exists.has(n) ? 1 : 0])) })
@@ -333,9 +339,9 @@ let tvId;
   ok(r.stage === 'copy' && r.item === 'Game.of.Thrones.S02.1080p.[Full-4]-Cuven®', '改好名 → 传输', r);
   W.verifyOK = false;
   W.job[88] = { finished: true, success: true, bytes: 1, total: 1 };
-  await tick(); await tick(); await tick();
+  await tick(); await tick(); await tick(); await tick();      // 开传输 → 传完 → 核对不一致 → 再核对还不一致
   r = await one(tvId);
-  ok(r.stage === 'copy' && /不一致/.test(r.note), '两端对不上：重新传，不删 PikPak', r);
+  ok(r.stage === 'copy' && /补传 1 个文件/.test(r.note), '两端对不上：先再核对一次，还对不上才补传缺的那 1 个，不删 PikPak', r);
   ok(!W.tf.some(([op, b]) => op === 'purge' && b.item === r.item), '对不上时没有删除');
   W.verifyOK = true;
   await tick(); await tick(); await tick(); await tick();
@@ -498,6 +504,67 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   await tickShort();
   s = await st();
   ok(of(s, 903).state === 'done', '发行检查：不在 /auto 了就是已发行', of(s, 903));
+}
+
+
+/* ══ 两端核对（用户：「经常触发两端核对不一致，重新传输」）══ */
+{
+  env.DB.db.exec('DELETE FROM tj_req');
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('health', 'tick:last')");
+  W.versions['movie:950'] = [{ tid: 2, title: 'Verify 1080p', mb: 1, labels: [], res: '1080p' }];
+  const id = (await call('POST', '/app/requests', { user: 'alice', body: { src: 'movie', id: 950 } }))[1].request.id;
+  W.job[88] = { finished: true, success: true, bytes: 1, total: 1 };
+  W.copyJobs = [];
+  await tick();                                   // 推送
+  for (const t of [...W.tasks.keys()]) finishTask(t);
+  await tick(); await tick(); await tick();        // 下完 → 清洗 → 开传输
+  const copies = () => W.tf.filter(x => x[0] === 'copy');
+  const nCopy0 = copies().length;
+  await tick();                                   // 传完 → 核对（等 45 秒再核对）
+  let r = await one(id);
+  ok(r.stage === 'verify' && r.next - Date.now() > 30000, '传完先等一会儿再核对（两边列表刷新）', r);
+
+  /* 列目录失败：没核对成，过会儿再核对，不补传、不算补传次数 */
+  W.verifyDown = 1;
+  await tick();
+  r = await one(id);
+  ok(r.stage === 'verify' && copies().length === nCopy0 && /列目录失败|列 Dropbox/.test(r.note), '核对时列目录失败：不当不一致、不补传', r);
+
+  /* 第一次不一致：再核对一次就好了（列表刚刷新）→ 不补传 */
+  W.verifySeq = [false, true];
+  await tick(); r = await one(id);
+  ok(r.stage === 'verify' && /2 分钟后再核对一次/.test(r.note) && copies().length === nCopy0, '第一次不一致：2 分钟后再核对，不马上重传', r);
+  await tick(); r = await one(id);
+  ok(r.stage === 'purge' && copies().length === nCopy0, '再核对一次就一致了：一次都没重传', r);
+  const log = (await call('GET', '/admin/api/log?id=' + id, { admin: true }))[1].items.map(l => l.msg);
+  ok(log.some(m => /两端核对一致：2 个文件.*Dropbox 那边多 1 个，不影响/.test(m)), '日志：一致（Dropbox 多出来的不算）', log.slice(0, 4));
+  ok(log.some(m => /缺 1 个.*E02\.mkv/.test(m)), '日志：写清楚缺了哪个文件', log.filter(m => /不一致/.test(m)));
+}
+{
+  /* 一直不一致：补传缺的（第一次走 WebDAV，第二次起改从 PikPak 原生接口、只按大小），补传 3 次还不行才停下 */
+  env.DB.db.exec('DELETE FROM tj_req');
+  W.versions['movie:951'] = [{ tid: 2, title: 'Verify2 1080p', mb: 1, labels: [], res: '1080p' }];
+  const id = (await call('POST', '/app/requests', { user: 'alice', body: { src: 'movie', id: 951 } }))[1].request.id;
+  await tick();
+  for (const t of [...W.tasks.keys()]) finishTask(t);
+  await tick(); await tick(); await tick(); await tick();     // → verify
+  W.verifySeq = []; W.verifyOK = false;
+  const copyArgs = () => W.tf.filter(x => x[0] === 'copy').map(x => x[1]);
+  const n0 = copyArgs().length, tf0 = W.tf.length;
+  const toCopy = async () => { for (let i = 0; i < 6; i++){ await tick(); if ((await one(id)).stage !== 'verify') break; } };
+  await toCopy();
+  let r = await one(id);
+  ok(r.stage === 'copy' && /补传 1 个文件/.test(r.note), '两次核对都不一致：补传缺的那 1 个', r);
+  await tick();                                                 // 开补传
+  ok(copyArgs().length === n0 + 1 && !copyArgs()[n0].from, '第一次补传还是从 WebDAV', copyArgs()[n0]);
+  await tick(); await toCopy(); await tick();                   // 传完 → 核对两次 → 第二次补传
+  const second = copyArgs()[n0 + 1];
+  ok(second && second.from === 'pikpak' && second.sizeOnly === 1, '第二次补传改从 PikPak 原生接口、只按大小', second);
+  for (let i = 0; i < 12; i++){ await tick(); if ((await one(id)).state === 'failed') break; }
+  r = await one(id);
+  ok(r.state === 'failed' && /补传 3 次后两端还是对不上（缺 1 个）/.test(r.note), '补传 3 次还对不上：停下，原因写清楚', r);
+  ok(!W.tf.slice(tf0).some(([op]) => op === 'purge'), '一直对不上：PikPak 那份没删');
+  W.verifyOK = true;
 }
 
 /* ── 共用的 D1：别人的表原样不动，自己的表缺的列补上了 ── */

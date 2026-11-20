@@ -1,5 +1,11 @@
 /**
- * Cuven 请求添加 Worker（tj.cuven.us）v2.0
+ * Cuven 请求添加 Worker（tj.cuven.us）v2.1
+ *
+ * v2.1：修「经常两端核对不一致、重新传输」
+ *   · 列目录失败 = 没核对成（暂时性错误，过会儿再核对），不再当「不一致」整个重传
+ *   · 传完等 45 秒再核对；第一次不一致隔 2 分钟再核对一次，还不一致才补传
+ *   · 补传只传缺的 / 大小不对的；第二次起改从 PikPak 原生接口拿、只按大小判断；补传 3 次还不行才停下，写清楚缺了哪些
+ *   · 配合传输 Worker 909：逐个文件核对（源头用原生 pikpak 后端，NFC + 不分大小写，系统 / 临时文件不算，Dropbox 多出来的不算）
  *
  * v2.0：核心重做——稳、省、不堵
  *   · 熔断：影片库 / VPS / PikPak / TMDB 各自记健康，连续 3 次暂时性失败就熔断 2→4→8→15 分钟，要用它的请求原地等，
@@ -61,7 +67,7 @@
  * 控制面板接口（x-admin-key: ADMIN_KEY）：/admin/api/state · cfg · pk · links · req · add · tick
  */
 
-const VER = 'tj 2.0';
+const VER = 'tj 2.1';
 const MIN = 60000, HOUR = 3600000, DAY = 86400000;
 const LIMIT = {
   userActive: 5,          // 一个用户同时进行中的请求
@@ -72,7 +78,10 @@ const LIMIT = {
   dlStall: 2 * HOUR,      // 云下载这么久没进度就换规格
   dlMax: 12 * HOUR,       // 云下载最长等多久
   busyMax: 30 * MIN,      // 剧集文件夹里一直有没下完的分段文件
-  copyTries: 3,
+  copyTries: 3,           // 传输作业失败 / 卡住最多重来几次
+  recopyMax: 3,           // 核对不一致最多补传几次
+  verifySettle: 45000,    // 传完等这么久再核对（两边的目录列表刷新一下）
+  verifyRecheck: 2 * MIN, // 第一次核对不一致：隔这么久再核对一次，还不一致才补传
   copyStall: HOUR,        // 传输这么久没有新字节：停掉重开
   renameStall: 30 * MIN,  // 改名这么久没有进展：停掉重来
   lostMax: 5,             // rclone 作业丢了（VPS 重启）最多重开几次
@@ -597,7 +606,7 @@ async function drop(c, r, why){
   if (r.d.file) await pkTrash(c, [r.d.file]).catch(() => {});
   if (r.d.cur && r.d.cur.tid != null) r.d.tried = [...new Set([...(r.d.tried || []), r.d.cur.tid])];
   for (const k of ['cur', 'task', 'file', 'fname', 'fkind', 'item', 'kind', 'job', 'newname', 'pmax', 'pat', 'org', 'check',
-                   'busySince', 'ctries', 'rtries', 'lost', 'cb', 'cbAt', 'rb', 'rbAt', 'wait'])
+                   'busySince', 'ctries', 'rtries', 'lost', 'cb', 'cbAt', 'rb', 'rbAt', 'wait', 'vbad', 'vtries', 'fromPk'])
     delete r.d[k];
   go(r, 'queued', why + '，换下一个规格');
 }
@@ -829,10 +838,11 @@ async function stCopy(c, r){
       return;
     }
     delete r.d.wait;
-    const j = await tf(c, 'copy', { item: r.d.item, kind: r.d.kind });
+    /* 补传第二次起改从 PikPak 原生接口拿、只按大小判断（WebDAV 列表里没有 / 拿不到的文件；两个后端修改时间对不上） */
+    const j = await tf(c, 'copy', r.d.fromPk ? { item: r.d.item, kind: r.d.kind, from: 'pikpak', sizeOnly: 1 } : { item: r.d.item, kind: r.d.kind });
     if (!j.jobid) throw err('传输没给作业号');
     r.d.job = j.jobid; r.d.cstart = t; r.d.cb = 0; r.d.cbAt = t;
-    r.note = '开始传输到 Dropbox'; r.next = t + 30000;
+    r.note = r.d.vtries ? '补传到 Dropbox' + (r.d.fromPk ? '（从 PikPak 原生接口）' : '') : '开始传输到 Dropbox'; r.next = t + 30000;
     return;
   }
   const s = await jobStatus(c, r.d.job);
@@ -868,18 +878,46 @@ async function stCopy(c, r){
   }
   r.pct = 1;
   go(r, 'verify');
+  r.next = now() + LIMIT.verifySettle;          // 两边的目录列表刷新一下再核对
 }
 
+const gb = (n) => (Math.max(0, Number(n) || 0) / 1073741824).toFixed(2) + ' GB';
+/** 两端核对（用户：「经常触发两端核对不一致，重新传输」）：
+    · 列目录失败（传输 Worker 回 502）= 没核对成：抛暂时性错误，过会儿再核对，不补传、不算次数
+      （907 的核对把列失败也回成 ok: 0；那种回包里有 src.err / dst.err，一样当没核对成）
+    · 第一次不一致：隔 2 分钟再核对一次（刚传完，两边的列表可能还没刷新），还不一致才补传
+    · 补传只传缺的 / 大小不对的（rclone copy 跳过已经一样的），第二次起改从 PikPak 原生接口拿
+    · Dropbox 那边多出来的不算不一致；补传 3 次还不一致才停下，失败原因写清楚缺了哪些 */
 async function stVerify(c, r){
+  const t = now();
   const v = await tf(c, 'verify', { item: r.d.item, kind: r.d.kind });
+  const sideErr = (v.src && v.src.err) || (v.dst && v.dst.err);
+  if (sideErr) throw err('核对时列目录失败：' + String(sideErr).slice(0, 100), { net: 1 });
   if (v.ok){
-    await clog(c, r.id, '两端核对一致：' + v.dst.count + ' 个文件 / ' + v.dst.bytes + ' 字节');
+    await clog(c, r.id, '两端核对一致：' + v.src.count + ' 个文件 / ' + gb(v.src.bytes) +
+      (v.extra ? '（Dropbox 那边多 ' + v.extra + ' 个，不影响）' : '') + (r.d.vtries ? '，补传 ' + r.d.vtries + ' 次后' : ''));
+    delete r.d.vbad;
     return go(r, 'purge');
   }
-  r.d.ctries = (r.d.ctries || 0) + 1;
-  await clog(c, r.id, '两端核对不一致：' + JSON.stringify({ src: v.src, dst: v.dst }));
-  if (r.d.ctries >= LIMIT.copyTries) return fail(r, '两端核对一直不一致');
-  go(r, 'copy', '两端核对不一致，重新传输');
+  const miss = v.missingCount != null ? v.missingCount : (v.missing || []).length;
+  const diff = v.differCount != null ? v.differCount : (v.differ || []).length;
+  const what = miss || diff
+    ? [miss ? '缺 ' + miss + ' 个' : '', diff ? '大小不对 ' + diff + ' 个' : ''].filter(Boolean).join('、')
+    : '文件数 ' + (v.src || {}).count + ' / ' + (v.dst || {}).count + '，大小 ' + gb((v.src || {}).bytes) + ' / ' + gb((v.dst || {}).bytes);
+  const sample = (v.missing || []).slice(0, 3).concat((v.differ || []).slice(0, 2).map(x => x.path + '（' + x.src + ' → ' + x.dst + '）'));
+  r.d.vbad = (r.d.vbad || 0) + 1;
+  await clog(c, r.id, '两端核对不一致（' + what + '）' + (sample.length ? '：' + sample.join('，') : '') +
+    (r.d.vbad === 1 ? '，2 分钟后再核对一次' : ''));
+  if (r.d.vbad === 1){
+    r.note = '核对不一致（' + what + '），2 分钟后再核对一次';
+    r.next = t + LIMIT.verifyRecheck;
+    return;
+  }
+  r.d.vbad = 0;
+  r.d.vtries = (r.d.vtries || 0) + 1;
+  if (r.d.vtries > LIMIT.recopyMax) return fail(r, '补传 ' + LIMIT.recopyMax + ' 次后两端还是对不上（' + what + '）');
+  r.d.fromPk = r.d.vtries >= 2;
+  go(r, 'copy', '补传 ' + (miss + diff || '') + (miss + diff ? ' 个文件' : '缺的文件') + (r.d.fromPk ? '（改从 PikPak 原生接口）' : ''));
 }
 
 async function stPurge(c, r){
