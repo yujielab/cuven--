@@ -1,6 +1,8 @@
 /**
- * Cuven 请求添加 Worker（tj.cuven.us）v1.1
+ * Cuven 请求添加 Worker（tj.cuven.us）v1.2
  *
+ * v1.2：App 上的五步改成 等待制片商 → 等待回应 → 等待品质管理 → 等待传输 → 最终发行审批；给 App 的进度不再带内部说明
+ *       （note / 规格 / 试过几个），只有控制面板看得到。
  * v1.1：D1 的表名都带 tj_ 前缀（tj_req / tj_kv / tj_log）。库和别的 Worker 共用、里面已经有叫 kv 的表时，
  *       v1.0 报 no such column: exp。建表后再对一遍列，缺的补上。
  *
@@ -47,7 +49,7 @@
  * 控制面板接口（x-admin-key: ADMIN_KEY）：/admin/api/state · cfg · pk · links · req · add · tick
  */
 
-const VER = 'tj 1.1';
+const VER = 'tj 1.2';
 const MIN = 60000, HOUR = 3600000, DAY = 86400000;
 const LIMIT = {
   userActive: 5,          // 一个用户同时进行中的请求
@@ -66,7 +68,8 @@ const LIMIT = {
 const ACTIVE = ['queued', 'download', 'clean', 'check', 'rename', 'copy', 'verify', 'purge', 'release'];
 const ENDED = ['done', 'failed', 'cancelled'];
 const STEP_OF = { queued: 1, download: 2, clean: 3, check: 3, rename: 3, copy: 4, verify: 4, purge: 4, release: 5, done: 5 };
-const STEP_LABELS = ['已请求', '待传输', '预处理中', '正在传输', '等待工作人员的最终发行'];
+/* App 上给用户看的五步（用户定的说法）。内部在做什么（推到 PikPak、清洗、传 Dropbox…）只在控制面板里看得到 */
+const STEP_LABELS = ['等待制片商', '等待回应', '等待品质管理', '等待传输', '最终发行审批'];
 const STAGE_TEXT = {
   queued: '排队，准备推送到 PikPak', download: 'PikPak 云下载中', clean: '清洗文件夹', check: '整理并核对整季',
   rename: '按发行命名', copy: '传输到 Dropbox', verify: '核对两端', purge: '清理 PikPak', release: '等待工作人员发行',
@@ -817,16 +820,22 @@ function stepProgress(r){
     default: return 0;
   }
 }
-function view(r){
+/** 一条请求的进度。internal = 控制面板用：多带内部说明（note）、当前规格、试过几个。
+    给 App 的不带这些——用户不该看到推到哪个网盘、哪个版本、下载出了什么错 */
+function view(r, internal){
   const state = r.stage === 'done' ? 'done' : r.stage === 'failed' ? 'failed' : r.stage === 'cancelled' ? 'cancelled' : 'active';
   /* 失败 / 取消停在出事的那一步 */
   const at = state === 'active' || state === 'done' ? r.stage : (r.d.lastStage || 'queued');
   const step = STEP_OF[at] || 1;
   const pct = state === 'done' ? 100 : Math.round(((step - 1) + (state === 'active' ? stepProgress(r) : 0)) / 5 * 100);
-  return { id: r.id, src: r.src, tmdb: r.tmdb, season: r.season || 0, title: r.title || '', year: r.year || '', poster: r.poster || '',
-           stage: r.stage, state, step, steps: 5, pct, label: STEP_LABELS[step - 1], note: r.note || '',
-           spec: r.d.cur ? { res: r.d.cur.res || '', labels: r.d.cur.labels || [], size: r.d.cur.size || '' } : null,
-           tries: (r.d.tried || []).length, created: r.created || 0, updated: r.updated || 0 };
+  const out = { id: r.id, src: r.src, tmdb: r.tmdb, season: r.season || 0, title: r.title || '', year: r.year || '', poster: r.poster || '',
+           stage: r.stage, state, step, steps: 5, pct, label: STEP_LABELS[step - 1], created: r.created || 0, updated: r.updated || 0 };
+  if (internal){
+    out.note = r.note || '';
+    out.spec = r.d.cur ? { res: r.d.cur.res || '', labels: r.d.cur.labels || [], size: r.d.cur.size || '' } : null;
+    out.tries = (r.d.tried || []).length;
+  }
+  return out;
 }
 
 async function latestFor(env, src, ids){
@@ -976,10 +985,8 @@ async function appDetail(env, Q){
   const m = await latestFor(env, src, [id]);
   const reqs = {};
   for (const [k, r] of m) reqs[k.split(':')[1]] = r;
-  const best = items[0];
   return json({ id, src, known: 1, title: v.title || '', original: v.original || '', year: String(v.year || ''), poster: v.poster || '',
     seasons: v.seasons || [], season: v.season || 0, count: items.length,
-    best: best ? { res: best.res || '', labels: best.labels || [], size: best.size || '' } : null,
     req: reqs[String(src === 'tv' ? (v.season || season) : 0)] || null, reqs }, 200, { 'cache-control': 'private, max-age=15' });
 }
 async function appRequests(env, user){
@@ -1003,7 +1010,7 @@ async function adminState(env){
   const d = await db(env);
   const cfg = await loadCfg(env);
   const reqs = ((await d.prepare('SELECT * FROM tj_req ORDER BY (stage IN (\'done\',\'failed\',\'cancelled\')), id DESC LIMIT 200').all()).results || [])
-    .map(x => { const r = rowOf(x); return { ...view(r), users: r.users, item: r.d.item || '', cur: r.d.cur ? r.d.cur.t : '', tried: (r.d.tried || []).length,
+    .map(x => { const r = rowOf(x); return { ...view(r, true), users: r.users, item: r.d.item || '', cur: r.d.cur ? r.d.cur.t : '', tried: (r.d.tried || []).length,
       vers: (r.d.vers || []).length, next: r.next || 0, since: r.since || 0, errs: r.d.errs || 0, check: r.d.check || null }; });
   const logs = ((await d.prepare('SELECT * FROM tj_log ORDER BY id DESC LIMIT 200').all()).results || []);
   const tok = await kvGet(env, 'pk:tok');
@@ -1053,7 +1060,7 @@ async function adminReq(env, body){
   if (r.stage === 'failed' || r.stage === 'cancelled') r.d.lastStage = r.d.lastStage || 'queued';
   const ok = await saveReq(env, r);
   await logMsg(env, r.id, '面板：' + act);
-  return json({ ok: ok ? 1 : 0, request: view(r) });
+  return json({ ok: ok ? 1 : 0, request: view(r, true) });
 }
 async function adminPk(env){
   const cfg = await loadCfg(env);

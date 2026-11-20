@@ -18,13 +18,13 @@ App 上显示成五步进度。代码见 [`worker.js`](worker.js)，测试见 [`
 
 | App 上 | 内部阶段 | 做什么 | 出问题时 |
 | --- | --- | --- | --- |
-| ① 已请求 | `queued` | 问影片库这部片或这一季按规格排好的全部版本，取第一个没试过的，让影片库推进 PikPak 的 `/auto`（影片库用它自己配的 PikPak 账号建云下载任务）。 | 影片库这会儿推不了，就过几分钟再推；这个版本推不了，就换下一个。 |
-| ② 待传输 | `download` | 盯 PikPak 的云下载任务，进度直接显示在 App 上。 | 任务出错、2 小时没有进度、12 小时还没下完：删掉任务和文件，回到 ① 推下一个规格。 |
-| ③ 预处理中 | `clean`（电影） | 文件夹里体积最大的视频（不算 sample / 预告）移到 `/auto`，原文件夹进回收站。下来的是单个视频就直接用。 | 没有视频：换规格。 |
+| ① 等待制片商 | `queued` | 问影片库这部片或这一季按规格排好的全部版本，取第一个没试过的，让影片库推进 PikPak 的 `/auto`（影片库用它自己配的 PikPak 账号建云下载任务）。 | 影片库这会儿推不了，就过几分钟再推；这个版本推不了，就换下一个。 |
+| ② 等待回应 | `download` | 盯 PikPak 的云下载任务，进度直接显示在 App 上（只显示百分比）。 | 任务出错、2 小时没有进度、12 小时还没下完：删掉任务和文件，回到 ① 推下一个规格。 |
+| ③ 等待品质管理 | `clean`（电影） | 文件夹里体积最大的视频（不算 sample / 预告）移到 `/auto`，原文件夹进回收站。下来的是单个视频就直接用。 | 没有视频：换规格。 |
 | | `check`（剧集） | 传输 Worker 整理文件夹（删广告垃圾），再核对整季：总集数取标题里写的，标题没写就用 TMDB 上这一季已经播出的集数。 | 缺集、标题写着还在连载、没有认得出集号的视频：换规格（降档重试）。 |
 | | `rename`（剧集） | 传输 Worker 按发行命名改文件夹名（默认 `rel` / 英文名 / `Cuven®`，面板里可改），等 rclone 的任务跑完。 | 失败重试 3 次，还不行就停下来等人。 |
-| ④ 正在传输 | `copy` → `verify` → `purge` | rclone `webdav:auto/<名字>` → `dropbox:auto/<名字>`（先 copy）。两端核对文件数和字节数，一致了才删 PikPak 那份。 | 传输出错或两端对不上，就重新 copy，最多 3 次。 |
-| ⑤ 等待工作人员的最终发行 | `release` | 每 5 分钟看一眼 `dropbox:auto/<名字>` 还在不在。 | — |
+| ④ 等待传输 | `copy` → `verify` → `purge` | rclone `webdav:auto/<名字>` → `dropbox:auto/<名字>`（先 copy）。两端核对文件数和字节数，一致了才删 PikPak 那份。 | 传输出错或两端对不上，就重新 copy，最多 3 次。 |
+| ⑤ 最终发行审批 | `release` | 每 5 分钟看一眼 `dropbox:auto/<名字>` 还在不在。 | — |
 | 完成 | `done` | 工作人员把它挪去 ram / ram2 之后，它就不在 `/auto` 里了，算作已发行。 | — |
 
 百分比 =（第几步 − 1 + 这一步的进度）÷ 5。例如刚进第 3 步是 40%，等发行是 80%，发行了是 100%。
@@ -42,7 +42,7 @@ App 上显示成五步进度。代码见 [`worker.js`](worker.js)，测试见 [`
 | 接口 | 回包 |
 | --- | --- |
 | `GET /app/catalog?src=movie\|tv\|all&q=&page=&sort=new\|vote\|hot\|spec&own=all\|hide&min=` | 索引里的全部已知影片和剧集（`id` 是 TMDB 编号）。`src=all` 时电影、剧集交替排。每条带 `req`（这部片的请求进度）。 |
-| `GET /app/detail?src=&id=&season=` | `known`（索引里有没有）、`count`（几个可请求的版本）、`best`（最好的规格）、`seasons`、`season`、`req`（这一部或这一季的进度）、`reqs`（每一季的进度）。 |
+| `GET /app/detail?src=&id=&season=` | `known`（索引里有没有）、`count`（大于 0 才能请求）、`seasons`、`season`、`req`（这一部或这一季的进度）、`reqs`（每一季的进度）。 |
 | `GET /app/requests` | 我的请求：进行中的，加上 30 天内结束的。 |
 | `POST /app/requests { src, id, season }` | 请求添加。回 `created`（新建）、`joined`（跟上已有的）或 `failedRecently`（刚失败过）。 |
 
@@ -51,11 +51,12 @@ App 上显示成五步进度。代码见 [`worker.js`](worker.js)，测试见 [`
 ```json
 { "id": 12, "src": "tv", "tmdb": 1399, "season": 2, "title": "权力的游戏", "poster": "/x.jpg",
   "stage": "copy", "state": "active", "step": 4, "steps": 5, "pct": 69,
-  "label": "正在传输", "note": "传输到 Dropbox 50% · 2.0 MB/s",
-  "spec": { "res": "1080p", "labels": ["1080p"], "size": "8 GB" }, "tries": 1, "updated": 1763520000000 }
+  "label": "等待传输", "created": 1763518000000, "updated": 1763520000000 }
 ```
 
 `state` 是 `active` / `done` / `failed` / `cancelled`。失败和取消的 `step` 停在出事的那一步。
+
+给 App 的进度**不带内部说明**：现在在做什么、出了什么错（`note`）、哪个版本（`spec`）、试过几个（`tries`）只有控制面板看得到。App 上那张卡只显示五步、百分比和一行固定的说明（「您可以返回，我们将在影片就绪时提醒您。添加流程一般不会超过一个小时。」）。
 
 ## 控制面板
 

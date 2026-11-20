@@ -7,7 +7,7 @@ import UserNotifications
 // 影片库（lb.cuven.us）索引里的全部已知电影和剧集都能在 App 里看到，片库里没有的那部，详情页的「播放」换成「请求添加」。
 // 按下去请求添加 Worker 就接管整条链：推到 PikPak → 云下载 → 清洗 → 传到 Dropbox → 等工作人员发行。
 // App 这边只做三件事：发请求、轮询进度（详情页那张五步进度卡）、状态一变发一条本机通知。
-// 通知只在这三处发：传完等发行、已发行、没成功。App 不在前台时靠系统的后台刷新（BGAppRefreshTask）偶尔看一眼，不保证准时。
+// 通知只在这三处发：进入最终发行审批、已就绪、没能添加（只说结果，不说内部出了什么事）。App 不在前台时靠系统的后台刷新（BGAppRefreshTask）偶尔看一眼，不保证准时。
 
 /// 索引里的一部片 / 一部剧（还没在片库里），详情页的路由参数
 struct CatalogTitle: Hashable, Sendable {
@@ -82,7 +82,7 @@ struct RequestStatus: Decodable, Hashable, Identifiable, Sendable {
     }
 
     /// 五步的名字（和服务器的 STEP_LABELS 一致）
-    static let labels = ["已请求", "待传输", "预处理中", "正在传输", "等待工作人员的最终发行"]
+    static let labels = ["等待制片商", "等待回应", "等待品质管理", "等待传输", "最终发行审批"]
 
     var key: String { RequestStatus.key(src: src, id: tmdb, season: season) }
     static func key(src: String, id: Int, season: Int) -> String { "\(src)-\(id)-\(season)" }
@@ -351,11 +351,11 @@ final class RequestStore {
         guard let before = seen[s.id], before != tag else { return }
         let name = s.title.isEmpty ? "这部影片" : "《\(s.title)》" + (s.season > 0 ? "第 \(s.season) 季" : "")
         if s.state == .done {
-            RequestNotice.post(id: s.id, body: "\(name)已发行，现在可以在片库里观看了。")
+            RequestNotice.post(id: s.id, body: "\(name)已就绪，现在可以观看了。")
         } else if s.state == .failed {
-            RequestNotice.post(id: s.id, body: "\(name)没能添加成功：\(s.note)")
+            RequestNotice.post(id: s.id, body: "\(name)暂时无法添加，请稍后再试。")
         } else if s.stage == "release" && !before.hasPrefix("release|") {
-            RequestNotice.post(id: s.id, body: "\(name)已传输完成，等待授权发行。")
+            RequestNotice.post(id: s.id, body: "\(name)已进入最终发行审批，就绪后会再提醒您。")
         }
     }
 

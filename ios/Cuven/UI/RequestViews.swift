@@ -5,7 +5,8 @@ import SwiftUI
 // 片库里没有的那部（影片库索引里有），详情页的「播放」换成一颗「请求添加」：白色的玻璃胶囊。按下去，这块玻璃原地长成一张
 // 矩形的玻璃卡（同一个视图、同一块玻璃，圆角和大小跟着版面一起动画，不是淡出淡入两样东西：见 RequestMorphControl），卡上是
 // 「STEP 3 OF 5」「40% Complete」（绿）、五段胶囊进度（走完的实心绿、正在走的绿边 + 走了多少、没到的暗）和五步的名字：
-// 已请求 → 待传输（已经到 PikPak 了）→ 预处理中（清洗）→ 正在传输 → 等待工作人员的最终发行。
+// 等待制片商 → 等待回应 → 等待品质管理 → 等待传输 → 最终发行审批（用户定的说法），底下一行固定的说明。
+// 内部在做什么（推到 PikPak、清洗、传到 Dropbox、哪个版本、出了什么错）不显示，服务器给 App 的也不带。
 
 private let requestGreen = Color(red: 0.19, green: 0.82, blue: 0.35)
 private let requestRed = Color(red: 1.0, green: 0.27, blue: 0.23)
@@ -63,7 +64,9 @@ struct RequestMorphControl: View {
     }
 }
 
-/// 卡里的内容：STEP X OF 5 · N% Complete · 五段胶囊 · 五步的名字 · 现在在做什么
+/// 卡里的内容：STEP X OF 5 · N% Complete · 五段胶囊 · 五步的名字 · 一行给用户的说明。
+/// 用户要求：不展示用户不该知道的内容——内部在做什么（推到 PikPak、清洗、传到 Dropbox、哪个版本、出了什么错）一律不显示，
+/// 服务器给 App 的进度里也不再带这些（只在控制面板里看得到）
 struct RequestProgressCard: View {
     let status: RequestStatus
 
@@ -93,22 +96,30 @@ struct RequestProgressCard: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            if !status.note.isEmpty {
-                Text(status.note)
-                    .font(.footnote)
-                    .foregroundStyle(status.state == .failed ? requestRed : DSInk.secondary)
-                    .lineLimit(2)
-            }
+            Text(footnote)
+                .font(.footnote)
+                .foregroundStyle(DSInk.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(18)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("请求添加，第 \(status.step) 步，共 \(status.steps) 步：\(status.label)。\(trailing)。\(status.note)")
+        .accessibilityLabel("请求添加，第 \(status.step) 步，共 \(status.steps) 步：\(RequestStatus.labels[max(0, min(4, status.step - 1))])。\(trailing)。\(footnote)")
+    }
+
+    /// 卡底下那一行小字（进行中的是用户定的说法）
+    private var footnote: String {
+        switch status.state {
+        case .active: return "您可以返回，我们将在影片就绪时提醒您。添加流程一般不会超过一个小时。"
+        case .done: return "影片已就绪，现在可以观看。"
+        case .failed: return "暂时无法添加这部影片，请稍后再试。"
+        case .cancelled: return "这次添加已取消。"
+        }
     }
 
     private var trailing: String {
         switch status.state {
         case .active, .done: return "\(status.pct)% Complete"
-        case .failed: return "未成功"
+        case .failed: return "未能添加"
         case .cancelled: return "已取消"
         }
     }
@@ -247,7 +258,7 @@ struct CatalogDetailView: View {
         return s
     }
 
-    // MARK: 下面几段：选季（剧集）、资源
+    // MARK: 下面一段：选季（剧集）。用户要求：不放「资源」那张卡（规格、版本数、怎么下载都是用户不该知道的）
 
     @ViewBuilder
     private func sections(_ m: DSMetrics) -> some View {
@@ -262,7 +273,6 @@ struct CatalogDetailView: View {
                 .scrollIndicators(.hidden)
             }
         }
-        group(m, "资源") { resourceCard }
     }
 
     private func seasonChip(_ n: Int) -> some View {
@@ -279,7 +289,7 @@ struct CatalogDetailView: View {
                 if ownedSeasons.contains(n) {
                     Image(systemName: "checkmark.circle.fill").font(.caption)
                 } else if let st {
-                    Text(st.state == .done ? "已发行" : st.state == .failed ? "未成功" : "\(st.pct)%")
+                    Text(st.state == .done ? "已就绪" : st.state == .failed ? "未能添加" : "\(st.pct)%")
                         .font(.caption.weight(.semibold)).monospacedDigit()
                         .foregroundStyle(on ? Color.black.opacity(0.6) : (st.state == .failed ? requestRed : requestGreen))
                 }
@@ -294,46 +304,6 @@ struct CatalogDetailView: View {
         .buttonStyle(PressableStyle(scale: 0.94))
         .accessibilityAddTraits(on ? .isSelected : [])
         .accessibilityIdentifier("request-season-\(n)")
-    }
-
-    private var resourceCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if loading && detail == nil {
-                HStack(spacing: 10) {
-                    ProgressView()
-                    Text("正在查询影片库…").foregroundStyle(DSInk.secondary)
-                }
-            } else if let d = detail, d.count > 0 {
-                let spec = ([d.best?.res].compactMap { $0 } + (d.best?.labels ?? [])).filter { !$0.isEmpty }
-                let unique = spec.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
-                if !unique.isEmpty {
-                    HStack(spacing: 6) {
-                        ForEach(unique.prefix(5), id: \.self) { s in
-                            Text(s).font(.caption.weight(.semibold))
-                                .padding(.horizontal, 8).padding(.vertical, 3)
-                                .background(Capsule().fill(Color.white.opacity(0.14)))
-                        }
-                        if let size = d.best?.size, !size.isEmpty {
-                            Text(size).font(.caption).foregroundStyle(DSInk.secondary)
-                        }
-                    }
-                }
-                Text(title.kind == .tv ? "第 \(seasonKey) 季有 \(d.count) 个整季版本可以请求。" : "有 \(d.count) 个版本可以请求。")
-                    .font(.subheadline.weight(.semibold))
-                Text("请求后会自动下载最好的那一个；下不完或者不完整就换下一个。整理好传进片库后会通知你，等工作人员最终发行就能观看。")
-                    .font(.footnote)
-                    .foregroundStyle(DSInk.secondary)
-            } else {
-                Text(title.kind == .tv ? "这一季暂时没有可用的整季资源。" : "这部影片暂时没有可用的资源。")
-                    .font(.subheadline.weight(.semibold))
-                Text("影片库收录新的资源后，这里就能请求添加。")
-                    .font(.footnote)
-                    .foregroundStyle(DSInk.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color.white.opacity(0.08)))
     }
 
     /// 和详情页别的分区同一个样子：粗体标题 + 内容，展开的屏上最宽 720
@@ -442,7 +412,7 @@ struct CatalogPosterLink: View {
     }
 
     private func badge(_ s: RequestStatus) -> some View {
-        let text = s.state == .done ? "已发行" : s.state == .failed ? "未成功" : s.stage == "release" ? "等待发行" : "已请求 \(s.pct)%"
+        let text = s.state == .done ? "已就绪" : s.state == .failed ? "未能添加" : s.stage == "release" ? "发行审批" : "已请求 \(s.pct)%"
         return Text(text)
             .font(.caption2.weight(.semibold))
             .monospacedDigit()
