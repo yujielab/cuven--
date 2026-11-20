@@ -12,7 +12,7 @@ App 上显示成五步进度。代码见 [`worker.js`](worker.js)，测试见 [`
 
 它连接另外两个 Worker：
 - 影片库：[index/](../index/README.md)，lb.cuven.us，用 v7.0 的 `/api/link/versions` 和 `/api/pikpush`。
-- 传输：transfer.cuven.us，用 909 版的 `/api/link/*`（907 / 908 也能跑，但没有逐个文件核对）。传输 Worker 的代码不在仓库里。
+- 传输：transfer.cuven.us，用 909 版的 `/api/link/*`（907 / 908 也能跑，但没有逐个文件核对）。代码和说明见 [transfer/](../transfer/README.md)。
 
 ## 五个步骤
 
@@ -171,7 +171,7 @@ wrangler deploy
 ### 另外两个 Worker 要做的
 
 - **影片库**：部署 v7.0 的 `index/worker.js`。`PIKPAK_USER` 必须和这里面板里填的是同一个 PikPak 账号。
-- **传输**（909 版，代码不在仓库里）：设置下面这些变量。908 起连 VPS 遇到 521 / 522 / 523 会自动重试（见上面「核心」），可选的 `VPS_ALT` 填同一台 VPS 的备用入口（不走 Cloudflare 代理的灰云子域名，或者 IP），重试时轮流走它。
+- **传输**（909 版，[transfer/](../transfer/README.md)）：设置下面这些变量。908 起连 VPS 遇到 521 / 522 / 523 会自动重试（见上面「核心」），可选的 `VPS_ALT` 填同一台 VPS 的备用入口（不走 Cloudflare 代理的灰云子域名，或者 IP），重试时轮流走它。
   - `LINK_KEY`（密钥）：和这里的一样。
   - `VPS_PASS`（密钥）：rclone rcd 的密码。
   - 以下有默认值，一般不用改：
