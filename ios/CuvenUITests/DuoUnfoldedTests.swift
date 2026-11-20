@@ -107,6 +107,28 @@ final class DuoUnfoldedTests: XCTestCase {
         snap("duo-3q-request-d-sections")
     }
 
+    /// 请求中心（标签栏「请求」，RequestCenter.swift）：演示数据里 7 个请求——进行中的几张卡（复用五步进度卡）、
+    /// 最近（已就绪带「播放」、没能添加、按时间）。截 duo-3r-*（iPad 上 duo-4r-*）；外屏大小不截
+    func testRequestCenter() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-CuvenDemo", "YES"]
+        app.launch()
+        sleep(4)
+        let size = report(app, "requests")
+        guard size.width > 500 else { return }
+        tab(app, "请求")
+        guard app.otherElements["request-center-card"].waitForExistence(timeout: 8) || app.buttons["request-center-card"].waitForExistence(timeout: 2) else {
+            print("DUO requests: request center did not show")
+            snap("duo-3r-requests-missing")
+            return
+        }
+        sleep(2)
+        snap("duo-3r-requests")
+        app.swipeUp(); sleep(2)
+        snap("duo-3r-requests-recent")
+    }
+
     /// 半折的播放面板（PlayerTabletop.swift）：上面画面、下面一条液态玻璃的 Touch Bar（左右滑，长按展开），
     /// 最底下 InSight / 继续观看 / 推荐；横过来是书本（右页画面、左页控制）。
     /// 模拟器折不了、演示数据也放不了片，所以用 -CuvenTabletop YES 弹一个假的播放页，折痕固定在屏正中。

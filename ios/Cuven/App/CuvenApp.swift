@@ -71,9 +71,9 @@ struct CuvenApp: App {
     }
 }
 
-enum AppTab: Hashable { case home, library, search }
+enum AppTab: Hashable { case home, library, requests, search }
 
-/// 系统标签栏：主页 / 资料库，搜索单独一颗（搜索标签：横在底下时 iOS 26 把它拆出来）。
+/// 系统标签栏：主页 / 资料库 / 请求，搜索单独一颗（搜索标签：横在底下时 iOS 26 把它拆出来）。
 /// 账户与设置不是标签：主页标题那一行右边的头像点开（用户要求：头像从侧边导航里分出来）。
 ///
 /// iPhone Duo：导航栏与工具栏一律用系统的（返回在侧边那一列最上面）。标签栏在展开竖拿时也是系统的（横在底下）；
@@ -103,6 +103,11 @@ struct RootView: View {
             Tab("资料库", systemImage: "square.stack.fill", value: AppTab.library) {
                 LibraryView().duoHidesTabBar().id(roots[.library, default: 0])
             }
+            // 请求中心（用户要求）：角标是进行中的请求个数
+            Tab("请求", systemImage: "tray.and.arrow.down.fill", value: AppTab.requests) {
+                RequestCenterView().duoHidesTabBar().id(roots[.requests, default: 0])
+            }
+            .badge(RequestStore.shared.activeCount)
             Tab(value: AppTab.search, role: .search) {
                 SearchView().duoHidesTabBar().id(roots[.search, default: 0])
             }
