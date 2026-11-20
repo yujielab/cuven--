@@ -1,5 +1,17 @@
 /**
- * Cuven 请求添加 Worker（tj.cuven.us）v1.2
+ * Cuven 请求添加 Worker（tj.cuven.us）v2.0
+ *
+ * v2.0：核心重做——稳、省、不堵
+ *   · 熔断：影片库 / VPS / PikPak / TMDB 各自记健康，连续 3 次暂时性失败就熔断 2→4→8→15 分钟，要用它的请求原地等，
+ *     不算出错、不换规格；到期放一次试探，通了就恢复（面板「系统」里看得到）
+ *   · 智能队列：先把开了头的做完（发行检查 > 删除 > 核对 > 传输 > 改名 / 清洗 > 云下载 > 排队），排队中的每个人的第一个先上，
+ *     好几个人在等的优先；PikPak 同时云下载、VPS 同时传输各有资源位（面板里调），满了排队，不会把 rclone 压垮
+ *   · 批量：一轮里要问的 rclone 作业一次问完（/api/link/jobs），发行检查列一次目录（/api/link/exists {items}）
+ *   · 看门狗：传输一小时 / 改名半小时没有新字节就停掉重开（copy 跳过已传完的）；VPS 重启丢了作业就从断点重开；
+ *     依赖一天都连不上才停下等人
+ *   · 状态只许按流程走（FLOW），每一步可重入；一轮的写入（请求 + 日志）攒起来一个事务写进 D1
+ *   · /app/requests 带 ETag，App 轮询没变化时回 304
+ *   要配合传输 Worker 908（52x 自动重试、批量接口）；老版本也能跑，只是退回一个一个问。
  *
  * v1.2：App 上的五步改成 等待制片商 → 等待回应 → 等待品质管理 → 等待传输 → 最终发行审批；给 App 的进度不再带内部说明
  *       （note / 规格 / 试过几个），只有控制面板看得到。
@@ -49,18 +61,22 @@
  * 控制面板接口（x-admin-key: ADMIN_KEY）：/admin/api/state · cfg · pk · links · req · add · tick
  */
 
-const VER = 'tj 1.2';
+const VER = 'tj 2.0';
 const MIN = 60000, HOUR = 3600000, DAY = 86400000;
 const LIMIT = {
   userActive: 5,          // 一个用户同时进行中的请求
   globalActive: 30,       // 全部进行中的请求
-  perTick: 8,             // 一轮最多推进几条
+  perTick: 24,            // 一轮最多推进几条（轮询类的步骤批量问，便宜）
   tickMs: 22000,          // 一轮的时间预算
   fetches: 42,            // 一轮的子请求预算（免费计划 50）
   dlStall: 2 * HOUR,      // 云下载这么久没进度就换规格
   dlMax: 12 * HOUR,       // 云下载最长等多久
   busyMax: 30 * MIN,      // 剧集文件夹里一直有没下完的分段文件
   copyTries: 3,
+  copyStall: HOUR,        // 传输这么久没有新字节：停掉重开
+  renameStall: 30 * MIN,  // 改名这么久没有进展：停掉重来
+  lostMax: 5,             // rclone 作业丢了（VPS 重启）最多重开几次
+  depGiveUp: DAY,         // 依赖一直连不上多久就停下等人
   stepErrors: 20,         // 同一步连续出错这么多次就停下来等人看
   releasePoll: 5 * MIN,
   refail: DAY,            // 失败后多久用户可以重新请求
@@ -180,7 +196,9 @@ async function saveReq(env, r){
    设置（PikPak 密码加密存放）
    ══════════════════════════════════════════════════════════════════ */
 const CFG_DEF = { pkUser: '', pkPass: '', tpl: 'rel', lang: 'en', grp: 'Cuven®', userCap: LIMIT.userActive,
-                  globalCap: LIMIT.globalActive, paused: false };
+                  globalCap: LIMIT.globalActive, paused: false,
+                  pkSlots: 4,     // PikPak 同时云下载几个
+                  vpsSlots: 2 };  // VPS 同时传输几个（rclone 一次跑太多会把内存吃满、整个进程被杀）
 const b64 = (u8) => { let s = ''; for (const c of u8) s += String.fromCharCode(c); return btoa(s); };
 const unb64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 async function secretKey(env){
@@ -221,6 +239,8 @@ async function saveCfg(env, patch){
   if (patch.userCap != null) next.userCap = clamp(parseInt(patch.userCap, 10) || LIMIT.userActive, 1, 50);
   if (patch.globalCap != null) next.globalCap = clamp(parseInt(patch.globalCap, 10) || LIMIT.globalActive, 1, 500);
   if (patch.paused != null) next.paused = !!patch.paused;
+  if (patch.pkSlots != null) next.pkSlots = clamp(parseInt(patch.pkSlots, 10) || CFG_DEF.pkSlots, 1, 20);
+  if (patch.vpsSlots != null) next.vpsSlots = clamp(parseInt(patch.vpsSlots, 10) || CFG_DEF.vpsSlots, 1, 8);
   if (next.pkUser !== raw.pkUser || next.pkPassEnc !== raw.pkPassEnc){ await kvDel(env, 'pk:tok'); PK_MEM = null; PK_FAIL = null; }
   await kvPut(env, 'cfg', next);
   return loadCfg(env);
@@ -228,10 +248,10 @@ async function saveCfg(env, patch){
 const mask = (u) => { u = String(u || ''); const i = u.indexOf('@'); return !u ? '' : i > 0 ? u.slice(0, Math.min(2, i)) + '***' + u.slice(i) : u.slice(0, 3) + '***' + u.slice(-2); };
 
 /* ══════════════════════════════════════════════════════════════════
-   一轮的上下文：子请求预算 + 时间预算 + 这一轮里共用的缓存
+   一轮的上下文：子请求预算 + 时间预算 + 这一轮里共用的缓存 + 依赖健康 + 写入缓冲
    ══════════════════════════════════════════════════════════════════ */
 function context(env, cfg, budget){
-  return { env, cfg, n: 0, max: budget || LIMIT.fetches, t0: now(), memo: {} };
+  return { env, cfg, n: 0, max: budget || LIMIT.fetches, t0: now(), memo: {}, health: null, logs: null, pending: null, slots: null };
 }
 async function xfetch(c, url, init = {}, ms = 25000){
   if (c.n >= c.max) throw err('这一轮的子请求用完了，下一轮接着做', { budget: 1 });
@@ -247,37 +267,89 @@ async function readJSON(r){
   try { return txt ? JSON.parse(txt) : {}; } catch { return { error: txt.slice(0, 160) || ('HTTP ' + r.status) }; }
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   依赖的健康：熔断
+   四个外部依赖：影片库（lb）、传输 / VPS（vps）、PikPak（pikpak）、TMDB 分季（stream）。
+   同一个依赖连续 3 次「暂时性」失败（连不上、超时、5xx、429、影片库忙）就熔断 2 分钟：这一轮和后面几轮都不再碰它，
+   要用它的请求原地等——不算出错次数、不换规格、不会因为对方抖一下就把一部片判死。
+   到期放一次试探（半开）：通了就恢复；又失败就再熔断，时间翻倍（2 → 4 → 8 → 15 分钟封顶）。
+   逻辑错误（4xx：参数不对、文件夹不在、作业没了）不算依赖坏了。状态存在 tj_kv 的 health 里，控制面板看得到。
+   ══════════════════════════════════════════════════════════════════ */
+const DEPS = { lb: '影片库', vps: '传输（VPS）', pikpak: 'PikPak', stream: 'TMDB' };
+/** 每一步要用哪些依赖：熔断中的不去碰 */
+const STAGE_DEPS = { queued: ['lb'], download: ['pikpak'], clean: ['pikpak'], check: ['vps'], rename: ['vps'],
+                     copy: ['vps'], verify: ['vps'], purge: ['vps'], release: ['vps'] };
+const transientErr = (e) => !!(e && !e.budget && !e.circuit && (e.net || e.status >= 500 || e.status === 429 || e.status === 409));
+async function loadHealth(env){
+  const h = (await kvGet(env, 'health')) || {};
+  for (const k of Object.keys(DEPS)) h[k] = { fails: 0, trips: 0, open: 0, err: '', ok: 0, bad: 0, ...(h[k] || {}) };
+  return h;
+}
+function depOpenUntil(c, dep){
+  const h = c.health && c.health[dep];
+  return h && h.open > now() ? h.open : 0;
+}
+function depResult(c, dep, e){
+  if (!c.health) return;
+  const h = c.health[dep], t = now();
+  if (!e){
+    if (h.fails || h.trips || h.open){ h.fails = 0; h.trips = 0; h.open = 0; c.healthDirty = true; }
+    if (t - h.ok > MIN){ h.ok = t; c.healthDirty = true; }
+    return;
+  }
+  if (!transientErr(e)) return;
+  const halfOpen = h.open && h.open <= t;
+  h.err = String(e.message || e).slice(0, 160); h.bad = t; h.fails++; c.healthDirty = true;
+  if (halfOpen || h.fails >= 3){ h.trips = Math.min(h.trips + 1, 4); h.open = t + Math.min(15, 2 ** h.trips) * MIN; h.fails = 0; }
+}
+async function depCall(c, dep, fn){
+  const until = depOpenUntil(c, dep);
+  if (until) throw err(DEPS[dep] + '暂时不可用，约 ' + Math.max(1, Math.ceil((until - now()) / MIN)) + ' 分钟后再试', { circuit: dep, until });
+  try { const v = await fn(); depResult(c, dep, null); return v; }
+  catch (e){ depResult(c, dep, e); throw e; }
+}
+
 /* ── 影片库（lb.cuven.us）── */
 async function lb(c, path, init){
   if (!c.env.LB_GATE) throw err('还没配 LB_GATE（影片库的 GATE 口令）', { conf: 1 });
-  const r = await xfetch(c, base(c.env, 'LB_BASE', 'https://lb.cuven.us') + path, {
-    ...(init || {}), headers: { 'x-gate': c.env.LB_GATE, 'content-type': 'application/json', ...((init || {}).headers || {}) } }, 40000);
-  const j = await readJSON(r);
-  if (!r.ok) throw err('影片库：' + (j.error || 'HTTP ' + r.status), { status: r.status, net: r.status >= 500 || r.status === 409 ? 1 : 0, lb: 1 });
-  return j;
+  return depCall(c, 'lb', async () => {
+    const r = await xfetch(c, base(c.env, 'LB_BASE', 'https://lb.cuven.us') + path, {
+      ...(init || {}), headers: { 'x-gate': c.env.LB_GATE, 'content-type': 'application/json', ...((init || {}).headers || {}) } }, 40000);
+    const j = await readJSON(r);
+    if (!r.ok) throw err('影片库：' + (j.error || 'HTTP ' + r.status), { status: r.status, net: r.status >= 500 || r.status === 409 ? 1 : 0, lb: 1 });
+    return j;
+  });
 }
 const lbVersions = (c, src, id, season) =>
   lb(c, '/api/link/versions?src=' + src + '&id=' + id + (season ? '&season=' + season : ''));
 
-/* ── 传输（transfer.cuven.us，VPS 上的 rclone）── */
+/* ── 传输（transfer.cuven.us，VPS 上的 rclone）──
+   传输 Worker 908 起自己会对 52x 重试；到这里还是 5xx，说明 VPS 那头真的有问题，算进熔断。
+   422 是 rclone 自己回的逻辑错（作业没了、文件夹不在），不算 VPS 坏了 */
 async function tf(c, op, body){
   if (!c.env.LINK_KEY) throw err('还没配 LINK_KEY（传输 Worker 的 LINK_KEY）', { conf: 1 });
-  const r = await xfetch(c, base(c.env, 'TRANSFER_BASE', 'https://transfer.cuven.us') + '/api/link/' + op, {
-    method: 'POST', headers: { 'x-cuven-link': c.env.LINK_KEY, 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }, 60000);
-  const j = await readJSON(r);
-  if (!r.ok) throw err('传输：' + (j.error || 'HTTP ' + r.status), { status: r.status, net: r.status >= 500 ? 1 : 0, tf: 1 });
-  return j;
+  return depCall(c, 'vps', async () => {
+    const r = await xfetch(c, base(c.env, 'TRANSFER_BASE', 'https://transfer.cuven.us') + '/api/link/' + op, {
+      method: 'POST', headers: { 'x-cuven-link': c.env.LINK_KEY, 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }, 60000);
+    const j = await readJSON(r);
+    if (!r.ok) throw err('传输：' + (j.error || 'HTTP ' + r.status), { status: r.status, net: r.status >= 500 ? 1 : 0, tf: 1 });
+    return j;
+  });
 }
 
-/* ── TMDB：一季已经播出的集数（标题里没写总集数时用来核对整季）── */
+/* ── TMDB：一季已经播出的集数（标题里没写总集数时用来核对整季；问不到就当不知道）── */
 async function airedCount(c, id, season){
-  const r = await xfetch(c, base(c.env, 'STREAM_BASE', 'https://stream.cuven.online') + '/api/tmdb/season?id=' + id + '&season=' + season, {}, 20000);
-  if (!r.ok) return 0;
-  const j = await readJSON(r);
-  const today = new Date().toISOString().slice(0, 10);
-  const eps = (j.episodes || []).filter(e => e && e.ep > 0);
-  const aired = eps.filter(e => e.air_date && e.air_date <= today).length;
-  return { total: eps.length, aired };
+  try {
+    return await depCall(c, 'stream', async () => {
+      const r = await xfetch(c, base(c.env, 'STREAM_BASE', 'https://stream.cuven.online') + '/api/tmdb/season?id=' + id + '&season=' + season, {}, 20000);
+      if (r.status >= 500) throw err('TMDB：HTTP ' + r.status, { status: r.status, net: 1 });
+      if (!r.ok) return 0;
+      const j = await readJSON(r);
+      const today = new Date().toISOString().slice(0, 10);
+      const eps = (j.episodes || []).filter(e => e && e.ep > 0);
+      return { total: eps.length, aired: eps.filter(e => e.air_date && e.air_date <= today).length };
+    });
+  } catch (e){ if (e.budget) throw e; return 0; }
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -342,14 +414,18 @@ function pkError(j, status){
     { pk: 1, code: Number(j && j.error_code) || 0, perr: String((j && j.error) || ''), status, notFound: /not_found/i.test(key) });
 }
 async function pkJSON(c, method, url, body, headers){
-  const r = await xfetch(c, url, { method, body: body == null ? undefined : JSON.stringify(body),
-    headers: { 'content-type': 'application/json; charset=utf-8', accept: 'application/json', 'user-agent': PK.ua, ...(headers || {}) } });
-  const txt = await r.text().catch(() => '');
-  let j = null;
-  try { j = txt ? JSON.parse(txt) : {}; } catch {}
-  if (j && !j.error && r.status < 400) return j;
-  if (!j) throw err('PikPak 回的不是 JSON（HTTP ' + r.status + '）', { pk: 1, status: r.status, net: r.status >= 500 ? 1 : 0 });
-  throw pkError(j, r.status);
+  return depCall(c, 'pikpak', async () => {
+    const r = await xfetch(c, url, { method, body: body == null ? undefined : JSON.stringify(body),
+      headers: { 'content-type': 'application/json; charset=utf-8', accept: 'application/json', 'user-agent': PK.ua, ...(headers || {}) } });
+    const txt = await r.text().catch(() => '');
+    let j = null;
+    try { j = txt ? JSON.parse(txt) : {}; } catch {}
+    if (j && !j.error && r.status < 400) return j;
+    if (!j) throw err('PikPak 回的不是 JSON（HTTP ' + r.status + '）', { pk: 1, status: r.status, net: r.status >= 500 ? 1 : 0 });
+    const e = pkError(j, r.status);
+    if (r.status >= 500 || r.status === 429 || /too_many_requests|frequen/i.test(e.perr || '')) e.net = 1;   // PikPak 那头忙：算暂时性的
+    throw e;
+  });
 }
 async function pkCaptcha(c, action, meta){
   const dev = pkDevice(c.cfg);
@@ -480,37 +556,64 @@ const pkDelTasks = (c, ids, files) => pkCall(c, 'DELETE', '/drive/v1/tasks', { q
 /** /auto 的文件夹编号：问影片库（它往哪个网盘推，就以它看到的为准），没有就让它建一个 */
 async function autoFolder(c, refresh){
   const name = String(c.env.AUTO_DIR || 'auto');
-  if (!refresh){ const v = await kvGet(c.env, 'auto:id'); if (v && v.id && v.name === name) return v.id; }
+  if (!refresh && c.memo.auto) return c.memo.auto;
+  if (!refresh){ const v = await kvGet(c.env, 'auto:id'); if (v && v.id && v.name === name) return (c.memo.auto = v.id); }
   const ls = await lb(c, '/api/pikpak?do=ls&parent=');
   let f = (ls.folders || []).find(x => x.name === name);
   if (!f) f = await lb(c, '/api/pikpak?do=mkdir', { method: 'POST', body: JSON.stringify({ parent: '', name }) });
   if (!f || !f.id) throw err('影片库没给出 /' + name + ' 的文件夹编号');
   await kvPut(c.env, 'auto:id', { id: String(f.id), name }, 7 * DAY);
-  return String(f.id);
+  return (c.memo.auto = String(f.id));
 }
 
 /* ══════════════════════════════════════════════════════════════════
    状态机：每条请求一次往前走一步
+   · 只许按 FLOW 走（其余跳转是程序错误，停下来等人，不会悄悄跳过一步）
+   · 每一步都可以重入：中途被掐（预算、超时、VPS 重启）下一轮从同一步接着做，不重复推送 / 不重复开传输
    ══════════════════════════════════════════════════════════════════ */
+const FLOW = {
+  queued: ['queued', 'download'], download: ['clean', 'check', 'queued'], clean: ['copy', 'queued'], check: ['rename', 'queued'],
+  rename: ['copy'], copy: ['verify'], verify: ['purge', 'copy'], purge: ['release'], release: [],
+};
 function go(r, stage, note){
+  if (FLOW[r.stage] && !FLOW[r.stage].includes(stage)) throw err('状态不能从 ' + r.stage + ' 跳到 ' + stage, { bug: 1 });
   r.stage = stage; r.since = now(); r.pct = 0; r.next = now();
   r.note = note || STAGE_TEXT[stage] || '';
-  r.d.errs = 0;
+  r.d.errs = 0; delete r.d.errSince;
 }
 function fail(r, why){
   r.d.lastStage = r.stage;
   r.stage = 'failed'; r.since = now(); r.next = 0; r.note = why;
 }
+/** 这一轮里写日志：先攒着，和请求的更新一起一次写进 D1（不在一轮里的直接写） */
+function clog(c, rid, msg){
+  if (c.logs){ c.logs.push([rid || 0, now(), String(msg).slice(0, 500)]); return; }
+  return logMsg(c.env, rid, msg);
+}
 /** 当前规格不行了：删掉 PikPak 上的任务和文件，记下试过，回到 ① 推下一个 */
 async function drop(c, r, why){
-  await logMsg(c.env, r.id, '放弃 ' + ((r.d.cur && r.d.cur.t) || '这个规格') + '：' + why);
+  await clog(c, r.id, '放弃 ' + ((r.d.cur && r.d.cur.t) || '这个规格') + '：' + why);
   if (r.d.task) await pkDelTasks(c, [r.d.task], true).catch(() => {});
   if (r.d.file) await pkTrash(c, [r.d.file]).catch(() => {});
   if (r.d.cur && r.d.cur.tid != null) r.d.tried = [...new Set([...(r.d.tried || []), r.d.cur.tid])];
-  for (const k of ['cur', 'task', 'file', 'fname', 'fkind', 'item', 'kind', 'job', 'newname', 'pmax', 'pat', 'org', 'check', 'busySince', 'ctries', 'rtries'])
+  for (const k of ['cur', 'task', 'file', 'fname', 'fkind', 'item', 'kind', 'job', 'newname', 'pmax', 'pat', 'org', 'check',
+                   'busySince', 'ctries', 'rtries', 'lost', 'cb', 'cbAt', 'rb', 'rbAt', 'wait'])
     delete r.d[k];
   go(r, 'queued', why + '，换下一个规格');
 }
+/** 资源位：PikPak 同时云下载几个、VPS 同时传几个（面板里可调）。满了就排队等，不算出错 */
+function slotFree(c, kind){
+  const s = c.slots && c.slots[kind];
+  return !s || s.used < s.max;
+}
+/** 作业进度：这一轮批量问过（/api/link/jobs）就用那一份，没有再单独问 */
+async function jobStatus(c, id){
+  const m = c.memo.jobs && c.memo.jobs[id];
+  if (m && !m.error) return m;
+  try { return await tf(c, 'job', { jobid: id }); }
+  catch (e){ if (transientErr(e) || e.budget || e.circuit) throw e; return { finished: true, success: false, error: e.message }; }
+}
+async function stopJob(c, id){ await tf(c, 'stop', { jobid: id }).catch(e => { if (e.budget) throw e; }); }
 
 async function stQueued(c, r){
   const t = now();
@@ -528,6 +631,13 @@ async function stQueued(c, r){
   const tried = new Set(r.d.tried || []);
   const v = r.d.vers.find(x => !tried.has(x.tid));
   if (!v) return fail(r, r.d.vers.length ? '所有规格都试过了，没有一个能完整下完' : (r.src === 'tv' ? '影片库里还没有这一季的整季资源' : '影片库里还没有这部片的资源'));
+  if (!slotFree(c, 'pk')){
+    r.d.wait = 'pk';
+    r.note = '排队：PikPak 同时云下载已满（' + c.slots.pk.used + ' / ' + c.slots.pk.max + '），轮到就推送';
+    r.next = t + 2 * MIN;
+    return;
+  }
+  delete r.d.wait;
   const parent = await autoFolder(c);
   let j;
   try { j = await lb(c, '/api/pikpush?src=' + r.src, { method: 'POST', body: JSON.stringify({ parent, items: [{ tid: v.tid, name: r.title || '' }] }) }); }
@@ -538,7 +648,7 @@ async function stQueued(c, r){
   const it = (j.items || [])[0] || {};
   if (it.ok){
     r.d.cur = v; r.d.task = it.task || ''; r.d.file = it.file || ''; r.d.fname = it.fileName || it.name || '';
-    await logMsg(c.env, r.id, '已推送到 PikPak：' + v.t);
+    await clog(c, r.id, '已推送到 PikPak：' + v.t);
     return go(r, 'download', '已推送到 PikPak，等云下载开始');
   }
   if (j.stop || it.retry){
@@ -547,7 +657,7 @@ async function stQueued(c, r){
     return;
   }
   r.d.tried = [...tried, v.tid];
-  await logMsg(c.env, r.id, '推不了 ' + v.t + '：' + (it.err || '未知原因'));
+  await clog(c, r.id, '推不了 ' + v.t + '：' + (it.err || '未知原因'));
   r.note = '这个规格推不了，换下一个';
   r.next = t;
 }
@@ -566,7 +676,8 @@ async function stDownload(c, r){
     if (t - (r.d.pat || r.since) > LIMIT.dlStall) return drop(c, r, '云下载 2 小时没有进度');
     if (t - r.since > LIMIT.dlMax) return drop(c, r, '云下载 12 小时还没完成');
     r.note = 'PikPak 云下载 ' + Math.round(p * 100) + '%';
-    r.next = t + MIN;
+    /* 快下完的看勤一点，刚开始的慢慢看（省子请求） */
+    r.next = t + (p > 0.9 ? 1 : p > 0.5 ? 2 : 3) * MIN;
     return;
   }
   /* 不在进行中的任务里：要么下完了，要么没了 —— 看文件 */
@@ -591,7 +702,7 @@ async function stDownload(c, r){
   r.d.fname = String(f.name || r.d.fname || '');
   r.d.fkind = f.kind === 'drive#folder' ? 'dir' : 'file';
   r.d.bytes = Number(f.size) || 0;
-  await logMsg(c.env, r.id, 'PikPak 云下载完成：' + r.d.fname);
+  await clog(c, r.id, 'PikPak 云下载完成：' + r.d.fname);
   go(r, r.src === 'tv' ? 'check' : 'clean');
 }
 
@@ -605,7 +716,7 @@ async function stClean(c, r){
     if (String(f.parent_id || '') !== parent) await pkMove(c, [String(f.id)], parent);
     const moved = (await pkFile(c, String(f.id))) || f;
     r.d.item = String(moved.name || f.name); r.d.kind = 'file'; r.d.bytes = Number(moved.size) || 0;
-    await logMsg(c.env, r.id, '电影文件：' + r.d.item);
+    await clog(c, r.id, '电影文件：' + r.d.item);
     return go(r, 'copy');
   }
   const files = await pkWalk(c, String(f.id));
@@ -614,10 +725,10 @@ async function stClean(c, r){
   const big = vids[0];
   await pkMove(c, [big.id], parent);
   const moved = (await pkFile(c, big.id)) || big;
-  await pkTrash(c, [String(f.id)]).catch(e => logMsg(c.env, r.id, '原文件夹没删掉：' + e.message));
+  await pkTrash(c, [String(f.id)]).catch(e => clog(c, r.id, '原文件夹没删掉：' + e.message));
   r.d.file = big.id;
   r.d.item = String(moved.name || big.name); r.d.kind = 'file'; r.d.bytes = Number(moved.size) || big.size;
-  await logMsg(c.env, r.id, '清洗完成：' + r.d.item + '（' + files.length + ' 个文件里最大的）');
+  await clog(c, r.id, '清洗完成：' + r.d.item + '（' + files.length + ' 个文件里最大的）');
   go(r, 'copy');
 }
 
@@ -629,7 +740,7 @@ async function stCheck(c, r){
   if (!r.d.org){
     const o = await tf(c, 'organize', { dir });
     r.d.org = 1;
-    if ((o.deleted || []).length) await logMsg(c.env, r.id, '整理：删了 ' + o.deleted.length + ' 个垃圾文件');
+    if ((o.deleted || []).length) await clog(c, r.id, '整理：删了 ' + o.deleted.length + ' 个垃圾文件');
   }
   let total = (r.d.cur && r.d.cur.total) || 0;
   if (!total){
@@ -640,7 +751,7 @@ async function stCheck(c, r){
   r.d.check = { k: v.k, total: v.total || 0, vids: v.vids || 0, miss: (v.miss || []).slice(0, 30) };
   r.pct = 0.5;
   if (v.k === 'ok' || v.k === 'unsure'){
-    await logMsg(c.env, r.id, '整季核对：' + (v.k === 'ok' ? '完整' : '文件数够（集号没全认出）') + '，' + v.vids + ' 个视频 / 共 ' + (v.total || total) + ' 集');
+    await clog(c, r.id, '整季核对：' + (v.k === 'ok' ? '完整' : '文件数够（集号没全认出）') + '，' + v.vids + ' 个视频 / 共 ' + (v.total || total) + ' 集');
     return go(r, 'rename');
   }
   if (v.k === 'busy'){
@@ -653,7 +764,7 @@ async function stCheck(c, r){
   /* skip：标题写着还在连载，或者总集数无从得知 */
   if (v.ongoing) return drop(c, r, '标题写着还在连载，不是整季');
   if (!total && v.vids > 0){
-    await logMsg(c.env, r.id, '标题和 TMDB 都给不出总集数，按 ' + v.vids + ' 个视频收下');
+    await clog(c, r.id, '标题和 TMDB 都给不出总集数，按 ' + v.vids + ' 个视频收下');
     return go(r, 'rename');
   }
   return drop(c, r, '核对不了整季（' + v.k + '）');
@@ -665,23 +776,38 @@ async function stRename(c, r){
     let j;
     try { j = await tf(c, 'rename', { dir: r.d.fname, tpl: c.cfg.tpl, lang: c.cfg.lang, grp: c.cfg.grp }); }
     catch (e){
-      /* 上一次改名其实做完了、只是任务记录丢了（VPS 重启）：原名不在、新名字在 */
-      if (r.d.newname && !e.net && /not found|找不到|doesn't exist|directory not found/i.test(e.message)){ r.d.fname = r.d.newname; return renamed(c, r); }
+      /* 上一次改名其实做完了、只是作业记录丢了（VPS 重启）：原名不在了 */
+      if (r.d.newname && !transientErr(e) && !e.circuit && !e.budget && /not found|找不到|doesn't exist/i.test(e.message)){ r.d.fname = r.d.newname; return renamed(c, r); }
       throw e;
     }
     if (j.same){ r.d.newname = r.d.fname; return renamed(c, r); }
-    r.d.job = j.jobid; r.d.newname = j.name;
+    r.d.job = j.jobid; r.d.newname = j.name; r.d.rb = 0; r.d.rbAt = t;
     r.note = '改名为 ' + j.name; r.next = t + 20000;
     return;
   }
-  let s;
-  try { s = await tf(c, 'job', { jobid: r.d.job }); }
-  catch (e){ if (e.net || e.budget) throw e; s = { finished: true, success: false, error: e.message }; }
-  if (!s.finished){ r.pct = s.total ? clamp(s.bytes / s.total, 0, 1) : 0.5; r.next = t + 30000; return; }
+  const s = await jobStatus(c, r.d.job);
+  if (s.missing){
+    /* VPS 重启过，作业没了：重新发一次改名（原名已经不在 = 其实改完了，上面那个分支会接住） */
+    r.d.job = 0; r.d.lost = (r.d.lost || 0) + 1;
+    await clog(c, r.id, '改名作业没了（VPS 重启过？），重来');
+    if (r.d.lost > LIMIT.lostMax) return fail(r, '改名作业一直丢（VPS 反复重启）');
+    r.next = t; return;
+  }
+  if (!s.finished){
+    if (s.bytes > (r.d.rb || 0)){ r.d.rb = s.bytes; r.d.rbAt = t; }
+    if (t - (r.d.rbAt || r.since) > LIMIT.renameStall){
+      await stopJob(c, r.d.job);
+      r.d.job = 0; r.d.rtries = (r.d.rtries || 0) + 1;
+      await clog(c, r.id, '改名 ' + Math.round(LIMIT.renameStall / MIN) + ' 分钟没有进展，停掉重来');
+      if (r.d.rtries >= 3) return fail(r, '改名一直没有进展');
+      r.next = t + MIN; return;
+    }
+    r.pct = s.total ? clamp(s.bytes / s.total, 0, 1) : 0.5; r.next = t + 30000; return;
+  }
   r.d.job = 0;
   if (!s.success){
     r.d.rtries = (r.d.rtries || 0) + 1;
-    await logMsg(c.env, r.id, '改名出错：' + (s.error || '未知'));
+    await clog(c, r.id, '改名出错：' + (s.error || '未知'));
     if (r.d.rtries >= 3) return fail(r, '改名失败：' + String(s.error || '').slice(0, 80));
     r.note = '改名出错，重试'; r.next = t + 2 * MIN; return;
   }
@@ -689,23 +815,44 @@ async function stRename(c, r){
 }
 async function renamed(c, r){
   r.d.item = r.d.newname || r.d.fname; r.d.kind = 'dir'; r.d.job = 0;
-  await logMsg(c.env, r.id, '命名：' + r.d.item);
+  await clog(c, r.id, '命名：' + r.d.item);
   go(r, 'copy');
 }
 
 async function stCopy(c, r){
   const t = now();
   if (!r.d.job){
+    if (!slotFree(c, 'vps')){
+      r.d.wait = 'vps';
+      r.note = '排队：VPS 同时传输已满（' + c.slots.vps.used + ' / ' + c.slots.vps.max + '）';
+      r.next = t + 2 * MIN;
+      return;
+    }
+    delete r.d.wait;
     const j = await tf(c, 'copy', { item: r.d.item, kind: r.d.kind });
-    if (!j.jobid) throw err('传输没给任务号');
-    r.d.job = j.jobid; r.d.cstart = t;
+    if (!j.jobid) throw err('传输没给作业号');
+    r.d.job = j.jobid; r.d.cstart = t; r.d.cb = 0; r.d.cbAt = t;
     r.note = '开始传输到 Dropbox'; r.next = t + 30000;
     return;
   }
-  let s;
-  try { s = await tf(c, 'job', { jobid: r.d.job }); }
-  catch (e){ if (e.net || e.budget) throw e; s = { finished: true, success: false, error: e.message }; }
+  const s = await jobStatus(c, r.d.job);
+  if (s.missing){
+    /* VPS 重启过，作业没了：重新开（rclone copy 会跳过已经传完的文件） */
+    r.d.job = 0; r.d.lost = (r.d.lost || 0) + 1;
+    await clog(c, r.id, '传输作业没了（VPS 重启过？），从断点重开');
+    if (r.d.lost > LIMIT.lostMax) return fail(r, '传输作业一直丢（VPS 反复重启）');
+    r.next = t; return;
+  }
   if (!s.finished){
+    if (s.bytes > (r.d.cb || 0)){ r.d.cb = s.bytes; r.d.cbAt = t; }
+    /* 看门狗：一直没有新字节 = 卡住了，停掉重开（copy 跳过已经传完的） */
+    if (t - (r.d.cbAt || r.d.cstart || t) > LIMIT.copyStall){
+      await stopJob(c, r.d.job);
+      r.d.job = 0; r.d.ctries = (r.d.ctries || 0) + 1;
+      await clog(c, r.id, '传输 ' + Math.round(LIMIT.copyStall / MIN) + ' 分钟没有进展，停掉重开（第 ' + r.d.ctries + ' 次）');
+      if (r.d.ctries >= LIMIT.copyTries) return fail(r, '传输一直没有进展');
+      r.next = t + MIN; return;
+    }
     const p = s.total ? clamp(s.bytes / s.total, 0, 0.99) : r.pct;
     r.pct = p;
     r.note = '传输到 Dropbox ' + Math.round(p * 100) + '%' + (s.speed ? ' · ' + (s.speed / 1048576).toFixed(1) + ' MB/s' : '');
@@ -715,7 +862,7 @@ async function stCopy(c, r){
   r.d.job = 0;
   if (!s.success){
     r.d.ctries = (r.d.ctries || 0) + 1;
-    await logMsg(c.env, r.id, '传输出错（第 ' + r.d.ctries + ' 次）：' + (s.error || '未知'));
+    await clog(c, r.id, '传输出错（第 ' + r.d.ctries + ' 次）：' + (s.error || '未知'));
     if (r.d.ctries >= LIMIT.copyTries) return fail(r, '传输失败：' + String(s.error || '').slice(0, 80));
     r.note = '传输出错，重试'; r.next = t + 2 * MIN; return;
   }
@@ -726,27 +873,28 @@ async function stCopy(c, r){
 async function stVerify(c, r){
   const v = await tf(c, 'verify', { item: r.d.item, kind: r.d.kind });
   if (v.ok){
-    await logMsg(c.env, r.id, '两端核对一致：' + v.dst.count + ' 个文件 / ' + v.dst.bytes + ' 字节');
+    await clog(c, r.id, '两端核对一致：' + v.dst.count + ' 个文件 / ' + v.dst.bytes + ' 字节');
     return go(r, 'purge');
   }
   r.d.ctries = (r.d.ctries || 0) + 1;
-  await logMsg(c.env, r.id, '两端核对不一致：' + JSON.stringify({ src: v.src, dst: v.dst }));
+  await clog(c, r.id, '两端核对不一致：' + JSON.stringify({ src: v.src, dst: v.dst }));
   if (r.d.ctries >= LIMIT.copyTries) return fail(r, '两端核对一直不一致');
   go(r, 'copy', '两端核对不一致，重新传输');
 }
 
 async function stPurge(c, r){
   await tf(c, 'purge', { item: r.d.item, kind: r.d.kind });
-  if (r.d.task && c.cfg.pkUser) await pkDelTasks(c, [r.d.task], false).catch(() => {});
-  await logMsg(c.env, r.id, '传输完成，PikPak 那份已删，等待发行：dropbox:' + (c.env.AUTO_DIR || 'auto') + '/' + r.d.item);
+  if (r.d.task && c.cfg.pkUser) await pkDelTasks(c, [r.d.task], false).catch(e => { if (e.budget) throw e; });
+  await clog(c, r.id, '传输完成，PikPak 那份已删，等待发行：dropbox:' + (c.env.AUTO_DIR || 'auto') + '/' + r.d.item);
   go(r, 'release');
   r.next = now() + LIMIT.releasePoll;
 }
 
 async function stRelease(c, r){
-  const e = await tf(c, 'exists', { item: r.d.item });
-  if (!e.exists){
-    await logMsg(c.env, r.id, '已发行（不在 Dropbox 的 /auto 里了）');
+  const batch = c.memo.exists;
+  const exists = batch && r.d.item in batch ? batch[r.d.item] : (await tf(c, 'exists', { item: r.d.item })).exists;
+  if (!exists){
+    await clog(c, r.id, '已发行（不在 Dropbox 的 /auto 里了）');
     r.stage = 'done'; r.since = now(); r.next = 0; r.pct = 1; r.note = STAGE_TEXT.done;
     return;
   }
@@ -762,46 +910,138 @@ async function advance(c, r){
   const fn = STAGES[r.stage];
   if (!fn) return;
   const before = r.stage;
+  /* 要用的依赖在熔断：原地等它恢复（错开一点，免得恢复那一刻一窝蜂） */
+  for (const dep of STAGE_DEPS[r.stage] || []){
+    const until = depOpenUntil(c, dep);
+    if (until){ r.note = DEPS[dep] + '暂时不可用，等它恢复'; r.next = until + Math.floor(Math.random() * 20000); return; }
+  }
+  if (NEEDS_PK.has(r.stage) && !(c.cfg.pkUser && c.cfg.pkPass)){
+    r.note = '等控制面板填 PikPak 账号和密码'; r.next = now() + 5 * MIN; return;
+  }
   try {
-    if (NEEDS_PK.has(r.stage) && !(c.cfg.pkUser && c.cfg.pkPass)){
-      r.note = '等控制面板填 PikPak 账号和密码'; r.next = now() + 5 * MIN; return;
-    }
     await fn(c, r);
-    if (r.stage === before && r.d.errs) r.d.errs = 0;
+    if (r.stage === before && r.d.errs){ r.d.errs = 0; delete r.d.errSince; }
   } catch (e){
     if (e.budget){ r.next = now(); return; }
+    if (e.circuit){ r.note = String(e.message); r.next = (e.until || now() + 2 * MIN) + Math.floor(Math.random() * 20000); return; }
+    if (e.bug){ await clog(c, r.id, '内部状态出错：' + e.message); return fail(r, '内部状态出错：' + e.message); }
+    const transient = transientErr(e) || !!e.cool;
     r.d.errs = (r.d.errs || 0) + 1;
-    const transient = e.net || e.status === 429 || e.status === 409 || e.cool;
+    r.d.errSince = r.d.errSince || now();
     r.note = String(e.message || e).slice(0, 160);
-    await logMsg(c.env, r.id, STAGE_TEXT[r.stage] + ' 出错（第 ' + r.d.errs + ' 次）：' + r.note);
+    await clog(c, r.id, STAGE_TEXT[r.stage] + ' 出错（第 ' + r.d.errs + ' 次）：' + r.note);
     if (e.conf){ r.next = now() + 10 * MIN; return; }
     if (!transient && r.d.errs >= LIMIT.stepErrors) return fail(r, STAGE_TEXT[r.stage] + '一直出错：' + r.note);
-    r.next = now() + Math.min(30, 2 ** Math.min(r.d.errs, 5)) * MIN / (transient ? 2 : 1);
+    if (transient && now() - r.d.errSince > LIMIT.depGiveUp) return fail(r, STAGE_TEXT[r.stage] + '：依赖一天都连不上，停下等人处理（' + r.note + '）');
+    /* 退避：2、4、8…30 分钟（暂时性的减半），带 ±15% 抖动 */
+    const mins = Math.min(30, 2 ** Math.min(r.d.errs, 5)) / (transient ? 2 : 1);
+    r.next = now() + Math.round(mins * MIN * (0.85 + Math.random() * 0.3));
   }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   智能队列
+   · 先把开了头的做完：发行检查 / 删 PikPak / 核对 > 传输 > 改名 / 清洗 > 云下载 > 排队中的
+     （越往后的一步越早腾出 PikPak 和 VPS 的位子，整条流水线就不会堵在中间）
+   · 排队中的按「这个人的第几个」打散：每个人的第一个先上，一个人连点五部不会把别人挤到后面
+   · 同一档里人多的（好几个人在等）优先，再按到期时间、先来后到
+   · 资源位：PikPak 同时云下载、VPS 同时传输各有上限（面板里调），满了排队等，不算出错
+   · 批量：这一轮要问的 rclone 作业一次问完（/api/link/jobs），要看的发行检查列一次目录（/api/link/exists）
+   ══════════════════════════════════════════════════════════════════ */
+const STAGE_PRI = { purge: 9, verify: 8, release: 7, copy: 6, rename: 5, check: 4, clean: 4, download: 3, queued: 1 };
+function schedule(rows){
+  const list = rows.map(rowOf);
+  const seen = new Map();
+  for (const r of list.filter(r => r.stage === 'queued').sort((a, b) => (a.created || 0) - (b.created || 0))){
+    const u = r.users[0] || '';
+    const k = seen.get(u) || 0;
+    r._fair = k; seen.set(u, k + 1);
+  }
+  return list.sort((a, b) => (STAGE_PRI[b.stage] || 0) - (STAGE_PRI[a.stage] || 0)
+    || (a._fair || 0) - (b._fair || 0)
+    || b.users.length - a.users.length
+    || (a.next || 0) - (b.next || 0)
+    || (a.created || 0) - (b.created || 0));
+}
+async function loadSlots(c){
+  const rows = (await (await db(c.env)).prepare("SELECT stage, data FROM tj_req WHERE stage IN ('download', 'copy')").all()).results || [];
+  let pk = 0, vps = 0;
+  for (const x of rows){
+    if (x.stage === 'download'){ pk++; continue; }
+    try { if ((JSON.parse(x.data || '{}') || {}).job) vps++; } catch {}
+  }
+  c.slots = { pk: { used: pk, max: c.cfg.pkSlots || CFG_DEF.pkSlots }, vps: { used: vps, max: c.cfg.vpsSlots || CFG_DEF.vpsSlots } };
+  return c.slots;
+}
+/** 这一轮要问的东西先一次问完：rclone 作业（传输 / 改名）、发行检查。老版本传输 Worker 没有批量接口就退回一个一个问 */
+async function prefetch(c, list){
+  if (depOpenUntil(c, 'vps')) return;
+  const ids = [...new Set(list.filter(r => (r.stage === 'copy' || r.stage === 'rename') && r.d.job).map(r => r.d.job))];
+  if (ids.length > 1){
+    try { c.memo.jobs = (await tf(c, 'jobs', { ids: ids.slice(0, 12) })).jobs || null; }
+    catch (e){ if (e.budget) throw e; }
+  }
+  const items = [...new Set(list.filter(r => r.stage === 'release' && r.d.item).map(r => r.d.item))];
+  if (items.length > 1){
+    try { c.memo.exists = (await tf(c, 'exists', { items: items.slice(0, 200) })).exists || null; }
+    catch (e){ if (e.budget) throw e; }
+  }
+}
+function saveStmt(d, r){
+  return d.prepare(
+    `UPDATE tj_req SET title = ?, year = ?, poster = ?, users = ?, stage = ?, pct = ?, note = ?, data = ?, updated = ?, since = ?,
+       next = ?, rev = rev + 1 WHERE id = ? AND rev = ?`)
+    .bind(r.title || '', r.year || '', r.poster || '', JSON.stringify(r.users || []), r.stage, +r.pct || 0, r.note || '',
+          JSON.stringify(r.d || {}), now(), r.since || now(), r.next || 0, r.id, r.rev);
+}
+/** 攒着的请求更新和日志一次写进 D1（一个事务）。rev 对不上的那条（面板刚改过）不写，面板赢 */
+async function flush(c){
+  if (!(c.pending && c.pending.length) && !(c.logs && c.logs.length)) return [];
+  const d = await db(c.env);
+  const rs = c.pending || [], logs = c.logs || [];
+  c.pending = []; c.logs = [];
+  const stmts = rs.map(r => saveStmt(d, r))
+    .concat(logs.map(([rid, at, msg]) => d.prepare('INSERT INTO tj_log (rid, at, msg) VALUES (?, ?, ?)').bind(rid, at, msg)));
+  const res = await d.batch(stmts);
+  return rs.map((r, i) => { const ok = !!(res[i] && res[i].meta && res[i].meta.changes); if (ok) r.rev++; return { id: r.id, ok }; });
 }
 
 async function tick(env, opt = {}){
   const t = now();
   if (!opt.force && !(await lease(env, 'tick', 55000))) return { busy: 1 };
   const cfg = await loadCfg(env);
-  const c = context(env, cfg);
-  const out = { done: 0, steps: [] };
   if (cfg.paused && !opt.force) return { paused: 1 };
+  const c = context(env, cfg);
+  c.health = await loadHealth(env);
+  c.logs = []; c.pending = [];
+  await loadSlots(c);
   const d = await db(env);
-  const rows = (await d.prepare(`SELECT * FROM tj_req WHERE stage IN (${ACTIVE.map(() => '?').join(',')}) AND next <= ? ORDER BY next ASC LIMIT ?`)
-    .bind(...ACTIVE, t, LIMIT.perTick).all()).results || [];
-  for (const x of rows){
-    if (now() - c.t0 > LIMIT.tickMs || c.n >= c.max - 3) break;
-    const r = rowOf(x);
-    const from = r.stage;
-    await advance(c, r);
-    const saved = await saveReq(env, r);
-    out.steps.push({ id: r.id, from, to: r.stage, saved, note: r.note });
-    out.done++;
-    if (r.stage !== from) await logMsg(env, r.id, STAGE_TEXT[from] + ' → ' + STAGE_TEXT[r.stage]);
+  const rows = (await d.prepare(`SELECT * FROM tj_req WHERE stage IN (${ACTIVE.map(() => '?').join(',')}) AND next <= ? ORDER BY next ASC LIMIT 60`)
+    .bind(...ACTIVE, t).all()).results || [];
+  const list = schedule(rows);
+  const out = { done: 0, steps: [], due: list.length };
+  try {
+    await prefetch(c, list);
+    for (const r of list){
+      if (out.done >= LIMIT.perTick || now() - c.t0 > LIMIT.tickMs || c.n >= c.max - 3) break;
+      const from = r.stage;
+      const held = { pk: from === 'download', vps: from === 'copy' && !!r.d.job };
+      await advance(c, r);
+      c.slots.pk.used += (r.stage === 'download' ? 1 : 0) - (held.pk ? 1 : 0);
+      c.slots.vps.used += (r.stage === 'copy' && r.d.job ? 1 : 0) - (held.vps ? 1 : 0);
+      if (r.stage !== from) clog(c, r.id, STAGE_TEXT[from] + ' → ' + STAGE_TEXT[r.stage]);
+      c.pending.push(r);
+      out.steps.push({ id: r.id, from, to: r.stage, note: r.note });
+      out.done++;
+      if (c.pending.length >= 6) await flush(c);
+    }
+  } finally {
+    await flush(c).catch(e => console.error('写入失败：', e && e.message));
+    if (c.healthDirty) await kvPut(env, 'health', c.health).catch(() => {});
   }
   if (Math.random() < 0.03) await d.prepare('DELETE FROM tj_log WHERE id < (SELECT MAX(id) - 4000 FROM tj_log)').run().catch(() => {});
-  out.fetches = c.n; out.ms = now() - c.t0;
+  out.fetches = c.n; out.ms = now() - c.t0; out.slots = c.slots;
+  await kvPut(env, 'tick:last', { at: t, done: out.done, due: out.due, fetches: c.n, ms: out.ms }).catch(() => {});
   return out;
 }
 
@@ -989,11 +1229,16 @@ async function appDetail(env, Q){
     seasons: v.seasons || [], season: v.season || 0, count: items.length,
     req: reqs[String(src === 'tv' ? (v.season || season) : 0)] || null, reqs }, 200, { 'cache-control': 'private, max-age=15' });
 }
-async function appRequests(env, user){
+/** 我的请求。带 ETag：App 每 30 秒问一次，没变就回 304（不带正文） */
+async function appRequests(env, user, request){
   const t = now();
   const res = await (await db(env)).prepare(`SELECT * FROM tj_req WHERE EXISTS (SELECT 1 FROM json_each(tj_req.users) WHERE value = ?)
       AND (stage NOT IN ('done','failed','cancelled') OR updated > ?) ORDER BY id DESC LIMIT 60`).bind(user, t - 30 * DAY).all();
-  return json({ items: (res.results || []).map(x => view(rowOf(x))), at: t });
+  const body = JSON.stringify({ items: (res.results || []).map(x => view(rowOf(x))) });
+  const tag = 'W/"' + md5(body).slice(0, 20) + '"';
+  const h = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', etag: tag };
+  if (request && request.headers.get('if-none-match') === tag) return new Response(null, { status: 304, headers: h });
+  return new Response(body, { headers: h });
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1014,9 +1259,17 @@ async function adminState(env){
       vers: (r.d.vers || []).length, next: r.next || 0, since: r.since || 0, errs: r.d.errs || 0, check: r.d.check || null }; });
   const logs = ((await d.prepare('SELECT * FROM tj_log ORDER BY id DESC LIMIT 200').all()).results || []);
   const tok = await kvGet(env, 'pk:tok');
-  return { ver: VER, now: now(),
+  /* 排队位置：和定时任务同一套排序（每个人的第一个先上、人多的优先、先来后到） */
+  const queued = schedule(((await d.prepare("SELECT * FROM tj_req WHERE stage = 'queued'").all()).results || []));
+  const pos = new Map(queued.map((r, i) => [r.id, i + 1]));
+  for (const r of reqs) if (pos.has(r.id)) r.pos = pos.get(r.id);
+  const c = context(env, cfg, 1);
+  const slots = await loadSlots(c);
+  const health = await loadHealth(env);
+  return { ver: VER, now: now(), health, slots, tick: await kvGet(env, 'tick:last'), queued: queued.length,
     cfg: { pkUser: mask(cfg.pkUser), pkSet: !!(cfg.pkUser && cfg.pkPass), tpl: cfg.tpl, lang: cfg.lang, grp: cfg.grp,
-           userCap: cfg.userCap, globalCap: cfg.globalCap, paused: !!cfg.paused, pkToken: tok ? { exp: tok.exp } : null },
+           userCap: cfg.userCap, globalCap: cfg.globalCap, paused: !!cfg.paused, pkToken: tok ? { exp: tok.exp } : null,
+           pkSlots: cfg.pkSlots, vpsSlots: cfg.vpsSlots },
     env: { LB_GATE: !!env.LB_GATE, LINK_KEY: !!env.LINK_KEY, LB_BASE: base(env, 'LB_BASE', 'https://lb.cuven.us'),
            TRANSFER_BASE: base(env, 'TRANSFER_BASE', 'https://transfer.cuven.us'), AUTO_DIR: String(env.AUTO_DIR || 'auto') },
     reqs, logs };
@@ -1112,7 +1365,7 @@ export default {
           let user = String(request.headers.get('x-cuven-user') || '').trim();
           try { user = decodeURIComponent(user); } catch {}
           if (!user) return json({ error: '要登录' }, 401);
-          if (request.method === 'GET') return await appRequests(env, user);
+          if (request.method === 'GET') return await appRequests(env, user, request);
           if (request.method === 'POST'){
             if (!(await userOK(env, user))) return json({ error: '账户核对不上，重新登录再试' }, 401);
             const body = await request.json().catch(() => null);
@@ -1185,6 +1438,7 @@ th{color:var(--dim);font-weight:500;font-size:12px}td .t{font-weight:600}.mono{f
 <header><h1>请求添加</h1><span class="ver" id="ver"></span><span style="flex:1"></span>
 <button id="tick">立即跑一轮</button><button id="refresh">刷新</button><button id="logout">退出</button></header>
 <main>
+<div class="card"><h2>系统</h2><div id="sys" class="dim">—</div></div>
 <div class="grid">
  <div class="card"><h2>PikPak（清洗用）</h2>
   <div id="pkline" class="dim">—</div>
@@ -1202,6 +1456,8 @@ th{color:var(--dim);font-weight:500;font-size:12px}td .t{font-weight:600}.mono{f
  <div class="card"><h2>限额</h2>
   <label>每个用户同时进行中</label><input id="userCap" type="number" min="1" max="50">
   <label>全部同时进行中</label><input id="globalCap" type="number" min="1" max="500">
+  <label>PikPak 同时云下载</label><input id="pkSlots" type="number" min="1" max="20">
+  <label>VPS 同时传输（太多会把 rclone 内存吃满）</label><input id="vpsSlots" type="number" min="1" max="8">
   <label class="row" style="margin-top:12px;color:var(--text)"><input id="paused" type="checkbox" style="width:auto"> 暂停定时任务</label>
   <div class="row" style="margin-top:12px"><button class="pri" id="saveCfg">保存设置</button><span id="cfgres"></span></div>
   <h2 style="margin-top:18px">手动添加</h2>
@@ -1224,12 +1480,20 @@ function render(s){
  $('ver').textContent=s.ver;var c=s.cfg;
  $('pkline').innerHTML=c.pkSet?'<span class="ok">已填</span> '+esc(c.pkUser)+(c.pkToken?' · 令牌到 '+new Date(c.pkToken.exp).toLocaleTimeString():''):'<span class="warn">还没填 PikPak 账号</span>';
  $('tpl').value=c.tpl;$('lang').value=c.lang;$('grp').value=c.grp;$('userCap').value=c.userCap;$('globalCap').value=c.globalCap;$('paused').checked=c.paused;
+ $('pkSlots').value=c.pkSlots;$('vpsSlots').value=c.vpsSlots;
+ var NAMES={lb:'影片库',vps:'传输（VPS）',pikpak:'PikPak',stream:'TMDB'};
+ var hs=Object.keys(NAMES).map(function(k){var h=s.health[k]||{};var open=h.open&&h.open>s.now;
+  return '<span class="pill '+(open?'failed':'active')+'">'+NAMES[k]+' '+(open?'熔断到 '+new Date(h.open).toLocaleTimeString():'正常')+'</span>'+
+   (h.err&&h.bad&&s.now-h.bad<3600000?' <span class="dim">'+esc(h.err)+'（'+ago(h.bad)+'）</span>':'')}).join('<br>');
+ var sl=s.slots||{pk:{},vps:{}};
+ $('sys').innerHTML=hs+'<div style="margin-top:10px">PikPak 云下载 <b>'+sl.pk.used+' / '+sl.pk.max+'</b> · VPS 传输 <b>'+sl.vps.used+' / '+sl.vps.max+'</b> · 排队 <b>'+s.queued+'</b>'+
+  (s.tick?' · 上一轮 '+ago(s.tick.at)+'，推进 '+s.tick.done+' / 到期 '+s.tick.due+'，子请求 '+s.tick.fetches+'，'+s.tick.ms+' ms':' · 定时任务还没跑过')+'</div>';
  var e=s.env;$('links').innerHTML='影片库 '+esc(e.LB_BASE)+(e.LB_GATE?'':' <span class="bad">缺 LB_GATE</span>')+'<br>传输 '+esc(e.TRANSFER_BASE)+(e.LINK_KEY?'':' <span class="bad">缺 LINK_KEY</span>')+'<br>目录 /'+esc(e.AUTO_DIR);
  $('reqs').innerHTML=s.reqs.map(function(r){
   var acts=r.state==='active'?'<button class="small" data-a="now" data-id="'+r.id+'">现在</button> <button class="small" data-a="skip" data-id="'+r.id+'">换规格</button> <button class="small" data-a="cancel" data-id="'+r.id+'">取消</button>':
    (r.state!=='done'?'<button class="small" data-a="retry" data-id="'+r.id+'">重试</button> ':'')+'<button class="small" data-a="delete" data-id="'+r.id+'">删除</button>';
   return '<tr><td><div class="t">'+esc(r.title||r.tmdb)+(r.season?' · 第 '+r.season+' 季':'')+'</div><div class="dim">#'+r.id+' · '+(r.src==='tv'?'剧集':'电影')+' '+r.tmdb+' · '+ago(r.created)+'</div></td>'+
-   '<td style="min-width:200px"><span class="pill '+r.state+'">'+esc(r.state==='active'?('STEP '+r.step+' · '+r.label):r.state==='done'?'已发行':r.state==='failed'?'失败':'已取消')+'</span> <b>'+r.pct+'%</b>'+bar(r)+'<div class="dim">'+esc(r.note)+(r.errs?' <span class="warn">（出错 '+r.errs+' 次）</span>':'')+'</div><div class="dim">'+(r.next&&r.state==='active'?'下次 '+new Date(r.next).toLocaleTimeString():'')+'</div></td>'+
+   '<td style="min-width:200px"><span class="pill '+r.state+'">'+esc(r.state==='active'?('STEP '+r.step+' · '+r.label):r.state==='done'?'已发行':r.state==='failed'?'失败':'已取消')+'</span> <b>'+r.pct+'%</b>'+(r.pos?' <span class="dim">排队第 '+r.pos+' 位</span>':'')+bar(r)+'<div class="dim">'+esc(r.note)+(r.errs?' <span class="warn">（出错 '+r.errs+' 次）</span>':'')+'</div><div class="dim">'+(r.next&&r.state==='active'?'下次 '+new Date(r.next).toLocaleTimeString():'')+'</div></td>'+
    '<td class="mono" style="max-width:340px;word-break:break-all">'+esc(r.cur||'')+(r.item?'<div class="ok">'+esc(r.item)+'</div>':'')+'<div class="dim">规格 '+(r.tried+(r.cur?1:0))+' / '+r.vers+'</div></td>'+
    '<td>'+esc((r.users||[]).join('、'))+'</td><td style="white-space:nowrap"><button class="small" data-a="log" data-id="'+r.id+'">日志</button> '+acts+'</td></tr>'}).join('')||'<tr><td colspan="5" class="dim">还没有请求</td></tr>';
  $('log').innerHTML=s.logs.map(function(l){return '<div><span class="dim">'+new Date(l.at).toLocaleString()+'</span> '+(l.rid?'#'+l.rid+' ':'')+esc(l.msg)+'</div>'}).join('');
@@ -1243,7 +1507,7 @@ $('tick').onclick=function(){this.disabled=true;var b=this;api('tick',{}).then(f
 $('savePk').onclick=function(){var u=$('pkUser').value.trim(),p=$('pkPass').value;if(!u&&!p)return;var body={};if(u)body.pkUser=u;if(p)body.pkPass=p;api('cfg',body).then(function(s){$('pkUser').value='';$('pkPass').value='';$('pkres').innerHTML='<span class="ok">已保存</span>';render(s)}).catch(function(e){$('pkres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
 $('testPk').onclick=function(){$('pkres').textContent='…';api('pk',{}).then(function(r){$('pkres').innerHTML=r.ok?'<span class="ok">登录成功</span> '+(r.limit?(r.usage/1073741824).toFixed(1)+' / '+(r.limit/1073741824).toFixed(0)+' GB':'')+(r.auto?(r.auto.same?' · /auto 对得上':' <span class="bad">'+esc(r.auto.hint||r.auto.err||'')+'</span>'):''):'<span class="bad">'+esc(r.err||'')+'</span>'}).catch(function(e){$('pkres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
 $('testLinks').onclick=function(){$('links').textContent='…';api('links',{}).then(function(r){$('links').innerHTML='影片库：'+(r.lb.ok?'<span class="ok">通</span> · PikPak '+esc(r.lb.pikpak):'<span class="bad">'+esc(r.lb.err)+'</span>')+'<br>传输：'+(r.transfer.ok?'<span class="ok">通</span> · rclone '+esc(r.transfer.rclone)+' · '+esc(r.transfer.core):'<span class="bad">'+esc(r.transfer.err)+'</span>')}).catch(function(e){$('links').textContent=e.message})};
-$('saveCfg').onclick=function(){api('cfg',{tpl:$('tpl').value,lang:$('lang').value,grp:$('grp').value,userCap:$('userCap').value,globalCap:$('globalCap').value,paused:$('paused').checked}).then(function(s){$('cfgres').innerHTML='<span class="ok">已保存</span>';render(s)}).catch(function(e){$('cfgres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
+$('saveCfg').onclick=function(){api('cfg',{tpl:$('tpl').value,lang:$('lang').value,grp:$('grp').value,userCap:$('userCap').value,globalCap:$('globalCap').value,pkSlots:$('pkSlots').value,vpsSlots:$('vpsSlots').value,paused:$('paused').checked}).then(function(s){$('cfgres').innerHTML='<span class="ok">已保存</span>';render(s)}).catch(function(e){$('cfgres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
 $('add').onclick=function(){api('add',{src:$('addSrc').value,id:$('addId').value,season:$('addSeason').value}).then(function(r){$('addres').textContent=r.joined?'已经在进行中':'已添加';load()}).catch(function(e){$('addres').textContent=e.message})};
 $('reqs').onclick=function(e){var b=e.target.closest('button[data-a]');if(!b)return;var a=b.dataset.a,id=+b.dataset.id;
  if(a==='log'){api('log?id='+id).then(function(r){alert(r.items.map(function(l){return new Date(l.at).toLocaleString()+'  '+l.msg}).join('\\n')||'没有日志')});return}

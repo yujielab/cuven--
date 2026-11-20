@@ -113,16 +113,22 @@ globalThis.fetch = async (url, init = {}) => {
     if (H['x-cuven-link'] !== 'link') return J({ error: '口令不对' }, 401);
     const op = p.replace('/api/link/', '');
     W.tf.push([op, body]);
+    if (W.tfDown > 0){ W.tfDown--; return J({ error: 'HTTP 523 · Cloudflare 连不上 VPS（已自动重试 2 次）' }, 502); }
+    const jobOf = (id) => W.job[id] || { finished: true, success: true, bytes: 1, total: 1 };
     switch (op){
       case 'ping': return J({ ok: 1, version: 'v1.68', core: 'test' });
       case 'organize': return J({ files: 3, deleted: ['ad.txt'], failed: [] });
       case 'check': return J(W.check.shift() || { k: 'ok', total: 4, vids: 4, have: [1, 2, 3, 4], miss: [], ongoing: false });
       case 'rename': return J({ name: 'Game.of.Thrones.S02.1080p.[Full-4]-Cuven®', jobid: 77 });
-      case 'copy': return J({ jobid: 88 });
-      case 'job': { const s = W.job[body.jobid] || { finished: true, success: true, bytes: 1, total: 1 }; return J({ error: '', speed: 2097152, ...s }); }
+      case 'copy': return J({ jobid: (W.copyJobs || []).shift() || 88 });
+      case 'job': return J({ error: '', speed: 2097152, ...jobOf(body.jobid) });
+      case 'jobs': return J({ jobs: Object.fromEntries(body.ids.map(id => [id, { error: '', speed: 1, ...jobOf(id) }])) });
+      case 'stop': (W.stopped = W.stopped || []).push(body.jobid); return J({ ok: 1 });
       case 'verify': return J({ ok: W.verifyOK ? 1 : 0, src: { count: 1, bytes: 9 }, dst: { count: W.verifyOK ? 1 : 0, bytes: 9 } });
       case 'purge': W.exists.add(body.item); return J({ ok: 1 });
-      case 'exists': return J({ exists: W.exists.has(body.item) ? 1 : 0 });
+      case 'exists': return Array.isArray(body.items)
+        ? J({ exists: Object.fromEntries(body.items.map(n => [n, W.exists.has(n) ? 1 : 0])) })
+        : J({ exists: W.exists.has(body.item) ? 1 : 0 });
     }
     return J({ error: 'tf 404' }, 404);
   }
@@ -188,7 +194,7 @@ const call = async (method, p, { body, user, admin } = {}) => {
   let j; try { j = JSON.parse(txt); } catch { j = txt; }
   return [r.status, j];
 };
-const tick = async () => { advance(61000); let pr; await worker.scheduled({}, env, { waitUntil(p){ pr = p; } }); await pr; };
+const tick = async () => { advance(3 * 60000 + 6000); let pr; await worker.scheduled({}, env, { waitUntil(p){ pr = p; } }); await pr; };
 const mine = async (user = 'alice') => (await call('GET', '/app/requests', { user }))[1].items;
 const one = async (id) => (await call('GET', '/admin/api/state', { admin: true }))[1].reqs.find(r => r.id === id);
 
@@ -393,6 +399,105 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   const dl = st.reqs.filter(r => r.stage === 'download');
   ok(dl.length && dl.every(r => /PikPak 账号/.test(r.note)) && W.push.length >= before, '没配 PikPak：等，不换规格', dl.map(r => r.note));
   ok(!st.cfg.pkSet, '清掉了 PikPak 账号');
+}
+
+
+/* ══ v2.0 核心：资源位、公平排队、批量轮询、看门狗、作业丢失、熔断、ETag ══
+   清空队列重新来，免得前面的请求占着资源位 */
+{
+  env.DB.db.exec('DELETE FROM tj_req');
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('health', 'tick:last')");
+  await call('POST', '/admin/api/cfg', { admin: true, body: { pkUser: 'pk@x.com', pkPass: 'pkpass', pkSlots: 2, vpsSlots: 1 } });
+  for (const id of [901, 902, 903, 904]) W.versions['movie:' + id] = [{ tid: 2, title: 'Movie ' + id + ' 1080p', mb: 1, labels: [], res: '1080p' }];
+  const ids = {};
+  for (const id of [901, 902, 903]) ids[id] = (await call('POST', '/app/requests', { user: 'alice', body: { src: 'movie', id } }))[1].request.id;
+  ids[904] = (await call('POST', '/app/requests', { user: 'bob', body: { src: 'movie', id: 904 } }))[1].request.id;
+  const st = async () => (await call('GET', '/admin/api/state', { admin: true }))[1];
+  const of = (s, tm) => s.reqs.find(r => r.tmdb === tm);
+
+  await tick();
+  let s = await st();
+  ok(of(s, 901).stage === 'download' && of(s, 904).stage === 'download' && of(s, 902).stage === 'queued' && of(s, 903).stage === 'queued',
+     '资源位 2 个：每个人的第一个先上（alice 的第一部 + bob 的那部），alice 的另外两部排队', s.reqs.map(r => [r.tmdb, r.stage]));
+  ok(/PikPak 同时云下载已满/.test(of(s, 902).note) && of(s, 902).errs === 0, '排队等位子不算出错', of(s, 902));
+  ok(s.slots.pk.used === 2 && s.slots.pk.max === 2 && of(s, 902).pos === 1 && of(s, 903).pos === 2, '面板：资源位 2 / 2，排队第 1、2 位', { slots: s.slots, p2: of(s, 902).pos, p3: of(s, 903).pos });
+  ok((await mine()).every(r => r.note === undefined && r.pos === undefined), 'App 看不到排队细节');
+
+  /* 两部下完 → 清洗 → 传输：VPS 只给 1 个位子，第二部排队 */
+  for (const t of [...W.tasks.keys()]) finishTask(t);
+  W.copyJobs = [501, 502];
+  W.job[501] = { finished: false, success: false, bytes: 100, total: 1000 };
+  W.job[502] = { finished: false, success: false, bytes: 200, total: 1000 };
+  await tick();          // download → clean（腾出 PikPak 位子：排队的两部推上去）
+  s = await st();
+  ok(of(s, 902).stage === 'download' && of(s, 903).stage === 'download', '前面的下完腾出位子，排队的接着推', s.reqs.map(r => [r.tmdb, r.stage]));
+  await tick();          // clean → copy
+  await tick();          // copy：一个开传输，一个排队
+  s = await st();
+  const copying = s.reqs.filter(r => r.stage === 'copy');
+  ok(copying.length === 2 && copying.filter(r => /VPS 同时传输已满/.test(r.note)).length === 1 && s.slots.vps.used === 1,
+     'VPS 只给 1 个传输位子：第二部排队', copying.map(r => [r.tmdb, r.note]));
+  await call('POST', '/admin/api/cfg', { admin: true, body: { vpsSlots: 2 } });
+  await tick();
+  s = await st();
+  ok(s.slots.vps.used === 2, '位子调成 2：第二部也开始传', s.slots);
+
+  /* 批量轮询：两个传输作业一轮只问一次 */
+  const before = W.tf.length;
+  W.job[501].bytes = 150; W.job[502].bytes = 260;
+  await tick();
+  const ops = W.tf.slice(before).map(x => x[0]);
+  ok(ops.filter(o => o === 'jobs').length === 1 && !ops.includes('job'), '两个传输作业：一轮只发一次 /api/link/jobs', ops);
+
+  /* 看门狗：501 一小时没有新字节 → 停掉重开；502 的作业丢了（VPS 重启）→ 从断点重开 */
+  W.job[502] = { missing: 1, finished: true, success: false, error: 'job not found' };
+  W.job[501].bytes = 150;
+  advance(61 * 60000);
+  W.copyJobs = [601, 602];
+  await tick();
+  s = await st();
+  ok((W.stopped || []).includes(501), '传输一小时没进展：先停掉作业', W.stopped);
+  const notes = (await call('GET', '/admin/api/log?id=' + ids[901], { admin: true }))[1].items.map(l => l.msg)
+    .concat((await call('GET', '/admin/api/log?id=' + ids[904], { admin: true }))[1].items.map(l => l.msg))
+    .concat((await call('GET', '/admin/api/log?id=' + ids[902], { admin: true }))[1].items.map(l => l.msg))
+    .concat((await call('GET', '/admin/api/log?id=' + ids[903], { admin: true }))[1].items.map(l => l.msg));
+  ok(notes.some(m => /没有进展，停掉重开/.test(m)) && notes.some(m => /作业没了/.test(m)), '日志里写着停掉重开、作业丢了重开', notes.filter(m => /进展|没了/.test(m)));
+  const copiesBefore = W.tf.filter(x => x[0] === 'copy').length;
+  await tick();
+  ok(W.tf.filter(x => x[0] === 'copy').length >= copiesBefore + 2, '两部都重新开了传输（copy 会跳过传完的）');
+
+  /* 熔断：VPS 连着出错 3 次 → 熔断，后面几轮不再去碰它，请求原地等、不算出错 */
+  W.tfDown = 99;
+  const tickShort = async () => { advance(61000); let pr; await worker.scheduled({}, env, { waitUntil(p){ pr = p; } }); await pr; };
+  env.DB.db.prepare("UPDATE tj_req SET next = 0 WHERE stage = 'copy'").run();
+  await tickShort();
+  s = await st();
+  ok(s.health.vps.open > s.now && /523/.test(s.health.vps.err), 'VPS 连着失败：熔断（面板看得到原因）', s.health.vps);
+  const callsAtOpen = W.tf.length;
+  env.DB.db.prepare("UPDATE tj_req SET next = 0 WHERE stage = 'copy'").run();
+  await tickShort();
+  s = await st();
+  ok(W.tf.length === callsAtOpen, '熔断中：这一轮一次都没去碰 VPS', W.tf.slice(callsAtOpen).map(x => x[0]));
+  ok(s.reqs.filter(r => r.stage === 'copy').every(r => /暂时不可用/.test(r.note) && r.state === 'active'), '要用 VPS 的请求原地等，不失败', s.reqs.map(r => [r.stage, r.note, r.errs]));
+  W.tfDown = 0;
+  advance(3 * 60000);
+  await tickShort();
+  s = await st();
+  ok(!(s.health.vps.open > s.now) && s.health.vps.trips === 0, '到期试探一次，通了就恢复', s.health.vps);
+
+  /* ETag：没变就 304 */
+  const get = (tag) => worker.fetch(new Request('https://tj.cuven.us/app/requests', { headers: { 'x-cuven-user': 'alice', ...(tag ? { 'if-none-match': tag } : {}) } }), env, {});
+  const r1 = await get();
+  const tag = r1.headers.get('etag');
+  const r2 = await get(tag);
+  ok(r1.status === 200 && tag && r2.status === 304 && (await r2.text()) === '', '我的请求没变：304 不带正文', { s1: r1.status, tag, s2: r2.status });
+
+  /* 发行检查（只剩一条在等发行时单独问）：不在 /auto 了就是已发行 */
+  const rid = ids[903];
+  env.DB.db.prepare("UPDATE tj_req SET stage = 'release', next = 0, data = json_set(data, '$.item', 'gone.mkv') WHERE id = ?").run(rid);
+  await tickShort();
+  s = await st();
+  ok(of(s, 903).state === 'done', '发行检查：不在 /auto 了就是已发行', of(s, 903));
 }
 
 /* ── 共用的 D1：别人的表原样不动，自己的表缺的列补上了 ── */

@@ -237,11 +237,22 @@ enum RequestAPI {
 
     struct Mine: Decodable { var items: [RequestStatus] }
 
-    static func mine(user: String) async throws -> [RequestStatus] {
+    /// 我的请求。带上次的 ETag：没变服务器回 304，这里回 items = nil（不用重新解码、不重画）
+    static func mine(user: String, etag: String?) async throws -> (items: [RequestStatus]?, etag: String?) {
         var r = URLRequest(url: url("/app/requests", []))
         r.setValue(userHeader(user), forHTTPHeaderField: "x-cuven-user")
-        let m: Mine = try await send(r)
-        return m.items
+        if let etag { r.setValue(etag, forHTTPHeaderField: "If-None-Match") }
+        let (data, resp) = try await session.data(for: r)
+        UsageMeter.shared.add(data.count, to: .data)
+        let http = resp as? HTTPURLResponse
+        let tag = http?.value(forHTTPHeaderField: "ETag")
+        switch http?.statusCode ?? 0 {
+        case 304: return (nil, etag)
+        case 200..<300: return (try JSONDecoder().decode(Mine.self, from: data).items, tag)
+        default:
+            let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
+            throw RequestAPIError.server(msg ?? "服务暂时不可用，请稍后再试。")
+        }
     }
 
     struct Created: Decodable { var request: RequestStatus }
@@ -275,6 +286,12 @@ final class RequestStore {
 
     @ObservationIgnored private var user: String?
     @ObservationIgnored private var loop: Task<Void, Never>?
+    /// 上一次「我的请求」的 ETag：没变服务器回 304
+    @ObservationIgnored private var etag: String?
+    /// 正在问：回到前台、轮询、后台刷新撞在一起时只问一次
+    @ObservationIgnored private var refreshing = false
+    /// 连着问失败几次（没网、服务器出错）：轮询按 2 的倍数放慢，最慢 10 分钟一次
+    @ObservationIgnored private var failures = 0
     /// 上次看到的每一条是什么状态（id → "stage|state"）：变了才发通知；存在本机，App 重开后照样比得出来
     @ObservationIgnored private var seen: [Int: String]
     private static let seenKey = "cuven_requests_seen"
@@ -312,19 +329,25 @@ final class RequestStore {
 
     // MARK: 轮询
 
-    /// 登录后开始：有进行中的每 30 秒看一次，没有就 5 分钟一次；回到前台马上看一次
+    /// 登录后开始：有进行中的每 30 秒看一次，没有就 5 分钟一次；回到前台马上看一次。
+    /// 问失败了（没网、服务器出错）按 2 的倍数放慢（最慢 10 分钟），通了马上回到原来的节奏；间隔带一点随机，
+    /// 很多台手机不会在同一秒一起问
     func start(user: String?) {
         guard self.user != user || loop == nil else { return }
         self.user = user
         UserDefaults.standard.set(user, forKey: Self.userKey)
         loop?.cancel()
         items = []
+        etag = nil
+        failures = 0
         guard let user, !user.isEmpty, !DemoData.enabled else { return }
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh(user: user)
-                let active = self?.hasActive ?? false
-                try? await Task.sleep(for: .seconds(active ? 30 : 300))
+                guard let self else { return }
+                let base: Double = self.hasActive ? 30 : 300
+                let backoff = self.failures > 0 ? min(600, base * pow(2, Double(min(self.failures, 4)))) : base
+                try? await Task.sleep(for: .seconds(backoff * Double.random(in: 0.9...1.1)))
             }
         }
     }
@@ -335,8 +358,20 @@ final class RequestStore {
     }
 
     func refresh(user: String) async {
-        guard let list = try? await RequestAPI.mine(user: user) else { return }
-        apply(list)
+        guard !refreshing else { return }
+        refreshing = true
+        defer { refreshing = false }
+        do {
+            let r = try await RequestAPI.mine(user: user, etag: etag)
+            failures = 0
+            guard self.user == user else { return }          // 问的时候换了账户：这份作废
+            if let list = r.items {
+                apply(list)
+                etag = r.etag
+            }
+        } catch {
+            failures += 1
+        }
     }
 
     private func apply(_ list: [RequestStatus]) {
@@ -367,6 +402,7 @@ final class RequestStore {
         let s = try await RequestAPI.create(user: user, title: t, season: season)
         seen[s.id] = seen[s.id] ?? (s.stage + "|" + s.state.rawValue)
         merge(s)
+        etag = nil                                            // 列表变了：下一次轮询完整取一份
         RequestNotice.requestPermission()
         return s
     }
