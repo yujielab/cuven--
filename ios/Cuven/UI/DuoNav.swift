@@ -129,7 +129,7 @@ extension View {
 
 // MARK: - 导航本身
 
-/// 竖向玻璃导航：胶囊里是主页 / 资料库，下面单独一颗搜索（账户在主页右上的头像里）。
+/// 竖向玻璃导航：胶囊里是主页 / 资料库 / 请求，下面单独一颗搜索（账户在主页右上的头像里）。
 /// 点一格就切过去（触感由 RootView 的 onChange 统一给）；再点一下当前那一格，这一格回到根页面（系统标签栏自带这个行为，自己画的要自己做）
 struct DuoNav: View {
     @Binding var tab: AppTab
@@ -158,6 +158,7 @@ struct DuoNav: View {
     private static let items: [Item] = [
         Item(tab: .home, symbol: "house.fill", label: "主页", id: "nav-home"),
         Item(tab: .library, symbol: "square.stack.fill", label: "资料库", id: "nav-library"),
+        Item(tab: .requests, symbol: "tray.and.arrow.down.fill", label: "请求", id: "nav-requests"),
     ]
 
     var body: some View {

@@ -85,6 +85,10 @@ struct RequestStatus: Decodable, Hashable, Identifiable, Sendable {
     static let labels = ["等待制片商", "等待回应", "等待品质管理", "等待传输", "最终发行审批"]
 
     var key: String { RequestStatus.key(src: src, id: tmdb, season: season) }
+    /// 这条请求对应的那部（详情页、播放用）
+    var catalogTitle: CatalogTitle {
+        CatalogTitle(kind: src == "tv" ? .tv : .movie, id: tmdb, title: title, year: year, poster: poster)
+    }
     static func key(src: String, id: Int, season: Int) -> String { "\(src)-\(id)-\(season)" }
 
     /// 这一步自己走了多少（0…1）：百分比 =（第几步 − 1 + 这一步的进度）÷ 5
@@ -278,8 +282,10 @@ final class RequestStore {
     static let shared = RequestStore()
     static let refreshTask = "us.cuven.tv.requests"
 
-    /// 我的请求（进行中的 + 30 天内结束的），按编号倒序
+    /// 知道的所有请求进度（我的 + 详情页 / 目录里带回来的别人的）：查某一部、某一季的进度用
     private(set) var items: [RequestStatus] = []
+    /// 只有我自己的请求（/app/requests 和刚提交的），新的在前：请求中心用
+    private(set) var mine: [RequestStatus] = []
     /// 主页「可请求添加」那一排（十分钟内不重取）
     private(set) var shelf: [CatalogItem] = []
     @ObservationIgnored private var shelfAt: Date?
@@ -306,6 +312,8 @@ final class RequestStore {
     }
 
     var hasActive: Bool { items.contains { $0.state == .active && $0.stage != "release" } }
+    /// 我进行中的请求有几个（标签栏「请求」上的角标）
+    var activeCount: Int { mine.filter { $0.state == .active }.count }
 
     /// 这一部 / 这一季最要紧的那一条：进行中的优先，其次最新的
     func status(src: String, id: Int, season: Int) -> RequestStatus? {
@@ -320,7 +328,7 @@ final class RequestStore {
         return all.first { $0.state == .active } ?? all.max { $0.id < $1.id }
     }
 
-    /// 服务器回来的（详情页、目录里带的）也记下，详情页切季时马上有
+    /// 服务器回来的（详情页、目录里带的）也记下，详情页切季时马上有；是我的那条就连请求中心一起更新
     func merge(_ s: RequestStatus?) {
         guard let s else { return }
         if let i = items.firstIndex(where: { $0.id == s.id }) {
@@ -328,6 +336,7 @@ final class RequestStore {
         } else {
             items.insert(s, at: 0)
         }
+        if let i = mine.firstIndex(where: { $0.id == s.id }), mine[i] != s { mine[i] = s }
     }
 
     // MARK: 轮询
@@ -341,9 +350,11 @@ final class RequestStore {
         UserDefaults.standard.set(user, forKey: Self.userKey)
         loop?.cancel()
         items = []
+        mine = []
         etag = nil
         failures = 0
-        guard let user, !user.isEmpty, !DemoData.enabled else { return }
+        if DemoData.enabled { loadDemo(); return }
+        guard let user, !user.isEmpty else { return }
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh(user: user)
@@ -353,6 +364,12 @@ final class RequestStore {
                 try? await Task.sleep(for: .seconds(backoff * Double.random(in: 0.9...1.1)))
             }
         }
+    }
+
+    /// 请求中心打开 / 下拉时：马上问一次
+    func refreshNow() async {
+        guard let user, !DemoData.enabled else { return }
+        await refresh(user: user)
     }
 
     func appBecameActive() {
@@ -380,6 +397,7 @@ final class RequestStore {
     private func apply(_ list: [RequestStatus]) {
         for s in list { notifyIfChanged(s) }
         items = list
+        mine = list.sorted { $0.id > $1.id }
         UserDefaults.standard.set(seen.reduce(into: [String: String]()) { $0[String($1.key)] = $1.value }, forKey: Self.seenKey)
     }
 
@@ -415,9 +433,34 @@ final class RequestStore {
         let s = try await RequestAPI.create(user: user, title: t, season: season)
         seen[s.id] = seen[s.id] ?? (s.stage + "|" + s.state.rawValue)
         merge(s)
+        mine.removeAll { $0.id == s.id }
+        mine.insert(s, at: 0)
         etag = nil                                            // 列表变了：下一次轮询完整取一份
         RequestNotice.requestPermission()
         return s
+    }
+
+    /// 演示数据（截图用）：请求中心里几条不同阶段的请求（不含详情页演示用的那部）
+    private func loadDemo() {
+        let t = Date().timeIntervalSince1970 * 1000
+        func make(_ id: Int, _ kind: CatalogTitle.Kind, _ name: String, _ year: String, poster: Int, season: Int = 0,
+                  step: Int, pct: Int, state: RequestStatus.State = .active, stage: String, ago: Double) -> RequestStatus {
+            var s = RequestStatus(id: id, title: CatalogTitle(kind: kind, id: 5000 + id, title: name, year: year, poster: "demo://poster/\(poster)"),
+                                  season: season, step: step, pct: pct, note: "", state: state)
+            s.stage = stage
+            s.updated = t - ago * 60_000
+            return s
+        }
+        mine = [
+            make(18, .movie, "北方来信", "2026", poster: 2, step: 4, pct: 66, stage: "copy", ago: 3),
+            make(17, .tv, "盛夏未至", "2025", poster: 4, season: 1, step: 3, pct: 46, stage: "rename", ago: 9),
+            make(16, .movie, "雾中灯塔", "2026", poster: 3, step: 2, pct: 31, stage: "download", ago: 14),
+            make(15, .movie, "第七号站台", "2024", poster: 6, step: 5, pct: 80, stage: "release", ago: 52),
+            make(14, .movie, "无声海岸", "2025", poster: 5, step: 5, pct: 100, state: .done, stage: "done", ago: 190),
+            make(13, .tv, "远山的回响", "2023", poster: 7, season: 2, step: 2, pct: 20, state: .failed, stage: "failed", ago: 1500),
+            make(12, .movie, "白昼之下", "2026", poster: 8, step: 5, pct: 100, state: .done, stage: "done", ago: 3000),
+        ]
+        items = mine
     }
 
     /// 演示数据：先停在第 1 步，1.6 秒后走到第 3 步 40%（截图用）

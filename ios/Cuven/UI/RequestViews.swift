@@ -281,62 +281,17 @@ struct CatalogDetailView: View {
 
     // MARK: 立即播放（发行以后：这部已经在片库里了）
 
-    /// 片库里的这部电影（按 TMDB 编号对）
-    private var libraryMovie: Video? {
-        guard title.kind == .movie else { return nil }
-        return model.movies.first { model.meta($0)?.id == title.id }
-    }
-
-    /// 片库里这部剧的这一季
-    private var librarySeries: Series? {
-        guard title.kind == .tv else { return nil }
-        let want = seasonKey
-        return model.series.first { s in
-            (s.tmdbId ?? model.seriesMetas[s.path]?.id) == title.id && (want == 0 || (s.season ?? 1) == want)
-        }
-    }
+    private var libraryMovie: Video? { RequestPlayback.movie(title, model: model) }
+    private var librarySeries: Series? { RequestPlayback.series(title, season: seasonKey, model: model) }
 
     private func playNow() {
         guard !opening else { return }
-        if let v = libraryMovie { playMovie(v); return }
-        if let s = librarySeries { Task { await playSeries(s) }; return }
-        /* 刚发行：片库清单还没刷新到这部 —— 刷新一次再找 */
         opening = true
         Task { @MainActor in
-            await model.refreshLibrary()
-            if title.kind == .tv { await model.refreshSeries() }
+            let problem = await RequestPlayback.play(title, season: seasonKey, model: model, artwork: meta?.backdrop ?? meta?.poster)
             opening = false
-            if let v = libraryMovie { playMovie(v) }
-            else if let s = librarySeries { await playSeries(s) }
-            else { alert = DetailAlert(title: "影片正在上架", message: "影片已经就绪，片库还在更新。请稍后再试一次。") }
+            if let problem { alert = DetailAlert(title: problem.title, message: problem.message) }
         }
-    }
-
-    private func playMovie(_ v: Video) {
-        Haptics.light()
-        PlayerCoordinator.shared.play(PlayRequest(path: v.path, name: v.name, title: model.title(v),
-                                                  subtitle: model.year(v).map { String($0) },
-                                                  artwork: model.backgroundArtString(v) ?? meta?.backdrop ?? meta?.poster), model: model)
-    }
-
-    /// 剧集：从这一季第 1 集放起，后面几集接着排上（看过一半的，播放器自己接着上次的地方）
-    private func playSeries(_ s: Series) async {
-        opening = true
-        defer { opening = false }
-        guard let list = try? await APIClient.shared.episodes(seriesPath: s.path), !list.isEmpty else {
-            alert = DetailAlert(title: "暂时无法播放", message: "无法载入剧集，请稍后再试。")
-            return
-        }
-        let files = list.sorted { ($0.ep ?? Int.max, $0.name) < ($1.ep ?? Int.max, $1.name) }
-        let sm = model.seriesMetas[s.path]
-        func req(_ f: EpisodeFile) -> PlayRequest {
-            PlayRequest(path: f.path, name: f.name, title: sm?.title ?? displayTitle, subtitle: f.ep.map { "第 \($0) 集" },
-                        artwork: sm?.backdrop ?? meta?.backdrop, seriesPath: s.path, episode: f.ep)
-        }
-        var first = req(files[0])
-        first.queue = files.dropFirst().map(req)
-        Haptics.light()
-        PlayerCoordinator.shared.play(first, model: model)
     }
 
     private var displayTitle: String {
@@ -501,6 +456,63 @@ struct CatalogDetailView: View {
         detail = CatalogDetail(demo: title, seasons: title.kind == .tv ? [1, 2] : [], count: 3,
                                best: RequestStatus.Spec(res: "2160p", labels: ["4K", "杜比视界"], size: "58.6 GB"))
         loading = false
+    }
+}
+
+// MARK: - 立即播放：片库里的这部（详情页、请求中心共用）
+
+@MainActor
+enum RequestPlayback {
+    struct Problem { let title: String; let message: String }
+
+    /// 片库里的这部电影（按 TMDB 编号对）
+    static func movie(_ t: CatalogTitle, model: AppModel) -> Video? {
+        guard t.kind == .movie else { return nil }
+        return model.movies.first { model.meta($0)?.id == t.id }
+    }
+
+    /// 片库里这部剧的这一季（season 0 = 哪一季都行）
+    static func series(_ t: CatalogTitle, season: Int, model: AppModel) -> Series? {
+        guard t.kind == .tv else { return nil }
+        return model.series.first { s in
+            (s.tmdbId ?? model.seriesMetas[s.path]?.id) == t.id && (season == 0 || (s.season ?? 1) == season)
+        }
+    }
+
+    /// 放片库里的这部；刚发行、片库清单还没刷新到的先刷新一次再找。放不了回给人看的说明
+    static func play(_ t: CatalogTitle, season: Int, model: AppModel, artwork: String?) async -> Problem? {
+        if let v = movie(t, model: model) { playMovie(v, model: model, artwork: artwork); return nil }
+        if let s = series(t, season: season, model: model) { return await playSeries(s, title: t.title, model: model, artwork: artwork) }
+        await model.refreshLibrary()
+        if t.kind == .tv { await model.refreshSeries() }
+        if let v = movie(t, model: model) { playMovie(v, model: model, artwork: artwork); return nil }
+        if let s = series(t, season: season, model: model) { return await playSeries(s, title: t.title, model: model, artwork: artwork) }
+        return Problem(title: "影片正在上架", message: "影片已经就绪，片库还在更新。请稍后再试一次。")
+    }
+
+    private static func playMovie(_ v: Video, model: AppModel, artwork: String?) {
+        Haptics.light()
+        PlayerCoordinator.shared.play(PlayRequest(path: v.path, name: v.name, title: model.title(v),
+                                                  subtitle: model.year(v).map { String($0) },
+                                                  artwork: model.backgroundArtString(v) ?? artwork), model: model)
+    }
+
+    /// 剧集：从这一季第 1 集放起，后面几集接着排上（看过一半的，播放器自己接着上次的地方）
+    private static func playSeries(_ s: Series, title: String, model: AppModel, artwork: String?) async -> Problem? {
+        guard let list = try? await APIClient.shared.episodes(seriesPath: s.path), !list.isEmpty else {
+            return Problem(title: "暂时无法播放", message: "无法载入剧集，请稍后再试。")
+        }
+        let files = list.sorted { ($0.ep ?? Int.max, $0.name) < ($1.ep ?? Int.max, $1.name) }
+        let sm = model.seriesMetas[s.path]
+        func req(_ f: EpisodeFile) -> PlayRequest {
+            PlayRequest(path: f.path, name: f.name, title: sm?.title ?? title, subtitle: f.ep.map { "第 \($0) 集" },
+                        artwork: sm?.backdrop ?? artwork, seriesPath: s.path, episode: f.ep)
+        }
+        var first = req(files[0])
+        first.queue = files.dropFirst().map(req)
+        Haptics.light()
+        PlayerCoordinator.shared.play(first, model: model)
+        return nil
     }
 }
 
