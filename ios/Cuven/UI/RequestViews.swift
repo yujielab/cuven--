@@ -11,35 +11,49 @@ import SwiftUI
 private let requestGreen = Color(red: 0.19, green: 0.82, blue: 0.35)
 private let requestRed = Color(red: 1.0, green: 0.27, blue: 0.23)
 
+/// 头部那颗按钮 / 那张卡的三种样子：请求添加（按钮）→ 五步进度（卡）→ 立即播放（按钮）
+enum RequestButtonMode: Equatable {
+    case request(title: String, symbol: String, enabled: Bool)
+    case progress(RequestStatus)
+    /// 发行了、片库里有了：卡收回成「立即播放」（用户要求：完成后自动还原形变为立即播放）
+    case play(busy: Bool)
+
+    var isCard: Bool { if case .progress = self { return true }; return false }
+}
+
 /// 头部那颗按钮 / 那张卡。
 /// 是同一个视图、同一块玻璃：按钮时高 48、圆角 24（正好是胶囊），卡时圆角 26、高度跟着内容。玻璃挂在一直在的那个框上，
 /// 框的大小随版面一起动画——玻璃的边、上面的片名和那一行信息在同一个动画里一起走，不会有一刻卡先铺满、盖住上面的字
 /// （第一版用两个视图 + glassEffectID 变形：截图里变形到一半，玻璃已经是卡的大小，片名还在往上走）。
-/// 里面的字交叉淡入淡出，裁在玻璃里面。
+/// 里面的字交叉淡入淡出，裁在玻璃里面。请求添加 → 卡、卡 → 立即播放 都是这一块玻璃变过去
 struct RequestMorphControl: View {
-    let status: RequestStatus?
-    let buttonTitle: String
-    let buttonSymbol: String
-    let enabled: Bool
+    let mode: RequestButtonMode
     let wide: Bool
-    let onTap: () -> Void
+    let onRequest: () -> Void
+    let onPlay: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let card = status != nil
+        let card = mode.isCard
         let shape = RoundedRectangle(cornerRadius: card ? 26 : 24, style: .continuous)
         let maxW: CGFloat? = card ? (wide ? 520 : .infinity) : (wide ? nil : .infinity)
+        let tappable: Bool = {
+            switch mode {
+            case .request(_, _, let enabled): return enabled
+            case .play(let busy): return !busy
+            case .progress: return false
+            }
+        }()
         ZStack(alignment: .topLeading) {
-            if let status {
+            switch mode {
+            case .progress(let status):
                 RequestProgressCard(status: status)
                     .transition(.opacity)
-            } else {
-                Label(buttonTitle, systemImage: buttonSymbol)
-                    .font(.headline)
-                    .foregroundStyle(enabled ? Color.black : Color.white.opacity(0.75))
-                    .lineLimit(1)
-                    .padding(.horizontal, 22)
-                    .frame(maxWidth: .infinity, minHeight: 48)
+            case .request(let title, let symbol, let enabled):
+                buttonLabel(title, symbol: symbol, dark: enabled)
+                    .transition(.opacity)
+            case .play(let busy):
+                buttonLabel(busy ? "正在准备…" : "立即播放", symbol: "play.fill", dark: true)
                     .transition(.opacity)
             }
         }
@@ -47,15 +61,34 @@ struct RequestMorphControl: View {
         .fixedSize(horizontal: wide && !card, vertical: false)
         .clipShape(shape)
         .contentShape(shape)
-        .glassEffect(card ? .regular : (enabled ? .regular.tint(.white.opacity(0.92)).interactive() : .regular), in: shape)
+        .glassEffect(card ? .regular : (tappable || isPlay ? .regular.tint(.white.opacity(0.92)).interactive() : .regular), in: shape)
         .environment(\.colorScheme, .dark)
-        .onTapGesture { if !card && enabled { onTap() } }
+        .onTapGesture { tap() }
         .accessibilityElement(children: card ? .contain : .combine)
         .accessibilityAddTraits(card ? [] : .isButton)
-        .accessibilityAction { if !card && enabled { onTap() } }
-        .accessibilityIdentifier(card ? "request-card" : "request-add")
+        .accessibilityAction { tap() }
+        .accessibilityIdentifier(card ? "request-card" : (isPlay ? "request-play" : "request-add"))
         // 按钮 ↔ 卡的那一下由详情页用 morph 这条曲线包起来（版面和玻璃同一个动画）；这里只管卡里的进度更新
-        .animation(DSMotion.adapt(.smooth(duration: 0.45), reduce: reduceMotion), value: status)
+        .animation(DSMotion.adapt(.smooth(duration: 0.45), reduce: reduceMotion), value: mode)
+    }
+
+    private var isPlay: Bool { if case .play = mode { return true }; return false }
+
+    private func tap() {
+        switch mode {
+        case .request(_, _, let enabled): if enabled { onRequest() }
+        case .play(let busy): if !busy { onPlay() }
+        case .progress: break
+        }
+    }
+
+    private func buttonLabel(_ title: String, symbol: String, dark: Bool) -> some View {
+        Label(title, systemImage: symbol)
+            .font(.headline)
+            .foregroundStyle(dark ? Color.black : Color.white.opacity(0.75))
+            .lineLimit(1)
+            .padding(.horizontal, 22)
+            .frame(maxWidth: .infinity, minHeight: 48)
     }
 
     /// 按钮 ↔ 卡：详情页改状态时用这一条（整个头部的版面一起走）
@@ -180,8 +213,14 @@ struct CatalogDetailView: View {
     @State private var busy = false
     /// 刚按下去、服务器还没回话：先把卡变出来（第 1 步），回话了换成真的
     @State private var pending: RequestStatus?
-    @State private var alert: String?
+    @State private var alert: DetailAlert?
+    /// 完成了（发行了 / 片库里本来就有）：卡收回成「立即播放」。看着页面时刚完成的，先让 100% 的卡停一下再收回
+    @State private var showPlay = false
+    /// 按了「立即播放」：片库还没刷新到这部、正在找
+    @State private var opening = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    struct DetailAlert: Identifiable { let title: String; let message: String; var id: String { title + message } }
 
     private var store: RequestStore { RequestStore.shared }
     private var seasonKey: Int { title.kind == .tv ? (season > 0 ? season : (detail?.season ?? 0)) : 0 }
@@ -189,16 +228,22 @@ struct CatalogDetailView: View {
 
     var body: some View {
         let status = pending ?? store.status(src: title.kind.rawValue, id: title.id, season: seasonKey)
-        let owned = title.kind == .tv && ownedSeasons.contains(seasonKey)
-        let available = (detail?.count ?? 0) > 0 && !owned
+        let inLibrary = libraryMovie != nil || librarySeries != nil
+        let done = inLibrary || status?.state == .done
+        let available = (detail?.count ?? 0) > 0 && !inLibrary
+        let mode: RequestButtonMode = done && (showPlay || status == nil)
+            ? .play(busy: opening)
+            : (status.map { .progress($0) }
+               ?? .request(title: buttonTitle(available: available), symbol: available ? "plus" : "clock", enabled: available && !busy))
+        let playing: Bool = { if case .play = mode { return true }; return false }()
         DetailScaffold(
             title: displayTitle,
             art: art,
             metaLine: metaLine,
-            playTitle: status == nil ? "请求添加" : "已请求",
+            playTitle: playing ? "播放" : (status == nil ? "请求添加" : "已请求"),
             playID: "request-pinned",
-            playDisabled: status != nil || !available || busy,
-            onPlay: { request() },
+            playDisabled: playing ? opening : (status != nil || !available || busy),
+            onPlay: { if playing { playNow() } else { request() } },
             genres: meta?.genres ?? [],
             overview: meta?.overview,
             director: meta?.director,
@@ -210,19 +255,88 @@ struct CatalogDetailView: View {
             trailerArt: [],
             stills: DetailText.stills(meta),
             customAction: AnyView(
-                RequestMorphControl(status: status, buttonTitle: buttonTitle(available: available, owned: owned),
-                                    buttonSymbol: available ? "plus" : (owned ? "checkmark" : "clock"),
-                                    enabled: available && !busy, wide: false, onTap: { request() })
+                RequestMorphControl(mode: mode, wide: false, onRequest: { request() }, onPlay: { playNow() })
             )
         ) { m in
             sections(m)
         }
         .task(id: title) { await load() }
-        .alert("无法请求添加", isPresented: Binding(get: { alert != nil }, set: { if !$0 { alert = nil } })) {
-            Button("好", role: .cancel) {}
-        } message: {
-            Text(alert ?? "")
+        .onAppear { if done { showPlay = true } }
+        // 完成了：100% 的卡停 1.5 秒，再收回成「立即播放」（刚打开页面、还在载入时就完成的，直接是「立即播放」）
+        .onChange(of: done) { _, now in
+            guard now else { showPlay = false; return }
+            if loading || status == nil { showPlay = true; return }
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(1500))
+                withAnimation(RequestMorphControl.morph(reduce: reduceMotion)) { showPlay = true }
+                Haptics.success()
+            }
         }
+        .alert(alert?.title ?? "", isPresented: Binding(get: { alert != nil }, set: { if !$0 { alert = nil } }), presenting: alert) { _ in
+            Button("好", role: .cancel) {}
+        } message: { a in
+            Text(a.message)
+        }
+    }
+
+    // MARK: 立即播放（发行以后：这部已经在片库里了）
+
+    /// 片库里的这部电影（按 TMDB 编号对）
+    private var libraryMovie: Video? {
+        guard title.kind == .movie else { return nil }
+        return model.movies.first { model.meta($0)?.id == title.id }
+    }
+
+    /// 片库里这部剧的这一季
+    private var librarySeries: Series? {
+        guard title.kind == .tv else { return nil }
+        let want = seasonKey
+        return model.series.first { s in
+            (s.tmdbId ?? model.seriesMetas[s.path]?.id) == title.id && (want == 0 || (s.season ?? 1) == want)
+        }
+    }
+
+    private func playNow() {
+        guard !opening else { return }
+        if let v = libraryMovie { playMovie(v); return }
+        if let s = librarySeries { Task { await playSeries(s) }; return }
+        /* 刚发行：片库清单还没刷新到这部 —— 刷新一次再找 */
+        opening = true
+        Task { @MainActor in
+            await model.refreshLibrary()
+            if title.kind == .tv { await model.refreshSeries() }
+            opening = false
+            if let v = libraryMovie { playMovie(v) }
+            else if let s = librarySeries { await playSeries(s) }
+            else { alert = DetailAlert(title: "影片正在上架", message: "影片已经就绪，片库还在更新。请稍后再试一次。") }
+        }
+    }
+
+    private func playMovie(_ v: Video) {
+        Haptics.light()
+        PlayerCoordinator.shared.play(PlayRequest(path: v.path, name: v.name, title: model.title(v),
+                                                  subtitle: model.year(v).map { String($0) },
+                                                  artwork: model.backgroundArtString(v) ?? meta?.backdrop ?? meta?.poster), model: model)
+    }
+
+    /// 剧集：从这一季第 1 集放起，后面几集接着排上（看过一半的，播放器自己接着上次的地方）
+    private func playSeries(_ s: Series) async {
+        opening = true
+        defer { opening = false }
+        guard let list = try? await APIClient.shared.episodes(seriesPath: s.path), !list.isEmpty else {
+            alert = DetailAlert(title: "暂时无法播放", message: "无法载入剧集，请稍后再试。")
+            return
+        }
+        let files = list.sorted { ($0.ep ?? Int.max, $0.name) < ($1.ep ?? Int.max, $1.name) }
+        let sm = model.seriesMetas[s.path]
+        func req(_ f: EpisodeFile) -> PlayRequest {
+            PlayRequest(path: f.path, name: f.name, title: sm?.title ?? displayTitle, subtitle: f.ep.map { "第 \($0) 集" },
+                        artwork: sm?.backdrop ?? meta?.backdrop, seriesPath: s.path, episode: f.ep)
+        }
+        var first = req(files[0])
+        first.queue = files.dropFirst().map(req)
+        Haptics.light()
+        PlayerCoordinator.shared.play(first, model: model)
     }
 
     private var displayTitle: String {
@@ -230,8 +344,7 @@ struct CatalogDetailView: View {
         return title.title
     }
 
-    private func buttonTitle(available: Bool, owned: Bool) -> String {
-        if owned { return "已在片库中" }
+    private func buttonTitle(available: Bool) -> String {
         if available { return busy ? "正在提交…" : "请求添加" }
         return loading ? "正在查询…" : "暂无可用资源"
     }
@@ -355,7 +468,7 @@ struct CatalogDetailView: View {
 
     private func request() {
         guard !busy, pending == nil else { return }
-        if !DemoData.enabled && !account.isLoggedIn { alert = "登录后才能请求添加。"; return }
+        if !DemoData.enabled && !account.isLoggedIn { alert = DetailAlert(title: "无法请求添加", message: "登录后才能请求添加。"); return }
         let s = seasonKey
         busy = true
         Haptics.light()
@@ -370,7 +483,7 @@ struct CatalogDetailView: View {
                 Haptics.success()
             } catch {
                 withAnimation(RequestMorphControl.morph(reduce: reduceMotion)) { pending = nil }
-                alert = error.localizedDescription
+                alert = DetailAlert(title: "无法请求添加", message: error.localizedDescription)
                 Haptics.error()
             }
         }

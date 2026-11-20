@@ -77,7 +77,8 @@ final class DuoUnfoldedTests: XCTestCase {
     }
 
     /// 请求添加（RequestViews.swift）：演示数据里推进一部片库里没有的剧集（-CuvenRequestPreview YES），
-    /// 截「请求添加」按钮、按下去那一下（玻璃正在变形）、变形完的五步进度卡（演示里 1.6 秒后走到第 3 步 40%）。
+    /// 截「请求添加」按钮、按下去那一下（玻璃正在变形）、变形完的五步进度卡（演示里 1.6 秒后走到第 3 步 40%）、
+    /// 走完以后收回成的「立即播放」。
     /// 截 duo-3q-*（iPad 上是 duo-4q-*）；外屏大小不截
     func testRequestCard() {
         XCUIDevice.shared.orientation = .portrait
@@ -98,6 +99,10 @@ final class DuoUnfoldedTests: XCTestCase {
         snap("duo-3q-request-b-morph")
         sleep(3)
         snap("duo-3q-request-c-card")
+        // 演示里 4.6 秒走完：100% 的卡停 1.5 秒，再收回成「立即播放」
+        _ = app.buttons["request-play"].waitForExistence(timeout: 8)
+        sleep(1)
+        snap("duo-3q-request-e-play")
         app.swipeUp(); sleep(2)
         snap("duo-3q-request-d-sections")
     }
