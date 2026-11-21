@@ -465,17 +465,26 @@ struct CatalogDetailView: View {
 enum RequestPlayback {
     struct Problem { let title: String; let message: String }
 
-    /// 片库里的这部电影（按 TMDB 编号对）
+    /// 片库里的这部电影：先看名字（或所在文件夹）里的追踪码 [auto-m550-r13]——确定的 TMDB 编号，不用等片名认出来；
+    /// 没有追踪码的再按 TMDB 编号对
     static func movie(_ t: CatalogTitle, model: AppModel) -> Video? {
         guard t.kind == .movie else { return nil }
+        if let v = model.videos.first(where: { v in
+            guard let i = AutoTag.info(in: v.path) else { return false }
+            return !i.tv && i.tmdb == t.id
+        }) { return v }
         return model.movies.first { model.meta($0)?.id == t.id }
     }
 
-    /// 片库里这部剧的这一季（season 0 = 哪一季都行）
+    /// 片库里这部剧的这一季（season 0 = 哪一季都行）：先看文件夹名里的追踪码 [auto-tv1399s2-r14]，再按 TMDB 编号对
     static func series(_ t: CatalogTitle, season: Int, model: AppModel) -> Series? {
         guard t.kind == .tv else { return nil }
+        if let s = model.series.first(where: { s in
+            guard let i = AutoTag.info(in: s.path), i.tv, i.tmdb == t.id else { return false }
+            return season == 0 || i.season == season || (i.season == 0 && (s.season ?? 1) == season)
+        }) { return s }
         return model.series.first { s in
-            (s.tmdbId ?? model.seriesMetas[s.path]?.id) == t.id && (season == 0 || (s.season ?? 1) == season)
+            (s.tmdbId ?? model.seriesMetas[s.path]?.id) == t.id && (season == 0 || max(1, s.season ?? 1) == season)
         }
     }
 

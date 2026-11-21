@@ -501,6 +501,59 @@ console.log('\n■ 片库对照：实时清单走 Stream 接口（STREAM_KEY）�
   ok(tom.get(94997) === 2 && tom.get(1399) === 2 && !tom.get(100088), '剧集：v25 剧集表里认好的两部判为确定已有，没有的那部显示缺片');
 }
 
+console.log('\n■ 片库对照：追踪码优先（[auto-m550-r13] / [auto-tv1399s2-r14]，v7.1）');
+{
+  const { env, W } = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+  makeForumU(W, 10);
+  const I = H.isolate(env, W);
+  await turboAll(I);
+  const films = W.tmdb.movie;
+  const A = films[0], B = films[1], C = films[2], D = films[3];
+  const nB = `${B.title}.${B.original_title.replace(/ /g, '.')}.${B.release_date.slice(0, 4)}.1080p.BluRay.x264`;
+  W.recv.files = { root: '/ram', _gen: 'tg1', _ts: Date.now(), videos: [],
+    /* Stream v25.1 起叠在快照 auto 字段里的 /auto 电影（传完还没挪进片库） */
+    auto: { root: '/auto', videos: [
+      { name: `zzqx.[auto-m${A.id}-r5].mkv`, path: `/auto/zzqx.[auto-m${A.id}-r5].mkv` },              // 名字里什么都认不出，只有追踪码
+      { name: `${nB}.[auto-m${C.id}-r6].mkv`, path: `/auto/${nB}.[auto-m${C.id}-r6].mkv` },              // 名字像 B，追踪码说是 C
+      { name: `Some.Show.S01E01.[auto-tv${D.id}s1-r7].mkv`, path: '/auto/Some.Show/x.mkv' } ] } };       // 剧集的追踪码不归电影源
+  W.recv.ptr = { g: 'tg1' };
+  W.tmdb.fail = (u) => /search/.test(u.pathname) ? new Response('{}', { status: 500 }) : null;      // TMDB 不通也要认得出
+  await I.call('/api/lib?refresh=1'); await I.settle();
+  const all = [];
+  for (let pg = 1; pg < 20; pg++) { const c = await (await I.call('/api/catalog?min=0&own=all&page=' + pg)).json(); all.push(...c.items); if (pg >= c.pages) break; }
+  const om = new Map(all.map(x => [x.id, x.own]));
+  const st = await (await I.call('/api/lib')).json();
+  ok(om.get(A.id) === 2 && om.get(C.id) === 2, `/auto 里带追踪码的电影：按编号判为确定已有（名字认不出的「${A.title}」、名字像别的片的「${C.title}」都对），TMDB 不通也不影响`);
+  ok(!om.get(B.id), `名字像「${B.title}」、追踪码说是「${C.title}」：以追踪码为准，「${B.title}」不算已有`);
+  ok(!om.get(D.id) && st.viaTag === 2 && !st.left, `剧集的追踪码不进电影源；追踪码认的 ${st.viaTag} 部不排队认定`, st);
+  W.tmdb.fail = null;
+
+  /* 总账里的条目带追踪码：总账记的编号是错的（年份也对不上）也以追踪码为准 */
+  const e2 = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+  makeForumU(e2.W, 6);
+  const J = H.isolate(e2.env, e2.W);
+  await buildAll(J);
+  const F = e2.W.tmdb.movie[0], G = e2.W.tmdb.movie[1];
+  e2.W.recv.meta = { gen: 'v22-t' };
+  e2.W.recv.doc = { gen: 'v22-t', ts: Date.now(), items: [{ key: 'x', kind: 'movie', name: `whatever.1970.[auto-m${F.id}-r9].mkv`, path: '/ram/w.mkv',
+    tmdb: G.id, type: 'movie', title: G.title, orig: G.original_title, year: '1970', guess: 'whatever', guessYear: '1970' }] };
+  await J.call('/api/lib?refresh=1'); await J.settle();
+  const o2 = await (await J.call('/api/catalog?min=0&own=only')).json();
+  ok(o2.total === 1 && o2.items[0].id === F.id, `总账条目带追踪码：以追踪码的「${F.title}」为准（总账记成「${G.title}」、年份还对不上，以前会判成认错）`);
+
+  /* 剧集：文件夹名里的追踪码给了编号（剧集表那一季还没认出 TMDB 也算） */
+  const e4 = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+  e4.W.tmdb.tv.push({ id: 1399, name: '权力的游戏', original_name: 'Game of Thrones', first_air_date: '2011-04-17', vote_count: 9000, vote_average: 8.4, poster_path: '/g.jpg', popularity: 80 });
+  e4.W.forum.boards['2'] = { 'tv_shangyingshijian_3=22': [{ tid: 20003, title: '权力的游戏 第二季 Game.of.Thrones.S02.2012.1080p.BluRay.x264 30GB' }] };
+  e4.W.recv.tv = { at: Date.now(), series: [
+    { id: 'tv-9', path: '/auto/GoT.S02.1080p.[auto-tv1399s2-r9]', title: 'GoT', season: 0, year: '', tmdbId: 0, total: 0 } ] };
+  const T = H.isolate(e4.env, e4.W);
+  for (let i = 0; i < 20; i++) { const q = await (await T.call('/api/build?src=tv')).json(); if (q.done || q.error) break; }
+  await T.call('/api/lib?refresh=1&src=tv'); await T.settle();
+  const tc = await (await T.call('/api/catalog?min=0&own=all&src=tv')).json();
+  ok(tc.items.find(x => x.id === 1399)?.own === 2, '剧集：/auto 里文件夹名带追踪码的那一季，剧集表还没认出 TMDB 也按追踪码判为确定已有');
+}
+
 console.log('\n■ 片库对照：新进库的片几分钟内自己认出来、各 isolate 跟上、详情页写明对上的文件');
 {
   const { env, r2, W } = H.makeEnv({ RECV_BASE: 'https://recv.test' });

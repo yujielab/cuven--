@@ -1,4 +1,9 @@
 /**
+ * [v7.1] 追踪码优先（用户要求：优先识别 auto 的唯一 TMDB 码，快速核对、正确添加影片和剧集）
+ *   请求添加（tj 2.3）传进 Dropbox /auto 的电影文件 / 剧集文件夹名字里带着 [auto-m550-r13] / [auto-tv1399s2-r14]
+ *   （m / tv + TMDB 编号、剧集带季，r + 请求编号）。片库对照时先看它：带着的就是确定的 TMDB 编号（按类型分进电影源 /
+ *   剧集源），「库中已有」直接按编号判，不再切片名、不排队用 TMDB 认，也不会被「年份对不上」判成认错。
+ *   实时清单也收 Stream v25.1 起叠在快照 auto 字段里的 /auto 电影 —— 传完还没挪进片库的，同样算已有。
  * [v7.0] 接「请求添加」Worker（tj.cuven.us，见 request/）：GET /api/link/versions?src=movie|tv&id=<tmdb>[&season=N]
  *   一部片 / 一季按规格排好的全部版本（剧集只要整季包，total = 标题里写的总集数）；/api/pikpush 的回包多带
  *   file / fileName（PikPak 里这个云下载落成的文件或文件夹），请求添加拿它去做清洗。都走原来的 GATE 口令（x-gate）。
@@ -4190,6 +4195,12 @@ function recvClassify(it, kind){
   if (!it || typeof it !== 'object') return null;
   const str = (v) => (typeof v === 'string' || typeof v === 'number') ? String(v).trim().slice(0, 160) : '';
   const uniq = (arr) => { const o = []; for (const v of arr){ const t = str(v); if (t && !o.includes(t)) o.push(t); } return o; };
+  /* [v7.1] 名字里带追踪码：确定的 TMDB 编号和类型，直接可信（不看年份、不比片名） */
+  const tg = autoTag(it.name) || autoTag(it.path) || autoTag(it.guess);
+  if (tg){
+    if (tg.type !== kind) return null;
+    return { id: tg.id, title: str(it.title || it.guess), y: String(yearOf(it.year) || yearOf(it.guessYear) || ''), idn: null, tag: 1 };
+  }
   const tm = Number(it.tmdb) > 0 ? Math.floor(Number(it.tmdb)) : 0;
   /* TMDB 的 movie id 与 tv id 是两套编号：认下来的按 type 分拣，没认下来的按目录形态猜 */
   const ty = (tm && (it.type === 'tv' || it.type === 'movie')) ? it.type
@@ -4312,6 +4323,12 @@ const liveRoot = (env) => String(env.RECV_BASE || '').replace(/\/+$/, '');
 const streamRoot = (env) => String(env.STREAM_BASE || '').replace(/\/+$/, '');
 const liveOn = (env) => !!(liveRoot(env) || streamRoot(env));
 const h32 = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); };
+/* [v7.1] 追踪码：[auto-m550-r13] / [auto-tv1399s2-r14]（方括号丢了也认）→ { type, id, season, code }；没有 → null */
+const AUTO_TAG_RE = /(?:^|[^a-z0-9])auto-(m|tv)(\d{1,9})(?:s(\d{1,3}))?-r(\d{1,12})(?![a-z0-9])/i;
+function autoTag(name){
+  const m = AUTO_TAG_RE.exec(String(name || ''));
+  return m ? { type: m[1].toLowerCase() === 'tv' ? 'tv' : 'movie', id: +m[2], season: m[3] ? +m[3] : 0, code: m[4] } : null;
+}
 
 /** 公开 R2 桶里 Stream v25 写的一个 JSON。404 / 拒绝访问 = 没有这个对象或桶没挂公开域名 → null */
 async function liveGet(env, path, timeout){
@@ -4376,8 +4393,11 @@ async function liveMovies(env, prev){
     if (ptr && ptr.g && keep && prev.gen === String(ptr.g)) return { gen: String(ptr.g), unchanged: 1, via: 'r2' };
     const d = await liveGet(env, 'file-list-v2.json', 25000)
       .catch(e => { trace('lib', '实时清单 file-list-v2.json 取不到：' + (e.message || e), { lvl: 'warn' }); return null; });
-    if (d && Array.isArray(d.videos) && d.videos.length)
-      return { gen: String(d._gen || (ptr && ptr.g) || ('t' + (d._ts || 0))), videos: d.videos, root: String(d.root || ''), ts: d._ts || 0, via: 'r2' };
+    /* [v7.1] Stream v25.1 起，/auto 里传完还没挪进片库的电影叠在 auto 字段里：一起算 */
+    const extra = d && d.auto && Array.isArray(d.auto.videos) ? d.auto.videos : [];
+    if (d && Array.isArray(d.videos) && (d.videos.length || extra.length))
+      return { gen: String(d._gen || (ptr && ptr.g) || ('t' + (d._ts || 0))), videos: extra.length ? d.videos.concat(extra) : d.videos,
+               root: String(d.root || ''), ts: d._ts || 0, via: 'r2' };
   }
   if (!streamRoot(env)) return null;
   const g = await streamApi(env, '/api/gen').catch(() => null);
@@ -4453,13 +4473,14 @@ async function ledgerHints(env, prev){
  */
 function liveCompose(doc){
   const ids = [], dedup = new Set(), idn = [], idnSeen = new Set(), fz = [], todo = [];
-  let viaLedger = 0, viaTmdb = 0;
+  let viaLedger = 0, viaTmdb = 0, viaTag = 0;
   /* [v6.5] 每条都带上片库里对应的文件名：详情页上能写明「库里对上的是哪个文件」 */
   const addId = (id, t, y, k, f) => { if (!dedup.has(id)){ dedup.add(id); ids.push([id, t || '', String(y || ''), k || '', f || '']); } };
   for (const pk in doc.lids || {}){
     const e = doc.lids[pk];
     if (!Array.isArray(e) || !(e[0] > 0)) continue;
-    addId(e[0], e[1], e[2], '', e[5] || pk.slice(pk.lastIndexOf('/') + 1)); viaLedger++;
+    addId(e[0], e[1], e[2], '', e[5] || pk.slice(pk.lastIndexOf('/') + 1));
+    if (e[6] === 'tag') viaTag++; else viaLedger++;
     if (Array.isArray(e[4]) && e[4].length && !idnSeen.has(e[0])){ idnSeen.add(e[0]); idn.push([e[0], e[3] || [], yearOf(e[2]) || 0, e[4]]); }
   }
   const res = doc.res || {};
@@ -4482,12 +4503,13 @@ function liveCompose(doc){
   }
   for (const s of doc.tvs || []){                  // 剧集：v25 剧集表认好的 id 直接用，没有的按片名 + 季 + 年份认领
     if (s[0] > 0){
-      addId(s[0], s[1][0] || '', s[2], '', s[5] || ''); viaLedger++;
+      addId(s[0], s[1][0] || '', s[2], '', s[5] || '');
+      if (s[6] === 'tag') viaTag++; else viaLedger++;
       if (s[4].length && !idnSeen.has(s[0])){ idnSeen.add(s[0]); idn.push([s[0], s[1], yearOf(s[2]) || 0, s[4]]); }
     } else if (s[4].length) fz.push([s[1], yearOf(s[2]) || '', s[3] || 0, s[4], [], s[5] || '']);
   }
   doc.ids = ids; doc.idn = idn; doc.fz = fz; doc.todo = todo;
-  doc.viaLedger = viaLedger; doc.viaTmdb = viaTmdb;
+  doc.viaLedger = viaLedger; doc.viaTmdb = viaTmdb; doc.viaTag = viaTag;
   doc.missed = fz.length;
   return doc;
 }
@@ -4516,8 +4538,11 @@ async function libSyncLive(env, force){
       if (!s || typeof s !== 'object') continue;
       out.files += Math.max(1, Number(s.episodes || s.total) || 1);
       const nm = []; for (const x of [s.zh, s.en, s.title]) if (x && typeof x === 'string' && !nm.includes(x.trim())) nm.push(x.trim().slice(0, 160));
-      const id = Number(s.tmdbId) > 0 ? Math.floor(Number(s.tmdbId)) : 0;
-      out.tvs.push([id, nm, String(yearOf(s.year) || ''), Number(s.season) || 0, canonKeys(nm), String(s.folder || s.path || '').slice(0, 200)]);
+      /* [v7.1] 文件夹名里的追踪码优先：确定的剧集编号 */
+      const tg = autoTag(s.path) || autoTag(s.folder);
+      const id = tg && tg.type === 'tv' ? tg.id : (Number(s.tmdbId) > 0 ? Math.floor(Number(s.tmdbId)) : 0);
+      out.tvs.push([id, nm, String(yearOf(s.year) || ''), Number(s.season) || (tg ? tg.season : 0) || 0, canonKeys(nm),
+                    String(s.folder || s.path || '').slice(0, 200), tg && tg.type === 'tv' ? 'tag' : '']);
     }
     out.mine = out.tvs.length;
   } else {
@@ -4538,6 +4563,9 @@ async function libSyncLive(env, force){
       if (!v || !v.path || !v.name) continue;
       out.files++;
       const pk = String(v.path).toLowerCase();
+      /* ⓪ [v7.1] 名字里带追踪码：确定的 TMDB 编号，不切片名、不排队认定（剧集的追踪码不归电影源） */
+      const tg = autoTag(v.name) || autoTag(v.path);       // 文件名上，或者所在的文件夹名上
+      if (tg){ if (tg.type === 'movie') out.lids[pk] = [tg.id, '', '', [], [], String(v.name).slice(0, 200), 'tag']; continue; }
       /* ① 总账提示：这个文件在 v22 那份快照里、而且 id 可信 */
       const lh = hints.map ? (hints.map.get('p:' + pk) || hints.map.get('n:' + String(v.name))) : prevL[pk];
       if (lh){ out.lids[pk] = lh.length > 5 ? lh : lh.slice(0, 5).concat([String(v.name).slice(0, 200)]); continue; }
@@ -4559,7 +4587,7 @@ async function libSyncLive(env, force){
   await r2put(env, LIB.list, out);
   libMem = null;
   trace('lib', '实时清单（' + (live.via === 'r2' ? '公开 R2' : 'Stream 接口') + '）：片库 ' + out.files + ' 个文件 → ' + out.mine + ' 部 · '
-    + out.ids.length + ' 部带 TMDB id（总账 ' + out.viaLedger + ' · 这边认定 ' + out.viaTmdb + '）'
+    + out.ids.length + ' 部带 TMDB id（追踪码 ' + out.viaTag + ' · 总账 ' + out.viaLedger + ' · 这边认定 ' + out.viaTmdb + '）'
     + (out.todo.length ? ' · 待认定 ' + out.todo.length : '') + (out.part ? ' · 还有 ' + out.part + ' 个文件下次接着切' : '')
     + ' · gen=' + out.gen, { lvl: 'info' });
   return { mode: 'live', gen: out.gen, files: out.files, cands: out.mine, ids: out.ids.length,
@@ -5002,7 +5030,7 @@ function libHydrate(doc){
            mine: doc.mine || 0, missed: doc.missed || 0, distrust: doc.distrust || 0, pending: doc.pending || 0,
            /* [v6.3] 实时清单：清单时间、总账（只当提示）停在哪天、两种来源各认了多少、还有多少文件没切 */
            recvTs: doc.recvTs || 0, liveTs: doc.liveTs || 0, lts: doc.lts || 0, part: doc.part || 0,
-           viaLedger: doc.viaLedger || 0, viaTmdb: doc.viaTmdb || 0 };
+           viaLedger: doc.viaLedger || 0, viaTmdb: doc.viaTmdb || 0, viaTag: doc.viaTag || 0 };
 }
 
 async function libRefresh(env, alsoResolve){
@@ -5321,7 +5349,7 @@ const libStat = (env, l, os) => ({
   distrust: l ? (l.distrust || 0) : 0,
   pending: l ? (l.pending || 0) : 0,
   recvTs: l ? (l.recvTs || 0) : 0, liveTs: l ? (l.liveTs || 0) : 0, lts: l ? (l.lts || 0) : 0,
-  part: l ? (l.part || 0) : 0, viaLedger: l ? (l.viaLedger || 0) : 0, viaTmdb: l ? (l.viaTmdb || 0) : 0,
+  part: l ? (l.part || 0) : 0, viaLedger: l ? (l.viaLedger || 0) : 0, viaTmdb: l ? (l.viaTmdb || 0) : 0, viaTag: l ? (l.viaTag || 0) : 0,
   liveOn: liveOn(env) ? 1 : 0, streamKey: env.STREAM_KEY ? 1 : 0, err: l ? '' : libErr,
   files: l ? l.files : 0,
   ids: l ? l.ids.size : 0,

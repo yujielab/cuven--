@@ -117,7 +117,7 @@ final class PlaybackStore {
     func relink(videos: [Video], series: [Series]) {
         guard !entries.isEmpty else { return }
         var movieAt: [String: String] = [:], seriesAt: [String: String] = [:]
-        for v in videos { if let c = AutoTag.code(in: v.name) { movieAt[c] = v.path } }
+        for v in videos { if let c = AutoTag.code(in: v.path) { movieAt[c] = v.path } }
         for s in series { if let c = AutoTag.code(in: s.path) { seriesAt[c] = s.path } }
         guard !movieAt.isEmpty || !seriesAt.isEmpty else { return }
         let livePaths = Set(videos.map(\.path)), liveSeries = Set(series.map(\.path))
@@ -200,7 +200,7 @@ final class WatchlistStore {
     func relink(videos: [Video], series: [Series]) {
         guard !items.isEmpty else { return }
         var movieAt: [String: String] = [:], seriesAt: [String: String] = [:]
-        for v in videos { if let c = AutoTag.code(in: v.name) { movieAt[c] = v.path } }
+        for v in videos { if let c = AutoTag.code(in: v.path) { movieAt[c] = v.path } }
         for s in series { if let c = AutoTag.code(in: s.path) { seriesAt[c] = s.path } }
         guard !movieAt.isEmpty || !seriesAt.isEmpty else { return }
         let live = Set(videos.map(\.path)).union(series.map(\.path))
