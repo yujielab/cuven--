@@ -1,5 +1,14 @@
 /**
- * Cuven 请求添加 Worker（tj.cuven.us）v2.3
+ * Cuven 请求添加 Worker（tj.cuven.us）v2.4
+ *
+ * v2.4：文件抵达 /auto 自动通过最终审核（用户要求：当文件抵达 auto 自动通过最终审核，使影片可以播放）
+ *   · 两端核对一致、PikPak 那份删了 = 抵达 /auto：当场通过最终审核，App 上 100%、「立即播放」、「已就绪」通知；
+ *     不再进「最终发行审批」等人，也不再像 2.2 那样等片库收录了才算（最多等 15 分钟）
+ *   · 通过的同时请片库马上收录（/api/auto/sync）。片库还没收录的，之后每分钟催一次（前 15 次，之后每 30 分钟，最多一天），
+ *     收录了就停；App 里按「立即播放」时也会再催片库一次
+ *   · 以前停在「最终发行审批」的（升级之前进来的、片库那时还是老版本的）下一轮直接通过
+ *   · 片库不收录 /auto（老版本 / 关了）照样通过，日志写清楚要等工作人员挪进片库才能播放
+ *   · 控制面板「设置」里可以关掉（关了就照旧等工作人员发行）
  *
  * v2.3：名字里带追踪码，传完以后也能一直追踪（用户要求：在文件和文件夹名中带上 auto-TMDB唯一码-内部代码）
  *   · 开始传 Dropbox 之前，在 PikPak 上把电影文件 / 剧集文件夹改个名，带上追踪码：
@@ -57,8 +66,8 @@
  *   ④ 正在传输  copy      VPS 上的 rclone：webdav:auto/<名字> → dropbox:auto/<名字>（先 copy）
  *               verify    两端核对（文件数 + 字节数），对不上重新 copy（最多 3 次）
  *               purge     核对一致才删 PikPak 那份
- *               （v2.2）删完问片库收录了没有：收录了 → 直接完成（在 /auto 里就能播放）
- *   ⑤ 等待工作人员的最终发行  release  片库一直没收录时才到这一步：每 5 分钟问一次片库、看一眼 dropbox:auto/<名字> 还在不在
+ *               （v2.4）删完 = 文件抵达 /auto：自动通过最终审核 → 完成（同时请片库收录，没收录的接着催）
+ *   ⑤ 等待工作人员的最终发行  release  只有面板里关了「自动通过」才到这一步：每 5 分钟看一眼 dropbox:auto/<名字> 还在不在
  *                         （人工挪去 ram / ram2 之后就不在了）
  *   完成        done      可以播放了（在 /auto 里，或者已经发行）
  *
@@ -90,7 +99,7 @@
  * 控制面板接口（x-admin-key: ADMIN_KEY）：/admin/api/state · cfg · pk · links · req · add · tick
  */
 
-const VER = 'tj 2.3';
+const VER = 'tj 2.4';
 const MIN = 60000, HOUR = 3600000, DAY = 86400000;
 const LIMIT = {
   userActive: 5,          // 一个用户同时进行中的请求
@@ -111,8 +120,7 @@ const LIMIT = {
   depGiveUp: DAY,         // 依赖一直连不上多久就停下等人
   stepErrors: 20,         // 同一步连续出错这么多次就停下来等人看
   releasePoll: 5 * MIN,
-  autoPoll: MIN,          // 文件在 /auto 里、片库还没收录：隔多久再问片库
-  autoWait: 15 * MIN,     // 这么久片库还没收录：转去「最终发行审批」照旧等（那期间收录了一样算就绪）
+  autoPoll: MIN,          // 自动通过最终审核以后片库还没收录：隔多久催一次
   trackEvery: 30 * MIN,   // 就绪以后追踪追踪码：多久看一次
   trackDays: 30 * DAY,    // 最多追多久
   trackLost: 6,           // 连着这么多次哪儿都找不到（改了名 / 删了）就不追了
@@ -236,7 +244,7 @@ const CFG_DEF = { pkUser: '', pkPass: '', tpl: 'rel', lang: 'en', grp: 'Cuven®'
                   globalCap: LIMIT.globalActive, paused: false,
                   pkSlots: 4,     // PikPak 同时云下载几个
                   vpsSlots: 2,    // VPS 同时传输几个（rclone 一次跑太多会把内存吃满、整个进程被杀）
-                  autoReady: true,    // 传到 /auto、片库收录了就算就绪（不等工作人员发行）
+                  autoReady: true,    // 文件抵达 /auto 自动通过最终审核（不等工作人员发行）
                   tagNames: true };   // 名字里带追踪码 [auto-m550-r13]（传完以后也能一直追踪）
 const b64 = (u8) => { let s = ''; for (const c of u8) s += String.fromCharCode(c); return btoa(s); };
 const unb64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
@@ -1006,46 +1014,90 @@ async function tagItem(c, r){
   await clog(c, r.id, r.d.tag ? '加上追踪码：' + r.d.item : '改了名但追踪码没留住：' + r.d.item);
 }
 
-/* ── 在 /auto 里就算就绪（v2.2）── */
-const autoOn = (c, r) => c.cfg.autoReady !== false && !r.d.autoOff && !!r.d.item;
-/** 这一轮要不要问片库：删完 PikPak 在等收录的、等发行的 */
+/* ── 文件抵达 /auto 自动通过最终审核（v2.4；v2.2 起「片库收录了才算」，现在抵达就算）── */
+const autoOn = (c, r) => c.cfg.autoReady !== false && !!r.d.item;
+/** 这一轮要不要先一次问完片库：删完 PikPak 的、等审批的 */
 const wantsSync = (c, r) => autoOn(c, r) && ((r.stage === 'purge' && !!r.d.purged) || r.stage === 'release');
 function finish(r, note){
   r.stage = 'done'; r.since = now(); r.next = 0; r.pct = 1; r.note = note || STAGE_TEXT.done;
 }
-/** 问片库这一部收录了没有：'has' 收录了 · 'off' 片库不认 /auto（这一条以后不再问）· 'wait' 还没有 / 没问成。
-    问不成（片库连不上、熔断）不算出错：文件好好地在 /auto 里，过会儿再问 */
-async function autoCheck(c, r){
+/** 片库的回答 → 'has' 收录了 · 'off' 片库不收录 /auto（老版本、关了、口令不对）· 'wait' 还没有 / 没问成。
+    按名字认，也按追踪码认（名字写法对不上、已经被挪进 ram / ram2 都算；挪走了顺手记下归宿） */
+function libVerdict(r, s){
+  if (!s || s.err) return 'wait';
+  if (s.off) return 'off';
+  if (s.has && s.has[r.d.item]) return 'has';
+  const w = r.d.tag && s.where && s.where[String(r.id)];
+  if (w && (r.d.kind !== 'dir' || w.ready)){
+    if (!w.auto && !r.d.home) r.d.home = { path: w.path, at: now() };
+    return 'has';
+  }
+  return 'wait';
+}
+/** 问片库这一部（顺便让它马上重看一眼 /auto）。这一轮已经一次问过的就用那一份；问不成不算出错 */
+async function libCheck(c, r){
   const m = c.memo.sync;
   let s = m && (m.off || m.err || (m.has && r.d.item in m.has)) ? m : null;
   if (!s){
     try { s = await streamSync(c, [r.d.item], r.d.kind === 'dir', r.d.tag ? [String(r.id)] : []); }
     catch (e){ if (e.budget) throw e; s = { err: String(e.message || e) }; }
   }
-  if (s.off){
-    r.d.autoOff = 1;
-    await clog(c, r.id, '片库不收录 /auto（' + s.why + '），照旧等工作人员发行');
-    return 'off';
-  }
-  if (s.has && s.has[r.d.item]) return 'has';
-  /* 按追踪码也认（v2.3）：名字大小写 / 写法对不上、或者已经被挪进 ram / ram2 了，都还认得出来 */
-  const w = r.d.tag && s.where && s.where[String(r.id)];
-  if (w && (r.d.kind !== 'dir' || w.ready)){
-    if (!w.auto) r.d.home = { path: w.path, at: now() };
-    return 'has';
-  }
-  r.d.autoTries = (r.d.autoTries || 0) + 1;
-  r.note = s.err ? '已在 /auto，等片库收录（' + s.err.slice(0, 80) + '）' : '已在 /auto，等片库收录';
-  return 'wait';
+  return { k: libVerdict(r, s), why: s.why || s.err || '' };
 }
-async function autoReady(c, r){
+/** 文件抵达 /auto（两端核对一致、PikPak 那份删了）：自动通过最终审核 → 可以播放。
+    片库当场收录了就完事；还没收录（Dropbox 的列表慢几秒、片库连不上）照样通过，之后每分钟催片库一次（libNudge），
+    App 上「立即播放」按下去时也会再催一次。片库不收录 /auto（老版本）也通过，日志写清楚要等工作人员挪进片库才能播放 */
+async function autoPass(c, r){
+  const { k, why } = await libCheck(c, r);
   r.d.ready = now();
-  if (r.d.home){
-    await clog(c, r.id, '片库已收录（工作人员已经挪到 ' + r.d.home.path + '）→ 可以播放了');
-    return finish(r, '可以播放（已归档到 ' + r.d.home.path + '）');
+  const moved = r.d.home ? '（工作人员已经挪到 ' + r.d.home.path + '）' : '';
+  if (k === 'has'){
+    r.d.lib = now();
+    await clog(c, r.id, '文件已抵达 /auto，自动通过最终审核；片库已收录 → 可以播放了' + moved);
+    return finish(r, '可以播放（自动通过最终审核）');
   }
-  await clog(c, r.id, '片库已收录 dropbox:/' + (c.env.AUTO_DIR || 'auto') + '/' + r.d.item + ' → 可以播放了（不等工作人员发行）');
-  finish(r, '可以播放（还在 /auto，等工作人员归档）');
+  finish(r, '自动通过最终审核');
+  if (k === 'off'){
+    r.d.lib = 'off';
+    await clog(c, r.id, '文件已抵达 /auto，自动通过最终审核；但片库不收录 /auto（' + why + '），要等工作人员挪进片库才能播放');
+    return;
+  }
+  r.d.libTries = 0;
+  r.next = now() + LIMIT.autoPoll;            // done 的这一条留个 next：libNudge 接着催片库
+  await clog(c, r.id, '文件已抵达 /auto，自动通过最终审核；片库还没收录' + (why ? '（' + why.slice(0, 80) + '）' : '') + '，每分钟催一次');
+}
+
+/** 自动通过以后片库还没收录的（done、next > 0）：一次问完，收录了就停；前 15 次每分钟，之后每 30 分钟，一天还不行就不催了。
+    只改 data / next（不动 updated：App 上的时间不跳） */
+async function libNudge(env, c){
+  if (depOpenUntil(c, 'stream') || c.n >= c.max - 2) return;
+  const d = await db(env);
+  const list = ((await d.prepare("SELECT * FROM tj_req WHERE stage = 'done' AND next > 0 AND next <= ? ORDER BY next LIMIT 30")
+    .bind(now()).all()).results || []).map(rowOf);
+  if (!list.length) return;
+  let s;
+  try {
+    s = await streamSync(c, [...new Set(list.map(r => r.d.item).filter(Boolean))].slice(0, 50), list.some(r => r.d.kind === 'dir'),
+                         list.filter(r => r.d.tag).map(r => String(r.id)).slice(0, 50));
+  } catch (e){ if (e.budget) throw e; s = { err: String(e.message || e) }; }
+  const stmts = [];
+  for (const r of list){
+    const k = libVerdict(r, s);
+    if (k === 'has'){
+      r.d.lib = now(); r.next = 0;
+      await clog(c, r.id, '片库已收录 → 可以播放了' + (r.d.home ? '（在 ' + r.d.home.path + '）' : ''));
+    } else if (k === 'off'){
+      r.d.lib = 'off'; r.next = 0;
+      await clog(c, r.id, '片库不收录 /auto（' + (s.why || '') + '），要等工作人员挪进片库才能播放');
+    } else {
+      r.d.libTries = (r.d.libTries || 0) + 1;
+      if (now() - (r.d.ready || r.since || 0) > DAY){ r.next = 0; await clog(c, r.id, '片库一天都没收录，不再催（等工作人员挪进片库）'); }
+      else r.next = now() + (r.d.libTries < 15 ? LIMIT.autoPoll : 30 * MIN);
+    }
+    stmts.push(d.prepare('UPDATE tj_req SET data = ?, next = ?, rev = rev + 1 WHERE id = ? AND rev = ?')
+      .bind(JSON.stringify(r.d), r.next || 0, r.id, r.rev));
+  }
+  await d.batch(stmts);
 }
 
 async function stPurge(c, r){
@@ -1055,20 +1107,14 @@ async function stPurge(c, r){
     r.d.purged = now();
     await clog(c, r.id, '传输完成，PikPak 那份已删：dropbox:' + (c.env.AUTO_DIR || 'auto') + '/' + r.d.item);
   }
-  if (autoOn(c, r)){
-    const k = await autoCheck(c, r);
-    if (k === 'has') return autoReady(c, r);
-    if (k === 'wait'){
-      if (now() - r.d.purged < LIMIT.autoWait){ r.next = now() + LIMIT.autoPoll; return; }
-      await clog(c, r.id, '片库 ' + Math.round(LIMIT.autoWait / MIN) + ' 分钟还没收录，转去等发行（这期间片库收录了一样算就绪）');
-    }
-  }
-  go(r, 'release', autoOn(c, r) ? '已在 /auto，等片库收录或工作人员发行' : '');
+  if (autoOn(c, r)) return autoPass(c, r);
+  go(r, 'release');
   r.next = now() + LIMIT.releasePoll;
 }
 
 async function stRelease(c, r){
-  if (autoOn(c, r) && (await autoCheck(c, r)) === 'has') return autoReady(c, r);
+  /* 开着「抵达 /auto 自动通过」：等审批的（升级之前进来的、以前片库不收录时停在这儿的）也直接通过 */
+  if (autoOn(c, r)) return autoPass(c, r);
   const batch = c.memo.exists;
   const exists = batch && r.d.item in batch ? batch[r.d.item] : (await tf(c, 'exists', { item: r.d.item })).exists;
   if (!exists){
@@ -1259,7 +1305,7 @@ async function tick(env, opt = {}){
   }
   /* 就绪以后的追踪（v2.3）：放在最后，用剩下的子请求和时间 */
   if (now() - c.t0 < LIMIT.tickMs){
-    try { await trackHomes(env, c); await flush(c); }
+    try { await libNudge(env, c); await trackHomes(env, c); await flush(c); }
     catch (e){ if (!e.budget) console.error('追踪：', e && e.message); }
     if (c.healthDirty) await kvPut(env, 'health', c.health).catch(() => {});
   }
@@ -1686,7 +1732,7 @@ th{color:var(--dim);font-weight:500;font-size:12px}td .t{font-weight:600}.mono{f
   <label>全部同时进行中</label><input id="globalCap" type="number" min="1" max="500">
   <label>PikPak 同时云下载</label><input id="pkSlots" type="number" min="1" max="20">
   <label>VPS 同时传输（太多会把 rclone 内存吃满）</label><input id="vpsSlots" type="number" min="1" max="8">
-  <label class="row" style="margin-top:12px;color:var(--text)"><input id="autoReady" type="checkbox" style="width:auto"> 传到 /auto、片库收录了就算就绪（不等工作人员发行）</label>
+  <label class="row" style="margin-top:12px;color:var(--text)"><input id="autoReady" type="checkbox" style="width:auto"> 文件抵达 /auto 自动通过最终审核（不等工作人员发行）</label>
   <label class="row" style="margin-top:8px;color:var(--text)"><input id="tagNames" type="checkbox" style="width:auto"> 名字里带追踪码 [auto-m550-r13]（挪走以后也能一直追踪）</label>
   <label class="row" style="margin-top:8px;color:var(--text)"><input id="paused" type="checkbox" style="width:auto"> 暂停定时任务</label>
   <div class="row" style="margin-top:12px"><button class="pri" id="saveCfg">保存设置</button><span id="cfgres"></span></div>
