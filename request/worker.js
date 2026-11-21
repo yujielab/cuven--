@@ -1,5 +1,12 @@
 /**
- * Cuven 请求添加 Worker（tj.cuven.us）v2.1
+ * Cuven 请求添加 Worker（tj.cuven.us）v2.2
+ *
+ * v2.2：传到 Dropbox 的 /auto 就立即可用（用户要求：在 auto 文件夹时就立即可用）
+ *   · 两端核对一致、删掉 PikPak 那份以后，请片库（Stream Worker v25.1 起的 /api/auto/sync）马上重看一眼 /auto；
+ *     片库回「收录了」就直接算就绪：App 上 100%、按钮变「立即播放」、发「已就绪」通知，不再等工作人员挪进 ram / ram2
+ *   · 片库还没收录（Dropbox 的列表慢几秒）：每分钟再问，15 分钟还不行就转去「最终发行审批」照旧等；那期间片库收录了一样算就绪
+ *   · 片库是老版本（没有这个接口）或关了 AUTO_FOLDER：照旧等工作人员发行，什么都不坏
+ *   · 一轮里要问的一次问完（?item=…&item=…）；控制面板「设置」里可以关掉（关了就是 v2.1 的样子）
  *
  * v2.1：修「经常两端核对不一致、重新传输」
  *   · 列目录失败 = 没核对成（暂时性错误，过会儿再核对），不再当「不一致」整个重传
@@ -37,8 +44,10 @@
  *   ④ 正在传输  copy      VPS 上的 rclone：webdav:auto/<名字> → dropbox:auto/<名字>（先 copy）
  *               verify    两端核对（文件数 + 字节数），对不上重新 copy（最多 3 次）
  *               purge     核对一致才删 PikPak 那份
- *   ⑤ 等待工作人员的最终发行  release  每 5 分钟看一眼 dropbox:auto/<名字> 还在不在：人工挪去 ram / ram2 之后就不在了
- *   完成        done      已发行
+ *               （v2.2）删完问片库收录了没有：收录了 → 直接完成（在 /auto 里就能播放）
+ *   ⑤ 等待工作人员的最终发行  release  片库一直没收录时才到这一步：每 5 分钟问一次片库、看一眼 dropbox:auto/<名字> 还在不在
+ *                         （人工挪去 ram / ram2 之后就不在了）
+ *   完成        done      可以播放了（在 /auto 里，或者已经发行）
  *
  * App 轮询 /app/requests 显示进度（STEP X OF 5、百分比），状态一变就发本地通知。
  *
@@ -49,7 +58,8 @@
  *   LINK_KEY       传输 Worker 的 LINK_KEY（密钥）
  *   LB_BASE        默认 https://lb.cuven.us
  *   TRANSFER_BASE  默认 https://transfer.cuven.us
- *   STREAM_BASE    默认 https://stream.cuven.online（TMDB 分季集数）
+ *   STREAM_BASE    默认 https://stream.cuven.online（TMDB 分季集数；v2.2 起也用它的 /api/auto/sync 让片库收录 /auto）
+ *   STREAM_SYNC_KEY  可选（密钥）：Stream Worker 配了 AUTO_SYNC_KEY 时填同一个
  *   ACCOUNT_BASE   默认 https://check.cuven.us（App 用户名核对：请求要带真实存在的用户名）
  *   AUTO_DIR       默认 auto
  *   定时触发器      * * * * *（每分钟）
@@ -67,7 +77,7 @@
  * 控制面板接口（x-admin-key: ADMIN_KEY）：/admin/api/state · cfg · pk · links · req · add · tick
  */
 
-const VER = 'tj 2.1';
+const VER = 'tj 2.2';
 const MIN = 60000, HOUR = 3600000, DAY = 86400000;
 const LIMIT = {
   userActive: 5,          // 一个用户同时进行中的请求
@@ -88,6 +98,8 @@ const LIMIT = {
   depGiveUp: DAY,         // 依赖一直连不上多久就停下等人
   stepErrors: 20,         // 同一步连续出错这么多次就停下来等人看
   releasePoll: 5 * MIN,
+  autoPoll: MIN,          // 文件在 /auto 里、片库还没收录：隔多久再问片库
+  autoWait: 15 * MIN,     // 这么久片库还没收录：转去「最终发行审批」照旧等（那期间收录了一样算就绪）
   refail: DAY,            // 失败后多久用户可以重新请求
 };
 const ACTIVE = ['queued', 'download', 'clean', 'check', 'rename', 'copy', 'verify', 'purge', 'release'];
@@ -207,7 +219,8 @@ async function saveReq(env, r){
 const CFG_DEF = { pkUser: '', pkPass: '', tpl: 'rel', lang: 'en', grp: 'Cuven®', userCap: LIMIT.userActive,
                   globalCap: LIMIT.globalActive, paused: false,
                   pkSlots: 4,     // PikPak 同时云下载几个
-                  vpsSlots: 2 };  // VPS 同时传输几个（rclone 一次跑太多会把内存吃满、整个进程被杀）
+                  vpsSlots: 2,    // VPS 同时传输几个（rclone 一次跑太多会把内存吃满、整个进程被杀）
+                  autoReady: true };  // 传到 /auto、片库收录了就算就绪（不等工作人员发行）
 const b64 = (u8) => { let s = ''; for (const c of u8) s += String.fromCharCode(c); return btoa(s); };
 const unb64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 async function secretKey(env){
@@ -248,6 +261,7 @@ async function saveCfg(env, patch){
   if (patch.userCap != null) next.userCap = clamp(parseInt(patch.userCap, 10) || LIMIT.userActive, 1, 50);
   if (patch.globalCap != null) next.globalCap = clamp(parseInt(patch.globalCap, 10) || LIMIT.globalActive, 1, 500);
   if (patch.paused != null) next.paused = !!patch.paused;
+  if (patch.autoReady != null) next.autoReady = !!patch.autoReady;
   if (patch.pkSlots != null) next.pkSlots = clamp(parseInt(patch.pkSlots, 10) || CFG_DEF.pkSlots, 1, 20);
   if (patch.vpsSlots != null) next.vpsSlots = clamp(parseInt(patch.vpsSlots, 10) || CFG_DEF.vpsSlots, 1, 8);
   if (next.pkUser !== raw.pkUser || next.pkPassEnc !== raw.pkPassEnc){ await kvDel(env, 'pk:tok'); PK_MEM = null; PK_FAIL = null; }
@@ -284,10 +298,10 @@ async function readJSON(r){
    到期放一次试探（半开）：通了就恢复；又失败就再熔断，时间翻倍（2 → 4 → 8 → 15 分钟封顶）。
    逻辑错误（4xx：参数不对、文件夹不在、作业没了）不算依赖坏了。状态存在 tj_kv 的 health 里，控制面板看得到。
    ══════════════════════════════════════════════════════════════════ */
-const DEPS = { lb: '影片库', vps: '传输（VPS）', pikpak: 'PikPak', stream: 'TMDB' };
+const DEPS = { lb: '影片库', vps: '传输（VPS）', pikpak: 'PikPak', stream: '片库 / TMDB' };
 /** 每一步要用哪些依赖：熔断中的不去碰 */
 const STAGE_DEPS = { queued: ['lb'], download: ['pikpak'], clean: ['pikpak'], check: ['vps'], rename: ['vps'],
-                     copy: ['vps'], verify: ['vps'], purge: ['vps'], release: ['vps'] };
+                     copy: ['vps'], verify: ['vps'], purge: ['vps'], release: [] };
 const transientErr = (e) => !!(e && !e.budget && !e.circuit && (e.net || e.status >= 500 || e.status === 429 || e.status === 409));
 async function loadHealth(env){
   const h = (await kvGet(env, 'health')) || {};
@@ -359,6 +373,26 @@ async function airedCount(c, id, season){
       return { total: eps.length, aired: eps.filter(e => e.air_date && e.air_date <= today).length };
     });
   } catch (e){ if (e.budget) throw e; return 0; }
+}
+
+/* ── 片库（Stream Worker v25.1+）：马上重看一眼 Dropbox 的 /auto，回这几个名字收录了没有 ──
+   电影是 /auto 里的那个文件名，剧集是 /auto 里的那个文件夹名。
+   老版本没有这个接口（404）、关了 AUTO_FOLDER、口令不对（401 / 403）→ { off }：照旧等工作人员发行 */
+async function streamSync(c, items, tv){
+  return depCall(c, 'stream', async () => {
+    const q = new URLSearchParams();
+    for (const n of items) q.append('item', n);
+    if (tv) q.set('tv', '1');
+    const headers = c.env.STREAM_SYNC_KEY ? { 'x-sync-key': c.env.STREAM_SYNC_KEY } : {};
+    const r = await xfetch(c, base(c.env, 'STREAM_BASE', 'https://stream.cuven.online') + '/api/auto/sync?' + q, { method: 'POST', headers }, 30000);
+    if (r.status === 404) return { off: 1, why: '片库是老版本，没有 /api/auto/sync' };
+    if (r.status === 401 || r.status === 403) return { off: 1, why: '片库要口令（STREAM_SYNC_KEY 和它的 AUTO_SYNC_KEY 对不上）' };
+    if (r.status >= 500 || r.status === 429) throw err('片库：HTTP ' + r.status, { status: r.status, net: 1 });
+    const j = await readJSON(r);
+    if (!r.ok) throw err('片库：' + (j.error || 'HTTP ' + r.status), { status: r.status });
+    if (j.off) return { off: 1, why: '片库关了 AUTO_FOLDER' };
+    return { has: j.has || {}, root: j.root || '' };
+  });
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -920,21 +954,64 @@ async function stVerify(c, r){
   go(r, 'copy', '补传 ' + (miss + diff || '') + (miss + diff ? ' 个文件' : '缺的文件') + (r.d.fromPk ? '（改从 PikPak 原生接口）' : ''));
 }
 
+/* ── 在 /auto 里就算就绪（v2.2）── */
+const autoOn = (c, r) => c.cfg.autoReady !== false && !r.d.autoOff && !!r.d.item;
+/** 这一轮要不要问片库：删完 PikPak 在等收录的、等发行的 */
+const wantsSync = (c, r) => autoOn(c, r) && ((r.stage === 'purge' && !!r.d.purged) || r.stage === 'release');
+function finish(r, note){
+  r.stage = 'done'; r.since = now(); r.next = 0; r.pct = 1; r.note = note || STAGE_TEXT.done;
+}
+/** 问片库这一部收录了没有：'has' 收录了 · 'off' 片库不认 /auto（这一条以后不再问）· 'wait' 还没有 / 没问成。
+    问不成（片库连不上、熔断）不算出错：文件好好地在 /auto 里，过会儿再问 */
+async function autoCheck(c, r){
+  const m = c.memo.sync;
+  let s = m && (m.off || m.err || (m.has && r.d.item in m.has)) ? m : null;
+  if (!s){
+    try { s = await streamSync(c, [r.d.item], r.d.kind === 'dir'); }
+    catch (e){ if (e.budget) throw e; s = { err: String(e.message || e) }; }
+  }
+  if (s.off){
+    r.d.autoOff = 1;
+    await clog(c, r.id, '片库不收录 /auto（' + s.why + '），照旧等工作人员发行');
+    return 'off';
+  }
+  if (s.has && s.has[r.d.item]) return 'has';
+  r.d.autoTries = (r.d.autoTries || 0) + 1;
+  r.note = s.err ? '已在 /auto，等片库收录（' + s.err.slice(0, 80) + '）' : '已在 /auto，等片库收录';
+  return 'wait';
+}
+async function autoReady(c, r){
+  r.d.ready = now();
+  await clog(c, r.id, '片库已收录 dropbox:/' + (c.env.AUTO_DIR || 'auto') + '/' + r.d.item + ' → 可以播放了（不等工作人员发行）');
+  finish(r, '可以播放（还在 /auto，等工作人员归档）');
+}
+
 async function stPurge(c, r){
-  await tf(c, 'purge', { item: r.d.item, kind: r.d.kind });
-  if (r.d.task && c.cfg.pkUser) await pkDelTasks(c, [r.d.task], false).catch(e => { if (e.budget) throw e; });
-  await clog(c, r.id, '传输完成，PikPak 那份已删，等待发行：dropbox:' + (c.env.AUTO_DIR || 'auto') + '/' + r.d.item);
-  go(r, 'release');
+  if (!r.d.purged){
+    await tf(c, 'purge', { item: r.d.item, kind: r.d.kind });
+    if (r.d.task && c.cfg.pkUser) await pkDelTasks(c, [r.d.task], false).catch(e => { if (e.budget) throw e; });
+    r.d.purged = now();
+    await clog(c, r.id, '传输完成，PikPak 那份已删：dropbox:' + (c.env.AUTO_DIR || 'auto') + '/' + r.d.item);
+  }
+  if (autoOn(c, r)){
+    const k = await autoCheck(c, r);
+    if (k === 'has') return autoReady(c, r);
+    if (k === 'wait'){
+      if (now() - r.d.purged < LIMIT.autoWait){ r.next = now() + LIMIT.autoPoll; return; }
+      await clog(c, r.id, '片库 ' + Math.round(LIMIT.autoWait / MIN) + ' 分钟还没收录，转去等发行（这期间片库收录了一样算就绪）');
+    }
+  }
+  go(r, 'release', autoOn(c, r) ? '已在 /auto，等片库收录或工作人员发行' : '');
   r.next = now() + LIMIT.releasePoll;
 }
 
 async function stRelease(c, r){
+  if (autoOn(c, r) && (await autoCheck(c, r)) === 'has') return autoReady(c, r);
   const batch = c.memo.exists;
   const exists = batch && r.d.item in batch ? batch[r.d.item] : (await tf(c, 'exists', { item: r.d.item })).exists;
   if (!exists){
     await clog(c, r.id, '已发行（不在 Dropbox 的 /auto 里了）');
-    r.stage = 'done'; r.since = now(); r.next = 0; r.pct = 1; r.note = STAGE_TEXT.done;
-    return;
+    return finish(r);
   }
   r.next = now() + LIMIT.releasePoll;
 }
@@ -1013,6 +1090,12 @@ async function loadSlots(c){
 }
 /** 这一轮要问的东西先一次问完：rclone 作业（传输 / 改名）、发行检查。老版本传输 Worker 没有批量接口就退回一个一个问 */
 async function prefetch(c, list){
+  /* 等片库收录的：一次问完（老版本片库回 off，这几条以后都不再问） */
+  const want = list.filter(r => wantsSync(c, r));
+  if (want.length > 1 && !depOpenUntil(c, 'stream')){
+    try { c.memo.sync = await streamSync(c, [...new Set(want.map(r => r.d.item))].slice(0, 50), want.some(r => r.d.kind === 'dir')); }
+    catch (e){ if (e.budget) throw e; c.memo.sync = { err: String(e.message || e) }; }
+  }
   if (depOpenUntil(c, 'vps')) return;
   const ids = [...new Set(list.filter(r => (r.stage === 'copy' || r.stage === 'rename') && r.d.job).map(r => r.d.job))];
   if (ids.length > 1){
@@ -1094,7 +1177,7 @@ function stepProgress(r){
     case 'rename': return 0.6 + 0.4 * clamp(r.pct, 0, 1);
     case 'copy': return 0.9 * clamp(r.pct, 0, 1);
     case 'verify': return 0.94;
-    case 'purge': return 0.98;
+    case 'purge': return r.d.purged ? 0.99 : 0.98;
     default: return 0;
   }
 }
@@ -1307,9 +1390,10 @@ async function adminState(env){
   return { ver: VER, now: now(), health, slots, tick: await kvGet(env, 'tick:last'), queued: queued.length,
     cfg: { pkUser: mask(cfg.pkUser), pkSet: !!(cfg.pkUser && cfg.pkPass), tpl: cfg.tpl, lang: cfg.lang, grp: cfg.grp,
            userCap: cfg.userCap, globalCap: cfg.globalCap, paused: !!cfg.paused, pkToken: tok ? { exp: tok.exp } : null,
-           pkSlots: cfg.pkSlots, vpsSlots: cfg.vpsSlots },
+           pkSlots: cfg.pkSlots, vpsSlots: cfg.vpsSlots, autoReady: cfg.autoReady !== false },
     env: { LB_GATE: !!env.LB_GATE, LINK_KEY: !!env.LINK_KEY, LB_BASE: base(env, 'LB_BASE', 'https://lb.cuven.us'),
-           TRANSFER_BASE: base(env, 'TRANSFER_BASE', 'https://transfer.cuven.us'), AUTO_DIR: String(env.AUTO_DIR || 'auto') },
+           TRANSFER_BASE: base(env, 'TRANSFER_BASE', 'https://transfer.cuven.us'), AUTO_DIR: String(env.AUTO_DIR || 'auto'),
+           STREAM_BASE: base(env, 'STREAM_BASE', 'https://stream.cuven.online') },
     reqs, logs };
 }
 async function adminReq(env, body){
@@ -1376,6 +1460,8 @@ async function adminLinks(env){
   catch (e){ out.lb = { ok: 0, err: e.message }; }
   try { const p = await tf(c, 'ping', {}); out.transfer = { ok: 1, rclone: p.version || '', core: p.core || '' }; }
   catch (e){ out.transfer = { ok: 0, err: e.message }; }
+  try { const s = await streamSync(c, [], false); out.stream = s.off ? { ok: 1, off: 1, why: s.why } : { ok: 1, root: s.root }; }
+  catch (e){ out.stream = { ok: 0, err: e.message }; }
   return json(out);
 }
 
@@ -1496,7 +1582,8 @@ th{color:var(--dim);font-weight:500;font-size:12px}td .t{font-weight:600}.mono{f
   <label>全部同时进行中</label><input id="globalCap" type="number" min="1" max="500">
   <label>PikPak 同时云下载</label><input id="pkSlots" type="number" min="1" max="20">
   <label>VPS 同时传输（太多会把 rclone 内存吃满）</label><input id="vpsSlots" type="number" min="1" max="8">
-  <label class="row" style="margin-top:12px;color:var(--text)"><input id="paused" type="checkbox" style="width:auto"> 暂停定时任务</label>
+  <label class="row" style="margin-top:12px;color:var(--text)"><input id="autoReady" type="checkbox" style="width:auto"> 传到 /auto、片库收录了就算就绪（不等工作人员发行）</label>
+  <label class="row" style="margin-top:8px;color:var(--text)"><input id="paused" type="checkbox" style="width:auto"> 暂停定时任务</label>
   <div class="row" style="margin-top:12px"><button class="pri" id="saveCfg">保存设置</button><span id="cfgres"></span></div>
   <h2 style="margin-top:18px">手动添加</h2>
   <div class="row"><select id="addSrc" style="width:90px"><option value="movie">电影</option><option value="tv">剧集</option></select>
@@ -1517,21 +1604,21 @@ function bar(r){var h='<div class="bar">';for(var i=1;i<=5;i++){if(i<r.step||r.s
 function render(s){
  $('ver').textContent=s.ver;var c=s.cfg;
  $('pkline').innerHTML=c.pkSet?'<span class="ok">已填</span> '+esc(c.pkUser)+(c.pkToken?' · 令牌到 '+new Date(c.pkToken.exp).toLocaleTimeString():''):'<span class="warn">还没填 PikPak 账号</span>';
- $('tpl').value=c.tpl;$('lang').value=c.lang;$('grp').value=c.grp;$('userCap').value=c.userCap;$('globalCap').value=c.globalCap;$('paused').checked=c.paused;
+ $('tpl').value=c.tpl;$('lang').value=c.lang;$('grp').value=c.grp;$('userCap').value=c.userCap;$('globalCap').value=c.globalCap;$('paused').checked=c.paused;$('autoReady').checked=c.autoReady;
  $('pkSlots').value=c.pkSlots;$('vpsSlots').value=c.vpsSlots;
- var NAMES={lb:'影片库',vps:'传输（VPS）',pikpak:'PikPak',stream:'TMDB'};
+ var NAMES={lb:'影片库',vps:'传输（VPS）',pikpak:'PikPak',stream:'片库 / TMDB'};
  var hs=Object.keys(NAMES).map(function(k){var h=s.health[k]||{};var open=h.open&&h.open>s.now;
   return '<span class="pill '+(open?'failed':'active')+'">'+NAMES[k]+' '+(open?'熔断到 '+new Date(h.open).toLocaleTimeString():'正常')+'</span>'+
    (h.err&&h.bad&&s.now-h.bad<3600000?' <span class="dim">'+esc(h.err)+'（'+ago(h.bad)+'）</span>':'')}).join('<br>');
  var sl=s.slots||{pk:{},vps:{}};
  $('sys').innerHTML=hs+'<div style="margin-top:10px">PikPak 云下载 <b>'+sl.pk.used+' / '+sl.pk.max+'</b> · VPS 传输 <b>'+sl.vps.used+' / '+sl.vps.max+'</b> · 排队 <b>'+s.queued+'</b>'+
   (s.tick?' · 上一轮 '+ago(s.tick.at)+'，推进 '+s.tick.done+' / 到期 '+s.tick.due+'，子请求 '+s.tick.fetches+'，'+s.tick.ms+' ms':' · 定时任务还没跑过')+'</div>';
- var e=s.env;$('links').innerHTML='影片库 '+esc(e.LB_BASE)+(e.LB_GATE?'':' <span class="bad">缺 LB_GATE</span>')+'<br>传输 '+esc(e.TRANSFER_BASE)+(e.LINK_KEY?'':' <span class="bad">缺 LINK_KEY</span>')+'<br>目录 /'+esc(e.AUTO_DIR);
+ var e=s.env;$('links').innerHTML='影片库 '+esc(e.LB_BASE)+(e.LB_GATE?'':' <span class="bad">缺 LB_GATE</span>')+'<br>传输 '+esc(e.TRANSFER_BASE)+(e.LINK_KEY?'':' <span class="bad">缺 LINK_KEY</span>')+'<br>目录 /'+esc(e.AUTO_DIR)+'<br>片库 '+esc(e.STREAM_BASE);
  $('reqs').innerHTML=s.reqs.map(function(r){
   var acts=r.state==='active'?'<button class="small" data-a="now" data-id="'+r.id+'">现在</button> <button class="small" data-a="skip" data-id="'+r.id+'">换规格</button> <button class="small" data-a="cancel" data-id="'+r.id+'">取消</button>':
    (r.state!=='done'?'<button class="small" data-a="retry" data-id="'+r.id+'">重试</button> ':'')+'<button class="small" data-a="delete" data-id="'+r.id+'">删除</button>';
   return '<tr><td><div class="t">'+esc(r.title||r.tmdb)+(r.season?' · 第 '+r.season+' 季':'')+'</div><div class="dim">#'+r.id+' · '+(r.src==='tv'?'剧集':'电影')+' '+r.tmdb+' · '+ago(r.created)+'</div></td>'+
-   '<td style="min-width:200px"><span class="pill '+r.state+'">'+esc(r.state==='active'?('STEP '+r.step+' · '+r.label):r.state==='done'?'已发行':r.state==='failed'?'失败':'已取消')+'</span> <b>'+r.pct+'%</b>'+(r.pos?' <span class="dim">排队第 '+r.pos+' 位</span>':'')+bar(r)+'<div class="dim">'+esc(r.note)+(r.errs?' <span class="warn">（出错 '+r.errs+' 次）</span>':'')+'</div><div class="dim">'+(r.next&&r.state==='active'?'下次 '+new Date(r.next).toLocaleTimeString():'')+'</div></td>'+
+   '<td style="min-width:200px"><span class="pill '+r.state+'">'+esc(r.state==='active'?('STEP '+r.step+' · '+r.label):r.state==='done'?'已就绪':r.state==='failed'?'失败':'已取消')+'</span> <b>'+r.pct+'%</b>'+(r.pos?' <span class="dim">排队第 '+r.pos+' 位</span>':'')+bar(r)+'<div class="dim">'+esc(r.note)+(r.errs?' <span class="warn">（出错 '+r.errs+' 次）</span>':'')+'</div><div class="dim">'+(r.next&&r.state==='active'?'下次 '+new Date(r.next).toLocaleTimeString():'')+'</div></td>'+
    '<td class="mono" style="max-width:340px;word-break:break-all">'+esc(r.cur||'')+(r.item?'<div class="ok">'+esc(r.item)+'</div>':'')+'<div class="dim">规格 '+(r.tried+(r.cur?1:0))+' / '+r.vers+'</div></td>'+
    '<td>'+esc((r.users||[]).join('、'))+'</td><td style="white-space:nowrap"><button class="small" data-a="log" data-id="'+r.id+'">日志</button> '+acts+'</td></tr>'}).join('')||'<tr><td colspan="5" class="dim">还没有请求</td></tr>';
  $('log').innerHTML=s.logs.map(function(l){return '<div><span class="dim">'+new Date(l.at).toLocaleString()+'</span> '+(l.rid?'#'+l.rid+' ':'')+esc(l.msg)+'</div>'}).join('');
@@ -1544,8 +1631,8 @@ $('refresh').onclick=load;
 $('tick').onclick=function(){this.disabled=true;var b=this;api('tick',{}).then(function(r){b.disabled=false;load()}).catch(function(e){b.disabled=false;alert(e.message)})};
 $('savePk').onclick=function(){var u=$('pkUser').value.trim(),p=$('pkPass').value;if(!u&&!p)return;var body={};if(u)body.pkUser=u;if(p)body.pkPass=p;api('cfg',body).then(function(s){$('pkUser').value='';$('pkPass').value='';$('pkres').innerHTML='<span class="ok">已保存</span>';render(s)}).catch(function(e){$('pkres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
 $('testPk').onclick=function(){$('pkres').textContent='…';api('pk',{}).then(function(r){$('pkres').innerHTML=r.ok?'<span class="ok">登录成功</span> '+(r.limit?(r.usage/1073741824).toFixed(1)+' / '+(r.limit/1073741824).toFixed(0)+' GB':'')+(r.auto?(r.auto.same?' · /auto 对得上':' <span class="bad">'+esc(r.auto.hint||r.auto.err||'')+'</span>'):''):'<span class="bad">'+esc(r.err||'')+'</span>'}).catch(function(e){$('pkres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
-$('testLinks').onclick=function(){$('links').textContent='…';api('links',{}).then(function(r){$('links').innerHTML='影片库：'+(r.lb.ok?'<span class="ok">通</span> · PikPak '+esc(r.lb.pikpak):'<span class="bad">'+esc(r.lb.err)+'</span>')+'<br>传输：'+(r.transfer.ok?'<span class="ok">通</span> · rclone '+esc(r.transfer.rclone)+' · '+esc(r.transfer.core):'<span class="bad">'+esc(r.transfer.err)+'</span>')}).catch(function(e){$('links').textContent=e.message})};
-$('saveCfg').onclick=function(){api('cfg',{tpl:$('tpl').value,lang:$('lang').value,grp:$('grp').value,userCap:$('userCap').value,globalCap:$('globalCap').value,pkSlots:$('pkSlots').value,vpsSlots:$('vpsSlots').value,paused:$('paused').checked}).then(function(s){$('cfgres').innerHTML='<span class="ok">已保存</span>';render(s)}).catch(function(e){$('cfgres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
+$('testLinks').onclick=function(){$('links').textContent='…';api('links',{}).then(function(r){$('links').innerHTML='影片库：'+(r.lb.ok?'<span class="ok">通</span> · PikPak '+esc(r.lb.pikpak):'<span class="bad">'+esc(r.lb.err)+'</span>')+'<br>传输：'+(r.transfer.ok?'<span class="ok">通</span> · rclone '+esc(r.transfer.rclone)+' · '+esc(r.transfer.core):'<span class="bad">'+esc(r.transfer.err)+'</span>')+'<br>片库：'+(r.stream.ok?(r.stream.off?'<span class="warn">不收录 /auto</span> · '+esc(r.stream.why):'<span class="ok">通</span> · 收录 '+esc(r.stream.root)+'，传完就能播放'):'<span class="bad">'+esc(r.stream.err)+'</span>')}).catch(function(e){$('links').textContent=e.message})};
+$('saveCfg').onclick=function(){api('cfg',{tpl:$('tpl').value,lang:$('lang').value,grp:$('grp').value,userCap:$('userCap').value,globalCap:$('globalCap').value,pkSlots:$('pkSlots').value,vpsSlots:$('vpsSlots').value,paused:$('paused').checked,autoReady:$('autoReady').checked}).then(function(s){$('cfgres').innerHTML='<span class="ok">已保存</span>';render(s)}).catch(function(e){$('cfgres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
 $('add').onclick=function(){api('add',{src:$('addSrc').value,id:$('addId').value,season:$('addSeason').value}).then(function(r){$('addres').textContent=r.joined?'已经在进行中':'已添加';load()}).catch(function(e){$('addres').textContent=e.message})};
 $('reqs').onclick=function(e){var b=e.target.closest('button[data-a]');if(!b)return;var a=b.dataset.a,id=+b.dataset.id;
  if(a==='log'){api('log?id='+id).then(function(r){alert(r.items.map(function(l){return new Date(l.at).toLocaleString()+'  '+l.msg}).join('\\n')||'没有日志')});return}

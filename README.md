@@ -284,6 +284,26 @@ UI 测试找元素时拍一次快照、看全部匹配项是否在屏上（`UITe
 
 建议使用 **Workers 付费计划**：一个 4K remux 分段大约消耗 20~40ms CPU，免费计划每次请求只有 10ms 上限。
 
+### 传到 /auto 就能播放（v25.1，`AUTO_FOLDER`，默认 `/auto`）
+
+用户要求：在 auto 文件夹时就立即可用。请求添加（tj.cuven.us）把影片传进 Dropbox 的 `/auto`，以前要等工作人员挪进 `/ram`（电影）/ `/ram2`（剧集）
+片库才看得到；现在片库把 `/auto` 当成「待归档」的一层叠上去：
+
+| `/auto` 里 | 算成 | 进哪个接口 |
+| --- | --- | --- |
+| 直接放着的视频 | 电影（样片、像单集的 `S01E01` 不算） | `/api/all` |
+| 只装着一个视频的文件夹（文件名没有集号、文件夹名没有季号） | 电影 | `/api/all` |
+| 装着好几个视频、文件名有集号、或者文件夹名有季号（`S02` / `Season 2` / `第二季` / `全 10 集`）的一级文件夹 | 剧集的一季 | `/api/tv`、`/api/tv/episodes` |
+
+- 这一层单独存在快照的 `auto` 字段里，不混进片库本体：增量游标、**重复影片巡检（会删文件）**、首页大图 / 精选都只看本体，碰不到 `/auto`。
+  `/api/all` 和库指纹 `g` 才把它算进来，所以这一层一变，`/api/all` 的缓存键跟着翻。
+- 每次预热（cron / webhook）重列一次 `/auto`（一次 `list_folder`，里面东西很少）；剧集表重扫时一起收。
+- `POST /api/auto/sync?item=<名字>&item=…[&tv=1]`：马上重列 `/auto`、换掉快照里那一层（`tv=1` 时连剧集表一起重扫，TMDB 编号最多等 3.5 秒），
+  回 `{ has: { 名字: 收录了没有 } }`。请求添加 Worker 删完 PikPak 那份就来问，收录了就让 App 变「立即播放」。
+  剧集要认出 TMDB 编号才算收录（App 靠它对上详情页）。这个接口不走 Cookie 门，10 秒内最多真列一次；配了 `AUTO_SYNC_KEY` 就要带 `x-sync-key`（请求添加那边填 `STREAM_SYNC_KEY`）。
+- 工作人员挪走以后，`/auto` 那份从这一层消失，本体的增量把新位置加进来。`/auto` 已经在 `ROOT_FOLDER`（`TV_FOLDER`）里面的，本体就扫得到，不重复叠。
+- `AUTO_FOLDER=off` 关掉；健康页（`/health`）有一行「/auto（传完就能播放）」写这一层有几部、多久前列过。
+
 ### 剧集（`TV_FOLDER`，默认 `/ram2`）
 
 前端的剧集区读这几个接口（v25 之前由旧后端提供，换到 v25 后缺了它们，剧集区整段消失 —— 现已补上）：
@@ -478,7 +498,7 @@ service = "cuven-audio-tx"
 
 ```bash
 tests/make-samples.sh     # 用 ffmpeg / mkvmerge 生成样片（约 30 秒）
-node tests/run.mjs        # Worker：217 项回归，约 1 分钟
+node tests/run.mjs        # Worker：227 项回归，约 1 分钟
 node tests/web.mjs        # 前端：182 项，需要 Playwright + Chromium（PLAYWRIGHT_PATH 可指定其 index.js），约 8 分钟
 node tests/bench.mjs [样片…]  # 性能基准：每一段都切一遍，量 Worker 的 CPU（BENCH_REPEAT=3 取最好的一遍）
 ```

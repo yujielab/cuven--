@@ -47,6 +47,8 @@ const W = {
   signins: 0,
   catalog: { movie: [], tv: [] },
   aired: { '1399:2': { total: 6, aired: 4 } },
+  lib: { mode: 404, seen: new Set() },   // 片库（Stream Worker）：404 = 老版本没有 /api/auto/sync；'on' / 'off' / 'down'
+  sync: [],                  // 片库收到的 /api/auto/sync
 };
 const pkFolderWith = (name, children) => {
   const id = 'F' + (W.seq++);
@@ -64,6 +66,9 @@ const LAYOUT = {
   2: () => ['Fight.Club.1999.1080p.BluRay', [['Fight.Club.1999.1080p.mkv', 12e9], ['Fight.Club.sample.mkv', 1e8], ['www.ads.url', 50]]],
   10: () => ['权力的游戏.第2季[全4集].Game.of.Thrones.S02.2160p', [['S02E01.mkv', 5e9], ['S02E02.mkv', 5e9]]],
   11: () => ['Game.of.Thrones.S02.1080p.WEB-DL', [['S02E01.mkv', 2e9], ['S02E02.mkv', 2e9], ['S02E03.mkv', 2e9], ['S02E04.mkv', 2e9]]],
+  30: () => ['Heat.1995.1080p.BluRay', [['Heat.1995.1080p.mkv', 9e9]]],
+  31: () => ['Ronin.1998.1080p.BluRay', [['Ronin.1998.1080p.mkv', 8e9]]],
+  32: () => ['Collateral.2004.1080p.BluRay', [['Collateral.2004.1080p.mkv', 8e9]]],
 };
 const finishTask = (taskId) => {
   const t = W.tasks.get(taskId);
@@ -137,6 +142,15 @@ globalThis.fetch = async (url, init = {}) => {
         : J({ exists: W.exists.has(body.item) ? 1 : 0 });
     }
     return J({ error: 'tf 404' }, 404);
+  }
+  /* 片库：重看一眼 /auto，回这几个名字收录了没有 */
+  if (u.host === 'stream.cuven.online' && p === '/api/auto/sync'){
+    const items = u.searchParams.getAll('item');
+    W.sync.push({ items, tv: u.searchParams.get('tv') === '1', key: H['x-sync-key'] || '' });
+    if (W.lib.mode === 404) return J({ error: 'Not found', path: p }, 404);
+    if (W.lib.mode === 'down') return J({ error: 'Internal error' }, 500);
+    if (W.lib.mode === 'off') return J({ ok: false, off: 1 });
+    return J({ ok: true, root: '/auto', movies: W.lib.seen.size, has: Object.fromEntries(items.map(n => [n, W.lib.seen.has(n)])) });
   }
   /* TMDB 分季 */
   if (u.host === 'stream.cuven.online' && p === '/api/tmdb/season'){
@@ -565,6 +579,93 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   ok(r.state === 'failed' && /补传 3 次后两端还是对不上（缺 1 个）/.test(r.note), '补传 3 次还对不上：停下，原因写清楚', r);
   ok(!W.tf.slice(tf0).some(([op]) => op === 'purge'), '一直对不上：PikPak 那份没删');
   W.verifyOK = true;
+}
+
+/* ══ v2.2：传到 Dropbox 的 /auto、片库收录了就立即可用（用户：「在 auto 文件夹时就立即可用」）══ */
+{
+  env.DB.db.exec('DELETE FROM tj_req');
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('health', 'tick:last')");
+  W.verifyOK = true; W.verifySeq = []; W.copyJobs = [];
+  W.job[88] = { finished: true, success: true, bytes: 1, total: 1 };
+  W.versions['movie:960'] = [{ tid: 30, title: 'Heat 1995 1080p', mb: 1, labels: [], res: '1080p' }];
+  W.versions['movie:961'] = [{ tid: 31, title: 'Ronin 1998 1080p', mb: 1, labels: [], res: '1080p' }];
+  W.versions['movie:962'] = [{ tid: 32, title: 'Collateral 2004 1080p', mb: 1, labels: [], res: '1080p' }];
+  const req = async (id, user = 'alice') => (await call('POST', '/app/requests', { user, body: { src: 'movie', id } }))[1].request.id;
+  /** 一路推到删完 PikPak（purge 那一轮之后） */
+  const toPurged = async (id) => {
+    await tick();
+    for (const t of [...W.tasks.keys()]) finishTask(t);
+    for (let i = 0; i < 10; i++){ await tick(); const r = await one(id); if (r.stage !== 'purge' ? ['release', 'done'].includes(r.stage) : W.tf.some(([op, b]) => op === 'purge' && b.item === r.item)) break; }
+    return one(id);
+  };
+
+  /* 片库收录了：不进「最终发行审批」，直接就绪 */
+  W.lib = { mode: 'on', seen: new Set() };
+  W.sync = [];
+  const a = await req(960);
+  let r = await toPurged(a);
+  ok(r.stage === 'purge' && r.item === 'Heat.1995.1080p.mkv' && /等片库收录/.test(r.note), '删完 PikPak、片库还没收录：停在第 4 步等（不进最终发行审批）', r);
+  let app = (await mine()).find(x => x.id === a);
+  ok(app.step === 4 && app.state === 'active', 'App 上还在第 4 步', app);
+  ok(W.sync.some(s => s.items.includes('Heat.1995.1080p.mkv') && !s.tv), '问片库的是 /auto 里的那个文件名（电影不带 tv=1）', W.sync);
+  W.lib.seen.add('Heat.1995.1080p.mkv');
+  const tfExists0 = W.tf.filter(([op]) => op === 'exists').length;
+  await tick();
+  r = await one(a);
+  app = (await mine()).find(x => x.id === a);
+  ok(r.state === 'done' && /可以播放/.test(r.note) && app.state === 'done' && app.pct === 100, '片库收录了 → 立即就绪 100%（App 变「立即播放」）', { r, app });
+  ok(W.tf.filter(([op]) => op === 'exists').length === tfExists0, '在 /auto 就算就绪：不再去看工作人员挪没挪', W.tf.slice(-3));
+  let log = (await call('GET', '/admin/api/log?id=' + a, { admin: true }))[1].items.map(l => l.msg);
+  ok(log.some(m => /片库已收录 dropbox:\/auto\/Heat\.1995\.1080p\.mkv → 可以播放了/.test(m)), '日志写清楚：在 /auto 里就可以播放', log.slice(0, 3));
+
+  /* 片库一直连不上：不出错、不失败；15 分钟后转去等发行，那期间收录了一样就绪 */
+  W.lib.mode = 'down';
+  const b = await req(961);
+  r = await toPurged(b);
+  ok(r.stage === 'purge' && r.state === 'active', '片库连不上：文件在 /auto 里，原地等，不算出错', r);
+  for (let i = 0; i < 8 && (await one(b)).stage === 'purge'; i++) await tick();
+  r = await one(b);
+  ok(r.stage === 'release' && r.state === 'active' && !r.errs, '15 分钟片库还没收录：转去最终发行审批（不失败）', r);
+  W.lib.mode = 'on'; W.lib.seen.add('Ronin.1998.1080p.mkv');
+  W.exists.add('Ronin.1998.1080p.mkv');
+  advance(6 * 60000); await tick();
+  r = await one(b);
+  ok(r.state === 'done' && /可以播放/.test(r.note), '等发行期间片库收录了：一样立即就绪（不用等人挪）', r);
+
+  /* 老版本片库（没有这个接口）：照旧等工作人员发行，以后不再问 */
+  W.lib.mode = 404;
+  W.sync = [];
+  const c3 = await req(962);
+  r = await toPurged(c3);
+  ok(r.stage === 'release', '老版本片库：照旧进最终发行审批', r);
+  const asked = W.sync.length;
+  advance(6 * 60000); await tick();
+  ok(W.sync.length === asked && (await one(c3)).stage === 'release', '老版本片库：这一条以后不再问，照旧等人挪', W.sync);
+  W.exists.delete('Collateral.2004.1080p.mkv');
+  advance(6 * 60000); await tick();
+  ok((await one(c3)).state === 'done', '人工挪走 → 已发行（老路照旧）');
+
+  /* 一轮里好几条等收录：一次问完；面板能关掉这个功能 */
+  env.DB.db.exec('DELETE FROM tj_req');
+  W.lib = { mode: 'on', seen: new Set() };
+  const d1 = await req(960), d2 = await req(961);
+  for (const [id, item] of [[d1, 'Heat.1995.1080p.mkv'], [d2, 'Ronin.1998.1080p.mkv']])
+    env.DB.db.prepare("UPDATE tj_req SET stage = 'release', next = 0, data = json_set(data, '$.item', ?, '$.kind', 'file') WHERE id = ?").run(item, id);
+  W.sync = [];
+  await tick();
+  ok(W.sync.length === 1 && W.sync[0].items.length === 2, '好几条等收录：一轮一次问完', W.sync);
+  const [, st] = await call('POST', '/admin/api/cfg', { admin: true, body: { autoReady: false } });
+  ok(st.cfg.autoReady === false, '面板：可以关掉「传到 /auto 就算就绪」', st.cfg);
+  W.sync = []; W.lib.seen.add('Heat.1995.1080p.mkv');
+  env.DB.db.exec("UPDATE tj_req SET next = 0");
+  await tick();
+  ok(W.sync.length === 0 && (await one(d1)).stage === 'release', '关掉以后：不问片库，照旧等发行', W.sync);
+  await call('POST', '/admin/api/cfg', { admin: true, body: { autoReady: true } });
+  const [, links] = await call('POST', '/admin/api/links', { admin: true, body: {} });
+  ok(links.stream && links.stream.ok && links.stream.root === '/auto', '面板「测试连接」：片库收录 /auto', links.stream);
+  W.lib.mode = 404;
+  const [, links2] = await call('POST', '/admin/api/links', { admin: true, body: {} });
+  ok(links2.stream.ok && links2.stream.off, '面板「测试连接」：老版本片库写清楚「不收录 /auto」', links2.stream);
 }
 
 /* ── 共用的 D1：别人的表原样不动，自己的表缺的列补上了 ── */
