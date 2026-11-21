@@ -270,7 +270,7 @@ struct AccountView: View {
     private var notifyGroup: some View {
         AccountGroup(title: "通知") {
             AccountRow(icon: "bell", title: "新片上架通知",
-                       subtitle: notifyWanted && notifyBlocked ? "已在“设置”中关闭通知" : "有新影片上架时通知你") {
+                       subtitle: notifyWanted && notifyBlocked ? "已在“设置”中关闭通知" : nil) {
                 Toggle("新片上架通知", isOn: notifyBinding)
                     .labelsHidden()
                     .tint(.green)
@@ -290,8 +290,8 @@ struct AccountView: View {
     private var playbackGroup: some View {
         let audio = TrackPrefs.Audio(rawValue: audioPref) ?? .auto
         let subtitle = TrackPrefs.Subtitle(rawValue: subtitlePref) ?? .auto
-        return AccountGroup(title: "播放", footer: "每集开始时自动应用，播放时仍可在播放器中更改。") {
-            AccountRow(icon: "forward.end", title: "自动播放下一集", subtitle: "看完自动继续") {
+        return AccountGroup(title: "播放") {
+            AccountRow(icon: "forward.end", title: "自动播放下一集") {
                 Toggle("自动播放下一集", isOn: $autoplayNext)
                     .labelsHidden()
                     .tint(.green)
@@ -304,7 +304,7 @@ struct AccountView: View {
                     ForEach(TrackPrefs.Audio.allCases) { Text($0.label).tag($0.rawValue) }
                 }
             } label: {
-                AccountRow(icon: "waveform", title: "首选音轨", subtitle: audio.hint) {
+                AccountRow(icon: "waveform", title: "首选音轨") {
                     AccountMenuValue(audio.label)
                 }
             }
@@ -319,7 +319,7 @@ struct AccountView: View {
                     ForEach(TrackPrefs.Subtitle.allCases) { Text($0.label).tag($0.rawValue) }
                 }
             } label: {
-                AccountRow(icon: "captions.bubble", title: "首选字幕", subtitle: subtitle.hint) {
+                AccountRow(icon: "captions.bubble", title: "首选字幕") {
                     AccountMenuValue(subtitle.label)
                 }
             }
@@ -345,7 +345,7 @@ struct AccountView: View {
         if let s = account.session {
             AccountGroup(title: "登录与安全") {
                 if account.loginRequired && account.biometryAvailable {
-                    AccountRow(icon: account.biometrySymbol, title: "使用\(account.biometryName) 登录", subtitle: "下次轻点一下即可登录") {
+                    AccountRow(icon: account.biometrySymbol, title: "使用\(account.biometryName) 登录") {
                         Toggle("使用\(account.biometryName) 登录", isOn: faceIDBinding)
                             .labelsHidden()
                             .tint(.green)
@@ -459,10 +459,9 @@ struct AccountView: View {
 
 // MARK: - 部件（参考图：Apple「游戏」App 的个人页）
 
-/// 一组：粗体组名 + 一张卡（+ 卡下一行灰色说明）
+/// 一组：粗体组名 + 一张卡
 struct AccountGroup<Rows: View>: View {
     let title: String
-    var footer: String? = nil
     @ViewBuilder var rows: () -> Rows
 
     var body: some View {
@@ -473,14 +472,6 @@ struct AccountGroup<Rows: View>: View {
                 .padding(.leading, 2)
                 .accessibilityAddTraits(.isHeader)
             AccountCard(content: rows)
-            if let footer {
-                // 卡下的说明和卡里那一列符号同一条左边线（离卡边 20；以前 8，和什么都对不上：F2），灰度用全 App 的第三级（50% → 55%）
-                Text(footer)
-                    .font(.footnote)
-                    .foregroundStyle(DSInk.tertiary)
-                    .padding(.horizontal, AccountMetrics.inset)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
     }
 }
@@ -499,9 +490,9 @@ struct AccountCard<Content: View>: View {
 }
 
 /// 卡里一行的几个距离（设计轮 2（并行·library））：行的左右内边距、符号那一列的宽、符号到字的间距。
-/// 细线和卡下的说明都按它们对齐，不再各写各的数
+/// 分隔线用同一套距离对齐
 enum AccountMetrics {
-    /// 卡边到符号（也是卡下说明的左边线）
+    /// 卡边到符号
     static let inset: CGFloat = 20
     /// 符号那一列（默认字号时；跟着动态字体放大）。用户要求卡片更精致：40 → 32
     static let iconColumn: CGFloat = 32
@@ -527,7 +518,7 @@ struct AccountRow<Trailing: View>: View {
     var body: some View {
         // 用户要求个人信息页的卡片「在视觉上优雅精致」：标题 Title 3 → Body 半粗（20 → 17 点）、说明 Callout → Subheadline，
         // 符号 24 → 21、符号列 40 → 32、间距 16 → 14，一行 66 / 78 → 54 / 64 点高——
-        // 字那一列宽出 16 点，折起的 Duo 上邮箱、「用于登录的面容数据」不再折成两行，整张卡矮了约四分之一
+        // 字那一列宽出 16 点，折起的 Duo 上有更多空间显示邮箱
         HStack(spacing: AccountMetrics.gap) {
             Image(systemName: icon)
                 .font(.system(size: iconSize, weight: .regular))

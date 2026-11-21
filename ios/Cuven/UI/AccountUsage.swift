@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - 账户页移植（网页版）：网络速度、使用洞察 · 流量概览
 //
-// 网页版账户页的第二、三张卡，样子换成这一页的（Apple「游戏」App 的个人页：组名 + 圆角 26 的半透明卡、白字、灰色说明，见 AccountView）：
+// 网页版账户页的第二、三张卡，样子换成这一页的（Apple「游戏」App 的个人页：组名 + 半透明卡，见 AccountView）：
 // · 网络速度：45 根竖条的波浪滑块（拇指那一处凹下去，左亮右暗），整条都能拖，拖的时候拇指上方一颗气泡写着数，每 5% 一下选择触感；
 //   旁白是一个可调的元素（上下轻扫 ±5%）。存在 cuven_network_speed（和网页版的 settings.networkSpeed 同步），在 iOS 上真的管播放（NetworkSpeed）。
 //   滑块下面一行「自动调整」（用户要求）：检测网络情况和速度、自动选百分比（NetworkAuto）；自动选的数只在本机，手动拖一下就关掉自动。
@@ -11,30 +11,11 @@ import SwiftUI
 
 // MARK: - 网络速度
 
-/// 「网络」一组：标题 + 一张卡（「网络速度」那一行）+ 卡下一行说明这个设置在 iOS 上管什么。直接放进账户页的组里用
+/// 「网络」一组：标题 + 网络速度卡
 struct NetworkSpeedCard: View {
-    @AppStorage(NetworkSpeed.key) private var speed = NetworkSpeed.defaultValue
-    @AppStorage(NetworkSpeed.autoKey) private var auto = false
-    @AppStorage(NetworkSpeed.autoValueKey) private var autoValue = -1
-
     var body: some View {
-        AccountGroup(title: "网络", footer: footer) {
+        AccountGroup(title: "网络") {
             NetworkSpeedRow()
-        }
-    }
-
-    /// 说真话：这个百分比（开着自动调整就是自动选的那个）在 iOS 上换成了什么：正片缓冲多久、编辑推荐的预告片缓存成哪一档（TrailerCache.Tier）
-    private var footer: String {
-        let p = auto && autoValue >= 0 ? min(100, autoValue) : min(100, max(0, speed))
-        let tail = auto ? "开启自动调整后，网络变化时会重新检测。更改将在下次播放时生效。"
-                        : "更改将在下次播放时生效。"
-        if p >= 100 { return "设为 100% 时，由系统决定缓冲时长，预告片以最高画质（4K / HDR）缓存。" + tail }
-        let base = "最多提前缓冲约 \(Int(NetworkSpeed.forwardBuffer(p))) 秒"
-        switch TrailerCache.Tier.of(p) {
-        case .p1080?: return base + "，预告片以 1080p 缓存。" + tail
-        case .p720?: return base + "，预告片以 720p 缓存。" + tail
-        case .p540?: return base + "，预告片以 540p 缓存。" + tail
-        default: return base + "。低于 25% 时，预告片不会自动播放，也不会缓存。" + tail
         }
     }
 }
@@ -91,31 +72,25 @@ struct NetworkSpeedRow: View {
         .padding(.bottom, 16)
     }
 
-    /// 符号、「网络速度」、右边的百分比；下面一行灰色提示（和账户页的行同一套字、同一条左边线）
+    /// 符号、「网络速度」和右边的百分比
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: AccountMetrics.gap) {
             Image(systemName: "speedometer")
                 .font(.system(size: iconSize, weight: .regular))
                 .foregroundStyle(.white.opacity(0.6))
                 .frame(width: iconColumn)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text("网络速度")
-                        .font(.title3.weight(.medium))
-                        .foregroundStyle(.white)
-                    Spacer(minLength: 0)
-                    Text(verbatim: "\(shown)%")
-                        .font(.title2.weight(.semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(.white)
-                        // 自动调整选了新的数：数字滚过去（手指拖的时候不滚，跟手）
-                        .contentTransition(.numericText(value: Double(shown)))
-                        .animation(dragValue == nil ? Animation.smooth(duration: 0.5) : nil, value: shown)
-                }
-                Text(Self.hint)
-                    .font(.callout)
-                    .foregroundStyle(DSInk.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text("网络速度")
+                    .font(.title3.weight(.medium))
+                    .foregroundStyle(.white)
+                Spacer(minLength: 0)
+                Text(verbatim: "\(shown)%")
+                    .font(.title2.weight(.semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                    // 自动调整选了新的数：数字滚过去（手指拖的时候不滚，跟手）
+                    .contentTransition(.numericText(value: Double(shown)))
+                    .animation(dragValue == nil ? Animation.smooth(duration: 0.5) : nil, value: shown)
             }
         }
     }
@@ -141,7 +116,7 @@ struct NetworkSpeedRow: View {
     }
 }
 
-/// 「自动调整」一行：左边标题 + 一行灰字（关着：说这颗钮做什么；检测中；开着：检测到的网络、速度、延迟），
+/// 「自动调整」一行：左边标题和检测状态，
 /// 右边一颗胶囊——关着是玻璃「开启」，开着是白底「✓ 已开启」（选中的样子：C11），检测时胶囊里转圈、不变窄。
 /// 按「开启」马上测一次、测完给一下成功触感；按「已开启」关掉，停在现在的数上
 private struct NetworkAutoRow: View {
@@ -157,12 +132,14 @@ private struct NetworkAutoRow: View {
                 Text("自动调整")
                     .font(.body.weight(.semibold))
                     .foregroundStyle(.white)
-                Text(status(engine, measuring: measuring))
-                    .font(.subheadline)
-                    .monospacedDigit()
-                    .foregroundStyle(DSInk.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .contentTransition(.opacity)
+                if let status = status(engine, measuring: measuring) {
+                    Text(status)
+                        .font(.subheadline)
+                        .monospacedDigit()
+                        .foregroundStyle(DSInk.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .contentTransition(.opacity)
+                }
             }
             .accessibilityElement(children: .combine)
             Spacer(minLength: 8)
@@ -174,9 +151,9 @@ private struct NetworkAutoRow: View {
         .sensoryFeedback(.success, trigger: engine.userRuns)
     }
 
-    private func status(_ engine: NetworkAuto, measuring: Bool) -> String {
+    private func status(_ engine: NetworkAuto, measuring: Bool) -> String? {
         if measuring { return "正在检测网络…" }
-        guard auto else { return "根据网络状况自动调整" }
+        guard auto else { return nil }
         if engine.phase == .offline { return "未连接网络" }
         return engine.last?.summary ?? "即将检测"
     }
@@ -355,7 +332,7 @@ struct UsageInsightsCard: View {
     @State private var cleared = 0
 
     var body: some View {
-        AccountGroup(title: "使用洞察", footer: footer) {
+        AccountGroup(title: "使用洞察") {
             VStack(alignment: .leading, spacing: 0) {
                 header
                 if expanded, let summary {
@@ -394,7 +371,7 @@ struct UsageInsightsCard: View {
         DemoData.enabled ? .demo : UsageMeter.shared.summary()
     }
 
-    /// 应用图标那一格 + 右上「收起 / 展开」，下面标题和说明（网页版 acc-powerup-header / -text）
+    /// 图标和「收起 / 展开」按钮，下方是标题
     private var header: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 12) {
@@ -402,16 +379,10 @@ struct UsageInsightsCard: View {
                 Spacer(minLength: 0)
                 togglePill
             }
-            VStack(alignment: .leading, spacing: 4) {
-                Text("流量概览")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .accessibilityAddTraits(.isHeader)
-                Text("了解近期的流量使用情况。")
-                    .font(.callout)
-                    .foregroundStyle(DSInk.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text(expanded && DemoData.enabled ? "流量概览（示例数据）" : "流量概览")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.white)
+                .accessibilityAddTraits(.isHeader)
         }
     }
 
@@ -433,18 +404,6 @@ struct UsageInsightsCard: View {
         .buttonStyle(.plain)
         .sensoryFeedback(.selection, trigger: taps)
         .accessibilityLabel(expanded ? "收起流量概览" : "展开流量概览")
-    }
-
-    /// 卡下一行：统计的是什么、从哪天起（演示模式直说是示例数）；清除缓存会怎样（以前写在「存储」那一组下面）
-    private var footer: String {
-        let cache = "清除后，片库、海报和影片信息将重新下载。"
-        guard expanded else { return cache }
-        if DemoData.enabled { return "演示模式：以上为示例数据。" + cache }
-        var s = "仅统计 Cuven 在此设备上使用的流量，记录只保存在本机。"
-        if let since = summary?.since {
-            s += "自 \(since.formatted(.dateTime.month().day())) 起统计。"
-        }
-        return s + cache
     }
 
     // MARK: 清除缓存
@@ -935,11 +894,6 @@ private struct UsageEmptyState: View {
             Text("暂无流量记录")
                 .font(.headline)
                 .foregroundStyle(.white)
-            Text("播放或浏览后，这里会按小时显示流量使用情况。")
-                .font(.callout)
-                .foregroundStyle(DSInk.tertiary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
