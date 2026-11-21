@@ -127,6 +127,14 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: 剧集
 
+    /// 请片库马上重看一眼 /auto（请求添加刚自动通过最终审核、片库清单里还没有这一部时）。后端 10 秒内最多真列一次；出错不管
+    func autoSync() async {
+        if DemoData.enabled { return }
+        var req = URLRequest(url: url("/api/auto/sync", [("tv", "1")]), timeoutInterval: 20)
+        req.httpMethod = "POST"
+        _ = try? await load(req)
+    }
+
     /// 剧集表：不用本机缓存（后端回 max-age=60）——请求添加刚就绪、还在 /auto 里的那一季要马上能「立即播放」
     func tvList() async throws -> [Series] {
         let p: TVPayload = try await get("/api/tv", timeout: 30, fresh: true)

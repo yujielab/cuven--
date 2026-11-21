@@ -487,6 +487,12 @@ enum RequestPlayback {
         if t.kind == .tv { await model.refreshSeries() }
         if let v = movie(t, model: model) { playMovie(v, model: model, artwork: artwork); return nil }
         if let s = series(t, season: season, model: model) { return await playSeries(s, title: t.title, model: model, artwork: artwork) }
+        // 文件刚抵达 /auto、自动通过了最终审核，片库清单里还没有：请片库马上收录一次，再找
+        await APIClient.shared.autoSync()
+        await model.refreshLibrary()
+        if t.kind == .tv { await model.refreshSeries() }
+        if let v = movie(t, model: model) { playMovie(v, model: model, artwork: artwork); return nil }
+        if let s = series(t, season: season, model: model) { return await playSeries(s, title: t.title, model: model, artwork: artwork) }
         return Problem(title: "影片正在上架", message: "影片已经就绪，片库还在更新。请稍后再试一次。")
     }
 

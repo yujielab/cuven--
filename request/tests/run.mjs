@@ -231,7 +231,8 @@ const one = async (id) => (await call('GET', '/admin/api/state', { admin: true }
 {
   const [s1] = await call('GET', '/admin/api/state', { admin: 'wrong' });
   ok(s1 === 401, '面板：错口令 401');
-  const [s2, st] = await call('POST', '/admin/api/cfg', { admin: true, body: { pkUser: 'pk@x.com', pkPass: 'pkpass', grp: 'Cuven®' } });
+  // 前面几段测的是「等工作人员发行」那条老路：先关掉「抵达 /auto 自动通过」，到 v2.2 那一段再打开
+  const [s2, st] = await call('POST', '/admin/api/cfg', { admin: true, body: { pkUser: 'pk@x.com', pkPass: 'pkpass', grp: 'Cuven®', autoReady: false } });
   ok(s2 === 200 && st.cfg.pkSet && st.cfg.pkUser === 'pk***@x.com', '面板：保存 PikPak 账号（只回打码的）', st.cfg);
   const raw = env.DB.db.prepare("SELECT v FROM tj_kv WHERE k = 'cfg'").get().v;
   ok(!raw.includes('pkpass') && raw.includes('pkPassEnc'), 'D1 里的 PikPak 密码是加密的');
@@ -595,10 +596,11 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   W.verifyOK = true;
 }
 
-/* ══ v2.2：传到 Dropbox 的 /auto、片库收录了就立即可用（用户：「在 auto 文件夹时就立即可用」）══ */
+/* ══ v2.4：文件抵达 /auto 自动通过最终审核（用户：「当文件抵达 auto 自动通过最终审核，使影片可以播放」）══ */
 {
   env.DB.db.exec('DELETE FROM tj_req');
   env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('health', 'tick:last', 'track')");
+  await call('POST', '/admin/api/cfg', { admin: true, body: { autoReady: true } });
   W.verifyOK = true; W.verifySeq = []; W.copyJobs = [];
   W.job[88] = { finished: true, success: true, bytes: 1, total: 1 };
   W.versions['movie:960'] = [{ tid: 30, title: 'Heat 1995 1080p', mb: 1, labels: [], res: '1080p' }];
@@ -612,73 +614,83 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
     for (let i = 0; i < 10; i++){ await tick(); const r = await one(id); if (r.stage !== 'purge' ? ['release', 'done'].includes(r.stage) : W.tf.some(([op, b]) => op === 'purge' && b.item === r.item)) break; }
     return one(id);
   };
+  const logOf = async (id) => (await call('GET', '/admin/api/log?id=' + id, { admin: true }))[1].items.map(l => l.msg);
 
-  /* 片库收录了：不进「最终发行审批」，直接就绪 */
+  /* 抵达 /auto、片库当场就收录了：自动通过最终审核，可以播放 */
   W.lib = { mode: 'on', seen: new Set(), where: {} };
   W.sync = [];
   const a = await req(960);
-  let r = await toPurged(a);
   const heat = 'Heat.1995.1080p.[auto-m960-r' + a + '].mkv';
-  ok(r.stage === 'purge' && r.item === heat && /等片库收录/.test(r.note), '删完 PikPak、片库还没收录：停在第 4 步等（不进最终发行审批）', r);
-  let app = (await mine()).find(x => x.id === a);
-  ok(app.step === 4 && app.state === 'active', 'App 上还在第 4 步', app);
-  ok(W.sync.some(s => s.items.includes(heat) && !s.tv), '问片库的是 /auto 里的那个文件名（电影不带 tv=1）', W.sync);
-  ok(W.sync.some(s => s.codes.includes(String(a))), '连追踪码（这条请求的编号）一起问', W.sync.slice(-1));
   W.lib.seen.add(heat);
-  const tfExists0 = W.tf.filter(([op]) => op === 'exists').length;
-  await tick();
-  r = await one(a);
-  app = (await mine()).find(x => x.id === a);
-  ok(r.state === 'done' && /可以播放/.test(r.note) && app.state === 'done' && app.pct === 100, '片库收录了 → 立即就绪 100%（App 变「立即播放」）', { r, app });
-  ok(W.tf.filter(([op]) => op === 'exists').length === tfExists0, '在 /auto 就算就绪：不再去看工作人员挪没挪', W.tf.slice(-3));
-  let log = (await call('GET', '/admin/api/log?id=' + a, { admin: true }))[1].items.map(l => l.msg);
-  ok(log.some(m => m.includes('片库已收录 dropbox:/auto/' + heat + ' → 可以播放了')), '日志写清楚：在 /auto 里就可以播放', log.slice(0, 3));
+  let r = await toPurged(a);
+  let app = (await mine()).find(x => x.id === a);
+  ok(r.state === 'done' && r.next === 0 && /可以播放（自动通过最终审核）/.test(r.note) && app.state === 'done' && app.pct === 100,
+     '文件抵达 /auto：自动通过最终审核，片库当场收录 → 可以播放（App 100%、「立即播放」）', { r, app });
+  ok(!W.tf.some(([op, x]) => op === 'exists' && (x.item === heat || (x.items || []).includes(heat))), '不进「最终发行审批」、不等工作人员挪');
+  ok(W.sync.some(s => s.items.includes(heat) && s.codes.includes(String(a))), '通过的同时请片库马上收录（带名字和追踪码）', W.sync);
+  ok((await logOf(a)).some(m => /文件已抵达 \/auto，自动通过最终审核；片库已收录 → 可以播放了/.test(m)), '日志：抵达 /auto 自动通过最终审核');
 
-  /* 片库一直连不上：不出错、不失败；15 分钟后转去等发行，那期间收录了一样就绪 */
-  W.lib.mode = 'down';
+  /* 片库还没收录（列表慢几秒）：照样当场通过；之后每分钟催片库，收录了就停 */
   const b = await req(961);
-  r = await toPurged(b);
   const ronin = 'Ronin.1998.1080p.[auto-m961-r' + b + '].mkv';
-  ok(r.stage === 'purge' && r.state === 'active', '片库连不上：文件在 /auto 里，原地等，不算出错', r);
-  for (let i = 0; i < 8 && (await one(b)).stage === 'purge'; i++) await tick();
-  r = await one(b);
-  ok(r.stage === 'release' && r.state === 'active' && !r.errs, '15 分钟片库还没收录：转去最终发行审批（不失败）', r);
-  W.lib.mode = 'on'; W.lib.seen.add(ronin);
-  advance(6 * 60000); await tick();
-  r = await one(b);
-  ok(r.state === 'done' && /可以播放/.test(r.note), '等发行期间片库收录了：一样立即就绪（不用等人挪）', r);
-
-  /* 老版本片库（没有这个接口）：照旧等工作人员发行，以后不再问 */
-  W.lib.mode = 404;
+  r = await toPurged(b);
+  app = (await mine()).find(x => x.id === b);
+  ok(r.state === 'done' && app.pct === 100 && r.next > 0, '片库还没收录：照样当场自动通过（App 100%），留着接着催片库', r);
+  ok((await logOf(b)).some(m => /自动通过最终审核；片库还没收录.*每分钟催一次/.test(m)), '日志：片库还没收录，每分钟催一次');
   W.sync = [];
+  await tick();
+  ok(W.sync.some(s => s.items.includes(ronin)) && (await one(b)).next > 0, '下一轮接着催片库', W.sync);
+  W.lib.seen.add(ronin);
+  const updated0 = (await mine()).find(x => x.id === b).updated;
+  await tick();
+  r = await one(b);
+  ok(r.next === 0 && (await logOf(b)).some(m => /片库已收录 → 可以播放了/.test(m)), '片库收录了：不再催', r);
+  ok((await mine()).find(x => x.id === b).updated === updated0, '催片库只改记录：App 上的时间不跳');
+
+  /* 片库连不上：照样通过、不出错；连上了收录了就停 */
+  W.lib.mode = 'down';
   const c3 = await req(962);
   r = await toPurged(c3);
-  ok(r.stage === 'release', '老版本片库：照旧进最终发行审批', r);
-  const asked = W.sync.length;
-  advance(6 * 60000); await tick();
-  ok(W.sync.filter(s => s.items.length).length === asked && (await one(c3)).stage === 'release', '老版本片库：这一条以后不再问，照旧等人挪', W.sync);
-  W.exists.delete(r.item);
-  advance(6 * 60000); await tick();
-  ok((await one(c3)).state === 'done', '人工挪走 → 已发行（老路照旧）');
+  ok(r.state === 'done' && !r.errs && r.next > 0, '片库连不上：照样自动通过，不算出错，接着催', r);
+  W.lib.mode = 'on'; W.lib.seen.add('Collateral.2004.1080p.[auto-m962-r' + c3 + '].mkv');
+  advance(2 * 60000); await tick();
+  ok((await one(c3)).next === 0, '片库连上、收录了：不再催');
 
-  /* 一轮里好几条等收录：一次问完；面板能关掉这个功能 */
+  /* 老版本片库（没有 /api/auto/sync）：照样通过，日志写清楚要等工作人员挪进片库才能播放，不再催 */
   env.DB.db.exec('DELETE FROM tj_req');
-  W.lib = { mode: 'on', seen: new Set(), where: {} };
-  const d1 = await req(960), d2 = await req(961);
-  for (const [id, item] of [[d1, 'Heat.1995.1080p.mkv'], [d2, 'Ronin.1998.1080p.mkv']]){
-    env.DB.db.prepare("UPDATE tj_req SET stage = 'release', next = 0, data = json_set(data, '$.item', ?, '$.kind', 'file') WHERE id = ?").run(item, id);
+  W.lib = { mode: 404, seen: new Set(), where: {} };
+  const d = await req(960);
+  r = await toPurged(d);
+  ok(r.state === 'done' && r.next === 0, '老版本片库：照样自动通过最终审核', r);
+  ok((await logOf(d)).some(m => /片库不收录 \/auto.*要等工作人员挪进片库才能播放/.test(m)), '日志写清楚：老版本片库要等工作人员挪进片库才能播放');
+  W.sync = [];
+  advance(5 * 60000); await tick();
+  ok(W.sync.length === 0, '老版本片库：不再催');
+
+  /* 以前停在「最终发行审批」的（升级之前进来的）：下一轮直接通过；好几条一次问完 */
+  env.DB.db.exec('DELETE FROM tj_req');
+  W.lib = { mode: 'on', seen: new Set(['Heat.1995.1080p.mkv', 'Ronin.1998.1080p.mkv']), where: {} };
+  const e1 = await req(960), e2 = await req(961);
+  for (const [id, item] of [[e1, 'Heat.1995.1080p.mkv'], [e2, 'Ronin.1998.1080p.mkv']]){
+    env.DB.db.prepare("UPDATE tj_req SET stage = 'release', next = 0, data = json_set(data, '$.item', ?, '$.kind', 'file', '$.autoOff', 1) WHERE id = ?").run(item, id);
     W.exists.add(item);
   }
   W.sync = [];
   await tick();
-  ok(W.sync.length === 1 && W.sync[0].items.length === 2, '好几条等收录：一轮一次问完', W.sync);
+  ok((await one(e1)).state === 'done' && (await one(e2)).state === 'done', '停在最终发行审批的（以前片库不收录时留下的）：下一轮直接通过');
+  ok(W.sync.length === 1 && W.sync[0].items.length === 2, '好几条一次问完片库', W.sync);
+
+  /* 面板关掉「自动通过」：照旧等工作人员发行 */
+  env.DB.db.exec('DELETE FROM tj_req');
   const [, st] = await call('POST', '/admin/api/cfg', { admin: true, body: { autoReady: false } });
-  ok(st.cfg.autoReady === false, '面板：可以关掉「传到 /auto 就算就绪」', st.cfg);
-  W.sync = []; W.lib.seen.add('Heat.1995.1080p.mkv');
-  env.DB.db.exec("UPDATE tj_req SET next = 0");
+  ok(st.cfg.autoReady === false, '面板：可以关掉「文件抵达 /auto 自动通过最终审核」', st.cfg);
+  const f1 = await req(960);
+  env.DB.db.prepare("UPDATE tj_req SET stage = 'release', next = 0, data = json_set(data, '$.item', 'Heat.1995.1080p.mkv', '$.kind', 'file') WHERE id = ?").run(f1);
+  W.sync = [];
   await tick();
-  ok(W.sync.filter(s => s.items.length).length === 0 && (await one(d1)).stage === 'release', '关掉以后：不问片库，照旧等发行', W.sync);
+  ok(W.sync.length === 0 && (await one(f1)).stage === 'release', '关掉以后：照旧等工作人员发行，不问片库', W.sync);
   await call('POST', '/admin/api/cfg', { admin: true, body: { autoReady: true } });
+  W.lib.mode = 'on';
   const [, links] = await call('POST', '/admin/api/links', { admin: true, body: {} });
   ok(links.stream && links.stream.ok && links.stream.root === '/auto', '面板「测试连接」：片库收录 /auto', links.stream);
   W.lib.mode = 404;
@@ -705,10 +717,11 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   let r = await toPurged(a);
   ok(W.renames.some(([from, to]) => from === 'Heat.1995.1080p.mkv' && to === 'Heat.1995.1080p.[auto-m960-r' + a + '].mkv'), 'PikPak 上改名：扩展名前面加 [auto-m<TMDB>-r<请求编号>]', W.renames);
   ok(W.sync.some(s => s.codes.includes(String(a))), '问片库时带着追踪码（请求编号）', W.sync.slice(-1));
+  ok(r.state === 'done' && r.next > 0, '抵达 /auto 自动通过，片库还没收录：接着催', r);
   W.lib.where[String(a)] = { path: '/auto/heat.1995.1080p.[auto-m960-r' + a + '].mkv', auto: true, kind: 'movie' };
   await tick();
   r = await one(a);
-  ok(r.state === 'done' && /还在 \/auto/.test(r.note), '按追踪码认出来了（名字大小写对不上也行）→ 就绪', r);
+  ok(r.state === 'done' && r.next === 0 && !r.home, '片库按追踪码认出来了（名字大小写对不上也行）→ 不再催；还在 /auto 不算归档', r);
 
   /* 就绪以后接着追踪：工作人员挪进 ram 了 → 面板写去了哪儿；App 上的时间不跳 */
   const updated0 = (await mine()).find(x => x.id === a).updated;
@@ -732,7 +745,7 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   W.lib.where[String(b)] = { path: '/ram/Ronin.1998.1080p.[auto-m961-r' + b + '].mkv', auto: false, kind: 'movie' };
   await tick();
   r = await one(b);
-  ok(r.state === 'done' && /已归档到 \/ram\/Ronin/.test(r.note) && r.home, '问到时已经被挪进 /ram：一样就绪，归宿直接记下', r);
+  ok(r.state === 'done' && r.next === 0 && /^\/ram\/Ronin/.test(r.home), '催片库时已经被挪进 /ram：按追踪码找到，归宿直接记下', r);
 
   /* 哪儿都找不到（改了名 / 删了）：连着 6 次才放弃 */
   const c3 = await req(962);
