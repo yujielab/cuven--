@@ -1,5 +1,14 @@
 /**
- * Dropbox Video Proxy — Cloudflare Worker (v25.2 · 2026-11-21)
+ * Dropbox Video Proxy — Cloudflare Worker (v25.3 · 2026-11-21)
+ * ────────────────────────────────────────────────────────────────
+ * v25.3 —— 追踪码优先（用户要求：优先识别 auto 的唯一 TMDB 码，快速核对、正确添加影片和剧集）
+ *
+ *   ▸ /auto 里是电影还是剧集，先看追踪码：[auto-m…] 一定是电影（文件夹里有好几个文件也取最大的那个正片），
+ *     [auto-tv…] 一定是剧集的一季（只有一集也算）；没有追踪码的才按文件夹的样子猜（v25.1 的规则）。
+ *   ▸ 在线字幕查 TMDB 编号时也先看追踪码（文件名或所在文件夹带着的），不再按片名去搜。
+ *   ▸ /api/auto/sync 多收 tmdb=m550 / tmdb=tv1399s2：回 found: { 'm550': { path, auto, code } } ——
+ *     片库里有没有带这个 TMDB 编号（剧集再加季）追踪码的那一部。请求添加收到新请求时先问一句，有了就不再下载。
+ *
  * ────────────────────────────────────────────────────────────────
  * v25.2 —— 认得名字里的追踪码（用户要求：在文件和文件夹名中带上 auto-tmdb唯一码-内部代码，就可以持续追踪）
  *
@@ -1151,11 +1160,13 @@ async function osMovieHash(read, size) {
 
 const osTokens = s => new Set(String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 1));
 /** 文件名 → 片名 / 年份 / 季集 / 发布名里的词 */
-function osGuess(name) {
+function osGuess(name, filePath) {
   const stem = String(name || '').replace(/\.[^./]+$/, '');
   const ep = /(?:^|[ ._\-[(])S(\d{1,2})[ ._-]?E(\d{1,3})(?!\d)/i.exec(stem) || /(?:^|[ ._-])(\d{1,2})x(\d{2,3})(?!\d)/.exec(stem);
   const p = parseFilename((ep ? stem.slice(0, ep.index) : stem) + '.x');
-  return { title: p.title, year: p.year, q: p, season: ep ? +ep[1] : null, episode: ep ? +ep[2] : null, tokens: osTokens(stem) };
+  // v25.3：追踪码（文件名或所在文件夹带着的）给了 TMDB 编号，就不按片名搜
+  const tag = autoTag(name) || autoTag(String(filePath || '').split('/').slice(0, -1).join('/'));
+  return { title: p.title, year: p.year, q: p, season: ep ? +ep[1] : null, episode: ep ? +ep[2] : null, tokens: osTokens(stem), tag };
 }
 /** 发布名有多像：两边词集合的 Jaccard */
 function osSim(tokens, release) {
@@ -1314,6 +1325,8 @@ async function osDownload(env, auth, c, fps) {
 
 /** TMDB 编号（有 TMDB_API_KEY 时）：电影 → tmdb_id；剧集 → 剧的编号（parent_tmdb_id） */
 async function osTmdb(g, env) {
+  // v25.3：追踪码优先（剧集的就是这部剧的编号；剧集要认得出第几集才用，不然按剧的编号会搜到别的集）
+  if (g.tag && (g.tag.type === 'movie' || g.season != null)) return { id: g.tag.id, type: g.tag.type };
   if (!env.TMDB_API_KEY || !g.title) return null;
   if (g.season != null) { const h = await tmdbSearch('tv', g.title, '', env).catch(() => null); return h && h.id ? { id: h.id, type: 'tv' } : null; }
   const ck = tmdbCacheKey(g.q || g.title, g.year, false);
@@ -1340,7 +1353,7 @@ async function osHashRef(env, auth, items, chosen, job) {
 
 /** 真正去查一遍：job = { filePath, name, size, read, fps, dur, allowEn, refs } → 存储记录 */
 async function osRun(env, job) {
-  const g = osGuess(job.name);
+  const g = osGuess(job.name, job.filePath);
   const langs = ['ze', 'zh-cn', 'zh-tw', ...(job.allowEn ? ['en'] : [])].sort().join(',');
   const base = { v: OS_FMT, at: Date.now(), langs };
   try {
@@ -2877,17 +2890,25 @@ function autoClassify(root, entries) {
     const rel = disp.slice(root.length + 1).split('/');
     const v = { name: e.name, path: disp, type: 'file', size: e.size || 0,
                 modified: e.client_modified || null, added: e.server_modified || e.client_modified || null };
+    const ft = autoTag(e.name);
     if (rel.length === 1) {                            // 直接放在 /auto 下面的：电影（样片、像单集的不算）
-      if (!AUTO_EP_FILE.test(e.name) && !TV_SKIP.test(e.name)) movies.push(v);
+      // v25.3：追踪码说了算 —— [auto-m…] 就是电影，[auto-tv…] 散放着不成一季（剧集要在文件夹里）
+      if (ft ? ft.type === 'movie' : (!AUTO_EP_FILE.test(e.name) && !TV_SKIP.test(e.name))) movies.push(v);
       continue;
     }
     if (TV_SKIP.test(e.name) || rel.slice(1, -1).some(d => TV_SKIP_DIR.test(d.trim()))) continue;
     const k = rel[0].toLowerCase();
-    if (!dirs.has(k)) dirs.set(k, { top: rel[0], vids: [] });
-    dirs.get(k).vids.push(v);
+    if (!dirs.has(k)) dirs.set(k, { top: rel[0], vids: [], ftag: null });
+    const g = dirs.get(k);
+    g.vids.push(v);
+    if (ft && !g.ftag) g.ftag = ft;
   }
   const tv = new Set();
   for (const [k, d] of dirs) {
+    /* v25.3：追踪码优先 —— 文件夹名上的，其次文件名上的。m = 电影（取最大的那个正片），tv = 剧集（一集也算） */
+    const tag = autoTag(d.top) || d.ftag;
+    if (tag && tag.type === 'movie') { movies.push(d.vids.reduce((a, b) => ((b.size || 0) > (a.size || 0) ? b : a))); continue; }
+    if (tag && tag.type === 'tv') { tv.add(k); continue; }
     if (d.vids.length === 1 && !AUTO_EP_FILE.test(d.vids[0].name) && !AUTO_SEASON_DIR.test(d.top)) movies.push(d.vids[0]);
     else tv.add(k);
   }
@@ -2960,16 +2981,23 @@ async function autoSync(env, ctx, wantTv) {
     names.add(key(sr.path.slice(aroot.length + 1).split(/[/#]/)[0]));
   }
   // v25.2：追踪码 → 现在在哪儿（整个片库 + /auto + 剧集表；工作人员挪走以后也找得到）
-  const tags = new Map();
+  // v25.3：再按 TMDB 编号（剧集加季）记一份：m550 / tv1399s2 → 片库里带这个码的那一部
+  const tags = new Map(), byTmdb = new Map();
   for (const v of snapVideos(snap)) {
-    const t = autoTag(v.name);
-    if (t && !tags.has(t.code)) tags.set(t.code, { path: v.path, auto: pathUnder(v.path, aroot), kind: t.type, ready: true });
+    const t = autoTag(v.path) || autoTag(v.name);           // 追踪码在文件名上，或者在它所在的文件夹名上
+    if (!t || t.type !== 'movie') continue;
+    const w = { path: v.path, auto: pathUnder(v.path, aroot), kind: 'movie', ready: true, code: t.code };
+    if (!tags.has(t.code)) tags.set(t.code, w);
+    if (!byTmdb.has('m' + t.id) || (byTmdb.get('m' + t.id).auto && !w.auto)) byTmdb.set('m' + t.id, w);   // 片库里的优先于 /auto 里的
   }
   for (const sr of (tv && tv.series) || []) {
-    if (!sr.code || tags.has(sr.code)) continue;
-    tags.set(sr.code, { path: sr.path, auto: pathUnder(sr.path, aroot), kind: 'tv', ready: sr.tmdbId > 0 });
+    if (!sr.code) continue;
+    const w = { path: sr.path, auto: pathUnder(sr.path, aroot), kind: 'tv', ready: sr.tmdbId > 0, code: sr.code };
+    if (!tags.has(sr.code)) tags.set(sr.code, w);
+    const key = 'tv' + (sr.tagId || sr.tmdbId) + 's' + (sr.season || 1);
+    if (!byTmdb.has(key) || (byTmdb.get(key).auto && !w.auto)) byTmdb.set(key, w);
   }
-  return { at: Date.now(), tv: !!wantTv, names, tags, movies, series };
+  return { at: Date.now(), tv: !!wantTv, names, tags, byTmdb, movies, series };
 }
 
 let _autoSyncRes = null;
@@ -2997,7 +3025,10 @@ async function handleAutoSync(request, url, env, ctx) {
   // v25.2：按追踪码（请求编号）找：在 /auto 里、已经被挪进片库，都回现在的位置；找不到的不回
   const where = {};
   for (const code of url.searchParams.getAll('code').slice(0, 60)) { const w = res.tags.get(String(code).replace(/^r/i, '')); if (w) where[code] = w; }
-  return jsonResponse({ ok: true, root, movies: res.movies, series: res.series, has, where, at: res.at }, 200, nostore);
+  // v25.3：按 TMDB 编号（m550 / tv1399s2）找：片库里已经有带这个码的那一部了没有
+  const found = {};
+  for (const k of url.searchParams.getAll('tmdb').slice(0, 60)) { const w = res.byTmdb && res.byTmdb.get(String(k).toLowerCase()); if (w) found[k] = w; }
+  return jsonResponse({ ok: true, root, movies: res.movies, series: res.series, has, where, found, at: res.at }, 200, nostore);
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

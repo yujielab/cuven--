@@ -152,13 +152,14 @@ globalThis.fetch = async (url, init = {}) => {
   /* 片库：重看一眼 /auto，回这几个名字收录了没有 */
   if (u.host === 'stream.cuven.online' && p === '/api/auto/sync'){
     const items = u.searchParams.getAll('item');
-    W.sync.push({ items, codes: u.searchParams.getAll('code'), tv: u.searchParams.get('tv') === '1', key: H['x-sync-key'] || '' });
+    W.sync.push({ items, codes: u.searchParams.getAll('code'), tmdbs: u.searchParams.getAll('tmdb'), tv: u.searchParams.get('tv') === '1', key: H['x-sync-key'] || '' });
     if (W.lib.mode === 404) return J({ error: 'Not found', path: p }, 404);
     if (W.lib.mode === 'down') return J({ error: 'Internal error' }, 500);
     if (W.lib.mode === 'off') return J({ ok: false, off: 1 });
-    const codes = u.searchParams.getAll('code');
+    const codes = u.searchParams.getAll('code'), tmdbs = u.searchParams.getAll('tmdb');
     const where = Object.fromEntries(codes.filter(k => W.lib.where && W.lib.where[k]).map(k => [k, W.lib.where[k]]));
-    return J({ ok: true, root: '/auto', movies: W.lib.seen.size, has: Object.fromEntries(items.map(n => [n, W.lib.seen.has(n)])), where });
+    const found = Object.fromEntries(tmdbs.filter(k => W.lib.found && W.lib.found[k]).map(k => [k, W.lib.found[k]]));
+    return J({ ok: true, root: '/auto', movies: W.lib.seen.size, has: Object.fromEntries(items.map(n => [n, W.lib.seen.has(n)])), where, found });
   }
   /* TMDB 分季 */
   if (u.host === 'stream.cuven.online' && p === '/api/tmdb/season'){
@@ -777,6 +778,35 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   r = await toPurged(e);
   ok(W.renames.length === 0 && r.item === 'Ronin.1998.1080p.mkv', '关掉以后不改名', { renames: W.renames, item: r.item });
   await call('POST', '/admin/api/cfg', { admin: true, body: { tagNames: true } });
+}
+
+/* ══ v2.5：追踪码优先 —— 新请求先核对片库，片库里已有带这个 TMDB 编号的追踪码就不再下载 ══ */
+{
+  env.DB.db.exec('DELETE FROM tj_req');
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('health', 'tick:last', 'track')");
+  W.versions['movie:970'] = [{ tid: 30, title: 'Heat 1995 1080p', mb: 1, labels: [], res: '1080p' }];
+  W.versions['movie:971'] = [{ tid: 31, title: 'Ronin 1998 1080p', mb: 1, labels: [], res: '1080p' }];
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: { m970: { path: '/ram/Heat.1995.1080p.[auto-m970-r3].mkv', auto: false, kind: 'movie', ready: true, code: '3' } } };
+  W.sync = [];
+  const push0 = W.push.length;
+  const a = (await call('POST', '/app/requests', { user: 'alice', body: { src: 'movie', id: 970 } }))[1].request.id;
+  await tick();
+  let r = await one(a);
+  const app = (await mine()).find(x => x.id === a);
+  ok(r.state === 'done' && /片库里已有/.test(r.note) && app.pct === 100 && W.push.length === push0,
+     '片库里已有带这个 TMDB 编号追踪码的那一部：不再推送下载，直接就绪（App 100%、「立即播放」）', { r, push: W.push.length - push0 });
+  ok(W.sync.some(s => s.tmdbs.includes('m970')), '核对时问的是追踪码里的 TMDB 那一截（m970）', W.sync);
+  ok(r.home === '/ram/Heat.1995.1080p.[auto-m970-r3].mkv', '记下片库里那一部在哪儿', r);
+  const log = (await call('GET', '/admin/api/log?id=' + a, { admin: true }))[1].items.map(l => l.msg);
+  ok(log.some(m => /片库里已经有了（追踪码 r3，在 \/ram\/Heat/.test(m)), '日志写清楚是哪一条请求加的、在哪儿');
+
+  /* 片库里没有：照常下载；片库连不上：照常下载，不耽误 */
+  const b = (await call('POST', '/app/requests', { user: 'alice', body: { src: 'movie', id: 971 } }))[1].request.id;
+  W.lib.mode = 'down';
+  await tick();
+  r = await one(b);
+  ok(r.stage === 'download' && W.push.length === push0 + 1, '片库连不上：照常推送下载，不耽误', r);
+  W.lib.mode = 404;
 }
 
 /* ── 共用的 D1：别人的表原样不动，自己的表缺的列补上了 ── */

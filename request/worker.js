@@ -1,5 +1,11 @@
 /**
- * Cuven 请求添加 Worker（tj.cuven.us）v2.4
+ * Cuven 请求添加 Worker（tj.cuven.us）v2.5
+ *
+ * v2.5：追踪码优先（用户要求：优先识别 auto 的唯一 TMDB 码，快速核对、正确添加影片和剧集）
+ *   · 新请求先核对片库：片库里已经有带这个 TMDB 编号（剧集再加季）追踪码的那一部（以前的请求加的，在 /auto 或已经挪进
+ *     ram / ram2），就不再下载，直接就绪「片库里已有」——问一次片库（/api/auto/sync?tmdb=m550 / tv1399s2），零 PikPak、零 VPS
+ *   · 问不成（片库连不上、老版本）就照常下，不耽误
+ *   · 配合 Stream v25.3（按 TMDB 编号找）、索引库 v7.1（追踪码直接判「库中已有」）
  *
  * v2.4：文件抵达 /auto 自动通过最终审核（用户要求：当文件抵达 auto 自动通过最终审核，使影片可以播放）
  *   · 两端核对一致、PikPak 那份删了 = 抵达 /auto：当场通过最终审核，App 上 100%、「立即播放」、「已就绪」通知；
@@ -99,7 +105,7 @@
  * 控制面板接口（x-admin-key: ADMIN_KEY）：/admin/api/state · cfg · pk · links · req · add · tick
  */
 
-const VER = 'tj 2.4';
+const VER = 'tj 2.5';
 const MIN = 60000, HOUR = 3600000, DAY = 86400000;
 const LIMIT = {
   userActive: 5,          // 一个用户同时进行中的请求
@@ -404,11 +410,12 @@ async function airedCount(c, id, season){
 /* ── 片库（Stream Worker v25.1+）：马上重看一眼 Dropbox 的 /auto，回这几个名字收录了没有 ──
    电影是 /auto 里的那个文件名，剧集是 /auto 里的那个文件夹名。
    老版本没有这个接口（404）、关了 AUTO_FOLDER、口令不对（401 / 403）→ { off }：照旧等工作人员发行 */
-async function streamSync(c, items, tv, codes){
+async function streamSync(c, items, tv, codes, tmdbs){
   return depCall(c, 'stream', async () => {
     const q = new URLSearchParams();
     for (const n of items) q.append('item', n);
     for (const k of codes || []) q.append('code', k);
+    for (const k of tmdbs || []) q.append('tmdb', k);
     if (tv) q.set('tv', '1');
     const headers = c.env.STREAM_SYNC_KEY ? { 'x-sync-key': c.env.STREAM_SYNC_KEY } : {};
     const r = await xfetch(c, base(c.env, 'STREAM_BASE', 'https://stream.cuven.online') + '/api/auto/sync?' + q, { method: 'POST', headers }, 30000);
@@ -418,7 +425,7 @@ async function streamSync(c, items, tv, codes){
     const j = await readJSON(r);
     if (!r.ok) throw err('片库：' + (j.error || 'HTTP ' + r.status), { status: r.status });
     if (j.off) return { off: 1, why: '片库关了 AUTO_FOLDER' };
-    return { has: j.has || {}, where: j.where || null, root: j.root || '' };
+    return { has: j.has || {}, where: j.where || null, found: j.found || null, root: j.root || '' };
   });
 }
 
@@ -685,8 +692,33 @@ async function jobStatus(c, id){
 }
 async function stopJob(c, id){ await tf(c, 'stop', { jobid: id }).catch(e => { if (e.budget) throw e; }); }
 
+/** 追踪码里的 TMDB 那一截：电影 m550，剧集 tv1399s2 */
+const tmdbKey = (r) => r.src === 'tv' ? 'tv' + r.tmdb + 's' + (r.season || 1) : 'm' + r.tmdb;
+/** 新请求先核对片库（v2.5）：片库里已经有带这个 TMDB 编号追踪码的那一部 → 不用再下，直接就绪。问不成就照常下 */
+async function libHasAlready(c, r){
+  if (r.d.dup !== undefined) return false;
+  r.d.dup = 0;
+  if (c.cfg.tagNames === false || depOpenUntil(c, 'stream')) return false;
+  const key = tmdbKey(r);
+  let s;
+  try { s = await streamSync(c, [], false, [], [key]); }
+  catch (e){ if (e.budget) throw e; return false; }
+  const w = s && s.found && s.found[key];
+  if (!w || (r.src === 'tv' && !w.ready)) return false;
+  r.d.dup = 1;
+  r.d.item = String(w.path || '').split('/').pop().split('#')[0];
+  r.d.kind = w.kind === 'tv' ? 'dir' : 'file';
+  r.d.tag = '';                                         // 那份是别的请求的追踪码，这一条不追踪
+  r.d.ready = now(); r.d.lib = now();
+  if (!w.auto) r.d.home = { path: w.path, at: now() };
+  await clog(c, r.id, '片库里已经有了（追踪码 r' + w.code + '，在 ' + w.path + '），不用再下 → 可以播放');
+  finish(r, '片库里已有，可以播放');
+  return true;
+}
+
 async function stQueued(c, r){
   const t = now();
+  if (await libHasAlready(c, r)) return;
   if (!r.d.vers || !r.d.versAt || t - r.d.versAt > 6 * HOUR){
     let v;
     try { v = await lbVersions(c, r.src, r.tmdb, r.src === 'tv' ? r.season : 0); }

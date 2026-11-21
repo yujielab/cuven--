@@ -985,6 +985,44 @@ console.log('\n■ 追踪码：[auto-m550-r13] / [auto-tv1399s2-r14]（v25.2，�
   await get('/api/tv?refresh=1'); await get('/api/refresh'); await settle();
 }
 
+console.log('\n■ 追踪码优先：/auto 里是电影还是剧集先看追踪码；按 TMDB 编号找（v25.3）');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const get = async u => { const r = await H.call(u, 'GET', { Cookie: cookie }); return { status: r.status, body: await r.json() }; };
+  const f = (p, size = 1000) => ({ path_display: p, size, server_modified: '2026-11-21T00:00:00Z' });
+  const MF = '/auto/Some.Movie.2019.1080p.[auto-m951-r31]';
+  const TV1 = '/auto/One.Episode.Special.[auto-tv779s1-r32]';
+  H.tv.entries = [
+    f(`${MF}/Some.Movie.2019.1080p.CD1.mkv`, 4e9), f(`${MF}/Some.Movie.2019.1080p.mkv`, 9e9), f(`${MF}/Bonus.Clip.mkv`, 2e8),   // 追踪码说电影：几个文件也取最大的那个
+    f(`${TV1}/One.Episode.Special.mkv`, 3e9),                                                                                    // 追踪码说剧集：只有一个文件也是一季
+    f('/auto/Loose.Show.Episode.[auto-tv780s1-r33].mkv', 1e9),                                                                   // 剧集的追踪码散放着：不当电影
+  ];
+  H.tmdb.movies = [{ id: 951, title: '某部电影', en: 'Some Movie', date: '2019-01-01', query: 'zzz-n' }];
+  H.tmdb.shows = [{ id: 779, name: '特别篇', original: 'Nope', first: '2024-01-01', seasons: [{ n: 1, air: '2024-01-01', count: 1 }] }];
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  delete H.env.AUTO_FOLDER; delete H.env.AUTO_SYNC_KEY;
+  await get('/api/refresh'); await settle();
+  const all = await get('/api/all?x=' + Date.now());
+  const vp = (all.body.videos || []).map(v => v.path).filter(p => p.startsWith('/auto/'));
+  ok(vp.length === 1 && vp[0] === `${MF}/Some.Movie.2019.1080p.mkv`, `[auto-m…] 的文件夹：一定是电影，取最大的那个正片（文件夹里还有 CD1、花絮也不当剧集）：${vp.join('、')}`);
+  const tv = await get('/api/tv?refresh=1'); await settle();
+  const sp = (tv.body.series || []).map(x => x.path).filter(p => p.startsWith('/auto/'));
+  ok(sp.length === 1 && sp[0] === TV1 && (tv.body.series || []).find(x => x.path === TV1).tmdbId === 779,
+    `[auto-tv…] 的文件夹：只有一个文件也是剧集的一季（TMDB 779）；散放的剧集追踪码文件哪边都不算：${sp.join('、')}`);
+
+  await new Promise(r => setTimeout(r, 10_100));       // 同步接口 10 秒内最多真列一次
+  const s1 = await (await H.call('/api/auto/sync?tmdb=m951&tmdb=tv779s1&tmdb=m1', 'POST', {})).json();
+  await settle();
+  ok(s1.found && s1.found.m951 && s1.found.m951.code === '31' && s1.found.m951.kind === 'movie' && s1.found.tv779s1 && s1.found.tv779s1.code === '32' && !s1.found.m1,
+    '按 TMDB 编号找（m951 / tv779s1）：回片库里带这个码的那一部和它的请求编号；没有的不回', s1.found);
+
+  delete H.env.TMDB_API_KEY;
+  H.tv.entries = []; H.tmdb.shows = []; H.tmdb.movies = [];
+  await get('/api/tv?refresh=1'); await get('/api/refresh'); await settle();
+}
+
 console.log('\n■ 预告片：IMDb 直链优先，被拒时退到 TMDB 登记的 YouTube 官方预告');
 {
   const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };

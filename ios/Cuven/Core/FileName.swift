@@ -147,16 +147,28 @@ enum AppleImage {
 /// 「继续观看」和片单就按它跟到新位置（PlaybackStore / WatchlistStore 的 relink）
 enum AutoTag {
     private static let find = try! NSRegularExpression(
-        pattern: "(?i)(?<![0-9a-z])auto-(?:m|tv)[0-9]{1,9}(?:s[0-9]{1,3})?-r([0-9]{1,12})(?![0-9a-z])")
+        pattern: "(?i)(?<![0-9a-z])auto-(m|tv)([0-9]{1,9})(?:s([0-9]{1,3}))?-r([0-9]{1,12})(?![0-9a-z])")
     private static let cut = try! NSRegularExpression(
         pattern: "(?i)[. ]*\\[?auto-(?:m|tv)[0-9]{1,9}(?:s[0-9]{1,3})?-r[0-9]{1,12}\\]?")
 
-    /// 名字或路径里的追踪码（请求编号）；没有 → nil
-    static func code(in s: String) -> String? {
+    struct Info: Equatable {
+        var tv: Bool         // m = 电影，tv = 剧集
+        var tmdb: Int        // TMDB 编号
+        var season: Int      // 剧集的季（电影 0）
+        var code: String     // 请求编号
+    }
+
+    /// 名字或路径里的追踪码：类型、TMDB 编号、季、请求编号；没有 → nil
+    static func info(in s: String) -> Info? {
+        guard s.localizedCaseInsensitiveContains("auto-") else { return nil }
         let ns = s as NSString
         guard let m = find.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)) else { return nil }
-        return ns.substring(with: m.range(at: 1))
+        func g(_ i: Int) -> String { m.range(at: i).location == NSNotFound ? "" : ns.substring(with: m.range(at: i)) }
+        return Info(tv: g(1).lowercased() == "tv", tmdb: Int(g(2)) ?? 0, season: Int(g(3)) ?? 0, code: g(4))
     }
+
+    /// 名字或路径里的追踪码（请求编号）；没有 → nil
+    static func code(in s: String) -> String? { info(in: s)?.code }
 
     /// 去掉追踪码（显示用）
     static func strip(_ s: String) -> String {

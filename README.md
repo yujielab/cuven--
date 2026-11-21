@@ -311,6 +311,13 @@ UI 测试找元素时拍一次快照、看全部匹配项是否在屏上（`UITe
   请求添加靠它判断就绪、记下工作人员把它挪去了哪儿。
 - 追踪码不算进片名、年份、季（`r` 前缀免得 `r2001` 被当成年份）。App 按它把「继续观看」和片单接到挪过以后的新路径。
 
+**追踪码优先（v25.3）**：
+- `/auto` 里是电影还是剧集先看追踪码：`[auto-m…]` 一定是电影（文件夹里有好几个文件也取最大的那个正片），`[auto-tv…]` 一定是剧集的一季（只有一集也算），
+  散放的剧集追踪码文件哪边都不算；没有追踪码的才按文件夹的样子猜。
+- 在线字幕查 TMDB 编号先看追踪码（文件名或所在文件夹的；剧集要认得出第几集才用）。
+- `/api/auto/sync?tmdb=m550&tmdb=tv1399s2`：回 `found: { m550: { path, auto, kind, ready, code } }`，片库里带这个 TMDB 编号追踪码的那一部（片库里的优先于 `/auto` 里的）。
+  请求添加（tj 2.5）收到新请求先问一句，有了就不再下载。
+
 ### 剧集（`TV_FOLDER`，默认 `/ram2`）
 
 前端的剧集区读这几个接口（v25 之前由旧后端提供，换到 v25 后缺了它们，剧集区整段消失 —— 现已补上）：
@@ -505,7 +512,7 @@ service = "cuven-audio-tx"
 
 ```bash
 tests/make-samples.sh     # 用 ffmpeg / mkvmerge 生成样片（约 30 秒）
-node tests/run.mjs        # Worker：235 项回归，约 1 分钟
+node tests/run.mjs        # Worker：238 项回归，约 1 分钟
 node tests/web.mjs        # 前端：182 项，需要 Playwright + Chromium（PLAYWRIGHT_PATH 可指定其 index.js），约 8 分钟
 node tests/bench.mjs [样片…]  # 性能基准：每一段都切一遍，量 Worker 的 CPU（BENCH_REPEAT=3 取最好的一遍）
 ```
