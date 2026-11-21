@@ -304,6 +304,13 @@ UI 测试找元素时拍一次快照、看全部匹配项是否在屏上（`UITe
 - 工作人员挪走以后，`/auto` 那份从这一层消失，本体的增量把新位置加进来。`/auto` 已经在 `ROOT_FOLDER`（`TV_FOLDER`）里面的，本体就扫得到，不重复叠。
 - `AUTO_FOLDER=off` 关掉；健康页（`/health`）有一行「/auto（传完就能播放）」写这一层有几部、多久前列过。
 
+**追踪码（v25.2）**：请求添加（tj 2.3）传进来的电影文件 / 剧集文件夹名字里带着 `[auto-m550-r13]` / `[auto-tv1399s2-r14]`
+（`m` / `tv` + TMDB 编号、剧集带季，`r` + 请求编号）。工作人员挪进 `/ram` / `/ram2` 时名字不变，追踪码就跟着走：
+- `/api/tmdb-batch` 遇到带追踪码的文件名直接按 TMDB 编号取，不靠文件名猜；剧集表里那一季的 TMDB 编号当场就有，中文名 / 年份 / 集数也按编号取。
+- `/api/auto/sync?code=13&code=14`：回 `where: { "13": { path, auto, kind, ready } }`，在 `/auto` 里、已经挪进片库，都回现在的位置（找不到的不回）。
+  请求添加靠它判断就绪、记下工作人员把它挪去了哪儿。
+- 追踪码不算进片名、年份、季（`r` 前缀免得 `r2001` 被当成年份）。App 按它把「继续观看」和片单接到挪过以后的新路径。
+
 ### 剧集（`TV_FOLDER`，默认 `/ram2`）
 
 前端的剧集区读这几个接口（v25 之前由旧后端提供，换到 v25 后缺了它们，剧集区整段消失 —— 现已补上）：
@@ -498,7 +505,7 @@ service = "cuven-audio-tx"
 
 ```bash
 tests/make-samples.sh     # 用 ffmpeg / mkvmerge 生成样片（约 30 秒）
-node tests/run.mjs        # Worker：227 项回归，约 1 分钟
+node tests/run.mjs        # Worker：235 项回归，约 1 分钟
 node tests/web.mjs        # 前端：182 项，需要 Playwright + Chromium（PLAYWRIGHT_PATH 可指定其 index.js），约 8 分钟
 node tests/bench.mjs [样片…]  # 性能基准：每一段都切一遍，量 Worker 的 CPU（BENCH_REPEAT=3 取最好的一遍）
 ```

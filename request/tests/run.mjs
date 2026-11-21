@@ -49,6 +49,7 @@ const W = {
   aired: { '1399:2': { total: 6, aired: 4 } },
   lib: { mode: 404, seen: new Set() },   // 片库（Stream Worker）：404 = 老版本没有 /api/auto/sync；'on' / 'off' / 'down'
   sync: [],                  // 片库收到的 /api/auto/sync
+  renames: [],               // PikPak 上的改名（加追踪码）
 };
 const pkFolderWith = (name, children) => {
   const id = 'F' + (W.seq++);
@@ -124,7 +125,12 @@ globalThis.fetch = async (url, init = {}) => {
       case 'ping': return J({ ok: 1, version: 'v1.68', core: 'test' });
       case 'organize': return J({ files: 3, deleted: ['ad.txt'], failed: [] });
       case 'check': return J(W.check.shift() || { k: 'ok', total: 4, vids: 4, have: [1, 2, 3, 4], miss: [], ongoing: false });
-      case 'rename': return J({ name: 'Game.of.Thrones.S02.1080p.[Full-4]-Cuven®', jobid: 77 });
+      case 'rename': {
+        const name = 'Game.of.Thrones.S02.1080p.[Full-4]-Cuven®';
+        const dir = [...W.files.values()].find(f => f.parent_id === 'AUTO' && f.name === body.dir && !f.trashed);
+        if (dir) dir.name = name;            // rclone 在 PikPak 上把文件夹改了名
+        return J({ name, jobid: 77 });
+      }
       case 'copy': return J({ jobid: (W.copyJobs || []).shift() || 88 });
       case 'job': return J({ error: '', speed: 2097152, ...jobOf(body.jobid) });
       case 'jobs': return J({ jobs: Object.fromEntries(body.ids.map(id => [id, { error: '', speed: 1, ...jobOf(id) }])) });
@@ -146,11 +152,13 @@ globalThis.fetch = async (url, init = {}) => {
   /* 片库：重看一眼 /auto，回这几个名字收录了没有 */
   if (u.host === 'stream.cuven.online' && p === '/api/auto/sync'){
     const items = u.searchParams.getAll('item');
-    W.sync.push({ items, tv: u.searchParams.get('tv') === '1', key: H['x-sync-key'] || '' });
+    W.sync.push({ items, codes: u.searchParams.getAll('code'), tv: u.searchParams.get('tv') === '1', key: H['x-sync-key'] || '' });
     if (W.lib.mode === 404) return J({ error: 'Not found', path: p }, 404);
     if (W.lib.mode === 'down') return J({ error: 'Internal error' }, 500);
     if (W.lib.mode === 'off') return J({ ok: false, off: 1 });
-    return J({ ok: true, root: '/auto', movies: W.lib.seen.size, has: Object.fromEntries(items.map(n => [n, W.lib.seen.has(n)])) });
+    const codes = u.searchParams.getAll('code');
+    const where = Object.fromEntries(codes.filter(k => W.lib.where && W.lib.where[k]).map(k => [k, W.lib.where[k]]));
+    return J({ ok: true, root: '/auto', movies: W.lib.seen.size, has: Object.fromEntries(items.map(n => [n, W.lib.seen.has(n)])), where });
   }
   /* TMDB 分季 */
   if (u.host === 'stream.cuven.online' && p === '/api/tmdb/season'){
@@ -184,6 +192,7 @@ globalThis.fetch = async (url, init = {}) => {
     }
     if (p.startsWith('/drive/v1/files/')){
       const f = W.files.get(decodeURIComponent(p.slice('/drive/v1/files/'.length)));
+      if (f && m === 'PATCH'){ W.renames.push([f.name, body.name]); if (W.renameDeny) return J({ error: 'permission_denied', error_code: 7 }, 403); f.name = body.name; }
       return f ? J(f) : J({ error: 'file_not_found', error_code: 3 }, 404);
     }
     if (p === '/drive/v1/files' && m === 'GET'){
@@ -286,7 +295,10 @@ let movieId;
      '清洗：最大的视频移到 /auto，原文件夹进回收站', { r, big });
   W.job[88] = { finished: false, success: false, bytes: 500, total: 1000 };
   await tick();
-  ok(W.tf.some(([op, b]) => op === 'copy' && b.item === 'Fight.Club.1999.1080p.mkv' && b.kind === 'file'), '④ 触发 webdav → dropbox 复制（文件）');
+  const tagged = 'Fight.Club.1999.1080p.[auto-m550-r' + movieId + '].mkv';
+  ok(big.name === tagged && (await one(movieId)).item === tagged && (await one(movieId)).tag === '[auto-m550-r' + movieId + ']',
+     '传之前在 PikPak 上改名：文件名带上追踪码 auto-m550-r<请求编号>（扩展名前面）', { name: big.name, r: await one(movieId) });
+  ok(W.tf.some(([op, b]) => op === 'copy' && b.item === tagged && b.kind === 'file'), '④ 触发 webdav → dropbox 复制（文件，用带追踪码的名字）');
   await tick();
   r = (await mine()).find(x => x.id === movieId);
   ok(r.step === 4 && r.pct === 69 && r.label === '等待传输' && r.note === undefined, '传输 50% → STEP 4 / 69%（App 看不到内部说明）', r);
@@ -304,7 +316,7 @@ let movieId;
   ok((await one(movieId)).stage === 'release', '5 分钟内不去看');
   advance(6 * 60000); await tick();
   ok((await one(movieId)).stage === 'release', '还在 dropbox:/auto → 继续等');
-  W.exists.delete('Fight.Club.1999.1080p.mkv');
+  W.exists.delete(tagged);
   advance(6 * 60000); await tick();
   r = (await mine()).find(x => x.id === movieId);
   ok(r.state === 'done' && r.pct === 100, '人工挪走 → 已发行 100%', r);
@@ -361,6 +373,8 @@ let tvId;
   await tick(); await tick(); await tick(); await tick();
   r = await one(tvId);
   ok(r.stage === 'release' && W.tf.some(([op, b]) => op === 'copy' && b.kind === 'dir'), '剧集按文件夹传完，等发行', r);
+  ok(r.item === 'Game.of.Thrones.S02.1080p.[Full-4]-Cuven®.[auto-tv1399s2-r' + tvId + ']' && W.tf.some(([op, b]) => op === 'copy' && b.item === r.item),
+     '剧集文件夹名带上追踪码 auto-tv1399s2-r<请求编号>（剧集带季）', r.item);
 }
 
 /* ── 目录 / 详情：带上请求进度 ── */
@@ -584,7 +598,7 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
 /* ══ v2.2：传到 Dropbox 的 /auto、片库收录了就立即可用（用户：「在 auto 文件夹时就立即可用」）══ */
 {
   env.DB.db.exec('DELETE FROM tj_req');
-  env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('health', 'tick:last')");
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('health', 'tick:last', 'track')");
   W.verifyOK = true; W.verifySeq = []; W.copyJobs = [];
   W.job[88] = { finished: true, success: true, bytes: 1, total: 1 };
   W.versions['movie:960'] = [{ tid: 30, title: 'Heat 1995 1080p', mb: 1, labels: [], res: '1080p' }];
@@ -600,15 +614,17 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   };
 
   /* 片库收录了：不进「最终发行审批」，直接就绪 */
-  W.lib = { mode: 'on', seen: new Set() };
+  W.lib = { mode: 'on', seen: new Set(), where: {} };
   W.sync = [];
   const a = await req(960);
   let r = await toPurged(a);
-  ok(r.stage === 'purge' && r.item === 'Heat.1995.1080p.mkv' && /等片库收录/.test(r.note), '删完 PikPak、片库还没收录：停在第 4 步等（不进最终发行审批）', r);
+  const heat = 'Heat.1995.1080p.[auto-m960-r' + a + '].mkv';
+  ok(r.stage === 'purge' && r.item === heat && /等片库收录/.test(r.note), '删完 PikPak、片库还没收录：停在第 4 步等（不进最终发行审批）', r);
   let app = (await mine()).find(x => x.id === a);
   ok(app.step === 4 && app.state === 'active', 'App 上还在第 4 步', app);
-  ok(W.sync.some(s => s.items.includes('Heat.1995.1080p.mkv') && !s.tv), '问片库的是 /auto 里的那个文件名（电影不带 tv=1）', W.sync);
-  W.lib.seen.add('Heat.1995.1080p.mkv');
+  ok(W.sync.some(s => s.items.includes(heat) && !s.tv), '问片库的是 /auto 里的那个文件名（电影不带 tv=1）', W.sync);
+  ok(W.sync.some(s => s.codes.includes(String(a))), '连追踪码（这条请求的编号）一起问', W.sync.slice(-1));
+  W.lib.seen.add(heat);
   const tfExists0 = W.tf.filter(([op]) => op === 'exists').length;
   await tick();
   r = await one(a);
@@ -616,18 +632,18 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   ok(r.state === 'done' && /可以播放/.test(r.note) && app.state === 'done' && app.pct === 100, '片库收录了 → 立即就绪 100%（App 变「立即播放」）', { r, app });
   ok(W.tf.filter(([op]) => op === 'exists').length === tfExists0, '在 /auto 就算就绪：不再去看工作人员挪没挪', W.tf.slice(-3));
   let log = (await call('GET', '/admin/api/log?id=' + a, { admin: true }))[1].items.map(l => l.msg);
-  ok(log.some(m => /片库已收录 dropbox:\/auto\/Heat\.1995\.1080p\.mkv → 可以播放了/.test(m)), '日志写清楚：在 /auto 里就可以播放', log.slice(0, 3));
+  ok(log.some(m => m.includes('片库已收录 dropbox:/auto/' + heat + ' → 可以播放了')), '日志写清楚：在 /auto 里就可以播放', log.slice(0, 3));
 
   /* 片库一直连不上：不出错、不失败；15 分钟后转去等发行，那期间收录了一样就绪 */
   W.lib.mode = 'down';
   const b = await req(961);
   r = await toPurged(b);
+  const ronin = 'Ronin.1998.1080p.[auto-m961-r' + b + '].mkv';
   ok(r.stage === 'purge' && r.state === 'active', '片库连不上：文件在 /auto 里，原地等，不算出错', r);
   for (let i = 0; i < 8 && (await one(b)).stage === 'purge'; i++) await tick();
   r = await one(b);
   ok(r.stage === 'release' && r.state === 'active' && !r.errs, '15 分钟片库还没收录：转去最终发行审批（不失败）', r);
-  W.lib.mode = 'on'; W.lib.seen.add('Ronin.1998.1080p.mkv');
-  W.exists.add('Ronin.1998.1080p.mkv');
+  W.lib.mode = 'on'; W.lib.seen.add(ronin);
   advance(6 * 60000); await tick();
   r = await one(b);
   ok(r.state === 'done' && /可以播放/.test(r.note), '等发行期间片库收录了：一样立即就绪（不用等人挪）', r);
@@ -640,17 +656,19 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   ok(r.stage === 'release', '老版本片库：照旧进最终发行审批', r);
   const asked = W.sync.length;
   advance(6 * 60000); await tick();
-  ok(W.sync.length === asked && (await one(c3)).stage === 'release', '老版本片库：这一条以后不再问，照旧等人挪', W.sync);
-  W.exists.delete('Collateral.2004.1080p.mkv');
+  ok(W.sync.filter(s => s.items.length).length === asked && (await one(c3)).stage === 'release', '老版本片库：这一条以后不再问，照旧等人挪', W.sync);
+  W.exists.delete(r.item);
   advance(6 * 60000); await tick();
   ok((await one(c3)).state === 'done', '人工挪走 → 已发行（老路照旧）');
 
   /* 一轮里好几条等收录：一次问完；面板能关掉这个功能 */
   env.DB.db.exec('DELETE FROM tj_req');
-  W.lib = { mode: 'on', seen: new Set() };
+  W.lib = { mode: 'on', seen: new Set(), where: {} };
   const d1 = await req(960), d2 = await req(961);
-  for (const [id, item] of [[d1, 'Heat.1995.1080p.mkv'], [d2, 'Ronin.1998.1080p.mkv']])
+  for (const [id, item] of [[d1, 'Heat.1995.1080p.mkv'], [d2, 'Ronin.1998.1080p.mkv']]){
     env.DB.db.prepare("UPDATE tj_req SET stage = 'release', next = 0, data = json_set(data, '$.item', ?, '$.kind', 'file') WHERE id = ?").run(item, id);
+    W.exists.add(item);
+  }
   W.sync = [];
   await tick();
   ok(W.sync.length === 1 && W.sync[0].items.length === 2, '好几条等收录：一轮一次问完', W.sync);
@@ -659,13 +677,93 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   W.sync = []; W.lib.seen.add('Heat.1995.1080p.mkv');
   env.DB.db.exec("UPDATE tj_req SET next = 0");
   await tick();
-  ok(W.sync.length === 0 && (await one(d1)).stage === 'release', '关掉以后：不问片库，照旧等发行', W.sync);
+  ok(W.sync.filter(s => s.items.length).length === 0 && (await one(d1)).stage === 'release', '关掉以后：不问片库，照旧等发行', W.sync);
   await call('POST', '/admin/api/cfg', { admin: true, body: { autoReady: true } });
   const [, links] = await call('POST', '/admin/api/links', { admin: true, body: {} });
   ok(links.stream && links.stream.ok && links.stream.root === '/auto', '面板「测试连接」：片库收录 /auto', links.stream);
   W.lib.mode = 404;
   const [, links2] = await call('POST', '/admin/api/links', { admin: true, body: {} });
   ok(links2.stream.ok && links2.stream.off, '面板「测试连接」：老版本片库写清楚「不收录 /auto」', links2.stream);
+}
+
+/* ══ v2.3：名字里带追踪码，传完以后也能一直追踪（用户：「在文件和文件夹名中带上 auto-tmdb唯一码-内部代码」）══ */
+{
+  env.DB.db.exec('DELETE FROM tj_req');
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('health', 'tick:last', 'track')");
+  W.lib = { mode: 'on', seen: new Set(), where: {} };
+  W.renames = []; W.sync = [];
+  const req = async (id) => (await call('POST', '/app/requests', { user: 'alice', body: { src: 'movie', id } }))[1].request.id;
+  const toPurged = async (id) => {
+    await tick();
+    for (const t of [...W.tasks.keys()]) finishTask(t);
+    for (let i = 0; i < 10; i++){ await tick(); const r = await one(id); if (r.stage !== 'purge' ? ['release', 'done'].includes(r.stage) : W.tf.some(([op, b]) => op === 'purge' && b.item === r.item)) break; }
+    return one(id);
+  };
+
+  /* 片库按追踪码认出来（名字写法对不上也行）；问的时候带着追踪码 */
+  const a = await req(960);
+  let r = await toPurged(a);
+  ok(W.renames.some(([from, to]) => from === 'Heat.1995.1080p.mkv' && to === 'Heat.1995.1080p.[auto-m960-r' + a + '].mkv'), 'PikPak 上改名：扩展名前面加 [auto-m<TMDB>-r<请求编号>]', W.renames);
+  ok(W.sync.some(s => s.codes.includes(String(a))), '问片库时带着追踪码（请求编号）', W.sync.slice(-1));
+  W.lib.where[String(a)] = { path: '/auto/heat.1995.1080p.[auto-m960-r' + a + '].mkv', auto: true, kind: 'movie' };
+  await tick();
+  r = await one(a);
+  ok(r.state === 'done' && /还在 \/auto/.test(r.note), '按追踪码认出来了（名字大小写对不上也行）→ 就绪', r);
+
+  /* 就绪以后接着追踪：工作人员挪进 ram 了 → 面板写去了哪儿；App 上的时间不跳 */
+  const updated0 = (await mine()).find(x => x.id === a).updated;
+  W.lib.where[String(a)] = { path: '/ram/Heat.1995.1080p.[auto-m960-r' + a + '].mkv', auto: false, kind: 'movie' };
+  await tick();
+  ok(!(await one(a)).home, '还没到 30 分钟：不去追');
+  advance(31 * 60000); await tick();
+  r = await one(a);
+  ok(r.home === '/ram/Heat.1995.1080p.[auto-m960-r' + a + '].mkv' && (await mine()).find(x => x.id === a).updated === updated0,
+     '30 分钟一轮：按追踪码找到它被挪到了 /ram（只改记录，App 上「最近」的时间不跳）', r);
+  const log = (await call('GET', '/admin/api/log?id=' + a, { admin: true }))[1].items.map(l => l.msg);
+  ok(log.some(m => /工作人员已归档：\/ram\/Heat/.test(m)), '日志：工作人员已归档到哪儿', log.slice(0, 2));
+  const nSync = W.sync.length;
+  advance(31 * 60000); await tick();
+  ok(!W.sync.slice(nSync).some(s => s.codes.includes(String(a))), '找到归宿以后不再追这一条');
+
+  /* 已经被挪走了才第一次问到：一样算就绪，直接记下归宿 */
+  const b = await req(961);
+  W.lib.where = {};
+  r = await toPurged(b);
+  W.lib.where[String(b)] = { path: '/ram/Ronin.1998.1080p.[auto-m961-r' + b + '].mkv', auto: false, kind: 'movie' };
+  await tick();
+  r = await one(b);
+  ok(r.state === 'done' && /已归档到 \/ram\/Ronin/.test(r.note) && r.home, '问到时已经被挪进 /ram：一样就绪，归宿直接记下', r);
+
+  /* 哪儿都找不到（改了名 / 删了）：连着 6 次才放弃 */
+  const c3 = await req(962);
+  W.lib.where = {};
+  r = await toPurged(c3);
+  W.lib.where[String(c3)] = { path: '/auto/x', auto: true, kind: 'movie' };
+  await tick();
+  ok((await one(c3)).state === 'done', '就绪');
+  W.lib.where = {};
+  for (let i = 0; i < 5; i++){ advance(31 * 60000); await tick(); }
+  ok(!(await one(c3)).home, '找不到 5 次：还在追（片库的列表可能慢）');
+  advance(31 * 60000); await tick();
+  ok(/找不到了/.test((await one(c3)).home), '连着 6 次哪儿都找不到：不再追踪，面板写清楚', await one(c3));
+
+  /* PikPak 不让改名：照原名传，不耽误 */
+  env.DB.db.exec('DELETE FROM tj_req');
+  W.renameDeny = true;
+  const d = await req(960);
+  r = await toPurged(d);
+  ok(r.item === 'Heat.1995.1080p.mkv' && r.tag === '' && W.tf.some(([op, x]) => op === 'copy' && x.item === 'Heat.1995.1080p.mkv'), 'PikPak 不让改名：照原名传', r);
+  W.renameDeny = false;
+
+  /* 面板关掉追踪码：不改名 */
+  env.DB.db.exec('DELETE FROM tj_req');
+  const [, st] = await call('POST', '/admin/api/cfg', { admin: true, body: { tagNames: false } });
+  ok(st.cfg.tagNames === false, '面板：可以关掉追踪码', st.cfg);
+  W.renames = [];
+  const e = await req(961);
+  r = await toPurged(e);
+  ok(W.renames.length === 0 && r.item === 'Ronin.1998.1080p.mkv', '关掉以后不改名', { renames: W.renames, item: r.item });
+  await call('POST', '/admin/api/cfg', { admin: true, body: { tagNames: true } });
 }
 
 /* ── 共用的 D1：别人的表原样不动，自己的表缺的列补上了 ── */

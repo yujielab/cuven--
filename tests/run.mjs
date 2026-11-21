@@ -929,6 +929,62 @@ console.log('\n■ /auto：传完就能播放（v25.1，用户要求：在 auto 
   await get('/api/tv?refresh=1'); await settle();
 }
 
+console.log('\n■ 追踪码：[auto-m550-r13] / [auto-tv1399s2-r14]（v25.2，用户要求：名字里带 auto-tmdb唯一码-内部代码，持续追踪）');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const get = async u => { const r = await H.call(u, 'GET', { Cookie: cookie }); return { status: r.status, body: await r.json() }; };
+  const post = async (u, body) => {
+    const r = await H.worker.fetch(new Request('https://w.test' + u, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify(body) }), H.env, H.ctx);
+    return { status: r.status, body: await r.json() };
+  };
+  const f = (p, size = 1000) => ({ path_display: p, size, server_modified: '2026-11-21T00:00:00Z' });
+  const SHOW = '/auto/Some.Show.S01.1080p.WEB-DL.[auto-tv777s1-r22]';
+  const MOVED_TV = '/ram2/Other Show 2001 1080p [auto-tv778s1-r24]';
+  // 被工作人员挪进片库本体（/Movies）的那部：在样片目录里放一个小文件
+  const MOVED = 'Moved.Film.2001.1080p.[auto-m950-r23].mkv';
+  fs.writeFileSync(path.join(H.SAMPLES, MOVED), Buffer.alloc(2048));
+  H.tv.entries = [
+    f('/auto/Heat.1995.1080p.BluRay.[auto-m949-r2001].mkv', 9e9),
+    f(`${SHOW}/Some.Show.S01E01.mkv`), f(`${SHOW}/Some.Show.S01E02.mkv`),
+    f(`${MOVED_TV}/Other.Show.S01E01.mkv`), f(`${MOVED_TV}/Other.Show.S01E02.mkv`),
+  ];
+  H.tmdb.movies = [{ id: 949, title: '盗火线', en: 'Heat', date: '1995-12-15', query: 'zzz-nothing' },
+                   { id: 950, title: '挪走的片', en: 'Moved Film', date: '2001-01-01', query: 'zzz-nothing2' }];
+  H.tmdb.shows = [{ id: 777, name: '某部剧', original: 'Nothing Like The Folder', first: '2024-01-01', seasons: [{ n: 1, air: '2024-01-01', count: 8 }] },
+                  { id: 778, name: '另一部剧', original: 'Also Unrelated', first: '2001-01-01', seasons: [{ n: 1, air: '2001-01-01', count: 6 }] }];
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  delete H.env.AUTO_FOLDER; delete H.env.AUTO_SYNC_KEY;
+
+  const tb = await post('/api/tmdb-batch', { queries: [{ name: 'Heat.1995.1080p.BluRay.[auto-m949-r2001].mkv' }] });
+  const heat = tb.body['Heat.1995.1080p.BluRay.[auto-m949-r2001].mkv'];
+  ok(heat && heat.id === 949 && heat.title === '盗火线' && heat.year === '1995', `带追踪码的文件名直接按 TMDB 编号认（搜索搜不到也认得出；请求编号 r2001 不会被当成年份）：${heat && heat.title} ${heat && heat.year}`);
+
+  const tv = await get('/api/tv?refresh=1');
+  await settle();
+  const show = (tv.body.series || []).find(x => x.path === SHOW);
+  const moved = (tv.body.series || []).find(x => x.path === MOVED_TV);
+  ok(show && show.tmdbId === 777 && show.code === '22' && show.season === 1 && show.title === '某部剧' && !/auto-/.test(show.en || ''),
+    `剧集文件夹带追踪码：TMDB 编号当场就有（777），中文名按编号取（${show && show.title}），片名里不带追踪码`);
+  ok(moved && moved.tmdbId === 778 && moved.year === '2001' && !/auto-/.test(moved.en || ''), '挪进 /ram2 的那一季照样带着追踪码认出来；年份是 2001 不是请求编号');
+
+  await new Promise(r => setTimeout(r, 10_100));       // 同步接口 10 秒内最多真列一次：等上一段的那次过期
+  const sync = await H.call('/api/auto/sync?code=2001&code=22&code=23&code=24&code=999', 'POST', {});
+  const w = (await sync.json()).where || {};
+  await settle();
+  ok(w['2001'] && w['2001'].auto === true && w['2001'].kind === 'movie' && /Heat/.test(w['2001'].path), '按追踪码找：还在 /auto 里的电影', w['2001']);
+  ok(w['22'] && w['22'].auto === true && w['22'].kind === 'tv' && w['22'].ready === true, '按追踪码找：还在 /auto 里的剧集（认出了 TMDB 编号才算 ready）', w['22']);
+  ok(w['23'] && w['23'].auto === false && w['23'].path === '/Movies/' + MOVED, '按追踪码找：已经挪进片库本体的电影，回新位置', w['23']);
+  ok(w['24'] && w['24'].auto === false && w['24'].path === MOVED_TV, '按追踪码找：已经挪进 /ram2 的剧集，回新位置', w['24']);
+  ok(!('999' in w), '找不到的追踪码不回');
+
+  fs.unlinkSync(path.join(H.SAMPLES, MOVED));
+  delete H.env.TMDB_API_KEY;
+  H.tv.entries = []; H.tmdb.shows = []; H.tmdb.movies = [];
+  await get('/api/tv?refresh=1'); await get('/api/refresh'); await settle();
+}
+
 console.log('\n■ 预告片：IMDb 直链优先，被拒时退到 TMDB 登记的 YouTube 官方预告');
 {
   const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };

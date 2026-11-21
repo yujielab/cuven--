@@ -112,6 +112,43 @@ final class PlaybackStore {
         entries.values.filter { $0.seriesPath == seriesPath }.max { $0.updated < $1.updated }
     }
 
+    /// 请求添加的片子名字里带追踪码（[auto-m550-r13]）：工作人员把它从 /auto 挪进片库以后路径变了、追踪码没变——
+    /// 按追踪码把进度接到新路径上（「继续观看」不丢、接着放的位置也在）。只动旧路径已经不在片库里的
+    func relink(videos: [Video], series: [Series]) {
+        guard !entries.isEmpty else { return }
+        var movieAt: [String: String] = [:], seriesAt: [String: String] = [:]
+        for v in videos { if let c = AutoTag.code(in: v.name) { movieAt[c] = v.path } }
+        for s in series { if let c = AutoTag.code(in: s.path) { seriesAt[c] = s.path } }
+        guard !movieAt.isEmpty || !seriesAt.isEmpty else { return }
+        let livePaths = Set(videos.map(\.path)), liveSeries = Set(series.map(\.path))
+        var next = entries, changed = false
+        for (key, e) in entries {
+            if let sp = e.seriesPath {
+                guard !liveSeries.contains(sp), let c = AutoTag.code(in: sp), let np = seriesAt[c], np != sp else { continue }
+                var ne = e
+                ne.seriesPath = np
+                let oldDir = Self.dir(sp), newDir = Self.dir(np)
+                if e.path.hasPrefix(oldDir + "/") { ne.path = newDir + e.path.dropFirst(oldDir.count) }
+                next[key] = nil
+                next[ne.path] = ne
+                changed = true
+            } else {
+                guard !livePaths.contains(e.path), let c = AutoTag.code(in: e.path), let np = movieAt[c], np != e.path else { continue }
+                var ne = e
+                ne.path = np
+                next[key] = nil
+                next[np] = ne
+                changed = true
+            }
+        }
+        if changed { entries = next; persist() }
+    }
+
+    /// 剧集表里一季的路径可能带「#S2」（一个文件夹混着几季时拆开的）：文件夹部分
+    private static func dir(_ seriesPath: String) -> String {
+        seriesPath.split(separator: "#", maxSplits: 1).first.map(String.init) ?? seriesPath
+    }
+
     private func persist() {
         if DemoData.enabled { return }
         saveTask?.cancel()
@@ -156,6 +193,30 @@ final class WatchlistStore {
         } else {
             items.insert(WatchItem(key: key, kind: kind, added: Date()), at: 0)
         }
+        save()
+    }
+
+    /// 和 PlaybackStore.relink 一样：带追踪码的片子被挪了位置，片单跟到新路径
+    func relink(videos: [Video], series: [Series]) {
+        guard !items.isEmpty else { return }
+        var movieAt: [String: String] = [:], seriesAt: [String: String] = [:]
+        for v in videos { if let c = AutoTag.code(in: v.name) { movieAt[c] = v.path } }
+        for s in series { if let c = AutoTag.code(in: s.path) { seriesAt[c] = s.path } }
+        guard !movieAt.isEmpty || !seriesAt.isEmpty else { return }
+        let live = Set(videos.map(\.path)).union(series.map(\.path))
+        var changed = false
+        items = items.map { it in
+            guard !live.contains(it.key), let c = AutoTag.code(in: it.key),
+                  let np = it.kind == .movie ? movieAt[c] : seriesAt[c], np != it.key else { return it }
+            changed = true
+            var n = it
+            n.key = np
+            return n
+        }
+        if changed { save() }
+    }
+
+    private func save() {
         guard !DemoData.enabled, let d = try? JSONEncoder().encode(items) else { return }
         UserDefaults.standard.set(d, forKey: storeKey)
     }
@@ -293,6 +354,9 @@ final class AppModel {
             let lib = try await APIClient.shared.library()
             let vids = lib.videos.filter { FileName.isVideo($0.name) }.sorted { $0.addedKey > $1.addedKey }
             videos = vids
+            // 带追踪码的片子被工作人员挪了位置：进度和片单跟到新路径
+            playback.relink(videos: vids, series: series)
+            watchlist.relink(videos: vids, series: series)
             freezeFresh()
             folders = lib.folders
             libraryRoot = lib.root ?? ""
@@ -390,6 +454,8 @@ final class AppModel {
         series = list.filter { $0.tmdbMiss != true && ($0.episodes ?? 0) > 0 }
             .sorted { ($0.added ?? "") > ($1.added ?? "") }
         DiskCache.save(series, "series.json")
+        playback.relink(videos: videos, series: series)
+        watchlist.relink(videos: videos, series: series)
         // 首页那排要先知道谁有字标：最新的 24 部先取
         await withTaskGroup(of: Void.self) { g in
             for s in series.prefix(24) { g.addTask { await self.ensureSeriesMeta(s) } }
