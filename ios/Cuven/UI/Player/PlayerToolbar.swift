@@ -6,14 +6,14 @@ import UIKit
 //
 // 一排液态玻璃胶囊，左右滑动（这一条比屏宽，两头的胶囊伸出屏外；一开始让中间那颗播放的大胶囊居中）：
 //   锁定（圆）| 全屏 | 亮度 | 声音 | 后退 · 播放 / 暂停 · 前进（一颗大胶囊，上面一条可以拖的进度条）| 字幕 | 音轨 | 光效（宽）
-// 交互（用户要求）：长按 → 形变 → 滑动选择或调整 → 松开 → 还原形变。
-//   · 长按亮度 / 声音：这颗胶囊长成一条滑杆，手指左右滑调大小，松开收回；
-//   · 长按字幕 / 音轨 / 光效：长成一排选项（字幕：关 + 各条字幕；音轨：各条音轨；光效：标准 / 影院 / 沉浸），
-//     手指左右滑，白色的高亮跟着走，松开就选它、收回；
-//   · 形变时这颗按需要长宽（最多是看得见的宽度的 80%），把别的胶囊推开、调暗，整条挪到让它居中；松开时都回去。
-// 也可以点（用户要求）：点按 → 形变 → 点按或滑动选择 → 还原。点一下亮度 / 声音 / 字幕 / 音轨 / 光效，它展开着不收；
-// 再点滑杆上的某一处（或按住拖）就调到那儿，点某个选项（或按住滑过去）就选它，手指抬起来就收回。
-// 声音展开时点左边的喇叭是静音 / 取消静音。点别处（面板空的地方、调暗的胶囊）或者 4 秒没动：不改，收回。
+// 交互（用户要求）：点按 → 形变 → 点按或滑动选择 → 还原。只用点按展开，不再长按滑动展开（用户要求）。
+//   · 点一下亮度 / 声音：这颗胶囊长成一条滑杆；再点滑杆上的某一处（或按住拖）就调到那儿，手指抬起来收回；
+//   · 点一下字幕 / 音轨 / 光效：长成一排选项（字幕：关 + 各条字幕；音轨：各条音轨；光效：标准 / 影院 / 沉浸），
+//     点某个选项（或按住滑过去，白色的高亮跟着走）就选它，手指抬起来收回；
+//   · 形变时这颗按需要长宽（最多是看得见的宽度的 80%），把别的胶囊推开、调暗，整条挪到让它居中；收回时都回去。
+// 声音展开时点左边的喇叭是静音 / 取消静音。点别处（面板空的地方、调暗的胶囊）、再点一下同一颗，或者 4 秒没动：不改，收回。
+// 一颗胶囊只挂一个手势（pillGesture）。以前是「长按序列 + 点按」和「点开以后的拖」两个手势、靠 GestureMask 切换，
+// 外面那个的 .none 连里面那个也关了（GestureMask.none 关的是整棵子视图上的手势），结果点按也展不开。
 // 锁定 = 这一页的方向锁在现在的方向（亮起来）；全屏 = 退出半折回到系统播放器全屏、方向回到原来的规则。
 // 光影只有这三种模式能换，参数是固定的（CinematicReflectionMode）。
 // 进度条：在那条线上按住拖，松手才跳过去。
@@ -87,7 +87,7 @@ struct PlayerTouchBar: View {
     @State private var startValue: Double = 0
     @State private var startIndex = 0
     @State private var pick = 0
-    /// 点一下展开的（等着点或滑来选；长按展开的松手就收）
+    /// 点开着（等着点或滑来选）
     @State private var sticky = false
     /// 点开以后多久没动就收回（每动一下重新算）
     @State private var stickyToken = 0
@@ -150,7 +150,7 @@ struct PlayerTouchBar: View {
             .animation(spring, value: morph)
             .animation(.spring(response: 0.26, dampingFraction: 0.82), value: pressed)
             .contentShape(Rectangle())
-            // 左右滑：整条跟着手指走，松手按惯性停下（长按展开着、拖进度条时不算）
+            // 左右滑：整条跟着手指走，松手按惯性停下（展开着、拖进度条时不算）
             .simultaneousGesture(
                 DragGesture(minimumDistance: 10)
                     .onChanged { v in
@@ -176,10 +176,6 @@ struct PlayerTouchBar: View {
                         model.poke()
                     }
             )
-            .onChange(of: pressed) { _, now in
-                // 长按的手指抬起来了（或者被打断）：选上、收回（点开的等着点或滑来选）
-                if now == nil, morph != nil, !sticky { end() }
-            }
             // 面板上空的地方点了一下：点开的收回
             .onChange(of: model.barCollapseRequest) { _, _ in if sticky { cancel() } }
         }
@@ -252,27 +248,6 @@ struct PlayerTouchBar: View {
         morph = k
     }
 
-    /// 手指在展开的那一颗上左右滑了 dx
-    private func adjust(_ k: TouchBarKey, dx: CGFloat, visible W: CGFloat) {
-        let width = morphWidth(k, visible: W)
-        switch k {
-        case .brightness:
-            model.setBrightness(startValue + Double(dx / max(width * 0.8, 1)))
-        case .volume:
-            model.setVolume(startValue + Double(dx / max(width * 0.8, 1)))
-        default:
-            let n = labels(k).count
-            guard n > 0 else { return }
-            let step = max(24, (width - 56) / CGFloat(n))
-            let i = min(n - 1, max(0, startIndex + Int((dx / step).rounded())))
-            if i != pick {
-                Haptics.selection()
-                pick = i
-            }
-        }
-        model.poke()
-    }
-
     /// 松开：选项按高亮的那一个选上；收回（commit 为假：不改，直接收回）
     private func end(commit: Bool = true) {
         guard let k = morph else { return }
@@ -309,24 +284,18 @@ struct PlayerTouchBar: View {
         }
     }
 
-    /// 长按 → 形变 → 滑动 → 松开（松开由 pressed 复位收回）；早早松开算点一下（点开）
-    private func morphGesture(_ k: TouchBarKey, visible W: CGFloat) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.28, maximumDistance: 10)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("touchbar")))
-            .updating($pressed) { _, state, _ in state = k }
-            .onChanged { v in
-                guard case .second(true, let drag) = v else { return }
-                if morph != k { begin(k) }
-                if let drag { adjust(k, dx: drag.translation.width, visible: W) }
-            }
-            .exclusively(before: TapGesture().onEnded { openSticky(k) })
-    }
-
-    /// 点开以后：点哪儿 / 滑到哪儿就是哪儿（按手指在展开的那一颗上的位置），抬起来就选上、收回。
-    /// frame：展开的那一颗在这一条（"touchbar"）里的位置
-    private func stickyGesture(_ k: TouchBarKey, frame: CGRect) -> some Gesture {
+    /// 一颗胶囊的手势（只有这一个，不靠 GestureMask 切换）：
+    /// · 没展开：手指没怎么动就抬起来 = 点了一下 → 展开（等着点或滑来选）；滑远了是在左右滑整条，不管
+    /// · 展开着：点哪儿 / 滑到哪儿就是哪儿（按手指在展开的那一颗上的位置），抬起来就选上、收回
+    /// frame：这一颗在这一条（"touchbar"）里的位置
+    private func pillGesture(_ k: TouchBarKey, frame: CGRect) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("touchbar"))
+            .updating($pressed) { v, state, _ in
+                // 按下去略缩一下（展开着的那一颗不缩）；滑远了就不算按着它
+                if hypot(v.translation.width, v.translation.height) < 10 { state = k }
+            }
             .onChanged { v in
+                guard morph == k, sticky else { return }
                 if !stickyTouch {
                     stickyTouch = true
                     iconPress = v.startLocation.x - frame.minX < iconZone(k)
@@ -339,6 +308,11 @@ struct PlayerTouchBar: View {
             }
             .onEnded { v in
                 let moved = hypot(v.translation.width, v.translation.height) > 6
+                guard morph == k, sticky, stickyTouch else {
+                    // 没展开：点了一下就展开；滑远了是在左右滑整条
+                    if hypot(v.translation.width, v.translation.height) < 10 { openSticky(k) }
+                    return
+                }
                 if iconPress, !moved {
                     // 按在左边的符号上：声音是静音 / 取消静音，别的是不改、收回
                     if k == .volume { model.toggleMute() }
@@ -385,7 +359,6 @@ struct PlayerTouchBar: View {
 
     @ViewBuilder
     private func pill(_ k: TouchBarKey, visible W: CGFloat, frame: CGRect) -> some View {
-        let open = morph == k && sticky
         switch k {
         case .lock:
             Button { model.toggleOrientationLock() } label: {
@@ -414,13 +387,11 @@ struct PlayerTouchBar: View {
         case .brightness, .volume:
             level(k)
                 .contentShape(Capsule())
-                .gesture(morphGesture(k, visible: W), including: open ? .none : .all)
-                .simultaneousGesture(stickyGesture(k, frame: frame), including: open ? .all : .none)
+                .gesture(pillGesture(k, frame: frame))
         case .subtitles, .audio, .effects:
             options(k)
                 .contentShape(Capsule())
-                .gesture(morphGesture(k, visible: W), including: open ? .none : .all)
-                .simultaneousGesture(stickyGesture(k, frame: frame), including: open ? .all : .none)
+                .gesture(pillGesture(k, frame: frame))
         }
     }
 
@@ -559,7 +530,7 @@ struct PlayerTouchBar: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(isBrightness ? "亮度" : (model.muted ? "声音，已静音" : "声音"))
         .accessibilityValue("\(Int((value * 100).rounded()))%")
-        .accessibilityHint(isBrightness ? "点按或长按展开，左右滑动调整" : "点按或长按展开，左右滑动调整音量")
+        .accessibilityHint(isBrightness ? "点按展开，再点按或滑动调整" : "点按展开，再点按或滑动调整音量")
         .accessibilityAdjustableAction { direction in
             let d = direction == .increment ? 0.1 : -0.1
             if isBrightness { model.setBrightness(value + d) } else { model.setVolume(value + d) }
@@ -633,8 +604,8 @@ struct PlayerTouchBar: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(k == .subtitles ? "字幕" : k == .audio ? "音轨" : "光效")
         .accessibilityValue(names.indices.contains(current) ? names[current] : "")
-        .accessibilityHint(k == .subtitles ? "点按或长按展开，选择字幕"
-                           : k == .audio ? "点按或长按展开，选择音轨" : "点按或长按展开，选择光影模式")
+        .accessibilityHint(k == .subtitles ? "点按展开，再点按选择字幕"
+                           : k == .audio ? "点按展开，再点按选择音轨" : "点按展开，再点按选择光影模式")
         .accessibilityAdjustableAction { direction in
             let n = names.count
             guard n > 0 else { return }
