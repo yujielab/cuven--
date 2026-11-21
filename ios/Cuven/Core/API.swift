@@ -127,8 +127,9 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: 剧集
 
+    /// 剧集表：不用本机缓存（后端回 max-age=60）——请求添加刚就绪、还在 /auto 里的那一季要马上能「立即播放」
     func tvList() async throws -> [Series] {
-        let p: TVPayload = try await get("/api/tv", timeout: 30)
+        let p: TVPayload = try await get("/api/tv", timeout: 30, fresh: true)
         return p.series
     }
 

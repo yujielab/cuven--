@@ -859,6 +859,76 @@ console.log('\n■ 剧集：/api/tv、/api/tv/episodes、/api/tmdb/season、/api
   H.tv.entries = []; H.tv.pageSize = 0;
 }
 
+console.log('\n■ /auto：传完就能播放（v25.1，用户要求：在 auto 文件夹时就立即可用）');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const get = async u => { const r = await H.call(u, 'GET', { Cookie: cookie }); return { status: r.status, body: await r.json() }; };
+  const f = (p, size = 1000, at = '2026-11-20T00:00:00Z') => ({ path_display: p, size, server_modified: at });
+  const GOT = '/auto/Game.of.Thrones.S02.1080p.[Full-4]-Cuven®';
+  H.tv.entries = [
+    f('/auto/Heat.1995.1080p.BluRay.mkv', 9e9),                                         // 直接放着的：电影
+    f('/auto/Ronin.1998.2160p/Ronin.1998.2160p.mkv', 8e9), f('/auto/Ronin.1998.2160p/sample.mkv', 10),   // 只装一部片的文件夹：电影
+    f(`${GOT}/Game.of.Thrones.S02E01.mkv`), f(`${GOT}/Game.of.Thrones.S02E02.mkv`),       // 好几集：剧集
+    f('/auto/Chernobyl.S01.2160p/Chernobyl.S01E01.mkv'),                                 // 只有一个文件但有季号 / 集号：剧集
+    f('/auto/Loose.Show.S01E01.mkv'),                                                    // 散放的一集：哪边都不算
+    f('/auto/avc_inband.mkv', 5e9),                                                      // 和片库本体同名（测重复影片巡检碰不到 /auto）
+    f('/ram2/Fargo/Season 1/Fargo.S01E01.mkv'),
+  ];
+  H.tmdb.shows = [
+    { id: 1399, name: '权力的游戏', original: 'Game of Thrones', first: '2011-04-17', seasons: [{ n: 2, air: '2012-04-01', count: 10 }] },
+    { id: 87108, name: '切尔诺贝利', original: 'Chernobyl', first: '2019-05-06', seasons: [{ n: 1, air: '2019-05-06', count: 5 }] },
+    { id: 60622, name: '冰血暴', original: 'Fargo', first: '2014-04-15', seasons: [{ n: 1, air: '2014-04-15', count: 10 }] },
+  ];
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  delete H.env.TV_FOLDER; delete H.env.AUTO_FOLDER; delete H.env.AUTO_SYNC_KEY;
+
+  const all = await get('/api/all?refresh=' + Date.now());
+  await settle();
+  const vp = (all.body.videos || []).map(v => v.path);
+  ok(all.status === 200 && vp.includes('/auto/Heat.1995.1080p.BluRay.mkv') && vp.includes('/auto/Ronin.1998.2160p/Ronin.1998.2160p.mkv'),
+    '/api/all：/auto 里直接放着的、只装一部片的文件夹里的，都当电影给（不用等挪进片库）');
+  ok(!vp.some(p => /sample|Game\.of\.Thrones|Chernobyl|Loose\.Show/.test(p)) && vp.some(p => p.startsWith('/Movies/')),
+    '/api/all：样片、剧集的分集、散放的单集不当电影；片库本体照旧都在');
+
+  const tv = await get('/api/tv?refresh=1');
+  await settle();
+  const sp = (tv.body.series || []).map(x => x.path);
+  const got = (tv.body.series || []).find(x => x.path === GOT);
+  ok(got && got.season === 2 && got.episodes === 2 && got.tmdbId === 1399 && sp.includes('/auto/Chernobyl.S01.2160p') && sp.includes('/ram2/Fargo/Season 1'),
+    `/api/tv：/auto 里的剧集一级文件夹进剧集表（权力的游戏 S2 两集、TMDB 1399），和 /ram2 的放在一起（${sp.join('、')}）`);
+  ok(!sp.some(p => /Heat|Ronin/.test(p)), '/api/tv：认成电影的不进剧集表');
+  const ep = await get('/api/tv/episodes?path=' + encodeURIComponent(GOT));
+  ok(ep.status === 200 && ep.body.episodes.map(e => e.ep).join() === '1,2', '/auto 里的剧集一样有分集表（能直接播）');
+
+  const sync = await H.call('/api/auto/sync?item=' + encodeURIComponent('Heat.1995.1080p.BluRay.mkv') + '&item=' + encodeURIComponent(GOT.slice(6)) +
+    '&item=' + encodeURIComponent('Ronin.1998.2160p') + '&item=Nope.mkv&tv=1', 'POST', {});
+  const sj = await sync.json(); await settle();
+  ok(sync.status === 200 && sj.has['Heat.1995.1080p.BluRay.mkv'] === true && sj.has[GOT.slice(6)] === true && sj.has['Ronin.1998.2160p'] === true && sj.has['Nope.mkv'] === false,
+    '/api/auto/sync：不带 Cookie 也能叫（请求添加 Worker 用），电影按文件名、剧集按文件夹名回收录了没有', sj);
+  const dup = await get('/api/dupes?minMb=0');
+  ok(dup.status === 200 && !JSON.stringify(dup.body.groups || []).includes('/auto/'), '重复影片巡检（会删文件）碰不到 /auto 里的片子');
+  const health = await (await H.call('/health', 'GET', {})).text();
+  ok(/\/auto（传完就能播放）/.test(health), '健康页有一行 /auto 的情况');
+
+  H.env.AUTO_SYNC_KEY = 'sync-key';
+  const s403 = await H.call('/api/auto/sync?item=x', 'POST', {});
+  const s200 = await H.call('/api/auto/sync?item=x', 'POST', { 'x-sync-key': 'sync-key' });
+  ok(s403.status === 403 && s200.status === 200, '配了 AUTO_SYNC_KEY：不带 / 带错口令 403，带对了 200');
+  delete H.env.AUTO_SYNC_KEY;
+
+  H.env.AUTO_FOLDER = 'off';
+  const off = await (await H.call('/api/auto/sync?item=x', 'POST', {})).json();
+  await get('/api/refresh'); await settle();          // 下一次预热（cron / webhook）把 /auto 那一层拿掉，库指纹跟着翻
+  const all2 = await get('/api/all?refresh=' + Date.now());
+  await settle();
+  ok(off.off === 1 && !(all2.body.videos || []).some(v => v.path.startsWith('/auto/')), 'AUTO_FOLDER=off：不收录 /auto，同步接口回 off（请求添加照旧等人挪）');
+  delete H.env.AUTO_FOLDER; delete H.env.TMDB_API_KEY;
+  H.tv.entries = []; H.tmdb.shows = [];
+  await get('/api/tv?refresh=1'); await settle();
+}
+
 console.log('\n■ 预告片：IMDb 直链优先，被拒时退到 TMDB 登记的 YouTube 官方预告');
 {
   const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };

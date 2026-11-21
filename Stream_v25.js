@@ -1,5 +1,21 @@
 /**
- * Dropbox Video Proxy — Cloudflare Worker (v25 · 2026-11-10)
+ * Dropbox Video Proxy — Cloudflare Worker (v25.1 · 2026-11-21)
+ * ────────────────────────────────────────────────────────────────
+ * v25.1 —— 传到 /auto 就能播放（用户要求：在 auto 文件夹时就立即可用）
+ *
+ *   ▸ 请求添加（tj.cuven.us）把影片传进 Dropbox 的 /auto，工作人员再挪进 /ram / /ram2。
+ *     现在 /auto 里的片子不用等挪：片库把 /auto 当成「待归档」的一层叠上去 ——
+ *     直接放在 /auto 下面的视频、只装着一个视频的文件夹算电影（进 /api/all）；
+ *     装着好几个视频、文件名有集号或文件夹名有季号的一级文件夹算剧集的一季（进 /api/tv）。
+ *   ▸ 这一层单独存在快照的 auto 字段里，不混进片库本体：增量游标、重复影片巡检（会删文件）、
+ *     首页大图 / 精选都只看本体，碰不到 /auto；/api/all 和库指纹 g 才把它算进来。
+ *     每次预热（cron / webhook）重列一次 /auto（一次 list_folder，/auto 里东西很少）。
+ *   ▸ POST /api/auto/sync?item=<名字>&item=…[&tv=1]：马上重列 /auto、换掉快照里那一层（tv=1 时连剧集表一起重扫），
+ *     回 { has: { 名字: 收录了没有 } }。请求添加 Worker 删完 PikPak 那份就问它，收录了就让 App 变「立即播放」。
+ *     不走 Cookie 门（10 秒内最多真列一次）；配了 AUTO_SYNC_KEY 就要带 x-sync-key。
+ *   ▸ 新变量：AUTO_FOLDER（默认 /auto，设 off 关掉；已经在 ROOT_FOLDER / TV_FOLDER 里面的不重复叠）、
+ *     AUTO_SYNC_KEY（可选）。工作人员挪走以后，/auto 那份从这一层消失，本体的增量把新位置加进来。
+ *
  * ────────────────────────────────────────────────────────────────
  * v25 变更 —— 主题：MKV → HLS → iOS Safari 完整链路（HDR10 / HLG / 杜比视界）
  *
@@ -551,6 +567,7 @@
  * 环境变量
  *   DROPBOX_REFRESH_TOKEN, DROPBOX_APP_KEY, DROPBOX_APP_SECRET
  *   ROOT_FOLDER, AUTH_SECRET, TMDB_API_KEY
+ *   AUTO_FOLDER（v25.1，默认 /auto；off 关掉）、AUTO_SYNC_KEY（可选：/api/auto/sync 的口令）
  *   STREAM_SIGN_TTL（可选：签名直链有效期秒数，默认 43200 = 12h。
  *     外部播放器把 URL 存进片库长期复用的场景可调大，如 604800 = 7d；
  *     TTL 越长，单条泄露链接的可用窗口越大 —— 按威胁模型权衡）
@@ -598,7 +615,8 @@ export default {
     // ── 鉴权 ──
     // /dbx/webhook 走 Dropbox 自己的 HMAC 签名鉴权（见 handleDbxWebhook），
     // 不能套 Cookie 门 —— Dropbox 的通知请求不带 Cookie
-    if (env.AUTH_SECRET && path !== '/health' && path !== '/auth' && path !== '/dbx/webhook') {
+    // /api/auto/sync 给请求添加 Worker 叫（它没有 Cookie）：自己限流，配了 AUTO_SYNC_KEY 就自己验口令
+    if (env.AUTH_SECRET && path !== '/health' && path !== '/auth' && path !== '/dbx/webhook' && path !== '/api/auto/sync') {
       const cookie = parseCookies(request.headers.get('Cookie') || '');
       const paramKey = url.searchParams.get('key');
       const isStream = path === '/stream' || path.startsWith('/stream/');
@@ -697,6 +715,8 @@ export default {
         case '/api/atv/art':            return cors(await handleAtvArt(request, url, env, ctx));
         case '/api/coming-soon/remind': return cors(await handleRemind(request, env, ctx));
         case '/api/refresh':    return cors(await handleRefreshCache(env, ctx));
+        // v25.1：请求添加刚传进 /auto 的片子马上收录（App 立即能播放）
+        case '/api/auto/sync':  return cors(await handleAutoSync(request, url, env, ctx));
         // 重复影片：列表（纯读，带 gen 可长缓存）/ 清理（写，需 confirm）
         case '/api/dupes':       return cors(await handleDupes(url, request, env, ctx));
         case '/api/dupes/prune': return cors(await handleDupePrune(request, url, env, ctx));
@@ -2430,10 +2450,11 @@ function r2IsFresh(data) {
   return data && (Date.now() - (data._ts || 0) < R2_TTL);
 }
 
-async function r2Put(env, payload) {
+async function r2Put(env, payload, { keepTs = false } = {}) {
   if (!env.FILE_CACHE) return;
   try {
-    const data = { ...payload, _ts: Date.now() };
+    // keepTs：只换了 /auto 那一层，片库本体并没有重列 —— 不能把它的新鲜时间也往后推
+    const data = { ...payload, _ts: keepTs && payload._ts ? payload._ts : Date.now() };
     await env.FILE_CACHE.put(R2_KEY, JSON.stringify(data), {
       httpMetadata: { contentType: 'application/json' },
     });
@@ -2495,7 +2516,7 @@ async function ptrGet(env) {
   // 冷启动兜底：还没有指针 → 用快照现算 g，f/h 归零（成品端点先走 R2 路径）
   if (!raw) {
     const d = await r2Get(env, { allowExpired: true });
-    raw = d?.videos ? { g: d._gen || libGen(d.videos), f: '0', h: '0' } : null;
+    raw = d?.videos ? { g: d._gen || libGen(snapVideos(d)), f: '0', h: '0' } : null;
   }
   _ptrMem = ptrNorm(raw); _ptrMemTs = Date.now();
   return _ptrMem;
@@ -2513,9 +2534,9 @@ async function ptrSet(env, ptr) {
 }
 
 /** 落快照的唯一入口：算 g → 写 R2。指针交由调用方在成品就绪后发布 */
-async function snapshotPut(env, data) {
-  data._gen = libGen(data.videos);
-  await r2Put(env, data);
+async function snapshotPut(env, data, opts) {
+  data._gen = libGen(snapVideos(data));       // 指纹连 /auto 那一层一起算：那一层变了，/api/all 的键跟着翻
+  await r2Put(env, data, opts);
   return data;
 }
 
@@ -2693,9 +2714,12 @@ async function warmCaches(env, { force = false, full = false } = {}) {
   }
 
   if (!fresh) {
-    fresh = await fetchVideosFromDropbox(env);   // 自带 _cursor
+    fresh = await fetchVideosFromDropbox(env, prevSnap?.auto);   // 自带 _cursor 和 /auto 那一层
     out.mode = 'full';
   }
+  // v25.1：/auto 那一层每次预热都重列（增量游标只管片库本体）。放在写快照前最后一步：和 /api/auto/sync 撞车的窗口最小
+  if (fresh.auto === undefined) fresh.auto = await autoSnapshot(env, prevSnap?.auto, { fresh: true });
+  out.auto = fresh.auto ? fresh.auto.videos.length : null;
 
   // g 只由内容决定：delta 空转 / 无关改动 → g 不变 → 全球缓存继续命中。
   // 快照始终回写：即使内容没变，也要推进 _ts（保住 SWR 新鲜窗）与游标。
@@ -2785,6 +2809,159 @@ function kickWarm(env, ctx) {
   if (now - _lastWarmKick < 60_000) return;
   _lastWarmKick = now;
   ctx.waitUntil(singleFlight('warm', () => warmCaches(env)).catch(() => {}));
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  /auto：传完就能播放（v25.1）
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  请求添加（tj.cuven.us）把影片传进 Dropbox 的 /auto，工作人员再挪进 /ram（电影）/ /ram2（剧集）。
+//  用户要求：在 auto 文件夹时就立即可用 —— 片库把 /auto 当成「待归档」的一层叠上去：
+//    · /auto 下面直接放的视频 = 电影；一个文件夹里只有一个视频、文件名没有集号、文件夹名没有季号 = 电影
+//    · 其余的一级文件夹（好几个视频 / 有集号 / 有季号）= 剧集的一季（tvScan 收进剧集表）
+//  电影那一层存在快照的 auto 字段里，不混进 videos：增量游标、重复影片巡检（会删文件）、首页大图 / 精选只看本体；
+//  /api/all 和库指纹 g 才把它算进来。/auto 已经在 ROOT_FOLDER（TV_FOLDER）里面的，本体就扫得到，不重复叠。
+
+/** AUTO_FOLDER：默认 /auto；off / 0 / false / none / 空 → 关 */
+function autoRoot(env) {
+  const raw = String(env.AUTO_FOLDER ?? '/auto').trim();
+  if (!raw || /^(off|0|false|no|none)$/i.test(raw)) return '';
+  return ('/' + raw.replace(/^\/+|\/+$/g, '')).replace(/^\/$/, '');
+}
+/** p 在 dir 里面（Dropbox 路径不分大小写；dir 为空 = 整个 Dropbox） */
+const pathUnder = (p, dir) => {
+  const a = String(p || '').toLowerCase(), d = String(dir || '').toLowerCase().replace(/\/+$/, '');
+  return !d || a === d || a.startsWith(d + '/');
+};
+/** 电影要叠的那一层：/auto 已经在 ROOT_FOLDER 里面（本体就扫得到）就不叠 */
+const autoMovieRoot = env => { const a = autoRoot(env); return a && !pathUnder(a, env.ROOT_FOLDER || '') ? a : ''; };
+/** 剧集要叠的那一层：/auto 已经在 TV_FOLDER 里面就不叠 */
+const autoTvRoot = env => { const a = autoRoot(env); return a && !pathUnder(a, tvRoot(env)) ? a : ''; };
+/** 叠上 /auto 那一层以后的全部电影（库指纹、/api/auto/sync 用；巡检、精选只用 d.videos） */
+const snapVideos = d => (d?.auto?.videos?.length ? (d.videos || []).concat(d.auto.videos) : (d?.videos || []));
+
+// 文件名像一集：S01E02 / 1x02 / EP02 / Episode 2 / 第2集
+const AUTO_EP_FILE = /(?:^|[^a-z0-9])S\d{1,2}[ ._-]?E\d{1,4}(?!\d)|(?:^|[^a-z0-9])\d{1,2}x\d{2,3}(?!\d)|(?:^|[^a-z])(?:EP|Episode)[ ._-]?\d{1,4}(?!\d)|第\s*[一二三四五六七八九十百零〇两\d]{1,6}\s*[集话話]/i;
+// 文件夹名像一季：S02 / Season 2 / 第二季 / 全 10 集 / Complete
+const AUTO_SEASON_DIR = /(?:^|[^a-z0-9])S\d{1,2}(?![\d])|\bSeason\s*\d{1,2}\b|第\s*[一二三四五六七八九十\d]{1,3}\s*季|[全共]\s*\d{1,4}\s*[集话話]|\b(?:Complete|Full[-\s]?\d{1,4})\b/i;
+
+/** /auto 的列表 → { movies: [快照里的视频条目], tv: Set(认成剧集的一级文件夹名，小写) } */
+function autoClassify(root, entries) {
+  const rootLow = root.toLowerCase();
+  const movies = [], dirs = new Map();
+  for (const e of entries || []) {
+    if (e['.tag'] !== 'file' || !VIDEO_EXTS.has(getExt(e.name || ''))) continue;
+    const disp = e.path_display || '';
+    if (!disp.toLowerCase().startsWith(rootLow + '/')) continue;
+    const rel = disp.slice(root.length + 1).split('/');
+    const v = { name: e.name, path: disp, type: 'file', size: e.size || 0,
+                modified: e.client_modified || null, added: e.server_modified || e.client_modified || null };
+    if (rel.length === 1) {                            // 直接放在 /auto 下面的：电影（样片、像单集的不算）
+      if (!AUTO_EP_FILE.test(e.name) && !TV_SKIP.test(e.name)) movies.push(v);
+      continue;
+    }
+    if (TV_SKIP.test(e.name) || rel.slice(1, -1).some(d => TV_SKIP_DIR.test(d.trim()))) continue;
+    const k = rel[0].toLowerCase();
+    if (!dirs.has(k)) dirs.set(k, { top: rel[0], vids: [] });
+    dirs.get(k).vids.push(v);
+  }
+  const tv = new Set();
+  for (const [k, d] of dirs) {
+    if (d.vids.length === 1 && !AUTO_EP_FILE.test(d.vids[0].name) && !AUTO_SEASON_DIR.test(d.top)) movies.push(d.vids[0]);
+    else tv.add(k);
+  }
+  return { movies, tv };
+}
+
+/** 列 /auto（递归；不存在 → 空）。15 秒内列过就用那一份（预热和剧集表同一轮各要一次）；fresh 不用旧的 */
+let _autoMem = null;                               // { root, at, entries }
+const AUTO_MEM_MS = 15_000;
+async function autoList(env, { fresh = false } = {}) {
+  const root = autoRoot(env);
+  if (!root) return { root: '', at: Date.now(), entries: [] };
+  if (!fresh && _autoMem && _autoMem.root === root && Date.now() - _autoMem.at < AUTO_MEM_MS) return _autoMem;
+  return singleFlight('auto-list', async () => {
+    const entries = await dbxListTree(root, env);
+    _autoMem = { root, at: Date.now(), entries };
+    return _autoMem;
+  });
+}
+
+/** 快照里 /auto 那一层：{ root, videos, at }；关了或 /auto 在片库根里 → null；列不出来 → 先用上一份 */
+async function autoSnapshot(env, prev, opts) {
+  const root = autoMovieRoot(env);
+  if (!root) return null;
+  try {
+    const { entries } = await autoList(env, opts);
+    return { root, videos: autoClassify(root, entries).movies, at: Date.now() };
+  } catch (e) {
+    console.error('auto list:', e && e.message);
+    return prev && prev.root === root ? prev : null;
+  }
+}
+
+/** 重列 /auto、换掉快照里那一层（本体和它的增量游标不动），wantTv 时连剧集表一起重扫；回 /auto 里收录了的名字 */
+async function autoSync(env, ctx, wantTv) {
+  const aroot = autoRoot(env);
+  const mroot = autoMovieRoot(env);
+  let snap = null;
+  if (mroot) {
+    const { entries } = await autoList(env, { fresh: true });     // 列不出来就报错：请求添加 Worker 过会儿再问
+    const layer = { root: mroot, videos: autoClassify(mroot, entries).movies, at: Date.now() };
+    snap = await r2Get(env, { allowExpired: true });
+    if (snap?.videos) {
+      snap = await snapshotPut(env, { ...snap, auto: layer }, { keepTs: true });
+      await ptrBumpLib(env, snap._gen);
+    } else {
+      snap = await fetchAllVideosList(env, ctx);                   // 还没有快照：现建一份（自带这一层）
+    }
+  } else {
+    // /auto 就在片库根目录里：本体的增量就扫得到，跑一次预热
+    await singleFlight('warm', () => warmCaches(env)).catch(() => {});
+    snap = await r2Get(env, { allowExpired: true });
+  }
+  // 剧集表：TMDB 补充信息最多等 3.5 秒（App 要靠 TMDB 编号认出这一季），剩下的后台补
+  let tv = tvMem;
+  if (wantTv) tv = await singleFlight('tv-scan:sync', () => tvRefresh(env, ctx, { metaMs: 3500 }));
+  const names = new Set();
+  const key = n => String(n || '').normalize('NFC').toLowerCase();
+  let movies = 0, series = 0;
+  for (const v of snapVideos(snap)) {
+    if (!pathUnder(v.path, aroot)) continue;
+    movies++;
+    names.add(key(v.name));                                       // 电影：文件名
+    names.add(key(v.path.slice(aroot.length + 1).split('/')[0])); // 只装着一部片的文件夹：文件夹名
+  }
+  for (const sr of (tv && tv.series) || []) {
+    if (!pathUnder(sr.path, aroot) || !(sr.tmdbId > 0)) continue;  // 没认出 TMDB 编号的 App 对不上，不算收录
+    series++;
+    names.add(key(sr.path.slice(aroot.length + 1).split(/[/#]/)[0]));
+  }
+  return { at: Date.now(), tv: !!wantTv, names, movies, series };
+}
+
+let _autoSyncRes = null;
+/** POST /api/auto/sync?item=<名字>&item=…[&tv=1]
+ *  请求添加 Worker 删完 PikPak 那份就来问：马上重列 /auto，回 { has: { 名字: 收录了没有 } }。
+ *  不走 Cookie 门（它没有 Cookie）：10 秒内最多真列一次，别人拿它刷不了 Dropbox；配了 AUTO_SYNC_KEY 就要带 x-sync-key */
+async function handleAutoSync(request, url, env, ctx) {
+  const nostore = { 'Cache-Control': 'no-store' };
+  if (env.AUTO_SYNC_KEY && !timingSafeEqualStr(request.headers.get('x-sync-key') || '', env.AUTO_SYNC_KEY)) {
+    return jsonResponse({ error: 'bad sync key' }, 403, nostore);
+  }
+  const root = autoRoot(env);
+  if (!root) return jsonResponse({ ok: false, off: 1 }, 200, nostore);
+  const wantTv = url.searchParams.get('tv') === '1';
+  let res = _autoSyncRes;
+  if (!res || Date.now() - res.at > 10_000 || (wantTv && !res.tv)) {
+    try { res = _autoSyncRes = await singleFlight('auto-sync' + (wantTv ? ':tv' : ''), () => autoSync(env, ctx, wantTv)); }
+    catch (e) {
+      console.error('auto sync:', e && e.message);
+      return jsonResponse({ ok: false, error: 'dropbox unavailable' }, 503, nostore);
+    }
+  }
+  const has = {};
+  for (const raw of url.searchParams.getAll('item').slice(0, 50)) has[raw] = res.names.has(String(raw).normalize('NFC').toLowerCase());
+  return jsonResponse({ ok: true, root, movies: res.movies, series: res.series, has, at: res.at }, 200, nostore);
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3652,6 +3829,11 @@ async function handleHealth(env, request) {
       const sync = !snap._gen || ptr.g === snap._gen ? '' : ' ⚠️落后';
       c.gen = `g:${ptr.g} f:${ptr.f} h:${ptr.h}${sync}`;
     }
+    const ar = autoRoot(env);
+    c.extras.push(['/auto（传完就能播放）', !ar ? '关（AUTO_FOLDER=off）'
+      : !autoMovieRoot(env) ? `${ar} 在片库根目录里，本体就扫得到`
+      : snap?.auto ? `${ar} · ${snap.auto.videos.length} 部电影 · ${Math.max(0, Math.round((Date.now() - (snap.auto.at || 0)) / 1000))}s 前列过`
+      : `${ar} · 还没列过`]);
   } catch {}
 
   c.status = c.account && c.folder ? '✅ OK' : '⚠️ Partial';
@@ -3772,7 +3954,7 @@ async function handleList(url, request, env, ctx) {
 //  /api/all — 四层缓存：Edge → R2 → Coalesced Dropbox
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async function fetchVideosFromDropbox(env) {
+async function fetchVideosFromDropbox(env, prevAuto) {
   const root = env.ROOT_FOLDER || '';
   const rootLen = root.length;
   const token = await getAccessToken(env);
@@ -3817,8 +3999,11 @@ async function fetchVideosFromDropbox(env) {
     .filter(e => e.path_display.slice(rootLen).split('/').filter(Boolean).length === 1)
     .map(e => ({ name: e.name, path: e.path_display, type: 'folder' }));
 
+  // v25.1：/auto 那一层（列不出来先用上一份）
+  const auto = await autoSnapshot(env, prevAuto, { fresh: true });
+
   // page.cursor：下次从这里接着取「变化的部分」（见 dbxDelta）
-  return { root, rootLen, videos, folders, _cursor: page.cursor || null };
+  return { root, rootLen, videos, folders, auto, _cursor: page.cursor || null };
 }
 
 /** 单航班 + 内存 + R2 + Dropbox，真 SWR */
@@ -3835,7 +4020,7 @@ function fetchAllVideosList(env, ctx) {
         // 这条路径只刷库快照、不重建成品 → 只推进指针的 g 分量
         ctx.waitUntil(
           singleFlight('video-list-refresh', () =>
-            fetchVideosFromDropbox(env)
+            fetchVideosFromDropbox(env, r2.auto)
               .then(d => snapshotPut(env, d))
               .then(d => ptrBumpLib(env, d._gen))
           ).catch(() => {})
@@ -3847,10 +4032,10 @@ function fetchAllVideosList(env, ctx) {
     //    stale-if-error：回源失败时允许读超过 SWR 窗口的 R2 旧数据兜底
     //    —— Dropbox 整体故障时页面显示旧片库，而不是白屏。
     try {
-      const fresh = await fetchVideosFromDropbox(env);
+      const fresh = await fetchVideosFromDropbox(env, null);
       // 指针要在返回前就位：调用方（/api/all）拿它拼本次响应的 edge key。
       // 若指针落后于内容，新内容会被写进旧键 —— 旧键正是别人正在读的键。
-      fresh._gen = libGen(fresh.videos);
+      fresh._gen = libGen(snapVideos(fresh));
       await ptrBumpLib(env, fresh._gen);
       const put = snapshotPut(env, fresh);
       ctx?.waitUntil ? ctx.waitUntil(put) : await put;
@@ -3926,8 +4111,10 @@ async function handleListAll(url, request, env, ctx) {
   const videos = data.videos.filter(v =>
     v.path.slice(data.rootLen).split('/').filter(Boolean).length <= maxDepth
   );
+  // v25.1：/auto 里已经认成电影的（传完、还没挪进片库）一起给
+  const extra = data.auto?.videos || [];
 
-  const body = JSON.stringify({ root: data.root, videos, folders: data.folders });
+  const body = JSON.stringify({ root: data.root, videos: extra.length ? videos.concat(extra) : videos, folders: data.folders });
   const etag = `W/"${fnv1a(body)}"`;
 
   const headers = {
@@ -5903,17 +6090,16 @@ function tvEpisodeList(files) {
   return list;
 }
 
-/** 整棵 TV 目录 → { series, eps: { 剧 path 小写: [{ ep, path, name, size }] } } */
-async function tvScan(env) {
-  const root = tvRoot(env), rootLow = root.toLowerCase();
-  const entries = await dbxListTree(root, env);
-  const groups = new Map();
+/** 一棵目录的列表 → 按「一季」分组（only：只收这几个一级文件夹，小写；/auto 里认成剧集的那些） */
+function tvGroup(root, entries, groups, only) {
+  const rootLow = root.toLowerCase();
   for (const e of entries) {
     if (e['.tag'] !== 'file' || !VIDEO_EXTS.has(getExt(e.name || ''))) continue;
     const disp = e.path_display || '';
     if (!disp.toLowerCase().startsWith(rootLow + '/')) continue;
     const rel = disp.slice(root.length + 1).split('/');
     if (rel.length < 2) continue;                                    // TV 根目录下散放的文件不算剧
+    if (only && !only.has(rel[0].toLowerCase())) continue;
     if (rel.slice(1, -1).some(d => TV_SKIP_DIR.test(d.trim()))) continue;
     if (TV_SKIP.test(e.name)) continue;
     const seasonDir = rel.length >= 3 && TV_SEASON_DIR.test(rel[1].trim()) ? rel[1] : null;
@@ -5921,6 +6107,23 @@ async function tvScan(env) {
     const k = dir.toLowerCase();
     if (!groups.has(k)) groups.set(k, { dir, top: rel[0], seasonDir, files: [] });
     groups.get(k).files.push({ name: e.name, path: disp, size: e.size || 0, at: e.server_modified || e.client_modified || '', m: tvEpOf(e.name) });
+  }
+}
+
+/** 整棵 TV 目录（加上 /auto 里认成剧集的一级文件夹）→ { series, eps: { 剧 path 小写: [{ ep, path, name, size }] } } */
+async function tvScan(env) {
+  const root = tvRoot(env);
+  const entries = await dbxListTree(root, env);
+  const groups = new Map();
+  tvGroup(root, entries, groups, null);
+  // v25.1：/auto 里像剧集的一级文件夹（传完、还没挪进 TV_FOLDER）也进剧集表；列不出来就先不算，下一轮再说
+  const aroot = autoTvRoot(env);
+  if (aroot) {
+    try {
+      const { entries: ae } = await autoList(env);
+      const { tv } = autoClassify(aroot, ae);
+      if (tv.size) tvGroup(aroot, ae, groups, tv);
+    } catch (e) { console.error('tv auto:', e && e.message); }
   }
   const series = [], eps = {};
   const emit = (g, info, files, path) => {
@@ -6033,13 +6236,13 @@ async function tvSave(env, d) {
 }
 
 /** 重扫目录，带上旧的 TMDB 补充信息；首次（没有旧表）给 TMDB 留 4 秒，其余交给后台 */
-async function tvRefresh(env, ctx) {
+async function tvRefresh(env, ctx, { metaMs } = {}) {
   const prev = tvMem || await tvLoad(env);
   const { series, eps } = await tvScan(env);
   const d = { v: 1, mv: TV_META_V, at: Date.now(), root: tvRoot(env), series, eps,
     meta: (prev && prev.root === tvRoot(env) && prev.mv === TV_META_V && prev.meta) || {} };
   tvApplyMeta(d);
-  await tvEnrich(env, d, prev ? 0 : 4000);
+  await tvEnrich(env, d, metaMs ?? (prev ? 0 : 4000));
   tvMem = d;
   await tvSave(env, d);
   if (tvMetaPending(d)) ctx?.waitUntil?.(singleFlight('tv-meta', () => tvEnrichMore(env)));
