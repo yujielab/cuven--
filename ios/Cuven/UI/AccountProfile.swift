@@ -146,7 +146,7 @@ struct ProfileCard: View {
     private var rows: some View {
         VStack(spacing: 0) {
             Button { present(.avatar) } label: {
-                AccountRow(icon: "person.crop.circle", title: "头像", subtitle: "个人形象") {
+                AccountRow(icon: "person.crop.circle", title: "头像") {
                     AvatarView(size: 40)
                 }
             }
@@ -165,7 +165,7 @@ struct ProfileCard: View {
                     .accessibilityIdentifier("account-email-edit")
             }
             AccountDivider()
-            AccountRow(icon: account.biometrySymbol, title: "登录面容", subtitle: "用于登录的面容数据") {
+            AccountRow(icon: account.biometrySymbol, title: "登录面容") {
                 ProfilePill(title: "重设", label: "重设登录面容") { present(.faceReset) }
                     .accessibilityIdentifier("account-face-reset")
             }
@@ -192,17 +192,17 @@ struct ProfileCard: View {
 
 }
 
-/// 骨架：五行的样子，字是灰块，一道光从左往右扫（网页版 accSkeletonShimmer，2 秒一趟）；「减弱动态效果」时不扫
+/// 骨架：字是灰块，一道光从左往右扫（网页版 accSkeletonShimmer，2 秒一趟）；「减弱动态效果」时不扫
 private struct ProfileSkeleton: View {
     var body: some View {
         VStack(spacing: 0) {
-            row("person.crop.circle", "头像", "个人形象", round: true)
+            row("person.crop.circle", "头像", round: true)
             AccountDivider()
             row("person.text.rectangle", "姓名", "用户名占位")
             AccountDivider()
             row("envelope", "电子邮件", "user@example.com")
             AccountDivider()
-            row("faceid", "登录面容", "已录入")
+            row("faceid", "登录面容")
         }
         .redacted(reason: .placeholder)
         .modifier(ProfileShimmer())
@@ -210,7 +210,7 @@ private struct ProfileSkeleton: View {
         .accessibilityLabel("正在载入账户资料")
     }
 
-    private func row(_ icon: String, _ title: String, _ subtitle: String, round: Bool = false) -> some View {
+    private func row(_ icon: String, _ title: String, _ subtitle: String? = nil, round: Bool = false) -> some View {
         AccountRow(icon: icon, title: title, subtitle: subtitle) {
             if round {
                 Circle().fill(Color.white.opacity(0.12)).frame(width: 40, height: 40)
