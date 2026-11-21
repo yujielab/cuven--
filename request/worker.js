@@ -1,5 +1,18 @@
 /**
- * Cuven 请求添加 Worker（tj.cuven.us）v2.2
+ * Cuven 请求添加 Worker（tj.cuven.us）v2.3
+ *
+ * v2.3：名字里带追踪码，传完以后也能一直追踪（用户要求：在文件和文件夹名中带上 auto-TMDB唯一码-内部代码）
+ *   · 开始传 Dropbox 之前，在 PikPak 上把电影文件 / 剧集文件夹改个名，带上追踪码：
+ *       电影  Fight.Club.1999.1080p.[auto-m550-r13].mkv
+ *       剧集  Game.of.Thrones.S02.1080p.[Full-4]-Cuven®.[auto-tv1399s2-r14]
+ *     m / tv + TMDB 编号（电影和剧集的编号会重复，所以带类型；剧集再带季），最后是 r + 这条请求的编号（面板里的 #13；
+ *     带个 r 是免得 2001 这种编号被当成年份）
+ *   · 片库（Stream Worker v25.2）认得追踪码：直接按 TMDB 编号认片（不靠文件名猜），App 对得准
+ *   · 问片库收录了没有时连追踪码一起问：在 /auto 里、已经被挪进 ram / ram2，都认得出来
+ *   · 就绪以后接着追踪（30 分钟一轮，最多 30 天）：工作人员挪去哪儿了，面板和日志里写清楚；
+ *     找了 3 小时都找不到（改了名、删了）才停
+ *   · App 里「继续观看」和片单也按追踪码跟着走：工作人员挪了位置，进度不丢
+ *   · 控制面板「设置」里可以关掉（关了就照原名传）；改名失败（没填 PikPak、找不到、PikPak 拒绝）就照原名传，不耽误
  *
  * v2.2：传到 Dropbox 的 /auto 就立即可用（用户要求：在 auto 文件夹时就立即可用）
  *   · 两端核对一致、删掉 PikPak 那份以后，请片库（Stream Worker v25.1 起的 /api/auto/sync）马上重看一眼 /auto；
@@ -77,7 +90,7 @@
  * 控制面板接口（x-admin-key: ADMIN_KEY）：/admin/api/state · cfg · pk · links · req · add · tick
  */
 
-const VER = 'tj 2.2';
+const VER = 'tj 2.3';
 const MIN = 60000, HOUR = 3600000, DAY = 86400000;
 const LIMIT = {
   userActive: 5,          // 一个用户同时进行中的请求
@@ -100,6 +113,9 @@ const LIMIT = {
   releasePoll: 5 * MIN,
   autoPoll: MIN,          // 文件在 /auto 里、片库还没收录：隔多久再问片库
   autoWait: 15 * MIN,     // 这么久片库还没收录：转去「最终发行审批」照旧等（那期间收录了一样算就绪）
+  trackEvery: 30 * MIN,   // 就绪以后追踪追踪码：多久看一次
+  trackDays: 30 * DAY,    // 最多追多久
+  trackLost: 6,           // 连着这么多次哪儿都找不到（改了名 / 删了）就不追了
   refail: DAY,            // 失败后多久用户可以重新请求
 };
 const ACTIVE = ['queued', 'download', 'clean', 'check', 'rename', 'copy', 'verify', 'purge', 'release'];
@@ -220,7 +236,8 @@ const CFG_DEF = { pkUser: '', pkPass: '', tpl: 'rel', lang: 'en', grp: 'Cuven®'
                   globalCap: LIMIT.globalActive, paused: false,
                   pkSlots: 4,     // PikPak 同时云下载几个
                   vpsSlots: 2,    // VPS 同时传输几个（rclone 一次跑太多会把内存吃满、整个进程被杀）
-                  autoReady: true };  // 传到 /auto、片库收录了就算就绪（不等工作人员发行）
+                  autoReady: true,    // 传到 /auto、片库收录了就算就绪（不等工作人员发行）
+                  tagNames: true };   // 名字里带追踪码 [auto-m550-r13]（传完以后也能一直追踪）
 const b64 = (u8) => { let s = ''; for (const c of u8) s += String.fromCharCode(c); return btoa(s); };
 const unb64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 async function secretKey(env){
@@ -262,6 +279,7 @@ async function saveCfg(env, patch){
   if (patch.globalCap != null) next.globalCap = clamp(parseInt(patch.globalCap, 10) || LIMIT.globalActive, 1, 500);
   if (patch.paused != null) next.paused = !!patch.paused;
   if (patch.autoReady != null) next.autoReady = !!patch.autoReady;
+  if (patch.tagNames != null) next.tagNames = !!patch.tagNames;
   if (patch.pkSlots != null) next.pkSlots = clamp(parseInt(patch.pkSlots, 10) || CFG_DEF.pkSlots, 1, 20);
   if (patch.vpsSlots != null) next.vpsSlots = clamp(parseInt(patch.vpsSlots, 10) || CFG_DEF.vpsSlots, 1, 8);
   if (next.pkUser !== raw.pkUser || next.pkPassEnc !== raw.pkPassEnc){ await kvDel(env, 'pk:tok'); PK_MEM = null; PK_FAIL = null; }
@@ -378,10 +396,11 @@ async function airedCount(c, id, season){
 /* ── 片库（Stream Worker v25.1+）：马上重看一眼 Dropbox 的 /auto，回这几个名字收录了没有 ──
    电影是 /auto 里的那个文件名，剧集是 /auto 里的那个文件夹名。
    老版本没有这个接口（404）、关了 AUTO_FOLDER、口令不对（401 / 403）→ { off }：照旧等工作人员发行 */
-async function streamSync(c, items, tv){
+async function streamSync(c, items, tv, codes){
   return depCall(c, 'stream', async () => {
     const q = new URLSearchParams();
     for (const n of items) q.append('item', n);
+    for (const k of codes || []) q.append('code', k);
     if (tv) q.set('tv', '1');
     const headers = c.env.STREAM_SYNC_KEY ? { 'x-sync-key': c.env.STREAM_SYNC_KEY } : {};
     const r = await xfetch(c, base(c.env, 'STREAM_BASE', 'https://stream.cuven.online') + '/api/auto/sync?' + q, { method: 'POST', headers }, 30000);
@@ -391,7 +410,7 @@ async function streamSync(c, items, tv){
     const j = await readJSON(r);
     if (!r.ok) throw err('片库：' + (j.error || 'HTTP ' + r.status), { status: r.status });
     if (j.off) return { off: 1, why: '片库关了 AUTO_FOLDER' };
-    return { has: j.has || {}, root: j.root || '' };
+    return { has: j.has || {}, where: j.where || null, root: j.root || '' };
   });
 }
 
@@ -872,6 +891,8 @@ async function stCopy(c, r){
       return;
     }
     delete r.d.wait;
+    /* 第一次传之前给名字加上追踪码（v2.3）：之后的传输、核对、删除、发行检查都用新名字 */
+    if (r.d.tag === undefined) await tagItem(c, r);
     /* 补传第二次起改从 PikPak 原生接口拿、只按大小判断（WebDAV 列表里没有 / 拿不到的文件；两个后端修改时间对不上） */
     const j = await tf(c, 'copy', r.d.fromPk ? { item: r.d.item, kind: r.d.kind, from: 'pikpak', sizeOnly: 1 } : { item: r.d.item, kind: r.d.kind });
     if (!j.jobid) throw err('传输没给作业号');
@@ -954,6 +975,37 @@ async function stVerify(c, r){
   go(r, 'copy', '补传 ' + (miss + diff || '') + (miss + diff ? ' 个文件' : '缺的文件') + (r.d.fromPk ? '（改从 PikPak 原生接口）' : ''));
 }
 
+/* ── 追踪码（v2.3）：[auto-m550-r13] / [auto-tv1399s2-r14] ── */
+const autoTagOf = (r) => '[auto-' + (r.src === 'tv' ? 'tv' + r.tmdb + 's' + (r.season || 1) : 'm' + r.tmdb) + '-r' + r.id + ']';
+const TAG_ANY = /[.\s]*\[?auto-(?:m|tv)\d{1,9}(?:s\d{1,3})?-r\d{1,12}\]?/ig;
+/** 名字里加上追踪码：文件加在扩展名前面；名字是空格分隔的用空格，点分隔的用点（旧的追踪码先去掉） */
+function withTag(name, tag, kind){
+  name = String(name || '').replace(TAG_ANY, '');
+  const m = kind === 'file' ? /^(.*?)(\.[A-Za-z0-9]{1,6})$/.exec(name) : null;
+  const stem = m ? m[1] : name, ext = m ? m[2] : '';
+  const sep = /\s/.test(stem) && !/\./.test(stem) ? ' ' : '.';
+  return stem + sep + tag + ext;
+}
+/** 开始传 Dropbox 之前，在 PikPak 上把这一部改个带追踪码的名字。
+    改不成（关了、没填 PikPak、/auto 里找不到、PikPak 拒绝）就照原名传：r.d.tag = ''，不耽误 */
+async function tagItem(c, r){
+  const tag = autoTagOf(r);
+  if (String(r.d.item || '').includes(tag)){ r.d.tag = tag; return; }
+  const skip = async (why) => { r.d.tag = ''; await clog(c, r.id, '不加追踪码（' + why + '），照原名传'); };
+  if (c.cfg.tagNames === false){ r.d.tag = ''; return; }
+  if (!(c.cfg.pkUser && c.cfg.pkPass)) return skip('没填 PikPak 账号');
+  const parent = await autoFolder(c);
+  const hit = (await pkChildren(c, parent)).find(f => f.name === r.d.item);
+  if (!hit) return skip('/auto 里没找到 ' + r.d.item);
+  const name = withTag(r.d.item, tag, r.d.kind);
+  try { await pkCall(c, 'PATCH', '/drive/v1/files/' + encodeURIComponent(hit.id), { body: { name } }); }
+  catch (e){ if (e.budget || e.net || transientErr(e)) throw e; return skip('PikPak：' + e.message); }
+  const back = await pkFile(c, String(hit.id));
+  r.d.item = String((back && back.name) || name);
+  r.d.tag = r.d.item.includes(tag) ? tag : '';
+  await clog(c, r.id, r.d.tag ? '加上追踪码：' + r.d.item : '改了名但追踪码没留住：' + r.d.item);
+}
+
 /* ── 在 /auto 里就算就绪（v2.2）── */
 const autoOn = (c, r) => c.cfg.autoReady !== false && !r.d.autoOff && !!r.d.item;
 /** 这一轮要不要问片库：删完 PikPak 在等收录的、等发行的 */
@@ -967,7 +1019,7 @@ async function autoCheck(c, r){
   const m = c.memo.sync;
   let s = m && (m.off || m.err || (m.has && r.d.item in m.has)) ? m : null;
   if (!s){
-    try { s = await streamSync(c, [r.d.item], r.d.kind === 'dir'); }
+    try { s = await streamSync(c, [r.d.item], r.d.kind === 'dir', r.d.tag ? [String(r.id)] : []); }
     catch (e){ if (e.budget) throw e; s = { err: String(e.message || e) }; }
   }
   if (s.off){
@@ -976,12 +1028,22 @@ async function autoCheck(c, r){
     return 'off';
   }
   if (s.has && s.has[r.d.item]) return 'has';
+  /* 按追踪码也认（v2.3）：名字大小写 / 写法对不上、或者已经被挪进 ram / ram2 了，都还认得出来 */
+  const w = r.d.tag && s.where && s.where[String(r.id)];
+  if (w && (r.d.kind !== 'dir' || w.ready)){
+    if (!w.auto) r.d.home = { path: w.path, at: now() };
+    return 'has';
+  }
   r.d.autoTries = (r.d.autoTries || 0) + 1;
   r.note = s.err ? '已在 /auto，等片库收录（' + s.err.slice(0, 80) + '）' : '已在 /auto，等片库收录';
   return 'wait';
 }
 async function autoReady(c, r){
   r.d.ready = now();
+  if (r.d.home){
+    await clog(c, r.id, '片库已收录（工作人员已经挪到 ' + r.d.home.path + '）→ 可以播放了');
+    return finish(r, '可以播放（已归档到 ' + r.d.home.path + '）');
+  }
   await clog(c, r.id, '片库已收录 dropbox:/' + (c.env.AUTO_DIR || 'auto') + '/' + r.d.item + ' → 可以播放了（不等工作人员发行）');
   finish(r, '可以播放（还在 /auto，等工作人员归档）');
 }
@@ -1093,7 +1155,8 @@ async function prefetch(c, list){
   /* 等片库收录的：一次问完（老版本片库回 off，这几条以后都不再问） */
   const want = list.filter(r => wantsSync(c, r));
   if (want.length > 1 && !depOpenUntil(c, 'stream')){
-    try { c.memo.sync = await streamSync(c, [...new Set(want.map(r => r.d.item))].slice(0, 50), want.some(r => r.d.kind === 'dir')); }
+    try { c.memo.sync = await streamSync(c, [...new Set(want.map(r => r.d.item))].slice(0, 50), want.some(r => r.d.kind === 'dir'),
+                                         want.filter(r => r.d.tag).map(r => String(r.id)).slice(0, 50)); }
     catch (e){ if (e.budget) throw e; c.memo.sync = { err: String(e.message || e) }; }
   }
   if (depOpenUntil(c, 'vps')) return;
@@ -1127,6 +1190,40 @@ async function flush(c){
   return rs.map((r, i) => { const ok = !!(res[i] && res[i].meta && res[i].meta.changes); if (ok) r.rev++; return { id: r.id, ok }; });
 }
 
+/** 就绪以后接着追踪追踪码（v2.3）：工作人员把它挪去哪儿了。30 分钟一轮，一次问完（最多 40 条），最多追 30 天。
+    只改 data（不动 updated：App 上「最近」的时间不跳）；哪儿都找不到连着 trackLost 次（改了名 / 删了）就不追了 */
+async function trackHomes(env, c){
+  if (c.cfg.tagNames === false || depOpenUntil(c, 'stream') || c.n >= c.max - 2) return;
+  if (!(await lease(env, 'track', LIMIT.trackEvery - 30000))) return;
+  const d = await db(env);
+  const rows = (await d.prepare("SELECT * FROM tj_req WHERE stage = 'done' AND updated > ? ORDER BY updated DESC LIMIT 300")
+    .bind(now() - LIMIT.trackDays).all()).results || [];
+  const list = rows.map(rowOf).filter(r => r.d.tag && !r.d.home).slice(0, 40);
+  if (!list.length) return;
+  let s;
+  try { s = await streamSync(c, [], false, list.map(r => String(r.id))); }
+  catch (e){ if (e.budget) throw e; return; }
+  if (s.off || !s.where) return;
+  const stmts = [];
+  for (const r of list){
+    const w = s.where[String(r.id)];
+    if (w && w.auto){ if (!r.d.tmiss) continue; r.d.tmiss = 0; }
+    else if (w){
+      r.d.home = { path: w.path, at: now() }; delete r.d.tmiss;
+      await clog(c, r.id, '工作人员已归档：' + w.path + '（按追踪码 ' + r.d.tag + ' 找到的）');
+    } else {
+      r.d.tmiss = (r.d.tmiss || 0) + 1;
+      if (r.d.tmiss < LIMIT.trackLost) { /* 片库的列表可能慢一点，下一轮再找 */ }
+      else {
+        r.d.home = { gone: 1, at: now() };
+        await clog(c, r.id, '片库里哪儿都找不到追踪码 ' + r.d.tag + '（可能改了名或删了），不再追踪');
+      }
+    }
+    stmts.push(d.prepare('UPDATE tj_req SET data = ?, rev = rev + 1 WHERE id = ? AND rev = ?').bind(JSON.stringify(r.d), r.id, r.rev));
+  }
+  if (stmts.length) await d.batch(stmts);
+}
+
 async function tick(env, opt = {}){
   const t = now();
   if (!opt.force && !(await lease(env, 'tick', 55000))) return { busy: 1 };
@@ -1158,6 +1255,12 @@ async function tick(env, opt = {}){
     }
   } finally {
     await flush(c).catch(e => console.error('写入失败：', e && e.message));
+    if (c.healthDirty){ await kvPut(env, 'health', c.health).catch(() => {}); c.healthDirty = false; }
+  }
+  /* 就绪以后的追踪（v2.3）：放在最后，用剩下的子请求和时间 */
+  if (now() - c.t0 < LIMIT.tickMs){
+    try { await trackHomes(env, c); await flush(c); }
+    catch (e){ if (!e.budget) console.error('追踪：', e && e.message); }
     if (c.healthDirty) await kvPut(env, 'health', c.health).catch(() => {});
   }
   if (Math.random() < 0.03) await d.prepare('DELETE FROM tj_log WHERE id < (SELECT MAX(id) - 4000 FROM tj_log)').run().catch(() => {});
@@ -1377,6 +1480,7 @@ async function adminState(env){
   const cfg = await loadCfg(env);
   const reqs = ((await d.prepare('SELECT * FROM tj_req ORDER BY (stage IN (\'done\',\'failed\',\'cancelled\')), id DESC LIMIT 200').all()).results || [])
     .map(x => { const r = rowOf(x); return { ...view(r, true), users: r.users, item: r.d.item || '', cur: r.d.cur ? r.d.cur.t : '', tried: (r.d.tried || []).length,
+      tag: r.d.tag || '', home: r.d.home ? (r.d.home.gone ? '找不到了（改了名或删了）' : r.d.home.path) : '',
       vers: (r.d.vers || []).length, next: r.next || 0, since: r.since || 0, errs: r.d.errs || 0, check: r.d.check || null }; });
   const logs = ((await d.prepare('SELECT * FROM tj_log ORDER BY id DESC LIMIT 200').all()).results || []);
   const tok = await kvGet(env, 'pk:tok');
@@ -1390,7 +1494,7 @@ async function adminState(env){
   return { ver: VER, now: now(), health, slots, tick: await kvGet(env, 'tick:last'), queued: queued.length,
     cfg: { pkUser: mask(cfg.pkUser), pkSet: !!(cfg.pkUser && cfg.pkPass), tpl: cfg.tpl, lang: cfg.lang, grp: cfg.grp,
            userCap: cfg.userCap, globalCap: cfg.globalCap, paused: !!cfg.paused, pkToken: tok ? { exp: tok.exp } : null,
-           pkSlots: cfg.pkSlots, vpsSlots: cfg.vpsSlots, autoReady: cfg.autoReady !== false },
+           pkSlots: cfg.pkSlots, vpsSlots: cfg.vpsSlots, autoReady: cfg.autoReady !== false, tagNames: cfg.tagNames !== false },
     env: { LB_GATE: !!env.LB_GATE, LINK_KEY: !!env.LINK_KEY, LB_BASE: base(env, 'LB_BASE', 'https://lb.cuven.us'),
            TRANSFER_BASE: base(env, 'TRANSFER_BASE', 'https://transfer.cuven.us'), AUTO_DIR: String(env.AUTO_DIR || 'auto'),
            STREAM_BASE: base(env, 'STREAM_BASE', 'https://stream.cuven.online') },
@@ -1583,6 +1687,7 @@ th{color:var(--dim);font-weight:500;font-size:12px}td .t{font-weight:600}.mono{f
   <label>PikPak 同时云下载</label><input id="pkSlots" type="number" min="1" max="20">
   <label>VPS 同时传输（太多会把 rclone 内存吃满）</label><input id="vpsSlots" type="number" min="1" max="8">
   <label class="row" style="margin-top:12px;color:var(--text)"><input id="autoReady" type="checkbox" style="width:auto"> 传到 /auto、片库收录了就算就绪（不等工作人员发行）</label>
+  <label class="row" style="margin-top:8px;color:var(--text)"><input id="tagNames" type="checkbox" style="width:auto"> 名字里带追踪码 [auto-m550-r13]（挪走以后也能一直追踪）</label>
   <label class="row" style="margin-top:8px;color:var(--text)"><input id="paused" type="checkbox" style="width:auto"> 暂停定时任务</label>
   <div class="row" style="margin-top:12px"><button class="pri" id="saveCfg">保存设置</button><span id="cfgres"></span></div>
   <h2 style="margin-top:18px">手动添加</h2>
@@ -1604,7 +1709,7 @@ function bar(r){var h='<div class="bar">';for(var i=1;i<=5;i++){if(i<r.step||r.s
 function render(s){
  $('ver').textContent=s.ver;var c=s.cfg;
  $('pkline').innerHTML=c.pkSet?'<span class="ok">已填</span> '+esc(c.pkUser)+(c.pkToken?' · 令牌到 '+new Date(c.pkToken.exp).toLocaleTimeString():''):'<span class="warn">还没填 PikPak 账号</span>';
- $('tpl').value=c.tpl;$('lang').value=c.lang;$('grp').value=c.grp;$('userCap').value=c.userCap;$('globalCap').value=c.globalCap;$('paused').checked=c.paused;$('autoReady').checked=c.autoReady;
+ $('tpl').value=c.tpl;$('lang').value=c.lang;$('grp').value=c.grp;$('userCap').value=c.userCap;$('globalCap').value=c.globalCap;$('paused').checked=c.paused;$('autoReady').checked=c.autoReady;$('tagNames').checked=c.tagNames;
  $('pkSlots').value=c.pkSlots;$('vpsSlots').value=c.vpsSlots;
  var NAMES={lb:'影片库',vps:'传输（VPS）',pikpak:'PikPak',stream:'片库 / TMDB'};
  var hs=Object.keys(NAMES).map(function(k){var h=s.health[k]||{};var open=h.open&&h.open>s.now;
@@ -1619,7 +1724,7 @@ function render(s){
    (r.state!=='done'?'<button class="small" data-a="retry" data-id="'+r.id+'">重试</button> ':'')+'<button class="small" data-a="delete" data-id="'+r.id+'">删除</button>';
   return '<tr><td><div class="t">'+esc(r.title||r.tmdb)+(r.season?' · 第 '+r.season+' 季':'')+'</div><div class="dim">#'+r.id+' · '+(r.src==='tv'?'剧集':'电影')+' '+r.tmdb+' · '+ago(r.created)+'</div></td>'+
    '<td style="min-width:200px"><span class="pill '+r.state+'">'+esc(r.state==='active'?('STEP '+r.step+' · '+r.label):r.state==='done'?'已就绪':r.state==='failed'?'失败':'已取消')+'</span> <b>'+r.pct+'%</b>'+(r.pos?' <span class="dim">排队第 '+r.pos+' 位</span>':'')+bar(r)+'<div class="dim">'+esc(r.note)+(r.errs?' <span class="warn">（出错 '+r.errs+' 次）</span>':'')+'</div><div class="dim">'+(r.next&&r.state==='active'?'下次 '+new Date(r.next).toLocaleTimeString():'')+'</div></td>'+
-   '<td class="mono" style="max-width:340px;word-break:break-all">'+esc(r.cur||'')+(r.item?'<div class="ok">'+esc(r.item)+'</div>':'')+'<div class="dim">规格 '+(r.tried+(r.cur?1:0))+' / '+r.vers+'</div></td>'+
+   '<td class="mono" style="max-width:340px;word-break:break-all">'+esc(r.cur||'')+(r.item?'<div class="ok">'+esc(r.item)+'</div>':'')+(r.home?'<div class="dim">→ '+esc(r.home)+'</div>':'')+'<div class="dim">规格 '+(r.tried+(r.cur?1:0))+' / '+r.vers+'</div></td>'+
    '<td>'+esc((r.users||[]).join('、'))+'</td><td style="white-space:nowrap"><button class="small" data-a="log" data-id="'+r.id+'">日志</button> '+acts+'</td></tr>'}).join('')||'<tr><td colspan="5" class="dim">还没有请求</td></tr>';
  $('log').innerHTML=s.logs.map(function(l){return '<div><span class="dim">'+new Date(l.at).toLocaleString()+'</span> '+(l.rid?'#'+l.rid+' ':'')+esc(l.msg)+'</div>'}).join('');
 }
@@ -1632,7 +1737,7 @@ $('tick').onclick=function(){this.disabled=true;var b=this;api('tick',{}).then(f
 $('savePk').onclick=function(){var u=$('pkUser').value.trim(),p=$('pkPass').value;if(!u&&!p)return;var body={};if(u)body.pkUser=u;if(p)body.pkPass=p;api('cfg',body).then(function(s){$('pkUser').value='';$('pkPass').value='';$('pkres').innerHTML='<span class="ok">已保存</span>';render(s)}).catch(function(e){$('pkres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
 $('testPk').onclick=function(){$('pkres').textContent='…';api('pk',{}).then(function(r){$('pkres').innerHTML=r.ok?'<span class="ok">登录成功</span> '+(r.limit?(r.usage/1073741824).toFixed(1)+' / '+(r.limit/1073741824).toFixed(0)+' GB':'')+(r.auto?(r.auto.same?' · /auto 对得上':' <span class="bad">'+esc(r.auto.hint||r.auto.err||'')+'</span>'):''):'<span class="bad">'+esc(r.err||'')+'</span>'}).catch(function(e){$('pkres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
 $('testLinks').onclick=function(){$('links').textContent='…';api('links',{}).then(function(r){$('links').innerHTML='影片库：'+(r.lb.ok?'<span class="ok">通</span> · PikPak '+esc(r.lb.pikpak):'<span class="bad">'+esc(r.lb.err)+'</span>')+'<br>传输：'+(r.transfer.ok?'<span class="ok">通</span> · rclone '+esc(r.transfer.rclone)+' · '+esc(r.transfer.core):'<span class="bad">'+esc(r.transfer.err)+'</span>')+'<br>片库：'+(r.stream.ok?(r.stream.off?'<span class="warn">不收录 /auto</span> · '+esc(r.stream.why):'<span class="ok">通</span> · 收录 '+esc(r.stream.root)+'，传完就能播放'):'<span class="bad">'+esc(r.stream.err)+'</span>')}).catch(function(e){$('links').textContent=e.message})};
-$('saveCfg').onclick=function(){api('cfg',{tpl:$('tpl').value,lang:$('lang').value,grp:$('grp').value,userCap:$('userCap').value,globalCap:$('globalCap').value,pkSlots:$('pkSlots').value,vpsSlots:$('vpsSlots').value,paused:$('paused').checked,autoReady:$('autoReady').checked}).then(function(s){$('cfgres').innerHTML='<span class="ok">已保存</span>';render(s)}).catch(function(e){$('cfgres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
+$('saveCfg').onclick=function(){api('cfg',{tpl:$('tpl').value,lang:$('lang').value,grp:$('grp').value,userCap:$('userCap').value,globalCap:$('globalCap').value,pkSlots:$('pkSlots').value,vpsSlots:$('vpsSlots').value,paused:$('paused').checked,autoReady:$('autoReady').checked,tagNames:$('tagNames').checked}).then(function(s){$('cfgres').innerHTML='<span class="ok">已保存</span>';render(s)}).catch(function(e){$('cfgres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
 $('add').onclick=function(){api('add',{src:$('addSrc').value,id:$('addId').value,season:$('addSeason').value}).then(function(r){$('addres').textContent=r.joined?'已经在进行中':'已添加';load()}).catch(function(e){$('addres').textContent=e.message})};
 $('reqs').onclick=function(e){var b=e.target.closest('button[data-a]');if(!b)return;var a=b.dataset.a,id=+b.dataset.id;
  if(a==='log'){api('log?id='+id).then(function(r){alert(r.items.map(function(l){return new Date(l.at).toLocaleString()+'  '+l.msg}).join('\\n')||'没有日志')});return}

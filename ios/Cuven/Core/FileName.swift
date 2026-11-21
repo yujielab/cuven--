@@ -7,8 +7,9 @@ enum FileName {
     private static let cutRegex = try! NSRegularExpression(
         pattern: "(?i)[ ._\\-\\[(](2160p|1080p|720p|480p|4k|8k|uhd|bluray|blu-ray|web-?dl|webrip|hdtv|remux|hdr|dv|x26[45]|h\\.?26[45]|hevc|s[0-9]{1,2}e[0-9]{1,3}|s[0-9]{1,2}(?![0-9a-z]))")
 
+    /// 去掉扩展名和追踪码（[auto-m550-r13]）以后的名字
     static func stem(_ name: String) -> String {
-        (name as NSString).deletingPathExtension
+        AutoTag.strip((name as NSString).deletingPathExtension)
     }
 
     /// 年份取「最后一个」像年份的数：1917.2019 取 2019，Blade.Runner.2049.2017 取 2017
@@ -138,5 +139,29 @@ enum AppleImage {
         let nh = Int((Double(width) * Double(h) / Double(w)).rounded())
         let code = ns.substring(with: m.range(at: 3)), ext = ns.substring(with: m.range(at: 4))
         return ns.replacingCharacters(in: m.range, with: "/\(width)x\(nh)\(code).\(ext)")
+    }
+}
+
+/// 追踪码：请求添加给传进 /auto 的电影文件 / 剧集文件夹名字里加的 [auto-m550-r13] / [auto-tv1399s2-r14]
+/// （m / tv + TMDB 编号、剧集带季，r + 请求编号）。工作人员把它从 /auto 挪进片库时名字不变，
+/// 「继续观看」和片单就按它跟到新位置（PlaybackStore / WatchlistStore 的 relink）
+enum AutoTag {
+    private static let find = try! NSRegularExpression(
+        pattern: "(?i)(?<![0-9a-z])auto-(?:m|tv)[0-9]{1,9}(?:s[0-9]{1,3})?-r([0-9]{1,12})(?![0-9a-z])")
+    private static let cut = try! NSRegularExpression(
+        pattern: "(?i)[. ]*\\[?auto-(?:m|tv)[0-9]{1,9}(?:s[0-9]{1,3})?-r[0-9]{1,12}\\]?")
+
+    /// 名字或路径里的追踪码（请求编号）；没有 → nil
+    static func code(in s: String) -> String? {
+        let ns = s as NSString
+        guard let m = find.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)) else { return nil }
+        return ns.substring(with: m.range(at: 1))
+    }
+
+    /// 去掉追踪码（显示用）
+    static func strip(_ s: String) -> String {
+        guard s.localizedCaseInsensitiveContains("auto-") else { return s }
+        let ns = s as NSString
+        return cut.stringByReplacingMatches(in: s, range: NSRange(location: 0, length: ns.length), withTemplate: "")
     }
 }
