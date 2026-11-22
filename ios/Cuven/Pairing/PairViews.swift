@@ -462,15 +462,22 @@ struct PairLabView: View {
             guard let px = r.renderOffscreen(side: side, warmup: k == 0 ? 40 : 4, time: 2 + Float(k) * 0.1) else { break }
             if k == 0 { cloud = Self.image(px, side: side) }
             // 白底上的预乘颜色 → 和相机看到的一样：蓝色程度 = B − R（透明底按白底合成：c + (1 − a)·白）
+            // 缩小时按块平均（和扫描时 GPU 上的 pair_ink 一样），不是隔点取：粒子是一个个小点，隔点取会很花
             var ink = [Float](repeating: 0, count: cam * cam)
-            let scale = Float(side) / Float(cam)
+            let scale = Float(side) / Float(cam), k = max(1, Int(scale))
             for y in 0..<cam {
                 for x in 0..<cam {
-                    let sx = min(side - 1, Int(Float(x) * scale)), sy = min(side - 1, Int(Float(y) * scale))
-                    let o = (sy * side + sx) * 4
-                    let a = Float(px[o + 3]) / 255
-                    let bch = Float(px[o]) / 255 + (1 - a), rch = Float(px[o + 2]) / 255 + (1 - a)
-                    ink[y * cam + x] = min(1, max(0, (bch - rch) * 1.6))
+                    let x0 = Int(Float(x) * scale), y0 = Int(Float(y) * scale)
+                    var acc: Float = 0, n: Float = 0
+                    for yy in y0..<min(side, y0 + k) {
+                        for xx in x0..<min(side, x0 + k) {
+                            let o = (yy * side + xx) * 4
+                            let a = Float(px[o + 3]) / 255
+                            let bch = Float(px[o]) / 255 + (1 - a), rch = Float(px[o + 2]) / 255 + (1 - a)
+                            acc += max(bch - rch, 0); n += 1
+                        }
+                    }
+                    ink[y * cam + x] = min(1, max(0, acc / max(n, 1) * 1.6))
                 }
             }
             if let h = dec.feed(ink: ink) { hit = h; break }
