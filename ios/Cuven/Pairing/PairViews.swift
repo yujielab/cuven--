@@ -125,6 +125,9 @@ struct PairScanSheet: View {
     @State private var busy = false
     @State private var scanner = PairScanner()
     @State private var camDenied = false
+    /// 相机读出来、后端说「不存在 / 过期」的码。CRC-8 挡不住所有误读（约 1/256 的乱码能过），乱码的编号是随机的：
+    /// 第一次被拒先接着扫；同一个码再被拒一次（真的过期了）才报错
+    @State private var rejected: Set<UInt64> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -326,6 +329,12 @@ struct PairScanSheet: View {
             switch await PairService.peek(t) {
             case .success(let w): who = w; stage = .confirm
             case .failure(.server("bad_device", _)): stage = .verify
+            case .failure(.server("expired", let m)):
+                if case .code(let id, let sec) = t, rejected.insert(UInt64(id) << 32 | UInt64(sec)).inserted {
+                    target = nil; stage = .scanning; scanner?.start()
+                } else {
+                    stage = .failed(m)
+                }
             case .failure(.server(_, let m)): stage = .failed(m)
             case .failure(.network): stage = .failed("连不上账号中心，稍后再试")
             }

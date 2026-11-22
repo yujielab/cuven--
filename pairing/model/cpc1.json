@@ -1,0 +1,64 @@
+{
+ "version": 1,
+ "input": [
+  2,
+  24,
+  192
+ ],
+ "layers": [
+  {
+   "cin": 2,
+   "cout": 24,
+   "dr": 1,
+   "da": 1,
+   "offset": 0
+  },
+  {
+   "cin": 24,
+   "cout": 24,
+   "dr": 1,
+   "da": 2,
+   "offset": 456
+  },
+  {
+   "cin": 24,
+   "cout": 24,
+   "dr": 2,
+   "da": 4,
+   "offset": 5664
+  },
+  {
+   "cin": 24,
+   "cout": 24,
+   "dr": 2,
+   "da": 8,
+   "offset": 10872
+  },
+  {
+   "cin": 24,
+   "cout": 24,
+   "dr": 4,
+   "da": 16,
+   "offset": 16080
+  },
+  {
+   "cin": 24,
+   "cout": 24,
+   "dr": 1,
+   "da": 2,
+   "offset": 21288
+  },
+  {
+   "cin": 24,
+   "cout": 24,
+   "dr": 1,
+   "da": 1,
+   "offset": 26496
+  }
+ ],
+ "head": {
+  "cin": 24,
+  "offset": 31704
+ },
+ "floats": 31729
+}
