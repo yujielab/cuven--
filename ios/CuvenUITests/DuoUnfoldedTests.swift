@@ -217,6 +217,20 @@ final class DuoUnfoldedTests: XCTestCase {
 
     /// 光影实验室（PlayerLab.swift）：放内置的测试画面，四段场景各截一张，看卡片上的光跟着画面变（火是暖的、海是冷的、
     /// 夜里只有局部的光、霓虹是分开的几种颜色）；再横过来截一张。截 duo-39*（iPad 上 duo-49*）；外屏大小不截
+    /// 光学配对自检：编码和 Python 规范对照、离屏用 Metal 画一团粒子云、再用 GPU 网络解出来（PairViews.swift 的 PairLabView）
+    func testPairLab() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-CuvenDemo", "YES", "-CuvenPairLab", "YES"]
+        app.launch()
+        let r = app.staticTexts["pair-lab-result"]
+        let deadline = Date().addingTimeInterval(120)
+        while Date() < deadline && (!r.exists || r.label == "运行中…") { sleep(1) }
+        print("DUO pair-lab: \(r.exists ? r.label : "没出现")")
+        for t in app.staticTexts.allElementsBoundByIndex.prefix(12) { print("DUO pair-lab line: \(t.label)") }
+        snap("duo-3s-pair-lab")
+    }
+
     func testPlayerLab() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()

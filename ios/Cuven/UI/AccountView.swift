@@ -103,6 +103,8 @@ struct AccountView: View {
     @State private var navTop: CGFloat = 56
     /// 系统设置里 Cuven 的通知是关着的（拒绝过，或者后来到设置里关了）
     @State private var notifyBlocked = false
+    /// 光学配对：扫另一台设备上的粒子云
+    @State private var pairScanning = false
     @State private var notifyAsking = false
     @State private var confirmSignOut = false
     /// 顶上那一截的颜色：头像的主色（取不到是紫色）
@@ -355,7 +357,18 @@ struct AccountView: View {
                 AccountRow(icon: "key", title: "登录方式") { AccountValue(Self.methodName(s.method, bio: account.biometryName)) }
                 AccountDivider()
                 AccountRow(icon: "clock", title: "登录时间") { AccountValue(s.at.formatted(date: .abbreviated, time: .shortened)) }
+                if PairSpec.shared != nil, s.method != "demo" {
+                    AccountDivider()
+                    Button { pairScanning = true } label: {
+                        AccountRow(icon: "dot.viewfinder", title: "扫描登录其他设备", subtitle: "对准另一台设备上的粒子云，它就登录你的账户") {
+                            Image(systemName: "chevron.forward").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(AccountRowPress())
+                    .accessibilityIdentifier("account-pair-scan")
+                }
             }
+            .sheet(isPresented: $pairScanning) { PairScanSheet().environment(account) }
         }
     }
 
@@ -383,6 +396,7 @@ struct AccountView: View {
         case "email_otp": return "电子邮件验证码"
         case "faceid": return bio
         case "register": return "新建账户"
+        case "pair": return "光学配对"
         case "demo": return "演示"
         default: return m
         }
