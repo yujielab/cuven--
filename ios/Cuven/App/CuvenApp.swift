@@ -171,6 +171,8 @@ struct RootView: View {
             TabletopPreview.presentIfRequested()
             // -CuvenPlayerLab YES：打开光影实验室并放测试画面（PlayerLab.swift）
             PlayerLab.presentIfRequested()
+            // -CuvenPairLab YES：光学配对自检（编码对照、离屏画一团云再用 GPU 网络解出来；PairViews.swift）
+            PairLab.presentIfRequested()
             // -CuvenRequestPreview YES：推进一部「可请求添加」的剧集详情页（RequestViews.swift）
             RequestPreview.presentIfRequested(model)
             #endif

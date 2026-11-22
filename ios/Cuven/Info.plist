@@ -9,6 +9,8 @@
 		<key>NSAllowsArbitraryLoadsForMedia</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>扫描另一台设备上的粒子云，让它登录你的 Cuven 账户。</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>使用面容 ID 快速登录 Cuven max。你的面容数据仅存储在此设备上，Cuven 无法访问。</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>

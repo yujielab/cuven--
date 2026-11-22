@@ -320,6 +320,8 @@ final class LoginFlow {
             return
         }
         set(.signin, "")
+        // 光学配对：顺手领一枚设备令牌（以后这台 iPhone 才能「扫描登录其他设备」；后台，失败不影响登录）
+        PairService.fetchDevice(username: user, password: password)
         succeed(user, email: rec.email ?? "", method: "password", kind: .login)
     }
 
@@ -854,6 +856,8 @@ private struct LoginScreen: View {
     @State private var keyboardTop = CGFloat.greatestFiniteMagnitude
     @State private var passRevealed = false
     @State private var pwRevealed = false
+    /// 光学配对：这台设备显示粒子云，让另一台已登录的 iPhone 扫
+    @State private var pairShowing = false
 
     var body: some View {
         GeometryReader { geo in
@@ -876,6 +880,7 @@ private struct LoginScreen: View {
             .statusBarHidden(m.folded)
         }
         .ignoresSafeArea(.keyboard)
+        .fullScreenCover(isPresented: $pairShowing) { PairShowView().environment(flow.account) }
         .onAppear {
             flow.reduceMotion = reduceMotion
             scheduleFxStop()
@@ -1211,6 +1216,12 @@ private struct LoginScreen: View {
                 LoginAlt(title: alt) { flow.otpAltTapped() }
                     .accessibilityIdentifier("login-alt")
                     .modifier(LoginChildMod(fx: child(p, 7, 6, fx)))
+                    .padding(.top, 6)
+            }
+            if PairSpec.shared != nil {
+                LoginAlt(title: "用 iPhone 扫描登录", enabled: !flow.busy) { pairShowing = true }
+                    .accessibilityIdentifier("login-pair")
+                    .modifier(LoginChildMod(fx: child(p, 8, 7, fx)))
                     .padding(.top, 6)
             }
         }
