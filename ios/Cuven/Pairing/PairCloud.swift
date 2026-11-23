@@ -42,6 +42,9 @@ final class PairCloudRenderer: NSObject, MTKViewDelegate {
     /// 云半径占短边的比例
     var radiusFraction: Float = 0.30
 
+    /// 登录页能不能先显示粒子云：有配对规范和 Metal，而且不是演示模式（演示数据不连网，UI 测试也要看登录页本身）
+    static var canShow: Bool { !DemoData.enabled && PairSpec.shared != nil && MTLCreateSystemDefaultDevice() != nil }
+
     init?(pixelFormat: MTLPixelFormat = .bgra8Unorm, spec: PairSpec? = PairSpec.shared) {
         guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue(), let lib = dev.makeDefaultLibrary() else { return nil }
         let d = MTLRenderPipelineDescriptor()
