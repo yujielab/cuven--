@@ -105,8 +105,6 @@ struct AccountView: View {
     @State private var navTop: CGFloat = 56
     /// 系统设置里 Cuven 的通知是关着的（拒绝过，或者后来到设置里关了）
     @State private var notifyBlocked = false
-    /// 光学配对：扫另一台设备上的粒子云
-    @State private var pairScanning = false
     @State private var notifyAsking = false
     @State private var confirmSignOut = false
     /// 顶上那一截的颜色：头像的主色（取不到是紫色）
@@ -127,10 +125,9 @@ struct AccountView: View {
                     VStack(alignment: .leading, spacing: 34) {
                         // 个人资料卡（账户页移植（网页版）：网页版账户页的第一张卡）
                         ProfileCard { profileSheet = $0 }
-                        // 网络速度（网页版的第二张卡：45 根竖条的滑块，在 iOS 上管正片缓冲多少秒，AccountUsage.swift）
+                        // 网络（网页版的第二张卡：45 根竖条的滑块，在 iOS 上管正片缓冲多少秒，AccountUsage.swift）；
+                        // Cuven Pass Pro（影片经加速节点传输，AccountPassPro.swift）并在这张卡里（用户要求）
                         NetworkSpeedCard()
-                        // Cuven Pass Pro（用户要求）：影片经加速节点（Worker → VPS → 你）传输，AccountPassPro.swift
-                        PassProGroup()
                         // 使用洞察 · 流量概览（网页版的第三张卡；数是这台设备真的下载了多少，不是网页版的随机数）
                         UsageInsightsCard()
                         watchingGroup
@@ -295,7 +292,7 @@ struct AccountView: View {
     private var playbackGroup: some View {
         let audio = TrackPrefs.Audio(rawValue: audioPref) ?? .auto
         let subtitle = TrackPrefs.Subtitle(rawValue: subtitlePref) ?? .auto
-        return AccountGroup(title: "播放", footer: "每集开始时自动应用，播放时仍可在播放器中更改。") {
+        return AccountGroup(title: "播放") {
             AccountRow(icon: "forward.end", title: "自动播放下一集", subtitle: "看完自动继续") {
                 Toggle("自动播放下一集", isOn: $autoplayNext)
                     .labelsHidden()
@@ -343,10 +340,8 @@ struct AccountView: View {
 
     /// 改进兼容性（用户要求：iPad（第 9 代）和更早的机型放不了）。说明照实写：改的是片源的规格标记，画面数据不变
     private var compatGroup: some View {
-        AccountGroup(title: "兼容性",
-                     footer: "适用于 iPad（第 9 代）及更早的机型。打开后，4K、杜比视界影片按这台设备能解码的规格播放，画面数据不变；杜比视界 8 改用 HDR10 播放，播放时不能隔空播放到其他设备。"
-                        + (Compat.legacyDevice ? "这台设备建议打开。" : "这台设备一般不需要打开。")) {
-            AccountRow(icon: "ipad.landscape", title: "改进兼容性", subtitle: compatMode ? "已打开 · 从下一次播放起生效" : "旧机型无法播放时打开") {
+        AccountGroup(title: "兼容性") {
+            AccountRow(icon: "ipad.landscape", title: "改进兼容性", subtitle: "适用于 iPad（第 9 代）及更早机型") {
                 Toggle("改进兼容性", isOn: $compatMode)
                     .labelsHidden()
                     .tint(.green)
@@ -372,21 +367,9 @@ struct AccountView: View {
                     }
                     AccountDivider()
                 }
+                // 「登录时间」「扫描登录其他设备」两行按用户要求移除（扫描在主页头像旁边的「光学扫描」圆钮）
                 AccountRow(icon: "key", title: "登录方式") { AccountValue(Self.methodName(s.method, bio: account.biometryName)) }
-                AccountDivider()
-                AccountRow(icon: "clock", title: "登录时间") { AccountValue(s.at.formatted(date: .abbreviated, time: .shortened)) }
-                if PairSpec.shared != nil, s.method != "demo" {
-                    AccountDivider()
-                    Button { pairScanning = true } label: {
-                        AccountRow(icon: "dot.viewfinder", title: "扫描登录其他设备", subtitle: "对准另一台设备上的粒子云，它就登录你的账户") {
-                            Image(systemName: "chevron.forward").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
-                        }
-                    }
-                    .buttonStyle(AccountRowPress())
-                    .accessibilityIdentifier("account-pair-scan")
-                }
             }
-            .sheet(isPresented: $pairScanning) { PairScanSheet().environment(account).environment(\.colorScheme, .light) }
         }
     }
 
@@ -492,9 +475,9 @@ struct AccountView: View {
 // MARK: - 部件（参考图：Apple「游戏」App 的个人页）
 
 /// 一组：粗体组名 + 一张卡（+ 卡下一行灰色说明）
+/// 组名 + 一张卡。卡下面不再放说明文字（用户要求移除这类解释性文本）
 struct AccountGroup<Rows: View>: View {
     let title: String
-    var footer: String? = nil
     @ViewBuilder var rows: () -> Rows
 
     var body: some View {
@@ -505,14 +488,6 @@ struct AccountGroup<Rows: View>: View {
                 .padding(.leading, 2)
                 .accessibilityAddTraits(.isHeader)
             AccountCard(content: rows)
-            if let footer {
-                // 卡下的说明和卡里那一列符号同一条左边线（离卡边 20；以前 8，和什么都对不上：F2），灰度用全 App 的第三级（50% → 55%）
-                Text(footer)
-                    .font(.footnote)
-                    .foregroundStyle(DSInk.tertiary)
-                    .padding(.horizontal, AccountMetrics.inset)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
     }
 }

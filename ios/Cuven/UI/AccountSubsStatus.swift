@@ -173,8 +173,7 @@ private struct SubsStatusLook {
             switch s.state {
             case "ok":
                 badge = "正常"; color = .green; isGood = true
-                if let left = s.remaining { detail = "今天还可下载 \(left) 条" }
-                else { detail = "可以正常使用" }
+                detail = "可以正常使用"          // 不写今天还能下载多少条（用户要求）
             case "quota":
                 badge = "已达上限"; color = .orange
                 let at = Self.resetTime(s.resetAt).map { "\($0)恢复" } ?? "明天恢复"
