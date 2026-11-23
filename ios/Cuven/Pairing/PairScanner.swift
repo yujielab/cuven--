@@ -59,7 +59,10 @@ final class PairScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
             // 媒体服务重置之类：重启一次；再坏就报出来
             if !restarted {
                 restarted = true
-                queue.async { [self] in if !session.isRunning { session.startRunning() }; report(session.isRunning ? .running : .failed("相机出错了（\(e?.code ?? 0)）")) }
+                self.queue.async {
+                    if !self.session.isRunning { self.session.startRunning() }
+                    self.report(self.session.isRunning ? .running : .failed("相机出错了（\(e?.code ?? 0)）"))
+                }
             } else {
                 report(.failed("相机出错了（\(e?.code ?? 0)）"))
             }
