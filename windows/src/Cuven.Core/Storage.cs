@@ -55,7 +55,7 @@ public static class Storage
     }
 }
 
-/// <summary>机密（设备令牌）怎么加密存：Windows 上用 DPAPI（App 里接上），测试里原样</summary>
+/// <summary>机密怎么加密存：Windows 上用 DPAPI（App 里接上），测试里原样。设备令牌已经不存了（开机删掉旧的 device.bin）</summary>
 public interface ISecretProtector
 {
     byte[] Protect(byte[] plain);

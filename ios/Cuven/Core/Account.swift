@@ -527,8 +527,8 @@ final class AccountStore {
         s.email = email
         persist(s)
         let name = s.username
-        UserDefaults.standard.set(email, forKey: "cuven_emailmap_\(name)")
-        Task { await AccountAPI.putEmailMap(email, username: name) }
+        // 邮箱映射写成功了才记「写过了」（失败的话下次登录再补）
+        Task { if await AccountAPI.putEmailMap(email, username: name) { UserDefaults.standard.set(email, forKey: "cuven_emailmap_\(name)") } }
     }
 
     /// 改了姓名：登录状态换成新姓名；本机的面容 ID 快速登录是旧姓名的，关掉（网页版：改名后旧的面容数据清除、要重新录入）；
@@ -543,8 +543,7 @@ final class AccountStore {
         UserDefaults.standard.removeObject(forKey: "cuven_emailmap_\(old)")
         let email = s.email
         if !email.isEmpty {
-            UserDefaults.standard.set(email, forKey: "cuven_emailmap_\(newName)")
-            Task { await AccountAPI.putEmailMap(email, username: newName) }
+            Task { if await AccountAPI.putEmailMap(email, username: newName) { UserDefaults.standard.set(email, forKey: "cuven_emailmap_\(newName)") } }
         }
         Task { await refreshAvatar() }
     }

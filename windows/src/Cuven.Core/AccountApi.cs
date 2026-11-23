@@ -184,7 +184,9 @@ public sealed class PairLogin : IDisposable
 
     const int MaxWaitMs = 20_000;      // 服务端一次最多挂 20 秒
     const int RotateMs = 8_000;        // 离到期不到 8 秒、还没人扫：换下一团
-    const int SlackMs = 12_000;        // wait 的客户端超时 = 挂的时间 + 这么多（服务端读写、网络往返）
+    // wait 的客户端超时 = 挂的时间 + 这么多（服务端读写、网络往返）。20 + 6 秒再隔半秒重试：
+    // 回包悄悄丢了（NAT 掐了连接）的那次批准，重试落在服务端 30 秒的重发窗口里
+    const int SlackMs = 6_000;
     const int RedeliverMs = 35_000;    // 过期以后一直连不上：再试这么久（批准了的回包丢了，服务端 30 秒内照样再给），之后另开一团
 
     readonly CancellationTokenSource _cts = new();
@@ -348,7 +350,7 @@ public sealed class PairLogin : IDisposable
                 return false;
             }
             if (now > l.ExpAt && !cleared) { cleared = true; CodeCleared?.Invoke(); }
-            await Delay(2000, ct);
+            await Delay(500, ct);
             return true;
         }
     }
