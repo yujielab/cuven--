@@ -8,7 +8,7 @@ import CoreVideo
 // 后置相机 1920×1080、BGRA；每一帧在 GPU 上裁出正中间的正方形（屏幕上的那个圆框）、缩成 256 × 256、
 // 算 B − R（蓝色的粒子在白底 / 黑底上都是正的，背景是 0）→ PairDecoder（椭圆、极坐标、网络、匹配滤波、Viterbi）。
 // 解码在一条串行队列上跑，上一帧没算完就丢掉这一帧；同一个结果连着两次才回调。
-// 认出来一个码以后只停「处理」、不停相机（pause）：后端说是误读就 resume 接着扫，窗口留着、不用重开相机。
+// 认出来一个码以后只停「处理」、不停相机：后端说是误读就 resume 接着扫，窗口留着、不用重开相机。
 // 解码器（模板、Gram 逆、网络权重）建一次就留着：第一次打开扫描页时在后台建（shared()）。
 
 /// 状态都在 queue 上改（onResult 之类的回调在主线程上调）
@@ -44,8 +44,9 @@ final class PairScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
     init?(decoder: PairDecoder? = PairDecoder()) {
         guard let decoder else { return nil }
         self.decoder = decoder
-        cam = decoder.spec.decode.cam
-        inkScratch = [Float](repeating: 0, count: cam * cam)
+        let side = decoder.spec.decode.cam
+        cam = side
+        inkScratch = [Float](repeating: 0, count: side * side)
         let dev = MTLCreateSystemDefaultDevice()
         device = dev
         cq = dev?.makeCommandQueue()
@@ -145,6 +146,7 @@ final class PairScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
     /// 在 queue 上：开相机并报状态
     private func run() {
         if !session.isRunning { session.startRunning() }
+        if session.isRunning, let cam = camera { Self.useWideLens(cam) }     // 一般在接相机时就设好了，这里只是保险
         if session.isRunning { report(.running) }
         else if session.isInterrupted { report(.paused("相机被系统暂停了")) }
         else { report(.failed("相机没有启动")) }
@@ -184,8 +186,9 @@ final class PairScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
     private static func useWideLens(_ cam: AVCaptureDevice) {
         guard cam.isVirtualDevice, cam.deviceType == .builtInDualWideCamera || cam.deviceType == .builtInTripleCamera,
               let f = cam.virtualDeviceSwitchOverVideoZoomFactors.first else { return }
-        guard (try? cam.lockForConfiguration()) != nil else { return }
+        // 超出可用范围会抛异常（崩）：夹在 [minAvailable, maxAvailable] 和这个格式的上限里
         let z = min(max(CGFloat(truncating: f), cam.minAvailableVideoZoomFactor), cam.maxAvailableVideoZoomFactor, cam.activeFormat.videoMaxZoomFactor)
+        guard abs(cam.videoZoomFactor - z) > 0.01, (try? cam.lockForConfiguration()) != nil else { return }
         cam.videoZoomFactor = z
         cam.unlockForConfiguration()
     }

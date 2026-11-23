@@ -6,7 +6,7 @@ import MetalKit
 // 外观：照 Apple 配对动画复刻的那一版（和网页 web/pair.js 同一套着色器）—— 3D 球壳 5.3 万点 + 光晕 1.65 万点 + 12 缕丝各 1500 点，
 // 绕斜轴滚动、几层剪切把壳「折」起来，10 秒一个循环；再按录屏拟合的逐帧光学密度校正（pair-density.png，120 帧拼一张）调浓淡。
 // 所有运动都在顶点着色器里算，粒子缓冲是静态的（和网页同一个随机数种子，粒子一模一样）。
-// 码：每个粒子的光学深度乘上它在屏幕上那一点的 M（PairCodec.modulationGrid → 192² 的 8 位纹理）。3D 的云在滚、码钉在屏幕平面上慢慢转，
+// 码：每个粒子的光学深度乘上它在屏幕上那一点的 M（PairCodec.codeTexture → 192² 的 8 位纹理；后台线程上算好，这里只上传）。3D 的云在滚、码钉在屏幕平面上慢慢转，
 // 相机几帧一平均，滚动的结构抹平了，码就显出来（PairDecoder 平均最近几帧的极坐标图）。
 
 final class PairCloudRenderer: NSObject, MTKViewDelegate {
@@ -130,15 +130,23 @@ final class PairCloudRenderer: NSObject, MTKViewDelegate {
         return r8Texture(dev, width: img.width, height: img.height, bytes: bytes)
     }
 
-    /// 换一团码：调制网格 → 8 位纹理（M / codeScale）
+    /// 换一团码（自检用的参考路径：逐点算调制网格 → 8 位纹理（M / codeScale））
     func setCode(id: UInt32, secret: UInt32, spec: PairSpec) {
         let G = spec.codeGrid
         let m = PairCodec.modulationGrid(PairCodec.cellSigns(id: id, secret: secret, spec: spec), size: G, spec: spec)
-        let px = m.map { UInt8(max(0, min(255, ($0 / Float(spec.codeScale) * 255).rounded()))) }
-        if let t = Self.r8Texture(device, width: G, height: G, bytes: px) { codeTex = t }
+        setCode(bytes: PairCodec.textureBytes(m, spec: spec), size: G)
+    }
+
+    /// 换一团码：算好的 size² 8 位纹理（PairCodec.codeTexture）→ 上传
+    func setCode(bytes px: [UInt8], size G: Int) {
+        guard G > 0, px.count == G * G, let t = Self.r8Texture(device, width: G, height: G, bytes: px) else { return }
+        codeTex = t
         codeT0 = CACurrentMediaTime()
         coded = true
     }
+
+    /// 不画码了（下一帧清成透明）
+    func clearCode() { coded = false }
 
     // 浓淡在一个循环里的变化（照录屏拟合）
     private static func gathering(_ ph: Float) -> Float {
@@ -149,10 +157,17 @@ final class PairCloudRenderer: NSObject, MTKViewDelegate {
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
-        guard coded, let rpd = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
+        guard let rpd = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
               let cb = queue.makeCommandBuffer() else { return }
-        let now = CACurrentMediaTime()
-        encode(cb, target: rpd, size: view.drawableSize, scale: Float(view.contentScaleFactor), time: now - t0, codeTime: now - codeT0)
+        if coded {
+            let now = CACurrentMediaTime()
+            encode(cb, target: rpd, size: view.drawableSize, scale: Float(view.contentScaleFactor), time: now - t0, codeTime: now - codeT0)
+        } else {
+            // 没有码：清成透明（换码之间、过期以后，不留上一团）
+            rpd.colorAttachments[0].loadAction = .clear
+            rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            cb.makeRenderCommandEncoder(descriptor: rpd)?.endEncoding()
+        }
         cb.present(drawable)
         cb.commit()
     }
@@ -207,12 +222,20 @@ final class PairCloudRenderer: NSObject, MTKViewDelegate {
     }
 }
 
-/// SwiftUI 里的粒子云：给码就显示，不给码不画
-struct PairCloudView: UIViewRepresentable {
-    let id: UInt32?
-    let secret: UInt32?
+/// 一团码：编号、密钥 + 算好的 size² 8 位纹理（PairCodec.codeTexture）。只按编号、密钥比相等
+struct PairCloudCode: Equatable {
+    let id: UInt32
+    let secret: UInt32
+    let size: Int
+    let bytes: [UInt8]
+    static func == (a: PairCloudCode, b: PairCloudCode) -> Bool { a.id == b.id && a.secret == b.secret && a.size == b.size }
+}
 
-    final class Coordinator { var renderer: PairCloudRenderer?; var code: (UInt32, UInt32)? }
+/// SwiftUI 里的粒子云：给码就显示；不给码不画，而且马上把上一团清掉
+struct PairCloudView: UIViewRepresentable {
+    let code: PairCloudCode?
+
+    final class Coordinator { var renderer: PairCloudRenderer?; var shown: PairCloudCode? }
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> MTKView {
@@ -235,10 +258,17 @@ struct PairCloudView: UIViewRepresentable {
     func updateUIView(_ v: MTKView, context: Context) { update(v, context.coordinator) }
 
     private func update(_ v: MTKView, _ c: Coordinator) {
-        guard let id, let secret, let spec = PairSpec.shared, let r = c.renderer else { v.isPaused = true; return }
-        if c.code?.0 != id || c.code?.1 != secret {
-            c.code = (id, secret)
-            r.setCode(id: id, secret: secret, spec: spec)
+        guard let r = c.renderer else { v.isPaused = true; return }
+        guard let code else {
+            // 暂停的 MTKView 会一直留着最后一帧：先画一帧透明的，过期的码不能还挂在屏幕上
+            if r.coded { r.clearCode(); v.draw() }
+            c.shown = nil
+            v.isPaused = true
+            return
+        }
+        if c.shown != code {
+            c.shown = code
+            r.setCode(bytes: code.bytes, size: code.size)
         }
         v.isPaused = false
     }
