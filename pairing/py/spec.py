@@ -5,15 +5,16 @@ Cuven 粒子码（CPC）v1 —— 规范与参考实现（numpy）
   · 卷积码（K=7，生成多项式 171 / 133，八进制，码率 1/2，补 6 个 0 收尾）→ 140 个码位
   · 再加 20 个已知的导频位（找旋转用）→ 160 个格子，排在 5 圈上
   · 每个格子是一团 ± 的高斯：D(x) = Σ b_i · G_i(x)，b_i ∈ {+1, −1}
-  · 粒子密度 ρ = 球壳亮边 ×（1 + α·tanh(D/τ)）×（1 + β·exp(−(D/w)²)）
-      D 的零线（正负两团挨着的地方）粒子扎堆 → 一缕缕的丝；正的一侧略密 → 读得出正负
-  · 解码：相机 → 蓝色程度 → 椭圆（矩）→ 极坐标展开 → 神经网络估 D → 每个格子做匹配滤波
+  · 外观是照 Apple 配对动画复刻的 3D 粒子云（web/pair.js，iOS PairCloud）；码藏在每个粒子的光学深度里：
+      光学深度 × M，M = （1 + α·tanh(D/τ)）×（1 + β·覆盖度²·exp(−(D/w)²)），按粒子在屏幕上的位置取
+      正的一侧浓一点 → 读得出正负；零线上浓一些（只在有格子的地方）
+  · 解码：相机 → 蓝色程度 → 找框 → 极坐标展开 → 几帧平均 → 神经网络估 D → 最小二乘解出 160 个格子
           → 导频找旋转 → Viterbi → CRC
 JS（网页）、Swift（iOS）照这份逐项实现，常数一个都不能改。
 """
 import numpy as np
 
-VERSION = 1
+VERSION = 2                    # 2：外观换成复刻的 3D 粒子云，码改成光学深度的调制（格子、编码不变）
 
 # ── 格子：5 圈，半径（以云的半径为 1）、格数、起始角 ──
 RINGS = [  # (半径, 格数, 起始角弧度)
@@ -134,8 +135,8 @@ def soft_from_cells(cell_soft) -> np.ndarray:
     return np.asarray(cell_soft)[DATA_IDX[INTERLEAVE]]
 
 # ── 场与密度 ──
-ALPHA, TAU = 0.22, 0.30       # 正的一侧略密：1 + α·tanh(D/τ)
-BETA, W = 2.40, 0.07          # 零线上扎堆成丝：1 + β·exp(−(D/w)²)
+ALPHA, TAU = 0.25, 0.30       # 正的一侧浓一点：1 + α·tanh(D/τ)
+BETA, W = 0.60, 0.10          # 零线上浓一些：1 + β·覆盖度²·exp(−(D/w)²)
 def wrap(a): return (a + np.pi) % (2 * np.pi) - np.pi
 
 # 固定的平滑扭曲（各语言照抄）：格子不再是一圈圈整齐的团，零线弯弯曲曲像折起来的丝
@@ -163,13 +164,11 @@ def field(b, x, y, coverage=False):
         D += bi * g; E += g
     return (D, E) if coverage else D
 
-def shell(r):
-    """球壳亮边：中心 1，边上约 1.9，外面一圈雾（照 Apple 录屏量出来的径向分布）"""
-    inside = 1.0 + 0.9 * np.clip(r, 0, 1) ** 3
-    halo = 1.9 * np.exp(-np.maximum(r - 1.0, 0) ** 1.5 / 0.17 ** 1.5)
-    return np.where(r <= 1.0, inside, halo)
-
-E0 = 0.55                     # 覆盖度到这个数才算「有格子」：丝只长在有格子的地方
-def density(D, E, r):
+E0 = 0.55                     # 覆盖度到这个数才算「有格子」：零线上的那一项只在有格子的地方
+def modulation(D, E):
+    """光学深度的倍数 M（显示时乘到每个粒子上；网页 / iOS 存成 8 位纹理：M / 3）"""
     gate = np.clip(E / E0, 0.0, 1.0)
-    return shell(r) * (1.0 + ALPHA * np.tanh(D / TAU)) * (1.0 + BETA * gate * gate * np.exp(-(D / W) ** 2))
+    return (1.0 + ALPHA * np.tanh(D / TAU)) * (1.0 + BETA * gate * gate * np.exp(-(D / W) ** 2))
+CODE_SCALE = 3.0              # 纹理里存 M / CODE_SCALE
+CODE_GRID = 192               # 调制网格 192²，覆盖 [-1.6, 1.6]²
+CODE_SPIN = 0.05              # 码平面每秒转的弧度

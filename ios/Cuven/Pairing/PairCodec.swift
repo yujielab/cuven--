@@ -4,11 +4,11 @@ import Foundation
 //
 // 一团粒子云里藏 64 位：配对编号 24 位 + 密钥 32 位 + CRC-8。
 //   · 卷积码（K=7，171 / 133，码率 1/2，补 6 个 0）→ 140 码位；交织；加 20 个导频 → 160 个格子，排在 5 圈上
-//   · 每个格子一团 ± 高斯：D(x) = Σ b_i·G_i(扭曲后的 x)；粒子密度
-//       ρ = 球壳亮边 ×（1 + α·tanh(D/τ)）×（1 + β·覆盖度²·exp(−(D/w)²)）
-//     D 的零线上粒子扎堆成丝（正负两团挨着的地方），正的一侧略密 —— 码藏在丝的走向里
+//   · 每个格子一团 ± 高斯：D(x) = Σ b_i·G_i(扭曲后的 x)；调制 M = （1 + α·tanh(D/τ)）×（1 + β·覆盖度²·exp(−(D/w)²)）
+//     显示时（PairCloud，照 Apple 配对动画复刻的 3D 粒子云）每个粒子的光学深度乘上屏幕上那一点的 M：正的一侧浓一点、零线上浓一些
 //   · 解码：相机 → 蓝色程度（B − R）→ 找框（矩 + 射线找亮边 + 最小二乘，去掉旋转）→ 极坐标展开（24 × 192）
-//           → 神经网络估 D（PairNet，Metal）→ 每个旋转下最小二乘解出 160 个格子 → 导频定旋转 → Viterbi → CRC
+//           → 最近几帧平均（滚动的云抹平、码留下）→ 神经网络估 D（PairNet，Metal）→ 每个旋转下最小二乘解出 160 个格子
+//           → 导频定旋转 → Viterbi → CRC
 // 规范和 Python 参考实现（pairing/py/spec.py，训练用）、网页（web/pair.js）逐项一致；常数在 cpc1-spec.json（三边同一份）。
 
 struct PairSpec: Decodable {
@@ -19,6 +19,7 @@ struct PairSpec: Decodable {
         // v1.1 的框：背景分位、减底余量、射线；半高处 / 真半径；最小二乘解卷的正则
         let bgQ: Double; let bgMargin: Double; let rays: Int; let rayN: Int; let rayT0: Double; let rayT1: Double
         let edgeK: Double; let lsReg: Double
+        let avgFrames: Int              // 平均最近几帧的极坐标图
     }
     let version: Int
     let cells: [[Double]]           // (半径, 角, 切向 σ)
@@ -33,6 +34,9 @@ struct PairSpec: Decodable {
     let beta: Double
     let w: Double
     let e0: Double
+    let codeGrid: Int                   // 调制网格边长（显示用的纹理）
+    let codeScale: Double               // 8 位纹理里存 M / codeScale
+    let codeSpin: Double                // 码平面每秒转的弧度
     let conv: Conv
     let decode: Decode
 
@@ -119,31 +123,27 @@ enum PairCodec {
         return (D, E)
     }
 
-    static func shell(_ r: Double) -> Double {
-        r <= 1 ? 1 + 0.9 * r * r * r : 1.9 * exp(-pow(max(r - 1, 0), 1.5) / pow(0.17, 1.5))
-    }
-
-    static func density(_ D: Double, _ E: Double, _ r: Double, spec: PairSpec) -> Double {
+    /// 调制 M（光学深度的倍数）
+    static func modulation(_ D: Double, _ E: Double, spec: PairSpec) -> Double {
         let gate = min(1, max(0, E / spec.e0))
-        return shell(r) * (1 + spec.alpha * tanh(D / spec.tau)) * (1 + spec.beta * gate * gate * exp(-(D / spec.w) * (D / spec.w)))
+        return (1 + spec.alpha * tanh(D / spec.tau)) * (1 + spec.beta * gate * gate * exp(-(D / spec.w) * (D / spec.w)))
     }
 
-    /// G × G 的密度网格（覆盖 [-ext, ext]²，按像素中心取样；第 0 行是 y 最小的那一行）
-    static func densityGrid(_ b: [Float], size G: Int, spec: PairSpec) -> [Float] {
-        var rho = [Float](repeating: 0, count: G * G)
+    /// G × G 的调制网格（覆盖 [-ext, ext]²，按像素中心取样；第 0 行是 y 最小的那一行 —— 码平面的 y 在屏幕上朝下）
+    static func modulationGrid(_ b: [Float], size G: Int, spec: PairSpec) -> [Float] {
+        var m = [Float](repeating: 0, count: G * G)
         let cell = 2 * ext / Double(G)
-        rho.withUnsafeMutableBufferPointer { buf in
+        m.withUnsafeMutableBufferPointer { buf in
             let out = buf.baseAddress!                       // 指针在并行之前取一次：每行只写自己那一段
             DispatchQueue.concurrentPerform(iterations: G) { j in
                 let y = -ext + (Double(j) + 0.5) * cell
                 for i in 0..<G {
-                    let x = -ext + (Double(i) + 0.5) * cell
-                    let f = field(b, x, y, spec: spec)
-                    out[j * G + i] = Float(density(f.D, f.E, (x * x + y * y).squareRoot(), spec: spec))
+                    let f = field(b, -ext + (Double(i) + 0.5) * cell, y, spec: spec)
+                    out[j * G + i] = Float(modulation(f.D, f.E, spec: spec))
                 }
             }
         }
-        return rho
+        return m
     }
 
     // MARK: 解码：Viterbi、CRC
@@ -207,7 +207,7 @@ final class PairDecoder {
     private struct Tap { let row: Int32; let col: Int32; let v: Float }
     private var taps: [[Tap]] = []
     private var ginv: [Float] = []                       // 160 × 160：(TᵀT + λI)⁻¹
-    private var ema: [Float]?
+    private var recent: [[Float]] = []                   // 最近几帧的极坐标图（归一过的第 0 通道）
     private var last: (UInt32, UInt32)?
     private(set) var lastScore: Float = 0
 
@@ -218,7 +218,7 @@ final class PairDecoder {
         buildTemplates()
     }
 
-    func reset() { ema = nil; last = nil }
+    func reset() { recent = []; last = nil }
 
     /// 极坐标网格上每个格子的模板（稀疏：只存不为 0 的点）+ 模板的 Gram 矩阵的逆（最小二乘解卷用）
     private func buildTemplates() {
@@ -482,19 +482,23 @@ final class PairDecoder {
         return nil
     }
 
-    /// 喂一帧。前后几帧的网络输出取平均（框已经去掉旋转，手机拿稳时是对齐的）；同一个结果连着两次才算数
+    /// 喂一帧。最近 avgFrames 帧的极坐标图取平均再进网络（框已经去掉旋转，手机拿稳时前后几帧是对齐的；
+    /// 3D 的云在滚，平均一下滚动的结构就抹平了，码留下来）；同一个结果连着两次才算数
     func feed(ink: [Float]) -> (id: UInt32, secret: UInt32)? {
         guard ink.count == cam * cam, let f = frame(ink) else { return nil }
         let size = (abs(f.m.0 * f.m.3 - f.m.1 * f.m.2)).squareRoot()
         guard size > 20, size < Float(cam) else { return nil }
-        let out = net.run(polarInput(ink, f))
-        if var m = ema, m.count == out.count {
-            for i in 0..<m.count { m[i] = 0.55 * m[i] + 0.45 * out[i] }
-            ema = m
-        } else {
-            ema = out
+        let x = polarInput(ink, f)
+        let n = pr * pa
+        recent.append(Array(x[0..<n]))
+        if recent.count > max(1, spec.decode.avgFrames) { recent.removeFirst() }
+        var avg = x
+        for i in 0..<n {
+            var acc: Float = 0
+            for r in recent { acc += r[i] }
+            avg[i] = acc / Float(recent.count)
         }
-        guard let m = ema, let hit = decode(m) ?? decode(out) else { return nil }
+        guard let hit = decode(net.run(avg)) else { return nil }
         defer { last = hit }
         if let l = last, l.0 == hit.id, l.1 == hit.secret { return hit }
         return nil

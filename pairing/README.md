@@ -1,8 +1,9 @@
-# 光学配对快速登录（Cuven 粒子码 CPC v1）
+# 光学配对快速登录（Cuven 粒子码 CPC，规范第 2 版）
 
 要登录的设备（网页版、或者 iPhone 的登录页）显示一团蓝色粒子云；已经登录的 iPhone 扫一下、面容 ID 确认，那台设备就登进同一个账户。
-外观参照 Apple 配对时那团粒子云（录屏量出来的：球壳边上密、外面一圈雾、8 秒一折一松、慢慢转）。
-Apple 的协议拿不到、也不该照搬，所以**编码、解码、协议全是自己的**：码藏在粒子丝的走向里，相机拍到后用一个小卷积网络（GPU）还原。
+外观是照 Apple 配对动画复刻的 3D 粒子云（`web/pair.js`、iOS `PairCloud.swift`，同一套着色器）。
+Apple 的协议拿不到、也不该照搬，所以**编码、解码、协议全是自己的**：码藏在每个粒子的光学深度里（屏幕上的位置决定乘多少），
+3D 的云在滚、码钉在屏幕平面上；相机几帧一平均，滚动的结构抹平、码显出来，再用一个小卷积网络（GPU）还原。
 
 ```
 要登录的设备                         check.cuven.us                      已登录的 iPhone
@@ -20,12 +21,13 @@ Apple 的协议拿不到、也不该照搬，所以**编码、解码、协议全
 
 | 位置 | 做什么 |
 | --- | --- |
-| `pairing/py/` | Python 参考实现：`spec.py`（编码、场、密度）、`render.py`（合成相机图、找框）、`model.py`（网络与导出）、`decode.py`（最小二乘解卷 + Viterbi）、`train.py`、`eval.py`、`export_spec.py` |
-| `pairing/model/` | `cpc1-spec.json`（所有常数，三边同一份）、`cpc1-vectors.json`（测试向量）、`cpc1.pt`（训练检查点） |
-| `ios/Cuven/Pairing/` | `PairCodec.swift`（编码、场、解码器）、`PairNet.swift`（网络，Metal）、`PairCloud.swift`（粒子云，Metal）、`PairScanner.swift`（相机）、`PairService.swift`（后端、设备令牌）、`PairViews.swift`（显示页、扫描页、自检页）、`PairShaders.metal`；资源 `cpc1-spec.json`、`cpc1-vectors.json`、`cpc1.json`、`cpc1.bin` |
-| `web/pair.js` | 网页版的显示端：WebGL2 粒子云 + `/pair/open → wait` 循环（规范常数内嵌在文件头的 `SPEC` 里，改规范时要一起改） |
+| `pairing/py/` | Python 参考实现：`spec.py`（编码、码场、调制）、`render.py`（训练数据：渲染好的云 × 调制 → 相机；找框）、`model.py`（网络与导出）、`decode.py`（最小二乘解卷 + Viterbi）、`train.py`、`eval.py`、`export_spec.py` |
+| `pairing/frames/` | 训练用的背景：浏览器里把 `web/pair.js`（码关掉）在 10 秒循环里渲染 360 帧（`render.mjs` + `harness.html`）→ `convert.py` → `look-frames.npz`（44 MB，不进仓库，要训练时现渲染） |
+| `pairing/model/` | `cpc1-spec.json`（所有常数，三边同一份）、`cpc1-vectors.json`（测试向量）、`cpc1.pt`（训练检查点）、`cpc1.json` / `cpc1.bin`（导出的权重） |
+| `ios/Cuven/Pairing/` | `PairCodec.swift`（编码、码场、解码器）、`PairNet.swift`（网络，Metal）、`PairCloud.swift`（粒子云，Metal）、`PairScanner.swift`（相机）、`PairService.swift`（后端、设备令牌）、`PairViews.swift`（显示页、扫描页、自检页）、`PairShaders.metal`；资源 `cpc1-spec.json`、`cpc1-vectors.json`、`cpc1.json`、`cpc1.bin`、`pair-density.png` |
+| `web/pair.js` | 网页版的显示端：WebGL 粒子云 + `/pair/open → wait` 循环（规范常数内嵌在文件头的 `SPEC` 里，改规范时要一起改）；`web/pair-density.png` 是逐帧光学密度校正图 |
 
-改了规范或重新训练：`cd pairing/py && python3 export_spec.py`，把 `../model/cpc1-spec.json`、`cpc1-vectors.json`、`cpc1.json`、`cpc1.bin` 拷进 `ios/Cuven/Pairing/`。
+改了规范或重新训练：`cd pairing/py && python3 export_spec.py`，把 `../model/cpc1-spec.json`、`cpc1-vectors.json`、`cpc1.json`、`cpc1.bin` 拷进 `ios/Cuven/Pairing/`，`cpc1-spec.json` 的内容替换 `web/pair.js` 里的 `SPEC`。
 
 ## 编码（CPC v1）
 
@@ -34,14 +36,18 @@ Apple 的协议拿不到、也不该照搬，所以**编码、解码、协议全
 - **160 个格子**排在 5 圈上（14 / 22 / 30 / 42 / 52 个，各圈错开一点角度），其中 20 个是导频（`i mod 8 = 3`，LFSR 定的正负）——解码时用来找旋转。
   每个格子的位置按编号做一点确定的抖动（不像整齐的表格）。
 - **场**：`D(x) = Σ bᵢ·Gᵢ(warp(x))`，每个格子一团 ± 高斯（径向 σ 0.070、切向 σ 是格距的 0.45），先过一个固定的正弦扭曲（丝是弯的，不是一圈圈的环）。
-- **密度**：`ρ = 球壳(r) ×（1 + 0.22·tanh(D/0.30)）×（1 + 2.4·覆盖度²·exp(−(D/0.07)²)）`。
-  D 的零线（正负两团挨着的地方）上粒子扎堆成丝，正的一侧略密：码藏在丝的走向里。球壳：r ≤ 1 时 `1 + 0.9r³`（边上亮），外面一圈雾到 1.6。
+- **调制**：`M = （1 + 0.25·tanh(D/0.30)）×（1 + 0.6·覆盖度²·exp(−(D/0.10)²)）`——正的一侧浓一点（读得出正负），零线上浓一些。
+  显示时算成 192² 的网格、存成 8 位纹理（`M / 3`），每个粒子按它在屏幕上的位置取 M，乘到光学深度上。
 
 ## 显示（GPU）
 
-几万个粒子全在显存里，每帧走一步朗之万：`x += ε∇log ρ + √(2ε)·ξ + κε(∇log ρ)⊥`。前两项让分布始终是 ρ（相机读得出来），
-最后一项沿等密度线流动：丝在「流」，分布不变。8 秒一呼吸（κ 跟着变）、每秒转 0.06 弧度。iOS 用 Metal（`pair_step` + 画点），网页用 WebGL2（transform feedback）。
-**y 朝下画**：和相机拍屏幕（行号往下）同一手性；反过来就是镜像，解不出来。
+- **云本身**（和码无关）：3D 球壳 5.3 万点 + 光晕 1.65 万点 + 12 缕丝各 1500 点（固定的随机数种子，网页和 iOS 粒子一模一样），
+  绕斜轴滚动、上下几圈滚得不一样快，几层剪切把壳「折」起来，带一点透视；10 秒一个循环，浓淡（gathering）照录屏拟合。
+  `pair-density.png` 是按录屏拟合的逐帧光学密度校正（120 帧，每帧 112²，拼成 1368 × 1140 一张），片元着色器里两帧插值、调每个粒子的光学增益。
+  所有运动都在顶点着色器里算，粒子缓冲是静态的。
+- **码**：每个粒子的不透明度 `1 − (1 − a)^(增益·M)`，即光学深度 × M。码平面是屏幕平面（y 朝下，和相机拍屏幕的行号同一手性，反过来是镜像、解不出来），
+  每秒转 0.05 弧度。眼睛看是云的浓淡有点起伏；相机几帧一平均，滚动的结构就抹平了。
+- 画在透明底上（输出预乘：颜色 over 混合、透明度累积），浅色深色页面都对。iOS 用 Metal（`pair_cloud_vertex` / `pair_cloud_fragment`），网页用 WebGL 1。
 
 ## 解码（扫描端）
 
@@ -50,19 +56,26 @@ Apple 的协议拿不到、也不该照搬，所以**编码、解码、协议全
    除以 `edgeK`（半高处 / 真半径）；最后用极分解去掉映射里的旋转——角度 0 永远对着画面的 x 方向，前后几帧对齐，才能取平均。
 3. 极坐标展开 24 × 192（半径 0.10–1.08），每张自己归一，加一个「半径」通道。
 4. **网络**（`PairNet`，约 3.2 万参数）：7 层 3×3 空洞卷积（角向首尾相接、径向补 0）+ ReLU，1×1 + tanh，输出每个点的 `tanh(D/0.35)`。在 Metal 上逐层跑，没有 Metal 时退回 CPU。
-5. 前后几帧的网络输出取平均；对所有 192 个旋转一起做**最小二乘解卷**（格子模板的 Gram 矩阵 + 0.001 的正则，先求逆）得到 160 个格子的软值。
-6. 导频相关度最高的 3 个旋转依次试 Viterbi → CRC；同一个结果连着两次才算数。
+5. **最近 8 帧的极坐标图取平均**再进网络（框已经去掉旋转，手机拿稳时前后几帧对齐；云在滚，平均一下滚动的结构抹平、码留下来）；
+   网络输出后，对所有 192 个旋转一起做**最小二乘解卷**（格子模板的 Gram 矩阵 + 0.001 的正则，先求逆）得到 160 个格子的软值。
+6. 导频相关度最高的 3 个旋转依次试 Viterbi → CRC；同一个结果出现两次才算数。
 
 ## 训练
 
 ```
-cd pairing/py
-python3 train.py 3000                     # 从头练（CPU 就够：约 1 秒一步）
-python3 train.py 2000 ../model/cpc1.pt    # 接着练（难度从 0.75 开始）
-python3 eval.py                           # 端到端解码率 + 截图解码
+cd pairing/frames                         # 先渲染训练用的背景（要 Playwright + Chromium）
+node render.mjs frames "{\"times\":$(python3 -c 'print([i*10/360 for i in range(360)])')}"
+python3 convert.py frames                 # → look-frames.npz
+cd ../py
+python3 train.py 4000                     # 从头练（CPU 就够：约 0.5 秒一步）
+SEV0=0.4 python3 train.py 4000 ../model/cpc1.pt   # 接着练（SEV0：起始难度）
+python3 eval.py ../model/cpc1.pt 40 ../frames/test/*   # 合成画面的解码率 + 浏览器真渲染的带码帧
 ```
 
-训练数据全是合成的：随机码 → ρ → 撒粒子 → 模拟相机（透视 / 倾斜 ≤ 40°、失焦、手抖、曝光、伽马、摩尔纹、反光、噪点）→ 找框 → 极坐标；目标是真位置上的 `tanh(D/0.35)`。
+训练数据：渲染好的云（码关掉）每帧存覆盖度 c 和每单位覆盖度的蓝色程度 k；随机码的 M 和显示时一样算（192²、8 位、双线性、任意转角），
+带码的蓝色程度 = `(1 − (1 − c)^M)·k`（光学深度 × M 时透过率 T 变成 T^M，和着色器严格一致）；连着 1–8 帧平均；
+再模拟相机（透视 / 倾斜 ≤ 40°、失焦、手抖、曝光、伽马、摩尔纹、反光、噪点）→ 找框 → 极坐标；目标是真位置上的 `tanh(D/0.35)`。
+找框的两个标定常数（`kRms`、`edgeK`）也在这团云上现量。
 
 ## 后端（check.cuven.us）
 
