@@ -27,11 +27,17 @@ final class CacheDissolveEngine {
         return max(0, now - start)
     }
 
-    /// 0…1：溶解前沿走到哪儿（进度胶囊上的数字跟着它走）
-    func progress(_ now: CFTimeInterval = CACurrentMediaTime()) -> Double {
-        let e = elapsed(now)
+    /// 0…1：卡上的溶解前沿走到哪儿（3.6 秒扫完整张卡）
+    func front(_ now: CFTimeInterval = CACurrentMediaTime()) -> Double {
         guard start != nil else { return 0 }
-        return Self.ease(min(1, max(0, (e - 0.35) / 3.6)))
+        return Self.ease(min(1, max(0, (elapsed(now) - 0.35) / 3.6)))
+    }
+
+    /// 0…1：进度胶囊上的数字。跟着整股光流走（光流快收完才到头），不跟卡的前沿 —— 卡化完了光还在往下流
+    func progress(_ now: CFTimeInterval = CACurrentMediaTime()) -> Double {
+        guard start != nil else { return 0 }
+        let x = min(1, max(0, (elapsed(now) - 0.35) / 5.1))
+        return 1 - pow(1 - x, 2.2)
     }
 
     static func ease(_ x: Double) -> Double { x < 0.5 ? 4 * x * x * x : 1 - pow(-2 * x + 2, 3) / 2 }
@@ -359,7 +365,7 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
         let tx = Float(engine.target.x), ty = Float(engine.target.y)
         let target = SIMD3<Float>((tx * 2 - 1) * halfVis * aspect, (1 - ty * 2) * halfVis, 0)
 
-        let front: Float = started ? Float(engine.progress(now)) * 1.18 - 0.09 : -0.2
+        let front: Float = started ? Float(engine.front(now)) * 1.18 - 0.09 : -0.2
         let fade: Float = started ? Float(1 - ramp(4.6, 5.9, Double(e))) : 1
         let light: Float = started ? Float(ramp(0.7, 2.3, Double(e)) * (1 - 0.92 * ramp(4.9, 6.2, Double(e)))) : 0
         let lightPulse: Float = reduce ? light * 0.8 : light
@@ -372,7 +378,7 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
             camera: SIMD4(Self.eye, 1),
             timing: SIMD4(t, dt, front, fade),
             target: SIMD4(target, 0.12),
-            screen: SIMD4(w, h, 0.6 * scale, lightPulse),        // 光线半宽（像素）：屏上约 1.2 点
+            screen: SIMD4(w, h, 0.45 * scale, lightPulse),       // 光线半宽（像素）：屏上约 0.9 点
             params: SIMD4(1.0, 1.6, 1.0, Float(count)),
             targetScreen: SIMD4(tx, ty, aspect, t),
             cardInfo: SIMD4(Self.halfW, Self.halfH, Self.halfT, reduce ? 1 : 0),

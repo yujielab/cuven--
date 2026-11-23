@@ -215,7 +215,7 @@ fragment float4 cd_line_fragment(CDLineOut in [[stage_in]]) {
     float along = smoothstep(-1.0, -0.1, in.local.y);
     float a = across * across * mix(0.3, 1.0, along);
     // 每一条都很淡：几十条叠在一缕上才是一根亮的光纤，缕与缕之间留黑
-    return float4(in.color * a * 0.03, 0.0);
+    return float4(in.color * a * 0.034, 0.0);
 }
 
 // MARK: 卡
@@ -306,7 +306,7 @@ fragment float4 cd_trail_fragment(CDFullOut in [[stage_in]],
     float2 adv = float2((uv.x - U.targetScreen.x) * 0.0045, -0.0038);
     float3 p = prev.sample(s, uv + adv).rgb * U.trail.x;
     float3 n = lines.sample(s, uv).rgb;
-    return float4(p + n * 0.22, 1.0);
+    return float4(p + n * 0.16, 1.0);
 }
 
 /// 辉光的输入：亮的部分（光线 + 拖尾 + 卡上那条溶解光带），1/4 分辨率
