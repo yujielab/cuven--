@@ -9,6 +9,8 @@ struct CuvenApp: App {
     @State private var welcome: Bool
     /// 隐私同意闸门（网页版 __privacyGate）：欢迎页退场 0.5 秒后、或刚登录完，没同意过就盖上
     @State private var privacy = false
+    /// 清除缓存动画的预览（UI 测试 / CI 截图用：-CuvenDemo YES -CuvenDissolvePreview YES 一打开就是那一屏，不清真的缓存）
+    @State private var dissolvePreview = DemoData.enabled && UserDefaults.standard.bool(forKey: "CuvenDissolvePreview")
 
     init() {
         // 播放走系统的「影视」音频会话：静音键不影响声音，画中画 / 锁屏后继续放
@@ -30,6 +32,9 @@ struct CuvenApp: App {
         WindowGroup {
             RootView()
                 .overlay { if privacy { PrivacyGateView { privacy = false } } }
+                .fullScreenCover(isPresented: $dissolvePreview) {
+                    CacheDissolveSheet(bytes: 1_240_000_000) { try? await Task.sleep(for: .seconds(1)) }
+                }
                 // 和网页版一样整屏盖在最上面（片库在底下照常加载）；退场是 0.45 秒的淡出
                 .overlay {
                     if welcome {

@@ -9023,9 +9023,11 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
        早于该机制建立的账户查不到映射 → 输邮箱一律"未找到"。这里在任意一次
        成功登录后顺手补写一次（每台设备每个组合只写一次），让老账户自愈。 */
     if (email && ls('cuven_emailmap_' + username) !== email) {
+      /* 写成功（2xx）才记「补过了」：STRICT_AUTH 下没带识别代码会被拒，下次登录再补 */
       try {
-        putEmailMap(email, username);
-        localStorage.setItem('cuven_emailmap_' + username, email);
+        putEmailMap(email, username).then(function (res) {
+          if (res && res.ok) { try { localStorage.setItem('cuven_emailmap_' + username, email); } catch (_) {} }
+        });
       } catch (_) {}
     }
     if (kind === 'login') notify('login_alert', username, method);
@@ -9158,41 +9160,95 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
 
   /* ══ 光学配对（web/pair.js，按需加载）══════════════════════════════
      这台设备开一团粒子云（check.cuven.us/pair/open）→ 已登录的 iPhone 扫到、面容 ID 批准 → /pair/wait 拿到账户
-     （后端批准时已经发过登录提醒，这里不再发）。过期了自动换一团；退回登录页就取消 */
-  var pairCtl = null;
+     （后端批准时已经发过登录提醒，这里不再发）。快过期自动换一团；退回登录页就取消。
+     开云的请求不等 pair.js：和下载脚本、建 WebGL 同时进行，开好的交给 CuvenPair.login({ opened })。
+     网页不要、也不存设备令牌（能批准别人登录的长期凭证，网页从来用不上）；批准时给的识别代码记下来，写账户档 / 邮箱映射要用 */
+  var pairCtl = null, pairGen = 0, pairJsP = null, pairCap = null, pairBroken = false;
+  var PAIR_NO_GL = '这个浏览器画不了粒子云：请使用账户密码登录';
+  try { localStorage.removeItem('cuven_pair_device'); } catch (_) {}   // 旧版存过的设备令牌：清掉
   function loadPairJs() {
     if (window.CuvenPair) return Promise.resolve();
-    return new Promise(function (ok, bad) {
+    return pairJsP || (pairJsP = new Promise(function (ok, bad) {
       var sc = document.createElement('script');
-      sc.src = '/pair.js'; sc.async = true; sc.onload = ok; sc.onerror = bad;
+      sc.src = '/pair.js'; sc.async = true; sc.onload = ok;
+      sc.onerror = function (e) { pairJsP = null; try { sc.remove(); } catch (_) {} bad(e); };
       document.head.appendChild(sc);
-    });
+    }));
   }
-  function stopPair() { if (pairCtl) { try { pairCtl.stop(); } catch (_) {} pairCtl = null; } }
+  /* 和 pair.js 的 deviceName 一样：批准的那台 iPhone 上显示是哪台设备 */
+  function pairDeviceName() {
+    var ua = navigator.userAgent, os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : /Android/.test(ua) ? 'Android' : '电脑';
+    var br = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : '浏览器';
+    return os + ' · ' + br;
+  }
+  /* /pair/* 的 POST：text/plain 免预检；回包带 _http、_at（收到的时刻，pair.js 拿它对钟）；15 秒超时 */
+  function pairPost(path, body) {
+    var ac = typeof AbortController !== 'undefined' ? new AbortController() : null, timer = 0;
+    var req = fetch(API + path, {
+      method: 'POST', headers: { 'content-type': 'text/plain' }, body: JSON.stringify(body || {}), signal: ac ? ac.signal : undefined
+    }).then(function (r) {
+      return r.json().catch(function () { return null; }).then(function (j) {
+        j = j && typeof j === 'object' ? j : {};
+        j._http = r.status; j._at = Date.now();
+        return j;
+      });
+    });
+    var cut = new Promise(function (_, bad) { timer = setTimeout(function () { if (ac) ac.abort(); bad(new Error('timeout')); }, 15000); });
+    return Promise.race([req, cut]).then(function (j) { clearTimeout(timer); return j; }, function (e) { clearTimeout(timer); throw e; });
+  }
+  /* 先开好的那一团用不上了（退出了 / 缓存里是旧版 pair.js / 画不了）：关掉 */
+  function pairDrop(opened) {
+    if (opened) opened.then(function (p) { if (p && p.ok && p.id) pairPost('/pair/cancel', { id: p.id, poll: p.poll }).catch(function () {}); }, function () {});
+  }
+  /* 代数 +1：还在路上的 startPair / 旧的回调都作废（只有最新的一次能登录） */
+  function stopPair() { pairGen++; if (pairCtl) { try { pairCtl.stop(); } catch (_) {} pairCtl = null; } }
   function startPair() {
     var stEl = $('cvlPairStatus');
+    stopPair();
+    var g = ++pairGen;
     go('pair', null);
+    if (pairBroken) { setStatus(stEl, PAIR_NO_GL); return; }
     setStatus(stEl, '正在准备…');
+    var opened = document.hidden ? null : pairPost('/pair/open', { device: pairDeviceName() });
     loadPairJs().then(function () {
-      if (st.pane !== 'pair') return;
-      pairCtl = window.CuvenPair.login({
-        api: API, canvas: $('cvlPairCanvas'), dark: false,
-        onStatus: function (t) { setStatus(stEl, t); },
+      if (g !== pairGen || st.pane !== 'pair') { pairDrop(opened); return; }
+      var P = window.CuvenPair;
+      if (!P.acceptsOpened) { pairDrop(opened); opened = null; }   // 缓存里还是旧版 pair.js：它自己开
+      pairCtl = P.login({
+        api: API, canvas: $('cvlPairCanvas'), opened: opened || undefined,
+        onStatus: function (t) { if (g === pairGen) setStatus(stEl, t); },
         onApproved: function (r) {
+          if (g !== pairGen) return;
           pairCtl = null;
-          try { if (r.device) localStorage.setItem('cuven_pair_device', r.device); } catch (_) {}
+          rememberCode(r.code);
           succeed(r.username, r.email || '', 'pair', 'pair');
         }
       });
-      if (pairCtl.cloud && !pairCtl.cloud.ok) setStatus(stEl, '这个浏览器画不了粒子云：请使用账户密码登录');
-    }).catch(function () { setStatus(stEl, '加载失败，请刷新再试', 'bad'); });
+      if (pairCtl && pairCtl.cloud && !pairCtl.cloud.ok) {
+        /* 画不了粒子云：不再配对，说明文字留着；这次打开往后都直接走账户密码 */
+        pairBroken = true;
+        try { pairCtl.stop(); } catch (_) {}
+        pairCtl = null;
+        setStatus(stEl, PAIR_NO_GL);
+      }
+    }).catch(function () {
+      pairDrop(opened);
+      if (g === pairGen) setStatus(stEl, '加载失败，请刷新再试', 'bad');
+    });
   }
   $('cvlPairBtn').addEventListener('click', function () { haptic(6); startPair(); });
   $('cvlPairPw').addEventListener('click', function () { haptic(6); stopPair(); go('signin', null); });
-  /* 画得了粒子云吗（WebGL）：画不了就直接用账户密码登录 */
+  /* 画得了粒子云吗（WebGL）：画不了就直接用账户密码登录。只探一次，探完把上下文还掉（浏览器同时活着的 WebGL 上下文有上限） */
   function pairCapable() {
-    try { var c = document.createElement('canvas'); return !!(c.getContext('webgl') || c.getContext('experimental-webgl')); }
-    catch (_) { return false; }
+    if (pairBroken) return false;
+    if (pairCap !== null) return pairCap;
+    try {
+      var c = document.createElement('canvas'), gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+      pairCap = !!gl;
+      var lose = gl && gl.getExtension('WEBGL_lose_context');
+      if (lose) lose.loseContext();
+    } catch (_) { pairCap = false; }
+    return pairCap;
   }
 
   /* ══ 事件 ══════════════════════════════════════════════════════ */
@@ -23126,7 +23182,7 @@ function setTVLogin(username) {
 function clearTVLogin() {
   window.__tvLoggedOut = true;
   try {
-    ['cuven_login','cuven_login_ts','cuven_username','cuven_email','cuven_avatar_cache_v1'].forEach(k => localStorage.removeItem(k));
+    ['cuven_login','cuven_login_ts','cuven_username','cuven_email','cuven_avatar_cache_v1','cuven_pair_device'].forEach(k => localStorage.removeItem(k));
     sessionStorage.removeItem('cuven_profile_v1');
   } catch (_) {}
 }

@@ -277,11 +277,14 @@ enum AccountAPI {
         return code
     }
 
-    static func putEmailMap(_ email: String, username: String) async {
+    /// 写「邮箱 → 用户名」对照。写成了（2xx）回 true：调用方这时才记「写过了」，没写成下次登录再写
+    @discardableResult
+    static func putEmailMap(_ email: String, username: String) async -> Bool {
         struct Map: Encodable { var username: String; var created_at: String }
         let e = email.trimmingCharacters(in: .whitespaces).lowercased()
-        _ = await send("PUT", "/file/" + component("email_\(e).json"),
-                       json: Map(username: username, created_at: ISO8601DateFormatter.cuven.string(from: Date())))
+        let (code, _) = await send("PUT", "/file/" + component("email_\(e).json"),
+                                   json: Map(username: username, created_at: ISO8601DateFormatter.cuven.string(from: Date())))
+        return (200..<300).contains(code)
     }
 
     struct CodeReply: Decodable {
@@ -458,11 +461,14 @@ final class AccountStore {
         // 光学配对的设备令牌只认它自己的账户：换了账户，上一个账户的令牌作废（不然扫码批准出去的是上一个账户）
         PairService.keepDevice(onlyFor: username)
         session = s
-        // 邮箱 → 用户名的映射只在注册 / 改邮箱时写过，老账户查不到：任意一次成功登录后补写一次（与网页版一致）
+        // 邮箱 → 用户名的映射只在注册 / 改邮箱时写过，老账户查不到：任意一次成功登录后补写一次（与网页版一致）。
+        // 写成了才记下来（以前先记：账号中心开了 STRICT_AUTH 时扫码登录那一次没带识别代码、401，之后就再也不补了）
         let mapKey = "cuven_emailmap_\(username)"
-        if !email.isEmpty, UserDefaults.standard.string(forKey: mapKey) != email.lowercased() {
-            Task { await AccountAPI.putEmailMap(email, username: username) }
-            UserDefaults.standard.set(email.lowercased(), forKey: mapKey)
+        let lower = email.lowercased()
+        if !email.isEmpty, UserDefaults.standard.string(forKey: mapKey) != lower {
+            Task {
+                if await AccountAPI.putEmailMap(email, username: username) { UserDefaults.standard.set(lower, forKey: mapKey) }
+            }
         }
         if alert { AccountAPI.notify("login_alert", username: username, method: method) }
         Task { await refreshAvatar() }
@@ -521,8 +527,8 @@ final class AccountStore {
         s.email = email
         persist(s)
         let name = s.username
-        UserDefaults.standard.set(email, forKey: "cuven_emailmap_\(name)")
-        Task { await AccountAPI.putEmailMap(email, username: name) }
+        // 邮箱映射写成功了才记「写过了」（失败的话下次登录再补）
+        Task { if await AccountAPI.putEmailMap(email, username: name) { UserDefaults.standard.set(email, forKey: "cuven_emailmap_\(name)") } }
     }
 
     /// 改了姓名：登录状态换成新姓名；本机的面容 ID 快速登录是旧姓名的，关掉（网页版：改名后旧的面容数据清除、要重新录入）；
@@ -537,8 +543,7 @@ final class AccountStore {
         UserDefaults.standard.removeObject(forKey: "cuven_emailmap_\(old)")
         let email = s.email
         if !email.isEmpty {
-            UserDefaults.standard.set(email, forKey: "cuven_emailmap_\(newName)")
-            Task { await AccountAPI.putEmailMap(email, username: newName) }
+            Task { if await AccountAPI.putEmailMap(email, username: newName) { UserDefaults.standard.set(email, forKey: "cuven_emailmap_\(newName)") } }
         }
         Task { await refreshAvatar() }
     }

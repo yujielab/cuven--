@@ -18,7 +18,7 @@ Windows 10 / 11（x64）上的原生 Cuven：WinUI 3 界面 + 自研的播放管
 - **免安装**：解压 `Cuven-Windows-x64.zip`，直接运行 `Cuven.exe`（自带 .NET 10 和 Windows App SDK 运行库，不用另装）。
 
 没有代码签名：第一次运行时 SmartScreen 会拦，点「更多信息 → 仍要运行」。片库缓存、设置、下载在 `%LOCALAPPDATA%\Cuven`
-（设备令牌用 DPAPI 加密，只有这个 Windows 账户能解开），日志在它下面的 `logs\`。
+（Windows 版不要也不存配对用的设备令牌：那是扫描端 iPhone 才用的），日志在它下面的 `logs\`。
 
 `main` 上的构建发布在 Release「windows-latest」；每次 CI 的包另外提交到 `refs/ci/windows/<分支>`：
 `git fetch origin refs/ci/windows/<分支> && git checkout FETCH_HEAD -- .`（大于 95 MB 的切成 `.partN`，`cat` 起来就是原文件）。

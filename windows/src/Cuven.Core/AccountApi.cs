@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace Cuven.Core;
 
-/// <summary>登录成功拿到的东西：用户名、邮箱（可能没有）、设备令牌（d1.…，长期）、识别代码（c1.…，5 分钟）</summary>
+/// <summary>登录成功拿到的东西：用户名、邮箱（可能没有）、设备令牌（d1.…；这台电脑不要，恒为 null）、识别代码（c1.…，5 分钟）</summary>
 public sealed record LoginResult(string Username, string Email, string? Device, string? Code, string Method);
 
 public enum LoginError { None, Wrong, NoAccount, NoPassword, Throttled, Offline, Server }
@@ -100,7 +100,8 @@ public static class AccountApi
     }
 
     /// <summary>
-    /// 账户密码登录：查账户 → 拿 salt / iter → 本机算 key → /session 核对（领设备令牌）。
+    /// 账户密码登录：查账户 → 拿 salt / iter → 本机算 key → /session 核对（拿识别代码）。
+    /// 不领设备令牌：它能批准别的设备登录，电脑上用不着、也不该留着。
     /// 旧版账号中心不认 key 时退回账户档里的摘要比对（和网页版、iOS 一致）
     /// </summary>
     public static async Task<LoginResult> PasswordLoginAsync(string username, string password, CancellationToken ct = default)
@@ -115,7 +116,7 @@ public static class AccountApi
         Http.Reply r;
         try
         {
-            r = await Http.PostAsync(U("/session"), new { username, key, device = true }, TimeSpan.FromSeconds(20), ct);
+            r = await Http.PostAsync(U("/session"), new { username, key }, TimeSpan.FromSeconds(20), ct);
         }
         catch (CuvenException)
         {
@@ -137,8 +138,7 @@ public static class AccountApi
         {
             var code = ok?.Str("code");
             Remember(code);
-            var device = ok?.Str("device");
-            return new LoginResult(username, acct.Email ?? "", device is { } t && t.StartsWith("d1.") ? t : null, code, "password");
+            return new LoginResult(username, acct.Email ?? "", null, code, "password");
         }
     }
 
@@ -170,77 +170,195 @@ public static class AccountApi
 
 /// <summary>
 /// 光学配对（要登录的这台电脑这一边）：/pair/open → 显示粒子云 → /pair/wait 长轮询 → iPhone 扫到、面容 ID 批准 → 拿到账户。
-/// 过期 / 作废了自动换一团；Stop 时 /pair/cancel
+/// 快到期还没人扫：先开好下一团换上，再关掉旧的；wait 回 open / approved 以外的（过期 / 取消 / 用过 / 不认识）→ 马上不画旧码，再开一团。
+/// 这台电脑不要设备令牌（open 不带 want_device、wait 不带 device）。Stop 时 /pair/cancel
 /// </summary>
 public sealed class PairLogin : IDisposable
 {
     public sealed record Opened(uint Id, uint Secret, string Poll, string Code, int Ttl);
 
     public event Action<Opened>? CodeChanged;          // 换了一团码（UI 线程外）
+    public event Action? CodeCleared;                  // 旧码作废了、新的还没到：别再画它（UI 线程外）
     public event Action<string>? StatusChanged;        // "" = 不写字
     public event Action<LoginResult>? Approved;
 
+    const int MaxWaitMs = 20_000;      // 服务端一次最多挂 20 秒
+    const int RotateMs = 8_000;        // 离到期不到 8 秒、还没人扫：换下一团
+    // wait 的客户端超时 = 挂的时间 + 这么多（服务端读写、网络往返）。20 + 6 秒再隔半秒重试：
+    // 回包悄悄丢了（NAT 掐了连接）的那次批准，重试落在服务端 30 秒的重发窗口里
+    const int SlackMs = 6_000;
+    const int RedeliverMs = 35_000;    // 过期以后一直连不上：再试这么久（批准了的回包丢了，服务端 30 秒内照样再给），之后另开一团
+
     readonly CancellationTokenSource _cts = new();
     readonly string _device;
-    Opened? _cur;
-    public PairLogin(string deviceName) { _device = deviceName; }
+    readonly string _base;
+    Opened? _cur;                      // 正显示的那一团（Stop 时要关掉它）；Interlocked 读写
+    /// <param name="baseUrl">只给测试用（本机假的账号中心）；默认 check.cuven.us</param>
+    public PairLogin(string deviceName, string? baseUrl = null) { _device = deviceName; _base = baseUrl ?? AccountApi.Base; }
 
-    public void Start() => _ = Task.Run(LoopAsync);
+    public void Start()
+    {
+        _ = Task.Run(PairCodec.Prepare);   // 码纹理的稀疏基底和 /pair/open 的往返一起算
+        _ = Task.Run(LoopAsync);
+    }
+
+    static long Now => Environment.TickCount64;
+
+    /// <summary>开出来的一团 + 本机（单调时钟）上的到期时刻：服务端的 exp 按开出来那一刻的时差换算，不怕电脑的钟不准</summary>
+    sealed class Live
+    {
+        public required Opened O { get; init; }
+        public long ExpAt;          // Environment.TickCount64
+        public long? Offset;        // 服务端毫秒 → 本机；旧版不回 exp 时为 null（只按 ttl 算）
+        public bool Peeked;         // 上一次 wait 说有人扫到了（服务端已经延了期，别换掉它）
+        public bool RotateTried;    // 提前换过一次（没开出来就等它过期）
+        public void Update(long? serverExp) { if (Offset is { } off && serverExp is > 0 and { } e) ExpAt = e + off; }
+    }
 
     async Task LoopAsync()
     {
         var ct = _cts.Token;
-        while (!ct.IsCancellationRequested)
+        try
         {
-            StatusChanged?.Invoke("正在准备…");
-            Opened? o = null;
-            try
-            {
-                var r = await Http.PostAsync(AccountApi.Base + "/pair/open", new { device = _device }, TimeSpan.FromSeconds(15), ct);
-                using var d = r.Json();
-                var e = d?.RootElement;
-                if (e?.Bool("ok") == true && e.Value.UInt("id") is { } id && e.Value.UInt("secret") is { } sec)
-                    o = new Opened(id, sec, e.Value.Str("poll") ?? "", e.Value.Str("code") ?? "", e.Value.Int("ttl") ?? 120);
-                else StatusChanged?.Invoke(e?.Str("message") ?? "暂时连不上，稍后再试");
-            }
-            catch (OperationCanceledException) { return; }
-            catch { StatusChanged?.Invoke("暂时连不上，稍后再试"); }
-            if (o is null) { await Delay(5000, ct); continue; }
-            _cur = o;
-            CodeChanged?.Invoke(o);
-            StatusChanged?.Invoke("");
-            // 长轮询：open → 接着等；approved → 登录；其他（过期 / 作废 / 取消）→ 换一团
             while (!ct.IsCancellationRequested)
             {
-                JsonDocument? d = null;
-                try
-                {
-                    var r = await Http.PostAsync(AccountApi.Base + "/pair/wait", new { id = o.Id, poll = o.Poll }, TimeSpan.FromSeconds(35), ct);
-                    d = r.Json();
-                }
-                catch (OperationCanceledException) { return; }
-                catch { await Delay(2000, ct); continue; }
-                using (d)
-                {
-                    var e = d?.RootElement;
-                    var st = e?.Str("status");
-                    if (st == "approved" && e is { } ok)
-                    {
-                        _cur = null;
-                        var code = ok.Str("code");
-                        AccountApi.Remember(code);
-                        var dev = ok.Str("device");
-                        Approved?.Invoke(new LoginResult(ok.Str("username") ?? "", ok.Str("email") ?? "",
-                            dev is { } t && t.StartsWith("d1.") ? t : null, code, "pair"));
-                        return;
-                    }
-                    if (st == "open") continue;
-                    if (d is null) { await Delay(2000, ct); continue; }
-                    break;
-                }
+                StatusChanged?.Invoke("正在准备…");
+                var l = await OpenAsync(false, ct);
+                if (l is null) { await Delay(5000, ct); continue; }
+                if (!Show(l)) return;
+                if (await WatchAsync(l, ct)) return;
             }
         }
+        catch (OperationCanceledException) { }
     }
+
+    /// <summary>开一团；quiet = 提前换的那次，失败不写字</summary>
+    async Task<Live?> OpenAsync(bool quiet, CancellationToken ct)
+    {
+        try
+        {
+            var r = await Http.PostAsync(_base + "/pair/open", new { device = _device }, TimeSpan.FromSeconds(15), ct);
+            var at = Now;
+            using var d = r.Json();
+            var e = d?.RootElement;
+            if (e?.Bool("ok") == true && e.Value.UInt("id") is { } id && e.Value.UInt("secret") is { } sec && e.Value.Str("poll") is { Length: > 0 } poll)
+            {
+                var ttl = Math.Clamp(e.Value.Int("ttl") ?? 120, 10, 600);
+                var l = new Live { O = new Opened(id, sec, poll, e.Value.Str("code") ?? "", ttl), ExpAt = at + ttl * 1000L };
+                if (e.Value.Long("exp") is > 0 and { } exp) l.Offset = l.ExpAt - exp;
+                return l;
+            }
+            if (!quiet) StatusChanged?.Invoke(e?.Str("message") ?? "暂时连不上，稍后再试");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { if (!quiet) StatusChanged?.Invoke("暂时连不上，稍后再试"); }
+        return null;
+    }
+
+    /// <summary>换上这一团；已经停了就顺手关掉它 → false</summary>
+    bool Show(Live l)
+    {
+        Interlocked.Exchange(ref _cur, l.O);
+        if (_cts.IsCancellationRequested)
+        {
+            if (Interlocked.Exchange(ref _cur, null) is { } o) Cancel(o);
+            return false;
+        }
+        CodeChanged?.Invoke(l.O);
+        StatusChanged?.Invoke("");
+        return true;
+    }
+
+    /// <summary>盯着一团：登录了 / 停了 → true；作废了 → false（外面再开一团）</summary>
+    async Task<bool> WatchAsync(Live l, CancellationToken ct)
+    {
+        bool cleared = false;
+        while (!ct.IsCancellationRequested)
+        {
+            var left = l.ExpAt - Now;
+            // 快到期、还没人扫：先开好下一团换上，再关掉旧的（只试一次；开不出来就等旧的过期）
+            if (!l.Peeked && !l.RotateTried && left < RotateMs)
+            {
+                l.RotateTried = true;
+                var n = await OpenAsync(true, ct);
+                if (n is not null)
+                {
+                    var old = l.O;
+                    if (!Show(n)) { Cancel(old); return true; }
+                    Cancel(old);
+                    l = n;
+                    cleared = false;
+                    continue;
+                }
+                left = l.ExpAt - Now;
+            }
+            // 还没人扫：只挂到该换的时候；扫过了（或者换不成）：挂满，让服务端说什么时候过期
+            int waitMs = l.Peeked || l.RotateTried ? MaxWaitMs : (int)Math.Clamp(left - RotateMs, 0, MaxWaitMs);
+            Http.Reply r;
+            try
+            {
+                r = await Http.PostAsync(_base + "/pair/wait", new { id = l.O.Id, poll = l.O.Poll, wait = waitMs },
+                    TimeSpan.FromMilliseconds(waitMs + SlackMs), ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return true; }
+            catch
+            {
+                if (await Retry()) continue;
+                return false;
+            }
+            using var d = r.Json();
+            var e = d?.RootElement;
+            var st = e?.Str("status");
+            if (st == "approved" && e is { } ok && ok.Str("username") is { Length: > 0 } user)
+            {
+                Interlocked.CompareExchange(ref _cur, null, l.O);
+                if (ct.IsCancellationRequested) return true;     // 已经停了（切到密码页 / 关掉了）：不登录
+                var code = ok.Str("code");
+                AccountApi.Remember(code);
+                // 设备令牌不收：没要，服务端也不会给
+                Approved?.Invoke(new LoginResult(user, ok.Str("email") ?? "", null, code, "pair"));
+                return true;
+            }
+            if (st == "open" && e is { } op)
+            {
+                l.Update(op.Long("exp"));
+                l.Peeked = op.Bool("peeked") == true;
+                continue;
+            }
+            // 没有 status 的 5xx / 429 / 不是 JSON：算网络问题，同一团接着问
+            if (st is null && (d is null || r.Status == 429 || r.Status >= 500))
+            {
+                if (await Retry()) continue;
+                return false;
+            }
+            // 过期 / 取消 / 用过 / 作废 / 不认识（404）：马上不画旧码，外面再开一团
+            Interlocked.CompareExchange(ref _cur, null, l.O);
+            CodeCleared?.Invoke();
+            return false;
+        }
+        return true;
+
+        // 连不上 / 超时：同一团接着问（批准了的回包丢了，服务端 30 秒内照样再给）。
+        // 过了期就先别画它；过期太久还连不上 → false（另开一团）
+        async Task<bool> Retry()
+        {
+            var now = Now;
+            if (now > l.ExpAt + RedeliverMs)
+            {
+                Interlocked.CompareExchange(ref _cur, null, l.O);
+                if (!cleared) CodeCleared?.Invoke();
+                return false;
+            }
+            if (now > l.ExpAt && !cleared) { cleared = true; CodeCleared?.Invoke(); }
+            await Delay(500, ct);
+            return true;
+        }
+    }
+
+    void Cancel(Opened o) => _ = Task.Run(async () =>
+    {
+        try { await Http.PostAsync(_base + "/pair/cancel", new { id = o.Id, poll = o.Poll }, TimeSpan.FromSeconds(10)); } catch { }
+    });
 
     static async Task Delay(int ms, CancellationToken ct)
     {
@@ -251,11 +369,7 @@ public sealed class PairLogin : IDisposable
     {
         if (_cts.IsCancellationRequested) return;
         _cts.Cancel();
-        if (_cur is { } o)
-            _ = Task.Run(async () =>
-            {
-                try { await Http.PostAsync(AccountApi.Base + "/pair/cancel", new { id = o.Id, poll = o.Poll }, TimeSpan.FromSeconds(10)); } catch { }
-            });
+        if (Interlocked.Exchange(ref _cur, null) is { } o) Cancel(o);
     }
 
     public void Dispose() => Stop();

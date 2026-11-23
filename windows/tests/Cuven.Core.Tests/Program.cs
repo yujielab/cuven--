@@ -43,6 +43,168 @@ foreach (var v in vecs.EnumerateArray())
     Check(tex.Length == web.Length && maxd <= 1 && diff < 20, $"码纹理和网页版 pair.js 一致（{diff} 个像素差 1）");
 }
 
+Console.WriteLine("码纹理快路（稀疏基底）和参考实现一致");
+{
+    int g = spec.CodeGrid;
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    var fresh = PairCodec.BuildBasis(spec, g);   // 上面的码纹理已经用过缓存的那份：另算一份量时间、对一下
+    var buildMs = sw.Elapsed.TotalMilliseconds;
+    var basis = PairCodec.Basis;
+    Check(fresh.NonZeros == basis.NonZeros && fresh.Start.SequenceEqual(basis.Start) && fresh.Weight.SequenceEqual(basis.Weight) && fresh.E.SequenceEqual(basis.E),
+        "重算一遍的基底和缓存的逐项相同");
+    bool shape = basis.G == g && basis.E.Length == g * g && basis.Start.Length == g * g + 1 && basis.Start[^1] == basis.NonZeros
+        && basis.Weight.All(w => w > PairBasis.Cutoff) && basis.Cell.All(c => c < spec.Cells.Length);
+    Check(shape && basis.NonZeros > g * g && basis.NonZeros < g * g * 20,
+        $"基底 {basis.NonZeros} 个非零（每像素 {basis.NonZeros / (double)(g * g):F1} 个），算了 {buildMs:F0} ms");
+    Check(ReferenceEquals(basis, PairCodec.Basis), "基底只算一次");
+    var rng = new Random(7);
+    var codes = vecs.EnumerateArray().Select(v => (v.GetProperty("id").GetUInt32(), v.GetProperty("secret").GetUInt32())).Take(2)
+        .Concat(Enumerable.Range(0, 3).Select(_ => ((uint)rng.Next(1, 0xFFFFFF), (uint)rng.NextInt64(0, 1L << 32))))
+        .Append((0xFFFFFFu, 0xFFFFFFFFu)).ToArray();
+    double fastMs = 0;
+    foreach (var (id, sec) in codes)
+    {
+        var b = PairCodec.CellSigns(id, sec);
+        var dense = PairCodec.ModulationGrid(b, g);
+        sw.Restart();
+        var fast = PairCodec.ModulationGridFast(b);
+        var texFast = PairCodec.CodeTexture(id, sec);
+        fastMs = Math.Max(fastMs, sw.Elapsed.TotalMilliseconds);
+        var texDense = PairCodec.CodeTextureDense(id, sec);
+        double worst = 0;
+        for (int i = 0; i < dense.Length; i++) worst = Math.Max(worst, Math.Abs(dense[i] - fast[i]));
+        int diff = 0, maxd = 0;
+        for (int i = 0; i < texFast.Length; i++) { var d = Math.Abs(texFast[i] - texDense[i]); if (d > 0) diff++; maxd = Math.Max(maxd, d); }
+        Check(worst < 1e-4 && maxd <= 1 && diff <= 3, $"码 {id}/{sec}：M 最大差 {worst:E1}，8 位纹理 {diff} 个像素差 1");
+    }
+    Check(fastMs < 200, $"快路一团码 {fastMs:F1} ms（最慢的一次）");
+    var neutral = PairCodec.NeutralTexture();
+    Check(neutral.Length == g * g && neutral.All(x => x == neutral[0]) && Math.Abs(neutral[0] / 255.0 * spec.CodeScale - 1) < 1e-9,
+        $"不带码的纹理：处处 M = 1（{neutral[0]}）");
+}
+
+Console.WriteLine("设备令牌：这台电脑不存");
+DeviceTokenChecks();
+
+[System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+void DeviceTokenChecks()
+{
+    // 旧版留下的 device.bin：一启动（第一次用 Settings）就删掉
+    var bin = Path.Combine(Storage.Root, "device.bin");
+    File.WriteAllText(bin, "d1.old");
+    var st = Settings.Shared;
+    Check(!File.Exists(bin) && st.DeviceToken is null, "启动时删掉旧的 device.bin");
+    File.WriteAllText(bin, "d1.other-account");
+    st.SignIn(new LoginResult("u1", "", "d1.new", "c1.x", "pair"));
+    Check(!File.Exists(bin) && st.DeviceToken is null && st.Username == "u1", "登录不存设备令牌、也不留上一个账户的");
+    st.SignOut();
+}
+
+Console.WriteLine("配对显示端（本机假账号中心）：提前换码、作废就不画、批准登录、不要设备令牌");
+await PairLoopChecks();
+
+async Task PairLoopChecks()
+{
+    int port;
+    { var tl = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0); tl.Start(); port = ((System.Net.IPEndPoint)tl.LocalEndpoint).Port; tl.Stop(); }
+    var baseUrl = $"http://127.0.0.1:{port}";
+    using var hl = new System.Net.HttpListener();
+    hl.Prefixes.Add(baseUrl + "/");
+    hl.Start();
+    var log = new System.Collections.Concurrent.ConcurrentQueue<(string path, JsonElement body)>();
+    long serverNow() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 3_600_000;   // 服务端的钟比本机快一小时：只认 ttl / 时差
+    var exps = new System.Collections.Concurrent.ConcurrentDictionary<uint, long>();
+    uint nextId = 0;
+    using var stop = new CancellationTokenSource();
+    var server = Task.Run(async () =>
+    {
+        while (!stop.IsCancellationRequested)
+        {
+            System.Net.HttpListenerContext cx;
+            try { cx = await hl.GetContextAsync(); } catch { return; }
+            _ = Task.Run(async () =>
+            {
+                using var sr = new StreamReader(cx.Request.InputStream);
+                var body = JsonDocument.Parse(await sr.ReadToEndAsync()).RootElement.Clone();
+                var path = cx.Request.Url!.AbsolutePath;
+                log.Enqueue((path, body));
+                object reply;
+                if (path == "/pair/open")
+                {
+                    var id = Interlocked.Increment(ref nextId);
+                    var exp = serverNow() + 10_000;
+                    exps[id] = exp;
+                    reply = new { ok = true, id, secret = 1000 + id, poll = "p" + id, code = "", ttl = 10, exp };
+                }
+                else if (path == "/pair/wait")
+                {
+                    var id = body.GetProperty("id").GetUInt32();
+                    if (id == 1)
+                    {
+                        // 第一团：按 wait 挂着，一直没人扫（客户端该在到期前 8 秒自己换掉）
+                        var w = Math.Clamp(body.GetProperty("wait").GetInt32(), 0, 20_000);
+                        await Task.Delay(Math.Min(w, 3000));
+                        reply = new { ok = true, status = "open", exp = exps[1], peeked = false };
+                    }
+                    else if (id == 2) reply = new { ok = true, status = "expired" };
+                    else if (id >= 4) { await Task.Delay(800); reply = new { ok = true, status = "approved", username = "late", code = "c1.late" }; }
+                    else reply = new { ok = true, status = "approved", username = "u3", email = "u3@example.com", code = "c1.test", device = "d1.should-not-keep" };
+                }
+                else reply = new { ok = true };
+                var bytes = JsonSerializer.SerializeToUtf8Bytes(reply);
+                cx.Response.ContentType = "application/json";
+                cx.Response.ContentLength64 = bytes.Length;
+                await cx.Response.OutputStream.WriteAsync(bytes);
+                cx.Response.Close();
+            });
+        }
+    });
+
+    var events = new System.Collections.Concurrent.ConcurrentQueue<string>();
+    var done = new TaskCompletionSource<LoginResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var pl = new PairLogin("Windows · TEST", baseUrl);
+    pl.CodeChanged += o => events.Enqueue("code " + o.Id);
+    pl.CodeCleared += () => events.Enqueue("clear");
+    pl.Approved += r => { events.Enqueue("approved " + r.Username); done.TrySetResult(r); };
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    pl.Start();
+    var finished = await Task.WhenAny(done.Task, Task.Delay(15_000)) == done.Task;
+    var took = sw.Elapsed.TotalSeconds;
+    await Task.Delay(300);   // 等 cancel 发完
+    pl.Stop();
+    var ev = string.Join(", ", events);
+    Check(finished && ev == "code 1, code 2, clear, code 3, approved u3", $"事件顺序：{ev}（{took:F1} 秒）");
+    var cancels = log.Where(x => x.path == "/pair/cancel").Select(x => x.body.GetProperty("id").GetUInt32()).ToArray();
+    Check(cancels.SequenceEqual(new[] { 1u }), $"换下来的第一团发了 /pair/cancel（{string.Join(",", cancels)}）");
+    // 第一团 ttl 10 秒：大约 2 秒时（到期前 8 秒）换掉，而不是等它过期
+    var firstWaits = log.Where(x => x.path == "/pair/wait" && x.body.GetProperty("id").GetUInt32() == 1).Select(x => x.body.GetProperty("wait").GetInt32()).ToArray();
+    Check(firstWaits.Length >= 1 && firstWaits[0] is > 1000 and <= 2100 && took < 6, $"到期前 8 秒换码（第一次 wait 挂 {string.Join("/", firstWaits)} ms）");
+    var opens = log.Where(x => x.path == "/pair/open").Select(x => x.body).ToArray();
+    var waits = log.Where(x => x.path == "/pair/wait").Select(x => x.body).ToArray();
+    Check(opens.Length == 3 && opens.All(b => !b.TryGetProperty("want_device", out _)) && waits.All(b => !b.TryGetProperty("device", out _)),
+        "open 不带 want_device、wait 不带 device");
+    Check(waits.All(b => b.GetProperty("wait").GetInt32() is >= 0 and <= 20_000), "wait 都在 0–20000 ms 之间");
+    Check(finished && done.Task.Result is { Device: null, Code: "c1.test", Method: "pair", Email: "u3@example.com" }, "批准：拿到识别代码，设备令牌不收");
+
+    // wait 挂着的时候 Stop（切到密码页）：那一团发 /pair/cancel，之后回来的批准不算
+    var late = new PairLogin("Windows · TEST", baseUrl);
+    bool lateApproved = false;
+    var shown = new TaskCompletionSource<uint>(TaskCreationOptions.RunContinuationsAsynchronously);
+    late.CodeChanged += o => shown.TrySetResult(o.Id);
+    late.Approved += _ => lateApproved = true;
+    late.Start();
+    var lateId = await Task.WhenAny(shown.Task, Task.Delay(5000)) == shown.Task ? shown.Task.Result : 0u;
+    await Task.Delay(200);
+    late.Stop();
+    await Task.Delay(1500);
+    var lateCancels = log.Where(x => x.path == "/pair/cancel").Select(x => x.body.GetProperty("id").GetUInt32()).ToArray();
+    Check(lateId == 4 && !lateApproved && lateCancels.Contains(4u), "Stop 时关掉正显示的那一团，之后回来的批准不登录");
+
+    stop.Cancel();
+    hl.Stop();
+    try { await server; } catch { }
+}
+
 Console.WriteLine("口令 v3（PBKDF2-SHA256，和网页版 keyOf 一致）");
 {
     var k = PasswordKey.Derive("password", PasswordKey.B64u("salt"u8), 1);
