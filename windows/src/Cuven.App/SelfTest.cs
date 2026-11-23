@@ -100,17 +100,28 @@ static class SelfTest
             for (int i = 0; i < 40 && LibraryStore.Shared.Movies.Count == 0; i++) await Task.Delay(500);
             report.Add($"片库：{LibraryStore.Shared.Movies.Count} 部电影，{LibraryStore.Shared.Series.Count} 季剧集");
             await Shot("2-home", 6);
-            Shell.Current?.Root("movies");
-            await Shot("3-movies", 4);
+            Shell.Current?.Root("library");
+            await Shot("3-library", 5);
             if (LibraryStore.Shared.Movies.FirstOrDefault(m => !string.IsNullOrEmpty(m.Meta.Backdrop)) is { } mv)
             {
                 Nav.Open(mv);
                 await Shot("4-detail", 6);
+                (Shell.CurrentView as DetailView)?.ScrollToInfo();
+                await Shot("4b-detail-info", 3);
             }
             if (LibraryStore.Shared.Series.FirstOrDefault() is { } se)
             {
                 Nav.Open(se);
                 await Shot("5-series", 6);
+            }
+            // 搜索：导航变成搜索框；先是「最近添加」，再搜片库里第一部的片名前两个字
+            Shell.Current?.Root("home");
+            Shell.Current?.OpenSearch();
+            await Shot("9-search", 3);
+            if (LibraryStore.Shared.Movies.FirstOrDefault()?.Title is { Length: >= 2 } t0)
+            {
+                Shell.Current?.SearchFor(t0[..2]);
+                await Shot("9b-search-results", 4);
             }
             Shell.Current?.Root("requests");
             await Shot("6-requests", 5);

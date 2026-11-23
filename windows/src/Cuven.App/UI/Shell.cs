@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Windows.System;
 
 namespace Cuven.App.UI;
@@ -21,15 +22,12 @@ public abstract partial class View : Grid
     public virtual void Refresh() { }
 }
 
-/// <summary>
-/// 内容的左边距跟着侧边栏走（侧边栏浮在内容上：大图、海报从它下面过去，字和第一张卡从它右边开始）。
-/// Inset.Track(元素, 左边距 → 设置) 登记一下，侧边栏收起 / 展开时自动改
-/// </summary>
+/// <summary>页面左右的留白（和网页版一样：1440 宽时 72 像素，窄了收一点）</summary>
 static class Inset
 {
-    public static double Left => Shell.Current?.ContentLeft ?? 32;
-    public const double Top = 64;
-    public const double Right = 36;
+    public static double Left => Shell.Current?.ContentLeft ?? 64;
+    public const double Top = 72;
+    public static double Right => Left;
     public static event Action? Changed;
     public static void Raise() => Changed?.Invoke();
 
@@ -44,124 +42,72 @@ static class Inset
 }
 
 /// <summary>
-/// 主界面（Mac 风格）：内容铺满整个窗口；左边一块浮着的磨砂玻璃侧边栏（红黄绿三个按钮、搜索、分组、选中的那块玻璃会滑、底下是账户）；
-/// 顶上一枚玻璃胶囊（后退 / 前进）。两指在触控板上往右滑 = 后退
+/// 主界面（照网页版 tv.cuven.us）：纯黑的底，内容铺满窗口；底下正中浮着一条磨砂玻璃的导航（头像 · 主页 · 资料库 · 请求 · 下载），
+/// 右边单独一颗搜索圆钮；进了详情页左上角一颗磨砂圆钮返回。红黄绿留在左上角（窗口按钮）
 /// </summary>
 public sealed partial class Shell : Grid, IDisposable
 {
     public static Shell? Current { get; private set; }
-    const double SideWidth = 232, SideMargin = 10;
+    /// <summary>现在显示的那一页</summary>
+    public static View? CurrentView => Current is { _stack.Count: > 0 } c ? c._stack.Peek() : null;
     readonly ContentPresenter _host = new();
-    readonly Glass _side = new(18, GlassKind.Regular) { Width = SideWidth, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(SideMargin) };
-    readonly Grid _list = new();
-    readonly StackPanel _items = new() { Spacing = 2 };
-    readonly Glass _pill = new(9, GlassKind.Selection) { Height = 34, VerticalAlignment = VerticalAlignment.Top, IsHitTestVisible = false };
-    readonly Dictionary<string, SidebarItem> _byTag = new();
-    readonly TextBox _search = new() { PlaceholderText = "搜索", BorderThickness = new Thickness(0), Background = Mac.Clear, FontSize = 13, VerticalAlignment = VerticalAlignment.Center, Padding = new Thickness(4, 5, 4, 5) };
-    readonly StackPanel _toolbar = new() { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Top, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
-    readonly MacButton _back, _fwd, _toggleOpen, _toggleClose;
+    readonly Dock _dock;
+    readonly MacButton _back;
     readonly Stack<View> _stack = new();
     readonly Stack<View> _forward = new();
     readonly DispatcherQueueTimerWrapper _libTimer;
-    readonly TextBlock _userName = Mac.Text("", 13, FontWeights.SemiBold);
-    readonly PersonPicture _avatar = new() { Width = 30, Height = 30 };
-    string _selected = "home";
-    bool _sideVisible = true, _userHid;
     double _swipe;
     long _swipeAt;
+    double _left = 64;
+    Microsoft.UI.Dispatching.DispatcherQueueTimer? _searchTimer;
+    string _pendingQuery = "";
 
-    public double ContentLeft => _sideVisible ? SideMargin + SideWidth + 26 : 32;
-    public bool SidebarVisible => _sideVisible;
+    public double ContentLeft => _left;
 
     public Shell()
     {
         Current = this;
-        Background = Mac.Clear;   // 每一页自己定底色：大图页实色，列表页半透明（透出窗口后面的磨砂）
+        Background = Mac.CanvasBrush;
         Children.Add(_host);
 
-        // ── 侧边栏 ──
-        var col = U.Rows("52", "auto", "*", "auto");
-        _toggleClose = MacButton.Round("", () => SetSidebar(false, true), "隐藏边栏（Ctrl+Alt+S）", 28, 13, MacButton.Style.Plain);
-        _toggleClose.HorizontalAlignment = HorizontalAlignment.Right;
-        _toggleClose.VerticalAlignment = VerticalAlignment.Center;
-        _toggleClose.Margin = new Thickness(0, 0, 10, 0);
-        col.Children.Add(_toggleClose.At(0));
-        // 搜索：一枚凹进去的小胶囊
-        var searchBox = new Border
+        _dock = new Dock(tag => { if (tag == "search") OpenSearch(); else Root(tag); });
+        _dock.QueryChanged += q =>
         {
-            CornerRadius = new CornerRadius(9), Background = new SolidColorBrush(Windows.UI.Color.FromArgb(22, 255, 255, 255)),
-            Margin = new Thickness(12, 0, 12, 10), Height = 32,
+            _searchTimer ??= DispatcherQueue.CreateTimer().With(t =>
+            {
+                t.Interval = TimeSpan.FromMilliseconds(160);
+                t.IsRepeating = false;
+                t.Tick += (_, _) => { if (_stack.Count > 0 && _stack.Peek() is SearchView sv) sv.Run(_pendingQuery); };
+            });
+            _pendingQuery = q;
+            _searchTimer.Stop();
+            _searchTimer.Start();
         };
-        foreach (var k in new[] { "TextControlBackground", "TextControlBackgroundPointerOver", "TextControlBackgroundFocused", "TextControlBorderBrush", "TextControlBorderBrushPointerOver", "TextControlBorderBrushFocused" })
-            _search.Resources[k] = Mac.Clear;
-        var sg = U.Cols("28", "*");
-        sg.Children.Add(U.Icon("", 13).With(i => { i.Foreground = Mac.Secondary; i.HorizontalAlignment = HorizontalAlignment.Center; }).At(0, 0));
-        sg.Children.Add(_search.At(0, 1));
-        searchBox.Child = sg;
-        _search.KeyDown += (_, e) =>
+        _dock.Submitted += q =>
         {
-            if (e.Key == VirtualKey.Enter && _search.Text.Trim().Length > 0) { e.Handled = true; Go(new SearchView(_search.Text.Trim())); }
-            if (e.Key == VirtualKey.Escape) { _search.Text = ""; Focus(FocusState.Programmatic); }
+            if (_stack.Count == 0 || _stack.Peek() is not SearchView sv) return;
+            sv.Run(q);
+            if (q.Trim().Length > 0) SearchHistory.Add(q.Trim());
         };
-        col.Children.Add(searchBox.At(1));
+        _dock.Cancelled += CloseSearch;
+        Children.Add(_dock);
 
-        Section("Cuven");
-        Item("home", "首页", "");
-        Item("movies", "电影", "");
-        Item("series", "剧集", "");
-        Section("我的");
-        Item("requests", "请求", "");
-        Item("downloads", "下载", "");
-        _list.Children.Add(_pill);
-        _list.Children.Add(_items);
-        _list.Margin = new Thickness(10, 0, 10, 0);
-        col.Children.Add(new ScrollViewer { Content = _list, HorizontalScrollMode = ScrollMode.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Hidden }.At(2));
+        // 左上角（红黄绿右边）：返回
+        _back = MacButton.Round("", () => Back(), "返回（Esc）", 40, 15);
+        _back.HorizontalAlignment = HorizontalAlignment.Left;
+        _back.VerticalAlignment = VerticalAlignment.Top;
+        _back.Margin = new Thickness(92, 12, 0, 0);
+        _back.Visibility = Visibility.Collapsed;
+        Children.Add(_back);
 
-        // 底下：账户
-        var acct = U.Cols("auto", "*", "auto");
-        acct.ColumnSpacing = 10;
-        acct.Padding = new Thickness(10, 8, 10, 8);
-        acct.CornerRadius = new CornerRadius(10);
-        acct.Background = Mac.Clear;
-        _avatar.DisplayName = Settings.Shared.Username ?? "";
-        _userName.Text = Settings.Shared.Username ?? "";
-        acct.Children.Add(_avatar.At(0, 0));
-        acct.Children.Add(U.V(0, _userName, Mac.Text("账户与设置", 11, null, Mac.Tertiary)).With(v => v.VerticalAlignment = VerticalAlignment.Center).At(0, 1));
-        acct.Children.Add(U.Icon("", 11).With(i => { i.Foreground = Mac.Tertiary; i.VerticalAlignment = VerticalAlignment.Center; }).At(0, 2));
-        acct.PointerEntered += (_, _) => acct.Background = Mac.Hover;
-        acct.PointerExited += (_, _) => acct.Background = Mac.Clear;
-        acct.Tapped += (_, _) => Root("account");
-        var footer = new Border { BorderBrush = Mac.Separator, BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(6, 6, 6, 8), Child = acct };
-        col.Children.Add(footer.At(3));
-        _side.Content = col;
-        Children.Add(_side);
-        Mac.Shadow(_side, _host, 28);
-        _side.TranslationTransition = new Vector3Transition { Duration = TimeSpan.FromMilliseconds(320) };
-        _side.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(220) };
-
-        // ── 顶上的玻璃胶囊：后退 / 前进；边栏藏起来时多一个「显示边栏」 ──
-        _toggleOpen = MacButton.Round("", () => SetSidebar(true, true), "显示边栏（Ctrl+Alt+S）", 34, 14);
-        _toggleOpen.Visibility = Visibility.Collapsed;
-        _back = new MacButton(MacButton.Style.Plain, U.Icon("", 13).With(i => i.Foreground = Mac.Label), 30, "后退（Ctrl+[）");
-        _fwd = new MacButton(MacButton.Style.Plain, U.Icon("", 13).With(i => i.Foreground = Mac.Label), 30, "前进（Ctrl+]）");
-        _back.Width = _fwd.Width = 34;
-        _back.Click += () => Back();
-        _fwd.Click += () => Forward();
-        var navCap = new Glass(17, GlassKind.Clear) { Height = 34, Content = U.H(0, _back, _fwd).With(s => s.Margin = new Thickness(2, 2, 2, 2)) };
-        _toolbar.Children.Add(_toggleOpen);
-        _toolbar.Children.Add(navCap);
-        Children.Add(_toolbar);
-        PlaceToolbar();
-
-        // ── 键盘（Mac 的 ⌘ 换成 Ctrl）、触控板两指滑动后退、鼠标侧键 ──
-        AddKey(VirtualKey.F, VirtualKeyModifiers.Control, () => { if (!_sideVisible) SetSidebar(true, true); _search.Focus(FocusState.Keyboard); _search.SelectAll(); });
+        // ── 键盘、触控板两指滑动后退、鼠标侧键 ──
+        AddKey(VirtualKey.F, VirtualKeyModifiers.Control, OpenSearch);
         AddKey((VirtualKey)219, VirtualKeyModifiers.Control, () => Back());
         AddKey((VirtualKey)221, VirtualKeyModifiers.Control, () => Forward());
         AddKey(VirtualKey.Left, VirtualKeyModifiers.Menu, () => Back());
         AddKey(VirtualKey.Right, VirtualKeyModifiers.Menu, () => Forward());
-        AddKey(VirtualKey.S, VirtualKeyModifiers.Control | VirtualKeyModifiers.Menu, () => SetSidebar(!_sideVisible, true));
         AddKey((VirtualKey)188, VirtualKeyModifiers.Control, () => Root("account"));
-        var tags = new[] { "home", "movies", "series", "requests", "downloads" };
+        var tags = new[] { "home", "library", "requests", "downloads" };
         for (int i = 0; i < tags.Length; i++) { var t = tags[i]; AddKey(VirtualKey.Number1 + i, VirtualKeyModifiers.Control, () => Root(t)); }
         PointerPressed += (_, e) =>
         {
@@ -172,16 +118,16 @@ public sealed partial class Shell : Grid, IDisposable
         AddHandler(PointerWheelChangedEvent, new PointerEventHandler(OnWheel), false);
         SizeChanged += (_, e) =>
         {
-            // 窗口窄了自动收起边栏（用户自己收起 / 展开过就听用户的）
-            if (!_userHid) SetSidebar(e.NewSize.Width >= 860, false);
+            // 留白：1440 宽 72，窄窗口按比例收，最少 28
+            var l = Math.Clamp(e.NewSize.Width * 0.05, 28, 72);
+            if (Math.Abs(l - _left) > 0.5) { _left = l; Inset.Raise(); }
             MainWindow.Current.UpdateDragRegions();
         };
 
         Root("home");
-        _ = LoadAvatarAsync();
         var user = Settings.Shared.Username;
         if (user is not null && user != "selftest") RequestCenter.Shared.Start(user);
-        RequestCenter.Shared.Changed += () => DispatcherQueue.TryEnqueue(UpdateBadge);
+        RequestCenter.Shared.Changed += () => DispatcherQueue.TryEnqueue(() => _dock.Badge("requests", RequestCenter.Shared.ActiveCount));
         RequestCenter.Shared.Milestone += (r, s) => Notifications.Show(r.Title, s);
         DownloadManager.Shared.ResumeAll();
         _ = LibraryStore.Shared.RefreshAsync();
@@ -195,7 +141,7 @@ public sealed partial class Shell : Grid, IDisposable
         KeyboardAccelerators.Add(acc);
     }
 
-    // 触控板两指横滑：系统把它当成横向滚轮。没有被横着滚的货架吃掉的，往右滑够一段就后退
+    // 触控板两指横滑（系统当成横向滚轮）：没被横着滚的货架吃掉的，往右滑够一段就后退
     void OnWheel(object sender, PointerRoutedEventArgs e)
     {
         var p = e.GetCurrentPoint(this).Properties;
@@ -208,85 +154,15 @@ public sealed partial class Shell : Grid, IDisposable
         else if (_swipe > 360) { _swipe = 0; Forward(); e.Handled = true; }
     }
 
-    async Task LoadAvatarAsync()
-    {
-        var u = Settings.Shared.Username;
-        if (u is null || u == "selftest") return;
-        var url = await AccountApi.AvatarAsync(u);
-        if (url is not null && U.Bitmap(url, 60) is { } b) _avatar.ProfilePicture = b;
-    }
-
-    void Section(string title) =>
-        _items.Children.Add(Mac.Text(title, 11, FontWeights.SemiBold, Mac.Tertiary).With(t => t.Margin = new Thickness(10, _items.Children.Count == 0 ? 2 : 14, 0, 4)));
-
-    void Item(string tag, string text, string glyph)
-    {
-        var it = new SidebarItem(text, glyph);
-        it.Tapped += (_, _) => Root(tag);
-        it.KeyDown += (_, e) => { if (e.Key is VirtualKey.Enter or VirtualKey.Space) Root(tag); };
-        _byTag[tag] = it;
-        _items.Children.Add(it);
-    }
-
-    /// <summary>选中的那块玻璃滑到这一格：路上竖着拉长一点再收回（像一滴水）</summary>
-    void Select(string tag, bool animate = true)
-    {
-        _selected = tag;
-        foreach (var (t, it) in _byTag) it.Selected = t == tag;
-        if (!_byTag.TryGetValue(tag, out var target))
-        {
-            _pill.Opacity = 0;
-            return;
-        }
-        void move()
-        {
-            var y = (float)target.TransformToVisual(_items).TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
-            _pill.Opacity = 1;
-            if (animate)
-            {
-                Mac.SpringMove(_pill, new Vector3(0, y, 0), 0.68f, 50);
-                Mac.SpringScaleXY(_pill, new Vector3(0.97f, 1.22f, 1), Vector3.One, 0.45f, 60);
-            }
-            else Mac.SpringMove(_pill, new Vector3(0, y, 0), 1f, 1);
-        }
-        if (target.ActualHeight > 0) move();
-        else target.Loaded += (_, _) => move();
-    }
-
-    void UpdateBadge()
-    {
-        var n = RequestCenter.Shared.ActiveCount;
-        if (_byTag.TryGetValue("requests", out var it)) it.Badge = n > 0 ? n.ToString() : null;
-    }
-
-    void SetSidebar(bool visible, bool user)
-    {
-        if (user) _userHid = !visible;
-        if (visible == _sideVisible) return;
-        _sideVisible = visible;
-        // 边栏滑出去 / 滑回来，内容的左边距跟着变（用 XAML 的 Translation：投影跟着走）
-        _side.Translation = new Vector3(visible ? 0 : -(float)(SideWidth + SideMargin + 20), 0, 28);
-        _side.Opacity = visible ? 1 : 0;
-        _side.IsHitTestVisible = visible;
-        _toggleOpen.Visibility = visible ? Visibility.Collapsed : Visibility.Visible;
-        PlaceToolbar();
-        Inset.Raise();
-        MainWindow.Current.UpdateDragRegions();
-    }
-
-    void PlaceToolbar() => _toolbar.Margin = new Thickness(_sideVisible ? SideMargin + SideWidth + 14 : 96, 12, 0, 0);
-
     /// <summary>标题栏那一条里能点的东西（不能当拖动区）</summary>
     public IEnumerable<FrameworkElement> TitleControls()
     {
-        if (_sideVisible) yield return _toggleClose;
-        yield return _toolbar;
+        if (_back.Visibility == Visibility.Visible) yield return _back;
     }
 
     View Make(string tag) => tag switch
     {
-        "movies" => new BrowseView(BrowseKind.Movies),
-        "series" => new BrowseView(BrowseKind.Series),
+        "library" => new LibraryFeedView(),
         "requests" => new RequestsView(),
         "downloads" => new DownloadsView(),
         "account" => new AccountView(),
@@ -298,8 +174,39 @@ public sealed partial class Shell : Grid, IDisposable
     {
         while (_stack.Count > 0) _stack.Pop().Closed();
         ClearForward();
-        Select(tag);
+        _dock.Select(tag);
         Show(Make(tag));
+    }
+
+    // ── 搜索：底下的导航变成搜索框，页面是 SearchView ──
+    public void OpenSearch()
+    {
+        if (_stack.Count > 0 && _stack.Peek() is SearchView sv) { _dock.BeginSearch(sv.Query); return; }
+        Go(new SearchView());
+    }
+
+    /// <summary>点了「最近搜索」里的一条</summary>
+    public void SearchFor(string q)
+    {
+        if (_stack.Count > 0 && _stack.Peek() is SearchView sv) { sv.Run(q); _dock.BeginSearch(q); }
+        else Go(new SearchView(q));
+    }
+
+    void CloseSearch()
+    {
+        if (_stack.Count > 0 && _stack.Peek() is SearchView sv)
+        {
+            sv.Commit();
+            if (!Back()) Root("home");
+        }
+        _dock.EndSearch();
+    }
+
+    /// <summary>显示出来的是搜索页：导航是搜索框（带着那一页的字）；别的页：收回成标签</summary>
+    void SyncDock(View v)
+    {
+        if (v is SearchView sv) _dock.BeginSearch(sv.Query);
+        else _dock.EndSearch();
     }
 
     public void Go(View v)
@@ -316,13 +223,14 @@ public sealed partial class Shell : Grid, IDisposable
         _host.Content = v;
         Mac.Enter(v);
         UpdateNav();
+        SyncDock(v);
         v.Shown();
     }
 
     void UpdateNav()
     {
-        _back.Opacity = _stack.Count > 1 ? 1 : 0.35;
-        _fwd.Opacity = _forward.Count > 0 ? 1 : 0.35;
+        _back.Visibility = _stack.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
+        MainWindow.Current.UpdateDragRegions();
     }
 
     public bool Back()
@@ -333,6 +241,7 @@ public sealed partial class Shell : Grid, IDisposable
         _host.Content = v;
         Mac.Enter(v);
         UpdateNav();
+        SyncDock(v);
         v.Shown();
         return true;
     }
@@ -345,6 +254,7 @@ public sealed partial class Shell : Grid, IDisposable
         _host.Content = v;
         Mac.Enter(v);
         UpdateNav();
+        SyncDock(v);
         v.Shown();
         return true;
     }
@@ -360,60 +270,226 @@ public sealed partial class Shell : Grid, IDisposable
     }
 }
 
-/// <summary>侧边栏的一格：图标 + 名字 + 角标。选中时图标变蓝（底下那块玻璃由 Shell 滑过来）</summary>
-public sealed partial class SidebarItem : Grid
+/// <summary>
+/// 底部导航（网页版的 dock）：一条磨砂玻璃胶囊（左边头像，然后 主页 / 资料库 / 请求 / 下载：图标在上、字在下，选中的变蓝、
+/// 底下垫一块玻璃，切换时那块玻璃弹簧滑过去），右边隔开一颗磨砂的搜索圆钮
+/// </summary>
+public sealed partial class Dock : StackPanel
 {
-    readonly FontIcon _icon;
-    readonly TextBlock _text;
-    readonly Border _badge = new() { CornerRadius = new CornerRadius(8), Padding = new Thickness(6, 1, 6, 1), Background = Mac.BlueBrush, Visibility = Visibility.Collapsed, VerticalAlignment = VerticalAlignment.Center };
-    bool _selected;
+    readonly Glass _bar = new(32, GlassKind.Regular) { Height = 64 };
+    readonly Grid _tabs = new() { Margin = new Thickness(4, 0, 4, 0) };
+    readonly Glass _pill = new(26, GlassKind.Selection) { Height = 52, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left, IsHitTestVisible = false };
+    readonly Dictionary<string, (Grid cell, FontIcon icon, TextBlock text, Border badge)> _cells = new();
+    readonly PersonPicture _avatar = new() { Width = 40, Height = 40 };
+    readonly Action<string> _go;
+    const double TabWidth = 112;
+    /// <summary>标签那一条的宽度（头像 + 四个标签）；搜索时收成一枚圆钮（只包住头像）</summary>
+    const double BarWidth = 10 + 44 + 4 + 4 * TabWidth + 4 + 6;
+    const double Dot = 64;
 
-    public SidebarItem(string text, string glyph)
+    // 搜索钮：搜索时拉长成搜索框（网页版 .dock.searching）
+    readonly Glass _search = new(32, GlassKind.Regular) { Width = Dot, Height = 64 };
+    readonly FontIcon _glyph = U.Icon("\uE721", 19);
+    readonly TextBox _field = new();
+    readonly MacButton _cancel;
+    readonly Grid _cancelHost = new() { HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 9, 0) };
+    bool _suppress;
+    string _selected = "home";
+    public bool Searching { get; private set; }
+    public event Action<string>? QueryChanged;
+    public event Action<string>? Submitted;
+    public event Action? Cancelled;
+
+    public Dock(Action<string> go)
     {
-        Height = 34;
-        CornerRadius = new CornerRadius(9);
-        Padding = new Thickness(10, 0, 10, 0);
-        Background = Mac.Clear;
-        IsTabStop = true;
-        UseSystemFocusVisuals = true;
-        ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(26) });
-        ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        _icon = U.Icon(glyph, 15);
-        _icon.Foreground = Mac.Secondary;
-        _icon.HorizontalAlignment = HorizontalAlignment.Left;
-        _text = Mac.Text(text, 13.5, FontWeights.Medium);
-        _text.VerticalAlignment = VerticalAlignment.Center;
-        Children.Add(_icon.At(0, 0));
-        Children.Add(_text.At(0, 1));
-        Children.Add(_badge.At(0, 2));
-        PointerEntered += (_, _) => { if (!_selected) Background = Mac.Hover; };
-        PointerExited += (_, _) => Background = Mac.Clear;
-        PointerPressed += (_, _) => Mac.SpringScale(this, 0.97f, 0.7f, 30);
-        PointerReleased += (_, _) => Mac.SpringScale(this, 1, 0.45f, 45);
-        PointerCaptureLost += (_, _) => Mac.SpringScale(this, 1);
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(this, text);
+        _go = go;
+        Orientation = Orientation.Horizontal;
+        Spacing = 12;
+        HorizontalAlignment = HorizontalAlignment.Center;
+        VerticalAlignment = VerticalAlignment.Bottom;
+        Margin = new Thickness(0, 0, 0, 22);
+
+        _bar.Width = BarWidth;
+        _bar.SizeChanged += (_, e) => _bar.Clip = new RectangleGeometry { Rect = new Windows.Foundation.Rect(0, 0, e.NewSize.Width, e.NewSize.Height) };
+        var inner = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 6, 0) };
+        // 头像（账户与设置）
+        var av = new Grid { Width = 44, Height = 44, CornerRadius = new CornerRadius(22), Background = Mac.Clear, VerticalAlignment = VerticalAlignment.Center };
+        _avatar.DisplayName = Settings.Shared.Username ?? "";
+        av.Children.Add(_avatar);
+        av.Tapped += (_, _) => { _go("account"); Select("account"); };
+        ToolTipService.SetToolTip(av, "账户与设置（Ctrl+,）");
+        Mac.Pressable(av, 1.06f, 0.94f);
+        inner.Children.Add(av);
+        _tabs.Children.Add(_pill);
+        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        foreach (var (tag, text, glyph) in new[] { ("home", "主页", "\uE80F"), ("library", "资料库", "\uE8F1"), ("requests", "请求", "\uE710"), ("downloads", "下载", "\uE896") })
+            row.Children.Add(Cell(tag, text, glyph));
+        _tabs.Children.Add(row);
+        _tabs.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(200) };
+        inner.Children.Add(_tabs);
+        _bar.Content = inner;
+        Children.Add(_bar);
+
+        // 搜索框：右端一个 64 见方的图标位（放大镜），左边输入，搜索时右端换成「取消」胶囊
+        var sg = new Grid();
+        _glyph.Foreground = Mac.Label;
+        _glyph.HorizontalAlignment = HorizontalAlignment.Center;
+        _glyph.VerticalAlignment = VerticalAlignment.Center;
+        var glyphBox = new Grid { Width = Dot, HorizontalAlignment = HorizontalAlignment.Right, IsHitTestVisible = false };
+        glyphBox.Children.Add(_glyph);
+        _glyph.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(180) };
+        sg.Children.Add(glyphBox);
+        _field.PlaceholderText = "电影、剧集";
+        _field.FontSize = 17;
+        _field.VerticalAlignment = VerticalAlignment.Center;
+        _field.Margin = new Thickness(18, 0, 92, 0);
+        _field.BorderThickness = new Thickness(0);
+        _field.Background = Mac.Clear;
+        foreach (var k in new[] { "TextControlBackground", "TextControlBackgroundPointerOver", "TextControlBackgroundFocused",
+                                  "TextControlBorderBrush", "TextControlBorderBrushPointerOver", "TextControlBorderBrushFocused" })
+            _field.Resources[k] = Mac.Clear;
+        _field.Resources["TextControlForegroundFocused"] = Mac.Label;
+        _field.Resources["TextControlPlaceholderForegroundFocused"] = Mac.Tertiary;
+        _field.Opacity = 0;
+        _field.IsHitTestVisible = false;
+        _field.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(320) };
+        _field.TextChanged += (_, _) => { if (!_suppress) QueryChanged?.Invoke(_field.Text); };
+        _field.KeyDown += (_, e) =>
+        {
+            if (e.Key == VirtualKey.Enter) { Submitted?.Invoke(_field.Text); e.Handled = true; }
+            else if (e.Key == VirtualKey.Escape) { Cancelled?.Invoke(); e.Handled = true; }
+        };
+        sg.Children.Add(_field);
+        // 「取消」：淡入淡出放在外面那一层（同一个元素上 OpacityTransition 和 Composition 动画不能同时用），弹簧在按钮自己身上
+        _cancel = MacButton.Pill("取消", null, () => Cancelled?.Invoke(), MacButton.Style.Glass, 46);
+        _cancelHost.Children.Add(_cancel);
+        _cancelHost.Opacity = 0;
+        _cancelHost.IsHitTestVisible = false;
+        _cancelHost.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(260) };
+        sg.Children.Add(_cancelHost);
+        _search.Content = sg;
+        _search.SizeChanged += (_, e) => _search.Clip = new RectangleGeometry { Rect = new Windows.Foundation.Rect(0, 0, e.NewSize.Width, e.NewSize.Height) };
+        _search.Tapped += (_, _) => { if (Searching) _field.Focus(FocusState.Programmatic); else _go("search"); };
+        ToolTipService.SetToolTip(_search, "搜索（Ctrl+F）");
+        Mac.Pressable(_search, 1.04f, 0.96f);
+        Children.Add(_search);
+        _ = LoadAvatarAsync();
+        Select("home", false);
     }
 
-    public bool Selected
+    /// <summary>变成搜索框：标签那一条收成头像圆钮，让出的宽度全给搜索框（两边同一条弹簧，总宽不变）</summary>
+    public void BeginSearch(string text)
     {
-        get => _selected;
-        set
+        if (!Searching)
         {
-            _selected = value;
-            _icon.Foreground = value ? Mac.BlueBrush : Mac.Secondary;
-            _text.FontWeight = value ? FontWeights.SemiBold : FontWeights.Medium;
-            Background = Mac.Clear;
+            Searching = true;
+            AnimateWidth(_bar, Dot);
+            AnimateWidth(_search, BarWidth);
+            _tabs.Opacity = 0;
+            _tabs.IsHitTestVisible = false;
+            _glyph.Opacity = 0;
+            _field.Opacity = 1;
+            _field.IsHitTestVisible = true;
+            _cancelHost.Opacity = 1;
+            _cancelHost.IsHitTestVisible = true;
+            Mac.SpringScaleXY(_cancel, new System.Numerics.Vector3(0.5f, 0.5f, 1), System.Numerics.Vector3.One, 0.55f, 60);
         }
+        if (_field.Text != text) { _suppress = true; _field.Text = text; _field.SelectionStart = text.Length; _suppress = false; }
+        _field.Focus(FocusState.Programmatic);
     }
 
-    public string? Badge
+    /// <summary>收回成标签</summary>
+    public void EndSearch()
     {
-        set
+        if (!Searching) return;
+        Searching = false;
+        AnimateWidth(_bar, BarWidth);
+        AnimateWidth(_search, Dot);
+        _tabs.Opacity = 1;
+        _tabs.IsHitTestVisible = true;
+        _glyph.Opacity = 1;
+        _field.Opacity = 0;
+        _field.IsHitTestVisible = false;
+        _cancelHost.Opacity = 0;
+        _cancelHost.IsHitTestVisible = false;
+        Select(_selected, false);
+    }
+
+    static void AnimateWidth(FrameworkElement e, double to)
+    {
+        var a = new DoubleAnimation
         {
-            _badge.Visibility = value is null ? Visibility.Collapsed : Visibility.Visible;
-            _badge.Child = value is null ? null : Mac.Text(value, 11, FontWeights.SemiBold);
+            To = to, Duration = TimeSpan.FromMilliseconds(520), EnableDependentAnimation = true,
+            EasingFunction = new BackEase { Amplitude = 0.16, EasingMode = EasingMode.EaseOut },
+        };
+        Storyboard.SetTarget(a, e);
+        Storyboard.SetTargetProperty(a, "Width");
+        var sb = new Storyboard();
+        sb.Children.Add(a);
+        sb.Begin();
+    }
+
+    UIElement Cell(string tag, string text, string glyph)
+    {
+        var icon = U.Icon(glyph, 19);
+        icon.Foreground = Mac.Label;
+        var label = Mac.Text(text, 11, FontWeights.SemiBold);
+        label.HorizontalAlignment = HorizontalAlignment.Center;
+        var badge = new Border { CornerRadius = new CornerRadius(8), Padding = new Thickness(5, 0, 5, 1), Background = Mac.BlueBrush, Visibility = Visibility.Collapsed, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 6, 22, 0) };
+        var stack = U.V(3, icon, label);
+        stack.HorizontalAlignment = HorizontalAlignment.Center;
+        stack.VerticalAlignment = VerticalAlignment.Center;
+        var cell = new Grid { Width = TabWidth, Height = 56, Background = Mac.Clear, IsTabStop = true, UseSystemFocusVisuals = true };
+        cell.Children.Add(stack);
+        cell.Children.Add(badge);
+        cell.Tapped += (_, _) => { Select(tag); _go(tag); };
+        cell.KeyDown += (_, e) => { if (e.Key is VirtualKey.Enter or VirtualKey.Space) { Select(tag); _go(tag); } };
+        cell.PointerPressed += (_, _) => Mac.SpringScale(stack, 0.92f, 0.7f, 30);
+        cell.PointerReleased += (_, _) => Mac.SpringScale(stack, 1, 0.45f, 45);
+        cell.PointerCaptureLost += (_, _) => Mac.SpringScale(stack, 1);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(cell, text);
+        _cells[tag] = (cell, icon, label, badge);
+        return cell;
+    }
+
+    public void Select(string tag, bool animate = true)
+    {
+        _selected = tag;
+        if (Searching) { _pill.Opacity = 0; return; }
+        int i = 0, idx = -1;
+        foreach (var (t, c) in _cells)
+        {
+            bool on = t == tag;
+            c.icon.Foreground = on ? Mac.BlueBrush : Mac.Label;
+            c.text.Foreground = on ? Mac.BlueBrush : Mac.Label;
+            if (on) idx = i;
+            i++;
         }
+        _pill.Width = TabWidth - 4;
+        _pill.Opacity = idx >= 0 ? 1 : 0;
+        if (idx < 0) return;
+        var x = (float)(idx * TabWidth + 2);
+        if (animate)
+        {
+            Mac.SpringMove(_pill, new Vector3(x, 0, 0), 0.7f, 50);
+            Mac.SpringScaleXY(_pill, new Vector3(1.12f, 0.94f, 1), Vector3.One, 0.5f, 55);
+        }
+        else Mac.SpringMove(_pill, new Vector3(x, 0, 0), 1, 1);
+    }
+
+    public void Badge(string tag, int n)
+    {
+        if (!_cells.TryGetValue(tag, out var c)) return;
+        c.badge.Visibility = n > 0 ? Visibility.Visible : Visibility.Collapsed;
+        c.badge.Child = n > 0 ? Mac.Text(n.ToString(), 10, FontWeights.Bold) : null;
+    }
+
+    async Task LoadAvatarAsync()
+    {
+        var u = Settings.Shared.Username;
+        if (u is null || u == "selftest") return;
+        var url = await AccountApi.AvatarAsync(u);
+        if (url is not null && U.Bitmap(url, 80) is { } b) _avatar.ProfilePicture = b;
     }
 }
 

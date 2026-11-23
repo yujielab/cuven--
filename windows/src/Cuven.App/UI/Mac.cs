@@ -37,10 +37,10 @@ public enum GlassKind
 static class Mac
 {
     public static readonly Color Blue = Color.FromArgb(255, 10, 132, 255);
-    public static readonly Color Canvas = Color.FromArgb(255, 18, 18, 20);
+    public static readonly Color Canvas = Color.FromArgb(255, 0, 0, 0);   // 和网页版一样纯黑
     public static Brush CanvasBrush { get; } = new SolidColorBrush(Canvas);
     /// <summary>列表页的底：半透明，窗口后面的磨砂（桌面被模糊）透出来</summary>
-    public static Brush FrostCanvas { get; } = new SolidColorBrush(Color.FromArgb(150, 16, 16, 18));
+    public static Brush FrostCanvas { get; } = new SolidColorBrush(Color.FromArgb(232, 0, 0, 0));
     public static Brush Label { get; } = new SolidColorBrush(Colors.White);
     public static Brush Secondary { get; } = new SolidColorBrush(Color.FromArgb(158, 235, 235, 245));
     public static Brush Tertiary { get; } = new SolidColorBrush(Color.FromArgb(92, 235, 235, 245));
