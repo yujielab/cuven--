@@ -1,0 +1,184 @@
+import SwiftUI
+
+// MARK: - 清除缓存（用户要求「清除缓存的时候要有这样的动画」，参照他发来的录屏：Prismatic Data Dissolution）
+//
+// 整屏黑底，上半截浮着一张 3D 的「缓存卡」（卡面写着这次要清的大小），下面一枚小胶囊「Cuven 缓存」、一行「清除 1.2 GB 缓存？」、
+// 「取消」「清除」两颗胶囊。点「清除」：两颗按钮收成一枚玻璃进度胶囊（转圈 + 「正在清除 0.6 GB / 1.2 GB」，数字跟着溶解前沿走），
+// 卡从下沿化成光点、流成光纤、汇进胶囊那一点的光里（CacheDissolveRenderer）；真的清除同时在做（清三样缓存、重新取片库）。
+// 动画走完、清除也做完：胶囊换成「已清除 1.2 GB」和一枚勾，1.3 秒后自己收起。
+
+struct CacheDissolveSheet: View {
+    let bytes: Int64
+    let clear: () async -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var engine = CacheDissolveEngine()
+    @State private var phase: Phase = .idle
+    @Namespace private var ns
+
+    enum Phase { case idle, clearing, done }
+
+    private var sizeText: String {
+        let s = Format.size(bytes)
+        return s.isEmpty ? "0 MB" : s
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let bottomPad = max(geo.safeAreaInsets.bottom, 16) + 28
+            ZStack {
+                Color.black
+                CacheDissolveCanvas(engine: engine, sizeLabel: sizeText)
+                    .accessibilityHidden(true)
+                VStack(spacing: 0) {
+                    HStack {
+                        Spacer()
+                        if phase == .idle { closeButton.transition(.opacity) }
+                    }
+                    .padding(.top, geo.safeAreaInsets.top + 8)
+                    .padding(.horizontal, 20)
+                    Spacer(minLength: 0)
+                    if phase == .idle {
+                        prompt
+                            .padding(.bottom, 26)
+                            .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                    }
+                    actions
+                        .padding(.bottom, bottomPad)
+                }
+            }
+            .onAppear { place(geo.size, bottomPad: bottomPad) }
+            .onChange(of: geo.size) { _, s in place(s, bottomPad: bottomPad) }
+        }
+        .ignoresSafeArea()
+        .preferredColorScheme(.dark)
+        .statusBarHidden(phase != .idle)
+        .sensoryFeedback(.impact(weight: .medium), trigger: phase == .clearing)
+        .sensoryFeedback(.success, trigger: phase == .done)
+        .onAppear { engine.reduceMotion = reduceMotion }
+    }
+
+    /// 光流汇聚的那一点：进度胶囊的正中（胶囊 46 点高，在底下居中）
+    private func place(_ size: CGSize, bottomPad: CGFloat) {
+        guard size.height > 0 else { return }
+        engine.target = CGPoint(x: 0.5, y: (size.height - bottomPad - 23) / size.height)
+    }
+
+    private var closeButton: some View {
+        Button { dismiss() } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 40, height: 40)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("关闭")
+        .accessibilityIdentifier("cache-dissolve-close")
+    }
+
+    private var prompt: some View {
+        VStack(spacing: 14) {
+            Label("Cuven 缓存", systemImage: "internaldrive")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .glassEffect(.regular, in: Capsule())
+            Text("清除 \(sizeText) 缓存？")
+                .font(.title2.bold())
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+        }
+        .padding(.horizontal, 32)
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        if phase == .idle {
+            HStack(spacing: 14) {
+                Button("取消") { dismiss() }
+                    .buttonStyle(CacheDissolvePill(prominent: false))
+                    .accessibilityIdentifier("cache-dissolve-cancel")
+                Button("清除") { start() }
+                    .buttonStyle(CacheDissolvePill(prominent: true))
+                    .matchedGeometryEffect(id: "action", in: ns)
+                    .accessibilityIdentifier("cache-dissolve-clear")
+            }
+        } else {
+            progressCapsule
+                .matchedGeometryEffect(id: "action", in: ns)
+                .accessibilityIdentifier("cache-dissolve-progress")
+        }
+    }
+
+    /// 玻璃进度胶囊：转圈 + 「正在清除 已清 / 总共」，完了换成勾 +「已清除」
+    private var progressCapsule: some View {
+        TimelineView(.animation(paused: phase == .done)) { tl in
+            let t = tl.date.timeIntervalSinceReferenceDate
+            let p = engine.progress()
+            HStack(spacing: 10) {
+                if phase == .done {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .transition(.scale.combined(with: .opacity))
+                } else {
+                    Circle()
+                        .trim(from: 0.08, to: 0.78)
+                        .stroke(Color.white.opacity(0.85), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .frame(width: 16, height: 16)
+                        .rotationEffect(.radians(t * 5.2))
+                }
+                Text(phase == .done ? "已清除 \(sizeText)" : "正在清除 \(clearedText(p)) / \(sizeText)")
+                    .font(.subheadline.weight(.semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                    .contentTransition(.numericText())
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 46)
+            .glassEffect(.regular, in: Capsule())
+        }
+    }
+
+    private func clearedText(_ p: Double) -> String {
+        let s = Format.size(Int64(Double(bytes) * p))
+        return s.isEmpty ? "0 MB" : s
+    }
+
+    private func start() {
+        guard phase == .idle else { return }
+        engine.reduceMotion = reduceMotion
+        engine.start = CACurrentMediaTime()
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.86)) { phase = .clearing }
+        let work = Task { @MainActor in await clear() }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(CacheDissolveEngine.duration))
+            await work.value
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) { phase = .done }
+            try? await Task.sleep(for: .seconds(1.3))
+            dismiss()
+        }
+    }
+}
+
+/// 白底黑字（主要的）/ 半透明白底白字（次要的）胶囊，按下缩一点
+private struct CacheDissolvePill: ButtonStyle {
+    let prominent: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.body.weight(.semibold))
+            .foregroundStyle(prominent ? Color.black : Color.white)
+            .frame(minWidth: 116)
+            .frame(height: 46)
+            .padding(.horizontal, 8)
+            .background(Capsule().fill(prominent ? Color.white : Color.white.opacity(0.14)))
+            .contentShape(Capsule())
+            .scaleEffect(configuration.isPressed ? 0.95 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}

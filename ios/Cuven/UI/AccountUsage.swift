@@ -337,6 +337,8 @@ struct UsageInsightsCard: View {
     @State private var cacheBytes: Int64 = AppModel.cacheUsage
     @State private var clearing = false
     @State private var cleared = 0
+    /// 清除缓存的整屏动画（CacheDissolveSheet：卡化成光流）
+    @State private var dissolving = false
 
     var body: some View {
         AccountGroup(title: "使用洞察") {
@@ -437,7 +439,7 @@ struct UsageInsightsCard: View {
     }
 
     private var clearPill: some View {
-        Button { clearCache() } label: {
+        Button { dissolving = true } label: {
             ZStack {
                 // 转圈时胶囊不变窄
                 Text("清除缓存").opacity(clearing ? 0 : 1)
@@ -457,6 +459,9 @@ struct UsageInsightsCard: View {
         .accessibilityLabel("清除缓存")
         .accessibilityHint("清除后，片库、海报和影片信息将重新下载。")
         .accessibilityIdentifier("account-clear-cache")
+        .fullScreenCover(isPresented: $dissolving) {
+            CacheDissolveSheet(bytes: cacheBytes) { await clearCache() }
+        }
     }
 
     private var cacheText: String {
@@ -464,17 +469,17 @@ struct UsageInsightsCard: View {
         return s.isEmpty ? "0 MB" : s
     }
 
-    /// 清掉三样缓存，再把片库重新取一遍（和以前「存储」里那一行一样），完了给一下成功触感
-    private func clearCache() {
+    /// 清掉三样缓存，再把片库重新取一遍（和以前「存储」里那一行一样），完了给一下成功触感。
+    /// 由清除动画（CacheDissolveSheet）在点「清除」时调用，动画和它同时进行
+    @MainActor
+    private func clearCache() async {
         clearing = true
         model.clearCaches()
         withAnimation(.snappy) { cacheBytes = AppModel.cacheUsage }
-        Task { @MainActor in
-            await model.refreshAll()
-            withAnimation(.snappy) { cacheBytes = AppModel.cacheUsage }
-            clearing = false
-            cleared += 1
-        }
+        await model.refreshAll()
+        withAnimation(.snappy) { cacheBytes = AppModel.cacheUsage }
+        clearing = false
+        cleared += 1
     }
 }
 

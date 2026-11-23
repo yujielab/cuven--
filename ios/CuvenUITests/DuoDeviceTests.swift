@@ -377,6 +377,26 @@ final class DuoDeviceTests: XCTestCase {
             } else {
                 print("DUO network auto: none")
             }
+            // 清除缓存：整屏动画（卡化成光点、流成光纤、汇进进度胶囊那一点的光里：用户要求）。空闲时一张，点「清除」后每隔约一秒一张
+            if let clearCache = reveal(app, "account-clear-cache", swipes: 4) {
+                clearCache.tap(); sleep(2)
+                snap("duo-06f-cache-card")
+                let go = app.buttons["cache-dissolve-clear"].firstMatch
+                if go.waitForExistence(timeout: 3) {
+                    go.tap()
+                    usleep(800_000); snap("duo-06g-cache-dissolve-1")
+                    usleep(700_000); snap("duo-06h-cache-dissolve-2")
+                    usleep(700_000); snap("duo-06i-cache-dissolve-3")
+                    usleep(700_000); snap("duo-06j-cache-dissolve-4")
+                    usleep(900_000); snap("duo-06k-cache-dissolve-5")
+                    sleep(2); snap("duo-06l-cache-dissolve-done")
+                    sleep(3)
+                } else {
+                    print("DUO cache dissolve: no clear button")
+                }
+            } else {
+                print("DUO cache clear: none")
+            }
             // 首选音轨：系统弹出菜单（自动 / 自然 / 国语 / 粤语 / 英语 / 日语 / 韩语）；点菜单外面收起
             if let audio = reveal(app, swipes: 3, where: { $0.elementType == .button && $0.label == "首选音轨" }) {
                 audio.tap(); sleep(2)
