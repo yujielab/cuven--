@@ -7807,10 +7807,6 @@ body.voice-on .dock > *{ pointer-events:none !important; }
 #cvlHost .cvl-alt-danger { color: #d70015; }
 /* 光学配对：用已登录的 iPhone 扫这团粒子云（web/pair.js） */
 #cvlHost .cvl-pair-canvas { display: block; width: min(300px, 76vw); height: min(300px, 76vw); margin: 6px auto 0; }
-#cvlHost .cvl-pair-code { text-align: center; font: 600 30px/1.2 ui-rounded, -apple-system, system-ui, sans-serif; letter-spacing: .32em;
-  font-variant-numeric: tabular-nums; color: #1d1d1f; margin-top: 4px; }
-#cvlHost .cvl-pair-code[hidden] { display: none; }
-#cvlHost .cvl-pair-hint { text-align: center; font-size: 13px; color: rgba(0,0,0,.5); margin-top: 10px; }
 
 /* iOS 齿转子 */
 #cvlHost .cvl-spinner { position: relative; width: 20px; height: 20px; }
@@ -7957,12 +7953,9 @@ body.voice-on .dock > *{ pointer-events:none !important; }
       <!-- ①′ 光学配对：这台设备显示粒子云，已登录 Cuven 的 iPhone 扫一下就登录 -->
       <div class="cvl-pane" id="cvlPanePair" data-pane="pair">
         <h2 class="cvl-title">用 iPhone 扫描登录</h2>
-        <p class="cvl-sub">在已登录 Cuven 的 iPhone 上打开「账户 → 扫描登录其他设备」，对准这团粒子云。</p>
+        <p class="cvl-sub">Cuven 光学安全保护措施是迄今为止最安全的加密保护措施，Cuven 的安全团队日夜保护您的账户。</p>
         <canvas class="cvl-pair-canvas" id="cvlPairCanvas" aria-label="配对用的粒子云"></canvas>
         <div class="cvl-status" id="cvlPairStatus" role="status" aria-live="polite"></div>
-        <div class="cvl-pair-hint" id="cvlPairHint" hidden>在 iPhone 上选「手动验证」，输入：</div>
-        <div class="cvl-pair-code" id="cvlPairCode" hidden></div>
-        <button class="cvl-alt" id="cvlPairManual" type="button">手动验证</button>
         <button class="cvl-alt" id="cvlPairPw" type="button">使用账户密码登录</button>
       </div>
 
@@ -9178,7 +9171,6 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
   function stopPair() { if (pairCtl) { try { pairCtl.stop(); } catch (_) {} pairCtl = null; } }
   function startPair() {
     var stEl = $('cvlPairStatus');
-    $('cvlPairCode').hidden = true; $('cvlPairHint').hidden = true; $('cvlPairManual').textContent = '手动验证';
     go('pair', null);
     setStatus(stEl, '正在准备…');
     loadPairJs().then(function () {
@@ -9186,14 +9178,13 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
       pairCtl = window.CuvenPair.login({
         api: API, canvas: $('cvlPairCanvas'), dark: false,
         onStatus: function (t) { setStatus(stEl, t); },
-        onCode: function (c) { $('cvlPairCode').textContent = c; },
         onApproved: function (r) {
           pairCtl = null;
           try { if (r.device) localStorage.setItem('cuven_pair_device', r.device); } catch (_) {}
           succeed(r.username, r.email || '', 'pair', 'pair');
         }
       });
-      if (pairCtl.cloud && !pairCtl.cloud.ok) setStatus(stEl, '这个浏览器画不了粒子云：点「手动验证」，在 iPhone 上输入数字');
+      if (pairCtl.cloud && !pairCtl.cloud.ok) setStatus(stEl, '这个浏览器画不了粒子云：请使用账户密码登录');
     }).catch(function () { setStatus(stEl, '加载失败，请刷新再试', 'bad'); });
   }
   $('cvlPairBtn').addEventListener('click', function () { haptic(6); startPair(); });
@@ -9203,12 +9194,6 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
     try { var c = document.createElement('canvas'); return !!(c.getContext('webgl') || c.getContext('experimental-webgl')); }
     catch (_) { return false; }
   }
-  $('cvlPairManual').addEventListener('click', function () {
-    var on = $('cvlPairCode').hidden;
-    $('cvlPairCode').hidden = !on; $('cvlPairHint').hidden = !on;
-    this.textContent = on ? '隐藏数字' : '手动验证';
-    sizeSheet();
-  });
 
   /* ══ 事件 ══════════════════════════════════════════════════════ */
   userIn.addEventListener('input', function () {
