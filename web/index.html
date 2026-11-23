@@ -7963,6 +7963,7 @@ body.voice-on .dock > *{ pointer-events:none !important; }
         <div class="cvl-pair-hint" id="cvlPairHint" hidden>在 iPhone 上选「手动验证」，输入：</div>
         <div class="cvl-pair-code" id="cvlPairCode" hidden></div>
         <button class="cvl-alt" id="cvlPairManual" type="button">手动验证</button>
+        <button class="cvl-alt" id="cvlPairPw" type="button">使用账户密码登录</button>
       </div>
 
       <!-- ② 电子邮件 -->
@@ -8439,7 +8440,14 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
   function syncNav() {
     var p = st.pane;
     if (p === 'done' || p === 'face') { navBtn.hidden = true; return; }
-    if (p === 'signin') {
+    /* 光学配对是入口时：粒子云那一页是「关闭」，账户密码那一页是「返回」（回到粒子云） */
+    if (st.pairFirst && p === 'signin') {
+      navBtn.hidden = false;
+      navBtn.classList.add('is-back');
+      navBtn.setAttribute('aria-label', '返回');
+      return;
+    }
+    if (p === 'signin' || (p === 'pair' && st.pairFirst)) {
       navBtn.hidden = loginRequired();
       navBtn.classList.remove('is-back');
       navBtn.setAttribute('aria-label', '关闭');
@@ -9189,6 +9197,12 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
     }).catch(function () { setStatus(stEl, '加载失败，请刷新再试', 'bad'); });
   }
   $('cvlPairBtn').addEventListener('click', function () { haptic(6); startPair(); });
+  $('cvlPairPw').addEventListener('click', function () { haptic(6); stopPair(); go('signin', null); });
+  /* 画得了粒子云吗（WebGL）：画不了就直接用账户密码登录 */
+  function pairCapable() {
+    try { var c = document.createElement('canvas'); return !!(c.getContext('webgl') || c.getContext('experimental-webgl')); }
+    catch (_) { return false; }
+  }
   $('cvlPairManual').addEventListener('click', function () {
     var on = $('cvlPairCode').hidden;
     $('cvlPairCode').hidden = !on; $('cvlPairHint').hidden = !on;
@@ -9328,8 +9342,8 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
 
   navBtn.addEventListener('click', function () {
     haptic(6);
-    if (st.pane === 'signin') { requestClose(); return; }
-    if (st.pane === 'pair') { stopPair(); go('signin', null); return; }
+    if (st.pane === 'signin') { if (st.pairFirst) { startPair(); return; } requestClose(); return; }
+    if (st.pane === 'pair') { if (st.pairFirst) { requestClose(); return; } stopPair(); go('signin', null); return; }
     if (st.pane === 'code') {
       stopCd();
       if (st.codeBack === 'signin') { go('signin', null); syncSigninCTA(); }
@@ -9371,6 +9385,7 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
     boxes.forEach(function (b) { b.value = ''; });
     setStatus(siStatus, ''); setStatus(emStatus, ''); setStatus(coStatus, ''); setStatus(pwStatus, '');
     resetSignin();
+    stopPair(); st.pairFirst = false;
     go('signin', null);
   }
 
@@ -9394,6 +9409,10 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
       userIn.value = preset;
       resolveAccount();
     }
+    /* 优先光学配对：浏览器画得了粒子云、不是带着重设授权进来的、调用方也没指定要密码 → 先显示粒子云，
+       账户密码作为备选（粒子云下面「使用账户密码登录」）。用户名照样预填好，切过去就能直接输密码 */
+    st.pairFirst = !grant && opts.mode !== 'password' && pairCapable();
+    if (st.pairFirst) startPair();
     /* 不自动聚焦：一进来就弹输入法，屏幕会先被键盘顶一下再回落，抖得厉害。
        让用户自己点第一个输入框，键盘与 sheet 的位移就只发生一次。 */
 
