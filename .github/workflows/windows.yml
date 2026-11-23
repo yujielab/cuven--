@@ -1,0 +1,220 @@
+# Cuven for Windows（windows/）→ 免安装包 + 安装程序
+#
+#   · 原生核心 CuvenCore.dll（windows/native，C++20）：MSVC + FFmpeg 8.1（BtbN 的 LGPL 共享库）
+#   · App（windows/src/Cuven.App，WinUI 3 + .NET 10）：自带 .NET 和 Windows App SDK 运行库，解压就能用
+#   · 自检：Cuven.Core 的测试；原生核心在 WARP（软件渲染、没有显卡和声卡）上画配对粒子云、播合成片子和片库里真的 HDR10 / 杜比视界 5 片头；
+#     App 依次打开各页截图。截图、报告和安装包一起提交到 refs/ci/windows/<分支>（会话里 git fetch 就能取）
+#   · main 上的构建另外发布到 Release「windows-latest」
+name: Windows App
+
+on:
+  push:
+    branches: [main, 'claude/**']
+    paths: ['windows/**', 'web/pair-density.png', 'pairing/model/cpc1-spec.json', '.github/workflows/windows.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+  FFMPEG_ASSET: ffmpeg-n8.1-latest-win64-lgpl-shared-8.1.zip
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: FFmpeg 8.1（共享库 + 头文件 + 导入库）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dir = "$env:RUNNER_TEMP\ffmpeg"
+          gh release download latest -R BtbN/FFmpeg-Builds -p $env:FFMPEG_ASSET -D $env:RUNNER_TEMP --clobber
+          if ($LASTEXITCODE -ne 0) {
+            # 版本号换了：挑名字最像的那个 LGPL 共享库（不要 master）
+            $name = gh release view latest -R BtbN/FFmpeg-Builds --json assets -q '.assets[].name' | Where-Object { $_ -match '^ffmpeg-n[0-9.]+-latest-win64-lgpl-shared-[0-9.]+\.zip$' } | Sort-Object -Descending | Select-Object -First 1
+            Write-Host "改用 $name"
+            gh release download latest -R BtbN/FFmpeg-Builds -p $name -D $env:RUNNER_TEMP --clobber
+            $env:FFMPEG_ASSET = $name
+          }
+          Expand-Archive "$env:RUNNER_TEMP\$env:FFMPEG_ASSET" -DestinationPath "$env:RUNNER_TEMP\ffx" -Force
+          $root = Get-ChildItem "$env:RUNNER_TEMP\ffx" -Directory | Select-Object -First 1
+          Move-Item $root.FullName $dir
+          Get-ChildItem "$dir\bin", "$dir\lib" | Select-Object Name, Length | Format-Table
+          "FFMPEG_DIR=$dir" | Out-File -Append $env:GITHUB_ENV
+
+      - name: 着色器（fxc 先编一遍：错误在这里就报出来）
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" | Sort-Object FullName | Select-Object -Last 1
+          Write-Host "用 $($fxc.FullName)"
+          $jobs = @(@('cloud.hlsl','VS','vs_5_0'), @('cloud.hlsl','PS','ps_5_0'), @('video.hlsl','VS_Full','vs_5_0'), @('video.hlsl','PS_Convert','ps_5_0'), @('video.hlsl','PS_Present','ps_5_0'))
+          $bad = 0
+          foreach ($j in $jobs) {
+            & $fxc.FullName /nologo /O3 /T $j[2] /E $j[1] /Fo "$env:RUNNER_TEMP\$($j[1]).cso" "windows\native\shaders\$($j[0])"
+            if ($LASTEXITCODE -ne 0) { $bad++ }
+          }
+          if ($bad) { exit 1 }
+
+      - name: 原生核心（CMake + MSVC）
+        run: |
+          cmake -S windows/native -B build/native -A x64 "-DFFMPEG_DIR=$env:FFMPEG_DIR"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cmake --build build/native --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem build/native/Release | Select-Object Name, Length | Format-Table
+
+      - name: Cuven.Core 的测试（含线上接口）
+        env:
+          CUVEN_LIVE: '1'
+        run: |
+          dotnet run --project windows/tests/Cuven.Core.Tests -c Release
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: 自检用的片子（合成的 + 片库里两部的片头）
+        run: |
+          $m = "$env:RUNNER_TEMP\media"
+          New-Item -ItemType Directory -Force $m | Out-Null
+          $ff = "$env:FFMPEG_DIR\bin\ffmpeg.exe"
+          Set-Content -Encoding utf8 "$m\test.srt" "1`r`n00:00:01,000 --> 00:00:09,000`r`nCuven 字幕测试 Subtitle test`r`n`r`n2`r`n00:00:10,000 --> 00:00:19,000`r`n第二条字幕`r`n"
+          & $ff -hide_banner -loglevel error -f lavfi -i "testsrc2=size=1280x720:rate=24" -f lavfi -i "sine=frequency=440:sample_rate=48000" -i "$m\test.srt" `
+            -t 20 -map 0:v -map 1:a -map 2:s -c:v mpeg4 -q:v 3 -c:a aac -b:a 128k -c:s srt -metadata:s:s:0 language=eng "$m\synthetic.mkv"
+          Get-Item "$m\synthetic.mkv" | Select-Object Name, Length
+          # 片库里挑一部 HDR10、一部杜比视界（WEB-DL 多是 5）：只要前 40 MB
+          try {
+            $all = Invoke-RestMethod -TimeoutSec 60 https://stream.cuven.online/api/all
+            $hdr = $all.videos | Where-Object { $_.name -match '(?i)[ ._-]HDR[ ._-]' -and $_.name -notmatch '(?i)[ ._-](DV|DoVi)[ ._-]' -and $_.name -match '(?i)\.mkv$' } | Select-Object -First 1
+            $dv = $all.videos | Where-Object { $_.name -match '(?i)WEB-?DL' -and $_.name -match '(?i)[ ._-](DV|DoVi)[ ._-]' -and $_.name -notmatch '(?i)HDR' -and $_.name -match '(?i)\.mkv$' } | Select-Object -First 1
+            foreach ($p in @(@('hdr10', $hdr), @('dovi', $dv))) {
+              if (-not $p[1]) { continue }
+              $url = "https://stream.cuven.online/stream/Cuven.mkv?path=" + [uri]::EscapeDataString($p[1].path)
+              $out = "$m\$($p[0]).mkv"
+              curl.exe -s -L -r 0-41943039 --max-time 120 -o $out $url
+              $f = [IO.File]::Open($out, 'Open')
+              if ($f.Length -gt 41943040) { $f.SetLength(41943040) }
+              $f.Close()
+              Write-Host "$($p[0])：$((Get-Item $out).Length) 字节"
+            }
+          } catch { Write-Host "片库的片子没拿到：$_" }
+
+      - name: 原生自检（WARP：配对粒子云 + 播放器）
+        id: native_selftest
+        continue-on-error: true
+        run: |
+          $exe = "build/native/Release/CuvenSelfTest.exe"
+          Copy-Item "$env:FFMPEG_DIR\bin\*.dll" build/native/Release/
+          $out = "$env:GITHUB_WORKSPACE\selftest"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $env:CUVEN_HOME = "$env:RUNNER_TEMP\cuvenhome"
+          $fail = 0
+          & $exe "$env:RUNNER_TEMP\media\synthetic.mkv" web/pair-density.png windows/tests/Cuven.Core.Tests/fixtures/grid0.bin 11253989 3457461230 "$out\synthetic"
+          if ($LASTEXITCODE -ne 0) { $fail++ }
+          foreach ($n in @('hdr10', 'dovi')) {
+            $f = "$env:RUNNER_TEMP\media\$n.mkv"
+            if (-not (Test-Path $f)) { continue }
+            & $exe $f - - 0 0 "$out\$n"
+            if ($LASTEXITCODE -ne 0) { Write-Host "::warning::$n 自检没过" }
+          }
+          Copy-Item "$env:CUVEN_HOME\logs\core.log" "$out\core.log" -ErrorAction SilentlyContinue
+          if ($fail) { exit 1 }
+
+      - name: App（dotnet publish，自带运行库）
+        run: |
+          dotnet publish windows/src/Cuven.App/Cuven.App.csproj -c Release -r win-x64 -p:Platform=x64 -o out/Cuven `
+            "-p:Version=1.0.${{ github.run_number }}"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Copy-Item build/native/Release/CuvenCore.dll out/Cuven/
+          foreach ($d in 'avcodec','avformat','avutil','swresample','swscale') { Copy-Item "$env:FFMPEG_DIR\bin\$d-*.dll" out/Cuven/ }
+          Copy-Item "$env:FFMPEG_DIR\LICENSE.txt" out/Cuven/FFmpeg-LICENSE.txt -ErrorAction SilentlyContinue
+          $size = (Get-ChildItem out/Cuven -Recurse | Measure-Object Length -Sum).Sum
+          Write-Host ("一共 {0:N1} MB，{1} 个文件" -f ($size / 1MB), (Get-ChildItem out/Cuven -Recurse -File).Count)
+
+      - name: App 自检（各页截图）
+        continue-on-error: true
+        run: |
+          $out = "$env:GITHUB_WORKSPACE\selftest\app"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $env:CUVEN_HOME = "$env:RUNNER_TEMP\apphome"
+          $p = Start-Process -FilePath out/Cuven/Cuven.exe -ArgumentList '--selftest', $out -PassThru
+          if (-not $p.WaitForExit(240000)) { Write-Host "::warning::App 自检超时"; $p.Kill() }
+          Write-Host "退出码 $($p.ExitCode)"
+          Get-Content "$out\report.txt" -ErrorAction SilentlyContinue
+          Copy-Item "$env:CUVEN_HOME\logs\*" $out -ErrorAction SilentlyContinue
+
+      - name: 打包（zip + 安装程序）
+        run: |
+          $ver = "1.0.${{ github.run_number }}"
+          Compress-Archive -Path out/Cuven/* -DestinationPath Cuven-Windows-x64.zip -CompressionLevel Optimal
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress | Out-Null
+            $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if ($iscc) {
+            & $iscc /Qp "/DAppVersion=$ver" "/DSourceDir=$env:GITHUB_WORKSPACE\out\Cuven" "/DOutDir=$env:GITHUB_WORKSPACE" windows/installer/Cuven.iss
+          } else { Write-Host "::warning::没有 Inno Setup，只出 zip" }
+          Get-ChildItem Cuven-* | Select-Object Name, Length | Format-Table
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cuven-Windows-${{ github.run_number }}
+          path: |
+            Cuven-Windows-x64.zip
+            Cuven-Setup-x64.exe
+            selftest/**
+          if-no-files-found: error
+
+      # 会话里拿不到 Actions 产物的下载地址：同样的东西再提交到 refs/ci/windows/<分支>（GitHub 单个文件不能超过 100 MB：大的切成 95 MB 一块）
+      - name: 提交到 refs/ci/windows/<分支>
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $o = "$env:RUNNER_TEMP\winref"
+          New-Item -ItemType Directory -Force $o | Out-Null
+          foreach ($f in @('Cuven-Windows-x64.zip', 'Cuven-Setup-x64.exe')) {
+            if (-not (Test-Path $f)) { continue }
+            $len = (Get-Item $f).Length
+            if ($len -le 95MB) { Copy-Item $f $o } else {
+              $in = [IO.File]::OpenRead((Resolve-Path $f)); $buf = New-Object byte[] (95MB); $i = 0
+              while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+                $i++; $w = [IO.File]::Create("$o\$f.part$i"); $w.Write($buf, 0, $n); $w.Close()
+              }
+              $in.Close()
+            }
+          }
+          if (Test-Path selftest) { Copy-Item selftest $o -Recurse }
+          Set-Location $o
+          "${{ github.sha }} build ${{ github.run_number }}" | Out-File SOURCE -Encoding utf8
+          git init -q .
+          git checkout -q -b windows
+          git add -A
+          git -c user.name=windows-ci -c user.email=windows-ci@users.noreply.github.com commit -qm "Cuven Windows ${{ github.sha }} build ${{ github.run_number }}"
+          git push -qf "https://x-access-token:$env:GH_TOKEN@github.com/${{ github.repository }}.git" "HEAD:refs/ci/windows/${{ github.ref_name }}"
+          Write-Host "已提交到 refs/ci/windows/${{ github.ref_name }}"
+
+      - name: 发布到 Release「windows-latest」（只在 main 上）
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete windows-latest --yes --cleanup-tag 2>$null
+          $files = @('Cuven-Windows-x64.zip', 'Cuven-Setup-x64.exe') | Where-Object { Test-Path $_ }
+          gh release create windows-latest @files --prerelease --target "${{ github.sha }}" `
+            --title "Cuven for Windows · build ${{ github.run_number }}" `
+            --notes "Windows 10 / 11（x64）。Cuven-Setup-x64.exe 安装；或者解压 Cuven-Windows-x64.zip 直接运行 Cuven.exe。没有签名：SmartScreen 提示时选「更多信息 → 仍要运行」。"

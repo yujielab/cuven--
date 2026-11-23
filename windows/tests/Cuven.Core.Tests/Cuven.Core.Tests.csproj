@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 不依赖测试框架（CI 和这台 Linux 上都直接 dotnet run）：失败时退出码非 0 -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Cuven.Core\Cuven.Core.csproj" />
+    <None Include="fixtures\**" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\pairing\model\cpc1-vectors.json" Link="fixtures\cpc1-vectors.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Cuven 的跨平台核心：后端接口、口令 v3、光学配对的码、片库、下载。不碰 Windows API，Linux 上也能编、能跑测试 -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Cuven.Core</RootNamespace>
+    <AssemblyName>Cuven.Core</AssemblyName>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 光学配对规范只有一份：pairing/model/cpc1-spec.json（Python 训练、iOS、网页、Windows 共用） -->
+    <EmbeddedResource Include="..\..\..\pairing\model\cpc1-spec.json" LogicalName="cpc1-spec.json" />
+  </ItemGroup>
+</Project>
