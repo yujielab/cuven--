@@ -5,6 +5,7 @@ import spec, render, model, decode
 torch.set_num_threads(4)
 steps = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
 init = sys.argv[2] if len(sys.argv) > 2 else ''
+OUT = os.environ.get('OUT', '../model/cpc1')                      # 存到哪（不带扩展名）
 net = model.Net()
 if init: net.load_state_dict(torch.load(init)); print('接着训练：', init, flush=True)
 opt = torch.optim.Adam(net.parameters(), lr=2e-3)
@@ -13,7 +14,7 @@ g = torch.Generator().manual_seed(1234)
 t0 = time.time(); run = 0.0
 for step in range(1, steps + 1):
     sev0 = float(os.environ.get('SEV0', 0.75 if init else 0.4))
-    sev = min(1.0, sev0 + step / (steps * 0.5))                       # 先易后难（接着训练时默认从 0.75 起，SEV0 可改）
+    sev = min(float(os.environ.get('SEV1', 1.0)), sev0 + step / (steps * 0.5))   # 先易后难（接着训练时默认从 0.75 起；SEV0 / SEV1 改起止）
     x, y, m, _, _ = render.batch(32, g, severity=sev)
     out = net(model.with_radius(x))
     loss = (((out - y) ** 2) * m).sum() / m.sum()
@@ -24,8 +25,8 @@ for step in range(1, steps + 1):
         with torch.no_grad():
             acc = (((out > 0) == (y > 0)).float() * m).sum() / m.sum()
         print(f'step {step} loss {run:.4f} sign-acc {float(acc):.3f} sev {sev:.2f} {time.time() - t0:.0f}s', flush=True)
-        torch.save(net.state_dict(), '../model/cpc1.pt')
-model.export(net, '../model/cpc1.json', '../model/cpc1.bin')
+        torch.save(net.state_dict(), OUT + '.pt')
+model.export(net, OUT + '.json', OUT + '.bin')
 
 # 端到端：随机配对码 → 渲染 → 解码
 def e2e(n, sev, seed, nf):
