@@ -28,7 +28,7 @@ public sealed partial class RequestsView : View
         Inset.Track(head, (e, l) => e.Margin = new Thickness(l, 24, Inset.Right, 4));
         col.Children.Add(head);
         col.Children.Add(Inset.Track(_catStatus, (e, l) => e.Margin = new Thickness(l, 0, Inset.Right, 0)));
-        _catalog.Layout = new UniformGridLayout { MinItemWidth = 150, MinItemHeight = 285, MinRowSpacing = 20, MinColumnSpacing = 18, ItemsStretch = UniformGridLayoutItemsStretch.Uniform };
+        _catalog.Layout = new UniformGridLayout { MinItemWidth = 150, MinItemHeight = 278, MinRowSpacing = 22, MinColumnSpacing = 18, ItemsStretch = UniformGridLayoutItemsStretch.None, ItemsJustification = UniformGridLayoutItemsJustification.SpaceBetween };
         _catalog.ItemTemplate = new PosterFactory(150);
         Inset.Track(_catalog, (e, l) => e.Margin = new Thickness(l, 8, Inset.Right, 0));
         col.Children.Add(_catalog);

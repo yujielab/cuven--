@@ -38,12 +38,13 @@ public sealed partial class BrowseView : View
         }
         _grid.Layout = new UniformGridLayout
         {
+            // 卡片尺寸固定（160 × 240 的海报 + 两行字），多出来的宽度分到间距里（Mac 的 TV App 那样）
             MinItemWidth = 160,
-            MinItemHeight = 300,
-            MinRowSpacing = 22,
-            MinColumnSpacing = 18,
-            ItemsStretch = UniformGridLayoutItemsStretch.Uniform,
-            ItemsJustification = UniformGridLayoutItemsJustification.Start,
+            MinItemHeight = 292,
+            MinRowSpacing = 24,
+            MinColumnSpacing = 20,
+            ItemsStretch = UniformGridLayoutItemsStretch.None,
+            ItemsJustification = UniformGridLayoutItemsJustification.SpaceBetween,
         };
         _grid.ItemTemplate = new PosterFactory(160);
         var scroll = new ScrollViewer { Content = Inset.Track(_grid, (g, l) => g.Margin = new Thickness(l, 0, Inset.Right, 40)), HorizontalScrollMode = ScrollMode.Disabled };
