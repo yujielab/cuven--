@@ -37,6 +37,12 @@ HDR10、HLG、杜比视界都能真正点亮，并且支持全屏、画中画、
 | Cuven Pass Pro | 账户页一组「Cuven Pass Pro」：打开后影片（HLS、直链）走加速节点 pass.cuven.us（VPS 上的 nginx，只转发影片、分段缓存在本机；签名只盖路径，换主机名照样有效），资料和接口照旧直连。播放前确认节点到 Worker 那一条通（5 分钟内确认过不再问），播放中节点出错就从当前位置改走普通线路、节点 10 分钟内不再用；「加速节点」一行显示延迟、点一下重新检测，「测速对比」两条线路各测一次（`PassPro.swift`、`AccountPassPro.swift`，节点部署见 [vps/pass-pro](vps/pass-pro/README.md)） |
 | iPhone Duo | 按 Apple 的 [Designing for iPhone Duo](https://developer.apple.com/design/human-interface-guidelines/designing-for-iphone-duo)：一律用系统的标签栏、导航栏与工具栏，不自己画（自绘的栏不参与 Duo 的竖向布局，Apple 也要求别改系统的摆放）。用 iOS 27.1 SDK 编译后，折起时（外屏，横竖都算）和展开横拿时，系统把它们竖着放到侧边那一列：灵动岛、状态栏、工具栏（返回在最上，然后是操作）、标签栏，自上而下；展开竖拿时恢复成横向的顶栏 / 底栏。内容只按安全区与尺寸类别排版，不认设备型号；**所有页面全屏、元素都能越过安全区**（用户要求）：每一页的滚动区连同侧边那一列一起铺满，横着的一排（主页各排、精选、简介卡、分集、预告片、演员、搜索结果、资料库剧照）一直铺到那一列底下——卡滑过去时从那一列底下过、不在安全区边上被切掉，在那一列上也能滑，第一张仍停在左边线上、最后一张能滑回安全区里；资料库的画幅和预告片也连同那一列铺满；字、按钮、网格和列表留在安全区里；首页头图与详情页头部画面用 `backgroundExtensionEffect()` 延伸到侧边那一列底下；工具栏项都同时给标题和符号（竖着放用符号，溢出菜单里用标题）；账户不是标签：主页标题那一行右边一枚头像，点开账户与设置。**搜索单独一颗**（用户要求，对 D7「别改系统的摆放」的有意偏离）：折起（横竖都算）和展开横拿时，系统竖在侧边那一列的标签栏把搜索和别的格挤在一枚胶囊里、拆不开，所以这几种形态下收起系统标签栏，在那一列里自己画：一枚竖向 Liquid Glass 胶囊（主页 / 资料库，只有图标，选中那格垫一块更亮的玻璃、滑过去；再点一下当前那格回到这一格的根页面）加下面单独一颗搜索圆钮（`DuoNav.swift`，标识 `nav-home` / `nav-library` / `nav-search`）；是不是这几种形态只看窗口大小（短边超过 440 点的 iPhone、折起或横拿），展开竖拿和别的 iPhone 仍是系统标签栏（横在底下时 iOS 26 本来就把搜索拆出来）。**展开后是 tvOS 的样子**：不另做一套界面，同一套部件按可用宽度长大（S1、D2、I11，见 docs/ios-design.md「iPhone Duo 展开」）——头图更大，每排海报 4（竖拿）/ 6（横拿）张、16:9 卡 2 / 4 张，年份那两排的标题上一级字号，边距与间距按 tvOS 的比例；焦点放大、阴影、视差都按卡宽算，展开时幅度更从容（S9、S12）。用 Xcode 26 编的包在 Duo 上只能待在状态栏那一列左边，所以 IPA 改在 Xcode 27 上打 |
 
+**账户安全（check.cuven.us，口令 v3）**：App 和网页版都在本机用账户档里的 salt / iter 算 PBKDF2-SHA256（31 万轮）得到 key，只把 key 交给 `POST /session` 核对，密码本身不离开设备；
+账号中心只存 `HMAC(胡椒, key)`（私有的 `auth/<用户名>.json`，胡椒是 Worker 的 secret `PASSWORD_PEPPER`），失败按用户名 / IP 限流。旧账户第一次用新版登录时自动迁移；
+旧版账号中心不认 key 时两边都退回本机比对。登录、验证码核对拿到的识别代码（5 分钟）在写账户档、邮箱映射时作为 `Authorization: Bearer` 带上——
+账号中心打开 `STRICT_AUTH=1` 后，公开读的账户档不再带摘要，改已有账户必须有它。验证码、通知邮件走 Cloudflare Email Service（`send_email` 绑定 `EMAIL`）。
+账号中心的 Worker 代码不在这个仓库里（单独交付）。
+
 **打包**：`.github/workflows/ios.yml` 在 GitHub 的 `xcode-27` 构建机上（Xcode 27.x、iOS 27 SDK）用 XcodeGen 生成工程、`xcodebuild archive`（不签名）、
 打成 `Cuven-unsigned.ipa`。`ios/` 有改动、推到 `main` 或 `claude/**` 时自动跑，也可以在 Actions 页手动运行；
 每次的 IPA 在那次运行的 Artifacts 里，`main` 上的构建另外发布到 Release「ios-latest」。

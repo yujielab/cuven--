@@ -8317,12 +8317,16 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
       return { algo: 'PBKDF2-SHA256', iter: PBKDF2_ITER, salt: b64uEnc(salt), hash: b64uEnc(bits) };
     });
   }
-  function checkPass(password, pass) {
-    return derive(password, b64uDec(pass.salt), pass.iter || PBKDF2_ITER)
-      .then(function (bits) { return b64uEnc(bits) === pass.hash; })
-      .catch(function () { return false; });
+  /* 设过密码：有盐就算（账号中心开了 STRICT_AUTH 时公开的账户档不带摘要，只有 salt / iter） */
+  function hasPass(r) { return !!(r && r.pass && r.pass.salt); }
+  /* 口令 v3：本机算 PBKDF2 得到 key，只把 key 交给账号中心核对；密码本身不离开浏览器 */
+  function keyOf(password, pass) {
+    return derive(password, b64uDec(pass.salt), pass.iter || PBKDF2_ITER).then(function (bits) { return b64uEnc(bits); });
   }
-  function hasPass(r) { return !!(r && r.pass && r.pass.hash && r.pass.salt); }
+  /* 识别代码（c1.…，5 分钟）：登录 / 验证码核对时账号中心给的；写账户档、邮箱映射时带上（STRICT_AUTH 时必需） */
+  var IDENT = null;
+  function rememberCode(c) { if (c && /^c1\./.test(c)) IDENT = { code: c, until: Date.now() + 280000 }; }
+  function authHeaders(h) { if (IDENT && IDENT.until > Date.now()) h.Authorization = 'Bearer ' + IDENT.code; return h; }
 
   /* ══ 后端 ══════════════════════════════════════════════════════ */
   function fetchRecord(name) {
@@ -8340,14 +8344,14 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
   }
   function putRecord(rec) {
     return fetch(API + '/file/' + encodeURIComponent('username_' + rec.username + '.json'), {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rec)
+      method: 'PUT', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(rec)
     }).then(function (r) { return r.ok ? { ok: true } : { ok: false, status: r.status }; })
       .catch(function () { return { ok: false, status: 0 }; });
   }
   function emailFile(email) { return 'email_' + String(email).trim().toLowerCase() + '.json'; }
   function putEmailMap(email, username) {
     return fetch(API + '/file/' + encodeURIComponent(emailFile(email)), {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      method: 'PUT', headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ username: username, created_at: new Date().toISOString() })
     }).catch(function () {});
   }
@@ -8641,10 +8645,24 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
       .then(function (r) {
         if (!hasPass(r)) throw new Error('norec');
         rec = r;
-        return checkPass(passIn.value, r.pass);
+        return keyOf(passIn.value, r.pass);
+      })
+      .then(function (key) {
+        /* 账号中心核对 key；旧版账号中心不认 key、或者连不上时退回本机比对账户档里的摘要 */
+        return fetch(API + '/session', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: st.user, key: key }) })
+          .then(function (res) { return res.json().catch(function () { return null; }); })
+          .catch(function () { return null; })
+          .then(function (j) {
+            if (j && j.ok) { rememberCode(j.code); return true; }
+            if (j && j.error === 'bad_credentials') return false;
+            if (j && j.error === 'rate_limited') return j.message || '尝试太多次了，15 分钟后再试';
+            return !!(rec.pass && rec.pass.hash && key === rec.pass.hash);
+          });
       })
       .then(function (ok) {
         setBusy(siBtn, false);
+        if (typeof ok === 'string') { syncSigninCTA(); setStatus(siStatus, ok, 'bad'); haptic([40, 60, 40]); return; }
         if (!ok) {
           syncSigninCTA();
           setStatus(siStatus, '密码不正确，请重试', 'bad');
@@ -8796,8 +8814,11 @@ function stop(){if(raf){cancelAnimationFrame(raf);raf=0}}
     setBusy(coBtn, true); coBtn.disabled = true;
     setStatus(coStatus, '正在验证…');
 
-    apiJSON(API + '/verify-code', { email: st.otpEmail, code: code }).then(function (j) {
+    /* 带上用户名：邮箱是这个账户绑的就会多回一枚识别代码，接下来写账户档（设定 / 找回密码）要用 */
+    var vUser = st.otpIntent === 'login' ? st.otpUser : ((st.passCtx || {}).name || '');
+    apiJSON(API + '/verify-code', { email: st.otpEmail, code: code, username: vUser || undefined }).then(function (j) {
       setBusy(coBtn, false);
+      if (j && j.ok) rememberCode(j.code);
       if (!(j && j.ok)) {
         var msg = (j && j.message) || '验证失败，请重试';
         if (j && j.error === 'wrong_code') {
