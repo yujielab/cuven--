@@ -13,28 +13,9 @@ import SwiftUI
 
 /// 「网络」一组：标题 + 一张卡（「网络速度」那一行）+ 卡下一行说明这个设置在 iOS 上管什么。直接放进账户页的组里用
 struct NetworkSpeedCard: View {
-    @AppStorage(NetworkSpeed.key) private var speed = NetworkSpeed.defaultValue
-    @AppStorage(NetworkSpeed.autoKey) private var auto = false
-    @AppStorage(NetworkSpeed.autoValueKey) private var autoValue = -1
-
     var body: some View {
-        AccountGroup(title: "网络", footer: footer) {
+        AccountGroup(title: "网络") {
             NetworkSpeedRow()
-        }
-    }
-
-    /// 说真话：这个百分比（开着自动调整就是自动选的那个）在 iOS 上换成了什么：正片缓冲多久、编辑推荐的预告片缓存成哪一档（TrailerCache.Tier）
-    private var footer: String {
-        let p = auto && autoValue >= 0 ? min(100, autoValue) : min(100, max(0, speed))
-        let tail = auto ? "开启自动调整后，网络变化时会重新检测。更改将在下次播放时生效。"
-                        : "更改将在下次播放时生效。"
-        if p >= 100 { return "设为 100% 时，由系统决定缓冲时长，预告片以最高画质（4K / HDR）缓存。" + tail }
-        let base = "最多提前缓冲约 \(Int(NetworkSpeed.forwardBuffer(p))) 秒"
-        switch TrailerCache.Tier.of(p) {
-        case .p1080?: return base + "，预告片以 1080p 缓存。" + tail
-        case .p720?: return base + "，预告片以 720p 缓存。" + tail
-        case .p540?: return base + "，预告片以 540p 缓存。" + tail
-        default: return base + "。低于 25% 时，预告片不会自动播放，也不会缓存。" + tail
         }
     }
 }
@@ -355,7 +336,7 @@ struct UsageInsightsCard: View {
     @State private var cleared = 0
 
     var body: some View {
-        AccountGroup(title: "使用洞察", footer: footer) {
+        AccountGroup(title: "使用洞察") {
             VStack(alignment: .leading, spacing: 0) {
                 header
                 if expanded, let summary {
@@ -402,16 +383,10 @@ struct UsageInsightsCard: View {
                 Spacer(minLength: 0)
                 togglePill
             }
-            VStack(alignment: .leading, spacing: 4) {
-                Text("流量概览")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .accessibilityAddTraits(.isHeader)
-                Text("了解近期的流量使用情况。")
-                    .font(.callout)
-                    .foregroundStyle(DSInk.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text("流量概览")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.white)
+                .accessibilityAddTraits(.isHeader)
         }
     }
 
@@ -436,17 +411,6 @@ struct UsageInsightsCard: View {
     }
 
     /// 卡下一行：统计的是什么、从哪天起（演示模式直说是示例数）；清除缓存会怎样（以前写在「存储」那一组下面）
-    private var footer: String {
-        let cache = "清除后，片库、海报和影片信息将重新下载。"
-        guard expanded else { return cache }
-        if DemoData.enabled { return "演示模式：以上为示例数据。" + cache }
-        var s = "仅统计 Cuven 在此设备上使用的流量，记录只保存在本机。"
-        if let since = summary?.since {
-            s += "自 \(since.formatted(.dateTime.month().day())) 起统计。"
-        }
-        return s + cache
-    }
-
     // MARK: 清除缓存
 
     /// 左边「缓存」+ 占了多少，右边一颗和「收起 / 展开」同一种玻璃胶囊「清除缓存」

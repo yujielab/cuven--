@@ -12,8 +12,7 @@ struct PassProGroup: View {
     @State private var pass = PassPro.shared
 
     var body: some View {
-        AccountGroup(title: "Cuven Pass Pro",
-                     footer: "开启后，影片经 Cuven 专属加速节点传输，跨网络和晚高峰时更稳、更快。加速节点暂时不可用时，会自动改用普通线路，不影响观看。") {
+        AccountGroup(title: "Cuven Pass Pro") {
             AccountRow(icon: "bolt.fill", title: "Cuven Pass Pro", subtitle: "影片经加速节点传输") {
                 Toggle("Cuven Pass Pro", isOn: Binding(get: { pass.enabled }, set: { pass.setEnabled($0) }))
                     .labelsHidden()
