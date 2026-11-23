@@ -16,7 +16,7 @@ public sealed partial class DetailView : View
     readonly ScrollViewer _scroll = new() { HorizontalScrollMode = ScrollMode.Disabled };
     readonly StackPanel _col = new() { Spacing = 0, Padding = new Thickness(0, 0, 0, 120) };
     readonly Grid _hero = new();
-    readonly StackPanel _info = new() { Spacing = 16, VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Center, MaxWidth = 760, Margin = new Thickness(40, 0, 40, 40) };
+    readonly StackPanel _info = new() { Spacing = 16, VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Center, MaxWidth = 760, Margin = new Thickness(40, 0, 40, 118) };
     readonly StackPanel _actions = new() { Orientation = Orientation.Horizontal, Spacing = 14, HorizontalAlignment = HorizontalAlignment.Center };
     readonly StackPanel _extra = new() { Spacing = 0 };
     Movie? _movie;
@@ -135,7 +135,8 @@ public sealed partial class DetailView : View
         _hero.Children.Insert(0, U.Img(bg, 1920));
 
         _info.Children.Clear();
-        _info.Children.Add(FeatureBlock.LogoOrTitle(m?.Logo, TitleText, 150, 560));
+        var w = ActualWidth > 0 ? ActualWidth : 1280;
+        _info.Children.Add(FeatureBlock.LogoOrTitle(m?.Logo, TitleText, Math.Clamp(w * 0.1, 80, 140), Math.Clamp(w * 0.34, 280, 520)));
         if (_series is not null)
         {
             var bits = new[] { _series.SeasonLabel ?? (_series.Season is { } sn ? $"第 {sn} 季" : null), m?.Year ?? _series.Year }.Where(b => !string.IsNullOrEmpty(b));

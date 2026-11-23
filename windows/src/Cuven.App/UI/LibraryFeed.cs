@@ -21,7 +21,7 @@ public sealed partial class LibraryFeedView : View
         Background = Mac.CanvasBrush;
         var col = new StackPanel { Padding = new Thickness(0, 0, 0, 120) };
         var head = U.V(4, U.T("资料库", 30, FontWeights.Bold), U.T("Cuven 为你提供严格品质的影片", 12, null, Mac.Tertiary), _count);
-        Inset.Track(head, (h, l) => h.Margin = new Thickness(l, 22, l, 16));
+        Inset.Track(head, (h, l) => h.Margin = new Thickness(l, 64, l, 20));
         col.Children.Add(head);
         _feed.Layout = new StackLayout { Orientation = Orientation.Vertical, Spacing = 0 };
         _feed.ItemTemplate = new FeatureFactory();
@@ -57,27 +57,35 @@ public sealed partial class FeatureBlock : StackPanel
     readonly StackPanel _stillsRow = new();
     readonly TextBlock _people = U.T("", 12, null, Mac.Tertiary, 2);
     readonly TextBlock _overview;
+    readonly MacButton _play;
     bool _loaded;
+
+    void Banner(Meta meta)
+    {
+        _banner.Children.Clear();
+        var bg = TmdbImage.Url(meta.Backdrop ?? meta.BackdropClean ?? _m.Meta.Backdrop, "w1280");
+        _banner.Children.Add(U.Img(bg, 1600));
+        _banner.Children.Add(new Border { Background = U.Fade(0, 1, Colors.Black), Height = 260, VerticalAlignment = VerticalAlignment.Bottom });
+        var mid = new StackPanel { Spacing = 10, VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(40, 0, 40, 46) };
+        var meta1 = string.Join(" · ", new[] { meta.Year ?? _m.Year, meta.Genres is { Count: > 0 } g ? string.Join(" · ", g.Take(2)) : null, meta.Runtime is > 0 ? $"{meta.Runtime} 分钟" : null }.Where(x => !string.IsNullOrEmpty(x)));
+        mid.Children.Add(U.T(meta1, 14, FontWeights.SemiBold).With(t => t.HorizontalAlignment = HorizontalAlignment.Center));
+        mid.Children.Add(LogoOrTitle(meta.Logo, meta.Title ?? _m.Title, 120, 460));
+        _banner.Children.Add(mid);
+        _banner.Children.Add(_play);
+    }
 
     public FeatureBlock(Movie m)
     {
         _m = m;
         Spacing = 16;
         Padding = new Thickness(0, 0, 0, 40);
-        // 整幅剧照（中间一行信息 + 字标；右上角一颗播放）
-        _banner.Children.Add(U.Img(m.BackdropUrl("w1280"), 1600));
-        _banner.Children.Add(new Border { Background = U.Fade(0, 1, Colors.Black), Height = 260, VerticalAlignment = VerticalAlignment.Bottom });
-        var mid = new StackPanel { Spacing = 10, VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(40, 0, 40, 46) };
-        var meta = string.Join(" · ", new[] { m.Year, m.Meta.Genres is { Count: > 0 } g ? string.Join(" · ", g.Take(2)) : null, m.Meta.Runtime is > 0 ? $"{m.Meta.Runtime} 分钟" : null }.Where(x => !string.IsNullOrEmpty(x)));
-        mid.Children.Add(U.T(meta, 14, FontWeights.SemiBold).With(t => t.HorizontalAlignment = HorizontalAlignment.Center));
-        mid.Children.Add(LogoOrTitle(m.Meta.Logo, m.Title));
-        _banner.Children.Add(mid);
-        var play = MacButton.Round("", () => PlayRequest.Movie(m), "播放", 40, 14);
-        play.HorizontalAlignment = HorizontalAlignment.Right;
-        play.VerticalAlignment = VerticalAlignment.Top;
-        play.Margin = new Thickness(0, 22, 26, 0);
-        _banner.Children.Add(play);
-        _banner.Tapped += (_, e) => { if (e.OriginalSource is not FrameworkElement fe || !IsIn(fe, play)) Nav.Open(m); };
+        // 整幅剧照（中间一行信息 + 字标；右上角一颗播放）。先用片库里的简要资料画，取到全量资料（剧照、字标、片长）再画一遍
+        _play = MacButton.Round("\uE768", () => PlayRequest.Movie(m), "播放", 40, 14);
+        _play.HorizontalAlignment = HorizontalAlignment.Right;
+        _play.VerticalAlignment = VerticalAlignment.Top;
+        _play.Margin = new Thickness(0, 22, 26, 0);
+        Banner(m.Meta);
+        _banner.Tapped += (_, e) => { if (e.OriginalSource is not FrameworkElement fe || !IsIn(fe, _play)) Nav.Open(m); };
         SizeChanged += (_, e) => _banner.Height = Math.Clamp(e.NewSize.Width * 0.5, 360, 760);
         Children.Add(_banner);
 
@@ -116,6 +124,7 @@ public sealed partial class FeatureBlock : StackPanel
         if (_loaded) return;
         _loaded = true;
         var full = await LibraryStore.Shared.FullMetaAsync(_m) ?? _m.Meta;
+        if (full != _m.Meta) Banner(full);
         var cast = full.Cast?.Take(4).Select(c => c.Name).ToList() ?? new List<string>();
         _people.Text = string.Join("　", new[] { full.Director is { Length: > 0 } d ? "导演 " + d : null, cast.Count > 0 ? "主演 " + string.Join("、", cast) : null }.Where(x => x is not null));
         if (string.IsNullOrEmpty(_overview.Text) && full.Overview is { } ov) _overview.Text = ov;

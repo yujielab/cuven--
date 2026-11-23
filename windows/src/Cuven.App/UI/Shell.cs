@@ -292,6 +292,7 @@ public sealed partial class Dock : StackPanel
     readonly FontIcon _glyph = U.Icon("\uE721", 19);
     readonly TextBox _field = new();
     readonly MacButton _cancel;
+    readonly Grid _cancelHost = new() { HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 9, 0) };
     bool _suppress;
     string _selected = "home";
     public bool Searching { get; private set; }
@@ -359,14 +360,13 @@ public sealed partial class Dock : StackPanel
             else if (e.Key == VirtualKey.Escape) { Cancelled?.Invoke(); e.Handled = true; }
         };
         sg.Children.Add(_field);
+        // 「取消」：淡入淡出放在外面那一层（同一个元素上 OpacityTransition 和 Composition 动画不能同时用），弹簧在按钮自己身上
         _cancel = MacButton.Pill("取消", null, () => Cancelled?.Invoke(), MacButton.Style.Glass, 46);
-        _cancel.HorizontalAlignment = HorizontalAlignment.Right;
-        _cancel.VerticalAlignment = VerticalAlignment.Center;
-        _cancel.Margin = new Thickness(0, 0, 9, 0);
-        _cancel.Opacity = 0;
-        _cancel.IsHitTestVisible = false;
-        _cancel.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(260) };
-        sg.Children.Add(_cancel);
+        _cancelHost.Children.Add(_cancel);
+        _cancelHost.Opacity = 0;
+        _cancelHost.IsHitTestVisible = false;
+        _cancelHost.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(260) };
+        sg.Children.Add(_cancelHost);
         _search.Content = sg;
         _search.SizeChanged += (_, e) => _search.Clip = new RectangleGeometry { Rect = new Windows.Foundation.Rect(0, 0, e.NewSize.Width, e.NewSize.Height) };
         _search.Tapped += (_, _) => { if (Searching) _field.Focus(FocusState.Programmatic); else _go("search"); };
@@ -390,8 +390,8 @@ public sealed partial class Dock : StackPanel
             _glyph.Opacity = 0;
             _field.Opacity = 1;
             _field.IsHitTestVisible = true;
-            _cancel.Opacity = 1;
-            _cancel.IsHitTestVisible = true;
+            _cancelHost.Opacity = 1;
+            _cancelHost.IsHitTestVisible = true;
             Mac.SpringScaleXY(_cancel, new System.Numerics.Vector3(0.5f, 0.5f, 1), System.Numerics.Vector3.One, 0.55f, 60);
         }
         if (_field.Text != text) { _suppress = true; _field.Text = text; _field.SelectionStart = text.Length; _suppress = false; }
@@ -410,8 +410,8 @@ public sealed partial class Dock : StackPanel
         _glyph.Opacity = 1;
         _field.Opacity = 0;
         _field.IsHitTestVisible = false;
-        _cancel.Opacity = 0;
-        _cancel.IsHitTestVisible = false;
+        _cancelHost.Opacity = 0;
+        _cancelHost.IsHitTestVisible = false;
         Select(_selected, false);
     }
 
