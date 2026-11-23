@@ -27,6 +27,13 @@ final class PairScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
     /// 调试：最近一帧的「看清了几分」（导频的相关度，0–1）
     var onScore: ((Float) -> Void)?
 
+    /// 相机现在的状态（扫描页圆圈下面显示）：以前相机起不来就是一个空圆圈，看不出为什么
+    enum CamState: Equatable { case starting, running, noCamera, paused(String), failed(String) }
+    var onState: ((CamState) -> Void)?
+    private func report(_ s: CamState) { DispatchQueue.main.async { self.onState?(s) } }
+    private var observers: [NSObjectProtocol] = []
+    private var restarted = false
+
     init?(decoder: PairDecoder? = PairDecoder()) {
         guard let decoder else { return nil }
         self.decoder = decoder
@@ -38,24 +45,69 @@ final class PairScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
         inkBuf = dev?.makeBuffer(length: decoder.spec.decode.cam * decoder.spec.decode.cam * 4, options: .storageModeShared)
         super.init()
         if let dev { CVMetalTextureCacheCreate(nil, nil, dev, nil, &cache) }
+        let nc = NotificationCenter.default
+        observers.append(nc.addObserver(forName: AVCaptureSession.wasInterruptedNotification, object: session, queue: nil) { [weak self] n in
+            let raw = (n.userInfo?[AVCaptureSessionInterruptionReasonKey] as? Int) ?? -1
+            self?.report(.paused(Self.reasonText(AVCaptureSession.InterruptionReason(rawValue: raw))))
+        })
+        observers.append(nc.addObserver(forName: AVCaptureSession.interruptionEndedNotification, object: session, queue: nil) { [weak self] _ in
+            self?.report(.running)
+        })
+        observers.append(nc.addObserver(forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: nil) { [weak self] n in
+            guard let self else { return }
+            let e = n.userInfo?[AVCaptureSessionErrorKey] as? NSError
+            // 媒体服务重置之类：重启一次；再坏就报出来
+            if !restarted {
+                restarted = true
+                queue.async { [self] in if !session.isRunning { session.startRunning() }; report(session.isRunning ? .running : .failed("相机出错了（\(e?.code ?? 0)）")) }
+            } else {
+                report(.failed("相机出错了（\(e?.code ?? 0)）"))
+            }
+        })
+    }
+
+    deinit { observers.forEach { NotificationCenter.default.removeObserver($0) } }
+
+    private static func reasonText(_ r: AVCaptureSession.InterruptionReason?) -> String {
+        switch r {
+        case .videoDeviceNotAvailableWithMultipleForegroundApps?: return "几个 App 同时在前台时相机被系统暂停了：把 Cuven 切到全屏再试"
+        case .videoDeviceInUseByAnotherClient?: return "相机正被别的 App 用着"
+        case .videoDeviceNotAvailableDueToSystemPressure?: return "手机太热了，相机暂停了一下"
+        case .videoDeviceNotAvailableInBackground?: return "Cuven 在后台，相机暂停了"
+        default: return "相机被系统暂停了"
+        }
+    }
+
+    /// 后置相机：优先多摄的虚拟设备（离得太近时自动换超广角微距，贴近屏幕也对得上焦），没有再退回广角
+    private static func backCamera() -> AVCaptureDevice? {
+        let types: [AVCaptureDevice.DeviceType] = [.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera, .builtInWideAngleCamera]
+        let found = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: .back).devices
+        for t in types { if let d = found.first(where: { $0.deviceType == t }) { return d } }
+        return AVCaptureDevice.default(for: .video)
     }
 
     static var authorized: Bool { AVCaptureDevice.authorizationStatus(for: .video) == .authorized }
     static func requestAccess() async -> Bool { await AVCaptureDevice.requestAccess(for: .video) }
 
     func start() {
+        report(.starting)
         queue.async { [self] in
             if session.inputs.isEmpty {
                 session.beginConfiguration()
-                session.sessionPreset = .hd1920x1080
-                if let cam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-                   let input = try? AVCaptureDeviceInput(device: cam), session.canAddInput(input) {
-                    session.addInput(input)
-                    if (try? cam.lockForConfiguration()) != nil {
-                        if cam.isFocusModeSupported(.continuousAutoFocus) { cam.focusMode = .continuousAutoFocus }
-                        if cam.isAutoFocusRangeRestrictionSupported { cam.autoFocusRangeRestriction = .near }
-                        cam.unlockForConfiguration()
-                    }
+                // iPhone Duo 展开、iPad：几个 App 同时在前台（分屏 / 多窗口）时，不开这一项相机会被系统暂停 —— 扫描框里就是空的
+                if session.isMultitaskingCameraAccessSupported { session.isMultitaskingCameraAccessEnabled = true }
+                session.sessionPreset = session.canSetSessionPreset(.hd1920x1080) ? .hd1920x1080 : .high
+                guard let cam = Self.backCamera(), let input = try? AVCaptureDeviceInput(device: cam), session.canAddInput(input) else {
+                    session.commitConfiguration()
+                    report(.noCamera)
+                    return
+                }
+                session.addInput(input)
+                if (try? cam.lockForConfiguration()) != nil {
+                    if cam.isFocusModeSupported(.continuousAutoFocus) { cam.focusMode = .continuousAutoFocus }
+                    if cam.isAutoFocusRangeRestrictionSupported { cam.autoFocusRangeRestriction = .near }
+                    if cam.isExposureModeSupported(.continuousAutoExposure) { cam.exposureMode = .continuousAutoExposure }
+                    cam.unlockForConfiguration()
                 }
                 let out = AVCaptureVideoDataOutput()
                 out.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
@@ -65,10 +117,17 @@ final class PairScanner: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate 
                 session.commitConfiguration()
             }
             done = false
+            restarted = false
             decoder.reset()
             if !session.isRunning { session.startRunning() }
+            if session.isRunning { report(.running) }
+            else if session.isInterrupted { report(.paused("相机被系统暂停了")) }
+            else { report(.failed("相机没有启动")) }
         }
     }
+
+    /// 现在用的后置相机（预览层按它算横竖）
+    var camera: AVCaptureDevice? { (session.inputs.first as? AVCaptureDeviceInput)?.device }
 
     func stop() { queue.async { [self] in if session.isRunning { session.stopRunning() } } }
 
