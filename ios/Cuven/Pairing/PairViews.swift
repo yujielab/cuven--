@@ -279,14 +279,17 @@ struct PairScanSheet: View {
     private var verifyView: some View {
         VStack(spacing: 0) {
             titleBlock("先验证一下身份", "第一次用这台 iPhone 批准别的设备登录，需要确认是你本人。")
-            SecureField("密码", text: $password)
+            Text("账户：\(account.displayName)")
+                .font(.system(size: 15, weight: .medium)).foregroundStyle(.black.opacity(0.55)).padding(.top, 18)
+                .accessibilityIdentifier("pair-verify-account")
+            SecureField("", text: $password, prompt: Text("这个账号的密码").foregroundStyle(.black.opacity(0.35)))
                 .textContentType(.password)
                 .font(.system(size: 18)).foregroundStyle(.black)
                 .padding(16).background(RoundedRectangle(cornerRadius: 14).fill(.white))
-                .padding(.horizontal, 32).padding(.top, 34)
+                .padding(.horizontal, 32).padding(.top, 14)
                 .accessibilityIdentifier("pair-verify-password")
             if let hint = otpHint {
-                TextField("邮箱验证码（发到 \(hint)）", text: $otpCode)
+                TextField("", text: $otpCode, prompt: Text("邮箱验证码（发到 \(hint)）").foregroundStyle(.black.opacity(0.35)))
                     .keyboardType(.numberPad).font(.system(size: 18)).foregroundStyle(.black)
                     .padding(16).background(RoundedRectangle(cornerRadius: 14).fill(.white))
                     .padding(.horizontal, 32).padding(.top, 12)

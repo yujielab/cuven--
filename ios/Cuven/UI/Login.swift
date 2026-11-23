@@ -880,7 +880,7 @@ private struct LoginScreen: View {
             .statusBarHidden(m.folded)
         }
         .ignoresSafeArea(.keyboard)
-        .fullScreenCover(isPresented: $pairShowing) { PairShowView().environment(flow.account) }
+        .fullScreenCover(isPresented: $pairShowing) { PairShowView().environment(flow.account).environment(\.colorScheme, .light) }
         .onAppear {
             flow.reduceMotion = reduceMotion
             scheduleFxStop()
