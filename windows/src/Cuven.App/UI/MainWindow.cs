@@ -39,7 +39,14 @@ public sealed partial class MainWindow : Window
         try { AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "cuven.ico")); } catch { }
         var scale = Win32.GetDpiForWindow(Hwnd) / 96.0;
         if (scale <= 0) scale = 1;
-        AppWindow.Resize(new SizeInt32((int)(1360 * scale), (int)(860 * scale)));
+        // 第一次打开：1360×860，屏幕小就按工作区的九成，居中（Mac 上新窗口也是在屏幕中间偏上）
+        try
+        {
+            var work = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
+            int ww = Math.Min((int)(1360 * scale), (int)(work.Width * 0.92)), wh = Math.Min((int)(860 * scale), (int)(work.Height * 0.92));
+            AppWindow.MoveAndResize(new RectInt32(work.X + (work.Width - ww) / 2, work.Y + Math.Max(0, (work.Height - wh) / 3), ww, wh));
+        }
+        catch { AppWindow.Resize(new SizeInt32((int)(1360 * scale), (int)(860 * scale))); }
         if (AppWindow.Presenter is OverlappedPresenter op) { op.PreferredMinimumWidth = (int)(900 * scale); op.PreferredMinimumHeight = (int)(600 * scale); }
         try { _nc = InputNonClientPointerSource.GetForWindowId(AppWindow.Id); } catch { }
 

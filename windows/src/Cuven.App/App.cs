@@ -53,6 +53,15 @@ public sealed partial class App : Application, IXamlMetadataProvider
     void Launch()
     {
         Resources.MergedDictionaries.Add(new XamlControlsResources());
+        // 强调色用 macOS 的系统蓝（开关、进度条、选中都跟着变；深色用 #0A84FF，浅色用 #007AFF）
+        var blue = Windows.UI.Color.FromArgb(255, 10, 132, 255);
+        Resources["SystemAccentColor"] = blue;
+        Resources["SystemAccentColorLight1"] = Windows.UI.Color.FromArgb(255, 51, 149, 255);
+        Resources["SystemAccentColorLight2"] = blue;
+        Resources["SystemAccentColorLight3"] = Windows.UI.Color.FromArgb(255, 102, 176, 255);
+        Resources["SystemAccentColorDark1"] = Windows.UI.Color.FromArgb(255, 0, 122, 255);
+        Resources["SystemAccentColorDark2"] = Windows.UI.Color.FromArgb(255, 0, 100, 215);
+        Resources["SystemAccentColorDark3"] = Windows.UI.Color.FromArgb(255, 0, 80, 180);
         Settings.Protector = new Dpapi();
         Native.Native.Init();
         // 下载线程：EcoQoS（排到能效核，不抢播放）

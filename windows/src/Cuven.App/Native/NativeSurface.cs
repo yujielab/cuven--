@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -37,9 +36,11 @@ public sealed partial class NativeSurface : IDisposable
         var (w, h) = PixelSize();
         Handle = Native.cv_surface_create(w, h, _flags);
         if (Handle == IntPtr.Zero) return;
-        IntPtr unk = WinRT.MarshalInspectable<object>.FromManaged(Panel);
-        try { Native.cv_surface_attach(Handle, unk); }
-        finally { Marshal.Release(unk); }
+        // 要面板背后那个原生的 WinRT 对象（不是 C# 这边的包装）：原生核心在它上面 QueryInterface 出 ISwapChainPanelNative
+        IntPtr unk = ((WinRT.IWinRTObject)Panel).NativeObject.ThisPtr;
+        int hr = Native.cv_surface_attach(Handle, unk);
+        if (hr != 0) App.Log($"交换链挂不到面板上（{hr}）");
+        GC.KeepAlive(Panel);
         Resize();
         Ready?.Invoke();
     }

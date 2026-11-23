@@ -206,7 +206,7 @@ public sealed partial class AccountView : View
         hdr.SelectedIndex = s.HdrMode == "sdr" ? 1 : 0;
         hdr.SelectionChanged += (_, _) => { s.HdrMode = hdr.SelectedIndex == 1 ? "sdr" : "auto"; s.Save(); };
         col.Children.Add(Setting("HDR 输出", "HDR10、HLG、杜比视界在 HDR 屏上原样输出；在 SDR 屏上用 BT.2390 映射", hdr));
-        var hw = new ToggleSwitch { IsOn = s.HardwareDecode, OnContent = "开", OffContent = "关" };
+        var hw = new ToggleSwitch { IsOn = s.HardwareDecode, OnContent = "", OffContent = "", MinWidth = 0 };
         hw.Toggled += (_, _) => { s.HardwareDecode = hw.IsOn; s.Save(); };
         col.Children.Add(Setting("硬件解码", "用显卡解码（D3D11VA）：省电、4K 也流畅。遇到花屏可以关掉试试", hw));
         var audio = new ComboBox { Width = 220 };
@@ -215,12 +215,12 @@ public sealed partial class AccountView : View
         audio.SelectedIndex = s.AudioPref == "zh" ? 1 : 0;
         audio.SelectionChanged += (_, _) => { s.AudioPref = audio.SelectedIndex == 1 ? "zh" : "natural"; s.Save(); };
         col.Children.Add(Setting("首选音轨", null, audio));
-        var subs = new ToggleSwitch { IsOn = s.SubtitlesOn, OnContent = "开", OffContent = "关" };
+        var subs = new ToggleSwitch { IsOn = s.SubtitlesOn, OnContent = "", OffContent = "", MinWidth = 0 };
         subs.Toggled += (_, _) => { s.SubtitlesOn = subs.IsOn; s.Save(); };
         col.Children.Add(Setting("中文字幕", "优先用片子自带的中文字幕，没有就自动加载在线字幕", subs));
 
         col.Children.Add(U.T("这台电脑", 17, FontWeights.Bold).With(t => t.Margin = new Thickness(0, 10, 0, 0)));
-        var eco = new ToggleSwitch { IsOn = s.Efficiency, OnContent = "开", OffContent = "关" };
+        var eco = new ToggleSwitch { IsOn = s.Efficiency, OnContent = "", OffContent = "", MinWidth = 0 };
         eco.Toggled += (_, _) => { s.Efficiency = eco.IsOn; s.Save(); };
         col.Children.Add(Setting("能效模式（Win11）", "下载、图片解码放到能效核（EcoQoS）；最小化又没在播时整个程序进效率模式。播放线程始终高优先级（MMCSS）", eco));
         var d = Native.Native.QueryDisplay(MainWindow.Current.Monitor);

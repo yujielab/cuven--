@@ -173,7 +173,7 @@ public sealed partial class Shell : Grid, IDisposable
         SizeChanged += (_, e) =>
         {
             // 窗口窄了自动收起边栏（用户自己收起 / 展开过就听用户的）
-            if (!_userHid) SetSidebar(e.NewSize.Width >= 980, false);
+            if (!_userHid) SetSidebar(e.NewSize.Width >= 860, false);
             MainWindow.Current.UpdateDragRegions();
         };
 
