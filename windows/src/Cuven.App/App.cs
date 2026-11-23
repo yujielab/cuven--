@@ -33,7 +33,23 @@ public sealed partial class App : Application, IXamlMetadataProvider
     public IXamlType GetXamlType(string fullName) => _meta.GetXamlType(fullName);
     public XmlnsDefinition[] GetXmlnsDefinitions() => _meta.GetXmlnsDefinitions();
 
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern int MessageBoxW(IntPtr hwnd, string text, string caption, uint type);
+
     protected override void OnLaunched(LaunchActivatedEventArgs args)
+    {
+        try { Launch(); }
+        catch (Exception e)
+        {
+            // 起不来：别悄悄退出，告诉用户日志在哪
+            Log("启动失败：" + e);
+            MessageBoxW(IntPtr.Zero, $"Cuven 启动失败：{e.Message}\n\n日志：{Path.Combine(Storage.Root, "logs", "app.log")}", "Cuven", 0x10);
+            ExitCode = 1;
+            Exit();
+        }
+    }
+
+    void Launch()
     {
         Resources.MergedDictionaries.Add(new XamlControlsResources());
         Settings.Protector = new Dpapi();

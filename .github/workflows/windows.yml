@@ -94,7 +94,7 @@ jobs:
           & $ff -hide_banner -loglevel error -f lavfi -i "testsrc2=size=1280x720:rate=24" -f lavfi -i "sine=frequency=440:sample_rate=48000" -i "$m\test.srt" `
             -t 20 -map 0:v -map 1:a -map 2:s -c:v mpeg4 -q:v 3 -c:a aac -b:a 128k -c:s srt -metadata:s:s:0 language=eng "$m\synthetic.mkv"
           Get-Item "$m\synthetic.mkv" | Select-Object Name, Length
-          # 片库里挑一部 HDR10、一部杜比视界（WEB-DL 多是 5）：只要前 40 MB
+          # 片库里挑一部 HDR10、一部杜比视界（WEB-DL 多是 5）：只要前 120 MB
           try {
             $all = Invoke-RestMethod -TimeoutSec 60 https://stream.cuven.online/api/all
             $hdr = $all.videos | Where-Object { $_.name -match '(?i)[ ._-]HDR[ ._-]' -and $_.name -notmatch '(?i)[ ._-](DV|DoVi)[ ._-]' -and $_.name -match '(?i)\.mkv$' } | Select-Object -First 1
@@ -103,9 +103,9 @@ jobs:
               if (-not $p[1]) { continue }
               $url = "https://stream.cuven.online/stream/Cuven.mkv?path=" + [uri]::EscapeDataString($p[1].path)
               $out = "$m\$($p[0]).mkv"
-              curl.exe -s -L -r 0-41943039 --max-time 120 -o $out $url
+              curl.exe -s -L -r 0-125829119 --max-time 180 -o $out $url
               $f = [IO.File]::Open($out, 'Open')
-              if ($f.Length -gt 41943040) { $f.SetLength(41943040) }
+              if ($f.Length -gt 125829120) { $f.SetLength(125829120) }
               $f.Close()
               Write-Host "$($p[0])：$((Get-Item $out).Length) 字节"
             }
@@ -140,6 +140,9 @@ jobs:
           Copy-Item build/native/Release/CuvenCore.dll out/Cuven/
           foreach ($d in 'avcodec','avformat','avutil','swresample','swscale') { Copy-Item "$env:FFMPEG_DIR\bin\$d-*.dll" out/Cuven/ }
           Copy-Item "$env:FFMPEG_DIR\LICENSE.txt" out/Cuven/FFmpeg-LICENSE.txt -ErrorAction SilentlyContinue
+          # Windows App SDK 的机器学习运行库（onnxruntime / DirectML，近 40 MB）用不到
+          Remove-Item out/Cuven/onnxruntime*.dll, out/Cuven/DirectML.dll -ErrorAction SilentlyContinue
+          Get-ChildItem out/Cuven/*.pri | Select-Object Name, Length | Format-Table
           $size = (Get-ChildItem out/Cuven -Recurse | Measure-Object Length -Sum).Sum
           Write-Host ("一共 {0:N1} MB，{1} 个文件" -f ($size / 1MB), (Get-ChildItem out/Cuven -Recurse -File).Count)
 

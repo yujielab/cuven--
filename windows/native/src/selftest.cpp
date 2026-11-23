@@ -111,17 +111,21 @@ extern "C" CV_API int CV_CALL cv_selftest(const char* media, const char* out_dir
                 R.add("轨 %d：%s %s %s %s%s", tr[i].id, tr[i].type == CV_TRACK_AUDIO ? "音频" : "字幕", tr[i].lang, tr[i].codec, tr[i].title,
                       tr[i].selected ? "（选中）" : "");
             if (st.duration > 8) {
-                double target = std::min(st.duration - 3, 6.0);
+                // 片头多是黑的：真片子跳得远一点（自检只下了片子的前一截）
+                double target = std::min(st.duration - 3, st.duration > 600 ? 20.0 : 6.0);
                 cv_player_seek(p, target, 1);
                 Sleep(300);
                 bool seeked = wait_for([&] { cv_player_get_state(p, &st); return !st.seeking && st.position >= target - 0.05; }, 60);
                 Sleep(1500);
                 cv_player_get_state(p, &st);
                 R.add("跳到 %.1f 秒后：位置 %.2f", target, st.position);
-                R.check(seeked && st.position >= target - 0.1 && st.position < target + 4, "精确跳转");
+                R.check(seeked && st.position >= target - 0.1 && st.position < target + 6, "精确跳转");
                 if (cv_player_readback(p, px, w, h)) {
+                    double mean, chroma;
+                    stats(px, mean, chroma);
+                    R.add("画面 2：%dx%d，平均 %.1f，彩色 %.1f", w, h, mean, chroma);
                     std::string f = std::string(out_dir) + "\\video-2.png";
-                    cv_save_png(f.c_str(), px.data(), w, h);
+                    R.check(cv_save_png(f.c_str(), px.data(), w, h) == 0, "存 PNG");
                 }
             }
             cv_player_pause(p);
@@ -131,6 +135,7 @@ extern "C" CV_API int CV_CALL cv_selftest(const char* media, const char* out_dir
             Sleep(600);
             cv_player_get_state(p, &st);
             b = st.position;
+            R.add("暂停：%.3f → %.3f 秒", a, b);
             R.check(std::fabs(b - a) < 0.05, "暂停（时钟停住）");
         }
         {

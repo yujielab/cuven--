@@ -167,6 +167,11 @@ void AudioOut::play() {
 
 void AudioOut::pause() {
     std::lock_guard<std::mutex> l(m_);
+    // 停在外推出来的那一帧（两次放音事件之间时钟是按 QPC 补的）：暂停后时钟不往回跳
+    if (playing_ && !starved_) {
+        double dt = now() - played_at_;
+        if (dt > 0 && dt < 0.1) played_ = std::min<int64_t>(written_, played_ + (int64_t)(dt * rate_));
+    }
     playing_ = false;
     SetEvent(event_);
 }
@@ -265,7 +270,7 @@ void AudioOut::loop() {
             // 暂停：时钟停在设备停下的那一帧
             UINT64 pos = 0, qpc = 0;
             if (D.clock && SUCCEEDED(D.clock->GetPosition(&pos, &qpc)))
-                played_ = (int64_t)((double)pos / D.clock_freq * rate_);
+                played_ = std::max<int64_t>(played_, (int64_t)((double)pos / D.clock_freq * rate_));
             played_at_ = now();
             continue;
         }

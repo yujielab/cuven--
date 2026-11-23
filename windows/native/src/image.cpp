@@ -40,10 +40,15 @@ CV_API int CV_CALL cv_save_png(const char* path, const uint8_t* rgba, int w, int
     ComPtr<IWICBitmapFrameEncode> fr;
     if (FAILED(enc->CreateNewFrame(&fr, nullptr)) || FAILED(fr->Initialize(nullptr))) return -5;
     fr->SetSize((UINT)w, (UINT)h);
-    WICPixelFormatGUID pf = GUID_WICPixelFormat32bppRGBA;
+    // PNG 编码器认 BGRA（RGBA 在有的系统上不认）：自己换一下
+    WICPixelFormatGUID pf = GUID_WICPixelFormat32bppBGRA;
     fr->SetPixelFormat(&pf);
-    if (pf != GUID_WICPixelFormat32bppRGBA) return -6;
-    if (FAILED(fr->WritePixels((UINT)h, (UINT)w * 4, (UINT)w * h * 4, (BYTE*)rgba))) return -7;
+    if (pf != GUID_WICPixelFormat32bppBGRA) return -6;
+    std::vector<uint8_t> bgra((size_t)w * h * 4);
+    for (size_t i = 0; i < bgra.size(); i += 4) {
+        bgra[i] = rgba[i + 2]; bgra[i + 1] = rgba[i + 1]; bgra[i + 2] = rgba[i]; bgra[i + 3] = rgba[i + 3];
+    }
+    if (FAILED(fr->WritePixels((UINT)h, (UINT)w * 4, (UINT)bgra.size(), bgra.data()))) return -7;
     if (FAILED(fr->Commit()) || FAILED(enc->Commit())) return -8;
     return 0;
 }
