@@ -1,155 +1,203 @@
 import SwiftUI
 import MetalKit
-import Accelerate
 
 // MARK: - 粒子云（显示的那一边，GPU）
 //
-// 照着 Apple 配对时那团粒子云的样子（录屏量出来的：球壳边上密、外面一圈雾、8 秒一折一松、慢慢转），但码是我们自己的（PairCodec）。
-// 几万个粒子全在显存里，每帧一步朗之万（PairShaders.metal 的 pair_step）：分布始终是码对应的 ρ，相机读得出；
-// 再加一项沿等密度线的流动，丝在「流」但不改分布。和网页版（web/pair.js）同一套参数。
+// 外观：照 Apple 配对动画复刻的那一版（和网页 web/pair.js 同一套着色器）—— 3D 球壳 5.3 万点 + 光晕 1.65 万点 + 12 缕丝各 1500 点，
+// 绕斜轴滚动、几层剪切把壳「折」起来，10 秒一个循环；再按录屏拟合的逐帧光学密度校正（pair-density.png，120 帧拼一张）调浓淡。
+// 所有运动都在顶点着色器里算，粒子缓冲是静态的（和网页同一个随机数种子，粒子一模一样）。
+// 码：每个粒子的光学深度乘上它在屏幕上那一点的 M（PairCodec.modulationGrid → 192² 的 8 位纹理）。3D 的云在滚、码钉在屏幕平面上慢慢转，
+// 相机几帧一平均，滚动的结构抹平了，码就显出来（PairDecoder 平均最近几帧的极坐标图）。
 
 final class PairCloudRenderer: NSObject, MTKViewDelegate {
-    private struct StepParams { var eps: Float; var swirl: Float; var frame: Float; var ext: Float; var n: UInt32 }
-    private struct DrawParams { var rot: Float; var scale: Float; var size: Float; var ext: Float; var breath: Float
-                                var aspect: SIMD2<Float>; var light: SIMD3<Float>; var deep: SIMD3<Float> }
+    private struct Uniforms {
+        var scaleCenter: SIMD4<Float>
+        var params: SIMD4<Float>          // 粒子大小比例、相位、浓淡、码平面范围
+        var codeRotDensity: SIMD4<Float>  // 码平面 cos / sin、密度图一帧占的比例
+        var densityOrigins: SIMD4<Float>
+        var misc: SIMD4<Float>            // 两帧之间的插值、codeScale
+    }
+    private struct Particle { var position: SIMD4<Float>; var detail: SIMD4<Float> }
+
+    static let loopSeconds: Double = 10
+    private static let bodyPoints = 53_000, haloPoints = 16_500, wisps = 12, pointsPerWisp = 1_500
+    private static let densityTile = 112, densityColumns = 12, densityFrames = 120
+    private static var densityStride: Int { densityTile + 2 }
+    private static var densityWidth: Int { densityStride * densityColumns }
+    private static var densityHeight: Int { densityStride * (densityFrames / densityColumns) }
 
     let device: MTLDevice
     private let queue: MTLCommandQueue
-    private let step: MTLComputePipelineState
-    private let draw: MTLRenderPipelineState
-    private let n: Int
-    private let G = 192
-    private var particles: MTLBuffer
-    private var field: MTLTexture?
-    private var frame: Int = 0
+    private let pipeline: MTLRenderPipelineState
+    private let particles: MTLBuffer
+    private let count: Int
+    private var densityTex: MTLTexture
+    private var codeTex: MTLTexture
+    private var densityReady = false
+    private let codeScale: Float
+    private let codeSpin: Float
     private let t0 = CACurrentMediaTime()
-    var dark: Bool
+    private var codeT0 = CACurrentMediaTime()
+    private(set) var coded = false
+    /// 云半径占短边的比例
+    var radiusFraction: Float = 0.30
 
-    init?(particles count: Int = 50_000, dark: Bool = true, pixelFormat: MTLPixelFormat = .bgra8Unorm) {
-        guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue(), let lib = dev.makeDefaultLibrary(),
-              let fs = lib.makeFunction(name: "pair_step"), let st = try? dev.makeComputePipelineState(function: fs),
-              let buf = dev.makeBuffer(length: count * MemoryLayout<SIMD2<Float>>.stride, options: .storageModeShared) else { return nil }
+    init?(pixelFormat: MTLPixelFormat = .bgra8Unorm, spec: PairSpec? = PairSpec.shared) {
+        guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue(), let lib = dev.makeDefaultLibrary() else { return nil }
         let d = MTLRenderPipelineDescriptor()
-        d.vertexFunction = lib.makeFunction(name: "pair_vertex")
-        d.fragmentFunction = lib.makeFunction(name: "pair_fragment")
-        d.colorAttachments[0].pixelFormat = pixelFormat
-        d.colorAttachments[0].isBlendingEnabled = true
-        d.colorAttachments[0].rgbBlendOperation = .add
-        d.colorAttachments[0].alphaBlendOperation = .add
-        d.colorAttachments[0].sourceRGBBlendFactor = .one
-        d.colorAttachments[0].sourceAlphaBlendFactor = .one
-        d.colorAttachments[0].destinationRGBBlendFactor = dark ? .one : .oneMinusSourceAlpha
-        d.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        d.vertexFunction = lib.makeFunction(name: "pair_cloud_vertex")
+        d.fragmentFunction = lib.makeFunction(name: "pair_cloud_fragment")
+        let ca = d.colorAttachments[0]!
+        ca.pixelFormat = pixelFormat
+        // 画在透明底上、输出预乘：颜色 over 混合，透明度累积（和网页 blendFuncSeparate 一样）
+        ca.isBlendingEnabled = true
+        ca.rgbBlendOperation = .add
+        ca.alphaBlendOperation = .add
+        ca.sourceRGBBlendFactor = .sourceAlpha
+        ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        ca.sourceAlphaBlendFactor = .one
+        ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         guard let rp = try? dev.makeRenderPipelineState(descriptor: d) else { return nil }
-        device = dev; queue = q; step = st; draw = rp; n = count; particles = buf; self.dark = dark
+        let pts = Self.buildParticles()
+        guard let buf = pts.withUnsafeBytes({ dev.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared) }),
+              let dt = Self.r8Texture(dev, width: 1, height: 1, bytes: [128]),
+              let ct = Self.r8Texture(dev, width: 1, height: 1, bytes: [85]) else { return nil }   // 没码时 M = 1（85 / 255 × 3）
+        device = dev; queue = q; pipeline = rp; particles = buf; count = pts.count
+        densityTex = dt; codeTex = ct
+        codeScale = Float(spec?.codeScale ?? 3)
+        codeSpin = Float(spec?.codeSpin ?? 0.05)
         super.init()
+        if let t = Self.loadDensity(dev) { densityTex = t; densityReady = true }
     }
 
-    /// 换一团码：算密度网格 → 场纹理（ρ/ρmax、∇log ρ）→ 粒子按 ρ 撒好（不用等它流到位）
+    // 和网页同一个 xorshift 种子：粒子一模一样
+    private static func buildParticles() -> [Particle] {
+        var state: UInt32 = 0x7a32f9d1
+        func random() -> Float {
+            state ^= state << 13; state ^= state >> 17; state ^= state << 5
+            return Float(Double(state) / 4294967296.0)
+        }
+        func bell() -> Float { (random() + random() + random() + random() - 2) * 1.73 }
+        var out: [Particle] = []
+        out.reserveCapacity(bodyPoints + haloPoints + wisps * pointsPerWisp)
+        for i in 0..<(bodyPoints + haloPoints) {
+            let halo = i >= bodyPoints
+            let lon = random() * 2 * .pi, z = random() * 2 - 1, eq = (1 - z * z).squareRoot(), isShell = random() < 0.82
+            let radius: Float = halo ? 1.07 + 0.57 * pow(random(), 1.85) : isShell ? 0.937 + 0.101 * bell() : 0.96 * cbrt(random())
+            let a = cos(lon) * eq * radius, b = sin(lon) * eq * radius, c = z * radius
+            let d0 = random(), d1: Float = halo ? random() : 0.63 + 0.37 * random(), d2 = random()
+            out.append(Particle(position: SIMD4(a, b, c, 0), detail: SIMD4(d0, d1, d2, halo ? 1 : 0)))
+        }
+        for s in 0..<wisps {
+            let lon = Float(s) * 2.399963 + 0.55 * random()
+            let elev = asin((Float(s) + 0.5) / Float(wisps) * 1.83 - 0.915) + 0.15 * bell()
+            let idPhase = Float(s) * 1.954 + 0.5 * random()
+            for _ in 0..<pointsPerWisp {
+                let along = random() * 2 - 1, scatter: Float = random() < 0.22 ? 2.7 : 1
+                let d0 = random(), d1 = bell() * scatter, d2 = bell() * scatter
+                out.append(Particle(position: SIMD4(lon, elev, along, idPhase), detail: SIMD4(d0, d1, d2, 2)))
+            }
+        }
+        return out
+    }
+
+    private static func r8Texture(_ dev: MTLDevice, width: Int, height: Int, bytes: [UInt8]) -> MTLTexture? {
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: width, height: height, mipmapped: false)
+        d.usage = .shaderRead
+        guard let t = dev.makeTexture(descriptor: d) else { return nil }
+        bytes.withUnsafeBytes { t.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: width) }
+        return t
+    }
+
+    /// 密度校正图（灰度 PNG）：直接读解码后的原始字节，不经过色彩管理
+    private static func loadDensity(_ dev: MTLDevice) -> MTLTexture? {
+        guard let url = Bundle.main.url(forResource: "pair-density", withExtension: "png"),
+              let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let img = CGImageSourceCreateImageAtIndex(src, 0, nil),
+              img.width == densityWidth, img.height == densityHeight else { return nil }
+        var bytes = [UInt8](repeating: 0, count: img.width * img.height)
+        if img.bitsPerPixel == 8, img.bitsPerComponent == 8, let data = img.dataProvider?.data, let p = CFDataGetBytePtr(data) {
+            let row = img.bytesPerRow
+            for y in 0..<img.height { for x in 0..<img.width { bytes[y * img.width + x] = p[y * row + x] } }
+        } else {
+            guard let ctx = CGContext(data: &bytes, width: img.width, height: img.height, bitsPerComponent: 8, bytesPerRow: img.width,
+                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+            ctx.draw(img, in: CGRect(x: 0, y: 0, width: img.width, height: img.height))
+        }
+        return r8Texture(dev, width: img.width, height: img.height, bytes: bytes)
+    }
+
+    /// 换一团码：调制网格 → 8 位纹理（M / codeScale）
     func setCode(id: UInt32, secret: UInt32, spec: PairSpec) {
-        let b = PairCodec.cellSigns(id: id, secret: secret, spec: spec)
-        let rho = PairCodec.densityGrid(b, size: G, spec: spec)
-        let maxv = rho.max() ?? 1
-        let cell = Float(2 * PairCodec.ext / Double(G))
-        var tex = [Float](repeating: 0, count: G * G * 4)
-        func lr(_ i: Int, _ j: Int) -> Float { log(max(rho[min(G - 1, max(0, j)) * G + min(G - 1, max(0, i))], 1e-6)) }
-        for j in 0..<G {
-            for i in 0..<G {
-                let k = (j * G + i) * 4
-                tex[k] = rho[j * G + i] / maxv
-                tex[k + 1] = (lr(i + 1, j) - lr(i - 1, j)) / (2 * cell)
-                tex[k + 2] = (lr(i, j + 1) - lr(i, j - 1)) / (2 * cell)
-                tex[k + 3] = 0
-            }
-        }
-        // 16 位浮点纹理：所有 GPU 都能线性过滤（32 位的老机型不行）
-        let half = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: G, height: G, mipmapped: false)
-        half.usage = .shaderRead
-        guard let t = device.makeTexture(descriptor: half) else { return }
-        var h16 = [UInt16](repeating: 0, count: tex.count)
-        tex.withUnsafeBufferPointer { src in
-            h16.withUnsafeMutableBufferPointer { dst in
-                var s = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: src.baseAddress!), height: 1, width: vImagePixelCount(src.count), rowBytes: src.count * 4)
-                var d = vImage_Buffer(data: dst.baseAddress!, height: 1, width: vImagePixelCount(dst.count), rowBytes: dst.count * 2)
-                vImageConvert_PlanarFtoPlanar16F(&s, &d, vImage_Flags(kvImageNoFlags))
-            }
-        }
-        h16.withUnsafeBytes { t.replace(region: MTLRegionMake2D(0, 0, G, G), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: G * 8) }
-        field = t
-        // 逆累积分布撒点
-        var cdf = [Double](repeating: 0, count: rho.count); var acc = 0.0
-        for i in 0..<rho.count { acc += Double(rho[i]); cdf[i] = acc }
-        let p = particles.contents().bindMemory(to: SIMD2<Float>.self, capacity: n)
-        var rng = SystemRandomNumberGenerator()
-        for i in 0..<n {
-            let u = Double.random(in: 0..<acc, using: &rng)
-            var lo = 0, hi = rho.count - 1
-            while lo < hi { let mid = (lo + hi) / 2; if cdf[mid] < u { lo = mid + 1 } else { hi = mid } }
-            let x = -Float(PairCodec.ext) + (Float(lo % G) + Float.random(in: 0..<1, using: &rng)) * cell
-            let y = -Float(PairCodec.ext) + (Float(lo / G) + Float.random(in: 0..<1, using: &rng)) * cell
-            p[i] = SIMD2(x, y)
-        }
+        let G = spec.codeGrid
+        let m = PairCodec.modulationGrid(PairCodec.cellSigns(id: id, secret: secret, spec: spec), size: G, spec: spec)
+        let px = m.map { UInt8(max(0, min(255, ($0 / Float(spec.codeScale) * 255).rounded()))) }
+        if let t = Self.r8Texture(device, width: G, height: G, bytes: px) { codeTex = t }
+        codeT0 = CACurrentMediaTime()
+        coded = true
+    }
+
+    // 浓淡在一个循环里的变化（照录屏拟合）
+    private static func gathering(_ ph: Float) -> Float {
+        0.649 + 0.031 * cos(ph) - 0.125 * sin(ph) + 0.036 * cos(2 * ph) + 0.109 * sin(2 * ph)
+            - 0.222 * cos(3 * ph) - 0.036 * sin(3 * ph) - 0.047 * cos(4 * ph) + 0.013 * sin(4 * ph)
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
-        guard let rpd = view.currentRenderPassDescriptor, let drawable = view.currentDrawable else { return }
-        let t = Float(CACurrentMediaTime() - t0)
-        encode(target: rpd, size: view.drawableSize, time: t, scale: Float(view.contentScaleFactor))
-        if let cb = lastCB { cb.present(drawable); cb.commit() }
+        guard coded, let rpd = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
+              let cb = queue.makeCommandBuffer() else { return }
+        let now = CACurrentMediaTime()
+        encode(cb, target: rpd, size: view.drawableSize, scale: Float(view.contentScaleFactor), time: now - t0, codeTime: now - codeT0)
+        cb.present(drawable)
+        cb.commit()
     }
 
-    private var lastCB: MTLCommandBuffer?
-
-    /// 一帧：朗之万一步 + 画点（drawable 或者离屏纹理）
-    @discardableResult
-    func encode(target rpd: MTLRenderPassDescriptor, size: CGSize, time t: Float, scale: Float, commit: Bool = false) -> MTLCommandBuffer? {
-        guard let field, let cb = queue.makeCommandBuffer() else { lastCB = nil; return nil }
-        let breath = 0.5 + 0.5 * cos(t * 2 * .pi / 8)                          // 8 秒一次：丝聚拢、散开
-        if let ce = cb.makeComputeCommandEncoder() {
-            var sp = StepParams(eps: 1.6e-5, swirl: 18 + 22 * breath, frame: Float(frame % 100_000) * 0.618, ext: Float(PairCodec.ext), n: UInt32(n))
-            frame += 1
-            ce.setComputePipelineState(step)
-            ce.setBuffer(particles, offset: 0, index: 0)
-            ce.setBytes(&sp, length: MemoryLayout<StepParams>.stride, index: 1)
-            ce.setTexture(field, index: 0)
-            ce.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-            ce.endEncoding()
-        }
+    /// 一帧：t 秒时的云（size：像素；scale：每点多少像素）
+    func encode(_ cb: MTLCommandBuffer, target rpd: MTLRenderPassDescriptor, size: CGSize, scale: Float, time t: Double, codeTime: Double) {
         rpd.colorAttachments[0].loadAction = .clear
         rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        if let re = cb.makeRenderCommandEncoder(descriptor: rpd) {
-            let w = Float(size.width), h = Float(size.height)
-            var dp = DrawParams(rot: t * 0.06, scale: 0.60, size: max(1.4, 1.3 * scale) * (min(w, h) / 600 + 0.6), ext: Float(PairCodec.ext),
-                                breath: 0.85 + 0.15 * breath, aspect: SIMD2(min(1, h / max(w, 1)), min(1, w / max(h, 1))),
-                                light: dark ? SIMD3(0.16, 0.42, 0.85) : SIMD3(0.47, 0.75, 0.96),
-                                deep: dark ? SIMD3(0.35, 0.65, 1.0) : SIMD3(0.12, 0.43, 0.90))
-            re.setRenderPipelineState(draw)
-            re.setVertexBuffer(particles, offset: 0, index: 0)
-            re.setVertexBytes(&dp, length: MemoryLayout<DrawParams>.stride, index: 1)
-            re.setVertexTexture(field, index: 0)
-            re.setFragmentBytes(&dp, length: MemoryLayout<DrawParams>.stride, index: 1)
-            re.drawPrimitives(type: .point, vertexStart: 0, vertexCount: n)
-            re.endEncoding()
-        }
-        lastCB = cb
-        if commit { cb.commit() }
-        return cb
+        guard let re = cb.makeRenderCommandEncoder(descriptor: rpd) else { return }
+        let w = Float(size.width) / scale, h = Float(size.height) / scale          // 点
+        let radius = min(w, h) * radiusFraction
+        let progress = (t / Self.loopSeconds).truncatingRemainder(dividingBy: 1)
+        let phase = Float(progress * 2 * .pi)
+        let f = progress * Double(Self.densityFrames)
+        let a = Int(f) % Self.densityFrames, b = (a + 1) % Self.densityFrames
+        func left(_ i: Int) -> Float { Float((i % Self.densityColumns) * Self.densityStride + 1) / Float(Self.densityWidth) }
+        func top(_ i: Int) -> Float { Float((i / Self.densityColumns) * Self.densityStride + 1) / Float(Self.densityHeight) }
+        let ang = Float(codeTime) * codeSpin
+        var u = Uniforms(
+            scaleCenter: SIMD4(radius * 2 / w, radius * 2 / h, 0, 0),
+            params: SIMD4(radius / 186.5 * scale, phase, Self.gathering(phase), Float(PairCodec.ext)),
+            codeRotDensity: SIMD4(cos(ang), sin(ang),
+                                  densityReady ? Float(Self.densityTile) / Float(Self.densityWidth) : 0,
+                                  densityReady ? Float(Self.densityTile) / Float(Self.densityHeight) : 0),
+            densityOrigins: densityReady ? SIMD4(left(a), top(a), left(b), top(b)) : SIMD4(0.5, 0.5, 0.5, 0.5),
+            misc: SIMD4(Float(f - f.rounded(.down)), codeScale, 0, 0))
+        re.setRenderPipelineState(pipeline)
+        re.setVertexBuffer(particles, offset: 0, index: 0)
+        re.setVertexBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
+        re.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 1)
+        re.setFragmentTexture(densityTex, index: 0)
+        re.setFragmentTexture(codeTex, index: 1)
+        re.drawPrimitives(type: .point, vertexStart: 0, vertexCount: count)
+        re.endEncoding()
     }
 
-    /// 离屏画一帧（自检用）：先空跑几步，再画到 side × side 的纹理上，读回 BGRA 像素（预乘过的、透明底）
-    func renderOffscreen(side: Int, warmup: Int = 30, time: Float = 2) -> [UInt8]? {
+    /// 离屏画一帧（自检用）：side × side 像素、t 秒时，读回 BGRA（预乘过的、透明底）
+    func renderOffscreen(side: Int, time: Double, codeTime: Double = 0) -> [UInt8]? {
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: side, height: side, mipmapped: false)
         d.usage = [.renderTarget, .shaderRead]
         d.storageMode = .shared
-        guard let tex = device.makeTexture(descriptor: d) else { return nil }
+        guard let tex = device.makeTexture(descriptor: d), let cb = queue.makeCommandBuffer() else { return nil }
         let rpd = MTLRenderPassDescriptor()
         rpd.colorAttachments[0].texture = tex
         rpd.colorAttachments[0].storeAction = .store
-        var last: MTLCommandBuffer?
-        for i in 0..<warmup { last = encode(target: rpd, size: CGSize(width: side, height: side), time: time + Float(i) / 60, scale: 1, commit: true) }
-        last?.waitUntilCompleted()
+        encode(cb, target: rpd, size: CGSize(width: side, height: side), scale: 1, time: time, codeTime: codeTime)
+        cb.commit()
+        cb.waitUntilCompleted()
         var px = [UInt8](repeating: 0, count: side * side * 4)
         px.withUnsafeMutableBytes { tex.getBytes($0.baseAddress!, bytesPerRow: side * 4, from: MTLRegionMake2D(0, 0, side, side), mipmapLevel: 0) }
         return px
@@ -160,7 +208,6 @@ final class PairCloudRenderer: NSObject, MTKViewDelegate {
 struct PairCloudView: UIViewRepresentable {
     let id: UInt32?
     let secret: UInt32?
-    var dark = true
 
     final class Coordinator { var renderer: PairCloudRenderer?; var code: (UInt32, UInt32)? }
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -172,7 +219,8 @@ struct PairCloudView: UIViewRepresentable {
         v.colorPixelFormat = .bgra8Unorm
         v.preferredFramesPerSecond = 60
         v.framebufferOnly = true
-        if let r = PairCloudRenderer(dark: dark) {
+        (v.layer as? CAMetalLayer)?.isOpaque = false
+        if let r = PairCloudRenderer() {
             v.device = r.device
             v.delegate = r
             context.coordinator.renderer = r

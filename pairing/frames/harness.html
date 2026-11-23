@@ -1,0 +1,10 @@
+<!doctype html><meta charset=utf-8><style>html,body{margin:0;background:#fff}canvas{display:block}</style>
+<canvas id=c></canvas><script src="pair.js"></script>
+<script>
+  // 渲染用的页面：画布边长和半径比例从地址栏来（?size=400&radius=0.30）
+  const q = new URLSearchParams(location.search), size = +(q.get('size') || 400);
+  const cv = document.getElementById('c'); cv.style.width = cv.style.height = size + 'px';
+  const cloud = new CuvenPair.Cloud(cv, { pixelRatio: 1, radius: +(q.get('radius') || 0.30), preserve: true, atlas: 'pair-density.png' });
+  window.cloud = cloud;
+  window.atlas = new Promise(r => { cloud.onAtlas = r; });
+</script>

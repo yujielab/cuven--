@@ -22,7 +22,7 @@ struct PairShowView: View {
 
     var body: some View {
         ZStack {
-            Color(white: 0.96).ignoresSafeArea()
+            Color.white.ignoresSafeArea()
             VStack(spacing: 0) {
                 HStack {
                     Spacer()
@@ -40,7 +40,7 @@ struct PairShowView: View {
                 Text("在已登录 Cuven 的 iPhone 上打开「账户 → 扫描登录其他设备」，对准这团粒子云。")
                     .font(.system(size: 16)).foregroundStyle(.black.opacity(0.6))
                     .multilineTextAlignment(.center).padding(.horizontal, 36).padding(.top, 10)
-                PairCloudView(id: opened?.id, secret: opened?.secret, dark: false)
+                PairCloudView(id: opened?.id, secret: opened?.secret)
                     .frame(width: 330, height: 330)
                     .padding(.top, 18)
                     .accessibilityIdentifier("pair-cloud")
@@ -439,11 +439,11 @@ struct PairLabView: View {
                 let id = UInt32(v["id"] as! Int), sec = UInt32(v["secret"] as! Int)
                 let b = PairCodec.cellSigns(id: id, secret: sec, spec: spec)
                 if b.map({ Int($0) }) != (v["signs"] as! [Int]) { signsOK = false }
-                let pts = v["pts"] as! [[Double]], Ds = v["D"] as! [Double], rs = v["rho"] as! [Double]
+                let pts = v["pts"] as! [[Double]], Ds = v["D"] as! [Double], ms = v["m"] as! [Double]
                 for (i, p) in pts.enumerated() {
                     let f = PairCodec.field(b, p[0], p[1], spec: spec)
-                    let rho = PairCodec.density(f.D, f.E, (p[0] * p[0] + p[1] * p[1]).squareRoot(), spec: spec)
-                    worst = max(worst, abs(f.D - Ds[i]), abs(rho - rs[i]) / max(1, rs[i]))
+                    let m = PairCodec.modulation(f.D, f.E, spec: spec)
+                    worst = max(worst, abs(f.D - Ds[i]), abs(m - ms[i]))
                 }
             }
             log("编码对照：正负\(signsOK ? "一致" : "不一致")，场最大误差 \(String(format: "%.1e", worst))")
@@ -457,8 +457,8 @@ struct PairLabView: View {
         let back = PairCodec.parse(PairCodec.viterbi(soft, spec: spec))
         log("Viterbi：\(back.map { String(format: "%06X / %08X", $0.id, $0.secret) } ?? "解不出")")
         ok = ok && back?.id == 0xABCDEF && back?.secret == 0x12345678
-        // 3) 离屏画一团云 → 当成相机画面 → 解码（GPU 网络）
-        guard let net = PairNet(), let dec = PairDecoder(spec: spec, net: net), let r = PairCloudRenderer(particles: 60_000, dark: false) else {
+        // 3) 离屏画一团云（连着 40 帧，每帧 1/30 秒）→ 当成相机画面 → 解码（最近 16 帧平均 + GPU 网络）
+        guard let net = PairNet(), let dec = PairDecoder(spec: spec, net: net), let r = PairCloudRenderer() else {
             verdict = "失败：Metal / 网络权重不可用"; return
         }
         log("网络：\(net.usesGPU ? "Metal GPU" : "CPU")，\(net.layers.count) 层")
@@ -467,8 +467,8 @@ struct PairLabView: View {
         let side = 600, cam = spec.decode.cam
         var hit: (UInt32, UInt32)?
         let t0 = Date()
-        for k in 0..<6 {
-            guard let px = r.renderOffscreen(side: side, warmup: k == 0 ? 40 : 4, time: 2 + Float(k) * 0.1) else { break }
+        for k in 0..<40 {
+            guard let px = r.renderOffscreen(side: side, time: 2 + Double(k) / 30, codeTime: Double(k) / 30) else { break }
             if k == 0 { cloud = Self.image(px, side: side) }
             // 白底上的预乘颜色 → 和相机看到的一样：蓝色程度 = B − R（透明底按白底合成：c + (1 − a)·白）
             // 缩小时按块平均（和扫描时 GPU 上的 pair_ink 一样），不是隔点取：粒子是一个个小点，隔点取会很花

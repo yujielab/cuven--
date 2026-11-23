@@ -1,59 +1,53 @@
-"""训练数据：随机码 → 密度 → 撒粒子 → 随机相机（透视 / 旋转 / 远近）→ 模糊、曝光、噪点、摩尔纹、反光
-→ 和手机上同一套「椭圆 + 极坐标展开」→ 网络输入；目标是每个采样点真实的 D（软正负）。"""
-import math
+"""训练数据（外观 v2）：复刻的 3D 粒子云 × 码的调制 → 随机相机 → 和手机上同一套「找框 + 极坐标展开」→ 网络输入；
+目标是每个采样点真实的 D（软正负）。
+
+  · 粒子云本身和码无关：用浏览器把 web/pair.js（码关掉，M = 1）在一个 10 秒循环里渲染 360 帧（pairing/frames/），
+    每帧存「覆盖度」c（1 − 透过率）和每单位覆盖度的蓝色程度 k
+  · 显示时码乘在每个粒子的光学深度上 → 一点的透过率 T 变成 T^M：带码的蓝色程度 = (1 − (1 − c)^M) · k
+    M 和显示时一样：192² 网格、8 位量化、双线性取样；码平面可以转任意角度
+  · 扫描端把连着几帧的极坐标图平均了再进网络（滚动的结构抹平、码留下来）：这里同样把连着 n 帧（AVG_FRAMES/4 – AVG_FRAMES）平均
+  · 相机：透视 / 倾斜 ≤ 40°、远近、偏心 → 失焦、手抖、曝光、伽马、摩尔纹、反光、噪点"""
+import math, os
 import numpy as np, torch, torch.nn.functional as F
 import spec
 
-GS = 160                     # 源网格（云的平面，[-1.6, 1.6]²）
-EXT = 1.6
+EXT = 1.6                    # 码平面的范围：[-1.6, 1.6]²（云的半径 = 1）
 CAM = 256                    # 相机裁出来的正方形
 PR, PA = 24, 192             # 极坐标：径向 24 格（r 0.10–1.08）、角向 192 格
 R_LO, R_HI = 0.10, 1.08
-TH = 0.06                    # 算矩之前减掉的底（背景不完全干净）
-K_RMS = None                 # 半径 = K_RMS × sqrt(主轴方差)（下面现算）
+TH = 0.06
+N_RAYS, RAY_N, RAY_T0, RAY_T1 = 24, 64, 0.2, 1.8
+AVG_FRAMES = 16              # 扫描端平均最近几帧的极坐标图（30 帧每秒时约半秒）
+K_RMS = None                 # 半径 = K_RMS × sqrt(主轴方差)（下面标定）
+EDGE_K = None                # 半高处的半径 / 真半径（下面标定）
 
-xs = np.linspace(-EXT, EXT, GS, endpoint=False) + EXT / GS
-X, Y = np.meshgrid(xs, xs)
-R = np.hypot(X, Y)
-_Dbasis = []
-Wx, Wy = spec.warp_xy(X, Y)
-rr = np.hypot(Wx, Wy); th = np.arctan2(Wy, Wx)
-for ri, pi, st in spec.CELLS:
-    dr = rr - ri; dt = ri * spec.wrap(th - pi)
-    _Dbasis.append(np.exp(-(dr * dr) / (2 * spec.SIGMA_R ** 2) - (dt * dt) / (2 * st * st)))
-BASIS = torch.tensor(np.stack(_Dbasis), dtype=torch.float32)          # 160 × GS × GS
-COVER = BASIS.sum(0)                                                   # 覆盖度（和码无关）
-SHELL = torch.tensor(spec.shell(R), dtype=torch.float32)
-GATE2 = torch.clamp(COVER / spec.E0, 0, 1) ** 2
+# ── 码的调制网格：和显示时一样（192²，像素中心取样，第 0 行 y 最小）──
+MG = spec.CODE_GRID
+_c = -EXT + (np.arange(MG) + 0.5) * 2 * EXT / MG
+_X, _Y = np.meshgrid(_c, _c)
+_Wx, _Wy = spec.warp_xy(_X, _Y)
+_rr, _th = np.hypot(_Wx, _Wy), np.arctan2(_Wy, _Wx)
+BASIS = torch.tensor(np.stack([np.exp(-((_rr - ri) ** 2) / (2 * spec.SIGMA_R ** 2) - (ri * spec.wrap(_th - pi)) ** 2 / (2 * st * st))
+                               for ri, pi, st in spec.CELLS]), dtype=torch.float32)            # 160 × MG × MG
+GATE2 = torch.clamp(BASIS.sum(0) / spec.E0, 0, 1) ** 2
 
-def density(b):
-    """b：B × 160（±1）→ D、ρ（B × GS × GS）"""
+def code_grids(b):
+    """b：B × 160 → D（B × MG × MG）、M（8 位量化后的，和显示时纹理里的一样）"""
     D = torch.einsum('bi,ixy->bxy', b, BASIS)
-    rho = SHELL * (1 + spec.ALPHA * torch.tanh(D / spec.TAU)) * (1 + spec.BETA * GATE2 * torch.exp(-(D / spec.W) ** 2))
-    return D, rho
+    M = (1 + spec.ALPHA * torch.tanh(D / spec.TAU)) * (1 + spec.BETA * GATE2 * torch.exp(-(D / spec.W) ** 2))
+    M = torch.round(M / spec.CODE_SCALE * 255).clamp(0, 255) / 255 * spec.CODE_SCALE
+    return D, M
 
-def _calib():
-    """K_RMS：没有任何畸变时，主轴标准差 × K_RMS = 云的半径（对一批随机码取平均）"""
-    g = torch.Generator().manual_seed(7)
-    b = torch.randint(0, 2, (64, spec.N_CELLS), generator=g).float() * 2 - 1
-    _, rho = density(b)
-    w = torch.clamp(rho / rho.amax(dim=(1, 2), keepdim=True), 0, 1)
-    Xt = torch.tensor(X, dtype=torch.float32); Yt = torch.tensor(Y, dtype=torch.float32)
-    m = w.sum((1, 2))
-    vx = (w * Xt * Xt).sum((1, 2)) / m
-    return float((1.0 / torch.sqrt(vx)).mean())
-K_RMS = _calib()
-
-def lumps(B, g):
-    """大尺度的疏密起伏（装饰，和码无关）"""
-    Xt = torch.tensor(X, dtype=torch.float32)[None]; Yt = torch.tensor(Y, dtype=torch.float32)[None]
-    out = torch.ones(B, GS, GS)
-    amp = torch.rand(B, 1, 1, generator=g) * 0.30
-    for _ in range(3):
-        kx = (torch.rand(B, 1, 1, generator=g) - 0.5) * 6; ky = (torch.rand(B, 1, 1, generator=g) - 0.5) * 6
-        ph = torch.rand(B, 1, 1, generator=g) * 6.283
-        out = out + amp / 3 * torch.cos(kx * Xt + ky * Yt + ph)
-    return out.clamp(min=0.3)
+# ── 渲染好的粒子云帧 ──
+FRAMES = os.environ.get('CPC_FRAMES', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'frames', 'look-frames.npz'))
+_z = np.load(FRAMES)
+COV = torch.from_numpy(_z['cov'])                                      # NF × S × S（uint8）
+KK = torch.from_numpy(_z['k'])
+FRAD = float(_z['radius_px']); FSIZE = int(_z['size'])
+NF = COV.shape[0]
+# 半分辨率的一份（云在相机里小的时候用，免得隔点取样把颗粒取花了）
+COV2 = F.avg_pool2d(COV[:, None].float(), 2)[:, 0].round().to(torch.uint8)
+KK2 = F.avg_pool2d(KK[:, None].float(), 2)[:, 0].round().to(torch.uint8)
 
 def homography(B, g, severity=1.0):
     """云的平面（单位：半径）→ 相机像素。倾斜 0–40°、任意转角、远近、焦距、偏心"""
@@ -96,110 +90,68 @@ def blur(img, sig):
     img = F.conv2d(img, k.view(1, 1, 1, n), padding=(0, n // 2))
     return F.conv2d(img, k.view(1, 1, n, 1), padding=(n // 2, 0))
 
-def camera_image(b, g, severity=1.0, n_particles=None, H=None):
-    """b：B × 160 → 相机里看到的「蓝色程度」图（B × 1 × CAM × CAM）与单应矩阵"""
+def camera_ink(b, g, severity=1.0, H=None, nframes=None, theta=None):
+    """b：B × 160 → 相机里看到的「蓝色程度」（B × 1 × CAM × CAM）、单应矩阵 H、码的 D 网格、码平面的转角"""
     B = b.shape[0]
-    D, rho = density(b)
-    rho = rho * lumps(B, g)
-    N = n_particles or int(30000 + torch.rand(1, generator=g) * 90000)
-    idx = torch.multinomial(rho.view(B, -1), N, replacement=True, generator=g)
-    col = (idx % GS).float() + torch.rand(B, N, generator=g)
-    row = (idx // GS).float() + torch.rand(B, N, generator=g)
-    x = col / GS * 2 * EXT - EXT; y = row / GS * 2 * EXT - EXT
+    D, M = code_grids(b)
     H = H if H is not None else homography(B, g, severity)
-    u, v = project(H, x, y)
-    ui = u.round().long(); vi = v.round().long()
-    ok = (ui >= 0) & (ui < CAM) & (vi >= 0) & (vi < CAM)
-    flat = (torch.arange(B)[:, None] * CAM * CAM + vi * CAM + ui)[ok]
-    cnt = torch.bincount(flat, minlength=B * CAM * CAM).float().view(B, 1, CAM, CAM)
-    out = torch.empty_like(cnt)
+    theta = theta if theta is not None else torch.rand(B, generator=g) * 2 * math.pi
+    vv, uu = torch.meshgrid(torch.arange(CAM).float(), torch.arange(CAM).float(), indexing='ij')
+    q = torch.stack([uu, vv, torch.ones_like(uu)], -1).view(1, -1, 3) @ torch.linalg.inv(H).transpose(1, 2)
+    xf = (q[..., 0] / q[..., 2]).view(B, CAM, CAM); yf = (q[..., 1] / q[..., 2]).view(B, CAM, CAM)   # 云的坐标（y 朝下）
+    ct, st = torch.cos(theta)[:, None, None], torch.sin(theta)[:, None, None]
+    xc, yc = ct * xf - st * yf, st * xf + ct * yf                                                       # 码平面
+    Mc = F.grid_sample(M[:, None], torch.stack([xc / EXT, yc / EXT], -1), mode='bilinear', padding_mode='border', align_corners=False)
+    J = torch.sqrt(torch.abs(torch.linalg.det(H[:, :2, :2] / H[:, 2:, 2:])))                         # 正中附近：每单位多少像素
+    gscale = FRAD / (FSIZE / 2)
+    out = torch.empty(B, 1, CAM, CAM)
     for i in range(B):
-        sig = float(0.5 + torch.rand(1, generator=g) * 1.0 + torch.rand(1, generator=g) * 1.6 * severity)
-        im = blur(cnt[i:i + 1], sig)
+        n = nframes or int(torch.randint(max(1, AVG_FRAMES // 4), AVG_FRAMES + 1, (1,), generator=g))
+        f0 = int(torch.randint(0, NF, (1,), generator=g))
+        idx = (torch.arange(n) + f0) % NF
+        small = float(J[i]) < FRAD * 0.6
+        cov = (COV2 if small else COV)[idx][:, None].float() / 255
+        kk = (KK2 if small else KK)[idx][:, None].float() / 255
+        grid = torch.stack([xf[i] * gscale, yf[i] * gscale], -1)[None].expand(n, -1, -1, -1)
+        cs = F.grid_sample(cov, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+        ks = F.grid_sample(kk, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+        ink = ((1 - (1 - cs.clamp(0, 0.995)) ** Mc[i:i + 1]) * ks).mean(0, keepdim=True)
+        # 相机
+        sig = float(0.4 + torch.rand(1, generator=g) * 0.8 + torch.rand(1, generator=g) * 1.4 * severity)
+        im = blur(ink, sig)
         if torch.rand(1, generator=g) < 0.3 * severity:                 # 手抖：一条线的运动模糊
             L = int(2 + torch.rand(1, generator=g) * 5); ang = float(torch.rand(1, generator=g) * 3.1416)
             k = torch.zeros(1, 1, 2 * L + 1, 2 * L + 1)
             for t in range(-L, L + 1):
                 k[0, 0, int(round(L + t * math.sin(ang))), int(round(L + t * math.cos(ang)))] = 1
             im = F.conv2d(im, k / k.sum(), padding=L)
-        # 曝光：让云里面的平均「墨」落在 0.15–0.6
-        inside = im[im > 0]
+        inside = im[im > 0.01]
         scale = float(inside.mean()) if inside.numel() else 1.0
-        target = 0.15 + float(torch.rand(1, generator=g)) * 0.45
+        target = 0.15 + float(torch.rand(1, generator=g)) * 0.45        # 曝光：云里面的平均「墨」落在 0.15–0.6
         c = -math.log(1 - target) / max(scale, 1e-6)
-        ink = 1 - torch.exp(-c * im)
+        im = 1 - torch.exp(-c * im)
         gain = 0.6 + float(torch.rand(1, generator=g)) * 0.6; gam = 0.7 + float(torch.rand(1, generator=g)) * 0.7
-        ink = gain * ink.clamp(0, 1) ** gam + (float(torch.rand(1, generator=g)) * 0.13 - 0.05) * severity
-        yy, xx = torch.meshgrid(torch.arange(CAM).float(), torch.arange(CAM).float(), indexing='ij')
+        im = gain * im.clamp(0, 1) ** gam + (float(torch.rand(1, generator=g)) * 0.13 - 0.05) * severity
         if torch.rand(1, generator=g) < 0.5 * severity:                 # 屏幕像素和相机像素打架：摩尔纹
-            kk = 0.8 + float(torch.rand(1, generator=g)) * 1.7; a = float(torch.rand(1, generator=g)) * 3.1416
-            ink = ink + float(torch.rand(1, generator=g)) * 0.06 * torch.sin(kk * (xx * math.cos(a) + yy * math.sin(a)))
+            kk2 = 0.8 + float(torch.rand(1, generator=g)) * 1.7; a = float(torch.rand(1, generator=g)) * 3.1416
+            im = im + float(torch.rand(1, generator=g)) * 0.06 * torch.sin(kk2 * (uu * math.cos(a) + vv * math.sin(a)))
         if torch.rand(1, generator=g) < 0.15 * severity:                # 反光：一大块变白
             gx, gy = float(torch.rand(1, generator=g)) * CAM, float(torch.rand(1, generator=g)) * CAM
             gr = 20 + float(torch.rand(1, generator=g)) * 50
-            ink = ink * (1 - (0.3 + 0.5 * float(torch.rand(1, generator=g))) * torch.exp(-((xx - gx) ** 2 + (yy - gy) ** 2) / (2 * gr * gr)))
-        ink = ink + torch.randn(ink.shape, generator=g) * float(torch.rand(1, generator=g)) * 0.06 * severity
-        out[i] = ink.clamp(0, 1)
-    return out, H, D
+            im = im * (1 - (0.3 + 0.5 * float(torch.rand(1, generator=g))) * torch.exp(-((uu - gx) ** 2 + (vv - gy) ** 2) / (2 * gr * gr)))
+        im = im + torch.randn(im.shape, generator=g) * float(torch.rand(1, generator=g)) * 0.06 * severity / math.sqrt(n)
+        out[i] = im.clamp(0, 1)[0]
+    return out, H, D, theta
 
-def ellipse(ink):
-    """手机上同一套：减底 → 矩 → 椭圆（中心、两轴、方向；方向保持右手系，不镜像）"""
-    B = ink.shape[0]
-    w = torch.clamp(ink[:, 0] - TH, min=0)
-    yy, xx = torch.meshgrid(torch.arange(CAM).float(), torch.arange(CAM).float(), indexing='ij')
-    m = w.sum((1, 2)).clamp(min=1e-6)
-    mx = (w * xx).sum((1, 2)) / m; my = (w * yy).sum((1, 2)) / m
-    dx = xx[None] - mx[:, None, None]; dy = yy[None] - my[:, None, None]
-    cxx = (w * dx * dx).sum((1, 2)) / m; cyy = (w * dy * dy).sum((1, 2)) / m; cxy = (w * dx * dy).sum((1, 2)) / m
-    C = torch.stack([torch.stack([cxx, cxy], -1), torch.stack([cxy, cyy], -1)], -2)
-    ev, V = torch.linalg.eigh(C)                                      # 升序
-    V = V.flip(-1); ev = ev.flip(-1)
-    det = torch.linalg.det(V)
-    V[:, :, 1] = V[:, :, 1] * det[:, None]                            # 保持右手系
-    ax = K_RMS * torch.sqrt(ev.clamp(min=1e-6))
-    return mx, my, V, ax
+def ellipse_area_radius(H):
+    """单位圆投到相机里的面积 → 等效半径（像素）"""
+    t = torch.linspace(0, 2 * math.pi, 361)[:-1]
+    B = H.shape[0]
+    u, v = project(H, torch.cos(t)[None].expand(B, -1), torch.sin(t)[None].expand(B, -1))
+    area = 0.5 * torch.abs((u * torch.roll(v, -1, 1) - torch.roll(u, -1, 1) * v).sum(1))
+    return torch.sqrt(area / math.pi)
 
-def polar_grid():
-    r = torch.linspace(R_LO, R_HI, PR)
-    a = torch.arange(PA).float() / PA * 2 * math.pi
-    return r[:, None].expand(PR, PA), a[None, :].expand(PR, PA)
-
-def polar_sample(ink, mx, my, V, ax):
-    """极坐标网格上的点（单位：估出来的半径）→ 相机像素 → 双线性取样。返回 B × 1 × PR × PA，以及取样点像素坐标"""
-    r, a = polar_grid()
-    ex = r * torch.cos(a); ey = r * torch.sin(a)
-    px = mx[:, None, None] + V[:, 0, 0, None, None] * ax[:, 0, None, None] * ex + V[:, 0, 1, None, None] * ax[:, 1, None, None] * ey
-    py = my[:, None, None] + V[:, 1, 0, None, None] * ax[:, 0, None, None] * ex + V[:, 1, 1, None, None] * ax[:, 1, None, None] * ey
-    grid = torch.stack([px / (CAM - 1) * 2 - 1, py / (CAM - 1) * 2 - 1], -1)
-    out = F.grid_sample(ink, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
-    return out, px, py
-
-def normalize(pol):
-    """每张自己做归一（亮度、对比度差别交给这一步）"""
-    m = pol.mean((2, 3), keepdim=True); s = pol.std((2, 3), keepdim=True)
-    return (pol - m) / (s + 1e-4)
-
-def batch(B, g, severity=1.0, bits=None):
-    b = bits if bits is not None else torch.randint(0, 2, (B, spec.N_CELLS), generator=g).float() * 2 - 1
-    ink, H, D = camera_image(b, g, severity)
-    mx, my, V, ax = ellipse(ink)
-    pol, px, py = polar_sample(ink, mx, my, V, ax)
-    # 目标：每个取样点在云平面上的位置 → 那里真实的 D
-    Hi = torch.linalg.inv(H)
-    q = torch.stack([px, py, torch.ones_like(px)], -1) @ Hi.transpose(1, 2)[:, None]
-    sx = q[..., 0] / q[..., 2]; sy = q[..., 1] / q[..., 2]
-    grid = torch.stack([sx / EXT, sy / EXT], -1)                       # 源网格 [-EXT, EXT] → [-1, 1]
-    Dt = F.grid_sample(D[:, None], grid, mode='bilinear', padding_mode='zeros', align_corners=False)
-    mask = (torch.hypot(sx, sy) < 1.0).float()[:, None]
-    return normalize(pol), torch.tanh(Dt / 0.35), mask, b, ink
-
-# ── v1.1：更准的「框」（中心 + 2×2 映射）─────────────────────────────
-# 只靠矩估半径误差 14%（背景、过曝、反光都会把矩撑大），外圈的格子又细 → 模板对不上。现在两步：
-#   ① 减掉背景（全画面 20% 分位）再算矩 → 粗中心、粗椭圆
-#   ② 在粗椭圆的坐标里打 24 条射线，每条找「亮边过了峰值、掉到峰值一半」的那一点（球壳边上最密、外面一圈雾往下掉）
-#      → 24 个边缘点拟合 c + M·(cos θ, sin θ)（最小二乘，去掉最差的 4 个再拟合一次）→ 除以标定常数 EDGE_K
-N_RAYS, RAY_N, RAY_T0, RAY_T1 = 24, 64, 0.2, 1.8
-EDGE_K = None            # 半宽处的半径 / 真半径（下面标定）
+# ── 找框（和手机上逐步一致：减背景算矩 → 24 条射线找亮边的半高点 → 最小二乘 → 除以 EDGE_K → 去掉旋转）──
 def frame(ink):
     """ink：B × 1 × CAM × CAM → c（B × 2）、M（B × 2 × 2）：极坐标点 (r cos φ, r sin φ) → 像素 = c + M·(…)"""
     B = ink.shape[0]
@@ -272,33 +224,45 @@ def polar_sample_m(ink, c, M):
     grid = torch.stack([px / (CAM - 1) * 2 - 1, py / (CAM - 1) * 2 - 1], -1)
     return F.grid_sample(ink, grid, mode='bilinear', padding_mode='zeros', align_corners=True), px, py
 
-def _calib_edge():
-    """EDGE_K：无畸变、中等曝光时，半宽处的半径 / 真半径（对一批随机码取中位数）"""
-    global EDGE_K
-    EDGE_K = 1.0
-    g = torch.Generator().manual_seed(17)
-    vals = []
-    for _ in range(4):
-        b = torch.randint(0, 2, (16, spec.N_CELLS), generator=g).float() * 2 - 1
-        ink, H, _ = camera_image(b, g, 0.0)
-        c, M = frame(ink)
-        t = torch.linspace(0, 2 * math.pi, 361)[:-1]
-        u, v = project(H, torch.cos(t)[None].expand(16, -1), torch.sin(t)[None].expand(16, -1))
-        area = 0.5 * torch.abs((u * torch.roll(v, -1, 1) - torch.roll(u, -1, 1) * v).sum(1))
-        vals += (torch.sqrt(torch.abs(torch.linalg.det(M))) / torch.sqrt(area / math.pi)).tolist()
-    EDGE_K = float(np.median(vals))
-_calib_edge()
+def polar_grid():
+    r = torch.linspace(R_LO, R_HI, PR)
+    a = torch.arange(PA).float() / PA * 2 * math.pi
+    return r[:, None].expand(PR, PA), a[None, :].expand(PR, PA)
 
-def batch_v11(B, g, severity=1.0, bits=None):
-    """和 batch 一样，只是「框」换成 v1.1 的 frame"""
+def normalize(pol):
+    """每张自己做归一（亮度、对比度差别交给这一步）"""
+    m = pol.mean((2, 3), keepdim=True); s = pol.std((2, 3), keepdim=True)
+    return (pol - m) / (s + 1e-4)
+
+def _calib():
+    """K_RMS、EDGE_K：正对、无畸变、几帧平均时，「矩」和「半高处」量出来的半径 / 真半径（取中位数）"""
+    global K_RMS, EDGE_K
+    g = torch.Generator().manual_seed(17)
+    b = torch.randint(0, 2, (24, spec.N_CELLS), generator=g).float() * 2 - 1
+    ink, H, _, _ = camera_ink(b, g, 0.0, nframes=AVG_FRAMES)
+    r = ellipse_area_radius(H)
+    flat = ink.view(24, -1)
+    bg = torch.quantile(flat, 0.2, dim=1)
+    w = torch.clamp(ink[:, 0] - bg[:, None, None] - 0.04, min=0)
+    yy, xx = torch.meshgrid(torch.arange(CAM).float(), torch.arange(CAM).float(), indexing='ij')
+    m = w.sum((1, 2)); mx = (w * xx).sum((1, 2)) / m; my = (w * yy).sum((1, 2)) / m
+    var = (w * ((xx - mx[:, None, None]) ** 2 + (yy - my[:, None, None]) ** 2)).sum((1, 2)) / m / 2
+    K_RMS = float(torch.median(r / torch.sqrt(var)))
+    EDGE_K = 1.0
+    c, M = frame(ink)
+    EDGE_K = float(torch.median(torch.sqrt(torch.abs(torch.linalg.det(M))) / r))
+_calib()
+
+def batch(B, g, severity=1.0, bits=None, nframes=None):
     b = bits if bits is not None else torch.randint(0, 2, (B, spec.N_CELLS), generator=g).float() * 2 - 1
-    ink, H, D = camera_image(b, g, severity)
+    ink, H, D, theta = camera_ink(b, g, severity, nframes=nframes)
     c, M = frame(ink)
     pol, px, py = polar_sample_m(ink, c, M)
-    Hi = torch.linalg.inv(H)
-    q = torch.stack([px, py, torch.ones_like(px)], -1) @ Hi.transpose(1, 2)[:, None]
+    # 目标：每个取样点 → 云的坐标 → 码平面 → 那里真实的 D
+    q = torch.stack([px, py, torch.ones_like(px)], -1) @ torch.linalg.inv(H).transpose(1, 2)[:, None]
     sx = q[..., 0] / q[..., 2]; sy = q[..., 1] / q[..., 2]
-    grid = torch.stack([sx / EXT, sy / EXT], -1)
-    Dt = F.grid_sample(D[:, None], grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+    ct, st = torch.cos(theta)[:, None, None], torch.sin(theta)[:, None, None]
+    xc, yc = ct * sx - st * sy, st * sx + ct * sy
+    Dt = F.grid_sample(D[:, None], torch.stack([xc / EXT, yc / EXT], -1), mode='bilinear', padding_mode='zeros', align_corners=False)
     mask = (torch.hypot(sx, sy) < 1.0).float()[:, None]
     return normalize(pol), torch.tanh(Dt / 0.35), mask, b, ink
