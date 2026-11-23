@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Windows.System;
 
 namespace Cuven.App.UI;
@@ -47,6 +48,8 @@ static class Inset
 public sealed partial class Shell : Grid, IDisposable
 {
     public static Shell? Current { get; private set; }
+    /// <summary>现在显示的那一页</summary>
+    public static View? CurrentView => Current is { _stack.Count: > 0 } c ? c._stack.Peek() : null;
     readonly ContentPresenter _host = new();
     readonly Dock _dock;
     readonly MacButton _back;
@@ -56,6 +59,8 @@ public sealed partial class Shell : Grid, IDisposable
     double _swipe;
     long _swipeAt;
     double _left = 64;
+    Microsoft.UI.Dispatching.DispatcherQueueTimer? _searchTimer;
+    string _pendingQuery = "";
 
     public double ContentLeft => _left;
 
@@ -65,7 +70,26 @@ public sealed partial class Shell : Grid, IDisposable
         Background = Mac.CanvasBrush;
         Children.Add(_host);
 
-        _dock = new Dock(tag => { if (tag == "search") Go(new SearchView("")); else Root(tag); });
+        _dock = new Dock(tag => { if (tag == "search") OpenSearch(); else Root(tag); });
+        _dock.QueryChanged += q =>
+        {
+            _searchTimer ??= DispatcherQueue.CreateTimer().With(t =>
+            {
+                t.Interval = TimeSpan.FromMilliseconds(160);
+                t.IsRepeating = false;
+                t.Tick += (_, _) => { if (_stack.Count > 0 && _stack.Peek() is SearchView sv) sv.Run(_pendingQuery); };
+            });
+            _pendingQuery = q;
+            _searchTimer.Stop();
+            _searchTimer.Start();
+        };
+        _dock.Submitted += q =>
+        {
+            if (_stack.Count == 0 || _stack.Peek() is not SearchView sv) return;
+            sv.Run(q);
+            if (q.Trim().Length > 0) SearchHistory.Add(q.Trim());
+        };
+        _dock.Cancelled += CloseSearch;
         Children.Add(_dock);
 
         // 左上角（红黄绿右边）：返回
@@ -77,7 +101,7 @@ public sealed partial class Shell : Grid, IDisposable
         Children.Add(_back);
 
         // ── 键盘、触控板两指滑动后退、鼠标侧键 ──
-        AddKey(VirtualKey.F, VirtualKeyModifiers.Control, () => Go(new SearchView("")));
+        AddKey(VirtualKey.F, VirtualKeyModifiers.Control, OpenSearch);
         AddKey((VirtualKey)219, VirtualKeyModifiers.Control, () => Back());
         AddKey((VirtualKey)221, VirtualKeyModifiers.Control, () => Forward());
         AddKey(VirtualKey.Left, VirtualKeyModifiers.Menu, () => Back());
@@ -154,6 +178,37 @@ public sealed partial class Shell : Grid, IDisposable
         Show(Make(tag));
     }
 
+    // ── 搜索：底下的导航变成搜索框，页面是 SearchView ──
+    public void OpenSearch()
+    {
+        if (_stack.Count > 0 && _stack.Peek() is SearchView sv) { _dock.BeginSearch(sv.Query); return; }
+        Go(new SearchView());
+    }
+
+    /// <summary>点了「最近搜索」里的一条</summary>
+    public void SearchFor(string q)
+    {
+        if (_stack.Count > 0 && _stack.Peek() is SearchView sv) { sv.Run(q); _dock.BeginSearch(q); }
+        else Go(new SearchView(q));
+    }
+
+    void CloseSearch()
+    {
+        if (_stack.Count > 0 && _stack.Peek() is SearchView sv)
+        {
+            sv.Commit();
+            if (!Back()) Root("home");
+        }
+        _dock.EndSearch();
+    }
+
+    /// <summary>显示出来的是搜索页：导航是搜索框（带着那一页的字）；别的页：收回成标签</summary>
+    void SyncDock(View v)
+    {
+        if (v is SearchView sv) _dock.BeginSearch(sv.Query);
+        else _dock.EndSearch();
+    }
+
     public void Go(View v)
     {
         ClearForward();
@@ -168,6 +223,7 @@ public sealed partial class Shell : Grid, IDisposable
         _host.Content = v;
         Mac.Enter(v);
         UpdateNav();
+        SyncDock(v);
         v.Shown();
     }
 
@@ -185,6 +241,7 @@ public sealed partial class Shell : Grid, IDisposable
         _host.Content = v;
         Mac.Enter(v);
         UpdateNav();
+        SyncDock(v);
         v.Shown();
         return true;
     }
@@ -197,6 +254,7 @@ public sealed partial class Shell : Grid, IDisposable
         _host.Content = v;
         Mac.Enter(v);
         UpdateNav();
+        SyncDock(v);
         v.Shown();
         return true;
     }
@@ -225,6 +283,21 @@ public sealed partial class Dock : StackPanel
     readonly PersonPicture _avatar = new() { Width = 40, Height = 40 };
     readonly Action<string> _go;
     const double TabWidth = 112;
+    /// <summary>标签那一条的宽度（头像 + 四个标签）；搜索时收成一枚圆钮（只包住头像）</summary>
+    const double BarWidth = 10 + 44 + 4 + 4 * TabWidth + 4 + 6;
+    const double Dot = 64;
+
+    // 搜索钮：搜索时拉长成搜索框（网页版 .dock.searching）
+    readonly Glass _search = new(32, GlassKind.Regular) { Width = Dot, Height = 64 };
+    readonly FontIcon _glyph = U.Icon("\uE721", 19);
+    readonly TextBox _field = new();
+    readonly MacButton _cancel;
+    bool _suppress;
+    string _selected = "home";
+    public bool Searching { get; private set; }
+    public event Action<string>? QueryChanged;
+    public event Action<string>? Submitted;
+    public event Action? Cancelled;
 
     public Dock(Action<string> go)
     {
@@ -235,6 +308,8 @@ public sealed partial class Dock : StackPanel
         VerticalAlignment = VerticalAlignment.Bottom;
         Margin = new Thickness(0, 0, 0, 22);
 
+        _bar.Width = BarWidth;
+        _bar.SizeChanged += (_, e) => _bar.Clip = new RectangleGeometry { Rect = new Windows.Foundation.Rect(0, 0, e.NewSize.Width, e.NewSize.Height) };
         var inner = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 6, 0) };
         // 头像（账户与设置）
         var av = new Grid { Width = 44, Height = 44, CornerRadius = new CornerRadius(22), Background = Mac.Clear, VerticalAlignment = VerticalAlignment.Center };
@@ -246,20 +321,112 @@ public sealed partial class Dock : StackPanel
         inner.Children.Add(av);
         _tabs.Children.Add(_pill);
         var row = new StackPanel { Orientation = Orientation.Horizontal };
-        foreach (var (tag, text, glyph) in new[] { ("home", "主页", ""), ("library", "资料库", ""), ("requests", "请求", ""), ("downloads", "下载", "") })
+        foreach (var (tag, text, glyph) in new[] { ("home", "主页", "\uE80F"), ("library", "资料库", "\uE8F1"), ("requests", "请求", "\uE710"), ("downloads", "下载", "\uE896") })
             row.Children.Add(Cell(tag, text, glyph));
         _tabs.Children.Add(row);
+        _tabs.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(200) };
         inner.Children.Add(_tabs);
         _bar.Content = inner;
         Children.Add(_bar);
 
-        var search = new Glass(32, GlassKind.Regular) { Width = 64, Height = 64, Content = U.Icon("", 19).With(i => { i.Foreground = Mac.Label; i.HorizontalAlignment = HorizontalAlignment.Center; i.VerticalAlignment = VerticalAlignment.Center; }) };
-        search.Tapped += (_, _) => _go("search");
-        ToolTipService.SetToolTip(search, "搜索（Ctrl+F）");
-        Mac.Pressable(search, 1.06f, 0.94f);
-        Children.Add(search);
+        // 搜索框：右端一个 64 见方的图标位（放大镜），左边输入，搜索时右端换成「取消」胶囊
+        var sg = new Grid();
+        _glyph.Foreground = Mac.Label;
+        _glyph.HorizontalAlignment = HorizontalAlignment.Center;
+        _glyph.VerticalAlignment = VerticalAlignment.Center;
+        var glyphBox = new Grid { Width = Dot, HorizontalAlignment = HorizontalAlignment.Right, IsHitTestVisible = false };
+        glyphBox.Children.Add(_glyph);
+        _glyph.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(180) };
+        sg.Children.Add(glyphBox);
+        _field.PlaceholderText = "电影、剧集";
+        _field.FontSize = 17;
+        _field.VerticalAlignment = VerticalAlignment.Center;
+        _field.Margin = new Thickness(18, 0, 92, 0);
+        _field.BorderThickness = new Thickness(0);
+        _field.Background = Mac.Clear;
+        foreach (var k in new[] { "TextControlBackground", "TextControlBackgroundPointerOver", "TextControlBackgroundFocused",
+                                  "TextControlBorderBrush", "TextControlBorderBrushPointerOver", "TextControlBorderBrushFocused" })
+            _field.Resources[k] = Mac.Clear;
+        _field.Resources["TextControlForegroundFocused"] = Mac.Label;
+        _field.Resources["TextControlPlaceholderForegroundFocused"] = Mac.Tertiary;
+        _field.Opacity = 0;
+        _field.IsHitTestVisible = false;
+        _field.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(320) };
+        _field.TextChanged += (_, _) => { if (!_suppress) QueryChanged?.Invoke(_field.Text); };
+        _field.KeyDown += (_, e) =>
+        {
+            if (e.Key == VirtualKey.Enter) { Submitted?.Invoke(_field.Text); e.Handled = true; }
+            else if (e.Key == VirtualKey.Escape) { Cancelled?.Invoke(); e.Handled = true; }
+        };
+        sg.Children.Add(_field);
+        _cancel = MacButton.Pill("取消", null, () => Cancelled?.Invoke(), MacButton.Style.Glass, 46);
+        _cancel.HorizontalAlignment = HorizontalAlignment.Right;
+        _cancel.VerticalAlignment = VerticalAlignment.Center;
+        _cancel.Margin = new Thickness(0, 0, 9, 0);
+        _cancel.Opacity = 0;
+        _cancel.IsHitTestVisible = false;
+        _cancel.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(260) };
+        sg.Children.Add(_cancel);
+        _search.Content = sg;
+        _search.SizeChanged += (_, e) => _search.Clip = new RectangleGeometry { Rect = new Windows.Foundation.Rect(0, 0, e.NewSize.Width, e.NewSize.Height) };
+        _search.Tapped += (_, _) => { if (Searching) _field.Focus(FocusState.Programmatic); else _go("search"); };
+        ToolTipService.SetToolTip(_search, "搜索（Ctrl+F）");
+        Mac.Pressable(_search, 1.04f, 0.96f);
+        Children.Add(_search);
         _ = LoadAvatarAsync();
         Select("home", false);
+    }
+
+    /// <summary>变成搜索框：标签那一条收成头像圆钮，让出的宽度全给搜索框（两边同一条弹簧，总宽不变）</summary>
+    public void BeginSearch(string text)
+    {
+        if (!Searching)
+        {
+            Searching = true;
+            AnimateWidth(_bar, Dot);
+            AnimateWidth(_search, BarWidth);
+            _tabs.Opacity = 0;
+            _tabs.IsHitTestVisible = false;
+            _glyph.Opacity = 0;
+            _field.Opacity = 1;
+            _field.IsHitTestVisible = true;
+            _cancel.Opacity = 1;
+            _cancel.IsHitTestVisible = true;
+            Mac.SpringScaleXY(_cancel, new System.Numerics.Vector3(0.5f, 0.5f, 1), System.Numerics.Vector3.One, 0.55f, 60);
+        }
+        if (_field.Text != text) { _suppress = true; _field.Text = text; _field.SelectionStart = text.Length; _suppress = false; }
+        _field.Focus(FocusState.Programmatic);
+    }
+
+    /// <summary>收回成标签</summary>
+    public void EndSearch()
+    {
+        if (!Searching) return;
+        Searching = false;
+        AnimateWidth(_bar, BarWidth);
+        AnimateWidth(_search, Dot);
+        _tabs.Opacity = 1;
+        _tabs.IsHitTestVisible = true;
+        _glyph.Opacity = 1;
+        _field.Opacity = 0;
+        _field.IsHitTestVisible = false;
+        _cancel.Opacity = 0;
+        _cancel.IsHitTestVisible = false;
+        Select(_selected, false);
+    }
+
+    static void AnimateWidth(FrameworkElement e, double to)
+    {
+        var a = new DoubleAnimation
+        {
+            To = to, Duration = TimeSpan.FromMilliseconds(520), EnableDependentAnimation = true,
+            EasingFunction = new BackEase { Amplitude = 0.16, EasingMode = EasingMode.EaseOut },
+        };
+        Storyboard.SetTarget(a, e);
+        Storyboard.SetTargetProperty(a, "Width");
+        var sb = new Storyboard();
+        sb.Children.Add(a);
+        sb.Begin();
     }
 
     UIElement Cell(string tag, string text, string glyph)
@@ -287,6 +454,8 @@ public sealed partial class Dock : StackPanel
 
     public void Select(string tag, bool animate = true)
     {
+        _selected = tag;
+        if (Searching) { _pill.Opacity = 0; return; }
         int i = 0, idx = -1;
         foreach (var (t, c) in _cells)
         {

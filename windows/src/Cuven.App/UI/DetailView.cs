@@ -7,17 +7,18 @@ using Microsoft.UI.Xaml.Media;
 namespace Cuven.App.UI;
 
 /// <summary>
-/// 详情页：大图 + 字标 / 片名 + 一行信息 + 规格徽标 + 按钮（播放 / 继续播放 / 下载 / 版本）+ 简介 + 演职人员 + 剧照；
-/// 剧集多一块「分集」；片库里没有的是「请求添加」和五步进度
+/// 详情页（照网页版）：整幅剧照铺满一屏，正中间字标、「导演 · 主演」、8 分以上一枚「Cuven 品质保证」、白色「立即播放」+ 磨砂圆钮、简介；
+/// 下面演员阵容（圆头像）、剧照（竖的大卡「第 N 幕」）、剧集的分集；影片信息（类型 / 格式 / 评分）、尖端色彩和画面质量技术、语言、版权一行。
+/// 片库里没有的是「请求添加」和五步进度
 /// </summary>
 public sealed partial class DetailView : View
 {
     readonly ScrollViewer _scroll = new() { HorizontalScrollMode = ScrollMode.Disabled };
-    readonly StackPanel _col = new() { Spacing = 10, Padding = new Thickness(0, 0, 0, 48) };
-    readonly Grid _hero = new() { MinHeight = 520 };
-    readonly StackPanel _info = new() { Spacing = 14, VerticalAlignment = VerticalAlignment.Bottom, MaxWidth = 760, HorizontalAlignment = HorizontalAlignment.Left };
-    readonly StackPanel _actions = new() { Orientation = Orientation.Horizontal, Spacing = 12 };
-    readonly StackPanel _extra = new() { Spacing = 10 };
+    readonly StackPanel _col = new() { Spacing = 0, Padding = new Thickness(0, 0, 0, 120) };
+    readonly Grid _hero = new();
+    readonly StackPanel _info = new() { Spacing = 16, VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Center, MaxWidth = 760, Margin = new Thickness(40, 0, 40, 40) };
+    readonly StackPanel _actions = new() { Orientation = Orientation.Horizontal, Spacing = 14, HorizontalAlignment = HorizontalAlignment.Center };
+    readonly StackPanel _extra = new() { Spacing = 0 };
     Movie? _movie;
     Series? _series;
     CatalogTitle? _catalog;
@@ -28,15 +29,18 @@ public sealed partial class DetailView : View
     DetailView()
     {
         Background = Mac.CanvasBrush;
-        Inset.Track(_info, (i, l) => i.Margin = new Thickness(l + 8, 140, 48, 30));
         _hero.Children.Add(_info);
         _col.Children.Add(_hero);
         _col.Children.Add(_extra);
         _scroll.Content = _col;
         Children.Add(_scroll);
+        SizeChanged += (_, e) => _hero.Height = Math.Max(560, e.NewSize.Height * 0.92);
     }
 
     public override void Closed() => _unsub?.Invoke();
+
+    /// <summary>滚到大图下面（自检截图用）</summary>
+    public void ScrollToInfo() => _scroll.ChangeView(null, Math.Max(0, _hero.ActualHeight - 120), null, true);
     public override void Refresh() => RebuildActions();
 
     // ── 电影 ──
@@ -124,43 +128,39 @@ public sealed partial class DetailView : View
     void Render()
     {
         var m = _meta;
-        // 大图
+        // 整幅剧照，下面渐黑接到页面
         while (_hero.Children.Count > 1) _hero.Children.RemoveAt(0);
         var bg = TmdbImage.Url(m?.Backdrop ?? m?.BackdropClean ?? _movie?.Meta.Backdrop, "original");
-        _hero.Children.Insert(0, new Border { Background = U.Fade(0.05, 1.0, Mac.Canvas) });
-        _hero.Children.Insert(0, new Border { Background = U.Fade(0.6, 0, Mac.Canvas, true), Width = 960, HorizontalAlignment = HorizontalAlignment.Left });
-        _hero.Children.Insert(0, U.Img(bg, 1920).With(i => i.VerticalAlignment = VerticalAlignment.Top));
+        _hero.Children.Insert(0, new Border { Background = U.Fade(0, 1.0, Mac.Canvas), Height = 460, VerticalAlignment = VerticalAlignment.Bottom });
+        _hero.Children.Insert(0, U.Img(bg, 1920));
 
         _info.Children.Clear();
-        if (!string.IsNullOrEmpty(m?.Logo))
-            _info.Children.Add(new Image { Source = U.Bitmap(TmdbImage.Url(m.Logo, "w500"), 500), MaxHeight = 130, MaxWidth = 480, HorizontalAlignment = HorizontalAlignment.Left, Stretch = Stretch.Uniform });
-        else
-            _info.Children.Add(U.T(TitleText, 40, FontWeights.Bold, null, 2));
-        var bits = new List<string?>();
-        if (_series is not null) bits.Add(_series.SeasonLabel ?? (_series.Season is { } sn ? $"第 {sn} 季" : null));
-        bits.Add(m?.Year ?? _movie?.Year ?? _series?.Year ?? _catalog?.Year);
-        bits.Add(Format.Runtime(m?.Runtime));
-        if (m?.Rating is > 0) bits.Add($"评分 {m.Rating:0.0}");
-        if (m?.Genres is { Count: > 0 } gs) bits.Add(string.Join(" / ", gs.Take(3)));
-        _info.Children.Add(U.T(string.Join(" · ", bits.Where(b => !string.IsNullOrEmpty(b))), 14, null, Mac.Secondary));
-        var specs = _movie is not null ? FileName.Specs(_movie.Video.Name) : _series is not null ? (_series.Tags ?? new List<string>()) : new List<string>();
-        if (specs.Count > 0)
+        _info.Children.Add(FeatureBlock.LogoOrTitle(m?.Logo, TitleText, 150, 560));
+        if (_series is not null)
         {
-            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-            foreach (var sp in specs.Take(6)) row.Children.Add(new Glass(7, GlassKind.Clear) { Content = U.T(sp, 12, FontWeights.SemiBold).With(t => t.Margin = new Thickness(9, 3, 9, 4)) });
-            _info.Children.Add(row);
+            var bits = new[] { _series.SeasonLabel ?? (_series.Season is { } sn ? $"第 {sn} 季" : null), m?.Year ?? _series.Year }.Where(b => !string.IsNullOrEmpty(b));
+            _info.Children.Add(Center(U.T(string.Join(" · ", bits), 14, FontWeights.SemiBold, Mac.Secondary)));
         }
+        // 导演 / 主创 · 主演（前三位）
+        var credits = new List<string>();
+        if (!string.IsNullOrEmpty(m?.Director)) credits.Add("导演 " + m.Director);
+        if (m?.Cast is { Count: > 0 } cs) credits.Add("主演 " + string.Join(" · ", cs.Take(3).Select(c => c.Name)));
+        if (credits.Count > 0) _info.Children.Add(Center(U.T(string.Join("　·　", credits), 13, null, Mac.Tertiary)));
+        if (m?.Rating >= 8.0) _info.Children.Add(Web.Chip("Cuven 品质保证", 12).With(c => c.HorizontalAlignment = HorizontalAlignment.Center));
         _info.Children.Add(_actions);
         if (!string.IsNullOrEmpty(m?.Overview))
         {
-            var ov = U.T(m.Overview!, 15, null, Mac.Secondary, 4);
-            ov.Tapped += (_, _) => ov.MaxLines = ov.MaxLines == 0 ? 4 : 0;
+            var ov = U.T(m.Overview!, 15, null, Mac.Secondary, 3);
+            ov.TextAlignment = TextAlignment.Center;
+            ov.HorizontalAlignment = HorizontalAlignment.Center;
+            ov.Tapped += (_, _) => ov.MaxLines = ov.MaxLines == 0 ? 3 : 0;
             _info.Children.Add(ov);
         }
-        if (!string.IsNullOrEmpty(m?.Director)) _info.Children.Add(U.T("导演　" + m.Director, 13, null, Mac.Tertiary));
         RebuildActions();
         RenderExtra();
     }
+
+    static FrameworkElement Center(TextBlock t) { t.HorizontalAlignment = HorizontalAlignment.Center; t.TextAlignment = TextAlignment.Center; return t; }
 
     void RebuildActions()
     {
@@ -169,14 +169,14 @@ public sealed partial class DetailView : View
         {
             var path = _movie.Versions.FirstOrDefault()?.Path ?? _movie.Video.Path;
             var resume = PlaybackHistory.Shared.ResumeAt(path);
-            _actions.Children.Add(MacButton.Pill(resume > 0 ? $"继续播放 {Format.Clock(resume)}" : "播放", "\uE768", () => PlayRequest.Movie(_movie), MacButton.Style.Primary, 40));
+            _actions.Children.Add(MacButton.Pill(resume > 0 ? $"继续播放 {Format.Clock(resume)}" : "立即播放", "\uE768", () => PlayRequest.Movie(_movie), MacButton.Style.Primary, 50).With(b => b.MinWidth = 184));
             if (resume > 0)
-                _actions.Children.Add(MacButton.Pill("从头播放", "\uE72C", () =>
+                _actions.Children.Add(MacButton.Round("\uE72C", () =>
                 {
                     PlaybackHistory.Shared.Record(path, _movie.Video.Name, _movie.Title, 0, 0);
                     PlayRequest.Movie(_movie);
-                }, MacButton.Style.Glass, 40));
-            _dlBtn = MacButton.Pill("下载", "\uE896", DownloadClicked, MacButton.Style.Glass, 40);
+                }, "从头播放", 50, 17));
+            _dlBtn = MacButton.Round("\uE896", DownloadClicked, "下载", 50, 17);
             _actions.Children.Add(_dlBtn);
             UpdateDownload();
             if (_movie.Versions.Count > 1)
@@ -190,7 +190,7 @@ public sealed partial class DetailView : View
                     it.Click += (_, _) => PlayRequest.Movie(_movie, vv);
                     menu.Items.Add(it);
                 }
-                var vb = MacButton.Pill($"{_movie.Versions.Count} 个版本", "\uE8FD", () => { }, MacButton.Style.Glass, 40);
+                var vb = MacButton.Round("\uE8FD", () => { }, $"{_movie.Versions.Count} 个版本", 50, 17);
                 vb.Menu = menu;
                 _actions.Children.Add(vb);
             }
@@ -200,7 +200,7 @@ public sealed partial class DetailView : View
             if (_episodes.Count > 0)
             {
                 var (idx, label) = NextUp();
-                _actions.Children.Add(MacButton.Pill(label, "\uE768", () => PlayRequest.Episode(_series, TitleText, _episodes, idx, EpName(idx)), MacButton.Style.Primary, 40));
+                _actions.Children.Add(MacButton.Pill(label, "\uE768", () => PlayRequest.Episode(_series, TitleText, _episodes, idx, EpName(idx)), MacButton.Style.Primary, 50).With(b => b.MinWidth = 184));
             }
             else _actions.Children.Add(new ProgressRing { IsActive = true, Width = 24, Height = 24 });
             // 同一部剧的其他季
@@ -215,7 +215,7 @@ public sealed partial class DetailView : View
                     it.Click += (_, _) => { if (oo != _series) Shell.Current?.Go(ForSeries(oo)); };
                     menu.Items.Add(it);
                 }
-                _actions.Children.Add(MacButton.Pill("选季", "\uE8FD", () => { }, MacButton.Style.Glass, 40).With(b => b.Menu = menu));
+                _actions.Children.Add(MacButton.Round("\uE8FD", () => { }, "选季", 50, 17).With(b => b.Menu = menu));
             }
         }
         else if (_catalog is not null)
@@ -267,17 +267,19 @@ public sealed partial class DetailView : View
         var v = _movie.Versions.FirstOrDefault() ?? _movie.Video;
         var it = DownloadManager.Shared.Find(v.Path);
         string text, glyph;
-        if (it is null) { text = "下载" + (v.Size is > 0 ? "（" + Format.Size(v.Size) + "）" : ""); glyph = ""; }
+        if (it is null) { text = "下载" + (v.Size is > 0 ? "（" + Format.Size(v.Size) + "）" : ""); glyph = "\uE896"; }
         else switch (it.Phase)
         {
-            case DownloadPhase.Done: text = "已下载"; glyph = ""; break;
-            case DownloadPhase.Downloading: text = $"下载中 {it.Progress:P0}"; glyph = ""; break;
-            case DownloadPhase.Queued: text = "排队中"; glyph = ""; break;
-            case DownloadPhase.NoSpace: text = "空间不足"; glyph = ""; break;
-            case DownloadPhase.Failed: text = "重试下载"; glyph = ""; break;
-            default: text = $"继续下载 {it.Progress:P0}"; glyph = ""; break;
+            case DownloadPhase.Done: text = "已下载"; glyph = "\uE73E"; break;
+            case DownloadPhase.Downloading: text = $"下载中 {it.Progress:P0}（点一下暂停）"; glyph = "\uE769"; break;
+            case DownloadPhase.Queued: text = "排队中"; glyph = "\uE769"; break;
+            case DownloadPhase.NoSpace: text = "空间不足"; glyph = "\uE7BA"; break;
+            case DownloadPhase.Failed: text = "重试下载"; glyph = "\uE72C"; break;
+            default: text = $"继续下载 {it.Progress:P0}"; glyph = "\uE896"; break;
         }
-        _dlBtn.SetContent(U.H(7, U.Icon(glyph, 14), U.T(text, 14, FontWeights.SemiBold)));
+        _dlBtn.SetContent(U.Icon(glyph, 17).With(i => { i.HorizontalAlignment = HorizontalAlignment.Center; i.VerticalAlignment = VerticalAlignment.Center; }));
+        ToolTipService.SetToolTip(_dlBtn, text);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_dlBtn, text);
     }
 
     // ── 请求添加 ──
@@ -320,7 +322,8 @@ public sealed partial class DetailView : View
                 U.Toast(XamlRoot, "没能请求添加", CuvenException.Friendly(e));
                 if (btn is not null) { btn.IsHitTestVisible = true; btn.Opacity = 1; }
             }
-        }, MacButton.Style.Primary, 40);
+        }, MacButton.Style.Primary, 50);
+        btn.MinWidth = 184;
         _actions.Children.Add(btn);
         if (d?.Best is { } best)
         {
@@ -351,44 +354,145 @@ public sealed partial class DetailView : View
         return new Glass(14, GlassKind.Regular) { Content = new Border { Padding = new Thickness(16, 12, 16, 12), Child = col } };
     }
 
-    // ── 下面：分集、演职人员、剧照、文件 ──
+    // ── 下面（照网页版）：分集、演员阵容、剧照、影片信息、技术、语言 ──
+    const double Column = 756;
+
     void RenderExtra()
     {
         _extra.Children.Clear();
+        var m = _meta;
         if (_series is not null) RenderEpisodes();
-        var cast = _meta?.Cast;
-        if (cast is { Count: > 0 })
+        // 演员阵容：标题在中间那一栏，圆头像一排从页边起
+        if (m?.Cast is { Count: > 0 } cast)
         {
-            Section("演职人员");
-            var row = new StackPanel { Spacing = 18 };
-            foreach (var c in cast.Take(20))
+            var head = U.Cols("*", "auto");
+            head.Children.Add(U.T("演员阵容", 21, FontWeights.Bold).At(0, 0));
+            var more = U.H(4, cast.Count > 12 ? U.T($"共 {cast.Count} 位", 13, null, Mac.Tertiary) : null,
+                U.T("查看全部", 13, FontWeights.SemiBold, Mac.Secondary), U.Icon("\uE76C", 10).With(i => { i.Foreground = Mac.Secondary; i.VerticalAlignment = VerticalAlignment.Center; }));
+            more.VerticalAlignment = VerticalAlignment.Center;
+            head.Children.Add(more.At(0, 1));
+            _extra.Children.Add(Columned(head, 30, 14));
+            var row = new StackPanel();
+            foreach (var c in cast.Take(more is null ? 12 : 30))
             {
-                var pic = new PersonPicture { Width = 88, Height = 88, DisplayName = c.Name };
-                if (U.Bitmap(c.ProfileUrl, 176) is { } b) pic.ProfilePicture = b;
-                row.Children.Add(U.V(4, pic, U.T(c.Name, 13, FontWeights.SemiBold).With(t => { t.MaxWidth = 100; t.TextAlignment = TextAlignment.Center; }),
-                    U.T(c.Character ?? "", 12, null, Mac.Tertiary).With(t => { t.MaxWidth = 100; t.TextAlignment = TextAlignment.Center; })).With(s => s.Width = 100));
+                var pic = new PersonPicture { Width = 118, Height = 118, DisplayName = c.Name };
+                if (U.Bitmap(c.ProfileUrl, 236) is { } b) pic.ProfilePicture = b;
+                row.Children.Add(U.V(6, pic, U.T(c.Name, 14, FontWeights.SemiBold).With(t => t.MaxWidth = 124), U.T(c.Character ?? "", 13, null, Mac.Tertiary).With(t => t.MaxWidth = 124)).With(st => st.Width = 124));
             }
-            _extra.Children.Add(U.Shelf(row));
+            _extra.Children.Add(Web.Row(row, 12));
+            _extra.Children.Add(new Border { Height = 1, Background = Mac.Separator, Margin = new Thickness(0, 16, 0, 0) });
         }
-        var stills = _meta?.Stills;
-        if (stills is { Count: > 0 })
+        // 剧照：竖的大卡，下面「第 N 幕」
+        if (_series is null && m?.Stills is { Count: >= 2 } stills)
         {
-            Section("剧照");
-            var row = new StackPanel { Spacing = 14 };
-            foreach (var s in stills.Take(12))
-                row.Children.Add(U.RoundImg(TmdbImage.Url(s.Thumb ?? s.Url, "w780"), 640, 10).With(b => { b.Width = 320; b.Height = 180; }));
-            _extra.Children.Add(U.Shelf(row));
+            _extra.Children.Add(Inset.Track(U.T("剧照", 19, FontWeights.Bold), (t, l) => t.Margin = new Thickness(l, 30, l, 14)));
+            var row = new StackPanel();
+            int n = 0;
+            foreach (var st in stills.Take(12))
+            {
+                n++;
+                var card = U.RoundImg(TmdbImage.Url(st.Url ?? st.Thumb, "w780"), 760, 20).With(b => { b.Width = 370; b.Height = 458; });
+                row.Children.Add(U.V(14, card, U.T($"第 {n} 幕", 15, FontWeights.SemiBold).With(t => t.Margin = new Thickness(4, 0, 0, 0))));
+            }
+            _extra.Children.Add(Web.Row(row, 22));
         }
-        if (_movie is not null)
+        // 影片信息
+        var info = new StackPanel { Spacing = 0 };
+        info.Children.Add(new Border { Height = 1, Background = Mac.Separator, Margin = new Thickness(0, 0, 0, 26) });
+        info.Children.Add(U.T("影片信息", 21, FontWeights.Bold).With(t => t.Margin = new Thickness(0, 0, 0, 12)));
+        var type = (m?.Type == "tv" || _series is not null) ? "TV Series" : "Feature Film";
+        info.Children.Add(InfoRow("类型", type + " · " + (m?.Genres is { Count: > 0 } g ? string.Join(" · ", g) : "未知类型")));
+        if (_series is not null) info.Children.Add(InfoRow("剧集", string.Join(" · ", new[] { _series.SeasonLabel, _series.Total is { } tot ? $"共 {tot} 集" : null }.Where(x => !string.IsNullOrEmpty(x)))));
+        var name = _movie?.Video.Name ?? _episodes.FirstOrDefault()?.Name ?? "";
+        var specs = _movie is not null ? FileName.Specs(name) : _series?.Tags ?? new List<string>();
+        var ext = System.IO.Path.GetExtension(name).TrimStart('.').ToUpperInvariant();
+        var fmt = string.Join(" · ", new[] { ext.Length > 0 ? ext : null,
+            specs.Contains("4K") || specs.Contains("8K") ? "8K+ UHD" : null,
+            specs.Contains("杜比视界") ? "DV" : specs.Any(x => x.StartsWith("HDR")) ? "HDR" : null }.Where(x => x is not null));
+        if (fmt.Length > 0) info.Children.Add(InfoRow("格式", fmt));
+        if (m?.Rating is > 0 && m.Rating is { } r)
         {
-            Section("文件");
-            foreach (var v in _movie.Versions)
-                _extra.Children.Add(Inset.Track(U.T($"{v.Name}　{Format.Size(v.Size)}", 13, null, Mac.Tertiary, 2), (t, l) => t.Margin = new Thickness(l, 0, 48, 0)));
+            var val = U.H(8, U.T($"★ {r:0.0}", 14, FontWeights.SemiBold), r >= 8.0 ? Web.Chip("品质保证", 11) : null);
+            info.Children.Add(InfoRow("评分", null, val));
         }
+        // 尖端色彩和画面质量技术
+        info.Children.Add(U.T("尖端色彩和画面质量技术", 14, FontWeights.SemiBold, Mac.Secondary).With(t => t.Margin = new Thickness(0, 34, 0, 12)));
+        info.Children.Add(Box(
+            Tech("HDR ULTIMATE", "高动态技术 (HDR Ultimate) 绚丽生动的色彩、更锐利的对比度和更丰富的细节，为你呈现精致鲜活的迷人画质。"),
+            Tech("DOLBY ATMOS", "声音以前所未有的层次感、清晰度和细节，让你尽享全方位萦绕的声音体验。")));
+        // 语言
+        info.Children.Add(U.T("语言", 14, FontWeights.SemiBold, Mac.Secondary).With(t => t.Margin = new Thickness(0, 30, 0, 12)));
+        var audio = _series?.Langs is { Count: > 0 } langs
+            ? string.Join("、", langs) + (_series.Audio is { } au ? "（" + (au == "Atmos" ? "Dolby Atmos" : au) + "）" : "")
+            : "English (Dolby Atmos、Dolby Digital 7.1、Dolby 5.1、AAC、AD)";
+        info.Children.Add(Box(
+            Lang("原始音频", Language(m?.OriginalLanguage) ?? "English"),
+            Lang("音频", audio),
+            Lang("字幕", "Arabic、Bulgarian、Croatian、Czech、Danish、Dutch、English (SDH)、Estonian、Finnish、Greek、Hebrew、Hungarian、Icelandic、Latvian、Lithuanian、Norwegian、Polish、Portuguese、Slovak、Slovenian、Swedish、Turkish、Ukrainian")));
+        info.Children.Add(U.T("有关法律责任和信息 CUVEN 均不受理 适用法务归属为卢森堡地区", 12, null, Mac.Tertiary).With(t => { t.HorizontalAlignment = HorizontalAlignment.Center; t.Margin = new Thickness(0, 40, 0, 0); }));
+        _extra.Children.Add(Columned(info, 34, 0));
     }
 
+    /// <summary>中间那一栏（网页版 756 宽，窄了留页边）</summary>
+    static FrameworkElement Columned(FrameworkElement e, double top, double bottom)
+    {
+        e.MaxWidth = Column;
+        return Inset.Track(new Grid { Children = { e } }, (g, l) => g.Padding = new Thickness(l, top, l, bottom));
+    }
+
+    static FrameworkElement InfoRow(string label, string? value, FrameworkElement? custom = null)
+    {
+        var g = U.Cols("auto", "*");
+        g.Padding = new Thickness(0, 13, 0, 13);
+        g.BorderBrush = Mac.Separator;
+        g.BorderThickness = new Thickness(0, 0, 0, 1);
+        g.Children.Add(U.T(label, 14, null, Mac.Tertiary).At(0, 0));
+        var v = custom ?? U.T(value ?? "", 14, FontWeights.SemiBold, null, 2).With(t => t.TextAlignment = TextAlignment.Right);
+        v.HorizontalAlignment = HorizontalAlignment.Right;
+        v.Margin = new Thickness(24, 0, 0, 0);
+        g.Children.Add(v.At(0, 1));
+        return g;
+    }
+
+    static FrameworkElement Box(params FrameworkElement[] items)
+    {
+        var col = new StackPanel { Spacing = 0 };
+        for (int i = 0; i < items.Length; i++)
+        {
+            if (i > 0) col.Children.Add(new Border { Height = 1, Background = Mac.Separator, Margin = new Thickness(0, 4, 0, 4) });
+            col.Children.Add(items[i]);
+        }
+        return new Border
+        {
+            Child = col, Padding = new Thickness(20, 12, 20, 12), CornerRadius = new CornerRadius(22),
+            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 12, 12, 12)),
+            BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(36, 255, 255, 255)), BorderThickness = new Thickness(1),
+        };
+    }
+
+    static FrameworkElement Tech(string badge, string text) => U.V(10,
+        new Border
+        {
+            HorizontalAlignment = HorizontalAlignment.Left, CornerRadius = new CornerRadius(5), Padding = new Thickness(8, 3, 8, 3),
+            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(26, 255, 255, 255)),
+            BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(70, 255, 255, 255)), BorderThickness = new Thickness(1),
+            Child = U.T(badge, 11, FontWeights.Bold).With(t => t.CharacterSpacing = 60),
+        },
+        U.T(text, 14, null, Mac.Secondary, 3)).With(st => st.Margin = new Thickness(0, 10, 0, 10));
+
+    static FrameworkElement Lang(string label, string value) =>
+        U.V(6, U.T(label, 15, null, Mac.Tertiary), U.T(value, 15, null, null, 4)).With(st => st.Margin = new Thickness(0, 10, 0, 10));
+
+    static string? Language(string? code) => code switch
+    {
+        null or "" => null,
+        "en" => "English", "zh" => "中文", "cn" => "粤语", "ja" => "日本語", "ko" => "한국어", "fr" => "Français", "de" => "Deutsch",
+        "es" => "Español", "it" => "Italiano", "ru" => "Русский", "hi" => "हिन्दी", "th" => "ไทย", "pt" => "Português",
+        _ => code,
+    };
+
     void Section(string title) =>
-        _extra.Children.Add(Inset.Track(U.T(title, 19, FontWeights.Bold), (t, l) => t.Margin = new Thickness(l, 22, 48, 6)));
+        _extra.Children.Add(Inset.Track(U.T(title, 19, FontWeights.Bold), (t, l) => t.Margin = new Thickness(l, 30, l, 12)));
 
     void RenderEpisodes()
     {

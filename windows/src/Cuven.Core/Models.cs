@@ -132,6 +132,8 @@ public sealed class Series
     public string? Hdr { get; init; }
     public List<string>? Tags { get; init; }
     public string? Audio { get; init; }
+    /// <summary>音轨语言（网页版详情页「语言 · 音频」那一行）</summary>
+    public List<string>? Langs { get; init; }
     public bool? Full { get; init; }
     public int? TmdbId { get; init; }
     public bool? TmdbMiss { get; init; }
@@ -162,6 +164,7 @@ public sealed class Series
             Hdr = e.Str("hdr"),
             Tags = e.Strings("tags"),
             Audio = e.Str("audio"),
+            Langs = e.Strings("langs"),
             Full = e.Bool("full"),
             TmdbId = e.Int("tmdbId"),
             TmdbMiss = e.Bool("tmdbMiss"),
