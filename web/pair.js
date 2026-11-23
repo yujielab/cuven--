@@ -9,7 +9,8 @@
  *  · 码怎么藏进去：每个粒子的光学深度乘上它在屏幕上那一点的 M（不透明度 1 − (1 − a)^(增益·M)）。
  *    3D 的云在滚、码钉在屏幕平面上（慢慢转）：眼睛看是云的浓淡有点起伏，相机几帧一平均，滚动的结构就抹平了，码显出来。
  *    码平面的 y 朝下（和相机拍屏幕的行号同一手性），单位 = 云的半径
- *  · 登录：POST check.cuven.us/pair/open → 显示云和 6 位数字 → /pair/wait 长轮询 → 批准了就回调
+ *  · 登录：POST check.cuven.us/pair/open → 显示云 → /pair/wait 长轮询（快过期、手机还没看过就提前换一团）→ 批准了就回调。
+ *    网页不要设备令牌（不发 want_device / device:true）
  */
 (function () {
   'use strict';
@@ -76,7 +77,7 @@
     var gate = Math.min(1, Math.max(0, E / SPEC.e0));
     return (1 + SPEC.alpha * Math.tanh(D / SPEC.tau)) * (1 + SPEC.beta * gate * gate * Math.exp(-(D / SPEC.w) * (D / SPEC.w)));
   }
-  /** G×G 的调制网格（覆盖 [-EXT, EXT]²，按像素中心取样；第 0 行是 y 最小的一行） */
+  /** G×G 的调制网格（覆盖 [-EXT, EXT]²，按像素中心取样；第 0 行是 y 最小的一行）。全量参考版：测试、对照用 */
   function modulationGrid(b, G) {
     var m = new Float32Array(G * G);
     for (var j = 0; j < G; j++) for (var i = 0; i < G; i++) {
@@ -84,6 +85,110 @@
       m[j * G + i] = modulation(de[0], de[1]);
     }
     return m;
+  }
+
+  /* ── 码场的快速通道 ──
+     码场里只有格子的正负 b 跟着码变：扭曲、每个格子落在每个像素上的高斯权重 g、覆盖度 E 都和码无关。
+     所以一次算好一张稀疏表（每像素一个 E，外加一串（格子号, g），g > 1e-7 才记，平均六个左右，CSR 存），
+     换码时只算 D = Σ b·g 再调制：一团码几毫秒（全量要 192² 个像素 × 160 次 exp，一百多毫秒）。
+     结果和 modulationGrid 逐字节一致（四舍五入正好卡在边上的像素最多差 1/255） */
+  var BASIS_EPS = 1e-7;
+  var BASIS = null, basisWait = null;          // 算好的表（只算码网格那一种边长）/ 正在后台算
+  function basisNew(G) { return { G: G, E: new Float64Array(G * G), start: new Int32Array(G * G + 1), idx: [], g: [] }; }
+  /** 算第 j0 … j1−1 行，接在 o 后面（和 fieldAt 同一个式子、同一个求和顺序，E 一位不差） */
+  function basisRows(o, j0, j1) {
+    var G = o.G, s2r = 2 * SPEC.sigmaR * SPEC.sigmaR, cells = SPEC.cells, n = cells.length;
+    for (var j = j0; j < j1; j++) for (var i = 0; i < G; i++) {
+      var q = warp(-EXT + (i + 0.5) * 2 * EXT / G, -EXT + (j + 0.5) * 2 * EXT / G);
+      var r = Math.hypot(q[0], q[1]), th = Math.atan2(q[1], q[0]), E = 0;
+      for (var k = 0; k < n; k++) {
+        var c = cells[k], dr = r - c[0], dt = c[0] * wrap(th - c[1]);
+        var g = Math.exp(-(dr * dr) / s2r - (dt * dt) / (2 * c[2] * c[2]));
+        E += g;
+        if (g > BASIS_EPS) { o.idx.push(k); o.g.push(g); }
+      }
+      o.E[j * G + i] = E;
+      o.start[j * G + i + 1] = o.idx.length;
+    }
+  }
+  function basisPack(o) { return { G: o.G, E: o.E, start: o.start, idx: new Uint8Array(o.idx), g: new Float32Array(o.g) }; }
+  function basisOk(B, G) {
+    return !!B && B.G === G && B.E && B.E.length === G * G && B.start && B.start.length === G * G + 1 &&
+      B.idx && B.g && B.idx.length === B.g.length && B.start[G * G] === B.g.length;
+  }
+  /** 当场算（测试、没有后台的环境用）；算过就直接给 */
+  function basisSync(G) {
+    G = G || SPEC.codeGrid;
+    if (BASIS && BASIS.G === G) return BASIS;
+    var o = basisNew(G);
+    basisRows(o, 0, G);
+    var B = basisPack(o);
+    if (G === SPEC.codeGrid) BASIS = B;
+    return B;
+  }
+  /** 后台算：Worker 里算（不占主线程），开不了 Worker 就在主线程分片算（每片 ≤ 8 毫秒，让出来给动画）。回 Promise */
+  function prepare() {
+    var G = SPEC.codeGrid;
+    if (BASIS && BASIS.G === G) return Promise.resolve(BASIS);
+    if (basisWait) return basisWait;
+    basisWait = basisInWorker(G).catch(function () { return basisChunked(G); }).then(function (B) {
+      if (!BASIS || BASIS.G !== G) BASIS = B;
+      basisWait = null;
+      return BASIS;
+    }, function (e) { basisWait = null; throw e; });
+    return basisWait;
+  }
+  function basisInWorker(G) {
+    return new Promise(function (ok, bad) {
+      if (typeof Worker === 'undefined' || typeof Blob === 'undefined' || typeof URL === 'undefined' || !URL.createObjectURL) { bad(new Error('no worker')); return; }
+      var src = "'use strict';var SPEC=" + JSON.stringify(SPEC) + ',EXT=' + EXT + ',BASIS_EPS=' + BASIS_EPS + ';\n' +
+        [wrap, warp, basisNew, basisRows, basisPack].join('\n') +
+        '\nonmessage=function(e){var o=basisNew(e.data);basisRows(o,0,o.G);var B=basisPack(o);' +
+        'postMessage(B,[B.E.buffer,B.start.buffer,B.idx.buffer,B.g.buffer]);};';
+      var url = '', w = null, timer = 0;
+      var end = function () { clearTimeout(timer); try { w && w.terminate(); } catch (_) {} try { URL.revokeObjectURL(url); } catch (_) {} };
+      try {
+        url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+        w = new Worker(url);
+      } catch (e) { end(); bad(e); return; }
+      timer = setTimeout(function () { end(); bad(new Error('timeout')); }, 10000);
+      w.onmessage = function (e) { end(); if (basisOk(e.data, G)) ok(e.data); else bad(new Error('bad basis')); };
+      w.onerror = function (e) { end(); if (e && e.preventDefault) e.preventDefault(); bad(new Error('worker')); };
+      w.postMessage(G);
+    });
+  }
+  function basisChunked(G) {
+    return new Promise(function (ok) {
+      if (typeof setTimeout === 'undefined') { ok(basisSync(G)); return; }
+      var o = basisNew(G), j = 0;
+      var step = function () {
+        var t0 = Date.now();
+        while (j < G && (j === 0 || Date.now() - t0 < 8)) { basisRows(o, j, j + 1); j++; }
+        if (j < G) setTimeout(step, 0); else ok(basisPack(o));
+      };
+      setTimeout(step, 0);
+    });
+  }
+  /** 快速版的调制网格（输出同 modulationGrid） */
+  function modulationGridFast(b, G) {
+    var B = basisSync(G), m = new Float32Array(G * G), E = B.E, st = B.start, idx = B.idx, g = B.g;
+    for (var p = 0, n = G * G; p < n; p++) {
+      var D = 0;
+      for (var k = st[p], e = st[p + 1]; k < e; k++) D += b[idx[k]] * g[k];
+      m[p] = modulation(D, E[p]);
+    }
+    return m;
+  }
+  /** 调制网格 → 8 位码纹理（存 M / codeScale） */
+  function gridBytes(m) {
+    var px = new Uint8Array(m.length);
+    for (var i = 0; i < m.length; i++) px[i] = Math.max(0, Math.min(255, Math.round(m[i] / SPEC.codeScale * 255)));
+    return px;
+  }
+  /** 一团码的纹理：表算好了走快速通道，没好就全量算 */
+  function codeBytes(id, secret) {
+    var G = SPEC.codeGrid, b = cellSigns(id, secret);
+    return gridBytes(BASIS && BASIS.G === G ? modulationGridFast(b, G) : modulationGrid(b, G));
   }
 
   /* ── 粒子云（WebGL1）── */
@@ -261,7 +366,7 @@
 
   /**
    * new Cloud(canvas, { radius（占短边的比例，默认 0.30）, atlas（密度校正图的地址）, preserve, pixelRatio })
-   * setCode(id, secret)；start()；stop()；drawAt(秒)（自检 / 截图用）。没有 WebGL 时 ok = false（调用方只显示 6 位数字）
+   * setCode(id, secret)；clear()；start()；stop()；drawAt(秒)（自检 / 截图用）。没有 WebGL 时 ok = false（调用方改用账户密码）
    */
   function Cloud(canvas, opts) {
     opts = opts || {};
@@ -335,16 +440,20 @@
     };
     img.src = opts.atlas || '/pair-density.png';
   }
-  /** 换一团码：算调制网格（codeGrid²）→ 码纹理 */
+  /** 换一团码：算调制网格（codeGrid²，稀疏表好了走快速通道）→ 码纹理 */
   Cloud.prototype.setCode = function (id, secret) {
     if (!this.ok) return;
-    var G = CODE_GRID, m = modulationGrid(cellSigns(id, secret), G), px = new Uint8Array(G * G);
-    for (var i = 0; i < m.length; i++) px[i] = Math.max(0, Math.min(255, Math.round(m[i] / CODE_SCALE * 255)));
-    var gl = this.gl;
+    var G = CODE_GRID, px = codeBytes(id, secret), gl = this.gl;
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.codeTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, G, G, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, px);
     this.codeT0 = performance.now();
     this.coded = true;
+  };
+  /** 不画了（码作废、暂停）：画布立刻清空，等下一次 setCode */
+  Cloud.prototype.clear = function () {
+    this.coded = false;
+    if (!this.ok || this.gl.isContextLost()) return;
+    this.gl.clear(this.gl.COLOR_BUFFER_BIT);
   };
   /** 画 t 秒时的一帧（动画的时钟、码平面转的角度都用它） */
   Cloud.prototype.drawAt = function (t, codeT) {
@@ -386,57 +495,228 @@
   };
   Cloud.prototype.stop = function () { if (this.raf) cancelAnimationFrame(this.raf); this.raf = 0; };
 
-  /* ── 登录：开一团云 → 等批准（过期自动换一团） ── */
+  /* ── 登录：开一团云 → 等批准（快过期就提前换一团） ── */
+  var ROTATE_LEAD = 8000;               // 离过期不到 8 秒、手机还没看过（peek）：先开下一团换上，旧的关掉
+  var WAIT_MS = 30000, CALL_MS = 15000;  // 客户端超时：长轮询（服务端最多压 20 秒，再加读写）/ 其他请求
+  var HIDE_GRACE = 3000;                 // 标签页切到后台这么久才暂停（切走一下马上回来的不算）
+  var GEN = 0;                           // 第几次 login()：只有最新的一次能登录，旧的看到自己过时了就收摊
+  var noop = function () {};
   function deviceName() {
     var ua = navigator.userAgent, os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : /Android/.test(ua) ? 'Android' : '电脑';
     var br = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : '浏览器';
     return os + ' · ' + br;
   }
   /**
-   * CuvenPair.login({ api, canvas, atlas, onCode(code6), onStatus(text), onApproved(r) })
-   * r = { username, email, code（识别代码，5 分钟）, device（设备令牌） }；返回 { stop() }
+   * POST 一个 JSON，回 JSON（另带 _http = 状态码、_at = 收到的时刻）。ms：超时（AbortController，没有就赛跑）；
+   * keep：页面关了也要发出去（keepalive，不设超时）。content-type 用 text/plain：简单请求，不先发 OPTIONS 预检
+   * （账号中心照 JSON 解析，不看 content-type）
+   */
+  function post(api, path, body, ms, keep) {
+    var init = { method: 'POST', headers: { 'content-type': 'text/plain' }, body: JSON.stringify(body || {}) };
+    var ac = !keep && ms && typeof AbortController !== 'undefined' ? new AbortController() : null, timer = 0;
+    if (keep) init.keepalive = true;
+    if (ac) init.signal = ac.signal;
+    var req = fetch(api + path, init).then(function (r) {
+      return r.json().catch(function () { return null; }).then(function (j) {
+        j = j && typeof j === 'object' ? j : {};
+        j._http = r.status; j._at = Date.now();
+        return j;
+      });
+    });
+    if (!ms || keep) return req;
+    var cut = new Promise(function (_, bad) { timer = setTimeout(function () { if (ac) ac.abort(); bad(new Error('timeout')); }, ms); });
+    return Promise.race([req, cut]).then(function (j) { clearTimeout(timer); return j; }, function (e) { clearTimeout(timer); throw e; });
+  }
+  /** 刚开出来的一团：记下服务端和本机的钟差（exp 是服务端的钟），之后按本机时钟算还剩多久 */
+  function adopt(p) {
+    var ttl = (Number(p.ttl) > 0 ? Number(p.ttl) : 120) * 1000, at = Number(p._at) || Date.now();
+    if (Number(p.exp) > 0) { p.exp = Number(p.exp); p.skew = p.exp - ttl - at; }
+    else { p.exp = at + ttl; p.skew = 0; }
+    p.peeked = false;
+    return p;
+  }
+  function msLeft(p) { return p.exp - p.skew - Date.now(); }
+  // 一块画布一团云：再进来接着用（着色器、粒子缓冲不重建，也不漏显存），上一团码先清掉
+  function cloudFor(canvas, atlas, gen) {
+    var c = canvas.__cuvenCloud || (canvas.__cuvenCloud = new Cloud(canvas, { atlas: atlas }));
+    c.owner = gen;
+    if (c.ok) { c.stop(); c.clear(); }
+    return c;
+  }
+  /**
+   * CuvenPair.login({ api, canvas, atlas, opened, onStatus(text), onApproved(r) })
+   *   opened：页面先发出去的 /pair/open（Promise，回包同 open）：给了就不再自己开第一团（pair.js 下载、建 WebGL 和它同时进行）
+   *   r = { username, email, code（识别代码 c1.…，5 分钟） }；返回 { cloud, stop() }
+   *   wait 回 open / approved 以外的（过期、作废、取消、用过、找不到）：旧码立刻不画，再开一团；
+   *   快过期、手机还没看过：提前开下一团换上，旧的关掉（关之前那一刻刚好被批准的照样登录）。
+   *   标签页在后台：关掉手上这一团、不再轮询，回到前台再开；页面关掉（pagehide）用 keepalive 关掉。
+   *   画不了粒子云：不配对，只报一句说明
    */
   function login(o) {
     var api = (o.api || 'https://check.cuven.us').replace(/\/+$/, '');
-    var cloud = o.canvas ? new Cloud(o.canvas, { atlas: o.atlas }) : null;
-    var dead = false, cur = null;
-    var post = function (path, body) {
-      return fetch(api + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) })
-        .then(function (r) { return r.json().catch(function () { return {}; }); });
-    };
-    var status = function (t) { if (o.onStatus) o.onStatus(t); };
+    var gen = ++GEN, dead = false, paused = false, cur = null, seq = 0, note = '';
+    var retryT = 0, hideT = 0, expT = 0;
+    var doc = typeof document !== 'undefined' ? document : null;
+    var call = function (path, body, ms, keep) { return post(api, path, body, ms, keep); };
+    var cancel = function (p, keep) { return call('/pair/cancel', { id: p.id, poll: p.poll }, CALL_MS, keep).catch(noop); };
+    // 开出来却用不上的一团（过时了、暂停了、画不了）：关掉
+    var drop = function (pr) { Promise.resolve(pr).then(function (p) { if (p && p.ok && p.id) cancel(p); }, noop); };
+    var status = function (t) { if (alive() && o.onStatus) o.onStatus(t); };
+
+    // 网络先走：页面给的 / 自己开的第一团，和下面建 WebGL、后台算稀疏表同时进行
+    var first = o.opened ? Promise.resolve(o.opened) : doc && doc.hidden ? null : call('/pair/open', { device: deviceName() }, CALL_MS);
+    prepare().catch(noop);
+    var cloud = o.canvas ? cloudFor(o.canvas, o.atlas, gen) : null;
+    if (cloud && !cloud.ok) {
+      // 画不了粒子云：开出来也没人扫得到，不配对；说明文字留着，先开的那一团关掉
+      dead = true; drop(first);
+      if (o.onStatus) o.onStatus('这个浏览器画不了粒子云：请使用账户密码登录');
+      return { cloud: cloud, stop: noop };
+    }
+
+    function alive() {
+      if (dead) return false;
+      if (gen !== GEN) { stop(); return false; }          // 有更新的一次 login()：这一次作废
+      return true;
+    }
     function open() {
-      if (dead) return;
-      status('正在准备…');
-      post('/pair/open', { device: deviceName() }).then(function (p) {
-        if (dead) return;
-        if (!p || !p.ok) { status(p && p.message || '暂时连不上，稍后再试'); setTimeout(open, 5000); return; }
-        cur = p;
-        if (cloud && cloud.ok) { cloud.setCode(p.id, p.secret); cloud.start(); }
-        if (o.onCode) o.onCode(p.code);
-        status('');                                                          // 云出来了就不再写字（只在准备中、出错时提示）
-        wait();
-      }).catch(function () { if (!dead) { status('暂时连不上，稍后再试'); setTimeout(open, 5000); } });
+      clearTimeout(retryT);
+      if (!alive() || paused) return;
+      var mine = ++seq, req = first || call('/pair/open', { device: deviceName() }, CALL_MS);
+      first = null;
+      if (!cur) status('正在准备…');
+      req.then(function (p) {
+        if (!alive() || mine !== seq || paused) { drop(p); return; }
+        if (!p || !p.ok || !p.id) { openFailed(p); return; }
+        adopt(p);
+        prepare().then(null, noop).then(function () {      // 稀疏表好了再上码（一般早就好了）
+          if (!alive() || mine !== seq || paused) { drop(p); return; }
+          var old = cur;
+          if (cloud) { cloud.setCode(p.id, p.secret); cloud.start(); }
+          cur = p;
+          status(note); note = '';                         // 云出来了就不再写字（只在准备中、出错时提示）
+          if (old) retire(old);
+          guard();
+          wait();
+        });
+      }, function () {
+        if (alive() && mine === seq && !paused) openFailed(null);
+      });
+    }
+    function openFailed(p) {
+      if (cur) { cur.noRotate = true; wait(); return; }   // 提前换没换成：接着等手上这一团，到期了照常再开
+      var http = p ? p._http : 0;
+      status(p && p.message || '暂时连不上，稍后再试');
+      if (http === 403 && p.error === 'origin') return;   // 这个页面来源不让开云：再试也没用
+      retryT = setTimeout(open, http === 429 ? 20000 : 5000);
     }
     function wait() {
-      if (dead || !cur) return;
-      var mine = cur;
-      post('/pair/wait', { id: mine.id, poll: mine.poll }).then(function (r) {
-        if (dead || mine !== cur) return;
-        if (r && r.status === 'approved') { dead = true; if (cloud) cloud.stop(); if (o.onApproved) o.onApproved(r); return; }
-        if (r && r.status === 'open') { wait(); return; }
-        open();                                                            // 过期 / 作废 / 取消：换一团
-      }).catch(function () { if (!dead) setTimeout(wait, 2000); });
+      clearTimeout(retryT);
+      if (!alive() || paused || !cur) return;
+      var mine = cur, hold = 20000;
+      // 还可能提前换：长轮询在离过期 8 秒稍内一点回来，带着最新的 peeked
+      if (!mine.peeked && !mine.noRotate) hold = Math.max(0, Math.min(20000, Math.round(msLeft(mine) - ROTATE_LEAD + 300)));
+      call('/pair/wait', { id: mine.id, poll: mine.poll, wait: hold }, WAIT_MS).then(function (r) {
+        if (!alive()) return;
+        if (r.status === 'approved') { approved(r, mine); return; }   // 这一次开过的哪一团被批准都算（都是这台设备的）
+        if (mine !== cur || paused) return;
+        if (r.status === 'open') {
+          if (Number(r.exp) > 0) mine.exp = Number(r.exp);          // 手机看过一眼，服务端会把期限往后延
+          mine.peeked = r.peeked === true;
+          guard();
+          if (!mine.peeked && !mine.noRotate && msLeft(mine) < ROTATE_LEAD) open();
+          else wait();
+          return;
+        }
+        if (!r.status && (r._http === 429 || r._http >= 500)) { retryT = setTimeout(wait, 2000); return; }   // 服务端一时不行：码还有效，接着等
+        // 过期 / 作废 / 取消 / 用过 / 找不到：旧码立刻不画，再开一团
+        if (r.status === 'done') note = '已在 iPhone 上批准，但这台设备没收到结果，请再扫一次';
+        cur = null; clearTimeout(expT);
+        if (cloud) cloud.clear();
+        open();
+      }, function () {
+        // 断网 / 超时：同一团接着等（批准了的回包丢了，服务端 30 秒内还会再给一份）
+        if (alive() && mine === cur && !paused) retryT = setTimeout(wait, 2000);
+      });
     }
-    open();
-    return {
-      cloud: cloud,
-      stop: function () {
-        dead = true; if (cloud) cloud.stop();
-        if (cur) post('/pair/cancel', { id: cur.id, poll: cur.poll }).catch(function () {});
-      },
-    };
+    // 到点还没换下来（提前换的那一团开得太慢）：死码别再画；手机看过的不管（它已经拿到码，等批准就行）
+    function guard() {
+      clearTimeout(expT);
+      if (!cur || !cloud) return;
+      var p = cur;
+      expT = setTimeout(function () {
+        if (!alive() || p !== cur) return;
+        if (p.peeked || msLeft(p) > 0) guard(); else cloud.clear();
+      }, Math.max(0, msLeft(p)) + 250);
+    }
+    // 换下来的一团：关掉再看一眼（关之前那一刻刚好被批准的话照样登录）；页面要关了（keep）就只关
+    function retire(p, keep) {
+      cancel(p, keep).then(function () {
+        if (keep || !alive()) return;
+        return call('/pair/wait', { id: p.id, poll: p.poll, wait: 0 }, CALL_MS).then(function (r) {
+          if (r.status === 'approved' && alive()) approved(r, p);
+        });
+      }).catch(noop);
+    }
+    function approved(r, p) {
+      var c = cur;
+      dead = true; seq++; cur = null; quiet();
+      if (cloud && cloud.owner === gen) cloud.stop();
+      if (c && c !== p) cancel(c);                            // 批准的是换下来的那团：现在这团也关掉
+      if (o.onApproved) o.onApproved(r);
+    }
+    function pause(keep) {
+      clearTimeout(hideT);
+      if (!alive() || paused) return;
+      paused = true; seq++; clearTimeout(retryT); clearTimeout(expT);
+      var c = cur; cur = null;
+      if (cloud) { cloud.stop(); cloud.clear(); }
+      if (c) retire(c, keep);
+      if (first) { drop(first); first = null; }
+    }
+    function resume() {
+      clearTimeout(hideT);
+      if (!alive() || !paused) return;
+      paused = false;
+      open();
+    }
+    function onVis() {
+      clearTimeout(hideT);
+      if (doc.hidden) hideT = setTimeout(function () { pause(false); }, HIDE_GRACE);
+      else if (paused) resume();
+    }
+    function onPageHide() { pause(true); }
+    function onPageShow(e) { if (e && e.persisted && !doc.hidden) resume(); }   // 从往返缓存回来
+    function quiet() {
+      clearTimeout(retryT); clearTimeout(hideT); clearTimeout(expT);
+      if (!doc) return;
+      doc.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('pageshow', onPageShow);
+    }
+    function stop() {
+      if (dead) return;
+      dead = true; seq++; quiet();
+      if (cloud && cloud.owner === gen) { cloud.stop(); cloud.clear(); }
+      var c = cur; cur = null;
+      if (c) cancel(c, true);
+      if (first) { drop(first); first = null; }
+    }
+
+    if (doc) {
+      doc.addEventListener('visibilitychange', onVis);
+      window.addEventListener('pagehide', onPageHide);
+      window.addEventListener('pageshow', onPageShow);
+    }
+    if (doc && doc.hidden) { paused = true; if (first) { drop(first); first = null; } }
+    else open();
+    return { cloud: cloud, stop: stop };
   }
 
-  window.CuvenPair = { SPEC: SPEC, cellSigns: cellSigns, fieldAt: fieldAt, modulation: modulation, modulationGrid: modulationGrid, Cloud: Cloud, login: login };
+  window.CuvenPair = {
+    SPEC: SPEC, cellSigns: cellSigns, fieldAt: fieldAt, modulation: modulation, modulationGrid: modulationGrid,
+    modulationGridFast: modulationGridFast, basis: basisSync, prepare: prepare, codeBytes: codeBytes,
+    Cloud: Cloud, login: login,
+    acceptsOpened: true            // 认 login({ opened })：页面据此判断缓存里是不是旧版
+  };
 })();

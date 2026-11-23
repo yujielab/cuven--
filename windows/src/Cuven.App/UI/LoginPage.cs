@@ -31,6 +31,7 @@ public sealed partial class LoginPage : Grid, IDisposable
     NativeSurface? _surface;
     IntPtr _cloud;
     PairLogin? _pair;
+    int _pairGen;          // 每开 / 停一次配对加一：只认最新那一个的码和批准（切过密码页再回来就是新的一个）
     bool _disposed;
 
     public LoginPage()
@@ -99,8 +100,20 @@ public sealed partial class LoginPage : Grid, IDisposable
         _pairPane.Visibility = on ? Visibility.Collapsed : Visibility.Visible;
         _pwCard.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
         Mac.Enter(on ? _pwCard : _pairPane);
-        if (_cloud != IntPtr.Zero) Native.Native.cv_cloud_run(_cloud, on ? 0 : 1);
-        if (on) DispatcherQueue.TryEnqueue(() => _user.Focus(FocusState.Programmatic));
+        if (on)
+        {
+            // 切到密码页：配对关掉（/pair/cancel，和网页版、iOS 一样），旧码换成不带码的，回来时不会先画出一团作废的码
+            StopPairing();
+            ClearCode();
+            _status.Text = "";
+            if (_cloud != IntPtr.Zero) Native.Native.cv_cloud_run(_cloud, 0);
+            DispatcherQueue.TryEnqueue(() => _user.Focus(FocusState.Programmatic));
+        }
+        else
+        {
+            if (_cloud != IntPtr.Zero) Native.Native.cv_cloud_run(_cloud, 1);
+            if (Native.Native.Ready && _pair is null && !_disposed) StartPairing();
+        }
     }
 
     unsafe void StartCloud()
@@ -112,7 +125,7 @@ public sealed partial class LoginPage : Grid, IDisposable
         if (_cloud == IntPtr.Zero) { _status.Text = "这台电脑画不了粒子云：请使用账户密码登录"; return; }
         // 云直接画在页面的底色上（不靠系统合成透明交换链；和叠在这个颜色上数学上一样，iPhone 照样解得出）
         Native.Native.cv_cloud_set_background(_cloud, 245 / 255f, 245 / 255f, 247 / 255f, 1);
-        Native.Native.cv_cloud_run(_cloud, 1);
+        Native.Native.cv_cloud_run(_cloud, _pairPane.Visibility == Visibility.Visible ? 1 : 0);
         if (_pendingCode is { } c) ApplyCode(c);
     }
 
@@ -121,26 +134,48 @@ public sealed partial class LoginPage : Grid, IDisposable
     unsafe void ApplyCode(byte[] grid)
     {
         if (_cloud == IntPtr.Zero) { _pendingCode = grid; return; }
+        _pendingCode = null;
         var spec = PairSpec.Shared;
         fixed (byte* p = grid)
             Native.Native.cv_cloud_set_code(_cloud, p, spec.CodeGrid, (float)spec.CodeScale, (float)spec.CodeSpin);
     }
 
+    static byte[]? _neutral;
+
+    /// <summary>不再画旧码：换上不带码的纹理（M = 1，云照常动、扫不出东西）；云还没建好就什么都不留</summary>
+    void ClearCode()
+    {
+        if (_cloud == IntPtr.Zero) { _pendingCode = null; return; }
+        ApplyCode(_neutral ??= PairCodec.NeutralTexture());
+    }
+
     void StartPairing()
     {
-        _pair = new PairLogin("Windows · " + Environment.MachineName);
-        _pair.StatusChanged += s => DispatcherQueue.TryEnqueue(() => _status.Text = s);
-        _pair.CodeChanged += o =>
+        var gen = ++_pairGen;
+        var me = new PairLogin("Windows · " + Environment.MachineName);
+        _pair = me;
+        // 这几个回调都在 UI 线程上判断：页面还在、并且还是最新的那一次配对
+        bool Live() => !_disposed && gen == _pairGen;
+        me.StatusChanged += s => DispatcherQueue.TryEnqueue(() => { if (Live()) _status.Text = s; });
+        me.CodeChanged += o =>
         {
-            var grid = PairCodec.CodeTexture(o.Id, o.Secret);
-            DispatcherQueue.TryEnqueue(() => ApplyCode(grid));
+            var grid = PairCodec.CodeTexture(o.Id, o.Secret);   // 线程池上算（稀疏快路，几毫秒）
+            DispatcherQueue.TryEnqueue(() => { if (Live()) ApplyCode(grid); });
         };
-        _pair.Approved += r => DispatcherQueue.TryEnqueue(() =>
+        me.CodeCleared += () => DispatcherQueue.TryEnqueue(() => { if (Live()) ClearCode(); });
+        me.Approved += r => DispatcherQueue.TryEnqueue(() =>
         {
-            if (_disposed) return;
+            if (!Live() || _pairPane.Visibility != Visibility.Visible) return;
             MainWindow.Current.SignedIn(r);
         });
-        _pair.Start();
+        me.Start();
+    }
+
+    void StopPairing()
+    {
+        _pairGen++;
+        _pair?.Stop();
+        _pair = null;
     }
 
     async Task SignInAsync()
@@ -175,7 +210,7 @@ public sealed partial class LoginPage : Grid, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _pair?.Stop();
+        StopPairing();
         if (_cloud != IntPtr.Zero) Native.Native.cv_cloud_destroy(_cloud);
         _cloud = IntPtr.Zero;
         _surface?.Dispose();

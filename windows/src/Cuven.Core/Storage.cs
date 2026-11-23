@@ -68,7 +68,7 @@ sealed class PlainProtector : ISecretProtector
     public byte[]? Unprotect(byte[] s) => s;
 }
 
-/// <summary>登录状态 + 偏好（settings.json）；设备令牌另外加密存在 device.bin</summary>
+/// <summary>登录状态 + 偏好（settings.json）。设备令牌不再存（以前的版本加密存在 device.bin，启动时删掉）</summary>
 public sealed class Settings
 {
     public static Settings Shared { get; } = Load();
@@ -109,6 +109,7 @@ public sealed class Settings
             s.Efficiency = (bool?)o["eco"] ?? true;
             s.DownloadDir = (string?)o["downloads"];
         }
+        s.DeviceToken = null;   // 这台电脑不再存设备令牌：以前存下的 device.bin 启动时删掉
         return s;
     }
 
@@ -123,6 +124,7 @@ public sealed class Settings
         Storage.WriteJson("settings.json", o);
     }
 
+    /// <summary>设备令牌（能批准别的设备登录）：电脑上用不着，只剩删掉旧文件这一个用处；读出来的只有旧版留下的</summary>
     public string? DeviceToken
     {
         get
@@ -152,7 +154,7 @@ public sealed class Settings
     public void SignIn(LoginResult r)
     {
         Username = r.Username; Email = r.Email; Method = r.Method; SignedInAt = DateTime.UtcNow;
-        if (r.Device is not null) DeviceToken = r.Device;
+        DeviceToken = null;     // 不留设备令牌（也就不会有上一个账户的令牌留到这个账户）
         Save();
     }
 
