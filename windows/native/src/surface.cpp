@@ -8,7 +8,8 @@ ISwapChainPanelNative : public IUnknown {
 public:
     virtual HRESULT STDMETHODCALLTYPE SetSwapChain(IDXGISwapChain* swapChain) = 0;
 };
-static const GUID IID_SwapChainPanelNative = {0x63aad0b8, 0x7c24, 0x40ff, {0x85, 0x8a, 0x64, 0x0d, 0x94, 0x4c, 0xc3, 0x25}};
+// 63aad0b8-7c24-40ff-85a8-640d944cc325（和 microsoft.ui.xaml.media.dxinterop.h 一致）
+static const GUID IID_SwapChainPanelNative = {0x63aad0b8, 0x7c24, 0x40ff, {0x85, 0xa8, 0x64, 0x0d, 0x94, 0x4c, 0xc3, 0x25}};
 
 static const UINT kFlags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
