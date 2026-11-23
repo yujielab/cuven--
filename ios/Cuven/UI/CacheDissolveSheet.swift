@@ -25,18 +25,19 @@ struct CacheDissolveSheet: View {
     }
 
     var body: some View {
+        // 这一层的 GeometryReader 不忽略安全区：size 是安全区里的大小，safeAreaInsets 是上下留出来的
         GeometryReader { geo in
-            let bottomPad = max(geo.safeAreaInsets.bottom, 16) + 28
             ZStack {
-                Color.black
+                Color.black.ignoresSafeArea()
                 CacheDissolveCanvas(engine: engine, sizeLabel: sizeText)
+                    .ignoresSafeArea()
                     .accessibilityHidden(true)
                 VStack(spacing: 0) {
                     HStack {
                         Spacer()
                         if phase == .idle { closeButton.transition(.opacity) }
                     }
-                    .padding(.top, geo.safeAreaInsets.top + 8)
+                    .padding(.top, 8)
                     .padding(.horizontal, 20)
                     Spacer(minLength: 0)
                     if phase == .idle {
@@ -45,13 +46,12 @@ struct CacheDissolveSheet: View {
                             .transition(.opacity.combined(with: .scale(scale: 0.96)))
                     }
                     actions
-                        .padding(.bottom, bottomPad)
+                        .padding(.bottom, Self.bottomPad)
                 }
             }
-            .onAppear { place(geo.size, bottomPad: bottomPad) }
-            .onChange(of: geo.size) { _, s in place(s, bottomPad: bottomPad) }
+            .onAppear { place(geo) }
+            .onChange(of: geo.size) { _, _ in place(geo) }
         }
-        .ignoresSafeArea()
         .preferredColorScheme(.dark)
         .statusBarHidden(phase != .idle)
         .sensoryFeedback(.impact(weight: .medium), trigger: phase == .clearing)
@@ -59,10 +59,13 @@ struct CacheDissolveSheet: View {
         .onAppear { engine.reduceMotion = reduceMotion }
     }
 
-    /// 光流汇聚的那一点：进度胶囊的正中（胶囊 46 点高，在底下居中）
-    private func place(_ size: CGSize, bottomPad: CGFloat) {
-        guard size.height > 0 else { return }
-        engine.target = CGPoint(x: 0.5, y: (size.height - bottomPad - 23) / size.height)
+    private static let bottomPad: CGFloat = 24
+
+    /// 光流汇聚的那一点：进度胶囊的正中（胶囊 46 点高，在安全区底下居中），换算成整屏（画布铺满整屏）里的比例
+    private func place(_ geo: GeometryProxy) {
+        let full = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
+        guard full > 0 else { return }
+        engine.target = CGPoint(x: 0.5, y: (geo.safeAreaInsets.top + geo.size.height - Self.bottomPad - 23) / full)
     }
 
     private var closeButton: some View {
@@ -133,6 +136,8 @@ struct CacheDissolveSheet: View {
                         .rotationEffect(.radians(t * 5.2))
                 }
                 Text(phase == .done ? "已清除 \(sizeText)" : "正在清除 \(clearedText(p)) / \(sizeText)")
+                    .lineLimit(1)
+                    .fixedSize()
                     .font(.subheadline.weight(.semibold))
                     .monospacedDigit()
                     .foregroundStyle(.white)
