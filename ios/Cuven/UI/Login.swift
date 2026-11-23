@@ -875,6 +875,8 @@ private struct LoginScreen: View {
     @State private var pwRevealed = false
     /// 光学配对：这台设备显示粒子云，让另一台已登录的 iPhone 扫
     @State private var pairShowing = false
+    /// 登录页一出来就先显示粒子云（优先光学配对；粒子云下面「使用账户密码登录」回到这一页）
+    @State private var pairAuto = false
 
     var body: some View {
         GeometryReader { geo in
@@ -901,6 +903,11 @@ private struct LoginScreen: View {
         .onAppear {
             flow.reduceMotion = reduceMotion
             scheduleFxStop()
+            if !pairAuto, PairCloudRenderer.canShow {
+                pairAuto = true
+                var t = Transaction(); t.disablesAnimations = true
+                withTransaction(t) { pairShowing = true }
+            }
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(760))
                 settled = true

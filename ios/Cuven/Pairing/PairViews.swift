@@ -3,8 +3,9 @@ import AVFoundation
 
 // MARK: - 光学配对的界面
 //
-// · PairShowView（登录页「用 iPhone 扫描登录」）：这台设备要登录 —— 显示粒子云和 6 位数字，等另一台已登录的 iPhone 扫
-// · PairScanSheet（账户页「扫描登录其他设备」）：照 Apple 配对的样子 ——「将图案放在圆圈中」、圆形取景框、蓝圈、「手动验证」；
+// · PairShowView（登录页一出来先显示它，也可以点「用 iPhone 扫描登录」）：这台设备要登录 —— 显示粒子云，等另一台已登录的 iPhone 扫；
+//   下面「使用账户密码登录」回到登录页
+// · PairScanSheet（账户页「扫描登录其他设备」）：照 Apple 配对的样子 ——「将图案放在圆圈中」、圆形取景框、蓝圈；
 //   扫到 → 确认卡（哪台设备、在哪儿、几点）→ 面容 ID → 批准
 // · PairLabView（启动参数 -pairLab，自检）：编码对照、离屏画一团云再解出来
 
@@ -16,57 +17,37 @@ struct PairShowView: View {
     @Environment(AccountStore.self) private var account
     @Environment(\.dismiss) private var dismiss
     @State private var opened: PairService.Opened?
+    /// 只在准备中、出错时有字；云出来以后空着
     @State private var status = "正在准备…"
-    @State private var showDigits = false
     @State private var task: Task<Void, Never>?
 
     var body: some View {
         ZStack {
             Color.white.ignoresSafeArea()
             VStack(spacing: 0) {
-                HStack {
-                    Spacer()
-                    Button { close() } label: {
-                        Image(systemName: "xmark").font(.system(size: 17, weight: .semibold)).foregroundStyle(.black.opacity(0.75))
-                            .frame(width: 44, height: 44).background(Circle().fill(Color.black.opacity(0.06)))
-                    }
-                    .accessibilityLabel("关闭")
-                    .accessibilityIdentifier("pair-show-close")
-                }
-                .padding(.horizontal, 20)
                 Text("用 iPhone 扫描登录")
                     .font(.system(size: 30, weight: .bold)).foregroundStyle(.black)
-                    .padding(.top, 8)
-                Text("在已登录 Cuven 的 iPhone 上打开「账户 → 扫描登录其他设备」，对准这团粒子云。")
+                    .padding(.top, 52)
+                Text("Cuven 光学安全保护措施是迄今为止最安全的加密保护措施，Cuven 的安全团队日夜保护您的账户。")
                     .font(.system(size: 16)).foregroundStyle(.black.opacity(0.6))
                     .multilineTextAlignment(.center).padding(.horizontal, 36).padding(.top, 10)
                 PairCloudView(id: opened?.id, secret: opened?.secret)
                     .frame(width: 330, height: 330)
                     .padding(.top, 18)
                     .accessibilityIdentifier("pair-cloud")
-                Text(status)
-                    .font(.system(size: 15)).foregroundStyle(.black.opacity(0.55))
-                    .padding(.top, 6)
-                Spacer()
-                if showDigits, let code = opened?.code {
-                    VStack(spacing: 6) {
-                        Text("在 iPhone 上选「手动验证」，输入：").font(.system(size: 14)).foregroundStyle(.black.opacity(0.55))
-                        Text(code.map(String.init).joined(separator: " "))
-                            .font(.system(size: 34, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(.black)
-                            .accessibilityIdentifier("pair-show-digits")
-                    }
-                    .padding(.bottom, 14)
-                    .transition(.opacity)
+                if !status.isEmpty {
+                    Text(status)
+                        .font(.system(size: 15)).foregroundStyle(.black.opacity(0.55))
+                        .padding(.top, 6)
                 }
-                Button { withAnimation(.easeInOut(duration: 0.25)) { showDigits.toggle() } } label: {
-                    Text(showDigits ? "隐藏数字" : "手动验证")
+                Spacer()
+                Button { close() } label: {
+                    Text("使用账户密码登录")
                         .font(.system(size: 17, weight: .semibold)).foregroundStyle(.black)
                         .frame(maxWidth: .infinity).frame(height: 54)
-                        .background(Capsule().fill(.white))
-                        .overlay(Capsule().stroke(Color.black.opacity(0.12)))
                 }
                 .padding(.horizontal, 28).padding(.bottom, 20)
-                .accessibilityIdentifier("pair-show-manual")
+                .accessibilityIdentifier("pair-show-password")
             }
         }
         .onAppear { if task == nil { task = Task { await run() } } }
@@ -80,7 +61,7 @@ struct PairShowView: View {
                 try? await Task.sleep(for: .seconds(5)); continue
             }
             opened = o
-            status = "等待另一台 iPhone 扫描…"
+            status = ""
             var renew = false
             while !Task.isCancelled && !renew {
                 guard let r = await PairService.wait(o) else { try? await Task.sleep(for: .seconds(2)); continue }
@@ -89,7 +70,6 @@ struct PairShowView: View {
                     if let u = r.username {
                         PairService.saveDevice(r.device)
                         Haptics.success()
-                        status = "已批准"
                         account.signIn(username: u, email: r.email ?? "", method: "pair", alert: false)
                         dismiss()
                     }
@@ -113,11 +93,10 @@ struct PairShowView: View {
 struct PairScanSheet: View {
     @Environment(AccountStore.self) private var account
     @Environment(\.dismiss) private var dismiss
-    enum Stage: Equatable { case verify, scanning, manual, confirm, working, done, failed(String) }
+    enum Stage: Equatable { case verify, scanning, confirm, working, done, failed(String) }
     @State private var stage: Stage = .scanning
     @State private var target: PairService.Target?
     @State private var who: PairService.Who?
-    @State private var digits = ""
     @State private var password = ""
     @State private var otpHint: String?
     @State private var otpCode = ""
@@ -155,7 +134,6 @@ struct PairScanSheet: View {
         switch stage {
         case .verify: verifyView
         case .scanning: scanView
-        case .manual: manualView
         case .confirm: confirmView
         case .working: VStack(spacing: 16) { ProgressView().controlSize(.large); Text("正在登录…").foregroundStyle(.black.opacity(0.6)) }.padding(.top, 120)
         case .done: doneView
@@ -177,13 +155,13 @@ struct PairScanSheet: View {
             ZStack {
                 if camDenied {
                     Circle().fill(Color.black.opacity(0.85))
-                    Text("Cuven 没有相机权限。\n到「设置」里打开，或者用手动验证。").font(.system(size: 15)).foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center).padding(30)
+                    Text("Cuven 没有相机权限。\n到「设置」里打开。").font(.system(size: 15)).foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center).padding(30)
                 } else if let s = scanner {
                     Circle().fill(Color.black.opacity(0.85))
                     PairCameraPreview(scanner: s, state: camState).clipShape(Circle())
                 } else {
                     Circle().fill(Color.black.opacity(0.85))
-                    Text("这台设备上扫描用不了（解码器没加载起来），用手动验证。").font(.system(size: 15)).foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center).padding(30)
+                    Text("这台设备上扫描用不了（解码器没加载起来）。").font(.system(size: 15)).foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center).padding(30)
                 }
                 Circle().stroke(pairBlue, lineWidth: 10)
             }
@@ -196,14 +174,6 @@ struct PairScanSheet: View {
                     .accessibilityIdentifier("pair-scan-status")
             }
             Spacer(minLength: 40)
-            Button { stage = .manual; scanner?.stop() } label: {
-                Text("手动验证").font(.system(size: 18, weight: .semibold)).foregroundStyle(.black)
-                    .frame(maxWidth: .infinity).frame(height: 60)
-                    .background(Capsule().fill(Color.white.opacity(0.85)))
-                    .overlay(Capsule().stroke(Color.black.opacity(0.12)))
-            }
-            .padding(.horizontal, 32).padding(.top, 40).padding(.bottom, 28)
-            .accessibilityIdentifier("pair-scan-manual")
         }
         .padding(.top, 4)
     }
@@ -214,30 +184,8 @@ struct PairScanSheet: View {
         switch camState {
         case .starting: return "正在打开相机…"
         case .running: return nil
-        case .noCamera: return "找不到后置相机，用手动验证"
+        case .noCamera: return "找不到后置相机"
         case .paused(let m), .failed(let m): return m
-        }
-    }
-
-    private var manualView: some View {
-        VStack(spacing: 0) {
-            titleBlock("手动验证", "输入另一台设备上显示的 6 位数字。")
-            TextField("000000", text: $digits)
-                .keyboardType(.numberPad)
-                .font(.system(size: 40, weight: .semibold, design: .rounded)).monospacedDigit()
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.black)
-                .padding(.vertical, 18)
-                .background(RoundedRectangle(cornerRadius: 18).fill(.white))
-                .padding(.horizontal, 48).padding(.top, 50)
-                .onChange(of: digits) { _, v in
-                    let d = String(v.filter(\.isNumber).prefix(6))
-                    if d != v { digits = d }
-                    if d.count == 6 { found(.digits(d)) }
-                }
-                .accessibilityIdentifier("pair-manual-field")
-            Button("改用相机扫描") { digits = ""; stage = .scanning; scanner?.start() }
-                .font(.system(size: 16, weight: .semibold)).foregroundStyle(pairBlue).padding(.top, 24)
         }
     }
 
@@ -288,7 +236,7 @@ struct PairScanSheet: View {
         VStack(spacing: 18) {
             Image(systemName: "exclamationmark.circle").font(.system(size: 64)).foregroundStyle(.black.opacity(0.5))
             Text(m).font(.system(size: 17)).foregroundStyle(.black.opacity(0.75)).multilineTextAlignment(.center).padding(.horizontal, 36)
-            Button("重新扫描") { target = nil; who = nil; digits = ""; stage = .scanning; scanner?.start() }
+            Button("重新扫描") { target = nil; who = nil; stage = .scanning; scanner?.start() }
                 .font(.system(size: 17, weight: .semibold)).foregroundStyle(pairBlue)
         }
         .padding(.top, 110)
@@ -343,7 +291,7 @@ struct PairScanSheet: View {
     }
 
     private func found(_ t: PairService.Target) {
-        guard stage == .scanning || stage == .manual else { return }
+        guard stage == .scanning else { return }
         Haptics.light()
         scanner?.stop()
         target = t
