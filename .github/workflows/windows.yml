@@ -110,6 +110,8 @@ jobs:
               Write-Host "$($p[0])：$((Get-Item $out).Length) 字节"
             }
           } catch { Write-Host "片库的片子没拿到：$_" }
+          # 片子没下全（网络断了）不算构建失败：下面的自检会跳过、或者只测拿到的那一截
+          exit 0
 
       - name: 原生自检（WARP：配对粒子云 + 播放器）
         id: native_selftest
