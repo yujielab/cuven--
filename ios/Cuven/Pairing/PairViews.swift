@@ -125,6 +125,7 @@ struct PairScanSheet: View {
     @State private var busy = false
     @State private var scanner = PairScanner()
     @State private var camDenied = false
+    @State private var camState: PairScanner.CamState = .starting
     /// 相机读出来、后端说「不存在 / 过期」的码。CRC-8 挡不住所有误读（约 1/256 的乱码能过），乱码的编号是随机的：
     /// 第一次被拒先接着扫；同一个码再被拒一次（真的过期了）才报错
     @State private var rejected: Set<UInt64> = []
@@ -178,15 +179,22 @@ struct PairScanSheet: View {
                     Circle().fill(Color.black.opacity(0.85))
                     Text("Cuven 没有相机权限。\n到「设置」里打开，或者用手动验证。").font(.system(size: 15)).foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center).padding(30)
                 } else if let s = scanner {
-                    PairCameraPreview(session: s.session).clipShape(Circle())
+                    Circle().fill(Color.black.opacity(0.85))
+                    PairCameraPreview(scanner: s, state: camState).clipShape(Circle())
                 } else {
                     Circle().fill(Color.black.opacity(0.85))
+                    Text("这台设备上扫描用不了（解码器没加载起来），用手动验证。").font(.system(size: 15)).foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center).padding(30)
                 }
                 Circle().stroke(pairBlue, lineWidth: 10)
             }
             .frame(width: 300, height: 300)
             .padding(.top, 40)
             .accessibilityIdentifier("pair-scan-viewfinder")
+            if let note = camNote {
+                Text(note).font(.system(size: 15)).foregroundStyle(.black.opacity(0.6)).multilineTextAlignment(.center)
+                    .padding(.horizontal, 36).padding(.top, 16)
+                    .accessibilityIdentifier("pair-scan-status")
+            }
             Spacer(minLength: 40)
             Button { stage = .manual; scanner?.stop() } label: {
                 Text("手动验证").font(.system(size: 18, weight: .semibold)).foregroundStyle(.black)
@@ -198,6 +206,17 @@ struct PairScanSheet: View {
             .accessibilityIdentifier("pair-scan-manual")
         }
         .padding(.top, 4)
+    }
+
+    /// 相机不在正常取景时，圆圈下面说一句为什么
+    private var camNote: String? {
+        guard !camDenied, scanner != nil else { return nil }
+        switch camState {
+        case .starting: return "正在打开相机…"
+        case .running: return nil
+        case .noCamera: return "找不到后置相机，用手动验证"
+        case .paused(let m), .failed(let m): return m
+        }
     }
 
     private var manualView: some View {
@@ -318,6 +337,7 @@ struct PairScanSheet: View {
         Task {
             if !PairScanner.authorized, !(await PairScanner.requestAccess()) { camDenied = true; return }
             scanner?.onResult = { id, secret in found(.code(id: id, secret: secret)) }
+            scanner?.onState = { camState = $0 }
             scanner?.start()
         }
     }
@@ -376,18 +396,44 @@ struct PairScanSheet: View {
 
 /// 相机取景（铺满、裁成圆形）
 struct PairCameraPreview: UIViewRepresentable {
-    let session: AVCaptureSession
+    let scanner: PairScanner
+    var state: PairScanner.CamState = .starting
+
     final class V: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
         var preview: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+        weak var scanner: PairScanner?
+        private var rotation: AVCaptureDevice.RotationCoordinator?
+        private var watch: NSKeyValueObservation?
+
+        /// 预览转到和屏幕一致的方向（Duo 内屏横着拿、iPad 横屏时不然是歪的）；相机输入接上以后才建得了
+        func syncRotation() {
+            guard rotation == nil, let cam = scanner?.camera else { return }
+            let rc = AVCaptureDevice.RotationCoordinator(device: cam, previewLayer: preview)
+            rotation = rc
+            watch = rc.observe(\.videoRotationAngleForHorizonLevelPreview, options: [.initial, .new]) { [weak self] rc, _ in
+                let a = rc.videoRotationAngleForHorizonLevelPreview
+                DispatchQueue.main.async {
+                    guard let c = self?.preview.connection, c.isVideoRotationAngleSupported(a) else { return }
+                    c.videoRotationAngle = a
+                }
+            }
+        }
+        override func layoutSubviews() { super.layoutSubviews(); syncRotation() }
     }
+
     func makeUIView(context: Context) -> V {
         let v = V()
-        v.preview.session = session
+        v.backgroundColor = .black
+        v.scanner = scanner
+        v.preview.session = scanner.session
         v.preview.videoGravity = .resizeAspectFill
         return v
     }
-    func updateUIView(_ v: V, context: Context) {}
+
+    func updateUIView(_ v: V, context: Context) {
+        if state == .running { v.syncRotation() }
+    }
 }
 
 // MARK: 自检（启动参数 -CuvenPairLab YES）
