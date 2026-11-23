@@ -130,6 +130,14 @@ public static class Format
         return h > 0 ? $"{h}:{m:00}:{sec:00}" : $"{m}:{sec:00}";
     }
 
+    /// <summary>入库时间：今天 / 昨天 / N 天前 / M 月 d 日（网页版「最新加入」下面那行）</summary>
+    public static string Relative(string? iso)
+    {
+        if (string.IsNullOrEmpty(iso) || !DateTime.TryParse(iso, null, System.Globalization.DateTimeStyles.RoundtripKind, out var t)) return "";
+        var days = (DateTime.Now.Date - t.ToLocalTime().Date).Days;
+        return days <= 0 ? "今天" : days == 1 ? "昨天" : days < 30 ? $"{days} 天前" : $"{t.ToLocalTime().Month} 月 {t.ToLocalTime().Day} 日";
+    }
+
     public static string Speed(double bytesPerSecond) =>
         bytesPerSecond >= 1 << 20 ? $"{bytesPerSecond / (1 << 20):0.0} MB/s" : $"{bytesPerSecond / 1024:0} KB/s";
 }

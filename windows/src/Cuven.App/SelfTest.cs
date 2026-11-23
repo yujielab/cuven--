@@ -100,7 +100,7 @@ static class SelfTest
             for (int i = 0; i < 40 && LibraryStore.Shared.Movies.Count == 0; i++) await Task.Delay(500);
             report.Add($"片库：{LibraryStore.Shared.Movies.Count} 部电影，{LibraryStore.Shared.Series.Count} 季剧集");
             await Shot("2-home", 6);
-            Shell.Current?.Root("movies");
+            Shell.Current?.Root("library");
             await Shot("3-movies", 4);
             if (LibraryStore.Shared.Movies.FirstOrDefault(m => !string.IsNullOrEmpty(m.Meta.Backdrop)) is { } mv)
             {

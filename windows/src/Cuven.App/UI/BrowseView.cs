@@ -5,26 +5,28 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace Cuven.App.UI;
 
-public enum BrowseKind { Movies, Series }
+public enum BrowseKind { Movies, Series, Year }
 
 /// <summary>电影 / 剧集的全部：海报网格（ItemsRepeater 虚拟化 + 卡片回收），排序、按类型筛</summary>
 public sealed partial class BrowseView : View
 {
     readonly BrowseKind _kind;
+    readonly string? _year;
     readonly ItemsRepeater _grid = new();
     readonly ComboBox _sort = new() { Width = 140 };
     readonly ComboBox _genre = new() { Width = 140 };
     readonly TextBlock _count = U.T("", 13, null, U.Faint);
     Microsoft.UI.Dispatching.DispatcherQueueTimer? _debounce;
 
-    public BrowseView(BrowseKind kind)
+    public BrowseView(BrowseKind kind, string? year = null)
     {
+        _year = year;
         Background = Mac.FrostCanvas;
         _kind = kind;
         var header = U.Cols("auto", "*", "auto", "auto");
         header.ColumnSpacing = 12;
         Inset.Track(header, (h, l) => h.Margin = new Thickness(l, Inset.Top, Inset.Right, 14));
-        header.Children.Add(U.V(2, Mac.LargeTitle(kind == BrowseKind.Movies ? "电影" : "剧集"), _count).At(0, 0));
+        header.Children.Add(U.V(2, Mac.LargeTitle(kind == BrowseKind.Year ? $"{year} 年" : kind == BrowseKind.Movies ? "电影" : "剧集"), _count).At(0, 0));
         foreach (var s in new[] { "最新添加", "评分最高", "年份", "片名" }) _sort.Items.Add(s);
         _sort.SelectedIndex = 0;
         _sort.SelectionChanged += (_, _) => Fill();
@@ -70,7 +72,12 @@ public sealed partial class BrowseView : View
     {
         var lib = LibraryStore.Shared;
         List<object> items;
-        if (_kind == BrowseKind.Movies)
+        if (_kind == BrowseKind.Year)
+        {
+            // 这一年的剧集和电影（「查看电影和剧集 ›」）
+            items = lib.Series.Where(s => s.Year == _year).Cast<object>().Concat(lib.Movies.Where(m => m.Year == _year).Cast<object>()).ToList();
+        }
+        else if (_kind == BrowseKind.Movies)
         {
             IEnumerable<Movie> mv = lib.Movies;
             if (_genre.SelectedIndex > 0 && _genre.SelectedItem is string g) mv = mv.Where(m => m.Meta.Genres?.Contains(g) == true);
