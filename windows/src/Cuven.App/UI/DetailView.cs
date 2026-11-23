@@ -15,18 +15,19 @@ public sealed partial class DetailView : View
     readonly ScrollViewer _scroll = new() { HorizontalScrollMode = ScrollMode.Disabled };
     readonly StackPanel _col = new() { Spacing = 10, Padding = new Thickness(0, 0, 0, 48) };
     readonly Grid _hero = new() { MinHeight = 520 };
-    readonly StackPanel _info = new() { Spacing = 14, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(48, 120, 48, 28), MaxWidth = 760, HorizontalAlignment = HorizontalAlignment.Left };
+    readonly StackPanel _info = new() { Spacing = 14, VerticalAlignment = VerticalAlignment.Bottom, MaxWidth = 760, HorizontalAlignment = HorizontalAlignment.Left };
     readonly StackPanel _actions = new() { Orientation = Orientation.Horizontal, Spacing = 12 };
     readonly StackPanel _extra = new() { Spacing = 10 };
     Movie? _movie;
     Series? _series;
     CatalogTitle? _catalog;
     Meta? _meta;
-    Button? _dlBtn;
+    MacButton? _dlBtn;
     Action? _unsub;
 
     DetailView()
     {
+        Inset.Track(_info, (i, l) => i.Margin = new Thickness(l + 8, 140, 48, 30));
         _hero.Children.Add(_info);
         _col.Children.Add(_hero);
         _col.Children.Add(_extra);
@@ -125,8 +126,8 @@ public sealed partial class DetailView : View
         // 大图
         while (_hero.Children.Count > 1) _hero.Children.RemoveAt(0);
         var bg = TmdbImage.Url(m?.Backdrop ?? m?.BackdropClean ?? _movie?.Meta.Backdrop, "original");
-        _hero.Children.Insert(0, new Border { Background = U.Fade(0.15, 1.0) });
-        _hero.Children.Insert(0, new Border { Background = U.Fade(0.9, 0, null, true), Width = 900, HorizontalAlignment = HorizontalAlignment.Left });
+        _hero.Children.Insert(0, new Border { Background = U.Fade(0.05, 1.0, Mac.Canvas) });
+        _hero.Children.Insert(0, new Border { Background = U.Fade(0.6, 0, Mac.Canvas, true), Width = 960, HorizontalAlignment = HorizontalAlignment.Left });
         _hero.Children.Insert(0, U.Img(bg, 1920).With(i => i.VerticalAlignment = VerticalAlignment.Top));
 
         _info.Children.Clear();
@@ -140,22 +141,22 @@ public sealed partial class DetailView : View
         bits.Add(Format.Runtime(m?.Runtime));
         if (m?.Rating is > 0) bits.Add($"评分 {m.Rating:0.0}");
         if (m?.Genres is { Count: > 0 } gs) bits.Add(string.Join(" / ", gs.Take(3)));
-        _info.Children.Add(U.T(string.Join(" · ", bits.Where(b => !string.IsNullOrEmpty(b))), 14, null, U.Dim));
+        _info.Children.Add(U.T(string.Join(" · ", bits.Where(b => !string.IsNullOrEmpty(b))), 14, null, Mac.Secondary));
         var specs = _movie is not null ? FileName.Specs(_movie.Video.Name) : _series is not null ? (_series.Tags ?? new List<string>()) : new List<string>();
         if (specs.Count > 0)
         {
             var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-            foreach (var s in specs.Take(6)) row.Children.Add(U.Pill(s));
+            foreach (var sp in specs.Take(6)) row.Children.Add(new Glass(7, GlassKind.Clear) { Content = U.T(sp, 12, FontWeights.SemiBold).With(t => t.Margin = new Thickness(9, 3, 9, 4)) });
             _info.Children.Add(row);
         }
         _info.Children.Add(_actions);
         if (!string.IsNullOrEmpty(m?.Overview))
         {
-            var ov = U.T(m.Overview!, 15, null, U.Dim, 4);
+            var ov = U.T(m.Overview!, 15, null, Mac.Secondary, 4);
             ov.Tapped += (_, _) => ov.MaxLines = ov.MaxLines == 0 ? 4 : 0;
             _info.Children.Add(ov);
         }
-        if (!string.IsNullOrEmpty(m?.Director)) _info.Children.Add(U.T("导演　" + m.Director, 13, null, U.Faint));
+        if (!string.IsNullOrEmpty(m?.Director)) _info.Children.Add(U.T("导演　" + m.Director, 13, null, Mac.Tertiary));
         RebuildActions();
         RenderExtra();
     }
@@ -167,14 +168,14 @@ public sealed partial class DetailView : View
         {
             var path = _movie.Versions.FirstOrDefault()?.Path ?? _movie.Video.Path;
             var resume = PlaybackHistory.Shared.ResumeAt(path);
-            _actions.Children.Add(U.Btn(resume > 0 ? $"继续播放 {Format.Clock(resume)}" : "播放", "", (_, _) => PlayRequest.Movie(_movie), accent: true));
+            _actions.Children.Add(MacButton.Pill(resume > 0 ? $"继续播放 {Format.Clock(resume)}" : "播放", "\uE768", () => PlayRequest.Movie(_movie), MacButton.Style.Primary, 40));
             if (resume > 0)
-                _actions.Children.Add(U.Btn("从头播放", "", (_, _) =>
+                _actions.Children.Add(MacButton.Pill("从头播放", "\uE72C", () =>
                 {
                     PlaybackHistory.Shared.Record(path, _movie.Video.Name, _movie.Title, 0, 0);
                     PlayRequest.Movie(_movie);
-                }));
-            _dlBtn = U.Btn("下载", "", (_, _) => DownloadClicked());
+                }, MacButton.Style.Glass, 40));
+            _dlBtn = MacButton.Pill("下载", "\uE896", DownloadClicked, MacButton.Style.Glass, 40);
             _actions.Children.Add(_dlBtn);
             UpdateDownload();
             if (_movie.Versions.Count > 1)
@@ -188,8 +189,8 @@ public sealed partial class DetailView : View
                     it.Click += (_, _) => PlayRequest.Movie(_movie, vv);
                     menu.Items.Add(it);
                 }
-                var vb = U.Btn($"{_movie.Versions.Count} 个版本", "", (_, _) => { });
-                vb.Flyout = menu;
+                var vb = MacButton.Pill($"{_movie.Versions.Count} 个版本", "\uE8FD", () => { }, MacButton.Style.Glass, 40);
+                vb.Menu = menu;
                 _actions.Children.Add(vb);
             }
         }
@@ -198,7 +199,7 @@ public sealed partial class DetailView : View
             if (_episodes.Count > 0)
             {
                 var (idx, label) = NextUp();
-                _actions.Children.Add(U.Btn(label, "", (_, _) => PlayRequest.Episode(_series, TitleText, _episodes, idx, EpName(idx)), accent: true));
+                _actions.Children.Add(MacButton.Pill(label, "\uE768", () => PlayRequest.Episode(_series, TitleText, _episodes, idx, EpName(idx)), MacButton.Style.Primary, 40));
             }
             else _actions.Children.Add(new ProgressRing { IsActive = true, Width = 24, Height = 24 });
             // 同一部剧的其他季
@@ -213,7 +214,7 @@ public sealed partial class DetailView : View
                     it.Click += (_, _) => { if (oo != _series) Shell.Current?.Go(ForSeries(oo)); };
                     menu.Items.Add(it);
                 }
-                _actions.Children.Add(U.Btn("选季", "", (_, _) => { }).With(b => b.Flyout = menu));
+                _actions.Children.Add(MacButton.Pill("选季", "\uE8FD", () => { }, MacButton.Style.Glass, 40).With(b => b.Menu = menu));
             }
         }
         else if (_catalog is not null)
@@ -275,7 +276,7 @@ public sealed partial class DetailView : View
             case DownloadPhase.Failed: text = "重试下载"; glyph = ""; break;
             default: text = $"继续下载 {it.Progress:P0}"; glyph = ""; break;
         }
-        _dlBtn.Content = U.H(8, U.Icon(glyph, 15), U.T(text, 14, FontWeights.SemiBold));
+        _dlBtn.SetContent(U.H(7, U.Icon(glyph, 14), U.T(text, 14, FontWeights.SemiBold)));
     }
 
     // ── 请求添加 ──
@@ -300,12 +301,13 @@ public sealed partial class DetailView : View
         }
         if (d is not null && d.Known == 0 && d.Count == 0)
         {
-            _actions.Children.Add(U.T("暂时没有可以请求的资源", 14, null, U.Dim).With(t => t.VerticalAlignment = VerticalAlignment.Center));
+            _actions.Children.Add(U.T("暂时没有可以请求的资源", 14, null, Mac.Secondary).With(t => t.VerticalAlignment = VerticalAlignment.Center));
             return;
         }
-        var btn = U.Btn(req is { State: RequestState.Failed } ? "重新请求添加" : "请求添加", "", async (s, _) =>
+        MacButton? btn = null;
+        btn = MacButton.Pill(req is { State: RequestState.Failed } ? "重新请求添加" : "请求添加", "\uE710", async () =>
         {
-            if (s is Button b) b.IsEnabled = false;
+            if (btn is not null) { btn.IsHitTestVisible = false; btn.Opacity = 0.6; }
             try
             {
                 var r = await RequestCenter.Shared.CreateAsync(_catalog, season);
@@ -315,14 +317,14 @@ public sealed partial class DetailView : View
             catch (Exception e)
             {
                 U.Toast(XamlRoot, "没能请求添加", CuvenException.Friendly(e));
-                if (s is Button b2) b2.IsEnabled = true;
+                if (btn is not null) { btn.IsHitTestVisible = true; btn.Opacity = 1; }
             }
-        }, accent: true);
+        }, MacButton.Style.Primary, 40);
         _actions.Children.Add(btn);
         if (d?.Best is { } best)
         {
             var spec = string.Join(" · ", new[] { best.Res }.Concat(best.Labels ?? new List<string>()).Append(best.Size).Where(x => !string.IsNullOrEmpty(x)));
-            if (spec.Length > 0) _actions.Children.Add(U.T(spec, 13, null, U.Faint).With(t => t.VerticalAlignment = VerticalAlignment.Center));
+            if (spec.Length > 0) _actions.Children.Add(U.T(spec, 13, null, Mac.Tertiary).With(t => t.VerticalAlignment = VerticalAlignment.Center));
         }
     }
 
@@ -342,10 +344,10 @@ public sealed partial class DetailView : View
         }
         col.Children.Add(steps);
         var labels = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-        foreach (var l in RequestStatus.Labels) labels.Children.Add(U.T(l, 11, null, U.Faint).With(t => { t.Width = 76; t.TextAlignment = TextAlignment.Center; }));
+        foreach (var l in RequestStatus.Labels) labels.Children.Add(U.T(l, 11, null, Mac.Tertiary).With(t => { t.Width = 76; t.TextAlignment = TextAlignment.Center; }));
         col.Children.Add(labels);
-        if (r.Note.Length > 0) col.Children.Add(U.T(r.Note, 12, null, U.Dim, 2));
-        return new Border { Background = U.CardBrush, CornerRadius = new CornerRadius(12), Padding = new Thickness(16, 12, 16, 12), Child = col };
+        if (r.Note.Length > 0) col.Children.Add(U.T(r.Note, 12, null, Mac.Secondary, 2));
+        return new Glass(14, GlassKind.Regular) { Content = new Border { Padding = new Thickness(16, 12, 16, 12), Child = col } };
     }
 
     // ── 下面：分集、演职人员、剧照、文件 ──
@@ -363,7 +365,7 @@ public sealed partial class DetailView : View
                 var pic = new PersonPicture { Width = 88, Height = 88, DisplayName = c.Name };
                 if (U.Bitmap(c.ProfileUrl, 176) is { } b) pic.ProfilePicture = b;
                 row.Children.Add(U.V(4, pic, U.T(c.Name, 13, FontWeights.SemiBold).With(t => { t.MaxWidth = 100; t.TextAlignment = TextAlignment.Center; }),
-                    U.T(c.Character ?? "", 12, null, U.Faint).With(t => { t.MaxWidth = 100; t.TextAlignment = TextAlignment.Center; })).With(s => s.Width = 100));
+                    U.T(c.Character ?? "", 12, null, Mac.Tertiary).With(t => { t.MaxWidth = 100; t.TextAlignment = TextAlignment.Center; })).With(s => s.Width = 100));
             }
             _extra.Children.Add(U.Shelf(row));
         }
@@ -380,19 +382,19 @@ public sealed partial class DetailView : View
         {
             Section("文件");
             foreach (var v in _movie.Versions)
-                _extra.Children.Add(U.T($"{v.Name}　{Format.Size(v.Size)}", 13, null, U.Faint, 2).With(t => t.Margin = new Thickness(48, 0, 48, 0)));
+                _extra.Children.Add(Inset.Track(U.T($"{v.Name}　{Format.Size(v.Size)}", 13, null, Mac.Tertiary, 2), (t, l) => t.Margin = new Thickness(l, 0, 48, 0)));
         }
     }
 
     void Section(string title) =>
-        _extra.Children.Add(U.T(title, 20, FontWeights.SemiBold).With(t => t.Margin = new Thickness(48, 20, 48, 4)));
+        _extra.Children.Add(Inset.Track(U.T(title, 19, FontWeights.Bold), (t, l) => t.Margin = new Thickness(l, 22, 48, 6)));
 
     void RenderEpisodes()
     {
         if (_series is null) return;
         Section($"分集（{_episodes.Count}" + (_series.Total is { } tot && tot > _episodes.Count ? $" / {tot}" : "") + "）");
-        if (_episodes.Count == 0) { _extra.Children.Add(new ProgressRing { IsActive = true, Margin = new Thickness(48, 8, 0, 0), HorizontalAlignment = HorizontalAlignment.Left }); return; }
-        var list = new StackPanel { Spacing = 10, Margin = new Thickness(48, 0, 48, 0) };
+        if (_episodes.Count == 0) { _extra.Children.Add(Inset.Track(new ProgressRing { IsActive = true, HorizontalAlignment = HorizontalAlignment.Left }, (r, l) => r.Margin = new Thickness(l, 8, 0, 0))); return; }
+        var list = Inset.Track(new StackPanel { Spacing = 6 }, (st, l) => st.Margin = new Thickness(l - 10, 0, 48, 0));
         for (int i = 0; i < _episodes.Count; i++)
         {
             int idx = i;
@@ -411,8 +413,8 @@ public sealed partial class DetailView : View
             row.Children.Add(thumb.At(0, 0));
             var text = U.V(6,
                 U.T($"{e.Ep ?? i + 1}. {info?.Name ?? FileName.Title(e.Name)}", 16, FontWeights.SemiBold),
-                U.T(string.Join(" · ", new[] { Format.Runtime(info?.Runtime), info?.AirDate, Format.Size(e.Size) }.Where(x => !string.IsNullOrEmpty(x))), 12, null, U.Faint),
-                string.IsNullOrEmpty(info?.Overview) ? null : U.T(info!.Overview!, 13, null, U.Dim, 3));
+                U.T(string.Join(" · ", new[] { Format.Runtime(info?.Runtime), info?.AirDate, Format.Size(e.Size) }.Where(x => !string.IsNullOrEmpty(x))), 12, null, Mac.Tertiary),
+                string.IsNullOrEmpty(info?.Overview) ? null : U.T(info!.Overview!, 13, null, Mac.Secondary, 3));
             text.VerticalAlignment = VerticalAlignment.Center;
             row.Children.Add(text.At(0, 1));
             row.PointerEntered += (_, _) => row.Background = U.CardBrush;

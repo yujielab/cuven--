@@ -22,11 +22,12 @@ public sealed partial class LoginPage : Grid, IDisposable
 
     readonly Grid _pairPane = new();
     readonly StackPanel _pwPane;
+    readonly Glass _pwCard;
     readonly TextBlock _status = U.T("", 13, null, Sub, 2);
     readonly TextBox _user = new() { PlaceholderText = "用户名", Width = 320, Height = 40 };
     readonly PasswordBox _pass = new() { PlaceholderText = "密码", Width = 320, Height = 40 };
     readonly TextBlock _pwStatus = U.T("", 13, null, Sub, 3);
-    readonly Button _signIn;
+    readonly MacButton _signIn;
     NativeSurface? _surface;
     IntPtr _cloud;
     PairLogin? _pair;
@@ -35,7 +36,7 @@ public sealed partial class LoginPage : Grid, IDisposable
     public LoginPage()
     {
         RequestedTheme = ElementTheme.Light;
-        Background = new SolidColorBrush(Color.FromArgb(255, 250, 250, 252));
+        Background = new SolidColorBrush(Color.FromArgb(255, 245, 245, 247));   // macOS 浅色窗口的底色
 
         // ── 扫码 ──
         var title = U.T("用 iPhone 扫描登录", 30, FontWeights.SemiBold, Ink);
@@ -65,8 +66,8 @@ public sealed partial class LoginPage : Grid, IDisposable
         _pairPane.Children.Add(col);
 
         // ── 账户密码 ──
-        _signIn = U.Btn("登录", null, async (_, _) => await SignInAsync(), accent: true, height: 40);
-        _signIn.Width = 320;
+        _signIn = MacButton.Pill("登录", null, () => _ = SignInAsync(), MacButton.Style.Accent, 38);
+        _signIn.Width = 300;
         _pass.KeyDown += async (_, e) => { if (e.Key == Windows.System.VirtualKey.Enter) { e.Handled = true; await SignInAsync(); } };
         _user.KeyDown += (_, e) => { if (e.Key == Windows.System.VirtualKey.Enter) { e.Handled = true; _pass.Focus(FocusState.Keyboard); } };
         var back = new HyperlinkButton { Content = "用 iPhone 扫描登录", HorizontalAlignment = HorizontalAlignment.Center };
@@ -77,13 +78,17 @@ public sealed partial class LoginPage : Grid, IDisposable
         _pwStatus.MaxWidth = 320;
         _pwStatus.HorizontalAlignment = HorizontalAlignment.Center;
         _pwStatus.TextAlignment = TextAlignment.Center;
+        _user.Width = _pass.Width = 300;
         _pwPane = U.V(14, logo, pwTitle, _user, _pass, _signIn, _pwStatus, back);
-        _pwPane.HorizontalAlignment = HorizontalAlignment.Center;
-        _pwPane.VerticalAlignment = VerticalAlignment.Center;
-        _pwPane.Visibility = Visibility.Collapsed;
+        _pwPane.Margin = new Thickness(30, 28, 30, 24);
+        // 账户密码：一张浅色的磨砂玻璃卡（Mac 的登录窗口那样）
+        _pwCard = new Glass(20, GlassKind.Light) { Content = _pwPane, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed };
 
+        var backdrop = new Grid { Background = Background };
+        Children.Add(backdrop);
         Children.Add(_pairPane);
-        Children.Add(_pwPane);
+        Children.Add(_pwCard);
+        Mac.Shadow(_pwCard, backdrop, 40);
         if (!Native.Native.Ready) ShowPassword(true);
         else StartPairing();
         Unloaded += (_, _) => Dispose();
@@ -92,7 +97,8 @@ public sealed partial class LoginPage : Grid, IDisposable
     void ShowPassword(bool on)
     {
         _pairPane.Visibility = on ? Visibility.Collapsed : Visibility.Visible;
-        _pwPane.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        _pwCard.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        Mac.Enter(on ? _pwCard : _pairPane);
         if (_cloud != IntPtr.Zero) Native.Native.cv_cloud_run(_cloud, on ? 0 : 1);
         if (on) DispatcherQueue.TryEnqueue(() => _user.Focus(FocusState.Programmatic));
     }
@@ -140,7 +146,7 @@ public sealed partial class LoginPage : Grid, IDisposable
         var name = _user.Text.Trim();
         if (name.Length == 0) { _user.Focus(FocusState.Keyboard); return; }
         if (_pass.Password.Length == 0) { _pass.Focus(FocusState.Keyboard); return; }
-        _signIn.IsEnabled = false;
+        _signIn.Enabled = false;
         _pwStatus.Foreground = Sub;
         _pwStatus.Text = "正在验证…";
         try
@@ -160,7 +166,7 @@ public sealed partial class LoginPage : Grid, IDisposable
             _pwStatus.Foreground = Bad;
             _pwStatus.Text = CuvenException.Friendly(e);
         }
-        finally { _signIn.IsEnabled = true; }
+        finally { _signIn.Enabled = true; }
     }
 
     public void Dispose()

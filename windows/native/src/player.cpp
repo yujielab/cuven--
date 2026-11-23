@@ -1086,7 +1086,12 @@ CV_API void CV_CALL cv_player_set_volume(cv_player* p, float v) {
 CV_API void CV_CALL cv_player_get_state(cv_player* p, cv_state* o) {
     if (!p || !o) return;
     memset(o, 0, sizeof *o);
+    // 现算（渲染线程忙的时候 last_clock 会落后）：已经开始走、不在跳转就直接问时钟
     o->position = p->last_clock.load();
+    if (p->started && !p->seeking && !p->ended) {
+        double c = p->clock();
+        if (std::isfinite(c) && c >= 0) o->position = c;
+    }
     o->duration = p->duration;
     double b = NAN;
     {

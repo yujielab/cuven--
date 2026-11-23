@@ -183,7 +183,7 @@ static class U
     public static ScrollViewer Shelf(StackPanel row)
     {
         row.Orientation = Orientation.Horizontal;
-        row.Padding = new Thickness(36, 4, 36, 12);
+        Inset.Track(row, (r, l) => r.Padding = new Thickness(l, 4, Inset.Right, 14));
         return new ScrollViewer
         {
             Content = row,

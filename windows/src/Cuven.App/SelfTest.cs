@@ -14,6 +14,55 @@ namespace Cuven.App;
 /// </summary>
 static class SelfTest
 {
+    // ── 截屏（真正合成出来的画面：亚克力、阴影、SwapChainPanel 里的粒子云都在；RenderTargetBitmap 截不到这些） ──
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleBitmap(IntPtr dc, int w, int h);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr d, int x, int y, int w, int h, IntPtr s, int sx, int sy, uint rop);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] static extern int GetDIBits(IntPtr dc, IntPtr bmp, uint start, uint lines, byte[] bits, ref BITMAPINFOHEADER bi, uint usage);
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct BITMAPINFOHEADER { public uint Size; public int Width, Height; public ushort Planes, BitCount; public uint Compression, SizeImage; public int XPels, YPels; public uint ClrUsed, ClrImportant; }
+
+    static (byte[] px, int w, int h)? CaptureWindow(IntPtr hwnd)
+    {
+        if (DwmGetWindowAttribute(hwnd, 9, out var r, 16) != 0) return null;   // DWMWA_EXTENDED_FRAME_BOUNDS
+        int w = r.R - r.L, h = r.B - r.T;
+        if (w <= 0 || h <= 0) return null;
+        var screen = GetDC(IntPtr.Zero);
+        var mem = CreateCompatibleDC(screen);
+        var bmp = CreateCompatibleBitmap(screen, w, h);
+        var old = SelectObject(mem, bmp);
+        BitBlt(mem, 0, 0, w, h, screen, r.L, r.T, 0x00CC0020 | 0x40000000);   // SRCCOPY | CAPTUREBLT
+        SelectObject(mem, old);
+        var bi = new BITMAPINFOHEADER { Size = 40, Width = w, Height = -h, Planes = 1, BitCount = 32 };
+        var px = new byte[w * h * 4];
+        GetDIBits(mem, bmp, 0, (uint)h, px, ref bi, 0);
+        DeleteObject(bmp);
+        DeleteDC(mem);
+        ReleaseDC(IntPtr.Zero, screen);
+        for (int i = 3; i < px.Length; i += 4) px[i] = 255;
+        return (px, w, h);
+    }
+
+    static async Task SavePng(string path, byte[] bgra, int w, int h)
+    {
+        using var ms = new InMemoryRandomAccessStream();
+        var enc = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, ms);
+        enc.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, (uint)w, (uint)h, 96, 96, bgra);
+        await enc.FlushAsync();
+        var bytes = new byte[ms.Size];
+        ms.Seek(0);
+        await ms.ReadAsync(bytes.AsBuffer(), (uint)ms.Size, InputStreamOptions.None);
+        await File.WriteAllBytesAsync(path, bytes);
+    }
+
     public static async Task RunAsync(MainWindow w, string dir)
     {
         Directory.CreateDirectory(dir);
@@ -24,19 +73,16 @@ static class SelfTest
             await Task.Delay(TimeSpan.FromSeconds(wait));
             try
             {
+                SetForegroundWindow(w.Hwnd);
+                await Task.Delay(300);
+                var shot = CaptureWindow(w.Hwnd);
+                if (shot is { } c) await SavePng(Path.Combine(dir, name + ".png"), c.px, c.w, c.h);
                 if (w.Content is not UIElement root) throw new InvalidOperationException("没有内容");
                 var rtb = new RenderTargetBitmap();
                 await rtb.RenderAsync(root);
                 var px = await rtb.GetPixelsAsync();
-                using var ms = new InMemoryRandomAccessStream();
-                var enc = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, ms);
-                enc.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, (uint)rtb.PixelWidth, (uint)rtb.PixelHeight, 96, 96, px.ToArray());
-                await enc.FlushAsync();
-                var bytes = new byte[ms.Size];
-                ms.Seek(0);
-                await ms.ReadAsync(bytes.AsBuffer(), (uint)ms.Size, InputStreamOptions.None);
-                await File.WriteAllBytesAsync(Path.Combine(dir, name + ".png"), bytes);
-                report.Add($"✓ {name}（{rtb.PixelWidth}×{rtb.PixelHeight}）");
+                await SavePng(Path.Combine(dir, name + "-xaml.png"), px.ToArray(), rtb.PixelWidth, rtb.PixelHeight);
+                report.Add($"✓ {name}（截屏 {(shot is { } cc ? $"{cc.w}×{cc.h}" : "没截到")}，XAML {rtb.PixelWidth}×{rtb.PixelHeight}）");
             }
             catch (Exception e)
             {
@@ -68,6 +114,12 @@ static class SelfTest
             }
             Shell.Current?.Root("requests");
             await Shot("6-requests", 5);
+            if (LibraryStore.Shared.Movies.FirstOrDefault(m => m.Video.Name.Contains("1080p")) is { } pm)
+            {
+                PlayRequest.Movie(pm);
+                await Shot("8-player", 14);
+                w.ClosePlayer();
+            }
             Shell.Current?.Root("account");
             await Shot("7-account", 2);
         }

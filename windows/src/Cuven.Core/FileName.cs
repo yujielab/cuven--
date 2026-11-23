@@ -95,13 +95,14 @@ public static partial class AppleImage
     [GeneratedRegex(@"/([0-9]+)x([0-9]+)([A-Za-z]*)\.([A-Za-z0-9]+)$")]
     private static partial Regex TailRx();
 
-    public static string? Sized(string? raw, int width)
+    /// <summary>ext：换格式（图床现做；背景要 jpg —— WebP 要系统装了解码器才显示得出来）</summary>
+    public static string? Sized(string? raw, int width, string? ext = null)
     {
         if (string.IsNullOrEmpty(raw) || width <= 0 || !raw.Contains("mzstatic.com")) return raw;
         var m = TailRx().Match(raw);
         if (!m.Success || !int.TryParse(m.Groups[1].Value, out var w) || !int.TryParse(m.Groups[2].Value, out var h) || w <= 0 || h <= 0) return raw;
         var nh = (int)Math.Round((double)width * h / w);
-        return raw[..m.Index] + $"/{width}x{nh}{m.Groups[3].Value}.{m.Groups[4].Value}";
+        return raw[..m.Index] + $"/{width}x{nh}{m.Groups[3].Value}.{ext ?? m.Groups[4].Value}";
     }
 }
 

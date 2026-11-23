@@ -1,28 +1,33 @@
 using Cuven.App.Native;
 using Cuven.Core;
 using Microsoft.UI;
+using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Media.Animation;
 using Windows.Graphics;
 
 namespace Cuven.App.UI;
 
-/// <summary>主窗口：Mica 背景、自己画的标题栏；内容是登录页或主界面，播放器盖在最上层</summary>
+/// <summary>
+/// 主窗口（Mac 风格）：不要 Windows 的标题栏和右上角三个按钮，左上角是红黄绿（关闭 / 最小化 / 全屏）；
+/// 顶上那一条空白处能拖动窗口、双击最大化（InputNonClientPointerSource 的标题栏区域，按钮所在的地方让出来）。
+/// 内容是登录页或主界面，播放器盖在最上层
+/// </summary>
 public sealed partial class MainWindow : Window
 {
     public static new MainWindow Current { get; private set; } = null!;
     public IntPtr Hwnd { get; }
+    const double CaptionHeight = 52;
     readonly Grid _root = new();
-    readonly Grid _titleBar = new() { Height = 44, VerticalAlignment = VerticalAlignment.Top };
-    readonly TextBlock _titleText;
     readonly ContentPresenter _content = new();
     readonly Grid _overlay = new() { Visibility = Visibility.Collapsed };
+    readonly TrafficLights _lights;
+    readonly InputNonClientPointerSource? _nc;
     public Shell? Shell { get; private set; }
     public PlayerView? Player { get; private set; }
     public XamlRoot? Root => _root.XamlRoot;
+    Microsoft.UI.Dispatching.DispatcherQueueTimer? _dragTimer;
 
     public MainWindow()
     {
@@ -30,31 +35,32 @@ public sealed partial class MainWindow : Window
         Title = "Cuven";
         Hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         ExtendsContentIntoTitleBar = true;
-        SystemBackdrop = new MicaBackdrop { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.BaseAlt };
+        AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Collapsed;   // 系统的最小化 / 最大化 / 关闭不要了
         try { AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "cuven.ico")); } catch { }
-        AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
         var scale = Win32.GetDpiForWindow(Hwnd) / 96.0;
         if (scale <= 0) scale = 1;
         AppWindow.Resize(new SizeInt32((int)(1360 * scale), (int)(860 * scale)));
-        if (AppWindow.Presenter is OverlappedPresenter op) { op.PreferredMinimumWidth = (int)(960 * scale); op.PreferredMinimumHeight = (int)(620 * scale); }
+        if (AppWindow.Presenter is OverlappedPresenter op) { op.PreferredMinimumWidth = (int)(900 * scale); op.PreferredMinimumHeight = (int)(600 * scale); }
+        try { _nc = InputNonClientPointerSource.GetForWindowId(AppWindow.Id); } catch { }
 
-        _titleText = U.T("Cuven", 12, null, U.Dim);
-        _titleBar.Children.Add(U.H(10,
-            new Image { Width = 18, Height = 18, Source = U.Bitmap(Path.Combine(AppContext.BaseDirectory, "Assets", "cuven-256.png"), 36) },
-            _titleText).With(s => { s.Margin = new Thickness(16, 0, 0, 0); s.VerticalAlignment = VerticalAlignment.Center; }));
-        _content.ContentTransitions = new TransitionCollection { new ContentThemeTransition() };
-        _root.Children.Add(_content);
-        _root.Children.Add(_titleBar);
-        _root.Children.Add(_overlay);
-        Content = _root;
-        SetTitleBar(_titleBar);
-
-        Activated += (_, e) =>
+        _lights = new TrafficLights(() => Close(), Minimize, () => SetFullScreen(!IsFullScreen))
         {
-            var deactivated = e.WindowActivationState == WindowActivationState.Deactivated;
-            _titleText.Foreground = deactivated ? U.Faint : U.Dim;
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(22, 22, 0, 0),
         };
-        AppWindow.Changed += (_, e) => { if (e.DidPositionChange || e.DidSizeChange) Player?.DisplayMaybeChanged(); };
+        _root.Children.Add(_content);
+        _root.Children.Add(_overlay);
+        _root.Children.Add(_lights);
+        Content = _root;
+        _root.SizeChanged += (_, _) => UpdateDragRegions();
+
+        Activated += (_, e) => _lights.SetActive(e.WindowActivationState != WindowActivationState.Deactivated);
+        AppWindow.Changed += (_, e) =>
+        {
+            if (e.DidPositionChange || e.DidSizeChange) Player?.DisplayMaybeChanged();
+            if (e.DidPresenterChange) UpdateDragRegions();
+        };
         // 最小化、又没在播：整个进程进 EcoQoS（Win11 效率模式），回来恢复
         VisibilityChanged += (_, e) =>
         {
@@ -71,33 +77,67 @@ public sealed partial class MainWindow : Window
         else ShowLogin();
     }
 
-    void SetTheme(ElementTheme t)
+    void Minimize()
     {
-        _root.RequestedTheme = t;
-        var tb = AppWindow.TitleBar;
-        var fg = t == ElementTheme.Light ? Colors.Black : Colors.White;
-        tb.ButtonForegroundColor = fg;
-        tb.ButtonHoverForegroundColor = fg;
-        tb.ButtonBackgroundColor = Colors.Transparent;
-        tb.ButtonInactiveBackgroundColor = Colors.Transparent;
-        tb.ButtonHoverBackgroundColor = t == ElementTheme.Light ? Windows.UI.Color.FromArgb(24, 0, 0, 0) : Windows.UI.Color.FromArgb(30, 255, 255, 255);
-        _titleText.Foreground = t == ElementTheme.Light ? new SolidColorBrush(Windows.UI.Color.FromArgb(160, 0, 0, 0)) : U.Dim;
+        if (AppWindow.Presenter is OverlappedPresenter op) op.Minimize();
+        else { SetFullScreen(false); if (AppWindow.Presenter is OverlappedPresenter o2) o2.Minimize(); }
+    }
+
+    /// <summary>标题栏那一条：空白处拖动窗口，按钮让出来（按物理像素算）</summary>
+    public void UpdateDragRegions()
+    {
+        if (_nc is null) return;
+        _dragTimer ??= DispatcherQueue.CreateTimer().With(t =>
+        {
+            t.Interval = TimeSpan.FromMilliseconds(60);
+            t.IsRepeating = false;
+            t.Tick += (_, _) => ApplyDragRegions();
+        });
+        _dragTimer.Stop();
+        _dragTimer.Start();
+    }
+
+    void ApplyDragRegions()
+    {
+        if (_nc is null || _root.XamlRoot is null) return;
+        var s = _root.XamlRoot.RasterizationScale;
+        var w = _root.ActualWidth;
+        var controls = new List<FrameworkElement> { _lights };
+        if (Player is not null) controls.AddRange(Player.TitleControls());
+        else if (Shell is not null) controls.AddRange(Shell.TitleControls());
+        var pass = new List<RectInt32>();
+        foreach (var c in controls)
+        {
+            if (c.Visibility != Visibility.Visible || c.ActualWidth <= 0 || c.XamlRoot is null) continue;
+            var r = c.TransformToVisual(_root).TransformBounds(new Windows.Foundation.Rect(0, 0, c.ActualWidth, c.ActualHeight));
+            pass.Add(new RectInt32((int)(r.X * s), (int)(r.Y * s), (int)Math.Ceiling(r.Width * s), (int)Math.Ceiling(r.Height * s)));
+        }
+        try
+        {
+            _nc.SetRegionRects(NonClientRegionKind.Caption, new[] { new RectInt32(0, 0, (int)(w * s), (int)(CaptionHeight * s)) });
+            _nc.SetRegionRects(NonClientRegionKind.Passthrough, pass.ToArray());
+        }
+        catch (Exception e) { App.Log("拖动区域：" + e.Message); }
     }
 
     public void ShowLogin()
     {
         Shell?.Dispose();
         Shell = null;
-        SetTheme(ElementTheme.Light);
+        _lights.SetLight(true);
         _content.Content = new LoginPage();
+        Mac.Enter((UIElement)_content.Content);
+        UpdateDragRegions();
     }
 
     public void ShowShell()
     {
         if (_content.Content is LoginPage lp) lp.Dispose();
-        SetTheme(ElementTheme.Dark);
+        _lights.SetLight(false);
         Shell = new Shell();
         _content.Content = Shell;
+        Mac.Enter(Shell);
+        UpdateDragRegions();
     }
 
     public void SignedIn(LoginResult r)
@@ -122,9 +162,9 @@ public sealed partial class MainWindow : Window
         _overlay.Children.Clear();
         _overlay.Children.Add(Player);
         _overlay.Visibility = Visibility.Visible;
-        _titleBar.Visibility = Visibility.Collapsed;
-        SetTitleBar(null);
+        Mac.Enter(Player);
         Player.Focus(FocusState.Programmatic);
+        UpdateDragRegions();
     }
 
     public void ClosePlayer()
@@ -134,10 +174,17 @@ public sealed partial class MainWindow : Window
         Player = null;
         _overlay.Children.Clear();
         _overlay.Visibility = Visibility.Collapsed;
-        _titleBar.Visibility = Visibility.Visible;
-        SetTitleBar(_titleBar);
+        _lights.Opacity = 1;
         SetFullScreen(false);
         Shell?.Refresh();
+        UpdateDragRegions();
+    }
+
+    /// <summary>播放器控制条藏起来时红黄绿也一起淡掉</summary>
+    public void ShowChrome(bool on)
+    {
+        _lights.OpacityTransition ??= new ScalarTransition { Duration = TimeSpan.FromMilliseconds(200) };
+        _lights.Opacity = on ? 1 : 0;
     }
 
     public bool IsFullScreen => AppWindow.Presenter.Kind == AppWindowPresenterKind.FullScreen;
@@ -146,6 +193,7 @@ public sealed partial class MainWindow : Window
     {
         if (on == IsFullScreen) return;
         AppWindow.SetPresenter(on ? AppWindowPresenterKind.FullScreen : AppWindowPresenterKind.Overlapped);
+        if (!on) AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Collapsed;
     }
 
     public IntPtr Monitor => Win32.MonitorFromWindow(Hwnd, Win32.MONITOR_DEFAULTTONEAREST);

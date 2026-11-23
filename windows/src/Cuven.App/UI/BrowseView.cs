@@ -22,8 +22,8 @@ public sealed partial class BrowseView : View
         _kind = kind;
         var header = U.Cols("auto", "*", "auto", "auto");
         header.ColumnSpacing = 12;
-        header.Margin = new Thickness(36, 20, 36, 12);
-        header.Children.Add(U.V(2, U.Title(kind == BrowseKind.Movies ? "电影" : "剧集"), _count).At(0, 0));
+        Inset.Track(header, (h, l) => h.Margin = new Thickness(l, Inset.Top, Inset.Right, 14));
+        header.Children.Add(U.V(2, Mac.LargeTitle(kind == BrowseKind.Movies ? "电影" : "剧集"), _count).At(0, 0));
         foreach (var s in new[] { "最新添加", "评分最高", "年份", "片名" }) _sort.Items.Add(s);
         _sort.SelectedIndex = 0;
         _sort.SelectionChanged += (_, _) => Fill();
@@ -46,7 +46,7 @@ public sealed partial class BrowseView : View
             ItemsJustification = UniformGridLayoutItemsJustification.Start,
         };
         _grid.ItemTemplate = new PosterFactory(160);
-        var scroll = new ScrollViewer { Content = _grid.With(g => g.Margin = new Thickness(36, 0, 36, 40)), HorizontalScrollMode = ScrollMode.Disabled };
+        var scroll = new ScrollViewer { Content = Inset.Track(_grid, (g, l) => g.Margin = new Thickness(l, 0, Inset.Right, 40)), HorizontalScrollMode = ScrollMode.Disabled };
         var root = U.Rows("auto", "*");
         root.Children.Add(header.At(0));
         root.Children.Add(scroll.At(1));
@@ -107,19 +107,19 @@ public sealed partial class SearchView : View
     public SearchView(string q)
     {
         _q = q;
-        _col.Children.Add(U.Title($"“{q}”").With(t => t.Margin = new Thickness(36, 0, 36, 8)));
+        _col.Children.Add(Inset.Track(Mac.LargeTitle($"“{q}”"), (t, l) => t.Margin = new Thickness(l, Inset.Top - 20, Inset.Right, 8)));
         Children.Add(new ScrollViewer { Content = _col, HorizontalScrollMode = ScrollMode.Disabled });
         var (mv, se) = LibraryStore.Shared.Search(q);
         if (mv.Count > 0) Section("电影", mv.Cast<object>());
         if (se.Count > 0) Section("剧集", se.Cast<object>());
         if (mv.Count == 0 && se.Count == 0)
-            _col.Children.Add(U.T("片库里没有找到", 15, null, U.Dim).With(t => t.Margin = new Thickness(36, 0, 36, 0)));
+            _col.Children.Add(Inset.Track(U.T("片库里没有找到", 15, null, Mac.Secondary), (t, l) => t.Margin = new Thickness(l, 0, Inset.Right, 0)));
         _ = CatalogAsync();
     }
 
     void Section(string title, IEnumerable<object> items)
     {
-        _col.Children.Add(U.T(title, 20, FontWeights.SemiBold).With(t => t.Margin = new Thickness(36, 14, 36, 4)));
+        _col.Children.Add(Inset.Track(U.T(title, 19, FontWeights.Bold), (t, l) => t.Margin = new Thickness(l, 16, Inset.Right, 6)));
         var row = new StackPanel { Spacing = 18 };
         foreach (var it in items) row.Children.Add(PosterCard.For(it, 150));
         _col.Children.Add(U.Shelf(row));

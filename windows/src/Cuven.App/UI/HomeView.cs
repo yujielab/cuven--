@@ -12,7 +12,7 @@ public sealed partial class HomeView : View
 {
     readonly ScrollViewer _scroll = new() { HorizontalScrollMode = ScrollMode.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
     readonly StackPanel _col = new() { Spacing = 8, Padding = new Thickness(0, 0, 0, 40) };
-    readonly Grid _hero = new() { Height = 540 };
+    readonly Grid _hero = new() { Height = 620 };
     readonly ContentPresenter _heroContent = new();
     readonly StackPanel _shelves = new() { Spacing = 6 };
     readonly TextBlock _empty = U.T("", 15, null, U.Dim, 3);
@@ -27,7 +27,7 @@ public sealed partial class HomeView : View
         _heroContent.ContentTransitions = new TransitionCollection { new ContentThemeTransition() };
         _hero.Children.Add(_heroContent);
         _col.Children.Add(_hero);
-        _empty.Margin = new Thickness(36, 20, 36, 0);
+        Inset.Track(_empty, (t, l) => t.Margin = new Thickness(l, Inset.Top, Inset.Right, 0));
         _col.Children.Add(_empty);
         _col.Children.Add(_shelves);
         _scroll.Content = _col;
@@ -100,12 +100,11 @@ public sealed partial class HomeView : View
     void AddShelf(string title, IEnumerable<object> items, Action? more = null)
     {
         var head = U.Cols("*", "auto");
-        head.Margin = new Thickness(36, 18, 36, 4);
-        head.Children.Add(U.T(title, 20, FontWeights.SemiBold).At(0, 0));
+        Inset.Track(head, (h, l) => h.Margin = new Thickness(l, 22, Inset.Right, 6));
+        head.Children.Add(U.T(title, 19, FontWeights.Bold).At(0, 0));
         if (more is not null)
         {
-            var b = new HyperlinkButton { Content = "全部", Padding = new Thickness(6, 2, 6, 2) };
-            b.Click += (_, _) => more();
+            var b = MacButton.Pill("全部", "\uE76C", more, MacButton.Style.Plain, 28);
             head.Children.Add(b.At(0, 1));
         }
         var row = new StackPanel { Spacing = 18 };
@@ -126,35 +125,39 @@ public sealed partial class HomeView : View
     {
         if (_heroes.Count == 0) { _heroContent.Content = null; return; }
         var (m, h) = _heroes[_heroIndex % _heroes.Count];
+        // 大图铺满（连侧边栏下面也是：玻璃把它模糊了，就是 Mac 上那种浮着的边栏）
         var g = new Grid();
-        var bg = h?.Background is { } hb ? AppleImage.Sized(hb, 1920) : m.BackdropUrl("original");
+        var bg = h?.Background is { } hb ? AppleImage.Sized(hb, 1920, "jpg") : m.BackdropUrl("original");
         g.Children.Add(U.Img(bg, 1920));
-        g.Children.Add(new Border { Background = U.Fade(0, 0.95) });
-        g.Children.Add(new Border { Background = U.Fade(0.85, 0, null, true), Width = 760, HorizontalAlignment = HorizontalAlignment.Left });
-        var info = new StackPanel { Spacing = 12, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(48, 0, 48, 44), MaxWidth = 620, HorizontalAlignment = HorizontalAlignment.Left };
+        g.Children.Add(new Border { Background = U.Fade(0, 1.0, Mac.Canvas) });
+        g.Children.Add(new Border { Background = U.Fade(0.55, 0, Mac.Canvas, true), Width = 900, HorizontalAlignment = HorizontalAlignment.Left });
+        var info = new StackPanel { Spacing = 14, VerticalAlignment = VerticalAlignment.Bottom, MaxWidth = 640, HorizontalAlignment = HorizontalAlignment.Left };
+        Inset.Track(info, (i, l) => i.Margin = new Thickness(l + 8, 0, 48, 56));
         var logo = h?.Logo ?? m.Meta.Logo;
         if (!string.IsNullOrEmpty(logo))
-            info.Children.Add(new Image { Source = U.Bitmap(logo.Contains("mzstatic") ? AppleImage.Sized(logo, 800) : TmdbImage.Url(logo, "w500"), 500), MaxHeight = 120, MaxWidth = 460, HorizontalAlignment = HorizontalAlignment.Left, Stretch = Stretch.Uniform });
+            info.Children.Add(new Image { Source = U.Bitmap(logo.Contains("mzstatic") ? AppleImage.Sized(logo, 800, "png") : TmdbImage.Url(logo, "w500"), 500), MaxHeight = 130, MaxWidth = 480, HorizontalAlignment = HorizontalAlignment.Left, Stretch = Stretch.Uniform });
         else
             info.Children.Add(U.T(m.Title, 40, FontWeights.Bold, null, 2));
         var meta = string.Join(" · ", new[] { m.Year, Format.Runtime(m.Meta.Runtime), m.Meta.Genres is { Count: > 0 } gs ? string.Join(" / ", gs.Take(2)) : null }.Where(x => !string.IsNullOrEmpty(x)));
-        info.Children.Add(U.T(meta, 14, null, U.Dim));
-        if (!string.IsNullOrEmpty(m.Meta.Overview)) info.Children.Add(U.T(m.Meta.Overview!, 14, null, U.Dim, 3));
+        info.Children.Add(U.T(meta, 14, FontWeights.Medium, Mac.Secondary));
+        if (!string.IsNullOrEmpty(m.Meta.Overview)) info.Children.Add(U.T(m.Meta.Overview!, 14, null, Mac.Secondary, 3));
         info.Children.Add(U.H(12,
-            U.Btn("播放", "", (_, _) => PlayRequest.Movie(m), accent: true),
-            U.Btn("详情", "", (_, _) => Nav.Open(m))));
+            MacButton.Pill("播放", "\uE768", () => PlayRequest.Movie(m), MacButton.Style.Primary, 40),
+            MacButton.Pill("详情", "\uE946", () => Nav.Open(m), MacButton.Style.Glass, 40)));
         g.Children.Add(info);
         if (_heroes.Count > 1)
         {
-            var dots = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 48, 52) };
+            // 翻页点：一枚玻璃胶囊里，当前那一个拉长
+            var dots = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Margin = new Thickness(12, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center };
             for (int i = 0; i < _heroes.Count; i++)
             {
                 int k = i;
-                var d = new Border { Width = i == _heroIndex ? 22 : 8, Height = 8, CornerRadius = new CornerRadius(4), Background = i == _heroIndex ? U.White : U.Faint };
+                var d = new Border { Width = i == _heroIndex ? 20 : 7, Height = 7, CornerRadius = new CornerRadius(3.5), Background = i == _heroIndex ? U.White : U.Faint };
                 d.Tapped += (_, _) => { _heroIndex = k; ShowHero(); _timer?.Stop(); _timer?.Start(); };
                 dots.Children.Add(d);
             }
-            g.Children.Add(dots);
+            var cap = new Glass(13, GlassKind.Clear) { Height = 26, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 48, 62), Content = dots };
+            g.Children.Add(cap);
         }
         _heroContent.Content = g;
     }

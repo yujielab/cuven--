@@ -21,6 +21,7 @@ public sealed partial class App : Application, IXamlMetadataProvider
     public App(string[] args)
     {
         Args = args;
+        RequestedTheme = ApplicationTheme.Dark;   // 深色（Mac 的 TV / 音乐那样）；登录页自己用浅色
         UnhandledException += (_, e) =>
         {
             Log("未处理的异常：" + e.Exception);

@@ -72,14 +72,15 @@ public sealed partial class PlayerView : Grid
     readonly Grid _chrome = new();
     readonly Slider _seek = new() { Minimum = 0, Maximum = 1, StepFrequency = 0.1, IsThumbToolTipEnabled = true, VerticalAlignment = VerticalAlignment.Center };
     readonly TextBlock _pos = U.T("0:00", 13, null, U.Dim), _dur = U.T("0:00", 13, null, U.Dim);
-    readonly Button _playBtn;
+    readonly MacButton _playBtn, _closeBtn, _infoBtn;
+    readonly Glass _bar;
     readonly FontIcon _playIcon = U.Icon("", 22);
     readonly ProgressRing _ring = new() { IsActive = true, Width = 56, Height = 56, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
     readonly TextBlock _error = U.T("", 16, null, U.White, 4);
     readonly TextBlock _info = U.T("", 12, null, U.Dim, 12);
-    readonly Border _infoBox;
-    readonly Button _audioBtn, _subBtn, _nextBtn;
-    readonly Slider _volume = new() { Minimum = 0, Maximum = 100, Width = 110, VerticalAlignment = VerticalAlignment.Center };
+    readonly Glass _infoBox;
+    readonly MacButton _audioBtn, _subBtn, _nextBtn;
+    readonly Slider _volume = new() { Minimum = 0, Maximum = 100, Width = 96, VerticalAlignment = VerticalAlignment.Center };
     readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _tick, _idle;
     bool _updating, _dragging, _closed, _opened, _chromeShown = true, _endedHandled;
     double _lastRecord;
@@ -98,16 +99,23 @@ public sealed partial class PlayerView : Grid
         Children.Add(_surface.Panel);
         _surface.Ready += Start;
 
-        // ── 上：返回 + 片名 ──
-        var top = U.Cols("auto", "*");
+        // ── 左上：玻璃圆钮（返回）+ 片名（紧挨着红黄绿）；右上：播放信息 ──
+        _closeBtn = MacButton.Round("", Exit, "返回（Esc）", 34, 14);
+        var titleCol = U.V(0, Mac.Text(req.Title, 15, Microsoft.UI.Text.FontWeights.SemiBold), req.Subtitle is { Length: > 0 } sub ? Mac.Text(sub, 12, null, Mac.Secondary) : null);
+        titleCol.VerticalAlignment = VerticalAlignment.Center;
+        var top = U.Cols("auto", "*", "auto");
+        top.ColumnSpacing = 12;
         top.VerticalAlignment = VerticalAlignment.Top;
-        top.Padding = new Thickness(20, 16, 24, 36);
-        top.Background = U.Fade(0.75, 0, Colors.Black);
-        top.Children.Add(U.IconBtn("", (_, _) => Exit(), "返回（Esc）", 44, 18).At(0, 0));
-        top.Children.Add(U.V(0, U.T(req.Title, 20, FontWeights.SemiBold), req.Subtitle is { Length: > 0 } s ? U.T(s, 13, null, U.Dim) : null)
-            .With(v => { v.Margin = new Thickness(12, 0, 0, 0); v.VerticalAlignment = VerticalAlignment.Center; }).At(0, 1));
+        top.Padding = new Thickness(92, 14, 20, 48);
+        top.Background = U.Fade(0.7, 0, Colors.Black);
+        top.Children.Add(_closeBtn.At(0, 0));
+        top.Children.Add(titleCol.At(0, 1));
+        _infoBtn = MacButton.Round("", ToggleInfo, "播放信息（I）", 34, 14);
+        top.Children.Add(_infoBtn.At(0, 2));
 
-        // ── 下：进度 + 按钮 ──
+        // ── 下：浮着的一条液态玻璃（QuickTime / Apple TV 那样）──
+        StyleSlider(_seek);
+        StyleSlider(_volume);
         _seek.ThumbToolTipValueConverter = new TimeConverter();
         _seek.ValueChanged += (_, e) =>
         {
@@ -118,44 +126,46 @@ public sealed partial class PlayerView : Grid
         _seek.AddHandler(PointerPressedEvent, new PointerEventHandler((_, _) => _dragging = true), true);
         _seek.AddHandler(PointerReleasedEvent, new PointerEventHandler((_, _) => { if (_dragging) { _dragging = false; Seek(_seek.Value); } }), true);
         _seek.AddHandler(PointerCaptureLostEvent, new PointerEventHandler((_, _) => { if (_dragging) { _dragging = false; Seek(_seek.Value); } }), true);
-        var bar = U.Cols("auto", "*", "auto");
-        bar.ColumnSpacing = 14;
-        bar.Children.Add(_pos.With(t => t.VerticalAlignment = VerticalAlignment.Center).At(0, 0));
-        bar.Children.Add(_seek.At(0, 1));
-        bar.Children.Add(_dur.With(t => t.VerticalAlignment = VerticalAlignment.Center).At(0, 2));
+        var scrub = U.Cols("56", "*", "56");
+        scrub.ColumnSpacing = 10;
+        _pos.HorizontalAlignment = HorizontalAlignment.Right;
+        scrub.Children.Add(_pos.With(t => { t.VerticalAlignment = VerticalAlignment.Center; t.FontSize = 12; }).At(0, 0));
+        scrub.Children.Add(_seek.At(0, 1));
+        scrub.Children.Add(_dur.With(t => { t.VerticalAlignment = VerticalAlignment.Center; t.FontSize = 12; }).At(0, 2));
 
-        _playBtn = new Button { Content = _playIcon, Width = 52, Height = 52, CornerRadius = new CornerRadius(26), Padding = new Thickness(0), Background = U.CardHover, BorderThickness = new Thickness(0) };
-        _playBtn.Click += (_, _) => TogglePlay();
-        ToolTipService.SetToolTip(_playBtn, "播放 / 暂停（空格）");
-        _audioBtn = U.IconBtn("", (_, _) => { }, "音轨");
-        _subBtn = U.IconBtn("", (_, _) => { }, "字幕（C）");
-        _nextBtn = U.IconBtn("", (_, _) => NextEpisode(), "下一集（N）");
+        _playBtn = new MacButton(MacButton.Style.Plain, _playIcon, 44, "播放 / 暂停（空格）") { Width = 48 };
+        _playBtn.Click += TogglePlay;
+        _audioBtn = MacButton.Round("", () => { }, "音轨", 32, 15, MacButton.Style.Plain);
+        _subBtn = MacButton.Round("", () => { }, "字幕（C）", 32, 15, MacButton.Style.Plain);
+        _nextBtn = MacButton.Round("", NextEpisode, "下一集（N）", 34, 15, MacButton.Style.Plain);
         _nextBtn.Visibility = req.Episodes is { } eps && req.EpisodeIndex + 1 < eps.Count ? Visibility.Visible : Visibility.Collapsed;
         _volume.Value = Settings.Shared.Volume * 100;
         _volume.ValueChanged += (_, e) => SetVolume((float)(e.NewValue / 100));
-        var left = U.H(8, U.IconBtn("", (_, _) => Skip(-10), "后退 10 秒（←）"), _playBtn, U.IconBtn("", (_, _) => Skip(10), "前进 10 秒（→）"), _nextBtn);
+        var center = U.H(6, MacButton.Round("", () => Skip(-10), "后退 10 秒（←）", 34, 16, MacButton.Style.Plain), _playBtn,
+            MacButton.Round("", () => Skip(10), "前进 10 秒（→）", 34, 16, MacButton.Style.Plain), _nextBtn);
+        center.HorizontalAlignment = HorizontalAlignment.Center;
+        center.VerticalAlignment = VerticalAlignment.Center;
+        var left = U.H(6, U.Icon("", 14).With(i => { i.Foreground = Mac.Secondary; i.VerticalAlignment = VerticalAlignment.Center; }), _volume);
         left.VerticalAlignment = VerticalAlignment.Center;
-        var right = U.H(4, U.Icon("", 16).With(i => i.Margin = new Thickness(0, 0, 4, 0)), _volume, _audioBtn, _subBtn,
-            U.IconBtn("", (_, _) => ToggleInfo(), "播放信息（I）"), U.IconBtn("", (_, _) => ToggleFullScreen(), "全屏（F）"));
+        var right = U.H(2, _subBtn, _audioBtn, MacButton.Round("", ToggleFullScreen, "全屏（F）", 32, 14, MacButton.Style.Plain));
+        right.HorizontalAlignment = HorizontalAlignment.Right;
         right.VerticalAlignment = VerticalAlignment.Center;
-        var buttons = U.Cols("*", "auto");
-        buttons.Children.Add(left.At(0, 0));
-        buttons.Children.Add(right.At(0, 1));
-        var bottom = U.V(8, bar, buttons);
-        bottom.VerticalAlignment = VerticalAlignment.Bottom;
-        bottom.Padding = new Thickness(32, 48, 32, 22);
-        bottom.Background = U.Fade(0, 0.82, Colors.Black);
+        var row = new Grid { Height = 48 };
+        row.Children.Add(left);
+        row.Children.Add(center);
+        row.Children.Add(right);
+        var barCol = U.V(2, row, scrub);
+        barCol.Margin = new Thickness(18, 6, 18, 12);
+        _bar = new Glass(24, GlassKind.Regular) { Content = barCol, MaxWidth = 880, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(40, 0, 40, 26) };
 
-        _infoBox = new Border
+        _infoBox = new Glass(14, GlassKind.Regular)
         {
-            Child = _info, Background = new SolidColorBrush(Windows.UI.Color.FromArgb(170, 0, 0, 0)), CornerRadius = new CornerRadius(10),
-            Padding = new Thickness(14), Margin = new Thickness(24, 90, 0, 0), HorizontalAlignment = HorizontalAlignment.Left,
+            Content = _info.With(t => t.Margin = new Thickness(16, 14, 16, 14)), Margin = new Thickness(0, 64, 20, 0), HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Top, Visibility = Visibility.Collapsed,
         };
         _chrome.Children.Add(top);
-        _chrome.Children.Add(bottom);
-        _chrome.ChildrenTransitions = null;
-        _chrome.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(200) };
+        _chrome.Children.Add(_bar);
+        _chrome.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(260) };
         _error.HorizontalAlignment = HorizontalAlignment.Center;
         _error.VerticalAlignment = VerticalAlignment.Center;
         _error.TextAlignment = TextAlignment.Center;
@@ -183,10 +193,28 @@ public sealed partial class PlayerView : Grid
         if (!Native.Native.Ready) ShowError(Native.Native.InitError ?? "播放器核心没能启动");
     }
 
+    /// <summary>标题栏那一条里能点的（返回、播放信息）</summary>
+    public IEnumerable<FrameworkElement> TitleControls()
+    {
+        yield return _closeBtn;
+        yield return _infoBtn;
+    }
+
+    /// <summary>白色的进度条（Mac 的播放器那样），不用强调色</summary>
+    static void StyleSlider(Slider s)
+    {
+        var white = new SolidColorBrush(Colors.White);
+        var dim = new SolidColorBrush(Windows.UI.Color.FromArgb(70, 255, 255, 255));
+        foreach (var k in new[] { "SliderTrackValueFill", "SliderTrackValueFillPointerOver", "SliderTrackValueFillPressed", "SliderThumbBackground", "SliderThumbBackgroundPointerOver", "SliderThumbBackgroundPressed" })
+            s.Resources[k] = white;
+        foreach (var k in new[] { "SliderTrackFill", "SliderTrackFillPointerOver", "SliderTrackFillPressed" })
+            s.Resources[k] = dim;
+    }
+
     bool IsInChrome(FrameworkElement fe)
     {
         for (DependencyObject? d = fe; d is not null; d = VisualTreeHelper.GetParent(d))
-            if (d is Button || d is Slider || d == _infoBox) return true;
+            if (d is Button || d is Slider || d is MacButton || d == _infoBox || d == _bar) return true;
         return false;
     }
 
@@ -282,7 +310,7 @@ public sealed partial class PlayerView : Grid
             _pos.Text = Format.Clock(_st.Position);
         }
         _updating = false;
-        _dur.Text = Format.Clock(_st.Duration);
+        _dur.Text = _st.Duration > 0 ? "-" + Format.Clock(Math.Max(0, _st.Duration - _st.Position)) : "";
         _playIcon.Glyph = _st.Paused != 0 || _st.Ended != 0 ? "" : "";
         var busy = (_st.Buffering != 0 || _st.Seeking != 0 || !_opened) && _error.Text.Length == 0;
         _ring.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
@@ -370,6 +398,7 @@ public sealed partial class PlayerView : Grid
         _chromeShown = on;
         _chrome.Opacity = on ? 1 : 0;
         _chrome.IsHitTestVisible = on;
+        MainWindow.Current.ShowChrome(on);
         Win32.HideCursor(!on);
     }
 
@@ -470,7 +499,7 @@ public sealed partial class PlayerView : Grid
             audio.Items.Add(it);
         }
         if (audio.Items.Count == 0) audio.Items.Add(new MenuFlyoutItem { Text = "没有音轨", IsEnabled = false });
-        _audioBtn.Flyout = audio;
+        _audioBtn.Menu = audio;
 
         var subs = new MenuFlyout();
         var off = new ToggleMenuFlyoutItem { Text = "关闭字幕", IsChecked = !tracks.Any(t => t.Type == Native.Native.TrackSub && t.Selected != 0) };
@@ -492,7 +521,7 @@ public sealed partial class PlayerView : Grid
             it.Click += async (_, _) => await UseExternalAsync(sub);
             subs.Items.Add(it);
         }
-        _subBtn.Flyout = subs;
+        _subBtn.Menu = subs;
     }
 
     async Task LoadOnlineSubsAsync()

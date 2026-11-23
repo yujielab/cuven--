@@ -32,9 +32,9 @@ static class Nav
 /// <summary>海报卡：2:3 的圆角海报 + 片名 + 一行小字。可以换绑数据（虚拟化列表回收复用）</summary>
 public sealed partial class PosterCard : Grid
 {
-    readonly Border _art = new() { CornerRadius = new CornerRadius(10), Background = U.CardBrush };
-    readonly TextBlock _title = U.T("", 14, FontWeights.SemiBold);
-    readonly TextBlock _sub = U.T("", 12, null, U.Faint);
+    readonly Border _art = new() { CornerRadius = new CornerRadius(10), Background = U.CardBrush, BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(24, 255, 255, 255)), BorderThickness = new Thickness(0.5) };
+    readonly TextBlock _title = U.T("", 13, FontWeights.SemiBold);
+    readonly TextBlock _sub = U.T("", 12, null, Mac.Secondary);
     readonly Border _badge = new() { CornerRadius = new CornerRadius(6), Padding = new Thickness(7, 2, 7, 2), Margin = new Thickness(8), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Visibility = Visibility.Collapsed };
     readonly ProgressBar _progress = new() { VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(10, 0, 10, 10), Visibility = Visibility.Collapsed, Maximum = 1 };
     string? _url;
@@ -51,7 +51,7 @@ public sealed partial class PosterCard : Grid
         Children.Add(art.At(0));
         Children.Add(_title.At(1));
         Children.Add(_sub.At(2));
-        U.HoverGrow(art);
+        Mac.Pressable(art, 1.04f, 0.97f);
         Background = U.Transparent;
         Tapped += (_, _) => Nav.Open(Item);
         IsTabStop = true;
@@ -69,7 +69,7 @@ public sealed partial class PosterCard : Grid
             _art.Background = U.Bitmap(poster, (int)(Width * 1.5)) is { } b ? new ImageBrush { ImageSource = b, Stretch = Stretch.UniformToFill } : U.CardBrush;
         }
         _badge.Visibility = badge is null ? Visibility.Collapsed : Visibility.Visible;
-        if (badge is not null) { _badge.Child = U.T(badge, 11, FontWeights.SemiBold); _badge.Background = U.AccentBrush; }
+        if (badge is not null) { _badge.Child = U.T(badge, 11, FontWeights.SemiBold); _badge.Background = new Microsoft.UI.Xaml.Media.AcrylicBrush { TintColor = Windows.UI.Color.FromArgb(255, 20, 20, 24), TintOpacity = 0.4, TintLuminosityOpacity = 0.5, FallbackColor = Windows.UI.Color.FromArgb(200, 30, 30, 34) }; }
         _progress.Visibility = progress >= 0 ? Visibility.Visible : Visibility.Collapsed;
         if (progress >= 0) _progress.Value = progress;
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(this, title);

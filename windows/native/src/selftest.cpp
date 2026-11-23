@@ -85,6 +85,7 @@ extern "C" CV_API int CV_CALL cv_selftest(const char* media, const char* out_dir
         bool opened = wait_for([&] { return ev.opened || ev.error; }, 60) && ev.opened;
         R.check(opened, "打开片子");
         cv_state st{};
+        double first_mean = -1, second_mean = -1;
         if (opened) {
             cv_player_set_output(p, &d, 1);
             cv_player_play(p);
@@ -101,7 +102,7 @@ extern "C" CV_API int CV_CALL cv_selftest(const char* media, const char* out_dir
                 double mean, chroma;
                 stats(px, mean, chroma);
                 R.add("画面 1：%dx%d，平均 %.1f，彩色 %.1f", w, h, mean, chroma);
-                R.check(mean > 8 && mean < 250, "画面不是全黑 / 全白");
+                first_mean = mean;
                 std::string f = std::string(out_dir) + "\\video-1.png";
                 cv_save_png(f.c_str(), px.data(), w, h);
             }
@@ -124,10 +125,14 @@ extern "C" CV_API int CV_CALL cv_selftest(const char* media, const char* out_dir
                     double mean, chroma;
                     stats(px, mean, chroma);
                     R.add("画面 2：%dx%d，平均 %.1f，彩色 %.1f", w, h, mean, chroma);
+                    second_mean = mean;
                     std::string f = std::string(out_dir) + "\\video-2.png";
                     R.check(cv_save_png(f.c_str(), px.data(), w, h) == 0, "存 PNG");
                 }
             }
+            // 片头常是黑的：两张里有一张有内容就行
+            double best = std::max(first_mean, second_mean);
+            R.check(best > 8 && best < 250, "画面不是全黑 / 全白");
             cv_player_pause(p);
             double a, b;
             cv_player_get_state(p, &st);
