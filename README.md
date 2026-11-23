@@ -274,10 +274,14 @@ UI 测试找元素时拍一次快照、看全部匹配项是否在屏上（`UITe
 
 ## 部署
 
-前端（tv.cuven.us，Worker `cuven-tv`）由 Workers Builds 从仓库部署：连接 `main`，路径 `/web`，构建命令留空，部署命令
-`npx wrangler deploy`。`web/wrangler.jsonc` 把这个目录当作纯静态资源上传（只传 `index.html`，配置文件与
-`.wrangler/` 由 `web/.assetsignore` 排除），没有对应文件的路径都回 `index.html`。其中 `name` 必须与控制台里
-这个 Worker 的名字一致。合并到 `main` 即自动上线；自定义域名在控制台里绑定，部署不会改动它。
+前端（tv.cuven.us，Worker `cuven-tv`）现在是三个文件：`index.html`、光学配对的 `pair.js` 和 `pair-density.png`。两种发布方式都行：
+- `cd web && npx wrangler deploy`：`web/wrangler.jsonc` 把这个目录当作纯静态资源上传（配置文件与 `.wrangler/` 由 `web/.assetsignore` 排除），
+  没有对应文件的路径都回 `index.html`；也可以在控制台给这个 Worker 接上 Workers Builds（连接 `main`，路径 `/web`，构建命令留空，部署命令同上），合并即上线。
+- `CLOUDFLARE_API_TOKEN=… python3 tools/tv-deploy/deploy.py`：把三个文件作为模块打进一个小 Worker（`tools/tv-deploy/worker.js`），只用普通的脚本上传接口。
+  线上目前就是这样发布的。
+
+**不要**再把 `index.html` 包成一个字符串贴进控制台的编辑器：那样所有路径都回首页，`/pair.js` 拿到的是 HTML，网页的光学配对会「加载失败」。
+自定义域名在控制台里绑定，两种发布都不会改动它；`name` 必须与控制台里这个 Worker 的名字一致。
 
 主 Worker 照旧部署 `Stream_v25.js` 即可，不需要新的绑定。可选环境变量：
 
