@@ -68,7 +68,8 @@ struct PairShowView: View {
                 switch r.status {
                 case "approved":
                     if let u = r.username {
-                        PairService.saveDevice(r.device)
+                        PairService.keepDevice(onlyFor: u)
+                        if let d = r.device, PairService.tokenUser(d) == u { PairService.saveDevice(d) }
                         Haptics.success()
                         account.signIn(username: u, email: r.email ?? "", method: "pair", alert: false)
                         dismiss()
@@ -276,7 +277,7 @@ struct PairScanSheet: View {
     // MARK: 流程
 
     private func begin() {
-        guard PairService.deviceToken != nil else { stage = .verify; return }
+        guard PairService.accountDevice(account.displayName) != nil else { stage = .verify; return }
         stage = .scanning
         startCamera()
     }
@@ -297,7 +298,7 @@ struct PairScanSheet: View {
         target = t
         stage = .working
         Task {
-            switch await PairService.peek(t) {
+            switch await PairService.peek(t, as: account.displayName) {
             case .success(let w): who = w; stage = .confirm
             case .failure(.server("bad_device", _)): stage = .verify
             case .failure(.server("expired", let m)):
@@ -316,7 +317,7 @@ struct PairScanSheet: View {
         guard let t = target else { return }
         guard await PairService.confirmOwner(reason: "批准「\(who?.device ?? "这台设备")」登录你的 Cuven 账户") else { return }
         stage = .working
-        switch await PairService.approve(t) {
+        switch await PairService.approve(t, as: account.displayName) {
         case .success: Haptics.success(); stage = .done
         case .failure(.server("bad_device", _)): stage = .verify
         case .failure(.server(_, let m)): stage = .failed(m)

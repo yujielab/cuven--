@@ -337,7 +337,8 @@ final class LoginFlow {
         }
         set(.signin, "")
         // 光学配对：设备令牌（以后这台 iPhone 才能「扫描登录其他设备」）。新版账号中心登录时就给了；旧版再去领一次
-        if let device { PairService.saveDevice(device) } else { PairService.fetchDevice(username: user, key: key) }
+        PairService.keepDevice(onlyFor: user)
+        if let device, PairService.tokenUser(device) == user { PairService.saveDevice(device) } else { PairService.fetchDevice(username: user, key: key) }
         succeed(user, email: rec.email ?? "", method: "password", kind: .login)
     }
 
