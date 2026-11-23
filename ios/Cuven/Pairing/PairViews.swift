@@ -457,7 +457,7 @@ struct PairLabView: View {
         let back = PairCodec.parse(PairCodec.viterbi(soft, spec: spec))
         log("Viterbi：\(back.map { String(format: "%06X / %08X", $0.id, $0.secret) } ?? "解不出")")
         ok = ok && back?.id == 0xABCDEF && back?.secret == 0x12345678
-        // 3) 离屏画一团云（连着 24 帧，每帧 1/30 秒）→ 当成相机画面 → 解码（最近几帧平均 + GPU 网络）
+        // 3) 离屏画一团云（连着 40 帧，每帧 1/30 秒）→ 当成相机画面 → 解码（最近 16 帧平均 + GPU 网络）
         guard let net = PairNet(), let dec = PairDecoder(spec: spec, net: net), let r = PairCloudRenderer() else {
             verdict = "失败：Metal / 网络权重不可用"; return
         }
@@ -467,7 +467,7 @@ struct PairLabView: View {
         let side = 600, cam = spec.decode.cam
         var hit: (UInt32, UInt32)?
         let t0 = Date()
-        for k in 0..<24 {
+        for k in 0..<40 {
             guard let px = r.renderOffscreen(side: side, time: 2 + Double(k) / 30, codeTime: Double(k) / 30) else { break }
             if k == 0 { cloud = Self.image(px, side: side) }
             // 白底上的预乘颜色 → 和相机看到的一样：蓝色程度 = B − R（透明底按白底合成：c + (1 − a)·白）

@@ -5,7 +5,7 @@
     每帧存「覆盖度」c（1 − 透过率）和每单位覆盖度的蓝色程度 k
   · 显示时码乘在每个粒子的光学深度上 → 一点的透过率 T 变成 T^M：带码的蓝色程度 = (1 − (1 − c)^M) · k
     M 和显示时一样：192² 网格、8 位量化、双线性取样；码平面可以转任意角度
-  · 扫描端把连着几帧的极坐标图平均了再进网络（滚动的结构抹平、码留下来）：这里同样把连着 n 帧（1–AVG_FRAMES）平均
+  · 扫描端把连着几帧的极坐标图平均了再进网络（滚动的结构抹平、码留下来）：这里同样把连着 n 帧（AVG_FRAMES/4 – AVG_FRAMES）平均
   · 相机：透视 / 倾斜 ≤ 40°、远近、偏心 → 失焦、手抖、曝光、伽马、摩尔纹、反光、噪点"""
 import math, os
 import numpy as np, torch, torch.nn.functional as F
@@ -17,7 +17,7 @@ PR, PA = 24, 192             # 极坐标：径向 24 格（r 0.10–1.08）、�
 R_LO, R_HI = 0.10, 1.08
 TH = 0.06
 N_RAYS, RAY_N, RAY_T0, RAY_T1 = 24, 64, 0.2, 1.8
-AVG_FRAMES = 8               # 扫描端平均最近几帧的极坐标图
+AVG_FRAMES = 16              # 扫描端平均最近几帧的极坐标图（30 帧每秒时约半秒）
 K_RMS = None                 # 半径 = K_RMS × sqrt(主轴方差)（下面标定）
 EDGE_K = None                # 半高处的半径 / 真半径（下面标定）
 
@@ -106,7 +106,7 @@ def camera_ink(b, g, severity=1.0, H=None, nframes=None, theta=None):
     gscale = FRAD / (FSIZE / 2)
     out = torch.empty(B, 1, CAM, CAM)
     for i in range(B):
-        n = nframes or int(torch.randint(1, AVG_FRAMES + 1, (1,), generator=g))
+        n = nframes or int(torch.randint(max(1, AVG_FRAMES // 4), AVG_FRAMES + 1, (1,), generator=g))
         f0 = int(torch.randint(0, NF, (1,), generator=g))
         idx = (torch.arange(n) + f0) % NF
         small = float(J[i]) < FRAD * 0.6
