@@ -414,7 +414,7 @@
         cur = p;
         if (cloud && cloud.ok) { cloud.setCode(p.id, p.secret); cloud.start(); }
         if (o.onCode) o.onCode(p.code);
-        status('用已登录 Cuven 的 iPhone 扫描这团粒子云');
+        status('');                                                          // 云出来了就不再写字（只在准备中、出错时提示）
         wait();
       }).catch(function () { if (!dead) { status('暂时连不上，稍后再试'); setTimeout(open, 5000); } });
     }
