@@ -11,8 +11,11 @@ import SwiftUI
 
 struct HomeView: View {
     @Environment(AppModel.self) private var model
+    @Environment(AccountStore.self) private var account
     /// 右上头像点开的账户与设置（用户要求：头像从侧边导航里拿出来，放在主页标题这一行的右边）
     @State private var showAccount = false
+    /// 头像左边那颗「光学扫描」（用户要求）：扫另一台设备上的粒子云，让它登录这个账户
+    @State private var pairScanning = false
     /// 这一栈推进去的页（分享来的链接打开详情页时往里推）
     @State private var path = NavigationPath()
 
@@ -50,6 +53,7 @@ struct HomeView: View {
             .toolbar(.hidden, for: .navigationBar)
         }
         .sheet(isPresented: $showAccount) { AccountView() }
+        .sheet(isPresented: $pairScanning) { PairScanSheet().environment(account).environment(\.colorScheme, .light) }
         // 分享来的链接（cuven://movie/…）：推进那一部的详情页
         .onChange(of: model.openRequest) { _, r in
             guard let r else { return }
@@ -90,6 +94,7 @@ struct HomeView: View {
                     .allowsHitTesting(false)
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 12)
+                if canScan { scanButton }
                 accountButton
             }
             .padding(.top, max(insets.top, 12) + 8)
@@ -98,6 +103,28 @@ struct HomeView: View {
             .frame(width: fullWidth)
         }
         .frame(width: fullWidth, alignment: .topLeading)
+    }
+
+    /// 能扫：配对的解码器在（PairSpec），登录了、不是演示数据（和账户页「扫描登录其他设备」同一个条件）
+    private var canScan: Bool {
+        PairSpec.shared != nil && (account.session.map { $0.method != "demo" } ?? false)
+    }
+
+    /// 光学扫描（用户要求「在头像旁边添加 + 光学扫描按钮」）：和头像一样大的一颗 Liquid Glass 圆钮，
+    /// 点开就是账户页里那张扫描（将图案放在圆圈中 → 看是哪台设备 → 面容 ID 批准）
+    private var scanButton: some View {
+        Button { pairScanning = true } label: {
+            Image(systemName: "plus.viewfinder")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 46, height: 46)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("光学扫描")
+        .accessibilityHint("扫描另一台设备上的粒子云，让它登录你的账户")
+        .accessibilityIdentifier("home-pair-scan")
     }
 
     /// 头像：38 点的圆头像套在一圈 Liquid Glass 里（共 46 点，点得到的范围够大：F74）
