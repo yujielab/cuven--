@@ -110,6 +110,8 @@ public sealed partial class LoginPage : Grid, IDisposable
         fixed (byte* p = px)
             _cloud = Native.Native.cv_cloud_create(_surface.Handle, p, w, h);
         if (_cloud == IntPtr.Zero) { _status.Text = "这台电脑画不了粒子云：请使用账户密码登录"; return; }
+        // 云直接画在页面的底色上（不靠系统合成透明交换链；和叠在这个颜色上数学上一样，iPhone 照样解得出）
+        Native.Native.cv_cloud_set_background(_cloud, 245 / 255f, 245 / 255f, 247 / 255f, 1);
         Native.Native.cv_cloud_run(_cloud, 1);
         if (_pendingCode is { } c) ApplyCode(c);
     }

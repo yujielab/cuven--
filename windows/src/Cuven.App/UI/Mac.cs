@@ -161,7 +161,7 @@ static class Mac
 }
 
 /// <summary>
-/// 液态玻璃：亚克力 + 光泽 + 高光描边（按圆角裁）。内容放在 Content 里（在光泽之上、描边之下）
+/// 磨砂玻璃：亚克力（模糊 + 颗粒）+ 发丝边（按圆角裁）。内容放在 Content 里
 /// </summary>
 public sealed partial class Glass : Grid  // 磨砂玻璃
 {

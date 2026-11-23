@@ -68,6 +68,9 @@ CV_API cv_cloud* CV_CALL cv_cloud_create(cv_surface* s, const uint8_t* atlas, in
 /* grid：G×G 的码纹理（M / code_scale × 255，第 0 行是 y 最小的一行）；换码时码平面的转角从 0 开始 */
 CV_API void CV_CALL cv_cloud_set_code(cv_cloud* c, const uint8_t* grid, int g, float code_scale, float code_spin);
 CV_API void CV_CALL cv_cloud_run(cv_cloud* c, int running);
+/* 底色（0–1，预乘前的颜色）：a = 0 时透明（默认）。给了不透明的底色就直接画在这个颜色上 ——
+   和「透明地画、再叠到这个颜色上」数学上完全一样，但不依赖系统合成透明交换链 */
+CV_API void CV_CALL cv_cloud_set_background(cv_cloud* c, float r, float g, float b, float a);
 /* 自检：在离屏纹理上画第 t 秒的一帧，读回 RGBA（预乘）。0 = 成功 */
 CV_API int CV_CALL cv_cloud_snapshot(cv_cloud* c, double t, double code_t, int w, int h, uint8_t* rgba);
 CV_API void CV_CALL cv_cloud_destroy(cv_cloud* c);

@@ -77,6 +77,7 @@ public:
         if (!connect_) { err_ = "无法连接服务器"; return false; }
         buf_.reset(new uint8_t[(size_t)kCap]);
         // 头一条请求同步发：知道文件多大、地址能不能用
+        double t0 = now();
         for (int i = 0; i < 3; i++) {
             if (aborted_) return false;
             int r = start_request(0);
@@ -84,6 +85,7 @@ public:
             if (r < 0 || i == 2 || aborted_) { if (err_.empty()) err_ = "无法连接服务器"; return false; }
             Sleep(600 * (i + 1));
         }
+        log("网络源：连上 %.0f 毫秒，文件 %lld MB", (now() - t0) * 1000, (long long)(size_ >> 20));
         th_ = std::thread([this] { loop(); });
         return true;
     }

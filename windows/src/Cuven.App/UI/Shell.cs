@@ -44,7 +44,7 @@ static class Inset
 }
 
 /// <summary>
-/// 主界面（Mac 风格）：内容铺满整个窗口；左边一块浮着的液态玻璃侧边栏（红黄绿三个按钮、搜索、分组、选中的那块玻璃会滑、底下是账户）；
+/// 主界面（Mac 风格）：内容铺满整个窗口；左边一块浮着的磨砂玻璃侧边栏（红黄绿三个按钮、搜索、分组、选中的那块玻璃会滑、底下是账户）；
 /// 顶上一枚玻璃胶囊（后退 / 前进）。两指在触控板上往右滑 = 后退
 /// </summary>
 public sealed partial class Shell : Grid, IDisposable
@@ -228,7 +228,7 @@ public sealed partial class Shell : Grid, IDisposable
         _items.Children.Add(it);
     }
 
-    /// <summary>选中的那块玻璃滑到这一格：路上竖着拉长一点再收回（液态的感觉）</summary>
+    /// <summary>选中的那块玻璃滑到这一格：路上竖着拉长一点再收回（像一滴水）</summary>
     void Select(string tag, bool animate = true)
     {
         _selected = tag;

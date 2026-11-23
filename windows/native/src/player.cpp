@@ -238,11 +238,13 @@ bool cv_player::open_input() {
     fmt->interrupt_callback.opaque = this;
     fmt->probesize = 8 << 20;
     fmt->max_analyze_duration = 3 * AV_TIME_BASE;
+    double t0 = now();
     int r = avformat_open_input(&fmt, "", nullptr, nullptr);
     if (r < 0) { log("avformat_open_input 失败 %d", r); fmt = nullptr; return false; }
     r = avformat_find_stream_info(fmt, nullptr);
     if (r < 0) log("find_stream_info：%d（接着试）", r);
     duration = fmt->duration > 0 ? fmt->duration / (double)AV_TIME_BASE : 0;
+    log("解封装：%s，%.0f 毫秒（读了 %lld KB）", fmt->iformat ? fmt->iformat->name : "?", (now() - t0) * 1000, (long long)(avio_tell(pb) >> 10));
 
     vstream = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     // 封面图（attached_pic）不当视频

@@ -113,7 +113,7 @@ public sealed partial class PlayerView : Grid
         _infoBtn = MacButton.Round("", ToggleInfo, "播放信息（I）", 34, 14);
         top.Children.Add(_infoBtn.At(0, 2));
 
-        // ── 下：浮着的一条液态玻璃（QuickTime / Apple TV 那样）──
+        // ── 下：浮着的一条磨砂玻璃（QuickTime / Apple TV 那样）──
         StyleSlider(_seek);
         StyleSlider(_volume);
         _seek.ThumbToolTipValueConverter = new TimeConverter();

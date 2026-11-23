@@ -92,6 +92,7 @@ public static unsafe class Native
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern IntPtr cv_cloud_create(IntPtr s, byte* atlas, int w, int h);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern void cv_cloud_set_code(IntPtr c, byte* grid, int g, float scale, float spin);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern void cv_cloud_run(IntPtr c, int running);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern void cv_cloud_set_background(IntPtr c, float r, float g, float b, float a);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern void cv_cloud_destroy(IntPtr c);
 
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] public static extern IntPtr cv_player_create(IntPtr s, CvEventCallback cb, IntPtr user);

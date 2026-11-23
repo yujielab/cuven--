@@ -99,6 +99,7 @@ struct cv_cloud {
     UINT count = 0;
     bool atlas_ok = false;
     float code_scale = 3.0f, code_spin = 0.05f;
+    float bg[4] = {0, 0, 0, 0};
     std::atomic<bool> coded{false};
     double t0 = 0, code_t0 = 0;
 
@@ -108,7 +109,7 @@ struct cv_cloud {
     bool running = false, quit = false;
 
     bool init(const uint8_t* atlas, int aw, int ah);
-    void draw(ID3D11RenderTargetView* rtv, int w, int h, double t, double code_t);
+    void draw(ID3D11RenderTargetView* rtv, int w, int h, double t, double code_t, bool use_bg = true);
     void loop();
 };
 
@@ -188,7 +189,7 @@ bool cv_cloud::init(const uint8_t* atlas, int aw, int ah) {
     return true;
 }
 
-void cv_cloud::draw(ID3D11RenderTargetView* rtv, int w, int h, double t, double code_t) {
+void cv_cloud::draw(ID3D11RenderTargetView* rtv, int w, int h, double t, double code_t, bool use_bg) {
     auto& G = gpu();
     auto* ctx = G.ctx.Get();
     Consts c{};
@@ -225,8 +226,9 @@ void cv_cloud::draw(ID3D11RenderTargetView* rtv, int w, int h, double t, double 
         memcpy(mp.pData, &c, sizeof c);
         ctx->Unmap(cb.Get(), 0);
     }
-    const float clear[4] = {0, 0, 0, 0};
-    ctx->ClearRenderTargetView(rtv, clear);
+    const float transparent[4] = {0, 0, 0, 0};
+    float clear[4] = {bg[0] * bg[3], bg[1] * bg[3], bg[2] * bg[3], bg[3]};
+    ctx->ClearRenderTargetView(rtv, use_bg ? clear : transparent);
     D3D11_VIEWPORT vp{0, 0, (float)w, (float)h, 0, 1};
     ctx->RSSetViewports(1, &vp);
     ctx->RSSetState(raster.Get());
@@ -325,6 +327,12 @@ CV_API void CV_CALL cv_cloud_set_code(cv_cloud* c, const uint8_t* grid, int g, f
     c->cv.notify_all();
 }
 
+CV_API void CV_CALL cv_cloud_set_background(cv_cloud* c, float r, float g, float b, float a) {
+    if (!c) return;
+    GpuLock gl;
+    c->bg[0] = r; c->bg[1] = g; c->bg[2] = b; c->bg[3] = a;
+}
+
 CV_API void CV_CALL cv_cloud_run(cv_cloud* c, int running) {
     if (!c) return;
     std::lock_guard<std::mutex> l(c->m);
@@ -345,7 +353,7 @@ CV_API int CV_CALL cv_cloud_snapshot(cv_cloud* c, double t, double code_t, int w
     if (FAILED(G.dev->CreateTexture2D(&td, nullptr, &rt)) || FAILED(G.dev->CreateRenderTargetView(rt.Get(), nullptr, &rtv))) return -2;
     td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     if (FAILED(G.dev->CreateTexture2D(&td, nullptr, &st))) return -3;
-    c->draw(rtv.Get(), w, h, t, code_t);
+    c->draw(rtv.Get(), w, h, t, code_t, false);   // 自检：透明地画，调用方叠到白底上
     G.ctx->CopyResource(st.Get(), rt.Get());
     D3D11_MAPPED_SUBRESOURCE mp;
     if (FAILED(G.ctx->Map(st.Get(), 0, D3D11_MAP_READ, 0, &mp))) return -4;
