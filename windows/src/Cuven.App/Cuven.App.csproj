@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Cuven for Windows（WinUI 3，未打包、自带 .NET 和 Windows App SDK 运行库，解压就能用）。
+    界面全用 C# 搭（不用 XAML），播放 / 配对粒子云在原生核心 CuvenCore.dll 里（windows/native）。
+    构建：dotnet publish -c Release -r win-x64（CI：.github/workflows/windows.yml，会把 CuvenCore.dll 和 FFmpeg 拷进来）
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <RootNamespace>Cuven.App</RootNamespace>
+    <AssemblyName>Cuven</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\cuven.ico</ApplicationIcon>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <!-- 未打包也要生成 resources.pri（WinUI 的主题资源 themeresources.xaml 从这里找） -->
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <!-- 启动快：预编译（ReadyToRun）+ 分层 PGO -->
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <TieredPGO>true</TieredPGO>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <SatelliteResourceLanguages>zh-Hans;en</SatelliteResourceLanguages>
+    <Version>1.0.0</Version>
+    <Product>Cuven</Product>
+    <Company>Cuven</Company>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260921001" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Cuven.Core\Cuven.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\cuven.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\cuven-256.png" CopyToOutputDirectory="PreserveNewest" />
+    <!-- 配对粒子云的密度校正图：和网页版同一份 -->
+    <Content Include="..\..\..\web\pair-density.png" Link="Assets\pair-density.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

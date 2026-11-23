@@ -138,6 +138,12 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     private var sourceViaPass = false
     /// 这一集已经从加速节点改走过普通线路（只改一次）
     private var passFallbackTried = false
+    /// 改进兼容性（Compat.swift）：这一集的 HLS 经本机代理改标记再给播放器。设置里开着就一开始用；
+    /// 没开的、起播就失败（不是网络错）的，自动开一次再试
+    private var compatActive = false
+    /// 这一集的片源是 HLS / 走的是预先缓存的本机代理
+    private var sourceIsHLS = false
+    private var sourcePrecached = false
 
     func play(_ req: PlayRequest, model: AppModel) {
         self.model = model
@@ -169,6 +175,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         loadToken += 1
         let token = loadToken
         passFallbackTried = false
+        compatActive = Compat.isOn
         audioOrigin = nil
         originRefresh = nil
         if TrackPrefs.audio == .natural, let model {
@@ -278,6 +285,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         let route: (base: String, viaPass: Bool)
         if direct { route = (APIClient.base, false) } else { route = await PassPro.shared.mediaBase() }
         sourceViaPass = route.viaPass
+        sourceIsHLS = false
+        sourcePrecached = false
         plog("sign \(sign == nil ? "failed" : "ok") in \(Perf.ms(since: t0)) ms\(route.viaPass ? ", via pass pro" : "")")
         PlayerLoadingOverlay.shared.stage(.source)
         let isMKV = req.name.lowercased().hasSuffix(".mkv")
@@ -290,11 +299,11 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             // 半折面板的光影：HDR / 杜比视界的片子不取画面的帧（见 VideoFrameProcessor）
             controller?.tabletop.updateRange(from: body?.video)
             PlayerLoadingOverlay.shared.stage(.meta)
-            if (200..<300).contains(status) && body?.ok != false { return await precached(req, master) ?? master }
+            if (200..<300).contains(status) && body?.ok != false { return await compatible(await precached(req, master) ?? master) }
             if status >= 400 && status < 500 && status != 404 {
                 throw PlayError.unsupported(body?.error ?? "这个文件转不了 HLS（HTTP \(status)）")
             }
-            if isMKV { return await precached(req, master) ?? master }   // info.json 没取到（网络抖动）：让播放器自己试
+            if isMKV { return await compatible(await precached(req, master) ?? master) }   // info.json 没取到（网络抖动）：让播放器自己试
         }
         if isMKV { throw PlayError.unsupported("服务器没有为这个 MKV 提供 HLS，iPhone 无法直接播放 MKV") }
         plog("source direct")
@@ -305,7 +314,16 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     private func precached(_ req: PlayRequest, _ master: URL) async -> URL? {
         guard let local = await Precache.shared.playbackURL(path: req.path, upstreamMaster: master) else { return nil }
         plog("source precache")
+        sourcePrecached = true
         return local
+    }
+
+    /// HLS 主列表：「改进兼容性」开着就换成本机代理改过标记的那一份（Compat.swift）
+    private func compatible(_ master: URL) async -> URL {
+        sourceIsHLS = true
+        guard compatActive, let u = await PrecacheServer.shared.compatURL(master: master) else { return master }
+        plog("source compat")
+        return u
     }
 
     /// 点了就弹：系统播放器先出来（加载封面在上面），片源准备好再挂上
@@ -344,7 +362,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         // 账户页「网络速度」：往前缓冲多少秒（100% 交给系统；80% → 90 秒）。改了从下一个片源起生效。
         // 从本机代理放（预先缓存）：缓冲交给系统——下好的那截从本机读，不费流量
         let proxied = url.host == "127.0.0.1"
-        item.preferredForwardBufferDuration = proxied ? 0 : NetworkSpeed.forwardBuffer()
+        item.preferredForwardBufferDuration = sourcePrecached ? 0 : NetworkSpeed.forwardBuffer()
         // 账户页「首选音轨 / 首选字幕」：和播放器读播放列表同时进行，通常赶在首帧之前挑好并选上（「自动」也选：
         // 字幕打开服务器标成默认的那条、音轨是片源默认的那条，不交给系统按手机语言挑；TrackPrefs.swift）。
         // 「自然」带上这一集的原声语种
@@ -487,6 +505,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             let under = ((item.error as NSError?)?.userInfo[NSUnderlyingErrorKey] as? NSError).map { " ← \($0.domain) \($0.code)" } ?? ""
             let last = item.errorLog()?.events.last.map { " · log \($0.errorDomain) \($0.errorStatusCode)" } ?? ""
             plog("failed: \(code)\(under)\(last)", error: true)
+            if fallBackToCompat(item.error) { return }
             if fallBackFromPass("failed") { return }
             closeThenAlert("播放失败", PlayerErrorText.message(item.error) ?? msg)
         default:
@@ -500,6 +519,27 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         if fallBackFromPass("interrupted") { return }
         saveProgress()
         closeThenAlert("播放中断", PlayerErrorText.message(err) ?? "播放进度已保存，稍后可以继续观看。")
+    }
+
+    /// 起播就失败、不是网络错、这一集还没按兼容方式试过：按「改进兼容性」的方式再试一次（旧机型照着片源的标记拒播）
+    private func fallBackToCompat(_ err: Error?) -> Bool {
+        guard !compatActive, !startedPlaying, sourceIsHLS, let req = current else { return false }
+        if let e = err as NSError?, e.domain == NSURLErrorDomain { return false }
+        compatActive = true
+        plog("start failed, retrying with compat signaling")
+        let token = loadToken
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let url = try await self.resolve(req, direct: self.passFallbackTried)
+                guard token == self.loadToken, self.controller != nil || self.inPiP else { return }
+                self.show(url, req)
+            } catch {
+                guard token == self.loadToken else { return }
+                self.closeThenAlert("无法播放", (error as? PlayError)?.errorDescription ?? PlayerErrorText.message(error) ?? FriendlyError.message(error))
+            }
+        }
+        return true
     }
 
     /// Cuven Pass Pro 的加速节点出错（起播失败、播到一半断了）：节点 10 分钟内不再用，这一集从当前位置改走普通线路接着放。

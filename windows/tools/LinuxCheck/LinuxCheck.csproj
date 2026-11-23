@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    在 Linux 上检查 Cuven.App 的 C# 能不能编过（WinUI 的 XAML 编译器、MakePri 只能在 Windows 上跑；
+    Cuven.App 不用 XAML，界面全是 C# 搭的，所以把它的 .cs 拿来对着同一个 Windows App SDK 编一遍就能查出类型错误）。
+      dotnet build windows/tools/LinuxCheck
+    真正的构建在 CI 的 Windows 构建机上（.github/workflows/windows.yml）。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <OutputType>Library</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
+    <EnableCoreMrtTooling>false</EnableCoreMrtTooling>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\src\Cuven.App\**\*.cs" Exclude="..\..\src\Cuven.App\obj\**;..\..\src\Cuven.App\bin\**" />
+    <ProjectReference Include="..\..\src\Cuven.Core\Cuven.Core.csproj" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260921001" />
+  </ItemGroup>
+</Project>

@@ -455,6 +455,8 @@ final class AccountStore {
     func signIn(username: String, email: String, method: String, alert: Bool = true) {
         let s = AccountSession(username: username, email: email.lowercased(), method: method, at: Date())
         if let d = try? JSONEncoder().encode(s) { Keychain.set(d, account: "session") }
+        // 光学配对的设备令牌只认它自己的账户：换了账户，上一个账户的令牌作废（不然扫码批准出去的是上一个账户）
+        PairService.keepDevice(onlyFor: username)
         session = s
         // 邮箱 → 用户名的映射只在注册 / 改邮箱时写过，老账户查不到：任意一次成功登录后补写一次（与网页版一致）
         let mapKey = "cuven_emailmap_\(username)"
@@ -468,6 +470,7 @@ final class AccountStore {
 
     func signOut() {
         Keychain.delete(account: "session")
+        PairService.keepDevice(onlyFor: nil)
         session = nil
         avatarURL = nil
         // 网页版 clearLogin：头像 / 设置的本机缓存一起清掉（存在本机的头像图也删掉）

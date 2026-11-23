@@ -86,6 +86,8 @@ struct AccountView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(PlayerCoordinator.autoplayKey) private var autoplayNext = true
+    /// 改进兼容性（Compat.swift）：没选过的时候按机型（旧机型开）
+    @AppStorage(Compat.key) private var compatMode = Compat.legacyDevice
     /// 影院光影（半折播放器：画面里的光映在控制卡片上）的模式，这一行显示当前是哪一种
     /// 首选音轨 / 首选字幕（用户要求，TrackPrefs.swift）
     @AppStorage(TrackPrefs.audioKey) private var audioPref = TrackPrefs.Audio.auto.rawValue
@@ -134,6 +136,7 @@ struct AccountView: View {
                         watchingGroup
                         notifyGroup
                         playbackGroup
+                        compatGroup
                         securityGroup
                         signOutGroup
                     }
@@ -336,6 +339,21 @@ struct AccountView: View {
         }
         .sensoryFeedback(.selection, trigger: audioPref)
         .sensoryFeedback(.selection, trigger: subtitlePref)
+    }
+
+    /// 改进兼容性（用户要求：iPad（第 9 代）和更早的机型放不了）。说明照实写：改的是片源的规格标记，画面数据不变
+    private var compatGroup: some View {
+        AccountGroup(title: "兼容性",
+                     footer: "适用于 iPad（第 9 代）及更早的机型。打开后，4K、杜比视界影片按这台设备能解码的规格播放，画面数据不变；杜比视界 8 改用 HDR10 播放，播放时不能隔空播放到其他设备。"
+                        + (Compat.legacyDevice ? "这台设备建议打开。" : "这台设备一般不需要打开。")) {
+            AccountRow(icon: "ipad.landscape", title: "改进兼容性", subtitle: compatMode ? "已打开 · 从下一次播放起生效" : "旧机型无法播放时打开") {
+                Toggle("改进兼容性", isOn: $compatMode)
+                    .labelsHidden()
+                    .tint(.green)
+                    .accessibilityIdentifier("account-compat")
+            }
+        }
+        .sensoryFeedback(.selection, trigger: compatMode)
     }
 
     // 「片库」（片子数量、刷新片库）和「关于」（版本、片源、账户服务）两组用户要求移除；片库照常在主页下拉刷新

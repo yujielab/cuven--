@@ -10,6 +10,9 @@ import Network
 // · 主列表每次都问一次 Worker（在线字幕会变），问不到才用上次存下的；
 // · 播放器要到了第几段视频，告诉 Precache：后台下载跟到那儿往后接着下（PrecacheEvents.requested）。
 // 只接受本机的连接；不认识的路径、带「..」的一律 404。
+//
+// 另一条路径 /x/<编号>/…：「改进兼容性」（Compat.swift）。只经手主列表、视频的二级列表、初始化分段（改了标记再给播放器），
+// 媒体分段照旧直接去取（主列表那一层可以是 Worker，也可以是上面这条 /c/ 代理）。
 
 final class PrecacheServer: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     static let shared = PrecacheServer()
@@ -22,6 +25,10 @@ final class PrecacheServer: NSObject, URLSessionDataDelegate, @unchecked Sendabl
     /// 影片编号 → Worker 那边的 /hls/<签名>/
     private var upstream: [String: URL] = [:]
     private var relays: [Int: Relay] = [:]
+    /// 改进兼容性：编号 → 原来的主列表地址；改好的初始化分段（播放器可能带 Range 来要好几次）
+    private var compatMasters: [String: URL] = [:]
+    private var compatOrder: [String] = []
+    private var compatInits: [String: Data] = [:]
 
     private lazy var session: URLSession = {
         let cfg = URLSessionConfiguration.default
@@ -88,6 +95,25 @@ final class PrecacheServer: NSObject, URLSessionDataDelegate, @unchecked Sendabl
 
     func setUpstream(id: String, base: URL) {
         q.async { self.upstream[id] = base }
+    }
+
+    /// 改进兼容性：给播放器的主列表地址换成本机的（开不起来就是 nil，照原样播）
+    func compatURL(master: URL) async -> URL? {
+        guard let port = await start() else { return nil }
+        let token = String(format: "%08x%08x", UInt32.random(in: .min ... .max), UInt32.random(in: .min ... .max))
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            q.async {
+                self.compatMasters[token] = master
+                self.compatOrder.append(token)
+                while self.compatOrder.count > 6 {
+                    let old = self.compatOrder.removeFirst()
+                    self.compatMasters[old] = nil
+                    self.compatInits = self.compatInits.filter { !$0.key.hasPrefix(old + "/") }
+                }
+                c.resume()
+            }
+        }
+        return URL(string: "http://127.0.0.1:\(port)/x/\(token)/master.m3u8")
     }
 
     /// 开起来（已经开着就直接给端口）；3 秒还没好就是 nil（这次走网上）
@@ -184,6 +210,11 @@ final class PrecacheServer: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         }
         let path = first[1].split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
         let comps = path.split(separator: "/").map(String.init)
+        if comps.count >= 3, comps[0] == "x" {
+            let token = comps[1], rel = comps.dropFirst(2).joined(separator: "/")
+            guard !token.isEmpty, token.allSatisfy(\.isHexDigit), PrecacheFiles.safe(rel) else { return status(c, 404) }
+            return compat(c, token: token, rel: rel, range: range, headOnly: headOnly)
+        }
         guard comps.count >= 3, comps[0] == "c" else { return status(c, 404) }
         let id = comps[1], rel = comps.dropFirst(2).joined(separator: "/")
         guard !id.isEmpty, id.allSatisfy(\.isHexDigit), PrecacheFiles.safe(rel), !rel.hasSuffix(".part") else { return status(c, 404) }
@@ -280,6 +311,51 @@ final class PrecacheServer: NSObject, URLSessionDataDelegate, @unchecked Sendabl
                 }
             }
         }.resume()
+    }
+
+    // MARK: 改进兼容性：取原来的，改标记（CompatHLS），再给播放器
+
+    private func compat(_ c: NWConnection, token: String, rel: String, range: ByteRange?, headOnly: Bool) {
+        guard let master = compatMasters[token] else { return status(c, 404) }
+        let key = token + "/" + rel
+        if let d = compatInits[key] { return sendData(c, d, type: "video/mp4", range: range, headOnly: headOnly) }
+        let isMaster = rel == "master.m3u8"
+        guard isMaster || rel.hasSuffix(".m3u8") || rel.hasSuffix(".mp4") else { return status(c, 404) }
+        let base = master.deletingLastPathComponent()
+        let proxy = "http://127.0.0.1:\(port)/x/\(token)/"
+        var req = URLRequest(url: isMaster ? master : base.appendingPathComponent(rel))
+        req.timeoutInterval = 20
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            guard let self else { return }
+            let ok = (resp as? HTTPURLResponse)?.statusCode == 200
+            self.q.async {
+                guard ok, let data, !data.isEmpty else { return self.status(c, 502) }
+                if rel.hasSuffix(".mp4") {
+                    let patched = CompatHLS.patchInit(data)
+                    self.compatInits[key] = patched
+                    return self.sendData(c, patched, type: "video/mp4", range: range, headOnly: headOnly)
+                }
+                let text = String(decoding: data, as: UTF8.self)
+                let out = isMaster
+                    ? CompatHLS.master(text, base: base, proxy: proxy)
+                    : CompatHLS.media(text, base: base, dir: (rel as NSString).deletingLastPathComponent, proxy: proxy)
+                self.send(c, Data(out.utf8), type: "application/vnd.apple.mpegurl", headOnly: headOnly)
+            }
+        }.resume()
+    }
+
+    /// 内存里的一块（初始化分段）：带 Range 就切一截
+    private func sendData(_ c: NWConnection, _ data: Data, type: String, range: ByteRange?, headOnly: Bool) {
+        guard let range else { return send(c, data, type: type, headOnly: headOnly) }
+        let size = Int64(data.count)
+        guard let r = range.resolve(size: size) else { return status(c, 416, extra: "Content-Range: bytes */\(size)\r\n") }
+        let slice = data.subdata(in: Int(r.from)..<Int(r.to + 1))
+        let h = "HTTP/1.1 206 Partial Content\r\nContent-Type: \(type)\r\nContent-Length: \(slice.count)\r\n"
+            + "Content-Range: bytes \(r.from)-\(r.to)/\(size)\r\nAccept-Ranges: bytes\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+        c.send(content: Data(h.utf8), completion: .contentProcessed { _ in })
+        if !headOnly { c.send(content: slice, completion: .contentProcessed { _ in }) }
+        close(c)
     }
 
     // MARK: 本机没有的：去 Worker 取，边转边存
