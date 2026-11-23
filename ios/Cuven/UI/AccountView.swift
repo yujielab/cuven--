@@ -368,7 +368,7 @@ struct AccountView: View {
                     .accessibilityIdentifier("account-pair-scan")
                 }
             }
-            .sheet(isPresented: $pairScanning) { PairScanSheet().environment(account) }
+            .sheet(isPresented: $pairScanning) { PairScanSheet().environment(account).environment(\.colorScheme, .light) }
         }
     }
 
