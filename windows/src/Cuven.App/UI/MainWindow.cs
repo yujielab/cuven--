@@ -5,6 +5,7 @@ using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using Windows.Graphics;
 
 namespace Cuven.App.UI;
@@ -35,6 +36,8 @@ public sealed partial class MainWindow : Window
         Title = "Cuven";
         Hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         ExtendsContentIntoTitleBar = true;
+        // 窗口本身是磨砂玻璃：桌面在窗口后面被模糊（窗口不在前台时系统自动换成实色，省电）
+        SystemBackdrop = new DesktopAcrylicBackdrop();
         AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Collapsed;   // 系统的最小化 / 最大化 / 关闭不要了
         try { AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "cuven.ico")); } catch { }
         var scale = Win32.GetDpiForWindow(Hwnd) / 96.0;

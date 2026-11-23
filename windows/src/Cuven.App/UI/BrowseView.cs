@@ -19,6 +19,7 @@ public sealed partial class BrowseView : View
 
     public BrowseView(BrowseKind kind)
     {
+        Background = Mac.FrostCanvas;
         _kind = kind;
         var header = U.Cols("auto", "*", "auto", "auto");
         header.ColumnSpacing = 12;
@@ -107,6 +108,7 @@ public sealed partial class SearchView : View
 
     public SearchView(string q)
     {
+        Background = Mac.FrostCanvas;
         _q = q;
         _col.Children.Add(Inset.Track(Mac.LargeTitle($"“{q}”"), (t, l) => t.Margin = new Thickness(l, Inset.Top - 20, Inset.Right, 8)));
         Children.Add(new ScrollViewer { Content = _col, HorizontalScrollMode = ScrollMode.Disabled });

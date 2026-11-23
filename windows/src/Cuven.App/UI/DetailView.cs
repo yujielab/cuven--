@@ -27,6 +27,7 @@ public sealed partial class DetailView : View
 
     DetailView()
     {
+        Background = Mac.CanvasBrush;
         Inset.Track(_info, (i, l) => i.Margin = new Thickness(l + 8, 140, 48, 30));
         _hero.Children.Add(_info);
         _col.Children.Add(_hero);

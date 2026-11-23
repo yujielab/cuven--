@@ -15,8 +15,9 @@ namespace Cuven.App.UI;
 // ─────────────────────────────────────────────────────────────────────────────
 //  Mac 风格的设计系统（用户要求「尽可能和 Mac 原生软件靠近：磨砂玻璃、液态玻璃、MacBook 那样的交互和动效」）
 //
-//  · 液态玻璃（Glass）：程序内亚克力（模糊下面的内容）+ 一层从上往下淡掉的光泽 + 一圈高光描边
-//    （左上亮、右下弱，像玻璃边缘的折射）+ 投影。侧边栏浮在内容上，海报、大图从它下面滑过去
+//  · 磨砂玻璃（Glass，用户要求「Windows 版本使用磨砂玻璃」）：Windows 自己的亚克力 —— 强模糊 + 噪点颗粒 + 乳白 / 烟灰的底色，
+//    一根细细的发丝边，没有液态玻璃那种高光和折射。侧边栏浮在内容上，海报、大图从它下面滑过去被磨砂；
+//    窗口本身也是磨砂的（DesktopAcrylicBackdrop：桌面在窗口后面被模糊），列表页的底是半透明的，能透出来
 //  · 控件：胶囊按钮（主按钮白底黑字，和 Apple TV App 一样）、玻璃圆钮、红黄绿三个窗口按钮
 //  · 动效：都用弹簧（Composition 的 NaturalMotion）：悬停放大、按下回弹、选中的那块玻璃滑过去时拉长再收回
 // ─────────────────────────────────────────────────────────────────────────────
@@ -38,6 +39,8 @@ static class Mac
     public static readonly Color Blue = Color.FromArgb(255, 10, 132, 255);
     public static readonly Color Canvas = Color.FromArgb(255, 18, 18, 20);
     public static Brush CanvasBrush { get; } = new SolidColorBrush(Canvas);
+    /// <summary>列表页的底：半透明，窗口后面的磨砂（桌面被模糊）透出来</summary>
+    public static Brush FrostCanvas { get; } = new SolidColorBrush(Color.FromArgb(150, 16, 16, 18));
     public static Brush Label { get; } = new SolidColorBrush(Colors.White);
     public static Brush Secondary { get; } = new SolidColorBrush(Color.FromArgb(158, 235, 235, 245));
     public static Brush Tertiary { get; } = new SolidColorBrush(Color.FromArgb(92, 235, 235, 245));
@@ -47,35 +50,27 @@ static class Mac
     public static Brush BlueBrush { get; } = new SolidColorBrush(Blue);
     public static Brush Clear { get; } = new SolidColorBrush(Colors.Transparent);
 
+    /// <summary>磨砂玻璃：亚克力（模糊 + 颗粒）。烟灰（深色）/ 乳白（浅色）</summary>
     public static Brush Acrylic(GlassKind k) => k switch
     {
-        GlassKind.Light => new AcrylicBrush { TintColor = Color.FromArgb(255, 250, 250, 252), TintOpacity = 0.55, TintLuminosityOpacity = 0.85, FallbackColor = Color.FromArgb(240, 246, 246, 248) },
-        GlassKind.Clear => new AcrylicBrush { TintColor = Color.FromArgb(255, 30, 30, 34), TintOpacity = 0.10, TintLuminosityOpacity = 0.28, FallbackColor = Color.FromArgb(150, 40, 40, 44) },
-        GlassKind.Selection => new SolidColorBrush(Color.FromArgb(36, 255, 255, 255)),
-        _ => new AcrylicBrush { TintColor = Color.FromArgb(255, 28, 28, 32), TintOpacity = 0.32, TintLuminosityOpacity = 0.62, FallbackColor = Color.FromArgb(235, 36, 36, 40) },
+        GlassKind.Light => new AcrylicBrush { TintColor = Color.FromArgb(255, 252, 252, 253), TintOpacity = 0.62, TintLuminosityOpacity = 0.92, FallbackColor = Color.FromArgb(245, 246, 246, 248) },
+        GlassKind.Clear => new AcrylicBrush { TintColor = Color.FromArgb(255, 44, 44, 48), TintOpacity = 0.30, TintLuminosityOpacity = 0.62, FallbackColor = Color.FromArgb(190, 44, 44, 48) },
+        GlassKind.Selection => new AcrylicBrush { TintColor = Color.FromArgb(255, 120, 120, 128), TintOpacity = 0.28, TintLuminosityOpacity = 0.42, FallbackColor = Color.FromArgb(70, 255, 255, 255) },
+        _ => new AcrylicBrush { TintColor = Color.FromArgb(255, 32, 32, 36), TintOpacity = 0.58, TintLuminosityOpacity = 0.80, FallbackColor = Color.FromArgb(240, 36, 36, 40) },
     };
 
-    /// <summary>玻璃上面那层光泽：顶上一抹亮，往下淡掉</summary>
+    /// <summary>磨砂玻璃顶上极淡的一层亮（只在悬停时稍微显出来，不是液态玻璃的高光）</summary>
     public static Brush Sheen(double strength = 1)
     {
         var g = new LinearGradientBrush { StartPoint = new Windows.Foundation.Point(0.5, 0), EndPoint = new Windows.Foundation.Point(0.5, 1) };
-        g.GradientStops.Add(new GradientStop { Color = Color.FromArgb((byte)(30 * strength), 255, 255, 255), Offset = 0 });
-        g.GradientStops.Add(new GradientStop { Color = Color.FromArgb((byte)(8 * strength), 255, 255, 255), Offset = 0.38 });
-        g.GradientStops.Add(new GradientStop { Color = Color.FromArgb(0, 255, 255, 255), Offset = 0.62 });
-        g.GradientStops.Add(new GradientStop { Color = Color.FromArgb((byte)(10 * strength), 255, 255, 255), Offset = 1 });
+        g.GradientStops.Add(new GradientStop { Color = Color.FromArgb((byte)Math.Min(255, 14 * strength), 255, 255, 255), Offset = 0 });
+        g.GradientStops.Add(new GradientStop { Color = Color.FromArgb(0, 255, 255, 255), Offset = 0.5 });
         return g;
     }
 
-    /// <summary>玻璃边缘的高光：左上亮、中间弱、右下再亮一点（像光从左上打过来、在边上折了一下）</summary>
-    public static Brush Rim(bool light = false)
-    {
-        var g = new LinearGradientBrush { StartPoint = new Windows.Foundation.Point(0, 0), EndPoint = new Windows.Foundation.Point(1, 1) };
-        byte a0 = light ? (byte)200 : (byte)120, a1 = light ? (byte)60 : (byte)26, a2 = light ? (byte)120 : (byte)64;
-        g.GradientStops.Add(new GradientStop { Color = Color.FromArgb(a0, 255, 255, 255), Offset = 0 });
-        g.GradientStops.Add(new GradientStop { Color = Color.FromArgb(a1, 255, 255, 255), Offset = 0.45 });
-        g.GradientStops.Add(new GradientStop { Color = Color.FromArgb(a2, 255, 255, 255), Offset = 1 });
-        return g;
-    }
+    /// <summary>磨砂玻璃的发丝边：一圈均匀的细线</summary>
+    public static Brush Rim(bool light = false) =>
+        new SolidColorBrush(light ? Color.FromArgb(150, 255, 255, 255) : Color.FromArgb(34, 255, 255, 255));
 
     public static TextBlock Text(string s, double size = 13, FontWeight? w = null, Brush? fg = null, int lines = 1) => U.T(s, size, w, fg ?? Label, lines);
     public static TextBlock LargeTitle(string s) => U.T(s, 30, FontWeights.Bold, Label);
@@ -168,7 +163,7 @@ static class Mac
 /// <summary>
 /// 液态玻璃：亚克力 + 光泽 + 高光描边（按圆角裁）。内容放在 Content 里（在光泽之上、描边之下）
 /// </summary>
-public sealed partial class Glass : Grid
+public sealed partial class Glass : Grid  // 磨砂玻璃
 {
     readonly Border _sheen = new() { IsHitTestVisible = false };
     readonly Border _rim = new() { IsHitTestVisible = false, BorderThickness = new Thickness(1) };
@@ -182,7 +177,8 @@ public sealed partial class Glass : Grid
         CornerRadius = cr;
         Background = Mac.Acrylic(kind);
         _sheen.CornerRadius = cr;
-        _sheen.Background = Mac.Sheen(kind == GlassKind.Light ? 2.2 : kind == GlassKind.Selection ? 1.6 : 1);
+        _sheen.Background = Mac.Sheen(1);
+        _sheen.Opacity = 0;   // 磨砂：平时没有光泽，悬停才稍微亮一点
         _rim.CornerRadius = cr;
         _rim.BorderBrush = Mac.Rim(kind == GlassKind.Light);
         Children.Add(_sheen);
@@ -200,8 +196,8 @@ public sealed partial class Glass : Grid
         }
     }
 
-    /// <summary>悬停时光泽亮一点</summary>
-    public double Shine { set => _sheen.Opacity = value; }
+    /// <summary>悬停时稍微亮一点（0 = 不亮）</summary>
+    public double Shine { set => _sheen.Opacity = Math.Max(0, value - 1); }
 }
 
 /// <summary>

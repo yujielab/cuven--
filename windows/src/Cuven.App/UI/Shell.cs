@@ -76,7 +76,7 @@ public sealed partial class Shell : Grid, IDisposable
     public Shell()
     {
         Current = this;
-        Background = Mac.CanvasBrush;
+        Background = Mac.Clear;   // 每一页自己定底色：大图页实色，列表页半透明（透出窗口后面的磨砂）
         Children.Add(_host);
 
         // ── 侧边栏 ──

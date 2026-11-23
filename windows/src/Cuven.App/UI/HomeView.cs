@@ -24,6 +24,7 @@ public sealed partial class HomeView : View
 
     public HomeView()
     {
+        Background = Mac.CanvasBrush;
         _heroContent.ContentTransitions = new TransitionCollection { new ContentThemeTransition() };
         _hero.Children.Add(_heroContent);
         _col.Children.Add(_hero);

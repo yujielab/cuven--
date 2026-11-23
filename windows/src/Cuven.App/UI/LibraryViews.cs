@@ -18,6 +18,7 @@ public sealed partial class RequestsView : View
 
     public RequestsView()
     {
+        Background = Mac.FrostCanvas;
         var col = new StackPanel { Spacing = 10, Padding = new Thickness(0, Inset.Top - 8, 0, 48) };
         Inset.Track(_mine, (e, l) => e.Margin = new Thickness(l, 0, Inset.Right, 0));
         col.Children.Add(Inset.Track(Mac.LargeTitle("请求"), (e, l) => e.Margin = new Thickness(l, 0, Inset.Right, 0)));
@@ -60,7 +61,7 @@ public sealed partial class RequestsView : View
         g.ColumnSpacing = 16;
         g.Padding = new Thickness(12);
         g.CornerRadius = new CornerRadius(14);
-        g.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(16, 255, 255, 255));
+        g.Background = Mac.Acrylic(GlassKind.Regular);
         g.BorderBrush = Mac.Separator;
         g.BorderThickness = new Thickness(0.5);
         g.Children.Add(U.RoundImg(TmdbImage.Url(r.Poster, "w185"), 128, 6).With(b => b.Height = 96).At(0, 0));
@@ -100,6 +101,7 @@ public sealed partial class DownloadsView : View
 
     public DownloadsView()
     {
+        Background = Mac.FrostCanvas;
         var col = new StackPanel { Spacing = 10, Padding = new Thickness(0, Inset.Top - 8, 0, 48) };
         Inset.Track(_list, (e, l) => e.Margin = new Thickness(l, 0, Inset.Right, 0));
         col.Children.Add(Inset.Track(Mac.LargeTitle("下载"), (e, l) => e.Margin = new Thickness(l, 0, Inset.Right, 0)));
@@ -137,7 +139,7 @@ public sealed partial class DownloadsView : View
         g.ColumnSpacing = 16;
         g.Padding = new Thickness(12);
         g.CornerRadius = new CornerRadius(14);
-        g.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(16, 255, 255, 255));
+        g.Background = Mac.Acrylic(GlassKind.Regular);
         g.BorderBrush = Mac.Separator;
         g.BorderThickness = new Thickness(0.5);
         g.Children.Add(U.RoundImg(it.Poster, 128, 6).With(b => b.Height = 96).At(0, 0));
@@ -190,6 +192,7 @@ public sealed partial class AccountView : View
 {
     public AccountView()
     {
+        Background = Mac.FrostCanvas;
         var s = Settings.Shared;
         var col = new StackPanel { Spacing = 12, MaxWidth = 860, HorizontalAlignment = HorizontalAlignment.Left };
         Inset.Track(col, (e, l) => e.Padding = new Thickness(l, Inset.Top - 8, Inset.Right, 48));
@@ -247,13 +250,9 @@ public sealed partial class AccountView : View
         Children.Add(new ScrollViewer { Content = col, HorizontalScrollMode = ScrollMode.Disabled });
     }
 
-    static Border Card(UIElement child) => new()
-    {
-        Background = new SolidColorBrush(Windows.UI.Color.FromArgb(16, 255, 255, 255)), BorderBrush = Mac.Separator, BorderThickness = new Thickness(0.5),
-        CornerRadius = new CornerRadius(12), Padding = new Thickness(16, 12, 16, 12), Child = child,
-    };
+    static Glass Card(UIElement child) => new(12, GlassKind.Regular) { Content = new Border { Padding = new Thickness(16, 12, 16, 12), Child = child } };
 
-    static Border Setting(string title, string? desc, UIElement? control)
+    static Glass Setting(string title, string? desc, UIElement? control)
     {
         var g = U.Cols("*", "auto");
         g.ColumnSpacing = 24;
