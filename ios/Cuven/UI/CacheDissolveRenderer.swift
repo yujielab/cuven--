@@ -364,7 +364,7 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
         let light: Float = started ? Float(ramp(0.7, 2.3, Double(e)) * (1 - 0.92 * ramp(4.9, 6.2, Double(e)))) : 0
         let lightPulse: Float = reduce ? light * 0.8 : light
         let cardFade: Float = started ? Float(1 - ramp(3.6, 4.4, Double(e))) : 1
-        let keep = Float(pow(0.86, Double(dt) * 60))
+        let keep = Float(pow(0.82, Double(dt) * 60))
 
         return Uniforms(
             viewProj: proj * view,
@@ -373,7 +373,7 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
             timing: SIMD4(t, dt, front, fade),
             target: SIMD4(target, 0.12),
             screen: SIMD4(w, h, 0.6 * scale, lightPulse),        // 光线半宽（像素）：屏上约 1.2 点
-            params: SIMD4(0.75, 2.2, 1.0, Float(count)),
+            params: SIMD4(1.0, 1.6, 1.0, Float(count)),
             targetScreen: SIMD4(tx, ty, aspect, t),
             cardInfo: SIMD4(Self.halfW, Self.halfH, Self.halfT, reduce ? 1 : 0),
             trail: SIMD4(keep, 1.0, 0.38 * lightPulse, cardFade)

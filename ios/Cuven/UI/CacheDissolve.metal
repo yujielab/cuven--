@@ -141,9 +141,10 @@ kernel void cd_update(device CDParticle *ps [[buffer(0)]],
     float cardY = U.cardModel[3].y;
     // 0 = 卡那一高度，1 = 汇聚点那一高度
     float k = saturate((cardY - x.y) / max(cardY - U.target.y, 0.001));
-    float3 acc = curl * U.params.x * (1.0 - 0.5 * k)
+    // 往中轴收：从卡下面就开始收，越往下越紧 —— 整束光是一个越来越细的锥，到光源那儿收成一点
+    float3 acc = curl * U.params.x * (1.0 - 0.6 * k)
                + float3(0.0, -U.params.z, 0.0)
-               + float3(toT.x, 0.0, toT.z) * U.params.y * (0.25 + 2.0 * k * k)
+               + float3(toT.x, 0.0, toT.z) * U.params.y * (0.5 + 1.6 * k + 1.4 * k * k)
                + toT / max(d, 0.05) * (0.3 + 2.2 * k * k * k);
     v = v * exp(-dt * 1.3) + acc * dt;
     float sp = length(v);
@@ -214,7 +215,7 @@ fragment float4 cd_line_fragment(CDLineOut in [[stage_in]]) {
     float along = smoothstep(-1.0, -0.1, in.local.y);
     float a = across * across * mix(0.3, 1.0, along);
     // 每一条都很淡：几十条叠在一缕上才是一根亮的光纤，缕与缕之间留黑
-    return float4(in.color * a * 0.035, 0.0);
+    return float4(in.color * a * 0.03, 0.0);
 }
 
 // MARK: 卡
@@ -305,7 +306,7 @@ fragment float4 cd_trail_fragment(CDFullOut in [[stage_in]],
     float2 adv = float2((uv.x - U.targetScreen.x) * 0.0045, -0.0038);
     float3 p = prev.sample(s, uv + adv).rgb * U.trail.x;
     float3 n = lines.sample(s, uv).rgb;
-    return float4(p + n * 0.35, 1.0);
+    return float4(p + n * 0.22, 1.0);
 }
 
 /// 辉光的输入：亮的部分（光线 + 拖尾 + 卡上那条溶解光带），1/4 分辨率
@@ -315,7 +316,7 @@ fragment float4 cd_bright_fragment(CDFullOut in [[stage_in]],
                                    texture2d<float> card [[texture(2)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float3 c = lines.sample(s, in.uv).rgb + trails.sample(s, in.uv).rgb * 0.8;
-    c = max(c - 0.35, 0.0);
+    c = max(c - 0.5, 0.0);
     float3 k = card.sample(s, in.uv).rgb;
     c += max(k - 0.9, 0.0) * 1.5;
     return float4(c, 1.0);
@@ -371,7 +372,7 @@ fragment float4 cd_composite_fragment(CDFullOut in [[stage_in]],
     float flare = exp(-abs(d.y) / 0.005) * exp(-abs(d.x) / 0.30) * 0.75;
     float ang = atan2(d.y, d.x);
     float up = smoothstep(0.02, -0.08, d.y);                          // 光束只往上（画面里 y 向下）
-    float rays = pow(cd_noise2(float2(ang * 9.0, U.targetScreen.w * 0.12)), 4.0) * exp(-r / 0.20) * 0.28 * up;
+    float rays = pow(cd_noise2(float2(ang * 9.0, U.targetScreen.w * 0.12)), 4.0) * exp(-r / 0.20) * 0.18 * up;
     float3 ring = cd_spectral(fract(r * 7.0 + 0.2)) * exp(-pow((r - 0.12) / 0.018, 2.0)) * 0.10;
     float3 light = (float3(1.0, 0.97, 0.93) * (core + halo) + float3(0.82, 0.9, 1.0) * (wide + flare) + float3(0.9, 0.95, 1.0) * rays + ring) * I;
 
@@ -380,7 +381,7 @@ fragment float4 cd_composite_fragment(CDFullOut in [[stage_in]],
     float3 amb = ambCol * smoothstep(0.30, 1.05, uv.y) * U.trail.z;
 
     // 四周很淡的放射线（空间感），跟光源一起亮
-    float streak = pow(cd_noise2(float2(ang * 70.0, 2.0)), 10.0) * smoothstep(0.15, 0.9, r) * 0.06 * I;
+    float streak = pow(cd_noise2(float2(ang * 70.0, 2.0)), 10.0) * smoothstep(0.15, 0.9, r) * 0.035 * I;
 
     float3 c = cardC + streams + bloom + light + amb + streak;
     return float4(cd_aces(c * 1.05), 1.0);
