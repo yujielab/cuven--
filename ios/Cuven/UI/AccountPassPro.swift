@@ -1,18 +1,19 @@
 import SwiftUI
 
-// MARK: - 账户页「Cuven Pass Pro」一组（用户要求：在设置中允许启用 Cuven Pass Pro 服务）
+// MARK: - 账户页「Cuven Pass Pro」那几行（用户要求：在设置中允许启用 Cuven Pass Pro 服务；后来要求并进「网络」那张卡）
 //
-// 一张卡三行（和账户页别的组同一个样子：AccountGroup / AccountRow）：
+// 放在「网络」卡里网络速度、自动调整下面（NetworkSpeedCard），三行（AccountRow）：
 // · Cuven Pass Pro：开关（绿色）。开了以后影片经 Cuven 的加速节点传输（PassPro.swift）
 // · 加速节点：开着时才有——「已连接 · 延迟 38 毫秒」/「正在检测…」/「暂时不可用，正在使用普通线路」；点一下重新检测
 // · 测速对比：普通线路和 Pass Pro 各测一次，写「普通线路 23 Mbps · Pass Pro 61 Mbps」，快的那个是白字
-// 组下一行说明：开了会怎样、节点不可用时自动改回普通线路（不说 Worker / VPS 这些技术词：发行版文案规则）。
+// 不说 Worker / VPS 这些技术词（发行版文案规则）。
 
-struct PassProGroup: View {
+struct PassProRows: View {
     @State private var pass = PassPro.shared
 
     var body: some View {
-        AccountGroup(title: "Cuven Pass Pro") {
+        // 一个 VStack 包起来（不用 Group：Group 上的触感修饰会落到每一行上，各响一次）
+        VStack(spacing: 0) {
             AccountRow(icon: "bolt.fill", title: "Cuven Pass Pro", subtitle: "影片经加速节点传输") {
                 Toggle("Cuven Pass Pro", isOn: Binding(get: { pass.enabled }, set: { pass.setEnabled($0) }))
                     .labelsHidden()

@@ -127,10 +127,9 @@ struct AccountView: View {
                     VStack(alignment: .leading, spacing: 34) {
                         // 个人资料卡（账户页移植（网页版）：网页版账户页的第一张卡）
                         ProfileCard { profileSheet = $0 }
-                        // 网络速度（网页版的第二张卡：45 根竖条的滑块，在 iOS 上管正片缓冲多少秒，AccountUsage.swift）
+                        // 网络（网页版的第二张卡：45 根竖条的滑块，在 iOS 上管正片缓冲多少秒，AccountUsage.swift）；
+                        // Cuven Pass Pro（影片经加速节点传输，AccountPassPro.swift）并在这张卡里（用户要求）
                         NetworkSpeedCard()
-                        // Cuven Pass Pro（用户要求）：影片经加速节点（Worker → VPS → 你）传输，AccountPassPro.swift
-                        PassProGroup()
                         // 使用洞察 · 流量概览（网页版的第三张卡；数是这台设备真的下载了多少，不是网页版的随机数）
                         UsageInsightsCard()
                         watchingGroup
