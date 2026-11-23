@@ -304,13 +304,29 @@ final class LoginFlow {
         if rec?.hasPass != true {
             if case .found(let r) = await AccountAPI.fetchRecord(user) { rec = r } else { rec = nil }
         }
-        guard let rec, let pass = rec.pass, rec.hasPass else {
+        guard let rec, let pass = rec.pass, rec.hasPass, let key = await PasswordHash.key(password, pass) else {
             busy = false
             spinning = nil
             set(.signin, "无法读取账户资料，请稍后再试", .bad)
             return
         }
-        let ok = await PasswordHash.check(password, pass)
+        // 口令 v3：账号中心核对本机算好的 key（不发密码）；旧版账号中心不认、或者连不上时退回本机比对账户档里的摘要
+        var ok = false
+        var device: String?
+        switch await AccountAPI.session(username: user, key: key) {
+        case .ok(let d):
+            ok = true; device = d
+        case .wrong:
+            ok = false
+        case .throttled(let m):
+            busy = false
+            spinning = nil
+            set(.signin, m, .bad)
+            Haptics.error()
+            return
+        case .unsupported, .offline:
+            ok = !pass.hash.isEmpty && key == pass.hash
+        }
         busy = false
         spinning = nil
         guard ok else {
@@ -320,8 +336,8 @@ final class LoginFlow {
             return
         }
         set(.signin, "")
-        // 光学配对：顺手领一枚设备令牌（以后这台 iPhone 才能「扫描登录其他设备」；后台，失败不影响登录）
-        PairService.fetchDevice(username: user, password: password)
+        // 光学配对：设备令牌（以后这台 iPhone 才能「扫描登录其他设备」）。新版账号中心登录时就给了；旧版再去领一次
+        if let device { PairService.saveDevice(device) } else { PairService.fetchDevice(username: user, key: key) }
         succeed(user, email: rec.email ?? "", method: "password", kind: .login)
     }
 
@@ -486,7 +502,8 @@ final class LoginFlow {
         busy = true
         spinning = .code
         set(.code, "正在验证…")
-        let j = await AccountAPI.verifyCode(otpEmail, code: code)
+        // 带上用户名：邮箱是这个账户绑的就会多回一枚识别代码，接下来写账户档（设定 / 找回密码）要用
+        let j = await AccountAPI.verifyCode(otpEmail, code: code, username: intent == .login ? otpUser : ctx.name)
         busy = false
         spinning = nil
         guard j?.ok == true else {

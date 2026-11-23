@@ -77,7 +77,8 @@ struct AccountRecord: Codable {
     var created_at: String?
     var updated_at: String?
 
-    var hasPass: Bool { !(pass?.hash.isEmpty ?? true) && !(pass?.salt.isEmpty ?? true) }
+    /// 设过密码：有盐就算（账号中心开了 STRICT_AUTH 时公开的账户档不再带摘要，只有 salt / iter）
+    var hasPass: Bool { !(pass?.salt.isEmpty ?? true) }
 
     init(version: Int?, auth: String?, username: String?, email: String?, pass: PassHash?, webauthn: JSONValue?,
          created_at: String?, updated_at: String?) {
@@ -149,6 +150,14 @@ enum PasswordHash {
         }.value
     }
 
+    /// 口令 v3：本机算 PBKDF2 得到 key（base64url），只把 key 发给账号中心核对；密码本身不离开设备
+    static func key(_ password: String, _ pass: AccountRecord.PassHash) async -> String? {
+        guard !password.isEmpty, let salt = Base64URL.decode(pass.salt), !salt.isEmpty else { return nil }
+        let iter = pass.iter ?? iterations
+        let k = await Task.detached(priority: .userInitiated) { derive(password, salt: salt, iterations: iter) }.value
+        return k.isEmpty ? nil : Base64URL.encode(k)
+    }
+
     static func make(_ password: String) async -> AccountRecord.PassHash {
         var salt = Data(count: 16)
         _ = salt.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }
@@ -197,6 +206,20 @@ enum AccountAPI {
 
     static func url(_ path: String) -> URL? { URL(string: base + path) }
 
+    // 识别代码（c1.…，5 分钟）：登录 / 验证码核对时账号中心给的。写账户档、邮箱映射时带上（Authorization: Bearer），
+    // 账号中心开了 STRICT_AUTH 以后，改已有账户必须有它
+    private static let identityLock = NSLock()
+    nonisolated(unsafe) private static var identity: (code: String, until: Date)?
+    static func remember(code: String?) {
+        guard let code, code.hasPrefix("c1.") else { return }
+        identityLock.lock(); identity = (code, Date().addingTimeInterval(280)); identityLock.unlock()
+    }
+    private static var freshIdentity: String? {
+        identityLock.lock(); defer { identityLock.unlock() }
+        guard let i = identity, i.until > Date() else { return nil }
+        return i.code
+    }
+
     private static func getJSON<T: Decodable>(_ path: String, as: T.Type) async throws -> (Int, T?) {
         guard let u = url(path) else { throw URLError(.badURL) }
         let (data, resp) = try await session.data(from: u)
@@ -209,6 +232,7 @@ enum AccountAPI {
         var req = URLRequest(url: u)
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if method != "GET", let code = freshIdentity { req.setValue("Bearer " + code, forHTTPHeaderField: "Authorization") }
         req.httpBody = try? JSONEncoder().encode(json)
         guard let (data, resp) = try? await session.data(for: req) else { return (0, nil) }
         return ((resp as? HTTPURLResponse)?.statusCode ?? 0, data)
@@ -265,6 +289,7 @@ enum AccountAPI {
         var error: String?
         var message: String?
         var attemptsLeft: Int?
+        var code: String?          // 带了用户名、邮箱是他绑的：识别代码
     }
 
     static func sendCode(_ email: String) async -> CodeReply? {
@@ -274,11 +299,41 @@ enum AccountAPI {
         return try? JSONDecoder().decode(CodeReply.self, from: data)
     }
 
-    static func verifyCode(_ email: String, code: String) async -> CodeReply? {
-        struct Body: Encodable { var email: String; var code: String }
-        let (status, data) = await send("POST", "/verify-code", json: Body(email: email, code: code))
+    static func verifyCode(_ email: String, code: String, username: String? = nil) async -> CodeReply? {
+        struct Body: Encodable { var email: String; var code: String; var username: String? }
+        let (status, data) = await send("POST", "/verify-code", json: Body(email: email, code: code, username: username))
         guard status > 0, let data else { return nil }
-        return try? JSONDecoder().decode(CodeReply.self, from: data)
+        let r = try? JSONDecoder().decode(CodeReply.self, from: data)
+        if r?.ok == true { remember(code: r?.code) }
+        return r
+    }
+
+    /// 口令参数（salt / iter）：新版账号中心有 /auth/params，旧版从账户档里读
+    static func passParams(_ name: String) async -> AccountRecord.PassHash? {
+        struct P: Decodable { var ok: Bool?; var algo: String?; var iter: Int?; var salt: String? }
+        if let (code, p) = try? await getJSON("/auth/params/" + component(name), as: P.self), code == 200, let p, let salt = p.salt, !salt.isEmpty {
+            return .init(algo: p.algo, iter: p.iter, salt: salt, hash: "")
+        }
+        if case .found(let r) = await fetchRecord(name), let pass = r?.pass, !pass.salt.isEmpty { return pass }
+        return nil
+    }
+
+    enum SessionResult { case ok(device: String?), wrong, throttled(String), unsupported, offline }
+
+    /// 口令 v3：把本机算好的 key 交给账号中心核对（顺便领设备令牌、记下识别代码）。
+    /// 旧版账号中心不认 key（回 bad_request）、服务端出错 → unsupported：调用方退回本机比对
+    static func session(username: String, key: String) async -> SessionResult {
+        struct Body: Encodable { var username: String; var key: String; var device: Bool }
+        struct Reply: Decodable { var ok: Bool?; var code: String?; var device: String?; var error: String?; var message: String? }
+        let (status, data) = await send("POST", "/session", json: Body(username: username, key: key, device: true))
+        guard status > 0, let data else { return .offline }
+        guard let r = try? JSONDecoder().decode(Reply.self, from: data) else { return .unsupported }
+        if r.ok == true { remember(code: r.code); return .ok(device: r.device) }
+        switch r.error {
+        case "bad_credentials": return .wrong
+        case "rate_limited": return .throttled(r.message ?? "尝试太多次了，15 分钟后再试")
+        default: return .unsupported
+        }
     }
 
     /// 账户通知：收件人 / IP / 设备 / 时间由服务端解析；失败不影响任何流程
