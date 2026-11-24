@@ -1,5 +1,7 @@
 /**
- * Cuven 请求添加 Worker（tj.cuven.us）v2.8
+ * Cuven 请求添加 Worker（tj.cuven.us）v2.8.1
+ *
+ * v2.8.1：按年份列（/app/years 的每一格、/app/catalog 带 year）问影片库的 /api/catalog 多带 ystrict=1：原因 = 影片库按「任何一个发行帖的年份」筛（r.ys），2020 那一页 24 部里只有 7 部是 2020 年上映的、total 虚高，App 在本机按年份筛完剩没几部；改成要影片库只给这一年上映的（老版本影片库不认，照旧宽的、App 照旧在本机筛）；VER 跟着改，/app/years 两条缓存 key 带版本号，部署前缓存的宽格子不再用
  *
  * v2.8：用上影片库 v7.2、传输 Worker 911 新给的几处（回包里没有这些字段 = 老版本，照 2.7 原样走；D1 的表不变，App 老接口不变，多一个 /app/years）
  *   · 推送幂等：推送结果不明（影片库回 unsure）或者这一下调用暂时性失败（超时、断线、5xx），记下 r.d.pushTry = { tid, btih, at }；
@@ -218,7 +220,7 @@
  * 控制面板接口（x-admin-key: ADMIN_KEY）：/admin/api/state · cfg · pk · links · req · add · tick
  */
 
-const VER = 'tj 2.8';
+const VER = 'tj 2.8.1';
 const MIN = 60000, HOUR = 3600000, DAY = 86400000;
 const LIMIT = {
   userActive: 50,         // 一个用户同时进行中的请求（2.6：请求中心一次能提交 50 部）
@@ -2643,6 +2645,9 @@ async function appCatalog(env, Q){
     min: Q.get('min') != null ? String(Number(Q.get('min')) || 0) : (q || byYear ? '0' : '6') });
   if (q) qs.set('q', q);
   if (byYear) qs.set('year', year);
+  /* 2.8.1：按年份列带 ystrict=1，要影片库只给这一年上映的（以前它按「任何一个发行帖的年份」筛，一页里大半是别的年份的）。
+     老版本影片库不认它：照旧回宽的，App 照旧在本机按年份筛 */
+  if (byYear) qs.set('ystrict', '1');
   const c = context(env, CFG_DEF, 6);
   const srcs = want === 'all' ? ['movie', 'tv'] : [want];
   const pages = await Promise.all(srcs.map(s => lb(c, '/api/catalog?src=' + s + '&' + qs).then(j => ({ s, j })).catch(e => ({ s, e }))));
@@ -2686,7 +2691,7 @@ async function appDetail(env, Q){
    · 请求进度一个源只查一次 D1（latestFor，json_each 一个参数），不是一年一次
    · 拼好的回包放进 Cache API（key = 参数 + 这一个小时 + 版本，放到用到的格子里最早过期的那一格为止，最多 5 分钟）；带弱 ETag，没变回 304
    · 2.8 复查：影片库的目录页另外一格（源 + 年份）一份缓存（yearsCells），什么参数都共用 —— 见 yearsCells
-   条目和 /app/catalog 一样（slimItem + req）。own = hide、min = 0、sort = new：一年的全部、片库里还没有的、新的在前 */
+   条目和 /app/catalog 一样（slimItem + req）。own = hide、min = 0、sort = new、ystrict = 1（2.8.1）：一年的全部（只要这一年上映的）、片库里还没有的、新的在前 */
 function yearsQuery(Q){
   const thisYear = new Date(now()).getUTCFullYear();
   /* 2.8 复查：年份只认今年往前 8 年到明年（App 按本机日历「今年往前数 7 年」，跨年那几个小时会比这边早 / 晚一年），
@@ -2732,7 +2737,8 @@ async function yearsCells(env, request, ctx, cache, cells){
   if (!need.length) return store;
   const c = context(env, CFG_DEF, LIMIT.yearsMax * 2);
   c.end = c.t0 + LIMIT.yearsMs;
-  const qs = (yr) => new URLSearchParams({ own: 'hide', min: '0', sort: 'new', page: '1', year: String(yr) });
+  /* 2.8.1：带 ystrict=1（只要这一年上映的，同 /app/catalog）；缓存 key 带版本号（VER），部署前缓存的宽格子换了版本就不再用 */
+  const qs = (yr) => new URLSearchParams({ own: 'hide', min: '0', sort: 'new', page: '1', year: String(yr), ystrict: '1' });
   const got = await pool(6, need.map(x => () => lb(c, '/api/catalog?src=' + x.s + '&' + qs(x.yr)).then(j => ({ j }), e => ({ e }))));
   const at = now();
   need.forEach((x, i) => {

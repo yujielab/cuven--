@@ -3152,6 +3152,102 @@ env.DB.prepare = prepSt;
   delete globalThis.caches;
 }
 
+/* ── 2.8.1 按年份列带 ystrict=1：影片库按「任何一个发行帖的年份」筛（实测 year=2020 新的在前第一页 24 部电影里只有 7 部是 2020 年上映的、
+      total 虚高），/app/years 的每一格、/app/catalog 带 year 的都要影片库只给这一年上映的；不带 year、搜索、不像年份的照旧不带。
+      老版本影片库不认 ystrict（照旧回宽的）：这边原样转，App 照旧在本机按年份筛。
+      /app/years 两条缓存 key（目录页一格一份、拼好的回包）带版本号：部署前（tj 2.8）缓存的宽格子、拼好的回包部署后不再用 ── */
+{
+  env.DB.db.exec('DELETE FROM tj_req');
+  advance(3600e3 - (Date.now() % 3600e3) + 1000);
+  const Y = new Date(Date.now()).getUTCFullYear(), hr = Math.floor(Date.now() / 3600e3);
+  const CACHE = new Map();
+  globalThis.caches = { default: {
+    async match(k){ const e = CACHE.get(String(k)); return e && e.exp > Date.now() ? new Response(e.body, { headers: e.headers }) : undefined; },
+    async put(k, res){ const ma = /max-age=(\d+)/.exec(res.headers.get('cache-control') || ''); const body = await res.text();
+                       CACHE.set(String(k), { body, headers: Object.fromEntries(res.headers), exp: Date.now() + (ma ? +ma[1] : 0) * 1000 }); },
+  } };
+  /* 影片库：每一年每个源 30 部，一半是这一年上映的，一半是前一年上映的（这一年又有人发了新的版本，r.ys 里有这一年）。
+     strict = 认 ystrict 的影片库（带了就只给这一年上映的那一半，total 也只算它们）；false = 老版本（不认，照旧回宽的） */
+  let strict = true;
+  const yq = [];
+  W.hook = async (u) => {
+    if (u.host !== 'lb.cuven.us' || u.pathname !== '/api/catalog' || !u.searchParams.has('year')) return;
+    const s = u.searchParams.get('src'), y = +u.searchParams.get('year');
+    yq.push(Object.fromEntries(u.searchParams));
+    W.lastCatalogQ = u.searchParams;
+    const loose = Array.from({ length: 30 }, (_, i) => ({ id: (s === 'tv' ? 90000 : 80000) + (y % 100) * 100 + i, title: s + y + '#' + i,
+      year: String(i % 2 ? y - 1 : y), vote: 7 }));
+    const items = strict && u.searchParams.get('ystrict') === '1' ? loose.filter(x => +x.year === y) : loose;
+    return J({ total: items.length, hidden: 0, page: 1, pages: 1, items, src: s });
+  };
+  const pend = [];
+  const years = async (qs = '') => {
+    const r = await worker.fetch(new Request('https://tj.cuven.us/app/years' + qs), env, { waitUntil(p){ pend.push(p); } });
+    await Promise.all(pend.splice(0));
+    return { s: r.status, j: await r.json() };
+  };
+  const [, vj] = await call('GET', '/version');
+  ok(vj && vj.ver === 'tj 2.8.1', 'VER 是 tj 2.8.1', vj);
+
+  /* 部署之前（tj 2.8）这一个小时里缓存下的：目录页一格一份（宽的、还新鲜）、默认参数拼好的回包。key 和 2.8 算出来的一模一样 */
+  const oldV = encodeURIComponent('tj 2.8'), base = 'https://tj.cuven.us';
+  const stale = {};
+  for (const s of ['movie', 'tv']) for (let yr = Y; yr >= Y - 6; yr--)
+    stale[s + ':' + yr] = { at: Date.now(), items: [{ id: 1, src: s, title: 'stale', year: String(yr - 3), poster: '', vote: 0, res: '', hb: 0, rb: 0, own: 0 }],
+                            n: 1, pages: 9, total: 999 };
+  const seed = (k, body) => CACHE.set(k, { body, headers: { 'content-type': 'application/json; charset=utf-8', etag: 'W/"stale"' }, exp: Date.now() + 300e3 });
+  seed(base + '/app/years/cells?h=' + hr + '&v=' + oldV, JSON.stringify({ cells: stale }));
+  seed(base + '/app/years?src=all&from=' + (Y - 6) + '&to=' + Y + '&per=24&h=' + hr + '&v=' + oldV, JSON.stringify({ years: {}, stale: 1 }));
+
+  let r = await years();
+  const cellsOf = (j) => Object.entries(j.years).flatMap(([yr, c]) => Object.entries(c).map(([s, v]) => ({ yr, s, v })));
+  ok(r.s === 200 && !r.j.stale && yq.length === 14 && cellsOf(r.j).every(x => x.v.items && x.v.items.every(it => it.title !== 'stale') && x.v.total !== 999),
+     '2.8.1：部署前（tj 2.8）缓存的宽格子、拼好的回包都不再用（缓存 key 带版本号，换了）：14 格全部重问影片库', { s: r.s, stale: r.j.stale, calls: yq.length });
+  ok(yq.length === 14 && yq.every(q => q.ystrict === '1' && q.own === 'hide' && q.min === '0' && q.sort === 'new' && q.page === '1' && /^\d{4}$/.test(q.year)),
+     '2.8.1：/app/years 问影片库的每一格都带 ystrict=1（own / min / sort / page / year 照旧）', yq.slice(0, 2));
+  ok(cellsOf(r.j).length === 14 && cellsOf(r.j).every(x => x.v.items.length === 15 && x.v.total === 15 && x.v.items.every(it => it.year === x.yr)),
+     '认 ystrict 的影片库：每一格只有这一年上映的，total 也是这一年的（以前一半是前一年的、total 虚高）', cellsOf(r.j).slice(0, 1));
+  const keys = [...CACHE.keys()].filter(k => !k.endsWith('&v=' + oldV));
+  ok(keys.length === 2 && keys.some(k => /\/app\/years\/cells\?/.test(k)) && keys.some(k => /\/app\/years\?/.test(k)) &&
+     keys.every(k => k.endsWith('&v=' + encodeURIComponent(vj.ver))),
+     '2.8.1：两条缓存 key（目录页一格一份、拼好的回包）都带新的版本号，和 tj 2.8 的不是同一条', [...CACHE.keys()]);
+  yq.length = 0;
+  const again = await years();
+  ok(again.s === 200 && yq.length === 0 && JSON.stringify(again.j.years) === JSON.stringify(r.j.years), '新的缓存照常用：再要不问影片库', { calls: yq.length });
+
+  /* /app/catalog：带像年份的 year 才带 ystrict=1（翻页、明说 min 也带）；不带 year、搜索、不像年份的照旧不带 */
+  yq.length = 0;
+  let [s, c] = await call('GET', '/app/catalog?src=all&year=' + (Y - 6));
+  ok(s === 200 && yq.length === 2 && yq.every(q => q.ystrict === '1' && q.year === String(Y - 6) && q.min === '0') &&
+     c.items.length === 30 && c.total === 30 && c.items.every(x => x.year === String(Y - 6)),
+     '2.8.1：/app/catalog 带 year 也带 ystrict=1（电影、剧集两个源都带），认它的影片库只给这一年上映的', { calls: yq, n: c.items && c.items.length, total: c.total });
+  [s, c] = await call('GET', '/app/catalog?src=movie&year=' + Y + '&page=2&min=6');
+  ok(s === 200 && W.lastCatalogQ.get('ystrict') === '1' && W.lastCatalogQ.get('page') === '2' && W.lastCatalogQ.get('min') === '6',
+     '按年份翻页、明说 min：一样带 ystrict=1，page / min 照给的', String(W.lastCatalogQ));
+  for (const qs of ['src=movie', 'src=all&q=' + encodeURIComponent('游戏'), 'src=movie&year=abc', 'src=tv&year=1850', 'src=movie&sort=vote&min=7']){
+    W.lastCatalogQ = null;
+    [s] = await call('GET', '/app/catalog?' + qs);
+    ok(s === 200 && W.lastCatalogQ && !W.lastCatalogQ.has('ystrict') && !W.lastCatalogQ.has('year'), '不按年份列（' + qs + '）：照旧不带 ystrict', W.lastCatalogQ && String(W.lastCatalogQ));
+  }
+
+  /* 老版本影片库（不认 ystrict，照旧按任何一个发行帖的年份回宽的）：这边原样转，不在这边筛（App 照旧在本机按年份筛），和 2.8 一样 */
+  strict = false;
+  CACHE.clear();
+  yq.length = 0;
+  r = await years('?src=movie&per=40');
+  const c0 = r.j.years[Y] && r.j.years[Y].movie;
+  ok(r.s === 200 && yq.length === 7 && yq.every(q => q.ystrict === '1') && c0 && c0.items.length === 30 && c0.total === 30 &&
+     c0.items.filter(x => x.year === String(Y - 1)).length === 15,
+     '老版本影片库不认 ystrict：/app/years 照旧原样转回来的（前一年的也在，total 照它给的），App 照旧在本机筛', { calls: yq.length, n: c0 && c0.items.length });
+  [s, c] = await call('GET', '/app/catalog?src=movie&year=' + Y);
+  ok(s === 200 && c.items.length === 30 && c.total === 30 && c.items.filter(x => x.year === String(Y - 1)).length === 15,
+     '老版本影片库：/app/catalog 带 year 也照旧原样转', { n: c.items && c.items.length, total: c.total });
+
+  W.hook = null;
+  W.lastCatalogQ = null;
+  delete globalThis.caches;
+}
+
 /* ── 共用的 D1：别人的表原样不动，自己的表缺的列补上了 ── */
 {
   const theirs = env.DB.db.prepare("SELECT v FROM kv WHERE k = 'theirs'").get();
