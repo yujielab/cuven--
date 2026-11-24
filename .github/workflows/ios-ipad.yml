@@ -19,7 +19,7 @@ concurrency:
 jobs:
   frames:
     runs-on: xcode-27
-    timeout-minutes: 60
+    timeout-minutes: 85
     steps:
       - uses: actions/checkout@v4
 
@@ -90,9 +90,10 @@ jobs:
             grep -E "Test Case|passed|failed|error:" "$RUNNER_TEMP/$1.log" | tail -10
             xcrun simctl shutdown "$2" 2>/dev/null
           }
-          run a16 "${A16:-}"
-          run p11 "${P11:-}"
+          # 13 寸先跑（以前排在最后，常被下一次推送取消，一直没截到）
           run p13 "${P13:-}"
+          run p11 "${P11:-}"
+          run a16 "${A16:-}"
 
       - name: 截图提交到 refs/ci/ios-ipad/<分支>
         if: always()
