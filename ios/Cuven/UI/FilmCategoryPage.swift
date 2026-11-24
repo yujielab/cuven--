@@ -270,8 +270,10 @@ private struct CategoryCardArt {
 }
 
 /// 顶上三张卡的图：用户给的（「图片就绪了」），四页共用一套，从左到右。传在 data.cuven.us/logo/<名字>.png，
-/// 走 App 的图片管线（内存 + 磁盘缓存）。要换图：把新图传上去、改下面的地址（顺序就是从左到右，label 是旁白念的）；
-/// 新图也要 3 : 4，四周的白边别超过宽的 2.8%（放大 zoom 裁掉的就这么多），不带白边的也行
+/// 走 App 的图片管线（内存 + 磁盘缓存）。要换图：把新图换个名字传上去、改下面的地址（顺序就是从左到右，label 是旁白念的）——
+/// 同一个地址换了内容，已经存进手机磁盘缓存的不会重新下载；
+/// 新图也要 3 : 4，白边左右各不超过宽的 2.8%、上下各不超过高的 2.8%（放大 zoom 每边裁掉的就这么多），
+/// 图里那张卡的圆角不比现在这三张大（约卡宽的 10%）；不带白边的也行
 private struct CategoryCardRemote {
     let url: URL?
     let label: String
@@ -286,7 +288,7 @@ private struct CategoryCardRemote {
         CategoryCardRemote(url: URL(string: "https://data.cuven.us/logo/33B0C220-FFC8-49B8-856B-0174DC1C428D.png"), label: "F1"),
     ]
 
-    /// 用户的图是画在白底上的一张卡（四周约 1.4–2.3% 的白边，自己的圆角约宽的 8–10%）：
+    /// 用户的图是画在白底上的一张卡（白边左右约宽的 1.4–2.3%、上下约高的 1.2–2.1%，自己的圆角约卡宽的 9–10%）：
     /// 铺满以后绕中心放大 6%、再按卡宽 11% 的大圆角裁（CategoryCardFace），白边、白角都落在外面
     static let zoom: CGFloat = 1.06
 }
