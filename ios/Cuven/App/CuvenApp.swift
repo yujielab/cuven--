@@ -135,12 +135,7 @@ struct RootView: View {
         // 标签栏不在滚动时缩小：HIG 只在标签栏带附件（迷你播放器之类）时这么做（C10）；标签名一字一词（C8）
         .onChange(of: tab) { _, _ in Haptics.selection() }
         .onChange(of: model.searchRequest) { _, q in if q != nil { tab = .search } }
-        // 详情页上已经加进请求中心的那部再按一下：切到「请求」去确认
-        .onChange(of: RequestBasket.shared.openCenter) { _, go in
-            guard go else { return }
-            tab = .requests
-            RequestBasket.shared.openCenter = false
-        }
+        .modifier(BasketOpensRequests(tab: $tab))
         // 分享来的链接（隔空投送的 cuven://movie/…）：切到主页、推进那一部的详情页（DeepLink）
         .onOpenURL { url in
             tab = .home
@@ -220,5 +215,18 @@ enum LayoutLog {
         guard key != last else { return }
         last = key
         Perf.log("layout " + key)
+    }
+}
+
+/// 详情页上已经加进请求中心的那部再按一下：切到「请求」去确认（单独一个修饰器：RootView 那一长串修饰器再长，编译器就推不动类型了）
+private struct BasketOpensRequests: ViewModifier {
+    @Binding var tab: AppTab
+
+    func body(content: Content) -> some View {
+        content.onChange(of: RequestBasket.shared.openCenter) { _, go in
+            guard go else { return }
+            tab = .requests
+            RequestBasket.shared.openCenter = false
+        }
     }
 }
