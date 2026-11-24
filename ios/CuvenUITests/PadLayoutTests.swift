@@ -28,9 +28,25 @@ final class PadLayoutTests: XCTestCase {
         let films = XCUIApplication()
         films.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-CuvenDemo", "YES", "-CuvenAllFilmsPreview", "YES"]
         films.launch()
-        if films.segmentedControls["all-films-mode"].firstMatch.waitForExistence(timeout: 20) {
+        let mode = films.segmentedControls["all-films-mode"].firstMatch
+        if mode.waitForExistence(timeout: 20) {
             sleep(2)
             snap("pad-\(tag)-6-allfilms")
+            // 可申请那一边（和可立即播放同一种横卡）
+            let req = mode.buttons["可申请"].firstMatch
+            if req.waitForExistence(timeout: 4) {
+                req.tap(); sleep(3)
+                snap("pad-\(tag)-7-requestable")
+                mode.buttons["可立即播放"].firstMatch.tap(); sleep(2)
+            }
+            // 详情页：横拿时简介和影片详细信息并排两栏
+            let card = films.buttons["all-films-movie"].firstMatch
+            if card.waitForExistence(timeout: 6) {
+                card.tap(); sleep(4)
+                snap("pad-\(tag)-8-detail")
+                films.swipeUp(); sleep(2)
+                snap("pad-\(tag)-9-detail-info")
+            }
         }
     }
 

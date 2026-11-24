@@ -670,16 +670,28 @@ struct DetailScaffold<Episodes: View>: View {
                     hero(m, width: fullW, height: heroH, insets: insets, barBottom: barBottom)
                     // 一组一行粗体标题 + 一张卡（参考图）；分区之间同一种留白（F3、F12）
                     VStack(alignment: .leading, spacing: m.shelfGap) {
-                        if let overview, !overview.isEmpty {
+                        if Self.twoColumns(m) && hasOverview && !stats.isEmpty {
+                            // iPad 横拿（窗口 1100 点以上）：简介和影片详细信息并排两栏，不再一张 720 宽的卡、右边空一大块
+                            HStack(alignment: .top, spacing: (m.gutter * 2.5).rounded()) {
+                                column(m, "简介") {
+                                    DetailDescriptionCard(title: title, genres: genres, overview: overview ?? "",
+                                                          director: director, palette: palette)
+                                }
+                                column(m, "影片详细信息") {
+                                    DetailStatsGrid(stats: stats, palette: palette, wide: false)
+                                }
+                            }
+                            .padding(.horizontal, m.margin)
+                        } else if hasOverview {
                             group(m, "简介") {
-                                DetailDescriptionCard(title: title, genres: genres, overview: overview,
+                                DetailDescriptionCard(title: title, genres: genres, overview: overview ?? "",
                                                       director: director, palette: palette)
                             }
                         }
                         episodes(m)
                         if !trailers.isEmpty || stills.count >= 2 { mediaSection(m) }
                         if !cast.isEmpty { castSection(m) }
-                        if !stats.isEmpty {
+                        if !stats.isEmpty && !(Self.twoColumns(m) && hasOverview) {
                             group(m, "影片详细信息") {
                                 DetailStatsGrid(stats: stats, palette: palette, wide: m.wide)
                             }
@@ -756,6 +768,13 @@ struct DetailScaffold<Episodes: View>: View {
 
     /// 剧照浏览台里放出来的剧照（最多 12 张，和网页版一样）
     private var stillShown: [String] { Array(stills.prefix(12)) }
+
+    private var hasOverview: Bool { !(overview ?? "").isEmpty }
+
+    /// iPad 横拿（大一档以上、窗口 1100 点以上）：简介、影片详细信息并排
+    static func twoColumns(_ m: DSMetrics) -> Bool {
+        UIDevice.current.userInterfaceIdiom == .pad && m.width >= 1100
+    }
 
     // MARK: 头部
 
@@ -913,6 +932,14 @@ struct DetailScaffold<Episodes: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// 并排两栏里的一栏：标题 + 卡，宽度对半分（外面那一层管左右边距）
+    private func column<Content: View>(_ m: DSMetrics, _ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: m.titleGap + 4) {
+            DetailGroupTitle(title: title, route: nil)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
 
     /// 预告片与剧照（用户要求：两样现在是同一种卡，合成一组、不再分开，同一横排里用间距分开）：
     /// 先是预告片（点一张全屏放，从这一段开始，左右滑换下一段），隔一段宽一点的空（卡间距的 2.5 倍），再是剧照（点一张全屏看大图，
