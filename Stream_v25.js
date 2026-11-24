@@ -1,5 +1,17 @@
 /**
- * Dropbox Video Proxy — Cloudflare Worker (v25.3 · 2026-11-21)
+ * Dropbox Video Proxy — Cloudflare Worker (v25.4 · 2026-11-24)
+ * ────────────────────────────────────────────────────────────────
+ * v25.4 —— 剧集传进 /auto/ram2（用户要求：请求中心攒批确认、凑够 16 部一起传；电影路径还是 /auto，剧集改成 /auto/ram2）
+ *
+ *   ▸ /auto/ram2 是剧集那一层：它下面的每个子文件夹是一季（名字里带 [auto-tv…] 追踪码）——
+ *     一集也算、不看有没有集号 / 季号；ram2 这个文件夹自己从来不当成一部剧（以前会把整层认成一部叫「ram2」的剧、
+ *     追踪码也跟着丢了）。散放在这一层的文件不算（只有带 [auto-m…] 的照追踪码当电影）。
+ *   ▸ 电影照旧直接放在 /auto；以前直接放在 /auto 下面的剧集文件夹照旧认（v25.1 / v25.3 的规则一点没变）。
+ *   ▸ /api/auto/sync：item=<名字>&tv=1 在 /auto/ram2 里也找得到（名字是那一季的文件夹名，写成 ram2/<名字> 也认；
+ *     问 ram2 自己永远是 false）；code= / tmdb= 一样找得到 /auto/ram2 里的。回包多一个 tvSub（剧集那一层的名字）。
+ *   ▸ 新变量：AUTO_TV_SUB（剧集那一层的名字，默认 ram2，和传输 Worker 的 AUTO_TV_DIR、请求添加的 tvSub 一致；
+ *     设 off 关掉分层，/auto 照 v25.3 的样子认）。这一层已经在 TV_FOLDER 里面的，本体就扫得到，不重复叠。
+ *
  * ────────────────────────────────────────────────────────────────
  * v25.3 —— 追踪码优先（用户要求：优先识别 auto 的唯一 TMDB 码，快速核对、正确添加影片和剧集）
  *
@@ -589,6 +601,7 @@
  *   DROPBOX_REFRESH_TOKEN, DROPBOX_APP_KEY, DROPBOX_APP_SECRET
  *   ROOT_FOLDER, AUTH_SECRET, TMDB_API_KEY
  *   AUTO_FOLDER（v25.1，默认 /auto；off 关掉）、AUTO_SYNC_KEY（可选：/api/auto/sync 的口令）
+ *   AUTO_TV_SUB（v25.4，/auto 下面剧集那一层的名字，默认 ram2；off 关掉分层）
  *   STREAM_SIGN_TTL（可选：签名直链有效期秒数，默认 43200 = 12h。
  *     外部播放器把 URL 存进片库长期复用的场景可调大，如 604800 = 7d；
  *     TTL 越长，单条泄露链接的可用窗口越大 —— 按威胁模型权衡）
@@ -2843,6 +2856,7 @@ function kickWarm(env, ctx) {
 //  用户要求：在 auto 文件夹时就立即可用 —— 片库把 /auto 当成「待归档」的一层叠上去：
 //    · /auto 下面直接放的视频 = 电影；一个文件夹里只有一个视频、文件名没有集号、文件夹名没有季号 = 电影
 //    · 其余的一级文件夹（好几个视频 / 有集号 / 有季号）= 剧集的一季（tvScan 收进剧集表）
+//    · v25.4：/auto/ram2（AUTO_TV_SUB）是剧集那一层 —— 它下面的每个子文件夹一季，ram2 自己不是剧
 //  电影那一层存在快照的 auto 字段里，不混进 videos：增量游标、重复影片巡检（会删文件）、首页大图 / 精选只看本体；
 //  /api/all 和库指纹 g 才把它算进来。/auto 已经在 ROOT_FOLDER（TV_FOLDER）里面的，本体就扫得到，不重复叠。
 
@@ -2861,6 +2875,24 @@ const pathUnder = (p, dir) => {
 const autoMovieRoot = env => { const a = autoRoot(env); return a && !pathUnder(a, env.ROOT_FOLDER || '') ? a : ''; };
 /** 剧集要叠的那一层：/auto 已经在 TV_FOLDER 里面就不叠 */
 const autoTvRoot = env => { const a = autoRoot(env); return a && !pathUnder(a, tvRoot(env)) ? a : ''; };
+/** v25.4：/auto 下面剧集那一层的名字（AUTO_TV_SUB，默认 ram2；没设、设成空串也是 ram2，和传输 Worker 的 AUTO_TV_DIR 一样）。
+    off / 0 / false / none → ''：不分层，/auto 照 v25.3 的样子认。只认一级名字：带斜杠的、. / .. 不认，用默认的 ram2 */
+function autoTvSub(env) {
+  const raw = String(env.AUTO_TV_SUB ?? '').trim().replace(/^\/+|\/+$/g, '');
+  if (/^(off|0|false|no|none)$/i.test(raw)) return '';
+  return !raw || raw.includes('/') || raw === '.' || raw === '..' ? 'ram2' : raw.normalize('NFC');
+}
+/** 这一级名字是不是剧集那一层（NFC + 不分大小写；sub 为空 = 不分层，永远不是） */
+const isTvSub = (seg, sub) => !!sub && String(seg || '').normalize('NFC').toLowerCase() === sub.toLowerCase();
+/** v25.4：/auto 里一个条目的名字（请求添加 Worker 传进来、在 /api/auto/sync 里问的那个）：
+    /auto 下面第一级；在剧集那一层（/auto/ram2）里的是第二级 —— ram2 自己不是条目。
+    剧集按季拆开时路径后面的 #S2 不算进名字。回 { name, sub（剧集那一层的名字，照 Dropbox 的大小写；不在这一层 = ''） }；不在 /auto 里 → null */
+function autoItemOf(p, aroot, sub) {
+  if (!aroot || !pathUnder(p, aroot)) return null;
+  const rel = String(p).replace(/#S\d+$/, '').slice(aroot.length + 1).split('/');
+  if (isTvSub(rel[0], sub)) return rel.length > 1 && rel[1] ? { name: rel[1], sub: rel[0] } : null;
+  return rel[0] ? { name: rel[0], sub: '' } : null;
+}
 /** 叠上 /auto 那一层以后的全部电影（库指纹、/api/auto/sync 用；巡检、精选只用 d.videos） */
 const snapVideos = d => (d?.auto?.videos?.length ? (d.videos || []).concat(d.auto.videos) : (d?.videos || []));
 
@@ -2879,10 +2911,22 @@ const AUTO_EP_FILE = /(?:^|[^a-z0-9])S\d{1,2}[ ._-]?E\d{1,4}(?!\d)|(?:^|[^a-z0-9
 // 文件夹名像一季：S02 / Season 2 / 第二季 / 全 10 集 / Complete
 const AUTO_SEASON_DIR = /(?:^|[^a-z0-9])S\d{1,2}(?![\d])|\bSeason\s*\d{1,2}\b|第\s*[一二三四五六七八九十\d]{1,3}\s*季|[全共]\s*\d{1,4}\s*[集话話]|\b(?:Complete|Full[-\s]?\d{1,4})\b/i;
 
-/** /auto 的列表 → { movies: [快照里的视频条目], tv: Set(认成剧集的一级文件夹名，小写) } */
-function autoClassify(root, entries) {
+/** /auto 的列表 → { movies: [快照里的视频条目], tv: Set(认成剧集的一级文件夹名，小写),
+ *                  tvSub: Set(剧集那一层里认成一季的子文件夹名，小写), tvDir: 剧集那一层的路径（照 Dropbox 的大小写） }
+ *  sub（v25.4）：剧集那一层的名字（autoTvSub，默认 ram2）；空 = 不分层，和 v25.3 一模一样 */
+function autoClassify(root, entries, sub = '') {
   const rootLow = root.toLowerCase();
-  const movies = [], dirs = new Map();
+  const movies = [], dirs = new Map(), layer = new Map();
+  let tvDir = sub ? root + '/' + sub : '';
+  // 同一个文件夹的视频归成一组；追踪码先记下第一个带着的
+  const put = (map, top, v, ft) => {
+    const k = top.toLowerCase();
+    if (!map.has(k)) map.set(k, { top, vids: [], ftag: null });
+    const g = map.get(k);
+    g.vids.push(v);
+    if (ft && !g.ftag) g.ftag = ft;
+  };
+  const biggest = vids => vids.reduce((a, b) => ((b.size || 0) > (a.size || 0) ? b : a));
   for (const e of entries || []) {
     if (e['.tag'] !== 'file' || !VIDEO_EXTS.has(getExt(e.name || ''))) continue;
     const disp = e.path_display || '';
@@ -2896,23 +2940,35 @@ function autoClassify(root, entries) {
       if (ft ? ft.type === 'movie' : (!AUTO_EP_FILE.test(e.name) && !TV_SKIP.test(e.name))) movies.push(v);
       continue;
     }
+    // v25.4：剧集那一层（/auto/ram2）：它自己不是剧 —— 它下面的每个子文件夹各是一季（第二级才是条目）
+    if (isTvSub(rel[0], sub)) {
+      tvDir = root + '/' + rel[0];
+      // 散放在这一层的文件不成一季；只有追踪码说是电影（[auto-m…]）的照追踪码当电影
+      if (rel.length === 2) { if (ft && ft.type === 'movie') movies.push(v); continue; }
+      if (TV_SKIP.test(e.name) || rel.slice(2, -1).some(d => TV_SKIP_DIR.test(d.trim()))) continue;
+      put(layer, rel[1], v, ft);
+      continue;
+    }
     if (TV_SKIP.test(e.name) || rel.slice(1, -1).some(d => TV_SKIP_DIR.test(d.trim()))) continue;
-    const k = rel[0].toLowerCase();
-    if (!dirs.has(k)) dirs.set(k, { top: rel[0], vids: [], ftag: null });
-    const g = dirs.get(k);
-    g.vids.push(v);
-    if (ft && !g.ftag) g.ftag = ft;
+    put(dirs, rel[0], v, ft);
   }
   const tv = new Set();
   for (const [k, d] of dirs) {
     /* v25.3：追踪码优先 —— 文件夹名上的，其次文件名上的。m = 电影（取最大的那个正片），tv = 剧集（一集也算） */
     const tag = autoTag(d.top) || d.ftag;
-    if (tag && tag.type === 'movie') { movies.push(d.vids.reduce((a, b) => ((b.size || 0) > (a.size || 0) ? b : a))); continue; }
+    if (tag && tag.type === 'movie') { movies.push(biggest(d.vids)); continue; }
     if (tag && tag.type === 'tv') { tv.add(k); continue; }
     if (d.vids.length === 1 && !AUTO_EP_FILE.test(d.vids[0].name) && !AUTO_SEASON_DIR.test(d.top)) movies.push(d.vids[0]);
     else tv.add(k);
   }
-  return { movies, tv };
+  // v25.4：剧集那一层里的子文件夹一律是一季（一集也算，不看集号 / 季号）；追踪码说是电影的照追踪码
+  const tvSub = new Set();
+  for (const [k, d] of layer) {
+    const tag = autoTag(d.top) || d.ftag;
+    if (tag && tag.type === 'movie') movies.push(biggest(d.vids));
+    else tvSub.add(k);
+  }
+  return { movies, tv, tvSub, tvDir };
 }
 
 /** 列 /auto（递归；不存在 → 空）。15 秒内列过就用那一份（预热和剧集表同一轮各要一次）；fresh 不用旧的 */
@@ -2935,7 +2991,7 @@ async function autoSnapshot(env, prev, opts) {
   if (!root) return null;
   try {
     const { entries } = await autoList(env, opts);
-    return { root, videos: autoClassify(root, entries).movies, at: Date.now() };
+    return { root, videos: autoClassify(root, entries, autoTvSub(env)).movies, at: Date.now() };
   } catch (e) {
     console.error('auto list:', e && e.message);
     return prev && prev.root === root ? prev : null;
@@ -2946,10 +3002,11 @@ async function autoSnapshot(env, prev, opts) {
 async function autoSync(env, ctx, wantTv) {
   const aroot = autoRoot(env);
   const mroot = autoMovieRoot(env);
+  const sub = autoTvSub(env);
   let snap = null;
   if (mroot) {
     const { entries } = await autoList(env, { fresh: true });     // 列不出来就报错：请求添加 Worker 过会儿再问
-    const layer = { root: mroot, videos: autoClassify(mroot, entries).movies, at: Date.now() };
+    const layer = { root: mroot, videos: autoClassify(mroot, entries, sub).movies, at: Date.now() };
     snap = await r2Get(env, { allowExpired: true });
     if (snap?.videos) {
       snap = await snapshotPut(env, { ...snap, auto: layer }, { keepTs: true });
@@ -2968,17 +3025,19 @@ async function autoSync(env, ctx, wantTv) {
   else if (!tv) tv = await tvData(env, ctx).catch(() => null);      // 只追踪追踪码：用存着的剧集表就够了
   const names = new Set();
   const key = n => String(n || '').normalize('NFC').toLowerCase();
+  // v25.4：条目名是 /auto 下面第一级，剧集那一层（/auto/ram2）里的是第二级；那一层里的再记一份「ram2/名字」。ram2 自己永远不记
+  const addItem = it => { if (!it) return; names.add(key(it.name)); if (it.sub) names.add(key(it.sub + '/' + it.name)); };
   let movies = 0, series = 0;
   for (const v of snapVideos(snap)) {
     if (!pathUnder(v.path, aroot)) continue;
     movies++;
     names.add(key(v.name));                                       // 电影：文件名
-    names.add(key(v.path.slice(aroot.length + 1).split('/')[0])); // 只装着一部片的文件夹：文件夹名
+    addItem(autoItemOf(v.path, aroot, sub));                      // 只装着一部片的文件夹：文件夹名
   }
   for (const sr of (tv && tv.series) || []) {
     if (!pathUnder(sr.path, aroot) || !(sr.tmdbId > 0)) continue;  // 没认出 TMDB 编号的 App 对不上，不算收录
     series++;
-    names.add(key(sr.path.slice(aroot.length + 1).split(/[/#]/)[0]));
+    addItem(autoItemOf(sr.path, aroot, sub));                     // 剧集：这一季的文件夹名
   }
   // v25.2：追踪码 → 现在在哪儿（整个片库 + /auto + 剧集表；工作人员挪走以后也找得到）
   // v25.3：再按 TMDB 编号（剧集加季）记一份：m550 / tv1399s2 → 片库里带这个码的那一部
@@ -3001,8 +3060,10 @@ async function autoSync(env, ctx, wantTv) {
 }
 
 let _autoSyncRes = null;
+const AUTO_SYNC_MAX = 100;                         // 一次最多问几个 item / code / tmdb
 /** POST /api/auto/sync?item=<名字>&item=…[&tv=1]
  *  请求添加 Worker 删完 PikPak 那份就来问：马上重列 /auto，回 { has: { 名字: 收录了没有 } }。
+ *  v25.4：剧集在 /auto/ram2 里的，名字是那一季的文件夹名（写成 ram2/<名字> 也认），问 ram2 自己永远是 false。
  *  不走 Cookie 门（它没有 Cookie）：10 秒内最多真列一次，别人拿它刷不了 Dropbox；配了 AUTO_SYNC_KEY 就要带 x-sync-key */
 async function handleAutoSync(request, url, env, ctx) {
   const nostore = { 'Cache-Control': 'no-store' };
@@ -3020,15 +3081,17 @@ async function handleAutoSync(request, url, env, ctx) {
       return jsonResponse({ ok: false, error: 'dropbox unavailable' }, 503, nostore);
     }
   }
+  // v25.4：一次最多问 100 个（请求中心一篮子 50 部，批量传完一起问；以前是 50 / 60）。都是查表，不多花子请求
   const has = {};
-  for (const raw of url.searchParams.getAll('item').slice(0, 50)) has[raw] = res.names.has(String(raw).normalize('NFC').toLowerCase());
+  for (const raw of url.searchParams.getAll('item').slice(0, AUTO_SYNC_MAX)) has[raw] = res.names.has(String(raw).normalize('NFC').toLowerCase().replace(/^\/+/, ''));
   // v25.2：按追踪码（请求编号）找：在 /auto 里、已经被挪进片库，都回现在的位置；找不到的不回
   const where = {};
-  for (const code of url.searchParams.getAll('code').slice(0, 60)) { const w = res.tags.get(String(code).replace(/^r/i, '')); if (w) where[code] = w; }
+  for (const code of url.searchParams.getAll('code').slice(0, AUTO_SYNC_MAX)) { const w = res.tags.get(String(code).replace(/^r/i, '')); if (w) where[code] = w; }
   // v25.3：按 TMDB 编号（m550 / tv1399s2）找：片库里已经有带这个码的那一部了没有
   const found = {};
-  for (const k of url.searchParams.getAll('tmdb').slice(0, 60)) { const w = res.byTmdb && res.byTmdb.get(String(k).toLowerCase()); if (w) found[k] = w; }
-  return jsonResponse({ ok: true, root, movies: res.movies, series: res.series, has, where, found, at: res.at }, 200, nostore);
+  for (const k of url.searchParams.getAll('tmdb').slice(0, AUTO_SYNC_MAX)) { const w = res.byTmdb && res.byTmdb.get(String(k).toLowerCase()); if (w) found[k] = w; }
+  // v25.4：tvSub = 剧集那一层的名字（'' = 不分层）：请求添加 Worker 看它就知道这边认得 /auto/ram2
+  return jsonResponse({ ok: true, root, tvSub: autoTvSub(env), movies: res.movies, series: res.series, has, where, found, at: res.at }, 200, nostore);
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3896,11 +3959,13 @@ async function handleHealth(env, request) {
       const sync = !snap._gen || ptr.g === snap._gen ? '' : ' ⚠️落后';
       c.gen = `g:${ptr.g} f:${ptr.f} h:${ptr.h}${sync}`;
     }
-    const ar = autoRoot(env);
+    const ar = autoRoot(env), ts = autoTvSub(env);
+    // v25.4：剧集那一层在哪儿（AUTO_TV_SUB=off 时说一声不分层）
+    const tvSubNote = ts ? ` · 剧集在 ${ar}/${ts}` : ' · 剧集不分层（AUTO_TV_SUB=off）';
     c.extras.push(['/auto（传完就能播放）', !ar ? '关（AUTO_FOLDER=off）'
       : !autoMovieRoot(env) ? `${ar} 在片库根目录里，本体就扫得到`
-      : snap?.auto ? `${ar} · ${snap.auto.videos.length} 部电影 · ${Math.max(0, Math.round((Date.now() - (snap.auto.at || 0)) / 1000))}s 前列过`
-      : `${ar} · 还没列过`]);
+      : snap?.auto ? `${ar} · ${snap.auto.videos.length} 部电影 · ${Math.max(0, Math.round((Date.now() - (snap.auto.at || 0)) / 1000))}s 前列过${tvSubNote}`
+      : `${ar} · 还没列过${tvSubNote}`]);
   } catch {}
 
   c.status = c.account && c.folder ? '✅ OK' : '⚠️ Partial';
@@ -6181,7 +6246,7 @@ function tvGroup(root, entries, groups, only) {
   }
 }
 
-/** 整棵 TV 目录（加上 /auto 里认成剧集的一级文件夹）→ { series, eps: { 剧 path 小写: [{ ep, path, name, size }] } } */
+/** 整棵 TV 目录（加上 /auto 里认成剧集的一级文件夹、/auto/ram2 里的每一季）→ { series, eps: { 剧 path 小写: [{ ep, path, name, size }] } } */
 async function tvScan(env, { fresh = false } = {}) {
   const root = tvRoot(env);
   const entries = await dbxListTree(root, env);
@@ -6192,8 +6257,11 @@ async function tvScan(env, { fresh = false } = {}) {
   if (aroot) {
     try {
       const { entries: ae } = await autoList(env, { fresh });
-      const { tv } = autoClassify(aroot, ae);
+      const { tv, tvSub, tvDir } = autoClassify(aroot, ae, autoTvSub(env));
       if (tv.size) tvGroup(aroot, ae, groups, tv);
+      // v25.4：剧集那一层（/auto/ram2）：每个子文件夹一季，同一份列表再分一遍组（不多列目录）；
+      // 这一层就在 TV_FOLDER 里面的，上面本体那一遍已经收了，不重复叠
+      if (tvSub.size && !pathUnder(tvDir, root)) tvGroup(tvDir, ae, groups, tvSub);
     } catch (e) { console.error('tv auto:', e && e.message); }
   }
   const series = [], eps = {};

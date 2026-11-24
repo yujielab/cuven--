@@ -1023,6 +1023,129 @@ console.log('\n■ 追踪码优先：/auto 里是电影还是剧集先看追踪�
   await get('/api/tv?refresh=1'); await get('/api/refresh'); await settle();
 }
 
+console.log('\n■ /auto/ram2：剧集那一层（v25.4，用户要求：电影路径还是 /auto，剧集改成 /auto/ram2）');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const get = async u => { const r = await H.call(u, 'GET', { Cookie: cookie }); return { status: r.status, body: await r.json() }; };
+  const f = (p, size = 1000) => ({ path_display: p, size, server_modified: '2026-11-24T00:00:00Z' });
+  const L = '/auto/ram2';
+  const A1 = `${L}/Show.A.S01.1080p.WEB-DL.[auto-tv801s1-r42]`;   // 同一部剧的两季：各是一季
+  const A2 = `${L}/Show.A.S02.1080p.WEB-DL.[auto-tv801s2-r43]`;
+  const B1 = `${L}/Show.B.2024.[auto-tv802s1-r44]`;               // 只有一个文件、文件名没有集号：这一层里照样是一季
+  const U1 = `${L}/Untagged.Show.S01.1080p`;                      // 没有追踪码（人手放进来的）：这一层里照样是一季
+  const MV = '/auto/New.Movie.2025.1080p.[auto-m960-r41].mkv';    // 电影照旧直接放在 /auto
+  const OLD = '/auto/Old.Show.S03.1080p.[auto-tv803s3-r45]';      // 以前的样子：剧集文件夹直接放在 /auto 下面
+  const OLDM = '/auto/Old.Movie.2001.1080p';                      // 以前的样子：只装一部片的文件夹
+  const nm = p => p.split('/').pop();
+  H.tv.entries = [
+    f(MV, 8e9),
+    f(`${A1}/Show.A.S01E01.mkv`), f(`${A1}/Show.A.S01E02.mkv`),
+    f(`${A2}/Show.A.S02E01.mkv`), f(`${A2}/Show.A.S02E02.mkv`), f(`${A2}/Show.A.S02E03.mkv`),
+    f(`${B1}/Special.mkv`, 3e9),
+    f(`${U1}/Untagged.Show.S01E01.mkv`),
+    f(`${L}/Stray.File.mkv`, 2e9),                                 // 散放在这一层的：哪边都不算
+    f(`${OLD}/Old.Show.S03E01.mkv`), f(`${OLD}/Old.Show.S03E02.mkv`),
+    f(`${OLDM}/Old.Movie.2001.1080p.mkv`, 7e9),
+  ];
+  H.tmdb.movies = [{ id: 960, title: '新电影', en: 'New Movie', date: '2025-01-01', query: 'zzz-n960' }];
+  H.tmdb.shows = [
+    { id: 801, name: '甲剧', original: 'Nothing A', first: '2023-01-01', seasons: [{ n: 1, air: '2023-01-01', count: 2 }, { n: 2, air: '2024-01-01', count: 3 }] },
+    { id: 802, name: '乙剧', original: 'Nothing B', first: '2024-01-01', seasons: [{ n: 1, air: '2024-01-01', count: 1 }] },
+    { id: 803, name: '老剧', original: 'Nothing Old', first: '2019-01-01', seasons: [{ n: 3, air: '2021-01-01', count: 2 }] },
+  ];
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  delete H.env.AUTO_FOLDER; delete H.env.AUTO_SYNC_KEY; delete H.env.AUTO_TV_SUB; delete H.env.TV_FOLDER;
+
+  // 纯函数：分类、条目名、AUTO_TV_SUB
+  {
+    const X = await H.internals();
+    const ents = H.tv.entries.map(e => ({ '.tag': 'file', name: nm(e.path_display), ...e }));
+    const c = X.autoClassify('/auto', ents, 'ram2');
+    ok([...c.tvSub].sort().join('|') === [A1, A2, B1, U1].map(p => nm(p).toLowerCase()).sort().join('|') && c.tvDir === L,
+      `autoClassify：/auto/ram2 下面每个子文件夹各是一季（${[...c.tvSub].join('、')}）`);
+    ok(![...c.tv].includes('ram2') && [...c.tv].join() === nm(OLD).toLowerCase(), 'autoClassify：ram2 自己不算一级的剧集文件夹；以前直接放在 /auto 的剧集照旧认');
+    ok(c.movies.map(v => v.path).sort().join('|') === [MV, `${OLDM}/Old.Movie.2001.1080p.mkv`].sort().join('|'),
+      'autoClassify：电影照旧（直接放着的、只装一部片的文件夹）；ram2 里散放的文件、只有一集的那一季都不当电影');
+    const off = X.autoClassify('/auto', ents, '');
+    ok([...off.tv].includes('ram2') && !off.tvSub.size, 'AUTO_TV_SUB=off（sub 为空）：和 v25.3 一模一样，不分层');
+    const mv = X.autoClassify('/auto', [...ents, { '.tag': 'file', name: 'x.mkv', path_display: `${L}/Moved.Film.[auto-m961-r47]/x.mkv`, size: 9 },
+      { '.tag': 'file', name: 'Loose.[auto-m962-r48].mkv', path_display: `${L}/Loose.[auto-m962-r48].mkv`, size: 9 }], 'ram2');
+    ok(mv.movies.some(v => /auto-m961/.test(v.path)) && mv.movies.some(v => /auto-m962/.test(v.path)) && !mv.tvSub.has('moved.film.[auto-m961-r47]'),
+      '这一层里带 [auto-m…] 的（不该放这儿，放错了也不丢）：照追踪码当电影');
+    ok(X.autoTvSub({}) === 'ram2' && X.autoTvSub({ AUTO_TV_SUB: '' }) === 'ram2' && X.autoTvSub({ AUTO_TV_SUB: '/tv/' }) === 'tv' &&
+      X.autoTvSub({ AUTO_TV_SUB: 'a/b' }) === 'ram2' && X.autoTvSub({ AUTO_TV_SUB: 'off' }) === '', 'AUTO_TV_SUB：默认 ram2，去掉斜杠，多级的不认，off 关掉');
+    const i1 = X.autoItemOf(`${A2}#S2`, '/auto', 'ram2'), i2 = X.autoItemOf('/auto/RAM2/Some.Show', '/auto', 'ram2');
+    ok(i1 && i1.name === nm(A2) && i1.sub === 'ram2' && i2 && i2.name === 'Some.Show' && i2.sub === 'RAM2' &&
+      X.autoItemOf(L, '/auto', 'ram2') === null && X.autoItemOf(MV, '/auto', 'ram2').name === nm(MV) && X.autoItemOf('/ram2/x', '/auto', 'ram2') === null,
+      'autoItemOf：ram2 里的取第二级（不分大小写，#S2 不算进名字），ram2 自己不是条目，/auto 外面的不算');
+  }
+
+  await get('/api/refresh'); await settle();
+  const all = await get('/api/all?x=' + Date.now());
+  const vp = (all.body.videos || []).map(v => v.path).filter(p => p.startsWith('/auto/'));
+  ok(vp.sort().join('|') === [MV, `${OLDM}/Old.Movie.2001.1080p.mkv`].sort().join('|'),
+    `/api/all：电影照旧直接在 /auto（新旧两种放法都在），/auto/ram2 里的一部都不当电影：${vp.join('、')}`);
+
+  const tv = await get('/api/tv?refresh=1'); await settle();
+  const S = tv.body.series || [];
+  const by = p => S.find(x => x.path === p);
+  const a1 = by(A1), a2 = by(A2), b1 = by(B1);
+  ok(a1 && a2 && a1.season === 1 && a2.season === 2 && a1.tmdbId === 801 && a2.tmdbId === 801 && a1.code === '42' && a2.code === '43' &&
+    a1.episodes === 2 && a2.episodes === 3 && a1.id !== a2.id && a1.folder === nm(A1),
+    `/api/tv：/auto/ram2 下面的子文件夹各是一季（甲剧 S1 两集、S2 三集，追踪码 42 / 43 都在）`);
+  ok(b1 && b1.episodes === 1 && b1.tmdbId === 802 && b1.season === 1 && by(U1) && by(U1).episodes === 1,
+    '/api/tv：这一层里只有一个文件、没有追踪码的子文件夹也各是一季');
+  ok(!S.some(x => x.path.toLowerCase() === L || x.folder === 'ram2' || x.title === 'ram2' || /Stray/.test(x.path)),
+    '/api/tv：ram2 这个文件夹自己不是剧；散放在这一层的文件不成一季');
+  const old = by(OLD);
+  ok(old && old.season === 3 && old.episodes === 2 && old.tmdbId === 803 && old.code === '45', '/api/tv：以前直接放在 /auto 下面的剧集照旧认');
+  const ep = await get('/api/tv/episodes?path=' + encodeURIComponent(A2));
+  ok(ep.status === 200 && ep.body.episodes.map(e => e.ep).join() === '1,2,3' && ep.body.episodes[0].path === `${A2}/Show.A.S02E01.mkv`,
+    '/auto/ram2 里的一季一样有分集表（能直接播）');
+
+  const q = [nm(A1), nm(A2), 'ram2/' + nm(B1), 'ram2', nm(OLD), nm(MV), nm(OLDM), 'Nope'].map(n => 'item=' + encodeURIComponent(n)).join('&');
+  const sync = await H.call(`/api/auto/sync?tv=1&${q}&code=42&code=43&code=44&code=45&code=41&tmdb=tv801s1&tmdb=tv801s2&tmdb=tv802s1&tmdb=m960`, 'POST', {});
+  const sj = await sync.json(); await settle();
+  const h = sj.has || {};
+  ok(sync.status === 200 && sj.tvSub === 'ram2' && h[nm(A1)] === true && h[nm(A2)] === true && h['ram2/' + nm(B1)] === true &&
+    h[nm(OLD)] === true && h[nm(MV)] === true && h[nm(OLDM)] === true && h.ram2 === false && h.Nope === false,
+    '/api/auto/sync?item=&tv=1：/auto/ram2 里的按那一季的文件夹名找得到（写成 ram2/名字 也认），ram2 自己是 false，以前的放法照旧', sj.has);
+  const w = sj.where || {};
+  ok(w['42'] && w['42'].path === A1 && w['42'].auto === true && w['42'].kind === 'tv' && w['42'].ready === true &&
+    w['43'] && w['43'].path === A2 && w['44'] && w['44'].path === B1 && w['45'] && w['45'].path === OLD && w['41'] && w['41'].kind === 'movie',
+    'code=：按追踪码找得到 /auto/ram2 里的每一季（还在 /auto 里、认出了编号）', w);
+  const fd = sj.found || {};
+  ok(fd.tv801s1 && fd.tv801s1.code === '42' && fd.tv801s2 && fd.tv801s2.code === '43' && fd.tv801s2.path === A2 && fd.tv802s1 && fd.tv802s1.code === '44' && fd.m960 && fd.m960.code === '41',
+    'tmdb=：同一部剧的两季各找各的（tv801s1 / tv801s2），电影照旧', fd);
+  const health = await (await H.call('/health', 'GET', {})).text();
+  ok(/剧集在 \/auto\/ram2/.test(health), '健康页的 /auto 那一行写着剧集那一层在哪儿');
+
+  // 剧集那一层改名（AUTO_TV_SUB=tv）：照样每个子文件夹一季，tv 自己不是剧
+  H.env.AUTO_TV_SUB = 'tv';
+  const C1 = '/auto/tv/Show.C.[auto-tv804s1-r46]';
+  H.tv.entries.push(f(`${C1}/Show.C.S01E01.mkv`), f(`${C1}/Show.C.S01E02.mkv`));
+  H.tmdb.shows.push({ id: 804, name: '丙剧', original: 'Nothing C', first: '2025-01-01', seasons: [{ n: 1, air: '2025-01-01', count: 2 }] });
+  const tvc = await get('/api/tv?refresh=1'); await settle();
+  const Sc = tvc.body.series || [];
+  ok(Sc.some(x => x.path === C1 && x.tmdbId === 804 && x.episodes === 2) && !Sc.some(x => x.path.toLowerCase() === '/auto/tv'),
+    'AUTO_TV_SUB=tv：/auto/tv 下面的子文件夹各是一季，tv 自己不是剧');
+  delete H.env.AUTO_TV_SUB;
+
+  // 这一层就在 TV_FOLDER 里面（TV_FOLDER=/auto/ram2）：本体那一遍已经收了，不重复叠
+  H.env.TV_FOLDER = L;
+  const tvf = await get('/api/tv?refresh=1'); await settle();
+  const Sf = tvf.body.series || [];
+  ok(Sf.filter(x => x.path === A1).length === 1 && Sf.filter(x => x.path === A2).length === 1 && Sf.some(x => x.path === OLD),
+    'TV_FOLDER=/auto/ram2：每一季只出现一次（不重复叠），/auto 下面以前的剧集照旧在');
+  delete H.env.TV_FOLDER;
+
+  delete H.env.TMDB_API_KEY;
+  H.tv.entries = []; H.tmdb.shows = []; H.tmdb.movies = [];
+  await get('/api/tv?refresh=1'); await get('/api/refresh'); await settle();
+}
+
 console.log('\n■ 预告片：IMDb 直链优先，被拒时退到 TMDB 登记的 YouTube 官方预告');
 {
   const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };

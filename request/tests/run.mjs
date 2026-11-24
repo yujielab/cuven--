@@ -50,10 +50,23 @@ const W = {
   lib: { mode: 404, seen: new Set() },   // 片库（Stream Worker）：404 = 老版本没有 /api/auto/sync；'on' / 'off' / 'down'
   sync: [],                  // 片库收到的 /api/auto/sync
   renames: [],               // PikPak 上的改名（加追踪码）
+  /* 2.6 批量 */
+  caps: null,                // 传输 Worker ping 回的 caps（null = 909，没有 caps）
+  tvName: 'ram2',            // 传输 Worker 的 AUTO_TV_DIR
+  nofilter: false,           // batch-copy 回 409 nofilter
+  batchJobs: [],             // batch-copy 依次给的作业号
+  batchCalls: [],            // 真开了的 batch-copy（不算 reused）
+  batchRun: {},              // key → 作业号
+  bverify: [], bpurge: [],   // batch-verify / batch-purge 收到的
+  vbad: new Map(),           // 'sub/名字' → 还要对不上几次（batch-verify）
+  copyWhileBatch: 0,         // 有批量作业在跑时开了单个 copy（不该有）
+  existsTv: new Set(),       // dropbox:auto/ram2 下面有什么
+  mkdirs: [],                // 影片库收到的 do=mkdir
+  lbCalls: 0,
 };
-const pkFolderWith = (name, children) => {
+const pkFolderWith = (name, children, parent = 'AUTO') => {
   const id = 'F' + (W.seq++);
-  W.files.set(id, { id, name, kind: 'drive#folder', parent_id: 'AUTO', size: '0', phase: 'PHASE_TYPE_RUNNING', trashed: false });
+  W.files.set(id, { id, name, kind: 'drive#folder', parent_id: parent, size: '0', phase: 'PHASE_TYPE_RUNNING', trashed: false });
   for (const [n, size] of children){
     const fid = 'f' + (W.seq++);
     W.files.set(fid, { id: fid, name: n, kind: 'drive#file', parent_id: id, size: String(size), phase: 'PHASE_TYPE_COMPLETE', trashed: false });
@@ -85,6 +98,7 @@ globalThis.fetch = async (url, init = {}) => {
   /* 影片库 */
   if (u.host === 'lb.cuven.us'){
     if (H['x-gate'] !== 'gate') return J({ error: '口令不正确' }, 401);
+    W.lbCalls++;
     if (p === '/api/link/versions'){
       const src = u.searchParams.get('src'), id = u.searchParams.get('id'), season = u.searchParams.get('season');
       const key = src + ':' + id + (src === 'tv' ? ':' + (season || 2) : '');
@@ -98,14 +112,22 @@ globalThis.fetch = async (url, init = {}) => {
       W.push.push({ src: u.searchParams.get('src'), parent: body.parent, tid: it.tid });
       if (W.pushStop){ return J({ items: [{ tid: it.tid, ok: 0, retry: 1, held: 1 }], ok: 0, stop: W.pushStop }); }
       const [name, children] = LAYOUT[it.tid]();
-      const fid = pkFolderWith(name, children);
+      const fid = pkFolderWith(name, children, body.parent || 'AUTO');
       const task = 'T' + (W.seq++);
       W.tasks.set(task, { id: task, phase: 'PHASE_TYPE_RUNNING', progress: 0, file_id: fid, file_name: name });
       return J({ items: [{ tid: it.tid, ok: 1, task, name, file: fid, fileName: name }], ok: 1, stop: '' });
     }
     if (p === '/api/pikpak'){
       const act = u.searchParams.get('do');
-      if (act === 'ls') return J({ parent: '', folders: [{ id: 'AUTO', name: 'auto' }, { id: 'X', name: 'other' }] });
+      const parent = u.searchParams.get('parent') || '';
+      if (act === 'ls' && !parent) return J({ parent: '', folders: [{ id: 'AUTO', name: 'auto' }, { id: 'X', name: 'other' }] });
+      if (act === 'ls') return J({ parent, folders: [...W.files.values()].filter(f => f.parent_id === parent && f.kind === 'drive#folder' && !f.trashed).map(f => ({ id: f.id, name: f.name })) });
+      if (act === 'mkdir'){
+        W.mkdirs.push(body);
+        const id = 'D' + (W.seq++);
+        W.files.set(id, { id, name: body.name, kind: 'drive#folder', parent_id: body.parent, size: '0', phase: 'PHASE_TYPE_COMPLETE', trashed: false });
+        return J({ id, name: body.name });
+      }
       if (act === 'status') return J({ on: 1, ok: 1, user: 'pk***@x.com' });
     }
     if (p === '/api/catalog'){
@@ -121,17 +143,52 @@ globalThis.fetch = async (url, init = {}) => {
     W.tf.push([op, body]);
     if (W.tfDown > 0){ W.tfDown--; return J({ error: 'HTTP 523 · Cloudflare 连不上 VPS（已自动重试 2 次）' }, 502); }
     const jobOf = (id) => W.job[id] || { finished: true, success: true, bytes: 1, total: 1 };
+    const keyOf = (x) => (x.sub ? x.sub + '/' : '') + x.item;
+    const batchBusy = () => Object.values(W.batchRun).some(id => W.job[id] && W.job[id].finished === false);
     switch (op){
-      case 'ping': return J({ ok: 1, version: 'v1.68', core: 'test' });
+      case 'ping': return J({ ok: 1, version: 'v1.68', core: 'test', ...(W.caps ? { caps: W.caps, tv: W.tvName } : {}) });
       case 'organize': return J({ files: 3, deleted: ['ad.txt'], failed: [] });
       case 'check': return J(W.check.shift() || { k: 'ok', total: 4, vids: 4, have: [1, 2, 3, 4], miss: [], ongoing: false });
       case 'rename': {
-        const name = 'Game.of.Thrones.S02.1080p.[Full-4]-Cuven®';
-        const dir = [...W.files.values()].find(f => f.parent_id === 'AUTO' && f.name === body.dir && !f.trashed);
+        /* 910：sub = 现在在哪个区，to = 改完放哪个区（剧集区的文件夹在 /auto/ram2 下面） */
+        const area = body.sub ? ([...W.files.values()].find(f => f.parent_id === 'AUTO' && f.name === body.sub && f.kind === 'drive#folder') || {}).id : 'AUTO';
+        const name = /^Show\./.test(body.dir) ? body.dir.replace('.WEB-DL', '.[Full-4]-Cuven®') : 'Game.of.Thrones.S02.1080p.[Full-4]-Cuven®';
+        const dir = [...W.files.values()].find(f => f.parent_id === area && f.name === body.dir && !f.trashed);
         if (dir) dir.name = name;            // rclone 在 PikPak 上把文件夹改了名
-        return J({ name, jobid: 77 });
+        return J({ name, jobid: 77, ...(body.sub ? { sub: body.to || '' } : {}) });
       }
-      case 'copy': return J({ jobid: (W.copyJobs || []).shift() || 88 });
+      case 'copy':
+        if (batchBusy()) W.copyWhileBatch++;
+        return J({ jobid: (W.copyJobs || []).shift() || 88 });
+      case 'batch-copy': {
+        if (!(W.caps || []).includes('batch')) return J({ error: 'item 不对' }, 400);      // 909：不认识的接口落到单条校验
+        if (W.nofilter) return J({ error: '试列时列出了不在这一批里的东西：rclone 不认筛选规则', nofilter: 1 }, 409);
+        const items = body.items || [];
+        if (!items.length || items.length > 16) return J({ error: '一批 1–16 个' }, 400);
+        const run = W.batchRun[body.key];
+        if (run && W.job[run] && W.job[run].finished === false) return J({ jobid: run, reused: true });
+        const jobid = W.batchJobs.shift() || (4000 + W.batchCalls.length + 1);
+        W.batchCalls.push(body); W.batchRun[body.key] = jobid;
+        return J({ jobid, total: items.length * 1e9, files: items.reduce((s, x) => s + (x.kind === 'dir' ? 4 : 1), 0),
+                   items: Object.fromEntries(items.map(x => [keyOf(x), { count: x.kind === 'dir' ? 4 : 1, bytes: 1e9 }])) });
+      }
+      case 'batch-verify': {
+        W.bverify.push(body);
+        const results = {};
+        for (const x of body.items){
+          const k = keyOf(x), bad = (W.vbad.get(k) || 0) > 0;
+          if (bad) W.vbad.set(k, W.vbad.get(k) - 1);
+          results[k] = bad ? { ok: 0, src: { count: 4, bytes: 9 }, dst: { count: 3, bytes: 7 }, missing: ['E04.mkv'], missingCount: 1, differ: [], differCount: 0, extra: 0 }
+                           : { ok: 1, src: { count: 4, bytes: 9 }, dst: { count: 4, bytes: 9 }, missing: [], missingCount: 0, differ: [], differCount: 0, extra: 0 };
+        }
+        return J({ results });
+      }
+      case 'batch-purge': {
+        if (body.items.length > 8) return J({ error: '一次最多 8 个' }, 400);
+        W.bpurge.push(body);
+        for (const x of body.items) (x.sub ? W.existsTv : W.exists).add(x.item);
+        return J({ results: Object.fromEntries(body.items.map(x => [keyOf(x), { ok: 1 }])) });
+      }
       case 'job': return J({ error: '', speed: 2097152, ...jobOf(body.jobid) });
       case 'jobs': return J({ jobs: Object.fromEntries(body.ids.map(id => [id, { error: '', speed: 1, ...jobOf(id) }])) });
       case 'stop': (W.stopped = W.stopped || []).push(body.jobid); return J({ ok: 1 });
@@ -142,10 +199,11 @@ globalThis.fetch = async (url, init = {}) => {
           ? { ok: 1, src: { count: 2, bytes: 9 }, dst: { count: 3, bytes: 10 }, missing: [], missingCount: 0, differ: [], differCount: 0, extra: 1 }
           : { ok: 0, src: { count: 2, bytes: 9 }, dst: { count: 1, bytes: 4 }, missing: ['E02.mkv'], missingCount: 1, differ: [], differCount: 0, extra: 0 });
       }
-      case 'purge': W.exists.add(body.item); return J({ ok: 1 });
+      case 'purge': (body.sub ? W.existsTv : W.exists).add(body.item); return J({ ok: 1 });
       case 'exists': return Array.isArray(body.items)
-        ? J({ exists: Object.fromEntries(body.items.map(n => [n, W.exists.has(n) ? 1 : 0])) })
-        : J({ exists: W.exists.has(body.item) ? 1 : 0 });
+        ? J({ exists: Object.fromEntries(body.items.map(n => [n, W.exists.has(n) ? 1 : 0])),
+              ...(Array.isArray(body.tv) && body.tv.length ? { tv: Object.fromEntries(body.tv.map(n => [n, W.existsTv.has(n) ? 1 : 0])) } : {}) })
+        : J({ exists: (body.sub ? W.existsTv : W.exists).has(body.item) ? 1 : 0 });
     }
     return J({ error: 'tf 404' }, 404);
   }
@@ -232,8 +290,10 @@ const one = async (id) => (await call('GET', '/admin/api/state', { admin: true }
 {
   const [s1] = await call('GET', '/admin/api/state', { admin: 'wrong' });
   ok(s1 === 401, '面板：错口令 401');
-  // 前面几段测的是「等工作人员发行」那条老路：先关掉「抵达 /auto 自动通过」，到 v2.2 那一段再打开
-  const [s2, st] = await call('POST', '/admin/api/cfg', { admin: true, body: { pkUser: 'pk@x.com', pkPass: 'pkpass', grp: 'Cuven®', autoReady: false } });
+  // 前面几段测的是「等工作人员发行」那条老路：先关掉「抵达 /auto 自动通过」，到 v2.2 那一段再打开。
+  // 2.6 以前的几段测的都是一部一部传的那条路：关掉批量传输（batch:false），限额用 2.5 的默认值（5 / 30），到 2.6 那几段再打开
+  const [s2, st] = await call('POST', '/admin/api/cfg', { admin: true, body: { pkUser: 'pk@x.com', pkPass: 'pkpass', grp: 'Cuven®', autoReady: false,
+    batch: false, userCap: 5, globalCap: 30 } });
   ok(s2 === 200 && st.cfg.pkSet && st.cfg.pkUser === 'pk***@x.com', '面板：保存 PikPak 账号（只回打码的）', st.cfg);
   const raw = env.DB.db.prepare("SELECT v FROM tj_kv WHERE k = 'cfg'").get().v;
   ok(!raw.includes('pkpass') && raw.includes('pkPassEnc'), 'D1 里的 PikPak 密码是加密的');
@@ -807,6 +867,496 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   r = await one(b);
   ok(r.stage === 'download' && W.push.length === push0 + 1, '片库连不上：照常推送下载，不耽误', r);
   W.lib.mode = 404;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   2.6：请求中心批量提交、凑满 16 部一起传（16 路并行传输 / 16 路并发核对）、剧集放进 /auto/ram2
+   ══════════════════════════════════════════════════════════════════ */
+const lastTick = () => JSON.parse(env.DB.db.prepare("SELECT v FROM tj_kv WHERE k = 'tick:last'").get().v);
+const reset26 = () => {
+  env.DB.db.exec('DELETE FROM tj_req'); env.DB.db.exec('DELETE FROM tj_batch');
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('health', 'tick:last', 'track', 'tf:caps', 'tv:id', 'flow:live')");
+  W.batchCalls = []; W.batchRun = {}; W.batchJobs = []; W.bverify = []; W.bpurge = []; W.vbad = new Map(); W.copyWhileBatch = 0; W.nofilter = false;
+};
+const batchPost = (user, items) => call('POST', '/app/requests/batch', { user, body: { items } });
+const flowGet = async (user, tag) => {
+  const r = await worker.fetch(new Request('https://tj.cuven.us/app/flow', { headers: { 'x-cuven-user': encodeURIComponent(user), ...(tag ? { 'if-none-match': tag } : {}) } }), env, {});
+  return [r.status, r.headers.get('etag'), r.status === 200 ? await r.json() : null];
+};
+
+/* ── /app/requests/batch：created / joined / failedRecently / limit / invalid，一组 SQL，不问影片库 ── */
+{
+  reset26();
+  W.caps = ['sub', 'batch']; W.tvName = 'ram2';
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, userCap: 50, globalCap: 200, autoReady: true, tagNames: true } });
+  const [, st0] = await call('GET', '/admin/api/state', { admin: true });
+  ok(st0.cfg.batch === true && st0.cfg.batchMin === 16 && st0.cfg.batchMax === 16 && st0.cfg.xfers === 16 && st0.cfg.checkers === 16 &&
+     st0.cfg.basketMax === 50 && st0.cfg.tvSub === 'ram2' && st0.cfg.batchWait === 30, '2.6 默认：批量开、凑 16 部、16 路传输 / 核对、请求中心最多 50、剧集在 ram2', st0.cfg);
+  const lb0 = W.lbCalls;
+  const [s, j] = await batchPost('alice', [
+    { src: 'movie', id: 1100, title: '甲<b>', year: 2001, poster: '/a.jpg' },
+    { src: 'movie', id: 1101, poster: 'javascript:alert(1)' },
+    { src: 'tv', id: 1399, season: 3 },
+    { src: 'tv', id: 1399 },                 // 剧集没说第几季
+    { src: 'music', id: 5 },                 // 不认得
+    { src: 'movie', id: 1100 },              // 篮子里重复的
+  ]);
+  const res = j.items.map(x => x.result);
+  ok(s === 200 && j.bid > 0 && res.join() === 'created,created,created,invalid,invalid,created', '一次提交：每条回结果（认不得的 invalid）', j);
+  ok(W.lbCalls === lb0, '一次提交不问影片库（版本留给 ① 去问）', W.lbCalls - lb0);
+  const a = j.items[0].request;
+  ok(a.stage === 'queued' && a.bid === j.bid && a.title === '甲<b>' && a.year === '2001' && j.items[5].request.id === a.id, '新建的记上 bid、片名年份先用 App 给的占位', a);
+  ok(j.items[1].request.poster === '' && j.items[2].request.season === 3, '海报只收路径 / https，剧集带季', j.items[1].request);
+  ok(env.DB.db.prepare('SELECT COUNT(*) AS n FROM tj_req WHERE bid = ?').get(j.bid).n === 3, 'D1 里三条，同一个 bid');
+  const logs = (await call('GET', '/admin/api/log?id=' + a.id, { admin: true }))[1].items.map(l => l.msg);
+  ok(logs.some(m => /alice 请求添加（请求中心一次提交 3 部）：甲/.test(m)), '日志一条 SQL 写完：谁、一次提交几部', logs);
+
+  /* 同一部别人已经在请求：跟上（users 里加上这个人），bid 是新的一次 */
+  const [, k] = await batchPost('bob', [{ src: 'movie', id: 1100 }, { src: 'movie', id: 1102 }]);
+  ok(k.bid > j.bid && k.items[0].result === 'joined' && k.items[0].request.id === a.id && k.items[1].result === 'created', '已经在进行中的：跟上，不重复下', k);
+  const users = JSON.parse(env.DB.db.prepare('SELECT users FROM tj_req WHERE id = ?').get(a.id).users);
+  ok(users.join() === 'alice,bob' && (await mine('bob')).some(r => r.id === a.id), '跟上的人加进 users，「我的请求」里看得到', users);
+  const [, k2] = await batchPost('bob', [{ src: 'movie', id: 1100 }]);
+  ok(k2.items[0].result === 'joined' && JSON.parse(env.DB.db.prepare('SELECT users FROM tj_req WHERE id = ?').get(a.id).users).length === 2, '再提交一次：不重复加人');
+
+  /* 一天之内失败过的：拿回那条 */
+  env.DB.db.prepare("UPDATE tj_req SET stage = 'failed', updated = ? WHERE tmdb = 1101").run(Date.now());
+  const [, f] = await batchPost('bob', [{ src: 'movie', id: 1101 }]);
+  ok(f.items[0].result === 'failedRecently' && f.items[0].request.state === 'failed' &&
+     JSON.parse(env.DB.db.prepare('SELECT users FROM tj_req WHERE tmdb = 1101').get().users).includes('bob'), '刚失败过：拿回那条失败的（也加上这个人）', f);
+
+  /* 限额：这个人的、全部的 */
+  await call('POST', '/admin/api/cfg', { admin: true, body: { userCap: 2 } });
+  const [, l] = await batchPost('小明', [{ src: 'movie', id: 1103 }, { src: 'movie', id: 1104 }, { src: 'movie', id: 1105 }]);
+  ok(l.items.map(x => x.result).join() === 'created,created,limit' && l.items[2].cap === 'user' && !l.items[2].request, '超了每个人的限额：limit（cap: user）', l);
+  const active = env.DB.db.prepare("SELECT COUNT(*) AS n FROM tj_req WHERE stage NOT IN ('done','failed','cancelled','release')").get().n;
+  await call('POST', '/admin/api/cfg', { admin: true, body: { userCap: 50, globalCap: active } });
+  const [, g] = await batchPost('alice', [{ src: 'movie', id: 1106 }]);
+  ok(g.items[0].result === 'limit' && g.items[0].cap === 'global', '超了全部的限额：limit（cap: global）', g);
+  await call('POST', '/admin/api/cfg', { admin: true, body: { globalCap: 200 } });
+
+  /* 请求篮最多 50 条；空的、没登录、用户名不存在都不收 */
+  const many = Array.from({ length: 51 }, (_, i) => ({ src: 'movie', id: 1200 + i }));
+  ok((await batchPost('alice', many))[0] === 400, '一次超过 50 条：400');
+  ok((await batchPost('alice', []))[0] === 400, '空的请求篮：400');
+  ok((await call('POST', '/app/requests/batch', { body: { items: [{ src: 'movie', id: 1 }] } }))[0] === 401, '没登录：401');
+  ok((await batchPost('mallory', [{ src: 'movie', id: 1 }]))[0] === 401, '用户名不存在：401');
+  const [, mx] = await call('POST', '/admin/api/cfg', { admin: true, body: { basketMax: 99, batchMin: 20, batchMax: 99, xfers: 64, tvSub: '../x' } });
+  ok(mx.cfg.basketMax === 50 && mx.cfg.batchMax === 16 && mx.cfg.batchMin === 16 && mx.cfg.xfers === 16 && mx.cfg.tvSub === 'ram2', '面板的设置有上限（剧集区名字不对的不收）', mx.cfg);
+}
+
+/* ── 端到端：14 部电影 + 4 季剧集一次提交 → 下载 / 清洗（剧集在 /auto/ram2）→ 凑满 16 部一起传 → 一次核对 → 8 个一次删 → 就绪 ── */
+{
+  reset26();
+  W.caps = ['sub', 'batch']; W.tvName = 'ram2';
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, batchMin: 16, batchMax: 16, batchWait: 600, pkSlots: 20, vpsSlots: 2,
+    xfers: 16, checkers: 16, tvSub: 'ram2', autoReady: true, tagNames: true, userCap: 50, globalCap: 200 } });
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {} };
+  W.sync = []; W.renames = []; W.mkdirs = [];
+  W.copyJobs = [];
+  W.job[88] = { finished: true, success: true, bytes: 1, total: 1 };
+  W.job[77] = { finished: true, success: true, bytes: 2, total: 2 };
+  const items = [];
+  for (let i = 0; i < 14; i++){
+    const tid = 100 + i;
+    LAYOUT[tid] = () => ['Movie' + i + '.2020.1080p.BluRay', [['Movie' + i + '.2020.1080p.mkv', 4e9 + i], ['sample.mkv', 1e8]]];
+    W.versions['movie:' + (2000 + i)] = [{ tid, title: 'Movie ' + i, mb: 1, labels: [], res: '1080p' }];
+    items.push({ src: 'movie', id: 2000 + i, title: 'Movie ' + i });
+  }
+  [[3001, 1], [3001, 2], [3002, 1], [3003, 1]].forEach(([id, sn], i) => {
+    const tid = 200 + i;
+    LAYOUT[tid] = () => ['Show.' + id + '.S0' + sn + '.1080p.WEB-DL', [['E01.mkv', 1e9], ['E02.mkv', 1e9], ['E03.mkv', 1e9], ['E04.mkv', 1e9]]];
+    W.versions['tv:' + id + ':' + sn] = [{ tid, title: 'Show ' + id + ' S' + sn, mb: 1, labels: [], res: '1080p', total: 4 }];
+    items.push({ src: 'tv', id, season: sn });
+  });
+  const [, sub] = await batchPost('alice', items);
+  ok(sub.items.length === 18 && sub.items.every(x => x.result === 'created'), '请求中心一次提交 18 部（14 部电影 + 4 季剧集）', sub.items.map(x => x.result));
+  const ids = sub.items.map(x => x.request.id);
+  W.batchJobs = [4101, 4102];
+  W.job[4101] = { finished: false, success: false, bytes: 0, total: 16e9 };
+  W.job[4102] = { finished: false, success: false, bytes: 0, total: 2e9 };
+  let maxF = 0, ticks = 0, sawParked = false, sawReady = false;
+  const tf0 = W.tf.length, push0 = W.push.length;
+  for (; ticks < 40 && !W.batchCalls.length; ticks++){
+    for (const t of [...W.tasks.keys()]) finishTask(t);
+    await tick();
+    maxF = Math.max(maxF, lastTick().fetches);
+    const rd = env.DB.db.prepare("SELECT next, data FROM tj_req WHERE stage = 'ready'").all().filter(x => JSON.parse(x.data).tag !== undefined);
+    if (rd.length){ sawReady = true; if (rd.every(x => x.next > Date.now() + 5 * 60000)) sawParked = true; }
+  }
+  ok(W.batchCalls.length === 1, '清洗好的凑够 16 部：开一批（' + ticks + ' 轮）', { ticks, stages: env.DB.db.prepare('SELECT stage, COUNT(*) n FROM tj_req GROUP BY stage').all() });
+  ok(sawReady && sawParked, '等待凑批的加好追踪码以后停着（不用每轮都排上）');
+  ok(W.sync.some(x => x.tmdbs.length >= 16), '新请求核对片库：一次问完（不是 18 次）', W.sync.map(x => x.tmdbs.length));
+  const bc = W.batchCalls[0];
+  ok(bc.items.length === 16 && bc.transfers === 16 && bc.checkers === 16 && /^\d+$/.test(bc.key), 'batch-copy：16 部、Transfers 16、Checkers 16、key = 批次编号', { n: bc.items.length, t: bc.transfers, c: bc.checkers, key: bc.key });
+  ok(bc.items.every(x => x.kind === 'dir' ? x.sub === 'ram2' && /^Show\./.test(x.item) : x.sub === '' && /\.mkv$/.test(x.item)) && bc.items.some(x => x.kind === 'dir'),
+     '电影在 /auto（sub 空），剧集在 /auto/ram2（sub: ram2）', bc.items);
+  ok(bc.items.every(x => /\[auto-(m|tv)\d+(s\d+)?-r\d+\]/.test(x.item)), '一批里的名字都带上了追踪码（在 ready 那一步加的）', bc.items.map(x => x.item));
+  const tvId = JSON.parse(env.DB.db.prepare("SELECT v FROM tj_kv WHERE k = 'tv:id'").get().v);
+  const tvPush = W.push.slice(push0).filter(p => p.src === 'tv'), mvPush = W.push.slice(push0).filter(p => p.src === 'movie');
+  ok(tvId.name === 'ram2' && tvId.parent === 'AUTO' && W.mkdirs.length === 1 && W.mkdirs[0].parent === 'AUTO' && W.mkdirs[0].name === 'ram2',
+     'PikPak 上的 /auto/ram2：问影片库没有就建一个（只建一次，存 tj_kv）', { tvId, mk: W.mkdirs });
+  ok(tvPush.length === 4 && tvPush.every(p => p.parent === tvId.id) && mvPush.every(p => p.parent === 'AUTO'), '剧集推进 /auto/ram2，电影照旧推进 /auto', W.push.slice(push0));
+  ok(W.renames.some(([from, to]) => /^Show\.3001\.S01/.test(from) && /\[auto-tv3001s1-r\d+\]$/.test(to)), '剧集的追踪码在 /auto/ram2 里加', W.renames.filter(([f]) => /^Show/.test(f)));
+  ok(maxF <= 42, '凑批之前每一轮的子请求都没超 42', maxF);
+
+  /* 成员停在 copy、不用每轮排上；多的两部等下一批 */
+  const members = env.DB.db.prepare('SELECT id, stage, next, bat FROM tj_req WHERE bat > 0').all();
+  const bid1 = members[0].bat;
+  ok(members.length === 16 && members.every(x => x.stage === 'copy' && x.bat === bid1 && x.next > Date.now() + 10 * 60000) && String(bid1) === bc.key,
+     '16 个成员停在 copy（进度由批次一起改）', members);
+  await tick();                                                   // 多的那两部也加好追踪码、停下
+  W.job[4101] = { finished: false, success: false, bytes: 8e9, total: 16e9, speed: 50 * 1048576, eta: 160, transfers: 5, totalTransfers: 26 };
+  const tfA = W.tf.length;
+  await tick();
+  const opsA = W.tf.slice(tfA).map(x => x[0]);
+  ok(lastTick().due === 0 && opsA.filter(o => o === 'job').length === 1 && opsA.length === 1, '批量传输中：一轮只问一次作业进度，没有别的条目到期', { due: lastTick().due, ops: opsA });
+  let app = (await mine()).filter(r => r.batch === bid1);
+  ok(app.length === 16 && app.every(r => r.step === 4 && r.pct === 69 && r.label === '等待传输'), '成员的进度一起改：一半 → STEP 4 / 69%（带 batch）', app.map(r => r.pct));
+  const waiting = (await mine()).filter(r => r.stage === 'ready');
+  ok(waiting.length === 2 && waiting.every(r => r.step === 4 && r.pct === 60 && r.wait && r.wait.ready === 2 && r.wait.need === 16), '多的两部等下一批：STEP 4「等待传输」，带 wait', waiting);
+  ok(W.copyWhileBatch === 0 && !W.tf.slice(tf0).some(([op]) => op === 'copy'), '批量在传：没有一个单个传输');
+
+  /* /app/flow：凑批进度和正在传的那一批；没变 304；实时进度缓存 5 秒 */
+  const nLive = () => W.tf.filter(([op, b]) => op === 'job' && b.detail).length;
+  const l0 = nLive();
+  const [fs1, ft1, f1] = await flowGet('alice');
+  const [fs2] = await flowGet('alice', ft1);
+  const files = bc.items.reduce((s, x) => s + (x.kind === 'dir' ? 4 : 1), 0);
+  ok(fs1 === 200 && f1.at > 0 && f1.poll === 5 && f1.gate.ready === 2 && f1.gate.need === 16 && f1.gate.mine === 2 &&
+     f1.batch && f1.batch.id === bid1 && f1.batch.stage === 'copy' && f1.batch.items === 16 && f1.batch.mine.length === 16 &&
+     f1.batch.bytes === 8e9 && f1.batch.total === 16e9 && f1.batch.pct === 50 && f1.batch.speed === 50 * 1048576 && f1.batch.eta === 160 &&
+     f1.batch.files.done === 5 && f1.batch.files.total === files && f1.batch.started > 0, '/app/flow：这一批 16 部、字节 / 速度 / 剩余时间 / 文件数、我的是哪几条，凑批 2 / 16', f1);
+  ok(fs2 === 304, '/app/flow 没变：304', fs2);
+  ok(nLive() - l0 === 1, '实时进度缓存 5 秒：两次只问了一次传输 Worker', nLive() - l0);
+  const [, , fb] = await flowGet('bob');
+  ok(fb.batch.mine.length === 0 && fb.gate.mine === 0 && !/Movie|Show|搏击|权力/.test(JSON.stringify(fb)), '/app/flow 只有汇总：不带别人的请求和片名', fb);
+  ok((await call('GET', '/app/flow'))[0] === 401, '/app/flow 要登录');
+
+  /* 批量里取消一部：这一批照常跑完 */
+  const cancelId = members.find(x => ids.indexOf(x.id) < 14).id;
+  const [, cc] = await call('POST', '/admin/api/req', { admin: true, body: { id: cancelId, act: 'cancel' } });
+  ok(cc.request.state === 'cancelled' && !(W.stopped || []).includes(4101), '批量里取消一部：这一条取消了，作业照常跑', cc.request);
+
+  /* 传完：成员一起去核对；多的两部开下一批（前面没有了） */
+  W.job[4101] = { finished: true, success: true, bytes: 16e9, total: 16e9 };
+  const badTv = bc.items.find(x => x.kind === 'dir');
+  W.vbad.set('ram2/' + badTv.item, 2);                          // 这一季对不上两次 → 单个补传
+  await tick();
+  let st = env.DB.db.prepare('SELECT stage, COUNT(*) n FROM tj_req WHERE bat = ? GROUP BY stage').all(bid1);
+  ok(st.find(x => x.stage === 'verify').n === 15 && st.find(x => x.stage === 'cancelled').n === 1, '传完：15 个成员一起去核对，取消的那条不核对', st);
+  const clog = (await call('GET', '/admin/api/log?id=' + cancelId, { admin: true }))[1].items.map(l => l.msg);
+  ok(clog.some(m => /已经取消，不核对、不删；它传到 Dropbox 的那份留在原处/.test(m)), '日志写清楚：取消的那部在 Dropbox 的那份留在原处', clog.slice(0, 3));
+  ok(W.batchCalls.length === 2 && W.batchCalls[1].items.length === 2 && W.batchCalls[1].transfers === 16 && lastTick().batch && /前面没有/.test(lastTick().batch.why),
+     '上一批传完：多的两部开下一批（前面没有还会清洗好的了）', { calls: W.batchCalls.length, why: lastTick().batch });
+  const bid2 = env.DB.db.prepare('SELECT MAX(id) AS id FROM tj_batch').get().id;
+
+  /* 一次核对一批：14 部一致 → 删 PikPak；那一季对不上 → 2 分钟后再核对 */
+  const v0 = W.bverify.length, tfV = W.tf.length;
+  await tick();
+  ok(W.bverify.length === v0 + 1 && W.bverify[v0].items.length === 15 && !W.tf.slice(tfV).some(([op]) => op === 'verify'),
+     '核对：15 部一次 batch-verify（没有一个一个核对）', W.bverify.map(b => b.items.length));
+  ok(W.bverify[v0].items.filter(x => x.kind === 'dir').every(x => x.sub === 'ram2'), 'batch-verify 里剧集带 sub');
+  st = env.DB.db.prepare('SELECT stage, COUNT(*) n FROM tj_req WHERE bat = ? GROUP BY stage').all(bid1);
+  ok(st.find(x => x.stage === 'purge').n === 14 && st.find(x => x.stage === 'verify').n === 1, '14 部一致 → 删 PikPak；那一季再核对一次', st);
+
+  /* 删 PikPak：8 个一次（14 部 = 2 次）、云下载任务一次删完、片库一次问完 → 就绪；那一季还是对不上 → 等这一批传完单个补传 */
+  const p0 = W.bpurge.length, del0 = W.pkCalls.filter(x => x === 'DELETE /drive/v1/tasks').length, s0 = W.sync.length;
+  await tick();
+  ok(W.bpurge.length === p0 + 2 && W.bpurge.slice(p0).map(b => b.items.length).join() === '8,6', '删 PikPak：8 个一次 batch-purge（14 部 = 2 次）', W.bpurge.slice(p0).map(b => b.items.length));
+  ok(W.pkCalls.filter(x => x === 'DELETE /drive/v1/tasks').length === del0 + 1, '云下载任务一次删完');
+  ok(W.sync.slice(s0).filter(x => x.items.length >= 14).length === 1 && W.sync.slice(s0).filter(x => x.items.length === 1).length === 0, '自动通过时问片库：14 部一次问完', W.sync.slice(s0).map(x => x.items.length));
+  const done1 = (await mine()).filter(r => r.state === 'done');
+  ok(done1.length === 14 && done1.every(r => r.pct === 100), '14 部就绪（App 100%）', done1.length);
+  let bad = env.DB.db.prepare('SELECT id, stage, bat, data FROM tj_req WHERE tmdb = ? AND season = ?').get(...(() => { const m = /^Show\.(\d+)\.S0(\d)/.exec(badTv.item); return [+m[1], +m[2]]; })());
+  ok(bad.stage === 'copy' && bad.bat === 0, '那一季两次都对不上：离开那一批，单个补传', bad);
+  ok(lastTick().fetches <= 42, '核对 / 删除那一轮的子请求没超 42', lastTick().fetches);
+  await tick();
+  bad = env.DB.db.prepare('SELECT stage, note FROM tj_req WHERE id = ?').get(bad.id);
+  ok(bad.stage === 'copy' && /批量 #\d+ 正在传/.test(bad.note) && W.copyWhileBatch === 0, '下一批还在传：单个补传排队等它传完', bad);
+
+  /* 下一批传完：那一季才开始单个补传（带 sub）；之后一个一个核对 / 删除，全部就绪 */
+  W.job[4102] = { finished: true, success: true, bytes: 2e9, total: 2e9 };
+  const c0 = W.tf.filter(([op]) => op === 'copy').length;
+  await tick();
+  const solo = W.tf.filter(([op]) => op === 'copy').slice(c0);
+  ok(solo.length === 1 && solo[0][1].sub === 'ram2' && solo[0][1].kind === 'dir' && W.copyWhileBatch === 0, '批量都传完了：那一季单个补传（带 sub: ram2）', solo);
+  for (let i = 0; i < 15; i++){ await tick(); maxF = Math.max(maxF, lastTick().fetches); if (env.DB.db.prepare("SELECT COUNT(*) n FROM tj_req WHERE stage NOT IN ('done','cancelled')").get().n === 0) break; }
+  const fin = env.DB.db.prepare('SELECT stage, COUNT(*) n FROM tj_req GROUP BY stage').all();
+  ok(fin.find(x => x.stage === 'done').n === 17 && fin.find(x => x.stage === 'cancelled').n === 1 && fin.length === 2, '17 部全部就绪（取消的那部除外）', fin);
+  ok(env.DB.db.prepare('SELECT COUNT(*) n FROM tj_batch WHERE ended = 0').get().n === 0, '两批都收尾了');
+  ok(maxF <= 42, '整个流程每一轮的子请求都没超 42', maxF);
+  /* 剧集的每一个传输调用都带 sub: ram2 */
+  const tvCalls = W.tf.slice(tf0).filter(([, b]) => b && (/^Show\./.test(b.dir || b.item || '') || (b.items || []).some(x => /^Show\./.test(x && x.item))));
+  const ops = new Set(tvCalls.map(([op]) => op));
+  ok(tvCalls.length && tvCalls.every(([, b]) => b.items ? b.items.filter(x => /^Show\./.test(x.item)).every(x => x.sub === 'ram2') : b.sub === 'ram2' && (b.to === undefined || b.to === 'ram2')),
+     '剧集的每一个传输调用都带 sub: ram2', tvCalls.filter(([, b]) => !(b.items || b.sub === 'ram2')));
+  ok(['organize', 'check', 'rename', 'batch-copy', 'batch-verify', 'batch-purge', 'copy', 'verify', 'purge'].every(o => ops.has(o)),
+     '（整理、核对整季、改名、批量传输 / 核对 / 删除、单个补传 / 核对 / 删除都覆盖到了）', [...ops]);
+  const [, , f3] = await flowGet('alice');
+  ok(f3.batch === null && f3.poll === 20 && f3.gate.ready === 0, '都传完了：/app/flow 没有在传的批，20 秒问一次', f3);
+}
+
+/* ── 凑批的几条退路（假时钟）：老版本 App 的等 10 分钟、请求中心的等 30 分钟、这一次提交的都清洗好了、前面没有了、退避很久的不等 ── */
+{
+  let seq = 0;
+  const seedReady = (n, bid = 0) => {
+    const out = [];
+    for (let i = 0; i < n; i++){
+      const tmdb = 5000 + (seq++), t = Date.now();
+      const r = env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+        VALUES ('movie', ?, 0, 'seed', '["alice"]', 'ready', '', ?, ?, ?, ?, ?, ?)`)
+        .run(tmdb, JSON.stringify({ item: 'Seed.' + tmdb + '.[auto-m' + tmdb + '-r0].mkv', kind: 'file', tag: '' }), t, t, t, t + 3600e3, bid);
+      out.push(Number(r.lastInsertRowid));
+    }
+    return out;
+  };
+  /* 前面还在云下载的（有进度、不出错，每 2 分钟看一次） */
+  const seedUp = (bid = 0, next = 0) => {
+    const tmdb = 5000 + (seq++), task = 'Tup' + tmdb, t = Date.now();
+    W.tasks.set(task, { id: task, phase: 'PHASE_TYPE_RUNNING', progress: 50, file_id: 'nofile', file_name: 'up' });
+    env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+      VALUES ('movie', ?, 0, 'up', '["bob"]', 'download', '', ?, ?, ?, ?, ?, ?)`).run(tmdb, JSON.stringify({ task, errs: next ? 3 : 0 }), t, t, t, next, bid);
+  };
+  const reset = () => { reset26(); for (const k of [...W.tasks.keys()]) if (k.startsWith('Tup')) W.tasks.delete(k); W.caps = ['sub', 'batch']; };
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, batchMin: 16, batchMax: 16, batchWait: 30, vpsSlots: 2 } });
+  const launched = () => W.batchCalls.length;
+
+  /* 老版本 App 一部一部提交的（bid = 0）：前面还有在下载的 → 最多等 10 分钟 */
+  reset(); seedReady(3); seedUp();
+  for (let i = 0; i < 3; i++) await tick();
+  ok(launched() === 0, '老版本 App 提交的 3 部、前面还有在下载的：先等（9 分钟）', lastTick());
+  await tick();
+  ok(launched() === 1 && W.batchCalls[0].items.length === 3 && /最早的一部等了 1[0-9] 分钟/.test(lastTick().batch.why), '等了 10 分钟以上：有几部传几部', lastTick().batch);
+
+  /* 请求中心提交的（bid > 0）、这一次提交的还有在下载的 → 等 30 分钟 */
+  reset(); seedReady(3, 7); seedUp(7);
+  for (let i = 0; i < 9; i++) await tick();
+  ok(launched() === 0, '请求中心提交的、同一次提交还有在下载的：等（28 分钟）');
+  await tick();
+  ok(launched() === 1 && /最早的一部等了 3[0-9] 分钟/.test(lastTick().batch.why), '等了 30 分钟以上：有几部传几部', lastTick().batch);
+
+  /* 这一次提交的都清洗好了（别人的提交还在下载）：不用等 */
+  reset(); seedReady(3, 9); seedUp(10);
+  await tick();
+  ok(launched() === 1 && W.batchCalls[0].items.length === 3 && /这一次提交的都清洗好了/.test(lastTick().batch.why), '这一次提交的都清洗好了：马上开（别人的还在下载也不等）', lastTick().batch);
+
+  /* 前面没有还会清洗好的了 / 前面的都在长时间退避 */
+  reset(); seedReady(2);
+  await tick();
+  ok(launched() === 1 && /前面没有/.test(lastTick().batch.why), '前面什么都没有了：马上开', lastTick().batch);
+  reset(); seedReady(2); seedUp(0, Date.now() + 3600e3);
+  await tick();
+  ok(launched() === 1 && /前面没有/.test(lastTick().batch.why), '前面的在退避一小时：不等它', lastTick().batch);
+
+  /* 凑够 16 部：一批 16 部，多的等下一批；一次只跑一批 */
+  reset(); seedReady(17); seedUp();
+  W.batchJobs = [4201]; W.job[4201] = { finished: false, success: false, bytes: 0, total: 1 };
+  await tick();
+  ok(launched() === 1 && W.batchCalls[0].items.length === 16 && /凑够 16 部/.test(lastTick().batch.why) &&
+     env.DB.db.prepare("SELECT COUNT(*) n FROM tj_req WHERE stage = 'ready'").get().n === 1, '凑够 16 部：一批 16 部，多的那部等下一批', lastTick().batch);
+  seedReady(16);
+  await tick(); await tick();
+  ok(launched() === 1, '一批在传：不开第二批（一次只跑一批）', W.batchCalls.length);
+
+  /* 单个传输还在跑：不开批（rclone 内存） */
+  reset(); seedReady(2);
+  env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next)
+    VALUES ('movie', 5999, 0, 'solo', '["bob"]', 'copy', '', '{"item":"solo.mkv","kind":"file","tag":"","job":501}', 1, 1, 1, ?)`).run(Date.now() + 3600e3);
+  W.job[501] = { finished: false, success: false, bytes: 1, total: 10 };
+  await tick();
+  ok(launched() === 0, '单个传输还在跑：先不开批');
+  W.job[501] = { finished: true, success: true, bytes: 10, total: 10 };
+  env.DB.db.prepare("UPDATE tj_req SET next = 0 WHERE tmdb = 5999").run();
+  await tick(); await tick();
+  ok(launched() === 1, '单个传完了：开批');
+
+  /* VPS 熔断中：不开批 */
+  reset(); seedReady(2);
+  await call('POST', '/admin/api/links', { admin: true, body: {} });          // 面板「测试连接」顺手记下传输 Worker 会什么
+  env.DB.db.prepare("INSERT INTO tj_kv (k, v, exp) VALUES ('health', ?, 0) ON CONFLICT(k) DO UPDATE SET v = excluded.v")
+    .run(JSON.stringify({ vps: { fails: 0, trips: 1, open: Date.now() + 3600e3, err: 'HTTP 523', ok: 0, bad: Date.now() } }));
+  const tfB = W.tf.length;
+  await tick();
+  ok(launched() === 0 && W.tf.length === tfB, 'VPS 熔断中：不开批，一次都不碰 VPS');
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k = 'health'");
+  await tick();
+  ok(launched() === 1, '熔断过了：开批');
+
+  /* 一次给 4 部加追踪码：/auto 只列一次 */
+  reset();
+  const ids = [];
+  for (let i = 0; i < 4; i++){
+    const fid = 'tagf' + i, name = 'Tagme' + i + '.2019.1080p.mkv', tmdb = 5900 + i;
+    W.files.set(fid, { id: fid, name, kind: 'drive#file', parent_id: 'AUTO', size: '100', phase: 'PHASE_TYPE_COMPLETE', trashed: false });
+    ids.push(Number(env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+      VALUES ('movie', ?, 0, 'tag', '["alice"]', 'ready', '', ?, 1, 1, ?, 0, 0)`).run(tmdb, JSON.stringify({ item: name, kind: 'file', file: fid }), Date.now()).lastInsertRowid));
+  }
+  const ls0 = W.pkCalls.filter(x => x === 'GET /drive/v1/files').length, pa0 = W.renames.length;
+  await tick();
+  ok(W.pkCalls.filter(x => x === 'GET /drive/v1/files').length - ls0 === 1 && W.renames.length - pa0 === 4, '4 部一起加追踪码：/auto 这一轮只列一次', { list: W.pkCalls.filter(x => x === 'GET /drive/v1/files').length - ls0 });
+  ok(launched() === 1 && W.batchCalls[0].items.every(x => /\[auto-m59\d\d-r\d+\]\.mkv$/.test(x.item)), '加好追踪码的这一轮就开批（前面没有了）', W.batchCalls[0] && W.batchCalls[0].items);
+
+  /* rclone 不认筛选规则（409 nofilter）：这一批退回一个一个传，6 小时内都一个一个传 */
+  reset(); seedReady(2);
+  W.nofilter = true;
+  const c0 = W.tf.filter(([op]) => op === 'copy').length;
+  await tick();
+  const solo = W.tf.filter(([op]) => op === 'copy').slice(c0);
+  const b0 = env.DB.db.prepare('SELECT * FROM tj_batch ORDER BY id DESC LIMIT 1').get();
+  ok(solo.length === 2 && b0.ended > 0 && /nofilter/.test(JSON.parse(b0.data).off) && env.DB.db.prepare('SELECT COUNT(*) n FROM tj_req WHERE bat > 0').get().n === 0,
+     '409 nofilter：这一批收尾，两部当场退回一个一个传', { solo, b0 });
+  const caps = JSON.parse(env.DB.db.prepare("SELECT v FROM tj_kv WHERE k = 'tf:caps'").get().v);
+  ok(caps.nofilter > Date.now() + 5 * 3600e3, '记下 rclone 不认筛选规则（6 小时）', caps);
+  const health = JSON.parse(env.DB.db.prepare("SELECT v FROM tj_kv WHERE k = 'health'").get()?.v || '{}');
+  ok(!(health.vps && health.vps.fails), '409 nofilter 不算 VPS 坏了（不进熔断）', health.vps);
+  seedReady(2);
+  const nb = W.batchCalls.length, c1 = W.tf.filter(([op]) => op === 'copy').length;
+  W.copyJobs = [];
+  await tick();
+  ok(W.batchCalls.length === nb && W.tf.filter(([op]) => op === 'copy').length - c1 >= 1, '之后等着的直接一个一个传，不再试批量');
+  W.nofilter = false;
+  reset();
+}
+
+/* ── 批量传输的看门狗：开作业时 VPS 抖了（同一个 key 再开）、作业号没记下来（认出正在跑的）、一小时没进展、作业丢了 ── */
+{
+  reset26();
+  W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, batchMin: 16, batchWait: 600, vpsSlots: 2 } });
+  await call('POST', '/admin/api/links', { admin: true, body: {} });        // 先记下传输 Worker 会批量
+  for (let i = 0; i < 2; i++){
+    const t = Date.now();
+    env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+      VALUES ('movie', ?, 0, 'w', '["alice"]', 'ready', '', ?, ?, ?, ?, ?, 0)`).run(6200 + i, JSON.stringify({ item: 'W' + i + '.mkv', kind: 'file', tag: '' }), t, t, t, t + 3600e3);
+  }
+  const bcs = () => W.tf.filter(([op]) => op === 'batch-copy').map(x => x[1]);
+  const n0 = bcs().length;
+  W.tfDown = 1;                                                 // 开作业的那一下 VPS 抖了
+  await tick();
+  let b = env.DB.db.prepare('SELECT * FROM tj_batch ORDER BY id DESC LIMIT 1').get();
+  ok(bcs().length === n0 + 1 && W.batchCalls.length === 0 && b && !JSON.parse(b.data).job && b.ended === 0 &&
+     env.DB.db.prepare("SELECT COUNT(*) n FROM tj_req WHERE stage = 'copy' AND bat = ?").get(b.id).n === 2, '开作业时 VPS 抖了：批次和成员记下了，作业还没开', b);
+  W.batchJobs = [4301]; W.job[4301] = { finished: false, success: false, bytes: 100, total: 2e9 };
+  await tick();
+  b = env.DB.db.prepare('SELECT * FROM tj_batch WHERE id = ?').get(b.id);
+  ok(JSON.parse(b.data).job === 4301 && bcs().slice(n0).every(x => x.key === String(b.id)), '下一轮同一个 key 再开，开成了', bcs().slice(n0).map(x => x.key));
+  /* 作业号没记下来（这边超时了，那边其实开了）：同一个 key 再开 → 传输 Worker 认出正在跑的那个，不开第二个 */
+  env.DB.db.prepare("UPDATE tj_batch SET data = json_set(data, '$.job', 0, '$.tryAt', 0) WHERE id = ?").run(b.id);
+  const calls0 = W.batchCalls.length;
+  await tick();
+  b = env.DB.db.prepare('SELECT * FROM tj_batch WHERE id = ?').get(b.id);
+  ok(JSON.parse(b.data).job === 4301 && W.batchCalls.length === calls0, '作业号丢了：同一个 key 认出正在跑的作业（reused），没开第二个', JSON.parse(b.data));
+  const blog = (await call('GET', '/admin/api/log?id=0', { admin: true }))[1].items.map(l => l.msg);
+  ok(blog.some(m => /接上了正在跑的传输作业 4301/.test(m)), '日志：接上了正在跑的作业', blog.slice(0, 3));
+  /* 一小时没有新字节：停掉重开（rclone 跳过传完的） */
+  await tick();                                                 // 问到 100 字节
+  advance(61 * 60000);
+  await tick();                                                 // 一小时后还是 100 字节
+  ok((W.stopped || []).includes(4301), '批量传输一小时没进展：停掉作业', W.stopped);
+  W.job[4301].finished = true;                                  // 停掉了
+  W.batchJobs = [4302]; W.job[4302] = { missing: 1, finished: true, success: false, error: 'job not found' };
+  await tick();
+  b = env.DB.db.prepare('SELECT * FROM tj_batch WHERE id = ?').get(b.id);
+  ok(JSON.parse(b.data).job === 4302 && JSON.parse(b.data).ctries === 1, '停掉以后重开（同一批、同一个 key）', JSON.parse(b.data));
+  /* 作业丢了（VPS 重启）：从断点重开 */
+  W.batchJobs = [4303]; W.job[4303] = { finished: false, success: false, bytes: 5, total: 2e9 };
+  await tick(); await tick();
+  b = env.DB.db.prepare('SELECT * FROM tj_batch WHERE id = ?').get(b.id);
+  ok(JSON.parse(b.data).job === 4303 && JSON.parse(b.data).lost === 1, '作业丢了：从断点重开', JSON.parse(b.data));
+  const mem = env.DB.db.prepare('SELECT stage FROM tj_req WHERE bat = ?').all(b.id);
+  ok(mem.length === 2 && mem.every(x => x.stage === 'copy'), '这期间成员一直停在批量里，没有一个单个传输', mem);
+  W.job[4303] = { finished: true, success: true, bytes: 2e9, total: 2e9 };
+  await tick();
+  ok(env.DB.db.prepare('SELECT COUNT(*) n FROM tj_req WHERE bat = ? AND stage = \'verify\'').get(b.id).n === 2, '传完：一起去核对');
+  reset26();
+}
+
+/* ── 面板操作：等待凑批的取消 / 重试 / 换规格；批量里的重试；中途关掉批量传输 ── */
+{
+  reset26();
+  W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, batchMin: 16, batchWait: 600 } });
+  const seed = (tmdb, stage, data, extra = '') => {
+    const fid = 'pf' + tmdb, tid = 'pt' + tmdb;
+    W.files.set(fid, { id: fid, name: data.item, kind: 'drive#file', parent_id: 'AUTO', size: '1', phase: 'PHASE_TYPE_COMPLETE', trashed: false });
+    W.tasks.set(tid, { id: tid, phase: 'PHASE_TYPE_RUNNING', progress: 100, file_id: fid, file_name: data.item });
+    W.versions['movie:' + tmdb] = [{ tid: 30, title: 'A', mb: 1, labels: [], res: '1080p' }, { tid: 31, title: 'B', mb: 1, labels: [], res: '1080p' }];
+    return Number(env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bat)
+      VALUES ('movie', ?, 0, 'p', '["alice"]', ?, '', ?, 1, 1, 1, ?, ?)`).run(tmdb, stage, JSON.stringify({ file: fid, task: tid, cur: { tid: 30, t: 'A' }, tried: [], vers: W.versions['movie:' + tmdb].map(v => ({ ...v, t: v.title })), versAt: Date.now(), ...data }),
+      Date.now() + 3600e3, extra || 0).lastInsertRowid);
+  };
+  const act = async (id, a) => (await call('POST', '/admin/api/req', { admin: true, body: { id, act: a } }))[1];
+  /* 换规格：等待凑批的也能换（PikPak 那份删掉、追踪码忘掉，下一个规格重新加） */
+  const s1 = seed(6101, 'ready', { item: 'P1.[auto-m6101-r1].mkv', kind: 'file', tag: '[auto-m6101-r1]' });
+  const k1 = await act(s1, 'skip');
+  const r1 = JSON.parse(env.DB.db.prepare('SELECT data FROM tj_req WHERE id = ?').get(s1).data);
+  ok(k1.request.stage === 'queued' && W.files.get('pf6101').trashed && r1.tag === undefined && r1.tried.includes(30), '等待凑批的换规格：删 PikPak 那份、忘掉追踪码、记下试过', { k1, r1 });
+  /* 取消：PikPak 那份删掉；重试从推送那一步重来 */
+  const s2 = seed(6102, 'ready', { item: 'P2.[auto-m6102-r2].mkv', kind: 'file', tag: '[auto-m6102-r2]' });
+  const c2 = await act(s2, 'cancel');
+  ok(c2.request.state === 'cancelled' && W.files.get('pf6102').trashed && !W.tasks.has('pt6102'), '等待凑批的取消：PikPak 上的任务和文件一起删', c2.request);
+  const t2 = await act(s2, 'retry');
+  ok(t2.request.stage === 'queued' && t2.request.state === 'active', '取消后重试：从推送那一步重来（PikPak 那份已经删了）', t2.request);
+  /* 批量里取消的重试：离开那一批，回去等凑批 */
+  const s3 = seed(6103, 'cancelled', { item: 'P3.[auto-m6103-r3].mkv', kind: 'file', tag: '[auto-m6103-r3]', batch: 99, lastStage: 'copy' }, 99);
+  const t3 = await act(s3, 'retry');
+  const r3 = env.DB.db.prepare('SELECT bat, data FROM tj_req WHERE id = ?').get(s3);
+  ok(t3.request.stage === 'ready' && r3.bat === 0 && JSON.parse(r3.data).batch === undefined && !t3.request.batch, '批量里取消的重试：离开那一批，回去等凑批', { t3: t3.request, r3 });
+  /* 中途关掉批量传输：等着的直接一个一个传 */
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: false } });
+  W.copyJobs = [];
+  const c0 = W.tf.filter(([op]) => op === 'copy').length;
+  await tick();
+  ok((await one(s3)).stage === 'copy' && W.tf.filter(([op]) => op === 'copy').length > c0 && W.batchCalls.length === 0, '关掉批量传输：等待凑批的直接单个传', await one(s3));
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true } });
+  for (const k of ['pt6101', 'pt6102', 'pt6103']) W.tasks.delete(k);
+}
+
+/* ── 发行检查（关了自动通过）：剧集区的名字放在 tv 里一起问 ── */
+{
+  reset26();
+  W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { autoReady: false } });
+  const ins = (tmdb, data) => Number(env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next)
+    VALUES (?, ?, ?, 'r', '["alice"]', 'release', '', ?, 1, 1, 1, 0)`).run(data.sub ? 'tv' : 'movie', tmdb, data.sub ? 1 : 0, JSON.stringify(data)).lastInsertRowid);
+  W.exists = new Set(['Rel.Movie.mkv']); W.existsTv = new Set(['Rel.Show.A']);
+  const m = ins(6001, { item: 'Rel.Movie.mkv', kind: 'file', tag: '' });
+  const a = ins(6002, { item: 'Rel.Show.A', kind: 'dir', sub: 'ram2', tag: '' });
+  const b = ins(6003, { item: 'Rel.Show.B', kind: 'dir', sub: 'ram2', tag: '' });
+  const e0 = W.tf.length;
+  await tick();
+  const ex = W.tf.slice(e0).filter(([op]) => op === 'exists');
+  ok(ex.length === 1 && ex[0][1].items.join() === 'Rel.Movie.mkv' && ex[0][1].tv.join() === 'Rel.Show.A,Rel.Show.B', '发行检查一次问完：电影在 items，剧集区的在 tv', ex);
+  ok((await one(m)).stage === 'release' && (await one(a)).stage === 'release' && (await one(b)).state === 'done', '还在 dropbox:auto/ram2 的接着等，不在了的已发行');
+  env.DB.db.exec('DELETE FROM tj_req');
+  await call('POST', '/admin/api/cfg', { admin: true, body: { autoReady: true } });
+}
+
+/* ── 传输 Worker 是老版本（909：ping 里没有 caps）：剧集照旧放 /auto、一个一个传，什么都不带 sub ── */
+{
+  reset26();
+  W.caps = null;
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true } });
+  W.lib = { mode: 404, seen: new Set() };
+  W.copyJobs = []; W.job[88] = { finished: true, success: true, bytes: 1, total: 1 };
+  const tf0 = W.tf.length, push0 = W.push.length;
+  const mv = (await call('POST', '/app/requests', { user: 'alice', body: { src: 'movie', id: 2000 } }))[1].request;
+  const tv = (await call('POST', '/app/requests', { user: 'alice', body: { src: 'tv', id: 3002, season: 1 } }))[1].request;
+  ok(!mv.bid && !tv.bid, '老版本 App 一部一部提交：没有 bid');
+  for (let i = 0; i < 14; i++){
+    for (const t of [...W.tasks.keys()]) finishTask(t);
+    await tick();
+    if ((await one(mv.id)).state === 'done' && (await one(tv.id)).state === 'done') break;
+  }
+  ok((await one(mv.id)).state === 'done' && (await one(tv.id)).state === 'done', '老版本传输 Worker：照样一部一部传完、就绪', [await one(mv.id), await one(tv.id)]);
+  const calls = W.tf.slice(tf0);
+  ok(calls.some(([op]) => op === 'ping') && !calls.some(([op]) => op.startsWith('batch-')), '问过 ping，没有 caps：不用批量接口', [...new Set(calls.map(x => x[0]))]);
+  ok(calls.every(([, b]) => !b || b.sub === undefined) && W.push.slice(push0).every(p => p.parent === 'AUTO'), '剧集照旧放 /auto，调用里不带 sub', W.push.slice(push0));
+  ok(calls.some(([op, b]) => op === 'copy' && b.kind === 'dir') && calls.some(([op, b]) => op === 'copy' && b.kind === 'file'), '电影、剧集都走单个传输');
+  const logs = (await call('GET', '/admin/api/log?id=' + mv.id, { admin: true }))[1].items.map(l => l.msg);
+  ok(!logs.some(m => /等待凑批/.test(m)), '老版本：不进「等待凑批」');
+  W.caps = ['sub', 'batch'];
 }
 
 /* ── 共用的 D1：别人的表原样不动，自己的表缺的列补上了 ── */
