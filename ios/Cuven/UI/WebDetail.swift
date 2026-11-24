@@ -924,13 +924,13 @@ struct DetailScaffold<Episodes: View>: View {
                             LogoImage(url: TMDBImage.url(logo, "w500"), height: logoH, alignment: .leading,
                                       fallback: title, maxWidth: box.maxWidth)
                         }
-                            // 量它在窗口里的框：粒子从这里出发（跟着页面往上走）
-                            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { motion.heroBox = $0 }
-                            .accessibilityElement(children: .ignore)
-                            .accessibilityLabel(title)
-                            .accessibilityAddTraits(.isHeader)
-                            // 透明底的模糊淡入：不透明的模糊会把字标四周的透明糊成一块黑框（「字标闪一下」）
-                            .transition(.dsBlurFadeClear())
+                        // 量它在窗口里的框：粒子从这里出发（跟着页面往上走）
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { motion.heroBox = $0 }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(title)
+                        .accessibilityAddTraits(.isHeader)
+                        // 透明底的模糊淡入：不透明的模糊会把字标四周的透明糊成一块黑框（「字标闪一下」）
+                        .transition(.dsBlurFadeClear())
                     } else {
                         Text(title)
                             .font(.largeTitle.bold())
@@ -1089,6 +1089,82 @@ struct DetailScaffold<Episodes: View>: View {
         }
     }
 
+}
+
+// MARK: - 字标粒子转场（用户要求：滚动驱动，头部大字标 → 顶上条里的小字标）
+
+/// 转场的滚动状态：DetailScaffold 在滚动 / 排版回调里写，粒子层、钉住的条、头部字标读。
+/// 单独一个可观察的小对象：每一帧只有读它的那几小块重画，整页（DetailScaffold）不跟着每帧重算
+@MainActor @Observable
+final class DetailLogoMotion {
+    /// 0 = 字标在头部原位，1 = 字标已经落进顶上的条（滚到以前钉住那条出现的位置）
+    private(set) var progress: Double = 0
+    /// 已经离开原位（p > 0）：头部真字标藏起来，交给粒子层。单独一个开关：头部那一块只在它翻转时重画
+    private(set) var moving = false
+    /// 头部字标（LogoImage 那一块，字标靠左下画在里面）在窗口里的框
+    var heroBox: CGRect = .zero
+    /// 顶上条里字标那一格在窗口里的框（粒子的落点）
+    var slot: CGRect = .zero
+
+    func setProgress(_ p: Double) {
+        if progress != p { progress = p }
+        let m = p > 0
+        if moving != m { moving = m }
+    }
+}
+
+/// 头部的真字标：p > 0 时藏起来（粒子层在画同一张图）；「减弱动态效果」时不放粒子，跟着进度淡出（条里那枚同时淡入）
+private struct DetailHeroLogoGate<Content: View>: View {
+    let motion: DetailLogoMotion
+    /// 转场开着（字标图到手了）；没开就和以前一样一直显示
+    let active: Bool
+    let reduceMotion: Bool
+    let content: Content
+
+    init(motion: DetailLogoMotion, active: Bool, reduceMotion: Bool, @ViewBuilder content: () -> Content) {
+        self.motion = motion
+        self.active = active
+        self.reduceMotion = reduceMotion
+        self.content = content()
+    }
+
+    var body: some View {
+        content.opacity(shown)
+    }
+
+    private var shown: Double {
+        guard active else { return 1 }
+        if reduceMotion { return 1 - motion.progress }
+        return motion.moving ? 0 : 1
+    }
+}
+
+/// 有字标时钉住的那一条：按当下的进度现做（只有这一小块每帧重画）
+private struct DetailLogoBarHost: View {
+    let motion: DetailLogoMotion
+    let bar: (Double) -> DetailPinnedBar
+
+    var body: some View {
+        bar(motion.progress)
+    }
+}
+
+/// 粒子层：从头部字标（跟着页面走的那个框）飞到条里那一格；两个框都是窗口坐标。
+/// 框还没量到时进度给 0（什么都不画）
+private struct DetailLogoParticleLayer: View {
+    let motion: DetailLogoMotion
+    let image: UIImage
+    /// 头部字标实际画出来的大小（在 LogoImage 那一块里靠左下）
+    let heroSize: CGSize
+
+    var body: some View {
+        let box = motion.heroBox
+        let slot = motion.slot
+        let p = motion.progress
+        let ready = box.width > 0 && slot.width > 0 && heroSize.width > 0
+        let from = CGRect(x: box.minX, y: box.maxY - heroSize.height, width: heroSize.width, height: heroSize.height)
+        LogoParticleField(image: image, from: from, to: slot, progress: ready ? p : 0)
+    }
 }
 
 // MARK: - 小部件

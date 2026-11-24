@@ -1219,23 +1219,20 @@ const flowGet = async (user, tag) => {
   const runTicks = async (n) => { let at = 0, why = ''; for (let i = 1; i <= n; i++){ await tick(); if (!at && launched()){ at = i; why = (lastTick().batch || {}).why || ''; } } return { at, why }; };
 
   /* 老版本 App 一部一部提交的（bid = 0）：前面还有在下载的 → 最多等 10 分钟。
-     2.9 改了开着智能凑批时的结果：seedUp 那一部卡在 50%（PikPak 的进度一直是 50），按开始下载以来的平均速度推，
-     第二轮（6 分钟）起预计要 14 分钟以后才清洗好，过了最晚开批（10 分钟）→ 不等它，第二轮就开（2.8 是干等到 10 分钟）。
-     关了智能凑批（子进程那一遍）照旧是原来那两条 */
+     2.9 曾经改了开着智能凑批时的结果（第 2 轮就开：卡在 50% 的那一部按开始下载以来的平均速度推，停住的时间也揉进速度里，6 分钟起预计 14 分钟）。
+     2.9 复查改回 2.8 的结果（两遍都是这两条）：seedUp 那一部 3 分钟就到 50%，之后停住；速度现在量到最后一次有进度为止
+     （没看的那几分钟不再乘上 (1 − p) ÷ p，见审查结论 ②），停了 6 分钟还不到「停住了」的 10 分钟（dlQuiet），预计照样赶得上；
+     第 3 轮（9 分钟）它已经「该好了还没好」，预计比最晚开批晚 1 分钟，可离最晚开批只剩不到 1 分钟，早开省不了几分钟，
+     算它赶得上（smartGain，审查结论 ④）→ 等到 10 分钟。老版本 App 最多就等 10 分钟，停住要 10 分钟才认得出来，这种情形和 2.8 一样 */
   reset(); seedReady(3); seedUp();
-  if (!SMART){
-    for (let i = 0; i < 3; i++) await tick();
-    ok(launched() === 0, '老版本 App 提交的 3 部、前面还有在下载的：先等（9 分钟）', lastTick());
-    await tick();
-    ok(launched() === 1 && W.batchCalls[0].items.length === 3 && /最早的一部等了 1[0-9] 分钟/.test(lastTick().batch.why), '等了 10 分钟以上：有几部传几部', lastTick().batch);
-  } else {
-    const r = await runTicks(4);
-    ok(r.at === 2, '2.9 智能凑批：老版本 App 的 3 部，前面那一部刚有进度时预计赶得上先等一轮，卡住了、预计赶不上就不等（第 2 轮，不等满 10 分钟）', r);
-    ok(launched() === 1 && W.batchCalls[0].items.length === 3 && /^智能凑批：所有人加起来这会儿只凑得到 3 部（其余 1 部约 \d+ 分钟后才清洗好）$/.test(r.why), '2.9：有几部传几部，为什么写清楚', r);
-  }
+  for (let i = 0; i < 3; i++) await tick();
+  ok(launched() === 0, '老版本 App 提交的 3 部、前面还有在下载的：先等（9 分钟）', lastTick());
+  await tick();
+  ok(launched() === 1 && W.batchCalls[0].items.length === 3 && /最早的一部等了 1[0-9] 分钟/.test(lastTick().batch.why), '等了 10 分钟以上：有几部传几部', lastTick().batch);
 
   /* 请求中心提交的（bid > 0）、这一次提交的还有在下载的 → 等 30 分钟。
-     2.9 同上：卡在 50% 的那一部越等越往后推，第 5 轮（15 分钟）预计要 33 分钟才清洗好、过了 30 分钟 → 那时就开（2.8 干等到 30 分钟） */
+     2.9：卡在 50% 的那一部第 5 轮（15 分钟）就不等了 → 那时就开（2.8 干等到 30 分钟）。
+     2.9 复查：断言不变，原因换了 —— 以前是停住的时间揉进平均速度、越推越晚，过了最晚开批；现在是最后一次有进度到现在超过 10 分钟 = 停住了 */
   reset(); seedReady(3, 7); seedUp(7);
   if (!SMART){
     for (let i = 0; i < 9; i++) await tick();
@@ -3353,6 +3350,15 @@ env.DB.prepare = prepSt;
     }
     return out;
   };
+  /* 2.9 复查：前面一部一直在改名（rclone 作业一直在跑，这一段里不会因为 30 分钟没进展被停掉）：每一轮都「2 分钟就好」，其实一直不好 */
+  const ren29 = (bid) => {
+    const tmdb = 29000 + (seq++), t = Date.now(), job = 59000 + seq;
+    W.job[job] = { finished: false, success: false, bytes: 1, total: 10 };
+    env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+      VALUES ('tv', ?, 1, 'rn', '["bob"]', 'rename', '', ?, ?, ?, ?, 0, ?)`)
+      .run(tmdb, JSON.stringify({ fname: 'Ren' + tmdb, fkind: 'dir', org: 1, job, newname: 'Ren' + tmdb + '.S01', rb: 1, rbAt: t + 3600e3, cur: { tid: 1, t: 'x' }, tried: [] }), t, t, t, bid);
+    return job;
+  };
   /* 来速的历史：n 次提交（每次一部，老版本 App 的 bid = 0；或者同一个 bid），建于最近 span 之内，已经就绪了。
      2.9 复查：bid = 0 的一部一个人（zed0、zed1…），真是 n 个人各提交一次；给了 user 就都是这一个人一部一部提交的（来速里 10 分钟算一次） */
   const hist29 = (n, span, bid = 0, user) => {
@@ -3387,7 +3393,9 @@ env.DB.prepare = prepSt;
   hist29(30, 20 * M, 99);
   ready29(3, 7); down29(1, 7, 30 * M, 0.15);             // 同一次提交还有一部要 3 小时：2.6 的两条退路都不成立，看有效的凑批数
   let r = await runTicks(1);
-  ok(r.at === 1 && W.batchCalls[0].items.length === 3 && /^智能凑批：所有人加起来这会儿只凑得到 3 部（其余 1 部约 3(\.\d)? 小时后才清洗好）$/.test(r.why),
+  /* 2.9 复查：「约 3 小时」改成「约 2–3 小时」：速度现在量到最后一次有进度（1 分钟前）为止、再扣掉那以后的几分钟，算出来 2.7 小时
+     （以前把没看的那 4 分钟也乘上 (1 − p) ÷ p，3.2 小时） */
+  ok(r.at === 1 && W.batchCalls[0].items.length === 3 && /^智能凑批：所有人加起来这会儿只凑得到 3 部（其余 1 部约 [23](\.\d)? 小时后才清洗好）$/.test(r.why),
      '2.9：一次提交 30 部算一次提交（来速不虚高）；前面那一部要 3 小时：不等，马上开 3 部', r);
 
   /* ② 5 部等着 + 同一次提交还有 3 部在下载、按速度 4 分钟左右下完：等它们，凑成 8 部一起开；App 上是「已凑 5 / 8」 */
@@ -3421,7 +3429,8 @@ env.DB.prepare = prepSt;
     await reset29(smart);
     ready29(5, 7); down29(3, 7, 30 * M, 0.15);
     const r3 = await runTicks(10);
-    if (smart) ok(r3.at === 1 && W.batchCalls[0].items.length === 5 && /^智能凑批：所有人加起来这会儿只凑得到 5 部（其余 3 部约 3(\.\d)? 小时后才清洗好）$/.test(r3.why),
+    /* 2.9 复查：「约 3 小时」→「约 2–3 小时」，原因同上（2.7 小时） */
+    if (smart) ok(r3.at === 1 && W.batchCalls[0].items.length === 5 && /^智能凑批：所有人加起来这会儿只凑得到 5 部（其余 3 部约 [23](\.\d)? 小时后才清洗好）$/.test(r3.why),
                   '2.9：前面 3 部要 3 小时才下完：不等它们，第一轮就开 5 部', r3);
     else ok(r3.at === 10 && /最早的一部等了 3\d 分钟/.test(r3.why), '（关了智能凑批）前面 3 部要 3 小时：照 2.8 干等到 30 分钟', r3);
   }
@@ -3449,17 +3458,25 @@ env.DB.prepare = prepSt;
   r = await runTicks(1);
   ok(r.at === 1 && W.batchCalls[0].items.length === 6, '2.9：同样的情形最近没人提交：第一轮就开 6 部', r);
 
-  /* ⑤ 硬上限：前面的还没有进度（不知道多快）→ 照 2.8 当它赶得上，等；等满 30 分钟（老版本 App 10 分钟）照样开 */
+  /* ⑤ 前面的刚开始下载、还没有进度（不知道多快）→ 照 2.8 当它赶得上，等。
+     2.9 复查改了后半段（审查结论 ⑥）：以前断言它们一直 0% 也等满 30 分钟（第 10 轮）——那正是用户说的「等永远不会来的那几部」。
+     现在开始下载 10 分钟还是 0% = 停住了（死种），不等：第 3 轮（开始下载 11 分钟）就开。
+     硬上限换了一种「一直预计马上就好、其实一直不好」的来测（前面一季一直在改名、每一轮都「2 分钟就好」）：等满 30 分钟（老版本 App 10 分钟）照样开 */
   await reset29(true);
   ready29(3, 7); down29(2, 7, 2 * M, 0);
   await tick();
   g = await gate();
   ok(launched() === 0 && g.need === 5 && g.why === '所有人加起来能凑 5 部：等前面 2 部清洗好' && g.launchBy === g.oldest + 30 * M,
-     '2.9：前面 2 部还没有进度：照 2.8 等它们，need 5，launchBy = 最晚开批', g);
+     '2.9：前面 2 部刚开始下载、还没有进度：照 2.8 等它们，need 5，launchBy = 最晚开批', g);
   r = await runTicks(9);
-  ok(r.at === 9 && W.batchCalls[0].items.length === 3 && /最早的一部等了 3\d 分钟/.test(r.why), '2.9 硬上限：等满 30 分钟照样开（第 10 轮）', { at: r.at + 1, why: r.why });
+  ok(r.at === 2 && W.batchCalls[0].items.length === 3 && r.why === '智能凑批：所有人加起来这会儿只凑得到 3 部（其余 2 部一时半会儿清洗不好）',
+     '2.9 复查：那 2 部开始下载 10 分钟还是 0%（死种）：不再等，第 3 轮就开', { at: r.at + 1, why: r.why });
   await reset29(true);
-  ready29(3, 0); down29(1, 0, 2 * M, 0);
+  ready29(3, 7); ren29(7);
+  r = await runTicks(10);
+  ok(r.at === 10 && W.batchCalls[0].items.length === 3 && /最早的一部等了 3\d 分钟/.test(r.why), '2.9 硬上限：前面那一部一直「马上就好」，等满 30 分钟照样开（第 10 轮）', r);
+  await reset29(true);
+  ready29(3, 0); ren29(0);
   r = await runTicks(4);
   ok(r.at === 4 && /最早的一部等了 1\d 分钟/.test(r.why), '2.9 硬上限：老版本 App 一部一部提交的等满 10 分钟照样开', r);
 
@@ -3547,15 +3564,6 @@ env.DB.prepare = prepSt;
   ok((await setCfg({ smart: false }))[1].cfg.smart === false && (await setCfg({ smart: true }))[1].cfg.smart === true, '2.9 面板：开关存得住');
 
   /* ══ 2.9 复查（审查结论十条）：每一条一个回归测试，复查之前的 2.9 在这里每一条都挂（先对着没改的 worker 跑过一遍确认了） ══ */
-  /* 前面一部一直在改名（rclone 作业一直在跑，这一段里不会因为 30 分钟没进展被停掉）：每一轮都「2 分钟就好」，其实一直不好 */
-  const ren29 = (bid) => {
-    const tmdb = 29000 + (seq++), t = Date.now(), job = 59000 + seq;
-    W.job[job] = { finished: false, success: false, bytes: 1, total: 10 };
-    env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
-      VALUES ('tv', ?, 1, 'rn', '["bob"]', 'rename', '', ?, ?, ?, ?, 0, ?)`)
-      .run(tmdb, JSON.stringify({ fname: 'Ren' + tmdb, fkind: 'dir', org: 1, job, newname: 'Ren' + tmdb + '.S01', rb: 1, rbAt: t + 3600e3, cur: { tid: 1, t: 'x' }, tried: [] }), t, t, t, bid);
-    return job;
-  };
   /* 排队中的（还没推送）：d = data 里多放的（wait、vers…），next = 下一次推进的时刻 */
   const q29 = (bid, d = {}, next) => {
     const tmdb = 29000 + (seq++), t = Date.now();
