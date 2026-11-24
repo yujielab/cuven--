@@ -273,7 +273,8 @@ struct HomeView: View {
         }
     }
 
-    /// 主页结尾（用户要求，照 Apple TV+ 那一页的结尾）：两排反向慢慢走的 16:9 字标卡、「查看全部影片 ›」+ 暂停，手机上再加「立即观看」
+    /// 主页结尾（用户要求，照 Apple TV+ 那一页的结尾）：两排反向慢慢走的 16:9 字标卡、「查看全部影片 ›」+ 暂停；
+    /// 手机上原先再加的「立即观看」用户要求去掉了（截图里是不该出现的按钮），手机和展开一样到这一行就完
     @ViewBuilder
     private func finale(_ m: DSMetrics) -> some View {
         let tiles = model.finaleTiles(limit: 20)

@@ -236,14 +236,21 @@ struct SeriesDetailView: View {
 
     private var current: Series { picked ?? series }
 
+    /// 这部剧的几季：和主页、合集页去重用同一条认法（AppModel.showKey），季菜单里的就是主页那张卡代表的那几季。
+    /// 同一季有两份（/auto 里请求添加来的那份和整理进剧集目录的那份，用户截图里重复的「铁拳教育 · 第 1 季」）：菜单里只出一个，
+    /// 留 preferredSeason 挑的那份；正在看的那份一定留
     private var seasons: [Series] {
-        let key = current.tmdbId ?? model.seriesMetas[current.path]?.id
-        let same = model.series.filter { s in
-            if let key { return (s.tmdbId ?? model.seriesMetas[s.path]?.id) == key }
-            return s.name == current.name
-        }
+        let key = model.showKey(current)
+        let same = model.series.filter { model.showKey($0) == key }
         let list = same.contains(where: { $0.path == current.path }) ? same : same + [current]
-        return list.sorted { ($0.season ?? 0) < ($1.season ?? 0) }
+        var bySeason: [Int: Series] = [:]
+        for s in list {
+            let n = s.season ?? 0
+            guard let have = bySeason[n] else { bySeason[n] = s; continue }
+            if have.path == current.path { continue }
+            if s.path == current.path || AppModel.preferredSeason(s, over: have) { bySeason[n] = s }
+        }
+        return bySeason.values.sorted { ($0.season ?? 0) < ($1.season ?? 0) }
     }
 
     var body: some View {
