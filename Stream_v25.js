@@ -1,5 +1,19 @@
 /**
- * Dropbox Video Proxy — Cloudflare Worker (v25.5 · 2026-11-24)
+ * Dropbox Video Proxy — Cloudflare Worker (v25.6 · 2026-11-24)
+ * ────────────────────────────────────────────────────────────────
+ * v25.6 —— /api/tmdb-batch 按 TMDB 编号批量取（App「可申请」那一行：约 24 部的背景、字标一次拿齐）
+ *
+ *   ▸ 原因：批接口只认文件名（q.name）。「可申请」的片子还不在片库里、没有文件名，App 手里只有 TMDB 编号，
+ *     要背景和字标只能一部一部问 /api/tmdb?id=&type=&logo=1 —— 一行 24 部就是 24 个请求。
+ *   ▸ 现在 queries 里多收 { id: 550, type: 'movie' | 'tv', logo?: true }：回包的键是 "movie:550" / "tv:1399"，
+ *     值和 /api/tmdb?id=&type= 回的一模一样（logo: true 时带 logo / logoChecked / backdropClean / posterClean，
+ *     同一个边缘缓存键：单条接口问过的批接口直接用，反过来也一样）；和文件名那几条共用 6 路并发、
+ *     TMDB 请求预算（按编号取一次算 1 个，带 logo 算 4 个）、整批最多 80 条。
+ *     编号 / 类型不对的（不是正整数、不是 movie / tv）：那个键回 null；TMDB 上没有这部也是 null（照旧写缓存）；
+ *     TMDB 出错 / 超预算：那个键不回（过会儿再问）—— 和文件名那条路一个规矩。同一个键问了两次只取一次（有一条要 logo 就取全量）。
+ *   ▸ 回包多一个 __byId: 1（App 据此知道后端认得编号查询；旧版后端不回这几个键，App 退回单条接口）。
+ *     带 name 的照旧按文件名认（同时带 id 也是）；老网页、老 App 只带文件名的批次，回包照旧（只多这一个记号）。
+ *
  * ────────────────────────────────────────────────────────────────
  * v25.5 —— /auto、/auto/ram2、/api/auto/sync 加固（用户要求：请求添加这条链上每个 Worker 的稳定性、性能都再加强）
  *
@@ -5467,45 +5481,92 @@ async function handleTmdbBatch(request, env, ctx) {
   const result = {};
   // 一次批量最多发这么多个 TMDB 请求（每部片 2–10 个不等）：超了的那几部这次不答，前端过会儿再问
   const budget = { left: 700 };
+  // 认好的结果进边缘缓存（文件名、编号两条路一样；字标没问成的半份不进，见 tmdbCacheable）
+  const keep = (ck, data, full) => {
+    if (!tmdbCacheable(data, full)) return;
+    const resp = new Response(data ? JSON.stringify(data) : 'null', {
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=2592000',
+      },
+    });
+    ctx?.waitUntil?.(cache.put(ck, resp));
+  };
 
-  await parallel(
-    queries.filter(q => q?.name).map(q => async () => {
-      const p = parseFilename(q.name);
-      // v25.2：名字里带追踪码的直接按 TMDB 编号取（不靠文件名猜）
-      const tag = autoTag(q.name);
-      if (tag) { p.id = tag.id; p.type = tag.type; }
-      else if (!p.title || p.extra) { result[q.name] = null; return; }   // 认不出片名 / 样片、预告、花絮：明确没有
-      const full = !!q.logo;
-      const ck = tmdbCacheKey(p, '', full);
+  const nameTask = q => async () => {
+    const p = parseFilename(q.name);
+    // v25.2：名字里带追踪码的直接按 TMDB 编号取（不靠文件名猜）
+    const tag = autoTag(q.name);
+    if (tag) { p.id = tag.id; p.type = tag.type; }
+    else if (!p.title || p.extra) { result[q.name] = null; return; }   // 认不出片名 / 样片、预告、花絮：明确没有
+    const full = !!q.logo;
+    const ck = tmdbCacheKey(p, '', full);
 
-      const hit = await cache.match(ck);
-      if (hit) {
-        try { result[q.name] = JSON.parse(await hit.text()); } catch { result[q.name] = null; }
-        return;
-      }
+    const hit = await cache.match(ck);
+    if (hit) {
+      try { result[q.name] = JSON.parse(await hit.text()); } catch { result[q.name] = null; }
+      return;
+    }
 
-      // 认不上 → null（写缓存）；TMDB 出错 / 超预算 → 这个键不回（不写缓存）。
-      // 前端靠这一点分清「TMDB 说没有这部」与「这次没问成」：前者不显示，后者过会儿再问
-      let data = null;
-      let failed = false;
-      try { data = await fetchMetadata(p, '', full, env, '', budget); }
-      catch { failed = true; }
-      if (failed) return;
-      result[q.name] = data;
-      if (!tmdbCacheable(data, full)) return;
-      const resp = new Response(data ? JSON.stringify(data) : 'null', {
-        headers: {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Cache-Control': 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=2592000',
-        },
-      });
-      ctx?.waitUntil?.(cache.put(ck, resp));
-    }),
-    6,
-  );
+    // 认不上 → null（写缓存）；TMDB 出错 / 超预算 → 这个键不回（不写缓存）。
+    // 前端靠这一点分清「TMDB 说没有这部」与「这次没问成」：前者不显示，后者过会儿再问
+    let data = null;
+    let failed = false;
+    try { data = await fetchMetadata(p, '', full, env, '', budget); }
+    catch { failed = true; }
+    if (failed) return;
+    result[q.name] = data;
+    keep(ck, data, full);
+  };
+
+  /* v25.6：按 TMDB 编号取 —— { id, type: 'movie' | 'tv', logo?: true }，键 "movie:550" / "tv:1399"。
+     和 /api/tmdb?id=&type=[&logo=1] 同一个取法、同一个缓存键（tmdbCacheKey 带 kind），回的东西一模一样 */
+  const idTask = (key, id, type, full) => async () => {
+    const ck = tmdbCacheKey({ id, type }, '', full, type);
+    const hit = await cache.match(ck);
+    if (hit) {
+      try { result[key] = JSON.parse(await hit.text()); } catch { result[key] = null; }
+      return;
+    }
+    // 预算：按编号取一次（/movie|tv/{id}）算 1 个，带字标再加 images / 详情 / 演职员 3 个；不够就这次不答
+    const cost = full ? 4 : 1;
+    if (budget.left < cost) return;
+    budget.left -= cost;
+    let data = null;
+    try { data = await fetchMetadata({ id, type }, '', full, env, type); }
+    catch { return; }                       // TMDB 出错：这个键不回、不写缓存（同文件名那条路）
+    result[key] = data;                     // TMDB 上没有这个编号（404）：null，照旧写缓存
+    keep(ck, data, full);
+  };
+
+  // 编号那几条：编号是正整数、类型是 movie / tv 才去问；同一个键只问一次（有一条要字标就取全量）
+  const idStr = v => (typeof v === 'string' || typeof v === 'number') ? String(v).slice(0, 40) : '';
+  const idNum = v => {
+    const n = typeof v === 'number' ? v : (typeof v === 'string' && /^[1-9]\d{0,9}$/.test(v) ? +v : NaN);
+    return Number.isSafeInteger(n) && n > 0 && n <= 2147483647 ? n : 0;
+  };
+  const byId = new Map();     // key → { id, type, full, at }（at：第一次出现的位置，保持原来的先后）
+  const order = [];
+  queries.forEach((q, i) => {
+    if (!q || typeof q !== 'object') return;
+    if (q.name) { order.push({ at: i, task: nameTask(q) }); return; }
+    if (q.id == null && q.type == null) return;                         // 什么都没带：照旧不理
+    const key = `${idStr(q.type)}:${idStr(q.id)}`;
+    const id = idNum(q.id), type = q.type === 'movie' || q.type === 'tv' ? q.type : '';
+    if (!id || !type) { result[key] = null; return; }                    // 编号 / 类型不对：明确没有（这种键和合法的键撞不上）
+    const prev = byId.get(key);
+    if (prev) { prev.full = prev.full || !!q.logo; return; }
+    byId.set(key, { id, type, full: !!q.logo, at: i });
+  });
+  for (const [key, x] of byId) order.push({ at: x.at, task: idTask(key, x.id, x.type, x.full) });
+  order.sort((a, b) => a.at - b.at);
+
+  await parallel(order.map(x => x.task), 6);
 
   // 版本记号：前端据此知道这里的 null 是确定的「认不出」（旧版出错时也回 null，不能拿来藏片）
   result.__match = 2;
+  // v25.6：认得编号查询（App 看到它才把「可申请」那一行交给批接口；旧版后端没有这个记号）
+  result.__byId = 1;
   return jsonResponse(result);
 }
 

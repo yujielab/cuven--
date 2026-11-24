@@ -68,6 +68,15 @@ const W = {
   hook: null,                // (url, method, body) → 回一个 Response 就用它，不回就照常模拟（中途掐一下、拨时钟、模拟有人跟上）
   batchJobless: false,       // batch-copy：这一批在跑、作业号没找到 → { jobid: 0, reused, running: 1 }（910）
   renameDone: false,         // rename：上一次其实改完了 → { name, sub, jobid, done: 1 }（910）
+  /* 2.8（影片库 v7.2、传输 911） */
+  pushSeq: [],               // /api/pikpush 接下来几次怎么回：'unsure'（建成了、回 unsure）/ 'lost'（建成了、回包路上断了）/ 'busy'（409 + Retry-After）/
+                             //   'gone'（404 文件夹不在了）/ 'forum'（stop + forum: 1）/ 'auth'（503 PikPak 登录不上）；空 = 照常建
+  pushRec: {},               // 影片库记着的推送（parent:tid → 任务）：带 check 的先按它认领（adopted）
+  pushNew: 0,                // 影片库真建了几个云下载任务
+  busyWait: 7,               // 409 的 Retry-After（秒）
+  orgLeft: [],               // organize 接下来几次回的 left（911）；空 = 不回 left（910 以前）
+  copyOpen: {},              // 单项 copy 每一项最近开的作业号（911 的 retry: 1 按它接上）
+  copyLost: 0,               // 单项 copy 接下来几次：那边开了，回包丢了（502）
 };
 const pkFolderWith = (name, children, parent = 'AUTO') => {
   const id = 'F' + (W.seq++);
@@ -115,12 +124,28 @@ globalThis.fetch = async (url, init = {}) => {
     }
     if (p === '/api/pikpush'){
       const it = body.items[0];
-      W.push.push({ src: u.searchParams.get('src'), parent: body.parent, tid: it.tid });
+      const chk = !!(it.check || body.check);
+      W.push.push({ src: u.searchParams.get('src'), parent: body.parent, tid: it.tid, check: chk ? 1 : 0, btih: it.btih || '', deadlineMs: body.deadlineMs });
       if (W.pushStop){ return J({ items: [{ tid: it.tid, ok: 0, retry: 1, held: 1 }], ok: 0, stop: W.pushStop }); }
-      const [name, children] = LAYOUT[it.tid]();
+      /* v7.2 的几种回法 */
+      const mode = W.pushSeq.length ? W.pushSeq.shift() : '';
+      if (mode === 'busy') return new Response(JSON.stringify({ error: '另一个源正在用，稍后再试', kind: 'busy', busy: 1, wait: W.busyWait }),
+                                               { status: 409, headers: { 'content-type': 'application/json', 'retry-after': String(W.busyWait) } });
+      if (mode === 'gone') return J({ items: [{ tid: it.tid, ok: 0, retry: 1, held: 1 }], ok: 0, stop: '目标文件夹不在了（可能被删了），换一个文件夹', gone: 1,
+                                      error: '目标文件夹不在了（可能被删了），换一个文件夹', pk: 1 }, 404);
+      if (mode === 'forum') return J({ items: [{ tid: it.tid, ok: 0, retry: 1, held: 1 }], ok: 0, stop: '论坛：登录失败（要验证码）', forum: 1 });
+      if (mode === 'auth') return J({ error: 'PikPak 登录冷却中，稍后再试', pk: 1, conf: 0, auth: 1, captcha: 0, gone: 0 }, 503);
+      /* 带 check：先在「任务列表」里找（影片库按 info hash 找；这里按 parent:tid），任务还在就认领 */
+      const rec = W.pushRec[body.parent + ':' + it.tid];
+      if (chk && rec && W.tasks.has(rec.task))
+        return J({ items: [{ tid: it.tid, ok: 1, adopted: 1, task: rec.task, name: rec.name, file: rec.file, fileName: rec.name, btih: 'bt' + it.tid }], ok: 1, stop: '' });
+      const [name, children] = (LAYOUT[it.tid] || (() => ['Movie.' + it.tid + '.1080p.BluRay', [['Movie.' + it.tid + '.1080p.mkv', 5e9]]]))();
       const fid = pkFolderWith(name, children, body.parent || 'AUTO');
       const task = 'T' + (W.seq++);
       W.tasks.set(task, { id: task, phase: 'PHASE_TYPE_RUNNING', progress: 0, file_id: fid, file_name: name });
+      W.pushRec[body.parent + ':' + it.tid] = { task, file: fid, name }; W.pushNew++;
+      if (mode === 'unsure') return J({ items: [{ tid: it.tid, ok: 0, retry: 1, soft: 1, unsure: 1, btih: 'bt' + it.tid, err: 'PikPak 超时' }], ok: 0, stop: '' });
+      if (mode === 'lost') throw new TypeError('fetch failed');          // 建成了，回包路上断了（这边看到的是连不上 / 超时）
       return J({ items: [{ tid: it.tid, ok: 1, task, name, file: fid, fileName: name }], ok: 1, stop: '' });
     }
     if (p === '/api/pikpak'){
@@ -154,7 +179,11 @@ globalThis.fetch = async (url, init = {}) => {
     const batchBusy = () => Object.values(W.batchRun).some(id => W.job[id] && W.job[id].finished === false);
     switch (op){
       case 'ping': return J({ ok: 1, version: 'v1.68', core: 'test', ...(W.caps ? { caps: W.caps, tv: W.tvName } : {}) });
-      case 'organize': return J({ files: 3, deleted: ['ad.txt'], failed: [] });
+      case 'organize': {
+        /* 911：一次最多删 40 个，没删完的回 left */
+        const left = W.orgLeft.length ? W.orgLeft.shift() : null;
+        return J({ files: 3, deleted: ['ad.txt'], failed: [], ...(left != null ? { left } : {}) });
+      }
       case 'check': return J(W.check.shift() || { k: 'ok', total: 4, vids: 4, have: [1, 2, 3, 4], miss: [], ongoing: false });
       case 'rename': {
         /* 910：sub = 现在在哪个区，to = 改完放哪个区（剧集区的文件夹在 /auto/ram2 下面） */
@@ -165,9 +194,16 @@ globalThis.fetch = async (url, init = {}) => {
         if (W.renameDone) return J({ name, jobid: 79, done: 1, sub: body.to || '' });
         return J({ name, jobid: 77, ...(body.sub ? { sub: body.to || '' } : {}) });
       }
-      case 'copy':
+      case 'copy': {
         if (batchBusy()) W.copyWhileBatch++;
-        return J({ jobid: (W.copyJobs || []).shift() || 88 });
+        /* 911 retry: 1：这一项最近开的那个作业还在跑就接上（reused），不开第二个 */
+        const key = keyOf(body);
+        if (body.retry){ const o = W.copyOpen[key]; if (o && W.job[o] && W.job[o].finished === false) return J({ jobid: o, reused: true, from: body.from || 'webdav' }); }
+        const jobid = (W.copyJobs || []).shift() || 88;
+        W.copyOpen[key] = jobid;
+        if (W.copyLost > 0){ W.copyLost--; return J({ error: 'HTTP 520 · 连接中途断了（已经发出去了，不重试）' }, 502); }
+        return J({ jobid });
+      }
       case 'batch-copy': {
         if (!(W.caps || []).includes('batch')) return J({ error: 'item 不对' }, 400);      // 909：不认识的接口落到单条校验
         if (W.nofilter) return J({ error: '试列时列出了不在这一批里的东西：rclone 不认筛选规则', nofilter: 1 }, 409);
@@ -2007,6 +2043,421 @@ const PK500 = () => J({ error: 'internal_error', error_code: 500 }, 500);
     ok(!scans(hot).length && hot.every(s => planOf(s).some(d => /USING (COVERING )?INDEX tj_req_(stnext|stage)\b/.test(d))),
        '库里有了统计（ANALYZE）以后照样走 stage 的索引（不改走 tj_req_next、不整张表扫）', hot.map(s => [s.replace(/\s+/g, ' ').slice(0, 60), planOf(s)]));
   } finally { env.DB.db.exec('DELETE FROM sqlite_stat1'); try { env.DB.db.exec('ANALYZE sqlite_schema'); } catch {} }
+  env.DB.db.exec('DELETE FROM tj_req');
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   2.8：用上影片库 v7.2（推送幂等、deadlineMs、409 忙、404 文件夹不在了、论坛 / 登录问题）和传输 Worker 911
+   （整理回 left、单项 copy 的 retry: 1、改名作业报原名找不到）。回包里没有这些字段的老版本，前面那些段落照旧跑
+   ══════════════════════════════════════════════════════════════════ */
+const health28 = () => { const x = env.DB.db.prepare("SELECT v FROM tj_kv WHERE k = 'health'").get(); return x ? JSON.parse(x.v) : {}; };
+const kv28 = (k) => { const x = env.DB.db.prepare('SELECT v FROM tj_kv WHERE k = ?').get(k); return x ? JSON.parse(x.v) : null; };
+const insTv28 = (stage, data, tmdb, season = 1) => Number(env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next)
+  VALUES ('tv', ?, ?, 'x', '["alice"]', ?, '', ?, ?, ?, ?, 0)`).run(tmdb, season, stage, JSON.stringify(data), Date.now(), Date.now(), Date.now()).lastInsertRowid);
+const mv28 = (tmdb, tids) => { W.versions['movie:' + tmdb] = tids.map(tid => ({ tid, title: 'V' + tid + ' 1080p', mb: 1, labels: [], res: '1080p' })); };
+
+/* ── 2.8 推送幂等：结果不明（unsure）/ 这一下调用断了 → 记下 pushTry，下一次带 check + btih，影片库认领上一次建成的任务（adopted） ── */
+{
+  reset26(); W.caps = ['sub', 'batch']; W.pushSeq = [];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { pkUser: 'pk@x.com', pkPass: 'pkpass', batch: false, autoReady: false, pkSlots: 16, vpsSlots: 4 } });
+  mv28(9810, [40, 41]);
+  const a = ins27('queued', { dup: 0 }, { tmdb: 9810 });
+  const p0 = W.push.length, n0 = W.pushNew;
+  W.pushSeq = ['unsure'];
+  await tick();
+  let r = row27(a);
+  const first = W.push[p0];
+  ok(r.stage === 'queued' && r.d.pushTry && r.d.pushTry.tid === 40 && r.d.pushTry.btih === 'bt40' && r.d.pushTry.at > 0 && !(r.d.tried || []).length &&
+     first.check === 0 && !first.btih && /结果不明/.test(r.note),
+     '推送结果不明（v7.2 回 unsure，其实建成了）：记下 pushTry { tid, btih, at }，不烧规格；第一次推不带 check', { d: r.d, first, note: r.note });
+  ok(first.deadlineMs >= 8000 && first.deadlineMs < 40000, '推送带 deadlineMs（8–50 秒之内，比这边等影片库的 40 秒短）', first);
+  await tick();
+  r = row27(a);
+  const second = W.push[p0 + 1];
+  ok(second && second.tid === 40 && second.check === 1 && second.btih === 'bt40' && r.stage === 'download' && r.d.task === W.pushRec['AUTO:40'].task &&
+     W.pushNew === n0 + 1 && r.d.pushTry === undefined && !(r.d.tried || []).length && logs27(a).some(m => /认领了上一次/.test(m)),
+     '下一次推同一个规格带 check: 1 + btih：影片库认领上一次建成的任务（adopted），当推成往下走，只建了一个云下载任务', { second, d: r.d, made: W.pushNew - n0 });
+  env.DB.db.prepare('DELETE FROM tj_req WHERE id = ?').run(a);
+
+  /* 推送这一下连不上（影片库其实建成了、回包路上断了）：也记下，下一次带 check（没有 btih） */
+  mv28(9811, [42]);
+  const b = ins27('queued', { dup: 0 }, { tmdb: 9811 });
+  const p1 = W.push.length, n1 = W.pushNew;
+  W.pushSeq = ['lost'];
+  await tick();
+  r = row27(b);
+  ok(r.stage === 'queued' && r.d.pushTry && r.d.pushTry.tid === 42 && r.d.pushTry.btih === '' && r.d.errs === 1 && !(r.d.tried || []).length,
+     '推送调用暂时性失败（连不上 / 超时）：记下 pushTry（没有 btih），算一次暂时性出错，不烧规格', { d: r.d });
+  await tick();
+  r = row27(b);
+  ok(W.push[p1 + 1] && W.push[p1 + 1].check === 1 && !W.push[p1 + 1].btih && r.stage === 'download' && r.d.task === W.pushRec['AUTO:42'].task &&
+     W.pushNew === n1 + 1 && r.d.pushTry === undefined,
+     '下一次带 check：认领那边其实建成的任务，没有建第二个', { push: W.push.slice(p1), d: r.d, made: W.pushNew - n1 });
+  env.DB.db.prepare('DELETE FROM tj_req WHERE id = ?').run(b);
+
+  /* 版本表刷新过、顺序变了：记着的那个规格（pushTry）先推，先把它对清楚 */
+  const c = ins27('queued', { dup: 0, versAt: Date.now(), vers: [{ tid: 44, t: 'V44', mb: 1 }, { tid: 43, t: 'V43', mb: 1 }], pushTry: { tid: 43, btih: 'bt43', at: Date.now() } }, { tmdb: 9812 });
+  const p2 = W.push.length;
+  await tick();
+  r = row27(c);
+  ok(W.push[p2] && W.push[p2].tid === 43 && W.push[p2].check === 1 && W.push[p2].btih === 'bt43' && r.stage === 'download' && r.d.cur.tid === 43 && r.d.pushTry === undefined,
+     '版本表顺序变了：先推记着的那个规格（带 check），不把可能建成的任务晾在 PikPak 上', { push: W.push[p2], d: r.d });
+  env.DB.db.prepare('DELETE FROM tj_req WHERE id = ?').run(c);
+
+  /* 记着的规格已经试过了（面板 / 别处烧掉了）：不再带 check，pushTry 清掉 */
+  mv28(9813, [45, 46]);
+  const d2 = ins27('queued', { dup: 0, tried: [45], pushTry: { tid: 45, btih: 'bt45', at: Date.now() } }, { tmdb: 9813 });
+  const p3 = W.push.length;
+  await tick();
+  r = row27(d2);
+  ok(W.push[p3] && W.push[p3].tid === 46 && W.push[p3].check === 0 && r.stage === 'download' && r.d.pushTry === undefined,
+     '记着的规格已经试过了：推下一个，不带 check，pushTry 清掉', { push: W.push[p3], d: r.d });
+  env.DB.db.exec('DELETE FROM tj_req');
+}
+
+/* ── 2.8 影片库 409（源闸门忙，带 Retry-After）：照 Retry-After 再来（最多 2 分钟），不算熔断、不算出错次数、不记 pushTry ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  mv28(9815, [47]);
+  const a = ins27('queued', { dup: 0 }, { tmdb: 9815 });
+  const p0 = W.push.length;
+  W.busyWait = 7; W.pushSeq = ['busy', 'busy', 'busy', 'busy'];
+  const waits = [];
+  for (let i = 0; i < 4; i++){ await tick(); waits.push(row27(a).next - Date.now()); }
+  let r = row27(a), h = health28().lb || {};
+  ok(W.push.length === p0 + 4 && r.stage === 'queued' && !r.d.errs && !(r.d.tried || []).length && r.d.pushTry === undefined && /影片库忙/.test(r.note) &&
+     waits.every(w => w > 5000 && w <= 7000),
+     '影片库 409 连着 4 次：照 Retry-After（7 秒）再来，不算出错、不烧规格、不记 pushTry', { waits, d: r.d, note: r.note });
+  ok(!(h.fails > 0) && !(h.open > Date.now()) && !(h.trips > 0), '409 忙不算影片库熔断的失败（以前 3 次就熔断 2 分钟）', h);
+  W.busyWait = 900; W.pushSeq = ['busy'];
+  await tick();
+  r = row27(a);
+  const w = r.next - Date.now();
+  ok(w <= 2 * 60000 && w > 2 * 60000 - 5000, 'Retry-After 900 秒：最多等 2 分钟', { w });
+  advance(2 * 60000);
+  await tick();
+  r = row27(a);
+  ok(r.stage === 'download' && W.push.length === p0 + 6, '闸门空了：照常推成', { stage: r.stage });
+  W.busyWait = 7;
+  env.DB.db.exec('DELETE FROM tj_req');
+}
+
+/* ── 2.8 推送回 404 gone（剧集区 / auto 被删了）：清掉缓存的文件夹编号（tj_kv 的 auto:id / tv:id），下一次重新找 / 建 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/links', { admin: true, body: {} });             // 传输 Worker 会 sub（剧集推进 /auto/ram2）
+  W.versions['tv:9816:1'] = [{ tid: 48, title: 'Show 9816 S01 全4集 1080p', mb: 1, labels: [], res: '1080p', total: 4 }];
+  const t = Date.now();
+  env.DB.db.prepare("INSERT INTO tj_kv (k, v, exp) VALUES ('auto:id', ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, exp = excluded.exp").run(JSON.stringify({ id: 'AUTO', name: 'auto' }), t + 86400e3);
+  env.DB.db.prepare("INSERT INTO tj_kv (k, v, exp) VALUES ('tv:id', ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, exp = excluded.exp").run(JSON.stringify({ id: 'RAM2OLD', name: 'ram2', parent: 'AUTO' }), t + 86400e3);
+  const a = insTv28('queued', { dup: 0 }, 9816);
+  const p0 = W.push.length;
+  W.pushSeq = ['gone'];
+  await tick();
+  let r = row27(a);
+  ok(W.push[p0] && W.push[p0].parent === 'RAM2OLD' && !kv28('auto:id') && !kv28('tv:id') && r.stage === 'queued' && !(r.d.tried || []).length &&
+     logs27(a).some(m => /文件夹不在了.*清掉缓存/.test(m)),
+     '推到已经被删的剧集区（404 gone）：tj_kv 里缓存的 /auto、剧集区编号都清掉，不烧规格', { push: W.push[p0], auto: kv28('auto:id'), tv: kv28('tv:id'), d: r.d });
+  await tick();
+  r = row27(a);
+  const tv = kv28('tv:id');
+  ok(tv && tv.id !== 'RAM2OLD' && kv28('auto:id') && W.push[p0 + 1] && W.push[p0 + 1].parent === tv.id && r.stage === 'download' && r.d.sub === 'ram2',
+     '下一次重新找到 / 建出剧集区，推进新的文件夹', { tv, push: W.push[p0 + 1], stage: r.stage });
+  env.DB.db.exec('DELETE FROM tj_req');
+}
+
+/* ── 2.8 列 /auto 时回 404 gone（/auto 整个被删了，缓存的编号还指着它）：清掉缓存的编号，不退回 /auto，下一次重新找到 /auto 和剧集区 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  W.versions['tv:9819:1'] = [{ tid: 54, title: 'Show 9819 S01 全4集 1080p', mb: 1, labels: [], res: '1080p', total: 4 }];
+  env.DB.db.prepare("INSERT INTO tj_kv (k, v, exp) VALUES ('auto:id', ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, exp = excluded.exp").run(JSON.stringify({ id: 'AUTOGONE', name: 'auto' }), Date.now() + 86400e3);
+  const goneQ = [];
+  W.hook = (u, m, body) => {
+    if (u.host === 'lb.cuven.us' && u.pathname === '/api/pikpak' && (u.searchParams.get('parent') === 'AUTOGONE' || (body && body.parent === 'AUTOGONE'))){
+      goneQ.push(u.searchParams.get('do'));
+      return J({ error: '文件夹不在了', pk: 1, conf: 0, auth: 0, captcha: 0, gone: 1 }, 404);
+    }
+  };
+  const a = insTv28('queued', { dup: 0 }, 9819);
+  const p0 = W.push.length;
+  await tick();
+  let r = row27(a);
+  ok(goneQ.length === 1 && W.push.length === p0 && !kv28('auto:id') && !kv28('tv:id') && r.stage === 'queued' && r.d.sub === undefined && !(r.d.tried || []).length,
+     '列 /auto 回 404 gone：缓存的 /auto 编号清掉，这一季不退回 /auto 去推（2.7 当成「剧集区建不了」推进那个已经没了的 /auto）', { goneQ, push: W.push.slice(p0), auto: kv28('auto:id'), d: r.d });
+  await tick();
+  r = row27(a);
+  const tv = kv28('tv:id');
+  ok(kv28('auto:id') && kv28('auto:id').id === 'AUTO' && tv && tv.parent === 'AUTO' && W.push[p0] && W.push[p0].parent === tv.id && r.stage === 'download' && r.d.sub === 'ram2',
+     '下一次重新找到 /auto 和剧集区，推进剧集区', { auto: kv28('auto:id'), tv, push: W.push[p0] });
+  W.hook = null;
+  env.DB.db.exec('DELETE FROM tj_req');
+}
+
+/* ── 2.8 论坛账号 / PikPak 登录的问题（stop + forum: 1 / 503）：依赖出了问题，原地等，不烧规格、不算出错次数；这一轮后面的也不去推 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  mv28(9817, [49]); mv28(9818, [50]);
+  const a = ins27('queued', { dup: 0 }, { tmdb: 9817 }), b = ins27('queued', { dup: 0 }, { tmdb: 9818 });
+  const p0 = W.push.length;
+  W.pushSeq = ['forum'];
+  await tick();
+  let ra = row27(a), rb = row27(b);
+  ok(W.push.length === p0 + 1 && [ra, rb].every(r => r.stage === 'queued' && !r.d.errs && !(r.d.tried || []).length && /论坛账号/.test(r.note) && r.next - Date.now() > 9 * 60000),
+     '论坛账号出了问题（stop + forum: 1）：不烧规格、不算出错，等 10 分钟；这一轮后面那条也不去推', { push: W.push.length - p0, a: [ra.note, ra.d], b: [rb.note, rb.d] });
+  env.DB.db.exec("UPDATE tj_req SET next = 0");
+  W.pushSeq = ['auth'];
+  await tick();
+  ra = row27(a); rb = row27(b);
+  ok(W.push.length === p0 + 2 && [ra, rb].every(r => r.stage === 'queued' && !r.d.errs && !(r.d.tried || []).length && /PikPak 登录不上/.test(r.note) && r.next - Date.now() > 9 * 60000),
+     '503（PikPak 登录不上）：同样原地等，不烧规格、不算出错次数，后面那条也不去推', { push: W.push.length - p0, a: [ra.note, ra.d], b: [rb.note, rb.d] });
+  env.DB.db.exec("UPDATE tj_req SET next = 0");
+  await tick();
+  ok([row27(a), row27(b)].every(r => r.stage === 'download') && W.push.length === p0 + 4, '恢复了：两条都推成', [row27(a).stage, row27(b).stage]);
+  env.DB.db.exec('DELETE FROM tj_req');
+}
+
+/* ── 2.8 整理（911）回 left > 0：还有垃圾文件没删完 → 下一轮再整理（最多 3 次），然后照常核对 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true } });
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  W.check = [];
+  const a = insTv28('check', { fname: 'Show.9820.S01.1080p.WEB-DL', fkind: 'dir', sub: 'ram2', cur: { tid: 11, t: 'x', total: 4 }, tried: [] }, 9820);
+  const o0 = tf27('organize').length, c0 = tf27('check').length;
+  W.orgLeft = [37, 0];
+  await tick();
+  let r = row27(a);
+  ok(tf27('organize').length === o0 + 1 && tf27('check').length === c0 && r.stage === 'check' && !r.d.org && r.d.orgN === 1 && /还有 37 个/.test(r.note),
+     '整理回 left: 37：r.d.org 先不记、这一轮不核对，下一轮接着删', { d: r.d, note: r.note });
+  await tick();
+  r = row27(a);
+  ok(tf27('organize').length === o0 + 2 && tf27('check').length === c0 + 1 && r.stage === 'rename' && r.d.org === 1 && r.d.orgN === 2,
+     '第二次删完了（left: 0）：记下 org，照常核对整季', { d: r.d, stage: r.stage });
+  env.DB.db.exec('DELETE FROM tj_req');
+  const b = insTv28('check', { fname: 'Show.9821.S01.1080p.WEB-DL', fkind: 'dir', sub: 'ram2', cur: { tid: 11, t: 'x', total: 4 }, tried: [] }, 9821);
+  const o1 = tf27('organize').length, c1 = tf27('check').length;
+  W.orgLeft = [40, 40, 40, 40];
+  for (let i = 0; i < 4; i++){ await tick(); if (row27(b).stage !== 'check') break; }
+  r = row27(b);
+  ok(tf27('organize').length === o1 + 3 && tf27('check').length === c1 + 1 && r.stage === 'rename' && r.d.org === 1 &&
+     logs27(b).some(m => /整理了 3 次还剩 40 个/.test(m)),
+     '一直删不完：最多整理 3 次，然后照常核对（日志写着还剩几个）', { org: tf27('organize').length - o1, d: r.d });
+  W.orgLeft = [];
+  env.DB.db.exec('DELETE FROM tj_req');
+}
+
+/* ── 2.8 单项 copy（911）：上一次暂时性失败、没拿到作业号（那边其实开了）→ 这一次带 retry: 1，接上那个作业，不开第二个 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: false, autoReady: false, vpsSlots: 4 } });
+  const k = ins27('copy', { item: 'Retry.Copy.2008.1080p.mkv', kind: 'file', tag: '' });
+  W.copyJobs = [8801, 8802]; W.job[8801] = { finished: false, success: false, bytes: 1, total: 9 };
+  W.copyLost = 1;
+  const c0 = tf27('copy').length;
+  await tick();
+  let r = row27(k);
+  ok(tf27('copy').length === c0 + 1 && !tf27('copy')[c0][1].retry && r.stage === 'copy' && !r.d.job && r.d.cretry === 1,
+     'copy 这一下回包丢了（那边开了 8801）：没有作业号，记下 cretry；平常的 copy 不带 retry', { d: r.d, body: tf27('copy')[c0][1] });
+  await tick();
+  r = row27(k);
+  const again = tf27('copy')[c0 + 1];
+  ok(again && again[1].retry === 1 && r.d.job === 8801 && r.d.cretry === undefined && JSON.stringify(W.copyJobs) === '[8802]' &&
+     logs27(k).some(m => /接上了上一次/.test(m)),
+     '下一次带 retry: 1：传输 Worker 认出还在跑的 8801（reused），接上，没开第二个 rclone 作业', { body: again && again[1], d: r.d, left: W.copyJobs });
+  await tick();
+  ok(tf27('copy').length === c0 + 2 && row27(k).d.job === 8801, '之后照常问作业进度，不再开', { copies: tf27('copy').length - c0 });
+  W.copyJobs = [];
+  env.DB.db.exec('DELETE FROM tj_req');
+}
+
+/* ── 2.8 改名作业跑完是失败、报原名找不到（directory not found），新名字已经记下了 = 上一次其实挪完了 → 用新名字往下走 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true } });
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  const t = Date.now();
+  const a = insTv28('rename', { fname: 'Show.9830.S01.1080p.WEB-DL', newname: 'Show.9830.S01.1080p.[Full-4]-Cuven®', fkind: 'dir', sub: 'ram2', job: 7801, rb: 0, rbAt: t, cur: { tid: 11, t: 'x' }, tried: [] }, 9830);
+  const b = insTv28('rename', { fname: 'Show.9831.S01.1080p.WEB-DL', newname: 'Show.9831.S01.1080p.[Full-4]-Cuven®', fkind: 'dir', sub: 'ram2', job: 7802, rb: 0, rbAt: t, cur: { tid: 11, t: 'x' }, tried: [] }, 9831);
+  const c = insTv28('rename', { fname: 'Show.9832.S01.1080p.WEB-DL', newname: 'Show.9832.S01.1080p.[Full-4]-Cuven®', fkind: 'dir', sub: 'ram2', job: 7803, rb: 0, rbAt: t, cur: { tid: 11, t: 'x' }, tried: [] }, 9832);
+  W.job[7801] = { finished: true, success: false, error: 'directory not found' };
+  W.job[7802] = { finished: true, success: false, error: 'job not found' };
+  W.job[7803] = { finished: true, success: false, error: 'permission denied' };
+  await tick();
+  const ra = row27(a), rb = row27(b), rc = row27(c);
+  ok(ra.stage === 'ready' && ra.d.item === 'Show.9830.S01.1080p.[Full-4]-Cuven®' && ra.d.fname === ra.d.item && !ra.d.rtries && !ra.d.job &&
+     logs27(a).some(m => /上一次其实已经改完了/.test(m)),
+     '改名作业报 directory not found、新名字记下了：用新名字往下走（以前重试 3 次判死，文件在新名字底下没人管）', { stage: ra.stage, d: ra.d });
+  ok(rb.stage === 'rename' && rb.d.rtries === 1 && rc.stage === 'rename' && rc.d.rtries === 1,
+     '别的失败（job not found、没权限）照旧算一次改名出错', { b: [rb.stage, rb.d.rtries], c: [rc.stage, rc.d.rtries] });
+  env.DB.db.exec('DELETE FROM tj_req');
+}
+
+/* ── 2.8 影片库 409 是按源排的闸门忙：这一轮后面同一个源排队的也照 Retry-After 一起等，不再去排一次闸门；别的源照常推 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  mv28(9840, [51]); mv28(9841, [52]);
+  W.versions['tv:9842:1'] = [{ tid: 53, title: 'Show 9842 S01 全4集 1080p', mb: 1, labels: [], res: '1080p', total: 4 }];
+  const a = ins27('queued', { dup: 0 }, { tmdb: 9840 }), b = ins27('queued', { dup: 0 }, { tmdb: 9841 });
+  const tv = insTv28('queued', { dup: 0 }, 9842);
+  const p0 = W.push.length;
+  W.busyWait = 9; W.pushSeq = ['busy'];
+  await tick();
+  const ra = row27(a), rb = row27(b), rt = row27(tv);
+  const pushed = W.push.slice(p0);
+  ok(pushed.length === 2 && pushed[0].tid === 51 && pushed[1].tid === 53 && ra.stage === 'queued' && rb.stage === 'queued' && rt.stage === 'download' &&
+     !ra.d.errs && !rb.d.errs && /影片库忙/.test(rb.note) && rb.next === ra.next && ra.next - Date.now() > 8000 && ra.next - Date.now() <= 9000,
+     '同一轮里电影这个源碰上 409：后面那部电影不再去排闸门、照 Retry-After 一起等，不算出错；剧集（别的源）照常推', { pushed: pushed.map(x => x.tid), a: [ra.note, ra.next - Date.now()], b: [rb.note, rb.next - Date.now()], tv: rt.stage });
+  await tick();
+  ok(row27(a).stage === 'download' && row27(b).stage === 'download' && W.push.length === p0 + 4, '下一轮两部电影都推成', [row27(a).stage, row27(b).stage]);
+  W.busyWait = 7;
+  env.DB.db.exec('DELETE FROM tj_req');
+}
+
+/* ── 2.8 /app/catalog 带 year、没明说 min：min = 0（一年的清单要全部，不是评分 6 分以上的那一小撮）；明说了照旧，不带 year 照旧 6 ── */
+{
+  await call('GET', '/app/catalog?src=movie&year=2024&own=hide');
+  ok(W.lastCatalogQ && W.lastCatalogQ.get('year') === '2024' && W.lastCatalogQ.get('min') === '0', '目录按年份列、没给 min：min = 0（2.7 是 6，整年只剩高分的）', String(W.lastCatalogQ));
+  await call('GET', '/app/catalog?src=movie&year=2024&min=6');
+  ok(W.lastCatalogQ.get('min') === '6', '按年份列、明说了 min = 6：照旧', String(W.lastCatalogQ));
+  await call('GET', '/app/catalog?src=movie');
+  ok(W.lastCatalogQ.get('min') === '6' && !W.lastCatalogQ.has('year'), '不带 year、不搜：照旧 min = 6', String(W.lastCatalogQ));
+  await call('GET', '/app/catalog?src=movie&year=abc');
+  ok(W.lastCatalogQ.get('min') === '6' && !W.lastCatalogQ.has('year'), '不像年份的 year 不算：min 照旧 6', String(W.lastCatalogQ));
+}
+
+/* ── 2.8 GET /app/years：App「全部影片」一次拿齐每一年、电影 / 剧集各一份目录第一页 ── */
+{
+  env.DB.db.exec('DELETE FROM tj_req');
+  /* 拨到一个整点刚过（缓存 key 带「这一个小时」，下面拨的几十秒、几分钟不跨小时） */
+  advance(3600e3 - (Date.now() % 3600e3) + 1000);
+  const Y = new Date(Date.now()).getUTCFullYear();
+  /* Cache API（caches.default）：按 cache-control 的 max-age 过期，时钟用假的 */
+  const CACHE = new Map(), cops = { match: 0, put: 0 };
+  globalThis.caches = { default: {
+    async match(k){ cops.match++; const e = CACHE.get(String(k)); return e && e.exp > Date.now() ? new Response(e.body, { headers: e.headers }) : undefined; },
+    async put(k, res){ cops.put++; const ma = /max-age=(\d+)/.exec(res.headers.get('cache-control') || ''); const body = await res.text();
+                       CACHE.set(String(k), { body, headers: Object.fromEntries(res.headers), exp: Date.now() + (ma ? +ma[1] : 0) * 1000 }); },
+  } };
+  /* 影片库的目录：每一年每个源一份；电影今年 45 部（两页），别的年份 30 部；剧集每年 3 部。fail = 这几格回 500 */
+  const idOf = (s, y, i) => (s === 'tv' ? 60000 : 40000) + (y % 100) * 100 + i;
+  const count = (s, y) => s === 'tv' ? 3 : y === Y ? 45 : 30;
+  const yq = [], fail = new Set();
+  let inflight = 0, peak = 0;
+  W.hook = async (u) => {
+    if (u.host !== 'lb.cuven.us' || u.pathname !== '/api/catalog' || !u.searchParams.has('year')) return;
+    const s = u.searchParams.get('src'), y = +u.searchParams.get('year');
+    yq.push(Object.fromEntries(u.searchParams)); W.lbCalls++;
+    inflight++; peak = Math.max(peak, inflight);
+    await new Promise(r => setTimeout(r, 3));
+    inflight--;
+    if (fail.has(s + y) || fail.has('*')) return J({ error: 'Internal error' }, 500);
+    const n = count(s, y), all = Array.from({ length: n }, (_, i) => ({ id: idOf(s, y, i), title: s + y + '#' + i, year: String(y), poster: '/p' + i + '.jpg',
+      vote: 6.1, votes: 9, res: '1080p', hb: 1, rb: 5, own: 0, sid: 'secret' + i, rels: 2, size: '9 GB' }));
+    return J({ total: n, hidden: 0, page: 1, pages: Math.ceil(n / 42), items: all.slice(0, 42), src: s });
+  };
+  /* 请求进度：2020 年最后一部电影（排在第 90 个以后）、今年的一部剧集 */
+  const mreq = ins27('copy', { item: 'x.mkv', kind: 'file' }, { tmdb: idOf('movie', Y - 6, 23) });
+  const treq = insTv28('download', {}, idOf('tv', Y, 1), 1);
+  /* 数一下查请求进度的 D1 语句：一个源一次 */
+  const prep = env.DB.prepare.bind(env.DB);
+  let latestQ = 0;
+  env.DB.prepare = (sql) => { if (/FROM tj_req WHERE src = \? AND tmdb IN/.test(sql)) latestQ++; return prep(sql); };
+  const pend = [];
+  const ctx = { waitUntil(p){ pend.push(p); } };
+  const years = async (qs = '', tag) => {
+    const r = await worker.fetch(new Request('https://tj.cuven.us/app/years' + qs, { headers: tag ? { 'if-none-match': tag } : {} }), env, ctx);
+    await Promise.all(pend.splice(0));
+    const txt = await r.text();
+    return { s: r.status, tag: r.headers.get('etag'), cc: r.headers.get('cache-control'), txt, j: txt ? JSON.parse(txt) : null };
+  };
+
+  fail.add('movie' + (Y - 4));
+  const lb0 = W.lbCalls;
+  let r = await years();
+  const ys = Object.keys(r.j.years).map(Number).sort();
+  ok(r.s === 200 && ys.length === 7 && ys[0] === Y - 6 && ys[6] === Y && r.j.from === Y - 6 && r.j.to === Y && r.j.per === 24 && r.j.src === 'all' && r.j.at > 0,
+     '默认：到今年为止的 7 年，每格 24 部，电影 / 剧集都要', { s: r.s, ys, from: r.j && r.j.from, to: r.j && r.j.to, per: r.j && r.j.per });
+  ok(yq.length === 14 && W.lbCalls - lb0 === 14 && new Set(yq.map(q => q.src + q.year)).size === 14 &&
+     yq.every(q => q.own === 'hide' && q.min === '0' && q.sort === 'new' && q.page === '1'),
+     '一次回齐：每一年每个源问一次影片库的目录第一页，own = hide、min = 0、sort = new', yq.slice(0, 3));
+  ok(peak > 1 && peak <= 6, '影片库的目录页并行去问（同时最多 6 个）', { peak });
+  const m0 = r.j.years[Y].movie, t0 = r.j.years[Y].tv;
+  ok(m0.items.length === 24 && m0.page === 1 && m0.pages === 2 && m0.total === 45 && m0.next === 1 && t0.items.length === 3 && t0.pages === 1 && t0.next === 0,
+     '每一格 { items, page, pages, total }：最多 per 部；next = 接着用 /app/catalog 翻哪一页（第一页没给全是 1，没有了是 0）', { m: { ...m0, items: m0.items.length }, t: { ...t0, items: t0.items.length } });
+  const it0 = m0.items[0];
+  ok(it0.id === idOf('movie', Y, 0) && it0.src === 'movie' && it0.title && it0.year === String(Y) && it0.vote === 6.1 && it0.res === '1080p' && it0.rb === 5 &&
+     !('sid' in it0) && !('rels' in it0) && !('size' in it0), '条目和 /app/catalog 一样精简（不外露帖子编号）', it0);
+  ok(JSON.stringify(r.j.years[Y - 4].movie) === '{"error":1}' && r.j.years[Y - 4].tv.items.length === 3,
+     '影片库那一格没问到：那一格是 { error: 1 }，别的照回（整个回包不失败）', r.j.years[Y - 4]);
+  const late = r.j.years[Y - 6].movie.items.find(x => x.id === idOf('movie', Y - 6, 23));
+  const tvIt = r.j.years[Y].tv.items.find(x => x.id === idOf('tv', Y, 1));
+  ok(late && late.req && late.req.id === mreq && late.req.state === 'active' && late.req.step === 4 && tvIt && tvIt.req && tvIt.req.id === treq &&
+     r.j.years[Y].movie.items.every(x => !x.req),
+     '带上请求进度（电影这边一百多部，排在第 90 个以后的也查到）', { late: late && late.req, tv: tvIt && tvIt.req });
+  ok(latestQ === 2, '请求进度一个源只查一次 D1（不是一年一次）', { latestQ });
+  ok(/^W\/"[0-9a-f]{20}"$/.test(r.tag || '') && cops.put === 1, '带弱 ETag；拼好的回包放进 Cache API', { tag: r.tag, cops });
+
+  /* 缓存：有一格没问到的只放 30 秒 */
+  const lb1 = W.lbCalls;
+  let r2 = await years();
+  ok(r2.s === 200 && r2.txt === r.txt && W.lbCalls === lb1 && latestQ === 2, '30 秒内再要：直接用缓存，不问影片库、不查 D1', { lb: W.lbCalls - lb1, latestQ });
+  r2 = await years('', r.tag);
+  ok(r2.s === 304 && r2.txt === '' && r2.tag === r.tag && W.lbCalls === lb1, '带 If-None-Match、没变：304 不带正文', { s: r2.s });
+  ok(r2.s === 304 && (await years('?src=all&from=' + (Y - 6) + '&to=' + Y + '&per=24', r.tag)).s === 304 && W.lbCalls === lb1,
+     '把默认值写出来也是同一份缓存');
+  fail.clear();
+  advance(31000);
+  r2 = await years('', r.tag);
+  ok(r2.s === 200 && W.lbCalls === lb1 + 14 && r2.j.years[Y - 4].movie.items.length === 24 && r2.tag !== r.tag,
+     '有格子没问到的 30 秒后过期：重新去问，补上了那一格（内容变了，ETag 也变）', { s: r2.s, lb: W.lbCalls - lb1 });
+  const full = r2;
+  advance(200e3);
+  const lb2 = W.lbCalls;
+  r2 = await years();
+  ok(r2.s === 200 && r2.txt === full.txt && W.lbCalls === lb2, '全都问到的放 5 分钟：200 秒后还是缓存', { lb: W.lbCalls - lb2 });
+  advance(101e3);
+  r2 = await years('', full.tag);
+  ok(r2.s === 304 && W.lbCalls === lb2 + 14, '5 分钟过期重拼：内容没变，ETag 不算 at，照样 304', { s: r2.s, lb: W.lbCalls - lb2 });
+  advance(3600e3);
+  const lb3 = W.lbCalls;
+  r2 = await years('', full.tag);
+  ok(r2.s === 304 && W.lbCalls === lb3 + 14, '换了一个小时：缓存 key 变了，重新拼', { s: r2.s, lb: W.lbCalls - lb3 });
+
+  /* 参数：最多 8 年（只要最近的 8 年）、per 最多 40、只要一个源 */
+  yq.length = 0;
+  r = await years('?src=movie&from=2010&to=' + Y + '&per=99');
+  const ys2 = Object.keys(r.j.years).map(Number).sort();
+  ok(r.s === 200 && ys2.length === 8 && ys2[0] === Y - 7 && r.j.per === 40 && yq.length === 8 && yq.every(q => q.src === 'movie') &&
+     Object.values(r.j.years).every(c => c.movie && !c.tv) && r.j.years[Y].movie.items.length === 40 && r.j.years[Y - 1].movie.items.length === 30,
+     '超过 8 年只要最近的 8 年；per 最多 40；src = movie 只问电影', { ys2, per: r.j.per, calls: yq.length });
+  yq.length = 0;
+  r = await years('?to=' + (Y - 1) + '&from=' + (Y - 2) + '&per=5&src=tv');
+  ok(Object.keys(r.j.years).length === 2 && r.j.years[Y - 1].tv.items.length === 3 && yq.length === 2, 'from / to / per 照给的', { keys: Object.keys(r.j.years), calls: yq.length });
+  r = await years('?from=' + Y + '&to=' + (Y - 2) + '&per=2&src=movie');
+  ok(r.j.from === Y - 2 && r.j.to === Y && r.j.years[Y].movie.items.length === 2 && r.j.years[Y].movie.next === 1, 'from 比 to 大就对调；per = 2', { from: r.j.from, to: r.j.to });
+  yq.length = 0;
+  r = await years('?src=all&from=' + (Y - 7) + '&to=' + Y + '&per=1');
+  ok(r.s === 200 && yq.length === 16 && Object.values(r.j.years).every(c => c.movie.items && c.tv.items),
+     '8 年 × 2 个源 = 16 个子请求：都在一次调用的预算里，一格都不缺', { calls: yq.length });
+
+  /* 影片库全都连不上：503（不进缓存）；workers.dev 上没有 Cache API：照常现拼 */
+  fail.add('*');
+  const puts = cops.put;
+  r = await years('?per=3');
+  ok(r.s === 503 && cops.put === puts, '影片库一格都没问到：503，不进缓存', { s: r.s });
+  fail.clear();
+  delete globalThis.caches;
+  const lb4 = W.lbCalls;
+  r = await years('?per=3');
+  const again = await years('?per=3');
+  ok(r.s === 200 && again.s === 200 && W.lbCalls === lb4 + 28 && again.tag === r.tag, '没有 Cache API（workers.dev）：每次现拼，ETag 照样稳定', { lb: W.lbCalls - lb4 });
+  ok((await years('?per=3', r.tag)).s === 304, '没有缓存也照样 304');
+  ok(r.cc === 'private, max-age=60', 'App 那边最多缓存 1 分钟', r.cc);
+
+  env.DB.prepare = prep;
+  W.hook = null;
   env.DB.db.exec('DELETE FROM tj_req');
 }
 

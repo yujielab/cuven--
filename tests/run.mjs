@@ -1588,6 +1588,153 @@ console.log('\n■ 片名匹配：文件名 → TMDB（候选打分、校验、�
   await clear();
 }
 
+console.log('\n■ v25.6：/api/tmdb-batch 按 TMDB 编号批量取（App「可申请」那一行：背景、字标一次拿齐）');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const clear = async () => { await settle(); caches.default.m.clear(); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const batch = async queries => {
+    const r = await H.worker.fetch(new Request('https://w.test/api/tmdb-batch', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ queries }) }), H.env, H.ctx);
+    await settle();
+    return r.json();
+  };
+  const single = async qs => { const r = await H.call('/api/tmdb?' + qs, 'GET', { Cookie: cookie }); const j = await r.json(); await settle(); return j; };
+  // 键排好序再比（两边是同一段代码拼出来的，顺序本来就一样；排序只是让比较不依赖这一点）
+  const canon = v => JSON.stringify(v, (k, x) => x && typeof x === 'object' && !Array.isArray(x)
+    ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : x);
+  const keysOf = r => Object.keys(r).filter(k => !k.startsWith('__')).sort();
+  const fcImages = {
+    logos: [{ file_path: '/fc-logo.png', iso_639_1: 'en', aspect_ratio: 4 }],
+    posters: [{ file_path: '/fc-titled.jpg', iso_639_1: 'en', vote_average: 9 }, { file_path: '/fc-clean.jpg', iso_639_1: null, vote_average: 6 }],
+    backdrops: [{ file_path: '/fc-bd-clean.jpg', iso_639_1: null, vote_average: 7, width: 3840, height: 2160, aspect_ratio: 1.778 },
+      { file_path: '/fc-bd-en.jpg', iso_639_1: 'en', vote_average: 8 }],
+  };
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  H.itunes.results = null;
+  H.tmdb.movies = [{ id: 550, title: '搏击俱乐部', en: 'Fight Club', date: '1999-10-15', query: 'zzz-fight-club', backdrop: '/b550.jpg', countries: ['US', 'DE'], images: fcImages },
+                   { id: 949, title: '盗火线', en: 'Heat', date: '1995-12-15', query: 'zzz-heat' }];
+  H.tmdb.shows = [{ id: 1399, name: '权力的游戏', original: 'Game of Thrones', first: '2011-04-17', seasons: [{ n: 1, air: '2011-04-17', count: 10 }], logo: '/got-logo.png' }];
+
+  // ① 回的东西和单条接口 /api/tmdb?id=&type=[&logo=1] 一模一样（各自冷启动取一遍再比）
+  await clear();
+  const s = { mb: await single('id=550&type=movie'), mf: await single('id=550&type=movie&logo=1'),
+              tb: await single('id=1399&type=tv'), tf: await single('id=1399&type=tv&logo=1') };
+  await clear();
+  const rb = await batch([{ id: 550, type: 'movie' }, { id: 1399, type: 'tv' }]);
+  await clear();
+  const rf = await batch([{ id: 550, type: 'movie', logo: true }, { id: 1399, type: 'tv', logo: true }]);
+  ok(s.mb?.id === 550 && s.tb?.id === 1399 && JSON.stringify(keysOf(rb)) === '["movie:550","tv:1399"]' && rb.__match === 2 && rb.__byId === 1
+    && canon(rb['movie:550']) === canon(s.mb) && canon(rb['tv:1399']) === canon(s.tb),
+    `按编号取（简要）：键 movie:550 / tv:1399，值和 /api/tmdb?id=&type= 一模一样（${rb['movie:550']?.title} / ${rb['tv:1399']?.title}）；回包带 __byId: 1`);
+  ok(rb['movie:550']?.logo === null && !('logoChecked' in rb['movie:550']) && !('backdropClean' in rb['movie:550']) && !('posterClean' in rb['movie:550']),
+    '不带 logo：和单条接口不带 logo=1 一样，没有字标那几项');
+  const fm = rf['movie:550'], ft = rf['tv:1399'];
+  ok(canon(fm) === canon(s.mf) && canon(ft) === canon(s.tf), '按编号取（logo: true）：值和 /api/tmdb?id=&type=&logo=1 一模一样');
+  ok(fm?.logo === 'https://image.tmdb.org/t/p/w500/fc-logo.png' && fm.logoChecked === true && fm.backdropClean === 'https://image.tmdb.org/t/p/w1280/fc-bd-clean.jpg'
+    && fm.posterClean === 'https://image.tmdb.org/t/p/w780/fc-clean.jpg' && fm.backdrop === 'https://image.tmdb.org/t/p/w1280/b550.jpg' && fm.imdb === 'tt550'
+    && ft?.logo === 'https://image.tmdb.org/t/p/w500/got-logo.png' && ft.logoChecked === true && ft.posterClean === 'https://image.tmdb.org/t/p/w780/clean.jpg',
+    `logo: true 带上字标、无字背景、纯净海报（电影 ${fm?.logo && 'logo'} / ${fm?.backdropClean && 'backdropClean'} / ${fm?.posterClean && 'posterClean'}；剧集 logo / posterClean）`);
+
+  // ② 同一个边缘缓存键：批接口取过的单条接口直接用，单条接口取过的批接口也直接用
+  H.tmdb.calls.length = 0;
+  const again = await single('id=550&type=movie&logo=1'), againTv = await single('id=1399&type=tv&logo=1');
+  ok(H.tmdb.calls.length === 0 && canon(again) === canon(s.mf) && canon(againTv) === canon(s.tf), '批接口取过的：单条接口走缓存（0 次 TMDB）');
+  await clear();
+  await single('id=1399&type=tv&logo=1'); await single('id=550&type=movie');
+  H.tmdb.calls.length = 0;
+  const warm = await batch([{ id: 1399, type: 'tv', logo: true }, { id: 550, type: 'movie' }]);
+  ok(H.tmdb.calls.length === 0 && canon(warm['tv:1399']) === canon(s.tf) && canon(warm['movie:550']) === canon(s.mb), '单条接口取过的：批接口走缓存（0 次 TMDB）');
+
+  // ③ 编号 / 类型不对：那个键回 null，不去问 TMDB；什么都没带的照旧不理
+  H.tmdb.calls.length = 0;
+  const bad = await batch([{ id: 0, type: 'movie' }, { id: -5, type: 'tv' }, { id: 'abc', type: 'movie' }, { id: 12.5, type: 'movie' },
+    { id: 550, type: 'person' }, { id: 550 }, { type: 'tv' }, { id: 550, type: 'MOVIE' }, { id: 1e12, type: 'movie' }, { id: '0550', type: 'movie' },
+    { id: { x: 1 }, type: 'tv' }, 'movie:550', null, {}, { logo: true }, 42]);
+  const badKeys = ['movie:0', 'tv:-5', 'movie:abc', 'movie:12.5', 'person:550', ':550', 'tv:', 'MOVIE:550', 'movie:1000000000000', 'movie:0550', 'tv:'].sort();
+  ok(JSON.stringify(keysOf(bad)) === JSON.stringify([...new Set(badKeys)].sort()) && keysOf(bad).every(k => bad[k] === null) && H.tmdb.calls.length === 0,
+    `编号不是正整数 / 类型不是 movie、tv：那个键回 null（${keysOf(bad).length} 个），0 次 TMDB；字符串、null、空对象不回键`);
+
+  // ④ TMDB 上没有这个编号：null，照旧写缓存（第二次不再问）
+  H.tmdb.calls.length = 0;
+  const nf = await batch([{ id: 999999, type: 'movie' }, { id: 888888, type: 'tv', logo: true }]);
+  const n1 = H.tmdb.calls.length;
+  const nf2 = await batch([{ id: 999999, type: 'movie' }, { id: 888888, type: 'tv', logo: true }]);
+  ok('movie:999999' in nf && nf['movie:999999'] === null && nf['tv:888888'] === null && n1 === 2 && H.tmdb.calls.length === n1 && nf2['movie:999999'] === null,
+    'TMDB 上没有这部（404）：回 null 并写缓存，第二次 0 次 TMDB');
+
+  // ⑤ TMDB 出错：这个键不回、不写缓存；字标那一问没问成的半份照回但不进缓存
+  await clear();
+  H.tmdb.fail = p => p === '/movie/550';
+  const er = await batch([{ id: 550, type: 'movie' }, { id: 1399, type: 'tv' }]);
+  H.tmdb.fail = null;
+  const er2 = await batch([{ id: 550, type: 'movie' }]);
+  ok(!('movie:550' in er) && er['tv:1399']?.id === 1399 && er2['movie:550']?.id === 550, 'TMDB 出错的那个键不回（App 过会儿再问），别的照常；恢复后正常取到（出错那次没被缓存成「没有」）');
+  await clear();
+  H.tmdb.fail = p => p === '/movie/550/images';
+  const half = await batch([{ id: 550, type: 'movie', logo: true }]);
+  H.tmdb.fail = null;
+  H.tmdb.calls.length = 0;
+  const whole = await batch([{ id: 550, type: 'movie', logo: true }]);
+  ok(half['movie:550']?.logoChecked === false && half['movie:550'].logo === null && whole['movie:550']?.logoChecked === true
+    && H.tmdb.calls.some(c => c.path === '/movie/550/images'), '字标那一问没问成：这份照回（logoChecked: false）但不进缓存，下次重问拿到字标');
+
+  // ⑥ 同一个键问了几次：只取一次；有一条要字标就取全量（编号写成字符串 "550" 也认）
+  await clear();
+  H.tmdb.calls.length = 0;
+  const dd = await batch([{ id: 550, type: 'movie' }, { id: '550', type: 'movie', logo: true }, { id: 550, type: 'movie' }]);
+  ok(JSON.stringify(keysOf(dd)) === '["movie:550"]' && dd['movie:550']?.logoChecked === true && canon(dd['movie:550']) === canon(s.mf)
+    && H.tmdb.calls.filter(c => c.path === '/movie/550/images').length === 1 && H.tmdb.calls.filter(c => c.path === '/movie/550').length === 2,
+    '同一个编号问了三次：只取一次（按编号 1 次 + 详情 1 次 + 字标 1 次），有一条要 logo 就回全量');
+
+  // ⑦ 和文件名的混在一批：文件名那条照旧；带 name 的一律按文件名认（同时带 id 也是）；只带文件名的批次回包照旧（只多 __byId）
+  const NAME = 'Heat.1995.1080p.BluRay.[auto-m949-r2001].mkv', SAMPLE = 'Movie.Name.2019.1080p-sample.mkv';
+  const mx = await batch([{ name: NAME }, { id: 1399, type: 'tv', logo: true }, { name: SAMPLE }, { name: 'Fight.Club.1999.mkv', id: 1399, type: 'tv' }]);
+  ok(mx[NAME]?.id === 949 && mx['tv:1399']?.id === 1399 && mx[SAMPLE] === null && mx['Fight.Club.1999.mkv'] === null
+    && JSON.stringify(keysOf(mx)) === JSON.stringify(['Fight.Club.1999.mkv', NAME, SAMPLE, 'tv:1399'].sort()),
+    '文件名、编号混在一批：各回各的键；带 name 的照旧按文件名认（同时带的 id 不理）');
+  const old = await batch([{ name: NAME, logo: false }, { name: SAMPLE }]);
+  ok(JSON.stringify(Object.keys(old).sort()) === JSON.stringify([NAME, SAMPLE, '__byId', '__match'].sort()) && old[NAME]?.id === 949 && old.__match === 2,
+    '老网页 / 老 App 只带文件名：键和值照旧（只多一个 __byId 记号，App 和网页都不看 __ 开头的键）');
+
+  // ⑧ 整批最多 80 条（文件名、编号一起算）
+  H.tmdb.calls.length = 0;
+  const cap = await batch([...Array.from({ length: 80 }, (_, i) => ({ id: 0, type: 'x' + i })), { id: 550, type: 'movie' }, { name: NAME }]);
+  ok(keysOf(cap).length === 80 && !('movie:550' in cap) && !(NAME in cap) && H.tmdb.calls.length === 0, '整批最多 80 条：第 81 条起不答（编号、文件名一起算）');
+
+  // ⑨ 并发和文件名那条路一样：同一时刻最多 6 部在问
+  await clear();
+  const real = globalThis.fetch;
+  let inflight = 0, peak = 0;
+  globalThis.fetch = async (input, init) => {
+    if (new URL(typeof input === 'string' ? input : input.url).host !== 'api.themoviedb.org') return real(input, init);
+    inflight++; peak = Math.max(peak, inflight);
+    try { await new Promise(r => setTimeout(r, 15)); return await real(input, init); } finally { inflight--; }
+  };
+  let par;
+  try { par = await batch(Array.from({ length: 24 }, (_, i) => ({ id: 70000 + i, type: i % 2 ? 'tv' : 'movie' }))); }
+  finally { globalThis.fetch = real; }
+  ok(keysOf(par).length === 24 && keysOf(par).every(k => par[k] === null) && peak === 6, `24 部一批：并发上限 6（同一时刻最多 ${peak} 个 TMDB 请求在途）`);
+
+  // ⑩ App 那一行的真实用法：24 部（12 部电影 + 12 部剧）一次要齐背景和字标；80 部也不会被预算截掉
+  H.tmdb.movies = Array.from({ length: 40 }, (_, i) => ({ id: 80000 + i, title: '电影' + i, en: 'Film ' + i, date: '2020-01-01', query: 'zzz-' + i,
+    backdrop: `/bd${80000 + i}.jpg`, images: { logos: [{ file_path: `/lg${80000 + i}.png`, iso_639_1: 'zh', aspect_ratio: 3 }], posters: [], backdrops: [] } }));
+  H.tmdb.shows = Array.from({ length: 40 }, (_, i) => ({ id: 90000 + i, name: '剧' + i, original: 'Show ' + i, first: '2021-01-01', seasons: [{ n: 1, air: '2021-01-01', count: 8 }] }));
+  const row = n => Array.from({ length: n }, (_, i) => ({ id: i % 2 ? 90000 + (i >> 1) : 80000 + (i >> 1), type: i % 2 ? 'tv' : 'movie', logo: true }));
+  await clear();
+  H.tmdb.calls.length = 0;
+  const r24 = await batch(row(24));
+  ok(keysOf(r24).length === 24 && keysOf(r24).every(k => r24[k]?.logo && r24[k].backdrop && r24[k].logoChecked === true) && H.tmdb.calls.length === 24 * 4,
+    `一行 24 部（电影 + 剧集）一个请求：背景、字标全齐（${H.tmdb.calls.length} 次 TMDB = 每部 4 次，原来要 24 个 /api/tmdb 请求）`);
+  await clear();
+  const r80 = await batch(row(80));
+  ok(keysOf(r80).length === 80 && keysOf(r80).every(k => r80[k]?.logoChecked === true), '80 部都要字标：全部回答（预算 700 够 80 × 4）');
+
+  delete H.env.TMDB_API_KEY; H.tmdb.movies = []; H.tmdb.shows = []; H.tmdb.fail = null;
+  await clear();
+}
+
 console.log('\n■ 字幕清洗：字幕组、发布 / 来源声明、网址、广告');
 {
   const X = await H.internals();
