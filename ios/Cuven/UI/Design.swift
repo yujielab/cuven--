@@ -24,6 +24,20 @@ struct DSMetrics {
 
     /// 展开的 Duo、iPad、横拿：一排多放几张，字号上一级
     var wide: Bool { width >= 600 }
+
+    /// iPad 的几档（用户要求按 Apple 的做法给普通 iPad、iPad Pro 11 / 13 寸定制版面：只看窗口宽，不认机型——
+    /// iPadOS 26 每台 iPad 都能把 App 放进随意缩放的窗口）：
+    /// 窄 < 600（分屏里的窄窗口，和 iPhone 一样）· 中 600–950（普通 iPad 竖拿 820、Pro 11 竖拿 834）·
+    /// 大 950–1300（Pro 13 竖拿 1032、普通 iPad 横拿 1180、Pro 11 横拿 1210）· 特大 ≥ 1300（Pro 13 横拿 1376）
+    enum Tier: Int, Comparable {
+        case compact, medium, large, xl
+        static func < (a: Tier, b: Tier) -> Bool { a.rawValue < b.rawValue }
+    }
+    static let largeWidth: CGFloat = 950
+    static let xlWidth: CGFloat = 1300
+    var tier: Tier {
+        width >= Self.xlWidth ? .xl : (width >= Self.largeWidth ? .large : (wide ? .medium : .compact))
+    }
     /// 左右边距（S5：80·s；iPhone 至少 20）
     var margin: CGFloat { max(20, (width * 80 / 1920).rounded()) }
     /// 卡与卡的间距：折起至少 18、展开至少 24（留白分组：F3、F12）
@@ -124,10 +138,11 @@ struct DSMetrics {
 
     private func clamp(_ v: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat { min(hi, max(lo, v)) }
 
-    /// 网格：一行整数张，左右都是边距（年份页、清单、搜索、文件夹）。折起 3 / 4 张；展开按海报的目标宽排
+    /// 网格：一行整数张，左右都是边距（年份页、清单、搜索、文件夹）。折起 3 / 4 张；展开按海报的目标宽排。
+    /// 大屏（iPad 横拿、Pro 13）海报不再越放越大：大档约 165 点（一行 6–7 张）、特大档约 150 点（一行 7–8 张），一屏看得到更多
     func gridColumns() -> Int {
         guard wide else { return width < 500 ? 3 : 4 }
-        let target = clamp(width * 0.15, 124, 190)
+        let target: CGFloat = tier == .xl ? 150 : (tier == .large ? 165 : clamp(width * 0.15, 124, 190))
         var best = 4, bestErr = CGFloat.infinity
         for n in 3...10 {
             let err = abs(cardWidth(columns: n) - target)

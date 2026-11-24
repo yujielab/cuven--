@@ -72,6 +72,18 @@ struct CuvenApp: App {
         .backgroundTask(.appRefresh(RequestStore.refreshTask)) {
             await RequestStore.shared.handleBackgroundRefresh()
         }
+        // iPad（用户要求，按 Apple 的做法）：接了键盘时 ⌘1–4 切换主页 / 资料库 / 请求 / 搜索，⌘F 搜索；
+        // 按住 ⌘ 出来的快捷键表、iPadOS 26 的菜单栏「前往」里都有这几项
+        .commands {
+            CommandMenu("前往") {
+                Button("主页") { AppNav.shared.go(.home) }.keyboardShortcut("1", modifiers: .command)
+                Button("资料库") { AppNav.shared.go(.library) }.keyboardShortcut("2", modifiers: .command)
+                Button("请求") { AppNav.shared.go(.requests) }.keyboardShortcut("3", modifiers: .command)
+                Button("搜索") { AppNav.shared.go(.search) }.keyboardShortcut("4", modifiers: .command)
+                Divider()
+                Button("查找影片") { AppNav.shared.go(.search) }.keyboardShortcut("f", modifiers: .command)
+            }
+        }
 
     }
 }
@@ -136,6 +148,8 @@ struct RootView: View {
         .onChange(of: tab) { _, _ in Haptics.selection() }
         .onChange(of: model.searchRequest) { _, q in if q != nil { tab = .search } }
         .modifier(BasketOpensRequests(tab: $tab))
+        // iPad：标签栏能展开成侧边栏（iPadOS 26 浮在顶上的那一条）；13 寸横拿这种特别宽的窗口一打开就是侧边栏
+        .modifier(PadTabStyle(wide: window.width >= DSMetrics.xlWidth))
         // 分享来的链接（隔空投送的 cuven://movie/…）：切到主页、推进那一部的详情页（DeepLink）
         .onOpenURL { url in
             tab = .home
@@ -220,15 +234,51 @@ enum LayoutLog {
     }
 }
 
-/// 详情页上已经加进请求中心的那部再按一下：切到「请求」去确认（单独一个修饰器：RootView 那一长串修饰器再长，编译器就推不动类型了）
+/// 详情页上已经加进请求中心的那部再按一下：切到「请求」去确认；键盘 ⌘1–4 / ⌘F（AppNav）切标签。
+/// 单独一个修饰器：RootView 那一长串修饰器再长，编译器就推不动类型了
 private struct BasketOpensRequests: ViewModifier {
     @Binding var tab: AppTab
 
     func body(content: Content) -> some View {
-        content.onChange(of: RequestBasket.shared.openCenter) { _, go in
-            guard go else { return }
-            tab = .requests
-            RequestBasket.shared.openCenter = false
+        content
+            .onChange(of: RequestBasket.shared.openCenter) { _, go in
+                guard go else { return }
+                tab = .requests
+                RequestBasket.shared.openCenter = false
+            }
+            .onChange(of: AppNav.shared.serial) { _, _ in
+                if let t = AppNav.shared.wanted { tab = t }
+            }
+    }
+}
+
+/// 键盘快捷键（菜单命令）要切的标签：命令在 Scene 上，标签的状态在 RootView 里，经它传过去
+@MainActor
+@Observable
+final class AppNav {
+    static let shared = AppNav()
+    private(set) var wanted: AppTab?
+    /// 每按一次加一（连按同一个也算变了）
+    private(set) var serial = 0
+
+    func go(_ t: AppTab) {
+        wanted = t
+        serial += 1
+    }
+}
+
+/// iPad 上的标签栏：iPadOS 26 浮在顶上、能展开成侧边栏的那种（sidebarAdaptable）；特别宽的窗口默认就是侧边栏。
+/// 只认 iPad：iPhone（含展开的 Duo）照旧是底下的标签栏 / Duo 自己画的侧边导航
+private struct PadTabStyle: ViewModifier {
+    let wide: Bool
+
+    func body(content: Content) -> some View {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            content
+                .tabViewStyle(.sidebarAdaptable)
+                .defaultAdaptableTabBarPlacement(wide ? .sidebar : .tabBar)
+        } else {
+            content
         }
     }
 }
