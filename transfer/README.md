@@ -41,14 +41,14 @@ PikPak → Dropbox 的传输面板，加上给[请求添加 Worker](../request/R
 | `ping` | 能不能连上 VPS（回 rclone 版本）。910 起多回 `caps: ['sub', 'batch']` 和 `tv`（剧集区的名字） |
 | `organize { dir }` | 删剧集文件夹里的广告文件（进 PikPak 回收站） |
 | `check { dir, total? }` | 整季完整性：ok / short / unsure / busy / skip / nonvid / bare |
-| `rename { dir, sub?, to?, tpl?, lang?, grp? }` | 按发行命名改文件夹名（`sync/move`，异步），回 `{ name, jobid, sub }`。`to` 是改完放在哪个区（不给 = 和 `sub` 一样），见下面 |
+| `rename { dir, sub?, to?, tpl?, lang?, grp? }` | 按发行命名改文件夹名（`sync/move`，异步），回 `{ name, jobid, sub }`。`to` 是改完放在哪个区（不给 = 和 `sub` 一样）。上一次其实已经挪完的，回 `{ name, jobid, sub, done: 1 }`，见下面 |
 | `job { jobid, detail? }` / `jobs { ids }` | 作业进度。作业不见了（rclone 重启过）回 `missing`。`detail: 1` 多回 ETA、文件数、正在传的文件（见下面） |
 | `stop { jobid }` | 停一个作业 |
 | `copy { item, kind, from?, sizeOnly? }` | `webdav:auto/<item>` → `dropbox:auto/<item>`。补传时可以用 `from: 'pikpak'` 改从原生后端拿，`sizeOnly` 只按大小判断 |
 | `verify { item, kind }` | 两端逐个文件核对（见下面），回 `ok`，以及缺了哪些（`missing`）、哪些大小不对（`differ`）、Dropbox 那边多了几个（`extra`） |
 | `purge { item, kind }` | 删 PikPak 那份 |
 | `exists { item, sub? }` / `exists { items, tv? }` | `dropbox:auto` 里还在不在（不在了 = 已经人工发行）。`tv` 里是剧集区下面的名字，回 `{ exists, tv }` |
-| `batch-copy { key, items, from?, sizeOnly?, transfers?, checkers? }` | 一批（最多 16 项）一个传输作业，见「批量传输」 |
+| `batch-copy { key, items, from?, sizeOnly?, transfers?, checkers? }` | 一批（最多 16 项）一个传输作业，见「批量传输」。同一个 key 的作业已经在跑，回 `{ jobid, reused: true }`（作业号没找到时 `jobid` 是 0，另带 `running: 1`） |
 | `batch-verify { items, src? }` | 一批一起核对，回 `{ results: { key: 同 verify } }` |
 | `batch-purge { items }` | 一批（最多 8 项）删 PikPak 那份，回 `{ results: { key: { ok } / { ok, gone } / { error } } }` |
 
@@ -85,17 +85,21 @@ PikPak → Dropbox 的传输面板，加上给[请求添加 Worker](../request/R
 
 `items` 里每项是 `{ item, kind, sub }`：`kind` 是 `file`（电影，直接在 `auto` 里）或 `dir`（剧集，一般在 `auto/ram2` 里）。结果按 key 回：带 `sub` 的是 `ram2/<item>`，不带的是 `<item>`。有一项不对，整批回 400，并在 `index` 里标出是第几项。同一项给两次的，只算一次。
 
-`batch-copy` 一次调用做四步：
+`batch-copy` 一次调用做四步。前三步同时进行（以前一步接一步，`sync/copy` 可能拖到 59 秒才发出去，这时调用方已经因为 60 秒超时放弃了）：
 
 1. **预检**：用这一批的过滤规则，递归列一次来源（`webdav:auto`；带 `from: 'pikpak'` 时列 `pikpak:auto`）。
    - 列回来有这批以外的文件，说明这台 rclone 不认过滤。这时回 409 `{ nofilter: 1 }`，不开作业，请求添加退回逐个传。不然一个作业会把整个 `auto` 都搬走。
    - 这次列表顺带给出每项的文件数和字节数（`items`、`total`、`files`），当进度条的分母。Dropbox 存不了的系统文件不计入。
-2. **幂等**：作业的统计组叫 `tjb/<key>`。开之前先用 `job/list` 和 `job/status` 看一眼，同组的作业还在跑，就回 `{ jobid, reused: true }`，不开第二个。这样调用方超时后重来，也不会重复开。
-   - 新版 rclone 只问还在跑的作业，老版 rclone 问最新的 8 个。
-   - 有作业的状态没问出来，就回 502，这一轮不开。
-   - 预检列得太久（超过 45 秒）也不开，回 503。调用方多半已经超时，下一轮会再来。
-3. 建好 `dropbox:auto`；这批里有剧集时，再建 `dropbox:auto/ram2`。
-4. 开一个异步 `sync/copy`：
+2. **幂等**：同一个 key 的作业按 rclone 的统计组来认。调用方超时后重来，不会开出第二个作业。
+   - 统计组每开一次换一个名字：第一次是 `tjb/<key>`，重开后是 `tjb/<key>/2`、`tjb/<key>/3`……rclone 不会删掉跑完的统计组，同名的新作业会接着上一次的字节数、文件数和错误往上加，所以重开不沿用旧名字。rclone 重启后统计组都清空了，又从 `tjb/<key>` 开始。
+   - 不按「最新几个作业号」来认：真的 rclone（1.62 起）每个 rc 调用都占一个作业号，连同步调用也算，`job/list` 也只回 `jobids`，里面是 24 小时内的全部作业。
+   - `core/group-list` 里没有这个 key 的组，说明 rclone 这次启动以来没开过，直接开。
+   - 有这个 key 的组时：`job/list` 给了 `runningIds`，就挨个问还在跑的作业。没给的话，就看最新那一组的统计：
+     - 有正在传或正在核对的文件，说明作业在跑，回 `{ jobid, reused: true }`。作业号在 `group-list` 里这一组前后的那段作业号里找，最多问 15 个；找不到时回 `{ jobid: 0, reused: true, running: 1 }`，这一轮不开。
+     - 什么都没在传，可能是作业已经跑完、被停掉，也可能还在列目录（`CheckFirst` 会先列完两边）。找到了作业，就看它跑完没有；找不到，就先用 `job/stopgroup` 停掉这一组，再开下一组。这样同一个 key 不会有两个作业同时在跑。
+   - `group-list`、`job/list`、统计、停组，有一样没问出来，这一轮就不开（502 / 503）。
+3. 建好 `dropbox:auto`；这批里有剧集时，再建 `dropbox:auto/ram2`。超时 5 秒，不看结果（`sync/copy` 自己也会建）。
+4. 开一个异步 `sync/copy`（超时 15 秒）。已经过了 40 秒就不开了，回 503，调用方下一轮再来。这个检查就放在发 `sync/copy` 之前（停组之后会再看一次），保证 55 秒以内回到调用方。`sync/copy` 的参数：
    - 来源：`webdav:auto`（或 `pikpak:auto`）。
    - 目标：`dropbox,chunk_size=16Mi,batch_mode=sync:auto`，从 `RC_DROPBOX` 推出来，只对这次调用生效。不开 batch_mode 的话，16 路同时上传会撞上 Dropbox 的 429。
    - `_config`：`Transfers` / `Checkers` 默认都是 16（可在 1–16 之间调），`BufferSize` 8Mi，`CheckFirst`（先检查完再传，进度条的分母不会往回跳），以及可选的 `SizeOnly`。
@@ -119,7 +123,10 @@ PikPak → Dropbox 的传输面板，加上给[请求添加 Worker](../request/R
 
 - 剧集在 PikPak 和 Dropbox 上都放在 `auto/ram2` 下面，电影还是直接放在 `auto` 里。
 - `rename { dir, sub, to }` 把 `auto/[sub/]dir` 挪到 `auto/[to/]<新名字>`。名字没变也照样挪（比如从 `auto` 挪进 `auto/ram2`）。名字和区都没变，才回 `{ same: 1 }`。
-- 用到剧集区（`sub` 或 `to` 不为空）时，先建好目标的上一层。目标已经在了，回 409 `{ exists: 1 }`：rclone 碰上已有的目标，会把两个文件夹逐个文件合并到一起。`sub`、`to` 都不带时和 909 一样。
+- 用到剧集区（`sub` 或 `to` 不为空）时，先建好目标的上一层，再看目标在不在：
+  - 目标在、原来的也在，回 409 `{ exists: 1 }`。rclone 碰上已有的目标，会把两个文件夹逐个文件合并到一起。
+  - 目标在、原来的不在了，说明上一次改名其实已经挪完了，只是回包丢了（PikPak 一下就挪完；`sync/move` 遇到 520 不重试）。这时回 200 `{ name, sub, jobid, done: 1 }`，不回 `exists`，免得调用方照原名往下走。`jobid` 是一个确认用的异步 `stat`（看新名字的那个文件夹），马上就会跑完、成功，所以老的调用方照常等作业跑完，再换成新名字。
+- `sub`、`to` 都不带时和 909 一样。
 - `exists { items, tv }`：只有给了 `tv` 才列 `dropbox:auto/ram2`，两次列表同时发。剧集区那个文件夹本身不算一个条目。名字不分大小写。
 
 ### 并发
@@ -136,4 +143,4 @@ rclone rc 全部模拟，不需要网络和 VPS。共四组：
 - `link.mjs`：接口的基本功能。
 - `retry.mjs`：52x 重试、备用入口、批量接口。
 - `verify.mjs`：逐个文件核对、补传换来源。
-- `batch.mjs`（910）：批量传输 / 核对 / 删除、剧集区 `sub`、改名挪进剧集区、`exists { tv }`、作业 detail、并发上限。模拟的 rclone 按 `_filter` 的 IncludeRule 匹配，认反斜杠转义和 IgnoreCase。
+- `batch.mjs`（910）：批量传输 / 核对 / 删除、剧集区 `sub`、改名挪进剧集区、`exists { tv }`、作业 detail、并发上限。模拟的 rclone 按 `_filter` 的 IncludeRule 匹配，认反斜杠转义和 IgnoreCase。作业号和统计组也照真的 rclone 来：每个调用都占一个作业号（放在 `X-Rclone-Jobid` 里），`job/list` 只回 `jobids`，`core/group-list` 按建组的先后排。另外还测了：两轮之间隔了很多调用的重来、重开换统计组、改名「挪完了但回包丢了」，以及用虚拟时钟测的 40 秒截止。

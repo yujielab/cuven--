@@ -13631,7 +13631,7 @@ async function linkRc(env, path, payload, ms) {
 }
 
 /** 一个异步作业的进度。rclone 重启过、作业没了：missing（调用方从头再来，不算 VPS 出错）
-    [910] 统计组从 job/status 的 group 读：批量传输开的时候带了 _group（tjb/<key>），不是 job/<id>；
+    [910] 统计组从 job/status 的 group 读：批量传输开的时候带了 _group（tjb/<key>，重开过是 tjb/<key>/<n>），不是 job/<id>；
     还是 2 次调用。detail：多回 eta、文件数、检查数、错误、正在传的文件（按路径归到条目） */
 async function linkJob(env, id, detail) {
   const r = await linkRc(env, 'job/status', { jobid: id }, 15000);
