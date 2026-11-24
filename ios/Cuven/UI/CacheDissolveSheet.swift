@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - 清除缓存（用户要求「清除缓存的时候要有这样的动画」，参照他发来的录屏：Prismatic Data Dissolution）
+// MARK: - 清除缓存（用户要求「清除缓存的时候要有这样的动画」，参照用户发来的录屏：Prismatic Data Dissolution）
 //
 // 整屏黑底，上半截浮着一张 3D 的「缓存卡」（卡面写着这次要清的大小），下面一枚小胶囊「Cuven 缓存」、一行「清除 1.2 GB 缓存？」、
 // 「取消」「清除」两颗胶囊。点「清除」：两颗按钮收成一枚玻璃进度胶囊（转圈 + 「正在清除 0.6 GB / 1.2 GB」，数字跟着溶解前沿走），
@@ -15,12 +15,20 @@ struct CacheDissolveSheet: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var engine = CacheDissolveEngine()
     @State private var phase: Phase = .idle
+    /// 打开时那一刻的大小：清的过程中外面的数会变小，卡面和胶囊上的总数不跟着变
+    @State private var total: Int64
     @Namespace private var ns
+
+    init(bytes: Int64, clear: @escaping () async -> Void) {
+        self.bytes = bytes
+        self.clear = clear
+        _total = State(initialValue: bytes)
+    }
 
     enum Phase { case idle, clearing, done }
 
     private var sizeText: String {
-        let s = Format.size(bytes)
+        let s = Format.size(total)
         return s.isEmpty ? "0 MB" : s
     }
 
@@ -61,11 +69,15 @@ struct CacheDissolveSheet: View {
 
     private static let bottomPad: CGFloat = 24
 
-    /// 光流汇聚的那一点：进度胶囊的正中（胶囊 46 点高，在安全区底下居中），换算成整屏（画布铺满整屏）里的比例
+    /// 光流汇聚的那一点：进度胶囊的正中（胶囊 46 点高，在安全区底下居中），换算成整屏（画布铺满整屏）里的比例。
+    /// 横向也按安全区算：iPhone Duo 一边有一列状态栏，内容区不在屏幕正中，卡和光都要对着胶囊
     private func place(_ geo: GeometryProxy) {
-        let full = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
-        guard full > 0 else { return }
-        engine.target = CGPoint(x: 0.5, y: (geo.safeAreaInsets.top + geo.size.height - Self.bottomPad - 23) / full)
+        let fullH = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
+        let fullW = geo.size.width + geo.safeAreaInsets.leading + geo.safeAreaInsets.trailing
+        guard fullH > 0, fullW > 0 else { return }
+        let cx = (geo.safeAreaInsets.leading + geo.size.width / 2) / fullW
+        engine.centerX = cx
+        engine.target = CGPoint(x: cx, y: (geo.safeAreaInsets.top + geo.size.height - Self.bottomPad - 23) / fullH)
     }
 
     private var closeButton: some View {
@@ -147,10 +159,12 @@ struct CacheDissolveSheet: View {
             .frame(height: 46)
             .glassEffect(.regular, in: Capsule())
         }
+        // 胶囊多大：渲染器里那一圈光贴着它的形状
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { engine.capsulePt = $0 }
     }
 
     private func clearedText(_ p: Double) -> String {
-        let s = Format.size(Int64(Double(bytes) * p))
+        let s = Format.size(Int64(Double(total) * p))
         return s.isEmpty ? "0 MB" : s
     }
 

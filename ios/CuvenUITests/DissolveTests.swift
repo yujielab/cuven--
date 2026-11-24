@@ -16,9 +16,10 @@ final class DissolveTests: XCTestCase {
         go.tap()
         let t0 = Date()
         var i = 1
-        while Date().timeIntervalSince(t0) < 7.6 {
+        // 名字里带点下去以后过了多少（十分之一秒，比如 t21 = 2.1 秒）；一直截到「已清除」快收起
+        while Date().timeIntervalSince(t0) < 8.2 {
             usleep(420_000)
-            snap(String(format: "dissolve-%02d-%.1fs", i, Date().timeIntervalSince(t0)))
+            snap(String(format: "dissolve-%02d-t%02d", i, Int(Date().timeIntervalSince(t0) * 10)))
             i += 1
         }
         sleep(2)
