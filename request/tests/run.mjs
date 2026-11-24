@@ -1461,6 +1461,174 @@ const flowGet = async (user, tag) => {
   reset26();
 }
 
+/* ── 2.6 一次只跑一批：在传的批次单独查（收尾中的再多也挤不掉它）、排在后面的也在 copy 的成员接着停、库里也挡住第二批 ── */
+{
+  const PARK = 15 * 60000;                                      // LIMIT.memberPark：batchGate 把成员停这么久
+  let seq = 0;
+  const ins = (stage, data, extra = {}) => {
+    const t = Date.now(), tmdb = 8000 + (seq++);
+    return Number(env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid, bat)
+      VALUES ('movie', ?, 0, 'x', '["alice"]', ?, '', ?, ?, ?, ?, ?, ?, ?)`)
+      .run(tmdb, stage, JSON.stringify(data), t, t, extra.since ?? t, extra.next ?? t + 3600e3, extra.bid ?? 0, extra.bat ?? 0).lastInsertRowid);
+  };
+  const newBatch = (stage, data = {}) => {
+    const t = Date.now();
+    return Number(env.DB.db.prepare('INSERT INTO tj_batch (stage, items, data, created, updated) VALUES (?, ?, ?, ?, ?)').run(stage, '[]', JSON.stringify(data), t, t).lastInsertRowid);
+  };
+  const row = (id) => { const x = env.DB.db.prepare('SELECT stage, bat, note, data FROM tj_req WHERE id = ?').get(id); return { ...x, d: JSON.parse(x.data) }; };
+  const bstage = (id) => env.DB.db.prepare('SELECT stage, ended FROM tj_batch WHERE id = ?').get(id);
+  const running = () => Object.entries(W.batchRun).filter(([, id]) => W.job[id] && W.job[id].finished === false).map(([k]) => k);
+  const setup = async () => {
+    reset26(); W.caps = ['sub', 'batch'];
+    await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, batchMin: 16, batchMax: 16, batchWait: 600, vpsSlots: 2, tagNames: true, autoReady: true } });
+    await call('POST', '/admin/api/links', { admin: true, body: {} });      // 先记下传输 Worker 会批量
+  };
+
+  /* 收尾中的批次 22 批（成员删 PikPak 一直出错，退避 8 小时）+ 正在传的那一批（编号最大）+ 两部等着凑批 + 一条排队的单个补传 */
+  await setup();
+  const old = [];
+  for (let i = 0; i < 22; i++){
+    const id = newBatch('purge'); old.push(id);
+    if (i < 21) ins('purge', { item: 'Old' + i + '.mkv', kind: 'file', tag: '', errs: 5 }, { bat: id, next: Date.now() + 8 * 3600e3 });
+  }
+  const t0 = Date.now();
+  const run = newBatch('copy', { job: 4601, started: t0, cbAt: t0, cb: 1 });
+  W.job[4601] = { finished: false, success: false, bytes: 5e8, total: 2e9 }; W.batchRun[String(run)] = 4601;
+  const mem = [0, 1].map(i => ins('copy', { item: 'Run' + i + '.mkv', kind: 'file', tag: '', batch: run }, { bat: run, next: t0 + PARK }));
+  for (let i = 0; i < 2; i++) ins('ready', { item: 'Next' + i + '.mkv', kind: 'file', tag: '' });
+  const recopy = ins('copy', { item: 'Recopy.mkv', kind: 'file', tag: '', vtries: 1, rode: old[0] }, { next: 0 });
+  W.copyJobs = [92]; W.job[92] = { finished: false, success: false, bytes: 1, total: 9 };
+  const tfA = W.tf.length;
+  await tick();
+  const opsA = W.tf.slice(tfA);
+  ok(W.batchCalls.length === 0 && opsA.filter(([op, b]) => op === 'job' && b.jobid === 4601).length === 1 && !opsA.some(([op]) => op === 'copy') && W.copyWhileBatch === 0,
+     '收尾中的批次有 22 批：正在传的那一批照样认得出（问了它的作业，没开第二批，没开单个传输）', opsA.map(x => x[0]));
+  ok(new RegExp('批量 #' + run + ' 正在传').test(row(recopy).note), '排队的单个补传：等正在传的那一批', row(recopy).note);
+  ok(bstage(old[21]).stage === 'done' && bstage(old[21]).ended > 0 && bstage(old[0]).stage === 'purge',
+     '收尾中的批次一批不漏：最新的那批（成员都走完了）也收尾了，不只看最早的 20 批', { first: bstage(old[0]), last: bstage(old[21]) });
+  for (let i = 0; i < 7; i++){ W.job[4601].bytes += 1e8; await tick(); }   // 22 分钟：成员停满 15 分钟醒过来一次
+  const polls = W.tf.slice(tfA).filter(([op, b]) => op === 'job' && b.jobid === 4601).length;
+  ok(mem.every(id => row(id).stage === 'copy' && row(id).bat === run && row(id).d.batch === run) && polls === 8 && W.batchCalls.length === 0 && W.copyWhileBatch === 0,
+     '22 分钟里每轮都问这一批的作业；成员醒过来也接着停着，不提前去核对', { polls, mem: mem.map(row).map(x => x.stage), calls: W.batchCalls.map(x => x.key) });
+  W.job[4601] = { finished: true, success: true, bytes: 2e9, total: 2e9 };
+  await tick();
+  ok(mem.every(id => row(id).stage === 'verify') && bstage(run).stage === 'verify', '这一批传完：成员一起去核对');
+  await tick();
+  ok(W.tf.some(([op, b]) => op === 'copy' && b.item === 'Recopy.mkv') && W.copyWhileBatch === 0, '没有在传的批了：排队的单个补传才开传');
+
+  /* 排在后面、也在 copy 的第二批（以前面板「推进一轮」撞上定时任务开出来的）：成员按 memberPark 停着、醒过来不提前去核对；
+     前面那一批传完时有等着凑批的，也先开第二批的作业，不凑第三批（不会两个作业一起跑） */
+  await setup();
+  for (let i = 0; i < 2; i++) ins('ready', { item: 'Ra' + i + '.mkv', kind: 'file', tag: '' });
+  W.batchJobs = [4501, 4502, 4503];
+  for (const j of [4501, 4502, 4503]) W.job[j] = { finished: false, success: false, bytes: 1, total: 1e9 };
+  await tick();
+  const b1 = env.DB.db.prepare('SELECT MAX(id) AS id FROM tj_batch').get().id;
+  const b2 = newBatch('copy');
+  const m2 = ins('copy', { item: 'Second.mkv', kind: 'file', tag: '', batch: b2 }, { bat: b2, next: Date.now() + PARK });
+  const wait = [0, 1].map(i => ins('ready', { item: 'Rc' + i + '.mkv', kind: 'file', tag: '' }));
+  let most = 0;
+  for (let i = 0; i < 7; i++){ W.job[4501].bytes += 1e8; await tick(); most = Math.max(most, running().length); }
+  const l2 = (await call('GET', '/admin/api/log?id=' + m2, { admin: true }))[1].items.map(l => l.msg);
+  ok(row(m2).stage === 'copy' && row(m2).bat === b2 && row(m2).d.batch === b2 && bstage(b2).stage === 'copy' && !l2.some(m => /核对/.test(m)) &&
+     W.batchCalls.map(x => x.key).join() === String(b1), '第二批的成员停满 15 分钟醒过来：自己那一批还没开，接着停着（不去核对）', { m2: row(m2), l2 });
+  ok(new RegExp('批量 #' + b2 + ' 排队：等批量 #' + b1).test(row(m2).note), '面板上写着第二批在排队', row(m2).note);
+  const [, , fw] = await flowGet('alice');
+  ok(fw.batch && fw.batch.id === b1 && fw.batch.stage === 'copy', '/app/flow 给的是正在传的那一批（不是排在后面的）', fw.batch);
+  const [, sw] = await call('GET', '/admin/api/state', { admin: true });
+  ok(sw.batch && sw.batch.id === b1 && sw.slots.batch === b1, '面板的系统卡也是正在传的那一批', sw.batch);
+  W.job[4501] = { finished: true, success: true, bytes: 1e9, total: 1e9 };
+  await tick(); most = Math.max(most, running().length);
+  ok(W.batchCalls.length === 1 && env.DB.db.prepare("SELECT COUNT(*) n FROM tj_batch WHERE ended = 0 AND stage = 'copy'").get().n === 1 &&
+     wait.every(id => row(id).stage === 'ready' && row(id).bat === 0), '第一批传完：等着凑批的不凑第三批（第二批还在 copy）', { calls: W.batchCalls.map(x => x.key), wait: wait.map(row).map(x => x.stage) });
+  await tick(); most = Math.max(most, running().length);
+  ok(W.batchCalls.length === 2 && W.batchCalls[1].key === String(b2) && running().join() === String(b2), '下一轮开第二批的作业（key = 它自己的编号）', { calls: W.batchCalls.map(x => x.key), running: running() });
+  W.job[4502] = { finished: true, success: true, bytes: 1e9, total: 1e9 };
+  await tick(); most = Math.max(most, running().length);
+  ok(W.batchCalls.length === 3 && W.batchCalls[2].items.map(x => x.item).join() === 'Rc0.mkv,Rc1.mkv' && most === 1,
+     '第二批传完：等着的两部这才开第三批；从头到尾同时只有一个批量作业', { calls: W.batchCalls.map(x => x.key), most });
+
+  /* 库里也挡住：凑批时另一边（面板「推进一轮」不拿租约）刚插了一批在 copy 的 → 这边插不进去，不开、不动成员 */
+  await setup();
+  const rr = [0, 1].map(i => ins('ready', { item: 'Rr' + i + '.mkv', kind: 'file', tag: '' }));
+  const prep = env.DB.prepare;
+  let racer = 0;
+  env.DB.prepare = function (sql){
+    if (!racer && /^INSERT INTO tj_batch/.test(sql)){
+      const t = Date.now();
+      racer = Number(this.db.prepare("INSERT INTO tj_batch (stage, items, data, created, updated) VALUES ('copy', '[]', ?, ?, ?)").run(JSON.stringify({ job: 4801, started: t, cbAt: t }), t, t).lastInsertRowid);
+      W.job[4801] = { finished: false, success: false, bytes: 1, total: 9 }; W.batchRun[String(racer)] = 4801;
+    }
+    return prep.call(this, sql);
+  };
+  try { await tick(); } finally { env.DB.prepare = prep; }
+  ok(racer > 0 && W.batchCalls.length === 0 && env.DB.db.prepare('SELECT COUNT(*) n FROM tj_batch WHERE ended = 0').get().n === 1 &&
+     rr.every(id => row(id).stage === 'ready' && row(id).bat === 0), '另一边刚开了一批：这边插不进第二批，等着的原样不动', { racer, calls: W.batchCalls.length, rr: rr.map(row) });
+  const tfR = W.tf.length;
+  await tick();
+  ok(W.tf.slice(tfR).some(([op, b]) => op === 'job' && b.jobid === 4801) && W.batchCalls.length === 0, '下一轮：认出那一批在传（问它的作业），照样不开第二批');
+}
+
+/* ── 2.6 凑批、/app/flow 的查询走索引：tj_req 不删旧的（就绪、失败的留着追踪、看历史），整张表读一遍很贵（D1 按读了几行算） ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, batchMin: 16, batchWait: 600 } });
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  const t = Date.now();
+  const hist = env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid, bat)
+    VALUES ('movie', ?, 0, 'h', '["alice"]', ?, '', '{}', 1, 1, 1, 0, ?, ?)`);
+  for (let i = 0; i < 300; i++) hist.run(9000 + i, i % 10 ? 'done' : 'failed', i % 3, i % 7);
+  for (let i = 0; i < 3; i++) env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+    VALUES ('movie', ?, 0, 'r', '["alice"]', 'ready', '', ?, ?, ?, ?, ?, 1)`).run(9500 + i, JSON.stringify({ item: 'Ix' + i + '.mkv', kind: 'file', tag: '' }), t, t, t, t + 3600e3);
+  env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+    VALUES ('movie', 9600, 0, 'u', '["bob"]', 'download', '', '{"task":"nope"}', ?, ?, ?, ?, 1)`).run(t, t, t, t + 6 * 60000);   // 同一次提交还在下载：先不开批
+  const seen = [];
+  const prep = env.DB.prepare;
+  env.DB.prepare = function (sql){ seen.push(sql); return prep.call(this, sql); };
+  try { await tick(); await flowGet('alice'); } finally { env.DB.prepare = prep; }
+  const idx = env.DB.db.prepare('PRAGMA index_list(tj_req)').all().map(x => x.name);
+  const plans = [...new Set(seen)].filter(s => /\btj_req\b/.test(s) && /^\s*(SELECT|UPDATE)/i.test(s))
+    .map(s => [s.replace(/\s+/g, ' ').slice(0, 90), env.DB.db.prepare('EXPLAIN QUERY PLAN ' + s).all().map(x => x.detail)]);
+  const scans = plans.filter(([, p]) => p.some(d => /^SCAN tj_req\b/.test(d)));
+  ok(idx.includes('tj_req_stage'), 'tj_req 有 stage 的索引（db() 给老库也补上）', idx);
+  ok(plans.length >= 8 && !scans.length, '定时任务一轮 + /app/flow 的查询没有一条把 tj_req 整张表读一遍', scans);
+  ok(seen.filter(s => /stage = 'ready' ORDER BY since/.test(s)).length === 2, '有加好追踪码的等着：凑批那一步一轮查两次（开头、末尾）');
+  seen.length = 0;
+  env.DB.db.exec("DELETE FROM tj_req WHERE stage IN ('ready', 'download')");
+  env.DB.prepare = function (sql){ seen.push(sql); return prep.call(this, sql); };
+  try { await tick(); } finally { env.DB.prepare = prep; }
+  ok(seen.filter(s => /stage = 'ready' ORDER BY since/.test(s)).length === 1, '一个等着凑批的都没有：一轮只查一次（末尾不再查）', seen.filter(s => /ready/.test(s)));
+  env.DB.db.exec('DELETE FROM tj_req');
+}
+
+/* ── 2.6 子请求预算：一轮里有调用被预算挡回去，tick:last 记下 over（面板的系统卡也写着），下一轮接着做、不算出错 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, pkSlots: 20 } });
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  /* 下下来的是很深的文件夹（12 个子文件夹、每个下面再 12 个）：清洗一部要列 25 个文件夹，两部一轮做不完 */
+  const deep = (tag) => {
+    const root = 'deep' + tag, F = (id, name, parent, kind = 'drive#folder', size = '0') =>
+      W.files.set(id, { id, name, kind, parent_id: parent, size, phase: 'PHASE_TYPE_COMPLETE', trashed: false });
+    F(root, 'Deep.' + tag + '.2020.1080p', 'AUTO');
+    F(root + 'v', 'Deep.' + tag + '.2020.1080p.mkv', root, 'drive#file', '5000000000');
+    for (let i = 0; i < 12; i++){ F(root + 'a' + i, 'd' + i, root); for (let j = 0; j < 12; j++) F(root + 'a' + i + 'b' + j, 'e' + j, root + 'a' + i); }
+    return root;
+  };
+  const ids = ['A', 'B'].map((tag, i) => Number(env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next)
+    VALUES ('movie', ?, 0, 'deep', '["alice"]', 'clean', '', ?, 1, 1, 1, 0)`).run(9700 + i, JSON.stringify({ file: deep(tag), cur: { tid: 1, t: 'x' }, tried: [] })).lastInsertRowid));
+  const st = () => ids.map(id => env.DB.db.prepare('SELECT stage, data FROM tj_req WHERE id = ?').get(id)).map(x => ({ stage: x.stage, errs: JSON.parse(x.data).errs || 0 }));
+  await tick();
+  const l1 = lastTick(), s1 = st();
+  ok(l1.over >= 1 && l1.fetches === 42 && s1.filter(x => x.stage === 'ready').length === 1 && s1.filter(x => x.stage === 'clean').length === 1 && s1.every(x => !x.errs),
+     '一轮的子请求用完了：tick:last 记下有几个被挡回去（over），第二部留到下一轮、不算出错', { l1, s1 });
+  const [, sp] = await call('GET', '/admin/api/state', { admin: true });
+  ok(sp.tick && sp.tick.over === l1.over, '面板的系统卡拿得到 over', sp.tick);
+  await tick();
+  ok(st().every(x => x.stage === 'ready') && lastTick().over === 0, '下一轮：第二部也清洗好了，没有再被挡', { s: st(), l: lastTick() });
+  env.DB.db.exec('DELETE FROM tj_req');
+}
+
 /* ── 共用的 D1：别人的表原样不动，自己的表缺的列补上了 ── */
 {
   const theirs = env.DB.db.prepare("SELECT v FROM kv WHERE k = 'theirs'").get();
