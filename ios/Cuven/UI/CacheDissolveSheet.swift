@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - 清除缓存（用户要求「清除缓存的时候要有这样的动画」，参照他发来的录屏：Prismatic Data Dissolution）
+// MARK: - 清除缓存（用户要求「清除缓存的时候要有这样的动画」，参照用户发来的录屏：Prismatic Data Dissolution）
 //
 // 整屏黑底，上半截浮着一张 3D 的「缓存卡」（卡面写着这次要清的大小），下面一枚小胶囊「Cuven 缓存」、一行「清除 1.2 GB 缓存？」、
 // 「取消」「清除」两颗胶囊。点「清除」：两颗按钮收成一枚玻璃进度胶囊（转圈 + 「正在清除 0.6 GB / 1.2 GB」，数字跟着溶解前沿走），
@@ -159,6 +159,8 @@ struct CacheDissolveSheet: View {
             .frame(height: 46)
             .glassEffect(.regular, in: Capsule())
         }
+        // 胶囊多大：渲染器里那一圈光贴着它的形状
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { engine.capsulePt = $0 }
     }
 
     private func clearedText(_ p: Double) -> String {
