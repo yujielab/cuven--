@@ -181,6 +181,8 @@ struct RootView: View {
             PairLab.presentIfRequested()
             // -CuvenRequestPreview YES：推进一部「可请求添加」的剧集详情页（RequestViews.swift）
             RequestPreview.presentIfRequested(model)
+            // -CuvenAllFilmsPreview YES：推进「全部影片」（AllFilmsView.swift）
+            AllFilmsPreview.presentIfRequested(model)
             #endif
         }
         .onChange(of: account.isLoggedIn) { _, now in if now { model.start() } }

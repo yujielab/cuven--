@@ -232,9 +232,11 @@ enum RequestAPI {
 
     struct CatalogPage: Decodable { var items: [CatalogItem] }
 
-    static func catalog(src: String = "all", query: String = "", sort: String = "new", own: String = "all", page: Int = 1) async throws -> [CatalogItem] {
+    static func catalog(src: String = "all", query: String = "", sort: String = "new", own: String = "all", page: Int = 1, year: Int? = nil) async throws -> [CatalogItem] {
         var q: [(String, String)] = [("src", src), ("sort", sort), ("own", own), ("page", String(page))]
         if !query.isEmpty { q.append(("q", query)) }
+        // 按年份（「全部影片」的可申请那一边；tj 2.6 起转给影片库，老版本不认就在 App 里过滤）
+        if let year { q.append(("year", String(year))) }
         let p: CatalogPage = try await send(URLRequest(url: url("/app/catalog", q)))
         return p.items
     }

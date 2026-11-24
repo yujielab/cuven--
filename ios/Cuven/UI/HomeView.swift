@@ -403,7 +403,8 @@ struct RouteView: View {
         case .movie(let v): MovieDetailView(video: v)
         case .series(let s): SeriesDetailView(series: s)
         case .year(let y): YearView(year: y)
-        case .shelf(let s): ShelfView(shelf: s)
+        // 全部影片：按年份、电影 / 剧集、可立即播放 / 可申请分开的那一页（用户要求；AllFilmsView.swift）
+        case .shelf(let s): if s == .all { AllFilmsView() } else { ShelfView(shelf: s) }
         case .person(let m): ActorPage(member: m)
         case .catalog(let t): CatalogDetailView(title: t)
         }
