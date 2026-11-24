@@ -108,8 +108,11 @@ struct RootView: View {
     @State private var window: CGSize = DuoLayout.initialWindowSize
     /// 自己画的导航里再点一下当前那一格：这一格回到根页面（换一个 id，整页重建）
     @State private var roots: [AppTab: Int] = [:]
+    /// UI 测试 / 截图（用户要求的新登录落地页）：-CuvenLoginLanding YES 演示数据、已登录时也盖上登录层，从落地页开始；
+    /// 在里面登录成功（会话一变）就撤掉
+    @State private var loginPreview = LoginLandingFlag.forced
 
-    private var showsLogin: Bool { account.loginRequired && !account.isLoggedIn }
+    private var showsLogin: Bool { (account.loginRequired && !account.isLoggedIn) || loginPreview }
 
     var body: some View {
         let column = DuoLayout.isColumn(window: window)
@@ -168,6 +171,10 @@ struct RootView: View {
             if showsLogin {
                 LoginView()
                     .transition(.opacity)
+                    .onChange(of: account.session) { _, _ in
+                        guard loginPreview else { return }
+                        withAnimation(.timingCurve(0.55, 0.06, 0.68, 0.35, duration: 0.2)) { loginPreview = false }
+                    }
             }
         }
         .background {

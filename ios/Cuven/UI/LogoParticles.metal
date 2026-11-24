@@ -85,7 +85,7 @@ fragment float4 lp_logo_fragment(LPQuadOut in [[stage_in]],
                                  const device float2 *cells [[buffer(2)]],
                                  texture2d<float> logo [[texture(0)]]) {
     float2 uv = in.uv;
-    if (any(uv < 0.0) || any(uv > 1.0)) discard_fragment();
+    if (any(uv < float2(0.0)) || any(uv > float2(1.0))) discard_fragment();
     float k = lp_visible(cells, U, uv, Q.info.y);
     if (k <= 0.0) discard_fragment();
     // 小字标只有大字标四成多宽：靠 mip 缩小，边缘不闪、不起锯齿（和系统画缩小的图一样平滑）
@@ -113,13 +113,13 @@ fragment float4 lp_shadow_fragment(LPQuadOut in [[stage_in]],
     }
     a *= 1.0 / 16.0;
     if (a <= 0.001) discard_fragment();
-    float2 m = clamp(uv, 0.0, 1.0);
+    float2 m = saturate(uv);
     float which = Q.info.y;
     float k = 2.0 * lp_visible(cells, U, m, which)
-            + lp_visible(cells, U, clamp(m + float2(r.x, 0.0), 0.0, 1.0), which)
-            + lp_visible(cells, U, clamp(m - float2(r.x, 0.0), 0.0, 1.0), which)
-            + lp_visible(cells, U, clamp(m + float2(0.0, r.y), 0.0, 1.0), which)
-            + lp_visible(cells, U, clamp(m - float2(0.0, r.y), 0.0, 1.0), which);
+            + lp_visible(cells, U, saturate(m + float2(r.x, 0.0)), which)
+            + lp_visible(cells, U, saturate(m - float2(r.x, 0.0)), which)
+            + lp_visible(cells, U, saturate(m + float2(0.0, r.y)), which)
+            + lp_visible(cells, U, saturate(m - float2(0.0, r.y)), which);
     k *= 1.0 / 6.0;
     float alpha = saturate(a * Q.shadow.w * k);
     return float4(0.0, 0.0, 0.0, alpha);
