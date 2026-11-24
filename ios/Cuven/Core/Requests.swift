@@ -236,14 +236,18 @@ enum RequestAPI {
         var page: Int
         var pages: Int
         var total: Int
+        /// /app/years 的一格（tj 2.8）：接着用 /app/catalog 问哪一页。影片库一页 42 部、一格最多给 40 部：
+        /// 1 = 第一页没给全（再问一次第一页，按 src-id 去重），2 = 接着第二页，0 = 没有了。/app/catalog 不带：nil
+        var next: Int?
 
-        enum CodingKeys: String, CodingKey { case items, page, pages, total, error }
+        enum CodingKeys: String, CodingKey { case items, page, pages, total, next, error }
         init(from d: Decoder) throws {
             let c = try d.container(keyedBy: CodingKeys.self)
             items = (try? c.decode([CatalogItem].self, forKey: .items)) ?? []
             page = (try? c.decode(Int.self, forKey: .page)) ?? 1
             pages = (try? c.decode(Int.self, forKey: .pages)) ?? 0
             total = (try? c.decode(Int.self, forKey: .total)) ?? 0
+            next = try? c.decode(Int.self, forKey: .next)
             failed = ((try? c.decode(Int.self, forKey: .error)) ?? 0) != 0 || (try? c.decode(Bool.self, forKey: .error)) == true
         }
         /// /app/years 里这一格影片库没答上（{error: 1}）
@@ -264,8 +268,9 @@ enum RequestAPI {
         return try await send(URLRequest(url: url("/app/catalog", q)))
     }
 
-    /// /app/years（tj 2.8）：几年 × 电影 / 剧集，每格第一页，一次问完。
-    /// 回 nil = 服务器还是老版本（404），调用方改成一年一年问
+    /// /app/years（tj 2.8）：几年 × 电影 / 剧集，每格第一页，一次问完。每一格是 { items, page, pages, total, next }，
+    /// 影片库没答上的那一格是 { error: 1 }；一格都没答上回 503。
+    /// old = 服务器还是老版本（只认 404：没有这个接口），调用方改成一年一年问
     struct YearsPage: Decodable {
         /// 年份 → 电影 / 剧集 → 第一页
         var years: [Int: [String: CatalogPage]]
@@ -291,7 +296,10 @@ enum RequestAPI {
         case 304: return (nil, nil, etag, false)
         case 404: return (nil, nil, nil, true)
         case 200..<300:
-            return (try JSONDecoder().decode(YearsPage.self, from: data), data, http?.value(forHTTPHeaderField: "ETag"), false)
+            let p = try JSONDecoder().decode(YearsPage.self, from: data)
+            // 200 却一年都没有（不是 /app/years 的回包）：当没问成，调用方一年一年问；也不存、不记 ETag
+            guard !p.years.isEmpty else { throw RequestAPIError.server("服务暂时不可用，请稍后再试。") }
+            return (p, data, http?.value(forHTTPHeaderField: "ETag"), false)
         default:
             let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
             throw RequestAPIError.server(msg ?? "服务暂时不可用，请稍后再试。")
@@ -490,15 +498,24 @@ final class RequestStore {
         return all.first { $0.state == .active } ?? all.max { $0.id < $1.id }
     }
 
-    /// 服务器回来的（详情页、目录里带的）也记下，详情页切季时马上有；是我的那条就连请求中心一起更新
+    /// 服务器回来的（详情页、目录里带的）也记下，详情页切季时马上有；是我的那条就连请求中心一起更新。
+    /// 只拿新的换旧的：目录、/app/years 的回包可能是几分钟前的（边缘缓存），比 /app/requests 刚给的旧，
+    /// 盖上去之后 /app/requests 回 304、再也改不回来
     func merge(_ s: RequestStatus?) {
         guard let s else { return }
         if let i = items.firstIndex(where: { $0.id == s.id }) {
-            if items[i] != s { items[i] = s }
+            if items[i] != s && Self.newer(s, than: items[i]) { items[i] = s }
         } else {
             items.insert(s, at: 0)
         }
-        if let i = mine.firstIndex(where: { $0.id == s.id }), mine[i] != s { mine[i] = s }
+        if let i = mine.firstIndex(where: { $0.id == s.id }), mine[i] != s, Self.newer(s, than: mine[i]) { mine[i] = s }
+    }
+
+    /// 同一条请求，s 能不能换掉手上的 old：updated 早的不要；同一刻的，结束了的（就绪、没能添加、取消）不被「进行中」盖回去。
+    /// updated 更晚的进行中照换（面板「重试」：同一条从出事的那一步重来）
+    private static func newer(_ s: RequestStatus, than old: RequestStatus) -> Bool {
+        if s.updated != old.updated { return s.updated > old.updated }
+        return s.state != .active || old.state == .active
     }
 
     // MARK: 轮询

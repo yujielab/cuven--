@@ -4,9 +4,11 @@ import Foundation
 //
 // 影片库索引只给片名、年份、竖版海报；横卡上面那张剧照、下面那枚字标要问片库的 TMDB 代理。
 // · 一排里看得到的几张一起问：卡出现时排进队，60 毫秒内排进来的合成一次 /api/tmdb-batch（按 TMDB 编号，v25.6）
-// · 片库还是老版本、不认按编号问：退回一张一张问 /api/tmdb?id=（同时最多 4 个，只问看得到的那几张）；10 分钟后再试一次批量
+// · 片库还是老版本、不认按编号问（回包没有 __byId、问的键一个都不回）：退回一张一张问 /api/tmdb?id=（同时最多 4 个，只问看得到的那几张）；
+//   10 分钟后再试一次批量。有 __byId 却没回的键、整批 503，都只是这次没问成：1 分钟后再问，批量不关
 // · 问到的记在本机（Caches，30 天，最多 3000 部）：第二次打开「全部影片」卡片直接是全的
 // · TMDB 说没有这部的也记下（空的一条），不反复问；这次没问成的 1 分钟内不再问
+// · 字标那一问没问成的半份（logoChecked: false）不算答案：剧照先在内存里画着，不存本机，10 分钟后再问
 
 @MainActor
 @Observable
@@ -20,6 +22,9 @@ final class CatalogArt {
         var genre: String?
         /// 记下的时间（秒）
         var at: Double
+        /// 字标那一问有答案（TMDB 说没有这部也算）。false = 半份：只在内存里、不存本机，10 分钟后再问。
+        /// nil = 老版本存的（没有这个记号，照样解得出来；读进来时按有没有字标分，见 loadIfNeeded）
+        var checked: Bool? = nil
     }
 
     private(set) var arts: [String: Art] = [:]
@@ -33,6 +38,8 @@ final class CatalogArt {
     @ObservationIgnored private var loaded = false
 
     private static let ttl: Double = 30 * 86_400
+    /// 半份过多久再问（TMDB 那一下抖动一般早过去了；不必每次卡片出现都问）
+    private static let halfRetry: Double = 600
     private static let cap = 3000
     private static var file: URL {
         let d = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("cuven", isDirectory: true)
@@ -55,8 +62,14 @@ final class CatalogArt {
     func want(_ item: CatalogItem) {
         guard !DemoData.enabled, item.id > 0 else { return }
         let k = Self.key(item)
-        guard arts[k] == nil, !inflight.contains(k), pending[k] == nil else { return }
-        if let t = failedAt[k], Date().timeIntervalSince(t) < 60 { return }
+        // 有了的不再问；半份（字标没问成）先拿剧照画着，隔 10 分钟再问一次（再问没问成也隔 10 分钟：剧照已经有了，不急）
+        var wait: Double = 60
+        if let a = arts[k] {
+            guard a.checked == false, Date().timeIntervalSince1970 - a.at >= Self.halfRetry else { return }
+            wait = Self.halfRetry
+        }
+        guard !inflight.contains(k), pending[k] == nil else { return }
+        if let t = failedAt[k], Date().timeIntervalSince(t) < wait { return }
         pending[k] = item
         guard flushTask == nil else { return }
         flushTask = Task { [weak self] in
@@ -81,20 +94,21 @@ final class CatalogArt {
                     guard let it = batch[k] else { return nil }
                     return (it.src == "tv" ? "tv" : "movie", it.id)
                 }
+                // 没问成（网络错、回包解不出、非 2xx —— v25.6 全批编号都没答出来回 503）：这几部过会儿再问（1 分钟，已有半份的 10 分钟），批量不关
                 guard let r = try? await APIClient.shared.metaByID(ask, logo: true) else {
                     for k in chunk { failedAt[k] = Date() }
                     for k in chunk { left.removeValue(forKey: k) }
                     continue
                 }
-                let answered = chunk.filter { r[$0] != nil }
-                if answered.isEmpty {
-                    // 老版本的片库不认按编号问（一个这样的键都不回）：这一批改成一张一张问，10 分钟后再试批量
+                // 老版本的片库不认按编号问：没有 __byId 记号、问的键一个都不回 → 这一批改成一张一张问，10 分钟后再试批量。
+                // 有记号就是认得：没回的键是这次没问成（TMDB 出错、超预算、只有半份），只按下面记 failedAt，不关批量
+                if !r.byId, !chunk.contains(where: { r.items[$0] != nil }) {
                     batchOffUntil = Date().addingTimeInterval(600)
                     break
                 }
                 for k in chunk {
                     left.removeValue(forKey: k)
-                    if let hit = r[k] { store(k, hit) } else { failedAt[k] = Date() }
+                    if let hit = r.items[k] { store(k, hit) } else { failedAt[k] = Date() }
                 }
             }
         }
@@ -119,7 +133,7 @@ final class CatalogArt {
             }
             for _ in 0..<4 { add() }
             while let r = await g.next() {
-                // 问成了（TMDB 说没有也算问成了，记一条空的）；出错的 1 分钟内不再问
+                // 问成了（TMDB 说没有也算问成了，记一条空的；半份见 store）；出错的 1 分钟内不再问
                 if let m = r.1 { store(r.0, m) } else { failedAt[r.0] = Date() }
                 add()
             }
@@ -127,9 +141,11 @@ final class CatalogArt {
         scheduleSave()
     }
 
+    /// 半份（logoChecked: false，后端那一下 TMDB images 没问成，字标、无字剧照都是空的）：剧照照样先画，
+    /// 但不当答案 —— checked = false，不存本机，want() 10 分钟后再问；不然一个月都是没字标、带字的那张剧照
     private func store(_ k: String, _ m: Meta?) {
         arts[k] = Art(backdrop: m?.backdropClean ?? m?.backdrop, logo: m?.logo, genre: m?.genres?.first,
-                      at: Date().timeIntervalSince1970)
+                      at: Date().timeIntervalSince1970, checked: m?.logoChecked != false)
     }
 
     // MARK: 本机缓存
@@ -140,7 +156,8 @@ final class CatalogArt {
         guard !DemoData.enabled, let data = try? Data(contentsOf: Self.file),
               let all = try? JSONDecoder().decode([String: Art].self, from: data) else { return }
         let now = Date().timeIntervalSince1970
-        arts = all.filter { now - $0.value.at < Self.ttl }
+        // 半份不该在文件里；老版本存的没有 checked：有字标的一定问全了，留着，没字标的分不清是「TMDB 上没有」还是半份，丢掉再问一次
+        arts = all.filter { now - $0.value.at < Self.ttl && ($0.value.checked == true || ($0.value.checked == nil && $0.value.logo != nil)) }
     }
 
     private func scheduleSave() {
@@ -149,7 +166,8 @@ final class CatalogArt {
         saveTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled, let self else { return }
-            var all = self.arts
+            // 半份只在内存里（不存本机：下次打开再问）
+            var all = self.arts.filter { $0.value.checked != false }
             if all.count > Self.cap {
                 for k in all.sorted(by: { $0.value.at < $1.value.at }).prefix(all.count - Self.cap).map(\.key) { all.removeValue(forKey: k) }
             }

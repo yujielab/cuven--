@@ -552,7 +552,9 @@ struct YearTrailerCard: View {
         VStack(alignment: .leading, spacing: 10) {
             ZStack {
                 DSFill.placeholder
-                if still == nil, let fallback {
+                // 剧照地址到了也一直垫着：剧照那张的占位是透明的，地址一到就拿掉会先露灰底、再淡入剧照（糊 → 灰 → 剧照闪一下）；
+                // 剧照不透明，载好后整个盖住它，取不到时也还有这张糊的
+                if let fallback {
                     RemoteImage(url: fallback, maxPixel: 120, placeholder: .clear)
                         .frame(width: width, height: h)
                         .blur(radius: 22, opaque: true)
@@ -598,11 +600,15 @@ struct YearTrailerCard: View {
                     DSViewPill(onArt: false, compact: compact)
                 }
             }
+            // 换成请求状态的胶囊（「已请求 42%」）比「查看」长得多，特大字号时连小海报一起比卡还宽、冲到旁边那张上：
+            // 有状态时字号最大到 xxLarge（和精选卡一样封顶）；只有「查看」的卡上限放到最大，和以前一样
+            .dynamicTypeSize(...(badge != nil ? DynamicTypeSize.xxLarge : DynamicTypeSize.accessibility5))
         }
         .frame(width: width, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([title, subtitle, badge?.text ?? ""].filter { !$0.isEmpty }.joined(separator: "，"))
+        // 灰字可能是「2024 · ★ 7.2」：走 DetailText.spoken，念「评分 7.2」，不念「黑星」「间隔号」
+        .accessibilityLabel(DetailText.spoken([title, subtitle, badge?.text ?? ""].filter { !$0.isEmpty }.joined(separator: "，")))
     }
 }
 
@@ -623,6 +629,8 @@ struct YearCardBadge: Equatable {
             .frame(minHeight: 32)
             .background(Capsule().fill(Color.white.opacity(0.12)))
             .fixedSize()
+            // 宁可片名截断，状态不被挤扁（和「查看」同一条规矩）
+            .layoutPriority(1)
             .contentTransition(.numericText())
     }
 }

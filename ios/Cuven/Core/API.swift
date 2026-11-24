@@ -116,11 +116,12 @@ final class APIClient: @unchecked Sendable {
     }
 
     /// 一批 TMDB 编号 → 资料（v25.6：{id, type, logo}，回包的键是 "movie:123" / "tv:456"）。
-    /// 「全部影片 › 可申请」一排二十几部的剧照、字标一次取完。老版本不认这种问法：回包里一个这样的键都没有
-    func metaByID(_ keys: [(type: String, id: Int)], logo: Bool = true) async throws -> [String: Meta?] {
+    /// 「全部影片 › 可申请」一排二十几部的剧照、字标一次取完。byId：回包带 __byId 记号（后端认得这种问法，没回的键 = 这次没问成）；
+    /// 老版本不认：没有记号、回包里一个这样的键都没有。v25.6 全批编号都没答出来回 503 → 抛错（这次没问成，不是老版本）
+    func metaByID(_ keys: [(type: String, id: Int)], logo: Bool = true) async throws -> (items: [String: Meta?], byId: Bool) {
         let queries: [[String: Any]] = keys.map { logo ? ["id": $0.id, "type": $0.type, "logo": true] : ["id": $0.id, "type": $0.type] }
         let batch: MetaBatch = try await post("/api/tmdb-batch", json: ["queries": queries])
-        return batch.items
+        return (batch.items, batch.byId)
     }
 
     /// 单条 TMDB（剧集按剧集表认好的编号取，详情页要字标 / 纯净海报 / 剧照）
@@ -248,12 +249,15 @@ final class APIClient: @unchecked Sendable {
     }
 }
 
-/// /api/tmdb-batch 的回包：{ 文件名: Meta | null, …, "__match": 2 }
+/// /api/tmdb-batch 的回包：{ 文件名: Meta | null, …, "__match": 2, "__byId": 1 }
 struct MetaBatch: Decodable {
     var items: [String: Meta?] = [:]
+    /// 带 __byId（v25.6 起）：后端认得按编号问。记号不进 items（按文件名问的那几处照旧只看文件名的键）
+    var byId = false
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: AnyKey.self)
+        byId = c.allKeys.contains { $0.stringValue == "__byId" }
         for k in c.allKeys where !k.stringValue.hasPrefix("__") {
             if (try? c.decodeNil(forKey: k)) == true {
                 items[k.stringValue] = .some(nil)

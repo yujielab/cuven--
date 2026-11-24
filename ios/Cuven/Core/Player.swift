@@ -100,12 +100,13 @@ final class CuvenPlayerViewController: AVPlayerViewController {
     }
 
     // iPad 接了键盘：空格暂停 / 播放、← → 快退快进是系统播放器自带的；这里补上关掉播放器的两个键（Esc、⌘W），
-    // 按住 ⌘ 时的快捷键面板里也列出来
+    // 按住 ⌘ 时的快捷键面板里也列出来。系统播放器自己挂在 keyCommands 上的快捷键要原样带上（只返回这两个，空格、← → 就没了）；
+    // 这两个放前面：同一个键 UIKit 取先匹配到的，Esc 才是关播放器，不是系统的退出全屏
     override var keyCommands: [UIKeyCommand]? {
         let esc = UIKeyCommand(title: "关闭播放器", action: #selector(closeFromKeyboard), input: UIKeyCommand.inputEscape)
         let w = UIKeyCommand(title: "关闭播放器", action: #selector(closeFromKeyboard), input: "w", modifierFlags: .command)
         esc.wantsPriorityOverSystemBehavior = true
-        return [w, esc]
+        return [w, esc] + (super.keyCommands ?? [])
     }
 
     @objc private func closeFromKeyboard() {

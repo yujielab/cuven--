@@ -394,6 +394,7 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
         let bokehIn: Float = started && !reduce ? Float(ramp(2.8, 4.6, E)) : 0
         let raysIn: Float = started && !reduce ? Float(ramp(4.2, 5.8, E)) : 0
         let cardFade: Float = started ? Float(1 - ramp(5.2, 5.5, E)) : 1
+        // 拖尾每 1/60 秒留六成，按 dt 折成这一帧的；往下、往轴上挪和加进去的光线在 cd_trail_fragment 里也按 dt 折，帧率不同拖尾一样长、一样亮
         let keep = Float(pow(0.6, Double(dt) * 60))
         // 进度胶囊的半高、半宽（占画面高的比例）：胶囊那一圈光贴着它
         let capHH = Float(engine.capsulePt.height) * 0.5 * scale / h
@@ -587,7 +588,7 @@ struct CacheDissolveCanvas: UIViewRepresentable {
         let v = MTKView()
         v.colorPixelFormat = .bgra8Unorm
         v.framebufferOnly = true
-        // ProMotion（iPad Pro、iPhone Pro）上 120 帧：粒子按真实时间走（dt），帧多了只是更顺，不会变快；旧机型照旧 60
+        // ProMotion（iPad Pro、iPhone Pro）上 120 帧：粒子和拖尾都按真实时间走（dt），帧多了只是更顺，不会变快、拖尾也不会变长变亮；旧机型照旧 60
         v.preferredFramesPerSecond = Compat.legacyDevice ? 60 : min(120, max(60, UIScreen.main.maximumFramesPerSecond))
         v.isOpaque = true
         v.backgroundColor = .black

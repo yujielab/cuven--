@@ -671,7 +671,10 @@ struct DetailScaffold<Episodes: View>: View {
                     // 一组一行粗体标题 + 一张卡（参考图）；分区之间同一种留白（F3、F12）
                     VStack(alignment: .leading, spacing: m.shelfGap) {
                         if Self.twoColumns(m) && hasOverview && !stats.isEmpty {
-                            // iPad 横拿（窗口 1100 点以上）：简介和影片详细信息并排两栏，不再一张 720 宽的卡、右边空一大块
+                            // iPad 横拿（窗口 1100 点以上）：简介和影片详细信息并排两栏，不再一张 720 宽的卡、右边空一大块。
+                            // 影片详细信息那一栏定宽：两块一行、两行，方块和单栏时一行四块（720 宽、间距 12）一样大，(720 − 3×12) / 4 = 171；
+                            // 简介那一栏拿剩下的。以前对半分，方块撑到近 300 点见方、字缩在角上，这一栏比简介高出几百点，下面整排都被往下推
+                            let statTile: CGFloat = (720 - 3 * 12) / 4
                             HStack(alignment: .top, spacing: (m.gutter * 2.5).rounded()) {
                                 column(m, "简介") {
                                     DetailDescriptionCard(title: title, genres: genres, overview: overview ?? "",
@@ -680,6 +683,7 @@ struct DetailScaffold<Episodes: View>: View {
                                 column(m, "影片详细信息") {
                                     DetailStatsGrid(stats: stats, palette: palette, wide: false)
                                 }
+                                .frame(width: statTile * 2 + 12)
                             }
                             .padding(.horizontal, m.margin)
                         } else if hasOverview {

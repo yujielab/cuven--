@@ -16,7 +16,7 @@ import SwiftUI
 // · 可申请（用户要求「布局和 UI 和可立即播放的一致，2026 至 2020 年影片库里的全部」）：同一张横卡，剧照、字标按 TMDB 编号
 //   一排一次取（CatalogArt）；右边那颗胶囊是请求的状态（申请 / 已加入 / 已请求 42% / 已就绪），请求进行中剧照底边一道进度线；
 //   长按电影可以直接放进请求中心。一打开页面就用 /app/years 一次问完七年 × 电影 / 剧集的第一页（tj 2.8；老版本一年一年问），
-//   本机存着上次的，再打开先有画面再更新；一排滑到头再取下一页
+//   本机存着上次的，再打开先有画面再更新；一排滑到头再取下一页（滤掉别的年份之后不到 8 张就自己接着翻）
 // 一节就是一个懒加载的块：几百部片也只建看得到的那几排。
 
 struct AllFilmsView: View {
@@ -207,15 +207,27 @@ final class CatalogYears {
     struct Key: Hashable { var year: Int; var src: String }
     struct Page {
         var items: [CatalogItem] = []
+        /// 接着用 /app/catalog 问哪一页（/app/years 的 next：1 = 第一页没给全，再问一次第一页、按 uid 去重）
         var next = 1
-        /// 影片库说一共几部（老版本的请求添加 Worker 不认年份：0 = 不知道）
+        /// 影片库说一共几部、几页（0 = 不知道）
         var total = 0
         var pages = 0
+        /// 影片库按年份给了、这里滤掉的别的年份（按 uid 记）：论坛分区的年份对得上影片库就给，它的总数里也算着这些
+        var off: Set<String> = []
+        /// 总数是这一年的（服务器认年份：有 /app/years 的版本）。老版本可能不认年份，总数是所有年份的，不能用
+        var counted = false
         var done = false
         var loading = false
         var failed = false
-        /// 问过第一页了（/app/years 一次问完，或者一年一年问）
+        /// 问过第一页了（问成没问成都算；/app/years 一次问完，或者一年一年问）
         var started = false
+        /// 往后翻过（滑到头又取了一页，或者第一页没给全又取了一次）：刷新时不换掉这一排（一换，看着的那几张就没了）
+        var paged = false
+
+        /// 标题、小标题里写的部数（不说多）：翻完了就是这一排的张数；没翻完、总数可信：总数扣掉已经滤掉的别的年份
+        func count(shown: Int) -> Int {
+            done || !counted ? shown : max(shown, total - off.count)
+        }
     }
 
     private(set) var pages: [Key: Page] = [:]
@@ -224,8 +236,9 @@ final class CatalogYears {
 
     @ObservationIgnored private var etag: String?
     @ObservationIgnored private var fetchedAt: Date?
-    /// 请求添加 Worker 还是老版本（没有 /app/years、不认年份）
-    @ObservationIgnored private var oldServer = false
+    /// 请求添加 Worker 没有 /app/years（老版本）：只认 /app/years 的 404，不从回来的条目里猜
+    /// （影片库按年份给的本来就夹着别的年份的：论坛分区的年份对得上就给）
+    @ObservationIgnored private var noYears = false
     @ObservationIgnored private var restored = false
 
     private init() {}
@@ -252,40 +265,56 @@ final class CatalogYears {
             return
         }
         restore(years)
-        if !oldServer {
+        if !noYears {
             do {
                 let r = try await RequestAPI.years(from: lo, to: hi, per: 24, etag: pages.isEmpty ? nil : etag)
                 if r.old {
-                    oldServer = true
+                    // 只有 /app/years 回 404 才算老版本（没有这个接口）：这个进程里往后都一年一年问
+                    noYears = true
                 } else {
-                    if let p = r.page { apply(p, years: years, replace: true) }
-                    if let data = r.data {
-                        let url = Self.file
-                        Task.detached(priority: .utility) { try? data.write(to: url, options: .atomic) }
+                    if let p = r.page {
+                        apply(p, years: years, live: true)
+                        // 有一格没问成的不存（存了下次冷启动那一格是空的）：本机留着上一份完整的，ETag 也留上一份的（两个对得上）
+                        let partial = p.years.values.contains { cells in cells.values.contains { $0.failed } }
+                        if !partial, let data = r.data {
+                            let url = Self.file
+                            Task.detached(priority: .utility) { try? data.write(to: url, options: .atomic) }
+                            UserDefaults.standard.set(r.etag, forKey: Self.etagKey)
+                        }
                     }
                     etag = r.etag
-                    UserDefaults.standard.set(r.etag, forKey: Self.etagKey)
-                    fetchedAt = Date()
+                    // 有一格没问成（{error: 1}）：不记时刻，下次打开再问（这一节出现时也会各自从第一页重问）
+                    if !anyFailed(years) { fetchedAt = Date() }
                     return
                 }
             } catch {
+                // 离开了页面（任务被取消）不是网络不好：什么都不动（不改成一年一年问、不记时刻）
+                if Self.cancelled(error) { return }
                 // 网络不好：一年一年问（每一格各自出错、各自重试）
             }
         }
-        let keys = years.flatMap { y in ["movie", "tv"].map { Key(year: y, src: $0) } }.filter { !page($0).started || page($0).failed }
+        guard !Task.isCancelled else { return }
+        // 一年一年问（老版本、网络不好）：每一格都从第一页重问、问到了才换掉 —— 再打开（过了 5 分钟）也是一次刷新，
+        // 新收录的、数目变了的都跟上；往后翻过的、正在取的不打断
+        let keys = years.flatMap { y in ["movie", "tv"].map { Key(year: y, src: $0) } }.filter { !page($0).paged && !page($0).loading }
         await withTaskGroup(of: Void.self) { g in
             var i = 0
             func add() {
                 guard i < keys.count else { return }
                 let k = keys[i]
                 i += 1
-                g.addTask { await self.loadMore(k, first: true) }
+                g.addTask { await self.fetch(k, fresh: true) }
             }
             for _ in 0..<4 { add() }
             while await g.next() != nil { add() }
         }
-        // 有一格没问成：下次打开（或滑到那一节）再问，不等 5 分钟
-        if !keys.contains(where: { page($0).failed }) { fetchedAt = Date() }
+        // 离开了页面：不记时刻。有一格没问成：下次打开（或滑到那一节）再问，不等 5 分钟
+        guard !Task.isCancelled else { return }
+        if !anyFailed(years) { fetchedAt = Date() }
+    }
+
+    private func anyFailed(_ years: [Int]) -> Bool {
+        years.contains { y in ["movie", "tv"].contains { page(Key(year: y, src: $0)).failed } }
     }
 
     /// 上次 /app/years 的回包（冷启动先有画面，再拿 ETag 问一次：没变就是 304）
@@ -295,68 +324,131 @@ final class CatalogYears {
         guard pages.isEmpty, let data = try? Data(contentsOf: Self.file),
               let p = try? JSONDecoder().decode(RequestAPI.YearsPage.self, from: data) else { return }
         etag = UserDefaults.standard.string(forKey: Self.etagKey)
-        apply(p, years: years, replace: false)
+        apply(p, years: years, live: false)
     }
 
-    private func apply(_ p: RequestAPI.YearsPage, years: [Int], replace: Bool) {
+    /// live = false：本机存的上次的回包，里面的请求进度可能是好几天前的，不并进 RequestStore（会把请求中心的盖回去）
+    private func apply(_ p: RequestAPI.YearsPage, years: [Int], live: Bool) {
         for y in years {
             for s in ["movie", "tv"] {
                 let k = Key(year: y, src: s)
                 guard let cell = p.years[y]?[s] else { continue }
+                if live { for i in cell.items { if let r = i.req { RequestStore.shared.merge(r) } } }
                 let old = page(k)
-                // 已经往后翻过页的那一排不打断（等下次打开再换）
-                if old.next > 2 && !replace { continue }
-                if old.next > 2 && old.items.count > cell.items.count { continue }
+                // 正在取的不动（它回来时接在现在的上面）；往后翻过的那一排也不打断
+                if old.loading || old.paged { continue }
+                if cell.failed {
+                    // 影片库这一格没答上：有上次的就留着，只标一下没问成；没有的空着，从第一页重问（滑到这一节、第一轮问完都会问）
+                    var n = old
+                    n.started = true
+                    n.failed = true
+                    if n.items.isEmpty { n.next = 1; n.done = false }
+                    pages[k] = n
+                    continue
+                }
                 var n = Page()
-                n.items = cell.items.filter { Int($0.year.prefix(4)) == y || $0.year.isEmpty }
+                n.items = cell.items.filter { Self.fits($0, y, loose: true) }
+                n.off = Set(cell.items.filter { !Self.fits($0, y, loose: true) }.map(\.uid))
                 n.total = cell.total
                 n.pages = cell.pages
-                n.next = 2
+                n.counted = true
                 n.started = true
-                n.failed = cell.failed
-                n.done = !cell.failed && (cell.items.isEmpty || cell.page >= cell.pages)
+                if let next = cell.next {
+                    // 0 = 第一页给全了、没有第二页；1 = 第一页没给全（影片库一页 42 部，一格最多 40）：再问一次第一页、去重接上；2 = 接着第二页
+                    n.done = next == 0
+                    n.next = max(1, next)
+                } else {
+                    // 没带 next 的（2.8 之前的测试版）：第一页当给全了
+                    n.done = cell.items.isEmpty || cell.page >= cell.pages
+                    n.next = 2
+                }
                 pages[k] = n
-                for i in cell.items { if let r = i.req { RequestStore.shared.merge(r) } }
             }
         }
     }
 
-    /// 取下一页（同一份同时只取一次）。服务器还是老版本、不认年份：按年份在这里过滤，取到够一排为止（最多翻 4 页）
-    func loadMore(_ k: Key, first: Bool = false) async {
-        var p = page(k)
-        guard !p.loading, !p.done else { return }
-        if first && p.started && !p.failed { return }
-        p.loading = true
-        p.failed = false
-        pages[k] = p
-        var got: [CatalogItem] = []
-        var tries = 0
-        repeat {
+    /// 这一节出现时、第一轮问完时：没问过、没问成的问（还没往后翻过的从第一页重问；翻过的接着翻）；
+    /// 问过了的：滤掉别的年份、片库里有的之后看得到的不到 8 张，又没翻完 —— 自己接着翻（一次最多 4 页），不等滑到头
+    func ensure(_ k: Key, visible: Int) async {
+        let p = page(k)
+        if !p.started || p.failed {
+            await fetch(k, fresh: !p.paged)
+        } else if visible < 8 && !p.done {
+            await fetch(k, fresh: false)
+        }
+    }
+
+    /// 滑到这一排最后几张：取下一页（同一格同时只取一次）
+    func loadMore(_ k: Key) async {
+        await fetch(k, fresh: false)
+    }
+
+    /// 问 /app/catalog。fresh：从第一页重问，问到了才换掉这一排（第一次问、没问成重问、老版本刷新）；
+    /// 否则从 next 接着翻、按 uid 去重接上。一次最多翻 4 页：滤掉别的年份之后新添的不到 8 部就接着翻。
+    /// 每一页回来都重新读一次这一格、接在现在的上面写回去（不拿出门前的那份写回去）
+    private func fetch(_ k: Key, fresh: Bool) async {
+        let start = page(k)
+        guard !start.loading, !(fresh && start.paged), fresh || !start.done else { return }
+        pages[k, default: Page()].loading = true
+        // 有 /app/years 的版本认年份：没有年份的条目是这一年分区里的，留着；老版本可能不认年份，留着会每一年都出一次
+        let loose = !noYears
+        var next = fresh ? 1 : start.next
+        var fetched = 0, added = 0, failed = false
+        while true {
+            let r: RequestAPI.CatalogPage
             do {
-                let r = try await RequestAPI.catalogPage(src: k.src, sort: "new", own: "hide", page: p.next, year: k.year)
-                p.next += 1
-                let mine = r.items.filter { Int($0.year.prefix(4)) == k.year }
-                // 回来的都是这一年的：服务器认年份，总数、页数可信
-                if !r.items.isEmpty && mine.count == r.items.count {
-                    p.total = r.total
-                    p.pages = r.pages
-                } else if !r.items.isEmpty {
-                    oldServer = true
-                }
-                got += mine
-                for i in r.items { if let s = i.req { RequestStore.shared.merge(s) } }
-                if r.items.isEmpty || (r.pages > 0 && p.next > r.pages) { p.done = true; break }
+                r = try await RequestAPI.catalogPage(src: k.src, sort: "new", own: "hide", page: next, year: k.year)
             } catch {
-                p.failed = true
+                // 离开页面（任务被取消）不算没问成
+                failed = !Self.cancelled(error)
                 break
             }
-            tries += 1
-        } while oldServer && got.count < 8 && tries < 4 && !p.done
-        let seen = Set(p.items.map(\.uid))
-        p.items += got.filter { !seen.contains($0.uid) }
-        p.started = true
-        p.loading = false
-        pages[k] = p
+            next += 1
+            for i in r.items { if let s = i.req { RequestStore.shared.merge(s) } }
+            var cur = page(k)
+            if fresh && fetched == 0 { cur.items = []; cur.off = []; cur.next = 1 }
+            var have = Set(cur.items.map(\.uid))
+            for i in r.items {
+                guard have.insert(i.uid).inserted else { continue }
+                if Self.fits(i, k.year, loose: loose) {
+                    cur.items.append(i)
+                    added += 1
+                } else {
+                    cur.off.insert(i.uid)
+                }
+            }
+            fetched += 1
+            cur.next = max(cur.next, next)
+            if !fresh { cur.paged = true }
+            if r.pages > 0 || r.total > 0 {
+                cur.total = r.total
+                cur.pages = r.pages
+                cur.counted = loose
+            }
+            cur.done = r.items.isEmpty || (r.pages > 0 && next > r.pages)
+            cur.started = true
+            cur.failed = false
+            pages[k] = cur                      // loading 还是 true：这一次还没完
+            if cur.done || fetched >= 4 || added >= 8 || Task.isCancelled { break }
+        }
+        var end = page(k)
+        end.loading = false
+        if failed && fetched == 0 {
+            // 一页都没问到：这一排原样留着（本机存的、上次的都不擦掉），标一下没问成，下次再问
+            end.started = true
+            end.failed = true
+        }
+        pages[k] = end
+    }
+
+    /// 这一条算不算这一年的：影片库按年份给的里面有别的年份的（论坛分区的年份对得上就给），只留这一年的
+    private static func fits(_ i: CatalogItem, _ year: Int, loose: Bool) -> Bool {
+        i.year.isEmpty ? loose : Int(i.year.prefix(4)) == year
+    }
+
+    /// 任务被取消（离开了页面）：URLSession 回 cancelled
+    private static func cancelled(_ e: any Error) -> Bool {
+        Task.isCancelled || e is CancellationError || (e as? URLError)?.code == .cancelled
     }
 
     private static func demo(_ k: Key) -> Page {
@@ -388,7 +480,10 @@ private struct RequestableYear: View {
         let movies = mp.items.filter { !model.owns($0, movies: owned, shows: shows) }
         let series = tp.items.filter { !model.owns($0, movies: owned, shows: shows) }
         let settled = (mp.started || mp.failed) && (tp.started || tp.failed)
-        Group {
+        let vm = movies.count, vt = series.count
+        // 外面这一层一直在（两格都没问成、整节不出的时候也在）：重问挂在它上面。挂在空的 Group 上一次也不会跑
+        VStack(alignment: .leading, spacing: 0) {
+            Color.clear.frame(height: 0).accessibilityHidden(true)
             if !movies.isEmpty || !series.isEmpty || !settled {
                 VStack(alignment: .leading, spacing: metrics.titleGap + 6) {
                     YearHeader(year: year, subtitle: settled ? Self.line(mp, tp, movies.count, series.count) : "正在查询…",
@@ -398,18 +493,21 @@ private struct RequestableYear: View {
                 }
             }
         }
-        // 第一轮（/app/years）没给到这一格的（网络不好、老版本）：滑到这一节、或者第一轮问完了再问一次
+        // 第一轮（/app/years）没给到、没问成的（网络不好、老版本）：滑到这一节、或者第一轮问完了再问一次（从第一页）；
+        // 问到了、可滤掉别的年份和片库里有的之后不到 8 张：接着往后翻（一次最多 4 页），不等滑到头
         .task(id: "\(year)-\(catalog.prefetching)") {
             guard !catalog.prefetching else { return }
-            async let a: Void = catalog.loadMore(mk, first: true)
-            async let b: Void = catalog.loadMore(tk, first: true)
+            let c = catalog
+            async let a: Void = c.ensure(mk, visible: vm)
+            async let b: Void = c.ensure(tk, visible: vt)
             _ = await (a, b)
         }
     }
 
-    /// 「128 部电影 · 54 部剧集」：影片库给了总数就用总数，没给（老版本）就是这里已经有的
+    /// 「128 部电影 · 54 部剧集」：不说多 —— 翻完了就是这一排的张数，没翻完用影片库的总数扣掉滤掉的别的年份（总数可信才用）。
+    /// 这一节里没出的那一排（一张都没有）不写
     static func line(_ mp: CatalogYears.Page, _ tp: CatalogYears.Page, _ m: Int, _ s: Int) -> String {
-        let mc = mp.total > 0 ? max(mp.total, m) : m, sc = tp.total > 0 ? max(tp.total, s) : s
+        let mc = m > 0 ? mp.count(shown: m) : 0, sc = s > 0 ? tp.count(shown: s) : 0
         let parts = [mc > 0 ? "\(mc) 部电影" : nil, sc > 0 ? "\(sc) 部剧集" : nil].compactMap { $0 }
         return parts.isEmpty ? "片库里还没有、可以申请添加的" : parts.joined(separator: " · ") + " 可申请"
     }
@@ -419,7 +517,7 @@ private struct RequestableYear: View {
         let w = metrics.trailerCardWidth
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: metrics.titleGap) {
-                KindLabel(title: title, count: p.total > 0 ? max(p.total, items.count) : items.count, metrics: metrics)
+                KindLabel(title: title, count: p.count(shown: items.count), metrics: metrics)
                 DSShelf(metrics: metrics) {
                     ForEach(items, id: \.uid) { it in
                         RequestableCard(item: it, width: w, slot: "all-request-\(year)")
@@ -453,8 +551,11 @@ private struct RequestableCard: View {
 
     var body: some View {
         let art = CatalogArt.shared.art(item)
-        let st = RequestStore.shared.anyStatus(src: item.src, id: item.id) ?? item.req
-        let queued = st == nil && RequestBasket.shared.containsAny(src: item.src, id: item.id)
+        let raw = RequestStore.shared.anyStatus(src: item.src, id: item.id) ?? item.req
+        // 取消了的当没请求过（和详情页一样）
+        let st = raw?.state == .cancelled ? nil : raw
+        // 放进了请求中心就是「已加入」：上一次取消了、没能添加的也一样（长按放进去的正是这两种）
+        let queued = RequestBasket.shared.containsAny(src: item.src, id: item.id)
         let sub = DetailText.line([String(item.year.prefix(4)), art?.genre ?? (item.vote ?? 0 >= 1 ? String(format: "★ %.1f", item.vote ?? 0) : nil)])
         ZoomLink(route: .catalog(item.catalogTitle), slot: slot) {
             YearTrailerCard(still: TMDBImage.url(art?.backdrop, "w1280"), cover: TMDBImage.url(item.poster, "w185"),
@@ -467,23 +568,20 @@ private struct RequestableCard: View {
         .contextMenu { menu(st, queued: queued) }
     }
 
+    /// 进行中、已就绪的照写；其余（没请求过、取消了、没能添加）放进了请求中心就是「已加入」
     static func badge(_ s: RequestStatus?, queued: Bool) -> YearCardBadge {
-        if let s {
-            switch s.state {
-            case .done: return YearCardBadge(text: "已就绪", tone: .plain)
-            case .failed: return YearCardBadge(text: "未能添加", tone: .alert)
-            case .active: return YearCardBadge(text: s.stage == "release" ? "发行审批" : "已请求 \(s.pct)%", tone: .plain)
-            case .cancelled: break
-            }
-        }
-        return queued ? YearCardBadge(text: "已加入", tone: .plain) : YearCardBadge(text: "申请", tone: .accent)
+        if let s, s.state == .done { return YearCardBadge(text: "已就绪", tone: .plain) }
+        if let s, s.state == .active { return YearCardBadge(text: s.stage == "release" ? "发行审批" : "已请求 \(s.pct)%", tone: .plain) }
+        if queued { return YearCardBadge(text: "已加入", tone: .plain) }
+        if s?.state == .failed { return YearCardBadge(text: "未能添加", tone: .alert) }
+        return YearCardBadge(text: "申请", tone: .accent)
     }
 
-    /// 长按：电影直接放进 / 拿出请求中心（剧集要先在详情页挑季，这里只给「去请求中心」）
+    /// 长按：电影直接放进 / 拿出请求中心（剧集要先在详情页挑季，这里只给「去请求中心」）。st 里取消了的已经当没有
     @ViewBuilder
     private func menu(_ st: RequestStatus?, queued: Bool) -> some View {
         let basket = RequestBasket.shared
-        if item.src != "tv" && (st == nil || st?.state == .cancelled || st?.state == .failed) {
+        if item.src != "tv" && (st == nil || st?.state == .failed) {
             if basket.contains(item.catalogTitle, season: 0) {
                 Button("从请求中心拿掉", systemImage: "minus.circle") {
                     if let i = basket.items.first(where: { $0.kind == .movie && $0.id == item.id }) { basket.remove(i) }

@@ -4,6 +4,7 @@ import SwiftUI
 //
 // · 缩放转场：点海报 / 卡片 / 大图，详情页从那张卡上放大出来；返回时缩回原处（也能下滑 / 捏合手势退出）。
 // · 按压回弹：卡片按下去略缩、松手弹回。
+// · 指针悬停：iPad 接了触控板 / 鼠标，指针停在卡上略放大（PointerLift）。
 // · 下拉拉伸：顶在最上面的大图，下拉时往上撑大。
 
 /// 推进到详情页的目标。同一部片可能同时出现在好几排（今日推荐、最新加入、某一年……），
@@ -65,17 +66,35 @@ struct ZoomLink<Label: View>: View {
 
     var body: some View {
         let target = ZoomTarget(route: route, slot: slot)
-        // iPad 接了触控板 / 鼠标：指针移上去卡片微微浮起（系统的 lift，没有指针时什么都不做）
         if let ns {
             NavigationLink(value: target) { label() }
                 .buttonStyle(PressableStyle(scale: press ? 0.96 : 1))
-                .hoverEffect(.lift)
+                .modifier(PointerLift(on: press))
                 .matchedTransitionSource(id: target, in: ns)
         } else {
             NavigationLink(value: route) { label() }
                 .buttonStyle(PressableStyle(scale: press ? 0.96 : 1))
-                .hoverEffect(.lift)
+                .modifier(PointerLift(on: press))
         }
+    }
+}
+
+/// iPad 接了触控板 / 鼠标：指针停在卡上，整张卡（连同底下的字）放大一点点、移开缩回，和按压回弹一个手感；没有指针时什么都不做。
+/// 不用系统的 .hoverEffect(.lift)：它不知道卡的形状，圆形头像、底下带字的圆角海报都按整个矩形浮起来，影子和高光是直角的。
+/// 不按压的（press: false，全宽的大图）也不放大：整块大图跟着指针动太晃
+private struct PointerLift: ViewModifier {
+    let on: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            // 「减弱动态效果」打开时不缩放（DSMotion.adapt 的规矩）
+            .scaleEffect(on && hovering && !reduceMotion ? 1.03 : 1)
+            .onHover { h in
+                guard on else { return }
+                withAnimation(DSMotion.press) { hovering = h }
+            }
     }
 }
 
