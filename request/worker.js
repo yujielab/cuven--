@@ -18,6 +18,18 @@
  *     作业丢了以后重发改名会这样）→ 用新名字往下走，不再重试 3 次判死（复查：只在上一个作业可能已经挪过时，见「v2.8 复查」）
  *   · 影片库 409 是按源排的闸门忙：这一轮后面同一个源排队的也照 Retry-After 一起等（c.memo.lbBusy），不再去排一次闸门
  *     （原因：影片库让推送在闸门前等 20 秒才回 409，一轮里第二条再去排就又是 20 秒，一轮的 22 秒就这么耗光了）
+ *   · 剧集区要片库点头：原因 = 传输 Worker 会 sub 就把剧集放进 /auto/ram2，可线上的片库（Stream）比 v25.4 老、不扫 /auto/ram2，
+ *     剧集传完了 App 里却一直看不到。改成片库也说它读的是同一个名字才放剧集区：片库 v25.4 起在 /api/auto/sync 的回包里带 tvSub
+ *     （它读的剧集区，没开分层是 ''），老版本没有这个字段（很老的 404）→ 当 ''。每次真问到片库（streamSync）就记下它说的，
+ *     存 tj_kv 的 st:sub = { sub, at }（没变不写，一次调用里只读一次）；推送时 sub = 传输 Worker 认得 sub 并且片库说的 === 这里的 tvSub，
+ *     片库从来没问到过 = 不知道 → 照旧放 /auto（安全）。6 小时没人问过片库（或者从来没问过）：推剧集之前、一轮的最后顺手问一次
+ *     （不带名字的 streamSync，只读；一次调用最多一次，熔断中、子请求预算不够就不问、用上一次的）。已经推了的照它记下的 r.d.sub 走，
+ *     不挪；片库升级以后新推的剧集才进 /auto/ram2。面板「测试连接」和传输那一行写清楚片库认不认剧集区。
+ *     复查四处：结果不明的那一次推送（pushTry）记下推到了哪个区（pushTry.sub），带 check 再推照它推，不重新决定（原因 = 影片库 v7.2
+ *     只在同一个 parent 里找上一次的任务，片库说的中途变了就推到另一个区、找不到、建第二个云下载任务，头一个晾在老地方）；
+ *     顺手问没问成（401 / 403 不抛错、不熔断，5xx、连不上）记 st:try、30 分钟里不再问（原因 = st:sub 一直是旧的，一分钟一轮每轮都去问）；
+ *     一轮最后的顺手问和追踪一样只在 22 秒之内（原因 = 只读超时 30 秒，过了 22 秒再问会跑过下一分钟的定时任务）；
+ *     片库说 '' 记下为什么（why：old 老版本 / off 关了 AUTO_FOLDER / flat 没开剧集区），面板照实写，不再一律写「老版本」
  * v2.8（给 App「全部影片」页用：一年一节，电影 / 剧集各一排）：
  *   · 新接口 GET /app/years：原因 = App 一年一个源各问一次 /app/catalog，7 年就是 14 个来回、每个都单独查一遍 D1 的请求进度。
  *     改成一次回齐：影片库的目录页并行去问（同时最多 6 个、一次最多 16 个子请求、最多等 20 秒），没问到的那一格是 { error: 1 }，
@@ -253,6 +265,8 @@ const LIMIT = {
   lbBusyMax: 2 * MIN,     // 影片库 409（源闸门忙）照 Retry-After 再来，最多等这么久
   pushHold: 10 * MIN,     // 论坛账号 / PikPak 账号层面的问题（stop / 503）：原地等这么久再推
   orgMax: 3,              // 整理回 left > 0（911）：一个规格最多整理几次
+  stSubEvery: 6 * HOUR,   // 片库认的剧集区（st:sub）：这么久没人问过片库就顺手问一次；没变的时候也最多这么久才写一次 at
+  stTryEvery: 30 * MIN,   // 顺手问片库没问成（401 / 403、5xx、连不上，st:try）：这么久里不再顺手问
   yearsDef: 7,            // /app/years 默认几年（到今年为止）
   yearsMax: 8,            // /app/years 最多几年
   yearsPer: 24,           // /app/years 每一格默认几部
@@ -419,7 +433,7 @@ const CFG_DEF = { pkUser: '', pkPass: '', tpl: 'rel', lang: 'en', grp: 'Cuven®'
                   xfers: 16,          // 批量传输：并行传输几个文件（rclone Transfers）
                   checkers: 16,       // 批量传输：并发核对几个（rclone Checkers）
                   basketMax: 50,      // 请求中心一次最多提交几条
-                  tvSub: 'ram2' };    // 剧集放在 /auto 下面哪个文件夹（PikPak 和 Dropbox 一样；空 = 直接放 /auto）
+                  tvSub: 'ram2' };    // 剧集放在 /auto 下面哪个文件夹（PikPak 和 Dropbox 一样；空 = 直接放 /auto；2.8：片库也说认得才用）
 /** 剧集区的名字：一层、不带斜杠（和传输 Worker 的 AUTO_TV_DIR、Stream 的 AUTO_TV_SUB 一致） */
 const subOK = (s) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/.test(s);
 const b64 = (u8) => { let s = ''; for (const c of u8) s += String.fromCharCode(c); return btoa(s); };
@@ -615,29 +629,102 @@ async function tf(c, op, body, ms){
    问不到（VPS 熔断、连不上）就用上一次的；从来没问到过 = 不知道：剧集照旧放 /auto，凑批先等着。这里从不抛错 ── */
 async function tfCaps(c){
   if (c.memo.caps) return c.memo.caps;
-  let v = await kvGet(c.env, 'tf:caps').catch(() => null);
-  if ((!v || now() - (v.at || 0) > LIMIT.capsEvery) && c.env.LINK_KEY && !depOpenUntil(c, 'vps') && c.n < c.max - 4){
-    try {
-      const p = await tf(c, 'ping', {});
-      v = { caps: Array.isArray(p.caps) ? p.caps.map(String) : [], tv: String(p.tv || ''), core: String(p.core || ''), at: now(),
-            nofilter: (v && v.nofilter) || 0 };
-      await kvPut(c.env, 'tf:caps', v).catch(() => {});
-    } catch {}
+  /* c.memo.tfv = 这一次调用里传输 Worker 的那一份（2.8：片库说的变了要重算 caps，不再去读 / 问一遍传输 Worker） */
+  let v = c.memo.tfv;
+  if (v === undefined){
+    v = await kvGet(c.env, 'tf:caps').catch(() => null);
+    if ((!v || now() - (v.at || 0) > LIMIT.capsEvery) && c.env.LINK_KEY && !depOpenUntil(c, 'vps') && c.n < c.max - 4){
+      try {
+        const p = await tf(c, 'ping', {});
+        v = { caps: Array.isArray(p.caps) ? p.caps.map(String) : [], tv: String(p.tv || ''), core: String(p.core || ''), at: now(),
+              nofilter: (v && v.nofilter) || 0 };
+        await kvPut(c.env, 'tf:caps', v).catch(() => {});
+      } catch {}
+    }
+    c.memo.tfv = v;
   }
-  return (c.memo.caps = capsOf(c.cfg, v));
+  return (c.memo.caps = capsOf(c.cfg, v, await stSub(c)));
 }
-/** 剧集区的名字两边要一样（这里的 tvSub、传输 Worker 的 AUTO_TV_DIR），对不上就照旧放 /auto（不然传输 Worker 回 400） */
-function capsOf(cfg, v){
-  if (!v) return { known: false, batch: false, sub: '', tv: '' };
-  const caps = v.caps || [], want = cfg.tvSub || '';
+/** 剧集区的名字两边要一样（这里的 tvSub、传输 Worker 的 AUTO_TV_DIR），对不上就照旧放 /auto（不然传输 Worker 回 400）。
+    2.8：片库（Stream）也得说它读的是同一个名字（st = tj_kv 的 st:sub）才放剧集区：片库是老版本（不扫 /auto/ram2，说的是 ''）、
+    从来没问到过（st = null）、读的是别的名字 → 照旧放 /auto，不然剧集传完了 App 里看不到。
+    tfSub = 光看传输 Worker 能不能放剧集区；sub = 真正用的（两边都点头）；stream = 片库说的（null = 还不知道）；
+    stWhy = 片库说 '' 的时候为什么（2.8 复查：old 老版本 / off 关了 AUTO_FOLDER / flat 没开剧集区，面板照实写） */
+function capsOf(cfg, v, st){
+  const want = cfg.tvSub || '';
+  const stream = st && typeof st.sub === 'string' ? st.sub : null;
+  const sv = { want, stream, stAt: stream === null ? 0 : Number(st.at) || 0, stOk: !!want && stream === want,
+               stWhy: stream === '' ? String(st.why || '') : '' };
+  if (!v) return { known: false, batch: false, sub: '', tfSub: '', tv: '', ...sv };
+  const caps = v.caps || [];
   const mismatch = !!(want && caps.includes('sub') && v.tv && v.tv !== want);
-  return { known: true, batch: caps.includes('batch') && !(v.nofilter > now()), sub: want && caps.includes('sub') && !mismatch ? want : '',
-           tv: v.tv || '', core: v.core || '', nofilter: v.nofilter > now() ? v.nofilter : 0, mismatch };
+  const tfSub = want && caps.includes('sub') && !mismatch ? want : '';
+  return { known: true, batch: caps.includes('batch') && !(v.nofilter > now()), sub: tfSub && sv.stOk ? tfSub : '', tfSub,
+           tv: v.tv || '', core: v.core || '', nofilter: v.nofilter > now() ? v.nofilter : 0, mismatch, ...sv };
 }
 async function capsSet(c, patch){
   const v = { caps: [], tv: '', at: now(), ...((await kvGet(c.env, 'tf:caps').catch(() => null)) || {}), ...patch };
   await kvPut(c.env, 'tf:caps', v).catch(() => {});
-  c.memo.caps = capsOf(c.cfg, v);
+  c.memo.tfv = v;
+  c.memo.caps = capsOf(c.cfg, v, await stSub(c));
+}
+
+/* ── 片库认的剧集区（2.8）：片库 v25.4 起在 /api/auto/sync 的回包里带 tvSub = 它读的剧集区（没开分层 = ''）；
+   老版本没有这个字段（很老的没有这个接口，404）→ 当 ''。每次真问到片库（streamSync）就记下它说的：存 tj_kv 的 st:sub = { sub, at }，
+   没变不写（只在 at 旧过 6 小时的时候顺手更新一下，免得每一轮都去问一遍）；一次调用里只读一次（c.memo.stSub）。
+   从来没问到过 = 不知道：剧集照旧放 /auto ── */
+async function stSub(c){
+  if (c.memo.stSub === undefined){
+    const v = await kvGet(c.env, 'st:sub').catch(() => null);
+    c.memo.stSub = v && typeof v.sub === 'string' ? v : null;
+  }
+  return c.memo.stSub;
+}
+/** why（2.8 复查）：片库说 '' 的时候为什么 —— old = 老版本（回包没有 tvSub / 没有这个接口 404）、off = 关了 AUTO_FOLDER、
+    flat = v25.4 起没开剧集区（AUTO_TV_SUB=off，明说 ''）。分流只看 sub；why 变了也写一次（面板照实写），没变不写 */
+async function stSubNote(c, sub, why){
+  c.memo.stTried = 1;                               // 这一次调用已经问到片库了：stSubCheck 不用再问
+  const old = await stSub(c), t = now();
+  why = sub === '' ? String(why || '') : '';
+  const same = !!old && old.sub === sub && String(old.why || '') === why;
+  if (same && t - (Number(old.at) || 0) <= LIMIT.stSubEvery) return;
+  const v = { sub, at: t, ...(why ? { why } : {}) };
+  if (!old || old.sub !== sub) c.memo.caps = null;  // 片库说的变了：这一次调用后面推的剧集按新的放（tfCaps 重算）
+  c.memo.stSub = v;
+  await kvPut(c.env, 'st:sub', v).catch(() => {});
+}
+/** 6 小时没人问过片库（或者从来没问过）：顺手问一次（不带名字的 streamSync，只读）。一次调用最多一次；
+    这边没开剧集区（tvSub 空）不用问；片库熔断中、子请求预算不够（剩的不到 5 个）就不问，用上一次的。从不抛错。
+    2.8 复查：上一次顺手问没问成（st:try，30 分钟过期）也不问。原因 = 口令不对（401 / 403）不抛错、不熔断，st:sub 一直是旧的 / 空的，
+    定时任务一分钟一轮、每一轮最后都要再问一遍（一天 1440 次，每次占这一轮一个子请求）；5xx、连不上也是熔断之前每轮一次。
+    预算 / 时间不够、这一下没发出去的不记（不算问过） */
+async function stSubCheck(c){
+  if (c.memo.stTried || !c.cfg.tvSub) return;
+  c.memo.stTried = 1;
+  const st = await stSub(c);
+  if (st && now() - (Number(st.at) || 0) <= LIMIT.stSubEvery) return;
+  if (depOpenUntil(c, 'stream') || c.n >= c.max - 4) return;
+  if (await kvGet(c.env, 'st:try').catch(() => null)) return;
+  let why = '';
+  try { const s = await streamSync(c, [], false); if (typeof s.tvSub !== 'string') why = s.why || '片库没说它读哪个剧集区'; }
+  catch (e){ if (e.budget || e.circuit) return; why = String((e && e.message) || e); }
+  if (why) await kvPut(c.env, 'st:try', { at: now(), err: why.slice(0, 160) }, LIMIT.stTryEvery).catch(() => {});
+}
+/** 结果不明的那一次推到了哪个区（2.8 复查）：pushTry.sub（'' = /auto）。带 check 再推得推回同一个 parent：影片库 v7.2 只在
+    同一个 parent 里找上一次的任务，这时候按片库说的重新决定、片库说的中途变了，就推到另一个区、找不到、建第二个云下载任务，
+    头一个晾在老地方（老版本片库看不到、没人清），还多用一次每天的云下载。
+    复查之前记下的 pushTry 没有 sub：那时候只看传输 Worker（tfSub）。传输 Worker 已经不认那个区了（降级、改了名字）才重新决定 */
+async function pushSubAgain(c, pt){
+  const caps = await tfCaps(c);
+  const s = typeof pt.sub === 'string' ? pt.sub : caps.tfSub;
+  return !s || !caps.known || s === caps.tfSub ? s : await tvSubFor(c);
+}
+/** 剧集推进哪个文件夹（2.8）：传输 Worker 认得剧集区、片库也说它读的是这个名字 → /auto/<tvSub>；不然照旧 /auto（返回 ''）。
+    传输 Worker 那边就不行的不用问片库；片库的回答旧了先顺手问一次（stSubCheck） */
+async function tvSubFor(c){
+  if (!(await tfCaps(c)).tfSub) return '';
+  await stSubCheck(c);
+  return (await tfCaps(c)).sub;
 }
 /** 剧集（在 /auto/ram2 里的）给传输 Worker 的每个调用都带上 sub；改名时 to = 改完放哪儿（同一个区） */
 const withSub = (r, o, move) => r.d.sub ? { ...o, sub: r.d.sub, ...(move ? { to: r.d.sub } : {}) } : o;
@@ -663,9 +750,11 @@ async function airedCount(c, id, season){
 
 /* ── 片库（Stream Worker v25.1+）：马上重看一眼 Dropbox 的 /auto，回这几个名字收录了没有 ──
    电影是 /auto 里的那个文件名，剧集是 /auto 里的那个文件夹名。
-   老版本没有这个接口（404）、关了 AUTO_FOLDER、口令不对（401 / 403）→ { off }：照旧等工作人员发行 */
+   老版本没有这个接口（404）、关了 AUTO_FOLDER、口令不对（401 / 403）→ { off }：照旧等工作人员发行。
+   2.8：回包里的 tvSub（v25.4 起：它读的剧集区）顺手记下（stSubNote）：老版本没有这个字段、404、关了 AUTO_FOLDER 都记 ''；
+   口令不对（401 / 403）、出错没问成的不记（还是上一次的）。2.8 复查：'' 带上为什么（tvWhy：old / off / flat，面板照实写） */
 async function streamSync(c, items, tv, codes, tmdbs){
-  return depCall(c, 'stream', async () => {
+  const s = await depCall(c, 'stream', async () => {
     const q = new URLSearchParams();
     for (const n of items) q.append('item', n);
     for (const k of codes || []) q.append('code', k);
@@ -674,14 +763,18 @@ async function streamSync(c, items, tv, codes, tmdbs){
     const headers = c.env.STREAM_SYNC_KEY ? { 'x-sync-key': c.env.STREAM_SYNC_KEY } : {};
     /* 让片库重看一眼 /auto、回收录了没有：重复问没有坏处，算只读 */
     const r = await xfetch(c, base(c.env, 'STREAM_BASE', 'https://stream.cuven.online') + '/api/auto/sync?' + q, { method: 'POST', headers }, 30000, true);
-    if (r.status === 404) return { off: 1, why: '片库是老版本，没有 /api/auto/sync' };
+    if (r.status === 404) return { off: 1, why: '片库是老版本，没有 /api/auto/sync', tvSub: '', tvWhy: 'old' };
     if (r.status === 401 || r.status === 403) return { off: 1, why: '片库要口令（STREAM_SYNC_KEY 和它的 AUTO_SYNC_KEY 对不上）' };
     if (r.status >= 500 || r.status === 429) throw err('片库：HTTP ' + r.status, { status: r.status, net: 1 });
     const j = await readJSON(r);
     if (!r.ok) throw err('片库：' + (j.error || 'HTTP ' + r.status), { status: r.status });
-    if (j.off) return { off: 1, why: '片库关了 AUTO_FOLDER' };
-    return { has: j.has || {}, where: j.where || null, found: j.found || null, root: j.root || '' };
+    if (j.off) return { off: 1, why: '片库关了 AUTO_FOLDER', tvSub: '', tvWhy: 'off' };
+    const tvSub = typeof j.tvSub === 'string' ? j.tvSub.trim().slice(0, 64) : '';
+    return { has: j.has || {}, where: j.where || null, found: j.found || null, root: j.root || '',
+             tvSub, tvWhy: tvSub ? '' : typeof j.tvSub === 'string' ? 'flat' : 'old' };
   });
+  if (typeof s.tvSub === 'string') await stSubNote(c, s.tvSub, s.tvWhy);
+  return s;
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1054,8 +1147,11 @@ async function stQueued(c, r){
     return;
   }
   delete r.d.wait;
-  /* 剧集推进剧集区（2.6，/auto/ram2）：传输 Worker 认得 sub 才这么放，不然照旧放 /auto（之后的调用都按推送时记下的 r.d.sub 走） */
-  let sub = r.src === 'tv' ? (await tfCaps(c)).sub : '', parent = '';
+  /* 剧集推进剧集区（2.6，/auto/ram2）：传输 Worker 认得 sub、片库也说它读这个文件夹（2.8，tvSubFor）才这么放，
+     不然照旧放 /auto（之后的调用都按推送时记下的 r.d.sub 走：片库后来升级了，已经推了的也不挪）。
+     2.8 复查：上一次推这个规格结果不明（pushTry）→ 照上一次推的那个区再推（pushSubAgain），带 check 才认领得到；新推的才重新决定 */
+  const again = r.src === 'tv' && r.d.pushTry && r.d.pushTry.tid === v.tid ? r.d.pushTry : null;
+  let sub = r.src !== 'tv' ? '' : again ? await pushSubAgain(c, again) : await tvSubFor(c), parent = '';
   if (sub){
     try { parent = await tvFolder(c, sub); }
     catch (e){
@@ -1081,7 +1177,7 @@ async function stQueued(c, r){
        2.8 复查：5xx 带 pk（影片库的 pkResp：503 登录不上 / 要验证码 / 冷却中，502 PikPak 连不上）不记 —— 影片库只在 pkPush
        一开头登录那一下把它抛出来，任务还没建；记了的话恢复以后每次推都带 check，影片库要先列一遍任务（又一个 PikPak 调用、
        至少 9 秒），闸门挤的时候更容易回「来不及，稍后再推」 */
-    if (e.net && !pkSide(e)) notePush(r, v, '');
+    if (e.net && !pkSide(e)) notePush(r, v, '', sub);
     /* 503（v7.2：PikPak 登录不上、要验证码、登录冷却中）：依赖出了问题，原地等，不烧规格、不算出错次数 */
     if (e.status === 503) return pushHold(c, r, lbHoldWhy(e));
     throw e;
@@ -1103,14 +1199,14 @@ async function stQueued(c, r){
   /* 2.8 复查：2xx 可是回包里没有这一部的结果（没有 items、没有这个 tid、没写 ok）= 推没推成不知道：和 unsure 一样记下 pushTry，
      3 分钟后带 check 再推同一个规格，不烧规格。只有影片库明说 ok: 0、又不是 retry 才算这个规格推不了 */
   if (!it || it.ok == null){
-    notePush(r, v, (it && it.btih) || '');
+    notePush(r, v, (it && it.btih) || '', sub);
     r.note = '影片库的回包不完整，推没推成不知道（下一次先核对 PikPak 的任务列表），稍后再试';
     r.next = t + 3 * MIN;
     return;
   }
   if (it.retry){
     /* unsure（v7.2）：建任务那一下结果不明，下一次带 check 先核对 */
-    if (it.unsure) notePush(r, v, it.btih);
+    if (it.unsure) notePush(r, v, it.btih, sub);
     r.note = (it.err || '影片库这会儿推不了') + (it.unsure ? '（结果不明，下一次先核对 PikPak 的任务列表）' : '') + '，稍后再试';
     r.next = t + 3 * MIN;
     return;
@@ -1122,10 +1218,11 @@ async function stQueued(c, r){
   r.next = t;
 }
 /** 推送结果不明（2.8）：记下这个规格和 info hash，下一次推它带 check: 1（影片库先在任务列表里找，找到就认领）。
-    btih 照样带上，影片库 v7.2 不看它（按自己记下的任务编号、重新从帖子里取的 info hash 和名字找） */
-function notePush(r, v, btih){
+    btih 照样带上，影片库 v7.2 不看它（按自己记下的任务编号、重新从帖子里取的 info hash 和名字找）。
+    sub（2.8 复查）= 这一次推到了哪个区（'' = /auto）：下一次照它推回同一个 parent（pushSubAgain） */
+function notePush(r, v, btih, sub){
   const p = r.d.pushTry && r.d.pushTry.tid === v.tid ? r.d.pushTry : null;
-  r.d.pushTry = { tid: v.tid, btih: String(btih || (p && p.btih) || '').slice(0, 80), at: now() };
+  r.d.pushTry = { tid: v.tid, btih: String(btih || (p && p.btih) || '').slice(0, 80), sub: sub || '', at: now() };
 }
 /** 影片库回的 5xx 带 pk（2.8 复查）：是影片库 pkResp 回的 PikPak 的错。推送时只会在 pkPush 一开头登录那一下出来，任务还没建 */
 const pkSide = (e) => !!(e && e.lb && e.status >= 500 && e.body && e.body.pk);
@@ -2266,8 +2363,12 @@ async function tickRun(env, cfg, t){
   if (now() - c.t0 < LIMIT.tickMs){
     try { await libNudge(env, c); await trackHomes(env, c); await flush(c); }
     catch (e){ if (!e.budget) console.error('追踪：', e && e.message); }
-    if (c.healthDirty) await kvPut(env, 'health', c.health).catch(() => {});
   }
+  /* 片库认的剧集区（2.8）：这一轮谁都没问到片库、记着的又旧过 6 小时（或者从来没问过）→ 顺手问一次（只读；熔断中、预算不够不问）。
+     2.8 复查：和追踪一样只在这一轮的 22 秒之内。原因 = 它的只读超时是 30 秒（只受 95 秒的截止时刻管），一轮已经用了 50 秒、
+     片库又慢（列 Dropbox 要 8–16 秒，老版本更久），这一轮就跑过 60 秒，下一分钟的定时任务拿不到租约、回 busy —— 可有可无的事耽误了正事 */
+  if (now() - c.t0 < LIMIT.tickMs) await stSubCheck(c);
+  if (c.healthDirty) await kvPut(env, 'health', c.health).catch(() => {});
   if (Math.random() < 0.03) await d.prepare('DELETE FROM tj_log WHERE id < (SELECT MAX(id) - 4000 FROM tj_log)').run().catch(() => {});
   out.fetches = c.n; out.over = c.over || 0; out.ms = now() - c.t0; out.slots = c.slots; out.batch = c.memo.launch || null;
   await kvPut(env, 'tick:last', { at: t, done: out.done, due: out.due, fetches: c.n, over: out.over, ms: out.ms, batch: out.batch }).catch(() => {});
@@ -2825,7 +2926,8 @@ async function adminState(env){
               jobless: b.stage === 'copy' && !b.d.job && b.d.running ? 1 : 0 };
     if (b.stage === 'copy' && !b.ended) slots.batch = b.id;
   }
-  const caps = capsOf(cfg, await kvGet(env, 'tf:caps'));
+  /* 2.8：片库认不认剧集区（st:sub）一起算进去：面板上写清楚剧集放哪儿、为什么 */
+  const caps = capsOf(cfg, await kvGet(env, 'tf:caps'), await kvGet(env, 'st:sub').catch(() => null));
   return { ver: VER, now: now(), health, slots, tick: await kvGet(env, 'tick:last'), queued: queued.length, gate, batch, caps,
     cfg: { pkUser: mask(cfg.pkUser), pkSet: !!(cfg.pkUser && cfg.pkPass), tpl: cfg.tpl, lang: cfg.lang, grp: cfg.grp,
            userCap: cfg.userCap, globalCap: cfg.globalCap, paused: !!cfg.paused, pkToken: tok ? { exp: tok.exp } : null,
@@ -2908,7 +3010,9 @@ async function adminPk(env){
   return json(out);
 }
 async function adminLinks(env){
-  const c = context(env, CFG_DEF, 6);
+  /* 2.8：用这边配的 tvSub（面板上说片库认不认这个剧集区）；问到片库的同时记下它说的（streamSync → st:sub） */
+  const cfg = await loadCfg(env).catch(() => CFG_DEF);
+  const c = context(env, cfg, 6);
   const out = {};
   try { const s = await lb(c, '/api/pikpak?do=status'); out.lb = { ok: 1, pikpak: s.on ? (s.ok ? '已登录 ' + (s.user || '') : '登录失败：' + (s.err || '')) : '没配 PikPak' }; }
   catch (e){ out.lb = { ok: 0, err: e.message }; }
@@ -2920,8 +3024,13 @@ async function adminLinks(env){
     const old = await kvGet(env, 'tf:caps').catch(() => null);
     await kvPut(env, 'tf:caps', { caps, tv: String(p.tv || ''), core: String(p.core || ''), at: now(), nofilter: (old && old.nofilter) || 0 }).catch(() => {});
   } catch (e){ out.transfer = { ok: 0, err: e.message }; }
-  try { const s = await streamSync(c, [], false); out.stream = s.off ? { ok: 1, off: 1, why: s.why } : { ok: 1, root: s.root }; }
-  catch (e){ out.stream = { ok: 0, err: e.message }; }
+  /* tvSub = 片库说它读的剧集区（2.8；没有 = 口令不对、没问成），want = 这边配的：两个一样剧集才放 /auto/<want> */
+  try {
+    const s = await streamSync(c, [], false);
+    out.stream = { ...(s.off ? { ok: 1, off: 1, why: s.why } : { ok: 1, root: s.root }), want: cfg.tvSub || '',
+                   ...(typeof s.tvSub === 'string' ? { tvSub: s.tvSub, tvWhy: s.tvWhy || '' } : {}) };
+  }
+  catch (e){ out.stream = { ok: 0, err: e.message, want: cfg.tvSub || '' }; }
   return json(out);
 }
 
@@ -3097,9 +3206,13 @@ function flowHtml(s){
   h+='<div>批量 #'+b.id+' · '+(run?'<span class="ok">传输中'+(b.jobless?'（作业号未知）':'')+'</span>':b.ended?'已收尾':b.stage==='purge'?'删 PikPak':'核对中')+' · '+b.items+' 部'+
    (run?' · <b>'+gbs(b.bytes)+' / '+gbs(b.total)+'</b>（'+b.pct+'%）· '+((b.speed||0)/1048576).toFixed(1)+' MB/s · 还要 '+dur(b.eta):'')+
    (b.why?' <span class="dim">（'+esc(b.why)+'）</span>':'')+(b.err?' <span class="bad">'+esc(b.err)+'</span>':'')+(b.off?' <span class="warn">'+esc(b.off)+'</span>':'')+'</div>'}
- h+='<div class="dim">传输 Worker：'+(!cp.known?'还没问到会什么':(cp.batch?'会批量传输':'不会批量（一部一部传）')+(cp.sub?' · 剧集在 /auto/'+esc(cp.sub):' · 剧集在 /auto')+
+ h+='<div class="dim">传输 Worker：'+(!cp.known?'还没问到会什么':(cp.batch?'会批量传输':'不会批量（一部一部传）')+(cp.sub?' · 剧集在 /auto/'+esc(cp.sub):cp.tfSub?' · 剧集先放 /auto（片库还没认 /auto/'+esc(cp.tfSub)+'）':' · 剧集在 /auto')+
   (cp.mismatch?' <span class="bad">剧集区名字对不上（这里 '+esc(c.tvSub)+'，传输 Worker '+esc(cp.tv)+'）</span>':'')+(cp.nofilter?' <span class="warn">rclone 不认筛选规则，'+new Date(cp.nofilter).toLocaleTimeString()+' 前一部一部传</span>':''))+'</div>';
+ h+='<div class="dim">片库：'+stLine(c.tvSub,cp.stream,cp.stWhy)+(cp.stAt?' · '+ago(cp.stAt)+'记下的':'')+'</div>';
  return h}
+/* 2.8：片库认不认剧集区（want = 这边配的 tvSub，st = 片库说它读的；null = 还没问到）。
+   why（2.8 复查）= 片库说 '' 的时候为什么：old 老版本、off 关了 AUTO_FOLDER、flat 没开剧集区（AUTO_TV_SUB=off）；以前一律写「老版本」 */
+function stLine(want,st,why){if(!want)return'剧集直接放 /auto（这边没开剧集区）';if(st==null)return'<span class="warn">还没问到片库认不认 /auto/'+esc(want)+'：剧集先放 /auto</span>';if(st===want)return'<span class="ok">片库认得 /auto/'+esc(want)+'</span>';if(st==='')return'<span class="warn">'+(why==='old'?'片库是老版本':why==='off'?'片库没开 /auto（关了 AUTO_FOLDER）':why==='flat'?'片库没开剧集区（AUTO_TV_SUB=off）':'片库不读剧集区')+'：剧集先放 /auto</span>';return'<span class="bad">片库读的是 /auto/'+esc(st)+'，和这里的 '+esc(want)+' 对不上：剧集先放 /auto</span>'}
 function bar(r){var h='<div class="bar">';for(var i=1;i<=5;i++){if(i<r.step||r.state==='done')h+='<i class="on"></i>';else if(i===r.step&&r.state==='active'){var p=Math.max(0,Math.min(100,(r.pct-(i-1)*20)*5));h+='<i class="cur" style="--p:'+p+'%"></i>'}else h+='<i></i>'}return h+'</div>'}
 function render(s){
  $('ver').textContent=s.ver;var c=s.cfg;
@@ -3133,7 +3246,7 @@ $('refresh').onclick=load;
 $('tick').onclick=function(){this.disabled=true;var b=this;api('tick',{}).then(function(r){b.disabled=false;load()}).catch(function(e){b.disabled=false;alert(e.message)})};
 $('savePk').onclick=function(){var u=$('pkUser').value.trim(),p=$('pkPass').value;if(!u&&!p)return;var body={};if(u)body.pkUser=u;if(p)body.pkPass=p;api('cfg',body).then(function(s){$('pkUser').value='';$('pkPass').value='';$('pkres').innerHTML='<span class="ok">已保存</span>';render(s)}).catch(function(e){$('pkres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
 $('testPk').onclick=function(){$('pkres').textContent='…';api('pk',{}).then(function(r){$('pkres').innerHTML=r.ok?'<span class="ok">登录成功</span> '+(r.limit?(r.usage/1073741824).toFixed(1)+' / '+(r.limit/1073741824).toFixed(0)+' GB':'')+(r.auto?(r.auto.same?' · /auto 对得上':' <span class="bad">'+esc(r.auto.hint||r.auto.err||'')+'</span>'):''):'<span class="bad">'+esc(r.err||'')+'</span>'}).catch(function(e){$('pkres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
-$('testLinks').onclick=function(){$('links').textContent='…';api('links',{}).then(function(r){$('links').innerHTML='影片库：'+(r.lb.ok?'<span class="ok">通</span> · PikPak '+esc(r.lb.pikpak):'<span class="bad">'+esc(r.lb.err)+'</span>')+'<br>传输：'+(r.transfer.ok?'<span class="ok">通</span> · rclone '+esc(r.transfer.rclone)+' · '+esc(r.transfer.core):'<span class="bad">'+esc(r.transfer.err)+'</span>')+'<br>片库：'+(r.stream.ok?(r.stream.off?'<span class="warn">不收录 /auto</span> · '+esc(r.stream.why):'<span class="ok">通</span> · 收录 '+esc(r.stream.root)+'，传完就能播放'):'<span class="bad">'+esc(r.stream.err)+'</span>')}).catch(function(e){$('links').textContent=e.message})};
+$('testLinks').onclick=function(){$('links').textContent='…';api('links',{}).then(function(r){$('links').innerHTML='影片库：'+(r.lb.ok?'<span class="ok">通</span> · PikPak '+esc(r.lb.pikpak):'<span class="bad">'+esc(r.lb.err)+'</span>')+'<br>传输：'+(r.transfer.ok?'<span class="ok">通</span> · rclone '+esc(r.transfer.rclone)+' · '+esc(r.transfer.core):'<span class="bad">'+esc(r.transfer.err)+'</span>')+'<br>片库：'+(r.stream.ok?(r.stream.off?'<span class="warn">不收录 /auto</span> · '+esc(r.stream.why):'<span class="ok">通</span> · 收录 '+esc(r.stream.root)+'，传完就能播放')+('tvSub' in r.stream?' · '+stLine(r.stream.want,r.stream.tvSub,r.stream.tvWhy):''):'<span class="bad">'+esc(r.stream.err)+'</span>')}).catch(function(e){$('links').textContent=e.message})};
 $('saveCfg').onclick=function(){api('cfg',{tpl:$('tpl').value,lang:$('lang').value,grp:$('grp').value,userCap:$('userCap').value,globalCap:$('globalCap').value,pkSlots:$('pkSlots').value,vpsSlots:$('vpsSlots').value,paused:$('paused').checked,autoReady:$('autoReady').checked,tagNames:$('tagNames').checked,
  batch:$('batch').checked,batchMin:$('batchMin').value,batchMax:$('batchMax').value,batchWait:$('batchWait').value,xfers:$('xfers').value,checkers:$('checkers').value,basketMax:$('basketMax').value,tvSub:$('tvSub').value}).then(function(s){$('cfgres').innerHTML='<span class="ok">已保存</span>';render(s)}).catch(function(e){$('cfgres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
 $('add').onclick=function(){api('add',{src:$('addSrc').value,id:$('addId').value,season:$('addSeason').value}).then(function(r){$('addres').textContent=r.joined?'已经在进行中':'已添加';load()}).catch(function(e){$('addres').textContent=e.message})};

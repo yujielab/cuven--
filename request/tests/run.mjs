@@ -48,6 +48,7 @@ const W = {
   catalog: { movie: [], tv: [] },
   aired: { '1399:2': { total: 6, aired: 4 } },
   lib: { mode: 404, seen: new Set() },   // 片库（Stream Worker）：404 = 老版本没有 /api/auto/sync；'on' / 'off' / 'down'
+                                         //   lib.tvSub：v25.4 起回包带它读的剧集区（字符串）；没有这一项 = 更老的版本，回包里没有 tvSub
   sync: [],                  // 片库收到的 /api/auto/sync
   renames: [],               // PikPak 上的改名（加追踪码）
   /* 2.6 批量 */
@@ -273,7 +274,8 @@ globalThis.fetch = async (url, init = {}) => {
     const codes = u.searchParams.getAll('code'), tmdbs = u.searchParams.getAll('tmdb');
     const where = Object.fromEntries(codes.filter(k => W.lib.where && W.lib.where[k]).map(k => [k, W.lib.where[k]]));
     const found = Object.fromEntries(tmdbs.filter(k => W.lib.found && W.lib.found[k]).map(k => [k, W.lib.found[k]]));
-    return J({ ok: true, root: '/auto', movies: W.lib.seen.size, has: Object.fromEntries(items.map(n => [n, W.lib.seen.has(n)])), where, found });
+    return J({ ok: true, root: '/auto', movies: W.lib.seen.size, has: Object.fromEntries(items.map(n => [n, W.lib.seen.has(n)])), where, found,
+               ...(typeof W.lib.tvSub === 'string' ? { tvSub: W.lib.tvSub } : {}) });
   }
   /* TMDB 分季 */
   if (u.host === 'stream.cuven.online' && p === '/api/tmdb/season'){
@@ -942,7 +944,7 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
 const lastTick = () => JSON.parse(env.DB.db.prepare("SELECT v FROM tj_kv WHERE k = 'tick:last'").get().v);
 const reset26 = () => {
   env.DB.db.exec('DELETE FROM tj_req'); env.DB.db.exec('DELETE FROM tj_batch');
-  env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('health', 'tick:last', 'track', 'track:cur', 'tf:caps', 'tv:id', 'flow:live')");
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('health', 'tick:last', 'track', 'track:cur', 'tf:caps', 'tv:id', 'flow:live', 'st:sub', 'st:try')");
   W.batchCalls = []; W.batchRun = {}; W.batchJobs = []; W.bverify = []; W.bpurge = []; W.vbad = new Map(); W.copyWhileBatch = 0; W.nofilter = false;
 };
 const batchPost = (user, items) => call('POST', '/app/requests/batch', { user, body: { items } });
@@ -1018,7 +1020,7 @@ const flowGet = async (user, tag) => {
   W.caps = ['sub', 'batch']; W.tvName = 'ram2';
   await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, batchMin: 16, batchMax: 16, batchWait: 600, pkSlots: 20, vpsSlots: 2,
     xfers: 16, checkers: 16, tvSub: 'ram2', autoReady: true, tagNames: true, userCap: 50, globalCap: 200 } });
-  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {} };
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {}, tvSub: 'ram2' };     // 片库 v25.4：认 /auto/ram2（2.8 起剧集要片库点头才放进去）
   W.sync = []; W.renames = []; W.mkdirs = [];
   W.copyJobs = [];
   W.job[88] = { finished: true, success: true, bytes: 1, total: 1 };
@@ -2156,6 +2158,7 @@ const mv28 = (tmdb, tids) => { W.versions['movie:' + tmdb] = tids.map(tid => ({ 
 /* ── 2.8 推送回 404 gone（剧集区 / auto 被删了）：清掉缓存的文件夹编号（tj_kv 的 auto:id / tv:id），下一次重新找 / 建 ── */
 {
   reset26(); W.caps = ['sub', 'batch'];
+  W.lib.tvSub = 'ram2';                                                           // 片库 v25.4 也认 /auto/ram2（2.8：两边都点头才推进剧集区）
   await call('POST', '/admin/api/links', { admin: true, body: {} });             // 传输 Worker 会 sub（剧集推进 /auto/ram2）
   W.versions['tv:9816:1'] = [{ tid: 48, title: 'Show 9816 S01 全4集 1080p', mb: 1, labels: [], res: '1080p', total: 4 }];
   const t = Date.now();
@@ -2174,12 +2177,14 @@ const mv28 = (tmdb, tids) => { W.versions['movie:' + tmdb] = tids.map(tid => ({ 
   const tv = kv28('tv:id');
   ok(tv && tv.id !== 'RAM2OLD' && kv28('auto:id') && W.push[p0 + 1] && W.push[p0 + 1].parent === tv.id && r.stage === 'download' && r.d.sub === 'ram2',
      '下一次重新找到 / 建出剧集区，推进新的文件夹', { tv, push: W.push[p0 + 1], stage: r.stage });
+  delete W.lib.tvSub;
   env.DB.db.exec('DELETE FROM tj_req');
 }
 
 /* ── 2.8 列 /auto 时回 404 gone（/auto 整个被删了，缓存的编号还指着它）：清掉缓存的编号，不退回 /auto，下一次重新找到 /auto 和剧集区 ── */
 {
   reset26(); W.caps = ['sub', 'batch'];
+  W.lib.tvSub = 'ram2';
   await call('POST', '/admin/api/links', { admin: true, body: {} });
   W.versions['tv:9819:1'] = [{ tid: 54, title: 'Show 9819 S01 全4集 1080p', mb: 1, labels: [], res: '1080p', total: 4 }];
   env.DB.db.prepare("INSERT INTO tj_kv (k, v, exp) VALUES ('auto:id', ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, exp = excluded.exp").run(JSON.stringify({ id: 'AUTOGONE', name: 'auto' }), Date.now() + 86400e3);
@@ -2201,7 +2206,7 @@ const mv28 = (tmdb, tids) => { W.versions['movie:' + tmdb] = tids.map(tid => ({ 
   const tv = kv28('tv:id');
   ok(kv28('auto:id') && kv28('auto:id').id === 'AUTO' && tv && tv.parent === 'AUTO' && W.push[p0] && W.push[p0].parent === tv.id && r.stage === 'download' && r.d.sub === 'ram2',
      '下一次重新找到 /auto 和剧集区，推进剧集区', { auto: kv28('auto:id'), tv, push: W.push[p0] });
-  W.hook = null;
+  W.hook = null; delete W.lib.tvSub;
   env.DB.db.exec('DELETE FROM tj_req');
 }
 
@@ -2483,6 +2488,426 @@ const mv28 = (tmdb, tids) => { W.versions['movie:' + tmdb] = tids.map(tid => ({ 
   W.busyWait = 7;
   env.DB.db.exec('DELETE FROM tj_req');
 }
+
+/* ══════════════════════════════════════════════════════════════════
+   2.8 剧集区要片库点头：传输 Worker 会 sub 不够，片库（Stream v25.4+）在 /api/auto/sync 的回包里说它读的剧集区（tvSub）
+   和这里的 tvSub 一样，新推的剧集才放 /auto/ram2；老版本（没有 tvSub / 404）、说 ''、说别的名字、还没问到过 → 照旧 /auto
+   ══════════════════════════════════════════════════════════════════ */
+const stSet28 = (sub, at) => env.DB.db.prepare("INSERT INTO tj_kv (k, v, exp) VALUES ('st:sub', ?, 0) ON CONFLICT(k) DO UPDATE SET v = excluded.v, exp = 0")
+  .run(JSON.stringify({ sub, at }));
+const stDel28 = () => env.DB.db.exec("DELETE FROM tj_kv WHERE k = 'st:sub'");
+/* 数 st:sub 写了几次（没变就不该写）；st:try（复查：顺手问没问成）写了几次，stTryFail = 写 st:try 的时候 D1 出错 */
+let stW = 0, stTryW = 0, stTryFail = false;
+const prepSt = env.DB.prepare;
+env.DB.prepare = function (sql){
+  const st = prepSt.call(this, sql);
+  if (/^INSERT INTO tj_kv/.test(sql)){
+    const b = st.bind;
+    st.bind = (...a) => {
+      if (a[0] === 'st:sub') stW++;
+      if (a[0] === 'st:try'){ stTryW++; if (stTryFail) st.run = async () => { throw new Error('D1：写失败'); }; }
+      return b(...a);
+    };
+  }
+  return st;
+};
+/** 片库收到的「顺手问一次」：不带名字、追踪码、TMDB 编号的 /api/auto/sync */
+const bare28 = (from) => W.sync.slice(from).filter(x => !x.items.length && !x.codes.length && !x.tmdbs.length);
+/** 一季剧集的样子（推送落成的文件夹、版本表） */
+const show28 = (tmdb, tid) => {
+  LAYOUT[tid] = () => ['Show.' + tmdb + '.S01.1080p.WEB-DL', [['E01.mkv', 1e9], ['E02.mkv', 1e9], ['E03.mkv', 1e9], ['E04.mkv', 1e9]]];
+  W.versions['tv:' + tmdb + ':1'] = [{ tid, title: 'Show ' + tmdb + ' S01 全4集 1080p', mb: 1, labels: [], res: '1080p', total: 4 }];
+};
+/** 传输收到的、点名这一季的调用（organize / check / rename / copy / verify / purge …） */
+const tfFor28 = (from, tmdb) => W.tf.slice(from).filter(([, b]) => JSON.stringify(b || {}).includes('Show.' + tmdb + '.'));
+const tvHome28 = () => kv28('tv:id');
+const wipe28 = () => { env.DB.db.exec('DELETE FROM tj_req'); for (const t of [...W.tasks.keys()]) finishTask(t); };
+const flow28 = () => { W.verifyOK = true; W.verifySeq = []; W.check = []; W.copyJobs = []; W.renameDone = false; W.orgLeft = []; W.copyLost = 0;
+  W.tfDown = 0; W.pushSeq = []; W.pushStop = null; W.job[88] = { finished: true, success: true, bytes: 1, total: 1 }; W.job[77] = { finished: true, success: true, bytes: 2, total: 2 }; };
+
+/* ── 片库是老版本（回包没有 tvSub）：剧集推进 /auto，传输调用不带 sub；片库升级（回 tvSub: ram2）以后新推的进 /auto/ram2，
+      早推的照它记下的走（不挪）；片库说的没变不写 tj_kv ── */
+{
+  reset26(); W.caps = ['sub', 'batch']; W.tvName = 'ram2'; flow28();
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: false, autoReady: true, tagNames: true, tvSub: 'ram2', pkSlots: 16, vpsSlots: 4 } });
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {} };          // 比 v25.4 老：回包里没有 tvSub
+  show28(9850, 60); show28(9851, 61);
+  const tf0 = W.tf.length, p0 = W.push.length;
+  const a = (await call('POST', '/app/requests', { user: 'alice', body: { src: 'tv', id: 9850, season: 1 } }))[1].request.id;
+  stW = 0;
+  await tick();
+  let ra = row27(a);
+  ok(W.push[p0] && W.push[p0].parent === 'AUTO' && ra.stage === 'download' && ra.d.sub === undefined && kv28('st:sub') && kv28('st:sub').sub === '' && stW === 1,
+     '片库是老版本（回包没有 tvSub）：传输 Worker 会 sub 也照旧推进 /auto，st:sub 记下 \'\'', { push: W.push[p0], d: ra.d, st: kv28('st:sub'), stW });
+  const [, s1] = await call('GET', '/admin/api/state', { admin: true });
+  ok(s1.caps.tfSub === 'ram2' && s1.caps.sub === '' && s1.caps.stream === '' && !s1.caps.stOk && s1.caps.stAt > 0,
+     '面板：传输 Worker 认得 ram2，片库是老版本 → 剧集先放 /auto', s1.caps);
+
+  /* 片库升级到 v25.4：回 tvSub: ram2 */
+  W.lib.tvSub = 'ram2';
+  const s0 = W.sync.length;
+  stW = 0;
+  const b = (await call('POST', '/app/requests', { user: 'alice', body: { src: 'tv', id: 9851, season: 1 } }))[1].request.id;
+  for (let i = 0; i < 20; i++){
+    for (const t of [...W.tasks.keys()]) finishTask(t);
+    await tick();
+    if (row27(a).stage === 'done' && row27(b).stage === 'done') break;
+  }
+  ra = row27(a); const rb = row27(b);
+  const tv = tvHome28();
+  const pb = W.push.slice(p0).find(p => p.tid === 61);
+  ok(ra.stage === 'done' && rb.stage === 'done', '两季都传完、就绪', [ra.stage, ra.note, rb.stage, rb.note]);
+  ok(tv && pb && pb.parent === tv.id && tv.name === 'ram2' && rb.d.sub === 'ram2', '片库说 tvSub: ram2 以后：新推的这一季进 /auto/ram2', { tv, pb, sub: rb.d.sub });
+  ok(ra.d.sub === undefined, '片库升级之前推的那一季：照它记下的（/auto）走完，不挪', ra.d);
+  const ca = tfFor28(tf0, 9850), cb = tfFor28(tf0, 9851);
+  const ops = (l) => [...new Set(l.map(x => x[0]))].sort().join();
+  ok(['check', 'copy', 'organize', 'purge', 'rename', 'verify'].every(op => ops(ca).includes(op)) && ca.every(([, x]) => x.sub === undefined && x.to === undefined),
+     '早推的那一季：整理、核对、改名、传输、核对两端、删 PikPak 都不带 sub', { ops: ops(ca), bad: ca.filter(([, x]) => x.sub !== undefined) });
+  ok(['check', 'copy', 'organize', 'purge', 'rename', 'verify'].every(op => ops(cb).includes(op)) && cb.every(([, x]) => x.sub === 'ram2' && (x.to === undefined || x.to === 'ram2')),
+     '新推的那一季：每一个传输调用都带 sub: ram2', { ops: ops(cb), bad: cb.filter(([, x]) => x.sub !== 'ram2') });
+  ok(W.sync.length - s0 >= 3 && stW === 1 && kv28('st:sub').sub === 'ram2',
+     '片库问了好几次、回的都是 ram2：st:sub 只在变的那一下写了一次（没变不写）', { asks: W.sync.length - s0, stW, st: kv28('st:sub') });
+  const [, s2] = await call('GET', '/admin/api/state', { admin: true });
+  ok(s2.caps.sub === 'ram2' && s2.caps.stream === 'ram2' && s2.caps.stOk, '面板：片库认得 /auto/ram2', s2.caps);
+  wipe28();
+}
+
+/* ── 片库说 tvSub: ''（v25.4 没开分层）或者别的名字：剧集照旧推进 /auto（tvSub 记下它说的） ── */
+{
+  reset26(); W.caps = ['sub', 'batch']; flow28();
+  stSet28('ram2', Date.now());
+  show28(9852, 62); show28(9853, 63);
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {}, tvSub: '' };
+  const p0 = W.push.length;
+  const c1 = insTv28('queued', {}, 9852);                             // 新请求：先核对片库（v2.5），顺带拿到 tvSub
+  await tick();
+  ok(W.push[p0] && W.push[p0].parent === 'AUTO' && row27(c1).d.sub === undefined && kv28('st:sub').sub === '',
+     '片库说 tvSub: \'\'（没开分层）：剧集推进 /auto', { push: W.push[p0], st: kv28('st:sub') });
+  W.lib.tvSub = 'ram9';
+  const c2 = insTv28('queued', {}, 9853);
+  await tick();
+  const p2 = W.push.slice(p0).find(p => p.tid === 63);
+  ok(p2 && p2.parent === 'AUTO' && row27(c2).d.sub === undefined && kv28('st:sub').sub === 'ram9',
+     '片库读的是 /auto/ram9（和这里的 ram2 对不上）：剧集推进 /auto', { push: p2, st: kv28('st:sub') });
+  const [, s] = await call('GET', '/admin/api/state', { admin: true });
+  ok(s.caps.stream === 'ram9' && !s.caps.stOk && s.caps.sub === '' && s.caps.tfSub === 'ram2', '面板拿得到片库说的名字（对不上）', s.caps);
+  wipe28(); delete W.lib.tvSub;
+}
+
+/* ── 从来没问到过片库 / 6 小时没人问过：推剧集之前、一轮的最后顺手问一次（不带名字），一次调用最多一次；问到了没变不写 ── */
+{
+  reset26(); W.caps = ['sub', 'batch']; flow28();
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {}, tvSub: 'ram2' };
+  show28(9854, 64);
+  stDel28();
+  const e = insTv28('queued', { dup: 0 }, 9854);                       // 已经核对过片库（dup: 0）：这一条不会再去问片库
+  const s0 = W.sync.length, p0 = W.push.length;
+  await tick();
+  ok(bare28(s0).length === 1 && W.sync.length - s0 === 1 && W.push[p0] && W.push[p0].parent === (tvHome28() || {}).id && row27(e).d.sub === 'ram2',
+     '从来没问到过片库：推剧集之前顺手问一次（只问一次），片库说 ram2 → 推进 /auto/ram2', { sync: W.sync.slice(s0), push: W.push[p0], d: row27(e).d });
+  wipe28();
+  /* 6 小时没人问过（没有新的剧集要推）：一轮的最后顺手问一次；at 旧了顺手更新（这一下写一次），下一轮就不再问 */
+  advance(6 * 3600e3);
+  const s1 = W.sync.length, at1 = (kv28('st:sub') || {}).at || 0;
+  stW = 0;
+  await tick();
+  ok(bare28(s1).length === 1 && W.sync.length - s1 === 1 && stW === 1 && (kv28('st:sub') || {}).sub === 'ram2' && kv28('st:sub').at > at1,
+     '6 小时没人问过片库：定时任务最后顺手问一次（不带名字），旧了的 at 更新一下', { sync: W.sync.slice(s1), stW, st: kv28('st:sub') });
+  const s2 = W.sync.length;
+  stW = 0;
+  await tick(); await tick();
+  ok(W.sync.length === s2 && stW === 0, '刚问过：接下来几轮不再问、不写', { sync: W.sync.slice(s2), stW });
+  /* 片库回 401（口令对不上）：不算问到了，记着的不动 */
+  advance(6 * 3600e3 + 60e3);
+  const at2 = (kv28('st:sub') || {}).at;
+  W.hook = (u) => u.host === 'stream.cuven.online' && u.pathname === '/api/auto/sync' ? J({ error: 'bad key' }, 401) : null;
+  stW = 0;
+  const [, l401] = await call('POST', '/admin/api/links', { admin: true, body: {} });
+  W.hook = null;
+  ok(l401.stream.off && !('tvSub' in l401.stream) && stW === 0 && kv28('st:sub').sub === 'ram2' && kv28('st:sub').at === at2,
+     '片库回 401：没问成，st:sub 不动', { stream: l401.stream, st: kv28('st:sub'), stW });
+  /* 很老的片库（没有 /api/auto/sync，404）：当成老版本，记 ''；测试连接写清楚 */
+  W.lib.mode = 404;
+  const [, l404] = await call('POST', '/admin/api/links', { admin: true, body: {} });
+  ok(l404.stream.off && l404.stream.tvSub === '' && l404.stream.want === 'ram2' && kv28('st:sub').sub === '', '很老的片库（404）：测试连接回 tvSub \'\'，记下 \'\'（剧集先放 /auto）', l404.stream);
+  W.lib.mode = 'on';
+  const [, lOn] = await call('POST', '/admin/api/links', { admin: true, body: {} });
+  ok(lOn.stream.ok && !lOn.stream.off && lOn.stream.tvSub === 'ram2' && lOn.stream.want === 'ram2' && kv28('st:sub').sub === 'ram2',
+     '测试连接：片库回 tvSub ram2，和这里一样（面板写「片库认得 /auto/ram2」）', lOn.stream);
+  const html = (await call('GET', '/'))[1];
+  ok(typeof html === 'string' && html.includes('片库认得 /auto/') && html.includes('片库是老版本') && html.includes('：剧集先放 /auto') && html.includes('function stLine'),
+     '面板：测试连接和传输那一行写着片库认不认剧集区');
+  wipe28();
+}
+
+/* ── 片库熔断中：不顺手问，用上一次的（旧了也用）；从来没问到过 = 不知道 → /auto ── */
+{
+  reset26(); W.caps = ['sub', 'batch']; flow28();
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {}, tvSub: 'ram2' };
+  show28(9855, 65); show28(9856, 66);
+  const old = Date.now() - 7 * 3600e3;
+  stSet28('ram2', old);
+  const open = { fails: 0, trips: 1, open: Date.now() + 3600e3, err: '片库：HTTP 500', ok: 0, bad: Date.now() };
+  env.DB.db.prepare("INSERT INTO tj_kv (k, v, exp) VALUES ('health', ?, 0) ON CONFLICT(k) DO UPDATE SET v = excluded.v, exp = 0").run(JSON.stringify({ stream: open }));
+  const f = insTv28('queued', { dup: 0 }, 9855);
+  const s0 = W.sync.length, p0 = W.push.length;
+  stW = 0;
+  await tick();
+  ok(W.sync.length === s0 && stW === 0 && kv28('st:sub').at === old && W.push[p0] && W.push[p0].parent === (tvHome28() || {}).id && row27(f).d.sub === 'ram2',
+     '片库熔断中：不去问，用上一次记下的（ram2，旧了也用）', { sync: W.sync.slice(s0), stW, st: kv28('st:sub'), push: W.push[p0] });
+  stDel28();
+  const g = insTv28('queued', { dup: 0 }, 9856);
+  await tick();
+  const pg = W.push.slice(p0).find(p => p.tid === 66);
+  ok(W.sync.length === s0 && pg && pg.parent === 'AUTO' && row27(g).d.sub === undefined && !kv28('st:sub'),
+     '片库熔断中、从来没问到过：不知道 → 剧集照旧推进 /auto', { push: pg, st: kv28('st:sub') });
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k = 'health'");
+  wipe28();
+}
+
+/* ── 一轮的子请求预算用完：不顺手问，记着的不动；下一轮有预算了，推剧集之前再问 ── */
+{
+  reset26(); W.caps = ['sub', 'batch']; flow28();
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, pkSlots: 20 } });
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {}, tvSub: 'ram2' };
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  const old = Date.now() - 7 * 3600e3;
+  stSet28('ram2', old);
+  const deep = (tag) => {
+    const root = 'stdeep' + tag, F = (id, name, parent, kind = 'drive#folder', size = '0') =>
+      W.files.set(id, { id, name, kind, parent_id: parent, size, phase: 'PHASE_TYPE_COMPLETE', trashed: false });
+    F(root, 'StDeep.' + tag + '.2020.1080p', 'AUTO');
+    F(root + 'v', 'StDeep.' + tag + '.2020.1080p.mkv', root, 'drive#file', '5000000000');
+    for (let i = 0; i < 12; i++){ F(root + 'a' + i, 'd' + i, root); for (let j = 0; j < 12; j++) F(root + 'a' + i + 'b' + j, 'e' + j, root + 'a' + i); }
+    return root;
+  };
+  ['A', 'B'].forEach((tag, i) => env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next)
+    VALUES ('movie', ?, 0, 'deep', '["alice"]', 'clean', '', ?, 1, 1, 1, 0)`).run(9857 + i, JSON.stringify({ file: deep(tag), cur: { tid: 1, t: 'x' }, tried: [] })));
+  show28(9859, 67);
+  const h = insTv28('queued', { dup: 0 }, 9859);
+  const s0 = W.sync.length, p0 = W.push.length;
+  stW = 0;
+  await tick();
+  const l1 = lastTick();
+  ok(l1.fetches === 42 && l1.over >= 1 && W.sync.length === s0 && stW === 0 && kv28('st:sub').at === old && row27(h).stage === 'queued',
+     '这一轮的子请求用完了：不顺手问片库，st:sub 不动', { l1, sync: W.sync.slice(s0), stW, st: kv28('st:sub'), h: row27(h).stage });
+  let n = 0;
+  for (; n < 3 && row27(h).stage === 'queued'; n++) await tick();
+  const ph = W.push.slice(p0).find(p => p.tid === 67);
+  ok(ph && ph.parent === (tvHome28() || {}).id && row27(h).d.sub === 'ram2' && bare28(s0).length === 1 && stW === 1 && kv28('st:sub').at > old,
+     '下一轮有预算了：推剧集之前顺手问一次片库（只一次），旧了的 at 更新一下，推进 /auto/ram2', { n, ph, sync: bare28(s0), stW, st: kv28('st:sub') });
+  wipe28();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   2.8 剧集区要片库点头 · 复查（四处，拿复查之前的版本跑会失败）
+   ══════════════════════════════════════════════════════════════════ */
+/** 片库收到的不带名字的 /api/auto/sync（W.hook 先接住的那几种回法 W.sync 里没有，自己数） */
+const stHook28 = (status, body) => { const h = { asks: 0 };
+  W.hook = (u) => u.host === 'stream.cuven.online' && u.pathname === '/api/auto/sync' ? (h.asks++, J(body, status)) : null;
+  return h; };
+
+/* ── 复查 1：结果不明的那一次推送记下推到了哪个区（pushTry.sub），带 check 再推照它推。原因 = 影片库 v7.2 只在同一个 parent 里找
+      上一次的任务：片库说的中途变了，重新决定就推到另一个区、找不到、建第二个云下载任务，头一个晾在老地方 ── */
+{
+  reset26(); W.caps = ['sub', 'batch']; W.tvName = 'ram2'; flow28();
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: false, tvSub: 'ram2', pkSlots: 16, vpsSlots: 4 } });
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {}, tvSub: 'ram2' };
+  await call('POST', '/admin/api/links', { admin: true, body: {} });            // 传输 Worker 会 sub、片库认 ram2
+  show28(9860, 70); show28(9861, 71); show28(9862, 72);
+  /* 推进 /auto/ram2、回包路上断了（影片库其实建成了）；片库改口说不分层（''）；再推照旧推进 ram2、带 check 认领 */
+  const a = insTv28('queued', { dup: 0 }, 9860);
+  const p0 = W.push.length, n0 = W.pushNew;
+  W.pushSeq = ['lost'];
+  await tick();
+  let r = row27(a);
+  const tv = tvHome28();
+  ok(tv && W.push[p0] && W.push[p0].parent === tv.id && r.stage === 'queued' && r.d.pushTry && r.d.pushTry.tid === 70 && r.d.pushTry.sub === 'ram2',
+     '复查：推进 /auto/ram2 结果不明，pushTry 记下推到了 ram2', { push: W.push[p0], d: r.d });
+  W.lib.tvSub = '';
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  ok(kv28('st:sub').sub === '', '片库改口：不分层（\'\'）', kv28('st:sub'));
+  await tick();
+  r = row27(a);
+  ok(W.push[p0 + 1] && W.push[p0 + 1].parent === tv.id && W.push[p0 + 1].check === 1 && r.stage === 'download' && r.d.sub === 'ram2' &&
+     r.d.pushTry === undefined && W.pushNew === n0 + 1 && logs27(a).some(m => /认领了上一次/.test(m)),
+     '复查：片库说的变了，再推照上一次的 ram2 推、带 check 认领，只有一个云下载任务（不推到 /auto 再建一个）',
+     { push: W.push.slice(p0), d: r.d, made: W.pushNew - n0 });
+
+  /* 反过来：片库是老版本时推进 /auto、结果不明（unsure）；片库升级认 ram2 以后，再推照旧推进 /auto 认领 */
+  delete W.lib.tvSub;
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  const b = insTv28('queued', { dup: 0 }, 9861);
+  const p1 = W.push.length, n1 = W.pushNew;
+  W.pushSeq = ['unsure'];
+  await tick();
+  r = row27(b);
+  ok(W.push[p1] && W.push[p1].parent === 'AUTO' && r.d.pushTry && r.d.pushTry.sub === '', '复查：片库是老版本，推进 /auto 结果不明，pushTry 记下 \'\'（/auto）', { push: W.push[p1], d: r.d });
+  W.lib.tvSub = 'ram2';
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  await tick();
+  r = row27(b);
+  ok(W.push[p1 + 1] && W.push[p1 + 1].parent === 'AUTO' && W.push[p1 + 1].check === 1 && r.stage === 'download' && r.d.sub === undefined && W.pushNew === n1 + 1,
+     '复查：片库升级认 ram2 了，结果不明的那一季照旧推回 /auto 认领（新推的才进 ram2）', { push: W.push.slice(p1), d: r.d, made: W.pushNew - n1 });
+
+  /* 复查之前记下的 pushTry（没有 sub，那时候只看传输 Worker 就推进了 ram2）；片库是老版本：照那时候的推回 ram2 认领 */
+  const c3 = insTv28('queued', { dup: 0 }, 9862);
+  const p2 = W.push.length, n2 = W.pushNew;
+  W.pushSeq = ['lost'];
+  await tick();
+  const d3 = row27(c3).d;
+  ok(W.push[p2] && W.push[p2].parent === tv.id && d3.pushTry && d3.pushTry.sub === 'ram2', '推进 ram2 结果不明', { push: W.push[p2], d: d3 });
+  delete d3.pushTry.sub;
+  env.DB.db.prepare('UPDATE tj_req SET data = ? WHERE id = ?').run(JSON.stringify(d3), c3);
+  delete W.lib.tvSub;
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  await tick();
+  r = row27(c3);
+  ok(W.push[p2 + 1] && W.push[p2 + 1].parent === tv.id && W.push[p2 + 1].check === 1 && r.stage === 'download' && r.d.sub === 'ram2' && W.pushNew === n2 + 1,
+     '复查：升级之前记下的 pushTry（没有 sub）照传输 Worker 的剧集区推回 ram2 认领，片库是老版本也不推到 /auto 再建一个',
+     { push: W.push.slice(p2), d: r.d, made: W.pushNew - n2 });
+  wipe28(); W.pushSeq = [];
+}
+
+/* ── 复查 2：顺手问片库没问成（401 / 403 不抛错、不熔断；5xx、连不上）记 st:try，30 分钟里不再顺手问。
+      原因 = st:sub 一直是旧的 / 空的，一分钟一轮、每一轮最后都要再问一遍（一天 1440 次、每次占这一轮一个子请求） ── */
+{
+  reset26(); W.caps = ['sub', 'batch']; flow28();
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {}, tvSub: 'ram2' };
+  stDel28();
+  let h = stHook28(403, { error: 'bad key' });
+  stTryW = 0; stW = 0;
+  for (let i = 0; i < 5; i++) await tick();
+  ok(h.asks === 1 && !kv28('st:sub') && kv28('st:try') && stTryW === 1 && stW === 0,
+     '复查：片库回 403，5 轮空转只顺手问了 1 次；st:try 记下（写一次），st:sub 不动', { asks: h.asks, st: kv28('st:sub'), tr: kv28('st:try'), stTryW });
+  advance(30 * 60e3);
+  await tick();
+  ok(h.asks === 2 && stTryW === 2, '30 分钟以后再顺手问一次', { asks: h.asks, stTryW });
+  advance(30 * 60e3);
+  h = stHook28(500, { error: 'Internal error' });
+  for (let i = 0; i < 5; i++) await tick();
+  const hs = health28().stream || {};
+  ok(h.asks === 1 && !(hs.open > Date.now()) && !kv28('st:sub'),
+     '复查：片库 5xx 也是 30 分钟里只顺手问一次（不用等熔断）', { asks: h.asks, stream: hs });
+  W.hook = null;
+  /* 恢复了：30 分钟后问到了，记下 ram2，接下来不再问 */
+  advance(30 * 60e3);
+  const s0 = W.sync.length;
+  await tick(); await tick();
+  ok(bare28(s0).length === 1 && kv28('st:sub') && kv28('st:sub').sub === 'ram2', '片库恢复：30 分钟后问到了，记下 ram2，下一轮不再问', { sync: bare28(s0), st: kv28('st:sub') });
+  /* 面板「测试连接」不受 st:try 管：一点就问 */
+  stDel28();
+  env.DB.db.prepare("INSERT INTO tj_kv (k, v, exp) VALUES ('st:try', ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, exp = excluded.exp")
+    .run(JSON.stringify({ at: Date.now(), err: 'x' }), Date.now() + 1800e3);
+  const [, l] = await call('POST', '/admin/api/links', { admin: true, body: {} });
+  ok(l.stream.tvSub === 'ram2' && kv28('st:sub') && kv28('st:sub').sub === 'ram2', '「测试连接」照样问片库、记下它说的', l.stream);
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('st:try', 'health')");
+}
+
+/* ── 复查 3：一轮最后的顺手问和追踪一样只在 22 秒之内。原因 = 它的只读超时是 30 秒（只受 95 秒的截止时刻管），一轮已经用了 50 秒、
+      片库又慢，这一轮就跑过 60 秒，下一分钟的定时任务拿不到租约 ── */
+{
+  reset26(); W.caps = ['sub', 'batch']; flow28();
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {}, tvSub: 'ram2' };
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  const old = Date.now() - 7 * 3600e3;
+  stSet28('ram2', old);
+  mv28(9863, [73]);
+  const m = ins27('queued', { dup: 0 }, { tmdb: 9863 });
+  let slow = 1;
+  W.hook = (u) => { if (slow && u.host === 'lb.cuven.us' && u.pathname === '/api/link/versions'){ slow = 0; advance(25000); } return null; };
+  const s0 = W.sync.length;
+  await tick(); W.hook = null;
+  const l = lastTick();
+  ok(l.ms > 22000 && row27(m).stage === 'download' && bare28(s0).length === 0 && kv28('st:sub').at === old,
+     '复查：这一轮已经过了 22 秒，最后不顺手问片库（st:sub 旧了也先不问）', { l, stage: row27(m).stage, sync: bare28(s0), st: kv28('st:sub') });
+  await tick();
+  ok(bare28(s0).length === 1 && kv28('st:sub').at > old && lastTick().ms < 22000, '下一轮时间够：最后顺手问一次', { sync: bare28(s0), st: kv28('st:sub') });
+  wipe28();
+}
+
+/* ── 复查 4a：顺手问要给这一轮留 4 个子请求（剩的不到 5 个就不问）：这一轮用到 38–41 个（还没撞上 42）时不问 ── */
+{
+  reset26(); W.caps = ['sub', 'batch']; flow28();
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {}, tvSub: 'ram2' };
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  const old = Date.now() - 7 * 3600e3;
+  stSet28('ram2', old);
+  /* 清洗一部电影 = 5 个子请求 + 列子文件夹（第二层最多 12 个、第三层最多 12 个）：29 + 11 = 40 */
+  const deep = (tag, k, m) => {
+    const root = 'stbud' + tag, F = (id, name, parent, kind = 'drive#folder', size = '0') =>
+      W.files.set(id, { id, name, kind, parent_id: parent, size, phase: 'PHASE_TYPE_COMPLETE', trashed: false });
+    F(root, 'StBud.' + tag + '.2020.1080p', 'AUTO');
+    F(root + 'v', 'StBud.' + tag + '.2020.1080p.mkv', root, 'drive#file', '5000000000');
+    for (let i = 0; i < k; i++) F(root + 'a' + i, 'd' + i, root);
+    for (let j = 0; j < m; j++) F(root + 'b' + j, 'e' + j, root + 'a' + (j % k));
+    return root;
+  };
+  [['A', 12, 12], ['B', 6, 0]].forEach(([tag, k, m2], i) => env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next)
+    VALUES ('movie', ?, 0, 'bud', '["alice"]', 'clean', '', ?, 1, 1, 1, 0)`).run(9866 + i, JSON.stringify({ file: deep(tag, k, m2), cur: { tid: 1, t: 'x' }, tried: [] })));
+  const s0 = W.sync.length;
+  stW = 0;
+  await tick();
+  const l = lastTick();
+  ok(l.done === 2 && l.fetches >= 38 && l.fetches <= 41 && !l.over && bare28(s0).length === 0 && stW === 0 && kv28('st:sub').at === old,
+     '复查：这一轮用了 38–41 个子请求（还没用完）：最后不顺手问片库，留给正事', { l, sync: bare28(s0), st: kv28('st:sub') });
+  wipe28();
+  await tick();
+  ok(bare28(s0).length === 1 && kv28('st:sub').at > old, '下一轮子请求够：最后顺手问一次', { sync: bare28(s0), st: kv28('st:sub'), l: lastTick() });
+}
+
+/* ── 复查 4b：一次调用最多顺手问一次。片库回 403、st:try 又写失败（D1 出错）：这一轮两季剧集推之前、一轮最后，一共只问一次 ── */
+{
+  reset26(); W.caps = ['sub', 'batch']; flow28();
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {}, tvSub: 'ram2' };
+  stDel28();
+  show28(9864, 74); show28(9865, 75);
+  const x = insTv28('queued', { dup: 0 }, 9864), y = insTv28('queued', { dup: 0 }, 9865);
+  const h = stHook28(403, { error: 'bad key' });
+  stTryFail = true; stTryW = 0;
+  const p0 = W.push.length;
+  await tick();
+  stTryFail = false; W.hook = null;
+  const px = W.push.slice(p0);
+  ok(px.length === 2 && px.every(p => p.parent === 'AUTO') && h.asks === 1 && stTryW === 1 && !kv28('st:try') && !kv28('st:sub') &&
+     row27(x).stage === 'download' && row27(y).stage === 'download',
+     '复查：片库回 403（st:try 也没写成），两季剧集推之前、一轮最后一共只顺手问一次；不知道 → 都推进 /auto', { asks: h.asks, px, stTryW, tr: kv28('st:try') });
+  wipe28();
+}
+
+/* ── 复查 5：片库说 '' 记下为什么（old 老版本 / off 关了 AUTO_FOLDER / flat 没开剧集区），面板照实写，不再一律写「老版本」 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  stDel28();
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {}, tvSub: '' };          // v25.4 起、AUTO_TV_SUB=off：明说 ''
+  stW = 0;
+  const [, l1] = await call('POST', '/admin/api/links', { admin: true, body: {} });
+  const [, s1] = await call('GET', '/admin/api/state', { admin: true });
+  ok(l1.stream.tvSub === '' && l1.stream.tvWhy === 'flat' && kv28('st:sub').why === 'flat' && s1.caps.stream === '' && s1.caps.stWhy === 'flat' && s1.caps.sub === '',
+     '复查：片库明说 \'\'（没开剧集区）：记 why: flat，面板拿得到', { stream: l1.stream, st: kv28('st:sub'), caps: s1.caps });
+  W.lib.mode = 'off';
+  const [, l2] = await call('POST', '/admin/api/links', { admin: true, body: {} });
+  ok(l2.stream.off && l2.stream.tvWhy === 'off' && kv28('st:sub').why === 'off', '复查：片库关了 AUTO_FOLDER：记 why: off', { stream: l2.stream, st: kv28('st:sub') });
+  W.lib.mode = 'on'; delete W.lib.tvSub;
+  const [, l3] = await call('POST', '/admin/api/links', { admin: true, body: {} });
+  ok(l3.stream.tvWhy === 'old' && kv28('st:sub').why === 'old', '复查：回包没有 tvSub：老版本（why: old）', { stream: l3.stream, st: kv28('st:sub') });
+  W.lib.mode = 404;
+  const [, l4] = await call('POST', '/admin/api/links', { admin: true, body: {} });
+  ok(l4.stream.tvWhy === 'old' && kv28('st:sub').why === 'old' && stW === 3, '很老的（404）也是老版本；why 变了才写（flat → off → old 三次，404 和上一次一样不写）', { stream: l4.stream, stW });
+  W.lib.mode = 'on'; W.lib.tvSub = 'ram2';
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  ok(kv28('st:sub').sub === 'ram2' && kv28('st:sub').why === undefined, '片库认 ram2：不带 why', kv28('st:sub'));
+  /* 面板上的 stLine 照实写 */
+  const html = (await call('GET', '/'))[1];
+  const i = html.indexOf('function stLine('), j = html.indexOf('\nfunction ', i + 1);
+  const stLine = new Function('esc', html.slice(i, j) + '\nreturn stLine;')(v => String(v));
+  const lOld = stLine('ram2', '', 'old'), lOff = stLine('ram2', '', 'off'), lFlat = stLine('ram2', '', 'flat');
+  ok(lOld.includes('片库是老版本') && !lOff.includes('老版本') && lOff.includes('AUTO_FOLDER') && !lFlat.includes('老版本') && lFlat.includes('没开剧集区') &&
+     [lOld, lOff, lFlat].every(t => t.includes('剧集先放 /auto')) && stLine('ram2', 'ram2', '').includes('片库认得 /auto/ram2') && !stLine('ram2', '', '').includes('老版本'),
+     '复查：面板按 why 写（老版本 / 没开 /auto / 没开剧集区），不再一律写「老版本」', { lOld, lOff, lFlat });
+  stDel28();
+}
+env.DB.prepare = prepSt;
 
 /* ── 2.8 /app/catalog 带 year、没明说 min：min = 0（一年的清单要全部，不是评分 6 分以上的那一小撮）；明说了照旧，不带 year 照旧 6 ── */
 {
