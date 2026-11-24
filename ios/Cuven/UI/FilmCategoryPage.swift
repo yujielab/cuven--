@@ -7,8 +7,9 @@ import UIKit
 // 并且使用 3 个可滑动卡片（参考图片，3 个卡片中的图片我等等提供）替换 3D 卡片区」。四页：可立即播放 / 可申请 × 电影 / 剧集。
 // · 版式和专区（CollectionPage）一样：页顶一片从排在最前那部取的主色、往下沉到黑；大号粗体标题 + 一句灰字，滚过大标题才接到导航栏里；
 //   下面一列同一张大卡（CollectionCard），折起一列、宽的屏一行两张 / 三张（CollectionScaffold、CollectionGrid、CollectionHeader 都是共用的）
-// · 专区顶上那一扇立体海报换成三张横滑的大卡（参考图：Apple TV App 那一排 4 : 5 的大圆角卡）：手机上一张约占八成宽、下一张露出一截，
-//   停在左边线上；宽的屏三张都放得下。用户的图还没到：先用这一页排在最前那三部的画面（点了进那一部），怎么加图见 CategoryCardRow
+// · 专区顶上那一扇立体海报换成三张横滑的大卡（参考图：Apple TV App 那一排大圆角卡，用户给的图是 3 : 4）：手机上一张约占八成宽、
+//   下一张露出一截，停在左边线上；宽的屏三张都放得下。卡上是用户给的三张图（网上的，见 CategoryCardRemote），取不到才用这一页
+//   排在最前那三部的画面（点了进那一部），怎么换图见 CategoryCardRow
 // · 可立即播放：片库里的全部电影 / 全部剧集（一部剧一张卡），新的年份在前、同一年最新入库的在前（AppModel.playableEntries，按片库缓存）
 // · 可申请：影片库索引里有、片库里没有的全部（不分年份，新的在前），滑到底接着取下一页；取的时候出骨架卡，没问成给「重试」。
 //   卡上右边那颗是请求的状态（和全部影片可申请那排同一条规矩：CatalogRequestState），长按电影可以放进请求中心
@@ -62,8 +63,8 @@ private struct PlayableCategoryPage: View {
         }
     }
 
-    /// 顶上三张卡的画面（用户的图还没到时）：排在最前那三部的竖版画面，点了进那一部。
-    /// 竖版的裁得最少（4 : 5 的卡竖着裁，横的剧照只剩中间一截、还要放大），用户的图到之前可立即播放、可申请两边一个样：
+    /// 顶上三张卡的画面（用户的图取不到时）：排在最前那三部的竖版画面，点了进那一部。
+    /// 竖版的裁得最少（3 : 4 的卡竖着裁，横的剧照只剩中间一截、还要放大），可立即播放、可申请两边一个样：
     /// 电影 Apple TV 竖版主视觉 → TMDB 纯净海报 → 海报 → 剧照；剧集纯净海报 → 海报（中文剧常常没有纯净的）→ 剧照（大一号）
     private func headerArts(_ head: [HomeEntry]) -> [CategoryCardArt] {
         head.map { (e: HomeEntry) -> CategoryCardArt in
@@ -216,8 +217,8 @@ private struct RequestableCategoryHeader: View {
                        lead: TMDBImage.url(head.first?.poster, "w500"), metrics: metrics)
     }
 
-    /// 顶上一张卡的画面（用户的图还没到时），点了进它的详情（请求添加）。和可立即播放那边一样竖版的先：
-    /// 索引里本来就有的海报（马上出来，剧照到了也不换一张、不跳）；没有海报才用剧照（4 : 5 竖着裁只剩中间一截，要原图才不糊）
+    /// 顶上一张卡的画面（用户的图取不到时），点了进它的详情（请求添加）。和可立即播放那边一样竖版的先：
+    /// 索引里本来就有的海报（马上出来，剧照到了也不换一张、不跳）；没有海报才用剧照（3 : 4 竖着裁只剩中间一截，要原图才不糊）
     static func art(_ it: CatalogItem) -> CategoryCardArt {
         let url = TMDBImage.url(it.poster, "w780") ?? TMDBImage.url(CatalogArt.shared.art(it)?.backdrop, "original")
         return CategoryCardArt(url: url, route: .catalog(it.catalogTitle), label: it.title)
@@ -260,12 +261,34 @@ private struct SkeletonCollectionCard: View {
 
 // MARK: - 头：三张横滑的大卡 + 大标题 + 一句说明
 
-/// 顶上一张卡在用户的图还没到时用的画面：这一页排在第几的那一部（点了进它）
+/// 顶上一张卡在用户的图取不到时用的画面：这一页排在第几的那一部（点了进它）
 private struct CategoryCardArt {
     let url: URL?
     let route: Route?
     /// 旁白念的：那一部的片名
     let label: String
+}
+
+/// 顶上三张卡的图：用户给的（「图片就绪了」），四页共用一套，从左到右。传在 data.cuven.us/logo/<名字>.png，
+/// 走 App 的图片管线（内存 + 磁盘缓存）。要换图：把新图传上去、改下面的地址（顺序就是从左到右，label 是旁白念的）；
+/// 新图也要 3 : 4，四周的白边别超过宽的 2.8%（放大 zoom 裁掉的就这么多），不带白边的也行
+private struct CategoryCardRemote {
+    let url: URL?
+    let label: String
+
+    static let all: [CategoryCardRemote] = [
+        // 浅灰底：MLS | Cuven max
+        CategoryCardRemote(url: URL(string: "https://data.cuven.us/logo/764B6BC6-EF80-45E1-9CF6-7EB59F57294E.png"), label: "MLS"),
+        // 深青底：Cuven Max · Friday Night Baseball
+        CategoryCardRemote(url: URL(string: "https://data.cuven.us/logo/AA1583FB-1610-49F9-9475-D2801C8681BD.png"),
+                           label: "Friday Night Baseball"),
+        // 红底：F1 | Cuven max
+        CategoryCardRemote(url: URL(string: "https://data.cuven.us/logo/33B0C220-FFC8-49B8-856B-0174DC1C428D.png"), label: "F1"),
+    ]
+
+    /// 用户的图是画在白底上的一张卡（四周约 1.4–2.3% 的白边，自己的圆角约宽的 8–10%）：
+    /// 铺满以后绕中心放大 6%、再按卡宽 11% 的大圆角裁（CategoryCardFace），白边、白角都落在外面
+    static let zoom: CGFloat = 1.06
 }
 
 /// 分类页的头：专区的立体海报换成三张横滑的大卡（用户要求），底色、大标题、说明和专区同一套（CollectionHeader）
@@ -291,28 +314,33 @@ private struct CategoryHeader: View {
     }
 }
 
-/// 顶上三张横滑的大卡（照用户给的参考图：Apple TV App 那一排 4 : 5、大圆角、整张是图的卡；第一张停在左边线上，下一张露出一截）。
+/// 顶上三张横滑的大卡（照用户给的参考图：Apple TV App 那一排大圆角、整张是图的卡，3 : 4（用户给的图就是这个比例）；
+/// 第一张停在左边线上，下一张露出一截）。
 ///
-/// 卡上的图（用户说「3 个卡片中的图片我等等提供」）——加图不用改代码：在 ios/Cuven/Resources/Assets.xcassets 里新建三个
-/// 图片集（Image Set），按下面的名字命名，把图拖进去：
-/// · 四页共用一套：CategoryCard1、CategoryCard2、CategoryCard3（从左到右）；
-/// · 某一页要自己的一套：CategoryCard-<页>-1、-2、-3，<页> 是 playableMovie（可立即播放 · 电影）、playableSeries（可立即播放 · 剧集）、
-///   requestableMovie（可申请 · 电影）、requestableSeries（可申请 · 剧集），例如 CategoryCard-playableMovie-1。这一页自己的优先，没有再用共用的。
-/// 图铺满卡、按 4 : 5 居中裁（多出来的裁掉），给 1200 × 1500 像素左右就清楚。
-/// 哪一张两样都没有：先用这一页排在第几的那一部的画面，点了进那一部；用户的图点了先不做什么（用户还没说点了去哪）
+/// 卡上的图，按这个顺序找，前面有的就用前面的：
+/// 1. 本机资产（以后想换成打包进 App 的图，不用改代码）：在 ios/Cuven/Resources/Assets.xcassets 里新建图片集（Image Set）：
+///    · 四页共用一套：CategoryCard1、CategoryCard2、CategoryCard3（从左到右）；
+///    · 某一页要自己的一套：CategoryCard-<页>-1、-2、-3，<页> 是 playableMovie（可立即播放 · 电影）、playableSeries（可立即播放 · 剧集）、
+///      requestableMovie（可申请 · 电影）、requestableSeries（可申请 · 剧集），例如 CategoryCard-playableMovie-1。这一页自己的优先，没有再用共用的。
+///    图铺满卡、按 3 : 4 居中裁（多出来的裁掉；不放大，要不带白边的图），给 1200 × 1600 像素左右就清楚。
+/// 2. 用户给的三张图（网上的，CategoryCardRemote）：现在用的就是它们。
+/// 3. 那张图取不到（地址失效、没网）：这一页排在第几的那一部的画面，点了进那一部。
+/// 用户的图点了先不做什么（用户还没说点了去哪）
 private struct CategoryCardRow: View {
     let category: FilmCategory
     let arts: [CategoryCardArt]
     let metrics: DSMetrics
+    /// 用户的图取不到的那几张（第几张）：换回那一部的画面。离开这一页再进来重试
+    @State private var failed: Set<Int> = []
 
-    /// 一张卡多大（4 : 5）：手机上约屏宽的 78%，下一张露出一截（参考图）；宽的屏三张一行放得下。
+    /// 一张卡多大（3 : 4）：手机上约屏宽的 78%，下一张露出一截（参考图）；宽的屏三张一行放得下。
     /// 卡高不过屏高的 56%（宽的屏 50%）：横拿、展开横拿那种矮的屏，一屏还看得到大标题
     static func cardSize(_ m: DSMetrics) -> CGSize {
         var w: CGFloat = m.wide
             ? ((m.width - m.margin * 2 - m.gutter * 2) / 3).rounded(.down)
             : (m.width * 0.78).rounded(.down)
-        if m.height > 0 { w = min(w, max(180, (m.height * (m.wide ? 0.5 : 0.56) / 1.25).rounded(.down))) }
-        return CGSize(width: w, height: (w * 1.25).rounded())
+        if m.height > 0 { w = min(w, max(180, (m.height * (m.wide ? 0.5 : 0.56) * 0.75).rounded(.down))) }
+        return CGSize(width: w, height: (w * 4 / 3).rounded())
     }
 
     /// 这一排占的高：卡高 + 上下各 4 点（按下去时略缩的那一点空）
@@ -339,11 +367,19 @@ private struct CategoryCardRow: View {
     @ViewBuilder
     private func card(_ i: Int, size: CGSize) -> some View {
         let art: CategoryCardArt? = i < arts.count ? arts[i] : nil
+        let remote: CategoryCardRemote? = i < CategoryCardRemote.all.count ? CategoryCardRemote.all[i] : nil
         if let image = Self.userImage(category, i + 1) {
             // 三张都是用户的图：旁白念第几张（不然三张念得一模一样）
             CategoryCardFace(image: image, url: nil, size: size)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("\(category.title)，第 \(i + 1) 张，共 3 张")
+                .accessibilityAddTraits(.isImage)
+                .accessibilityIdentifier("category-header-card")
+        } else if let remote, let url = remote.url, !failed.contains(i) {
+            // 用户给的图：一张静态的图，旁白念图上是什么；点了不做什么（不包 ZoomLink）
+            CategoryCardFace(image: nil, url: nil, size: size, remote: url, onRemoteFail: { _ = failed.insert(i) })
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(remote.label)
                 .accessibilityAddTraits(.isImage)
                 .accessibilityIdentifier("category-header-card")
         } else if let art, let route = art.route {
@@ -374,15 +410,18 @@ private struct CategoryCardRow: View {
     @MainActor private static var userImages: [String: UIImage?] = [:]
 }
 
-/// 一张卡：整张是图（铺满、居中裁），连续曲率的大圆角、一圈细边（参考图）
+/// 一张卡：整张是图（铺满、居中裁），连续曲率的大圆角、一圈细边（参考图）。还没取到时是一块同样形状的暗色占位（不闪白）
 private struct CategoryCardFace: View {
     let image: UIImage?
     let url: URL?
     let size: CGSize
+    /// 用户给的图（CategoryCardRemote）：放大 zoom 再裁，白边不露出来；取不到时叫 onRemoteFail，外面换回那一部的画面
+    var remote: URL? = nil
+    var onRemoteFail: () -> Void = {}
 
     var body: some View {
-        // 圆角约卡宽的 8%（参考图那种大圆角），24–34 点
-        let shape = RoundedRectangle(cornerRadius: min(34, max(24, (size.width * 0.08).rounded())), style: .continuous)
+        // 圆角约卡宽的 11%：用户的图自己带约 8–10% 的圆角，裁得比它圆一点才不露白角（宽的屏卡大，不封顶）；一排三张同一个圆角
+        let shape = RoundedRectangle(cornerRadius: (size.width * 0.11).rounded(), style: .continuous)
         ZStack {
             DSFill.placeholder
             if let image {
@@ -390,6 +429,13 @@ private struct CategoryCardFace: View {
                     .resizable()
                     .scaledToFill()
                     .frame(width: size.width, height: size.height)
+            } else if let remote {
+                // 图的最长边是高：按卡高（再放大的那一截）取，3 倍屏下也清楚
+                CategoryCardRemoteImage(url: remote, maxPixel: (size.height * 3 * CategoryCardRemote.zoom).rounded(),
+                                        onFail: onRemoteFail)
+                    .id(remote)
+                    .frame(width: size.width, height: size.height)
+                    .scaleEffect(CategoryCardRemote.zoom)
             } else {
                 RemoteImage(url: url, maxPixel: size.width * 3, placeholder: .clear)
                     .frame(width: size.width, height: size.height)
@@ -399,6 +445,56 @@ private struct CategoryCardFace: View {
         .clipShape(shape)
         .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
         .contentShape(shape)
+    }
+}
+
+/// 用户给的一张卡图：走 App 的图片管线（ImagePipeline：内存 + 磁盘缓存、按显示尺寸解码）。不用 RemoteImage：
+/// 它从模糊里淡入，会把图四周那圈白边糊进卡里（淡入那一下卡边泛白），也不告诉外面取没取到——这里只淡入，取不到叫 onFail
+private struct CategoryCardRemoteImage: View {
+    let url: URL
+    let maxPixel: CGFloat
+    let onFail: () -> Void
+
+    @State private var image: UIImage?
+    /// 手里这张按多大取的（转屏、分屏后卡变大了换更清楚的，原地换、不再淡入）
+    @State private var loadedPixel: CGFloat = 0
+
+    init(url: URL, maxPixel: CGFloat, onFail: @escaping () -> Void) {
+        self.url = url
+        self.maxPixel = maxPixel
+        self.onFail = onFail
+        // 内存里已经有（再打开这一页、换一页分类）：第一帧就是它，不闪占位
+        let hit = maxPixel < RemoteImage.minPixel ? nil : ImagePipeline.shared.cached(url, maxPixel: maxPixel)
+        _image = State(initialValue: hit)
+        _loadedPixel = State(initialValue: hit == nil ? 0 : maxPixel)
+    }
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .transition(.opacity)
+            }
+        }
+        .task(id: maxPixel.isFinite ? Int(maxPixel) : 0) {
+            guard maxPixel.isFinite, maxPixel >= RemoteImage.minPixel else { return }
+            let had = image != nil
+            if had, loadedPixel >= maxPixel * 0.8 { return }
+            let img = await ImagePipeline.shared.image(url, maxPixel: maxPixel)
+            guard !Task.isCancelled else { return }
+            if let img {
+                if had {
+                    image = img
+                } else {
+                    withAnimation(.easeOut(duration: 0.32)) { image = img }
+                }
+                loadedPixel = maxPixel
+            } else if !had {
+                onFail()
+            }
+        }
     }
 }
 

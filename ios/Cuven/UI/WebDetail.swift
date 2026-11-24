@@ -751,49 +751,23 @@ struct DetailScaffold<Episodes: View>: View {
                 withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.42, dampingFraction: 0.86)) { showTitle = v }
             }
             // 字标粒子转场的进度（用户要求：跟着滚动走，停下就停在这一帧，往回滚原路倒回去）：
-            // 0 = 没滚（字标在头部原位），1 = 滚到以前钉住那条出现的位置（字标已经落进条里）
+            // 0 = 没滚（字标在头部原位），1 = 滚到以前钉住那条出现的位置（字标已经落进条里）。
+            // 页面短、滚不到那么远时，就在滚到底的地方落定：粒子不会停在半路上
             .onScrollGeometryChange(for: Double.self) { g in
-                Double(min(1, max(0, (g.contentOffset.y + g.contentInsets.top) / max(1, pinAt))))
+                let d = g.contentOffset.y + g.contentInsets.top
+                let reach = g.contentSize.height + g.contentInsets.top + g.contentInsets.bottom - g.containerSize.height
+                let range = max(1, reach > 120 ? min(pinAt, reach) : pinAt)
+                return Double(min(1, max(0, d / range)))
             } action: { _, v in
                 motion.setProgress(v)
             }
             // 钉在顶上的条：从上面滑下来（参考图的「取得」那一条）；片名在这条里，导航栏里不再写
             .overlay(alignment: .top) {
-                if let logoImage, let heroLogo {
-                    // 有字标（用户要求）：条不再整条滑下来，底色、字标、「继续播放」都跟着滚动进度走；字标那一格是头部字标的 42%
-                    let slot = CGSize(width: heroLogo.width * 0.42, height: heroLogo.height * 0.42)
-                    DetailLogoBarHost(motion: motion) { p in
-                        DetailPinnedBar(title: title, thumb: thumb, logo: logoURL,
-                                        playTitle: playTitle, playDisabled: playDisabled, palette: palette,
-                                        topInset: barBottom, leading: insets.leading + m.margin, trailing: insets.trailing + m.margin,
-                                        onPlay: onPlay, logoImage: logoImage, logoSlot: slot, progress: p,
-                                        onLogoSlot: { r in if motion.slot != r { motion.slot = r } })
-                    }
-                    .allowsHitTesting(showTitle)
-                    .accessibilityHidden(!showTitle)
-                    .ignoresSafeArea(edges: [.top, .horizontal])
-                } else {
-                    DetailPinnedBar(title: title, thumb: thumb, logo: logoURL,
-                                    playTitle: playTitle, playDisabled: playDisabled, palette: palette,
-                                    topInset: barBottom, leading: insets.leading + m.margin, trailing: insets.trailing + m.margin,
-                                    onPlay: onPlay)
-                        // 「减弱动态效果」时只淡入淡出、不从上面滑下来（F59；以前只换了曲线，照样滑 100 多点）
-                        .offset(y: showTitle || reduceMotion ? 0 : -(barBottom + 90))
-                        .opacity(showTitle ? 1 : 0)
-                        .allowsHitTesting(showTitle)
-                        .accessibilityHidden(!showTitle)
-                        .ignoresSafeArea(edges: [.top, .horizontal])
-                }
+                pinnedBar(m, insets: insets, barBottom: barBottom, palette: palette, heroLogo: heroLogo)
             }
-            // 粒子层盖在整页和顶上那条上面（用户要求：字标化成细粒子，沿一条往右鼓的弧线飞进左上角再拼好）；
-            // 不接手势、旁白不念；「减弱动态效果」时不放粒子，两枚字标交叉淡入淡出
+            // 粒子层盖在整页和顶上那条上面（用户要求：字标化成细粒子，沿一条往右鼓的弧线飞进左上角再拼好）
             .overlay {
-                if let logoImage, let heroLogo, !reduceMotion {
-                    DetailLogoParticleLayer(motion: motion, image: logoImage, heroSize: heroLogo)
-                        .ignoresSafeArea()
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                }
+                particleLayer(heroLogo)
             }
         }
         .background(DetailPalette.from(edge).deep)
@@ -827,6 +801,45 @@ struct DetailScaffold<Episodes: View>: View {
     private var stillShown: [String] { Array(stills.prefix(12)) }
 
     private var hasOverview: Bool { !(overview ?? "").isEmpty }
+
+    /// 钉在顶上的那一条。有字标（用户要求）：条不再整条滑下来，底色、字标、「继续播放」都跟着滚动进度走，
+    /// 字标那一格是头部字标的 42%（同比例、同左边距）；没有字标（或字标图还没到手）和以前一样从上面滑下来
+    @ViewBuilder
+    private func pinnedBar(_ m: DSMetrics, insets: EdgeInsets, barBottom: CGFloat, palette: DetailPalette, heroLogo: CGSize?) -> some View {
+        if let logoImage, let heroLogo {
+            let slot = CGSize(width: heroLogo.width * 0.42, height: heroLogo.height * 0.42)
+            DetailLogoBarHost(motion: motion) { p in
+                DetailPinnedBar(title: title, thumb: thumb, logo: logoURL,
+                                playTitle: playTitle, playDisabled: playDisabled, palette: palette,
+                                topInset: barBottom, leading: insets.leading + m.margin, trailing: insets.trailing + m.margin,
+                                onPlay: onPlay, logoImage: logoImage, logoSlot: slot, progress: p,
+                                onLogoSlot: { r in if motion.slot != r { motion.slot = r } })
+            }
+            .ignoresSafeArea(edges: [.top, .horizontal])
+        } else {
+            DetailPinnedBar(title: title, thumb: thumb, logo: logoURL,
+                            playTitle: playTitle, playDisabled: playDisabled, palette: palette,
+                            topInset: barBottom, leading: insets.leading + m.margin, trailing: insets.trailing + m.margin,
+                            onPlay: onPlay)
+                // 「减弱动态效果」时只淡入淡出、不从上面滑下来（F59；以前只换了曲线，照样滑 100 多点）
+                .offset(y: showTitle || reduceMotion ? 0 : -(barBottom + 90))
+                .opacity(showTitle ? 1 : 0)
+                .allowsHitTesting(showTitle)
+                .accessibilityHidden(!showTitle)
+                .ignoresSafeArea(edges: [.top, .horizontal])
+        }
+    }
+
+    /// 字标的粒子层：铺满整个窗口，不接手势、旁白不念；「减弱动态效果」时不放粒子（两枚字标交叉淡入淡出），没有字标就没有这一层
+    @ViewBuilder
+    private func particleLayer(_ heroLogo: CGSize?) -> some View {
+        if let logoImage, let heroLogo, !reduceMotion {
+            DetailLogoParticleLayer(motion: motion, image: logoImage, heroSize: heroLogo)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
 
     /// 这一页的字标地址（头部、条里、粒子层都是这一张）；没有字标是 nil
     private var logoURL: URL? { art?.logo.flatMap { $0.isEmpty ? nil : TMDBImage.url($0, "w500") } }
@@ -1145,7 +1158,11 @@ private struct DetailLogoBarHost: View {
     let bar: (Double) -> DetailPinnedBar
 
     var body: some View {
-        bar(motion.progress)
+        let p = motion.progress
+        bar(p)
+            // 字标落定、「继续播放」出齐了才接手势、旁白才念这一条（没有字标时是看钉住那条有没有出来）
+            .allowsHitTesting(p >= 1)
+            .accessibilityHidden(p < 1)
     }
 }
 
