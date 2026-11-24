@@ -542,14 +542,17 @@ struct CatalogPosterLink: View {
     let slot: String
 
     var body: some View {
-        let st = RequestStore.shared.anyStatus(src: item.src, id: item.id) ?? item.req
-        let queued = st == nil && RequestBasket.shared.containsAny(src: item.src, id: item.id)
+        // 取消了的当没有；放进了请求中心的，上一次没能添加 / 取消了也写「已加入」（和「全部影片 › 可申请」的横卡一样）
+        let raw = RequestStore.shared.anyStatus(src: item.src, id: item.id) ?? item.req
+        let st = raw?.state == .cancelled ? nil : raw
+        let queued = RequestBasket.shared.containsAny(src: item.src, id: item.id)
+        let showStatus = st.map { $0.state == .done || $0.state == .active || !queued } ?? false
         ZoomLink(route: .catalog(item.catalogTitle), slot: slot) {
             DSPosterLockup(art: TMDBImage.url(item.poster, "w342"), title: item.title,
                            subtitle: [item.src == "tv" ? "剧集" : "电影", item.year].filter { !$0.isEmpty }.joined(separator: "，"),
                            metrics: metrics)
                 .overlay(alignment: .bottomLeading) {
-                    if let st { badge(st).padding(8) } else if queued { pill("已加入", color: .white).padding(8) }
+                    if let st, showStatus { badge(st).padding(8) } else if queued { pill("已加入", color: .white).padding(8) }
                 }
         }
         .accessibilityIdentifier("catalog-card")

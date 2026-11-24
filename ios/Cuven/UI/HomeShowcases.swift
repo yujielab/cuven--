@@ -542,19 +542,45 @@ struct YearTrailerCard: View {
     var badge: YearCardBadge? = nil
     /// 剧照底边一道细进度（请求进行中）
     var progress: Double? = nil
+    /// 剧照已经整张盖住了（取到了、淡入也走完了）：底下那张糊的海报拿掉——
+    /// 它在不透明的剧照底下看不见，留着的话滑动时每张卡每帧都要再糊一遍（可申请那几排一屏十几张）
+    @State private var stillCovered: Bool
+
+    init(still: URL?, cover: URL?, logo: URL?, title: String, subtitle: String, width: CGFloat,
+         fallback: URL? = nil, badge: YearCardBadge? = nil, progress: Double? = nil) {
+        self.still = still
+        self.cover = cover
+        self.logo = logo
+        self.title = title
+        self.subtitle = subtitle
+        self.width = width
+        self.fallback = fallback
+        self.badge = badge
+        self.progress = progress
+        // 剧照内存里就有：下面的 RemoteImage 第一次画就是它（不淡入），一开始就不用垫、也不去取那张海报
+        let hit = still.flatMap { ImagePipeline.shared.cached($0, maxPixel: width * 3) }
+        _stillCovered = State(initialValue: hit != nil)
+    }
 
     var body: some View {
         let h = (width * 9 / 16).rounded()
         // 设计轮 2：圆角取 DSRadius.card（和上面继续观看那排一样宽的卡一样圆；以前 6%、16–24）
         let shape = RoundedRectangle(cornerRadius: DSRadius.card(width), style: .continuous)
-        // 窄于 300 点（展开竖拿一屏两张多）：小海报、间距、「查看」都收一点，片名还能放七八个字
+        // 窄于 300 点：小海报、间距、「查看」都收一点。不只展开竖拿（最窄 270）：折起时卡宽跟着窗口走，
+        // iPhone 竖拿约 245–293，500–600 宽的分屏窗口一排两张多，一张只有 200–245
         let compact = width < 300
+        // 字标的宽是定死的（LogoImage 按比例给了固定宽，外面那层 maxWidth: .infinity 窄不过它），是这一行挤不动的那一截。
+        // 按小海报、三道间距、Spacer 最短那一截之外剩下的宽收：有状态胶囊时给字标约四成（「已请求 42%」放得下），
+        // 只有「查看」时约五成半（200 出头的卡上「查看」也不出卡）；宽的卡上照旧最宽 120
+        let rowFixed: CGFloat = compact ? 76 : 92
+        let logoShare: CGFloat = badge != nil ? 0.4 : 0.55
+        let logoMax = min(120, max(40, ((width - rowFixed) * logoShare).rounded()))
         VStack(alignment: .leading, spacing: 10) {
             ZStack {
                 DSFill.placeholder
-                // 剧照地址到了也一直垫着：剧照那张的占位是透明的，地址一到就拿掉会先露灰底、再淡入剧照（糊 → 灰 → 剧照闪一下）；
-                // 剧照不透明，载好后整个盖住它，取不到时也还有这张糊的
-                if let fallback {
+                // 剧照地址到了也先垫着：剧照那张的占位是透明的，地址一到就拿掉会先露灰底、再淡入剧照（糊 → 灰 → 剧照闪一下）；
+                // 剧照不透明，淡入走完（stillCovered）才拿掉，取不到时一直是这张糊的
+                if let fallback, !stillCovered {
                     RemoteImage(url: fallback, maxPixel: 120, placeholder: .clear)
                         .frame(width: width, height: h)
                         .blur(radius: 22, opaque: true)
@@ -580,7 +606,7 @@ struct YearTrailerCard: View {
                 DSThumb(url: cover, width: compact ? 40 : 48)
                 VStack(alignment: .leading, spacing: 3) {
                     if logo != nil {
-                        LogoImage(url: logo, height: 18, alignment: .leading, maxWidth: 120)
+                        LogoImage(url: logo, height: 18, alignment: .leading, maxWidth: logoMax)
                     }
                     Text(title)
                         .font(.headline)
@@ -601,10 +627,22 @@ struct YearTrailerCard: View {
                 }
             }
             // 换成请求状态的胶囊（「已请求 42%」）比「查看」长得多，特大字号时连小海报一起比卡还宽、冲到旁边那张上：
-            // 有状态时字号最大到 xxLarge（和精选卡一样封顶）；只有「查看」的卡上限放到最大，和以前一样
+            // 有状态时字号最大到 xxLarge（和精选卡一样封顶）；只有「查看」的卡上限放到最大，和以前一样。
+            // 光封顶不够（200 出头的窄卡、宽字标，默认字号也放不下）：字标按卡宽收（logoMax），胶囊放不下时字缩一点（YearCardBadge）
             .dynamicTypeSize(...(badge != nil ? DynamicTypeSize.xxLarge : DynamicTypeSize.accessibility5))
         }
         .frame(width: width, alignment: .leading)
+        // 剧照取到以后等它淡入（0.32 秒）走完，再把底下那张糊的拿掉：半透明的时候底下不露灰。
+        // 和上面那张剧照同一个地址、同一个尺寸：ImagePipeline 里是同一次下载（或内存里现成的），不多取
+        .task(id: still) {
+            guard fallback != nil, let still,
+                  await ImagePipeline.shared.image(still, maxPixel: width * 3) != nil else { return }
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            stillCovered = true
+        }
+        // 换了一张剧照（剧照那张会先清空再淡入）：先垫回去
+        .onChange(of: still) { stillCovered = false }
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         // 灰字可能是「2024 · ★ 7.2」：走 DetailText.spoken，念「评分 7.2」，不念「黑星」「间隔号」
@@ -625,11 +663,14 @@ struct YearCardBadge: Equatable {
             .monospacedDigit()
             .foregroundStyle(tone == .accent ? Theme.accent : tone == .alert ? Color(red: 1.0, green: 0.27, blue: 0.23) : Color.white)
             .lineLimit(1)
+            // 这一行实在放不下（窄窗口里 200 出头的卡、特大字号）：字缩一点，不再把整行撑得比卡还宽
+            .minimumScaleFactor(0.6)
             .padding(.horizontal, compact ? 12 : 16)
             .frame(minHeight: 32)
             .background(Capsule().fill(Color.white.opacity(0.12)))
-            .fixedSize()
-            // 宁可片名截断，状态不被挤扁（和「查看」同一条规矩）
+            // 只定高、不定宽：以前 .fixedSize() 连宽也定死，放不下时整行冲到旁边那张卡上
+            .fixedSize(horizontal: false, vertical: true)
+            // 宁可片名截断，状态不被挤扁（和「查看」同一条规矩）：排的时候先给它宽，放得下就是原来的大小，放不下才缩字
             .layoutPriority(1)
             .contentTransition(.numericText())
     }
