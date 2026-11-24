@@ -3,9 +3,11 @@ import SwiftUI
 // MARK: - 请求中心最上面那张卡：「Luminous Data Flow」（用户要求：影片进入传输时有动画效果和进度条；参照用户发来的录屏和设计说明）
 //
 // 近黑的卡（圆角 22、1 点细边），三层：
-// · 导航：全部 / 电影 / 剧集（选中那个下面一条细线滑过去），右边一颗会发光的小点 + 这张卡在说什么（「批量传输中」「传输流 · 24 小时」）
+// · 导航：全部 / 电影 / 剧集（选中那个下面一条细线滑过去）
 // · 数据：四段（已确认 → 已下载 → 已清洗 → 已入库）的数，下面一行灰的百分比（都是等宽数字，跳的时候不左右晃）；每一段正对着下面漏斗的那一段
-// · 可视化：一整块连续的发光漏斗（FlowFunnelCanvas，Metal），右边一个醒目的「入库率」；左下一颗小标签说落差最大的那一步
+// · 可视化：一整块连续的发光漏斗（FlowFunnelCanvas，Metal）；左下一颗小标签说落差最大的那一步
+// 数那一行和漏斗都占满卡里的整个宽度（用户要求：去掉右上角的发光小点 +「传输流 · 24 小时」和漏斗右边的「入库率 · 共 N 部」，
+// 让框起来的这块撑满整张卡）；入库率和「近 24 小时」改在读屏的 value 里念，批量到了哪一步看下面的进度条。
 // 批量传输时下面多一条发光的进度条（几部、多少 GB、速度、还要多久）；还在凑批时是一排 16 格的「凑批」进度。
 // 数字、百分比、漏斗形状、颜色、能量波都读 FlowFunnelEngine 的同一份插值状态：切分类、数据变了，整张卡一起平滑地变过去，
 // 不淡出重来；中途再切就从当时的样子接着走。减弱动态效果时：没有能量波，数直接到位。
@@ -28,7 +30,7 @@ struct RequestFlowCard: View {
     private var batch: RequestFlowInfo.Batch? { flow?.batch }
     private var transferring: Bool { batch?.stage == "copy" }
 
-    /// 宽屏（iPad、展开的 Duo）：漏斗高一点、右边的大数大一号
+    /// 宽屏（iPad、展开的 Duo）：漏斗高一点、四段的数大一号
     private var big: Bool { metrics.wide }
     private var funnelHeight: CGFloat { big ? 150 : 112 }
 
@@ -43,6 +45,7 @@ struct RequestFlowCard: View {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(accessibilitySummary)
+            .accessibilityValue(accessibilityRate)
             footer
         }
         .padding(big ? 20 : 16)
@@ -98,34 +101,13 @@ struct RequestFlowCard: View {
                 .accessibilityAddTraits(category == c ? .isSelected : [])
                 .accessibilityIdentifier("flow-tab-\(c.rawValue)")
             }
-            Spacer(minLength: 8)
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(accent)
-                    .frame(width: 6, height: 6)
-                    .shadow(color: accent.opacity(0.9), radius: 4)
-                Text(sourceLabel)
-                    .font(.caption)
-                    .foregroundStyle(Color.white.opacity(0.55))
-                    .lineLimit(1)
-            }
+            // 右上角那颗发光小点 +「传输流 · 24 小时」/「批量传输中」去掉了（用户要求：这一行只留分类）
         }
     }
 
     private var accent: Color {
         let p = category.palette.primary
         return Color(red: p.x, green: p.y, blue: p.z)
-    }
-
-    private var sourceLabel: String {
-        if let b = batch {
-            switch b.stage {
-            case "copy": return "批量传输中"
-            case "verify": return "两端核对中"
-            default: return "批量收尾中"
-            }
-        }
-        return "传输流 · 24 小时"
     }
 
     // MARK: 数据层 + 漏斗
@@ -138,61 +120,42 @@ struct RequestFlowCard: View {
         }
     }
 
+    /// 数一行 + 漏斗一块，左右都撑满卡里的整个宽度（用户要求：去掉右边那块「入库率 · 共 N 部」，让这两样占满整张卡）。
+    /// 四列等宽、漏斗也按宽度四等分（FlowFunnel.metal 里每段 0.25），两边同宽，所以每一列仍正对着下面漏斗的那一段
     private var dataAndFunnel: some View {
-        HStack(alignment: .bottom, spacing: big ? 22 : 12) {
-            VStack(alignment: .leading, spacing: big ? 12 : 10) {
-                live { s in
-                    let c = s.counts
-                    let top = max(c[0], 0.0001)
-                    HStack(alignment: .top, spacing: 0) {
-                        ForEach(0..<4, id: \.self) { i in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(RequestFlowStats.stageNames[i])
-                                    .font(.caption2)
-                                    .foregroundStyle(Color.white.opacity(0.5))
-                                Text("\(Int(c[i].rounded()))")
-                                    .font(.system(size: big ? 22 : 17, weight: .semibold))
-                                    .monospacedDigit()
-                                    .foregroundStyle(.white)
-                                Text(percent(c[0] > 0.5 ? c[i] / top : 0))
-                                    .font(.caption2)
-                                    .monospacedDigit()
-                                    .foregroundStyle(Color.white.opacity(0.38))
-                            }
-                            .padding(.leading, i == 0 ? 2 : 4)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                }
-                FlowFunnelCanvas(engine: engine, active: visible)
-                    .frame(height: funnelHeight)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .accessibilityHidden(true)
-            }
+        VStack(alignment: .leading, spacing: big ? 12 : 10) {
             live { s in
                 let c = s.counts
                 let top = max(c[0], 0.0001)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("入库率")
-                        .font(.caption)
-                        .foregroundStyle(Color.white.opacity(0.5))
-                    Text(percent(c[0] > 0.5 ? c[3] / top : 0))
-                        .font(.system(size: big ? 40 : 28, weight: .semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                    Text("共 \(Int(c[0].rounded())) 部")
-                        .font(.caption2)
-                        .monospacedDigit()
-                        .foregroundStyle(Color.white.opacity(0.4))
+                HStack(alignment: .top, spacing: 0) {
+                    ForEach(0..<4, id: \.self) { i in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(RequestFlowStats.stageNames[i])
+                                .font(.caption2)
+                                .foregroundStyle(Color.white.opacity(0.5))
+                            Text("\(Int(c[i].rounded()))")
+                                .font(.system(size: big ? 22 : 17, weight: .semibold))
+                                .monospacedDigit()
+                                .foregroundStyle(.white)
+                            Text(percent(c[0] > 0.5 ? c[i] / top : 0))
+                                .font(.caption2)
+                                .monospacedDigit()
+                                .foregroundStyle(Color.white.opacity(0.38))
+                        }
+                        .padding(.leading, i == 0 ? 2 : 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
             }
-            .frame(width: big ? 132 : 82, alignment: .leading)
-            .padding(.bottom, funnelHeight * 0.32)
+            FlowFunnelCanvas(engine: engine, active: visible)
+                .frame(maxWidth: .infinity)
+                .frame(height: funnelHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .accessibilityHidden(true)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// 左下那颗小标签：落差最大的那一步（按目标值算，变的时候淡入淡出）
@@ -330,6 +293,12 @@ struct RequestFlowCard: View {
         var parts = ["\(category.title)：已确认 \(c[0]) 部，已下载 \(c[1]) 部，已清洗 \(c[2]) 部，已入库 \(c[3]) 部"]
         if let b = batch, b.stage == "copy" { parts.append(String(format: "批量传输 %.0f%%", progress(at: Date()) * 100)) }
         return parts.joined(separator: "。")
+    }
+
+    /// 卡上不再单独显示「入库率 · 共 N 部」和「传输流 · 24 小时」（用户要求去掉），读屏还要听得到：放在这一块的 value 里
+    private var accessibilityRate: String {
+        let c = counts
+        return "入库率 \(percent(c[0] > 0 ? Double(c[3]) / Double(c[0]) : 0))，近 24 小时共 \(c[0]) 部"
     }
 }
 
