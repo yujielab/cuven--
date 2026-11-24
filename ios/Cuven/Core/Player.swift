@@ -98,6 +98,20 @@ final class CuvenPlayerViewController: AVPlayerViewController {
         tabletop.model.visible = false
         if isBeingDismissed || presentingViewController == nil { onClose?() }
     }
+
+    // iPad 接了键盘：空格暂停 / 播放、← → 快退快进是系统播放器自带的；这里补上关掉播放器的两个键（Esc、⌘W），
+    // 按住 ⌘ 时的快捷键面板里也列出来
+    override var keyCommands: [UIKeyCommand]? {
+        let esc = UIKeyCommand(title: "关闭播放器", action: #selector(closeFromKeyboard), input: UIKeyCommand.inputEscape)
+        let w = UIKeyCommand(title: "关闭播放器", action: #selector(closeFromKeyboard), input: "w", modifierFlags: .command)
+        esc.wantsPriorityOverSystemBehavior = true
+        return [w, esc]
+    }
+
+    @objc private func closeFromKeyboard() {
+        guard presentedViewController == nil, !isBeingDismissed else { return }
+        dismiss(animated: true)
+    }
 }
 
 // 加载画面（PlayerLoadingOverlay）在 UI/PlayerLoading.swift：和网页版一样的极光 + Cuven max + 胶囊进度条 + 提示，顶层窗口

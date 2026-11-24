@@ -587,7 +587,8 @@ struct CacheDissolveCanvas: UIViewRepresentable {
         let v = MTKView()
         v.colorPixelFormat = .bgra8Unorm
         v.framebufferOnly = true
-        v.preferredFramesPerSecond = 60
+        // ProMotion（iPad Pro、iPhone Pro）上 120 帧：粒子按真实时间走（dt），帧多了只是更顺，不会变快；旧机型照旧 60
+        v.preferredFramesPerSecond = Compat.legacyDevice ? 60 : min(120, max(60, UIScreen.main.maximumFramesPerSecond))
         v.isOpaque = true
         v.backgroundColor = .black
         v.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)

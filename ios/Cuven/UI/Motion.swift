@@ -65,13 +65,16 @@ struct ZoomLink<Label: View>: View {
 
     var body: some View {
         let target = ZoomTarget(route: route, slot: slot)
+        // iPad 接了触控板 / 鼠标：指针移上去卡片微微浮起（系统的 lift，没有指针时什么都不做）
         if let ns {
             NavigationLink(value: target) { label() }
                 .buttonStyle(PressableStyle(scale: press ? 0.96 : 1))
+                .hoverEffect(.lift)
                 .matchedTransitionSource(id: target, in: ns)
         } else {
             NavigationLink(value: route) { label() }
                 .buttonStyle(PressableStyle(scale: press ? 0.96 : 1))
+                .hoverEffect(.lift)
         }
     }
 }
