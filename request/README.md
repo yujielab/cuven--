@@ -216,7 +216,7 @@ App 上显示成五步进度。代码见 [`worker.js`](worker.js)，测试见 [`
 
 | 接口 | 回包 |
 | --- | --- |
-| `GET /app/catalog?src=movie\|tv\|all&q=&page=&sort=new\|vote\|hot\|spec&own=all\|hide&min=` | 索引里的全部已知影片和剧集（`id` 是 TMDB 编号）。`src=all` 时电影、剧集交替排。每条带 `req`（这部片的请求进度）。 |
+| `GET /app/catalog?src=movie\|tv\|all&q=&page=&sort=new\|vote\|hot\|spec&own=all\|hide&min=&year=` | 索引里的全部已知影片和剧集（`id` 是 TMDB 编号）。`src=all` 时电影、剧集交替排。每条带 `req`（这部片的请求进度）。`year`（2.6）：只要这一年的（App「全部影片」可申请那一边按年份分节）。 |
 | `GET /app/detail?src=&id=&season=` | `known`（索引里有没有）、`count`（大于 0 才能请求）、`seasons`、`season`、`req`（这一部或这一季的进度）、`reqs`（每一季的进度）。 |
 | `GET /app/requests` | 我的请求：进行中的，加上 30 天内结束的。 |
 | `POST /app/requests { src, id, season }` | 请求添加（老版本 App）。回 `created`（新建）、`joined`（跟上已有的）或 `failedRecently`（刚失败过）。 |

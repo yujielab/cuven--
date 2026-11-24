@@ -122,7 +122,7 @@
  * 它必须和影片库 Worker 配的 PIKPAK_USER 是同一个账号 —— 影片库推进哪个网盘，这里就去哪个网盘清洗。
  *
  * App 接口（不需要口令；请求类的要带 x-cuven-user: <用户名>）：
- *   GET  /app/catalog?src=movie|tv|all&q=&page=&sort=new|vote|hot|spec&own=all|hide&min=
+ *   GET  /app/catalog?src=movie|tv|all&q=&page=&sort=new|vote|hot|spec&own=all|hide&min=&year=
  *        索引里的全部已知影片 / 剧集（TMDB 编号），带上这部片的请求进度
  *   GET  /app/detail?src=movie|tv&id=<TMDB>&season=
  *        有没有可请求的资源（几个版本、最好的规格），这部 / 每一季的请求进度
@@ -2191,6 +2191,9 @@ async function appCatalog(env, Q){
     page: String(clamp(parseInt(Q.get('page') || '1', 10) || 1, 1, 500)),
     min: Q.get('min') != null ? String(Number(Q.get('min')) || 0) : (q ? '0' : '6') });
   if (q) qs.set('q', q);
+  /* 2.6：按年份（App「全部影片」的可申请那一边：2026 → 2020 一年一节）。影片库的 /api/catalog 本来就认 year */
+  const year = (Q.get('year') || '').trim();
+  if (/^(19|20)\d\d$/.test(year)) qs.set('year', year);
   const c = context(env, CFG_DEF, 6);
   const srcs = want === 'all' ? ['movie', 'tv'] : [want];
   const pages = await Promise.all(srcs.map(s => lb(c, '/api/catalog?src=' + s + '&' + qs).then(j => ({ s, j })).catch(e => ({ s, e }))));

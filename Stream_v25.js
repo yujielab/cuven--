@@ -3060,6 +3060,7 @@ async function autoSync(env, ctx, wantTv) {
 }
 
 let _autoSyncRes = null;
+const AUTO_SYNC_MAX = 100;                         // 一次最多问几个 item / code / tmdb
 /** POST /api/auto/sync?item=<名字>&item=…[&tv=1]
  *  请求添加 Worker 删完 PikPak 那份就来问：马上重列 /auto，回 { has: { 名字: 收录了没有 } }。
  *  v25.4：剧集在 /auto/ram2 里的，名字是那一季的文件夹名（写成 ram2/<名字> 也认），问 ram2 自己永远是 false。
@@ -3080,14 +3081,15 @@ async function handleAutoSync(request, url, env, ctx) {
       return jsonResponse({ ok: false, error: 'dropbox unavailable' }, 503, nostore);
     }
   }
+  // v25.4：一次最多问 100 个（请求中心一篮子 50 部，批量传完一起问；以前是 50 / 60）。都是查表，不多花子请求
   const has = {};
-  for (const raw of url.searchParams.getAll('item').slice(0, 50)) has[raw] = res.names.has(String(raw).normalize('NFC').toLowerCase());
+  for (const raw of url.searchParams.getAll('item').slice(0, AUTO_SYNC_MAX)) has[raw] = res.names.has(String(raw).normalize('NFC').toLowerCase().replace(/^\/+/, ''));
   // v25.2：按追踪码（请求编号）找：在 /auto 里、已经被挪进片库，都回现在的位置；找不到的不回
   const where = {};
-  for (const code of url.searchParams.getAll('code').slice(0, 60)) { const w = res.tags.get(String(code).replace(/^r/i, '')); if (w) where[code] = w; }
+  for (const code of url.searchParams.getAll('code').slice(0, AUTO_SYNC_MAX)) { const w = res.tags.get(String(code).replace(/^r/i, '')); if (w) where[code] = w; }
   // v25.3：按 TMDB 编号（m550 / tv1399s2）找：片库里已经有带这个码的那一部了没有
   const found = {};
-  for (const k of url.searchParams.getAll('tmdb').slice(0, 60)) { const w = res.byTmdb && res.byTmdb.get(String(k).toLowerCase()); if (w) found[k] = w; }
+  for (const k of url.searchParams.getAll('tmdb').slice(0, AUTO_SYNC_MAX)) { const w = res.byTmdb && res.byTmdb.get(String(k).toLowerCase()); if (w) found[k] = w; }
   // v25.4：tvSub = 剧集那一层的名字（'' = 不分层）：请求添加 Worker 看它就知道这边认得 /auto/ram2
   return jsonResponse({ ok: true, root, tvSub: autoTvSub(env), movies: res.movies, series: res.series, has, where, found, at: res.at }, 200, nostore);
 }

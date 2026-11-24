@@ -133,6 +133,7 @@ globalThis.fetch = async (url, init = {}) => {
     }
     if (p === '/api/catalog'){
       const src = u.searchParams.get('src');
+      W.lastCatalogQ = u.searchParams;
       return J({ total: W.catalog[src].length, hidden: 0, page: 1, pages: 1, items: W.catalog[src], src });
     }
     return J({ error: 'lb 404 ' + p }, 404);
@@ -460,6 +461,10 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
   ok(d.known === 1 && d.count === 2 && d.seasons.length === 2 && d.req && d.req.id === tvId && d.reqs['2'], '详情：剧集这一季的请求', d);
   const [, d2] = await call('GET', '/app/detail?src=movie&id=777');
   ok(d2.known === 0 && d2.count === 0, '详情：索引里没有的', d2);
+  await call('GET', '/app/catalog?src=movie&year=2024&own=hide');
+  ok(W.lastCatalogQ && W.lastCatalogQ.get('year') === '2024', '目录：年份转给影片库（全部影片按年份分节）', W.lastCatalogQ && String(W.lastCatalogQ));
+  await call('GET', '/app/catalog?src=movie&year=abc');
+  ok(W.lastCatalogQ && !W.lastCatalogQ.has('year'), '目录：不像年份的不转', W.lastCatalogQ && String(W.lastCatalogQ));
 }
 
 /* ── 限额、刚失败过、面板操作 ── */
