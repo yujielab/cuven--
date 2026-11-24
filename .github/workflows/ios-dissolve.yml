@@ -2,6 +2,7 @@
 # 和 RequestFlowTests（请求中心最上面那张「Luminous Data Flow」卡：光点、能量波、进度条、切分类），演示数据，
 # 提交到 refs/ci/ios-dissolve/<分支>（不是分支；会话里 git fetch 就能取）。约 10 分钟，不用等一小时的完整预览。
 # 还跑 LoginLandingTests（用户要的新登录落地页：开场连拍、终态、账号密码页、光学配对页，截图名以 login- 开头）。
+# 还跑 RequestSendTests（用户要的「上滑或按下申请添加」：胶囊、早松手弹回、发往请求中心那一屏连拍、上滑提交，截图名以 send- 开头）。
 name: iOS Dissolve Preview
 
 on:
@@ -9,7 +10,8 @@ on:
     branches: ['claude/**']
     paths: ['ios/Cuven/UI/CacheDissolve*', 'ios/Cuven/UI/FlowFunnel*', 'ios/Cuven/UI/RequestFlowCard.swift', 'ios/Cuven/UI/RequestCenter.swift',
             'ios/Cuven/Core/RequestBatch.swift', 'ios/Cuven/UI/AllFilmsView.swift', 'ios/CuvenUITests/DissolveTests.swift', 'ios/CuvenUITests/RequestFlowTests.swift',
-            'ios/CuvenUITests/AllFilmsTests.swift', 'ios/Cuven/UI/Login*', 'ios/CuvenUITests/LoginLandingTests.swift', '.github/workflows/ios-dissolve.yml']
+            'ios/CuvenUITests/AllFilmsTests.swift', 'ios/Cuven/UI/Login*', 'ios/CuvenUITests/LoginLandingTests.swift', '.github/workflows/ios-dissolve.yml',
+            'ios/Cuven/UI/RequestViews.swift', 'ios/Cuven/**/RequestSend*', 'ios/Cuven/**/SendGlow*', 'ios/CuvenUITests/RequestSendTests.swift']
   workflow_dispatch:
 
 permissions:
@@ -83,7 +85,7 @@ jobs:
           run() {
             xcrun simctl boot "$2" 2>/dev/null; xcrun simctl bootstatus "$2" -b > /dev/null 2>&1; sleep 10
             xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
-              -destination "id=$2" -only-testing:CuvenUITests/DissolveTests -only-testing:CuvenUITests/RequestFlowTests -only-testing:CuvenUITests/AllFilmsTests -only-testing:CuvenUITests/LoginLandingTests \
+              -destination "id=$2" -only-testing:CuvenUITests/DissolveTests -only-testing:CuvenUITests/RequestFlowTests -only-testing:CuvenUITests/AllFilmsTests -only-testing:CuvenUITests/LoginLandingTests -only-testing:CuvenUITests/RequestSendTests \
               -resultBundlePath "$RUNNER_TEMP/$1.xcresult" > "$RUNNER_TEMP/$1.log" 2>&1
             echo "$1 exit $?"
             grep -E "Test Case|passed|failed|error:" "$RUNNER_TEMP/$1.log" | tail -10
@@ -122,7 +124,7 @@ jobs:
                       for v in x: walk(v)
               walk(json.load(open(m)))
               for human, f in sorted(found):
-                  if not human.startswith(('dissolve-', 'flow-', 'films-', 'login-')):
+                  if not human.startswith(('dissolve-', 'flow-', 'films-', 'login-', 'send-')):
                       continue
                   name = dev + '-' + human.split('_')[0]
                   subprocess.run(['sips', '-s', 'format', 'jpeg', '-s', 'formatOptions', '80', '--resampleWidth', '480',
