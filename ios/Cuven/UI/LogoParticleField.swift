@@ -329,7 +329,9 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
 
         // 贴图：线性扩展 Display P3、预乘，半精度浮点；带 mip（小字标靠它缩小，影子靠它模糊）
         let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: true)
-        desc.usage = [.shaderRead]
+        // 共享存储：CPU 直接写第 0 级；renderTarget：有的 GPU 生成 mip 走的是渲染
+        desc.storageMode = .shared
+        desc.usage = [.shaderRead, .renderTarget]
         guard let texture = device.makeTexture(descriptor: desc) else { return nil }
         var half = [UInt16](repeating: 0, count: w * h * 4)
         px.data.withUnsafeBufferPointer { s in
