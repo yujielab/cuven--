@@ -20,6 +20,8 @@ final class CacheDissolveEngine {
     var start: CFTimeInterval?
     /// 进度胶囊正中在画面上的位置（0…1，y 向下）
     var target = CGPoint(x: 0.5, y: 0.88)
+    /// 内容区正中在画面上的横向位置（0…1）：iPhone Duo 一边有一列状态栏，安全区不在屏幕正中，卡和光都对着内容区的正中
+    var centerX: CGFloat = 0.5
     var reduceMotion = false
 
     func elapsed(_ now: CFTimeInterval = CACurrentMediaTime()) -> Double {
@@ -56,7 +58,7 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
         var cardInfo: SIMD4<Float>
         var trail: SIMD4<Float>
     }
-    private struct Particle { var pos: SIMD4<Float>; var vel: SIMD4<Float>; var home: SIMD4<Float> }
+    private struct Particle { var pos: SIMD4<Float>; var vel: SIMD4<Float>; var home: SIMD4<Float>; var orig: SIMD4<Float> }
     private struct CardVertex { var pos: SIMD4<Float>; var nrm: SIMD4<Float>; var uv: SIMD4<Float> }
 
     // 卡：SD 卡的比例（24 × 32），右上角切一刀
@@ -153,7 +155,7 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
             let v = rng.float()
             let seed = rng.float()
             let hue = Float(col) / Float(columns) * 0.9 + rng.float() * 0.1
-            ps.append(Particle(pos: SIMD4(0, 0, 0, -1), vel: SIMD4(0, 0, 0, 1), home: SIMD4(u, v, seed, hue)))
+            ps.append(Particle(pos: SIMD4(0, 0, 0, -1), vel: SIMD4(0, 0, 0, 1), home: SIMD4(u, v, seed, hue), orig: SIMD4(0, 0, 0, 1)))
         }
         guard let pb = dev.makeBuffer(bytes: ps, length: MemoryLayout<Particle>.stride * n, options: .storageModeShared) else { return nil }
         particles = pb
@@ -354,12 +356,15 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
         // 卡：浮着、慢慢转；开始清除以后往上飘一点、更竖一点地转向一边（参照录屏）
         let go = started ? Float(ramp(0, 1.6, Double(e))) : 0
         let wobble: Float = reduce ? 0 : 1
-        let yaw = (0.32 * sin(t * 0.47) + 0.22) * wobble + go * 0.28 * wobble
+        // 化的时候卡慢慢转到几乎侧对着人、再转回来一点（参照录屏）
+        let swing = go * sin(min(e, 4.2) * 0.75) * 0.85
+        let yaw = (0.32 * sin(t * 0.47) + 0.22) * wobble + swing * wobble
         let pitch = (0.10 * sin(t * 0.36) - 0.10) * wobble - go * 0.12 * wobble
         let roll = (0.05 * sin(t * 0.29) - 0.06) * wobble + go * 0.10 * wobble
         let bob = 0.035 * sin(t * 0.9) * wobble
         let cardY = halfVis * 0.47 + bob + go * 0.08
-        let model = Self.translation(SIMD3(0, cardY, 0)) * Self.rotationY(yaw) * Self.rotationX(pitch) * Self.rotationZ(roll)
+        let cardX = (Float(engine.centerX) * 2 - 1) * halfVis * aspect
+        let model = Self.translation(SIMD3(cardX, cardY, 0)) * Self.rotationY(yaw) * Self.rotationX(pitch) * Self.rotationZ(roll)
 
         // 汇聚点：进度胶囊正中，落在 z = 0 那一层
         let tx = Float(engine.target.x), ty = Float(engine.target.y)
@@ -370,7 +375,7 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
         let light: Float = started ? Float(ramp(0.7, 2.3, Double(e)) * (1 - 0.92 * ramp(4.9, 6.2, Double(e)))) : 0
         let lightPulse: Float = reduce ? light * 0.8 : light
         let cardFade: Float = started ? Float(1 - ramp(3.6, 4.4, Double(e))) : 1
-        let keep = Float(pow(0.82, Double(dt) * 60))
+        let keep = Float(pow(0.72, Double(dt) * 60))
 
         return Uniforms(
             viewProj: proj * view,
@@ -379,7 +384,7 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
             timing: SIMD4(t, dt, front, fade),
             target: SIMD4(target, 0.12),
             screen: SIMD4(w, h, 0.45 * scale, lightPulse),       // 光线半宽（像素）：屏上约 0.9 点
-            params: SIMD4(1.0, 1.6, 1.0, Float(count)),
+            params: SIMD4(1.15, 2.4, 0.05, Float(count)),    // 落到按钮约 1.15 秒、一路拧约 2.4 弧度、扰动幅度
             targetScreen: SIMD4(tx, ty, aspect, t),
             cardInfo: SIMD4(Self.halfW, Self.halfH, Self.halfT, reduce ? 1 : 0),
             trail: SIMD4(keep, 1.0, 0.38 * lightPulse, cardFade)

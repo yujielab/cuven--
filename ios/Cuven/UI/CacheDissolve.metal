@@ -2,8 +2,10 @@
 using namespace metal;
 
 // 清除缓存的动画「Prismatic Data Dissolution」（用户要求，参照他发来的录屏）：
-// 一张浮在黑底上的 3D 存储卡从下沿开始化成光点 → 光点被一个旋度噪声流场带着往下流、越往下越往中轴收，拉成一缕缕光纤 →
-// 汇进底部进度胶囊那一点的光源（光晕、横向镜头光、往上的光束、很淡的衍射环），四周泛起一层冷色的环境光 → 流变细、光收掉。
+// 一张浮在黑底上的 3D 存储卡从下沿开始化成一片闪烁的「数据」光点 → 每个光点沿一条引导路径落向进度胶囊的正中：
+// 竖直方向先慢后快，横向绕着胶囊那根竖轴边拧边收（龙卷风那样），中段带一点旋度噪声的扰动 —— 同一缕的光点走同一条路，
+// 连成一根根细光纤，最后全都收进按钮那一点（用户要求「粒子最终汇聚在按钮位置」）→ 那一点是一团横向的柔光，两边几颗彩色光斑，
+// 四周泛起青蓝 / 暖紫的环境光 → 流变细、光收掉。
 // 一帧：粒子更新（计算）→ 卡（带深度）→ 粒子拉成细线（相加混合）→ 拖尾累积（上一帧往下、往中轴挪一点再衰减）→
 // 亮部降采样 + 两档高斯模糊（辉光）→ 合成（侧向色散、光源、环境光、ACES 映射）。所有函数名带 cd_ 前缀。
 
@@ -14,7 +16,7 @@ struct CDUniforms {
     float4 timing;        // x 时间，y 这一帧的 dt，z 溶解前沿（卡面 v，0 = 下沿），w 光流整体亮度上限（收尾时降到 0）
     float4 target;        // xyz 汇聚点（世界坐标），w 吸收半径
     float4 screen;        // x 宽（像素），y 高，z 光纤线宽（像素），w 光源强度 0…1
-    float4 params;        // x 流场强度，y 收向中轴的强度，z 重力，w 粒子数
+    float4 params;        // x 落下来要多久（秒），y 一路拧几弧度，z 扰动幅度，w 粒子数
     float4 targetScreen;  // xy 汇聚点在画面上（uv，y 向下），z 宽高比，w 时间
     float4 cardInfo;      // x 半宽，y 半高，z 半厚，w 是否减弱动态效果（1 = 不放粒子）
     float4 trail;         // x 这一帧的拖尾保留比例，y 色散强度，z 环境光强度，w 卡的整体淡出（0…1）
@@ -22,8 +24,9 @@ struct CDUniforms {
 
 struct CDParticle {
     float4 pos;   // xyz 世界坐标；w < 0 还在卡上，w ≥ 0 脱落后过了多久，w ≥ 1e4 已经被吸收
-    float4 vel;   // xyz 速度；w 亮度
-    float4 home;  // xy 在卡面上的 uv（v 从下往上），z 随机种子，w 色相
+    float4 vel;   // xyz 速度（这一帧走了多少 / dt，拉线用）；w 亮度
+    float4 home;  // xy 在卡面上的 uv（v 从下往上），z 随机种子，w 属于哪一缕（0…1）
+    float4 orig;  // xyz 脱落的那一点（世界坐标），w 落到按钮要多久（秒）
 };
 
 struct CDCardVertex {
@@ -116,13 +119,13 @@ kernel void cd_update(device CDParticle *ps [[buffer(0)]],
     float3 onCard = (U.cardModel * float4(local, 1.0)).xyz;
 
     if (p.pos.w < 0.0) {
-        // 还在卡上：跟着卡走；前沿扫过就脱落
+        // 还在卡上：跟着卡走；前沿扫过就脱落，记下脱落点和这一路要走多久（同一缕差不多，缕与缕之间有快有慢）
         if (U.cardInfo.w < 0.5 && p.home.y + cd_jag(p.home.xy) < front) {
-            float3 n = normalize((U.cardModel * float4(0, 0, 1, 0)).xyz);
-            float s = p.home.z;
-            float3 r = float3(cd_hash11(s * 13.1) - 0.5, cd_hash11(s * 7.7) - 0.5, cd_hash11(s * 3.3) - 0.5);
+            float strand = cd_hash11(p.home.w * 91.7);
+            float dur = U.params.x * (0.82 + 0.36 * strand + 0.10 * cd_hash11(p.home.z * 7.3));
+            p.orig = float4(onCard, dur);
             p.pos = float4(onCard, 0.0);
-            p.vel = float4(n * 0.12 + r * float3(0.25, 0.12, 0.25) + float3(0.0, -0.8, 0.0), 1.0);
+            p.vel = float4(0.0, 0.0, 0.0, 1.0);
         } else {
             p.pos.xyz = onCard;
         }
@@ -131,36 +134,34 @@ kernel void cd_update(device CDParticle *ps [[buffer(0)]],
     }
     if (p.pos.w >= 1.0e4) return;
 
-    float3 x = p.pos.xyz, v = p.vel.xyz;
-    // 流场：慢慢往下漂（光流整体在流）。每一缕（home.w）在噪声里错开一段：各扭各的、互相缠绕，不会整片一起飘
+    float age = p.pos.w + dt;
+    float s = saturate(age / max(p.orig.w, 0.1));
+    float3 P0 = p.orig.xyz, T = U.target.xyz;
+    // 竖直：先慢（在卡下沿闪一下、聚成一片碎光），再越落越快
+    float y = mix(P0.y, T.y, pow(s, 1.45));
+    // 横向：绕汇聚点那根竖轴，一边转一边收，到按钮那一点收成零
+    float2 L0 = P0.xz - T.xz;
+    float ang = s * U.params.y * (0.75 + 0.5 * cd_hash11(p.home.w * 17.3));
+    float shrink = pow(1.0 - s, 1.25);
+    float ca = cos(ang), sa = sin(ang);
+    float2 L = float2(L0.x * ca - L0.y * sa, L0.x * sa + L0.y * ca) * shrink;
+    // 扰动：同一缕在噪声里取同一处（缕是连着的，形状随时间慢慢变）；中段最大，两头为零
     float so = p.home.w * 17.0;
-    float3 q = x * float3(2.0, 1.2, 2.0) + float3(so * 0.37, t * 0.55, so * 0.21 + t * 0.21);
-    float3 curl = cd_curl(q) * float3(1.0, 0.45, 1.0);
-    float3 toT = U.target.xyz - x;
-    float d = length(toT);
-    float cardY = U.cardModel[3].y;
-    // 0 = 卡那一高度，1 = 汇聚点那一高度
-    float k = saturate((cardY - x.y) / max(cardY - U.target.y, 0.001));
-    // 往中轴收：从卡下面就开始收，越往下越紧 —— 整束光是一个越来越细的锥，到光源那儿收成一点
-    float3 acc = curl * U.params.x * (1.0 - 0.6 * k)
-               + float3(0.0, -U.params.z, 0.0)
-               + float3(toT.x, 0.0, toT.z) * U.params.y * (0.5 + 1.6 * k + 1.4 * k * k)
-               + toT / max(d, 0.05) * (0.3 + 2.2 * k * k * k);
-    v = v * exp(-dt * 1.3) + acc * dt;
-    float sp = length(v);
-    if (sp > 3.0) v *= 3.0 / sp;
-    x += v * dt;
+    float3 q = float3(so * 0.37, s * 2.2 - t * 0.35, so * 0.21);
+    float3 wob = cd_curl(q) * U.params.z * sin(3.14159265 * s) * (0.35 + 0.65 * shrink);
+    float3 x = float3(T.x + L.x + wob.x, y + wob.y * 0.25, T.z + L.y + wob.z);
+    float3 v = (x - p.pos.xyz) / max(dt, 1.0e-4);
 
     float bright = p.vel.w;
-    if (d < U.target.w) bright -= dt * 5.0;            // 被光源吸收
-    bright = min(bright, U.timing.w + 0.15);             // 收尾时整体变淡
+    if (s >= 1.0) bright -= dt * 9.0;                 // 到了：被按钮那一点的光收进去
+    bright = min(bright, U.timing.w + 0.15);          // 收尾时整体变淡
     if (bright <= 0.002) {
         p.pos.w = 1.0e4;
         p.vel.w = 0.0;
         ps[id] = p;
         return;
     }
-    p.pos = float4(x, p.pos.w + dt);
+    p.pos = float4(x, age);
     p.vel = float4(v, bright);
     ps[id] = p;
 }
@@ -185,7 +186,7 @@ vertex CDLineOut cd_line_vertex(uint vid [[vertex_id]], uint iid [[instance_id]]
         return o;
     }
     float4 a = U.viewProj * float4(p.pos.xyz, 1.0);
-    float trailT = 0.11 + 0.08 * cd_hash11(p.home.z * 5.3);
+    float trailT = 0.07 + 0.06 * cd_hash11(p.home.z * 5.3);
     float4 b = U.viewProj * float4(p.pos.xyz - p.vel.xyz * trailT, 1.0);
     float2 sa = a.xy / a.w, sb = b.xy / b.w;
     float2 half_px = float2(U.screen.x, U.screen.y) * 0.5;
@@ -204,7 +205,7 @@ vertex CDLineOut cd_line_vertex(uint vid [[vertex_id]], uint iid [[instance_id]]
     o.local = float2(side, head ? 1.0 : -1.0);
     float hue = fract(p.home.w + p.home.x * 0.8 + U.timing.x * 0.03);
     float near = saturate(1.0 - distance(p.pos.xyz, U.target.xyz) / 1.1);
-    float3 c = mix(float3(1.0), cd_spectral(hue), 0.32) * (1.0 + near * 0.7);
+    float3 c = mix(float3(1.0), cd_spectral(hue), 0.2) * (1.0 + near * 0.9);
     c = mix(c, float3(2.2), fresh * 0.5);
     o.color = c * p.vel.w;
     return o;
@@ -215,7 +216,7 @@ fragment float4 cd_line_fragment(CDLineOut in [[stage_in]]) {
     float along = smoothstep(-1.0, -0.1, in.local.y);
     float a = across * across * mix(0.3, 1.0, along);
     // 每一条都很淡：几十条叠在一缕上才是一根亮的光纤，缕与缕之间留黑
-    return float4(in.color * a * 0.034, 0.0);
+    return float4(in.color * a * 0.05, 0.0);
 }
 
 // MARK: 卡
@@ -272,11 +273,15 @@ fragment float4 cd_card_fragment(CDCardOut in [[stage_in]],
     float rim = in.face > 1.5 ? 0.18 : 0.0;
     float3 c = base * diff + spec + fres * float3(0.75, 0.82, 1.0) + rim;
 
-    // 溶解前沿：一窄条白光，带一点光谱色；里面跳着一格格「数据」
-    float band = 1.0 - smoothstep(0.0, 0.055, edge);
-    float cell = cd_hash21(floor(in.uv * float2(46.0, 62.0)) + floor(U.timing.x * 14.0));
-    float3 glow = mix(float3(1.0), cd_spectral(fract(in.u * 1.7 + U.timing.x * 0.2)), 0.35) * (1.5 + 1.6 * step(0.62, cell));
-    c = mix(c, glow, band * band);
+    // 溶解前沿：一道亮边，上面一截（卡高的一成多）是一格格闪烁的「数据」方块（参照录屏：卡的下沿化成一片碎光）
+    float edgeLine = 1.0 - smoothstep(0.0, 0.02, edge);
+    float band = 1.0 - smoothstep(0.0, 0.13, edge);
+    float2 cellId = floor(in.uv * float2(52.0, 70.0));
+    float cell = cd_hash21(cellId + floor(U.timing.x * 12.0 + cd_hash21(cellId) * 3.0));
+    float on = step(1.0 - 0.75 * band * band, cell);
+    float3 tint = mix(float3(1.0), cd_spectral(fract(in.u * 1.7 + cellId.y * 0.05 + U.timing.x * 0.2)), 0.4);
+    c = mix(c, tint * 1.9, on * band);
+    c = mix(c, float3(2.2), edgeLine * edgeLine);
     c *= U.trail.w;
     return float4(c, 1.0);
 }
@@ -306,7 +311,7 @@ fragment float4 cd_trail_fragment(CDFullOut in [[stage_in]],
     float2 adv = float2((uv.x - U.targetScreen.x) * 0.0045, -0.0038);
     float3 p = prev.sample(s, uv + adv).rgb * U.trail.x;
     float3 n = lines.sample(s, uv).rgb;
-    return float4(p + n * 0.16, 1.0);
+    return float4(p + n * 0.12, 1.0);
 }
 
 /// 辉光的输入：亮的部分（光线 + 拖尾 + 卡上那条溶解光带），1/4 分辨率
@@ -352,8 +357,8 @@ fragment float4 cd_composite_fragment(CDFullOut in [[stage_in]],
     float2 tp = U.targetScreen.xy;
     float aspect = U.targetScreen.z;
 
-    // 色散：红往外、蓝往里，离中轴越远偏得越多（光纤两边的彩边），中间是白的
-    float ca = U.trail.y * (0.0024 + 0.004 * abs(uv.x - tp.x));
+    // 色散：红往外、蓝往里，离中轴越远偏得越多 —— 每一缕光纤两边一道红一道蓝，中间是白的（参照录屏）
+    float ca = U.trail.y * (0.0045 + 0.004 * abs(uv.x - tp.x));
     float2 off = float2(ca, 0.0);
     float3 streams;
     streams.r = lines.sample(s, uv + off).r + trails.sample(s, uv + off * 1.5).r;
@@ -363,25 +368,38 @@ fragment float4 cd_composite_fragment(CDFullOut in [[stage_in]],
     float3 cardC = card.sample(s, uv).rgb;
     float3 bloom = bloomA.sample(s, uv).rgb * 0.35 + bloomB.sample(s, uv).rgb * 0.28;
 
+    // 光源：按钮后面一团横向的柔光（宽是高的两倍多），外面一圈大的淡光；一道很细的横向镜头光；两边几颗带彩边的光斑；往上很淡的光束
     float I = U.screen.w;
     float2 d = (uv - tp) * float2(aspect, 1.0);
     float r = length(d);
-    float core = exp(-r * r / 0.0007) * 3.2;
-    float halo = exp(-r / 0.07) * 0.8;
-    float wide = exp(-r / 0.32) * 0.22;
-    float flare = exp(-abs(d.y) / 0.005) * exp(-abs(d.x) / 0.30) * 0.75;
+    float2 de = d * float2(0.42, 1.0);
+    float re = length(de);
+    float core = exp(-dot(de, de) / 0.0011) * 2.6;
+    float halo = exp(-re / 0.085) * 0.95;
+    float wide = exp(-r / 0.34) * 0.22;
+    float flare = exp(-abs(d.y) / 0.0035) * exp(-abs(d.x) / 0.42) * 0.55;
     float ang = atan2(d.y, d.x);
-    float up = smoothstep(0.02, -0.08, d.y);                          // 光束只往上（画面里 y 向下）
-    float rays = pow(cd_noise2(float2(ang * 9.0, U.targetScreen.w * 0.12)), 4.0) * exp(-r / 0.20) * 0.18 * up;
-    float3 ring = cd_spectral(fract(r * 7.0 + 0.2)) * exp(-pow((r - 0.12) / 0.018, 2.0)) * 0.10;
-    float3 light = (float3(1.0, 0.97, 0.93) * (core + halo) + float3(0.82, 0.9, 1.0) * (wide + flare) + float3(0.9, 0.95, 1.0) * rays + ring) * I;
+    float up = smoothstep(0.02, -0.08, d.y);
+    float rays = pow(cd_noise2(float2(ang * 9.0, U.targetScreen.w * 0.12)), 4.0) * exp(-r / 0.2) * 0.12 * up;
+    float3 bokeh = float3(0.0);
+    for (int k = 0; k < 6; k++) {
+        float fk = float(k);
+        float side = (k % 2 == 0) ? 1.0 : -1.0;
+        float2 c0 = float2(side * (0.16 + 0.085 * fk), -0.015 + 0.03 * cd_hash11(fk * 3.7) - 0.01 * fk);
+        float rad = 0.022 + 0.018 * cd_hash11(fk * 9.1);
+        float dist = length(d - c0);
+        float disc = smoothstep(rad, rad * 0.55, dist);
+        float rim = exp(-pow((dist - rad * 0.9) / (rad * 0.18), 2.0));
+        bokeh += (float3(0.85, 0.9, 1.0) * disc * 0.10 + cd_spectral(fract(fk * 0.23 + dist * 6.0)) * rim * 0.14) * (0.5 + 0.5 * cd_hash11(fk * 5.3));
+    }
+    float3 light = (float3(1.0, 0.97, 0.93) * (core + halo) + float3(0.82, 0.9, 1.0) * (wide + flare) + float3(0.9, 0.95, 1.0) * rays + bokeh) * I;
 
-    // 环境光：从底下泛起的一层青蓝 / 紫（参照录屏后半段）
-    float3 ambCol = mix(float3(0.10, 0.24, 0.32), float3(0.30, 0.15, 0.36), smoothstep(0.2, 0.8, uv.x));
+    // 环境光：从底下泛起，左边青蓝、右边暖紫（参照录屏后半段）
+    float3 ambCol = mix(float3(0.08, 0.25, 0.30), float3(0.33, 0.17, 0.26), smoothstep(0.25, 0.85, uv.x));
     float3 amb = ambCol * smoothstep(0.30, 1.05, uv.y) * U.trail.z;
 
     // 四周很淡的放射线（空间感），跟光源一起亮
-    float streak = pow(cd_noise2(float2(ang * 70.0, 2.0)), 10.0) * smoothstep(0.15, 0.9, r) * 0.035 * I;
+    float streak = pow(cd_noise2(float2(ang * 70.0, 2.0)), 10.0) * smoothstep(0.15, 0.9, r) * 0.03 * I;
 
     float3 c = cardC + streams + bloom + light + amb + streak;
     return float4(cd_aces(c * 1.05), 1.0);
