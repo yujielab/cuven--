@@ -1,4 +1,4 @@
-# Cuven Transfer Worker（transfer.cuven.us，910）
+# Cuven Transfer Worker（transfer.cuven.us，911）
 
 PikPak → Dropbox 的传输面板，加上给[请求添加 Worker](../request/README.md) 用的服务端接口。代码见 [`worker.js`](worker.js)。
 
@@ -39,14 +39,14 @@ PikPak → Dropbox 的传输面板，加上给[请求添加 Worker](../request/R
 | 接口 | 做什么 |
 | --- | --- |
 | `ping` | 能不能连上 VPS（回 rclone 版本）。910 起多回 `caps: ['sub', 'batch']` 和 `tv`（剧集区的名字） |
-| `organize { dir }` | 删剧集文件夹里的广告文件（进 PikPak 回收站） |
+| `organize { dir }` | 删剧集文件夹里的广告文件（进 PikPak 回收站）。911 起一次最多删 40 个，多回 `left`（还剩几个没删），见「911 加固」 |
 | `check { dir, total? }` | 整季完整性：ok / short / unsure / busy / skip / nonvid / bare |
 | `rename { dir, sub?, to?, tpl?, lang?, grp? }` | 按发行命名改文件夹名（`sync/move`，异步），回 `{ name, jobid, sub }`。`to` 是改完放在哪个区（不给 = 和 `sub` 一样）。上一次其实已经挪完的，回 `{ name, jobid, sub, done: 1 }`，见下面 |
 | `job { jobid, detail? }` / `jobs { ids }` | 作业进度。作业不见了（rclone 重启过）回 `missing`。`detail: 1` 多回 ETA、文件数、正在传的文件（见下面） |
 | `stop { jobid }` | 停一个作业 |
-| `copy { item, kind, from?, sizeOnly? }` | `webdav:auto/<item>` → `dropbox:auto/<item>`。补传时可以用 `from: 'pikpak'` 改从原生后端拿，`sizeOnly` 只按大小判断 |
+| `copy { item, kind, from?, sizeOnly?, retry? }` | `webdav:auto/<item>` → `dropbox:auto/<item>`。补传时可以用 `from: 'pikpak'` 改从原生后端拿，`sizeOnly` 只按大小判断。`retry: 1`（911）：上一次没拿到回答，先看那个作业是不是还在跑，在跑就接上（`reused: true`） |
 | `verify { item, kind }` | 两端逐个文件核对（见下面），回 `ok`，以及缺了哪些（`missing`）、哪些大小不对（`differ`）、Dropbox 那边多了几个（`extra`） |
-| `purge { item, kind }` | 删 PikPak 那份 |
+| `purge { item, kind }` | 删 PikPak 那份。本来就没了回 `{ ok: 1, gone: 1 }`（911） |
 | `exists { item, sub? }` / `exists { items, tv? }` | `dropbox:auto` 里还在不在（不在了 = 已经人工发行）。`tv` 里是剧集区下面的名字，回 `{ exists, tv }` |
 | `batch-copy { key, items, from?, sizeOnly?, transfers?, checkers? }` | 一批（最多 16 项）一个传输作业，见「批量传输」。同一个 key 的作业已经在跑，回 `{ jobid, reused: true }`（作业号没找到时 `jobid` 是 0，另带 `running: 1`） |
 | `batch-verify { items, src? }` | 一批一起核对，回 `{ results: { key: 同 verify } }` |
@@ -133,6 +133,37 @@ PikPak → Dropbox 的传输面板，加上给[请求添加 Worker](../request/R
 
 Worker 每次调用最多同时开 6 个连接，多出来的要排队。`vpsFetch` 的计时在 fetch 之前就开始了，排队的时间也算进超时。所以 `jobs`（最多 12 个作业）、`organize`（删广告文件）和 `batch-purge` 都限制最多 4 个同时进行，结果还按原来的顺序回。
 
+### 911 加固
+
+这一版只动 `/api/link/*`，接口形状都向下兼容（老的请求添加照旧能用）。每条的根因写在 `worker.js` 开头的 911 注释里。
+
+**子请求和总时长。** 免费版一次调用最多 50 个子请求，调用方（请求添加）60 秒超时。
+- `organize` 一次最多删 40 个（1 次列目录，最多重试 2 次，再留点余量），45 秒以后不再开新的删除。没删的（超过 40 个的、没来得及删的、删失败的）都算进 `left`。每次都重新列，所以 `left > 0` 时再叫一次是安全的。以前一次最多 61 个子请求，第 50 个以后全失败，60 个以后的连提都不提。
+- 单项 `verify` 两边同时列 / 同时 `stat`，和 `batch-verify` 一样（以前一个接一个，大的季两边各列 40 秒就是 80 秒）。回的错照旧：先看 PikPak 那边，再看 Dropbox 那边。
+- `rename`：建目录 5 秒、不看结果；发 `sync/move` 之前已经过了 28 秒，就回 503 `{ retry: 1 }`，下一轮再来（重来安全，见下面）。
+- `job` / `jobs` 的 `job/status`、`core/stats` 各 8 秒：`jobs` 12 个、4 个一轮，最多 48 秒。`batch-purge` 的 purge 25 秒，两轮最多 50 秒。
+- `batch-copy` 找作业：`runningIds` 一次问 3 个，每次之前看截止（以前 16 个一个不落地问完，能到 54 秒）。问到的记下来，退到看统计时不再问第二遍，15 个名额留给没问过的。这个 key 开过、又问到截止还没问完，回 503，不再往下问。
+
+**rclone 自己回的错。** rclone 的 rc 只有「没找到」回 404、参数不对回 400，后端出的事（PikPak / Dropbox 超时、限流、5xx、token 刷不下来）都是 HTTP 500 + JSON `error`。以前一律回 422，请求添加当成逻辑错误：熔断不开，每一行按满退避攒错，20 次后判死。现在：
+- rclone 回 5xx、消息又像暂时性的（`timeout`、`connection reset`、`too_many_requests`、`too_many_write_operations`、`rate limit`、`service unavailable`、`HTTP 503` 这类），回 502。只认整词和带前缀的状态码，文件名、路径里的数字不算。
+- 别的照旧 422（没找到、权限、参数）。`rc: true` 不变，「作业没了」「已经删掉了」的判断不受影响。
+- `batch-purge` 算「全都连不上」改看 5xx，rclone 回的暂时性错误也算。
+
+**让熔断看得见。** `jobs` 一个都没问到、而且全是 5xx（作业没了的不算），回 502，和 `batch-purge` 一样。以前回 200，请求添加的熔断把它当成「VPS 好好的」清零。
+
+**回包丢了以后的重来。**
+- 单项 `purge`：删完了、回包丢了，重来时本来就没了，回 `{ ok: 1, gone: 1 }`（以前 422，传完、核对完、删完的一项最后判失败）。
+- `rename` 不带 `sub` / `to`（909 那条路）：挪之前先 `stat` 原来的。确实不在了才看新名字，新名字在 = 上一次已经挪完了，回 `{ name, jobid, sub, done: 1 }`（和剧集区那条路一样，`jobid` 是确认用的异步 `stat`）。别的情况（原来的在、看不了、新名字也不在）照 909 原样发 `sync/move`，不回 409。多一次 `stat`。真的 rclone 对 `_async` 调用当场回作业号，原来的不在了是那个作业失败，所以「重来时报错」的办法认不出这种情况，只能挪之前看。
+- 单项 `copy` 都带统计组 `tjc/<[sub/]item>/<毫秒>`：每次一个新组，补传不和上一次的统计累加；平常不多问一次。带 `retry: 1` 时先查（同批量的 `linkBatchSlot`）：
+  - 这一项最近开的那个作业还在跑：回 `{ jobid, reused: true }`，不开第二个。
+  - 统计里在传、作业号没找到：503 `{ retry: 1 }`。
+  - 查不清楚（`group-list` / `job/list` / 统计没问出来）：502。都不开。
+  - 跑完了、停掉了：开新的（换一个组）。
+
+**进度不往回掉。** `core/stats` 没问到、`job/status` 问到了：`job { detail: 1 }` 回 503（请求添加下一轮再问），不带 `detail` 的不回 `bytes` / `total` / `speed`（多回 `stats: 0`），老调用方保持上一次的进度。以前当成 0 字节，批量的进度一下掉回 0%。`jobs` 里跑完的作业不再问统计，每个省一次调用；单个 `job` 照旧回。
+
+**要请求添加配合才生效的两处**（不配合也不会更糟）：整理回 `left > 0` 时，下一轮再叫一次 `organize`（最多几次）；`copy` 上一次暂时性失败、没拿到作业号时，带 `retry: 1`。
+
 ## 测试
 
 ```sh
@@ -143,4 +174,4 @@ rclone rc 全部模拟，不需要网络和 VPS。共四组：
 - `link.mjs`：接口的基本功能。
 - `retry.mjs`：52x 重试、备用入口、批量接口。
 - `verify.mjs`：逐个文件核对、补传换来源。
-- `batch.mjs`（910）：批量传输 / 核对 / 删除、剧集区 `sub`、改名挪进剧集区、`exists { tv }`、作业 detail、并发上限。模拟的 rclone 按 `_filter` 的 IncludeRule 匹配，认反斜杠转义和 IgnoreCase。作业号和统计组也照真的 rclone 来：每个调用都占一个作业号（放在 `X-Rclone-Jobid` 里），`job/list` 只回 `jobids`，`core/group-list` 按建组的先后排。另外还测了：两轮之间隔了很多调用的重来、重开换统计组、改名「挪完了但回包丢了」，以及用虚拟时钟测的 40 秒截止。
+- `batch.mjs`（910、911）：批量传输 / 核对 / 删除、剧集区 `sub`、改名挪进剧集区、`exists { tv }`、作业 detail、并发上限。模拟的 rclone 按 `_filter` 的 IncludeRule 匹配，认反斜杠转义和 IgnoreCase。作业号和统计组也照真的 rclone 来：每个调用都占一个作业号（放在 `X-Rclone-Jobid` 里），`job/list` 只回 `jobids`，`core/group-list` 按建组的先后排。另外还测了：两轮之间隔了很多调用的重来、重开换统计组、改名「挪完了但回包丢了」，以及用虚拟时钟测的 40 秒截止。911 一节每条加固各有回归测试（虚拟时钟测总时长，子请求数，rclone 500 的分类，回包丢了以后的重来）。模拟的 rclone 也改得和真的一样：`_async` 的 `sync/move` 来源不在了，是当场回作业号、作业失败，不是同步回 404。

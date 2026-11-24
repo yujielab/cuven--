@@ -1,5 +1,31 @@
 /**
- * Dropbox Video Proxy — Cloudflare Worker (v25.4 · 2026-11-24)
+ * Dropbox Video Proxy — Cloudflare Worker (v25.5 · 2026-11-24)
+ * ────────────────────────────────────────────────────────────────
+ * v25.5 —— /auto、/auto/ram2、/api/auto/sync 加固（用户要求：请求添加这条链上每个 Worker 的稳定性、性能都再加强）
+ *
+ *   ▸ 什么都没变的那一下催促不再重扫、重写：以前每次 tv=1 都整棵重列剧集目录（几页 list_folder）、重写 1 MB 多的快照和
+ *     1–2 MB 的剧集表（一分钟一次的催促、cron 每一轮都是）。现在剧集表记着自己是按哪一份 /auto 建的（autoFp 指纹），
+ *     同步接口列完 /auto 一比：一样就照用（只给 /auto 里还没 TMDB 信息的补），/auto 那一层没变就不写快照、不翻指针；
+ *     剧集表内容没变就不重写 R2（最多隔 5 分钟推进一次 at）。只问 code= / tmdb= 的不列 Dropbox，查快照。
+ *     → 没变的催促：1 次 Dropbox、0 次 R2 写，几毫秒 CPU（以前约 100 ms、写 3 MB）。
+ *   ▸ 带追踪码的新一季只查一次 TMDB：mtById 取回来的就是 /tv/{id} 的详情，以前原样再取一遍；
+ *     同步接口等不完（3.5 秒）的那几部，后台那一轮不再原样重查（正在查的记着），查完补进当前那张表、存进 R2。
+ *     一批 16 季：最多 64 次 TMDB（加上 Dropbox 超过 50 个子请求）→ 16 次。
+ *   ▸ 跨 isolate：/api/tv 每个 isolate 20 秒和 R2 里的剧集表对一次（head，etag 变了才读）——
+ *     请求添加在 B 同步完告诉用户「可以播放」，App 落在 A 上也不用等满 10 分钟；
+ *     存剧集表前先 head：R2 里那份是按更新的 /auto 建的（别处刚同步过），/auto 那几季用它的，不拿落地前那份 /auto 盖掉；
+ *     同步接口不跟落地前开始的那一轮扫描共用结果（等它扫完，不是这份 /auto 就自己再扫）。
+ *   ▸ 快照：同步接口改 /auto 那一层时用 R2 里现在那份（etag 对得上才用内存的），不拿 30 秒的内存副本
+ *     把别的 isolate 刚写的改动（工作人员刚挪走的片子）盖回去。
+ *   ▸ Dropbox 慢 / 限流 / 出错：列目录失败后这个目录记一段「先别列」（≥ 15 秒，照 Retry-After，最多 10 分钟），
+ *     同步接口回上一次的回答（200 + stale: 1），一次都没答过才 503 + Retry-After；同步接口列 Dropbox 只重试一次、
+ *     8 秒超时、Retry-After 超过 2 秒不空等（以前一个 429 要白等 20 秒、最坏一页 60 秒，超过请求添加的 30 秒 / App 的 20 秒）；
+ *     只有剧集目录列不出来时，电影和 /auto 的回答照样给。
+ *   ▸ 剧集表重扫时 /auto 列不出来：/auto 里的那几季照旧留在表里（以前一次 503 就把它们从表里、R2 里抹掉 10 分钟）。
+ *   ▸ /api/auto/sync 只收 POST（405）。配了 AUTO_SYNC_KEY：带了口令就得对（403）；不带口令的（App 的「立即播放」兜底）
+ *     有登录 Cookie 照常，没有的不再 403 —— 30 秒内最多真列一次 /auto，剧集目录不在前台重扫（交给后台那一轮）。
+ *     请求添加（带口令）、老版本 App、老版本请求添加 Worker 的用法和回包都不变（只多一个 stale）。
+ *
  * ────────────────────────────────────────────────────────────────
  * v25.4 —— 剧集传进 /auto/ram2（用户要求：请求中心攒批确认、凑够 16 部一起传；电影路径还是 /auto，剧集改成 /auto/ram2）
  *
@@ -600,7 +626,8 @@
  * 环境变量
  *   DROPBOX_REFRESH_TOKEN, DROPBOX_APP_KEY, DROPBOX_APP_SECRET
  *   ROOT_FOLDER, AUTH_SECRET, TMDB_API_KEY
- *   AUTO_FOLDER（v25.1，默认 /auto；off 关掉）、AUTO_SYNC_KEY（可选：/api/auto/sync 的口令）
+ *   AUTO_FOLDER（v25.1，默认 /auto；off 关掉）、AUTO_SYNC_KEY（可选：/api/auto/sync 的口令；
+ *     v25.5 起不带口令的不再 403，只走便宜的那条路 —— App 不用带口令）
  *   AUTO_TV_SUB（v25.4，/auto 下面剧集那一层的名字，默认 ram2；off 关掉分层）
  *   STREAM_SIGN_TTL（可选：签名直链有效期秒数，默认 43200 = 12h。
  *     外部播放器把 URL 存进片库长期复用的场景可调大，如 604800 = 7d；
@@ -2346,7 +2373,7 @@ async function parallel(tasks, concurrency) {
 //  要传几分钟。如果 AbortController 在 body 传输中触发，
 //  会直接截断播放。
 
-async function fetchRetry(url, opts = {}, { retries = 2, timeout = 15_000 } = {}) {
+async function fetchRetry(url, opts = {}, { retries = 2, timeout = 15_000, maxWait = Infinity } = {}) {
   let lastErr;
   for (let i = 0; i <= retries; i++) {
     const ctrl = new AbortController();
@@ -2356,12 +2383,15 @@ async function fetchRetry(url, opts = {}, { retries = 2, timeout = 15_000 } = {}
       // ✅ 拿到响应头后立即 clear timeout，body 传输不受限制
       clearTimeout(tid);
       if ((res.status >= 500 || res.status === 429) && i < retries) {
-        // 重试前显式 cancel 不再读的 body，释放连接（否则占用连接池）
-        try { res.body && await res.body.cancel(); } catch {}
         // 429 优先尊重 Retry-After（秒；HTTP-date 解析不出则退化为退避），封顶 10s
         const ra = res.status === 429
           ? parseInt(res.headers.get('Retry-After') || '', 10)
           : NaN;
+        // v25.5：maxWait —— 对方要等的比这久，就把这个 429 原样交回去（调用方记住、先用旧的），
+        // 不空等 10 秒再撞一次同样的 429
+        if (Number.isFinite(ra) && ra * 1000 > maxWait) return res;
+        // 重试前显式 cancel 不再读的 body，释放连接（否则占用连接池）
+        try { res.body && await res.body.cancel(); } catch {}
         await sleep(Number.isFinite(ra) && ra >= 0 ? Math.min(ra * 1000, 10_000) : 250 * (i + 1));
         continue;
       }
@@ -2459,6 +2489,7 @@ const R2_STALE_TTL = 60 * 60_000; // 60 min 过期但可用（SWR 窗口）
 // 同一 Worker isolate 内的内存缓存（避免同一请求周期重复读 R2）
 let _memCache = null;
 let _memCacheTs = 0;
+let _memEtag = null;    // v25.5：_memCache 对应的 R2 对象的 etag（读进来的 / 自己写的）—— /api/auto/sync 靠它判断内存这份是不是 R2 里现在那份
 const MEM_TTL = 30_000; // 30s
 
 async function r2Get(env, { allowExpired = false } = {}) {
@@ -2478,9 +2509,23 @@ async function r2Get(env, { allowExpired = false } = {}) {
     if (age <= R2_STALE_TTL) {
       _memCache = data;
       _memCacheTs = Date.now();
+      _memEtag = obj.etag || null;
     }
     return data;
   } catch { return null; }
+}
+
+/** v25.5：R2 里「现在」那份快照 —— /api/auto/sync 要在它上面改 /auto 那一层再写回去，不能拿 30 秒的内存副本
+ *  （别的 isolate 刚写进去的改动会被旧副本盖掉）。内存那份就是 R2 里那份（etag 对得上，一次 head）就不重读；
+ *  没绑 R2 照旧走内存层。R2 读不出来时退回内存那份（总比整个片库重列一遍好） */
+async function snapCurrent(env) {
+  if (!env.FILE_CACHE) return r2Get(env, { allowExpired: true });
+  const mem = _memCache;
+  if (mem && _memEtag) {
+    try { const h = await env.FILE_CACHE.head(R2_KEY); if (h && h.etag === _memEtag) return mem; } catch {}
+  }
+  _memCacheTs = 0;
+  return (await r2Get(env, { allowExpired: true })) || mem;
 }
 
 /** R2 数据是否在 TTL 内（新鲜） */
@@ -2493,12 +2538,13 @@ async function r2Put(env, payload, { keepTs = false } = {}) {
   try {
     // keepTs：只换了 /auto 那一层，片库本体并没有重列 —— 不能把它的新鲜时间也往后推
     const data = { ...payload, _ts: keepTs && payload._ts ? payload._ts : Date.now() };
-    await env.FILE_CACHE.put(R2_KEY, JSON.stringify(data), {
+    const put = await env.FILE_CACHE.put(R2_KEY, JSON.stringify(data), {
       httpMetadata: { contentType: 'application/json' },
     });
     // 同步更新内存缓存
     _memCache = data;
     _memCacheTs = Date.now();
+    _memEtag = (put && put.etag) || null;
   } catch {}
 }
 
@@ -2971,18 +3017,32 @@ function autoClassify(root, entries, sub = '') {
   return { movies, tv, tvSub, tvDir };
 }
 
-/** 列 /auto（递归；不存在 → 空）。15 秒内列过就用那一份（预热和剧集表同一轮各要一次）；fresh 不用旧的 */
+/** 列 /auto（递归；不存在 → 空）。15 秒内列过就用那一份（预热和剧集表同一轮各要一次）；fresh 不用旧的。
+ *  v25.5：at 记「开始列」的时刻（在它之前落进 /auto 的一定在这份里）；minAt：比它早的那份不再拿来用（剧集表已经按更新的建过了）；
+ *  dbx：同步接口传 AUTO_SYNC_DBX —— Dropbox 慢 / 限流时别把调用方拖过它自己的超时 */
 let _autoMem = null;                               // { root, at, entries }
 const AUTO_MEM_MS = 15_000;
-async function autoList(env, { fresh = false } = {}) {
+async function autoList(env, { fresh = false, minAt = 0, dbx } = {}) {
   const root = autoRoot(env);
   if (!root) return { root: '', at: Date.now(), entries: [] };
-  if (!fresh && _autoMem && _autoMem.root === root && Date.now() - _autoMem.at < AUTO_MEM_MS) return _autoMem;
+  if (!fresh && _autoMem && _autoMem.root === root && Date.now() - _autoMem.at < AUTO_MEM_MS && _autoMem.at >= minAt) return _autoMem;
   return singleFlight('auto-list', async () => {
-    const entries = await dbxListTree(root, env);
-    _autoMem = { root, at: Date.now(), entries };
+    const at = Date.now();
+    const entries = await dbxListTree(root, env, dbx);
+    _autoMem = { root, at, entries };
     return _autoMem;
   });
+}
+
+/** v25.5：/auto 列表的指纹（只看视频文件：路径 + 大小 + 落盘时间，连同 /auto、剧集那一层的设置）。
+ *  剧集表记着自己是按哪一份 /auto 建的（autoFp）；同步接口列完一比，没变就不重扫剧集目录、不重写 R2 */
+function autoFpOf(env, entries) {
+  const a = [];
+  for (const e of entries || []) {
+    if (e['.tag'] !== 'file' || !VIDEO_EXTS.has(getExt(e.name || ''))) continue;
+    a.push(`${String(e.path_lower || e.path_display || '').toLowerCase()}:${e.size || 0}:${e.server_modified || ''}`);
+  }
+  return fnv1a(`${autoRoot(env)}|${autoTvSub(env)}\n${a.sort().join('\n')}`);
 }
 
 /** 快照里 /auto 那一层：{ root, videos, at }；关了或 /auto 在片库根里 → null；列不出来 → 先用上一份 */
@@ -2998,31 +3058,62 @@ async function autoSnapshot(env, prev, opts) {
   }
 }
 
-/** 重列 /auto、换掉快照里那一层（本体和它的增量游标不动），wantTv 时连剧集表一起重扫；回 /auto 里收录了的名字 */
-async function autoSync(env, ctx, wantTv) {
-  const aroot = autoRoot(env);
+/* v25.5：快照里 /auto 那一层最近一次「列过、核对过、没变」（没变就不写快照，那一层的 at 不往后推）：{ root, g, at } */
+let _autoLayerChk = null;
+/** 快照里 /auto 那一层多久前核对过（毫秒；没有这一层 → Infinity） */
+function autoLayerAge(snap) {
+  const a = snap && snap.auto;
+  if (!a || !Array.isArray(a.videos)) return Infinity;
+  let t = a.at || 0;
+  const c = _autoLayerChk;
+  if (c && c.root === a.root && c.at > t && c.g === libGen(a.videos)) t = c.at;
+  return Date.now() - t;
+}
+
+// v25.5：同步接口列 Dropbox 只重试一次、8 秒拿不到响应头就算失败、Retry-After 超过 2 秒不等 ——
+// 最坏也落在请求添加的 30 秒、App 的 20 秒超时之内（以前一页最坏 3 × 20 秒，还会照 Retry-After 空等两次 10 秒）
+const AUTO_SYNC_DBX = { retries: 1, timeout: 8_000, maxWait: 2_000 };
+const AUTO_SYNC_TV_MS = 12_000;   // 同步接口等剧集表最多等多久；没做完的后台接着做，这次先拿存着的那份回答
+
+/** 重列 /auto、换掉快照里那一层（本体和它的增量游标不动），wantTv 时连剧集表一起核对；回 /auto 里收录了的名字。
+ *  v25.5：/auto 真变了才写快照（改的是 R2 里现在那份）、翻指针、重扫剧集目录；
+ *  trusted = false（配了 AUTO_SYNC_KEY、调用方没带口令也没登录）时剧集目录不在前台重扫 */
+async function autoSync(env, ctx, wantTv, trusted = true) {
   const mroot = autoMovieRoot(env);
   const sub = autoTvSub(env);
-  let snap = null;
+  let snap = null, L = null;
   if (mroot) {
-    const { entries } = await autoList(env, { fresh: true });     // 列不出来就报错：请求添加 Worker 过会儿再问
-    const layer = { root: mroot, videos: autoClassify(mroot, entries, sub).movies, at: Date.now() };
-    snap = await r2Get(env, { allowExpired: true });
+    L = await autoList(env, { fresh: true, dbx: AUTO_SYNC_DBX });   // 列不出来就报错：调用方先用上一次的回答
+    const layer = { root: mroot, videos: autoClassify(mroot, L.entries, sub).movies, at: L.at };
+    snap = await snapCurrent(env);
     if (snap?.videos) {
-      snap = await snapshotPut(env, { ...snap, auto: layer }, { keepTs: true });
-      await ptrBumpLib(env, snap._gen);
+      const g = libGen(layer.videos);
+      if (snap.auto && snap.auto.root === mroot && libGen(snap.auto.videos) === g) {
+        _autoLayerChk = { root: mroot, g, at: L.at };             // 没变：不重写 1 MB 多的快照、不翻指针
+      } else {
+        snap = await snapshotPut(env, { ...snap, auto: layer }, { keepTs: true });
+        await ptrBumpLib(env, snap._gen);
+      }
     } else {
-      snap = await fetchAllVideosList(env, ctx);                   // 还没有快照：现建一份（自带这一层）
+      snap = await fetchAllVideosList(env, ctx);                 // 还没有快照：现建一份（自带这一层）
     }
   } else {
     // /auto 就在片库根目录里：本体的增量就扫得到，跑一次预热
     await singleFlight('warm', () => warmCaches(env)).catch(() => {});
     snap = await r2Get(env, { allowExpired: true });
   }
-  // 剧集表：TMDB 补充信息最多等 3.5 秒（App 要靠 TMDB 编号认出这一季），剩下的后台补
-  let tv = tvMem;
-  if (wantTv) tv = await singleFlight('tv-scan:sync', () => tvRefresh(env, ctx, { metaMs: 3500 }));
-  else if (!tv) tv = await tvData(env, ctx).catch(() => null);      // 只追踪追踪码：用存着的剧集表就够了
+  let tv = tvMem, tvOk = false;
+  if (wantTv) {
+    if (!L && autoTvRoot(env)) L = await autoList(env, { fresh: true, dbx: AUTO_SYNC_DBX });
+    ({ d: tv, ok: tvOk } = await tvSync(env, ctx, L, trusted));
+  } else if (!tv) tv = await tvData(env, ctx).catch(() => null);    // 只追踪追踪码：用存着的剧集表就够了
+  return autoIndex(env, snap, tv, { at: L ? L.at : Date.now(), tvOk: wantTv && tvOk });
+}
+
+/** 快照 + 剧集表 → 同步接口的回答：/auto 里收录了的名字（names）、追踪码 → 现在在哪儿（tags）、TMDB 编号 → 那一部（byTmdb） */
+function autoIndex(env, snap, tv, { at = Date.now(), tvOk = false } = {}) {
+  const aroot = autoRoot(env);
+  const sub = autoTvSub(env);
   const names = new Set();
   const key = n => String(n || '').normalize('NFC').toLowerCase();
   // v25.4：条目名是 /auto 下面第一级，剧集那一层（/auto/ram2）里的是第二级；那一层里的再记一份「ram2/名字」。ram2 自己永远不记
@@ -3056,42 +3147,86 @@ async function autoSync(env, ctx, wantTv) {
     const key = 'tv' + (sr.tagId || sr.tmdbId) + 's' + (sr.season || 1);
     if (!byTmdb.has(key) || (byTmdb.get(key).auto && !w.auto)) byTmdb.set(key, w);
   }
-  return { at: Date.now(), tv: !!wantTv, names, tags, byTmdb, movies, series };
+  return { at, tv: tvOk, names, tags, byTmdb, movies, series };
+}
+
+/** v25.5：不列 Dropbox，拿快照里 /auto 那一层 + 存着的剧集表回答（只问 code= / tmdb= 的；Dropbox 列不出来时的旧回答）。
+ *  maxAge：那一层多久前核对过还算数；没有快照 / 这一层太旧 → null */
+async function autoIndexStored(env, maxAge) {
+  const mroot = autoMovieRoot(env);
+  const snap = (await snapCurrent(env)) || _memCache;             // 工作人员刚挪走的也要看得到：R2 里现在那份（etag 对得上就是内存这份）
+  if (!snap || !Array.isArray(snap.videos)) return null;
+  let age;
+  if (mroot) { if (!snap.auto || snap.auto.root !== mroot) return null; age = autoLayerAge(snap); }
+  else age = Date.now() - (snap._ts || 0);
+  if (!(age <= maxAge)) return null;
+  const tv = await tvCurrent(env).catch(() => tvMem);
+  return autoIndex(env, snap, tv, { at: Date.now() - age });
 }
 
 let _autoSyncRes = null;
 const AUTO_SYNC_MAX = 100;                         // 一次最多问几个 item / code / tmdb
+const AUTO_SYNC_MEMO_MS = 10_000;                  // 带对了口令（或没配口令）：10 秒内最多真列一次
+const AUTO_SYNC_OPEN_MS = 30_000;                  // v25.5：配了口令、调用方没带口令也没登录（App）：30 秒内最多真列一次
+const AUTO_IDX_MAX_MS = 120_000;                   // v25.5：只问 code= / tmdb= 的：快照里 /auto 那一层两分钟内核对过就直接查表
 /** POST /api/auto/sync?item=<名字>&item=…[&tv=1]
  *  请求添加 Worker 删完 PikPak 那份就来问：马上重列 /auto，回 { has: { 名字: 收录了没有 } }。
  *  v25.4：剧集在 /auto/ram2 里的，名字是那一季的文件夹名（写成 ram2/<名字> 也认），问 ram2 自己永远是 false。
- *  不走 Cookie 门（它没有 Cookie）：10 秒内最多真列一次，别人拿它刷不了 Dropbox；配了 AUTO_SYNC_KEY 就要带 x-sync-key */
+ *  不走 Cookie 门（它没有 Cookie）：10 秒内最多真列一次，别人拿它刷不了 Dropbox。
+ *  v25.5：只收 POST（405）。配了 AUTO_SYNC_KEY：带了口令就得对（403）；没带口令的（App）有登录 Cookie 照常，
+ *  没有的不再 403，只走便宜的路（30 秒一次、剧集目录不在前台重扫）。只问 code= / tmdb= 的不列 Dropbox。
+ *  Dropbox 列不出来 → 回上一次的回答（200 + stale: 1）；一次都没答过才 503 + Retry-After */
 async function handleAutoSync(request, url, env, ctx) {
   const nostore = { 'Cache-Control': 'no-store' };
-  if (env.AUTO_SYNC_KEY && !timingSafeEqualStr(request.headers.get('x-sync-key') || '', env.AUTO_SYNC_KEY)) {
-    return jsonResponse({ error: 'bad sync key' }, 403, nostore);
+  // 链接预览 / 爬虫的 GET 不该触发列 Dropbox（App 和每一版请求添加 Worker 都用 POST）
+  if (request.method !== 'POST') return jsonResponse({ error: 'POST only' }, 405, { ...nostore, Allow: 'POST' });
+  let trusted = true;
+  if (env.AUTO_SYNC_KEY) {
+    const sk = request.headers.get('x-sync-key');
+    if (sk) {
+      if (!timingSafeEqualStr(sk, env.AUTO_SYNC_KEY)) return jsonResponse({ error: 'bad sync key' }, 403, nostore);
+    } else {
+      const auth = env.AUTH_SECRET ? parseCookies(request.headers.get('Cookie') || '').auth : '';
+      trusted = !!(auth && await verifySession(auth, env));
+    }
   }
   const root = autoRoot(env);
   if (!root) return jsonResponse({ ok: false, off: 1 }, 200, nostore);
   const wantTv = url.searchParams.get('tv') === '1';
-  let res = _autoSyncRes;
-  if (!res || Date.now() - res.at > 10_000 || (wantTv && !res.tv)) {
-    try { res = _autoSyncRes = await singleFlight('auto-sync' + (wantTv ? ':tv' : ''), () => autoSync(env, ctx, wantTv)); }
-    catch (e) {
-      console.error('auto sync:', e && e.message);
-      return jsonResponse({ ok: false, error: 'dropbox unavailable' }, 503, nostore);
+  // v25.4：一次最多问 100 个（请求中心一篮子 50 部，批量传完一起问；以前是 50 / 60）。都是查表，不多花子请求
+  const items = url.searchParams.getAll('item').slice(0, AUTO_SYNC_MAX);
+  const codes = url.searchParams.getAll('code').slice(0, AUTO_SYNC_MAX);
+  const tmdbs = url.searchParams.getAll('tmdb').slice(0, AUTO_SYNC_MAX);
+  let res = _autoSyncRes, stale = 0;
+  if (!res || Date.now() - res.at > (trusted ? AUTO_SYNC_MEMO_MS : AUTO_SYNC_OPEN_MS) || (trusted && wantTv && !res.tv)) {
+    // 只问追踪码 / TMDB 编号的（去重、看工作人员挪去了哪儿）：快照里 /auto 那一层是新的就直接查表，不列 Dropbox
+    res = !items.length && (codes.length || tmdbs.length) ? await autoIndexStored(env, AUTO_IDX_MAX_MS) : null;
+    if (!res) {
+      try {
+        res = _autoSyncRes = await singleFlight(`auto-sync${wantTv ? ':tv' : ''}${trusted ? '' : ':open'}`, () => autoSync(env, ctx, wantTv, trusted));
+      } catch (e) {
+        // Dropbox 慢 / 限流 / 出错：先回上一次的回答（快照里那一层 + 存着的剧集表），标 stale；一次都没答过才 503
+        console.error('auto sync:', e && e.message);
+        res = (await autoIndexStored(env, Infinity).catch(() => null)) || _autoSyncRes;
+        if (!res) {
+          const ra = Math.max(1, Math.min(600, Math.ceil((e && e.retryAfter) || 15)));
+          return jsonResponse({ ok: false, error: 'dropbox unavailable' }, 503, { ...nostore, 'Retry-After': String(ra) });
+        }
+        stale = 1;
+      }
     }
   }
-  // v25.4：一次最多问 100 个（请求中心一篮子 50 部，批量传完一起问；以前是 50 / 60）。都是查表，不多花子请求
   const has = {};
-  for (const raw of url.searchParams.getAll('item').slice(0, AUTO_SYNC_MAX)) has[raw] = res.names.has(String(raw).normalize('NFC').toLowerCase().replace(/^\/+/, ''));
+  for (const raw of items) has[raw] = res.names.has(String(raw).normalize('NFC').toLowerCase().replace(/^\/+/, ''));
   // v25.2：按追踪码（请求编号）找：在 /auto 里、已经被挪进片库，都回现在的位置；找不到的不回
   const where = {};
-  for (const code of url.searchParams.getAll('code').slice(0, AUTO_SYNC_MAX)) { const w = res.tags.get(String(code).replace(/^r/i, '')); if (w) where[code] = w; }
+  for (const code of codes) { const w = res.tags.get(String(code).replace(/^r/i, '')); if (w) where[code] = w; }
   // v25.3：按 TMDB 编号（m550 / tv1399s2）找：片库里已经有带这个码的那一部了没有
   const found = {};
-  for (const k of url.searchParams.getAll('tmdb').slice(0, AUTO_SYNC_MAX)) { const w = res.byTmdb && res.byTmdb.get(String(k).toLowerCase()); if (w) found[k] = w; }
+  for (const k of tmdbs) { const w = res.byTmdb && res.byTmdb.get(String(k).toLowerCase()); if (w) found[k] = w; }
   // v25.4：tvSub = 剧集那一层的名字（'' = 不分层）：请求添加 Worker 看它就知道这边认得 /auto/ram2
-  return jsonResponse({ ok: true, root, tvSub: autoTvSub(env), movies: res.movies, series: res.series, has, where, found, at: res.at }, 200, nostore);
+  return jsonResponse({ ok: true, root, tvSub: autoTvSub(env), movies: res.movies, series: res.series, has, where, found, at: res.at,
+    ...(stale ? { stale: 1 } : {}) }, 200, nostore);
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -6190,26 +6325,47 @@ function tvEpOf(name) {
   return null;
 }
 
-/** Dropbox 递归列目录（自动翻页；目录不存在 → []） */
-async function dbxListTree(root, env) {
-  const token = await getAccessToken(env);
-  const call = async (ep, body) => {
-    const r = await fetchRetry(`https://api.dropboxapi.com/2/files/${ep}`, {
-      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    }, { retries: 2, timeout: 20_000 });
-    if (r.status === 409) { const t = await r.text().catch(() => ''); if (/not_found/.test(t)) return null; throw new Error(`${ep}: 409 ${t.slice(0, 120)}`); }
-    if (!r.ok) throw new Error(`${ep} failed: ${r.status}`);
-    return r.json();
-  };
-  let res = await call('list_folder', { path: root, recursive: true, limit: 2000 });
-  if (!res) return [];
-  const out = [...(res.entries || [])];
-  for (let i = 0; res.has_more && i < 100; i++) {
-    res = await call('list_folder/continue', { cursor: res.cursor });
-    if (!res) break;
-    out.push(...(res.entries || []));
+/** Dropbox 递归列目录（自动翻页；目录不存在 → []）。
+ *  v25.5：opts = fetchRetry 的 { retries, timeout, maxWait }（同步接口传短的）；
+ *  限流（429）/ 5xx / 超时以后这个目录记一段「先别列」（至少 15 秒，Retry-After 更长就照它，最多 10 分钟），
+ *  这段时间里直接抛错（带 retryAfter）—— 调用方先用上一份，不再一遍遍去撞 Dropbox（整个 App 的限流是共用的，播放的临时链接也算在里面） */
+const _dbxListBackoff = new Map();                 // 目录（小写）→ 到这个时刻之前先别列
+async function dbxListTree(root, env, { retries = 2, timeout = 20_000, maxWait } = {}) {
+  const bk = String(root || '').toLowerCase();
+  const until = _dbxListBackoff.get(bk) || 0;
+  if (Date.now() < until) throw Object.assign(new Error(`list_folder ${root}: backing off`), { status: 429, retryAfter: Math.ceil((until - Date.now()) / 1000), backoff: 1 });
+  try {
+    const token = await getAccessToken(env);
+    const call = async (ep, body) => {
+      const r = await fetchRetry(`https://api.dropboxapi.com/2/files/${ep}`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      }, { retries, timeout, maxWait });
+      if (r.status === 409) {
+        const t = await r.text().catch(() => '');
+        if (/not_found/.test(t)) return null;
+        throw Object.assign(new Error(`${ep}: 409 ${t.slice(0, 120)}`), { status: 409 });
+      }
+      if (!r.ok) {
+        const ra = parseInt(r.headers.get('Retry-After') || '', 10);
+        try { r.body && await r.body.cancel(); } catch {}
+        throw Object.assign(new Error(`${ep} failed: ${r.status}`), { status: r.status, retryAfter: Number.isFinite(ra) && ra > 0 ? ra : 0 });
+      }
+      return r.json();
+    };
+    let res = await call('list_folder', { path: root, recursive: true, limit: 2000 });
+    if (!res) return [];
+    const out = [...(res.entries || [])];
+    for (let i = 0; res.has_more && i < 100; i++) {
+      res = await call('list_folder/continue', { cursor: res.cursor });
+      if (!res) break;
+      out.push(...(res.entries || []));
+    }
+    return out;
+  } catch (e) {
+    const st = e && e.status;
+    if (!(st >= 400 && st < 500 && st !== 429)) _dbxListBackoff.set(bk, Date.now() + Math.min(600_000, Math.max(15_000, ((e && e.retryAfter) || 0) * 1000)));
+    throw e;
   }
-  return out;
 }
 
 /** 一组文件 → 排好序的分集表 */
@@ -6247,22 +6403,27 @@ function tvGroup(root, entries, groups, only) {
 }
 
 /** 整棵 TV 目录（加上 /auto 里认成剧集的一级文件夹、/auto/ram2 里的每一季）→ { series, eps: { 剧 path 小写: [{ ep, path, name, size }] } } */
-async function tvScan(env, { fresh = false } = {}) {
+async function tvScan(env, { fresh = false, prev = null, autoL = null, dbx } = {}) {
   const root = tvRoot(env);
-  const entries = await dbxListTree(root, env);
+  const entries = await dbxListTree(root, env, dbx);
   const groups = new Map();
   tvGroup(root, entries, groups, null);
-  // v25.1：/auto 里像剧集的一级文件夹（传完、还没挪进 TV_FOLDER）也进剧集表；列不出来就先不算，下一轮再说
+  // v25.1：/auto 里像剧集的一级文件夹（传完、还没挪进 TV_FOLDER）也进剧集表
+  // v25.5：用的哪一份 /auto 记下来（autoAt 开始列的时刻、autoFp 指纹）；同步接口刚列的那份直接给（autoL）；
+  // 比上一张表用的那份旧的不再拿来用（minAt）。列不出来 → autoFailed：调用方先留着上一张表里 /auto 的那几季
   const aroot = autoTvRoot(env);
+  let autoAt = 0, autoFp = '', autoFailed = false;
   if (aroot) {
     try {
-      const { entries: ae } = await autoList(env, { fresh });
+      const L = autoL && autoL.root === autoRoot(env) ? autoL : await autoList(env, { fresh, minAt: (prev && prev.autoAt) || 0, dbx });
+      const ae = L.entries;
       const { tv, tvSub, tvDir } = autoClassify(aroot, ae, autoTvSub(env));
       if (tv.size) tvGroup(aroot, ae, groups, tv);
       // v25.4：剧集那一层（/auto/ram2）：每个子文件夹一季，同一份列表再分一遍组（不多列目录）；
       // 这一层就在 TV_FOLDER 里面的，上面本体那一遍已经收了，不重复叠
       if (tvSub.size && !pathUnder(tvDir, root)) tvGroup(tvDir, ae, groups, tvSub);
-    } catch (e) { console.error('tv auto:', e && e.message); }
+      autoAt = L.at; autoFp = autoFpOf(env, ae);
+    } catch (e) { console.error('tv auto:', e && e.message); autoFailed = true; }
   }
   const series = [], eps = {};
   const emit = (g, info, files, path) => {
@@ -6307,7 +6468,48 @@ async function tvScan(env, { fresh = false } = {}) {
     if (!info.season && fileSeasons.length === 1) info.season = fileSeasons[0];
     emit(g, info, files, g.dir);
   }
-  return { series, eps };
+  return { series, eps, autoAt, autoFp, autoFailed };
+}
+
+/** v25.5：这一季是剧集表里 /auto 的那部分（不在 TV_FOLDER 里的 /auto 下面；path 可以带 #S2） */
+function tvIsAuto(env, p) {
+  const a = autoTvRoot(env);
+  return !!a && pathUnder(p, a) && !pathUnder(p, tvRoot(env));
+}
+/** v25.5：表 d 里 /auto 的那几季（连同分集表、TMDB 补充信息、autoAt / autoFp）换成 src 里的 ——
+ *  /auto 列不出来时留着上一张表的（不让一次 503 把已经告诉用户「可以播放」的那几季抹掉）；
+ *  别处刚按更新的 /auto 建过表（同步接口、别的 isolate）时用它的，不拿旧的盖回去 */
+function tvAdoptAuto(env, d, src) {
+  if (!src || !autoTvRoot(env)) return;
+  const part = p => tvIsAuto(env, p);
+  d.series = d.series.filter(s => !part(s.path)).concat((src.series || []).filter(s => part(s.path)));
+  for (const k of Object.keys(d.eps)) if (part(k)) delete d.eps[k];
+  for (const [k, v] of Object.entries(src.eps || {})) if (part(k)) d.eps[k] = v;
+  tvMergeMeta(d, src);
+  d.autoAt = src.autoAt || 0;
+  d.autoFp = src.autoFp || '';
+}
+/** src 查到了、d 还没有的 TMDB 补充信息并进 d（同一版匹配管线的才并） */
+function tvMergeMeta(d, src) {
+  if (!src || !src.meta || src.meta === d.meta || src.mv !== TV_META_V || d.mv !== TV_META_V) return;
+  for (const [k, m] of Object.entries(src.meta)) if (m && !d.meta[k]) d.meta[k] = m;
+}
+/** v25.5：别处存的那份（st）比 d 新的部分并进 d：/auto 那几季（st 的 /auto 更新时）、d 还没有的 TMDB 补充信息 */
+function tvMergeFrom(env, d, st) {
+  if (!st || st === d || st.root !== d.root) return;
+  if ((st.autoAt || 0) > (d.autoAt || 0)) tvAdoptAuto(env, d, st);
+  else tvMergeMeta(d, st);
+  tvApplyMeta(d);
+}
+const tvMetaN = d => Object.keys((d && d.meta) || {}).length;
+/** v25.5：剧集表的内容指纹（每一季的编号 / 集数 / 体积 / 落盘时间 / TMDB 结果 + 补充信息）：没变就不重写 R2 里那 1–2 MB */
+function tvFp(d) {
+  let s = `${d.v}|${d.mv}|${d.root}|${d.autoFp || ''}|${d.series.length}`;
+  for (const x of d.series) {
+    s += `\n${x.id}:${x.episodes}:${x.size}:${x.added || ''}:${x.tmdbId || 0}:${x.tmdbMiss ? 1 : 0}:${x.zh || ''}:${x.year || ''}:${x.total || 0}:${x.code || ''}`;
+  }
+  for (const k in d.meta) { const m = d.meta[k] || {}; s += `\n${k}=${m.id || 0}:${m.miss ? m.at || 0 : ''}:${m.err ? 1 : 0}`; }
+  return fnv1a(s);
 }
 
 const tvMetaKey = s => s.tagId ? `#tv:${s.tagId}|${s.season || 0}` : `${String(s.en || s.zh || s.title || '').toLowerCase()}|${s.season || 0}`;
@@ -6322,8 +6524,10 @@ async function tvLookup(s, env) {
   catch { return { miss: 1, err: 1, at: Date.now() - TV_META_RETRY_MS + 3600e3 }; }
   if (!m) return { miss: 1, at: Date.now() };
   const hit = Object.assign({}, m.c.raw, { id: m.c.id });
-  const d = await fetchRetry(`https://api.themoviedb.org/3/tv/${hit.id}?api_key=${env.TMDB_API_KEY}&language=zh-CN`, {}, { retries: 1, timeout: 6000 })
-    .then(r => (r.ok ? r.json() : null)).catch(() => null);
+  // v25.5：带追踪码的，mtById 取回来的就是 /tv/{id}?language=zh-CN 的详情（带 seasons）—— 不再原样取第二遍
+  const d = s.tagId && m.c.raw && Array.isArray(m.c.raw.seasons) ? m.c.raw
+    : await fetchRetry(`https://api.themoviedb.org/3/tv/${hit.id}?api_key=${env.TMDB_API_KEY}&language=zh-CN`, {}, { retries: 1, timeout: 6000 })
+      .then(r => (r.ok ? r.json() : null)).catch(() => null);
   const sn = s.season || 1;
   const season = d && (d.seasons || []).find(x => x.season_number === sn);
   const date = (season && season.air_date) || (sn === 1 ? (d && d.first_air_date) || hit.first_air_date || '' : '');
@@ -6350,63 +6554,193 @@ const tvMetaPending = d => !!d.series.find(s => {
   return !m || (m.miss && Date.now() - m.at > TV_META_RETRY_MS);
 });
 
-/** 给还没 TMDB 信息的剧补上（每次最多 TV_META_BUDGET 部；timeMs 到点就先交，剩下的下次补） */
-async function tvEnrich(env, d, timeMs) {
+/* v25.5：正在查 TMDB 的那几部（meta 键，本 isolate）—— 后台补的那一轮（tvEnrichMore）不再把还没查完的原样再查一遍 */
+const _tvMetaBusy = new Set();
+let _tvMetaLate = Promise.resolve();              // 上一批没等完、还在后台查的；后台那一轮等它查完再起（同时最多 4 个 TMDB 请求）
+
+/** 给还没 TMDB 信息的剧补上（每次最多 TV_META_BUDGET 部；timeMs 到点就先交，剩下的下次补）。
+ *  v25.5：only(s) 只给这几部补（同步接口：只补 /auto 里的）；正在查的跳过；
+ *  timeMs 到点没查完的那几部接着在后台查完，补到当前那张表上、存一次（不然只留在这个 isolate 的内存里，别的 isolate 还得再查） */
+async function tvEnrich(env, d, timeMs, ctx, only) {
   if (!env.TMDB_API_KEY) return false;
   const todo = [], seen = new Set();
   for (const s of d.series) {
+    if (only && !only(s)) continue;
     const k = tvMetaKey(s), m = d.meta[k];
-    if (seen.has(k) || (m && !(m.miss && Date.now() - m.at > TV_META_RETRY_MS))) continue;
+    if (seen.has(k) || _tvMetaBusy.has(k) || (m && !(m.miss && Date.now() - m.at > TV_META_RETRY_MS))) continue;
     seen.add(k); todo.push([k, s]);
     if (todo.length >= TV_META_BUDGET) break;
   }
   if (!todo.length) return false;
-  const work = parallel(todo.map(([k, s]) => async () => { d.meta[k] = await tvLookup(s, env); }), 4);
-  if (timeMs) await Promise.race([work, sleep(timeMs)]); else await work;
+  for (const [k] of todo) _tvMetaBusy.add(k);
+  const work = parallel(todo.map(([k, s]) => async () => {
+    try { d.meta[k] = await tvLookup(s, env); } finally { _tvMetaBusy.delete(k); }
+  }), 4);
+  let done = true;
+  if (timeMs) {
+    let tid;
+    done = await Promise.race([work.then(() => true), new Promise(r => { tid = setTimeout(r, timeMs, false); })]);
+    clearTimeout(tid);
+  } else await work;
   tvApplyMeta(d);
+  if (!done) {
+    const late = work.then(async () => {
+      const cur = tvMem && tvMem.root === d.root ? tvMem : d;
+      if (cur !== d) for (const [k] of todo) if (d.meta[k] && !cur.meta[k]) cur.meta[k] = d.meta[k];
+      tvApplyMeta(cur);
+      await tvSave(env, cur);
+    }).catch(e => console.error('tv meta:', e && e.message));
+    _tvMetaLate = late;
+    ctx?.waitUntil?.(late);
+  }
   return true;
 }
 
+/* v25.5：表 → 它在 R2 里对应的那个对象的 etag（读进来的 / 自己写的）。tvData 隔一会儿 head 一下 R2：
+   etag 变了 = 别的 isolate（同步接口、cron）存了新表 → 读进来，不再守着自己内存里那份等满 10 分钟 */
+const tvEtags = new WeakMap();
+const TV_HEAD_MS = 20_000;                // 每个 isolate 多久和 R2 里的剧集表对一次（一次 head，class B）
+const TV_RESAVE_MS = 5 * 60e3;            // 内容没变时 R2 里那份最多隔多久重写一次（推进 at：别的 isolate 读到的不算过期）
+let _tvHeadAt = 0;
+
 async function tvLoad(env) {
-  const r = await r2GetJson(env, TV_STORE);
-  if (r) return r;
+  if (env.FILE_CACHE) {
+    try {
+      const obj = await env.FILE_CACHE.get(TV_STORE);
+      if (obj) {
+        const d = await obj.json();
+        if (d && typeof d === 'object') { tvEtags.set(d, obj.etag || null); return d; }
+      }
+    } catch {}
+  }
   const hit = await caches.default.match(new Request(TV_CACHE_KEY)).catch(() => null);
   return hit ? hit.json().catch(() => null) : null;
 }
+/** 存剧集表。v25.5（R2）：先 head 一下 ——
+ *  · R2 里那份是按更新的 /auto 建的（别的 isolate 的同步接口刚存的）：/auto 那几季用它的，不拿旧的盖回去；
+ *  · 内容和 R2 里那份一样、那份也不旧（TV_RESAVE_MS 内）：不写（cron 每分钟一轮，以前每轮都重写 1–2 MB）。
+ *  at / autoAt / fp 同时记在 customMetadata 里，head 就看得到，不用把整张表读回来 */
 async function tvSave(env, d) {
-  if (env.FILE_CACHE) return r2PutJson(env, TV_STORE, d);
-  await caches.default.put(new Request(TV_CACHE_KEY), new Response(JSON.stringify(d), {
-    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=604800' },
-  })).catch(() => {});
+  if (!env.FILE_CACHE) {
+    await caches.default.put(new Request(TV_CACHE_KEY), new Response(JSON.stringify(d), {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=604800' },
+    })).catch(() => {});
+    return;
+  }
+  let h = null;
+  try { h = await env.FILE_CACHE.head(TV_STORE); } catch {}
+  const cm = (h && h.customMetadata) || {};
+  // R2 里那份的 /auto 更新、或者 TMDB 补充信息比这份多（别的 isolate 刚存的）：先并进来再存，不拿旧的盖回去
+  if (h && h.etag !== tvEtags.get(d) && (+cm.autoAt > (d.autoAt || 0) || +cm.mn > tvMetaN(d))) tvMergeFrom(env, d, await tvLoad(env));
+  const fp = tvFp(d);
+  if (h && h.etag && cm.fp === fp && Date.now() - (+cm.at || 0) < TV_RESAVE_MS) { tvEtags.set(d, h.etag); return; }
+  try {
+    const put = await env.FILE_CACHE.put(TV_STORE, JSON.stringify(d), {
+      httpMetadata: { contentType: 'application/json' },
+      customMetadata: { at: String(d.at || 0), autoAt: String(d.autoAt || 0), mn: String(tvMetaN(d)), fp },
+    });
+    tvEtags.set(d, (put && put.etag) || null);
+  } catch (e) { console.error('tv save:', e && e.message); }
 }
 
-/** 重扫目录，带上旧的 TMDB 补充信息；首次（没有旧表）给 TMDB 留 4 秒，其余交给后台 */
-async function tvRefresh(env, ctx, { metaMs, fresh } = {}) {
-  const prev = tvMem || await tvLoad(env);
-  const { series, eps } = await tvScan(env, { fresh });
-  const d = { v: 1, mv: TV_META_V, at: Date.now(), root: tvRoot(env), series, eps,
-    meta: (prev && prev.root === tvRoot(env) && prev.mv === TV_META_V && prev.meta) || {} };
+/** v25.5：内存里那张表和 R2 里那份对一下（TV_HEAD_MS 一次；force 马上）。R2 里是别的 isolate 新存的 → 换成它
+ *  （它整张更新就整张换；只有 /auto 那部分更新就只换那部分）；自己这份不比它旧就不读 */
+async function tvRecheck(env, force) {
+  const cur = tvMem;
+  if (!env.FILE_CACHE || !cur) return;
+  if (!force && Date.now() - _tvHeadAt < TV_HEAD_MS) return;
+  _tvHeadAt = Date.now();
+  let h = null;
+  try { h = await env.FILE_CACHE.head(TV_STORE); } catch { return; }
+  if (!h || !h.etag || h.etag === tvEtags.get(cur)) return;
+  const cm = h.customMetadata || {};
+  if (cm.at && +cm.at <= (cur.at || 0) && +(cm.autoAt || 0) <= (cur.autoAt || 0) && +(cm.mn || 0) <= tvMetaN(cur)) { tvEtags.set(cur, h.etag); return; }
+  const d = await tvLoad(env);
+  if (!d || d.root !== cur.root || d.v !== 1 || tvMem !== cur) return;
+  if ((d.at || 0) >= (cur.at || 0)) { tvMergeFrom(env, d, cur); tvMem = d; }
+  else { tvMergeFrom(env, cur, d); tvEtags.set(cur, h.etag); }
+}
+/** v25.5：现在的剧集表（不触发重扫）：内存（隔一会儿和 R2 对一下；force 马上对）→ R2 */
+async function tvCurrent(env, force) {
+  const root = tvRoot(env);
+  if (!tvMem || tvMem.root !== root) {
+    const d = await tvLoad(env);
+    if (d && d.root === root && d.v === 1) { tvMem = d; if (tvEtags.has(d)) _tvHeadAt = Date.now(); }   // 刚从 R2 读的：20 秒内不用再 head
+  } else await tvRecheck(env, force);
+  return tvMem && tvMem.root === root ? tvMem : null;
+}
+
+/** 重扫目录，带上旧的 TMDB 补充信息；首次（没有旧表）给 TMDB 留 4 秒，其余交给后台。
+ *  v25.5：autoL = 同步接口刚列的 /auto（直接用）；dbx = 列 Dropbox 的超时 / 重试；only = 前台只给这几部查 TMDB */
+async function tvRefresh(env, ctx, { metaMs, fresh, autoL, dbx, only } = {}) {
+  const root = tvRoot(env);
+  await tvRecheck(env, true);                      // 别的 isolate 刚存了更新的表：以它为底（TMDB 补充信息不重查）
+  const p0 = tvMem || await tvLoad(env);
+  const prev = p0 && p0.root === root ? p0 : null;
+  const sc = await tvScan(env, { fresh, prev, autoL, dbx });
+  const d = { v: 1, mv: TV_META_V, at: Date.now(), root, series: sc.series, eps: sc.eps, autoAt: sc.autoAt, autoFp: sc.autoFp,
+    meta: (prev && prev.mv === TV_META_V && prev.meta) || {} };
+  // v25.5：/auto 这次列不出来 → 留着上一张表里 /auto 的那几季（autoAt / autoFp 也不往前推）——
+  // 和电影那一层「列不出来先用上一份」一样；不能让一次 429 / 503 把已经告诉用户「可以播放」的那几季从表里抹掉
+  if (sc.autoFailed && prev) tvAdoptAuto(env, d, prev);
   tvApplyMeta(d);
-  await tvEnrich(env, d, metaMs ?? (prev ? 0 : 4000));
+  await tvEnrich(env, d, metaMs ?? (prev ? 0 : 4000), ctx, only);
+  // v25.5：扫的这段时间里本 isolate 已经有了一张按更新的 /auto 建的表（同步接口刚做的）→ /auto 那部分用它的，不拿旧的盖回去
+  if (tvMem && tvMem !== d && tvMem.root === root) tvMergeFrom(env, d, tvMem);
   tvMem = d;
   await tvSave(env, d);
-  if (tvMetaPending(d)) ctx?.waitUntil?.(singleFlight('tv-meta', () => tvEnrichMore(env)));
+  if (tvMetaPending(d)) ctx?.waitUntil?.(singleFlight('tv-meta', () => tvEnrichMore(env, ctx)).catch(() => {}));
   return d;
 }
-async function tvEnrichMore(env) {
+async function tvEnrichMore(env, ctx) {
+  await _tvMetaLate;                               // 上一批还在后台查：等它查完再起新的一批
   const d = tvMem;
-  if (!d || !(await tvEnrich(env, d, 0))) return;
+  if (!d || !(await tvEnrich(env, d, 0, ctx))) return;
   await tvSave(env, d);
 }
 
-/** 剧集表：内存 → R2 → 现扫。过期先给旧的、后台刷新；TMDB 还没补完的后台接着补 */
+/** v25.5：同步接口那一份剧集表。/auto 和建表时那份一样（指纹相同）→ 照用，只给 /auto 里还没 TMDB 信息的补（最多等 3.5 秒），
+ *  不重扫剧集目录、不重写 R2；变了 → 先等正在跑的那一轮（cron / /api/tv，可能是落地前开始的）扫完，
+ *  它扫出来的正好是这份 /auto 就用它的，不然按这次列出来的 /auto 自己扫一轮。
+ *  回 { d, ok }：ok = 这张表是按这次的 /auto 建的；剧集目录列不出来 / 超时 → 先拿存着的那份回答（电影和 /auto 的回答照样给） */
+async function tvSync(env, ctx, L, trusted) {
+  const aroot = autoTvRoot(env);
+  const fp = aroot && L ? autoFpOf(env, L.entries) : '';
+  const same = t => !!(t && fp && t.mv === TV_META_V && t.autoFp === fp);
+  const only = s => tvIsAuto(env, s.path);
+  const d0 = await tvCurrent(env, true);
+  if (same(d0)) {
+    if (await tvEnrich(env, d0, 3500, ctx, only)) await tvSave(env, d0);
+    return { d: d0, ok: true };
+  }
+  if (!trusted) {
+    // 配了口令、没带口令也没登录的（App）：剧集目录不在前台重扫，交给后台那一轮（和 /api/tv 过期时同一把锁）
+    ctx?.waitUntil?.(singleFlight('tv-scan', () => tvRefresh(env, ctx)).catch(e => console.error('tv scan:', e && e.message)));
+    return { d: d0, ok: false };
+  }
+  const run = (async () => {
+    const busy = _inflight.get('tv-scan');
+    if (busy) { await busy.catch(() => {}); if (same(tvMem)) return tvMem; }
+    return singleFlight('tv-scan:sync', () => tvRefresh(env, ctx, { metaMs: 3500, autoL: L, dbx: AUTO_SYNC_DBX, only }));
+  })();
+  let tid;
+  const r = await Promise.race([run.then(d => ({ d }), e => ({ e })), new Promise(res => { tid = setTimeout(res, AUTO_SYNC_TV_MS, null); })]);
+  clearTimeout(tid);
+  if (r && r.d) return { d: r.d, ok: true };
+  if (r) console.error('auto sync tv:', r.e && r.e.message);
+  else ctx?.waitUntil?.(run.catch(() => {}));
+  return { d: tvMem || d0, ok: false };
+}
+
+/** 剧集表：内存 → R2 → 现扫。过期先给旧的、后台刷新；TMDB 还没补完的后台接着补。
+ *  v25.5：内存里那份隔一会儿和 R2 对一下（别的 isolate 刚存的新表马上用上，不用等满 10 分钟） */
 async function tvData(env, ctx, force) {
   const root = tvRoot(env);
-  if (!tvMem || tvMem.root !== root) { const d = await tvLoad(env); if (d && d.root === root && d.v === 1) tvMem = d; }
+  await tvCurrent(env);
   if (tvMem && tvMem.mv !== TV_META_V) tvMem.at = 0;     // 旧版匹配的表：照旧先给，后台重扫重认
   if (tvMem && tvMem.root === root && !force) {
     if (Date.now() - (tvMem.at || 0) > TV_FRESH_MS) ctx?.waitUntil?.(singleFlight('tv-scan', () => tvRefresh(env, ctx)).catch(e => console.error('tv scan:', e && e.message)));
-    else if (tvMetaPending(tvMem)) ctx?.waitUntil?.(singleFlight('tv-meta', () => tvEnrichMore(env)).catch(() => {}));
+    else if (tvMetaPending(tvMem)) ctx?.waitUntil?.(singleFlight('tv-meta', () => tvEnrichMore(env, ctx)).catch(() => {}));
     return tvMem;
   }
   // 强制重扫（?refresh=1、没有存着的表）：/auto 也现列，不用 15 秒内列过的那份

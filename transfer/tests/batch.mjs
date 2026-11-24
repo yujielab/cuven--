@@ -16,9 +16,11 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 let FS = {}, DIRS = {}, JOBS = {}, STATS = {}, PLAN = {}, DOWN = {}, DENY = new Set();
 let NOFILTER = false, RUNNING_IDS = false, nextJob = 100, COPIED = null;
 let GROUPS = [], LIST_GROUPS = true, MOVES = false, AFTER = {}, VCLOCK = null;
+/* [911] FLAP：这几个作业号的 job/status 一直回 520（边缘抖）；RCFAIL：接口 → rclone 自己回的错 [HTTP 状态, 消息]（后端出事） */
+let FLAP = new Set(), RCFAIL = {};
 const calls = [];
 let inflight = 0, peak = 0;
-const reset = () => { calls.length = 0; peak = 0; PLAN = {}; DOWN = {}; AFTER = {}; NOFILTER = false; COPIED = null; };
+const reset = () => { calls.length = 0; peak = 0; PLAN = {}; DOWN = {}; AFTER = {}; NOFILTER = false; COPIED = null; FLAP = new Set(); RCFAIL = {}; };
 const addGroup = g => { if (g && !GROUPS.includes(g)) GROUPS.push(g); };
 const LONG = new Set(['sync/copy', 'sync/move', 'operations/copyfile']);       // 这几个异步作业要跑一阵；别的 _async 马上跑完
 /* 虚拟时钟：VCLOCK = { cost: { 接口: 毫秒 }, v }。一次调用从「上一次有调用结束的时刻」开始，花 cost 毫秒；
@@ -82,11 +84,12 @@ globalThis.fetch = async (url, init) => {
       if (st !== 'ok') return new Response('<html>' + st + ' cloudflare</html>', { status: st });
     }
     if (b.fs && DOWN[b.fs]) return new Response('<html>' + DOWN[b.fs] + ' cloudflare</html>', { status: DOWN[b.fs] });
+    if (p === 'job/status' && FLAP.has(b.jobid)) return new Response('<html>520 cloudflare</html>', { status: 520 });
     /* 请求到了 rclone：占一个作业号。同步调用当场跑完；异步的回 { jobid } */
     const id = nextJob++;
     JOBS[id] = { finished: !(b._async && LONG.has(p)), success: !(b._async && LONG.has(p)), group: b._async ? b._group || 'job/' + id : 'job/' + id };
     if (b._async) addGroup(JOBS[id].group);
-    const res = await rc(p, b, id);
+    const res = RCFAIL[p] ? rcErr(RCFAIL[p][1], RCFAIL[p][0]) : await rc(p, b, id);
     const lost = AFTER[p] && AFTER[p].length ? AFTER[p].shift() : 0;             // 做完了，回包丢了
     if (lost) return new Response('<html>' + lost + ' cloudflare</html>', { status: lost });
     res.headers.set('x-rclone-jobid', String(id));
@@ -134,7 +137,13 @@ async function rc(p, b, id) {
         }
         if (p === 'sync/move' && MOVES) {                                 // PikPak 的 DirMove：一下就挪完
           const s1 = remoteOf(b.srcFs), d1 = remoteOf(b.dstFs), m = FS[s1.remote] || new Map();
-          if (!dirExists(s1.remote, s1.root)) return rcErr('directory not found', 404);
+          /* [911] 真 rclone：_async 的调用当场回作业号，活在作业里干 —— 来源不在了是这个作业失败（directory not found），
+             不是同步回 404（以前的模拟同步回 404，测出来的 422 是模拟自己的） */
+          if (!dirExists(s1.remote, s1.root)) {
+            if (!b._async) return rcErr('directory not found', 404);
+            Object.assign(JOBS[id], { finished: true, success: false, error: 'directory not found' });
+            return okj({ jobid: id, executeId: 'x' });
+          }
           Array.from(m.keys()).forEach(k => { if (k.startsWith(s1.root + '/')) { m.set(d1.root + k.slice(s1.root.length), m.get(k)); m.delete(k); } });
           JOBS[id].finished = true; JOBS[id].success = true;
         }
@@ -194,7 +203,7 @@ world();
 /* ping：caps + 剧集区名字 */
 reset();
 let [s, j] = await call('ping');
-ok(s === 200 && same(j.caps, ['sub', 'batch']) && j.tv === 'ram2' && /910/.test(j.core), 'ping 回 caps 和剧集区', j);
+ok(s === 200 && same(j.caps, ['sub', 'batch']) && j.tv === 'ram2' && /911/.test(j.core), 'ping 回 caps 和剧集区', j);
 
 /* ══ batch-copy ══ */
 const BATCH = [
@@ -576,8 +585,10 @@ ok(s === 409 && j.exists === 1, '从剧集区挪回 auto、auto 里已有同名�
 reset();
 [s, j] = await call('rename', { dir: RAW });
 mv = find('sync/move');
-ok(s === 200 && j.name === NAME && mv[1].srcFs === 'pikpak:auto/' + RAW && mv[1].dstFs === 'pikpak:auto/' + NAME && n('operations/mkdir') === 0 && n('operations/stat') === 0,
-   '老客户端（没有 sub / to）：909 原样，不建目录、不查目标', calls.map(c => c[0]));
+/* [911] 909 那条路挪之前看一眼原来的在不在（一次 stat）；原来的在就照 909 原样挪 —— 新名字已经有了也不回 409、不看目标 */
+ok(s === 200 && j.name === NAME && mv[1].srcFs === 'pikpak:auto/' + RAW && mv[1].dstFs === 'pikpak:auto/' + NAME && n('operations/mkdir') === 0
+   && n('operations/stat') === 1 && find('operations/stat', b => b.fs === 'pikpak:auto' && b.remote === RAW && !b._async),
+   '老客户端（没有 sub / to）：不建目录、不查目标，只先看一眼原来的（在 → 909 原样挪）', calls.map(c => c[0]));
 [s, j] = await call('rename', { dir: NAME, to: 'tv' });
 ok(s === 400, 'to 不是剧集区：400', j);
 
@@ -608,7 +619,12 @@ reset(); AFTER = { 'sync/move': [520] };
 [s, j] = await call('rename', { dir: RAW2 });
 reset();
 [s, j] = await call('rename', { dir: RAW2 });
-ok(s === 422 && n('operations/stat') === 0 && n('sync/move') === 1, '老客户端（没有 sub / to）同样的重来：和 909 一样不 stat，rclone 回 directory not found → 422', { s, j });
+const NEW3 = j.name, cfm3 = find('operations/stat', b => b._async === true);
+ok(s === 200 && j.done === 1 && j.sub === '' && NEW3 && NEW3 !== RAW2 && FS.pikpak.has('auto/' + NEW3 + '/E01.mkv') && j.jobid > 0 && n('sync/move') === 0
+   && find('operations/stat', b => b.fs === 'pikpak:auto' && b.remote === RAW2 && !b._async) && cfm3 && cfm3[1].fs === 'pikpak:auto' && cfm3[1].remote === NEW3,
+   '[911] 老客户端（没有 sub / to）同样的重来：原来的不在、新名字在 → 200 done + 新名字（以前再发 sync/move，真 rclone 回一个必失败的作业）', { s, j });
+[s, j] = await call('job', { jobid: j.jobid });
+ok(s === 200 && j.finished === true && j.success === true, '[911] 909 那条路的 done：作业号「跑完、成功」，老的请求添加照常换成新名字', j);
 MOVES = false;
 
 /* ══ exists { items, tv } ══ */
@@ -658,10 +674,13 @@ ok(T.length === 4 && same(T[0], { item: TV1, sub: 'ram2', file: 'Subs/Café.srt'
    && same(T[1], { item: MOVIE, sub: '', file: MOVIE, bytes: 500, size: 1000, pct: 50, speed: 1e6 })
    && T[2].item === TV1 && T[2].sub === 'ram2' && T[2].file === 'E02.mkv' && T[3].item === TV2 && T[3].sub === 'ram2',
    '正在传的文件归到条目（批量作业、单项作业、没有 srcFs 的老版本）', T);
+JOBS[43] = { finished: false, success: false, group: '' }; STATS['job/43'] = { bytes: 3, totalBytes: 30, speed: 1 };
 reset();
-[s, j] = await call('jobs', { ids: [41, 42] });
-ok(s === 200 && j.jobs['41'].bytes === 600 && j.jobs['42'].bytes === 9 && n('job/status') === 2 && n('core/stats') === 2 && find('core/stats', b => b.group === 'job/42'),
-   'jobs：每个作业还是 2 次调用，统计组按作业自己的', j);
+[s, j] = await call('jobs', { ids: [41, 42, 43] });
+/* [911] 跑完的作业（42）不再问统计：调用方跑完了只看 success / error；没跑完的还是 2 次调用，统计组按作业自己的 */
+ok(s === 200 && j.jobs['41'].bytes === 600 && j.jobs['43'].bytes === 3 && n('job/status') === 3 && n('core/stats') === 2 && find('core/stats', b => b.group === 'job/43')
+   && !find('core/stats', b => b.group === 'job/42') && same(j.jobs['42'], { finished: true, success: true, error: '' }),
+   'jobs：没跑完的每个 2 次调用（统计组按作业自己的），跑完的只问 job/status', j);
 for (let i = 0; i < 12; i++) JOBS[200 + i] = { finished: false, group: '' };
 reset();
 [s, j] = await call('jobs', { ids: Array.from({ length: 12 }, (_, i) => 200 + i) });
@@ -670,8 +689,257 @@ STATS['job/42'] = { bytes: 9, totalBytes: 9, speed: 0, eta: null };
 [s, j] = await call('job', { jobid: 42, detail: 1 });
 ok(s === 200 && j.eta === null && same(j.transferring, []) && j.group === 'job/42', 'detail：rclone 没给 eta 回 null，没在传回 []', j);
 
-const v = await worker.fetch(new Request('https://transfer.cuven.us/version'), env);
-ok(/910/.test(await v.text()), '版本号 910');
+/* ══════════════ 911 加固（每条对应一个审查结论） ══════════════ */
+const vat = [];                                                           // [接口, 虚拟时刻]：每个调用什么时候发出去的
+const plain911 = globalThis.fetch;
+globalThis.fetch = async (url, init) => { vat.push([new URL(url).pathname.slice(1), VCLOCK ? VCLOCK.v : -1]); return plain911(url, init); };
+const vreset = () => { reset(); vat.length = 0; };
+let vEnd = 0;
+const vcall = async (cost, p, b) => { VCLOCK = { v: 0, cost: cost }; try { return await call(p, b); } finally { vEnd = VCLOCK.v; VCLOCK = null; } };
 
-console.log(`\n传输 Worker 910 批量：${pass} 项通过，${fail} 项失败`);
+/* transfer-1：organize 一次最多删 40 个、45 秒以后不开新的删除，回 left；免费版 50 个子请求以内 */
+world();
+for (let i = 0; i < 70; i++) put('pikpak', 'auto/ram2/' + TV2 + '/Ep' + i + '/最新地址' + i + '.txt', 1);
+vreset();
+[s, j] = await call('organize', { dir: TV2, sub: 'ram2' });
+ok(s === 200 && j.deleted.length === 40 && j.failed.length === 0 && j.left === 30 && n('operations/deletefile') === 40 && calls.length === 41 && peak <= 4,
+   '[911-1] 70 个广告文件：这一次删 40 个、回 left 30（以前 61 个子请求，第 50 个以后全失败，60 个以后不提）', { s, del: j.deleted.length, left: j.left, calls: calls.length });
+vreset();
+[s, j] = await call('organize', { dir: TV2, sub: 'ram2' });
+ok(s === 200 && j.deleted.length === 30 && j.left === 0 && j.files === 31, '[911-1] 再来一次（每次都重新列）：剩下的 30 个删完，left 0', j);
+for (let i = 0; i < 70; i++) put('pikpak', 'auto/ram2/' + TV2 + '/Ep' + i + '/最新地址' + i + '.txt', 1);
+vreset();
+[s, j] = await vcall({ 'operations/list': 30000, 'operations/deletefile': 2500 }, 'organize', { dir: TV2, sub: 'ram2' });
+const lastDel = Math.max(...vat.filter(x => x[0] === 'operations/deletefile').map(x => x[1]));
+ok(s === 200 && j.deleted.length >= 16 && j.deleted.length < 40 && j.failed.length === 0 && j.left === 70 - j.deleted.length && lastDel <= 45000 && vEnd <= 53000,
+   '[911-1] 列目录 30 秒、每个删除 2.5 秒：45 秒以后不再开新的删除，没删的算进 left（不算 failed），55 秒以内回到调用方（以前 67.5 秒）',
+   { del: j.deleted.length, left: j.left, lastDel, vEnd });
+world();
+
+/* transfer-2：单项 verify 两边同时列 / 同时看；rename 太晚了不发 sync/move */
+FS.dropbox = new Map();
+put('dropbox', 'auto/ram2/' + TV1 + '/E01.mkv', 100); put('dropbox', 'auto/ram2/' + TV1 + '/E02.mkv', 200); put('dropbox', 'auto/ram2/' + TV1 + '/Subs/Café.srt', 5);
+put('pikpak', 'auto/m.mkv', 9); put('dropbox', 'auto/m.mkv', 9);
+vreset();
+[s, j] = await vcall({ 'operations/list': 40000 }, 'verify', { item: TV1, kind: 'dir', sub: 'ram2' });
+ok(s === 200 && j.ok === 1 && n('operations/list') === 2 && vEnd <= 41000, '[911-2a] 核对剧集：两边各列 40 秒，一共 40 秒（以前一个接一个 80 秒）', { s, vEnd });
+vreset(); DOWN = { ['dropbox:auto/ram2/' + TV1]: 523 };
+[s, j] = await call('verify', { item: TV1, kind: 'dir', sub: 'ram2' });
+ok(s === 502 && j.side === 'dst', '[911-2a] Dropbox 那边列不出：照旧 502 side dst', { s, j });
+vreset(); DOWN = { ['dropbox:auto/ram2/' + TV1]: 523 };
+[s, j] = await call('verify', { item: 'Nope.S01', kind: 'dir', sub: 'ram2' });
+ok(s === 422 && j.side === 'src', '[911-2a] 两边都出错：先报 PikPak 那边（不在了 422）', { s, j });
+FS.dropbox.delete('auto/ram2/' + TV1 + '/E01.mkv'); FS.dropbox.delete('auto/ram2/' + TV1 + '/E02.mkv'); FS.dropbox.delete('auto/ram2/' + TV1 + '/Subs/Café.srt');
+vreset();
+[s, j] = await call('verify', { item: TV1, kind: 'dir', sub: 'ram2' });
+ok(s === 200 && j.ok === 0 && j.missingCount === 3, '[911-2a] Dropbox 那边还没有这个文件夹：照旧全缺', j);
+vreset();
+[s, j] = await vcall({ 'operations/stat': 28000 }, 'verify', { item: 'm.mkv', kind: 'file' });
+ok(s === 200 && j.ok === 1 && n('operations/stat') === 2 && vEnd <= 29000, '[911-2b] 核对文件：两次 stat 同时发（以前 2 × 30 秒）', { s, j, vEnd });
+vreset();
+[s, j] = await call('verify', { item: 'gone.mkv', kind: 'file' });
+ok(s === 422 && j.side === 'src', '[911-2b] PikPak 那边没有这个文件：照旧 422 side src', { s, j });
+vreset(); DOWN = { 'dropbox:auto': 523 };
+[s, j] = await call('verify', { item: 'm.mkv', kind: 'file' });
+ok(s === 502 && j.side === 'dst', '[911-2b] Dropbox 那边看不了：照旧 502 side dst', { s, j });
+put('pikpak', 'auto/' + RAW + '/E01.mkv', 1);
+vreset();
+[s, j] = await vcall({ 'operations/mkdir': 15000, 'operations/stat': 15000 }, 'rename', { dir: RAW, to: 'ram2' });
+ok(s === 503 && j.retry === 1 && n('sync/move') === 0 && FS.pikpak.has('auto/' + RAW + '/E01.mkv'),
+   '[911-2c] 改名：建目录 15 秒 + 看目标 15 秒，过了 28 秒不发 sync/move（再 30 秒就拖过调用方的 60 秒），回 503 retry', { s, j });
+vreset();
+[s, j] = await vcall({ 'operations/stat': 30000 }, 'rename', { dir: RAW });
+ok(s === 503 && j.retry === 1 && n('sync/move') === 0, '[911-2c] 909 那条路一样：看原来的花了 30 秒，这一轮不挪', { s, j });
+vreset();
+[s, j] = await vcall({ 'operations/stat': 12000 }, 'rename', { dir: RAW, to: 'ram2' });
+ok(s === 200 && j.jobid > 0 && n('sync/move') === 1 && vat.find(x => x[0] === 'sync/move')[1] <= 28000, '[911-2c] 来得及（12 秒）：照常挪', { s, j });
+world();
+
+/* transfer-3：rclone 回 500 + 后端暂时性错误 → 502（熔断看得见）；没找到、权限、文件名里的数字 → 还是 422 */
+const IOT = 'couldn\'t list files: Get "https://api-drive.mypikpak.com/drive/v1/files": dial tcp 1.2.3.4:443: i/o timeout';
+vreset(); RCFAIL = { 'operations/list': [500, IOT] };
+[s, j] = await call('check', { dir: TV2, sub: 'ram2' });
+ok(s === 502, '[911-3] check：PikPak 超时（rclone 500）→ 502（以前 422，熔断不开、一行行攒到 20 次判死）', { s, j });
+[s, j] = await call('organize', { dir: TV2, sub: 'ram2' });
+ok(s === 502, '[911-3] organize：同上 502', { s, j });
+[s, j] = await call('exists', { items: ['A.mkv'], tv: ['B'] });
+ok(s === 502, '[911-3] exists { items }：同上 502', { s, j });
+vreset(); RCFAIL = { 'operations/stat': [500, 'too_many_requests/..'] };
+[s, j] = await call('exists', { item: MOVIE });
+ok(s === 502, '[911-3] exists { item }：Dropbox too_many_requests → 502', { s, j });
+vreset(); RCFAIL = { 'sync/copy': [500, 'upload failed: too_many_write_operations'] };
+[s, j] = await call('copy', { item: TV1, kind: 'dir', sub: 'ram2' });
+ok(s === 502, '[911-3] copy：too_many_write_operations → 502', { s, j });
+vreset(); RCFAIL = { 'operations/purge': [500, 'pikpak: HTTP error 503 Service Unavailable'] };
+[s, j] = await call('purge', { item: TV1, kind: 'dir', sub: 'ram2' });
+ok(s === 502, '[911-3] purge：HTTP error 503 → 502', { s, j });
+[s, j] = await call('batch-purge', { items: [{ item: TV1, kind: 'dir', sub: 'ram2' }, { item: TV2, kind: 'dir', sub: 'ram2' }] });
+ok(s === 502 && j.results['ram2/' + TV1].status === 502, '[911-3] batch-purge：全是后端暂时性错误也算「连不上」→ 502（以前看 rc，算成逻辑错误回 200）', { s, j });
+vreset(); RCFAIL = { 'operations/purge': [500, 'can\'t purge Show.S01E429.2160p.HTTP.503: permission denied'] };
+[s, j] = await call('purge', { item: TV1, kind: 'dir', sub: 'ram2' });
+ok(s === 422, '[911-3] 名字里的 429 / 503 / HTTP 不算：权限不够 → 还是 422', { s, j });
+[s, j] = await call('batch-purge', { items: [{ item: TV1, kind: 'dir', sub: 'ram2' }] });
+ok(s === 200 && j.results['ram2/' + TV1].status === 422, '[911-3] batch-purge：逻辑错误照旧回 200 + 这一项的 error', { s, j });
+vreset(); RCFAIL = { 'operations/list': [500, 'directory not found'] };
+[s, j] = await call('check', { dir: TV2, sub: 'ram2' });
+ok(s === 422, '[911-3] 不像暂时性的消息（rclone 500 directory not found）：还是 422', { s, j });
+vreset();
+[s, j] = await call('job', { jobid: 987654 });
+ok(s === 200 && j.missing === 1, '[911-3] job not found（rclone 回 500）：照旧 missing', { s, j });
+vreset();
+[s, j] = await call('check', { dir: 'Nope.S01', sub: 'ram2' });
+ok(s === 422, '[911-3] 真没找到（404）：照旧 422', { s, j });
+
+/* transfer-4：jobs 一个都没问到、全是连不上 → 502 */
+JOBS[41] = { finished: false, success: false, group: 'tjb/k9' }; JOBS[42] = { finished: true, success: true, group: '' }; JOBS[43] = { finished: false, success: false, group: '' };
+vreset(); PLAN = { 'job/status': [524, 524, 524] };
+[s, j] = await call('jobs', { ids: [41, 43, 42] });
+ok(s === 502 && j.jobs && j.jobs['41'].status === 502 && Object.keys(j.jobs).length === 3, '[911-4] jobs：VPS 连不上（全部 5xx）→ 502（以前 200，请求添加的熔断当成 VPS 好好的）', { s, j });
+vreset(); PLAN = { 'job/status': [524, 524] };
+[s, j] = await call('jobs', { ids: [41, 43, 42] });
+ok(s === 200 && Object.values(j.jobs).filter(x => x.status === 502).length === 2 && Object.values(j.jobs).filter(x => x.finished && !x.error).length === 1, '[911-4] 问到了一个：照旧 200', { s, j });
+vreset();
+[s, j] = await call('jobs', { ids: [987651, 987652] });
+ok(s === 200 && j.jobs['987651'].missing === 1 && j.jobs['987652'].missing === 1, '[911-4] 全是作业没了（missing）：照旧 200', { s, j });
+
+/* transfer-5：单项 purge 删完了、回包丢了，重来 → 200 gone */
+world();
+vreset(); AFTER = { 'operations/purge': [520] };
+[s, j] = await call('purge', { item: TV2, kind: 'dir', sub: 'ram2' });
+ok(s === 502 && !FS.pikpak.has('auto/ram2/' + TV2 + '/S01E01.mkv') && n('operations/purge') === 1, '[911-5]（场景）删完了、回包丢了（520，purge 不重试）→ 502', { s, j });
+vreset();
+[s, j] = await call('purge', { item: TV2, kind: 'dir', sub: 'ram2' });
+ok(s === 200 && j.ok === 1 && j.gone === 1, '[911-5] 重来：directory not found → 200 { ok, gone }（以前 422，删完的一项最后判失败）', { s, j });
+vreset(); AFTER = { 'operations/deletefile': [520] };
+[s, j] = await call('purge', { item: ODD, kind: 'file' });
+vreset();
+[s, j] = await call('purge', { item: ODD, kind: 'file' });
+ok(s === 200 && j.ok === 1 && j.gone === 1, '[911-5] 文件也一样：object not found → 200 gone', { s, j });
+DENY.add('auto/' + MOVIE);
+vreset();
+[s, j] = await call('purge', { item: MOVIE, kind: 'file' });
+ok(s === 422, '[911-5] 别的 rclone 错误（权限）：照旧 422', { s, j });
+DENY.clear();
+
+/* transfer-6：909 那条路（没有 sub / to）挪之前先看原来的 */
+const RAW6 = 'Other.Show.S03.1080p.WEB-DL';
+put('pikpak', 'auto/' + RAW6 + '/E01.mkv', 1);
+MOVES = true;
+vreset(); PLAN = { 'operations/stat': [523, 523, 523] };
+[s, j] = await call('rename', { dir: RAW6 });
+ok(s === 200 && j.jobid > 0 && !j.done && n('sync/move') === 1, '[911-6] 原来的看不了（52x）：照 909 原样挪，不猜 done、不回 409', { s, j });
+const NEW6 = j.name;
+vreset();
+[s, j] = await call('rename', { dir: RAW6 });
+ok(s === 200 && j.done === 1 && j.name === NEW6 && n('sync/move') === 0, '[911-6] 挪完了再来（回包丢了的那种）：原来的不在、新名字在 → done', { s, j });
+FS.pikpak.delete('auto/' + NEW6 + '/E01.mkv');
+vreset();
+[s, j] = await call('rename', { dir: RAW6 });
+ok(s === 200 && !j.done && j.jobid > 0 && n('sync/move') === 1 && JOBS[j.jobid].success === false, '[911-6] 原来的、新名字都不在：照 909 原样发 sync/move（不自作主张）', { s, j });
+MOVES = false;
+
+/* transfer-7：单项复制认统计组；retry 才先查，接上还在跑的，不开第二个 */
+world(); RUNNING_IDS = false;
+vreset();
+[s, j] = await call('copy', { item: TV1, kind: 'dir', sub: 'ram2' });
+const g7 = String(find('sync/copy')[1]._group || ''), base7 = 'tjc/ram2/' + TV1 + '/';
+ok(s === 200 && j.jobid > 0 && g7.startsWith(base7) && /^\d{13}$/.test(g7.slice(base7.length)) && n('core/group-list') === 0 && n('job/list') === 0 && n('job/status') === 0,
+   '[911-7] 单项复制带统计组 tjc/<sub/item>/<毫秒>；不带 retry 不多问一次（和 909 一样：建目录 + 开作业）', { j, g7 });
+vreset();
+[s, j] = await call('copy', { item: 'x.mkv', kind: 'file' });
+ok(s === 200 && String(find('operations/copyfile')[1]._group || '').startsWith('tjc/x.mkv/'), '[911-7] 单个文件也带（tjc/<item>/<毫秒>）', find('operations/copyfile'));
+vreset(); AFTER = { 'sync/copy': [520] };
+[s, j] = await call('copy', { item: TV2, kind: 'dir', sub: 'ram2' });
+const lost7 = Object.keys(JOBS).map(Number).filter(id => !JOBS[id].finished && String(JOBS[id].group).startsWith('tjc/ram2/' + TV2 + '/'));
+ok(s === 502 && lost7.length === 1, '[911-7]（场景）开出去了、回包丢了（520，不重试）→ 502，rclone 那边作业在跑', { s, lost7 });
+await between(6);
+vreset();
+[s, j] = await call('copy', { item: TV2, kind: 'dir', sub: 'ram2', retry: 1 });
+const run7 = Object.keys(JOBS).map(Number).filter(id => !JOBS[id].finished && String(JOBS[id].group).startsWith('tjc/ram2/' + TV2 + '/'));
+ok(s === 200 && j.reused === true && j.jobid === lost7[0] && n('sync/copy') === 0 && same(run7, lost7) && n('operations/mkdir') === 1,
+   '[911-7] retry：认出上一次开的那个还在跑 → 接上（reused），不开第二个（以前两个作业一起传同一项）', { s, j, run7 });
+RUNNING_IDS = true;
+vreset();
+[s, j] = await call('copy', { item: TV2, kind: 'dir', sub: 'ram2', retry: 1 });
+ok(s === 200 && j.reused === true && j.jobid === lost7[0] && n('sync/copy') === 0, '[911-7] 新版 rclone（runningIds）：一样接上', { s, j });
+RUNNING_IDS = false;
+if (lost7[0]) await call('stop', { jobid: lost7[0] });
+vreset();
+[s, j] = await call('copy', { item: TV2, kind: 'dir', sub: 'ram2', retry: 1 });
+const g7b = (find('sync/copy') || [0, {}])[1]._group || '';
+ok(s === 200 && !j.reused && j.jobid > 0 && j.jobid !== lost7[0] && g7b.startsWith('tjc/ram2/' + TV2 + '/') && JOBS[lost7[0]] && g7b !== JOBS[lost7[0]].group
+   && Number(g7b.split('/').pop()) > Number(String(JOBS[lost7[0]].group).split('/').pop()),
+   '[911-7] retry：上一次的已经停了 / 跑完了 → 开新的，统计组换一个（不和上一次累加）', { s, j, g7b });
+vreset(); PLAN = { 'core/group-list': ['throw', 'throw', 'throw'] };
+[s, j] = await call('copy', { item: TV2, kind: 'dir', sub: 'ram2', retry: 1 });
+ok(s === 502 && n('sync/copy') === 0, '[911-7] retry 时查不清楚（group-list 问不出来）：502，不开', { s, j });
+LIST_GROUPS = false;
+vreset(); AFTER = { 'sync/copy': [520] };
+[s, j] = await call('copy', { item: TV1, kind: 'dir', sub: 'ram2' });
+await between(40);
+const lost7b = Math.max(0, ...Object.keys(JOBS).map(Number).filter(id => !JOBS[id].finished && String(JOBS[id].group).startsWith('tjc/ram2/' + TV1 + '/')));
+STATS[(JOBS[lost7b] || {}).group] = { bytes: 5, totalBytes: 9, transferring: [{ name: 'E01.mkv', bytes: 5, size: 100 }] };
+vreset();
+[s, j] = await call('copy', { item: TV1, kind: 'dir', sub: 'ram2', retry: 1 });
+LIST_GROUPS = true;
+ok(s === 503 && j.retry === 1 && n('sync/copy') === 0 && n('job/stopgroup') === 0 && JOBS[lost7b] && !JOBS[lost7b].finished, '[911-7] retry：统计里在传、作业号没找到 → 503 retry，不开第二个、也不停它', { s, j });
+
+/* transfer-8：core/stats 没问到（job/status 问到了） */
+JOBS[41] = { finished: false, success: false, group: 'tjb/k9' };
+vreset(); PLAN = { 'core/stats': [524] };
+[s, j] = await call('job', { jobid: 41, detail: 1 });
+ok(s === 503 && /统计/.test(j.error), '[911-8] detail（批量）：统计没问到 → 503（以前回 0 字节，成员一起写成 0%）', { s, j });
+vreset(); PLAN = { 'core/stats': [524] };
+[s, j] = await call('job', { jobid: 41 });
+ok(s === 200 && j.finished === false && !('bytes' in j) && !('total' in j) && !('speed' in j) && j.stats === 0,
+   '[911-8] 不带 detail：照常回 finished / success，不回 bytes / total / speed（老调用方保持上一次的进度）', { s, j });
+JOBS[42] = { finished: true, success: true, group: '' };
+vreset(); PLAN = { 'core/stats': [524] };
+[s, j] = await call('job', { jobid: 42, detail: 1 });
+ok(s === 200 && j.finished === true && j.success === true, '[911-8] 跑完了的 detail：统计没问到也回跑完（批量收尾只看 success）', { s, j });
+
+/* transfer-9：batch-copy 找作业时 runningIds 那段也看截止；问过的不再问第二遍 */
+world();
+Object.values(JOBS).forEach(x => { x.finished = true; });
+RUNNING_IDS = true;
+const fake = Array.from({ length: 16 }, (_, i) => nextJob + 50000 + i);
+fake.forEach((id, i) => { JOBS[id] = { finished: false, success: false, group: 'other/' + i }; });
+vreset();
+[s, j] = await vcall({ 'job/status': 9000 }, 'batch-copy', { key: 'sl1', items: BATCH });
+const sent9 = (vat.find(x => x[0] === 'sync/copy') || [0, -1])[1];
+ok(s === 200 && j.jobid > 0 && n('job/status') <= 12 && sent9 >= 0 && sent9 <= 40000,
+   '[911-9] 16 个别人的作业在跑、每个 job/status 9 秒：到点就不问了（这个 key 从没开过，开），40 秒以内发出 sync/copy（以前问满 16 个、54 秒，回 503）',
+   { s, st: n('job/status'), sent9 });
+fake.forEach(id => { delete JOBS[id]; });                                    // 上面那 16 个是凭空造的大号（真 rclone 的作业号只往上走）
+Object.values(JOBS).forEach(x => { x.finished = true; });                  // sl1 和别人的都跑完了
+/* 列目录不建组的 rclone：这一组前后没有 job/<n> 可以定位，作业号从最新的往回挑 15 个 —— 正好是刚问过的那些在跑的 */
+GROUPS = []; LIST_GROUPS = false;
+reset();
+[s, j] = await call('batch-copy', { key: 'sl2', items: BATCH });
+const sl2 = j.jobid;
+Object.assign(JOBS[sl2], { finished: true, success: true });                         // sl2 跑完了；之后又有 16 个别人的作业开起来
+const fake2 = Array.from({ length: 16 }, () => nextJob++);
+fake2.forEach((id, i) => { JOBS[id] = { finished: false, success: false, group: 'other2/' + i }; });
+vreset(); FLAP = new Set([fake2[0]]);
+[s, j] = await call('batch-copy', { key: 'sl2', items: BATCH });
+const asked9 = {};
+calls.filter(c => c[0] === 'job/status').forEach(c => { asked9[c[1].jobid] = (asked9[c[1].jobid] || 0) + 1; });
+const twice = fake2.slice(1).filter(id => asked9[id] > 1);
+LIST_GROUPS = true;
+ok(s === 200 && !j.reused && j.group === 'tjb/sl2/2' && twice.length === 0 && asked9[sl2] === 1 && n('job/stopgroup') === 0,
+   '[911-9] 有一个 job/status 一直 520，退到看统计找作业号：runningIds 问过的不再问第二遍、15 个名额留给没问过的（以前把刚问过的 15 个再问一遍，找不到 sl2，只好停组重开）',
+   { s, j, twice, sl2, asked: asked9[sl2], stop: n('job/stopgroup') });
+if (JOBS[j.jobid]) JOBS[j.jobid].finished = true;
+vreset();
+[s, j] = await vcall({ 'job/status': 9000 }, 'batch-copy', { key: 'sl2', items: BATCH });
+ok(s === 503 && n('sync/copy') === 0 && n('job/status') <= 12 && !find('core/stats') && vEnd <= 40000,
+   '[911-9] 有过这个 key、16 个在跑的问到截止还没问完：回 503，不再接着问统计 + 15 个作业号（以前问满 16 个到 54 秒，再退到统计那条路能到 117 个子请求）',
+   { s, j, st: n('job/status'), vEnd });
+RUNNING_IDS = false; FLAP = new Set();
+globalThis.fetch = plain911;
+
+const v = await worker.fetch(new Request('https://transfer.cuven.us/version'), env);
+ok(/911/.test(await v.text()), '版本号 911');
+
+console.log(`\n传输 Worker 910 批量 + 911 加固：${pass} 项通过，${fail} 项失败`);
 process.exit(fail ? 1 : 0);

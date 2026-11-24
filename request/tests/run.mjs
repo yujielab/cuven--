@@ -64,6 +64,10 @@ const W = {
   mkdirs: [],                // 影片库收到的 do=mkdir
   lbCalls: 0,
   fileGetDown: 0,            // PikPak 读单个文件（GET /drive/v1/files/<id>）接下来几次回 500
+  /* 2.7 */
+  hook: null,                // (url, method, body) → 回一个 Response 就用它，不回就照常模拟（中途掐一下、拨时钟、模拟有人跟上）
+  batchJobless: false,       // batch-copy：这一批在跑、作业号没找到 → { jobid: 0, reused, running: 1 }（910）
+  renameDone: false,         // rename：上一次其实改完了 → { name, sub, jobid, done: 1 }（910）
 };
 const pkFolderWith = (name, children, parent = 'AUTO') => {
   const id = 'F' + (W.seq++);
@@ -96,6 +100,7 @@ globalThis.fetch = async (url, init = {}) => {
   const u = new URL(url), p = u.pathname, m = (init.method || 'GET').toUpperCase();
   const body = init.body ? JSON.parse(init.body) : null;
   const H = init.headers || {};
+  if (W.hook){ const h = await W.hook(u, m, body); if (h) return h; }
   /* 影片库 */
   if (u.host === 'lb.cuven.us'){
     if (H['x-gate'] !== 'gate') return J({ error: '口令不正确' }, 401);
@@ -157,6 +162,7 @@ globalThis.fetch = async (url, init = {}) => {
         const name = /^Show\./.test(body.dir) ? body.dir.replace('.WEB-DL', '.[Full-4]-Cuven®') : 'Game.of.Thrones.S02.1080p.[Full-4]-Cuven®';
         const dir = [...W.files.values()].find(f => f.parent_id === area && f.name === body.dir && !f.trashed);
         if (dir) dir.name = name;            // rclone 在 PikPak 上把文件夹改了名
+        if (W.renameDone) return J({ name, jobid: 79, done: 1, sub: body.to || '' });
         return J({ name, jobid: 77, ...(body.sub ? { sub: body.to || '' } : {}) });
       }
       case 'copy':
@@ -168,7 +174,8 @@ globalThis.fetch = async (url, init = {}) => {
         const items = body.items || [];
         if (!items.length || items.length > 16) return J({ error: '一批 1–16 个' }, 400);
         const run = W.batchRun[body.key];
-        if (run && W.job[run] && W.job[run].finished === false) return J({ jobid: run, reused: true });
+        if (run && W.job[run] && W.job[run].finished === false)
+          return J(W.batchJobless ? { jobid: 0, reused: true, group: 'tjb/' + body.key, running: 1 } : { jobid: run, reused: true });
         const jobid = W.batchJobs.shift() || (4000 + W.batchCalls.length + 1);
         W.batchCalls.push(body); W.batchRun[body.key] = jobid;
         return J({ jobid, total: items.length * 1e9, files: items.reduce((s, x) => s + (x.kind === 'dir' ? 4 : 1), 0),
@@ -888,7 +895,7 @@ W.catalog.tv = [{ id: 1399, title: '权力的游戏', year: '2011', poster: '/g.
 const lastTick = () => JSON.parse(env.DB.db.prepare("SELECT v FROM tj_kv WHERE k = 'tick:last'").get().v);
 const reset26 = () => {
   env.DB.db.exec('DELETE FROM tj_req'); env.DB.db.exec('DELETE FROM tj_batch');
-  env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('health', 'tick:last', 'track', 'tf:caps', 'tv:id', 'flow:live')");
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k IN ('health', 'tick:last', 'track', 'track:cur', 'tf:caps', 'tv:id', 'flow:live')");
   W.batchCalls = []; W.batchRun = {}; W.batchJobs = []; W.bverify = []; W.bpurge = []; W.vbad = new Map(); W.copyWhileBatch = 0; W.nofilter = false;
 };
 const batchPost = (user, items) => call('POST', '/app/requests/batch', { user, body: { items } });
@@ -1631,6 +1638,375 @@ const flowGet = async (user, tag) => {
   ok(sp.tick && sp.tick.over === l1.over, '面板的系统卡拿得到 over', sp.tick);
   await tick();
   ok(st().every(x => x.stage === 'ready') && lastTick().over === 0, '下一轮：第二部也清洗好了，没有再被挡', { s: st(), l: lastTick() });
+  env.DB.db.exec('DELETE FROM tj_req');
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   2.7：稳定性 / 性能（每一处修的都有一条回归测试；不修的话这里的检查会失败）
+   ══════════════════════════════════════════════════════════════════ */
+let seq27 = 0;
+const ins27 = (stage, data, extra = {}) => {
+  const t = Date.now(), tmdb = extra.tmdb ?? (9800 + (seq27++));
+  return Number(env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid, bat)
+    VALUES ('movie', ?, 0, 'x', ?, ?, '', ?, ?, ?, ?, ?, ?, ?)`)
+    .run(tmdb, extra.users || '["alice"]', stage, JSON.stringify(data), extra.created ?? t, extra.updated ?? t, extra.since ?? t, extra.next ?? 0,
+         extra.bid ?? 0, extra.bat ?? 0).lastInsertRowid);
+};
+const row27 = (id) => { const x = env.DB.db.prepare('SELECT * FROM tj_req WHERE id = ?').get(id); return { ...x, d: JSON.parse(x.data), users: JSON.parse(x.users) }; };
+const logs27 = (id) => env.DB.db.prepare('SELECT msg FROM tj_log WHERE rid = ? ORDER BY id').all(id).map(x => x.msg);
+const tf27 = (op) => W.tf.filter(([o]) => o === op);
+/** 跑一次定时任务，回 tick() 的结果（{ busy } / { paused } / 这一轮的统计） */
+const cron = async (ms = 0) => { if (ms) advance(ms); let pr; await worker.scheduled({}, env, { waitUntil(p){ pr = p; } }); return pr; };
+const PK500 = () => J({ error: 'internal_error', error_code: 500 }, 500);
+
+/* ── 2.7 清洗：挪了视频以后被掐（读回来 500 / 删原文件夹 500）→ 下一轮从视频接着做，不换规格；drop 删不成下一轮再删 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { pkUser: 'pk@x.com', pkPass: 'pkpass', batch: false, autoReady: false, tagNames: true, vpsSlots: 4, pkSlots: 16 } });
+  /* 挪进 /auto 以后读回来那一下 PikPak 回 500 */
+  const root = pkFolderWith('Clean.One.2001.1080p.BluRay', [['Clean.One.2001.1080p.mkv', 9e9], ['Clean.One.sample.mkv', 1e8], ['ads.url', 10]]);
+  const vid = [...W.files.values()].find(f => f.parent_id === root && f.name === 'Clean.One.2001.1080p.mkv');
+  const a = ins27('clean', { file: root, fkind: 'dir', cur: { tid: 2, t: 'v2' }, tried: [1], task: 'Tc1' });
+  let nMove = 0, failed = 0;
+  W.hook = (u, m) => {
+    if (u.pathname === '/drive/v1/files:batchMove') nMove++;
+    else if (nMove && !failed && m === 'GET' && u.pathname === '/drive/v1/files/' + vid.id){ failed = 1; return PK500(); }
+  };
+  await tick();
+  let r = row27(a);
+  ok(failed && r.stage === 'clean' && r.d.file === vid.id && r.d.junk === root && vid.parent_id === 'AUTO' && !W.files.get(root).trashed && r.d.errs === 1,
+     '清洗：视频挪进 /auto 以后读回来失败 → 挪之前已经记下视频和原文件夹（不再指着原文件夹）', { stage: r.stage, d: r.d });
+  await tick(); W.hook = null;
+  r = row27(a);
+  ok(r.stage === 'copy' && r.d.item === 'Clean.One.2001.1080p.mkv' && r.d.junk === undefined && W.files.get(root).trashed && !vid.trashed &&
+     JSON.stringify(r.d.tried) === '[1]' && nMove === 1 && !logs27(a).some(m => /放弃/.test(m)),
+     '下一轮从视频接着做：不再挪（已经在 /auto）、删原文件夹、往下走，没换规格（以前：文件夹里没有视频 → 换规格，视频留在 /auto）', { stage: r.stage, d: r.d, nMove });
+  env.DB.db.prepare('DELETE FROM tj_req WHERE id = ?').run(a);
+
+  /* 删原文件夹那一下 PikPak 回 500：以前吞掉（原文件夹一直留在 PikPak），现在这一条停在清洗、下一轮再删 */
+  const root2 = pkFolderWith('Clean.Two.2002.1080p.BluRay', [['Clean.Two.2002.1080p.mkv', 8e9], ['junk.txt', 5]]);
+  const vid2 = [...W.files.values()].find(f => f.parent_id === root2 && f.name === 'Clean.Two.2002.1080p.mkv');
+  const b = ins27('clean', { file: root2, fkind: 'dir', cur: { tid: 2, t: 'v2' }, tried: [], task: 'Tc2' });
+  let trashFail = 1;
+  W.hook = (u, m, body) => { if (trashFail && u.pathname === '/drive/v1/files:batchTrash' && body.ids.includes(root2)){ trashFail = 0; return PK500(); } };
+  await tick();
+  r = row27(b);
+  ok(!trashFail && r.stage === 'clean' && r.d.junk === root2 && r.d.file === vid2.id && vid2.parent_id === 'AUTO' && !W.files.get(root2).trashed &&
+     !logs27(b).some(m => /原文件夹没删掉/.test(m)), '删原文件夹时 PikPak 抖了：不吞掉，这一条停在清洗、记着原文件夹', { stage: r.stage, d: r.d });
+  await tick(); W.hook = null;
+  r = row27(b);
+  ok(r.stage === 'copy' && W.files.get(root2).trashed && r.d.junk === undefined && !vid2.trashed, '下一轮删掉原文件夹再往下走', { stage: r.stage, d: r.d });
+  env.DB.prepare('DELETE FROM tj_req WHERE id = ?').bind(b).run();
+
+  /* drop：删云下载任务时 PikPak 回 500 → 以前吞掉（任务接着下、文件留着），现在原地等下一轮再删；「放弃」只记一次 */
+  const fd = 'fdrop', td = 'Tdrop';
+  W.files.set(fd, { id: fd, name: 'Drop.Me.2003.1080p', kind: 'drive#folder', parent_id: 'AUTO', size: '0', phase: 'PHASE_TYPE_RUNNING', trashed: false });
+  W.tasks.set(td, { id: td, phase: 'PHASE_TYPE_ERROR', progress: 10, file_id: fd, file_name: 'Drop.Me.2003.1080p', message: 'bad' });
+  const dd = ins27('download', { task: td, file: fd, cur: { tid: 5, t: 'v5' }, tried: [] });
+  let delFail = 1;
+  W.hook = (u, m) => { if (delFail && u.pathname === '/drive/v1/tasks' && m === 'DELETE'){ delFail = 0; return PK500(); } };
+  await tick();
+  r = row27(dd);
+  ok(!delFail && r.stage === 'download' && W.tasks.has(td) && !W.files.get(fd).trashed && !logs27(dd).some(m => /放弃/.test(m)) && r.d.errs === 1,
+     'drop：删云下载任务时 PikPak 抖了 → 不吞掉，这一条原地等下一轮（任务还在、还没记「放弃」）', { stage: r.stage, d: r.d });
+  await tick(); W.hook = null;
+  r = row27(dd);
+  ok(r.stage === 'queued' && !W.tasks.has(td) && W.files.get(fd).trashed && JSON.stringify(r.d.tried) === '[5]' && logs27(dd).filter(m => /^放弃/.test(m)).length === 1,
+     '下一轮再删：任务和文件都删了、记下试过，「放弃」只记了一次', { stage: r.stage, d: r.d, logs: logs27(dd) });
+}
+
+/* ── 2.7 有人中途跟上：这一轮推进的照样存得进去（跟上不动 rev，定时任务存的时候不写 users） ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: false, autoReady: false, vpsSlots: 4 } });
+  /* 清洗挪文件的时候 bob 从请求中心跟上 */
+  const root = pkFolderWith('Join.Clean.2004.1080p.BluRay', [['Join.Clean.2004.1080p.mkv', 7e9], ['x.txt', 1]]);
+  const a = ins27('clean', { file: root, fkind: 'dir', cur: { tid: 2, t: 'v2' }, tried: [1] }, { tmdb: 9901 });
+  let j1 = null;
+  W.hook = async (u) => { if (!j1 && u.pathname === '/drive/v1/files:batchMove') j1 = (await batchPost('bob', [{ src: 'movie', id: 9901 }]))[1]; };
+  const rev0 = row27(a).rev;
+  await tick(); W.hook = null;
+  let r = row27(a);
+  ok(j1 && j1.items[0].result === 'joined' && r.stage === 'copy' && r.d.item === 'Join.Clean.2004.1080p.mkv' && r.users.join() === 'alice,bob' && r.rev === rev0 + 1,
+     '清洗挪文件时 bob 跟上：这一轮的结果照样存进去（以前跟上 rev + 1，这一轮的存不进去），bob 也在', { j: j1 && j1.items[0].result, stage: r.stage, users: r.users, rev: r.rev - rev0 });
+  await tick();
+  r = row27(a);
+  ok(r.stage === 'copy' && !logs27(a).some(m => /放弃/.test(m)), '下一轮接着传，没有换规格（以前：云下载的文件不见了 → 换规格，视频留在 /auto）', { stage: r.stage, logs: logs27(a) });
+  env.DB.db.exec('DELETE FROM tj_req');
+  /* 开传输的时候 bob 从老版本 App 跟上（POST /app/requests） */
+  const b = ins27('copy', { item: 'Join.Copy.mkv', kind: 'file', tag: '' }, { tmdb: 9902 });
+  W.copyJobs = [501, 502]; W.job[501] = { finished: false, success: false, bytes: 1, total: 9 }; W.job[502] = { finished: false, success: false, bytes: 1, total: 9 };
+  let j2 = null;
+  W.hook = async (u) => { if (!j2 && u.pathname === '/api/link/copy') j2 = (await call('POST', '/app/requests', { user: 'bob', body: { src: 'movie', id: 9902 } }))[1]; };
+  const c0 = tf27('copy').length;
+  await tick(); W.hook = null;
+  await tick();
+  r = row27(b);
+  ok(j2 && j2.joined === 1 && tf27('copy').length === c0 + 1 && r.d.job === 501 && r.users.join() === 'alice,bob',
+     '开传输时 bob 跟上：作业号记下了，下一轮没再开第二个 rclone 作业', { j2: j2 && j2.joined, copies: tf27('copy').length - c0, job: r.d.job, users: r.users });
+  W.copyJobs = [];
+}
+
+/* ── 2.7 一轮的租约：跑完就还；一轮跑得久（传输调用慢），下一分钟的定时任务、面板「立即跑一轮」都拿不到；截止时刻前不发有副作用的调用 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: false, autoReady: false, vpsSlots: 4 } });
+  W.verifyOK = true; W.verifySeq = [];
+  const y = ins27('verify', { item: 'Lease.Y.mkv', kind: 'file', tag: '' });
+  const x = ins27('copy', { item: 'Lease.X.mkv', kind: 'file', tag: '' });
+  W.copyJobs = [601, 602]; W.job[601] = { finished: false, success: false, bytes: 1, total: 9 }; W.job[602] = { finished: false, success: false, bytes: 1, total: 9 };
+  let inner = null, panel = null, fired = 0;
+  W.hook = async (u) => {
+    if (u.pathname === '/api/link/verify' && !fired){ advance(21000); return; }      // VPS 慢：核对 21 秒
+    if (u.pathname === '/api/link/copy' && !fired){
+      fired = 1;                                                                         // 只掐一次（拿到了租约的那一轮自己也会走到这儿）
+      advance(40000);                                                                    // 开传输这一下 40 秒：期间下一分钟的定时任务来了，有人点了面板
+      inner = await cron();
+      panel = (await call('POST', '/admin/api/tick', { admin: true, body: {} }))[1];
+    }
+  };
+  const c0 = tf27('copy').length;
+  const outer = await cron(3 * 60000);
+  W.hook = null;
+  ok(inner && inner.busy === 1 && panel && panel.busy === 1 && outer && outer.done === 2 && tf27('copy').length === c0 + 1 && row27(x).d.job === 601 && row27(y).stage === 'purge',
+     '一轮跑了 61 秒：下一分钟的定时任务、面板「立即跑一轮」都拿不到租约（busy），只开了一个传输作业', { inner, panel, done: outer && outer.done, copies: tf27('copy').length - c0, job: row27(x).d.job });
+  const a1 = await cron(1000), a2 = await cron(1000);
+  ok(!a1.busy && !a2.busy && a2.done !== undefined, '一轮跑完就还租约：1 秒后的下一轮马上拿得到（以前租约 55 秒、不还）', { a1: a1.busy, a2: a2.busy });
+  await call('POST', '/admin/api/cfg', { admin: true, body: { paused: true } });
+  const p1 = await cron(1000), p2 = (await call('POST', '/admin/api/tick', { admin: true, body: {} }))[1];
+  ok(p1.paused === 1 && !p2.busy && !p2.paused && p2.done !== undefined, '暂停时：定时任务不跑；面板「立即跑一轮」只跳过暂停，照样拿租约跑', { p1, p2: p2.done });
+  await call('POST', '/admin/api/cfg', { admin: true, body: { paused: false } });
+
+  /* 截止时刻：这一轮在一个只读调用上耗了 45 秒，剩下的不够一个完整的传输调用（60 秒）→ 这一轮不开传输（不会「那边开了、这边超时没收到」），下一轮再开 */
+  env.DB.db.exec('DELETE FROM tj_req');
+  W.files.set('dl1', { id: 'dl1', name: 'Deadline.2005.1080p.mkv', kind: 'drive#file', parent_id: 'AUTO', size: '5', phase: 'PHASE_TYPE_COMPLETE', trashed: false });
+  const z = ins27('copy', { item: 'Deadline.2005.1080p.mkv', kind: 'file', file: 'dl1' });
+  let slow = 1;
+  W.hook = (u, m) => { if (slow && m === 'GET' && u.pathname === '/drive/v1/files'){ slow = 0; advance(45000); } };
+  const c1 = tf27('copy').length;
+  await tick(); W.hook = null;
+  let r = row27(z);
+  ok(!slow && tf27('copy').length === c1 && r.stage === 'copy' && !r.d.job && r.d.tag && r.d.item.includes(r.d.tag) && lastTick().over >= 1 && !r.d.errs,
+     '一轮快到截止时刻：追踪码加好了，但不开传输（只剩 50 秒，不够一个 60 秒的传输调用），不算出错', { copies: tf27('copy').length - c1, d: r.d, over: lastTick().over });
+  await tick();
+  r = row27(z);
+  ok(tf27('copy').length === c1 + 1 && r.d.job > 0 && tf27('copy').slice(-1)[0][1].item === r.d.item, '下一轮开传输（用带追踪码的名字），只开一次', { copies: tf27('copy').length - c1, d: r.d });
+  W.copyJobs = [];
+}
+
+/* ── 2.7 flush：一批写 D1 失败 → 放回去、收尾时再写一遍（以前这几条的进度丢了，下一轮再开一个传输作业） ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: false, autoReady: false, vpsSlots: 4 } });
+  const k = ins27('copy', { item: 'Flush.K.mkv', kind: 'file', tag: '' });
+  W.copyJobs = [701, 702]; W.job[701] = { finished: false, success: false, bytes: 1, total: 9 }; W.job[702] = { finished: false, success: false, bytes: 1, total: 9 };
+  const bat = env.DB.batch, prep = env.DB.prepare;
+  let failNext = 1;
+  env.DB.prepare = function (sql){ const s = prep.call(this, sql); s._sql = sql; return s; };
+  env.DB.batch = async function (list){
+    if (failNext && list.some(s => /^UPDATE tj_req SET title/.test(s._sql || ''))){ failNext = 0; throw new Error('D1_ERROR: Network connection lost.'); }
+    return bat.call(this, list);
+  };
+  const err0 = console.error; console.error = () => {};
+  const c0 = tf27('copy').length;
+  try { await tick(); await tick(); }
+  finally { env.DB.batch = bat; env.DB.prepare = prep; console.error = err0; }
+  const r = row27(k);
+  ok(failNext === 0 && tf27('copy').length === c0 + 1 && r.d.job === 701, '一批写 D1 失败：收尾时再写一遍，作业号记下了，下一轮没再开第二个传输', { copies: tf27('copy').length - c0, job: r.d.job });
+  W.copyJobs = [];
+}
+
+/* ── 2.7 批量：910 回「这一组在跑、作业号没找到」（running: 1）不算出错：记成在传、5 分钟才再接作业号，一天后也不退回单个传输 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, batchMin: 16, batchWait: 600, vpsSlots: 2, autoReady: true } });
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  const m = [0, 1].map(i => ins27('ready', { item: 'Jl' + i + '.mkv', kind: 'file', tag: '' }, { next: Date.now() + 3600e3 }));
+  const B = () => { const b = env.DB.db.prepare('SELECT * FROM tj_batch ORDER BY id DESC LIMIT 1').get(); return { ...b, d: JSON.parse(b.data) }; };
+  W.tfDown = 1;                                                    // 开作业那一下的回答丢了（其实那边开了）
+  await tick();
+  const key = String(B().id);
+  W.batchRun[key] = 4700; W.job[4700] = { finished: false, success: false, bytes: 3e8, total: 2e9 };
+  W.batchJobless = true;
+  const bc = () => tf27('batch-copy').length, n0 = bc();
+  await tick();
+  let b = B();
+  ok(bc() === n0 + 1 && b.d.running > 0 && !b.d.job && !b.d.err && !b.d.errSince && b.d.tries === 0 && b.ended === 0,
+     '910 回 running: 1：记成在传（不再当「传输没给作业号」出错）', b.d);
+  const [, st] = await call('GET', '/admin/api/state', { admin: true });
+  const [, , fl] = await flowGet('alice');
+  ok(st.batch.jobless === 1 && st.batch.err === '' && st.batch.stage === 'copy' && fl.batch.stage === 'copy' && fl.batch.speed === 0,
+     '面板写「传输中（作业号未知）」、不写出错；/app/flow 照样是在传（没有作业号就没有速度）', { panel: st.batch, flow: fl.batch });
+  for (let i = 0; i < 4; i++) await tick();
+  ok(bc() - n0 === 3, '作业号未知：5 分钟才再接一次（以前每 70 秒一次，VPS 在传 16 路时再列一遍）', bc() - n0);
+  advance(25 * 3600e3); await tick(); await tick();
+  b = B();
+  ok(b.ended === 0 && !b.d.off && W.copyWhileBatch === 0 && m.every(id => row27(id).stage === 'copy' && row27(id).bat === b.id),
+     '一天以后也不退回单个传输（以前一天后和还在跑的批量作业一起传）', { d: b.d, copyWhileBatch: W.copyWhileBatch, rows: m.map(row27).map(x => [x.stage, x.bat]) });
+  W.batchJobless = false;
+  advance(6 * 60000); await tick();
+  b = B();
+  ok(b.d.job === 4700 && !b.d.running, '传输 Worker 找到作业号了：同一个 key 接上正在跑的那个', b.d);
+  W.job[4700] = { finished: true, success: true, bytes: 2e9, total: 2e9 };
+  await tick();
+  ok(m.every(id => row27(id).stage === 'verify'), '传完：成员一起去核对', m.map(row27).map(x => x.stage));
+}
+
+/* ── 2.7 批量进度只往前走：作业丢了重开，rclone 新的一组从 0 算起，成员、App、/app/flow 不从 60% 跳回 5% ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, batchMin: 16, batchWait: 600, vpsSlots: 2 } });
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  const m = [0, 1].map(i => ins27('ready', { item: 'Pm' + i + '.mkv', kind: 'file', tag: '' }, { next: Date.now() + 3600e3 }));
+  W.batchJobs = [4801]; W.job[4801] = { finished: false, success: false, bytes: 1.2e9, total: 2e9 };
+  await tick(); await tick();                                     // 开批 → 问到 1.2 / 2 GB
+  const pct = () => m.map(id => Math.round(row27(id).pct * 100));
+  const app = async () => (await mine()).filter(r => m.includes(r.id)).map(r => r.pct);
+  const p1 = pct(), a1 = await app(), f1 = (await flowGet('alice'))[2].batch;
+  W.job[4801] = { missing: 1, finished: true, success: false, error: 'job not found' };           // VPS 重启，作业丢了
+  W.batchJobs = [4802]; W.job[4802] = { finished: false, success: false, bytes: 1e8, total: 8e8 }; // 新的一组：只算还缺的 0.8 GB，从 0 算起
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k = 'flow:live'");
+  await tick(); await tick(); await tick();                       // 发现丢了 → 重开 → 问到新的一组
+  const p2 = pct(), a2 = await app(), f2 = (await flowGet('alice'))[2].batch;
+  ok(p1.join() === '60,60' && f1.pct === 60 && W.batchCalls.length === 2 && p2.join() === '60,60' && a2.join() === a1.join() &&
+     f2.pct === 60 && f2.bytes === 1.2e9 && f2.total === 2e9,
+     '作业丢了重开、新的一组从 0 算：成员、App、/app/flow 的进度停在 60%（以前跳回 5%）', { p1, p2, a1, a2, f1: [f1.pct, f1.bytes], f2: [f2.pct, f2.bytes] });
+}
+
+/* ── 2.7 /app/requests 的 ETag：等着的（下载卡在 40%）每轮存一次也不变；进度变了才变；有人中途跟上，这一轮照样存、updated 留着跟上的那一刻 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, autoReady: true, pkSlots: 16 } });
+  const task = 'Tet1';
+  W.tasks.set(task, { id: task, phase: 'PHASE_TYPE_RUNNING', progress: 40, file_id: 'nofile', file_name: 'Etag.X' });
+  const id = ins27('download', { task, cur: { tid: 1, t: 'v' }, tried: [] }, { tmdb: 9950 });
+  const etag = async () => {
+    const r = await worker.fetch(new Request('https://tj.cuven.us/app/requests', { headers: { 'x-cuven-user': 'alice' } }), env, {});
+    return [r.headers.get('etag'), (await r.json()).items.find(x => x.id === id)];
+  };
+  const rev0 = row27(id).rev, tags = [];
+  for (let i = 0; i < 4; i++){ await tick(); tags.push(await etag()); }
+  ok(new Set(tags.map(x => x[0])).size === 1 && tags.every(x => x[1].pct === 28) && row27(id).rev === rev0 + 4,
+     '下载卡在 40%：每轮都存（rev 在涨），App 的 ETag 不变（以前每存一次 updated 就变，拿不到 304）', tags.map(x => x[0]));
+  W.tasks.get(task).progress = 60;
+  await tick();
+  const [t5, v5] = await etag();
+  ok(t5 !== tags[3][0] && v5.pct === 32 && v5.updated > tags[3][1].updated, '进度变了（40% → 60%）：ETag 变、updated 跟着变', { v5 });
+  let jt = 0;
+  W.hook = async (u, m) => {
+    if (jt || u.pathname !== '/drive/v1/tasks' || m !== 'GET') return;
+    advance(1000); await batchPost('bob', [{ src: 'movie', id: 9950 }]);
+    jt = env.DB.db.prepare('SELECT updated FROM tj_req WHERE id = ?').get(id).updated;            // 跟上那一刻写进去的 updated
+  };
+  await tick(); W.hook = null;
+  const r = row27(id);
+  ok(jt > v5.updated && r.updated === jt && r.users.join() === 'alice,bob' && r.next > jt && r.rev === rev0 + 6,
+     '这一轮中途 bob 跟上：这一轮照样存进去（next 往后了），updated 留着跟上的那一刻（没被这一轮盖回去）', { jt, updated: r.updated, next: r.next, users: r.users });
+}
+
+/* ── 2.7 /app/flow 的实时进度：问 VPS 的那几秒里别人来看直接用上一份（先盖戳），最多等 8 秒 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, batchMin: 16, batchWait: 600, vpsSlots: 2 } });
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  [0, 1].forEach(i => ins27('ready', { item: 'Fl' + i + '.mkv', kind: 'file', tag: '' }, { next: Date.now() + 3600e3 }));
+  W.batchJobs = [4900]; W.job[4900] = { finished: false, success: false, bytes: 5e8, total: 2e9 };
+  await tick(); await tick();                                     // 开批、问一次作业进度（记进 b.d.live）
+  env.DB.db.exec("DELETE FROM tj_kv WHERE k = 'flow:live'");
+  advance(10000);
+  let calls = 0, release;
+  const hold = new Promise(res => { release = res; });
+  const timeouts = [], realST = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...a) => { timeouts.push(ms); return realST(fn, ms, ...a); };
+  W.hook = async (u, m, body) => { if (u.pathname === '/api/link/job' && body && body.detail){ calls++; await hold; } };
+  let first, rest;
+  try {
+    first = flowGet('alice');
+    for (let i = 0; i < 200 && !calls; i++) await new Promise(res => setImmediate(res));
+    realST(release, 300);                                          // 不放的话以前那样每个都去问、一起挂着
+    rest = await Promise.all(Array.from({ length: 5 }, () => flowGet('alice')));
+    first = await first;
+  } finally { globalThis.setTimeout = realST; W.hook = null; release(); }
+  ok(calls === 1 && first[0] === 200 && rest.every(x => x[0] === 200 && x[2].batch.stage === 'copy' && x[2].batch.bytes === 5e8),
+     '6 个人同时看 /app/flow：只问了一次 VPS，问的那几秒里别人用上一份（先盖了戳）', { calls, rest: rest.map(x => x[2] && x[2].batch.bytes) });
+  ok(timeouts.includes(8000) && !timeouts.includes(60000), '问实时进度最多等 8 秒（以前跟着传输调用的 60 秒，App 的请求也挂着）', [...new Set(timeouts)]);
+}
+
+/* ── 2.7 追踪：按结束时刻往后翻（游标），不再每次都是最新的 40 条：早结束、被工作人员挪走的也追得到 ── */
+{
+  reset26();
+  await call('POST', '/admin/api/cfg', { admin: true, body: { tagNames: true, autoReady: true } });
+  W.lib = { mode: 'on', seen: new Set(), where: {}, found: {} };
+  W.sync = [];
+  const t = Date.now(), ids = [];
+  for (let i = 0; i < 60; i++){
+    const at = t - (60 - i) * 60000;
+    ids.push(ins27('done', { item: 'D' + i + '.mkv', kind: 'file', tag: '[auto-m' + (5000 + i) + '-r0]', lib: 1 }, { updated: at, since: at }));
+  }
+  /* 最早结束的 20 部工作人员挪进 /ram 了，最新的 40 部还在 /auto */
+  ids.forEach((id, i) => { W.lib.where[String(id)] = i < 20 ? { path: '/ram/D' + i + '.mkv', auto: false } : { path: '/auto/D' + i + '.mkv', auto: true }; });
+  for (let k = 0; k < 4; k++){ advance(31 * 60000); await tick(); }
+  const homes = ids.filter(id => row27(id).d.home).length, asked = new Set(W.sync.flatMap(s => s.codes));
+  ok(homes === 20 && ids.every(id => asked.has(String(id))) && W.sync.every(s => s.codes.length <= 40),
+     '追踪往后翻：60 条都问到了（一次最多 40），最早结束、被挪进 /ram 的 20 条都找到了（以前一直是最新的那 40 条）', { homes, asked: asked.size });
+}
+
+/* ── 2.7 改名：910 回 done: 1（上一次其实改完了）→ 不当作业去问，这一轮就往下走 ── */
+{
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true } });
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  const id = Number(env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next)
+    VALUES ('tv', 9960, 1, 'r', '["alice"]', 'rename', '', ?, 1, 1, ?, 0)`)
+    .run(JSON.stringify({ fname: 'Show.9960.S01.1080p.WEB-DL', fkind: 'dir', sub: 'ram2', cur: { tid: 1, t: 'x' }, tried: [] }), Date.now()).lastInsertRowid);
+  W.renameDone = true;
+  const tf0 = W.tf.length;
+  await tick(); W.renameDone = false;
+  const r = row27(id), ops = W.tf.slice(tf0);
+  ok(r.stage === 'ready' && r.d.item === 'Show.9960.S01.1080p.[Full-4]-Cuven®' && !r.d.job &&
+     !ops.some(([op, b]) => (op === 'job' && b.jobid === 79) || (op === 'jobs' && b.ids.includes(79))),
+     '改名回 done: 1：不再记作业号、等 20 秒再问，这一轮就去等凑批', { stage: r.stage, d: r.d, ops: ops.map(x => x[0]) });
+}
+
+/* ── 2.7 D1 读的行数：/app/requests 只读进行中的 + 30 天内结束的；面板、每轮挑到期的、libNudge、限额、追踪都走索引，
+      库里有了统计（PRAGMA optimize / ANALYZE）以后也一样 ── */
+{
+  reset26();
+  const t = Date.now(), old = t - 60 * 86400e3;
+  const hist = env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next)
+    VALUES ('movie', ?, 0, 'h', ?, ?, '', '{"tag":"[x]"}', ?, ?, ?, 0)`);
+  for (let i = 0; i < 400; i++) hist.run(12000 + i, i % 4 ? '["zed"]' : '["alice"]', i % 10 ? 'done' : 'failed', old, old, old);
+  const recentDone = ins27('done', { item: 'R.mkv', kind: 'file' }, { since: t - 86400e3, updated: t - 86400e3 });
+  const act = ins27('download', { task: 'nope' }, { next: t + 3600e3 });
+  ins27('queued', {}, { users: '["zed"]', next: t + 3600e3 });
+  const cx = ins27('queued', {}, { since: old, next: t + 3600e3 });
+  await call('POST', '/admin/api/req', { admin: true, body: { id: cx, act: 'cancel' } });      // 取消：since = 取消的时刻
+  const items = await mine();
+  ok(items.map(x => x.id).sort((p, q) => p - q).join() === [recentDone, act, cx].sort((p, q) => p - q).join(),
+     '/app/requests：我的进行中的 + 30 天内结束的（取消的也算），60 天前结束的不给', items.map(x => [x.id, x.stage]));
+  const seen = [], prep = env.DB.prepare;
+  env.DB.prepare = function (sql){ seen.push(sql); return prep.call(this, sql); };
+  try {
+    await mine();
+    await call('GET', '/admin/api/state', { admin: true });
+    await call('POST', '/app/requests', { user: 'bob', body: { src: 'movie', id: 12998 } });      // 限额（单条提交）
+    await batchPost('alice', [{ src: 'movie', id: 12999 }]);                                        // 限额（请求中心）
+    advance(31 * 60000); await tick();                                                              // 挑到期的、libNudge、追踪
+  } finally { env.DB.prepare = prep; }
+  const planOf = (s) => env.DB.db.prepare('EXPLAIN QUERY PLAN ' + s).all().map(x => x.detail);
+  const scans = (list) => list.map(s => [s.replace(/\s+/g, ' ').slice(0, 110), planOf(s)]).filter(([, p]) => p.some(d => /^SCAN tj_req\b/.test(d)));
+  /* 请求中心按片名键（json_each(?)）找的那几条一次提交只跑一次，不在这里查；面板「最近 200 条」按主键倒着读 200 行（SCAN 但有 LIMIT） */
+  const all = [...new Set(seen)].filter(s => /\btj_req\b/.test(s) && /^\s*(SELECT|UPDATE)/i.test(s) && !/json_each\(\?\)/.test(s) &&
+    !/^SELECT \* FROM tj_req ORDER BY id DESC LIMIT 200$/.test(s.trim()));
+  const hot = all.filter(s => /INDEXED BY/.test(s));
+  ok(!scans(all).length, '/app/requests、面板、限额、一轮定时任务的查询没有一条把 tj_req 整张表读一遍（400 行历史）', scans(all));
+  ok(['ORDER BY next ASC', "stage = 'done' AND next > 0", 'UNION ALL', 'COUNT(*)', 'ORDER BY since, id', 'ORDER BY id DESC LIMIT 200'].every(k => hot.some(s => s.includes(k))),
+     '每轮挑到期的、libNudge、/app/requests、限额、追踪、面板进行中的那几条都写了 INDEXED BY', hot.map(s => s.replace(/\s+/g, ' ').slice(0, 80)));
+  env.DB.db.exec('ANALYZE');
+  try {
+    ok(!scans(hot).length && hot.every(s => planOf(s).some(d => /USING (COVERING )?INDEX tj_req_(stnext|stage)\b/.test(d))),
+       '库里有了统计（ANALYZE）以后照样走 stage 的索引（不改走 tj_req_next、不整张表扫）', hot.map(s => [s.replace(/\s+/g, ' ').slice(0, 60), planOf(s)]));
+  } finally { env.DB.db.exec('DELETE FROM sqlite_stat1'); try { env.DB.db.exec('ANALYZE sqlite_schema'); } catch {} }
   env.DB.db.exec('DELETE FROM tj_req');
 }
 

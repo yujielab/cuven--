@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as H from './harness.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -913,9 +913,11 @@ console.log('\n■ /auto：传完就能播放（v25.1，用户要求：在 auto 
   ok(/\/auto（传完就能播放）/.test(health), '健康页有一行 /auto 的情况');
 
   H.env.AUTO_SYNC_KEY = 'sync-key';
-  const s403 = await H.call('/api/auto/sync?item=x', 'POST', {});
+  // v25.5：不带口令的不再 403（App 的「立即播放」兜底就是不带口令的 POST）—— 只有带了、但带错的才 403
+  const s403 = await H.call('/api/auto/sync?item=x', 'POST', { 'x-sync-key': 'wrong-key' });
+  const sNoKey = await H.call('/api/auto/sync?item=x', 'POST', {});
   const s200 = await H.call('/api/auto/sync?item=x', 'POST', { 'x-sync-key': 'sync-key' });
-  ok(s403.status === 403 && s200.status === 200, '配了 AUTO_SYNC_KEY：不带 / 带错口令 403，带对了 200');
+  ok(s403.status === 403 && sNoKey.status === 200 && s200.status === 200, '配了 AUTO_SYNC_KEY：带错口令 403，带对了 200；不带口令的（App）200（走便宜的那条路）');
   delete H.env.AUTO_SYNC_KEY;
 
   H.env.AUTO_FOLDER = 'off';
@@ -1162,6 +1164,271 @@ console.log('\n■ /auto/ram2：剧集那一层（v25.4，用户要求：电影�
   delete H.env.TMDB_API_KEY;
   H.tv.entries = []; H.tmdb.shows = []; H.tmdb.movies = [];
   await get('/api/tv?refresh=1'); await get('/api/refresh'); await settle();
+}
+
+console.log('\n■ v25.5：/api/auto/sync 与剧集表 —— /auto 没变不重扫不重写、TMDB 不重复查、跨 isolate 一致、Dropbox 限流先用旧回答');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  // 这一段的时间可以往前拨（memo / 新鲜度）；只用新开的模块实例（一个实例 = 一个 isolate），不碰 H.worker，结束时还原
+  const realNow = Date.now; let off = 0; Date.now = () => realNow() + off;
+  const WURL = pathToFileURL(path.join(HERE, '..', 'Stream_v25.js')).href;
+  let isoN = 0;
+  const iso = async () => (await import(`${WURL}?v255=${++isoN}`)).default;
+  // R2 / KV 替身：put 回 etag、head 带 customMetadata（和真绑定一样）
+  const r2 = () => {
+    const m = new Map(), st = { get: 0, head: 0, put: 0, bytes: 0, keys: [] }; let n = 0;
+    const meta = v => ({ etag: v.etag, httpEtag: `"${v.etag}"`, uploaded: v.at, size: v.body.length, customMetadata: { ...v.cm } });
+    return { m, st,
+      json: k => (m.get(k) ? JSON.parse(m.get(k).body) : null),
+      async get(k) { st.get++; const v = m.get(k); return v ? { ...meta(v), json: async () => JSON.parse(v.body), text: async () => v.body } : null; },
+      async head(k) { st.head++; const v = m.get(k); return v ? meta(v) : null; },
+      async put(k, body, o = {}) { st.put++; st.bytes += String(body).length; st.keys.push(k);
+        const v = { body: String(body), etag: 'e' + (++n), at: new Date(), cm: { ...(o.customMetadata || {}) } }; m.set(k, v); return meta(v); },
+      async delete(k) { m.delete(k); } };
+  };
+  const kv = () => { const m = new Map(); return { m,
+    async get(k, o) { const v = m.get(k); return v == null ? null : (o && (o === 'json' || o.type === 'json')) ? JSON.parse(v) : v; },
+    async put(k, v) { m.set(k, String(v)); } }; };
+  const mkEnv = (extra = {}) => { const e = { ...H.env, FILE_CACHE: r2(), LIB_STATE: kv() }; delete e.AUTH_SECRET; return Object.assign(e, extra); };
+  // 数 Dropbox 列目录（按目录）、TMDB；hook 可以改回包 / 拖慢
+  const baseFetch = globalThis.fetch;
+  const net = { by: {}, hook: null };
+  globalThis.fetch = async (input, init = {}) => {
+    const req = input instanceof Request ? input : new Request(input, init);
+    const u = new URL(req.url);
+    let k = u.host;
+    if (u.host === 'api.dropboxapi.com' && u.pathname.startsWith('/2/files/list_folder')) {
+      const b = await req.clone().json().catch(() => ({}));
+      k = 'list:' + (b.cursor ? 'continue' : String(b.path || '').toLowerCase());
+    }
+    net.by[k] = (net.by[k] || 0) + 1;
+    if (net.hook) { const r = await net.hook(u, k, req); if (r) return r; }
+    return baseFetch(req);
+  };
+  const reset = (...envs) => { net.by = {}; H.tmdb.calls.length = 0; for (const e of envs) Object.assign(e.FILE_CACHE.st, { get: 0, head: 0, put: 0, bytes: 0, keys: [] }); };
+  const call = async (W, E, u, method = 'GET', headers = {}, { wait = true } = {}) => {
+    const t0 = realNow();
+    const r = await W.fetch(new Request('https://w.test' + u, { method, headers }), E, H.ctx);
+    const out = { status: r.status, ms: realNow() - t0, ra: r.headers.get('Retry-After'), body: await r.json().catch(() => null) };
+    if (wait) await settle();
+    return out;
+  };
+  const f = (p, size = 1e9, at = '2026-11-24T00:00:00Z') => ({ path_display: p, size, server_modified: at });
+  const nm = p => p.split('/').pop();
+  const TVK = 'tv/list-v1.json', SNAPK = 'file-list-v2.json';
+  const autoSeasons = j => ((j && j.series) || []).filter(s => s.path.startsWith('/auto/')).map(s => s.path);
+  const season = (i, eps = 2) => {
+    const dir = `/auto/ram2/Batch.Show.${i}.S01.1080p.WEB-DL.[auto-tv${900 + i}s1-r${500 + i}]`;
+    if (!H.tmdb.shows.some(x => x.id === 900 + i)) H.tmdb.shows.push({ id: 900 + i, name: '批量剧' + i, original: 'Batch ' + i, first: '2024-01-01', seasons: [{ n: 1, air: '2024-01-01', count: eps }] });
+    return { dir, name: nm(dir), files: Array.from({ length: eps }, (_, e) => f(`${dir}/Batch.Show.${i}.S01E0${e + 1}.mkv`)) };
+  };
+  const movie = i => ({ path: `/auto/Batch.Movie.${i}.2024.1080p.[auto-m${700 + i}-r${600 + i}].mkv`, code: String(600 + i) });
+  const LIB = [f('/ram2/Fargo/Season 1/Fargo.S01E01.mkv'), f('/ram2/Fargo/Season 1/Fargo.S01E02.mkv')];
+  H.tv.pageSize = 0; H.tmdb.shows = []; H.tmdb.movies = [];
+  delete H.env.TV_FOLDER; delete H.env.AUTO_FOLDER; delete H.env.AUTO_SYNC_KEY; delete H.env.AUTO_TV_SUB;
+
+  try {
+    // ── stream-1：/auto 没变的那一下催促只列一次 /auto，不重扫剧集目录、不写 R2；只问 code= / tmdb= 的不列 Dropbox ──
+    {
+      const E = mkEnv({ TMDB_API_KEY: 'tmdb-test' });
+      const A = await iso();
+      H.tv.entries = [...LIB];
+      await call(A, E, '/api/all'); await call(A, E, '/api/tv?refresh=1');            // cron 已经热过：快照 + 剧集表都在 R2
+      const S = [0, 1, 2, 3].map(i => season(i)), M = [0, 1].map(movie);
+      H.tv.entries.push(...S.flatMap(s => s.files), ...M.map(m => f(m.path, 8e9)));     // 一批落地
+      const q = [...S.map(s => s.name), ...M.map(m => nm(m.path))].map(n => 'item=' + encodeURIComponent(n)).join('&') + '&tv=1&code=500&code=600';
+      reset(E);
+      const s1 = await call(A, E, '/api/auto/sync?' + q, 'POST');
+      const tm1 = H.tmdb.calls.filter(c => /^\/tv\/90\d$/.test(c.path)).length;
+      ok(s1.status === 200 && Object.values(s1.body.has).every(Boolean) && net.by['list:/ram2'] === 1 && E.FILE_CACHE.st.keys.includes(SNAPK) && E.FILE_CACHE.st.keys.includes(TVK),
+        `刚落地：/auto 变了 → 剧集目录重扫一次、快照和剧集表各写一次，${Object.keys(s1.body.has).length} 个都收录了`, { by: net.by, keys: E.FILE_CACHE.st.keys });
+      ok(tm1 === 4, `带追踪码的新一季只查一次 TMDB（mtById 取回来的详情直接用，不原样再取一遍）：4 季 ${tm1} 次`);
+      off += 30_000; reset(E);
+      await call(A, E, '/api/tv?refresh=1');                                // 像 cron 那样整棵重扫一遍：内容没变
+      ok(net.by['list:/ram2'] === 1 && !E.FILE_CACHE.st.keys.includes(TVK), '剧集表重扫一遍、内容没变：不重写 R2 里那 1–2 MB（cron 每分钟一轮，以前每轮都写）', E.FILE_CACHE.st.keys);
+      off += 61_000; reset(E);
+      const s2 = await call(A, E, '/api/auto/sync?' + q, 'POST');
+      const lists = Object.entries(net.by).filter(([k]) => k.startsWith('list:'));
+      ok(s2.status === 200 && Object.values(s2.body.has).every(Boolean) && s2.body.where['500'] && s2.body.where['600'] &&
+        lists.length === 1 && net.by['list:/auto'] === 1 && E.FILE_CACHE.st.put === 0 && E.FILE_CACHE.st.get === 0 && !H.tmdb.calls.length,
+        `一分钟后的催促（什么都没变）：只列一次 /auto，剧集目录不重扫、R2 不写也不读整份（${E.FILE_CACHE.st.head} 次 head）、不查 TMDB`, { by: net.by, r2: E.FILE_CACHE.st });
+      off += 11_000; reset(E);
+      const s3 = await call(A, E, '/api/auto/sync?code=500&code=601&tmdb=tv900s1&tmdb=m701', 'POST');
+      ok(s3.status === 200 && s3.body.where['500'] && s3.body.where['601'] && s3.body.found.tv900s1 && s3.body.found.m701 &&
+        !Object.keys(net.by).some(k => k.startsWith('list:')) && E.FILE_CACHE.st.put === 0,
+        '只问 code= / tmdb= 的（去重、追踪）：不列 Dropbox，查快照和存着的剧集表', { by: net.by });
+    }
+
+    // ── stream-2：TMDB 慢（超过同步接口等的 3.5 秒）：后台那一轮不把还没查完的再查一遍；查完的存进 R2 ──
+    {
+      const E = mkEnv({ TMDB_API_KEY: 'tmdb-test' });
+      const B = await iso();
+      H.tv.entries = [...LIB];
+      await call(B, E, '/api/tv?refresh=1');
+      const S = Array.from({ length: 12 }, (_, i) => season(20 + i));
+      H.tv.entries.push(...S.flatMap(s => s.files));
+      reset(E);
+      net.hook = async (u) => { if (u.host === 'api.themoviedb.org') await new Promise(r => setTimeout(r, 1300)); };
+      const s = await call(B, E, '/api/auto/sync?tv=1&' + S.map(x => 'item=' + encodeURIComponent(x.name)).join('&'), 'POST', {}, { wait: false });
+      await settle(); net.hook = null;
+      const tm = H.tmdb.calls.filter(c => /^\/tv\/9\d\d$/.test(c.path)).map(c => c.path);
+      const stored = E.FILE_CACHE.json(TVK);
+      ok(s.status === 200 && Object.values(s.body.has).every(Boolean) && s.ms < 6000, `TMDB 每次 1.3 秒：同步接口照样 ${s.ms}ms 回答（带追踪码的不等 TMDB）`);
+      ok(tm.length === 12 && new Set(tm).size === 12, `12 季、TMDB 慢到同步接口等不完：每季只查一次（共 ${tm.length} 次；以前 24–48 次）`);
+      ok(stored && S.every(x => (stored.meta['#tv:' + x.name.match(/auto-tv(\d+)s1/)[1] + '|1'] || {}).id > 0),
+        '等不完的那几季查完以后补进表里、存进 R2（别的 isolate 不用再查）');
+    }
+
+    // ── stream-3：一个 isolate 同步了，另一个 isolate 的 /api/tv 马上看得到；扫得慢的旧那一轮不拿旧的 /auto 盖掉新表 ──
+    {
+      const E = mkEnv();
+      const [A, B, C0, D] = [await iso(), await iso(), await iso(), await iso()];
+      H.tv.entries = [...LIB, f('/auto/Old.Movie.2001.mkv', 5e9)];
+      const S = season(40);
+      await call(A, E, '/api/tv?refresh=1');
+      H.tv.entries.push(...S.files);
+      const sb = await call(B, E, '/api/auto/sync?tv=1&item=' + encodeURIComponent(S.name), 'POST');
+      off += 21_000;                                                         // App 接着来拉 /api/tv（每个 isolate 20 秒和 R2 对一次）
+      const ta = await call(A, E, '/api/tv');
+      ok(sb.body.has[S.name] === true && autoSeasons(ta.body).includes(S.dir), 'B 同步完（请求添加据此告诉用户「可以播放」）：A 的 /api/tv 20 秒内就列出这一季（不用等满 10 分钟）');
+
+      // C0：/auto 列过一次（落地前），它的剧集表那一轮在剧集目录上卡住；这时 B 同步、存了新表；C0 那一轮扫完再存
+      H.tv.entries = H.tv.entries.filter(e => !e.path_display.startsWith(S.dir));
+      off += 20 * 60_000;
+      await call(C0, E, '/api/tv?refresh=1');                                // C0：落地前的表 + 落地前那份 /auto（_autoMem）
+      let release, hit; const gate = new Promise(r => { release = r; }), gateHit = new Promise(r => { hit = r; }); let armed = true;
+      net.hook = async (u, k) => { if (armed && k === 'list:/ram2') { armed = false; hit(); await gate; } };
+      off += 11 * 60_000 - 5_000;                                           // C0 的表过期了（> 10 分钟），/auto 那份还在 15 秒里
+      await call(C0, E, '/api/refresh', 'GET', {}, { wait: false });          // 预热顺手列 /auto（落地前）
+      await call(C0, E, '/api/tv', 'GET', {}, { wait: false });              // 后台那一轮开始：卡在剧集目录上
+      await Promise.race([gateHit, new Promise(r => setTimeout(r, 5000))]); armed = false;
+      await new Promise(r => setTimeout(r, 20));
+      H.tv.entries.push(...S.files);                                         // 这时落地
+      const sb2 = await call(B, E, '/api/auto/sync?tv=1&item=' + encodeURIComponent(S.name), 'POST', {}, { wait: false });
+      release(); await settle(); net.hook = null;
+      const stored = E.FILE_CACHE.json(TVK);
+      const td = await call(D, E, '/api/tv');
+      ok(sb2.body.has[S.name] === true && stored.series.some(x => x.path === S.dir) && autoSeasons(td.body).includes(S.dir),
+        'C0 那一轮（落地前开始、拿着落地前的 /auto）比 B 晚存：R2 里的表照样有这一季，新 isolate 的 /api/tv 也有', { stored: stored.series.map(x => x.path) });
+    }
+
+    // ── stream-4：同步接口改 /auto 那一层时用 R2 里现在那份快照，不拿 30 秒的内存副本把别处刚写的改动盖回去 ──
+    {
+      const E = mkEnv();
+      const [A, C, D] = [await iso(), await iso(), await iso()];
+      const FILM = 'Moved.Film.2002.1080p.[auto-m951-r951].mkv';
+      H.tv.entries = [...LIB, f('/auto/' + FILM, 8e9), f('/auto/Other.Movie.2003.mkv', 8e9)];
+      const a0 = await call(A, E, '/api/all');
+      fs.writeFileSync(path.join(H.SAMPLES, FILM), Buffer.alloc(2048));    // 工作人员把它从 /auto 挪进片库
+      H.tv.entries = H.tv.entries.filter(e => !e.path_display.endsWith(FILM));
+      try {
+        await call(C, E, '/api/refresh');                                    // 别的 isolate 的预热：R2 快照里它在 /Movies
+        H.tv.entries.push(f('/auto/New.Arrival.2024.mkv', 8e9));             // 又落地一部：A 这次同步要改 /auto 那一层、写快照
+        reset(E);
+        const s = await call(A, E, `/api/auto/sync?item=New.Arrival.2024.mkv&code=951`, 'POST');   // A 的内存副本还是 30 秒内的那份
+        const snap = E.FILE_CACHE.json(SNAPK);
+        const all = await call(D, E, '/api/all');
+        const inA0 = (a0.body.videos || []).some(v => v.path === '/auto/' + FILM);
+        const allP = (all.body.videos || []).map(v => v.path);
+        ok(inA0 && E.FILE_CACHE.st.keys.includes(SNAPK) && snap.videos.some(v => v.path === '/Movies/' + FILM) && snap.auto.videos.some(v => /New\.Arrival/.test(v.path)) &&
+          allP.includes('/Movies/' + FILM) && allP.includes('/auto/New.Arrival.2024.mkv') && s.body.has['New.Arrival.2024.mkv'] === true &&
+          s.body.where['951'] && s.body.where['951'].path === '/Movies/' + FILM && s.body.where['951'].auto === false,
+          'A 同步、改写 /auto 那一层时 R2 里已经是挪过之后的快照：写回去的是它（片子在 /Movies，没被 A 的旧副本抹掉），追踪码也回新位置', { where: s.body.where, all: allP.filter(p => /Moved|Arrival/.test(p)) });
+      } finally { fs.unlinkSync(path.join(H.SAMPLES, FILM)); }
+    }
+
+    // ── stream-5：Dropbox 出错 / 限流：先回上一次的回答（stale），记住别再去撞；剧集目录列不出来，电影的回答照样给 ──
+    {
+      const E = mkEnv();
+      const F = await iso();
+      H.tv.entries = [...LIB, f('/auto/Heat.1995.mkv', 9e9)];
+      const ok0 = await call(F, E, '/api/auto/sync?item=Heat.1995.mkv&tv=1', 'POST');
+      off += 11_000;
+      net.hook = async (u, k) => (k === 'list:/auto' ? new Response('busy', { status: 503 }) : null);
+      reset(E);
+      const e1 = await call(F, E, '/api/auto/sync?item=Heat.1995.mkv&tv=1', 'POST');
+      const n1 = net.by['list:/auto'] || 0;
+      const e2 = await call(F, E, '/api/auto/sync?item=Heat.1995.mkv&tv=1', 'POST');
+      ok(ok0.status === 200 && e1.status === 200 && e1.body.stale === 1 && e1.body.has['Heat.1995.mkv'] === true && e2.status === 200 && e2.body.stale === 1 &&
+        n1 === 2 && (net.by['list:/auto'] || 0) === 2, `Dropbox 503：回上一次的回答（200 + stale），不是 503；下一次不再去列（/auto 一共列了 ${net.by['list:/auto']} 次）`);
+
+      const G = await iso();
+      net.hook = null; await call(G, E, '/api/auto/sync?item=Heat.1995.mkv', 'POST');
+      off += 11_000; reset(E);
+      net.hook = async (u, k) => (k === 'list:/auto' ? new Response('{"error_summary":"too_many_requests/"}', { status: 429, headers: { 'Retry-After': '300' } }) : null);
+      const r1 = await call(G, E, '/api/auto/sync?item=Heat.1995.mkv', 'POST');
+      ok(r1.status === 200 && r1.body.stale === 1 && r1.ms < 3000 && net.by['list:/auto'] === 1,
+        `Dropbox 429 Retry-After: 300：不空等两次 10 秒（${r1.ms}ms），回上一次的回答，接下来 5 分钟不再去列`);
+
+      const K = await iso();
+      net.hook = null; await call(K, E, '/api/auto/sync?item=Heat.1995.mkv&tv=1', 'POST');
+      const S = season(50), M = movie(50);
+      H.tv.entries.push(...S.files, f(M.path, 8e9));
+      off += 11_000; reset(E);
+      net.hook = async (u, k) => (k === 'list:/ram2' ? new Response('{"error_summary":"too_many_requests/"}', { status: 429, headers: { 'Retry-After': '300' } }) : null);
+      const r2 = await call(K, E, `/api/auto/sync?tv=1&item=${encodeURIComponent(nm(M.path))}&item=${encodeURIComponent(S.name)}`, 'POST');
+      ok(r2.status === 200 && r2.body.has[nm(M.path)] === true && r2.ms < 3000,
+        `只有剧集目录 429（tv=1）：电影的回答照样给（${r2.ms}ms，不是 503）`, r2.body.has);
+
+      const N = await iso(), E2 = mkEnv();
+      net.hook = async (u, k) => (k === 'list:/auto' ? new Response('busy', { status: 503 }) : null);
+      const r3 = await call(N, E2, '/api/auto/sync?item=Heat.1995.mkv', 'POST');
+      ok(r3.status === 503 && +r3.ra >= 1, `一次都没答过、Dropbox 又列不出来：才回 503（Retry-After: ${r3.ra}）`);
+      net.hook = null;
+    }
+
+    // ── stream-6：剧集表后台重扫时 /auto 列不出来：/auto 里的那几季照旧留在表里（和电影那一层一样先用上一份） ──
+    {
+      const E = mkEnv();
+      const T = await iso();
+      const S = [60, 61, 62].map(i => season(i));
+      H.tv.entries = [...LIB, ...S.flatMap(s => s.files)];
+      const t0 = await call(T, E, '/api/tv?refresh=1');
+      off += 11 * 60_000;
+      net.hook = async (u, k) => (k === 'list:/auto' ? new Response('busy', { status: 503 }) : null);
+      await call(T, E, '/api/tv');                                            // 过期 → 后台重扫，/auto 503
+      net.hook = null;
+      const t1 = await call(T, E, '/api/tv');
+      const stored = E.FILE_CACHE.json(TVK);
+      ok(autoSeasons(t0.body).length === 3 && autoSeasons(t1.body).length === 3 && t1.body.at > t0.body.at &&
+        stored.series.filter(x => x.path.startsWith('/auto/')).length === 3,
+        `/auto 503 的那一轮重扫：/auto 的 3 季照旧在表里（${autoSeasons(t1.body).length}），存进 R2 的也是`);
+    }
+
+    // ── stream-7：配了 AUTO_SYNC_KEY 也不挡 App（不带口令的走便宜的路）；只收 POST ──
+    {
+      const exp = Math.floor(realNow() / 1000) + 3600;
+      const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+      const E = mkEnv({ AUTO_SYNC_KEY: 'sync-key', AUTH_SECRET: H.SECRET });
+      const P = await iso();
+      H.tv.entries = [...LIB, f('/auto/Heat.1995.mkv', 9e9)];
+      const g = await call(P, E, '/api/auto/sync?item=Heat.1995.mkv', 'GET');
+      const bad = await call(P, E, '/api/auto/sync?item=Heat.1995.mkv', 'POST', { 'x-sync-key': 'nope' });
+      const good = await call(P, E, '/api/auto/sync?item=Heat.1995.mkv&tv=1', 'POST', { 'x-sync-key': 'sync-key' });
+      const S = season(70);
+      H.tv.entries.push(...S.files);
+      off += 31_000; reset(E);
+      const app = await call(P, E, '/api/auto/sync?tv=1&item=' + encodeURIComponent(S.name), 'POST', {}, { wait: false });
+      const app2 = await call(P, E, '/api/auto/sync?tv=1&item=' + encodeURIComponent(S.name), 'POST', {}, { wait: false });
+      await settle();
+      const lists = net.by['list:/auto'] || 0;
+      const tv = await call(P, E, '/api/tv', 'GET', { Cookie: cookie });
+      ok(g.status === 405 && bad.status === 403 && good.status === 200 && app.status === 200 && app2.status === 200 && lists === 1,
+        `配了 AUTO_SYNC_KEY：GET ${g.status}、口令错 ${bad.status}、口令对 ${good.status}；App（不带口令、没登录）${app.status} 不再 403，30 秒内只真列一次 /auto（${lists}）`);
+      ok(app.body.has[S.name] === false && autoSeasons(tv.body).includes(S.dir),
+        '不带口令的：剧集目录不在前台重扫（这一次回 false），交给后台那一轮 —— 之后 /api/tv 就有这一季');
+      off += 31_000; reset(E);
+      const S2 = season(71); H.tv.entries.push(...S2.files);
+      const ck = await call(P, E, '/api/auto/sync?tv=1&item=' + encodeURIComponent(S2.name), 'POST', { Cookie: cookie });
+      ok(ck.status === 200 && ck.body.has[S2.name] === true, '带登录 Cookie 的（AUTH_SECRET 开着时）：和带口令一样，当场重扫、回 true');
+    }
+  } finally {
+    globalThis.fetch = baseFetch;
+    Date.now = realNow;
+    net.hook = null;
+    await settle();
+    H.tv.entries = []; H.tmdb.shows = []; H.tmdb.movies = [];
+  }
 }
 
 console.log('\n■ 预告片：IMDb 直链优先，被拒时退到 TMDB 登记的 YouTube 官方预告');
