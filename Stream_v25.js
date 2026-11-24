@@ -7,12 +7,25 @@
  *     要背景和字标只能一部一部问 /api/tmdb?id=&type=&logo=1 —— 一行 24 部就是 24 个请求。
  *   ▸ 现在 queries 里多收 { id: 550, type: 'movie' | 'tv', logo?: true }：回包的键是 "movie:550" / "tv:1399"，
  *     值和 /api/tmdb?id=&type= 回的一模一样（logo: true 时带 logo / logoChecked / backdropClean / posterClean，
- *     同一个边缘缓存键：单条接口问过的批接口直接用，反过来也一样）；和文件名那几条共用 6 路并发、
- *     TMDB 请求预算（按编号取一次算 1 个，带 logo 算 4 个）、整批最多 80 条。
+ *     同一个边缘缓存键：单条接口问过的批接口直接用，反过来也一样；只有一处不同：字标没问成的半份不回，见下面复查 ②）；
+ *     和文件名那几条共用 6 路并发、TMDB 请求预算（按编号取一次算 1 个，带 logo 算 4 个）、整批最多 80 条。
  *     编号 / 类型不对的（不是正整数、不是 movie / tv）：那个键回 null；TMDB 上没有这部也是 null（照旧写缓存）；
  *     TMDB 出错 / 超预算：那个键不回（过会儿再问）—— 和文件名那条路一个规矩。同一个键问了两次只取一次（有一条要 logo 就取全量）。
- *   ▸ 回包多一个 __byId: 1（App 据此知道后端认得编号查询；旧版后端不回这几个键，App 退回单条接口）。
+ *   ▸ 回包多一个 __byId: 1（认得编号查询的记号，留给以后的 App）。现在发出去的 App 看不到它：解码时丢掉 __ 开头的键，
+ *     认旧版后端靠的是「问的编号一个都没回」（旧版后端不回这几个键 → App 退回单条接口，10 分钟后再试批量）。
  *     带 name 的照旧按文件名认（同时带 id 也是）；老网页、老 App 只带文件名的批次，回包照旧（只多这一个记号）。
+ *   ▸ 复查后改的三处（发布前）：
+ *     ① 这一批有按编号问的、结果却一个键都没有 → 503 + Retry-After: 60（以前是只有 __match / __byId 的 200）。
+ *        原因：App 看不到 __byId，只按「问的编号一个都没回」认旧版后端；它的卡片 60 毫秒攒一批，一批常常只有 1–3 部，
+ *        一部碰上 TMDB 超时 / 5xx 两次，回包就只剩记号 → App 当成旧版后端，10 分钟里每张卡各问一次 /api/tmdb（正是这版要去掉的）。
+ *        现在：全批编号都没答出来（出错、超时、超预算、只有半份）才回 503，App 那边是「这一批这次没问成」—— 这几部 1 分钟后再问，
+ *        批量不关。有一个键答得出（null 也算）照常 200；只带文件名的批次不走这条，回包照旧。
+ *     ② 带 logo 按编号取、字标那一问没问成的半份（logoChecked: false）：这个键不回（以前照回）。
+ *        原因：App 把回了的键记在本机 30 天、不再问，半份记下就是一个月没有字标 / 无字背景（「半份 = 过会儿再问」落了空）。
+ *        现在和「TMDB 出错」一样不回，App 1 分钟后再问；/api/tmdb 和文件名那条路照旧回半份（详情页先有东西看）。
+ *     ③ 文件名和编号的键在同一张表里：文件名正好写成 "movie:550"、同一批又按编号问了这个键，以前两条各查各的，谁后查完谁占这个键
+ *        （文件名那条认不出回 null，就把按编号取到的盖掉）；文件名正好是 __match / __byId 的也是查完被记号盖掉。
+ *        现在这种键归编号那条 / 记号，文件名那条不查（不花 TMDB 请求）；只带文件名的批次照旧一条条认。
  *
  * ────────────────────────────────────────────────────────────────
  * v25.5 —— /auto、/auto/ram2、/api/auto/sync 加固（用户要求：请求添加这条链上每个 Worker 的稳定性、性能都再加强）
@@ -5535,6 +5548,10 @@ async function handleTmdbBatch(request, env, ctx) {
     let data = null;
     try { data = await fetchMetadata({ id, type }, '', full, env, type); }
     catch { return; }                       // TMDB 出错：这个键不回、不写缓存（同文件名那条路）
+    // 复查：字标那一问没问成的半份（logoChecked: false）这里不回这个键 —— 编号这条路的用户是 App「可申请」那一行（CatalogArt），
+    // 它把回了的键一律记在本机 30 天、不再问，半份记下就是一个月没有字标 / 无字背景；不回 = 「这次没问成」，App 1 分钟后再问。
+    // 和 /api/tmdb（半份照回，详情页先有东西看）、文件名那条路（照旧回半份）不一样；半份本来也不进边缘缓存
+    if (full && data && data.logoChecked === false) return;
     result[key] = data;                     // TMDB 上没有这个编号（404）：null，照旧写缓存
     keep(ck, data, full);
   };
@@ -5546,26 +5563,43 @@ async function handleTmdbBatch(request, env, ctx) {
     return Number.isSafeInteger(n) && n > 0 && n <= 2147483647 ? n : 0;
   };
   const byId = new Map();     // key → { id, type, full, at }（at：第一次出现的位置，保持原来的先后）
-  const order = [];
+  const idKeys = new Set();   // 编号那条路占着的键（合法、不合法的都算）
+  const names = [];
   queries.forEach((q, i) => {
     if (!q || typeof q !== 'object') return;
-    if (q.name) { order.push({ at: i, task: nameTask(q) }); return; }
+    if (q.name) { names.push({ at: i, q }); return; }
     if (q.id == null && q.type == null) return;                         // 什么都没带：照旧不理
     const key = `${idStr(q.type)}:${idStr(q.id)}`;
+    idKeys.add(key);
     const id = idNum(q.id), type = q.type === 'movie' || q.type === 'tv' ? q.type : '';
     if (!id || !type) { result[key] = null; return; }                    // 编号 / 类型不对：明确没有（这种键和合法的键撞不上）
     const prev = byId.get(key);
     if (prev) { prev.full = prev.full || !!q.logo; return; }
     byId.set(key, { id, type, full: !!q.logo, at: i });
   });
+  /* 复查：文件名和编号的键在同一张表里。文件名正好写成 "movie:550" 这种样子、同一批里又按编号问了这个键 —— 以前两条各查各的，
+     谁后查完谁占这个键（文件名那条认不出、回 null，就把按编号取到的《搏击俱乐部》盖掉）。现在这个键归编号那条，文件名那条不查；
+     文件名正好是 __match / __byId 的也不查（这两个键是下面的记号，以前也是查完就被记号盖掉）。只带文件名的批次照旧一条条认 */
+  const MARKS = new Set(['__match', '__byId']);
+  const order = names.filter(x => !idKeys.has(String(x.q.name)) && !MARKS.has(String(x.q.name))).map(x => ({ at: x.at, task: nameTask(x.q) }));
   for (const [key, x] of byId) order.push({ at: x.at, task: idTask(key, x.id, x.type, x.full) });
   order.sort((a, b) => a.at - b.at);
 
   await parallel(order.map(x => x.task), 6);
 
+  /* 复查：这一批里有按编号问的，却一个键都答不出来（TMDB 出错 / 超时 / 超预算 / 字标没问成）→ 503 + Retry-After，
+     不回一个只有记号的 200。原因：现在发出去的 App 解码时丢掉 __ 开头的键（看不到 __byId），只看「问的那几个编号回了没有」——
+     一个都没回就当成旧版后端，10 分钟里一张一张问 /api/tmdb；它的卡片 60 毫秒攒一批，一批常常只有 1–3 部，
+     一部碰上一次 TMDB 抖动就整页退回逐条问。503 在 App 那边是「这一批这次没问成」：这几部 1 分钟后再问，批量不关。
+     有一个键答得出（哪怕是 null）就照常 200；只带文件名的批次（老网页、老 App）不走这条，回包照旧 */
+  if (byId.size && !Object.keys(result).length) {
+    return jsonResponse({ error: 'tmdb unavailable', __match: 2, __byId: 1 }, 503, { 'Cache-Control': 'no-store', 'Retry-After': '60' });
+  }
+
   // 版本记号：前端据此知道这里的 null 是确定的「认不出」（旧版出错时也回 null，不能拿来藏片）
   result.__match = 2;
-  // v25.6：认得编号查询（App 看到它才把「可申请」那一行交给批接口；旧版后端没有这个记号）
+  // v25.6：认得编号查询。现在发出去的 App 看不到它（解码时丢掉 __ 开头的键，靠「问的编号一个都没回」认旧版后端，见上面的 503），
+  // 留给以后的 App：有这个记号就把没回的键当「这次没问成」，不关批量
   result.__byId = 1;
   return jsonResponse(result);
 }

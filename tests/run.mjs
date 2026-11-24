@@ -1594,12 +1594,13 @@ console.log('\n■ v25.6：/api/tmdb-batch 按 TMDB 编号批量取（App「可�
   const clear = async () => { await settle(); caches.default.m.clear(); };
   const exp = Math.floor(Date.now() / 1000) + 3600;
   const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
-  const batch = async queries => {
+  const batchRaw = async queries => {
     const r = await H.worker.fetch(new Request('https://w.test/api/tmdb-batch', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
       body: JSON.stringify({ queries }) }), H.env, H.ctx);
     await settle();
-    return r.json();
+    return { status: r.status, ra: r.headers.get('Retry-After'), cc: r.headers.get('Cache-Control'), body: await r.json() };
   };
+  const batch = async queries => (await batchRaw(queries)).body;
   const single = async qs => { const r = await H.call('/api/tmdb?' + qs, 'GET', { Cookie: cookie }); const j = await r.json(); await settle(); return j; };
   // 键排好序再比（两边是同一段代码拼出来的，顺序本来就一样；排序只是让比较不依赖这一点）
   const canon = v => JSON.stringify(v, (k, x) => x && typeof x === 'object' && !Array.isArray(x)
@@ -1664,7 +1665,7 @@ console.log('\n■ v25.6：/api/tmdb-batch 按 TMDB 编号批量取（App「可�
   ok('movie:999999' in nf && nf['movie:999999'] === null && nf['tv:888888'] === null && n1 === 2 && H.tmdb.calls.length === n1 && nf2['movie:999999'] === null,
     'TMDB 上没有这部（404）：回 null 并写缓存，第二次 0 次 TMDB');
 
-  // ⑤ TMDB 出错：这个键不回、不写缓存；字标那一问没问成的半份照回但不进缓存
+  // ⑤ TMDB 出错：这个键不回、不写缓存；字标那一问没问成的半份也不回（复查 ②），不进缓存
   await clear();
   H.tmdb.fail = p => p === '/movie/550';
   const er = await batch([{ id: 550, type: 'movie' }, { id: 1399, type: 'tv' }]);
@@ -1673,12 +1674,13 @@ console.log('\n■ v25.6：/api/tmdb-batch 按 TMDB 编号批量取（App「可�
   ok(!('movie:550' in er) && er['tv:1399']?.id === 1399 && er2['movie:550']?.id === 550, 'TMDB 出错的那个键不回（App 过会儿再问），别的照常；恢复后正常取到（出错那次没被缓存成「没有」）');
   await clear();
   H.tmdb.fail = p => p === '/movie/550/images';
-  const half = await batch([{ id: 550, type: 'movie', logo: true }]);
+  const half = await batchRaw([{ id: 550, type: 'movie', logo: true }]);
   H.tmdb.fail = null;
   H.tmdb.calls.length = 0;
   const whole = await batch([{ id: 550, type: 'movie', logo: true }]);
-  ok(half['movie:550']?.logoChecked === false && half['movie:550'].logo === null && whole['movie:550']?.logoChecked === true
-    && H.tmdb.calls.some(c => c.path === '/movie/550/images'), '字标那一问没问成：这份照回（logoChecked: false）但不进缓存，下次重问拿到字标');
+  ok(!('movie:550' in half.body) && half.status === 503 && whole['movie:550']?.logoChecked === true
+    && H.tmdb.calls.some(c => c.path === '/movie/550/images'),
+    '字标那一问没问成：这个键不回（复查 ②：以前照回 logoChecked: false 的半份，App 会记 30 天；这批只有它 → 503），不进缓存，下次重问拿到字标');
 
   // ⑥ 同一个键问了几次：只取一次；有一条要字标就取全量（编号写成字符串 "550" 也认）
   await clear();
@@ -1730,6 +1732,121 @@ console.log('\n■ v25.6：/api/tmdb-batch 按 TMDB 编号批量取（App「可�
   await clear();
   const r80 = await batch(row(80));
   ok(keysOf(r80).length === 80 && keysOf(r80).every(k => r80[k]?.logoChecked === true), '80 部都要字标：全部回答（预算 700 够 80 × 4）');
+
+  delete H.env.TMDB_API_KEY; H.tmdb.movies = []; H.tmdb.shows = []; H.tmdb.fail = null;
+  await clear();
+}
+
+console.log('\n■ v25.6 复查：按编号批量取 —— 全批没答出来回 503、半份不回、文件名的键不盖编号的键');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const clear = async () => { await settle(); caches.default.m.clear(); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const batchRaw = async queries => {
+    const r = await H.worker.fetch(new Request('https://w.test/api/tmdb-batch', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ queries }) }), H.env, H.ctx);
+    await settle();
+    return { status: r.status, ra: r.headers.get('Retry-After'), cc: r.headers.get('Cache-Control'), cors: r.headers.get('Access-Control-Allow-Origin'), body: await r.json() };
+  };
+  /* 现在发出去的 App 怎么读这一回（照 ios/Cuven/Core/CatalogArt.swift 的 flush、API.swift 的 MetaBatch 写的）：
+     非 2xx → 这一批记「这次没问成」，1 分钟后再问；2xx 但问的键一个都没有（__ 开头的键解码时就丢了）→ 当成旧版后端、关批量 10 分钟；
+     否则回了的键（值是什么都算）记本机 30 天、不再问，没回的 1 分钟后再问 */
+  const appRead = (r, keys) => r.status < 200 || r.status >= 300 ? 'retry' : keys.some(k => !k.startsWith('__') && k in r.body) ? 'ok' : 'batch-off';
+  const searched = () => H.tmdb.calls.filter(c => /^\/search\//.test(c.path)).length;
+  const img = n => ({ logos: [{ file_path: `/lg${n}.png`, iso_639_1: 'zh', aspect_ratio: 3 }], posters: [], backdrops: [{ file_path: `/bdc${n}.jpg`, iso_639_1: null }] });
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  H.itunes.results = null;
+  H.tmdb.movies = [{ id: 550, title: '搏击俱乐部', en: 'Fight Club', date: '1999-10-15', query: 'zzz-fight-club', backdrop: '/b550.jpg', images: img(550) },
+                   { id: 551, title: '片子551', en: 'Film 551', date: '2001-01-01', query: 'zzz-551', backdrop: '/b551.jpg', images: img(551) },
+                   { id: 552, title: '片子552', en: 'Film 552', date: '2002-01-01', query: 'zzz-552', backdrop: '/b552.jpg', images: img(552) },
+                   { id: 949, title: '盗火线', en: 'Heat', date: '1995-12-15', query: 'zzz-heat', images: img(949) }];
+  H.tmdb.shows = [{ id: 1399, name: '权力的游戏', original: 'Game of Thrones', first: '2011-04-17', seasons: [{ n: 1, air: '2011-04-17', count: 10 }] }];
+
+  // ① 全批编号都没答出来：503 + Retry-After（不是只有记号的 200 —— App 看不到 __byId，会当成旧版后端关批量 10 分钟）
+  await clear();
+  H.tmdb.fail = p => p === '/movie/550';
+  const one = await batchRaw([{ id: 550, type: 'movie', logo: true }]);
+  ok(one.status === 503 && one.ra === '60' && one.cc === 'no-store' && one.cors === '*' && !('movie:550' in one.body) && one.body.__byId === 1
+    && appRead(one, ['movie:550']) === 'retry',
+    `一张卡、按编号取那一问 TMDB 出错两次：回 ${one.status} + Retry-After ${one.ra}（不缓存、带 CORS 头），App 读成「这次没问成」1 分钟后再问，批量不关（以前 200 只有记号 → App 关批量 10 分钟、逐张问 /api/tmdb）`);
+  H.tmdb.fail = p => /^\/movie\/55[012]$/.test(p);
+  const three = await batchRaw([{ id: 550, type: 'movie', logo: true }, { id: 551, type: 'movie', logo: true }, { id: 552, type: 'movie', logo: true }]);
+  H.tmdb.fail = null;
+  const back = await batchRaw([{ id: 550, type: 'movie', logo: true }, { id: 551, type: 'movie', logo: true }, { id: 552, type: 'movie', logo: true }]);
+  ok(three.status === 503 && appRead(three, ['movie:550', 'movie:551', 'movie:552']) === 'retry'
+    && back.status === 200 && ['movie:550', 'movie:551', 'movie:552'].every(k => back.body[k]?.logoChecked === true),
+    '一批三张全没问成：也是 503；TMDB 好了再问一批全回（503 那次什么都没缓存）');
+  await clear();
+  H.tmdb.fail = p => p === '/movie/551';
+  const part = await batchRaw([{ id: 550, type: 'movie', logo: true }, { id: 551, type: 'movie', logo: true }]);
+  H.tmdb.fail = null;
+  const nf = await batchRaw([{ id: 999999, type: 'movie', logo: true }]);
+  const bad = await batchRaw([{ id: 0, type: 'movie' }]);
+  ok(part.status === 200 && part.body['movie:550']?.id === 550 && !('movie:551' in part.body) && appRead(part, ['movie:550', 'movie:551']) === 'ok'
+    && nf.status === 200 && 'movie:999999' in nf.body && nf.body['movie:999999'] === null && appRead(nf, ['movie:999999']) === 'ok'
+    && bad.status === 200 && bad.body['movie:0'] === null,
+    '有一个键答得出就照常 200：答出来的回、没问成的不回；TMDB 上没有这部（null）、编号不对（null）也算答出来');
+  await clear();
+  H.tmdb.fail = () => true;
+  const oldAll = await batchRaw([{ name: 'Some.Film.2012.mkv' }, { name: 'Other.Film.2013.mkv', logo: true }]);
+  const mixAll = await batchRaw([{ name: 'Some.Film.2012.mkv' }, { id: 550, type: 'movie' }]);
+  H.tmdb.fail = null;
+  ok(oldAll.status === 200 && JSON.stringify(Object.keys(oldAll.body).sort()) === '["__byId","__match"]' && mixAll.status === 503,
+    '只带文件名的批次（老网页、老 App）全没问成：照旧 200、只有记号，不走 503；文件名、编号混着的全没问成才 503');
+
+  // ② 带 logo 按编号取、字标那一问没问成的半份：这个键不回（App 会把回了的半份记 30 天）；/api/tmdb 和文件名那条路照旧回半份
+  await clear();
+  H.tmdb.calls.length = 0;
+  H.tmdb.fail = p => p === '/movie/551/images';
+  const row = await batchRaw([{ id: 550, type: 'movie', logo: true }, { id: 551, type: 'movie', logo: true }, { id: 1399, type: 'tv', logo: true }]);
+  const askedImg = H.tmdb.calls.filter(c => c.path === '/movie/551/images').length;
+  H.tmdb.fail = null;
+  ok(row.status === 200 && !('movie:551' in row.body) && askedImg === 2 && row.body['movie:550']?.logoChecked === true && row.body['tv:1399']?.logoChecked === true
+    && appRead(row, ['movie:550', 'movie:551', 'tv:1399']) === 'ok',
+    '一行里一部的字标那一问超时 / 出错两次：这部不回（App 1 分钟后再问，不把没字标、带字背景的半份记 30 天），别的照回');
+  H.tmdb.calls.length = 0;
+  const row2 = await batchRaw([{ id: 551, type: 'movie', logo: true }]);
+  ok(row2.status === 200 && row2.body['movie:551']?.logoChecked === true && row2.body['movie:551'].logo === 'https://image.tmdb.org/t/p/w500/lg551.png'
+    && row2.body['movie:551'].backdropClean === 'https://image.tmdb.org/t/p/w1280/bdc551.jpg' && H.tmdb.calls.some(c => c.path === '/movie/551/images'),
+    '再问一次：半份没进缓存，重问拿到字标和无字背景');
+  await clear();
+  H.tmdb.fail = p => p === '/movie/550/images' || p === '/movie/949/images';
+  const st = await H.call('/api/tmdb?id=550&type=movie&logo=1', 'GET', { Cookie: cookie });
+  const sj = await st.json();
+  const HEAT = 'Heat.1995.1080p.BluRay.[auto-m949-r2001].mkv';
+  const byName = await batchRaw([{ name: HEAT, logo: true }]);
+  const brief = await batchRaw([{ id: 550, type: 'movie' }]);
+  H.tmdb.fail = null;
+  await settle();
+  ok(st.status === 200 && sj?.id === 550 && sj.logoChecked === false && sj.logo === null && /max-age=120/.test(st.headers.get('Cache-Control') || '')
+    && byName.status === 200 && byName.body[HEAT]?.id === 949 && byName.body[HEAT].logoChecked === false
+    && brief.status === 200 && brief.body['movie:550']?.id === 550 && !('logoChecked' in brief.body['movie:550']),
+    '只改编号这条路：/api/tmdb?id=&logo=1 照旧回半份（logoChecked: false，浏览器只留两分钟），文件名那条路照旧回半份，不带 logo 的不问字标、照常回');
+
+  // ③ 文件名的键和编号的键撞上：这个键归编号那条，文件名那条不查；文件名是记号的也不查；只带文件名的照旧
+  await clear();
+  H.tmdb.calls.length = 0;
+  const c1 = await batchRaw([{ name: 'movie:550' }, { id: 550, type: 'movie' }]);
+  const s1 = searched();
+  await clear();
+  H.tmdb.calls.length = 0;
+  const c2 = await batchRaw([{ id: 550, type: 'movie' }, { name: 'movie:550', logo: true }, { name: 'person:7' }, { id: 7, type: 'person' }]);
+  const s2 = searched();
+  ok(c1.status === 200 && c1.body['movie:550']?.id === 550 && c1.body['movie:550'].title === '搏击俱乐部' && s1 === 0
+    && c2.body['movie:550']?.id === 550 && !('logoChecked' in c2.body['movie:550']) && c2.body['person:7'] === null && s2 === 0,
+    `文件名正好是 "movie:550"、同一批又按编号问了它：值是按编号取到的《${c1.body['movie:550']?.title}》（以前文件名那条后查完、回 null 把它盖掉），文件名那条不去搜（${s1 + s2} 次搜索）；不合法的编号键也一样`);
+  H.tmdb.calls.length = 0;
+  const marks = await batchRaw([{ name: '__byId' }, { name: '__match', logo: true }, { name: HEAT }]);
+  ok(marks.status === 200 && marks.body.__byId === 1 && marks.body.__match === 2 && marks.body[HEAT]?.id === 949
+    && JSON.stringify(Object.keys(marks.body).sort()) === JSON.stringify([HEAT, '__byId', '__match'].sort()) && searched() === 0
+    && H.tmdb.calls.length === 1 && H.tmdb.calls[0].path === '/movie/949',
+    '文件名正好是 __byId / __match：不查（键是记号，以前也是查完被记号盖掉），只花 1 次 TMDB（带追踪码那条）');
+  await clear();
+  H.tmdb.calls.length = 0;
+  const alone = await batchRaw([{ name: 'movie:550' }]);
+  ok(alone.status === 200 && 'movie:550' in alone.body && alone.body['movie:550'] === null && searched() > 0,
+    '只带文件名、没有按编号问同一个键："movie:550" 照旧按文件名认（搜不到 → null）');
 
   delete H.env.TMDB_API_KEY; H.tmdb.movies = []; H.tmdb.shows = []; H.tmdb.fail = null;
   await clear();

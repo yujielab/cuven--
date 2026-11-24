@@ -493,7 +493,8 @@ async function readJSON(r){
    同一个依赖连续 3 次「暂时性」失败（连不上、超时、5xx、429）就熔断 2 分钟：这一轮和后面几轮都不再碰它，
    要用它的请求原地等——不算出错次数、不换规格、不会因为对方抖一下就把一部片判死。
    到期放一次试探（半开）：通了就恢复；又失败就再熔断，时间翻倍（2 → 4 → 8 → 15 分钟封顶）。
-   逻辑错误（4xx：参数不对、文件夹不在、作业没了）不算依赖坏了；影片库 409（源闸门忙，2.8 起）也不算，照 Retry-After 再来。
+   逻辑错误（4xx：参数不对、文件夹不在、作业没了）不算依赖坏了；影片库 409（源闸门忙，2.8 起）也不算，照 Retry-After 再来；
+   影片库回 503 + pk（它那边的 PikPak 登录不上，2.8 复查）也不算，原地等 10 分钟（pushHold）。
    状态存在 tj_kv 的 health 里，控制面板看得到。
    ══════════════════════════════════════════════════════════════════ */
 const DEPS = { lb: '影片库', vps: '传输（VPS）', pikpak: 'PikPak', stream: '片库 / TMDB' };
@@ -519,8 +520,9 @@ function depResult(c, dep, e){
     if (t - h.ok > MIN){ h.ok = t; c.healthDirty = true; }
     return;
   }
-  /* 影片库 409（源闸门忙，2.8）：影片库好好的、只是这会儿在给别的源干活，照 Retry-After 再来就行，不算它坏了 */
-  if (!transientErr(e) || e.busy) return;
+  /* 影片库 409（源闸门忙，2.8）：影片库好好的、只是这会儿在给别的源干活，照 Retry-After 再来就行，不算它坏了。
+     503 + pk（acct，2.8 复查）：影片库好好的，是它那边的 PikPak 账号登录不上，照 pushHold 原地等，也不算它坏了 */
+  if (!transientErr(e) || e.busy || e.acct) return;
   const halfOpen = h.open && h.open <= t;
   h.err = String(e.message || e).slice(0, 160); h.bad = t; h.fails++; c.healthDirty = true;
   if (halfOpen || h.fails >= 3){ h.trips = Math.min(h.trips + 1, 4); h.open = t + Math.min(15, 2 ** h.trips) * MIN; h.fails = 0; }
@@ -544,8 +546,12 @@ async function lb(c, path, init){
       /* 2.8：409 = 源闸门忙（影片库 v7.2 带 Retry-After）：busy，熔断不算它（depResult），advance 照 Retry-After 再排上（最多 2 分钟）；
          body 交出去：推送回 404 gone（文件夹不在了）、503 auth / captcha 要看它 */
       const busy = r.status === 409;
+      /* 2.8 复查：503 + pk（v7.2 pkResp：影片库那边 PikPak 登录不上 / 要验证码 / 登录冷却中）= 影片库自己好好的，
+         熔断不算它（depResult），这一条和这一轮后面的照 pushHold 原地等（advance / stQueued）。
+         原因：以前算进熔断，等 10 分钟放一次试探、又是 503，又记一次，几次就把影片库熔断了，版本表、目录页都跟着不能问 */
+      const acct = r.status === 503 && j.pk ? 1 : 0;
       const e = err('影片库：' + (j.error || 'HTTP ' + r.status), { status: r.status, net: r.status >= 500 ? 1 : 0, lb: 1, body: j,
-        ...(busy ? { busy: 1, wait: retryAfter(r, j) } : {}) });
+        ...(busy ? { busy: 1, wait: retryAfter(r, j) } : {}), ...(acct ? { acct: 1 } : {}) });
       /* 404 gone（v7.2）：PikPak 上的文件夹不在了（被人删了）。不管是推送、列文件夹还是建文件夹碰上的，缓存的 /auto、剧集区编号都作废，
          下一次 autoFolder / tvFolder 重新问影片库找 / 建（以前只有推送的消息里写着「文件夹不在了」才清，列的时候碰上一直用着旧编号） */
       if (folderGone(e)) await forgetFolders(c);
@@ -946,7 +952,7 @@ async function drop(c, r, why){
 /** 这个规格在 PikPak / 传输上的一切都忘掉（试过哪些不动）。2.6 起 ready 那一步能换规格，追踪码（tag）也得忘掉，下一个规格重新加 */
 const DROP_KEYS = ['cur', 'task', 'file', 'fname', 'fkind', 'item', 'kind', 'job', 'newname', 'pmax', 'pat', 'org', 'check',
                    'busySince', 'ctries', 'rtries', 'lost', 'cb', 'cbAt', 'rb', 'rbAt', 'wait', 'vbad', 'vtries', 'fromPk', 'batch', 'sub', 'tag', 'rode',
-                   'junk', 'orgN', 'cretry'];
+                   'junk', 'orgN', 'cretry', 'rre'];
 function forget(r){ for (const k of DROP_KEYS) delete r.d[k]; r.bat = 0; }
 /** 资源位：PikPak 同时云下载几个、VPS 同时传几个（面板里可调）。满了就排队等，不算出错。
     批量传输在跑（2.6）：它一个作业就占着 VPS，单个传输一律等它传完（16 路并行已经把 rclone 的内存用到头了） */
@@ -1037,7 +1043,9 @@ async function stQueued(c, r){
     }
   }
   if (!sub) parent = await autoFolder(c);
-  /* 2.8 推送幂等（影片库 v7.2）：上一次这个规格结果不明（pushTry）→ 带 check: 1 和 btih，影片库先在任务列表里找，找到就认领（adopted）；
+  /* 2.8 推送幂等（影片库 v7.2）：上一次这个规格结果不明（pushTry）→ 带 check: 1，影片库先在任务列表里找，找到就认领（adopted）。
+     影片库 v7.2 按它自己记下的任务编号、它重新从帖子里取的 info hash 和名字去找，不看这边带的 btih（2.8 复查：以前这里写成
+     「按这边带的 btih 找」，不对）；btih 照样带上，不碍事。
      deadlineMs 比这边等它的 40 秒短：它快到点就不再去建任务，回「稍后再推」。老版本影片库不认这几个字段，照旧推 */
   const check = !!(r.d.pushTry && r.d.pushTry.tid === v.tid);
   const item = { tid: v.tid, name: r.title || '', ...(check ? { check: 1, ...(r.d.pushTry.btih ? { btih: r.d.pushTry.btih } : {}) } : {}) };
@@ -1046,17 +1054,19 @@ async function stQueued(c, r){
   catch (e){
     /* 文件夹不在了（v7.2：404 gone，整批没推）：缓存的文件夹编号 lb() 已经清掉了，下一次重新找 / 建（照旧算这一步出错一次，一直这样 20 次停下） */
     if (folderGone(e)){ await clog(c, r.id, '影片库说 PikPak 上的文件夹不在了：清掉缓存的文件夹编号，下一次重新找 / 建'); throw e; }
-    /* 超时、断线、5xx：请求可能已经到了影片库、任务可能建成了 → 记下，下一次带 check。409（闸门忙）、预算、熔断：没发出去 / 没推 */
-    if (e.net) notePush(r, v, '');
+    /* 超时、断线、5xx：请求可能已经到了影片库、任务可能建成了 → 记下，下一次带 check。409（闸门忙）、预算、熔断：没发出去 / 没推。
+       2.8 复查：5xx 带 pk（影片库的 pkResp：503 登录不上 / 要验证码 / 冷却中，502 PikPak 连不上）不记 —— 影片库只在 pkPush
+       一开头登录那一下把它抛出来，任务还没建；记了的话恢复以后每次推都带 check，影片库要先列一遍任务（又一个 PikPak 调用、
+       至少 9 秒），闸门挤的时候更容易回「来不及，稍后再推」 */
+    if (e.net && !pkSide(e)) notePush(r, v, '');
     /* 503（v7.2：PikPak 登录不上、要验证码、登录冷却中）：依赖出了问题，原地等，不烧规格、不算出错次数 */
-    if (e.status === 503){
-      const b = e.body || {};
-      return pushHold(c, r, (b.auth || b.captcha ? '影片库那边 PikPak 登录不上' : '影片库那边暂时推不了') + '（' + String(b.error || e.message).replace(/^影片库：/, '').slice(0, 80) + '）');
-    }
+    if (e.status === 503) return pushHold(c, r, lbHoldWhy(e));
     throw e;
   }
-  const it = (j.items || [])[0] || {};
-  if (it.ok){
+  /* 2.8 复查：按 tid 找这一部的结果（影片库每一版都回 tid）。以前拿 items[0]，回包是空的 / 读到一半断了 / 半截 JSON（readJSON 给 {}）
+     就成了「这个规格推不了、未知原因」：烧掉规格、下一轮推下一个 —— 那边其实建成了的话，就是两个云下载任务，头一个没人管 */
+  const it = (Array.isArray(j.items) ? j.items : []).find(x => x && String(x.tid) === String(v.tid)) || null;
+  if (it && it.ok){
     /* adopted（上一次结果不明时其实建成了）/ dedup（影片库记着建成了）：和推成一样往下走 */
     const how = it.adopted ? '（认领了上一次结果不明时建成的任务，没有新建）' : it.dedup ? '（影片库认出上一次已经建成，没有新建）' : '';
     delete r.d.pushTry;
@@ -1067,6 +1077,14 @@ async function stQueued(c, r){
   }
   /* 整批停下：论坛账号（v7.2 带 forum: 1）/ PikPak 账号（空间满、次数用完、登录不上）层面的问题。这几部都标 held，没推 */
   if (j.stop) return pushHold(c, r, (j.forum ? '影片库的论坛账号出了问题：' : '影片库推不了：') + String(j.stop).slice(0, 100));
+  /* 2.8 复查：2xx 可是回包里没有这一部的结果（没有 items、没有这个 tid、没写 ok）= 推没推成不知道：和 unsure 一样记下 pushTry，
+     3 分钟后带 check 再推同一个规格，不烧规格。只有影片库明说 ok: 0、又不是 retry 才算这个规格推不了 */
+  if (!it || it.ok == null){
+    notePush(r, v, (it && it.btih) || '');
+    r.note = '影片库的回包不完整，推没推成不知道（下一次先核对 PikPak 的任务列表），稍后再试';
+    r.next = t + 3 * MIN;
+    return;
+  }
   if (it.retry){
     /* unsure（v7.2）：建任务那一下结果不明，下一次带 check 先核对 */
     if (it.unsure) notePush(r, v, it.btih);
@@ -1080,10 +1098,18 @@ async function stQueued(c, r){
   r.note = '这个规格推不了，换下一个';
   r.next = t;
 }
-/** 推送结果不明（2.8）：记下这个规格和 info hash，下一次推它带 check: 1 + btih（影片库先在任务列表里找，找到就认领） */
+/** 推送结果不明（2.8）：记下这个规格和 info hash，下一次推它带 check: 1（影片库先在任务列表里找，找到就认领）。
+    btih 照样带上，影片库 v7.2 不看它（按自己记下的任务编号、重新从帖子里取的 info hash 和名字找） */
 function notePush(r, v, btih){
   const p = r.d.pushTry && r.d.pushTry.tid === v.tid ? r.d.pushTry : null;
   r.d.pushTry = { tid: v.tid, btih: String(btih || (p && p.btih) || '').slice(0, 80), at: now() };
+}
+/** 影片库回的 5xx 带 pk（2.8 复查）：是影片库 pkResp 回的 PikPak 的错。推送时只会在 pkPush 一开头登录那一下出来，任务还没建 */
+const pkSide = (e) => !!(e && e.lb && e.status >= 500 && e.body && e.body.pk);
+/** 影片库 503（PikPak 登录不上 / 要验证码 / 冷却中）写给面板的原因 */
+function lbHoldWhy(e){
+  const b = e.body || {};
+  return (b.auth || b.captcha ? '影片库那边 PikPak 登录不上' : '影片库那边暂时推不了') + '（' + String(b.error || e.message).replace(/^影片库：/, '').slice(0, 80) + '）';
 }
 /** 论坛账号 / PikPak 账号层面的问题（2.8）：依赖出了问题 —— 原地等，不烧规格、不算出错次数；这一轮后面排队的也不再去推 */
 function pushHold(c, r, why){
@@ -1228,8 +1254,12 @@ async function stRename(c, r){
     let j;
     try { j = await tf(c, 'rename', withSub(r, { dir: r.d.fname, tpl: c.cfg.tpl, lang: c.cfg.lang, grp: c.cfg.grp }, true)); }
     catch (e){
-      /* 上一次改名其实做完了、只是作业记录丢了（VPS 重启）：原名不在了 */
-      if (r.d.newname && !transientErr(e) && !e.circuit && !e.budget && srcGone(e.message)){ r.d.fname = r.d.newname; return renamed(c, r); }
+      /* 上一次改名其实做完了、只是作业记录丢了（VPS 重启）：原名不在了。
+         2.8 复查：只在上一个作业可能已经挪过（renameMayMoved）时才这么认；第一个作业就报原名找不到 = 原名本来就不在，往上抛照常算出错 */
+      if (r.d.newname && renameMayMoved(r) && !transientErr(e) && !e.circuit && !e.budget && srcGone(e.message)){
+        await clog(c, r.id, '重发改名报原名找不到（' + String(e.message).slice(0, 80) + '）：上一次其实已经改完了，用新名字 ' + r.d.newname);
+        r.d.fname = r.d.newname; return renamed(c, r);
+      }
       /* 910：发行名在 PikPak 上已经有一个了（以前的请求留下的）。不去合并两个文件夹，照原名传（追踪码会让名字不撞） */
       if (e.status === 409 && e.body && e.body.exists){
         await clog(c, r.id, '发行名 ' + (e.body.name || '') + ' 在 PikPak 上已经有了，照原名传');
@@ -1247,7 +1277,7 @@ async function stRename(c, r){
   const s = await jobStatus(c, r.d.job);
   if (s.missing){
     /* VPS 重启过，作业没了：重新发一次改名（原名已经不在 = 其实改完了，上面那个分支会接住） */
-    r.d.job = 0; r.d.lost = (r.d.lost || 0) + 1;
+    r.d.job = 0; r.d.lost = (r.d.lost || 0) + 1; r.d.rre = 1;
     await clog(c, r.id, '改名作业没了（VPS 重启过？），重来');
     if (r.d.lost > LIMIT.lostMax) return fail(r, '改名作业一直丢（VPS 反复重启）');
     r.next = t; return;
@@ -1256,7 +1286,7 @@ async function stRename(c, r){
     if (s.bytes > (r.d.rb || 0)){ r.d.rb = s.bytes; r.d.rbAt = t; }
     if (t - (r.d.rbAt || r.since) > LIMIT.renameStall){
       await stopJob(c, r.d.job);
-      r.d.job = 0; r.d.rtries = (r.d.rtries || 0) + 1;
+      r.d.job = 0; r.d.rtries = (r.d.rtries || 0) + 1; r.d.rre = 1;
       await clog(c, r.id, '改名 ' + Math.round(LIMIT.renameStall / MIN) + ' 分钟没有进展，停掉重来');
       if (r.d.rtries >= 3) return fail(r, '改名一直没有进展');
       r.next = t + MIN; return;
@@ -1267,11 +1297,17 @@ async function stRename(c, r){
   if (!s.success){
     /* 2.8：作业失败、报原名找不到，而新名字已经记下了 = 上一次其实挪完了（909 / 910 那条路：作业丢了以后重发改名，
        真 rclone 的 _async sync/move 当场回作业号，原来的已经不在 → 作业跑完是 directory not found）。用新名字往下走，
-       不再重试 3 次判死（文件在 PikPak 新名字底下没人管） */
-    if (r.d.newname && srcGone(s.error)){
+       不再重试 3 次判死（文件在 PikPak 新名字底下没人管）。
+       2.8 复查：r.d.newname 在第一个作业开的时候就记下了，以前第一个作业就报找不到（原名本来就不在：911 先看一眼也没看成、
+       910 的 sync/move 那条路）也认新名字 —— 拿一个不存在的文件夹去加追踪码、传、核对，几个小时后报一个不相干的错，
+       真的文件夹留在 PikPak 上。现在只在上一个作业可能已经挪过（renameMayMoved：丢了、卡住停掉了、跑完是别的失败）时才认；
+       不然照 2.7 算一次改名出错，3 次判死，原因写着原名找不到 */
+    if (r.d.newname && renameMayMoved(r) && srcGone(s.error)){
       await clog(c, r.id, '改名作业报原名找不到（' + String(s.error).slice(0, 80) + '）：上一次其实已经改完了，用新名字 ' + r.d.newname);
       r.d.fname = r.d.newname; return renamed(c, r);
     }
+    /* 跑完是别的失败（没权限、中途断了…）：可能已经挪了一部分 / 挪完了，下一次重发再报原名找不到就认新名字 */
+    if (!srcGone(s.error)) r.d.rre = 1;
     r.d.rtries = (r.d.rtries || 0) + 1;
     await clog(c, r.id, '改名出错：' + (s.error || '未知'));
     if (r.d.rtries >= 3) return fail(r, '改名失败：' + String(s.error || '').slice(0, 80));
@@ -1281,6 +1317,9 @@ async function stRename(c, r){
 }
 /** 原名不在了（rclone：directory not found / object not found；PikPak：file_not_found）。作业没了（job not found）不算 */
 const srcGone = (m) => /not found|not_found|找不到|doesn't exist/i.test(String(m || '')) && !/\bjob\b|作业/i.test(String(m || ''));
+/** 上一个改名作业可能已经挪过了（2.8 复查）：丢了（lost，VPS 重启）、卡住停掉了、跑完是别的失败（rre）。
+    只有这样「原名找不到」才说明上一次挪完了；lost 也认，是因为这个版本以前存下的行没有 rre */
+const renameMayMoved = (r) => !!(r.d.rre || r.d.lost > 0);
 async function renamed(c, r){
   const to = await afterPrep(c);
   r.d.item = r.d.newname || r.d.fname; r.d.kind = 'dir'; r.d.job = 0;
@@ -1605,6 +1644,10 @@ async function advance(c, r){
       if (r.stage === 'queued') (c.memo.lbBusy || (c.memo.lbBusy = {}))[r.src] = r.next;
       return;
     }
+    /* 影片库 503 + pk（2.8 复查）：列 / 建 /auto、剧集区的文件夹时碰上它那边的 PikPak 登录不上。熔断不算它了（depResult），
+       所以这里和推送碰上的一样：原地等 10 分钟、不算出错次数，这一轮后面排队的也不再去问（c.memo.lbHold）——
+       不然每一条都去列一次、每一条都记一次出错 */
+    if (e.acct) return pushHold(c, r, lbHoldWhy(e));
     if (e.bug){ await clog(c, r.id, '内部状态出错：' + e.message); return fail(r, '内部状态出错：' + e.message); }
     const transient = transientErr(e) || !!e.cool;
     r.d.errs = (r.d.errs || 0) + 1;
@@ -2517,14 +2560,20 @@ async function appDetail(env, Q){
    · 影片库的目录页并行去问（同时最多 6 个，Workers 一次调用同时开的连接就这么多），一次调用最多 16 个子请求（8 年 × 2），
      最多等 20 秒（一轮的截止时刻那套：剩的不到 5 秒的不发）；哪一格没问到就是 { error: 1 }，别的照回
    · 请求进度一个源只查一次 D1（latestFor，json_each 一个参数），不是一年一次
-   · 拼好的回包放进 Cache API 5 分钟（key = 参数 + 这一个小时 + 版本），有格子没问到的只放 30 秒；带弱 ETag，没变回 304
+   · 拼好的回包放进 Cache API（key = 参数 + 这一个小时 + 版本，放到用到的格子里最早过期的那一格为止，最多 5 分钟）；带弱 ETag，没变回 304
+   · 2.8 复查：影片库的目录页另外一格（源 + 年份）一份缓存（yearsCells），什么参数都共用 —— 见 yearsCells
    条目和 /app/catalog 一样（slimItem + req）。own = hide、min = 0、sort = new：一年的全部、片库里还没有的、新的在前 */
 function yearsQuery(Q){
   const thisYear = new Date(now()).getUTCFullYear();
-  const yr = (k) => { const v = (Q.get(k) || '').trim(); return /^(19|20)\d\d$/.test(v) ? Math.min(Number(v), thisYear + 1) : 0; };
+  /* 2.8 复查：年份只认今年往前 8 年到明年（App 按本机日历「今年往前数 7 年」，跨年那几个小时会比这边早 / 晚一年），
+     再早 / 再晚的夹到这一段里。原因：/app/years 不要口令（App 问它不带用户名头），以前 from / to 随便给，每换一个窗口就是
+     一次缓存落空、14–16 个影片库子请求；现在这一段一共 10 年 × 2 个源 = 20 格，目录页一格一份缓存，5 分钟里影片库最多被问 20 次 */
+  const lo = thisYear - LIMIT.yearsMax, hi = thisYear + 1;
+  const yr = (k) => { const v = (Q.get(k) || '').trim(); return /^(19|20)\d\d$/.test(v) ? clamp(Number(v), lo, hi) : 0; };
   let to = yr('to') || thisYear, from = yr('from') || to - (LIMIT.yearsDef - 1);
   if (from > to) [from, to] = [to, from];
   if (to - from + 1 > LIMIT.yearsMax) from = to - LIMIT.yearsMax + 1;          // 超过 8 年：只要最近的 8 年
+  from = Math.max(from, lo);
   const src = ['movie', 'tv', 'all'].includes(Q.get('src')) ? Q.get('src') : 'all';
   const per = clamp(parseInt(Q.get('per') || '', 10) || LIMIT.yearsPer, 1, LIMIT.yearsPerMax);
   return { src, from, to, per, srcs: src === 'all' ? ['movie', 'tv'] : [src] };
@@ -2535,6 +2584,50 @@ async function pool(n, jobs){
   let i = 0;
   await Promise.all(Array.from({ length: Math.min(n, jobs.length) }, async () => { while (i < jobs.length){ const k = i++; out[k] = await jobs[k](); } }));
   return out;
+}
+/** 一格还新鲜吗：问到的放 5 分钟，没问到的（{ error }）30 秒 */
+const cellLife = (x) => (x.error ? LIMIT.yearsCachePartial : LIMIT.yearsCache) * 1000;
+const cellFresh = (x, t) => !!(x && x.at && t - x.at < cellLife(x));
+/** 影片库的目录页（2.8 复查）：一格（源 + 年份）一份，都放在 Cache API 的同一条里（key 只带这一个小时和版本号，不带 per / src / from / to）。
+    原因：以前只缓存拼好的回包，key 带 per（1–40）、src、from / to，换一个参数就落空一次、重新问影片库 14–16 次（每一次也在影片库的
+    源闸门前排队，和定时任务的推送抢），/app/years 又不要口令；现在不管什么参数，同一格 5 分钟里只问一次（没问到的 30 秒）。
+    一格存第一页的前 40 部（per 最多 40）、第一页一共几部（n，算 next 用）、pages、total；过期的格子写回去时扔掉。
+    Cache API 出错就当没有缓存（workers.dev 上没有：每次现问），绝不因此让请求失败。cells 给的是这一次要的格子（新的年份在前） */
+async function yearsCells(env, request, ctx, cache, cells){
+  let store = {}, skey = '';
+  if (cache){
+    try {
+      skey = new URL('/app/years/cells?h=' + Math.floor(now() / HOUR) + '&v=' + encodeURIComponent(VER), request ? request.url : 'https://tj.cuven.us').toString();
+      const hit = await cache.match(skey);
+      const v = hit ? await hit.json() : null;
+      if (v && v.cells && typeof v.cells === 'object') store = v.cells;
+    } catch { skey = ''; }
+  }
+  const t = now();
+  const need = cells.filter(x => !cellFresh(store[x.k], t));
+  if (!need.length) return store;
+  const c = context(env, CFG_DEF, LIMIT.yearsMax * 2);
+  c.end = c.t0 + LIMIT.yearsMs;
+  const qs = (yr) => new URLSearchParams({ own: 'hide', min: '0', sort: 'new', page: '1', year: String(yr) });
+  const got = await pool(6, need.map(x => () => lb(c, '/api/catalog?src=' + x.s + '&' + qs(x.yr)).then(j => ({ j }), e => ({ e }))));
+  const at = now();
+  need.forEach((x, i) => {
+    const g = got[i];
+    if (g.e){ store[x.k] = { at, error: 1 }; return; }
+    const all = Array.isArray(g.j.items) ? g.j.items : [];
+    store[x.k] = { at, items: all.slice(0, LIMIT.yearsPerMax).map(it => slimItem(it, x.s)), n: all.length,
+                   pages: Number(g.j.pages) || 0, total: Number(g.j.total) || 0 };
+  });
+  if (cache && skey){
+    const keep = {};
+    for (const [k, v] of Object.entries(store)) if (cellFresh(v, at)) keep[k] = v;
+    try {
+      const put = Promise.resolve(cache.put(skey, new Response(JSON.stringify({ cells: keep }), { headers: { 'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'public, max-age=' + LIMIT.yearsCache } }))).catch(() => {});
+      if (ctx && ctx.waitUntil) ctx.waitUntil(put); else await put;
+    } catch {}
+  }
+  return store;
 }
 async function appYears(env, Q, request, ctx){
   const y = yearsQuery(Q);
@@ -2552,28 +2645,26 @@ async function appYears(env, Q, request, ctx){
     if (hit) return reply(await hit.text(), hit.headers.get('etag') || '');
   } catch { cache = null; }
 
-  const c = context(env, CFG_DEF, LIMIT.yearsMax * 2);
-  c.end = c.t0 + LIMIT.yearsMs;
   const cells = [];
-  for (const s of y.srcs) for (let yr = y.to; yr >= y.from; yr--) cells.push({ s, yr });
-  const qs = (yr) => new URLSearchParams({ own: 'hide', min: '0', sort: 'new', page: '1', year: String(yr) });
-  const got = await pool(6, cells.map(x => () => lb(c, '/api/catalog?src=' + x.s + '&' + qs(x.yr)).then(j => ({ j }), e => ({ e }))));
-  if (got.every(g => g.e)) return json({ error: '暂时连不上影片库' }, 503);
+  for (const s of y.srcs) for (let yr = y.to; yr >= y.from; yr--) cells.push({ s, yr, k: s + ':' + yr });
+  const store = await yearsCells(env, request, ctx, cache, cells);
+  if (cells.every(x => store[x.k].error)) return json({ error: '暂时连不上影片库' }, 503);
   const years = {};
   for (let yr = y.to; yr >= y.from; yr--) years[yr] = {};
-  cells.forEach((x, i) => {
-    const g = got[i];
-    if (g.e){ years[x.yr][x.s] = { error: 1 }; return; }
-    const all = g.j.items || [], pages = Number(g.j.pages) || 0;
+  for (const x of cells){
+    const v = store[x.k];
+    if (v.error){ years[x.yr][x.s] = { error: 1 }; continue; }
     /* next：接着用 /app/catalog 翻哪一页（影片库一页 42 部，per 最多 40）：第一页没给全 → 1（App 按 src-id 去重），
        还有第二页 → 2，没有了 → 0 */
-    years[x.yr][x.s] = { items: all.slice(0, y.per).map(it => slimItem(it, x.s)), page: 1, pages, total: Number(g.j.total) || 0,
-                         next: all.length > y.per ? 1 : pages > 1 ? 2 : 0 };
-  });
-  /* 请求进度：一个源一次（这个源所有年份的条目一起查），不是一年一次 */
+    years[x.yr][x.s] = { items: (v.items || []).slice(0, y.per).map(it => ({ ...it })), page: 1, pages: v.pages || 0, total: v.total || 0,
+                         next: (v.n || 0) > y.per ? 1 : v.pages > 1 ? 2 : 0 };
+  }
+  /* 请求进度：一个源一次（这个源所有年份的条目一起查），不是一年一次。
+     2.8 复查：新的年份在前拼。以前 for…in 按数字从小到大、最早的一年在前 —— 测试放的那一部恰好在前 90 个里，cap 退回 90 也测不出来，
+     真退回了砍掉的是今年、去年的（App 最先看的那几节没了请求进度）。现在万一被砍，砍的是最早的几年 */
   for (const s of y.srcs){
     const list = [];
-    for (const yr in years){ const cell = years[yr][s]; if (cell && cell.items) list.push(...cell.items); }
+    for (let yr = y.to; yr >= y.from; yr--){ const cell = years[yr][s]; if (cell && cell.items) list.push(...cell.items); }
     if (!list.length) continue;
     const m = await latestFor(env, s, list.map(it => it.id), LIMIT.yearsMax * LIMIT.yearsPerMax);
     for (const it of list){ const v = pickFor(m, it.id); if (v) it.req = v; }
@@ -2582,10 +2673,12 @@ async function appYears(env, Q, request, ctx){
   const tag = 'W/"' + md5(JSON.stringify(out)).slice(0, 20) + '"';          // ETag 不算 at：缓存过期重拼、内容没变照样 304
   const body = JSON.stringify({ ...out, at: now() });
   if (cache){
-    const partial = got.some(g => g.e);
+    /* 放到用到的格子里最早过期的那一格为止（有格子没问到的就是 30 秒以内），最多 5 分钟：回包里的数不会比目录页的缓存还旧 */
+    const t = now();
+    const ttl = clamp(Math.min(...cells.map(x => Math.floor((store[x.k].at + cellLife(store[x.k]) - t) / 1000))), 1, LIMIT.yearsCache);
     try {
       const put = Promise.resolve(cache.put(key, new Response(body, { headers: { 'content-type': 'application/json; charset=utf-8', etag: tag,
-        'cache-control': 'public, max-age=' + (partial ? LIMIT.yearsCachePartial : LIMIT.yearsCache) } }))).catch(() => {});
+        'cache-control': 'public, max-age=' + ttl } }))).catch(() => {});
       if (ctx && ctx.waitUntil) ctx.waitUntil(put); else await put;
     } catch {}
   }
