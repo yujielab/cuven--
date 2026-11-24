@@ -77,8 +77,7 @@ final class DuoUnfoldedTests: XCTestCase {
     }
 
     /// 请求添加（RequestViews.swift）：演示数据里推进一部片库里没有的剧集（-CuvenRequestPreview YES），
-    /// 截「请求添加」按钮、按下去那一下（玻璃正在变形）、变形完的五步进度卡（演示里 1.6 秒后走到第 3 步 40%）、
-    /// 走完以后收回成的「立即播放」。
+    /// 截「请求添加」按钮、按下去以后的「已加入请求中心」、再按一下切到请求中心（待确认那一段）。
     /// 截 duo-3q-*（iPad 上是 duo-4q-*）；外屏大小不截
     func testRequestCard() {
         XCUIDevice.shared.orientation = .portrait
@@ -95,16 +94,16 @@ final class DuoUnfoldedTests: XCTestCase {
         guard size.width > 500 else { return }
         snap("duo-3q-request-a-button")
         add.tap()
-        usleep(250_000)
-        snap("duo-3q-request-b-morph")
-        sleep(3)
-        snap("duo-3q-request-c-card")
-        // 演示里 4.6 秒走完：100% 的卡停 1.5 秒，再收回成「立即播放」
-        _ = app.buttons["request-play"].waitForExistence(timeout: 8)
         sleep(1)
-        snap("duo-3q-request-e-play")
+        snap("duo-3q-request-b-added")
         app.swipeUp(); sleep(2)
-        snap("duo-3q-request-d-sections")
+        snap("duo-3q-request-c-sections")
+        app.swipeDown(); sleep(1)
+        // 已经在请求中心里：再按一下切到「请求」去确认
+        if app.buttons["request-add"].waitForExistence(timeout: 4) { app.buttons["request-add"].tap() }
+        _ = app.buttons["basket-confirm"].waitForExistence(timeout: 6)
+        sleep(2)
+        snap("duo-3q-request-d-basket")
     }
 
     /// 请求中心（标签栏「请求」，RequestCenter.swift）：演示数据里 7 个请求——进行中的几张卡（复用五步进度卡）、

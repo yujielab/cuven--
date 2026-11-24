@@ -201,7 +201,8 @@ struct FlowFunnelCanvas: UIViewRepresentable {
         let v = MTKView()
         v.colorPixelFormat = .bgra8Unorm
         v.framebufferOnly = true
-        v.preferredFramesPerSecond = 60
+        // 旧机型（改进兼容性那一档）30 帧就够顺，省电省发热
+        v.preferredFramesPerSecond = Compat.legacyDevice ? 30 : 60
         v.isOpaque = true
         let bg = Double(FlowFunnelRenderer.background)
         v.backgroundColor = UIColor(white: bg, alpha: 1)

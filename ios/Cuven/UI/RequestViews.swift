@@ -223,26 +223,32 @@ struct CatalogDetailView: View {
     struct DetailAlert: Identifiable { let title: String; let message: String; var id: String { title + message } }
 
     private var store: RequestStore { RequestStore.shared }
+    private var basket: RequestBasket { RequestBasket.shared }
     private var seasonKey: Int { title.kind == .tv ? (season > 0 ? season : (detail?.season ?? 0)) : 0 }
     private var ownedSeasons: Set<Int> { title.kind == .tv ? (model.ownedSeasons[title.id] ?? []) : [] }
 
     var body: some View {
-        let status = pending ?? store.status(src: title.kind.rawValue, id: title.id, season: seasonKey)
+        // 进行中 / 失败了的请求才变成五步进度卡；取消了的当没请求过（可以重新放进请求中心）
+        let raw = pending ?? store.status(src: title.kind.rawValue, id: title.id, season: seasonKey)
+        let status = raw?.state == .cancelled ? nil : raw
         let inLibrary = libraryMovie != nil || librarySeries != nil
         let done = inLibrary || status?.state == .done
         let available = (detail?.count ?? 0) > 0 && !inLibrary
+        let queued = basket.contains(title, season: seasonKey)
         let mode: RequestButtonMode = done && (showPlay || status == nil)
             ? .play(busy: opening)
             : (status.map { .progress($0) }
-               ?? .request(title: buttonTitle(available: available), symbol: available ? "plus" : "clock", enabled: available && !busy))
+               ?? (queued
+                   ? .request(title: "已加入请求中心", symbol: "checkmark", enabled: true)
+                   : .request(title: buttonTitle(available: available), symbol: available ? "plus" : "clock", enabled: available && !busy)))
         let playing: Bool = { if case .play = mode { return true }; return false }()
         DetailScaffold(
             title: displayTitle,
             art: art,
             metaLine: metaLine,
-            playTitle: playing ? "播放" : (status == nil ? "请求添加" : "已请求"),
+            playTitle: playing ? "播放" : (status != nil ? "已请求" : (queued ? "已加入" : "请求添加")),
             playID: "request-pinned",
-            playDisabled: playing ? opening : (status != nil || !available || busy),
+            playDisabled: playing ? opening : (status != nil || (!available && !queued) || busy),
             onPlay: { if playing { playNow() } else { request() } },
             genres: meta?.genres ?? [],
             overview: meta?.overview,
@@ -421,26 +427,23 @@ struct CatalogDetailView: View {
         loading = false
     }
 
+    /// 用户要求的批量流程：「请求添加」先放进请求中心（最多 50 部），在请求中心按「确认」才一起提交。
+    /// 已经在请求中心里的，再按一下就切到请求中心去确认
     private func request() {
         guard !busy, pending == nil else { return }
         if !DemoData.enabled && !account.isLoggedIn { alert = DetailAlert(title: "无法请求添加", message: "登录后才能请求添加。"); return }
         let s = seasonKey
-        busy = true
-        Haptics.light()
-        withAnimation(RequestMorphControl.morph(reduce: reduceMotion)) {
-            pending = RequestStatus(id: -1, title: title, season: s, step: 1, pct: 0, note: "正在提交请求…")
+        if basket.contains(title, season: s) {
+            Haptics.selection()
+            basket.openCenter = true
+            return
         }
-        Task { @MainActor in
-            defer { busy = false }
-            do {
-                _ = try await store.request(title, season: s)
-                pending = nil
-                Haptics.success()
-            } catch {
-                withAnimation(RequestMorphControl.morph(reduce: reduceMotion)) { pending = nil }
-                alert = DetailAlert(title: "无法请求添加", message: error.localizedDescription)
-                Haptics.error()
-            }
+        switch basket.add(title, season: s) {
+        case .added, .already:
+            Haptics.success()
+        case .full:
+            Haptics.error()
+            alert = DetailAlert(title: "请求中心已满", message: "请求中心最多放 \(RequestBasket.limit) 部，先在请求中心确认这一批，再加新的。")
         }
     }
 
@@ -540,12 +543,13 @@ struct CatalogPosterLink: View {
 
     var body: some View {
         let st = RequestStore.shared.anyStatus(src: item.src, id: item.id) ?? item.req
+        let queued = st == nil && RequestBasket.shared.containsAny(src: item.src, id: item.id)
         ZoomLink(route: .catalog(item.catalogTitle), slot: slot) {
             DSPosterLockup(art: TMDBImage.url(item.poster, "w342"), title: item.title,
                            subtitle: [item.src == "tv" ? "剧集" : "电影", item.year].filter { !$0.isEmpty }.joined(separator: "，"),
                            metrics: metrics)
                 .overlay(alignment: .bottomLeading) {
-                    if let st { badge(st).padding(8) }
+                    if let st { badge(st).padding(8) } else if queued { pill("已加入", color: .white).padding(8) }
                 }
         }
         .accessibilityIdentifier("catalog-card")
@@ -553,10 +557,14 @@ struct CatalogPosterLink: View {
 
     private func badge(_ s: RequestStatus) -> some View {
         let text = s.state == .done ? "已就绪" : s.state == .failed ? "未能添加" : s.stage == "release" ? "发行审批" : "已请求 \(s.pct)%"
-        return Text(text)
+        return pill(text, color: s.state == .failed ? requestRed : .white)
+    }
+
+    private func pill(_ text: String, color: Color) -> some View {
+        Text(text)
             .font(.caption2.weight(.semibold))
             .monospacedDigit()
-            .foregroundStyle(s.state == .failed ? requestRed : .white)
+            .foregroundStyle(color)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .glassEffect(.regular, in: Capsule())
