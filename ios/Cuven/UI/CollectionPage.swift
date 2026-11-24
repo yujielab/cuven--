@@ -13,24 +13,66 @@ struct CollectionPage: View {
     @Environment(AppModel.self) private var model
     let shelf: Shelf
     let entries: [HomeEntry]
+
+    var body: some View {
+        CollectionScaffold(title: shelf.title, titleBottom: { FeaturedCollectionHeader.titleBottom($0) }) { m in
+            FeaturedCollectionHeader(title: shelf.title, blurb: shelf.blurb ?? "", covers: covers,
+                                     metrics: m, page: true)
+            if entries.isEmpty {
+                ContentUnavailableView("暂无影片", systemImage: "film",
+                                       description: Text("这一类的电影和剧集会显示在这里。"))
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 12)
+            } else {
+                CollectionGrid(metrics: m) { w in
+                    ForEach(entries) { e in CollectionEntryCard(entry: e, width: w, slot: "collection-" + shelf.key) }
+                }
+            }
+        }
+    }
+
+    /// 顶上三张立体海报：排在最前的三部（印着片名的海报）
+    private var covers: [URL?] {
+        entries.prefix(3).map { (e: HomeEntry) -> URL? in Self.cover(e, model: model) }
+    }
+
+    /// 一部的封面（印着片名的海报）：立体海报用它，页顶的底色也从排在最前那部的这一张取（分类页也是）
+    static func cover(_ e: HomeEntry, model: AppModel) -> URL? {
+        switch e {
+        case .movie(let v):
+            return model.coverArt(v)
+        case .series(let s):
+            let sm = model.seriesMetas[s.path]
+            return TMDBImage.url(sm?.poster ?? sm?.posterClean, "w500")
+        }
+    }
+}
+
+// MARK: - 合集页的架子（专区页、「全部影片」的分类页共用）
+
+/// 整页黑底，头部的颜色自己铺到状态栏、导航栏和侧边那一列底下；导航栏里先不写字（只有返回钮），
+/// 滚过大标题（titleBottom：大标题的底边离页顶多远）才把标题接上去
+struct CollectionScaffold<Content: View>: View {
+    let title: String
+    let titleBottom: (DSMetrics) -> CGFloat
+    let content: (DSMetrics) -> Content
     @State private var titleInBar = false
+
+    init(title: String, titleBottom: @escaping (DSMetrics) -> CGFloat,
+         @ViewBuilder content: @escaping (DSMetrics) -> Content) {
+        self.title = title
+        self.titleBottom = titleBottom
+        self.content = content
+    }
 
     var body: some View {
         GeometryReader { geo in
             let insets = geo.safeAreaInsets
             let m = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing, height: geo.size.height)
+            let bottom = titleBottom(m)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    FeaturedCollectionHeader(title: shelf.title, blurb: shelf.blurb ?? "", covers: covers,
-                                             metrics: m, page: true)
-                    if entries.isEmpty {
-                        ContentUnavailableView("暂无影片", systemImage: "film",
-                                               description: Text("这一类的电影和剧集会显示在这里。"))
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 12)
-                    } else {
-                        list(m)
-                    }
+                    content(m)
                 }
                 .padding(.bottom, 44)
                 // 卡留在安全区里；头部的颜色自己铺到侧边那一列底下
@@ -40,46 +82,58 @@ struct CollectionPage: View {
             .scrollIndicators(.hidden)
             .ignoresSafeArea(edges: .horizontal)
             .onScrollGeometryChange(for: Bool.self) { g in
-                g.contentOffset.y + g.contentInsets.top > FeaturedCollectionHeader.titleBottom(m)
+                g.contentOffset.y + g.contentInsets.top > bottom
             } action: { _, v in
                 withAnimation(.easeOut(duration: 0.2)) { titleInBar = v }
             }
         }
         .background(Color.black)
-        .navigationTitle(titleInBar ? shelf.title : "")
+        .navigationTitle(titleInBar ? title : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
     }
+}
 
-    /// 顶上三张立体海报：排在最前的三部（印着片名的海报）
-    private var covers: [URL?] {
-        entries.prefix(3).map { (e: HomeEntry) -> URL? in
-            switch e {
-            case .movie(let v):
-                return model.coverArt(v)
-            case .series(let s):
-                let sm = model.seriesMetas[s.path]
-                return TMDBImage.url(sm?.poster ?? sm?.posterClean, "w500")
-            }
-        }
-    }
-
-    /// 一列大卡；宽的屏（展开的 Duo、横拿）一行两张、三张
-    private func list(_ m: DSMetrics) -> some View {
-        let avail = max(200, m.width - m.margin * 2)
+extension DSMetrics {
+    /// 合集页那一列大卡：一行几张、每张多宽。折起一列；宽的屏（展开的 Duo、横拿）一行两张、三张
+    var collectionGrid: (columns: Int, width: CGFloat) {
+        let avail = max(200, width - margin * 2)
         let n = avail >= 1100 ? 3 : (avail >= 620 ? 2 : 1)
-        let w = ((avail - m.gutter * CGFloat(n - 1)) / CGFloat(n)).rounded(.down)
-        // 设计轮 2：行距就是列距（m.gutter），宽的屏上不再一个 24、一个按宽算
-        return LazyVGrid(columns: Array(repeating: GridItem(.fixed(w), spacing: m.gutter, alignment: .top), count: n),
-                         alignment: .leading, spacing: m.gutter) {
-            ForEach(entries) { e in card(e, width: w) }
-        }
-        .padding(.horizontal, m.margin)
+        return (n, ((avail - gutter * CGFloat(n - 1)) / CGFloat(n)).rounded(.down))
+    }
+}
+
+/// 一列大卡（懒加载：几千部也只建看得到的那几张）；content 拿到每张卡多宽
+struct CollectionGrid<Content: View>: View {
+    let metrics: DSMetrics
+    let content: (CGFloat) -> Content
+
+    init(metrics: DSMetrics, @ViewBuilder content: @escaping (CGFloat) -> Content) {
+        self.metrics = metrics
+        self.content = content
     }
 
-    @ViewBuilder private func card(_ e: HomeEntry, width w: CGFloat) -> some View {
-        let slot = "collection-" + shelf.key
-        switch e {
+    var body: some View {
+        let g = metrics.collectionGrid
+        // 设计轮 2：行距就是列距（m.gutter），宽的屏上不再一个 24、一个按宽算
+        LazyVGrid(columns: Array(repeating: GridItem(.fixed(g.width), spacing: metrics.gutter, alignment: .top), count: g.columns),
+                  alignment: .leading, spacing: metrics.gutter) {
+            content(g.width)
+        }
+        .padding(.horizontal, metrics.margin)
+    }
+}
+
+/// 合集页里片库的一部（电影或剧集）：点卡进详情（从卡上放大出来），长按是「播放 / 想看」菜单（C21、C45）
+struct CollectionEntryCard: View {
+    @Environment(AppModel.self) private var model
+    let entry: HomeEntry
+    let width: CGFloat
+    /// 缩放转场的来源（同一部片在不同的页里各算各的）
+    let slot: String
+
+    var body: some View {
+        switch entry {
         case .movie(let v):
             let meta = model.meta(v)
             let year: String? = model.year(v).map { String($0) }
@@ -87,7 +141,7 @@ struct CollectionPage: View {
             let line: String = DetailText.line([year, meta?.genres?.first])
             ZoomLink(route: .movie(v), slot: slot) {
                 CollectionCard(art: model.wideLockupArt(v).url, cover: model.thumbArt(v), title: model.title(v),
-                               line: line, width: w)
+                               line: line, width: width)
             }
             .accessibilityIdentifier("collection-movie")
             .movieMenu(v)
@@ -96,7 +150,7 @@ struct CollectionPage: View {
             let line: String = DetailText.line([s.seasonLabel, sm?.genres?.first])
             ZoomLink(route: .series(s), slot: slot) {
                 CollectionCard(art: model.seriesWideArt(s).url, cover: TMDBImage.url(sm?.poster ?? sm?.posterClean, "w185"),
-                               title: sm?.title ?? s.name, line: line, width: w)
+                               title: sm?.title ?? s.name, line: line, width: width)
             }
             .accessibilityIdentifier("collection-series")
             .seriesMenu(s)
@@ -117,17 +171,24 @@ struct CollectionCard: View {
     let width: CGFloat
     /// 片名上面那一行小字（参考图「Apple Arcade」）：合集页是「Cuven 独占」，主页展开时的年份分区是「电影」「剧集」
     let kicker: String
+    /// 右边那颗胶囊换成请求的状态（分类页「可申请」：申请 / 已加入 / 已请求 42% / 已就绪 / 未能添加）；nil = 「查看」
+    let badge: YearCardBadge?
+    /// 画面底边一道细进度（请求进行中）
+    let progress: Double?
     /// 底条的颜色：画面最下面那一截的平均色，压暗、收一点饱和度（白字看得清）；取到之前是深灰
     @State private var tone: Color?
 
     /// 写明的 init：tone 是 private，系统生成的那个只在这个文件里能用；主页展开时也要用这张卡
-    init(art: URL?, cover: URL?, title: String, line: String, width: CGFloat, kicker: String = "Cuven 独占") {
+    init(art: URL?, cover: URL?, title: String, line: String, width: CGFloat, kicker: String = "Cuven 独占",
+         badge: YearCardBadge? = nil, progress: Double? = nil) {
         self.art = art
         self.cover = cover
         self.title = title
         self.line = line
         self.width = width
         self.kicker = kicker
+        self.badge = badge
+        self.progress = progress
     }
 
     var body: some View {
@@ -141,6 +202,17 @@ struct CollectionCard: View {
             }
             .frame(width: width, height: artH)
             .clipped()
+            .overlay(alignment: .bottomLeading) {
+                if let progress {
+                    // 和「全部影片」可申请那排的卡同一种：画面底边一道细线
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(Color.white.opacity(0.22))
+                        Rectangle().fill(Color.white).frame(width: (width * min(1, max(0, progress))).rounded())
+                    }
+                    .frame(width: width, height: 3)
+                    .animation(.smooth(duration: 0.6), value: progress)
+                }
+            }
             bar
         }
         .frame(width: width)
@@ -149,7 +221,7 @@ struct CollectionCard: View {
         .contentShape(shape)
         .task(id: art) { await loadTone() }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([title, line].filter { !$0.isEmpty }.joined(separator: "，"))
+        .accessibilityLabel([title, line, badge?.text ?? ""].filter { !$0.isEmpty }.joined(separator: "，"))
     }
 
     private var bar: some View {
@@ -173,7 +245,11 @@ struct CollectionCard: View {
             }
             .lineLimit(1)
             Spacer(minLength: 8)
-            DSViewPill()
+            if let badge {
+                badge.view(compact: false)
+            } else {
+                DSViewPill()
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
