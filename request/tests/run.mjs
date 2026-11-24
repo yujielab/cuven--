@@ -63,6 +63,7 @@ const W = {
   existsTv: new Set(),       // dropbox:auto/ram2 下面有什么
   mkdirs: [],                // 影片库收到的 do=mkdir
   lbCalls: 0,
+  fileGetDown: 0,            // PikPak 读单个文件（GET /drive/v1/files/<id>）接下来几次回 500
 };
 const pkFolderWith = (name, children, parent = 'AUTO') => {
   const id = 'F' + (W.seq++);
@@ -251,6 +252,7 @@ globalThis.fetch = async (url, init = {}) => {
     }
     if (p.startsWith('/drive/v1/files/')){
       const f = W.files.get(decodeURIComponent(p.slice('/drive/v1/files/'.length)));
+      if (m === 'GET' && W.fileGetDown > 0){ W.fileGetDown--; return J({ error: 'internal_error', error_code: 500 }, 500); }
       if (f && m === 'PATCH'){ W.renames.push([f.name, body.name]); if (W.renameDeny) return J({ error: 'permission_denied', error_code: 7 }, 403); f.name = body.name; }
       return f ? J(f) : J({ error: 'file_not_found', error_code: 3 }, 404);
     }
@@ -282,7 +284,13 @@ const call = async (method, p, { body, user, admin } = {}) => {
   let j; try { j = JSON.parse(txt); } catch { j = txt; }
   return [r.status, j];
 };
-const tick = async () => { advance(3 * 60000 + 6000); let pr; await worker.scheduled({}, env, { waitUntil(p){ pr = p; } }); await pr; };
+/* OVERS：每一轮 tick:last 的 over（2.6：这一轮有几个子请求被预算挡回去），给「从开批到就绪没有一轮被掐」那样的检查用 */
+const OVERS = [];
+const tick = async () => {
+  advance(3 * 60000 + 6000); let pr; await worker.scheduled({}, env, { waitUntil(p){ pr = p; } }); await pr;
+  const v = env.DB.db.prepare("SELECT v FROM tj_kv WHERE k = 'tick:last'").get();
+  OVERS.push(v ? JSON.parse(v.v).over || 0 : 0);
+};
 const mine = async (user = 'alice') => (await call('GET', '/app/requests', { user }))[1].items;
 const one = async (id) => (await call('GET', '/admin/api/state', { admin: true }))[1].reqs.find(r => r.id === id);
 
@@ -976,9 +984,13 @@ const flowGet = async (user, tag) => {
   W.job[4101] = { finished: false, success: false, bytes: 0, total: 16e9 };
   W.job[4102] = { finished: false, success: false, bytes: 0, total: 2e9 };
   let maxF = 0, ticks = 0, sawParked = false, sawReady = false;
+  /* over = 这一轮有几个子请求被预算挡回去（c.n 到不了 42 以上，光看 fetches ≤ 42 永远成立）；tfL = 开批那一轮之前传输收到的调用数。
+     凑批之前 18 部一起清洗，一轮用满 42 个、最后一步被挡回去下一轮再做是正常的（看调度的先后），这里不查 */
+  let tfL = 0;
   const tf0 = W.tf.length, push0 = W.push.length;
   for (; ticks < 40 && !W.batchCalls.length; ticks++){
     for (const t of [...W.tasks.keys()]) finishTask(t);
+    tfL = W.tf.length;
     await tick();
     maxF = Math.max(maxF, lastTick().fetches);
     const rd = env.DB.db.prepare("SELECT next, data FROM tj_req WHERE stage = 'ready'").all().filter(x => JSON.parse(x.data).tag !== undefined);
@@ -999,6 +1011,9 @@ const flowGet = async (user, tag) => {
   ok(tvPush.length === 4 && tvPush.every(p => p.parent === tvId.id) && mvPush.every(p => p.parent === 'AUTO'), '剧集推进 /auto/ram2，电影照旧推进 /auto', W.push.slice(push0));
   ok(W.renames.some(([from, to]) => /^Show\.3001\.S01/.test(from) && /\[auto-tv3001s1-r\d+\]$/.test(to)), '剧集的追踪码在 /auto/ram2 里加', W.renames.filter(([f]) => /^Show/.test(f)));
   ok(maxF <= 42, '凑批之前每一轮的子请求都没超 42', maxF);
+  const lt = lastTick(), opsL = W.tf.slice(tfL).map(x => x[0]), o0 = OVERS.length;
+  ok(lt.over === 0 && opsL.filter(o => o === 'batch-copy').length === 1 && lt.batch && lt.batch.items === 16,
+     '开批那一轮：一个 batch-copy 开 16 部，没有子请求被预算挡回去', { fetches: lt.fetches, over: lt.over, ops: opsL });
 
   /* 成员停在 copy、不用每轮排上；多的两部等下一批 */
   const members = env.DB.db.prepare('SELECT id, stage, next, bat FROM tj_req WHERE bat > 0').all();
@@ -1054,6 +1069,9 @@ const flowGet = async (user, tag) => {
   /* 一次核对一批：14 部一致 → 删 PikPak；那一季对不上 → 2 分钟后再核对 */
   const v0 = W.bverify.length, tfV = W.tf.length;
   await tick();
+  const lv = lastTick(), opsV = W.tf.slice(tfV).map(x => x[0]);
+  ok(lv.over === 0 && lv.fetches < 39 && opsV.filter(o => o === 'batch-verify').length === 1 && opsV.length <= 4,
+     '核对那一轮：一个 batch-verify，总共没几个子请求（没碰到预算线、没被掐）', { fetches: lv.fetches, over: lv.over, ops: opsV });
   ok(W.bverify.length === v0 + 1 && W.bverify[v0].items.length === 15 && !W.tf.slice(tfV).some(([op]) => op === 'verify'),
      '核对：15 部一次 batch-verify（没有一个一个核对）', W.bverify.map(b => b.items.length));
   ok(W.bverify[v0].items.filter(x => x.kind === 'dir').every(x => x.sub === 'ram2'), 'batch-verify 里剧集带 sub');
@@ -1061,8 +1079,11 @@ const flowGet = async (user, tag) => {
   ok(st.find(x => x.stage === 'purge').n === 14 && st.find(x => x.stage === 'verify').n === 1, '14 部一致 → 删 PikPak；那一季再核对一次', st);
 
   /* 删 PikPak：8 个一次（14 部 = 2 次）、云下载任务一次删完、片库一次问完 → 就绪；那一季还是对不上 → 等这一批传完单个补传 */
-  const p0 = W.bpurge.length, del0 = W.pkCalls.filter(x => x === 'DELETE /drive/v1/tasks').length, s0 = W.sync.length;
+  const p0 = W.bpurge.length, del0 = W.pkCalls.filter(x => x === 'DELETE /drive/v1/tasks').length, s0 = W.sync.length, tfP = W.tf.length;
   await tick();
+  const lp = lastTick(), opsP = W.tf.slice(tfP).map(x => x[0]);
+  ok(lp.over === 0 && lp.fetches < 39 && opsP.filter(o => o === 'batch-purge').length === 2 && !opsP.includes('purge'),
+     '删除那一轮：两个 batch-purge、没有单个删，没碰到预算线、没被掐', { fetches: lp.fetches, over: lp.over, ops: opsP });
   ok(W.bpurge.length === p0 + 2 && W.bpurge.slice(p0).map(b => b.items.length).join() === '8,6', '删 PikPak：8 个一次 batch-purge（14 部 = 2 次）', W.bpurge.slice(p0).map(b => b.items.length));
   ok(W.pkCalls.filter(x => x === 'DELETE /drive/v1/tasks').length === del0 + 1, '云下载任务一次删完');
   ok(W.sync.slice(s0).filter(x => x.items.length >= 14).length === 1 && W.sync.slice(s0).filter(x => x.items.length === 1).length === 0, '自动通过时问片库：14 部一次问完', W.sync.slice(s0).map(x => x.items.length));
@@ -1086,6 +1107,7 @@ const flowGet = async (user, tag) => {
   ok(fin.find(x => x.stage === 'done').n === 17 && fin.find(x => x.stage === 'cancelled').n === 1 && fin.length === 2, '17 部全部就绪（取消的那部除外）', fin);
   ok(env.DB.db.prepare('SELECT COUNT(*) n FROM tj_batch WHERE ended = 0').get().n === 0, '两批都收尾了');
   ok(maxF <= 42, '整个流程每一轮的子请求都没超 42', maxF);
+  ok(OVERS.length - o0 >= 10 && Math.max(...OVERS.slice(o0)) === 0, '从开批到全部就绪：没有一轮有子请求被预算挡回去（over 一直是 0）', OVERS.slice(o0));
   /* 剧集的每一个传输调用都带 sub: ram2 */
   const tvCalls = W.tf.slice(tf0).filter(([, b]) => b && (/^Show\./.test(b.dir || b.item || '') || (b.items || []).some(x => /^Show\./.test(x && x.item))));
   const ops = new Set(tvCalls.map(([op]) => op));
@@ -1357,6 +1379,86 @@ const flowGet = async (user, tag) => {
   const logs = (await call('GET', '/admin/api/log?id=' + mv.id, { admin: true }))[1].items.map(l => l.msg);
   ok(!logs.some(m => /等待凑批/.test(m)), '老版本：不进「等待凑批」');
   W.caps = ['sub', 'batch'];
+}
+
+/* ── 2.6 的几处细节：补传先传完再开下一批、加追踪码读回来之前被掐、第二个在传的批次、跟上等待凑批的带 wait ── */
+{
+  reset26();
+  W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, batchMin: 16, batchMax: 16, batchWait: 600, vpsSlots: 2, tagNames: true } });
+  await call('POST', '/admin/api/links', { admin: true, body: {} });        // 先记下传输 Worker 会批量
+  let seq = 0;
+  const ins = (stage, data, extra = {}) => {
+    const t = Date.now(), tmdb = 7000 + (seq++);
+    return Number(env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid, bat)
+      VALUES ('movie', ?, 0, 'x', '["alice"]', ?, '', ?, ?, ?, ?, ?, ?, ?)`)
+      .run(tmdb, stage, JSON.stringify(data), t, t, extra.since ?? t, extra.next ?? t + 3600e3, extra.bid ?? 0, extra.bat ?? 0).lastInsertRowid);
+  };
+  const launched = () => W.batchCalls.length;
+
+  /* 批量里对不上、排着队的单个补传：先让它传完，再开下一批（不然一批接一批开，它一直排不上） */
+  for (let i = 0; i < 2; i++) ins('ready', { item: 'Rd' + i + '.mkv', kind: 'file', tag: '' });
+  const solo = ins('copy', { item: 'Solo.mkv', kind: 'file', tag: '', vtries: 1, rode: 3 }, { next: 0 });
+  W.copyJobs = [91]; W.job[91] = { finished: true, success: true, bytes: 5, total: 5 };
+  const c0 = W.tf.filter(([op]) => op === 'copy').length;
+  await tick();
+  ok(launched() === 0 && W.tf.filter(([op]) => op === 'copy').length === c0 + 1, '排着队的补传先开传，这一轮不开批', { launched: launched(), solo: await one(solo) });
+  await tick();
+  ok(launched() === 1 && (await one(solo)).stage !== 'copy' && W.batchCalls[0].items.length === 2, '补传传完了：再开批', { launched: launched(), solo: (await one(solo)).stage });
+  /* 退避很久的单个传输（一直出错的）不挡着开批 */
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  for (let i = 0; i < 2; i++) ins('ready', { item: 'Rb' + i + '.mkv', kind: 'file', tag: '' });
+  ins('copy', { item: 'Stuck.mkv', kind: 'file', tag: '', errs: 4 }, { next: Date.now() + 3600e3 });
+  await tick();
+  ok(launched() === 1, '退避一小时的单个传输不挡着开批');
+
+  /* 加追踪码：PikPak 改了名、读回来那一下失败（或者子请求用完了）→ 新名字已经记下，下一轮不再改、不拿旧名字去找 */
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  W.files.set('tg1', { id: 'tg1', name: 'Tagcut.2018.1080p.mkv', kind: 'drive#file', parent_id: 'AUTO', size: '10', phase: 'PHASE_TYPE_COMPLETE', trashed: false });
+  const tg = ins('ready', { item: 'Tagcut.2018.1080p.mkv', kind: 'file', file: 'tg1' }, { next: 0 });
+  const rn0 = W.renames.length;
+  W.fileGetDown = 1;
+  await tick();
+  let d = JSON.parse(env.DB.db.prepare('SELECT data FROM tj_req WHERE id = ?').get(tg).data);
+  ok(W.renames.length === rn0 + 1 && /\[auto-m\d+-r\d+\]\.mkv$/.test(d.item) && d.tag === undefined && launched() === 0,
+     '改了名、读回来失败：新名字先记下（追踪码还没确认，不开批）', d);
+  advance(5 * 60000);
+  await tick();
+  d = JSON.parse(env.DB.db.prepare('SELECT data FROM tj_req WHERE id = ?').get(tg).data);
+  ok(W.renames.length === rn0 + 1 && d.tag && d.item.includes(d.tag) && launched() === 1 && W.batchCalls[0].items[0].item === d.item,
+     '下一轮：名字里已经有追踪码，不再改名，用新名字开批', { d, b: W.batchCalls[0] });
+  W.fileGetDown = 0;
+
+  /* 面板「推进一轮」和定时任务撞上、开出了第二个在传的批次：前面那一批传完之前不动它（不会被当成传完了去核对），之后再开 */
+  reset26(); W.caps = ['sub', 'batch'];
+  await call('POST', '/admin/api/links', { admin: true, body: {} });
+  for (let i = 0; i < 2; i++) ins('ready', { item: 'Ra' + i + '.mkv', kind: 'file', tag: '' });
+  W.batchJobs = [4501, 4502]; W.job[4501] = { finished: false, success: false, bytes: 1, total: 2e9 }; W.job[4502] = { finished: false, success: false, bytes: 1, total: 1e9 };
+  await tick();
+  const b1 = env.DB.db.prepare('SELECT id FROM tj_batch ORDER BY id DESC LIMIT 1').get().id;
+  const t = Date.now();
+  const b2 = Number(env.DB.db.prepare("INSERT INTO tj_batch (stage, items, data, created, updated) VALUES ('copy', '[]', '{}', ?, ?)").run(t, t).lastInsertRowid);
+  const m2 = ins('copy', { item: 'Second.mkv', kind: 'file', tag: '', batch: b2 }, { bat: b2 });
+  await tick();
+  ok(env.DB.db.prepare('SELECT stage FROM tj_batch WHERE id = ?').get(b2).stage === 'copy' && (await one(m2)).stage === 'copy' && launched() === 1,
+     '第二个在传的批次：前面那一批还在传，原样不动', { b2: env.DB.db.prepare('SELECT * FROM tj_batch WHERE id = ?').get(b2), m2: (await one(m2)).stage });
+  W.job[4501] = { finished: true, success: true, bytes: 2e9, total: 2e9 };
+  await tick();
+  await tick();
+  ok(launched() === 2 && W.batchCalls[1].key === String(b2) && W.batchCalls[1].items.map(x => x.item).join() === 'Second.mkv' && (await one(m2)).stage === 'copy',
+     '前面那一批传完：再开第二个（key = 它自己的编号）', { calls: W.batchCalls.map(x => x.key), b1, b2 });
+
+  /* 请求中心提交时跟上了一条在等待凑批的：回包里一样带 wait */
+  reset26(); W.caps = ['sub', 'batch'];
+  const t2 = Date.now();
+  env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next)
+    VALUES ('movie', 7900, 0, 'w', '["alice"]', 'ready', '', '{"item":"W.mkv","kind":"file","tag":""}', ?, ?, ?, ?)`).run(t2, t2, t2, t2 + 3600e3);
+  const [, jb] = await batchPost('bob', [{ src: 'movie', id: 7900 }]);
+  ok(jb.items[0].result === 'joined' && jb.items[0].request.stage === 'ready' && jb.items[0].request.wait && jb.items[0].request.wait.ready === 1 &&
+     jb.items[0].request.wait.need === 16 && jb.items[0].request.pct === 60, '跟上等待凑批的：回包带 wait（1 / 16），STEP 4 的 60%', jb.items[0]);
+  reset26();
 }
 
 /* ── 共用的 D1：别人的表原样不动，自己的表缺的列补上了 ── */

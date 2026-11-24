@@ -227,6 +227,9 @@ const INDEXES = [
   `CREATE INDEX IF NOT EXISTS tj_req_tmdb ON tj_req(tmdb)`,
   `CREATE INDEX IF NOT EXISTS tj_req_bat ON tj_req(bat)`,
   `CREATE INDEX IF NOT EXISTS tj_batch_open ON tj_batch(ended)`,
+  /* 2.6：凑批每轮按 stage 查（等待凑批的、前面还在下载 / 清洗的、排队的单个传输），/app/flow 每 5 秒也查；
+     tj_req 不删旧的（就绪 / 失败的留着追踪、看历史），没有这个索引每次都把整张表读一遍（D1 按读了几行算） */
+  `CREATE INDEX IF NOT EXISTS tj_req_stage ON tj_req(stage, since)`,
 ];
 let SCHEMA_OK = false;
 async function db(env){
@@ -373,7 +376,8 @@ function context(env, cfg, budget){
   return { env, cfg, n: 0, max: budget || LIMIT.fetches, t0: now(), memo: {}, health: null, logs: null, pending: null, slots: null };
 }
 async function xfetch(c, url, init = {}, ms = 25000){
-  if (c.n >= c.max) throw err('这一轮的子请求用完了，下一轮接着做', { budget: 1 });
+  /* over = 这一轮撞上预算几次（2.6，记进 tick:last）：c.n 到不了 42 以上，光看用了几个看不出这一轮有没有被预算掐掉 */
+  if (c.n >= c.max){ c.over = (c.over || 0) + 1; throw err('这一轮的子请求用完了，下一轮接着做', { budget: 1 }); }
   c.n++;
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), ms);
@@ -1098,8 +1102,14 @@ async function stCopy(c, r){
   const t = now();
   /* 批量传输的成员（2.6）：不带自己的作业，进度由批次一起改（batchStep）；排上了也只是再停一会儿 */
   if (r.d.batch){
-    const b = c.memo.batch;
-    if (b && b.id === r.d.batch){ r.next = t + LIMIT.memberPark; return; }
+    const b = c.memo.batch, run = c.memo.copying;
+    /* undefined = 这一轮没问成批次（batchStep 出错）：不知道传完没有，先停着，别提前去核对 */
+    if (b === undefined || !run){ r.next = t + MIN; return; }
+    /* 自己那一批还在 copy（不管是不是正在传的那一批：排在后面、还没开作业的也算）：接着停着 */
+    if (run.has(r.d.batch)){
+      if (b && b.id !== r.d.batch) r.note = '批量 #' + r.d.batch + ' 排队：等批量 #' + b.id + ' 传完再开';
+      r.next = t + LIMIT.memberPark; return;
+    }
     /* 那一批已经传完了，这一条没赶上一起去核对（面板刚改过它）：去核对，对不上再单个补传 */
     delete r.d.batch;
     go(r, 'verify', '批量 #' + r.bat + ' 传完了，核对两端');
@@ -1230,6 +1240,9 @@ async function tagItem(c, r){
   const name = withTag(r.d.item, tag, r.d.kind);
   try { await pkCall(c, 'PATCH', '/drive/v1/files/' + encodeURIComponent(hit.id), { body: { name } }); }
   catch (e){ if (e.budget || e.net || transientErr(e)) throw e; return skip('PikPak：' + e.message); }
+  /* 改成了就先记下新名字（2.6：一轮给十几部加追踪码，读回来之前可能就用完了子请求预算；
+     下一轮看到名字里已经有追踪码就不再改，不会拿旧名字去找、找不到就照旧名传） */
+  r.d.item = name; hit.name = name;
   const back = await pkFile(c, String(hit.id));
   hit.name = String((back && back.name) || name);            // 这一轮列出来的那一份也跟着改名
   r.d.item = String((back && back.name) || name);
@@ -1408,11 +1421,14 @@ function schedule(rows){
     const k = seen.get(u) || 0;
     r._fair = k; seen.set(u, k + 1);
   }
+  /* 最后按编号（2.6）：请求中心一次提交的 created 都一样，以前靠 D1 按 next 索引回来的顺序（同一时刻的按编号），
+     加了 stage 索引以后 D1 可能换一个索引、回来的顺序跟着变；写明白，不看 D1 挑哪个索引 */
   return list.sort((a, b) => (STAGE_PRI[b.stage] || 0) - (STAGE_PRI[a.stage] || 0)
     || (a._fair || 0) - (b._fair || 0)
     || b.users.length - a.users.length
     || (a.next || 0) - (b.next || 0)
-    || (a.created || 0) - (b.created || 0));
+    || (a.created || 0) - (b.created || 0)
+    || a.id - b.id);
 }
 async function loadSlots(c){
   const rows = (await (await db(c.env)).prepare("SELECT stage, data FROM tj_req WHERE stage IN ('download', 'copy')").all()).results || [];
@@ -1577,21 +1593,26 @@ const waitOf = (cfg, bid) => { const w = (cfg.batchWait || CFG_DEF.batchWait) * 
 /** 每轮开头：问一次正在传的那一批（一个作业），传完的成员一起去核对；传完了的批次看看成员都核对、删完了没有 */
 async function batchStep(c){
   const d = await db(c.env);
-  const open = ((await d.prepare('SELECT * FROM tj_batch WHERE ended = 0 ORDER BY id LIMIT 20').all()).results || []).map(batchOf);
-  const b = open.find(x => x.stage === 'copy') || null;
+  /* 在 copy 的批次单独查（一般就一批）。以前和收尾中的一起取最早的 20 批：收尾中的一多（成员删 PikPak 一直出错、退避好几个小时），
+     正在传的那一批（编号最大）就被挤出去了，这一轮当它不存在——又开一批、单个传输也开了、作业没人问、成员提前去核对 */
+  const runs = ((await d.prepare("SELECT * FROM tj_batch WHERE ended = 0 AND stage = 'copy' ORDER BY id").all()).results || []).map(batchOf);
+  const b = runs[0] || null;
+  /* 排在后面、也在 copy 的（以前面板「推进一轮」和定时任务撞上时可能开出第二批）：不动，成员一直停着，
+     等前面那一批传完再轮到它（batchNext） */
+  c.memo.runs = runs; c.memo.copying = new Set(runs.map(x => x.id));
   c.memo.batch = b; c.slots.batch = b ? b.id : 0;
-  const rest = open.filter(x => x !== b);
-  if (rest.length){
-    const cnt = (await d.prepare(`SELECT bat, stage, COUNT(*) AS n FROM tj_req WHERE bat IN (${rest.map(() => '?').join(',')})
-        AND stage IN ('copy', 'verify', 'purge') GROUP BY bat, stage`).bind(...rest.map(x => x.id)).all()).results || [];
-    for (const x of rest){
-      const mine = cnt.filter(k => k.bat === x.id);
-      const st = mine.some(k => k.stage !== 'purge') ? 'verify' : mine.length ? 'purge' : 'done';
-      if (st === x.stage) continue;
-      x.stage = st;
-      if (st === 'done'){ x.ended = now(); await clog(c, 0, '批量 #' + x.id + ' 收尾：成员都核对、删完了（或者退回单个补传、取消了）'); }
-      await saveBatch(c, x);
-    }
+  /* 传完了的批次：看成员走到哪儿了。一条 SQL 数完每一批（几批都一样，不受一条语句 100 个参数的限制，也不会只看最早的几批） */
+  const rest = (await d.prepare(`SELECT b.*, SUM(CASE WHEN r.stage IN ('copy', 'verify') THEN 1 ELSE 0 END) AS nv,
+      SUM(CASE WHEN r.stage = 'purge' THEN 1 ELSE 0 END) AS np
+      FROM tj_batch b LEFT JOIN tj_req r ON r.bat = b.id AND r.stage IN ('copy', 'verify', 'purge')
+      WHERE b.ended = 0 AND b.stage != 'copy' GROUP BY b.id ORDER BY b.id`).all()).results || [];
+  for (const x of rest){
+    const st = x.nv ? 'verify' : x.np ? 'purge' : 'done';
+    if (st === x.stage) continue;
+    const y = batchOf(x);
+    y.stage = st;
+    if (st === 'done'){ y.ended = now(); await clog(c, 0, '批量 #' + y.id + ' 收尾：成员都核对、删完了（或者退回单个补传、取消了）'); }
+    await saveBatch(c, y);
   }
   if (!b || depOpenUntil(c, 'vps')) return;
   /* 还没开成（上一轮 VPS 抖了）/ 停掉重开 / 作业丢了：同一个 key 再开 */
@@ -1642,7 +1663,7 @@ async function batchLaunch(c, b){
   if (!rows.length){
     b.stage = 'done'; b.ended = now();
     await clog(c, 0, '批量 #' + b.id + '：成员都取消了，不传了');
-    c.memo.batch = null; c.slots.batch = 0;
+    batchNext(c, b);
     return saveBatch(c, b);
   }
   b.items = rows.map(r => ({ rid: r.id, ...bItem(r) }));
@@ -1696,7 +1717,7 @@ async function batchSingles(c, b, rows, why){
   }
   b.stage = 'done'; b.ended = t; b.d.off = why; b.d.job = 0;
   await clog(c, 0, '批量 #' + b.id + '：' + why);
-  c.memo.batch = null; c.slots.batch = 0;
+  batchNext(c, b);
   await saveBatch(c, b);
 }
 
@@ -1724,20 +1745,31 @@ async function batchDone(c, b, s){
   b.stage = n ? 'verify' : 'done';
   if (!n) b.ended = t;
   await clog(c, 0, '批量 #' + b.id + (s.success ? ' 传完' : ' 传输出错（' + String(s.error || '未知').slice(0, 80) + '）') + '：' + n + ' 部去核对');
-  c.memo.batch = null; c.slots.batch = 0;
+  batchNext(c, b);
   await saveBatch(c, b);
+}
+/** 这一批不在 copy 了（传完、退回单个传输、成员都取消了）：排在后面、也在 copy 的下一批接着占着 VPS（下一轮开它的作业），
+    这一轮不凑新的一批、单个补传也接着等；一批都没有了才腾出来。以前这里直接清空，下一批还没开就又凑出一批，两个作业一起跑 */
+function batchNext(c, b){
+  const run = c.memo.copying;
+  if (run) run.delete(b.id);
+  const next = (c.memo.runs || []).find(x => x.id !== b.id && run && run.has(x.id)) || null;
+  c.memo.batch = next; c.slots.batch = next ? next.id : 0;
 }
 
 /** 凑批：等着的（ready、加好了追踪码）凑够了就开一批。凑不满也不干等：
     · 最早的一部等了 batchWait（老版本 App 一部一部提交的 10 分钟）
     · 前面没有还会清洗好的了（下载 / 清洗中的都在长时间退避，或者根本没有）
     · 等着的这几次提交（bid），每一部都清洗好了或者结束了
-    VPS 熔断中、有一批在传、单个传输还在跑：不开。关了批量 / 传输 Worker 不会批量：等着的直接去单个传输 */
+    VPS 熔断中、有一批在传、单个传输还在跑或者在排队（批量里对不上的补传先传完，不然一批接一批开，它们一直排不上）：不开。
+    关了批量 / 传输 Worker 不会批量：等着的直接去单个传输 */
 async function batchGate(c){
-  if (c.memo.gated || c.memo.batch) return;
+  /* batch === undefined = 这一轮没问成在传的批次（batchStep 出错）：不知道有没有一批在传，不开 */
+  if (c.memo.gated || c.memo.batch || c.memo.batch === undefined) return;
   const cfg = c.cfg, d = await db(c.env), t = now();
   const all = ((await d.prepare("SELECT * FROM tj_req WHERE stage = 'ready' ORDER BY since, id LIMIT 200").all()).results || []).map(rowOf);
   const ready = all.filter(r => r.d.tag !== undefined);
+  c.memo.gateSaw = ready.length;                     // 一个加好追踪码的都没有：这一轮末尾不用再来一次（除非这一轮刚加好）
   if (!ready.length || depOpenUntil(c, 'vps')) return;
   const caps = await tfCaps(c);
   if (cfg.batch === false || (caps.known && !caps.batch)){
@@ -1747,12 +1779,25 @@ async function batchGate(c){
     return;
   }
   if (!caps.known || c.slots.vps.used > 0 || c.n > c.max - 3) return;
+  /* 排着队的单个传输（补传、老路的；长时间退避的不算）：等它们先传完。
+     +bat：别用 bat 的索引（bat = 0 差不多是整张表），走 stage 的 */
+  const solo = await d.prepare("SELECT COUNT(*) AS n FROM tj_req WHERE stage = 'copy' AND +bat = 0 AND next <= ?").bind(t + LIMIT.stuck).first();
+  if (solo && solo.n) return;
   const why = await gateWhy(c, all, ready);
   if (!why) return;
   const max = clamp(cfg.batchMax || CFG_DEF.batchMax, 1, LIMIT.batchMax);
   const pick = ready.slice().sort((a, b) => (a.since || 0) - (b.since || 0) || b.users.length - a.users.length || a.id - b.id).slice(0, max);
-  const res = await d.prepare('INSERT INTO tj_batch (stage, items, data, created, updated) VALUES (?, ?, ?, ?, ?)')
+  /* 一次只跑一批，在库里也挡住：已经有一批在 copy 就不插（面板「推进一轮」不拿租约，和定时任务撞上时两边都走到这儿） */
+  const res = await d.prepare(`INSERT INTO tj_batch (stage, items, data, created, updated) SELECT ?, ?, ?, ?, ?
+      WHERE NOT EXISTS (SELECT 1 FROM tj_batch WHERE ended = 0 AND stage = 'copy')`)
     .bind('copy', JSON.stringify(pick.map(r => ({ rid: r.id, ...bItem(r) }))), JSON.stringify({ why }), t, t).run();
+  if (!(res.meta && res.meta.changes)){
+    /* 另一边刚开了一批：这一轮不开，也当它在传（单个传输接着排队，那一批的成员停着） */
+    const x = await d.prepare("SELECT * FROM tj_batch WHERE ended = 0 AND stage = 'copy' ORDER BY id LIMIT 1").first();
+    if (x){ const o = batchOf(x); c.memo.runs.push(o); c.memo.copying.add(o.id); c.memo.batch = o; c.slots.batch = o.id; }
+    c.memo.gated = 1;
+    return;
+  }
   const id = res.meta.last_row_id;
   for (const r of pick){
     go(r, 'copy', '批量 #' + id + '：开始传输');
@@ -1762,6 +1807,7 @@ async function batchGate(c){
   }
   await flush(c);                                    // 先记下成员，再开作业（开了作业没记下来，下一轮同一个 key 再开也不会开出两个）
   const b = batchOf({ id, stage: 'copy', items: '[]', data: JSON.stringify({ why }), created: t, updated: t, ended: 0 });
+  c.memo.runs.push(b); c.memo.copying.add(id);
   c.memo.batch = b; c.slots.batch = id; c.memo.gated = 1;
   c.memo.launch = { id, items: pick.length, why };
   await clog(c, 0, '凑批：批量 #' + id + '，' + pick.length + ' 部（' + why + '）');
@@ -1854,6 +1900,7 @@ async function tick(env, opt = {}){
       const from = r.stage;
       const held = { pk: from === 'download', vps: from === 'copy' && !!r.d.job };
       await advance(c, r);
+      if (r.stage === 'ready' && r.d.tag !== undefined) c.memo.fresh = 1;   // 这一轮加好了追踪码（或者醒过来）的等待凑批
       c.slots.pk.used += (r.stage === 'download' ? 1 : 0) - (held.pk ? 1 : 0);
       c.slots.vps.used += (r.stage === 'copy' && r.d.job ? 1 : 0) - (held.vps ? 1 : 0);
       if (r.stage !== from) clog(c, r.id, STAGE_TEXT[from] + ' → ' + STAGE_TEXT[r.stage]);
@@ -1862,9 +1909,10 @@ async function tick(env, opt = {}){
       out.done++;
       if (c.pending.length >= 6) await flush(c);
     }
-    /* 这一轮刚加好追踪码、凑得上的：这一轮就开批（不用等下一轮） */
+    /* 这一轮刚加好追踪码、凑得上的：这一轮就开批（不用等下一轮）。开头那一次一个加好追踪码的都没看到、
+       这一轮也没有新加好的：不再查一遍（空转的每一轮少读一次） */
     await flush(c);
-    if (!c.memo.gated && !c.memo.batch && now() - c.t0 < LIMIT.tickMs){
+    if (!c.memo.gated && !c.memo.batch && (c.memo.gateSaw !== 0 || c.memo.fresh) && now() - c.t0 < LIMIT.tickMs){
       try { await batchGate(c); }
       catch (e){ if (!e.budget) console.error('凑批：', e && e.message); }
     }
@@ -1879,8 +1927,8 @@ async function tick(env, opt = {}){
     if (c.healthDirty) await kvPut(env, 'health', c.health).catch(() => {});
   }
   if (Math.random() < 0.03) await d.prepare('DELETE FROM tj_log WHERE id < (SELECT MAX(id) - 4000 FROM tj_log)').run().catch(() => {});
-  out.fetches = c.n; out.ms = now() - c.t0; out.slots = c.slots; out.batch = c.memo.launch || null;
-  await kvPut(env, 'tick:last', { at: t, done: out.done, due: out.due, fetches: c.n, ms: out.ms, batch: out.batch }).catch(() => {});
+  out.fetches = c.n; out.over = c.over || 0; out.ms = now() - c.t0; out.slots = c.slots; out.batch = c.memo.launch || null;
+  await kvPut(env, 'tick:last', { at: t, done: out.done, due: out.due, fetches: c.n, over: out.over, ms: out.ms, batch: out.batch }).catch(() => {});
   return out;
 }
 
@@ -1893,6 +1941,7 @@ function stepProgress(r){
     case 'clean': return 0.3;
     case 'check': return 0.25 + (r.d.org ? 0.15 : 0);
     case 'rename': return 0.6 + 0.4 * clamp(r.pct, 0, 1);
+    case 'ready': return 0;                       // 2.6：等待凑批 = 刚进第 4 步（60%），开始传了才往前走
     case 'copy': return 0.9 * clamp(r.pct, 0, 1);
     case 'verify': return 0.94;
     case 'purge': return r.d.purged ? 0.99 : 0.98;
@@ -2112,11 +2161,13 @@ async function createBatch(env, user, body){
       else if (v.result === 'failedRecently' && !v.row.users.includes(user)) v.row.users.push(user);
     }
   }
+  /* 跟上的有已经在等待凑批的：一样带上 wait（等着几部、要几部） */
+  const gate = [...res.values()].some(v => v.row && v.row.stage === 'ready') ? await gateInfo(env, cfg) : null;
   return json({ bid, items: items.map(x => {
     const base = { src: x.src, id: x.id, season: x.season };
     if (x.bad) return { ...base, result: 'invalid' };
     const v = res.get(x.key);
-    return { ...base, result: v.result, ...(v.cap ? { cap: v.cap } : {}), ...(v.row ? { request: view(v.row) } : {}) };
+    return { ...base, result: v.result, ...(v.cap ? { cap: v.cap } : {}), ...(v.row ? { request: view(v.row, false, gate) } : {}) };
   }) });
 }
 
@@ -2211,7 +2262,8 @@ async function appFlow(env, user, request){
   const mineReady = await d.prepare(`SELECT COUNT(*) AS n FROM tj_req WHERE stage = 'ready' AND EXISTS (SELECT 1 FROM json_each(tj_req.users) WHERE value = ?)`)
     .bind(user).first();
   gate.mine = (mineReady && mineReady.n) || 0;
-  const bx = await d.prepare("SELECT * FROM tj_batch WHERE ended = 0 ORDER BY (stage = 'copy') DESC, id DESC LIMIT 1").first();
+  /* 在 copy 的取最早的那一批（正在传的就是它，batchStep 也这么挑；排在后面的还没开作业），收尾中的取最新的 */
+  const bx = await d.prepare("SELECT * FROM tj_batch WHERE ended = 0 ORDER BY (stage = 'copy') DESC, CASE WHEN stage = 'copy' THEN -id ELSE id END DESC LIMIT 1").first();
   let batch = null;
   if (bx){
     const b = batchOf(bx);
@@ -2260,7 +2312,7 @@ async function adminState(env){
   const health = await loadHealth(env);
   /* 批量（2.6）：凑批进度、最近一批（在传的优先）、传输 Worker 会什么 */
   const gate = await gateInfo(env, cfg);
-  const bx = await d.prepare("SELECT * FROM tj_batch ORDER BY (ended = 0) DESC, (stage = 'copy') DESC, id DESC LIMIT 1").first();
+  const bx = await d.prepare("SELECT * FROM tj_batch ORDER BY (ended = 0) DESC, (stage = 'copy') DESC, CASE WHEN stage = 'copy' THEN -id ELSE id END DESC LIMIT 1").first();
   let batch = null;
   if (bx){
     const b = batchOf(bx), live = b.d.live || {};
@@ -2554,7 +2606,7 @@ function render(s){
    (h.err&&h.bad&&s.now-h.bad<3600000?' <span class="dim">'+esc(h.err)+'（'+ago(h.bad)+'）</span>':'')}).join('<br>');
  var sl=s.slots||{pk:{},vps:{}};
  $('sys').innerHTML=hs+'<div style="margin-top:10px">PikPak 云下载 <b>'+sl.pk.used+' / '+sl.pk.max+'</b> · VPS 传输 <b>'+sl.vps.used+' / '+sl.vps.max+'</b>'+(sl.batch?' <span class="warn">（批量 #'+sl.batch+' 在传，单个的排队）</span>':'')+' · 排队 <b>'+s.queued+'</b>'+
-  (s.tick?' · 上一轮 '+ago(s.tick.at)+'，推进 '+s.tick.done+' / 到期 '+s.tick.due+'，子请求 '+s.tick.fetches+'，'+s.tick.ms+' ms':' · 定时任务还没跑过')+'</div>'+flowHtml(s);
+  (s.tick?' · 上一轮 '+ago(s.tick.at)+'，推进 '+s.tick.done+' / 到期 '+s.tick.due+'，子请求 '+s.tick.fetches+(s.tick.over?'（用完了，'+s.tick.over+' 处留到下一轮）':'')+'，'+s.tick.ms+' ms':' · 定时任务还没跑过')+'</div>'+flowHtml(s);
  var e=s.env;$('links').innerHTML='影片库 '+esc(e.LB_BASE)+(e.LB_GATE?'':' <span class="bad">缺 LB_GATE</span>')+'<br>传输 '+esc(e.TRANSFER_BASE)+(e.LINK_KEY?'':' <span class="bad">缺 LINK_KEY</span>')+'<br>目录 /'+esc(e.AUTO_DIR)+'<br>片库 '+esc(e.STREAM_BASE);
  $('reqs').innerHTML=s.reqs.map(function(r){
   var acts=r.state==='active'?'<button class="small" data-a="now" data-id="'+r.id+'">现在</button> <button class="small" data-a="skip" data-id="'+r.id+'">换规格</button> <button class="small" data-a="cancel" data-id="'+r.id+'">取消</button>':

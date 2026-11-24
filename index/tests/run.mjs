@@ -1265,22 +1265,30 @@ console.log('\n■ 推送到 PikPak：登录、选文件夹、建云下载任务
   const cap = await call('/api/pikpush', { parent: 'f-tv', items: [{ tid: 51001, name: '沙丘2' }] });
   W.pk.driveCaptcha = false;
   ok(cap.ok === 1 && W.pk.captchaInits.some(a => a === 'POST:/drive/v1/files'), '建任务时 PikPak 要验证令牌（9）：按「POST:/drive/v1/files」签一个带上再建');
-  /* 空间满：整批停下，剩下的不再试 */
+  /* 空间满：整批停下，剩下的不再试（推到一个还没推过这两部的文件夹：推过的会先核对、直接认领） */
   W.pk.quotaFull = true;
-  const full = await call('/api/pikpush', { parent: 'f-tv', items: [{ tid: 51001, name: 'a' }, { tid: 51002, name: 'b' }] });
+  const full = await call('/api/pikpush', { parent: 'f-movie', items: [{ tid: 51001, name: 'a' }, { tid: 51002, name: 'b' }] });
   W.pk.quotaFull = false;
   ok(/空间不够/.test(full.stop) && full.items.every(x => x.held && x.retry) && full.ok === 0, 'PikPak 空间满：整批停下、原因交回（「' + full.stop.slice(0, 18) + '…」），这几部留着待推');
-  /* 文件夹被删了 */
-  const gone = await call('/api/pikpush', { parent: 'f-deleted', items: [{ tid: 51002, name: 'b' }] });
-  ok(!gone.items[0].ok && /文件夹不在了/.test(gone.items[0].err), '目标文件夹被删了：说「换一个文件夹」');
+  /* 文件夹被删了：[v7.2] 整批 404 + gone（请求添加据此清掉缓存的文件夹编号），这部留着待推，不记成推不了 */
+  const goneR = await I.call('/api/pikpush', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ parent: 'f-deleted', items: [{ tid: 51002, name: 'b' }, { tid: 51001, name: 'a' }] }) });
+  const gone = await goneR.json();
+  ok(goneR.status === 404 && gone.gone === 1 && gone.pk === 1 && /文件夹不在了/.test(gone.error) && /文件夹不在了/.test(gone.stop)
+    && gone.items.length === 2 && gone.items.every(x => !x.ok && x.retry && x.held && !x.err),
+    '目标文件夹被删了：整批停下、回 404（gone，「' + String(gone.error).slice(0, 10) + '…」），两部都留着待推、不记成推不了');
   /* 「只要文件夹」的筛选不认：去掉筛选重来，自己挑文件夹 */
   W.pk.rejectKindFilter = true;
   const fb = await call('/api/pikpak?do=ls');
   W.pk.rejectKindFilter = false;
   ok(fb.folders && fb.folders.length === 2, '列文件夹的筛选条件 PikPak 不认：去掉筛选重列，照样只给文件夹');
   /* 一次最多 4 部 */
-  const many = await call('/api/pikpush', { parent: '', items: Array.from({ length: 7 }, () => ({ tid: 51002, name: 'm' })) });
+  for (let i = 0; i < 7; i++) W.forum.threads[51010 + i] = { attach: [], magnets: ['magnet:?xt=urn:btih:' + String(i).repeat(40) + '&dn=Many.' + i] };
+  const many = await call('/api/pikpush', { parent: '', items: Array.from({ length: 7 }, (_, i) => ({ tid: 51010 + i, name: 'm' })) });
   ok(many.items.length === 4 && many.batch === 4, '一次调用最多推 4 部（帖子页 + 种子 + 建任务，子请求要留余量），剩下的浏览器下一批再发');
+  /* [v7.2] 同一次调用里重复的 tid：只推一次（以前 7 个一样的 tid 建出 4 个任务） */
+  const nT = W.pk.tasks.length;
+  const dup = await call('/api/pikpush', { parent: 'f-2025', items: [{ tid: 51010, name: 'a' }, { tid: 51010, name: 'a' }, { tid: '51010', name: 'a' }] });
+  ok(dup.items.length === 1 && dup.ok === 1 && W.pk.tasks.length === nT + 1, '同一次调用里重复的 tid（含字符串写法）：只推一次、只建 1 个任务');
   /* 密码错：说清楚，十分钟内不再试（免得把账号试锁了） */
   const e2 = H.makeEnv({ PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'wrong' });
   const J = H.isolate(e2.env, e2.W);
@@ -1294,6 +1302,323 @@ console.log('\n■ 推送到 PikPak：登录、选文件夹、建云下载任务
   const cs = await (await H.isolate(e3.env, e3.W).call('/api/pikpak')).json();
   ok(cs.ok === 0 && cs.captcha === 1 && /App 或网页上登录一次/.test(cs.err), 'PikPak 要求滑块验证：说明 Worker 过不了，先在 App / 网页上登录一次再试');
   ok(!r2.keys('').some(k => /pikpak|pk:/i.test(k)), 'R2 里不留 PikPak 的东西（令牌只在 KV）');
+}
+
+console.log('\n■ v7.2 请求添加的突发推送：不重复建任务、时限、论坛账号层面的错、PikPak 5xx 与状态码');
+{
+  const pad = (h) => h + '<!--' + 'x'.repeat(1200) + '-->';
+  const T1 = H.torrent({ name: 'Long.Night.S01.2160p', length: 9, 'piece length': 16384, pieces: Buffer.alloc(20) });
+  const T4 = H.torrent({ name: 'Credit.Only.2160p', length: 7, 'piece length': 16384, pieces: Buffer.alloc(20) });
+  const mk = () => {
+    const E = H.makeEnv({ PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'pk-secret' });
+    E.W.pk.folders.push({ id: 'f-auto', name: 'auto', parent: '' }, { id: 'f-ram2', name: 'ram2', parent: 'f-auto' });
+    const mg = (c, dn) => ({ attach: [], magnets: ['magnet:?xt=urn:btih:' + c.repeat(40) + '&dn=' + dn] });
+    E.W.forum.threads[61001] = { attach: [{ aid: 'Q1', name: 'ln.torrent', bytes: T1.bytes }] };
+    for (const [tid, c] of [[61002, 'b'], [61005, 'e'], [61006, 'f'], [61008, '8'], [61009, '9']]) E.W.forum.threads[tid] = mg(c, 'Film.' + tid);
+    E.W.forum.threads[61003] = { attach: [{ aid: 'Q3', name: 'c.torrent', bytes: T4.bytes }], magnets: ['magnet:?xt=urn:btih:' + 'c'.repeat(40) + '&dn=Film.C'] };
+    E.W.forum.threads[61004] = { attach: [{ aid: 'Q4', name: 'd.torrent', bytes: T4.bytes }] };
+    E.W.forum.threads[61007] = { attach: [{ aid: 'Q7', name: 'g.torrent', bytes: T1.bytes }] };
+    E.W.forum.threads[61010] = { attach: [], magnets: [] };
+    return E;
+  };
+  const post = (I, body) => I.call('/api/pikpush', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const push = async (I, body) => (await post(I, body)).json();
+  const isCreate = (u, init) => u.pathname === '/drive/v1/files' && init.method === 'POST' && /UPLOAD_TYPE_URL/.test(String(init.body || ''));
+
+  /* ① PikPak 收下了建任务的请求、回包丢了（断线）：回 retry + unsure；再推同一部先核对任务列表，认领那个任务，不建第二个 */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    let drop = 1;
+    W.pk.fail = async (u, init) => { if (drop && isCreate(u, init)) { drop--; await H.pikpakMock(W, 'api', u, init); throw new TypeError('Network connection lost'); } return null; };
+    const a = (await push(I, { parent: 'f-ram2', items: [{ tid: 61001, name: '长夜将尽' }] })).items[0];
+    ok(a && !a.ok && a.retry && a.soft && a.unsure && a.btih === T1.btih && W.pk.tasks.length === 1,
+      '建任务的回包丢了（PikPak 其实建成了）：回「稍后再推」+ unsure + btih，不记成推不了');
+    const lists0 = W.pk.taskLists || 0;
+    const b = (await push(I, { parent: 'f-ram2', items: [{ tid: 61001, name: '长夜将尽' }] })).items[0];
+    ok(b.ok && b.adopted && b.task === W.pk.tasks[0].id && b.file === W.pk.tasks[0].file_id && W.pk.tasks.length === 1 && (W.pk.taskLists || 0) === lists0 + 1,
+      '再推同一部：先查一次 PikPak 的任务列表，按 info hash 认领那个任务（task / file 都交回），没有建第二个');
+    await I.settle();
+    const J = H.isolate(env, W);
+    const c = (await push(J, { parent: 'f-ram2', items: [{ tid: 61001, name: '长夜将尽' }] })).items[0];
+    ok(c.ok && c.dedup && c.task === W.pk.tasks[0].id && W.pk.tasks.length === 1, '换一个 isolate 再推：KV 里的记录也认得，交回同一个任务（dedup），还是只有 1 个');
+    const d = (await push(J, { parent: 'f-auto', items: [{ tid: 61001, name: '长夜将尽' }] })).items[0];
+    ok(d.ok && !d.dedup && !d.adopted && W.pk.tasks.length === 2 && W.pk.tasks[1].parent === 'f-auto', '同一部推到另一个文件夹：照常新建（记录按文件夹分）');
+  }
+
+  /* ② 建成了、但调用方没收到回包（请求添加 40 秒断开 / 影片库回包路上出错）：再推交回同一个任务；任务被删掉之后再推照常新建 */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    const a = (await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] })).items[0];
+    const b = (await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] })).items[0];
+    ok(a.ok && b.ok && b.dedup && b.task === a.task && b.file === a.file && W.pk.tasks.length === 1, '推成功后又推同一部（调用方没收到回包）：交回同一个任务（dedup），不建第二个');
+    /* 请求添加放弃这个规格：删掉任务和文件 —— 记录挡不住正常的重推 */
+    W.pk.tasks.length = 0;
+    const c = (await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] })).items[0];
+    ok(c.ok && !c.dedup && c.task !== a.task && W.pk.tasks.length === 1, '任务被删掉之后再推：核对发现任务不在了，照常新建（记录不挡正常的重推）');
+    /* 下完了、文件已经被清洗挪走（扔进回收站）：不认领，新建 */
+    W.pk.tasks[0].phase = 'PHASE_TYPE_COMPLETE';
+    W.pk.made.find(f => f.id === W.pk.tasks[0].file_id).trashed = true;
+    const d = (await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] })).items[0];
+    ok(d.ok && !d.dedup && W.pk.tasks.length === 2, '已完成的任务、落成的文件已经进了回收站：不认领，新建一个');
+    W.pk.tasks[1].phase = 'PHASE_TYPE_COMPLETE';
+    const e = (await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] })).items[0];
+    ok(e.ok && e.dedup && e.task === W.pk.tasks[1].id && W.pk.tasks.length === 2, '已完成的任务、文件还在：认领（dedup）');
+    /* 调用方带 check:1：没有记录也先核对（手动建过的同一个磁力） */
+    W.pk.tasks.push({ id: 'manual-1', name: 'Film.61008', url: 'magnet:?xt=urn:btih:' + '8'.repeat(40), parent: 'f-ram2', phase: 'PHASE_TYPE_RUNNING', file_id: 'mf-1' });
+    const f = (await push(I, { parent: 'f-ram2', check: 1, items: [{ tid: 61008 }] })).items[0];
+    ok(f.ok && f.adopted && f.task === 'manual-1' && W.pk.tasks.length === 3, '带 check:1：先核对任务列表，同一个文件夹里已经有这个磁力的任务就认领');
+  }
+
+  /* ③ PikPak 5xx（带 JSON 的也算）：稍后再推 + unsure，不记成这一部推不了；恢复后核对一次再建，只建 1 个 */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    const res = [];
+    for (const [st, body] of [[500, { error: 'internal_error', error_description: 'Internal Server Error' }], [502, {}], [503, { error: 'unavailable' }]]) {
+      W.pk.fail = (u, init) => isCreate(u, init) ? Response.json(body, { status: st }) : null;
+      res.push((await push(I, { parent: 'f-auto', items: [{ tid: 61005 }] })).items[0]);
+    }
+    ok(res.length === 3 && res.every(x => !x.ok && x.retry && x.soft && x.unsure) && W.pk.tasks.length === 0,
+      'PikPak 回 500 / 502 / 503（带 JSON 或空 {}）：都标「稍后再推」+ unsure（以前带 JSON 的 5xx 记成这一部推不了，请求添加就换下一个规格）');
+    W.pk.fail = null;
+    const l0 = W.pk.taskLists || 0;
+    const ok1 = (await push(I, { parent: 'f-auto', items: [{ tid: 61005 }] })).items[0];
+    ok(ok1.ok && !ok1.adopted && W.pk.tasks.length === 1 && (W.pk.taskLists || 0) === l0 + 1, 'PikPak 恢复：先核对一次任务列表（没有），再建，只建了 1 个');
+    /* 列文件夹也一样：5xx 是 502（暂时不通），不去掉筛选条件重列 */
+    W.pk.fail = (u) => u.pathname === '/drive/v1/files' ? Response.json({ error: 'internal_error' }, { status: 500 }) : null;
+    const ls = await I.call('/api/pikpak?do=ls&parent=f-auto');
+    W.pk.fail = null;
+    ok(ls.status === 502, '列文件夹时 PikPak 5xx：回 502');
+  }
+
+  /* ④ 时限：整次调用 32 秒（请求添加 40 秒就断开）。论坛很慢、快到点了：不再去建任务（发出去又等不到回包，正是重复任务的来源） */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    W.forum.fail = (u) => { if (u.searchParams.get('mod') === 'viewthread' && u.searchParams.get('tid') === '61006') I.clock.off += 30000; return null; };
+    const a = (await push(I, { parent: 'f-auto', items: [{ tid: 61006 }] })).items[0];
+    ok(a && !a.ok && a.retry && a.soft && a.btih === 'f'.repeat(40) && W.pk.tasks.length === 0, '帖子页拖到快 32 秒：不去建任务，回「稍后再推」（带 btih），一个任务都没建');
+    W.forum.fail = null;
+    /* 论坛 429 + Retry-After: 120：不在一次调用里干睡两分钟（以前不封顶），直接回「稍后再推」 */
+    let n429 = 0;
+    W.forum.fail = (u) => (u.searchParams.get('mod') === 'viewthread' && u.searchParams.get('tid') === '61009') ? (n429++, new Response('busy', { status: 429, headers: { 'retry-after': '120' } })) : null;
+    const b = (await push(I, { parent: 'f-auto', items: [{ tid: 61009 }] })).items[0];
+    W.forum.fail = null;
+    ok(b && !b.ok && b.retry && b.soft && n429 === 1, '论坛回 429 + Retry-After 120 秒：只试一次就回「稍后再推」（不在调用里干睡两分钟）');
+  }
+
+  /* ⑤ 论坛账号层面的问题：整批停下（forum:1），这几部留着待推，不记成「这个规格推不了」 */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    let logins = 0;
+    W.forum.fail = (u) => (u.pathname.endsWith('member.php') && u.searchParams.get('loginsubmit') === 'yes')
+      ? (logins++, new Response(H.gbk('<root><![CDATA[登录失败，您还可以尝试 4 次]]></root>'))) : null;
+    const a = await push(I, { parent: 'f-auto', items: [{ tid: 61002 }, { tid: 61005 }] });
+    ok(a.forum === 1 && /^论坛：论坛登录失败/.test(a.stop) && a.items.length === 2 && a.items.every(x => !x.ok && x.retry && x.held && !x.err) && W.pk.tasks.length === 0,
+      '论坛登录失败：整批停下（forum:1，「' + String(a.stop).slice(0, 12) + '…」），两部都留着待推（以前每部记一次「推不了」，所有规格很快烧光）');
+    const n = logins;
+    const b = await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] });
+    ok(b.forum === 1 && b.items[0].held && logins === n, '五分钟内再推：直接整批停下、不再重登论坛（登录次数没涨）');
+    W.forum.fail = null;
+  }
+  {
+    /* 游客视图（会话过期又没跳登录页）：丢掉会话重登一次，好了就照常推 */
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    const GUEST = pad(`<script>var discuz_uid = '0', cookiepre = 'x_';</script><div class="t_f">附件: 您需要 <a href="member.php?mod=logging&amp;action=login" onclick="showWindow('login', this.href)">登录</a> 才可以下载或查看，没有账号？</div>`);
+    let guest = 1, logins = 0;
+    W.forum.fail = (u) => {
+      if (u.pathname.endsWith('member.php') && u.searchParams.get('loginsubmit') === 'yes') logins++;
+      if (u.searchParams.get('mod') === 'viewthread' && u.searchParams.get('tid') === '61007' && guest) { guest--; return new Response(H.gbk(GUEST)); }
+      return null;
+    };
+    const a = (await push(I, { parent: 'f-auto', items: [{ tid: 61007 }] })).items[0];
+    ok(a.ok && a.btih === T1.btih && logins === 2 && W.pk.tasks.length === 1, '帖子页是游客视图（附件要登录才能下载）：丢掉会话、重登一次再看，推成功');
+    /* 重登之后还是游客视图：账号层面的问题，整批停下；这份空帖子不缓存一小时 */
+    const ttl = {};
+    const put0 = env.KV.put.bind(env.KV);
+    env.KV.put = async (k, v, o) => { ttl[k] = o && o.expirationTtl; return put0(k, v, o); };
+    W.forum.fail = (u) => (u.searchParams.get('mod') === 'viewthread' && u.searchParams.get('tid') === '61004') ? new Response(H.gbk(GUEST)) : null;
+    const b = await push(I, { parent: 'f-auto', items: [{ tid: 61004 }, { tid: 61002 }] });
+    ok(b.forum === 1 && /游客视图/.test(b.stop) && b.items.every(x => x.held && x.retry && !x.err) && !('t:61004' in ttl),
+      '重登之后还是游客视图：整批停下（forum:1），不把游客视图下「没有种子」的解析结果缓存起来');
+    W.forum.fail = null;
+    /* 一个种子、一条磁力都没解析出来的帖子：只缓存 60 秒（以前一小时） */
+    const c = (await push(H.isolate(env, W), { parent: 'f-auto', items: [{ tid: 61010 }] })).items[0];
+    ok(!c.ok && /没有种子附件/.test(c.err) && !c.retry && ttl['t:61010'] === 60, '真的没有种子也没有磁力：这一部记推不了（不重试），这份空的帖子只缓存 60 秒');
+  }
+  {
+    /* 种子要积分（账号积分不够）：帖子里贴着磁力就改用磁力；没有磁力就整批停下（账号层面的） */
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    /* 登录后每一页的顶栏都有「积分: … | 用户组: …」：附件只是不存在的话，不能当成账号的问题把整批停掉 */
+    const HDR = '<div id="um"><a id="extcreditmenu">积分: 2367</a><span class="pipe">|</span><a href="home.php?mod=spacecp&amp;ac=usergroup" id="g_upmine">用户组: 高级会员</a></div>';
+    W.forum.fail = (u) => (u.searchParams.get('mod') === 'attachment') ? new Response(H.gbk(pad(HDR + '<div id="messagetext"><p>抱歉，指定的附件不存在或已被删除</p></div>'))) : null;
+    const h = await push(I, { parent: 'f-auto', items: [{ tid: 61004 }, { tid: 61002 }] });
+    ok(!h.forum && !h.stop && !h.items[0].ok && !h.items[0].retry && /不是种子/.test(h.items[0].err) && h.items[1].ok,
+      '附件只是不存在（页面顶栏照常有「积分 / 用户组」）：只记这一部推不了，不当成账号问题把整批停掉');
+    const CREDIT = pad(HDR + '<div id="messagetext" class="alert_error"><p>抱歉，您的积分不足，无法下载此附件（需要 金币 5）</p></div>');
+    W.forum.fail = (u) => (u.searchParams.get('mod') === 'attachment') ? new Response(H.gbk(CREDIT)) : null;
+    const a = (await push(I, { parent: 'f-auto', items: [{ tid: 61003 }] })).items[0];
+    ok(a.ok && a.btih === 'c'.repeat(40) && W.pk.tasks.length === 2 && W.pk.tasks[1].url.startsWith('magnet:?xt=urn:btih:' + 'c'.repeat(40)),
+      '种子要积分、帖子里贴着磁力：改用磁力，推成功（以前这一部直接记推不了）');
+    const b = await push(I, { parent: 'f-auto', items: [{ tid: 61004 }, { tid: 61002 }] });
+    ok(b.forum === 1 && /积分/.test(b.stop) && b.items.every(x => x.held && x.retry) && W.pk.tasks.length === 2, '种子要积分、帖子里也没有磁力：账号层面的问题，整批停下（forum:1）');
+    W.forum.fail = null;
+  }
+
+  /* ⑥ 状态码分开：文件夹不在了 404 · 限频 429（带 Retry-After）· 登录不上 503 · 参数不对 400 */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    const mkd = (b) => I.call('/api/pikpak?do=mkdir', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) });
+    const g = await mkd({ parent: 'f-gone', name: 'ram2' });
+    const gj = await g.json();
+    ok(g.status === 404 && gj.gone === 1 && /文件夹不在了/.test(gj.error), '在一个已经被删掉的文件夹里建文件夹：回 404 + gone（以前 502，请求添加当成影片库不通、一直重试、熔断，缓存的文件夹编号永远不清）');
+    const e = await mkd({ parent: 'f-auto', name: ' / ' });
+    ok(e.status === 400, '文件夹名是空的：回 400');
+    W.pk.fail = (u) => u.pathname === '/drive/v1/files' ? Response.json({ error: 'too_many_requests', error_description: 'Too many requests' }, { status: 429 }) : null;
+    const r = await I.call('/api/pikpak?do=ls&parent=f-auto');
+    W.pk.fail = null;
+    ok(r.status === 429 && r.headers.get('retry-after') === '30', 'PikPak 限频：回 429 + Retry-After');
+    const e2 = H.makeEnv({ PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'wrong' });
+    const bad = await H.isolate(e2.env, e2.W).call('/api/pikpak?do=ls');
+    const bj = await bad.json();
+    ok(bad.status === 503 && bj.auth === 1 && /账号或密码不对/.test(bj.error), 'PikPak 登录不上：回 503 + auth（不再和「文件夹不在了」一样是 502）');
+  }
+
+  /* ⑦ /api/pikpak 不排源闸门；/api/pikpush 不算重活，用自己的一份子请求配额 */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W, { expose: ['srcEnter', 'srcLeave', 'HEAVY', 'SUB', 'HEAVY_RE'] });
+    await I.k.srcEnter('tv');                         // 剧集那一批正在跑（另一个源）
+    const t0 = Date.now();
+    const ls = await I.call('/api/pikpak?do=ls');
+    ok(ls.status === 200 && (await ls.json()).folders.length === 1 && Date.now() - t0 < 2000 && vm.runInContext('GN + GSRC', I.c) === '1tv',
+      '另一个源正占着闸门：列文件夹照样马上回来（不排闸门，以前要等那一批跑完）');
+    I.k.srcLeave();
+    ok(!I.k.HEAVY_RE.test('/api/pikpush'), '/api/pikpush 不再算重活');
+    I.k.HEAVY.set(987654, Date.now());              // 建索引正在跑，isolate 全局的子请求计数快见底了
+    I.k.SUB.n = I.k.SUB.max - 1;
+    const p = await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] });
+    I.k.HEAVY.delete(987654);
+    ok(p.items[0].ok && p.sub > 0 && p.sub < 12, '建索引在跑、全局计数快见底：推送用自己的一份配额照样推成（花了 ' + p.sub + ' 个子请求）');
+  }
+}
+
+console.log('\n■ v7.2 影片库接口扛突发：版本表、换源不清缓存、读取合流、闸门公平');
+{
+  const { env, r2, W } = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+  W.tmdb.movie.push({ id: 900001, title: '沙丘', original_title: 'Dune', release_date: '2025-05-01', poster_path: '/d.jpg', popularity: 50, vote_average: 7.2, vote_count: 900 });
+  W.forum.boards['44'] = { 'movie_nianfen=32': [
+    { tid: 10001, title: '沙丘 Dune.2025.2160p.WEB-DL.HEVC 20.5GB' }, { tid: 10002, title: '沙丘 Dune.2025.1080p.BluRay.x264 10.1GB' }] };
+  W.tmdb.tv.push({ id: 510001, name: '长夜将尽', original_name: 'Long Night', first_air_date: '2025-02-01', vote_count: 900, vote_average: 8, poster_path: '/ln.jpg', popularity: 50 });
+  /* 整季包和一份「第1-12集」分段转帖：同组、同规格、体积同一档，分段那条帖子号更大（折叠时排在前面） */
+  W.forum.boards['2'] = { 'tv_shangyingshijian_3=22': [
+    { tid: 20101, title: '长夜将尽 第一季 全12集 Long.Night.S01.2025.2160p.WEB-DL.H265.DDP-ABC 48.2GB' },
+    { tid: 20102, title: '长夜将尽 第一季 第1-12集 Long.Night.S01.2025.2160p.WEB-DL.H265.DDP-ABC 48.2GB' },
+    { tid: 20103, title: '长夜将尽 第一季 第12集 Long.Night.S01E12.2025.2160p.WEB-DL.H265.DDP-ABC 4.1GB' },
+    { tid: 20104, title: '长夜将尽 第一季 全12集 Long.Night.S01.2025.1080p.WEB-DL.H264-XYZ 20.5GB' }] };
+  const I = H.isolate(env, W);
+  for (let i = 0; i < 12; i++) await I.cron();
+  const v = await (await I.call('/api/link/versions?src=tv&id=510001&season=1')).json();
+  ok(v.items && v.items.map(x => x.tid).join() === '20101,20104' && v.items.every(x => x.pack === 'full' && x.total === 12),
+    '剧集版本表：先去掉单集 / 一段再折叠 —— 和分段转帖同签名的整季包（4K）留下来了（以前被折掉，只剩 1080p）：' + (v.items || []).map(x => x.tid).join('、'));
+  ok(!('own' in v), '版本表默认不带 own（请求添加不看它；以前每次都建整张缺片判定表、顺手刷新片库）');
+  const vo = await (await I.call('/api/link/versions?src=movie&id=900001&own=1')).json();
+  ok(typeof vo.own === 'number' && vo.items.length === 2, '要 own 就带 &own=1：照样算（只看内存 / R2 里的成品，不起后台刷新）');
+
+  /* 读取计数：按 R2 键数 */
+  const gets = {};
+  const g0 = r2.get.bind(r2);
+  r2.get = async (k, o) => { gets[k] = (gets[k] || 0) + 1; return g0(k, o); };
+  const clear = () => { for (const k of Object.keys(gets)) delete gets[k]; };
+  /* 电影 / 剧集交替着要（请求添加一轮里一部电影、一季剧集地推）：每个源的影片表只读一次，不再每换一次源整份重读 */
+  const J = H.isolate(env, W);
+  const rc0 = W.recv.calls;
+  const titles = [];
+  for (let i = 0; i < 8; i++) {
+    const tv = i % 2 === 1;
+    const r = await (await J.call('/api/link/versions?src=' + (tv ? 'tv' : 'movie') + '&id=' + (tv ? 510001 : 900001))).json();
+    titles.push(r.title);
+  }
+  await J.settle();
+  ok(gets['idx/v4/movies.json'] === 1 && gets['idx/tv/movies.json'] === 1 && W.recv.calls === rc0,
+    `电影 / 剧集交替要 8 次版本表：两个源的影片表各只读 1 次（以前每换一次源整份重读，各 4 次），片库一次都没去拉（以前 23 次）`);
+  ok(titles.join() === '沙丘,长夜将尽,沙丘,长夜将尽,沙丘,长夜将尽,沙丘,长夜将尽', '换源只换绑定、各用各的那份：片名不串');
+  const cm = await (await J.call('/api/catalog?src=movie&own=all&min=0')).json();
+  const ct = await (await J.call('/api/catalog?src=tv&own=all&min=0')).json();
+  const cm2 = await (await J.call('/api/catalog?src=movie&own=all&min=0&page=1&q=')).json();
+  ok(cm.items.map(x => x.id).join() === '900001' && ct.items.map(x => x.id).join() === '510001' && cm2.items.map(x => x.id).join() === '900001',
+    '目录电影 → 剧集 → 电影交替翻：每个源的目录行缓存各管各的，不串');
+
+  /* 冷启动的 isolate 同时来 6 个：影片表 / state / 分片都只读一次 */
+  clear();
+  const K = H.isolate(env, W, { expose: ['F'] });
+  const six = await Promise.all(Array.from({ length: 6 }, () => K.call('/api/link/versions?src=movie&id=900001').then(r => r.json())));
+  const partReads = Object.entries(gets).filter(([k]) => /^idx\/v4\/y\d+/.test(k)).map(([, n]) => n);
+  ok(six.every(x => x.items.length === 2) && gets['idx/v4/movies.json'] === 1 && gets['idx/v4/state.json'] === 1 && partReads.length && partReads.every(n => n === 1),
+    '冷启动的 isolate 同时来 6 个版本表请求：影片表、state、分片各只读一次（以前各读 6 次、解析 6 份）');
+  /* 45 秒过期：先比 etag，影片表没变就不重下 */
+  clear();
+  K.clock.off += 46000;
+  await (await K.call('/api/link/versions?src=movie&id=900001')).json();
+  ok(!gets['idx/v4/movies.json'] && gets['idx/v4/state.json'] === 1, '缓存过期后：只读 state.json、问一下影片表的 etag，没变就沿用内存里那份（不整份重下重解析）');
+  /* 影片表真变了：etag 对不上，重读，读到新内容 */
+  const mv = r2.json(NS + 'movies.json');
+  mv.m['900001'][K.k.F.N] = '沙丘（新译名）';
+  await r2.put(NS + 'movies.json', JSON.stringify(mv));
+  K.clock.off += 46000;
+  clear();
+  const nv = await (await K.call('/api/link/versions?src=movie&id=900001')).json();
+  ok(gets['idx/v4/movies.json'] === 1 && nv.title === '沙丘（新译名）', '影片表真的变了：etag 对不上就重读，读到的是新内容');
+
+  /* 闸门公平：剧集那边等了 2.5 秒以上，电影新来的也先排队；闸门空出来先放剧集 */
+  {
+    const G = H.isolate(env, W, { expose: ['srcEnter', 'srcLeave'] });
+    const { srcEnter, srcLeave } = G.k;
+    const order = [];
+    const tick = (ms) => new Promise(r => setTimeout(r, ms));
+    await srcEnter('movie'); order.push('m1');
+    const pTv = srcEnter('tv').then(() => order.push('tv'));
+    await tick(15);
+    const pM2 = srcEnter('movie').then(() => order.push('m2'));
+    await tick(15);
+    const early = order.join();
+    srcLeave();                                          // m1 走了
+    await tick(15);
+    srcLeave();                                          // m2 也走了：剧集进
+    await pTv;
+    srcLeave();
+    /* 第二轮：剧集已经等了 2.6 秒 */
+    order.length = 0;
+    await srcEnter('movie'); order.push('m1');
+    const qTv = srcEnter('tv').then(() => order.push('tv'));
+    await tick(15);
+    G.clock.off += 2600;
+    const qM2 = srcEnter('movie').then(() => order.push('m2'));
+    await tick(15);
+    const held = order.join();
+    srcLeave();                                          // m1 走了：先放等得最久的剧集
+    await qTv;
+    await tick(15);
+    const mid = order.join();
+    srcLeave();                                          // 剧集走了：电影进
+    await qM2;
+    srcLeave();
+    ok(early.startsWith('m1,m2') && held === 'm1' && mid === 'm1,tv' && order.join() === 'm1,tv,m2',
+      '闸门公平：另一个源刚开始等时同源照常并发（' + early + '）；等了 2.5 秒以上，同源新来的先排队（' + held + '），闸门空了先放等得最久的（' + order.join() + '）');
+    /* 等不到：409 带 Retry-After */
+    await srcEnter('tv');
+    const iv = setInterval(() => { G.clock.off += 1000; }, 1);
+    const busy = await G.call('/api/catalog?src=movie');
+    clearInterval(iv);
+    srcLeave();
+    ok(busy.status === 409 && busy.headers.get('retry-after') === '5' && (await busy.json()).busy === 1, '另一个源一直占着：25 秒后回 409，带 Retry-After: 5');
+  }
 }
 
 console.log('\n■ 从 v5.4 的线上数据升级');

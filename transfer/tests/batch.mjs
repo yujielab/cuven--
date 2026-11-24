@@ -1,6 +1,9 @@
 // [910] 批量传输 / 核对 / 删除、剧集区 sub、改名挪进剧集区、exists { tv }、作业 detail、并发上限（模拟 rclone rc）
 // 模拟的 rclone 认 _filter 的 IncludeRule（带反斜杠转义的 glob）和 IgnoreCase，和真的 rclone 一个口径：
 // 名字里的 [ ] 不转义就成了字符类，这一项什么都匹配不到
+// 作业号和统计组也照真的 rclone（1.62 起）来：每个 rc 调用都占一个作业号（同步的也算，回在 X-Rclone-Jobid 里），
+// job/list 只回 jobids（24 小时的全在里面，没有 runningIds）；统计组按建的先后排（core/group-list），
+// 列目录会建一个 job/<作业号> 的组（rclone 1.68 起的 listed 统计），core/stats 问一个不存在的组会顺手把它建出来
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import path from 'node:path';
 const worker = (await import(pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'worker.js')).href)).default;
@@ -12,9 +15,16 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 /* ── 模拟的 rclone：每个 remote 一张「路径 → 大小」表，路径相对 remote 的根 ── */
 let FS = {}, DIRS = {}, JOBS = {}, STATS = {}, PLAN = {}, DOWN = {}, DENY = new Set();
 let NOFILTER = false, RUNNING_IDS = false, nextJob = 100, COPIED = null;
+let GROUPS = [], LIST_GROUPS = true, MOVES = false, AFTER = {}, VCLOCK = null;
 const calls = [];
 let inflight = 0, peak = 0;
-const reset = () => { calls.length = 0; peak = 0; PLAN = {}; DOWN = {}; NOFILTER = false; COPIED = null; };
+const reset = () => { calls.length = 0; peak = 0; PLAN = {}; DOWN = {}; AFTER = {}; NOFILTER = false; COPIED = null; };
+const addGroup = g => { if (g && !GROUPS.includes(g)) GROUPS.push(g); };
+const LONG = new Set(['sync/copy', 'sync/move', 'operations/copyfile']);       // 这几个异步作业要跑一阵；别的 _async 马上跑完
+/* 虚拟时钟：VCLOCK = { cost: { 接口: 毫秒 }, v }。一次调用从「上一次有调用结束的时刻」开始，花 cost 毫秒；
+   真等 cost/1000 毫秒，结束的先后和虚拟时间一致，同时发的几个调用重叠 */
+const realNow = Date.now;
+Date.now = () => realNow() + (VCLOCK ? VCLOCK.v : 0);
 const put = (remote, p, size) => { (FS[remote] = FS[remote] || new Map()).set(p, size); };
 const remoteOf = fs => { const i = fs.indexOf(':'); return { remote: fs.slice(0, i).split(',')[0], root: fs.slice(i + 1).replace(/^\/+|\/+$/g, '') }; };
 const join = (a, b) => [a, b].filter(Boolean).join('/');
@@ -61,16 +71,36 @@ globalThis.fetch = async (url, init) => {
   const u = new URL(url), p = u.pathname.slice(1), b = JSON.parse(init.body || '{}');
   calls.push([p, b]);
   inflight++; peak = Math.max(peak, inflight);
+  const v0 = VCLOCK ? VCLOCK.v : 0, cost = VCLOCK ? VCLOCK.cost[p] || 0 : 0;
   try {
-    await sleep(4);
+    await sleep(4 + Math.round(cost / 1000));
+    if (VCLOCK) VCLOCK.v = Math.max(VCLOCK.v, v0 + cost);
     const q = PLAN[p];
-    if (q && q.length) { const st = q.shift(); if (st === 'throw') throw new TypeError('Network connection lost'); return new Response('<html>' + st + ' cloudflare</html>', { status: st }); }
+    if (q && q.length) {
+      const st = q.shift();
+      if (st === 'throw') throw new TypeError('Network connection lost');
+      if (st !== 'ok') return new Response('<html>' + st + ' cloudflare</html>', { status: st });
+    }
     if (b.fs && DOWN[b.fs]) return new Response('<html>' + DOWN[b.fs] + ' cloudflare</html>', { status: DOWN[b.fs] });
+    /* 请求到了 rclone：占一个作业号。同步调用当场跑完；异步的回 { jobid } */
+    const id = nextJob++;
+    JOBS[id] = { finished: !(b._async && LONG.has(p)), success: !(b._async && LONG.has(p)), group: b._async ? b._group || 'job/' + id : 'job/' + id };
+    if (b._async) addGroup(JOBS[id].group);
+    const res = await rc(p, b, id);
+    const lost = AFTER[p] && AFTER[p].length ? AFTER[p].shift() : 0;             // 做完了，回包丢了
+    if (lost) return new Response('<html>' + lost + ' cloudflare</html>', { status: lost });
+    res.headers.set('x-rclone-jobid', String(id));
+    return res;
+  } finally { inflight--; }
+};
+async function rc(p, b, id) {
+    if (b._async && !LONG.has(p)) return okj({ jobid: id, executeId: 'x' });
     switch (p) {
-      case 'core/version': return okj({ version: 'v1.68.2' });
+      case 'core/version': return okj({ version: 'v1.71.0' });
       case 'operations/list': {
         const { remote, root } = remoteOf(b.fs), at = join(root, b.remote);
         if (!dirExists(remote, at)) return rcErr('directory not found', 404);
+        if (LIST_GROUPS) addGroup('job/' + id);
         if (b.opt && b.opt.recurse) {
           const k = keep(b._filter);
           return okj({ list: filesUnder(remote, at).filter(([rel]) => k(rel)).map(([rel, size]) => ({ Path: rel, Name: rel.split('/').pop(), Size: size, IsDir: false })) });
@@ -98,28 +128,41 @@ globalThis.fetch = async (url, init) => {
         return okj({});
       }
       case 'sync/copy': case 'sync/move': case 'operations/copyfile': {
-        const id = nextJob++;
-        JOBS[id] = { finished: false, success: false, group: b._group || '' };
         if (p === 'sync/copy') {
           const { remote, root } = remoteOf(b.srcFs), k = keep(b._filter);
           COPIED = filesUnder(remote, root).map(([rel]) => rel).filter(k);
         }
-        return okj({ jobid: id });
+        if (p === 'sync/move' && MOVES) {                                 // PikPak 的 DirMove：一下就挪完
+          const s1 = remoteOf(b.srcFs), d1 = remoteOf(b.dstFs), m = FS[s1.remote] || new Map();
+          if (!dirExists(s1.remote, s1.root)) return rcErr('directory not found', 404);
+          Array.from(m.keys()).forEach(k => { if (k.startsWith(s1.root + '/')) { m.set(d1.root + k.slice(s1.root.length), m.get(k)); m.delete(k); } });
+          JOBS[id].finished = true; JOBS[id].success = true;
+        }
+        return okj({ jobid: id, executeId: 'x' });
       }
       case 'job/list': {
         const ids = Object.keys(JOBS).map(Number);
-        return okj(RUNNING_IDS ? { jobids: ids, runningIds: ids.filter(i => !JOBS[i].finished), finishedIds: ids.filter(i => JOBS[i].finished) } : { jobids: ids, executeId: 'x' });
+        return okj(RUNNING_IDS ? { jobids: ids, runningIds: ids.filter(i => !JOBS[i].finished), finishedIds: ids.filter(i => JOBS[i].finished) } : { executeId: 'x', jobids: ids });
       }
       case 'job/status': {
         const j = JOBS[b.jobid];
         if (!j) return rcErr('job not found');
-        return okj({ id: b.jobid, finished: j.finished, success: j.success, error: '', group: j.group || ('job/' + b.jobid) });
+        return okj({ id: b.jobid, finished: j.finished, success: j.success, error: j.error || '', group: j.group || ('job/' + b.jobid) });
       }
-      case 'core/stats': return okj(STATS[b.group] || { bytes: 0, totalBytes: 0, speed: 0 });
+      case 'job/stop': {
+        const j = JOBS[b.jobid];
+        if (!j) return rcErr('job not found');
+        if (!j.finished) Object.assign(j, { finished: true, success: false, error: 'context canceled' });
+        return okj({});
+      }
+      case 'job/stopgroup':
+        Object.values(JOBS).forEach(j => { if (j.group === b.group && !j.finished) Object.assign(j, { finished: true, success: false, error: 'context canceled' }); });
+        return okj({});
+      case 'core/group-list': return okj({ groups: GROUPS.slice() });
+      case 'core/stats': addGroup(b.group); return okj(STATS[b.group] || { bytes: 0, totalBytes: 0, speed: 0 });
     }
     return rcErr('unknown', 404);
-  } finally { inflight--; }
-};
+}
 
 let env = { LINK_KEY: 'k', VPS_PASS: 'pw' };
 const call = async (p, b, e = env) => {
@@ -135,7 +178,7 @@ const ODD = 'Odd *Name? {x}.mkv';                                       // 名�
 const TV1 = 'Worst.Ex.Ever.S02.2160p.[Full-4][CN-HK-EN]-Cuven®.[auto-tv1-r2]';
 const TV2 = 'Show.S01.[auto-tv2-r3]';
 function world() {
-  FS = {}; DIRS = {}; JOBS = {}; STATS = {};
+  FS = {}; DIRS = {}; JOBS = {}; STATS = {}; GROUPS = [];
   for (const r of ['webdav', 'pikpak']) {
     put(r, 'auto/' + MOVIE, 1000); put(r, 'auto/' + ODD, 7);
     put(r, 'auto/ram2/' + TV1 + '/E01.mkv', 100); put(r, 'auto/ram2/' + TV1 + '/E02.mkv', 200);

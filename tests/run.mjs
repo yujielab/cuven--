@@ -1105,13 +1105,20 @@ console.log('\n■ /auto/ram2：剧集那一层（v25.4，用户要求：电影�
   ok(ep.status === 200 && ep.body.episodes.map(e => e.ep).join() === '1,2,3' && ep.body.episodes[0].path === `${A2}/Show.A.S02E01.mkv`,
     '/auto/ram2 里的一季一样有分集表（能直接播）');
 
-  const q = [nm(A1), nm(A2), 'ram2/' + nm(B1), 'ram2', nm(OLD), nm(MV), nm(OLDM), 'Nope'].map(n => 'item=' + encodeURIComponent(n)).join('&');
+  // 放错进这一层的电影（带 [auto-m…]，散放的文件、装着它的文件夹各一部）：ram2 里有了电影，问 ram2 自己也还是 false
+  // （v25.3 拿 /auto 下面第一级当名字，这时就会把 ram2 记成收录了）
+  const LM = `${L}/Loose.[auto-m962-r48].mkv`, FM = `${L}/Moved.Film.[auto-m961-r47]`;
+  H.tv.entries.push(f(LM, 4e9), f(`${FM}/x.mkv`, 5e9));
+  const q = [nm(A1), nm(A2), 'ram2/' + nm(B1), 'ram2', nm(OLD), nm(MV), nm(OLDM), 'Nope', nm(LM), nm(FM)].map(n => 'item=' + encodeURIComponent(n)).join('&');
   const sync = await H.call(`/api/auto/sync?tv=1&${q}&code=42&code=43&code=44&code=45&code=41&tmdb=tv801s1&tmdb=tv801s2&tmdb=tv802s1&tmdb=m960`, 'POST', {});
   const sj = await sync.json(); await settle();
   const h = sj.has || {};
   ok(sync.status === 200 && sj.tvSub === 'ram2' && h[nm(A1)] === true && h[nm(A2)] === true && h['ram2/' + nm(B1)] === true &&
     h[nm(OLD)] === true && h[nm(MV)] === true && h[nm(OLDM)] === true && h.ram2 === false && h.Nope === false,
     '/api/auto/sync?item=&tv=1：/auto/ram2 里的按那一季的文件夹名找得到（写成 ram2/名字 也认），ram2 自己是 false，以前的放法照旧', sj.has);
+  ok(h[nm(LM)] === true && h[nm(FM)] === true && h.ram2 === false,
+    '/api/auto/sync：ram2 里放错的电影按自己的文件名 / 文件夹名算收录了，ram2 自己照样是 false', sj.has);
+  H.tv.entries = H.tv.entries.filter(e => e.path_display !== LM && !e.path_display.startsWith(FM + '/'));
   const w = sj.where || {};
   ok(w['42'] && w['42'].path === A1 && w['42'].auto === true && w['42'].kind === 'tv' && w['42'].ready === true &&
     w['43'] && w['43'].path === A2 && w['44'] && w['44'].path === B1 && w['45'] && w['45'].path === OLD && w['41'] && w['41'].kind === 'movie',
@@ -1134,11 +1141,22 @@ console.log('\n■ /auto/ram2：剧集那一层（v25.4，用户要求：电影�
   delete H.env.AUTO_TV_SUB;
 
   // 这一层就在 TV_FOLDER 里面（TV_FOLDER=/auto/ram2）：本体那一遍已经收了，不重复叠
+  const D1 = `${L}/Show.D.2024.[auto-tv805s1-r49]`;               // 两个文件、都没有集号
+  H.tv.entries.push(f(`${D1}/Special.mkv`), f(`${D1}/Other.mkv`));
+  H.tmdb.shows.push({ id: 805, name: '丁剧', original: 'Nothing D', first: '2024-01-01', seasons: [{ n: 1, air: '2024-01-01', count: 2 }] });
   H.env.TV_FOLDER = L;
   const tvf = await get('/api/tv?refresh=1'); await settle();
   const Sf = tvf.body.series || [];
   ok(Sf.filter(x => x.path === A1).length === 1 && Sf.filter(x => x.path === A2).length === 1 && Sf.some(x => x.path === OLD),
     'TV_FOLDER=/auto/ram2：每一季只出现一次（不重复叠），/auto 下面以前的剧集照旧在');
+  // 两遍分到的是同一组（按小写的文件夹名），带集号的重复了分集表也会去掉，只看 A1 / A2 看不出叠没叠；
+  // 文件名没有集号的才看得出来：叠了就成了「Special、Special」「Other、Other、Special、Special」
+  const sfB = Sf.find(x => x.path === B1), sfD = Sf.find(x => x.path === D1);
+  const epB = await get('/api/tv/episodes?path=' + encodeURIComponent(B1)), epD = await get('/api/tv/episodes?path=' + encodeURIComponent(D1));
+  ok(sfB && sfB.episodes === 1 && sfD && sfD.episodes === 2 && epB.body.episodes.length === 1 &&
+    epD.body.episodes.map(e => e.name).join() === 'Other.mkv,Special.mkv',
+    'TV_FOLDER=/auto/ram2：没有集号的那几集也不重复叠（乙剧 1 集、丁剧 2 集，分集表一样）',
+    { B1: sfB && sfB.episodes, D1: sfD && sfD.episodes, epD: (epD.body.episodes || []).map(e => e.name) });
   delete H.env.TV_FOLDER;
 
   delete H.env.TMDB_API_KEY;

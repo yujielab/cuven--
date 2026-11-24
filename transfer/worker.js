@@ -2233,15 +2233,17 @@
 //      · 条目 / 目录接口都多一个可选的 sub：空 = 909 原样；剧集区的名字（AUTO_TV_DIR，默认 ram2）= auto/ram2 下面；
 //        别的值 400。sub 为空时名字不许就是剧集区本身（purge / verify 'ram2' 碰不到整个剧集区）
 //      · rename 多一个 to：可以从 auto 挪进 auto/ram2（名字不变也挪）；先建目标的上一层，
-//        目标已经有了回 409 exists（不再让 rclone 把两个文件夹逐个文件合并）
+//        目标已经有了、原来的也还在，回 409 exists（不再让 rclone 把两个文件夹逐个文件合并）；
+//        目标在、原来的不在了 = 上一次其实挪完了，回 200 done（见下面「审查后」②）
 //      · /api/link/batch-copy：最多 16 项一个作业，16 并发 / 16 检查。_filter 的 IncludeRule 一项一条
 //        （名字里的 * ? [ ] { } \ 全部转义，发行名里的 [Full-4]、追踪码 [auto-tv…] 才不会变成字符类）+ IgnoreCase；
 //        开之前用同一套过滤列一次来源当探针：列回来有这批以外的东西 = 这台 rclone 不认过滤，回 409 nofilter
 //        （请求添加退回逐个传），这次列表顺带给每项的文件数和字节数（进度条的分母）。
 //        Dropbox 走连接串 chunk_size=16Mi、batch_mode=sync，BufferSize 8Mi：16 并发约 100 + 16×24 ≈ 480 MB，
 //        2G 的 VPS 扛得住（默认 48Mi + 16Mi 是 1.1 GB，会被 OOM 杀掉）；CheckFirst 先核完再传，进度条分母不往回跳。
-//        key 幂等：统计组叫 tjb/<key>，开之前 job/list 看一眼，同组的作业还在跑就接上（reused），
-//        调用方超时重来不会开第二个；探针列得太久（超过 45 秒）就不开了，回 503 让调用方下一轮再来
+//        key 幂等：统计组第一次叫 tjb/<key>，重开一次换一个（tjb/<key>/2、/3…）；开之前看 core/group-list，
+//        同一个 key 的作业还在跑就接上（reused），调用方超时重来不会开第二个（见下面「审查后」①③）；
+//        过了 40 秒就不开了（就在发 sync/copy 之前看），回 503 让调用方下一轮再来
 //      · /api/link/batch-verify：两边各列一次（同一套过滤），按条目分开，逐个走 909 的 linkCompare；
 //        哪边列失败回 502 { side }，不算不一致
 //      · /api/link/batch-purge：最多 8 项，最多 4 个同时删；已经没了算删掉了（gone）
@@ -2249,6 +2251,31 @@
 //        检查数、错误、正在传的文件（按路径归到条目）。jobs 还是每个作业 2 次调用
 //      · /api/link/jobs、organize：并发上限 4（linkPool）；exists 多收 tv: [...]（列 dropbox:auto/ram2）
 //      · ping 多回 caps: ['sub', 'batch'] 和 tv：请求添加据此决定走不走批量（909 不认识的接口回 400 不是 404）
+//    审查后又改了四处（910 还没发出去，算在 910 里）：
+//    根因：① 真 rclone（1.62 起）每个 rc 调用都占一个作业号，同步的也算（rc/noop、core/stats、job/list 自己都算），
+//            job/list 只回 jobids（24 小时内的全在里面，没有 runningIds）。「最新 8 个作业号里找同组的」中间隔几个调用
+//            就找不到了 —— 请求添加超时重来，同一批会再开一个 16 路的作业，两个一起传同一批（内存翻倍、撞 429）；
+//            测试的模拟只给异步作业发作业号、还给了 runningIds，所以一直是绿的
+//          ② 改名的 sync/move 到了 rclone（PikPak 的 DirMove 一下就挪完了），回包丢了（520 / 超时）。重来的时候目标在了，
+//            回 409 exists —— 请求添加当成「发行名被以前的请求占了」照原名往下走，原名早就不在了：
+//            传 0 个文件、核对 0/0、补传、最后判失败，真正的文件在 PikPak 上新名字底下没人管
+//          ③ 重开（看门狗停掉、作业丢了、上一个跑完了）沿用同一个统计组 tjb/<key>：rclone 不删跑完的组，
+//            新作业的字节数、文件数、错误接着上一次的往上加，停的时候传了一半的文件算两遍，进度条提前到 99%
+//          ④ 45 秒的截止只在建目录（15 秒超时）和 sync/copy（30 秒超时）之前看一次：sync/copy 可能到 59 秒才发出去、
+//            89 秒才回来，调用方（60 秒超时）早就放弃了，没拿到作业号
+//    改法：① 按统计组认，不再按「最新几个作业号」：core/group-list 里没有这个 key 的组 = rclone 这次启动以来没开过，开；
+//            有：job/list 给了 runningIds 就挨个问还在跑的；没给（现在的 rclone）看最新那一组的统计 ——
+//            有正在传 / 正在核对的 = 在跑，接上；作业号在 group-list 里这一组前后那段作业号里找（最多问 15 个），
+//            找不到回 200 { jobid: 0, reused, running }，这一轮不开；什么都没在传 = 跑完了、停掉了，也可能还在列目录
+//            （CheckFirst 先列完两边才开始传）：找到了作业就看它跑完没有，找不到就先 job/stopgroup 停掉这一组再开 ——
+//            同一个 key 不会有两个作业同时跑。group-list / job/list / 统计 / 停组有一个没回来就不开
+//          ② rename 目标在的时候再看一眼原来的：原来的不在了 = 上一次挪完了，回 200 { name, sub, jobid, done: 1 }，
+//            jobid 是一个确认用的异步 stat（新名字那个文件夹，马上跑完、成功）—— 老的请求添加照常等作业跑完、换成新名字。
+//            两个都在才回 409 exists
+//          ③ 统计组一次开一个名字：tjb/<key>，之后 tjb/<key>/2、/3…（group-list 里最大的加一）；
+//            rclone 重启过组都没了，又从 tjb/<key> 开始
+//          ④ 探针、查作业、建目录同时走（建目录 5 秒超时、不看结果）；40 秒的截止放在 sync/copy 前一刻（停组之后再看一次），
+//            sync/copy 的超时改成 15 秒：最晚 55 秒回到调用方
 //  注意: Worker 出站仅支持 HTTP 端口 80/8080/8880/2052/2082/2086/2095
 //        因此 VPS 面板服务默认跑在 8080
 // ============================================================
@@ -2396,6 +2423,8 @@ const VPS_SAFE_RETRY = new Set([521, 522, 523, 525, 526, 530]);
 const VPS_IDEM_RETRY = new Set([502, 503, 520]);
 const RC_IDEMPOTENT = new Set([
   'core/version', 'core/stats', 'core/memstats', 'core/pid', 'core/bwlimit', 'job/status', 'job/list', 'job/stop',
+  // [910] 批量传输认作业用：列统计组、停一整组（停两次和停一次一样）
+  'core/group-list', 'job/stopgroup',
   'operations/list', 'operations/size', 'operations/stat', 'operations/fsinfo', 'operations/about', 'operations/mkdir',
   'config/get', 'config/listremotes', 'config/providers', 'options/get', 'rc/noop', 'vfs/stats'
 ]);
@@ -13546,13 +13575,15 @@ const ICONS = {
      [910] /api/link/job     { jobid, detail }  统计组从 job/status 读；detail 多回 eta / 文件数 / 检查数 / 正在传的文件（归到条目）
      [910] /api/link/batch-copy   { key, items: [{ item, kind, sub }], from?, sizeOnly?, transfers?, checkers? }
            最多 16 项一个 sync/copy 作业（_filter 一项一条 IncludeRule），回 { jobid, reused?, total, files, items }；
-           rclone 不认过滤回 409 nofilter（调用方退回逐个传）
+           rclone 不认过滤回 409 nofilter（调用方退回逐个传）；同一个 key 的作业在跑但作业号没找到回 { jobid: 0, reused, running }
+     [910] /api/link/rename  上一次其实挪完了（原来的不在、目标在）回 { name, sub, jobid, done: 1 }（jobid 是确认用的 stat，马上跑完）
      [910] /api/link/batch-verify { items, src? }  两边各列一次，按条目逐个核对 → { results: { key: 同 verify } }
      [910] /api/link/batch-purge  { items }        最多 8 项、4 个同时删 → { results: { key: { ok } | { ok, gone } | { error } } }
            结果里的 key：有 sub 是 sub + '/' + item，没有就是 item */
 
 const LINK_RC = new Set([
   'core/version', 'core/stats', 'job/status', 'job/stop', 'job/list',
+  'core/group-list', 'job/stopgroup',                                  // [910] 批量传输的幂等（linkBatchSlot）
   'operations/list', 'operations/size', 'operations/stat', 'operations/mkdir',
   'operations/deletefile', 'operations/purge', 'operations/copyfile',
   'sync/copy', 'sync/move'
@@ -13594,7 +13625,9 @@ async function linkRc(env, path, payload, ms) {
   /* rclone 自己回的错（JSON 里有 error，比如 job not found / directory not found）是 4xx 语义：不是 VPS 坏了 */
   if (!r.ok) return { ok: false, status: data && data.error ? 422 : 502, rc: !!(data && data.error),
                       error: (data && data.error) || edgeErr(r.status, text, x.attempts - 1), data: data };
-  return { ok: true, status: 200, data: data || {}, retried: x.attempts - 1 };
+  /* [910] rcid：rclone 1.62 起同步调用也占一个作业号，放在 X-Rclone-Jobid 里（批量传输找作业时跳过自己这几次调用） */
+  return { ok: true, status: 200, data: data || {}, retried: x.attempts - 1,
+           rcid: parseInt(r.headers && r.headers.get('x-rclone-jobid'), 10) || 0 };
 }
 
 /** 一个异步作业的进度。rclone 重启过、作业没了：missing（调用方从头再来，不算 VPS 出错）
@@ -13732,6 +13765,8 @@ async function linkPool(list, n, fn) {
      不转义就成了字符类，这一项什么都匹配不到，作业照样「成功」、0 个文件）；IgnoreCase（Dropbox 不分大小写）
    · 列表按路径归回条目时用 linkKey（NFC + 小写），和 909 的逐个核对一个口径 */
 const LINK_BATCH = 16, LINK_PURGE = 8;
+/* [910] batch-copy 最晚什么时候发 sync/copy：调用方 60 秒超时，sync/copy 再给 15 秒，55 秒以内回到调用方 */
+const LINK_LAUNCH_BY = 40000;
 const linkGlob = s => String(s).replace(/[*?\[\]{}\\]/g, '\\$&');
 const linkRule = it => '/' + (it.sub ? linkGlob(it.sub) + '/' : '') + linkGlob(it.item) + (it.kind === 'dir' ? '/**' : '');
 const linkFilter = items => ({ IncludeRule: items.map(linkRule), IgnoreCase: true });
@@ -13779,23 +13814,94 @@ function linkTuned(remote, opts) {
   return i <= 0 ? s : s.slice(0, i) + ',' + opts + s.slice(i);
 }
 
-/** 批量传输的幂等：同一个 key 开的作业统计组都是 tjb/<key>。调用方超时以后重来，先看有没有一个还在跑的同组作业。
-    新版 rclone 的 job/list 直接给 runningIds；老版只有 jobids（24 小时内的都在里面），只看最新的 8 个。
-    有一个作业的状态没问出来（不是「作业没了」）就回 error —— 宁可这一轮不开，也不冒开第二个的险 */
-async function linkFindGroup(env, group) {
-  const r = await linkRc(env, 'job/list', {}, 10000);
-  if (!r.ok) return { error: r.error, status: r.status };
-  const d = r.data || {};
-  const raw = Array.isArray(d.runningIds) ? d.runningIds : Array.isArray(d.jobids) ? d.jobids : [];
-  const ids = Array.from(new Set(raw.map(x => parseInt(x, 10)).filter(x => x > 0))).sort((a, b) => b - a).slice(0, 8);
-  const st = await linkPool(ids, 4, id => linkRc(env, 'job/status', { jobid: id }, 10000));
-  let unsure = null;
-  for (let i = 0; i < ids.length; i++) {
-    const s = st[i];
-    if (s.ok) { if (!(s.data || {}).finished && String((s.data || {}).group || '') === group) return { jobid: ids[i] }; }
-    else if (!(s.rc && /not found/i.test(s.error || ''))) unsure = unsure || s;
+/** [910] 批量传输的幂等：同一个 key（批次编号）的作业认统计组，不认「最新几个作业号」。
+    真 rclone（1.62 起）每个 rc 调用都占一个作业号（同步的也算），job/list 的 jobids 里 24 小时的全在、多半没有 runningIds，
+    以前只看最新的 8 个，中间隔几个调用就认不出自己开的那个了（审查后 ①）。现在：
+      · 统计组一次开一个名字：第一次 tjb/<key>，之后 tjb/<key>/2、/3…（group-list 里最大的加一）。
+        rclone 不删跑完的组，同名的新作业会把字节数、文件数、错误接着上一次的累加（审查后 ③）
+      · core/group-list 里没有这个 key 的组 = rclone 这次启动以来没开过（只问列出来的组的统计：core/stats 问一个
+        不存在的组会顺手把它建出来）
+      · 有：job/list 给了 runningIds 就挨个问还在跑的（最多 16 个）；没给就看最新那一组的统计 ——
+        有正在传 / 正在核对的 = 在跑；什么都没在传 = 跑完了、停掉了，也可能还在列目录（CheckFirst 先列完两边才开始核对、传）。
+        作业号在 group-list 里这一组前后那段作业号里找（linkNear，最多问 15 个，一次 3 个）：
+        找到了看它跑完没有；在跑但没找到 → { jobid: 0, running }，这一轮不开；没在传也没找到 → 开之前先停掉这一组（stop）
+    回 { jobid, group } 接上 / { jobid: 0, group, running: 1 } 在跑、作业号没找到 / { group, stop? } 开这一组（stop = 先停的组）
+    / { error, status } group-list、job/list、统计有一个没问出来（宁可这一轮不开，也不冒开第二个的险）。
+    until：找作业号最晚到什么时候（过了就当没找到） */
+async function linkBatchSlot(env, key, until) {
+  const base = 'tjb/' + key;
+  const genOf = nm => {
+    if (nm === base) return 1;
+    const t = nm.startsWith(base + '/') ? nm.slice(base.length + 1) : '';
+    return /^[1-9]\d{0,5}$/.test(t) ? parseInt(t, 10) : 0;
+  };
+  const [G, L] = await Promise.all([linkRc(env, 'core/group-list', {}, 10000), linkRc(env, 'job/list', {}, 10000)]);
+  if (!G.ok) return { error: G.error, status: G.status };
+  if (!L.ok) return { error: L.error, status: L.status };
+  const names = (Array.isArray((G.data || {}).groups) ? G.data.groups : []).map(String);
+  let top = 0, newest = '';
+  names.forEach(nm => { const g = genOf(nm); if (g > top) { top = g; newest = nm; } });
+  const next = top ? base + '/' + (top + 1) : base;
+  const d = L.data || {};
+  const ints = a => Array.from(new Set((Array.isArray(a) ? a : []).map(x => parseInt(x, 10)).filter(x => x > 0))).sort((x, y) => x - y);
+  /* 新版 rclone：runningIds 就是还在跑的，挨个问一遍就清楚（有一个没问出来、或者太多，退到下面看统计） */
+  if (Array.isArray(d.runningIds)) {
+    const run = ints(d.runningIds).reverse();
+    if (run.length <= 16) {
+      const st = await linkPool(run, 3, id => linkRc(env, 'job/status', { jobid: id }, 10000));
+      let unsure = false;
+      for (let i = 0; i < run.length; i++) {
+        const s = st[i], x = (s && s.data) || {};
+        if (s.ok) { if (!x.finished && genOf(String(x.group || ''))) return { jobid: run[i], group: String(x.group) }; }
+        else if (!(s.rc && /not found/i.test(s.error || ''))) unsure = true;
+      }
+      if (!unsure) return { group: next };
+    }
   }
-  return unsure ? { error: unsure.error, status: unsure.status } : { jobid: 0 };
+  if (!top) return { group: next };
+  const S = await linkRc(env, 'core/stats', { group: newest }, 10000);
+  if (!S.ok) return { error: S.error, status: S.status };
+  const x = S.data || {};
+  const busy = (Array.isArray(x.transferring) && x.transferring.length > 0) || (Array.isArray(x.checking) && x.checking.length > 0);
+  const own = new Set([G.rcid, L.rcid, S.rcid].filter(Boolean));            // 自己这几次调用的作业号不用问
+  const f = await linkProbe(env, linkNear(ints(d.jobids).filter(id => !own.has(id)), names, newest, 15), newest, until);
+  if (f && !f.finished) return { jobid: f.jobid, group: newest };
+  if (f) return { group: next };                                             // 找到了，已经跑完（统计里还没清干净也算）
+  if (busy) return { jobid: 0, group: newest, running: 1 };
+  return { group: next, stop: newest };
+}
+
+/** [910] 这一组的作业号多半在哪：group-list 按建组的先后排，默认组的名字就是 job/<作业号>。
+    这一组前面最近的 job/<a>（多半是开它的那次调用里的预检列表）之后、后面最近的 job/<b> 之前，从前往后；
+    不够 cap 个再从最新的往回补 */
+function linkNear(ids, names, group, cap) {
+  const i = names.indexOf(group);
+  const num = nm => { const m = /^job\/(\d+)$/.exec(nm || ''); return m ? parseInt(m[1], 10) : 0; };
+  let a = 0, b = 0;
+  if (i >= 0) {
+    for (let k = i - 1; k >= 0 && !a; k--) a = num(names[k]);
+    for (let k = i + 1; k < names.length && !b; k++) b = num(names[k]);
+  }
+  const out = [], seen = new Set();
+  const add = id => { if (out.length < cap && !seen.has(id)) { seen.add(id); out.push(id); } };
+  if (a) ids.forEach(id => { if (id > a && (!b || id < b)) add(id); });
+  for (let k = ids.length - 1; k >= 0 && out.length < cap; k--) add(ids[k]);
+  return out;
+}
+
+/** [910] 一次问 3 个，问到统计组对得上的就停：{ jobid, finished } / null（没找到、或者到点了）。
+    问不出来的那几个当没找到 —— 后面没在传就先停组再开，在传就不开，哪边都不会开出第二个 */
+async function linkProbe(env, ids, group, until) {
+  for (let i = 0; i < ids.length; i += 3) {
+    if (until && Date.now() > until) return null;
+    const part = ids.slice(i, i + 3);
+    const st = await Promise.all(part.map(id => linkRc(env, 'job/status', { jobid: id }, 8000)));
+    for (let k = 0; k < part.length; k++) {
+      const x = (st[k].ok && st[k].data) || null;
+      if (x && String(x.group || '') === group) return { jobid: part[k], finished: !!x.finished };
+    }
+  }
+  return null;
 }
 
 async function linkApi(request, env, p) {
@@ -13838,10 +13944,23 @@ async function linkApi(request, env, p) {
            · 目标已经在了回 409 exists：rclone 的 DirMove 碰上已有的目标会退成逐个文件合并，名字一样的两份就搅在一起了
              （改名的时候名字还不唯一：追踪码要到传输那一步才加） */
         if (sub || to) {
+          const opt = { noModTime: true, noMimeType: true };
           await linkRc(env, 'operations/mkdir', { fs: c.pikpak, remote: dirOf(to) }, 15000);
-          const ex = await linkRc(env, 'operations/stat', { fs: at(c.pikpak, '', to), remote: name, opt: { noModTime: true, noMimeType: true } }, 20000);
+          const ex = await linkRc(env, 'operations/stat', { fs: at(c.pikpak, '', to), remote: name, opt: opt }, 20000);
           if (!ex.ok && !gone(ex)) return fail(ex);
-          if (ex.ok && (ex.data || {}).item) return json({ error: '目标已经有了：' + dirOf(to) + '/' + name, exists: 1, name: name, sub: to }, 409);
+          if (ex.ok && (ex.data || {}).item) {
+            /* 目标在：再看一眼原来的。原来的不在了 = 上一次的改名其实做完了（sync/move 到了 rclone，PikPak 的 DirMove
+               一下就挪完，回包丢了：520 / 超时，sync/move 不重试）。这时候回 409 exists，请求添加会当成「发行名被以前的请求
+               占了」照原名往下走，原名早就不在了 —— 回 200 done，带一个确认用的异步 stat（看新名字那个文件夹，马上跑完、成功）
+               的作业号：老的请求添加照常等作业跑完、换成新名字。两个都在才是真撞名，回 409 */
+            const sx = await linkRc(env, 'operations/stat', { fs: at(c.pikpak, '', sub), remote: dir, opt: opt }, 20000);
+            if (!sx.ok && !gone(sx)) return fail(sx);
+            if (sx.ok && (sx.data || {}).item) return json({ error: '目标已经有了：' + dirOf(to) + '/' + name, exists: 1, name: name, sub: to }, 409);
+            const cf = await linkRc(env, 'operations/stat', { fs: at(c.pikpak, '', to), remote: name, opt: opt, _async: true }, 15000);
+            if (!cf.ok) return fail(cf);
+            if (!(cf.data || {}).jobid) return json({ error: 'rclone 没回作业号' }, 502);
+            return json({ name: name, jobid: cf.data.jobid, sub: to, done: 1 });
+          }
         }
         const r = await linkRc(env, 'sync/move', { srcFs: at(c.pikpak, dir, sub), dstFs: at(c.pikpak, name, to), deleteEmptySrcDirs: true, _async: true }, 30000);
         return r.ok ? json({ name: name, jobid: (r.data || {}).jobid, sub: to }) : fail(r);
@@ -13919,20 +14038,34 @@ async function linkApi(request, env, p) {
       if (v.error) return json({ error: v.error, index: v.index }, 400);
       const key = b.key == null ? '' : String(b.key).trim();
       if (key && !/^[A-Za-z0-9._:\-]{1,64}$/.test(key)) return json({ error: 'key 不对（字母、数字和 . _ : -，最多 64 个）' }, 400);
-      const group = key ? 'tjb/' + key : '';
       const num = x => { const n = parseInt(x, 10); return isFinite(n) ? Math.max(1, Math.min(LINK_BATCH, n)) : LINK_BATCH; };
       const from = b.from === 'pikpak' ? 'pikpak' : 'webdav';
       const src = from === 'pikpak' ? c.pikpak : c.webdav;
       const filter = linkFilter(v.items);
       const t0 = Date.now();
+      const late = () => Date.now() - t0 > LINK_LAUNCH_BY;
       /* ① 探针：用同一套过滤列一次来源。列回来有这一批以外的东西 = 这台 rclone 不认 _filter，开出去的 sync/copy
          会把整个 auto 搬过去（别人的片、没下完的 .part）—— 不开，回 409 nofilter，调用方退回逐个传。
-         这次列表顺带给每项的文件数和字节数（进度条的分母；Dropbox 存不了的系统文件不算） */
-      let files = null, lsErr = null;
-      try { files = await linkFiles(env, at(src), filter, 35000); } catch (e) { lsErr = e; }
+         这次列表顺带给每项的文件数和字节数（进度条的分母；Dropbox 存不了的系统文件不算）
+         ② 同一个 key 的作业是不是已经在跑（linkBatchSlot：认统计组）③ 目标的上一层先建好（Dropbox 里马上看得到；
+         这批有剧集才建剧集区；5 秒超时、不看结果，sync/copy 自己也会建）。
+         三样同时走（以前一个接一个：探针 35 秒 + 查作业 + 建目录 15 秒，sync/copy 可能到 59 秒才发出去）；
+         同时最多 4 个连接：探针 1 个 + 查作业最多 3 个，建目录在查完以后 */
+      const [L, S] = await Promise.all([
+        linkFiles(env, at(src), filter, 35000).then(list => ({ list: list }), e => ({ e: e })),
+        (async () => {
+          const s = key ? await linkBatchSlot(env, key, t0 + LINK_LAUNCH_BY - 8000) : { group: '' };
+          if (!s.error && !s.jobid && !s.running) {
+            const mk = [linkRc(env, 'operations/mkdir', { fs: c.dropbox, remote: dirOf('') }, 5000)];
+            if (v.items.some(it => it.sub)) mk.push(linkRc(env, 'operations/mkdir', { fs: c.dropbox, remote: dirOf(c.tv) }, 5000));
+            await Promise.all(mk);
+          }
+          return s;
+        })()
+      ]);
       let sums = null;
-      if (files) {
-        const sp = linkSplit(files, v.items, c);
+      if (L.list) {
+        const sp = linkSplit(L.list, v.items, c);
         if (sp.stray) return json({ error: '这台 rclone 没按过滤规则列（列回来 ' + sp.stray + ' 个不在这一批里的文件），不开批量传输', nofilter: 1, stray: sp.stray }, 409);
         sums = { total: 0, files: 0, items: {} };
         sp.idx.forEach(({ it, list }) => {
@@ -13942,32 +14075,34 @@ async function linkApi(request, env, p) {
           sums.total += bytes; sums.files += n;
         });
       }
-      /* ② 同一个 key 的作业还在跑（调用方上次超时了，作业其实已经开了）：接上，不开第二个。
-         探针列失败也先看这一眼 —— VPS 忙着传这一批的时候列表最容易超时 */
-      if (group) {
-        const f = await linkFindGroup(env, group);
-        if (f.error) return json({ error: '没查清楚这一批是不是已经在传：' + f.error }, f.status || 502);
-        if (f.jobid) return json(Object.assign({ jobid: f.jobid, reused: true, group: group, from: from }, sums || {}));
+      if (S.error) return json({ error: '没查清楚这一批是不是已经在传：' + S.error }, S.status || 502);
+      /* 同一个 key 的作业还在跑（调用方上次超时了，作业其实已经开了）：接上，不开第二个。
+         探针列失败也照样接上 —— VPS 忙着传这一批的时候列表最容易超时。
+         在跑、作业号没找到：jobid 0 + running（老的请求添加当成「没给作业号」，下一轮再来；作业传完、停下来以后就开得出来了） */
+      if (S.jobid || S.running) return json(Object.assign({ jobid: S.jobid || 0, reused: true, group: S.group, from: from }, S.running ? { running: 1 } : {}, sums || {}));
+      if (L.e) return json({ error: '开批量传输前列来源失败：' + L.e.message, side: 'src' }, L.e.notFound ? 422 : 502);
+      /* 太晚了：调用方（60 秒超时）等不到 sync/copy 的回包，多半已经放弃、下一轮会再来 —— 不开。就在发出去之前看（停组之后再看一次） */
+      const tooLate = () => json({ error: 'VPS 太慢，这一轮没开批量传输（下一轮再来）', retry: 1 }, 503);
+      if (late()) return tooLate();
+      /* 最新那一组没在传、也没找到它的作业：先停掉这一组（跑完了的停一下什么都不发生；还在列目录的停掉，下面开的接着传） */
+      if (S.stop) {
+        const st = await linkRc(env, 'job/stopgroup', { group: S.stop }, 8000);
+        if (!st.ok) return json({ error: '开之前停不掉上一次的作业（' + S.stop + '）：' + st.error + '，这一轮不开', retry: 1 }, 503);
+        if (late()) return tooLate();
       }
-      if (lsErr) return json({ error: '开批量传输前列来源失败：' + lsErr.message, side: 'src' }, lsErr.notFound ? 422 : 502);
-      /* 探针列得太久：调用方（60 秒超时）多半已经放弃，下一轮会再来；这时候再开，可能和下一轮各开一个 —— 不开 */
-      if (Date.now() - t0 > 45000) return json({ error: 'VPS 太慢，这一轮没开批量传输（下一轮再来）', retry: 1 }, 503);
-      /* ③ 目标的上一层先建好（Dropbox 里马上看得到；这批有剧集才建剧集区） */
-      const mk = [linkRc(env, 'operations/mkdir', { fs: c.dropbox, remote: dirOf('') }, 15000)];
-      if (v.items.some(it => it.sub)) mk.push(linkRc(env, 'operations/mkdir', { fs: c.dropbox, remote: dirOf(c.tv) }, 15000));
-      await Promise.all(mk);
       /* ④ 一个作业：Transfers / Checkers 默认 16（1–16）；Dropbox 连接串 chunk_size=16Mi、batch_mode=sync（不开 batch
          16 路同时上传会撞 too_many_write_operations / 429），BufferSize 8Mi —— 16 × (16 + 8) + 100 ≈ 480 MB；
-         CheckFirst：先核完再传，totalBytes 不再边传边涨，进度条不往回跳 */
+         CheckFirst：先核完再传，totalBytes 不再边传边涨，进度条不往回跳。
+         统计组用这一次的（tjb/<key>、tjb/<key>/2…）：重开不和上一次的字节数、文件数、错误搅在一起 */
       const cfg = { Transfers: num(b.transfers), Checkers: num(b.checkers), BufferSize: '8Mi', CheckFirst: true };
       if (b.sizeOnly) cfg.SizeOnly = true;
       const body = { srcFs: at(src), dstFs: at(linkTuned(c.dropbox, 'chunk_size=16Mi,batch_mode=sync')),
                      _async: true, _config: cfg, _filter: filter };
-      if (group) body._group = group;
-      const r = await linkRc(env, 'sync/copy', body, 30000);
+      if (S.group) body._group = S.group;
+      const r = await linkRc(env, 'sync/copy', body, 15000);
       if (!r.ok) return fail(r);
       const jobid = (r.data || {}).jobid;
-      return json(Object.assign({ jobid: jobid, group: group || 'job/' + jobid, from: from }, sums));
+      return json(Object.assign({ jobid: jobid, group: S.group || 'job/' + jobid, from: from }, sums));
     }
 
     /* [910] 批量核对：两边各列一次（同一套过滤，同时发），按条目分开，逐个走 909 的 linkCompare。
