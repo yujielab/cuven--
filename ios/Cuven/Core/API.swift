@@ -115,6 +115,14 @@ final class APIClient: @unchecked Sendable {
         return batch.items
     }
 
+    /// 一批 TMDB 编号 → 资料（v25.6：{id, type, logo}，回包的键是 "movie:123" / "tv:456"）。
+    /// 「全部影片 › 可申请」一排二十几部的剧照、字标一次取完。老版本不认这种问法：回包里一个这样的键都没有
+    func metaByID(_ keys: [(type: String, id: Int)], logo: Bool = true) async throws -> [String: Meta?] {
+        let queries: [[String: Any]] = keys.map { logo ? ["id": $0.id, "type": $0.type, "logo": true] : ["id": $0.id, "type": $0.type] }
+        let batch: MetaBatch = try await post("/api/tmdb-batch", json: ["queries": queries])
+        return batch.items
+    }
+
     /// 单条 TMDB（剧集按剧集表认好的编号取，详情页要字标 / 纯净海报 / 剧照）
     func tmdb(query: String, year: String?, type: String?, id: Int?, full: Bool) async throws -> Meta? {
         var q: [(String, String)] = [("query", query), ("language", "zh-CN")]

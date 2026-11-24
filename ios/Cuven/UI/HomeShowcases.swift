@@ -536,6 +536,12 @@ struct YearTrailerCard: View {
     let title: String
     let subtitle: String
     let width: CGFloat
+    /// 「全部影片 › 可申请」：剧照还没取到（或 TMDB 上没有）时，用竖版海报糊开垫底
+    var fallback: URL? = nil
+    /// 右边那颗胶囊换成请求的状态（「申请」「已加入」「已请求 42%」……）；nil = 「查看」
+    var badge: YearCardBadge? = nil
+    /// 剧照底边一道细进度（请求进行中）
+    var progress: Double? = nil
 
     var body: some View {
         let h = (width * 9 / 16).rounded()
@@ -546,9 +552,26 @@ struct YearTrailerCard: View {
         VStack(alignment: .leading, spacing: 10) {
             ZStack {
                 DSFill.placeholder
+                if still == nil, let fallback {
+                    RemoteImage(url: fallback, maxPixel: 120, placeholder: .clear)
+                        .frame(width: width, height: h)
+                        .blur(radius: 22, opaque: true)
+                        .opacity(0.55)
+                }
                 RemoteImage(url: still, maxPixel: width * 3, placeholder: .clear)
             }
             .frame(width: width, height: h)
+            .overlay(alignment: .bottomLeading) {
+                if let progress {
+                    // 和「继续观看」那排同一种：剧照底边一道细线
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(Color.white.opacity(0.22))
+                        Rectangle().fill(Color.white).frame(width: (width * min(1, max(0, progress))).rounded())
+                    }
+                    .frame(width: width, height: 3)
+                    .animation(.smooth(duration: 0.6), value: progress)
+                }
+            }
             .clipShape(shape)
             .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
             HStack(spacing: compact ? 10 : 12) {
@@ -569,13 +592,38 @@ struct YearTrailerCard: View {
                 .lineLimit(1)
                 Spacer(minLength: compact ? 6 : 8)
                 // 在黑的页面上：蓝字、12% 白的底（DSViewPill）
-                DSViewPill(onArt: false, compact: compact)
+                if let badge {
+                    badge.view(compact: compact)
+                } else {
+                    DSViewPill(onArt: false, compact: compact)
+                }
             }
         }
         .frame(width: width, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel([title, subtitle].filter { !$0.isEmpty }.joined(separator: "，"))
+        .accessibilityLabel([title, subtitle, badge?.text ?? ""].filter { !$0.isEmpty }.joined(separator: "，"))
+    }
+}
+
+/// 年份卡右边那颗胶囊换成的状态：和「查看」同一个样子（12% 白的底），只是字和颜色不同
+struct YearCardBadge: Equatable {
+    enum Tone: Equatable { case accent, plain, alert }
+    var text: String
+    var tone: Tone
+
+    @MainActor
+    func view(compact: Bool) -> some View {
+        Text(text)
+            .font(.subheadline.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(tone == .accent ? Theme.accent : tone == .alert ? Color(red: 1.0, green: 0.27, blue: 0.23) : Color.white)
+            .lineLimit(1)
+            .padding(.horizontal, compact ? 12 : 16)
+            .frame(minHeight: 32)
+            .background(Capsule().fill(Color.white.opacity(0.12)))
+            .fixedSize()
+            .contentTransition(.numericText())
     }
 }
 

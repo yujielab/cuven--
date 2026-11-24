@@ -230,15 +230,72 @@ enum RequestAPI {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    struct CatalogPage: Decodable { var items: [CatalogItem] }
+    struct CatalogPage: Decodable {
+        var items: [CatalogItem]
+        /// 这一页是第几页、一共几页、一共几部（老版本没有：0）
+        var page: Int
+        var pages: Int
+        var total: Int
+
+        enum CodingKeys: String, CodingKey { case items, page, pages, total, error }
+        init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            items = (try? c.decode([CatalogItem].self, forKey: .items)) ?? []
+            page = (try? c.decode(Int.self, forKey: .page)) ?? 1
+            pages = (try? c.decode(Int.self, forKey: .pages)) ?? 0
+            total = (try? c.decode(Int.self, forKey: .total)) ?? 0
+            failed = ((try? c.decode(Int.self, forKey: .error)) ?? 0) != 0 || (try? c.decode(Bool.self, forKey: .error)) == true
+        }
+        /// /app/years 里这一格影片库没答上（{error: 1}）
+        var failed = false
+    }
 
     static func catalog(src: String = "all", query: String = "", sort: String = "new", own: String = "all", page: Int = 1, year: Int? = nil) async throws -> [CatalogItem] {
+        try await catalogPage(src: src, query: query, sort: sort, own: own, page: page, year: year).items
+    }
+
+    /// 同上，连页数、总数一起（「全部影片」的可申请那一边翻页、标题里的部数用）
+    static func catalogPage(src: String = "all", query: String = "", sort: String = "new", own: String = "all", page: Int = 1, year: Int? = nil) async throws -> CatalogPage {
         var q: [(String, String)] = [("src", src), ("sort", sort), ("own", own), ("page", String(page))]
         if !query.isEmpty { q.append(("q", query)) }
-        // 按年份（「全部影片」的可申请那一边；tj 2.6 起转给影片库，老版本不认就在 App 里过滤）
-        if let year { q.append(("year", String(year))) }
-        let p: CatalogPage = try await send(URLRequest(url: url("/app/catalog", q)))
-        return p.items
+        // 按年份（「全部影片」的可申请那一边；tj 2.6 起转给影片库，老版本不认就在 App 里过滤）。
+        // 按年份列的是这一年的全部，不只是评分 6 分以上的那些（tj 2.8 起服务器自己这么做，这里明说一次，老版本也认 min）
+        if let year { q += [("year", String(year)), ("min", "0")] }
+        return try await send(URLRequest(url: url("/app/catalog", q)))
+    }
+
+    /// /app/years（tj 2.8）：几年 × 电影 / 剧集，每格第一页，一次问完。
+    /// 回 nil = 服务器还是老版本（404），调用方改成一年一年问
+    struct YearsPage: Decodable {
+        /// 年份 → 电影 / 剧集 → 第一页
+        var years: [Int: [String: CatalogPage]]
+
+        enum CodingKeys: String, CodingKey { case years }
+        init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            let raw = (try? c.decode([String: [String: CatalogPage]].self, forKey: .years)) ?? [:]
+            var out: [Int: [String: CatalogPage]] = [:]
+            for (k, v) in raw { if let y = Int(k) { out[y] = v } }
+            years = out
+        }
+    }
+
+    static func years(from: Int, to: Int, per: Int = 24, etag: String?) async throws -> (page: YearsPage?, data: Data?, etag: String?, old: Bool) {
+        var r = URLRequest(url: url("/app/years", [("src", "all"), ("from", String(from)), ("to", String(to)), ("per", String(per))]))
+        r.timeoutInterval = 25
+        if let etag { r.setValue(etag, forHTTPHeaderField: "If-None-Match") }
+        let (data, resp) = try await session.data(for: r)
+        UsageMeter.shared.add(data.count, to: .data)
+        let http = resp as? HTTPURLResponse
+        switch http?.statusCode ?? 0 {
+        case 304: return (nil, nil, etag, false)
+        case 404: return (nil, nil, nil, true)
+        case 200..<300:
+            return (try JSONDecoder().decode(YearsPage.self, from: data), data, http?.value(forHTTPHeaderField: "ETag"), false)
+        default:
+            let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
+            throw RequestAPIError.server(msg ?? "服务暂时不可用，请稍后再试。")
+        }
     }
 
     static func detail(_ t: CatalogTitle, season: Int?) async throws -> CatalogDetail {
