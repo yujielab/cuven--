@@ -44,11 +44,54 @@ struct RequestCenterView: View {
 
     private var basket: RequestBasket { RequestBasket.shared }
 
+    @ViewBuilder
     private func content(_ m: DSMetrics) -> some View {
         let active = store.mine.filter { $0.state == .active }
         let ended = Array(store.mine.filter { $0.state != .active }.prefix(Self.keep))
         let showFlow = !RequestFlowStats.inFlow(store.mine).isEmpty || store.flow?.batch != nil
-        return ScrollView {
+        if showFlow && m.width >= Self.splitWidth {
+            split(m, active: active, ended: ended)
+        } else {
+            single(m, active: active, ended: ended, showFlow: showFlow)
+        }
+    }
+
+    /// iPad 横拿（窗口宽于 1100 点：普通 iPad、Pro 11 / 13 寸横拿）：左右两栏（用户要求按 Apple 的做法给 iPad 定制）——
+    /// 左边一栏滚动：待确认、进行中（一列）、最近；右边一栏是那张 Luminous Data Flow 卡，钉在顶上不跟着滚
+    static let splitWidth: CGFloat = 1100
+
+    private func split(_ m: DSMetrics, active: [RequestStatus], ended: [RequestStatus]) -> some View {
+        let right = min(640, max(600, (m.width * 0.46).rounded()))
+        let leftW = m.width - right - m.margin
+        let lm = DSMetrics(width: leftW, leadingInset: m.leadingInset, trailingInset: 0, height: m.height)
+        let rm = DSMetrics(width: right, height: m.height)
+        return HStack(alignment: .top, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: lm.shelfGap) {
+                    if !basket.items.isEmpty { basketSection(lm) }
+                    summary(active: active, ended: ended, lm)
+                    if !active.isEmpty { activeSection(active, lm, columns: 1) }
+                    if !ended.isEmpty { recentSection(ended, lm) }
+                }
+                .padding(.top, 4)
+                .padding(.bottom, 40)
+                .padding(.leading, m.leadingInset)
+                .animation(.smooth(duration: 0.35), value: basket.items)
+            }
+            .scrollIndicators(.hidden)
+            .frame(width: leftW + m.leadingInset)
+            .refreshable { await store.refreshNow() }
+            RequestFlowCard(requests: store.mine, flow: store.flow, flowAt: store.flowAt, metrics: rm)
+                .frame(width: right)
+                .padding(.top, 4)
+                .padding(.trailing, m.margin)
+                .accessibilityIdentifier("request-flow-card")
+        }
+        .ignoresSafeArea(edges: .horizontal)
+    }
+
+    private func single(_ m: DSMetrics, active: [RequestStatus], ended: [RequestStatus], showFlow: Bool) -> some View {
+        ScrollView {
             Group {
                 if active.isEmpty && ended.isEmpty && basket.items.isEmpty && !showFlow {
                     emptyState
@@ -228,8 +271,8 @@ struct RequestCenterView: View {
 
     // MARK: 进行中
 
-    private func activeSection(_ list: [RequestStatus], _ m: DSMetrics) -> some View {
-        let columns = Array(repeating: GridItem(.flexible(), spacing: m.gutter, alignment: .top), count: m.wide ? 2 : 1)
+    private func activeSection(_ list: [RequestStatus], _ m: DSMetrics, columns n: Int? = nil) -> some View {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: m.gutter, alignment: .top), count: n ?? (m.wide ? 2 : 1))
         return VStack(alignment: .leading, spacing: m.titleGap) {
             DSShelfTitle(title: "进行中", metrics: m)
             LazyVGrid(columns: columns, alignment: .leading, spacing: m.gutter) {
