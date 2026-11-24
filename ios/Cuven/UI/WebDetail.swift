@@ -672,18 +672,24 @@ struct DetailScaffold<Episodes: View>: View {
                     VStack(alignment: .leading, spacing: m.shelfGap) {
                         if Self.twoColumns(m) && hasOverview && !stats.isEmpty {
                             // iPad 横拿（窗口 1100 点以上）：简介和影片详细信息并排两栏，不再一张 720 宽的卡、右边空一大块。
-                            // 影片详细信息那一栏定宽：两块一行、两行，方块和单栏时一行四块（720 宽、间距 12）一样大，(720 − 3×12) / 4 = 171；
-                            // 简介那一栏拿剩下的。以前对半分，方块撑到近 300 点见方、字缩在角上，这一栏比简介高出几百点，下面整排都被往下推
+                            // 影片详细信息那一栏定宽，方块和单栏时一行四块（720 宽、间距 12）一样大，(720 − 3×12) / 4 = 171；简介那一栏拿剩下的。
+                            // 以前对半分，方块撑到近 300 点见方、字缩在角上，这一栏比简介高出几百点，下面整排都被往下推。
+                            // 放得下一行四块（720）、简介还剩 420 点以上（Pro 13 横拿 1376）就一行，和简介差不多高；
+                            // 再窄（普通 iPad、Pro 11 横拿，简介只剩两三百点）两块一行、两行。只有一两块时两块一行本来就只一行，不撑到 720
+                            let gap = (m.gutter * 2.5).rounded()
                             let statTile: CGFloat = (720 - 3 * 12) / 4
-                            HStack(alignment: .top, spacing: (m.gutter * 2.5).rounded()) {
+                            let tileCount = [stats.release != nil, stats.runtime != nil, stats.efficiency != nil,
+                                             DetailFacts.recommendation(stats.rating) != nil].filter { $0 }.count
+                            let statsRow = tileCount > 2 && m.width - 2 * m.margin - gap - 720 >= 420
+                            HStack(alignment: .top, spacing: gap) {
                                 column(m, "简介") {
                                     DetailDescriptionCard(title: title, genres: genres, overview: overview ?? "",
                                                           director: director, palette: palette)
                                 }
                                 column(m, "影片详细信息") {
-                                    DetailStatsGrid(stats: stats, palette: palette, wide: false)
+                                    DetailStatsGrid(stats: stats, palette: palette, wide: statsRow)
                                 }
-                                .frame(width: statTile * 2 + 12)
+                                .frame(width: statsRow ? 720 : statTile * 2 + 12)
                             }
                             .padding(.horizontal, m.margin)
                         } else if hasOverview {
@@ -936,7 +942,7 @@ struct DetailScaffold<Episodes: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// 并排两栏里的一栏：标题 + 卡，宽度对半分（外面那一层管左右边距）
+    /// 并排两栏里的一栏：标题 + 卡。影片详细信息那一栏外面给定宽，简介这一栏拿剩下的（外面那一层管左右边距）
     private func column<Content: View>(_ m: DSMetrics, _ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: m.titleGap + 4) {
             DetailGroupTitle(title: title, route: nil)

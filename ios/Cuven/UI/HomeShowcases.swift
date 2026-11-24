@@ -566,15 +566,15 @@ struct YearTrailerCard: View {
         let h = (width * 9 / 16).rounded()
         // 设计轮 2：圆角取 DSRadius.card（和上面继续观看那排一样宽的卡一样圆；以前 6%、16–24）
         let shape = RoundedRectangle(cornerRadius: DSRadius.card(width), style: .continuous)
-        // 窄于 300 点：小海报、间距、「查看」都收一点。不只展开竖拿（最窄 270）：折起时卡宽跟着窗口走，
-        // iPhone 竖拿约 245–293，500–600 宽的分屏窗口一排两张多，一张只有 200–245
+        // 窄于 300 点：小海报、间距、「查看」都收一点。最窄 270 只是展开（≥ 600 宽）时；窄窗口里卡宽跟着窗口走：
+        // iPhone 竖拿约 293 起，320 宽的 iPad 窄窗口约 245，500–600 宽的分屏窗口一排两张多，一张只有 200–245
         let compact = width < 300
         // 字标的宽是定死的（LogoImage 按比例给了固定宽，外面那层 maxWidth: .infinity 窄不过它），是这一行挤不动的那一截。
-        // 按小海报、三道间距、Spacer 最短那一截之外剩下的宽收：有状态胶囊时给字标约四成（「已请求 42%」放得下），
-        // 只有「查看」时约五成半（200 出头的卡上「查看」也不出卡）；宽的卡上照旧最宽 120
+        // 按小海报、三道间距、Spacer 最短那一截之外剩下的宽收：有状态胶囊时给字标三成（最窄约 200 的卡上字标 38、胶囊有 87，
+        // 封顶的 xxLarge 下「已请求 42%」缩到六成以内放得下），只有「查看」时约五成半；宽的卡上照旧最宽 120
         let rowFixed: CGFloat = compact ? 76 : 92
-        let logoShare: CGFloat = badge != nil ? 0.4 : 0.55
-        let logoMax = min(120, max(40, ((width - rowFixed) * logoShare).rounded()))
+        let logoShare: CGFloat = badge != nil ? 0.3 : 0.55
+        let logoMax = min(120, max(36, ((width - rowFixed) * logoShare).rounded()))
         VStack(alignment: .leading, spacing: 10) {
             ZStack {
                 DSFill.placeholder

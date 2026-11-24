@@ -4,7 +4,7 @@ import SwiftUI
 //
 // · 缩放转场：点海报 / 卡片 / 大图，详情页从那张卡上放大出来；返回时缩回原处（也能下滑 / 捏合手势退出）。
 // · 按压回弹：卡片按下去略缩、松手弹回。
-// · 指针悬停：iPad 接了触控板 / 鼠标，指针停在卡上略放大（PointerLift）。
+// · 指针悬停：iPad 接了触控板 / 鼠标，指针停在卡上略放大（PointerLift；全宽的大图、一整行的不放大）。
 // · 下拉拉伸：顶在最上面的大图，下拉时往上撑大。
 
 /// 推进到详情页的目标。同一部片可能同时出现在好几排（今日推荐、最新加入、某一年……），
@@ -81,16 +81,26 @@ struct ZoomLink<Label: View>: View {
 
 /// iPad 接了触控板 / 鼠标：指针停在卡上，整张卡（连同底下的字）放大一点点、移开缩回，和按压回弹一个手感；没有指针时什么都不做。
 /// 不用系统的 .hoverEffect(.lift)：它不知道卡的形状，圆形头像、底下带字的圆角海报都按整个矩形浮起来，影子和高光是直角的。
-/// 不按压的（press: false，全宽的大图）也不放大：整块大图跟着指针动太晃
+/// 不按压的（press: false，全宽的大图）也不放大：整块大图跟着指针动太晃。
+/// 只放大卡那么大的：量一下自己多大，宽过 480（卡最宽约 460：featureCardWidth）或扁得像一行（宽超过高的 2.2 倍）的不放大——
+/// 搜索结果、请求中心那几行、演员页「最新」那一条按压照样回弹，但指针一停整行放大 3%，宽的一行两边各多出近十点，
+/// 挤到外面那块底的边上，旁边不跟着放大的按钮、分隔线也对不齐了
 private struct PointerLift: ViewModifier {
     let on: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
+    @State private var size: CGSize = .zero
+
+    private var lifts: Bool {
+        on && size.width > 0 && size.width <= 480 && size.width <= size.height * 2.2
+    }
 
     func body(content: Content) -> some View {
         content
+            // 量的是排版的大小，scaleEffect 不改它，放大了也不会来回跳
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
             // 「减弱动态效果」打开时不缩放（DSMotion.adapt 的规矩）
-            .scaleEffect(on && hovering && !reduceMotion ? 1.03 : 1)
+            .scaleEffect(lifts && hovering && !reduceMotion ? 1.03 : 1)
             .onHover { h in
                 guard on else { return }
                 withAnimation(DSMotion.press) { hovering = h }
