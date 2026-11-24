@@ -325,17 +325,21 @@ vertex CDFullOut cd_full_vertex(uint vid [[vertex_id]]) {
     return o;
 }
 
-/// 拖尾：上一帧往下、往汇聚点那条竖轴挪一点，乘保留比例，加上这一帧的光线
+/// 拖尾：上一帧往下、往汇聚点那条竖轴挪一点，乘保留比例，加上这一帧的光线。
+/// 数是按 60 帧调的，每一项都按这一帧的 dt 折算（f = dt·60）：60 帧和原来一模一样，120 帧（ProMotion）上拖尾的长短、亮度不变，掉帧时也不变暗
 fragment float4 cd_trail_fragment(CDFullOut in [[stage_in]],
                                   texture2d<float> prev [[texture(0)]],
                                   texture2d<float> lines [[texture(1)]],
                                   constant CDUniforms &U [[buffer(1)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_zero);
     float2 uv = in.uv;
-    float2 adv = float2((uv.x - U.targetScreen.x) * 0.003, -0.0012);
+    float f = U.timing.y * 60.0;
+    // 往竖轴收是按比例缩（每 1/60 秒离轴的距离 ÷1.003），f 帧合起来是 1.003^f；往下是平移（每 1/60 秒 0.0012），直接乘 f
+    float2 adv = float2((uv.x - U.targetScreen.x) * (pow(1.003f, f) - 1.0), -0.0012 * f);
     float3 p = prev.sample(s, uv + adv).rgb * U.trail.x;
     float3 n = lines.sample(s, uv).rgb;
-    return float4(p + n * 0.1, 1.0);
+    // 注入 0.25·(1 − 保留比例)：60 帧保留 0.6 时正好是原来的 0.1；稳定下来是 0.25 倍光线（0.1 / (1 − 0.6)），什么帧率都一样
+    return float4(p + n * (0.25 * (1.0 - U.trail.x)), 1.0);
 }
 
 /// 辉光的输入：亮的部分（光线 + 拖尾 + 卡上那条溶解光带），1/4 分辨率

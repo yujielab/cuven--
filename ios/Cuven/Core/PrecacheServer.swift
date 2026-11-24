@@ -27,6 +27,8 @@ final class PrecacheServer: NSObject, URLSessionDataDelegate, @unchecked Sendabl
     private var relays: [Int: Relay] = [:]
     /// 改进兼容性：编号 → 原来的主列表地址；改好的初始化分段（播放器可能带 Range 来要好几次）
     private var compatMasters: [String: URL] = [:]
+    /// 这一份是不是增强级（Compat.swift）
+    private var compatEnhanced: Set<String> = []
     private var compatOrder: [String] = []
     private var compatInits: [String: Data] = [:]
 
@@ -97,17 +99,19 @@ final class PrecacheServer: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         q.async { self.upstream[id] = base }
     }
 
-    /// 改进兼容性：给播放器的主列表地址换成本机的（开不起来就是 nil，照原样播）
-    func compatURL(master: URL) async -> URL? {
+    /// 改进兼容性：给播放器的主列表地址换成本机的（开不起来就是 nil，照原样播）。enhanced：增强级（多去掉 HDR / HDCP 标记、杜比 8 档按 HDR10 放）
+    func compatURL(master: URL, enhanced: Bool = false) async -> URL? {
         guard let port = await start() else { return nil }
         let token = String(format: "%08x%08x", UInt32.random(in: .min ... .max), UInt32.random(in: .min ... .max))
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             q.async {
                 self.compatMasters[token] = master
+                if enhanced { self.compatEnhanced.insert(token) }
                 self.compatOrder.append(token)
                 while self.compatOrder.count > 6 {
                     let old = self.compatOrder.removeFirst()
                     self.compatMasters[old] = nil
+                    self.compatEnhanced.remove(old)
                     self.compatInits = self.compatInits.filter { !$0.key.hasPrefix(old + "/") }
                 }
                 c.resume()
@@ -320,6 +324,7 @@ final class PrecacheServer: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         let key = token + "/" + rel
         if let d = compatInits[key] { return sendData(c, d, type: "video/mp4", range: range, headOnly: headOnly) }
         let isMaster = rel == "master.m3u8"
+        let enhanced = compatEnhanced.contains(token)
         guard isMaster || rel.hasSuffix(".m3u8") || rel.hasSuffix(".mp4") else { return status(c, 404) }
         let base = master.deletingLastPathComponent()
         let proxy = "http://127.0.0.1:\(port)/x/\(token)/"
@@ -332,13 +337,13 @@ final class PrecacheServer: NSObject, URLSessionDataDelegate, @unchecked Sendabl
             self.q.async {
                 guard ok, let data, !data.isEmpty else { return self.status(c, 502) }
                 if rel.hasSuffix(".mp4") {
-                    let patched = CompatHLS.patchInit(data)
+                    let patched = CompatHLS.patchInit(data, enhanced: enhanced)
                     self.compatInits[key] = patched
                     return self.sendData(c, patched, type: "video/mp4", range: range, headOnly: headOnly)
                 }
                 let text = String(decoding: data, as: UTF8.self)
                 let out = isMaster
-                    ? CompatHLS.master(text, base: base, proxy: proxy)
+                    ? CompatHLS.master(text, base: base, proxy: proxy, enhanced: enhanced)
                     : CompatHLS.media(text, base: base, dir: (rel as NSString).deletingLastPathComponent, proxy: proxy)
                 self.send(c, Data(out.utf8), type: "application/vnd.apple.mpegurl", headOnly: headOnly)
             }

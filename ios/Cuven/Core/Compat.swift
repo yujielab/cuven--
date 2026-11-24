@@ -16,15 +16,54 @@ import Metal
 //     dvvC（8 档的杜比配置）改名成 free 让播放器忽略。字节数一个不变，分段照旧直接从 Worker（或预先缓存的代理）取。
 // 默认：认出是旧机型（GPU 不到 Apple 7 代 = A14，或者内存不到 3.5 GB）就开，别的机型关；用户开关过以后一律听用户的。
 // 没开的机型起播失败、而且不是网络错时，也会自动按兼容方式再试一次（Player.swift）。
+//
+// 增强级（用户要求「允许启用增强级兼容性设置，想办法 fix」：截图是「播放失败 · 当前显示屏不支持这部影片的画面格式（4K 或 HDR）」，
+// 也就是 AVFoundation -11868：系统按主列表里写的规格挑，挑不出一个「这块屏放得了」的版本，连解码都不试就拒播）。
+// 在标准级的基础上再多做几件事，还是只改「标记」、不动画面数据：
+//   · 主列表：去掉 VIDEO-RANGE（HDR / 杜比视界的标记：系统照它判断屏幕支不支持）、HDCP-LEVEL、ALLOWED-CPC（外接屏、隔空播放没有
+//     HDCP 时整条拒播）；RESOLUTION 写成不超过 1920 宽（按比例）、BANDWIDTH 不超过 40 Mbps、FRAME-RATE 不超过 60；
+//     杜比视界 8 档的 CODECS 换成它的 HDR10 基础层（hvc1），5 档照旧（5 档没有能单独看的基础层）
+//   · 初始化分段：杜比视界 8 档的样本入口 dvh1 / dvhe 改名 hvc1 / hev1、dvcC / dvvC 改名 free —— 解码器把它当普通的
+//     HEVC HDR10（8.1）/ HLG（8.4）/ SDR（8.2）放，系统照常把 HDR 映射到这块屏的亮度
+//   · 播放器：外接显示器、隔空播放开着时画面仍在本机放（不交给外接屏去挑版本）
+// 起播失败（不是网络错）时一档一档往上试：原样 → 标准 → 增强 → 这部片的另一个规格更低的版本（Player.swift）。
 
 enum Compat {
+    /// 以前的开关（开 / 关）：用户开关过的照旧认
     static let key = "cuven_compat_mode"
+    /// 现在的档位：关闭 / 标准 / 增强
+    static let levelKey = "cuven_compat_level"
 
-    /// 现在开着没有（没选过 = 按机型）
-    static var isOn: Bool {
-        let d = UserDefaults.standard
-        return d.object(forKey: key) == nil ? legacyDevice : d.bool(forKey: key)
+    enum Level: String, CaseIterable, Identifiable, Comparable {
+        case off, standard, enhanced
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .off: "关闭"
+            case .standard: "标准"
+            case .enhanced: "增强"
+            }
+        }
+        private var order: Int { self == .off ? 0 : (self == .standard ? 1 : 2) }
+        static func < (a: Level, b: Level) -> Bool { a.order < b.order }
     }
+
+    /// 现在的档位（没选过 = 按机型：旧机型标准，别的关闭；以前只开关过的：开 = 标准）
+    static var level: Level {
+        get {
+            let d = UserDefaults.standard
+            if let s = d.string(forKey: levelKey), let l = Level(rawValue: s) { return l }
+            if d.object(forKey: key) != nil { return d.bool(forKey: key) ? .standard : .off }
+            return legacyDevice ? .standard : .off
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: levelKey)
+            UserDefaults.standard.set(newValue != .off, forKey: key)
+        }
+    }
+
+    /// 开着没有（标准或增强）
+    static var isOn: Bool { level != .off }
 
     /// 这台是不是旧机型
     static let legacyDevice: Bool = {
@@ -60,15 +99,20 @@ enum CompatHLS {
         return c
     }
 
-    /// 主列表：改 CODECS、去掉 SUPPLEMENTAL-CODECS；视频的二级列表走代理（proxy + 相对地址），别的地址一律补成绝对的（base）
-    static func master(_ text: String, base: URL, proxy: String) -> String {
+    /// 主列表：改 CODECS、去掉 SUPPLEMENTAL-CODECS（增强级再去掉 HDR / HDCP 的标记、把分辨率和码率写小）；
+    /// 视频的二级列表走代理（proxy + 相对地址），别的地址一律补成绝对的（base）
+    static func master(_ text: String, base: URL, proxy: String, enhanced: Bool = false) -> String {
         var out: [String] = []
         var nextIsVideo = false
         for raw in text.components(separatedBy: "\n") {
             var line = raw.hasSuffix("\r") ? String(raw.dropLast()) : raw
             if line.hasPrefix("#EXT-X-STREAM-INF:") || line.hasPrefix("#EXT-X-I-FRAME-STREAM-INF:") {
-                line = rewriteCodecs(line)
-                line = dropAttribute("SUPPLEMENTAL-CODECS", in: line)
+                // I 帧列表不走代理（它的初始化分段还是杜比的样本入口）：CODECS 只照标准级改，杜比 8 档不改成 hvc1
+                let iframe = line.hasPrefix("#EXT-X-I-FRAME-STREAM-INF:")
+                line = enhanced && !iframe ? rewriteCodecsEnhanced(line) : rewriteCodecs(line)
+                // 不管排在第几个都去掉（以前只认前面有逗号的）
+                line = dropBareAttribute("SUPPLEMENTAL-CODECS", in: line)
+                if enhanced { line = relax(line) }
                 if line.hasPrefix("#EXT-X-STREAM-INF:") { nextIsVideo = true }
                 else { line = rewriteURIs(line) { absolute($0, base) } }
             } else if line.hasPrefix("#") {
@@ -102,9 +146,11 @@ enum CompatHLS {
 
     // MARK: 初始化分段
 
-    /// 原地改 hvcC / dvcC，dvvC 改名 free（只在样本入口是 hvc1 / hev1 的时候：入口是 dvh1 的 8 档还得靠它）
-    static func patchInit(_ input: Data) -> Data {
+    /// 原地改 hvcC / dvcC，dvvC 改名 free（只在样本入口是 hvc1 / hev1 的时候：入口是 dvh1 的 8 档还得靠它）。
+    /// 增强级：杜比视界 8 档先把样本入口改成普通 HEVC、杜比配置改名 free（按 HDR10 / HLG / SDR 基础层放）
+    static func patchInit(_ input: Data, enhanced: Bool = false) -> Data {
         var d = [UInt8](input)
+        if enhanced, dvProfile(d) == 8 { demoteProfile8(&d) }
         let dvEntry = find(d, "dvh1") != nil || find(d, "dvhe") != nil
         for at in boxes(d, "hvcC") { patchHvcC(&d, at.payload, at.end) }
         for at in boxes(d, "dvcC") { patchDvLevel(&d, at.payload, at.end) }
@@ -120,6 +166,11 @@ enum CompatHLS {
         let t = Array(type.utf8)
         var r: [(Int, Int)] = []
         var i = 4
+        // 文件头 ftyp 整个跳过：里面的兼容品牌（可能正好是 dvh1 / hvc1）不是盒子，前面的 minor_version 又可能被当成盒子的长度
+        if d.count >= 8, d[4] == 0x66, d[5] == 0x74, d[6] == 0x79, d[7] == 0x70 {
+            let s = Int(d[0]) << 24 | Int(d[1]) << 16 | Int(d[2]) << 8 | Int(d[3])
+            if s >= 8, s <= d.count { i = s + 4 }
+        }
         while i + 4 <= d.count {
             if d[i] == t[0], d[i + 1] == t[1], d[i + 2] == t[2], d[i + 3] == t[3] {
                 let size = Int(d[i - 4]) << 24 | Int(d[i - 3]) << 16 | Int(d[i - 2]) << 8 | Int(d[i - 1])
@@ -179,6 +230,25 @@ enum CompatHLS {
         return nil
     }
 
+    /// 杜比视界档位（dvcC / dvvC 里的 dv_profile）；不是杜比视界 = nil
+    static func dvProfile(_ d: [UInt8]) -> Int? {
+        for t in ["dvcC", "dvvC"] {
+            if let at = boxes(d, t).first, at.payload + 3 <= at.end { return Int(d[at.payload + 2] >> 1) }
+        }
+        return nil
+    }
+
+    /// 杜比视界 8 档 → 普通 HEVC：样本入口 dvh1 → hvc1、dvhe → hev1，dvcC / dvvC 改名 free（字节数不变）。
+    /// 只认长度说得通的盒子（boxes 从 ftyp 后面开始找：文件头里的兼容品牌不会被当成盒子改掉）
+    static func demoteProfile8(_ d: inout [UInt8]) {
+        for (from, to) in [("dvh1", "hvc1"), ("dvhe", "hev1")] {
+            for at in boxes(d, from) { d.replaceSubrange((at.payload - 4)..<at.payload, with: Array(to.utf8)) }
+        }
+        for t in ["dvcC", "dvvC"] {
+            for at in boxes(d, t) { d.replaceSubrange((at.payload - 4)..<at.payload, with: Array("free".utf8)) }
+        }
+    }
+
     /// DOVIDecoderConfigurationRecord：第 2、3 字节是 profile(7) level(6) rpu el bl
     static func patchDvLevel(_ d: inout [UInt8], _ p: Int, _ end: Int) {
         guard p + 4 <= end else { return }
@@ -194,6 +264,94 @@ enum CompatHLS {
 
     private static func rewriteCodecs(_ line: String) -> String {
         replaceAttribute("CODECS", in: line) { v in v.split(separator: ",").map { codec(String($0)) }.joined(separator: ",") }
+    }
+
+    /// 增强级的 CODECS：先照标准级改；杜比视界 8 档（dvh1.08.xx / dvhe.08.xx）换成 HDR10 基础层的 HEVC Main 10
+    ///（同一行里已经有 hvc1 / hev1 的就只去掉杜比那一项）
+    static func codecsEnhanced(_ v: String) -> String {
+        let list = v.split(separator: ",").map { codec(String($0).trimmingCharacters(in: .whitespaces)) }
+        let hasHevc = list.contains { $0.hasPrefix("hvc1") || $0.hasPrefix("hev1") }
+        var out: [String] = []
+        for c in list {
+            let p = c.split(separator: ".")
+            if p.count >= 2, p[0] == "dvh1" || p[0] == "dvhe", Int(p[1]) == 8 {
+                // 和初始化分段里改的样本入口一致：dvh1 → hvc1、dvhe → hev1。Level 按上限写（4K 片子本来就要 5.1；1080p 的写高了也只是标记）
+                if !hasHevc { out.append("\(p[0] == "dvhe" ? "hev1" : "hvc1").2.4.L\(maxHevcLevel).B0") }
+                continue
+            }
+            out.append(c)
+        }
+        return out.joined(separator: ",")
+    }
+
+    private static func rewriteCodecsEnhanced(_ line: String) -> String {
+        replaceAttribute("CODECS", in: line) { codecsEnhanced($0) }
+    }
+
+    /// 增强级：去掉系统拿来判断「这块屏放不放得了」的标记，分辨率、码率、帧率写成一般的屏都认的范围（只是标记，画面不变）
+    static func relax(_ line: String) -> String {
+        var l = line
+        // 杜比视界 5 档没有能单独看的基础层：VIDEO-RANGE=PQ 是它的规定写法，去掉了反而成了「SDR 的杜比视界」，留着
+        let p5 = line.contains("dvh1.05") || line.contains("dvhe.05")
+        for a in ["VIDEO-RANGE", "HDCP-LEVEL", "ALLOWED-CPC", "REQ-VIDEO-LAYOUT"] where !(p5 && a == "VIDEO-RANGE") {
+            l = dropBareAttribute(a, in: l)
+        }
+        l = replaceBare("RESOLUTION", in: l) { v in
+            let wh = v.lowercased().split(separator: "x").compactMap { Int($0) }
+            guard wh.count == 2, wh[0] > 1920 else { return v }
+            return "1920x\(Int((Double(wh[1]) * 1920 / Double(wh[0])).rounded()) & ~1)"
+        }
+        for a in ["BANDWIDTH", "AVERAGE-BANDWIDTH"] {
+            l = replaceBare(a, in: l) { v in Int(v).map { String(min($0, 40_000_000)) } ?? v }
+        }
+        l = replaceBare("FRAME-RATE", in: l) { v in Double(v).map { $0 > 60 ? "60.000" : v } ?? v }
+        return l
+    }
+
+    /// 属性的起点（前一个字符是 : 或 ,，免得把 AVERAGE-BANDWIDTH 当成 BANDWIDTH；引号里面的不算，比如 URI 里的查询参数）
+    private static func attributeStart(_ name: String, in line: String) -> Range<String.Index>? {
+        var from = line.startIndex
+        while let r = line.range(of: name + "=", range: from..<line.endIndex) {
+            if r.lowerBound > line.startIndex {
+                let prev = line[line.index(before: r.lowerBound)]
+                let quotes = line[line.startIndex..<r.lowerBound].reduce(0) { $1 == "\"" ? $0 + 1 : $0 }
+                if (prev == ":" || prev == ","), quotes % 2 == 0 { return r }
+            }
+            from = r.upperBound
+        }
+        return nil
+    }
+
+    /// 属性值的范围（带引号的取到下一个引号，不带的取到下一个逗号）
+    private static func valueRange(after r: Range<String.Index>, in line: String) -> Range<String.Index> {
+        if r.upperBound < line.endIndex, line[r.upperBound] == "\"" {
+            let vs = line.index(after: r.upperBound)
+            let close = line[vs...].firstIndex(of: "\"").map { line.index(after: $0) } ?? line.endIndex
+            return r.upperBound..<close
+        }
+        let end = line[r.upperBound...].firstIndex(of: ",") ?? line.endIndex
+        return r.upperBound..<end
+    }
+
+    /// 去掉一个属性（带不带引号都行），连同它前面的逗号（它是第一个时连同后面的逗号）
+    static func dropBareAttribute(_ name: String, in line: String) -> String {
+        guard let r = attributeStart(name, in: line) else { return line }
+        let v = valueRange(after: r, in: line)
+        let prev = line.index(before: r.lowerBound)
+        if line[prev] == "," { return String(line[..<prev]) + String(line[v.upperBound...]) }
+        // 第一个属性：去掉它和后面的逗号
+        var after = v.upperBound
+        if after < line.endIndex, line[after] == "," { after = line.index(after: after) }
+        return String(line[..<r.lowerBound]) + String(line[after...])
+    }
+
+    /// 改一个不带引号的属性值
+    static func replaceBare(_ name: String, in line: String, _ f: (String) -> String) -> String {
+        guard let r = attributeStart(name, in: line) else { return line }
+        let v = valueRange(after: r, in: line)
+        let raw = String(line[v])
+        guard !raw.hasPrefix("\"") else { return line }
+        return String(line[..<v.lowerBound]) + f(raw) + String(line[v.upperBound...])
     }
 
     private static func replaceAttribute(_ name: String, in line: String, _ f: (String) -> String) -> String {
@@ -213,13 +371,6 @@ enum CompatHLS {
         let vStart = line.index(start, offsetBy: name.count + 2)
         guard let close = line[vStart...].firstIndex(of: "\"") else { return line }
         return String(line[..<vStart]) + f(String(line[vStart..<close])) + String(line[close...])
-    }
-
-    private static func dropAttribute(_ name: String, in line: String) -> String {
-        guard let r = line.range(of: "," + name + "=\"") else { return line }
-        let vStart = r.upperBound
-        guard let close = line[vStart...].firstIndex(of: "\"") else { return line }
-        return String(line[..<r.lowerBound]) + String(line[line.index(after: close)...])
     }
 
     private static func rewriteURIs(_ line: String, _ f: (String) -> String) -> String {

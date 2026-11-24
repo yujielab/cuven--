@@ -37,6 +37,15 @@ if (!process.env.IDX_V61_WORKER) {
     process.env.IDX_V61_WORKER = '/tmp/idx-test/worker-v61.js';
   } catch {}
 }
+/* v7.2 原版：v7.3「目录按年份严格筛」那项用它比「不带 ystrict 的回包一个字节都不变」、造部署前存下的宽缓存 */
+if (!process.env.IDX_V72_WORKER) {
+  try {
+    const src = execFileSync('git', ['show', '4c09d23:index/worker.js'], { cwd: new URL('..', import.meta.url).pathname, maxBuffer: 1 << 26 }).toString();
+    fs.mkdirSync('/tmp/idx-test', { recursive: true });
+    fs.writeFileSync('/tmp/idx-test/worker-v72.js', src);
+    process.env.IDX_V72_WORKER = '/tmp/idx-test/worker-v72.js';
+  } catch {}
+}
 const ok = (cond, msg) => { if (cond) { pass++; console.log('  ✓', msg); } else { fail++; console.log('  ✗', msg); } };
 const NS = 'idx/v4/';
 const LOCK_MS = 40000;
@@ -1265,22 +1274,30 @@ console.log('\n■ 推送到 PikPak：登录、选文件夹、建云下载任务
   const cap = await call('/api/pikpush', { parent: 'f-tv', items: [{ tid: 51001, name: '沙丘2' }] });
   W.pk.driveCaptcha = false;
   ok(cap.ok === 1 && W.pk.captchaInits.some(a => a === 'POST:/drive/v1/files'), '建任务时 PikPak 要验证令牌（9）：按「POST:/drive/v1/files」签一个带上再建');
-  /* 空间满：整批停下，剩下的不再试 */
+  /* 空间满：整批停下，剩下的不再试（推到一个还没推过这两部的文件夹：推过的会先核对、直接认领） */
   W.pk.quotaFull = true;
-  const full = await call('/api/pikpush', { parent: 'f-tv', items: [{ tid: 51001, name: 'a' }, { tid: 51002, name: 'b' }] });
+  const full = await call('/api/pikpush', { parent: 'f-movie', items: [{ tid: 51001, name: 'a' }, { tid: 51002, name: 'b' }] });
   W.pk.quotaFull = false;
   ok(/空间不够/.test(full.stop) && full.items.every(x => x.held && x.retry) && full.ok === 0, 'PikPak 空间满：整批停下、原因交回（「' + full.stop.slice(0, 18) + '…」），这几部留着待推');
-  /* 文件夹被删了 */
-  const gone = await call('/api/pikpush', { parent: 'f-deleted', items: [{ tid: 51002, name: 'b' }] });
-  ok(!gone.items[0].ok && /文件夹不在了/.test(gone.items[0].err), '目标文件夹被删了：说「换一个文件夹」');
+  /* 文件夹被删了：[v7.2] 整批 404 + gone（请求添加据此清掉缓存的文件夹编号），这部留着待推，不记成推不了 */
+  const goneR = await I.call('/api/pikpush', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ parent: 'f-deleted', items: [{ tid: 51002, name: 'b' }, { tid: 51001, name: 'a' }] }) });
+  const gone = await goneR.json();
+  ok(goneR.status === 404 && gone.gone === 1 && gone.pk === 1 && /文件夹不在了/.test(gone.error) && /文件夹不在了/.test(gone.stop)
+    && gone.items.length === 2 && gone.items.every(x => !x.ok && x.retry && x.held && !x.err),
+    '目标文件夹被删了：整批停下、回 404（gone，「' + String(gone.error).slice(0, 10) + '…」），两部都留着待推、不记成推不了');
   /* 「只要文件夹」的筛选不认：去掉筛选重来，自己挑文件夹 */
   W.pk.rejectKindFilter = true;
   const fb = await call('/api/pikpak?do=ls');
   W.pk.rejectKindFilter = false;
   ok(fb.folders && fb.folders.length === 2, '列文件夹的筛选条件 PikPak 不认：去掉筛选重列，照样只给文件夹');
   /* 一次最多 4 部 */
-  const many = await call('/api/pikpush', { parent: '', items: Array.from({ length: 7 }, () => ({ tid: 51002, name: 'm' })) });
+  for (let i = 0; i < 7; i++) W.forum.threads[51010 + i] = { attach: [], magnets: ['magnet:?xt=urn:btih:' + String(i).repeat(40) + '&dn=Many.' + i] };
+  const many = await call('/api/pikpush', { parent: '', items: Array.from({ length: 7 }, (_, i) => ({ tid: 51010 + i, name: 'm' })) });
   ok(many.items.length === 4 && many.batch === 4, '一次调用最多推 4 部（帖子页 + 种子 + 建任务，子请求要留余量），剩下的浏览器下一批再发');
+  /* [v7.2] 同一次调用里重复的 tid：只推一次（以前 7 个一样的 tid 建出 4 个任务） */
+  const nT = W.pk.tasks.length;
+  const dup = await call('/api/pikpush', { parent: 'f-2025', items: [{ tid: 51010, name: 'a' }, { tid: 51010, name: 'a' }, { tid: '51010', name: 'a' }] });
+  ok(dup.items.length === 1 && dup.ok === 1 && W.pk.tasks.length === nT + 1, '同一次调用里重复的 tid（含字符串写法）：只推一次、只建 1 个任务');
   /* 密码错：说清楚，十分钟内不再试（免得把账号试锁了） */
   const e2 = H.makeEnv({ PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'wrong' });
   const J = H.isolate(e2.env, e2.W);
@@ -1294,6 +1311,550 @@ console.log('\n■ 推送到 PikPak：登录、选文件夹、建云下载任务
   const cs = await (await H.isolate(e3.env, e3.W).call('/api/pikpak')).json();
   ok(cs.ok === 0 && cs.captcha === 1 && /App 或网页上登录一次/.test(cs.err), 'PikPak 要求滑块验证：说明 Worker 过不了，先在 App / 网页上登录一次再试');
   ok(!r2.keys('').some(k => /pikpak|pk:/i.test(k)), 'R2 里不留 PikPak 的东西（令牌只在 KV）');
+}
+
+console.log('\n■ v7.2 请求添加的突发推送：不重复建任务、时限、论坛账号层面的错、PikPak 5xx 与状态码');
+{
+  const pad = (h) => h + '<!--' + 'x'.repeat(1200) + '-->';
+  const T1 = H.torrent({ name: 'Long.Night.S01.2160p', length: 9, 'piece length': 16384, pieces: Buffer.alloc(20) });
+  const T4 = H.torrent({ name: 'Credit.Only.2160p', length: 7, 'piece length': 16384, pieces: Buffer.alloc(20) });
+  const mk = () => {
+    const E = H.makeEnv({ PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'pk-secret' });
+    E.W.pk.folders.push({ id: 'f-auto', name: 'auto', parent: '' }, { id: 'f-ram2', name: 'ram2', parent: 'f-auto' });
+    const mg = (c, dn) => ({ attach: [], magnets: ['magnet:?xt=urn:btih:' + c.repeat(40) + '&dn=' + dn] });
+    E.W.forum.threads[61001] = { attach: [{ aid: 'Q1', name: 'ln.torrent', bytes: T1.bytes }] };
+    for (const [tid, c] of [[61002, 'b'], [61005, 'e'], [61006, 'f'], [61008, '8'], [61009, '9']]) E.W.forum.threads[tid] = mg(c, 'Film.' + tid);
+    E.W.forum.threads[61003] = { attach: [{ aid: 'Q3', name: 'c.torrent', bytes: T4.bytes }], magnets: ['magnet:?xt=urn:btih:' + 'c'.repeat(40) + '&dn=Film.C'] };
+    E.W.forum.threads[61004] = { attach: [{ aid: 'Q4', name: 'd.torrent', bytes: T4.bytes }] };
+    E.W.forum.threads[61007] = { attach: [{ aid: 'Q7', name: 'g.torrent', bytes: T1.bytes }] };
+    E.W.forum.threads[61010] = { attach: [], magnets: [] };
+    return E;
+  };
+  const post = (I, body) => I.call('/api/pikpush', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const push = async (I, body) => (await post(I, body)).json();
+  const isCreate = (u, init) => u.pathname === '/drive/v1/files' && init.method === 'POST' && /UPLOAD_TYPE_URL/.test(String(init.body || ''));
+
+  /* ① PikPak 收下了建任务的请求、回包丢了（断线）：回 retry + unsure；再推同一部先核对任务列表，认领那个任务，不建第二个 */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    let drop = 1;
+    W.pk.fail = async (u, init) => { if (drop && isCreate(u, init)) { drop--; await H.pikpakMock(W, 'api', u, init); throw new TypeError('Network connection lost'); } return null; };
+    const a = (await push(I, { parent: 'f-ram2', items: [{ tid: 61001, name: '长夜将尽' }] })).items[0];
+    ok(a && !a.ok && a.retry && a.soft && a.unsure && a.btih === T1.btih && W.pk.tasks.length === 1,
+      '建任务的回包丢了（PikPak 其实建成了）：回「稍后再推」+ unsure + btih，不记成推不了');
+    const lists0 = W.pk.taskLists || 0;
+    const b = (await push(I, { parent: 'f-ram2', items: [{ tid: 61001, name: '长夜将尽' }] })).items[0];
+    ok(b.ok && b.adopted && b.task === W.pk.tasks[0].id && b.file === W.pk.tasks[0].file_id && W.pk.tasks.length === 1 && (W.pk.taskLists || 0) === lists0 + 1,
+      '再推同一部：先查一次 PikPak 的任务列表，按 info hash 认领那个任务（task / file 都交回），没有建第二个');
+    await I.settle();
+    const J = H.isolate(env, W);
+    const c = (await push(J, { parent: 'f-ram2', items: [{ tid: 61001, name: '长夜将尽' }] })).items[0];
+    ok(c.ok && c.dedup && c.task === W.pk.tasks[0].id && W.pk.tasks.length === 1, '换一个 isolate 再推：KV 里的记录也认得，交回同一个任务（dedup），还是只有 1 个');
+    const d = (await push(J, { parent: 'f-auto', items: [{ tid: 61001, name: '长夜将尽' }] })).items[0];
+    ok(d.ok && !d.dedup && !d.adopted && W.pk.tasks.length === 2 && W.pk.tasks[1].parent === 'f-auto', '同一部推到另一个文件夹：照常新建（记录按文件夹分）');
+  }
+
+  /* ② 建成了、但调用方没收到回包（请求添加 40 秒断开 / 影片库回包路上出错）：再推交回同一个任务；任务被删掉之后再推照常新建 */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    const a = (await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] })).items[0];
+    const b = (await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] })).items[0];
+    ok(a.ok && b.ok && b.dedup && b.task === a.task && b.file === a.file && W.pk.tasks.length === 1, '推成功后又推同一部（调用方没收到回包）：交回同一个任务（dedup），不建第二个');
+    /* 请求添加放弃这个规格：删掉任务和文件 —— 记录挡不住正常的重推 */
+    W.pk.tasks.length = 0;
+    const c = (await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] })).items[0];
+    ok(c.ok && !c.dedup && c.task !== a.task && W.pk.tasks.length === 1, '任务被删掉之后再推：核对发现任务不在了，照常新建（记录不挡正常的重推）');
+    /* 下完了、文件已经被清洗挪走（扔进回收站）：不认领，新建 */
+    W.pk.tasks[0].phase = 'PHASE_TYPE_COMPLETE';
+    W.pk.made.find(f => f.id === W.pk.tasks[0].file_id).trashed = true;
+    const d = (await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] })).items[0];
+    ok(d.ok && !d.dedup && W.pk.tasks.length === 2, '已完成的任务、落成的文件已经进了回收站：不认领，新建一个');
+    W.pk.tasks[1].phase = 'PHASE_TYPE_COMPLETE';
+    const e = (await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] })).items[0];
+    ok(e.ok && e.dedup && e.task === W.pk.tasks[1].id && W.pk.tasks.length === 2, '已完成的任务、文件还在：认领（dedup）');
+    /* 调用方带 check:1：没有记录也先核对（手动建过的同一个磁力） */
+    W.pk.tasks.push({ id: 'manual-1', name: 'Film.61008', url: 'magnet:?xt=urn:btih:' + '8'.repeat(40), parent: 'f-ram2', phase: 'PHASE_TYPE_RUNNING', file_id: 'mf-1' });
+    const f = (await push(I, { parent: 'f-ram2', check: 1, items: [{ tid: 61008 }] })).items[0];
+    ok(f.ok && f.adopted && f.task === 'manual-1' && W.pk.tasks.length === 3, '带 check:1：先核对任务列表，同一个文件夹里已经有这个磁力的任务就认领');
+  }
+
+  /* ③ PikPak 5xx（带 JSON 的也算）：稍后再推 + unsure，不记成这一部推不了；恢复后核对一次再建，只建 1 个 */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    const res = [];
+    for (const [st, body] of [[500, { error: 'internal_error', error_description: 'Internal Server Error' }], [502, {}], [503, { error: 'unavailable' }]]) {
+      W.pk.fail = (u, init) => isCreate(u, init) ? Response.json(body, { status: st }) : null;
+      res.push((await push(I, { parent: 'f-auto', items: [{ tid: 61005 }] })).items[0]);
+    }
+    ok(res.length === 3 && res.every(x => !x.ok && x.retry && x.soft && x.unsure) && W.pk.tasks.length === 0,
+      'PikPak 回 500 / 502 / 503（带 JSON 或空 {}）：都标「稍后再推」+ unsure（以前带 JSON 的 5xx 记成这一部推不了，请求添加就换下一个规格）');
+    W.pk.fail = null;
+    const l0 = W.pk.taskLists || 0;
+    const ok1 = (await push(I, { parent: 'f-auto', items: [{ tid: 61005 }] })).items[0];
+    ok(ok1.ok && !ok1.adopted && W.pk.tasks.length === 1 && (W.pk.taskLists || 0) === l0 + 1, 'PikPak 恢复：先核对一次任务列表（没有），再建，只建了 1 个');
+    /* 列文件夹也一样：5xx 是 502（暂时不通），不去掉筛选条件重列 */
+    W.pk.fail = (u) => u.pathname === '/drive/v1/files' ? Response.json({ error: 'internal_error' }, { status: 500 }) : null;
+    const ls = await I.call('/api/pikpak?do=ls&parent=f-auto');
+    W.pk.fail = null;
+    ok(ls.status === 502, '列文件夹时 PikPak 5xx：回 502');
+  }
+
+  /* ④ 时限：整次调用 32 秒（请求添加 40 秒就断开）。论坛很慢、快到点了：不再去建任务（发出去又等不到回包，正是重复任务的来源） */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    W.forum.fail = (u) => { if (u.searchParams.get('mod') === 'viewthread' && u.searchParams.get('tid') === '61006') I.clock.off += 30000; return null; };
+    const a = (await push(I, { parent: 'f-auto', items: [{ tid: 61006 }] })).items[0];
+    ok(a && !a.ok && a.retry && a.soft && a.btih === 'f'.repeat(40) && W.pk.tasks.length === 0, '帖子页拖到快 32 秒：不去建任务，回「稍后再推」（带 btih），一个任务都没建');
+    W.forum.fail = null;
+    /* 论坛 429 + Retry-After: 120：不在一次调用里干睡两分钟（以前不封顶），直接回「稍后再推」 */
+    let n429 = 0;
+    W.forum.fail = (u) => (u.searchParams.get('mod') === 'viewthread' && u.searchParams.get('tid') === '61009') ? (n429++, new Response('busy', { status: 429, headers: { 'retry-after': '120' } })) : null;
+    const b = (await push(I, { parent: 'f-auto', items: [{ tid: 61009 }] })).items[0];
+    W.forum.fail = null;
+    ok(b && !b.ok && b.retry && b.soft && n429 === 1, '论坛回 429 + Retry-After 120 秒：只试一次就回「稍后再推」（不在调用里干睡两分钟）');
+  }
+
+  /* ⑤ 论坛账号层面的问题：整批停下（forum:1），这几部留着待推，不记成「这个规格推不了」 */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    let logins = 0;
+    W.forum.fail = (u) => (u.pathname.endsWith('member.php') && u.searchParams.get('loginsubmit') === 'yes')
+      ? (logins++, new Response(H.gbk('<root><![CDATA[登录失败，您还可以尝试 4 次]]></root>'))) : null;
+    const a = await push(I, { parent: 'f-auto', items: [{ tid: 61002 }, { tid: 61005 }] });
+    ok(a.forum === 1 && /^论坛：论坛登录失败/.test(a.stop) && a.items.length === 2 && a.items.every(x => !x.ok && x.retry && x.held && !x.err) && W.pk.tasks.length === 0,
+      '论坛登录失败：整批停下（forum:1，「' + String(a.stop).slice(0, 12) + '…」），两部都留着待推（以前每部记一次「推不了」，所有规格很快烧光）');
+    const n = logins;
+    const b = await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] });
+    ok(b.forum === 1 && b.items[0].held && logins === n, '五分钟内再推：直接整批停下、不再重登论坛（登录次数没涨）');
+    W.forum.fail = null;
+  }
+  {
+    /* 游客视图（会话过期又没跳登录页）：丢掉会话重登一次，好了就照常推 */
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    const GUEST = pad(`<script>var discuz_uid = '0', cookiepre = 'x_';</script><div class="t_f">附件: 您需要 <a href="member.php?mod=logging&amp;action=login" onclick="showWindow('login', this.href)">登录</a> 才可以下载或查看，没有账号？</div>`);
+    let guest = 1, logins = 0;
+    W.forum.fail = (u) => {
+      if (u.pathname.endsWith('member.php') && u.searchParams.get('loginsubmit') === 'yes') logins++;
+      if (u.searchParams.get('mod') === 'viewthread' && u.searchParams.get('tid') === '61007' && guest) { guest--; return new Response(H.gbk(GUEST)); }
+      return null;
+    };
+    const a = (await push(I, { parent: 'f-auto', items: [{ tid: 61007 }] })).items[0];
+    ok(a.ok && a.btih === T1.btih && logins === 2 && W.pk.tasks.length === 1, '帖子页是游客视图（附件要登录才能下载）：丢掉会话、重登一次再看，推成功');
+    /* 重登之后还是游客视图：账号层面的问题，整批停下；这份空帖子不缓存一小时 */
+    const ttl = {};
+    const put0 = env.KV.put.bind(env.KV);
+    env.KV.put = async (k, v, o) => { ttl[k] = o && o.expirationTtl; return put0(k, v, o); };
+    W.forum.fail = (u) => (u.searchParams.get('mod') === 'viewthread' && u.searchParams.get('tid') === '61004') ? new Response(H.gbk(GUEST)) : null;
+    const b = await push(I, { parent: 'f-auto', items: [{ tid: 61004 }, { tid: 61002 }] });
+    ok(b.forum === 1 && /游客视图/.test(b.stop) && b.items.every(x => x.held && x.retry && !x.err) && !('t:61004' in ttl),
+      '重登之后还是游客视图：整批停下（forum:1），不把游客视图下「没有种子」的解析结果缓存起来');
+    W.forum.fail = null;
+    /* 一个种子、一条磁力都没解析出来的帖子：只缓存 60 秒（以前一小时） */
+    const c = (await push(H.isolate(env, W), { parent: 'f-auto', items: [{ tid: 61010 }] })).items[0];
+    ok(!c.ok && /没有种子附件/.test(c.err) && !c.retry && ttl['t:61010'] === 60, '真的没有种子也没有磁力：这一部记推不了（不重试），这份空的帖子只缓存 60 秒');
+  }
+  {
+    /* 种子要积分（账号积分不够）：帖子里贴着磁力就改用磁力；没有磁力就整批停下（账号层面的） */
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    /* 登录后每一页的顶栏都有「积分: … | 用户组: …」：附件只是不存在的话，不能当成账号的问题把整批停掉 */
+    const HDR = '<div id="um"><a id="extcreditmenu">积分: 2367</a><span class="pipe">|</span><a href="home.php?mod=spacecp&amp;ac=usergroup" id="g_upmine">用户组: 高级会员</a></div>';
+    W.forum.fail = (u) => (u.searchParams.get('mod') === 'attachment') ? new Response(H.gbk(pad(HDR + '<div id="messagetext"><p>抱歉，指定的附件不存在或已被删除</p></div>'))) : null;
+    const h = await push(I, { parent: 'f-auto', items: [{ tid: 61004 }, { tid: 61002 }] });
+    ok(!h.forum && !h.stop && !h.items[0].ok && !h.items[0].retry && /不是种子/.test(h.items[0].err) && h.items[1].ok,
+      '附件只是不存在（页面顶栏照常有「积分 / 用户组」）：只记这一部推不了，不当成账号问题把整批停掉');
+    const CREDIT = pad(HDR + '<div id="messagetext" class="alert_error"><p>抱歉，您的积分不足，无法下载此附件（需要 金币 5）</p></div>');
+    W.forum.fail = (u) => (u.searchParams.get('mod') === 'attachment') ? new Response(H.gbk(CREDIT)) : null;
+    const a = (await push(I, { parent: 'f-auto', items: [{ tid: 61003 }] })).items[0];
+    ok(a.ok && a.btih === 'c'.repeat(40) && W.pk.tasks.length === 2 && W.pk.tasks[1].url.startsWith('magnet:?xt=urn:btih:' + 'c'.repeat(40)),
+      '种子要积分、帖子里贴着磁力：改用磁力，推成功（以前这一部直接记推不了）');
+    const b = await push(I, { parent: 'f-auto', items: [{ tid: 61004 }, { tid: 61002 }] });
+    ok(b.forum === 1 && /积分/.test(b.stop) && b.items.every(x => x.held && x.retry) && W.pk.tasks.length === 2, '种子要积分、帖子里也没有磁力：账号层面的问题，整批停下（forum:1）');
+    W.forum.fail = null;
+  }
+
+  /* ⑥ 状态码分开：文件夹不在了 404 · 限频 429（带 Retry-After）· 登录不上 503 · 参数不对 400 */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W);
+    const mkd = (b) => I.call('/api/pikpak?do=mkdir', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) });
+    const g = await mkd({ parent: 'f-gone', name: 'ram2' });
+    const gj = await g.json();
+    ok(g.status === 404 && gj.gone === 1 && /文件夹不在了/.test(gj.error), '在一个已经被删掉的文件夹里建文件夹：回 404 + gone（以前 502，请求添加当成影片库不通、一直重试、熔断，缓存的文件夹编号永远不清）');
+    const e = await mkd({ parent: 'f-auto', name: ' / ' });
+    ok(e.status === 400, '文件夹名是空的：回 400');
+    W.pk.fail = (u) => u.pathname === '/drive/v1/files' ? Response.json({ error: 'too_many_requests', error_description: 'Too many requests' }, { status: 429 }) : null;
+    const r = await I.call('/api/pikpak?do=ls&parent=f-auto');
+    W.pk.fail = null;
+    ok(r.status === 429 && r.headers.get('retry-after') === '30', 'PikPak 限频：回 429 + Retry-After');
+    const e2 = H.makeEnv({ PIKPAK_USER: 'me@pk.test', PIKPAK_PASS: 'wrong' });
+    const bad = await H.isolate(e2.env, e2.W).call('/api/pikpak?do=ls');
+    const bj = await bad.json();
+    ok(bad.status === 503 && bj.auth === 1 && /账号或密码不对/.test(bj.error), 'PikPak 登录不上：回 503 + auth（不再和「文件夹不在了」一样是 502）');
+  }
+
+  /* ⑦ /api/pikpak 不排源闸门；/api/pikpush 不算重活，用自己的一份子请求配额 */
+  {
+    const { env, W } = mk();
+    const I = H.isolate(env, W, { expose: ['srcEnter', 'srcLeave', 'HEAVY', 'SUB', 'HEAVY_RE'] });
+    await I.k.srcEnter('tv');                         // 剧集那一批正在跑（另一个源）
+    const t0 = Date.now();
+    const ls = await I.call('/api/pikpak?do=ls');
+    ok(ls.status === 200 && (await ls.json()).folders.length === 1 && Date.now() - t0 < 2000 && vm.runInContext('GN + GSRC', I.c) === '1tv',
+      '另一个源正占着闸门：列文件夹照样马上回来（不排闸门，以前要等那一批跑完）');
+    I.k.srcLeave();
+    ok(!I.k.HEAVY_RE.test('/api/pikpush'), '/api/pikpush 不再算重活');
+    I.k.HEAVY.set(987654, Date.now());              // 建索引正在跑，isolate 全局的子请求计数快见底了
+    I.k.SUB.n = I.k.SUB.max - 1;
+    const p = await push(I, { parent: 'f-auto', items: [{ tid: 61002 }] });
+    I.k.HEAVY.delete(987654);
+    ok(p.items[0].ok && p.sub > 0 && p.sub < 12, '建索引在跑、全局计数快见底：推送用自己的一份配额照样推成（花了 ' + p.sub + ' 个子请求）');
+  }
+}
+
+console.log('\n■ v7.2 影片库接口扛突发：版本表、换源不清缓存、读取合流、闸门公平');
+{
+  const { env, r2, W } = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+  W.tmdb.movie.push({ id: 900001, title: '沙丘', original_title: 'Dune', release_date: '2025-05-01', poster_path: '/d.jpg', popularity: 50, vote_average: 7.2, vote_count: 900 });
+  W.forum.boards['44'] = { 'movie_nianfen=32': [
+    { tid: 10001, title: '沙丘 Dune.2025.2160p.WEB-DL.HEVC 20.5GB' }, { tid: 10002, title: '沙丘 Dune.2025.1080p.BluRay.x264 10.1GB' }] };
+  W.tmdb.tv.push({ id: 510001, name: '长夜将尽', original_name: 'Long Night', first_air_date: '2025-02-01', vote_count: 900, vote_average: 8, poster_path: '/ln.jpg', popularity: 50 });
+  /* 整季包和一份「第1-12集」分段转帖：同组、同规格、体积同一档，分段那条帖子号更大（折叠时排在前面） */
+  W.forum.boards['2'] = { 'tv_shangyingshijian_3=22': [
+    { tid: 20101, title: '长夜将尽 第一季 全12集 Long.Night.S01.2025.2160p.WEB-DL.H265.DDP-ABC 48.2GB' },
+    { tid: 20102, title: '长夜将尽 第一季 第1-12集 Long.Night.S01.2025.2160p.WEB-DL.H265.DDP-ABC 48.2GB' },
+    { tid: 20103, title: '长夜将尽 第一季 第12集 Long.Night.S01E12.2025.2160p.WEB-DL.H265.DDP-ABC 4.1GB' },
+    { tid: 20104, title: '长夜将尽 第一季 全12集 Long.Night.S01.2025.1080p.WEB-DL.H264-XYZ 20.5GB' }] };
+  const I = H.isolate(env, W);
+  for (let i = 0; i < 12; i++) await I.cron();
+  const v = await (await I.call('/api/link/versions?src=tv&id=510001&season=1')).json();
+  ok(v.items && v.items.map(x => x.tid).join() === '20101,20104' && v.items.every(x => x.pack === 'full' && x.total === 12),
+    '剧集版本表：先去掉单集 / 一段再折叠 —— 和分段转帖同签名的整季包（4K）留下来了（以前被折掉，只剩 1080p）：' + (v.items || []).map(x => x.tid).join('、'));
+  ok(!('own' in v), '版本表默认不带 own（请求添加不看它；以前每次都建整张缺片判定表、顺手刷新片库）');
+  const vo = await (await I.call('/api/link/versions?src=movie&id=900001&own=1')).json();
+  ok(typeof vo.own === 'number' && vo.items.length === 2, '要 own 就带 &own=1：照样算（只看内存 / R2 里的成品，不起后台刷新）');
+
+  /* 读取计数：按 R2 键数 */
+  const gets = {};
+  const g0 = r2.get.bind(r2);
+  r2.get = async (k, o) => { gets[k] = (gets[k] || 0) + 1; return g0(k, o); };
+  const clear = () => { for (const k of Object.keys(gets)) delete gets[k]; };
+  /* 电影 / 剧集交替着要（请求添加一轮里一部电影、一季剧集地推）：每个源的影片表只读一次，不再每换一次源整份重读 */
+  const J = H.isolate(env, W);
+  const rc0 = W.recv.calls;
+  const titles = [];
+  for (let i = 0; i < 8; i++) {
+    const tv = i % 2 === 1;
+    const r = await (await J.call('/api/link/versions?src=' + (tv ? 'tv' : 'movie') + '&id=' + (tv ? 510001 : 900001))).json();
+    titles.push(r.title);
+  }
+  await J.settle();
+  ok(gets['idx/v4/movies.json'] === 1 && gets['idx/tv/movies.json'] === 1 && W.recv.calls === rc0,
+    `电影 / 剧集交替要 8 次版本表：两个源的影片表各只读 1 次（以前每换一次源整份重读，各 4 次），片库一次都没去拉（以前 23 次）`);
+  ok(titles.join() === '沙丘,长夜将尽,沙丘,长夜将尽,沙丘,长夜将尽,沙丘,长夜将尽', '换源只换绑定、各用各的那份：片名不串');
+  const cm = await (await J.call('/api/catalog?src=movie&own=all&min=0')).json();
+  const ct = await (await J.call('/api/catalog?src=tv&own=all&min=0')).json();
+  const cm2 = await (await J.call('/api/catalog?src=movie&own=all&min=0&page=1&q=')).json();
+  ok(cm.items.map(x => x.id).join() === '900001' && ct.items.map(x => x.id).join() === '510001' && cm2.items.map(x => x.id).join() === '900001',
+    '目录电影 → 剧集 → 电影交替翻：每个源的目录行缓存各管各的，不串');
+
+  /* 冷启动的 isolate 同时来 6 个：影片表 / state / 分片都只读一次 */
+  clear();
+  const K = H.isolate(env, W, { expose: ['F'] });
+  const six = await Promise.all(Array.from({ length: 6 }, () => K.call('/api/link/versions?src=movie&id=900001').then(r => r.json())));
+  const partReads = Object.entries(gets).filter(([k]) => /^idx\/v4\/y\d+/.test(k)).map(([, n]) => n);
+  ok(six.every(x => x.items.length === 2) && gets['idx/v4/movies.json'] === 1 && gets['idx/v4/state.json'] === 1 && partReads.length && partReads.every(n => n === 1),
+    '冷启动的 isolate 同时来 6 个版本表请求：影片表、state、分片各只读一次（以前各读 6 次、解析 6 份）');
+  /* 45 秒过期：先比 etag，影片表没变就不重下 */
+  clear();
+  K.clock.off += 46000;
+  await (await K.call('/api/link/versions?src=movie&id=900001')).json();
+  ok(!gets['idx/v4/movies.json'] && gets['idx/v4/state.json'] === 1, '缓存过期后：只读 state.json、问一下影片表的 etag，没变就沿用内存里那份（不整份重下重解析）');
+  /* 影片表真变了：etag 对不上，重读，读到新内容 */
+  const mv = r2.json(NS + 'movies.json');
+  mv.m['900001'][K.k.F.N] = '沙丘（新译名）';
+  await r2.put(NS + 'movies.json', JSON.stringify(mv));
+  K.clock.off += 46000;
+  clear();
+  const nv = await (await K.call('/api/link/versions?src=movie&id=900001')).json();
+  ok(gets['idx/v4/movies.json'] === 1 && nv.title === '沙丘（新译名）', '影片表真的变了：etag 对不上就重读，读到的是新内容');
+
+  /* 闸门公平：剧集那边等了 2.5 秒以上，电影新来的也先排队；闸门空出来先放剧集 */
+  {
+    const G = H.isolate(env, W, { expose: ['srcEnter', 'srcLeave'] });
+    const { srcEnter, srcLeave } = G.k;
+    const order = [];
+    const tick = (ms) => new Promise(r => setTimeout(r, ms));
+    await srcEnter('movie'); order.push('m1');
+    const pTv = srcEnter('tv').then(() => order.push('tv'));
+    await tick(15);
+    const pM2 = srcEnter('movie').then(() => order.push('m2'));
+    await tick(15);
+    const early = order.join();
+    srcLeave();                                          // m1 走了
+    await tick(15);
+    srcLeave();                                          // m2 也走了：剧集进
+    await pTv;
+    srcLeave();
+    /* 第二轮：剧集已经等了 2.6 秒 */
+    order.length = 0;
+    await srcEnter('movie'); order.push('m1');
+    const qTv = srcEnter('tv').then(() => order.push('tv'));
+    await tick(15);
+    G.clock.off += 2600;
+    const qM2 = srcEnter('movie').then(() => order.push('m2'));
+    await tick(15);
+    const held = order.join();
+    srcLeave();                                          // m1 走了：先放等得最久的剧集
+    await qTv;
+    await tick(15);
+    const mid = order.join();
+    srcLeave();                                          // 剧集走了：电影进
+    await qM2;
+    srcLeave();
+    ok(early.startsWith('m1,m2') && held === 'm1' && mid === 'm1,tv' && order.join() === 'm1,tv,m2',
+      '闸门公平：另一个源刚开始等时同源照常并发（' + early + '）；等了 2.5 秒以上，同源新来的先排队（' + held + '），闸门空了先放等得最久的（' + order.join() + '）');
+    /* 等不到：409 带 Retry-After */
+    await srcEnter('tv');
+    const iv = setInterval(() => { G.clock.off += 1000; }, 1);
+    const busy = await G.call('/api/catalog?src=movie');
+    clearInterval(iv);
+    srcLeave();
+    ok(busy.status === 409 && busy.headers.get('retry-after') === '5' && (await busy.json()).busy === 1, '另一个源一直占着：25 秒后回 409，带 Retry-After: 5');
+  }
+}
+
+console.log('\n■ v7.3 目录按年份严格筛（ystrict=1）：只要这一年上映的，第 N 页是满的、总数是准的');
+{
+  const { env, r2, W } = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+  /* 2024 年版块：50 部 2024 年的片（P）、20 部 2023 年的片在 2024 年出的新版（Q）、6 部 2024 年的片（R，2025 年版块也有新帖）；
+     2025 年版块另有 10 部 2025 年的片（S）。宽口径下「2024 年」= 76 部（20 部是 2023 年的），「2025 年」= 16 部（6 部是 2024 年的） */
+  const HAN = '星海山河风云月光夜雨雪花火林城桥塔湖岛龙虎鹰狼梦影歌舞剑侠春秋金银铁石'.split('');
+  const EN = ['Alpha', 'Bravo', 'Cedar', 'Delta', 'Ember', 'Falcon', 'Garnet', 'Harbor', 'Ivory', 'Juniper', 'Kestrel', 'Lumen', 'Marble', 'Nimbus', 'Onyx', 'Prairie', 'Quartz', 'Raven', 'Summit', 'Tundra'];
+  let tid = 60000, id = 760000, n = 0;
+  const boards = { 2025: [], 2024: [] };
+  const add = (y, posted) => {
+    const cn = HAN[n % HAN.length] + HAN[Math.floor(n / HAN.length) % HAN.length] + HAN[(n * 7 + 3) % HAN.length];
+    const en = EN[n % EN.length] + ' ' + EN[Math.floor(n / EN.length) % EN.length] + ' ' + EN[(n * 3 + 1) % EN.length];
+    n++;
+    const f = { id: id++, cn, en, y };
+    W.tmdb.movie.push({ id: f.id, title: cn, original_title: en, release_date: y + '-05-01', poster_path: '/p' + f.id + '.jpg', popularity: 40, vote_average: 7, vote_count: 500 });
+    for (const b of posted) boards[b].push({ tid: tid++, title: `${cn} ${en.replace(/ /g, '.')}.${y}.${n % 2 ? '1080p' : '2160p'}.WEB-DL.x265 ${8 + n % 5}.5GB`, film: f.id });
+    return f;
+  };
+  const P = Array.from({ length: 50 }, () => add(2024, [2024]));
+  const Q = Array.from({ length: 20 }, () => add(2023, [2024]));
+  const R = Array.from({ length: 6 }, () => add(2024, [2024, 2025]));
+  const S = Array.from({ length: 10 }, () => add(2025, [2025]));
+  W.forum.boards['44'] = { 'movie_nianfen=32': boards[2025].reverse(), 'movie_nianfen=31': boards[2024].reverse() };
+  /* 片库（总账，按 TMDB 编号认）：P 的前 3 部、Q 的前 2 部、R 的第 1 部 */
+  const owned = [P[0], P[1], P[2], Q[0], Q[1], R[0]];
+  W.recv.meta = { gen: 'v22-9' };
+  W.recv.doc = { gen: 'v22-9', ts: Date.now() - 86400e3, items: owned.map((f, i) => {
+    const nm = `${f.cn}.${f.en.replace(/ /g, '.')}.${f.y}.2160p.WEB-DL.x265.mkv`;
+    return { key: 'y' + i, kind: 'movie', name: nm, path: '/ram/' + nm, tmdb: f.id, type: 'movie', title: f.cn, orig: f.en, year: String(f.y),
+             guess: f.cn, guessZh: f.cn, guessEn: f.en, guessYear: String(f.y) };
+  }) };
+  const I = H.isolate(env, W);
+  const b = await buildAll(I);
+  await I.call('/api/lib?refresh=1'); await I.settle();
+  const get = async (X, q) => (await X.call('/api/catalog?min=0&' + q)).json();
+  const allPages = async (X, q) => { const all = []; let first = null; for (let pg = 1; pg < 20; pg++) { const c = await get(X, q + '&page=' + pg); first = first || c; all.push(...c.items); if (pg >= c.pages) break; } return { first, all }; };
+  const mv0 = r2.json(NS + 'movies.json');
+  ok(!b.err && Object.keys(mv0.m).length === 86 && Q.every(f => mv0.m[f.id][2] === '2023' && mv0.m[f.id][7].join() === '2024') && R.every(f => mv0.m[f.id][7].length === 2),
+    '造好的索引：Q 的 20 部自己是 2023 年、帖子只在 2024 年版块（r.ys = [2024]）；R 的 6 部两个年份版块都有帖子');
+
+  /* 问题本身：宽口径（不带 ystrict，行为与 v7.2 相同） */
+  const L = await allPages(I, 'own=all&year=2024');
+  const loose1 = L.all.slice(0, 42).filter(x => x.year === '2024').length;
+  ok(L.first.total === 76 && L.first.pages === 2 && loose1 < 42 && !('ystrict' in L.first),
+    `宽口径（不带 ystrict，与 v7.2 一样）：「2024 年」total ${L.first.total}，第 1 页 42 部里只有 ${loose1} 部是 2024 年的 —— 线上那个问题（App 在本机筛完剩没几部、数字虚高）`);
+
+  /* 严格：total / pages / 分页都按影片自己的年份 */
+  const want24 = new Set([...P, ...R].map(f => f.id));
+  const S1 = await get(I, 'own=all&year=2024&ystrict=1'), S2 = await get(I, 'own=all&year=2024&ystrict=1&page=2'), S3 = await get(I, 'own=all&year=2024&ystrict=1&page=3');
+  const sAll = [...S1.items, ...S2.items];
+  ok(S1.ystrict === 1 && S1.total === 56 && S1.pages === 2 && S1.items.length === 42 && S2.items.length === 14 && S2.total === 56 && !S3.items.length
+     && sAll.every(x => x.year === '2024') && new Set(sAll.map(x => x.id)).size === 56 && sAll.every(x => want24.has(x.id)),
+    `严格（ystrict=1）：total ${S1.total}（50 + 6，不含 2023 年的 20 部）、${S1.pages} 页，第 1 页满 ${S1.items.length} 部、第 2 页 ${S2.items.length} 部，全是 2024 年的、不重不漏，回包带 ystrict:1`);
+  ok(sAll.map(x => x.id).join() === L.all.filter(x => x.year === '2024').map(x => x.id).join(),
+    '严格的顺序 = 宽口径整张表按年份筛出来的顺序（排序不变，只是筛在服务端、分页之前）');
+  const S25 = await get(I, 'own=all&year=2025&ystrict=1'), L25 = await get(I, 'own=all&year=2025');
+  const S23 = await get(I, 'own=all&year=2023&ystrict=1');
+  ok(S25.total === 10 && S25.items.every(x => x.year === '2025') && L25.total === 16 && S23.total === 20 && S23.items.every(x => x.year === '2023'),
+    `2025 年：严格 ${S25.total} 部（宽口径 ${L25.total}，多出来的 6 部是 2024 年的片在 2025 年的新帖）；2023 年：严格 ${S23.total} 部（帖子都在 2024 年版块，按影片自己的年份照样归 2023）`);
+  const low = (xs) => xs.filter(x => x.rb && x.rb <= 4).length, hdr = (xs) => xs.filter(x => x.hb >= 3).length;
+  ok(S1.counts.low === low(sAll) && S1.counts.hdr === hdr(sAll) && L.first.counts.low === low(L.all) && S1.counts.low < L.first.counts.low,
+    `三个角标计数也按严格口径：低质量 ${S1.counts.low} 部（宽口径 ${L.first.counts.low}）`);
+
+  /* 片库过滤（请求添加用 own=hide）：hidden 也只数这一年的 */
+  const H1 = await get(I, 'year=2024&ystrict=1'), H2 = await get(I, 'year=2024&ystrict=1&page=2'), HL = await get(I, 'year=2024');
+  const O1 = await get(I, 'year=2024&ystrict=1&own=only');
+  ok(H1.hidden === 4 && H1.total === 52 && H1.pages === 2 && H1.items.length === 42 && H2.items.length === 10 && H1.items.concat(H2.items).every(x => !x.own && x.year === '2024')
+     && HL.hidden === 6 && HL.total === 70 && O1.total === 4 && O1.items.every(x => x.own && x.year === '2024'),
+    `只看缺片（own=hide）：严格 total ${H1.total}、已隐藏 ${H1.hidden}（库里那 2 部 2023 年的片不算进 2024 年），第 2 页 ${H2.items.length} 部；宽口径 ${HL.total} / 已隐藏 ${HL.hidden}；own=only 严格 ${O1.total} 部`);
+
+  /* 只认 ystrict=1；没有像样的年份就和以前一样 */
+  const N0 = await (await I.call('/api/catalog?min=0&own=all')).text();
+  const N1 = await (await I.call('/api/catalog?min=0&own=all&ystrict=1')).text();
+  const NB = await (await I.call('/api/catalog?min=0&own=all&year=abc&ystrict=1')).text();
+  const Z0 = await get(I, 'own=all&year=2024&ystrict=0'), ZT = await get(I, 'own=all&year=2024&ystrict=true');
+  ok(N1 === N0 && NB === N0 && Z0.total === 76 && ZT.total === 76 && !('ystrict' in Z0) && !('ystrict' in ZT),
+    'ystrict=1 不带年份 / 年份乱填：照旧不按年份筛、回包与不带 ystrict 的逐字节相同；ystrict=0 / true：宽口径');
+
+  /* 边缘缓存（Cache API）：严格和宽的各存各的；严格的键尾多一截 &ys=1，宽的键没变 */
+  {
+    const C = H.isolate(env, W);
+    const cache = C.caches.default;
+    let puts = 0; const put0 = cache.put.bind(cache); cache.put = async (k, r) => { puts++; return put0(k, r); };
+    const a1 = await get(C, 'own=all&year=2024'), b1 = await get(C, 'own=all&year=2024&ystrict=1'); await C.settle();
+    const p1 = puts;
+    const a2 = await get(C, 'own=all&year=2024'), b2 = await get(C, 'own=all&year=2024&ystrict=1'); await C.settle();
+    const keys = [...cache.m.keys()];
+    ok(a1.total === 76 && b1.total === 56 && a2.total === 76 && b2.total === 56 && b2.ystrict === 1 && !('ystrict' in a2) && p1 === 2 && puts === 2
+       && keys.length === 2 && keys.filter(k => /ystrict=1/.test(k)).every(k => /&ys=1$/.test(k)) && keys.filter(k => !/ystrict=1/.test(k)).every(k => !/&ys=1/.test(k)),
+      '边缘缓存：宽 → 严 → 宽 → 严，第二轮两个都是缓存命中、各拿各的（严格的键尾带 &ys=1，宽的键没变）');
+  }
+  /* [v7.3 复查] 缓存键串号：以前只编码参数值、参数名原样拼。名字解出来是「own=all&year」的一个参数，
+     Worker 看来没有 year、回整张宽表，键却和真的 own=all&year=2024 拼得一模一样 —— 真请求 10 分钟内拿到的是它 */
+  {
+    const C = H.isolate(env, W);
+    const cache = C.caches.default;
+    const cart = async (q) => (await C.call('/api/cart?' + q)).json();
+    /* 先来造出来的三条：严格、宽、片单。own / year / ids 都藏在参数名里，Worker 看来都没带：
+       目录按默认 own=hide、不按年份筛，回所有年份的缺片（86 − 库里 6 部 = 80 部）；片单 ids 是空的 */
+    const x1 = await get(C, 'own%3Dall%26year=2024&ystrict=1'); await C.settle();
+    const x2 = await get(C, 'own%3Dall%26year=2024'); await C.settle();
+    const xc = await cart('ids%3D' + P[0].id + '%26src=movie'); await C.settle();
+    const k0 = [...cache.m.keys()];
+    /* 再来真的三条：不能命中上面那三份 */
+    let hits = 0; const m0 = cache.match.bind(cache); cache.match = async (k) => { const r = await m0(k); if (r) hits++; return r; };
+    const r1 = await get(C, 'own=all&year=2024&ystrict=1'); await C.settle();
+    const r2x = await get(C, 'own=all&year=2024'); await C.settle();
+    const rc = await cart('ids=' + P[0].id + '&src=movie'); await C.settle();
+    const keys = [...cache.m.keys()];
+    ok(x1.total === 80 && !('ystrict' in x1) && x2.total === 80 && Array.isArray(xc.items) && !xc.items.length
+       && k0.length === 3 && k0.every(k => /own%3Dall%26year=2024|ids%3D\d+%26src=movie/.test(k)),
+      `造出来的请求（参数名 own%3Dall%26year、ids%3D…%26src）：Worker 看来没有 year / ids，回所有年份的缺片（${x1.total} 部，不带 ystrict）/ 空片单 —— 照样缓存，但键里参数名是编码过的`);
+    ok(hits === 0 && keys.length === 6 && r1.total === 56 && r1.ystrict === 1 && r2x.total === 76 && !('ystrict' in r2x)
+       && rc.items.length === 1 && rc.items[0].id === P[0].id,
+      `之后真的严格 / 宽 / 片单请求不命中造出来的那几份（以前同一个键：严格 / 宽都拿到所有年份的 80 部、严格的没有 ystrict，请求添加当成影片库没升级）：严格 ${r1.total} 部${r1.ystrict === 1 ? '带' : '不带'} ystrict:1、宽 ${r2x.total} 部、片单 ${rc.items.length} 部`);
+    /* 反过来：真请求先存下，造出来的也拿不到它（各算各的） */
+    const D = H.isolate(env, W);
+    const d1 = await get(D, 'own=all&year=2024&ystrict=1'); await D.settle();
+    const d2 = await get(D, 'own%3Dall%26year=2024&ystrict=1'); await D.settle();
+    const d3 = await get(D, 'own=all&year=2024&ystrict=1'); await D.settle();
+    ok(d1.total === 56 && d2.total === 80 && d3.total === 56 && d3.ystrict === 1 && D.caches.default.m.size === 2,
+      '真请求先存、造出来的后到：两份各存各的键，真请求再来照样命中严格的那份');
+  }
+  /* 部署前：v7.2 不认 ystrict，把宽的结果存在了带 ystrict=1 的网址下 —— v7.3 不能把它当成严格的拿出来 */
+  const OLD = process.env.IDX_V72_WORKER;
+  if (!OLD || !fs.existsSync(OLD)) ok(false, '缺 v7.2 原版（IDX_V72_WORKER）：run.mjs 开头会从 git 取');
+  else {
+    const O = H.isolate(env, W, { file: OLD });
+    const o1 = await get(O, 'own=all&year=2024&ystrict=1'); await O.settle();
+    const ol = await get(O, 'own=all&year=2024'); await O.settle();
+    const shared = O.caches.default;
+    let sp = 0; const sput = shared.put.bind(shared); shared.put = async (k, r) => { sp++; return sput(k, r); };
+    const N = H.isolate(env, W, { cache: shared });
+    const n1 = await get(N, 'own=all&year=2024&ystrict=1'); await N.settle();
+    const sp1 = sp;
+    const nl = await get(N, 'own=all&year=2024'); await N.settle();
+    ok(o1.total === 76 && !('ystrict' in o1) && n1.total === 56 && n1.ystrict === 1 && sp1 === 1,
+      `部署前 v7.2 把宽的结果（${o1.total} 部）存在了带 ystrict=1 的网址下：v7.3 不拿它（键尾多一截 &ys=1），回严格的 ${n1.total} 部、另存一份`);
+    ok(JSON.stringify(nl) === JSON.stringify(ol) && sp === sp1, '宽口径的缓存键没变：v7.2 存下的宽结果 v7.3 直接命中（不重算、不另存）');
+    /* 不带 ystrict 的回包：v7.3 与 v7.2 逐字节相同（各用各的缓存，都是现算的） */
+    const O2 = H.isolate(env, W, { file: OLD }), N2 = H.isolate(env, W);
+    const qs = ['own=all&year=2024', 'year=2024', 'own=only&year=2024', 'own=all&year=2025&sort=vote', 'own=all', 'own=all&year=2024&page=2',
+      'own=all&year=2023&ystrict=0', 'own=all&year=2024&q=' + encodeURIComponent(P[3].cn), 'year=2024&min=6', 'own=all&year=2024&dr=hdr&qual=uhd', 'own=all&year=2024&ystrict=1'];
+    const diff = [];
+    for (const q of qs) {
+      const a = await (await O2.call('/api/catalog?' + q)).text(), c = await (await N2.call('/api/catalog?' + q)).text();
+      /* 最后一条带 ystrict=1：只有它该不一样 */
+      if ((a === c) !== !/ystrict=1/.test(q)) diff.push(q);
+    }
+    ok(!diff.length, `不带 ystrict 的 ${qs.length - 1} 种查询（宽口径、片库过滤、排序、分页、搜索、评分、画质筛选）：v7.3 回包与 v7.2 逐字节相同；只有带 ystrict=1 的那条不同${diff.length ? '；不对：' + diff.join(' | ') : ''}`);
+    /* [v7.3 复查] 参数名也编码之后：真用到的参数名都是普通字母，键与 v7.2 逐字节相同（严格的只多键尾 &ys=1）——
+       部署前存下的缓存照样命中。目录 / 详情 / 片单三条接口、所有真参数名（gate 照旧不进键）、值里带中文和保留字符 */
+    const O3 = H.isolate(env, W, { file: OLD }), N3 = H.isolate(env, W);
+    const kq = ['/api/catalog?q=' + encodeURIComponent(P[3].cn + ' &=?') + '&year=2024&own=all&min=0&sort=vote&page=1&dr=hdr&qual=uhd&src=movie&genre=' + encodeURIComponent('剧情') + '&gate=x',
+      '/api/catalog?year=2024&ystrict=1&own=hide&min=0&sort=new&page=2&src=movie', '/api/catalog?own=all&year=2024&ystrict=0&min=0',
+      '/api/detail?id=' + P[3].id + '&src=movie&gate=x', '/api/cart?ids=' + P[0].id + ',' + P[1].id + '&src=movie'];
+    for (const q of kq) { await O3.call(q); await O3.settle(); await N3.call(q); await N3.settle(); }
+    const ok3 = [...O3.caches.default.m.keys()].map(k => /ystrict=1&/.test(k) ? k + '&ys=1' : k).sort(), nk3 = [...N3.caches.default.m.keys()].sort();
+    ok(ok3.length === kq.length && JSON.stringify(nk3) === JSON.stringify(ok3) && nk3.every(k => !/gate=/.test(k)),
+      `参数名也编码之后，真用到的参数名（q / year / ystrict / own / min / sort / page / dr / qual / src / genre / id / ids）拼出的 ${nk3.length} 个键与 v7.2 逐字节相同（严格的只多键尾 &ys=1）：部署前存下的缓存照样命中`);
+  }
+
+  /* 影片自己没有年份（F.Y 是空的）：严格模式不留，宽口径照旧按帖子年份留着 */
+  {
+    const J = H.isolate(env, W, { expose: ['F'] });
+    const mv = r2.json(NS + 'movies.json');
+    mv.m[P[5].id][J.k.F.Y] = '';
+    await r2.put(NS + 'movies.json', JSON.stringify(mv));
+    const U = await allPages(J, 'own=all&year=2024&ystrict=1'), UL = await allPages(J, 'own=all&year=2024');
+    ok(U.first.total === 55 && U.all.length === 55 && !U.all.some(x => x.id === P[5].id) && UL.first.total === 76 && UL.all.some(x => x.id === P[5].id),
+      `影片自己没有年份的：严格模式不留（2024 年 ${U.first.total} 部）；宽口径照旧按帖子年份留着（${UL.first.total} 部）`);
+  }
+
+  /* 同一遍扫描、不比宽口径慢：3 万部的合成影片表直接调 queryCatalog */
+  {
+    const X = H.isolate(env, W, { expose: ['queryCatalog', 'F'] });
+    const { queryCatalog, F } = X.k;
+    let calls = 0;
+    const counted = function (v) { calls++; return Array.prototype.includes.call(this, v); };
+    const synth = (count) => {
+      const m = {};
+      for (let i = 0; i < 30000; i++) {
+        const y = 2018 + (i % 9), ys = [y + (i % 3 === 0 ? 1 : 0)];
+        if (i % 5 === 0) ys.push(y + 2);
+        if (count) Object.defineProperty(ys, 'includes', { value: counted });
+        const row = [];
+        row[F.N] = '片' + i; row[F.Y] = String(y); row[F.YS] = ys; row[F.C] = 60 + (i % 900); row[F.T] = 5 + (i % 5); row[F.B] = i % 400;
+        row[F.Q] = i % 2 ? '1080p' : '2160p'; row[F.HB] = i % 8; row[F.G] = [18];
+        m[1000000 + i] = row;
+      }
+      return { m };
+    };
+    const base = { year: '2024', min: 0, own: 'all', sort: 'new', page: 1 };
+    const mc = synth(true);
+    calls = 0; const lq = queryCatalog(mc, { ...base, ver: 'cnt' }); const lc = calls;
+    calls = 0; const sq = queryCatalog(mc, { ...base, ver: 'cnt', ystrict: true }); const sc = calls;
+    const exp = Object.values(mc.m).filter(r => r[F.Y] === '2024').length;
+    ok(sc === 0 && lc === 30000 && sq.total === exp && sq.items.length === 42 && sq.items.every(x => x.year === '2024') && lq.total > exp,
+      `3 万部：严格那一遍一次都不扫 r.ys（includes ${sc} 次，宽口径 ${lc} 次），total ${sq.total} = 影片自己是 2024 年的部数（宽口径 ${lq.total}）`);
+    const mt = synth(false);
+    const time = (q) => { let best = Infinity; for (let i = 0; i < 15; i++) { const t = performance.now(); queryCatalog(mt, q); best = Math.min(best, performance.now() - t); } return best; };
+    queryCatalog(mt, { ...base, ver: 'time' });                     // 行和排序先建好（两种口径共用同一份）
+    const tl = time({ ...base, ver: 'time' }), ts = time({ ...base, ver: 'time', ystrict: true });
+    ok(ts <= tl * 1.5 + 0.5, `3 万部：严格 ${ts.toFixed(2)}ms，宽口径 ${tl.toFixed(2)}ms（各取 15 次里最快的一次）—— 不比宽口径慢`);
+  }
+
+  /* 剧集源一样：按首播年份。2025 年版块里的《权力的游戏》第八季（首播 2011）、《龙之家族》第二季（首播 2022）不算 2025 年的 */
+  {
+    const { env: e2, W: W2 } = H.makeEnv();
+    W2.tmdb.tv.push({ id: 1399, name: '权力的游戏', original_name: 'Game of Thrones', first_air_date: '2011-04-17', vote_count: 9000, vote_average: 8.4, poster_path: '/g.jpg', popularity: 80 },
+                    { id: 94997, name: '龙之家族', original_name: 'House of the Dragon', first_air_date: '2022-08-21', vote_count: 4000, vote_average: 8.4, poster_path: '/h.jpg', popularity: 80 },
+                    { id: 510002, name: '长夜将明', original_name: 'Long Dawn', first_air_date: '2025-03-01', vote_count: 900, vote_average: 8, poster_path: '/ld.jpg', popularity: 50 });
+    W2.forum.boards['2'] = { 'tv_shangyingshijian_3=22': [
+      { tid: 20201, title: '龙之家族 第二季 全8集 House.of.the.Dragon.S02.2024.2160p.WEB-DL.DDP5.1.HEVC 40GB' },
+      { tid: 20202, title: '权力的游戏 第八季 全6集 Game.of.Thrones.S08.2019.1080p.BluRay.x264 30GB' },
+      { tid: 20203, title: '长夜将明 第一季 全10集 Long.Dawn.S01.2025.2160p.WEB-DL.H265 38GB' },
+    ] };
+    const T = H.isolate(e2, W2);
+    for (let i = 0; i < 12; i++) await T.cron();
+    const tl = await (await T.call('/api/catalog?src=tv&min=0&own=all&year=2025')).json();
+    const ts = await (await T.call('/api/catalog?src=tv&min=0&own=all&year=2025&ystrict=1')).json();
+    const t11 = await (await T.call('/api/catalog?src=tv&min=0&own=all&year=2011&ystrict=1')).json();
+    ok(tl.total === 3 && ts.total === 1 && ts.items[0].id === 510002 && ts.ystrict === 1 && t11.total === 1 && t11.items[0].id === 1399,
+      `剧集：2025 年版块里 3 部，宽口径 ${tl.total} 部；严格只剩首播 2025 的 ${ts.total} 部；《权力的游戏》归首播的 2011 年`);
+  }
 }
 
 console.log('\n■ 从 v5.4 的线上数据升级');

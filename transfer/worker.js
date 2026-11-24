@@ -2224,6 +2224,94 @@
 //    改法：逐个文件比路径和大小（NFC + 不分大小写），源头用原生 pikpak 后端；系统文件、没下完的临时文件不算；
 //      Dropbox 多出来的不算；列失败回 502（没核对成，过会儿再核对，不重传）；回缺了哪些 / 哪些大小不对。
 //      /api/link/copy 支持 from: 'pikpak' 与 sizeOnly（补传时绕开 WebDAV）
+//  910 「请求添加」批量传输 + 剧集区 auto/ram2
+//    根因：请求中心一次能加几十部，以前每部单独开一个 rclone 作业（rclone 默认 4 并发 / 8 检查，
+//      Dropbox 默认 48Mi 分块、不开 batch_mode），一部一部排着走；剧集和电影混在 auto 同一层，分不开。
+//      另外 jobs 一次最多 12 个作业、每个 2 次调用全并发出去，超过 Worker 每次 6 个连接的上限，
+//      多出来的排队等着 —— 而 vpsFetch 的计时在 fetch 之前就开始了，排队那段也算进超时
+//    改法：
+//      · 条目 / 目录接口都多一个可选的 sub：空 = 909 原样；剧集区的名字（AUTO_TV_DIR，默认 ram2）= auto/ram2 下面；
+//        别的值 400。sub 为空时名字不许就是剧集区本身（purge / verify 'ram2' 碰不到整个剧集区）
+//      · rename 多一个 to：可以从 auto 挪进 auto/ram2（名字不变也挪）；先建目标的上一层，
+//        目标已经有了、原来的也还在，回 409 exists（不再让 rclone 把两个文件夹逐个文件合并）；
+//        目标在、原来的不在了 = 上一次其实挪完了，回 200 done（见下面「审查后」②）
+//      · /api/link/batch-copy：最多 16 项一个作业，16 并发 / 16 检查。_filter 的 IncludeRule 一项一条
+//        （名字里的 * ? [ ] { } \ 全部转义，发行名里的 [Full-4]、追踪码 [auto-tv…] 才不会变成字符类）+ IgnoreCase；
+//        开之前用同一套过滤列一次来源当探针：列回来有这批以外的东西 = 这台 rclone 不认过滤，回 409 nofilter
+//        （请求添加退回逐个传），这次列表顺带给每项的文件数和字节数（进度条的分母）。
+//        Dropbox 走连接串 chunk_size=16Mi、batch_mode=sync，BufferSize 8Mi：16 并发约 100 + 16×24 ≈ 480 MB，
+//        2G 的 VPS 扛得住（默认 48Mi + 16Mi 是 1.1 GB，会被 OOM 杀掉）；CheckFirst 先核完再传，进度条分母不往回跳。
+//        key 幂等：统计组第一次叫 tjb/<key>，重开一次换一个（tjb/<key>/2、/3…）；开之前看 core/group-list，
+//        同一个 key 的作业还在跑就接上（reused），调用方超时重来不会开第二个（见下面「审查后」①③）；
+//        过了 40 秒就不开了（就在发 sync/copy 之前看），回 503 让调用方下一轮再来
+//      · /api/link/batch-verify：两边各列一次（同一套过滤），按条目分开，逐个走 909 的 linkCompare；
+//        哪边列失败回 502 { side }，不算不一致
+//      · /api/link/batch-purge：最多 8 项，最多 4 个同时删；已经没了算删掉了（gone）
+//      · /api/link/job { detail: 1 }：统计组从 job/status 读（批量作业不是 job/<id>）；多回 eta、文件数、
+//        检查数、错误、正在传的文件（按路径归到条目）。jobs 还是每个作业 2 次调用
+//      · /api/link/jobs、organize：并发上限 4（linkPool）；exists 多收 tv: [...]（列 dropbox:auto/ram2）
+//      · ping 多回 caps: ['sub', 'batch'] 和 tv：请求添加据此决定走不走批量（909 不认识的接口回 400 不是 404）
+//    审查后又改了四处（910 还没发出去，算在 910 里）：
+//    根因：① 真 rclone（1.62 起）每个 rc 调用都占一个作业号，同步的也算（rc/noop、core/stats、job/list 自己都算），
+//            job/list 只回 jobids（24 小时内的全在里面，没有 runningIds）。「最新 8 个作业号里找同组的」中间隔几个调用
+//            就找不到了 —— 请求添加超时重来，同一批会再开一个 16 路的作业，两个一起传同一批（内存翻倍、撞 429）；
+//            测试的模拟只给异步作业发作业号、还给了 runningIds，所以一直是绿的
+//          ② 改名的 sync/move 到了 rclone（PikPak 的 DirMove 一下就挪完了），回包丢了（520 / 超时）。重来的时候目标在了，
+//            回 409 exists —— 请求添加当成「发行名被以前的请求占了」照原名往下走，原名早就不在了：
+//            传 0 个文件、核对 0/0、补传、最后判失败，真正的文件在 PikPak 上新名字底下没人管
+//          ③ 重开（看门狗停掉、作业丢了、上一个跑完了）沿用同一个统计组 tjb/<key>：rclone 不删跑完的组，
+//            新作业的字节数、文件数、错误接着上一次的往上加，停的时候传了一半的文件算两遍，进度条提前到 99%
+//          ④ 45 秒的截止只在建目录（15 秒超时）和 sync/copy（30 秒超时）之前看一次：sync/copy 可能到 59 秒才发出去、
+//            89 秒才回来，调用方（60 秒超时）早就放弃了，没拿到作业号
+//    改法：① 按统计组认，不再按「最新几个作业号」：core/group-list 里没有这个 key 的组 = rclone 这次启动以来没开过，开；
+//            有：job/list 给了 runningIds 就挨个问还在跑的；没给（现在的 rclone）看最新那一组的统计 ——
+//            有正在传 / 正在核对的 = 在跑，接上；作业号在 group-list 里这一组前后那段作业号里找（最多问 15 个），
+//            找不到回 200 { jobid: 0, reused, running }，这一轮不开；什么都没在传 = 跑完了、停掉了，也可能还在列目录
+//            （CheckFirst 先列完两边才开始传）：找到了作业就看它跑完没有，找不到就先 job/stopgroup 停掉这一组再开 ——
+//            同一个 key 不会有两个作业同时跑。group-list / job/list / 统计 / 停组有一个没回来就不开
+//          ② rename 目标在的时候再看一眼原来的：原来的不在了 = 上一次挪完了，回 200 { name, sub, jobid, done: 1 }，
+//            jobid 是一个确认用的异步 stat（新名字那个文件夹，马上跑完、成功）—— 老的请求添加照常等作业跑完、换成新名字。
+//            两个都在才回 409 exists
+//          ③ 统计组一次开一个名字：tjb/<key>，之后 tjb/<key>/2、/3…（group-list 里最大的加一）；
+//            rclone 重启过组都没了，又从 tjb/<key> 开始
+//          ④ 探针、查作业、建目录同时走（建目录 5 秒超时、不看结果）；40 秒的截止放在 sync/copy 前一刻（停组之后再看一次），
+//            sync/copy 的超时改成 15 秒：最晚 55 秒回到调用方
+//  911 /api/link/* 加固（稳定 / 性能，九条审查结论；页面与 /api/rc 一行没动，接口形状都向下兼容）
+//    根因：
+//      ① organize 一次最多 1 + 60 个子请求（免费版 50 个封顶），第 50 个以后全报 Too many subrequests，60 个以后的连提都不提；
+//         也没有总截止（列目录 30 秒 + 删除排队能到 67 秒）。请求添加整理一次就算完，剩下的广告文件一起传到 Dropbox
+//      ② 每个调用各有超时，一个接一个加起来超过调用方的 60 秒：verify 文件夹两次列目录（80 秒）、文件两次 stat（58 秒）、
+//         rename 建目录 + 两次 stat + 确认（66 秒）/ sync/move 到 62 秒才回来 —— 调用方当成 VPS 出错，次次撞熔断
+//      ③ rclone 的 rc 只有「没找到」回 404、参数不对回 400，后端出事（PikPak / Dropbox 超时、限流、5xx）一律 500 + JSON error，
+//         以前一律回 422：请求添加当逻辑错误，熔断永远不开，一行行按满退避攒到 20 次判死
+//      ④ jobs 一个都没问到（VPS 连不上）也回 200：请求添加的熔断把它当「VPS 好好的」清零，半开试探永远成功
+//      ⑤ 单项 purge 删完了、回包丢了，重来是 directory not found → 422：传完、核对完、删完的一项最后判失败
+//      ⑥ rename 的 909 那条路（没有 sub / to）sync/move 回包丢了：真 rclone 的 _async 当场回作业号，重来时原来的已经不在，
+//         作业跑完是 directory not found，请求添加重试 3 次判死，文件在 PikPak 新名字底下没人管（910 的模拟同步回 404，没测出来）
+//      ⑦ 单项 copy 不认作业：回包丢了下一轮再开一个，两个 rclone 作业一起传同一项，多出来那个谁都停不了
+//      ⑧ job / jobs 的 core/stats 没问到（job/status 问到了）当 0 字节回去：批量进度一下掉回 0%
+//      ⑨ batch-copy 找作业：runningIds 16 个一个不落地问完（不看截止，能到 54 秒），退到看统计那条路又把它们问一遍
+//    改法：
+//      ① 一次最多删 40 个（LINK_ORG_MAX），45 秒以后不开新的删除（删除的超时也截到 53 秒以内）；多回 left（还剩几个垃圾文件），
+//         重来安全（每次都重新列）；老调用方不看 left
+//      ② verify 两边同时列 / 同时 stat（和 batch-verify 一样，回的错照旧先 PikPak 后 Dropbox）；rename 建目录 5 秒、不看结果，
+//         发 sync/move 之前过了 28 秒就回 503 retry；job/status、core/stats 各 8 秒（jobs 最多 3 轮 × 16 秒）；batch-purge 的 purge 25 秒
+//      ③ linkRc：rclone 回 5xx、消息像暂时性的（超时 / 连接断 / 限流 / 5xx 字样，只认整词和带前缀的状态码，文件名里的数字不算）
+//         回 502，别的照旧 422；rc 照样是 true（gone / job not found / stop 不受影响）。batch-purge 算「连不上」改看 5xx
+//      ④ jobs 全部 5xx（不算作业没了的）回 502，和 batch-purge 一样；老调用方本来就接着这个失败，退回一个一个问
+//      ⑤ 单项 purge：not found 回 200 { ok, gone }（和 batch-purge 一样）
+//      ⑥ 909 那条路挪之前先 stat 原来的：确实不在了才看新名字，新名字在 = 上一次挪完了，回 { name, jobid, sub, done: 1 }
+//         （jobid 是确认用的异步 stat，同 910 的剧集区那条路）；别的情况照 909 原样 sync/move，不回 409。多一次 stat
+//      ⑦ 单项 copy 都带统计组 tjc/<[sub/]item>/<毫秒>（每次一个新组，补传不和上一次累加），平常不多问；
+//         带 retry: 1（调用方说上一次没拿到回答）才先查：还在跑 → 接上（reused），在跑没找到作业号 → 503 retry，
+//         问不清楚 → 502，都不开；跑完了 / 停了才开新的（linkBatchSlot 加 prefix，同批量）。建目录 5 秒、不看结果
+//      ⑧ 统计没问到：detail 回 503（「VPS 抖了，下一轮再问」），不带 detail 的不回 bytes / total / speed（stats: 0）；
+//         jobs 里跑完的作业不再问统计（每个省一次调用；单个 job 照旧回）
+//      ⑨ runningIds 一次 3 个、每次之前看截止；问到的记下来，退到看统计时先从里面找、再从没问过的里挑 15 个；
+//         有过这个 key、又问到截止还没问完，不再往下问，回 503
+//    要请求添加配合才生效的两处（老的请求添加照旧能用）：整理回 left > 0 时再叫一次 organize；copy 上一次暂时性失败、
+//    没拿到作业号时带 retry: 1
+//    测试：tests/batch.mjs 的「911 加固」一节（模拟的 rclone 改成和真的一样：_async 的 sync/move 来源不在了是作业失败）
 //  注意: Worker 出站仅支持 HTTP 端口 80/8080/8880/2052/2082/2086/2095
 //        因此 VPS 面板服务默认跑在 8080
 // ============================================================
@@ -2289,7 +2377,7 @@ function isBlockedHost(host) {
 /* 版本标识单一来源。核心名与编号分开存，是因为编号每次都动、名字不动；
    拼好的 VER 同时供 /version、关于卡、window.Cuven 三处消费，不会走散。 */
 const CORE  = 'Cuven Bangkok';
-const BUILD = '909 / (S)';
+const BUILD = '911 / (S)';
 const VER   = CORE + ' ' + BUILD;
 
 export default {
@@ -2371,6 +2459,8 @@ const VPS_SAFE_RETRY = new Set([521, 522, 523, 525, 526, 530]);
 const VPS_IDEM_RETRY = new Set([502, 503, 520]);
 const RC_IDEMPOTENT = new Set([
   'core/version', 'core/stats', 'core/memstats', 'core/pid', 'core/bwlimit', 'job/status', 'job/list', 'job/stop',
+  // [910] 批量传输认作业用：列统计组、停一整组（停两次和停一次一样）
+  'core/group-list', 'job/stopgroup',
   'operations/list', 'operations/size', 'operations/stat', 'operations/fsinfo', 'operations/about', 'operations/mkdir',
   'config/get', 'config/listremotes', 'config/providers', 'options/get', 'rc/noop', 'vfs/stats'
 ]);
@@ -13512,10 +13602,28 @@ const ICONS = {
      [909] /api/link/copy    { from: 'pikpak', sizeOnly } 补传时可以改从原生 pikpak 后端拿、只按大小判断
      [908] /api/link/exists  { items }        一次看好几个（列一次 dropbox:auto）
      [908] 连 VPS 带重试（vpsFetch）；VPS_ALT 可选：同一台机器的备用入口（灰云子域名 / IP），重试时轮流走
-     [908] rclone 自己回的错（job not found、directory not found…）回 422，不再和「VPS 连不上」一样回 502 */
+     [908] rclone 自己回的错（job not found、directory not found…）回 422，不再和「VPS 连不上」一样回 502
+     [910] 条目 / 目录接口都收可选的 sub：空 = 909 原样（auto 下面一层）；剧集区的名字（AUTO_TV_DIR，默认 ram2）
+           = auto/ram2 下面一层；别的值 400。sub 为空时名字不许就是剧集区本身（400）
+     [910] /api/link/ping    多回 caps: ['sub', 'batch'] 和 tv（剧集区的名字）
+     [910] /api/link/rename  { dir, sub?, to? }  auto/[sub/]dir → auto/[to/]<新名字>；先建上一层；目标已在回 409 exists；回 { name, jobid, sub }
+     [910] /api/link/exists  { items, tv }      tv 里是剧集区下面的名字（只有给了才列 dropbox:auto/ram2）→ { exists, tv }
+     [910] /api/link/job     { jobid, detail }  统计组从 job/status 读；detail 多回 eta / 文件数 / 检查数 / 正在传的文件（归到条目）
+     [910] /api/link/batch-copy   { key, items: [{ item, kind, sub }], from?, sizeOnly?, transfers?, checkers? }
+           最多 16 项一个 sync/copy 作业（_filter 一项一条 IncludeRule），回 { jobid, reused?, total, files, items }；
+           rclone 不认过滤回 409 nofilter（调用方退回逐个传）；同一个 key 的作业在跑但作业号没找到回 { jobid: 0, reused, running }
+     [910] /api/link/rename  上一次其实挪完了（原来的不在、目标在）回 { name, sub, jobid, done: 1 }（jobid 是确认用的 stat，马上跑完）
+     [910] /api/link/batch-verify { items, src? }  两边各列一次，按条目逐个核对 → { results: { key: 同 verify } }
+     [910] /api/link/batch-purge  { items }        最多 8 项、4 个同时删 → { results: { key: { ok } | { ok, gone } | { error } } }
+           结果里的 key：有 sub 是 sub + '/' + item，没有就是 item
+     [911] /api/link/organize  一次最多删 40 个、45 秒以后不开新的删除，多回 left（还剩几个垃圾文件，> 0 可以再叫一次）
+     [911] /api/link/copy      { retry: 1 } 上一次没拿到回答：这一项的作业还在跑就接上（reused），不开第二个；统计组 tjc/…
+     [911] /api/link/purge     已经没了回 { ok, gone }；/api/link/rename 909 那条路也认得「上一次挪完了」（done: 1）
+     [911] /api/link/jobs      全部连不上回 502；rclone 回 5xx 的后端暂时性错误回 502（以前 422）；verify 两边同时列 */
 
 const LINK_RC = new Set([
-  'core/version', 'core/stats', 'job/status', 'job/stop',
+  'core/version', 'core/stats', 'job/status', 'job/stop', 'job/list',
+  'core/group-list', 'job/stopgroup',                                  // [910] 批量传输的幂等（linkBatchSlot）
   'operations/list', 'operations/size', 'operations/stat', 'operations/mkdir',
   'operations/deletefile', 'operations/purge', 'operations/copyfile',
   'sync/copy', 'sync/move'
@@ -13532,8 +13640,14 @@ const linkCfg = env => ({
   webdav: String(env.RC_WEBDAV || 'webdav:'),
   pikpak: String(env.RC_PIKPAK || 'pikpak:'),
   dropbox: String(env.RC_DROPBOX || 'dropbox:'),
-  auto: String(env.AUTO_DIR || 'auto').replace(/^\/+|\/+$/g, '')
+  auto: String(env.AUTO_DIR || 'auto').replace(/^\/+|\/+$/g, ''),
+  /* [910] 剧集区：auto 下面固定的一层名字（PikPak、Dropbox 两边一样），不收路径 */
+  tv: linkName(env.AUTO_TV_DIR) || 'ram2'
 });
+
+/* [911] rclone 回 5xx 时，哪些消息算「后端暂时不行」（回 502，算 VPS / 网盘抖了）。只认整词和带前缀的状态码：
+   光秃秃的 429 / 503 / EOF / tls 会撞上文件名、路径里的数字和字母 */
+const LINK_TRANSIENT = /\b(timeout|timed out|deadline exceeded|connection (reset|refused)|unexpected EOF|broken pipe|no such host|TLS handshake|too_many_requests|too_many_write_operations|too many requests|rate.?limit(ed|_exceeded|exceeded)?|service unavailable|bad gateway|gateway timeout|internal server error|temporar(y|ily)|try again)\b|\b(HTTP|status|error)[ :]*(429|50[0234])\b/i;
 
 /** 服务端自己调 rclone rc：同样的 host / 端口护栏，自己的接口白名单，异步作业不占边缘的超时 */
 async function linkRc(env, path, payload, ms) {
@@ -13552,24 +13666,74 @@ async function linkRc(env, path, payload, ms) {
   const r = x.r, text = x.text;
   let data = null; try { data = JSON.parse(text); } catch (e) {}
   if (r.status === 401) return { ok: false, status: 502, error: 'VPS 认证失败（VPS_USER / VPS_PASS 不对）' };
-  /* rclone 自己回的错（JSON 里有 error，比如 job not found / directory not found）是 4xx 语义：不是 VPS 坏了 */
-  if (!r.ok) return { ok: false, status: data && data.error ? 422 : 502, rc: !!(data && data.error),
-                      error: (data && data.error) || edgeErr(r.status, text, x.attempts - 1), data: data };
-  return { ok: true, status: 200, data: data || {}, retried: x.attempts - 1 };
+  /* rclone 自己回的错（JSON 里有 error，比如 job not found / directory not found）是 4xx 语义：不是 VPS 坏了。
+     [911] 但 rclone 的 rc 只有「没找到」回 404、参数不对回 400，后端出的事（PikPak / Dropbox 超时、限流、5xx、
+     token 刷不下来）一律 HTTP 500 + JSON error —— 以前这些也回 422，请求添加当成逻辑错误：熔断永远不开，
+     一行一行按满退避攒错，20 次后判死。现在 rclone 回 5xx、消息又像暂时性的才回 502（rc 照样是 true，
+     gone() / job not found / stop 的判断不受影响）；别的照旧 422 */
+  if (!r.ok) {
+    const msg = (data && data.error) || '';
+    const transient = !!msg && r.status >= 500 && LINK_TRANSIENT.test(msg);
+    return { ok: false, status: msg ? (transient ? 502 : 422) : 502, rc: !!msg, rcStatus: r.status,
+             error: msg || edgeErr(r.status, text, x.attempts - 1), data: data };
+  }
+  /* [910] rcid：rclone 1.62 起同步调用也占一个作业号，放在 X-Rclone-Jobid 里（批量传输找作业时跳过自己这几次调用） */
+  return { ok: true, status: 200, data: data || {}, retried: x.attempts - 1,
+           rcid: parseInt(r.headers && r.headers.get('x-rclone-jobid'), 10) || 0 };
 }
 
-/** 一个异步作业的进度。rclone 重启过、作业没了：missing（调用方从头再来，不算 VPS 出错） */
-async function linkJob(env, id) {
-  const r = await linkRc(env, 'job/status', { jobid: id }, 15000);
+/** 一个异步作业的进度。rclone 重启过、作业没了：missing（调用方从头再来，不算 VPS 出错）
+    [910] 统计组从 job/status 的 group 读：批量传输开的时候带了 _group（tjb/<key>，重开过是 tjb/<key>/<n>），不是 job/<id>；
+    还是 2 次调用。detail：多回 eta、文件数、检查数、错误、正在传的文件（按路径归到条目） */
+async function linkJob(env, id, detail, lite) {
+  /* [911] 两次调用各 8 秒（以前 15 秒）：jobs 12 个、4 个一轮，最多 3 轮 × 16 秒 = 48 秒，不会拖过调用方的 60 秒。
+     这两个 rclone 都从内存里答，8 秒还没回 = VPS 真的忙不过来了 */
+  const r = await linkRc(env, 'job/status', { jobid: id }, 8000);
   if (!r.ok) {
     if (r.rc && /job not found|not found/i.test(r.error || '')) return { finished: true, success: false, missing: 1, error: 'job not found' };
     return { error: r.error, status: r.status };
   }
   const s = r.data || {};
-  const st = await linkRc(env, 'core/stats', { group: 'job/' + id }, 15000);
-  const x = (st.ok && st.data) || {};
-  return { finished: !!s.finished, success: !!s.success, error: s.error || '',
-           bytes: Number(x.bytes) || 0, total: Number(x.totalBytes) || 0, speed: Number(x.speed) || 0 };
+  const group = String(s.group || '') || 'job/' + id;
+  /* [911] lite（jobs 用）：跑完的作业不问统计 —— 调用方（改名 / 传输 / 批量收尾）跑完了只看 success / error，
+     jobs 里每个跑完的作业省一次调用。单个 job 照旧回 bytes / total */
+  if (lite && s.finished && !detail) return { finished: true, success: !!s.success, error: s.error || '' };
+  const st = await linkRc(env, 'core/stats', { group: group }, 8000);
+  /* [911] 统计没问到（job/status 问到了）：以前当成 0 字节回去，批量的进度一下掉回 0%（成员一起写成「传输到 Dropbox 0%」）。
+     detail（批量那条）回 503，请求添加的「VPS 抖了：下一轮再问」；不带 detail 的不回 bytes / total / speed，
+     老调用方的进度保持上一次的（看门狗只认字节数往上走） */
+  if (!st.ok) {
+    if (detail && !s.finished) return { error: '作业统计没问到：' + st.error, status: 503 };
+    return { finished: !!s.finished, success: !!s.success, error: s.error || '', group: group, stats: 0 };
+  }
+  const x = st.data || {};
+  const o = { finished: !!s.finished, success: !!s.success, error: s.error || '',
+              bytes: Number(x.bytes) || 0, total: Number(x.totalBytes) || 0, speed: Number(x.speed) || 0 };
+  if (!detail) return o;
+  const c = linkCfg(env), n = v => Number(v) || 0;
+  return Object.assign(o, {
+    group: group, eta: x.eta == null ? null : n(x.eta), elapsed: n(x.elapsedTime),
+    transfers: n(x.transfers), totalTransfers: n(x.totalTransfers), checks: n(x.checks), totalChecks: n(x.totalChecks),
+    errors: n(x.errors), lastError: String(x.lastError || '').slice(0, 300),
+    transferring: (Array.isArray(x.transferring) ? x.transferring : []).slice(0, 32).map(t => Object.assign(linkWhich(t, c), {
+      bytes: n(t.bytes), size: t.size == null ? -1 : n(t.size), pct: n(t.percentage), speed: n(t.speed) }))
+  });
+}
+
+/* [910] 正在传的那个文件属于哪一项。core/stats 里的名字是相对 srcFs 的：批量作业的 srcFs 就是 auto
+   （ram2/<剧>/<集> 或 <电影文件>），单项作业的 srcFs 是 auto/[ram2/]<item>（把前面那截补回来再归） */
+function linkWhich(t, c) {
+  let p = String(t.name || '').replace(/^\/+/, '');
+  const fs = String(t.srcFs || '');
+  if (fs) {
+    const root = fs.slice(fs.indexOf(':') + 1).replace(/^\/+|\/+$/g, '');
+    if (c.auto && root.startsWith(c.auto + '/')) p = root.slice(c.auto.length + 1) + '/' + p;
+    else if (!c.auto && root) p = root + '/' + p;
+  }
+  const seg = p.split('/');
+  let sub = '';
+  if (seg.length >= 2 && linkKey(seg[0]) === linkKey(c.tv)) { sub = c.tv; seg.shift(); }
+  return { item: seg[0] || '', sub: sub, file: seg.length > 1 ? seg.slice(1).join('/') : seg[0] || '' };
 }
 
 /** auto 下面的一层名字：不许斜杠、不许 ..、不许空 */
@@ -13579,9 +13743,29 @@ function linkName(v) {
   return s.length > 255 ? '' : s;
 }
 
-/** 一个目录下的全部文件（递归），回 [{ path, name, size }] */
-async function linkFiles(env, fs) {
-  const r = await linkRc(env, 'operations/list', { fs: fs, remote: '', opt: { recurse: true, filesOnly: true, noModTime: true, noMimeType: true } }, 50000);
+/** [910] sub：空（或没给）= auto 下面；剧集区的名字（不分大小写）= auto/<剧集区> 下面；别的值回 null（调用方 400） */
+function linkSub(v, c) {
+  const s = v == null || v === false ? '' : String(v).trim();
+  if (!s) return '';
+  return linkKey(s) === linkKey(c.tv) ? c.tv : null;
+}
+
+/** [910] 名字 + sub 一起验：sub 为空时名字不许就是剧集区本身（不然 purge / verify 'ram2' 碰到的是整个剧集区） */
+function linkWhere(name, sub, c, what) {
+  const n = linkName(name);
+  if (!n) return { error: what + ' 不对（只能是 ' + c.auto + ' 下面的一层名字）' };
+  const s = linkSub(sub, c);
+  if (s == null) return { error: 'sub 不对（只能是空，或者剧集区 ' + c.tv + '）' };
+  if (!s && linkKey(n) === linkKey(c.tv)) return { error: what + ' 不能是剧集区 ' + c.tv + ' 本身（剧集区里的东西要带 sub）' };
+  return { name: n, sub: s };
+}
+
+/** 一个目录下的全部文件（递归），回 [{ path, name, size }]
+    [910] filter：rclone 的 _filter（批量接口在 auto 上一次列出这一批）；ms：超时（默认 50 秒） */
+async function linkFiles(env, fs, filter, ms) {
+  const body = { fs: fs, remote: '', opt: { recurse: true, filesOnly: true, noModTime: true, noMimeType: true } };
+  if (filter) body._filter = filter;
+  const r = await linkRc(env, 'operations/list', body, ms || 50000);
   if (!r.ok) throw Object.assign(new Error(r.error), { status: r.status, rc: !!r.rc, notFound: !!(r.rc && /not found|doesn't exist/i.test(r.error || '')) });
   return ((r.data && r.data.list) || []).map(f => ({ path: String(f.Path || f.Name || ''), name: String(f.Name || ''),
                                                   size: f.Size == null ? -1 : Number(f.Size) }));
@@ -13622,42 +13806,295 @@ function linkCompare(src, dst) {
            differ: differ.slice(0, 30), differCount: differ.length, extra: extra };
 }
 
+/* [910] 有上限的并发。Worker 每次调用最多同时开 6 个连接，多出来的排队；而 vpsFetch 的计时在 fetch 之前就开始了，
+   排队等的那段也算进超时里 —— 所以池子不超过 4。结果按原来的顺序回；fn 抛错当成一次失败的 rc 调用 */
+async function linkPool(list, n, fn) {
+  const out = new Array(list.length);
+  let next = 0;
+  const run = async () => {
+    while (next < list.length) {
+      const i = next++;
+      try { out[i] = await fn(list[i], i); }
+      catch (e) { out[i] = { ok: false, status: (e && e.status) || 500, error: (e && e.message) || String(e) }; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, n), list.length) }, run));
+  return out;
+}
+
+/* [910] 批量传输 / 核对 / 删除：一次一批（最多 16 项），一个 rclone 作业或一次列表走完。
+   · 条目 { item, kind, sub }：kind 是 dir / file，sub 同单项接口。结果按 key 回：有 sub 是 sub/item，没有就是 item
+   · 过滤：rclone 的 _filter.IncludeRule 一项一条 —— 文件是 /[sub/]<名字>，文件夹是 /[sub/]<名字>/**；
+     名字里的 * ? [ ] { } \ 全部转义（发行名里有 [Full-4][CN-HK-EN]，追踪码是 [auto-tv…]，原始名里有 [全4集]，
+     不转义就成了字符类，这一项什么都匹配不到，作业照样「成功」、0 个文件）；IgnoreCase（Dropbox 不分大小写）
+   · 列表按路径归回条目时用 linkKey（NFC + 小写），和 909 的逐个核对一个口径 */
+const LINK_BATCH = 16, LINK_PURGE = 8;
+/* [911] organize 一次最多删几个：免费版每次调用 50 个子请求，减去列目录（连重试 3 次），再留点余量 */
+const LINK_ORG_MAX = 40;
+/* [910] batch-copy 最晚什么时候发 sync/copy：调用方 60 秒超时，sync/copy 再给 15 秒，55 秒以内回到调用方 */
+const LINK_LAUNCH_BY = 40000;
+const linkGlob = s => String(s).replace(/[*?\[\]{}\\]/g, '\\$&');
+const linkRule = it => '/' + (it.sub ? linkGlob(it.sub) + '/' : '') + linkGlob(it.item) + (it.kind === 'dir' ? '/**' : '');
+const linkFilter = items => ({ IncludeRule: items.map(linkRule), IgnoreCase: true });
+
+/** 批量接口的 items：一个不对整批 400（带 index）；同一个 key 去重 */
+function linkItems(list, max, c) {
+  if (!Array.isArray(list) || !list.length) return { error: 'items 不能是空的' };
+  if (list.length > max) return { error: 'items 一次最多 ' + max + ' 个（这次 ' + list.length + ' 个）' };
+  const out = [], seen = new Set();
+  for (let i = 0; i < list.length; i++) {
+    const x = list[i] && typeof list[i] === 'object' ? list[i] : {};
+    const w = linkWhere(x.item, x.sub, c, 'item');
+    if (w.error) return { error: '第 ' + (i + 1) + ' 项：' + w.error, index: i };
+    const key = w.sub ? w.sub + '/' + w.name : w.name;
+    if (seen.has(linkKey(key))) continue;
+    seen.add(linkKey(key));
+    out.push({ item: w.name, sub: w.sub, kind: x.kind === 'dir' ? 'dir' : 'file', key: key });
+  }
+  return { items: out };
+}
+
+/** 一次过滤列表（路径相对 auto）按条目分开：idx 是 linkKey(key) → { it, list }，
+    list 里的路径相对条目自己（文件夹条目是里面的相对路径，文件条目就是它的名字）；不属于这一批的个数记在 stray */
+function linkSplit(files, items, c) {
+  const idx = new Map();
+  items.forEach(it => idx.set(linkKey(it.key), { it: it, list: [] }));
+  const tvk = linkKey(c.tv);
+  let stray = 0;
+  files.forEach(f => {
+    const seg = String(f.path || '').split('/');
+    let sub = '';
+    if (seg.length >= 2 && linkKey(seg[0]) === tvk) { sub = c.tv; seg.shift(); }
+    const hit = idx.get(linkKey((sub ? sub + '/' : '') + seg[0]));
+    if (!hit || (hit.it.kind === 'dir') !== (seg.length > 1)) { stray++; return; }
+    hit.list.push({ path: hit.it.kind === 'dir' ? seg.slice(1).join('/') : hit.it.item, name: f.name, size: f.size });
+  });
+  return { idx: idx, stray: stray };
+}
+
+/** 连接串注入后端参数（只对这一次调用生效，不动 rclone.conf，和面板 9737 那段同一个做法）：
+    'dropbox:' → 'dropbox,chunk_size=16Mi,batch_mode=sync:'；本来就带参数的连接串接在后面 */
+function linkTuned(remote, opts) {
+  const s = String(remote);
+  const i = s.indexOf(':', s.charAt(0) === ':' ? 1 : 0);
+  return i <= 0 ? s : s.slice(0, i) + ',' + opts + s.slice(i);
+}
+
+/** [910] 批量传输的幂等：同一个 key（批次编号）的作业认统计组，不认「最新几个作业号」。
+    真 rclone（1.62 起）每个 rc 调用都占一个作业号（同步的也算），job/list 的 jobids 里 24 小时的全在、多半没有 runningIds，
+    以前只看最新的 8 个，中间隔几个调用就认不出自己开的那个了（审查后 ①）。现在：
+      · 统计组一次开一个名字：第一次 tjb/<key>，之后 tjb/<key>/2、/3…（group-list 里最大的加一）。
+        rclone 不删跑完的组，同名的新作业会把字节数、文件数、错误接着上一次的累加（审查后 ③）
+      · core/group-list 里没有这个 key 的组 = rclone 这次启动以来没开过（只问列出来的组的统计：core/stats 问一个
+        不存在的组会顺手把它建出来）
+      · 有：job/list 给了 runningIds 就挨个问还在跑的（最多 16 个）；没给就看最新那一组的统计 ——
+        有正在传 / 正在核对的 = 在跑；什么都没在传 = 跑完了、停掉了，也可能还在列目录（CheckFirst 先列完两边才开始核对、传）。
+        作业号在 group-list 里这一组前后那段作业号里找（linkNear，最多问 15 个，一次 3 个）：
+        找到了看它跑完没有；在跑但没找到 → { jobid: 0, running }，这一轮不开；没在传也没找到 → 开之前先停掉这一组（stop）
+    回 { jobid, group } 接上 / { jobid: 0, group, running: 1 } 在跑、作业号没找到 / { group, stop? } 开这一组（stop = 先停的组）
+    / { error, status } group-list、job/list、统计有一个没问出来（宁可这一轮不开，也不冒开第二个的险）。
+    until：找作业号最晚到什么时候（过了就当没找到）
+    [911] prefix：'tjb/'（批量，默认）或 'tjc/'（单项复制的重来，见 /api/link/copy）。tjc 的代号是开的那一刻的毫秒数
+    （tjc/<[sub/]item>/<ms>）：单项复制平常不先问 group-list 也开得出一个新组（同一项补传不和上一次的统计累加），
+    重来时 group-list 里代号最大的就是最近开的那个。
+    [911] runningIds 那一段也看 until（以前 16 个一个不落地问完，每个 10 秒，能拖到 54 秒）；问到的记下来，
+    退到下面找作业号时不再问第二遍 */
+async function linkBatchSlot(env, key, until, prefix) {
+  const stamp = prefix === 'tjc/';
+  const base = (stamp ? 'tjc/' : 'tjb/') + key;
+  const genOf = nm => {
+    if (nm === base) return 1;
+    const t = nm.startsWith(base + '/') ? nm.slice(base.length + 1) : '';
+    return (stamp ? /^[1-9]\d{0,15}$/ : /^[1-9]\d{0,5}$/).test(t) ? parseInt(t, 10) : 0;
+  };
+  const [G, L] = await Promise.all([linkRc(env, 'core/group-list', {}, 10000), linkRc(env, 'job/list', {}, 10000)]);
+  if (!G.ok) return { error: G.error, status: G.status };
+  if (!L.ok) return { error: L.error, status: L.status };
+  const names = (Array.isArray((G.data || {}).groups) ? G.data.groups : []).map(String);
+  let top = 0, newest = '';
+  names.forEach(nm => { const g = genOf(nm); if (g > top) { top = g; newest = nm; } });
+  const next = stamp ? base + '/' + Math.max(Date.now(), top + 1) : top ? base + '/' + (top + 1) : base;
+  const d = L.data || {};
+  const ints = a => Array.from(new Set((Array.isArray(a) ? a : []).map(x => parseInt(x, 10)).filter(x => x > 0))).sort((x, y) => x - y);
+  const asked = new Map();                                                   // 作业号 → { group, finished }（问到了的）
+  /* 新版 rclone：runningIds 就是还在跑的，挨个问一遍就清楚（有一个没问出来、问不完、或者太多，退到下面看统计）。
+     一次 3 个，每次之前看 until（和 linkProbe 一样） */
+  if (Array.isArray(d.runningIds)) {
+    const run = ints(d.runningIds).reverse();
+    if (run.length <= 16) {
+      let unsure = false;
+      for (let i = 0; i < run.length; i += 3) {
+        if (until && Date.now() > until) { unsure = true; break; }
+        const part = run.slice(i, i + 3);
+        const st = await Promise.all(part.map(id => linkRc(env, 'job/status', { jobid: id }, 10000)));
+        for (let k = 0; k < part.length; k++) {
+          const s = st[k], x = (s && s.data) || {};
+          if (s.ok) {
+            asked.set(part[k], { group: String(x.group || ''), finished: !!x.finished });
+            if (!x.finished && genOf(String(x.group || ''))) return { jobid: part[k], group: String(x.group) };
+          }
+          else if (!(s.rc && /not found/i.test(s.error || ''))) unsure = true;
+        }
+      }
+      if (!unsure) return { group: next };
+    }
+  }
+  if (!top) return { group: next };
+  if (until && Date.now() > until) return { error: 'VPS 太慢，没来得及问清楚（下一轮再来）', status: 503 };
+  const S = await linkRc(env, 'core/stats', { group: newest }, 10000);
+  if (!S.ok) return { error: S.error, status: S.status };
+  const x = S.data || {};
+  const busy = (Array.isArray(x.transferring) && x.transferring.length > 0) || (Array.isArray(x.checking) && x.checking.length > 0);
+  const own = new Set([G.rcid, L.rcid, S.rcid].filter(Boolean));            // 自己这几次调用的作业号不用问
+  /* 问过的先拿掉再挑这 15 个：名额留给没问过的 */
+  const f = await linkProbe(env, linkNear(ints(d.jobids).filter(id => !own.has(id) && !asked.has(id)), names, newest, 15), newest, until, asked);
+  if (f && !f.finished) return { jobid: f.jobid, group: newest };
+  if (f) return { group: next };                                             // 找到了，已经跑完（统计里还没清干净也算）
+  if (busy) return { jobid: 0, group: newest, running: 1 };
+  return { group: next, stop: newest };
+}
+
+/** [910] 这一组的作业号多半在哪：group-list 按建组的先后排，默认组的名字就是 job/<作业号>。
+    这一组前面最近的 job/<a>（多半是开它的那次调用里的预检列表）之后、后面最近的 job/<b> 之前，从前往后；
+    不够 cap 个再从最新的往回补 */
+function linkNear(ids, names, group, cap) {
+  const i = names.indexOf(group);
+  const num = nm => { const m = /^job\/(\d+)$/.exec(nm || ''); return m ? parseInt(m[1], 10) : 0; };
+  let a = 0, b = 0;
+  if (i >= 0) {
+    for (let k = i - 1; k >= 0 && !a; k--) a = num(names[k]);
+    for (let k = i + 1; k < names.length && !b; k++) b = num(names[k]);
+  }
+  const out = [], seen = new Set();
+  const add = id => { if (out.length < cap && !seen.has(id)) { seen.add(id); out.push(id); } };
+  if (a) ids.forEach(id => { if (id > a && (!b || id < b)) add(id); });
+  for (let k = ids.length - 1; k >= 0 && out.length < cap; k--) add(ids[k]);
+  return out;
+}
+
+/** [910] 一次问 3 个，问到统计组对得上的就停：{ jobid, finished } / null（没找到、或者到点了）。
+    问不出来的那几个当没找到 —— 后面没在传就先停组再开，在传就不开，哪边都不会开出第二个 */
+async function linkProbe(env, ids, group, until, asked) {
+  /* [911] asked：runningIds 那一段已经问到的（作业号 → { group, finished }）：对得上的直接答，别的不再问第二遍 */
+  if (asked && asked.size) {
+    for (const [id, a] of asked) if (a.group === group) return { jobid: id, finished: a.finished };
+    ids = ids.filter(id => !asked.has(id));
+  }
+  for (let i = 0; i < ids.length; i += 3) {
+    if (until && Date.now() > until) return null;
+    const part = ids.slice(i, i + 3);
+    const st = await Promise.all(part.map(id => linkRc(env, 'job/status', { jobid: id }, 8000)));
+    for (let k = 0; k < part.length; k++) {
+      const x = (st[k].ok && st[k].data) || null;
+      if (x && String(x.group || '') === group) return { jobid: part[k], finished: !!x.finished };
+    }
+  }
+  return null;
+}
+
 async function linkApi(request, env, p) {
   if (!env.LINK_KEY) return json({ error: '这台传输 Worker 没开放 /api/link（没配 LINK_KEY）' }, 404);
   if (request.headers.get('x-cuven-link') !== String(env.LINK_KEY)) return json({ error: '口令不对' }, 401);
   if (request.method !== 'POST') return json({ error: '请用 POST' }, 405);
   let b = {};
   try { b = await request.json(); } catch (e) { return json({ error: '请求体不是 JSON' }, 400); }
+  if (!b || typeof b !== 'object') b = {};
   const c = linkCfg(env);
   const fail = (r) => json({ error: r.error || '出错了' }, r.status || 502);
-  const at = (remote, name) => remote + c.auto + (name ? '/' + name : '');
+  /* [910] 路径只从这里拼：remote + auto + [/sub] + [/name]。sub 为空时和 909 一个字节都不差 */
+  const at = (remote, name, sub) => remote + c.auto + (sub ? '/' + sub : '') + (name ? '/' + name : '');
+  const dirOf = sub => [c.auto, sub].filter(Boolean).join('/');
+  const gone = r => !!(r.rc && /not found|doesn't exist/i.test(r.error || ''));
   try {
     if (p === '/api/link/ping') {
       const r = await linkRc(env, 'core/version', {}, 15000);
-      return r.ok ? json({ ok: 1, version: (r.data || {}).version || '', core: VER }) : fail(r);
+      /* [910] caps：请求添加据此决定走不走批量 / 剧集区（909 不认识的接口回 400「item 不对」，不是 404） */
+      return r.ok ? json({ ok: 1, version: (r.data || {}).version || '', core: VER, caps: ['sub', 'batch'], tv: c.tv }) : fail(r);
     }
 
     if (p === '/api/link/organize' || p === '/api/link/check' || p === '/api/link/rename') {
-      const dir = linkName(b.dir);
-      if (!dir) return json({ error: 'dir 不对（只能是 ' + c.auto + ' 下面的一层名字）' }, 400);
+      const w = linkWhere(b.dir, b.sub, c, 'dir');
+      if (w.error) return json({ error: w.error }, 400);
+      const dir = w.name, sub = w.sub;
+      const t0 = Date.now();
       if (p === '/api/link/rename') {
         const tpl = ['rel', 'std', 'season', 'nest', 'dot'].indexOf(b.tpl) >= 0 ? b.tpl : 'rel';
         const lang = ['en', 'cn', 'cnen'].indexOf(b.lang) >= 0 ? b.lang : 'en';
         const grp = b.grp == null ? 'Cuven®' : String(b.grp).slice(0, 40);
-        const name = linkName(rnFormat(rnParse(dir), tpl, lang, grp));
-        if (!name || name === dir) return json({ name: dir, same: 1 });
-        const r = await linkRc(env, 'sync/move', { srcFs: at(c.pikpak, dir), dstFs: at(c.pikpak, name), deleteEmptySrcDirs: true, _async: true }, 30000);
-        return r.ok ? json({ name: name, jobid: (r.data || {}).jobid }) : fail(r);
-      }
-      const files = await linkFiles(env, at(c.pikpak, dir));
-      if (p === '/api/link/organize') {
-        const junk = files.filter(f => rnJunk(f.name)).slice(0, 60);
-        const done = [], errs = [];
-        for (const f of junk) {
-          const r = await linkRc(env, 'operations/deletefile', { fs: at(c.pikpak, dir), remote: f.path }, 20000);
-          (r.ok ? done : errs).push(f.path);
+        /* [910] to：改完放在哪个区（没给 = 原地不动，跟 sub 一样）。名字不变、区也不变才算 same；
+           从 auto 挪进 auto/ram2 时名字不变也照样挪 */
+        const to = b.to == null ? sub : linkSub(b.to, c);
+        if (to == null) return json({ error: 'to 不对（只能是空，或者剧集区 ' + c.tv + '）' }, 400);
+        const name = linkName(rnFormat(rnParse(dir), tpl, lang, grp)) || dir;
+        if (!to && linkKey(name) === linkKey(c.tv)) return json({ error: '改完的名字不能是剧集区 ' + c.tv + ' 本身' }, 400);
+        if (name === dir && sub === to) return json({ name: dir, same: 1, sub: to });
+        const opt = { noModTime: true, noMimeType: true };
+        /* 上一次其实挪完了：回 200 done，带一个确认用的异步 stat（看新名字那个文件夹，马上跑完、成功）的作业号 ——
+           老的请求添加照常等作业跑完、换成新名字。拿不到作业号回 null（调用方自己决定怎么办） */
+        const doneAns = async () => {
+          const cf = await linkRc(env, 'operations/stat', { fs: at(c.pikpak, '', to), remote: name, opt: opt, _async: true }, 10000);
+          return cf.ok && (cf.data || {}).jobid ? json({ name: name, jobid: cf.data.jobid, sub: to, done: 1 }) : cf.ok ? null : cf;
+        };
+        /* [910] 用到剧集区（sub / to 不为空）才走这两步，sub、to 都空 = 909 原样：
+           · 先建目标的上一层（auto/ram2 第一次用的时候还没有）
+           · 目标已经在了回 409 exists：rclone 的 DirMove 碰上已有的目标会退成逐个文件合并，名字一样的两份就搅在一起了
+             （改名的时候名字还不唯一：追踪码要到传输那一步才加）
+           [911] 建目录 5 秒、不看结果（以前 15 秒，它的结果本来就没用）：建目录 + 两次 stat + sync/move 一个接一个，
+           以前最长 15 + 20 + 30 = 65 秒，拖过调用方的 60 秒 */
+        if (sub || to) {
+          await linkRc(env, 'operations/mkdir', { fs: c.pikpak, remote: dirOf(to) }, 5000);
+          const ex = await linkRc(env, 'operations/stat', { fs: at(c.pikpak, '', to), remote: name, opt: opt }, 20000);
+          if (!ex.ok && !gone(ex)) return fail(ex);
+          if (ex.ok && (ex.data || {}).item) {
+            /* 目标在：再看一眼原来的。原来的不在了 = 上一次的改名其实做完了（sync/move 到了 rclone，PikPak 的 DirMove
+               一下就挪完，回包丢了：520 / 超时，sync/move 不重试）。这时候回 409 exists，请求添加会当成「发行名被以前的请求
+               占了」照原名往下走，原名早就不在了 —— 回 200 done，带一个确认用的异步 stat（看新名字那个文件夹，马上跑完、成功）
+               的作业号：老的请求添加照常等作业跑完、换成新名字。两个都在才是真撞名，回 409 */
+            const sx = await linkRc(env, 'operations/stat', { fs: at(c.pikpak, '', sub), remote: dir, opt: opt }, 20000);
+            if (!sx.ok && !gone(sx)) return fail(sx);
+            if (sx.ok && (sx.data || {}).item) return json({ error: '目标已经有了：' + dirOf(to) + '/' + name, exists: 1, name: name, sub: to }, 409);
+            const d = await doneAns();
+            if (!d) return json({ error: 'rclone 没回作业号' }, 502);
+            return d instanceof Response ? d : fail(d);
+          }
+        } else {
+          /* [911] 909 那条路（sub、to 都不带：老的请求添加、没有 sub 的剧集）同样会遇上「挪完了、回包丢了」：
+             真 rclone 的 _async 调用当场回作业号，原来的不在了照样回 200 + 一个作业，作业跑完是 directory not found ——
+             请求添加当成改名出错，重来 3 次判死，文件在 PikPak 上新名字底下没人管。
+             挪之前先看一眼原来的：不在了（没出错、确实没有）才看新名字，新名字在 = 上一次挪完了，回 done（同上）。
+             别的情况（原来的在、看不了、新名字也不在）照 909 原样 sync/move，不回 409：老客户端看到的和以前一样 */
+          const sx = await linkRc(env, 'operations/stat', { fs: at(c.pikpak, '', ''), remote: dir, opt: opt }, 15000);
+          if ((sx.ok && !(sx.data || {}).item) || gone(sx)) {
+            const ex = await linkRc(env, 'operations/stat', { fs: at(c.pikpak, '', to), remote: name, opt: opt }, 15000);
+            if (ex.ok && (ex.data || {}).item) {
+              const d = await doneAns();
+              if (d instanceof Response) return d;
+            }
+          }
         }
-        return json({ files: files.length, deleted: done, failed: errs });
+        /* [911] 太晚了就不挪：sync/move 再给 30 秒，前面花了 28 秒以上，调用方（60 秒超时）多半等不到回包 ——
+           回 503 retry，下一轮再来（重来安全：上一次真挪完了的话，上面会认出来回 done） */
+        if (Date.now() - t0 > 28000) return json({ error: 'VPS 太慢，这一轮没改名（下一轮再来）', retry: 1 }, 503);
+        const r = await linkRc(env, 'sync/move', { srcFs: at(c.pikpak, dir, sub), dstFs: at(c.pikpak, name, to), deleteEmptySrcDirs: true, _async: true }, 30000);
+        return r.ok ? json({ name: name, jobid: (r.data || {}).jobid, sub: to }) : fail(r);
+      }
+      const files = await linkFiles(env, at(c.pikpak, dir, sub));
+      if (p === '/api/link/organize') {
+        /* [910] 最多 4 个同时删（以前一个接一个，广告文件一多就排很久）；结果还按原来的顺序
+           [911] 一次最多删 LINK_ORG_MAX（40）个，并且 45 秒以后不再开新的删除：
+             · 免费版一次调用最多 50 个子请求：以前最多 60 个（1 次列表 + 60 次删除），第 50 个以后的全报
+               Too many subrequests；60 个以后的连提都不提 —— 请求添加整理一次就算完，剩下的广告文件一起传到 Dropbox
+             · 列目录 30 秒 + 60 个删除（每个 2.5 秒、4 个一起）能到 67 秒，拖过调用方的 60 秒，算一次 VPS 出错
+           多回 left：还剩几个垃圾文件没删（超过上限的、没来得及删的、删失败的）。重来是安全的（每次都重新列），
+           老的调用方不看 left */
+        const all = files.filter(f => rnJunk(f.name));
+        const junk = all.slice(0, LINK_ORG_MAX);
+        const T = t0 + 45000;
+        const rs = await linkPool(junk, 4, f => Date.now() > T ? { ok: false, skipped: 1 }
+          : linkRc(env, 'operations/deletefile', { fs: at(c.pikpak, dir, sub), remote: f.path }, Math.min(20000, Math.max(1000, T + 8000 - Date.now()))));
+        const done = [], errs = [];
+        junk.forEach((f, i) => { if (rs[i].ok) done.push(f.path); else if (!rs[i].skipped) errs.push(f.path); });
+        return json({ files: files.length, deleted: done, failed: errs, left: all.length - done.length });
       }
       const pr = rnParse(dir);
       const total = parseInt(b.total, 10) || 0;
@@ -13671,7 +14108,7 @@ async function linkApi(request, env, p) {
     if (p === '/api/link/job') {
       const id = parseInt(b.jobid, 10);
       if (!id) return json({ error: '缺 jobid' }, 400);
-      const j = await linkJob(env, id);
+      const j = await linkJob(env, id, !!b.detail);
       return j.status ? fail(j) : json(j);
     }
 
@@ -13684,69 +14121,229 @@ async function linkApi(request, env, p) {
       return json({ ok: 1 });
     }
 
-    /* [908] 一次问好几个作业（请求添加每一轮只发一次）：{ ids: [..] } → { jobs: { id: 同 /api/link/job } }，最多 12 个 */
+    /* [908] 一次问好几个作业（请求添加每一轮只发一次）：{ ids: [..] } → { jobs: { id: 同 /api/link/job } }，最多 12 个
+       [910] 最多 4 个作业同时问（每个还是 2 次调用），不再一下子全发出去 */
     if (p === '/api/link/jobs') {
       const ids = Array.from(new Set((Array.isArray(b.ids) ? b.ids : []).map(x => parseInt(x, 10)).filter(x => x > 0))).slice(0, 12);
+      const rs = await linkPool(ids, 4, id => linkJob(env, id, false, true));
       const jobs = {};
-      await Promise.all(ids.map(async id => { jobs[id] = await linkJob(env, id); }));
+      ids.forEach((id, i) => { jobs[id] = rs[i]; });
+      /* [911] 一个都没问到、而且全是连不上 VPS（5xx）：回 502（和 batch-purge 一样）。以前回 200 —— 请求添加的熔断
+         把它当成「VPS 好好的」，失败次数清零：半开的试探永远「成功」，VPS 挂着的时候熔断也永远凑不够 3 次。
+         老的调用方本来就接着这个失败，退回一个一个问 job */
+      if (ids.length && rs.every(x => x && x.error && !x.missing && (x.status || 502) >= 500)) return json({ error: '问作业时连不上 VPS', jobs: jobs }, 502);
       return json({ jobs: jobs });
     }
 
-    /* [908] 一次看好几个还在不在 dropbox:auto（列一次目录）：{ items: [..] } → { exists: { name: 0 | 1 } } */
-    if (p === '/api/link/exists' && Array.isArray(b.items)) {
-      const names = b.items.map(linkName).filter(Boolean).slice(0, 200);
-      const r = await linkRc(env, 'operations/list', { fs: at(c.dropbox), remote: '', opt: { noModTime: true, noMimeType: true } }, 50000);
-      let have = new Set();
-      if (r.ok) have = new Set(((r.data && r.data.list) || []).map(f => String(f.Name || f.Path || '')));
-      else if (!(r.rc && /not found/i.test(r.error || ''))) return fail(r);     // auto 文件夹都不在 = 全都不在了
+    /* [908] 一次看好几个还在不在 dropbox:auto（列一次目录）：{ items: [..] } → { exists: { name: 0 | 1 } }
+       [910] tv: [..] 是剧集区下面的名字（给了才列 dropbox:auto/ram2，两次列表同时发）→ 多回 tv: { name: 0 | 1 }；
+             剧集区那个文件夹本身不算一个条目；名字按 NFC + 不分大小写比（Dropbox 不分大小写） */
+    if (p === '/api/link/exists' && (Array.isArray(b.items) || Array.isArray(b.tv))) {
+      const pick = a => (Array.isArray(a) ? a : []).map(linkName).filter(Boolean).slice(0, 200);
+      const names = pick(b.items).filter(n => linkKey(n) !== linkKey(c.tv)), tvs = pick(b.tv);
+      const ls = async (sub, want) => {
+        if (!want.length) return { have: new Set() };
+        const r = await linkRc(env, 'operations/list', { fs: at(c.dropbox, '', sub), remote: '', opt: { noModTime: true, noMimeType: true } }, 50000);
+        if (r.ok) return { have: new Set(((r.data && r.data.list) || []).map(f => linkKey(f.Name || f.Path || ''))) };
+        if (r.rc && /not found/i.test(r.error || '')) return { have: new Set() };   // 文件夹都不在 = 全都不在了
+        return { err: r };
+      };
+      const [A, B] = await Promise.all([ls('', names), ls(c.tv, tvs)]);
+      if (A.err) return fail(A.err);
+      if (B.err) return fail(B.err);
       const exists = {};
-      names.forEach(n => { exists[n] = have.has(n) ? 1 : 0; });
-      return json({ exists: exists });
+      names.forEach(n => { exists[n] = A.have.has(linkKey(n)) ? 1 : 0; });
+      const out = { exists: exists };
+      if (Array.isArray(b.tv)) { out.tv = {}; tvs.forEach(n => { out.tv[n] = B.have.has(linkKey(n)) ? 1 : 0; }); }
+      return json(out);
     }
 
-    const item = linkName(b.item);
+    /* [910] 批量传输：一批（最多 16 项）一个 sync/copy 作业，webdav:auto → dropbox:auto，过滤规则圈出这一批 */
+    if (p === '/api/link/batch-copy') {
+      const v = linkItems(b.items, LINK_BATCH, c);
+      if (v.error) return json({ error: v.error, index: v.index }, 400);
+      const key = b.key == null ? '' : String(b.key).trim();
+      if (key && !/^[A-Za-z0-9._:\-]{1,64}$/.test(key)) return json({ error: 'key 不对（字母、数字和 . _ : -，最多 64 个）' }, 400);
+      const num = x => { const n = parseInt(x, 10); return isFinite(n) ? Math.max(1, Math.min(LINK_BATCH, n)) : LINK_BATCH; };
+      const from = b.from === 'pikpak' ? 'pikpak' : 'webdav';
+      const src = from === 'pikpak' ? c.pikpak : c.webdav;
+      const filter = linkFilter(v.items);
+      const t0 = Date.now();
+      const late = () => Date.now() - t0 > LINK_LAUNCH_BY;
+      /* ① 探针：用同一套过滤列一次来源。列回来有这一批以外的东西 = 这台 rclone 不认 _filter，开出去的 sync/copy
+         会把整个 auto 搬过去（别人的片、没下完的 .part）—— 不开，回 409 nofilter，调用方退回逐个传。
+         这次列表顺带给每项的文件数和字节数（进度条的分母；Dropbox 存不了的系统文件不算）
+         ② 同一个 key 的作业是不是已经在跑（linkBatchSlot：认统计组）③ 目标的上一层先建好（Dropbox 里马上看得到；
+         这批有剧集才建剧集区；5 秒超时、不看结果，sync/copy 自己也会建）。
+         三样同时走（以前一个接一个：探针 35 秒 + 查作业 + 建目录 15 秒，sync/copy 可能到 59 秒才发出去）；
+         同时最多 4 个连接：探针 1 个 + 查作业最多 3 个，建目录在查完以后 */
+      const [L, S] = await Promise.all([
+        linkFiles(env, at(src), filter, 35000).then(list => ({ list: list }), e => ({ e: e })),
+        (async () => {
+          const s = key ? await linkBatchSlot(env, key, t0 + LINK_LAUNCH_BY - 8000) : { group: '' };
+          if (!s.error && !s.jobid && !s.running) {
+            const mk = [linkRc(env, 'operations/mkdir', { fs: c.dropbox, remote: dirOf('') }, 5000)];
+            if (v.items.some(it => it.sub)) mk.push(linkRc(env, 'operations/mkdir', { fs: c.dropbox, remote: dirOf(c.tv) }, 5000));
+            await Promise.all(mk);
+          }
+          return s;
+        })()
+      ]);
+      let sums = null;
+      if (L.list) {
+        const sp = linkSplit(L.list, v.items, c);
+        if (sp.stray) return json({ error: '这台 rclone 没按过滤规则列（列回来 ' + sp.stray + ' 个不在这一批里的文件），不开批量传输', nofilter: 1, stray: sp.stray }, 409);
+        sums = { total: 0, files: 0, items: {} };
+        sp.idx.forEach(({ it, list }) => {
+          let n = 0, bytes = 0;
+          list.forEach(f => { if (!LINK_SKIP.test(f.name)) { n++; if (f.size > 0) bytes += f.size; } });
+          sums.items[it.key] = { count: n, bytes: bytes };
+          sums.total += bytes; sums.files += n;
+        });
+      }
+      if (S.error) return json({ error: '没查清楚这一批是不是已经在传：' + S.error }, S.status || 502);
+      /* 同一个 key 的作业还在跑（调用方上次超时了，作业其实已经开了）：接上，不开第二个。
+         探针列失败也照样接上 —— VPS 忙着传这一批的时候列表最容易超时。
+         在跑、作业号没找到：jobid 0 + running（老的请求添加当成「没给作业号」，下一轮再来；作业传完、停下来以后就开得出来了） */
+      if (S.jobid || S.running) return json(Object.assign({ jobid: S.jobid || 0, reused: true, group: S.group, from: from }, S.running ? { running: 1 } : {}, sums || {}));
+      if (L.e) return json({ error: '开批量传输前列来源失败：' + L.e.message, side: 'src' }, L.e.notFound ? 422 : 502);
+      /* 太晚了：调用方（60 秒超时）等不到 sync/copy 的回包，多半已经放弃、下一轮会再来 —— 不开。就在发出去之前看（停组之后再看一次） */
+      const tooLate = () => json({ error: 'VPS 太慢，这一轮没开批量传输（下一轮再来）', retry: 1 }, 503);
+      if (late()) return tooLate();
+      /* 最新那一组没在传、也没找到它的作业：先停掉这一组（跑完了的停一下什么都不发生；还在列目录的停掉，下面开的接着传） */
+      if (S.stop) {
+        const st = await linkRc(env, 'job/stopgroup', { group: S.stop }, 8000);
+        if (!st.ok) return json({ error: '开之前停不掉上一次的作业（' + S.stop + '）：' + st.error + '，这一轮不开', retry: 1 }, 503);
+        if (late()) return tooLate();
+      }
+      /* ④ 一个作业：Transfers / Checkers 默认 16（1–16）；Dropbox 连接串 chunk_size=16Mi、batch_mode=sync（不开 batch
+         16 路同时上传会撞 too_many_write_operations / 429），BufferSize 8Mi —— 16 × (16 + 8) + 100 ≈ 480 MB；
+         CheckFirst：先核完再传，totalBytes 不再边传边涨，进度条不往回跳。
+         统计组用这一次的（tjb/<key>、tjb/<key>/2…）：重开不和上一次的字节数、文件数、错误搅在一起 */
+      const cfg = { Transfers: num(b.transfers), Checkers: num(b.checkers), BufferSize: '8Mi', CheckFirst: true };
+      if (b.sizeOnly) cfg.SizeOnly = true;
+      const body = { srcFs: at(src), dstFs: at(linkTuned(c.dropbox, 'chunk_size=16Mi,batch_mode=sync')),
+                     _async: true, _config: cfg, _filter: filter };
+      if (S.group) body._group = S.group;
+      const r = await linkRc(env, 'sync/copy', body, 15000);
+      if (!r.ok) return fail(r);
+      const jobid = (r.data || {}).jobid;
+      return json(Object.assign({ jobid: jobid, group: S.group || 'job/' + jobid, from: from }, sums));
+    }
+
+    /* [910] 批量核对：两边各列一次（同一套过滤，同时发），按条目分开，逐个走 909 的 linkCompare。
+       哪边列失败回 502 { side }（没核对成），不回 ok: 0；Dropbox 那边 auto 都没有 = 全缺；
+       来源那边一个文件都没有的条目多回 nosrc: 1（补传也没用，调用方别一直重传） */
+    if (p === '/api/link/batch-verify') {
+      const v = linkItems(b.items, LINK_BATCH, c);
+      if (v.error) return json({ error: v.error, index: v.index }, 400);
+      const srcRemote = b.src === 'webdav' ? c.webdav : c.pikpak;
+      const filter = linkFilter(v.items);
+      const side = fs => linkFiles(env, fs, filter).then(list => ({ list: list }), e => ({ e: e }));
+      const [A, B] = await Promise.all([side(at(srcRemote)), side(at(c.dropbox))]);
+      if (A.e) return json({ error: '核对时列 PikPak 那边失败：' + A.e.message, side: 'src' }, A.e.notFound ? 422 : 502);
+      if (B.e && !B.e.notFound) return json({ error: '核对时列 Dropbox 那边失败：' + B.e.message, side: 'dst' }, 502);
+      const S = linkSplit(A.list, v.items, c).idx, D = linkSplit(B.e ? [] : B.list, v.items, c).idx;
+      const results = {};
+      v.items.forEach(it => {
+        const cmp = linkCompare(S.get(linkKey(it.key)).list, D.get(linkKey(it.key)).list);
+        results[it.key] = Object.assign(cmp, { ok: cmp.ok ? 1 : 0 }, cmp.src.count ? {} : { nosrc: 1 });
+      });
+      return json({ via: srcRemote, results: results });
+    }
+
+    /* [910] 批量删 PikPak 那份：最多 8 项、最多 4 个同时删；已经没了（not found）算删掉了，重试安全。
+       绝不用按过滤规则删（operations/delete + _filter）：过滤一旦没生效，删的就是整个 auto */
+    if (p === '/api/link/batch-purge') {
+      const v = linkItems(b.items, LINK_PURGE, c);
+      if (v.error) return json({ error: v.error, index: v.index }, 400);
+      /* [911] purge 25 秒（以前 30 秒）：8 项 4 个一轮，两轮最多 50 秒 */
+      const rs = await linkPool(v.items, 4, it => it.kind === 'dir'
+        ? linkRc(env, 'operations/purge', { fs: at(c.pikpak, it.item, it.sub), remote: '' }, 25000)
+        : linkRc(env, 'operations/deletefile', { fs: at(c.pikpak, '', it.sub), remote: it.item }, 20000));
+      const results = {};
+      let down = 0;
+      v.items.forEach((it, i) => {
+        const r = rs[i];
+        if (r.ok) results[it.key] = { ok: 1 };
+        else if (gone(r)) results[it.key] = { ok: 1, gone: 1 };
+        /* [911] 算「连不上」看状态（5xx），不看 rc：rclone 回的后端暂时性错误（PikPak 超时 / 限流）也是 502 */
+        else { results[it.key] = { error: r.error || '出错了', status: r.status || 502 }; if ((r.status || 502) >= 500) down++; }
+      });
+      /* 一项都没删成、而且全是连不上 VPS：回 502，调用方的熔断才看得见（不是这几项本身的问题） */
+      if (down === v.items.length) return json({ error: '删 PikPak 那份时连不上 VPS', results: results }, 502);
+      return json({ results: results });
+    }
+
+    /* 单项接口：上面的批量接口必须在这之前分派，不然会在这里回 400「item 不对」 */
+    const w = linkWhere(b.item, b.sub, c, 'item');
+    if (w.error) return json({ error: w.error }, 400);
+    const item = w.name, sub = w.sub;
     const kind = b.kind === 'dir' ? 'dir' : 'file';
-    if (!item) return json({ error: 'item 不对（只能是 ' + c.auto + ' 下面的一层名字）' }, 400);
 
     if (p === '/api/link/copy') {
-      await linkRc(env, 'operations/mkdir', { fs: c.dropbox, remote: c.auto }, 20000);
       /* [909] from: 'pikpak' —— 补传时改从 rclone 原生 pikpak 后端拿（WebDAV 列表里没有 / 拿不到的文件）；
          sizeOnly —— 只按大小判断要不要传（两个后端的修改时间对不上，不加这个会把传好的也重传一遍） */
-      const srcRemote = b.from === 'pikpak' ? c.pikpak : c.webdav;
+      const from = b.from === 'pikpak' ? 'pikpak' : 'webdav';
+      const srcRemote = from === 'pikpak' ? c.pikpak : c.webdav;
       const extra = b.sizeOnly ? { _config: { SizeOnly: true } } : {};
+      /* [911] 单项复制也认统计组（以前一个都不带）：开出去的回包丢了（520、连接断了，sync/copy 不重试），调用方下一轮再来，
+         以前就再开一个 —— 两个 rclone 作业往同一个地方传同一项，带宽、内存翻倍，多出来那个作业号谁都不知道，看门狗也停不了它。
+         · 组名 tjc/<[sub/]item>/<开的那一刻的毫秒数>：每次开都是新组，同一项补传不和上一次的统计累加（同 910 审查后 ③），
+           平常一次调用也不多问 —— 和 909 一样就是 建目录 + 开作业
+         · retry: 1（调用方说上一次 copy 没拿到回答）才先查：这一项最近开的那一组还在跑 → 接上（reused），
+           在跑但作业号没找到 → 503 retry，问不清楚 → 502，都不开；跑完了 / 停掉了才开新的（linkBatchSlot，同批量）。
+           老的调用方不带 retry，和 909 一样
+         · 建目录 5 秒、不看结果（以前 20 秒）：sync/copy 自己也会建 */
+      const t0 = Date.now();
+      const mk = linkRc(env, 'operations/mkdir', { fs: c.dropbox, remote: dirOf(sub) }, 5000);
+      let group = 'tjc/' + (sub ? sub + '/' : '') + item + '/' + t0;
+      if (b.retry) {
+        const s = await linkBatchSlot(env, (sub ? sub + '/' : '') + item, t0 + 20000, 'tjc/');
+        if (s.error) { await mk; return json({ error: '没查清楚上一次是不是已经开了：' + s.error }, s.status || 502); }
+        if (s.jobid) { await mk; return json({ jobid: s.jobid, reused: true, from: from }); }
+        if (s.running) { await mk; return json({ error: '上一次开的还在传，作业号没找到（下一轮再来）', retry: 1 }, 503); }
+        if (s.stop) {
+          const st = await linkRc(env, 'job/stopgroup', { group: s.stop }, 8000);
+          if (!st.ok) { await mk; return json({ error: '开之前停不掉上一次的作业（' + s.stop + '）：' + st.error + '，这一轮不开', retry: 1 }, 503); }
+        }
+        group = s.group;
+      }
+      await mk;
+      if (Date.now() - t0 > 28000) return json({ error: 'VPS 太慢，这一轮没开传输（下一轮再来）', retry: 1 }, 503);
       const r = kind === 'dir'
-        ? await linkRc(env, 'sync/copy', Object.assign({ srcFs: at(srcRemote, item), dstFs: at(c.dropbox, item), _async: true }, extra), 30000)
-        : await linkRc(env, 'operations/copyfile', Object.assign({ srcFs: at(srcRemote), srcRemote: item, dstFs: at(c.dropbox), dstRemote: item, _async: true }, extra), 30000);
-      return r.ok ? json({ jobid: (r.data || {}).jobid, from: b.from === 'pikpak' ? 'pikpak' : 'webdav' }) : fail(r);
+        ? await linkRc(env, 'sync/copy', Object.assign({ srcFs: at(srcRemote, item, sub), dstFs: at(c.dropbox, item, sub), _async: true, _group: group }, extra), 30000)
+        : await linkRc(env, 'operations/copyfile', Object.assign({ srcFs: at(srcRemote, '', sub), srcRemote: item, dstFs: at(c.dropbox, '', sub), dstRemote: item, _async: true, _group: group }, extra), 30000);
+      return r.ok ? json({ jobid: (r.data || {}).jobid, from: from }) : fail(r);
     }
 
     if (p === '/api/link/verify') {
       /* [909] 源头默认用原生 pikpak 后端（src: 'webdav' 可以改回 WebDAV）；列失败 = 没核对成（502 / 422），不是不一致 */
       const srcRemote = b.src === 'webdav' ? c.webdav : c.pikpak;
+      /* [911] 两边同时列 / 同时看（和 batch-verify 一样）。以前一个接一个：两次列目录各 50 秒、两次 stat 各 30 秒，
+         一个大的季两边各列 40 秒就是 80 秒，调用方 60 秒早放弃了，算一次 VPS 出错 —— 这种季永远核对不成，次次撞熔断。
+         回的错照旧：先看 PikPak 那边，再看 Dropbox 那边 */
       if (kind === 'dir') {
-        let src, dst;
-        try { src = await linkFiles(env, at(srcRemote, item)); }
-        catch (e) { return json({ error: '核对时列 PikPak 那边失败：' + e.message, side: 'src' }, e.notFound ? 422 : 502); }
-        try { dst = await linkFiles(env, at(c.dropbox, item)); }
-        catch (e) {
-          if (!e.notFound) return json({ error: '核对时列 Dropbox 那边失败：' + e.message, side: 'dst' }, 502);
-          dst = [];                                                 // Dropbox 那边还没有这个文件夹 = 全缺
-        }
-        const cmp = linkCompare(src, dst);
+        const side = fs => linkFiles(env, fs).then(list => ({ list: list }), e => ({ e: e }));
+        const [A, B] = await Promise.all([side(at(srcRemote, item, sub)), side(at(c.dropbox, item, sub))]);
+        if (A.e) return json({ error: '核对时列 PikPak 那边失败：' + A.e.message, side: 'src' }, A.e.notFound ? 422 : 502);
+        if (B.e && !B.e.notFound) return json({ error: '核对时列 Dropbox 那边失败：' + B.e.message, side: 'dst' }, 502);
+        const cmp = linkCompare(A.list, B.e ? [] : B.list);       // Dropbox 那边还没有这个文件夹 = 全缺
         return json(Object.assign({ via: srcRemote }, cmp, { ok: cmp.ok ? 1 : 0 }));
       }
       const stat = async (remote) => {
-        const r = await linkRc(env, 'operations/stat', { fs: at(remote), remote: item, opt: { noModTime: true, noMimeType: true } }, 30000);
+        const r = await linkRc(env, 'operations/stat', { fs: at(remote, '', sub), remote: item, opt: { noModTime: true, noMimeType: true } }, 30000);
         if (!r.ok) throw Object.assign(new Error(r.error), { status: r.status, notFound: !!(r.rc && /not found/i.test(r.error || '')) });
         const it = (r.data || {}).item;
         return it ? { size: it.Size == null ? -1 : Number(it.Size) } : null;
       };
-      let s1, s2;
-      try { s1 = await stat(srcRemote); }
-      catch (e) { return json({ error: '核对时看 PikPak 那边失败：' + e.message, side: 'src' }, e.notFound ? 422 : 502); }
+      const [P, Q] = await Promise.allSettled([stat(srcRemote), stat(c.dropbox)]);
+      if (P.status === 'rejected') { const e = P.reason || {}; return json({ error: '核对时看 PikPak 那边失败：' + e.message, side: 'src' }, e.notFound ? 422 : 502); }
+      const s1 = P.value;
       if (!s1) return json({ error: 'PikPak 那边没有这个文件了：' + item, side: 'src' }, 422);
-      try { s2 = await stat(c.dropbox); }
-      catch (e) { if (!e.notFound) return json({ error: '核对时看 Dropbox 那边失败：' + e.message, side: 'dst' }, 502); s2 = null; }
+      let s2 = null;
+      if (Q.status === 'rejected') { const e = Q.reason || {}; if (!e.notFound) return json({ error: '核对时看 Dropbox 那边失败：' + e.message, side: 'dst' }, 502); }
+      else s2 = Q.value;
       const differ = s2 && s1.size >= 0 && s2.size >= 0 && s1.size !== s2.size ? [{ path: item, src: s1.size, dst: s2.size }] : [];
       const ok = !!s2 && !differ.length;
       return json({ ok: ok ? 1 : 0, via: srcRemote, src: { count: 1, bytes: Math.max(0, s1.size) }, dst: { count: s2 ? 1 : 0, bytes: s2 ? Math.max(0, s2.size) : 0 },
@@ -13755,13 +14352,17 @@ async function linkApi(request, env, p) {
 
     if (p === '/api/link/purge') {
       const r = kind === 'dir'
-        ? await linkRc(env, 'operations/purge', { fs: at(c.pikpak, item), remote: '' }, 30000)
-        : await linkRc(env, 'operations/deletefile', { fs: at(c.pikpak), remote: item }, 20000);
-      return r.ok ? json({ ok: 1 }) : fail(r);
+        ? await linkRc(env, 'operations/purge', { fs: at(c.pikpak, item, sub), remote: '' }, 30000)
+        : await linkRc(env, 'operations/deletefile', { fs: at(c.pikpak, '', sub), remote: item }, 20000);
+      /* [911] 已经没了算删掉了（和 batch-purge 一样）：purge / deletefile 不重试，删完了回包丢了（520、超时）的话，
+         下一轮再来是 directory not found —— 以前回 422，请求添加一直攒错，传完、核对完、删完的一项最后判失败 */
+      if (r.ok) return json({ ok: 1 });
+      if (gone(r)) return json({ ok: 1, gone: 1 });
+      return fail(r);
     }
 
     if (p === '/api/link/exists') {
-      const r = await linkRc(env, 'operations/stat', { fs: at(c.dropbox), remote: item, opt: { noModTime: true, noMimeType: true } }, 30000);
+      const r = await linkRc(env, 'operations/stat', { fs: at(c.dropbox, '', sub), remote: item, opt: { noModTime: true, noMimeType: true } }, 30000);
       if (!r.ok) return fail(r);
       return json({ exists: (r.data || {}).item ? 1 : 0 });
     }

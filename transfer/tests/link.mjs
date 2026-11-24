@@ -64,7 +64,7 @@ ok(s === 200 && j.exists === 0, '发行检查：不在了', j);
 [s, j] = await call('exists', { item: 'm.mkv' });
 ok(s === 200 && j.exists === 1, '发行检查：还在', j);
 const v = await worker.fetch(new Request('https://transfer.cuven.us/version'), env);
-ok(/909/.test(await v.text()), '版本号 909');
+ok(/911/.test(await v.text()), '版本号 911');
 
 console.log(`\n传输 Worker /api/link 基本功能：${pass} 项通过，${fail} 项失败`);
 process.exit(fail ? 1 : 0);

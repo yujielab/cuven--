@@ -5,13 +5,15 @@ import UserNotifications
 // MARK: - 请求添加（tj.cuven.us，代码在仓库的 request/）
 //
 // 影片库（lb.cuven.us）索引里的全部已知电影和剧集都能在 App 里看到，片库里没有的那部，详情页的「播放」换成「请求添加」。
-// 按下去请求添加 Worker 就接管整条链：推到 PikPak → 云下载 → 清洗 → 传到 Dropbox → 等工作人员发行。
+// 用户要求（批量流程）：按「请求添加」先放进请求中心（RequestBasket，最多 50 部电影或剧集的一季），在请求中心按「确认」一次提交
+// （/app/requests/batch）。之后请求添加 Worker 接管整条链：推到 PikPak → 云下载 → 清洗（电影留在 /auto，剧集放进 /auto/ram2）→
+// 凑满至少 16 部再一起传到 Dropbox（16 路并行传输、16 路并发核对）→ 就绪。批量传输时请求中心最上面那张卡有动画和进度条（/app/flow）。
 // App 这边只做三件事：发请求、轮询进度（详情页那张五步进度卡）、状态一变发一条本机通知。
 // 通知只在这三处发：进入最终发行审批、已就绪、没能添加（只说结果，不说内部出了什么事）。App 不在前台时靠系统的后台刷新（BGAppRefreshTask）偶尔看一眼，不保证准时。
 
 /// 索引里的一部片 / 一部剧（还没在片库里），详情页的路由参数
 struct CatalogTitle: Hashable, Sendable {
-    enum Kind: String, Hashable, Sendable { case movie, tv }
+    enum Kind: String, Codable, Hashable, Sendable { case movie, tv }
     var kind: Kind
     /// TMDB 编号
     var id: Int
@@ -46,9 +48,11 @@ struct RequestStatus: Decodable, Hashable, Identifiable, Sendable {
     var spec: Spec?
     var tries: Int
     var updated: Double
+    /// 在哪一批批量传输里（tj 2.6 起；没有 = 不在批量里）
+    var batch: Int?
 
     enum CodingKeys: String, CodingKey {
-        case id, src, tmdb, season, title, year, poster, stage, state, step, steps, pct, label, note, spec, tries, updated
+        case id, src, tmdb, season, title, year, poster, stage, state, step, steps, pct, label, note, spec, tries, updated, batch
     }
 
     init(from d: Decoder) throws {
@@ -70,6 +74,7 @@ struct RequestStatus: Decodable, Hashable, Identifiable, Sendable {
         spec = try? c.decode(Spec.self, forKey: .spec)
         tries = (try? c.decode(Int.self, forKey: .tries)) ?? 0
         updated = (try? c.decode(Double.self, forKey: .updated)) ?? 0
+        batch = try? c.decode(Int.self, forKey: .batch)
     }
 
     /// 演示 / 刚按下去还没等到服务器回话时用的那一条
@@ -79,6 +84,7 @@ struct RequestStatus: Decodable, Hashable, Identifiable, Sendable {
         stage = step >= 5 ? "release" : "queued"; self.state = state; self.step = step; steps = 5; self.pct = pct
         label = RequestStatus.labels[max(0, min(4, step - 1))]; self.note = note; spec = nil; tries = 0
         updated = Date().timeIntervalSince1970 * 1000
+        batch = nil
     }
 
     /// 五步的名字（和服务器的 STEP_LABELS 一致）
@@ -224,13 +230,80 @@ enum RequestAPI {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    struct CatalogPage: Decodable { var items: [CatalogItem] }
+    struct CatalogPage: Decodable {
+        var items: [CatalogItem]
+        /// 这一页是第几页、一共几页、一共几部（老版本没有：0）
+        var page: Int
+        var pages: Int
+        var total: Int
+        /// /app/years 的一格（tj 2.8）：接着用 /app/catalog 问哪一页。影片库一页 42 部、一格最多给 40 部：
+        /// 1 = 第一页没给全（再问一次第一页，按 src-id 去重），2 = 接着第二页，0 = 没有了。/app/catalog 不带：nil
+        var next: Int?
 
-    static func catalog(src: String = "all", query: String = "", sort: String = "new", own: String = "all", page: Int = 1) async throws -> [CatalogItem] {
+        enum CodingKeys: String, CodingKey { case items, page, pages, total, next, error }
+        init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            items = (try? c.decode([CatalogItem].self, forKey: .items)) ?? []
+            page = (try? c.decode(Int.self, forKey: .page)) ?? 1
+            pages = (try? c.decode(Int.self, forKey: .pages)) ?? 0
+            total = (try? c.decode(Int.self, forKey: .total)) ?? 0
+            next = try? c.decode(Int.self, forKey: .next)
+            failed = ((try? c.decode(Int.self, forKey: .error)) ?? 0) != 0 || (try? c.decode(Bool.self, forKey: .error)) == true
+        }
+        /// /app/years 里这一格影片库没答上（{error: 1}）
+        var failed = false
+    }
+
+    static func catalog(src: String = "all", query: String = "", sort: String = "new", own: String = "all", page: Int = 1, year: Int? = nil) async throws -> [CatalogItem] {
+        try await catalogPage(src: src, query: query, sort: sort, own: own, page: page, year: year).items
+    }
+
+    /// 同上，连页数、总数一起（「全部影片」的可申请那一边翻页、标题里的部数用）
+    static func catalogPage(src: String = "all", query: String = "", sort: String = "new", own: String = "all", page: Int = 1, year: Int? = nil) async throws -> CatalogPage {
         var q: [(String, String)] = [("src", src), ("sort", sort), ("own", own), ("page", String(page))]
         if !query.isEmpty { q.append(("q", query)) }
-        let p: CatalogPage = try await send(URLRequest(url: url("/app/catalog", q)))
-        return p.items
+        // 按年份（「全部影片」的可申请那一边；tj 2.6 起转给影片库，老版本不认就在 App 里过滤）。
+        // 按年份列的是这一年的全部，不只是评分 6 分以上的那些（tj 2.8 起服务器自己这么做，这里明说一次，老版本也认 min）
+        if let year { q += [("year", String(year)), ("min", "0")] }
+        return try await send(URLRequest(url: url("/app/catalog", q)))
+    }
+
+    /// /app/years（tj 2.8）：几年 × 电影 / 剧集，每格第一页，一次问完。每一格是 { items, page, pages, total, next }，
+    /// 影片库没答上的那一格是 { error: 1 }；一格都没答上回 503。
+    /// old = 服务器还是老版本（只认 404：没有这个接口），调用方改成一年一年问
+    struct YearsPage: Decodable {
+        /// 年份 → 电影 / 剧集 → 第一页
+        var years: [Int: [String: CatalogPage]]
+
+        enum CodingKeys: String, CodingKey { case years }
+        init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            let raw = (try? c.decode([String: [String: CatalogPage]].self, forKey: .years)) ?? [:]
+            var out: [Int: [String: CatalogPage]] = [:]
+            for (k, v) in raw { if let y = Int(k) { out[y] = v } }
+            years = out
+        }
+    }
+
+    static func years(from: Int, to: Int, per: Int = 24, etag: String?) async throws -> (page: YearsPage?, data: Data?, etag: String?, old: Bool) {
+        var r = URLRequest(url: url("/app/years", [("src", "all"), ("from", String(from)), ("to", String(to)), ("per", String(per))]))
+        r.timeoutInterval = 25
+        if let etag { r.setValue(etag, forHTTPHeaderField: "If-None-Match") }
+        let (data, resp) = try await session.data(for: r)
+        UsageMeter.shared.add(data.count, to: .data)
+        let http = resp as? HTTPURLResponse
+        switch http?.statusCode ?? 0 {
+        case 304: return (nil, nil, etag, false)
+        case 404: return (nil, nil, nil, true)
+        case 200..<300:
+            let p = try JSONDecoder().decode(YearsPage.self, from: data)
+            // 200 却一年都没有（不是 /app/years 的回包）：当没问成，调用方一年一年问；也不存、不记 ETag
+            guard !p.years.isEmpty else { throw RequestAPIError.server("服务暂时不可用，请稍后再试。") }
+            return (p, data, http?.value(forHTTPHeaderField: "ETag"), false)
+        default:
+            let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
+            throw RequestAPIError.server(msg ?? "服务暂时不可用，请稍后再试。")
+        }
     }
 
     static func detail(_ t: CatalogTitle, season: Int?) async throws -> CatalogDetail {
@@ -261,6 +334,98 @@ enum RequestAPI {
 
     struct Created: Decodable { var request: RequestStatus }
 
+    /// 批量提交的一条结果
+    struct BatchItem: Decodable {
+        var src: String
+        var id: Int
+        var season: Int
+        var result: String
+        var request: RequestStatus?
+
+        enum CodingKeys: String, CodingKey { case src, id, season, result, request }
+        init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            src = (try? c.decode(String.self, forKey: .src)) ?? "movie"
+            id = (try? c.decode(Int.self, forKey: .id)) ?? 0
+            season = (try? c.decode(Int.self, forKey: .season)) ?? 0
+            result = (try? c.decode(String.self, forKey: .result)) ?? "invalid"
+            request = try? c.decode(RequestStatus.self, forKey: .request)
+        }
+        init(src: String, id: Int, season: Int, result: String, request: RequestStatus?) {
+            self.src = src; self.id = id; self.season = season; self.result = result; self.request = request
+        }
+    }
+    struct BatchCreated: Decodable { var bid: Int?; var items: [BatchItem] }
+
+    /// 请求中心按「确认」：一次提交整个请求篮（tj 2.6 的 /app/requests/batch）。
+    /// 服务器还是老版本（没有这个接口，回 404）：退回一部一部提交（同时最多 4 个）
+    static func createBatch(user: String, items: [RequestBasket.Item]) async throws -> BatchCreated {
+        var r = URLRequest(url: url("/app/requests/batch", []))
+        r.httpMethod = "POST"
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.setValue(userHeader(user), forHTTPHeaderField: "x-cuven-user")
+        r.timeoutInterval = 40
+        let list: [[String: Any]] = items.map { i in
+            var o: [String: Any] = ["src": i.kind.rawValue, "id": i.id, "title": i.title, "year": i.year]
+            if i.kind == .tv { o["season"] = i.season }
+            if let p = i.poster { o["poster"] = p }
+            return o
+        }
+        r.httpBody = try JSONSerialization.data(withJSONObject: ["items": list])
+        let (data, resp) = try await session.data(for: r)
+        UsageMeter.shared.add(data.count, to: .data)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 404 { return try await createOneByOne(user: user, items: items) }
+        if !(200..<300).contains(code) {
+            let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
+            throw RequestAPIError.server(msg ?? "服务暂时不可用，请稍后再试。")
+        }
+        return try JSONDecoder().decode(BatchCreated.self, from: data)
+    }
+
+    private static func createOneByOne(user: String, items: [RequestBasket.Item]) async throws -> BatchCreated {
+        var out: [BatchItem] = []
+        var i = 0
+        while i < items.count {
+            let chunk = Array(items[i..<min(items.count, i + 4)])
+            i += 4
+            let part = await withTaskGroup(of: BatchItem.self) { g in
+                for it in chunk {
+                    g.addTask {
+                        let t = CatalogTitle(kind: it.kind, id: it.id, title: it.title, year: it.year, poster: it.poster)
+                        do {
+                            let s = try await create(user: user, title: t, season: it.season)
+                            return BatchItem(src: it.kind.rawValue, id: it.id, season: it.season, result: "created", request: s)
+                        } catch {
+                            return BatchItem(src: it.kind.rawValue, id: it.id, season: it.season, result: "error", request: nil)
+                        }
+                    }
+                }
+                var r: [BatchItem] = []
+                for await x in g { r.append(x) }
+                return r
+            }
+            out += part
+        }
+        return BatchCreated(bid: nil, items: out)
+    }
+
+    /// /app/flow：凑批的进度和正在跑的那一批（tj 2.6 起；老版本回 404 → nil）
+    static func flow(user: String, etag: String?) async throws -> (info: RequestFlowInfo?, etag: String?, unchanged: Bool) {
+        var r = URLRequest(url: url("/app/flow", []))
+        r.setValue(userHeader(user), forHTTPHeaderField: "x-cuven-user")
+        if let etag { r.setValue(etag, forHTTPHeaderField: "If-None-Match") }
+        let (data, resp) = try await session.data(for: r)
+        UsageMeter.shared.add(data.count, to: .data)
+        let http = resp as? HTTPURLResponse
+        switch http?.statusCode ?? 0 {
+        case 304: return (nil, etag, true)
+        case 404: return (nil, nil, false)
+        case 200..<300: return (try JSONDecoder().decode(RequestFlowInfo.self, from: data), http?.value(forHTTPHeaderField: "ETag"), false)
+        default: throw RequestAPIError.server("服务暂时不可用，请稍后再试。")
+        }
+    }
+
     static func create(user: String, title: CatalogTitle, season: Int) async throws -> RequestStatus {
         var r = URLRequest(url: url("/app/requests", []))
         r.httpMethod = "POST"
@@ -288,6 +453,11 @@ final class RequestStore {
     private(set) var mine: [RequestStatus] = []
     /// 主页「可请求添加」那一排（十分钟内不重取）
     private(set) var shelf: [CatalogItem] = []
+    /// 凑批的进度、正在跑的那一批（/app/flow；请求中心开着时才问）
+    private(set) var flow: RequestFlowInfo?
+    /// 上一次拿到 flow 的时刻：进度条按速度往前推算到「现在」
+    private(set) var flowAt = Date()
+    @ObservationIgnored private var flowTag: String?
     @ObservationIgnored private var shelfAt: Date?
 
     @ObservationIgnored private var user: String?
@@ -328,15 +498,24 @@ final class RequestStore {
         return all.first { $0.state == .active } ?? all.max { $0.id < $1.id }
     }
 
-    /// 服务器回来的（详情页、目录里带的）也记下，详情页切季时马上有；是我的那条就连请求中心一起更新
+    /// 服务器回来的（详情页、目录里带的）也记下，详情页切季时马上有；是我的那条就连请求中心一起更新。
+    /// 只拿新的换旧的：目录、/app/years 的回包可能是几分钟前的（边缘缓存），比 /app/requests 刚给的旧，
+    /// 盖上去之后 /app/requests 回 304、再也改不回来
     func merge(_ s: RequestStatus?) {
         guard let s else { return }
         if let i = items.firstIndex(where: { $0.id == s.id }) {
-            if items[i] != s { items[i] = s }
+            if items[i] != s && Self.newer(s, than: items[i]) { items[i] = s }
         } else {
             items.insert(s, at: 0)
         }
-        if let i = mine.firstIndex(where: { $0.id == s.id }), mine[i] != s { mine[i] = s }
+        if let i = mine.firstIndex(where: { $0.id == s.id }), mine[i] != s, Self.newer(s, than: mine[i]) { mine[i] = s }
+    }
+
+    /// 同一条请求，s 能不能换掉手上的 old：updated 早的不要；同一刻的，结束了的（就绪、没能添加、取消）不被「进行中」盖回去。
+    /// updated 更晚的进行中照换（面板「重试」：同一条从出事的那一步重来）
+    private static func newer(_ s: RequestStatus, than old: RequestStatus) -> Bool {
+        if s.updated != old.updated { return s.updated > old.updated }
+        return s.state != .active || old.state == .active
     }
 
     // MARK: 轮询
@@ -352,7 +531,10 @@ final class RequestStore {
         items = []
         mine = []
         etag = nil
+        flow = nil
+        flowTag = nil
         failures = 0
+        RequestBasket.shared.load(user: user)
         if DemoData.enabled { loadDemo(); return }
         guard let user, !user.isEmpty else { return }
         loop = Task { [weak self] in
@@ -395,24 +577,33 @@ final class RequestStore {
     }
 
     private func apply(_ list: [RequestStatus]) {
-        for s in list { notifyIfChanged(s) }
+        // 一批一起就绪时（一批最多 16 部）：同一种结果超过 3 条就合成一条通知，不刷一屏横幅
+        var ready: [String] = [], failed: [String] = [], release: [String] = []
+        for s in list { notifyIfChanged(s, ready: &ready, failed: &failed, release: &release) }
+        func post(_ names: [String], one: (String) -> String, many: (Int) -> String, tag: Int) {
+            if names.count > 3 { RequestNotice.post(id: tag, body: many(names.count)) } else { names.forEach { RequestNotice.post(id: tag, body: one($0)) } }
+        }
+        post(ready, one: { "\($0)已就绪，现在可以观看了。" }, many: { "\($0) 部影片已就绪，现在可以观看了。" }, tag: 1)
+        post(failed, one: { "\($0)暂时无法添加，请稍后再试。" }, many: { "\($0) 部影片暂时无法添加，请稍后再试。" }, tag: 2)
+        post(release, one: { "\($0)已进入最终发行审批，就绪后会再提醒您。" }, many: { "\($0) 部影片已进入最终发行审批，就绪后会再提醒您。" }, tag: 3)
+        if !ready.isEmpty { refreshLibraryAfterRelease() }
         items = list
         mine = list.sorted { $0.id > $1.id }
+        RequestBasket.shared.dropSubmitted(list)
         UserDefaults.standard.set(seen.reduce(into: [String: String]()) { $0[String($1.key)] = $1.value }, forKey: Self.seenKey)
     }
 
-    private func notifyIfChanged(_ s: RequestStatus) {
+    private func notifyIfChanged(_ s: RequestStatus, ready: inout [String], failed: inout [String], release: inout [String]) {
         let tag = s.stage + "|" + s.state.rawValue
         defer { seen[s.id] = tag }
         guard let before = seen[s.id], before != tag else { return }
         let name = s.title.isEmpty ? "这部影片" : "《\(s.title)》" + (s.season > 0 ? "第 \(s.season) 季" : "")
         if s.state == .done {
-            RequestNotice.post(id: s.id, body: "\(name)已就绪，现在可以观看了。")
-            refreshLibraryAfterRelease()
+            ready.append(name)
         } else if s.state == .failed {
-            RequestNotice.post(id: s.id, body: "\(name)暂时无法添加，请稍后再试。")
+            failed.append(name)
         } else if s.stage == "release" && !before.hasPrefix("release|") {
-            RequestNotice.post(id: s.id, body: "\(name)已进入最终发行审批，就绪后会再提醒您。")
+            release.append(name)
         }
     }
 
@@ -422,6 +613,61 @@ final class RequestStore {
         releaseRefresh = Task { [weak self] in
             await hook()
             self?.releaseRefresh = nil
+        }
+    }
+
+    // MARK: 传输流（请求中心最上面那张卡）
+
+    /// 请求中心开着的时候一直问（服务器说隔几秒：传输中 5 秒、平时 20 秒）；页面关了这个任务就被取消
+    func watchFlow() async {
+        if DemoData.enabled { await demoFlow(); return }
+        while !Task.isCancelled {
+            var wait: Double = 20
+            if let user, !user.isEmpty {
+                do {
+                    let r = try await RequestAPI.flow(user: user, etag: flowTag)
+                    // 没变（304）：照旧，进度条按上次的速度接着往前推
+                    if !r.unchanged {
+                        flow = r.info
+                        flowAt = Date()
+                        flowTag = r.etag
+                    }
+                    wait = flow?.poll ?? 20
+                    // 正在传的那一批里有我的：顺手把我的请求也刷一下（每一步的进度跟着走）
+                    if flow?.batch?.mine.isEmpty == false { await refresh(user: user) }
+                } catch {
+                    wait = 30
+                }
+            }
+            try? await Task.sleep(for: .seconds(max(3, wait)))
+        }
+    }
+
+    /// 刚提交的（批量提交回来的那一条）：和单个提交一样记进「我的」
+    func adopt(_ s: RequestStatus) {
+        seen[s.id] = seen[s.id] ?? (s.stage + "|" + s.state.rawValue)
+        merge(s)
+        mine.removeAll { $0.id == s.id }
+        mine.insert(s, at: 0)
+        etag = nil
+    }
+
+    /// 演示数据：一批 16 部正在传，进度从 38% 慢慢往前走（截图用）
+    private func demoFlow() async {
+        let total = 31.6e9
+        var bytes = total * 0.38
+        while !Task.isCancelled {
+            let speed = 86e6
+            flow = RequestFlowInfo(
+                gate: .init(ready: 4, need: 16),
+                batch: .init(id: 3, stage: bytes >= total ? "verify" : "copy", items: 16, mine: [18, 17],
+                             bytes: min(bytes, total), total: total, speed: speed, eta: max(0, (total - bytes) / speed),
+                             filesDone: Int(min(1, bytes / total) * 41), filesTotal: 41),
+                poll: 5)
+            flowAt = Date()
+            try? await Task.sleep(for: .seconds(1))
+            bytes += total * 0.012
+            if bytes > total * 1.06 { bytes = total * 0.38 }
         }
     }
 

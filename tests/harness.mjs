@@ -173,6 +173,12 @@ globalThis.fetch = async (input, init = {}) => {
         alternative_titles: { titles: (x.aka || []).map(t => ({ iso_3166_1: 'JP', title: t })) },
         translations: { translations: [{ iso_639_1: 'zh', data: { title: x.title } }, { iso_639_1: 'en', data: { title: movieEn(x) } }] } });
     }
+    /* x.images：这部电影的 /movie/:id/images（logos / posters / backdrops 原样回）；没写的照旧 404（字标那一问没问成） */
+    mm = /^\/movie\/(\d+)\/images$/.exec(p);
+    if (mm) {
+      const x = tmdb.movies.find(z => String(z.id) === mm[1]);
+      if (x && x.images) return Response.json(x.images);
+    }
     let m = /^\/(movie|tv)\/(\d+)\/videos$/.exec(p);
     if (m) return Response.json({ id: +m[2], results: (tmdb.videos[m[1] + '/' + m[2]] || [])
       .filter(v => (q.include_video_language || 'en').split(',').includes(v.iso_639_1 === null ? 'null' : v.iso_639_1)) });

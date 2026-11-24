@@ -651,7 +651,7 @@ enum Shelf: Hashable {
     case featured
     /// 精选剧集：评分高的剧，一部剧只出一次（主页「精选剧集」那一块的全部）
     case featuredSeries
-    /// 全部影片：电影和剧集一起，新入库的在前（主页最底下「查看所有影片」）
+    /// 全部影片（主页最底下「查看全部影片」）：按年份、电影 / 剧集、可立即播放 / 可申请分开的那一页（AllFilmsView）
     case all
 
     var title: String {

@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as H from './harness.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -913,9 +913,11 @@ console.log('\n■ /auto：传完就能播放（v25.1，用户要求：在 auto 
   ok(/\/auto（传完就能播放）/.test(health), '健康页有一行 /auto 的情况');
 
   H.env.AUTO_SYNC_KEY = 'sync-key';
-  const s403 = await H.call('/api/auto/sync?item=x', 'POST', {});
+  // v25.5：不带口令的不再 403（App 的「立即播放」兜底就是不带口令的 POST）—— 只有带了、但带错的才 403
+  const s403 = await H.call('/api/auto/sync?item=x', 'POST', { 'x-sync-key': 'wrong-key' });
+  const sNoKey = await H.call('/api/auto/sync?item=x', 'POST', {});
   const s200 = await H.call('/api/auto/sync?item=x', 'POST', { 'x-sync-key': 'sync-key' });
-  ok(s403.status === 403 && s200.status === 200, '配了 AUTO_SYNC_KEY：不带 / 带错口令 403，带对了 200');
+  ok(s403.status === 403 && sNoKey.status === 200 && s200.status === 200, '配了 AUTO_SYNC_KEY：带错口令 403，带对了 200；不带口令的（App）200（走便宜的那条路）');
   delete H.env.AUTO_SYNC_KEY;
 
   H.env.AUTO_FOLDER = 'off';
@@ -1021,6 +1023,412 @@ console.log('\n■ 追踪码优先：/auto 里是电影还是剧集先看追踪�
   delete H.env.TMDB_API_KEY;
   H.tv.entries = []; H.tmdb.shows = []; H.tmdb.movies = [];
   await get('/api/tv?refresh=1'); await get('/api/refresh'); await settle();
+}
+
+console.log('\n■ /auto/ram2：剧集那一层（v25.4，用户要求：电影路径还是 /auto，剧集改成 /auto/ram2）');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const get = async u => { const r = await H.call(u, 'GET', { Cookie: cookie }); return { status: r.status, body: await r.json() }; };
+  const f = (p, size = 1000) => ({ path_display: p, size, server_modified: '2026-11-24T00:00:00Z' });
+  const L = '/auto/ram2';
+  const A1 = `${L}/Show.A.S01.1080p.WEB-DL.[auto-tv801s1-r42]`;   // 同一部剧的两季：各是一季
+  const A2 = `${L}/Show.A.S02.1080p.WEB-DL.[auto-tv801s2-r43]`;
+  const B1 = `${L}/Show.B.2024.[auto-tv802s1-r44]`;               // 只有一个文件、文件名没有集号：这一层里照样是一季
+  const U1 = `${L}/Untagged.Show.S01.1080p`;                      // 没有追踪码（人手放进来的）：这一层里照样是一季
+  const MV = '/auto/New.Movie.2025.1080p.[auto-m960-r41].mkv';    // 电影照旧直接放在 /auto
+  const OLD = '/auto/Old.Show.S03.1080p.[auto-tv803s3-r45]';      // 以前的样子：剧集文件夹直接放在 /auto 下面
+  const OLDM = '/auto/Old.Movie.2001.1080p';                      // 以前的样子：只装一部片的文件夹
+  const nm = p => p.split('/').pop();
+  H.tv.entries = [
+    f(MV, 8e9),
+    f(`${A1}/Show.A.S01E01.mkv`), f(`${A1}/Show.A.S01E02.mkv`),
+    f(`${A2}/Show.A.S02E01.mkv`), f(`${A2}/Show.A.S02E02.mkv`), f(`${A2}/Show.A.S02E03.mkv`),
+    f(`${B1}/Special.mkv`, 3e9),
+    f(`${U1}/Untagged.Show.S01E01.mkv`),
+    f(`${L}/Stray.File.mkv`, 2e9),                                 // 散放在这一层的：哪边都不算
+    f(`${OLD}/Old.Show.S03E01.mkv`), f(`${OLD}/Old.Show.S03E02.mkv`),
+    f(`${OLDM}/Old.Movie.2001.1080p.mkv`, 7e9),
+  ];
+  H.tmdb.movies = [{ id: 960, title: '新电影', en: 'New Movie', date: '2025-01-01', query: 'zzz-n960' }];
+  H.tmdb.shows = [
+    { id: 801, name: '甲剧', original: 'Nothing A', first: '2023-01-01', seasons: [{ n: 1, air: '2023-01-01', count: 2 }, { n: 2, air: '2024-01-01', count: 3 }] },
+    { id: 802, name: '乙剧', original: 'Nothing B', first: '2024-01-01', seasons: [{ n: 1, air: '2024-01-01', count: 1 }] },
+    { id: 803, name: '老剧', original: 'Nothing Old', first: '2019-01-01', seasons: [{ n: 3, air: '2021-01-01', count: 2 }] },
+  ];
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  delete H.env.AUTO_FOLDER; delete H.env.AUTO_SYNC_KEY; delete H.env.AUTO_TV_SUB; delete H.env.TV_FOLDER;
+
+  // 纯函数：分类、条目名、AUTO_TV_SUB
+  {
+    const X = await H.internals();
+    const ents = H.tv.entries.map(e => ({ '.tag': 'file', name: nm(e.path_display), ...e }));
+    const c = X.autoClassify('/auto', ents, 'ram2');
+    ok([...c.tvSub].sort().join('|') === [A1, A2, B1, U1].map(p => nm(p).toLowerCase()).sort().join('|') && c.tvDir === L,
+      `autoClassify：/auto/ram2 下面每个子文件夹各是一季（${[...c.tvSub].join('、')}）`);
+    ok(![...c.tv].includes('ram2') && [...c.tv].join() === nm(OLD).toLowerCase(), 'autoClassify：ram2 自己不算一级的剧集文件夹；以前直接放在 /auto 的剧集照旧认');
+    ok(c.movies.map(v => v.path).sort().join('|') === [MV, `${OLDM}/Old.Movie.2001.1080p.mkv`].sort().join('|'),
+      'autoClassify：电影照旧（直接放着的、只装一部片的文件夹）；ram2 里散放的文件、只有一集的那一季都不当电影');
+    const off = X.autoClassify('/auto', ents, '');
+    ok([...off.tv].includes('ram2') && !off.tvSub.size, 'AUTO_TV_SUB=off（sub 为空）：和 v25.3 一模一样，不分层');
+    const mv = X.autoClassify('/auto', [...ents, { '.tag': 'file', name: 'x.mkv', path_display: `${L}/Moved.Film.[auto-m961-r47]/x.mkv`, size: 9 },
+      { '.tag': 'file', name: 'Loose.[auto-m962-r48].mkv', path_display: `${L}/Loose.[auto-m962-r48].mkv`, size: 9 }], 'ram2');
+    ok(mv.movies.some(v => /auto-m961/.test(v.path)) && mv.movies.some(v => /auto-m962/.test(v.path)) && !mv.tvSub.has('moved.film.[auto-m961-r47]'),
+      '这一层里带 [auto-m…] 的（不该放这儿，放错了也不丢）：照追踪码当电影');
+    ok(X.autoTvSub({}) === 'ram2' && X.autoTvSub({ AUTO_TV_SUB: '' }) === 'ram2' && X.autoTvSub({ AUTO_TV_SUB: '/tv/' }) === 'tv' &&
+      X.autoTvSub({ AUTO_TV_SUB: 'a/b' }) === 'ram2' && X.autoTvSub({ AUTO_TV_SUB: 'off' }) === '', 'AUTO_TV_SUB：默认 ram2，去掉斜杠，多级的不认，off 关掉');
+    const i1 = X.autoItemOf(`${A2}#S2`, '/auto', 'ram2'), i2 = X.autoItemOf('/auto/RAM2/Some.Show', '/auto', 'ram2');
+    ok(i1 && i1.name === nm(A2) && i1.sub === 'ram2' && i2 && i2.name === 'Some.Show' && i2.sub === 'RAM2' &&
+      X.autoItemOf(L, '/auto', 'ram2') === null && X.autoItemOf(MV, '/auto', 'ram2').name === nm(MV) && X.autoItemOf('/ram2/x', '/auto', 'ram2') === null,
+      'autoItemOf：ram2 里的取第二级（不分大小写，#S2 不算进名字），ram2 自己不是条目，/auto 外面的不算');
+  }
+
+  await get('/api/refresh'); await settle();
+  const all = await get('/api/all?x=' + Date.now());
+  const vp = (all.body.videos || []).map(v => v.path).filter(p => p.startsWith('/auto/'));
+  ok(vp.sort().join('|') === [MV, `${OLDM}/Old.Movie.2001.1080p.mkv`].sort().join('|'),
+    `/api/all：电影照旧直接在 /auto（新旧两种放法都在），/auto/ram2 里的一部都不当电影：${vp.join('、')}`);
+
+  const tv = await get('/api/tv?refresh=1'); await settle();
+  const S = tv.body.series || [];
+  const by = p => S.find(x => x.path === p);
+  const a1 = by(A1), a2 = by(A2), b1 = by(B1);
+  ok(a1 && a2 && a1.season === 1 && a2.season === 2 && a1.tmdbId === 801 && a2.tmdbId === 801 && a1.code === '42' && a2.code === '43' &&
+    a1.episodes === 2 && a2.episodes === 3 && a1.id !== a2.id && a1.folder === nm(A1),
+    `/api/tv：/auto/ram2 下面的子文件夹各是一季（甲剧 S1 两集、S2 三集，追踪码 42 / 43 都在）`);
+  ok(b1 && b1.episodes === 1 && b1.tmdbId === 802 && b1.season === 1 && by(U1) && by(U1).episodes === 1,
+    '/api/tv：这一层里只有一个文件、没有追踪码的子文件夹也各是一季');
+  ok(!S.some(x => x.path.toLowerCase() === L || x.folder === 'ram2' || x.title === 'ram2' || /Stray/.test(x.path)),
+    '/api/tv：ram2 这个文件夹自己不是剧；散放在这一层的文件不成一季');
+  const old = by(OLD);
+  ok(old && old.season === 3 && old.episodes === 2 && old.tmdbId === 803 && old.code === '45', '/api/tv：以前直接放在 /auto 下面的剧集照旧认');
+  const ep = await get('/api/tv/episodes?path=' + encodeURIComponent(A2));
+  ok(ep.status === 200 && ep.body.episodes.map(e => e.ep).join() === '1,2,3' && ep.body.episodes[0].path === `${A2}/Show.A.S02E01.mkv`,
+    '/auto/ram2 里的一季一样有分集表（能直接播）');
+
+  // 放错进这一层的电影（带 [auto-m…]，散放的文件、装着它的文件夹各一部）：ram2 里有了电影，问 ram2 自己也还是 false
+  // （v25.3 拿 /auto 下面第一级当名字，这时就会把 ram2 记成收录了）
+  const LM = `${L}/Loose.[auto-m962-r48].mkv`, FM = `${L}/Moved.Film.[auto-m961-r47]`;
+  H.tv.entries.push(f(LM, 4e9), f(`${FM}/x.mkv`, 5e9));
+  const q = [nm(A1), nm(A2), 'ram2/' + nm(B1), 'ram2', nm(OLD), nm(MV), nm(OLDM), 'Nope', nm(LM), nm(FM)].map(n => 'item=' + encodeURIComponent(n)).join('&');
+  const sync = await H.call(`/api/auto/sync?tv=1&${q}&code=42&code=43&code=44&code=45&code=41&tmdb=tv801s1&tmdb=tv801s2&tmdb=tv802s1&tmdb=m960`, 'POST', {});
+  const sj = await sync.json(); await settle();
+  const h = sj.has || {};
+  ok(sync.status === 200 && sj.tvSub === 'ram2' && h[nm(A1)] === true && h[nm(A2)] === true && h['ram2/' + nm(B1)] === true &&
+    h[nm(OLD)] === true && h[nm(MV)] === true && h[nm(OLDM)] === true && h.ram2 === false && h.Nope === false,
+    '/api/auto/sync?item=&tv=1：/auto/ram2 里的按那一季的文件夹名找得到（写成 ram2/名字 也认），ram2 自己是 false，以前的放法照旧', sj.has);
+  ok(h[nm(LM)] === true && h[nm(FM)] === true && h.ram2 === false,
+    '/api/auto/sync：ram2 里放错的电影按自己的文件名 / 文件夹名算收录了，ram2 自己照样是 false', sj.has);
+  H.tv.entries = H.tv.entries.filter(e => e.path_display !== LM && !e.path_display.startsWith(FM + '/'));
+  const w = sj.where || {};
+  ok(w['42'] && w['42'].path === A1 && w['42'].auto === true && w['42'].kind === 'tv' && w['42'].ready === true &&
+    w['43'] && w['43'].path === A2 && w['44'] && w['44'].path === B1 && w['45'] && w['45'].path === OLD && w['41'] && w['41'].kind === 'movie',
+    'code=：按追踪码找得到 /auto/ram2 里的每一季（还在 /auto 里、认出了编号）', w);
+  const fd = sj.found || {};
+  ok(fd.tv801s1 && fd.tv801s1.code === '42' && fd.tv801s2 && fd.tv801s2.code === '43' && fd.tv801s2.path === A2 && fd.tv802s1 && fd.tv802s1.code === '44' && fd.m960 && fd.m960.code === '41',
+    'tmdb=：同一部剧的两季各找各的（tv801s1 / tv801s2），电影照旧', fd);
+  const health = await (await H.call('/health', 'GET', {})).text();
+  ok(/剧集在 \/auto\/ram2/.test(health), '健康页的 /auto 那一行写着剧集那一层在哪儿');
+
+  // 剧集那一层改名（AUTO_TV_SUB=tv）：照样每个子文件夹一季，tv 自己不是剧
+  H.env.AUTO_TV_SUB = 'tv';
+  const C1 = '/auto/tv/Show.C.[auto-tv804s1-r46]';
+  H.tv.entries.push(f(`${C1}/Show.C.S01E01.mkv`), f(`${C1}/Show.C.S01E02.mkv`));
+  H.tmdb.shows.push({ id: 804, name: '丙剧', original: 'Nothing C', first: '2025-01-01', seasons: [{ n: 1, air: '2025-01-01', count: 2 }] });
+  const tvc = await get('/api/tv?refresh=1'); await settle();
+  const Sc = tvc.body.series || [];
+  ok(Sc.some(x => x.path === C1 && x.tmdbId === 804 && x.episodes === 2) && !Sc.some(x => x.path.toLowerCase() === '/auto/tv'),
+    'AUTO_TV_SUB=tv：/auto/tv 下面的子文件夹各是一季，tv 自己不是剧');
+  delete H.env.AUTO_TV_SUB;
+
+  // 这一层就在 TV_FOLDER 里面（TV_FOLDER=/auto/ram2）：本体那一遍已经收了，不重复叠
+  const D1 = `${L}/Show.D.2024.[auto-tv805s1-r49]`;               // 两个文件、都没有集号
+  H.tv.entries.push(f(`${D1}/Special.mkv`), f(`${D1}/Other.mkv`));
+  H.tmdb.shows.push({ id: 805, name: '丁剧', original: 'Nothing D', first: '2024-01-01', seasons: [{ n: 1, air: '2024-01-01', count: 2 }] });
+  H.env.TV_FOLDER = L;
+  const tvf = await get('/api/tv?refresh=1'); await settle();
+  const Sf = tvf.body.series || [];
+  ok(Sf.filter(x => x.path === A1).length === 1 && Sf.filter(x => x.path === A2).length === 1 && Sf.some(x => x.path === OLD),
+    'TV_FOLDER=/auto/ram2：每一季只出现一次（不重复叠），/auto 下面以前的剧集照旧在');
+  // 两遍分到的是同一组（按小写的文件夹名），带集号的重复了分集表也会去掉，只看 A1 / A2 看不出叠没叠；
+  // 文件名没有集号的才看得出来：叠了就成了「Special、Special」「Other、Other、Special、Special」
+  const sfB = Sf.find(x => x.path === B1), sfD = Sf.find(x => x.path === D1);
+  const epB = await get('/api/tv/episodes?path=' + encodeURIComponent(B1)), epD = await get('/api/tv/episodes?path=' + encodeURIComponent(D1));
+  ok(sfB && sfB.episodes === 1 && sfD && sfD.episodes === 2 && epB.body.episodes.length === 1 &&
+    epD.body.episodes.map(e => e.name).join() === 'Other.mkv,Special.mkv',
+    'TV_FOLDER=/auto/ram2：没有集号的那几集也不重复叠（乙剧 1 集、丁剧 2 集，分集表一样）',
+    { B1: sfB && sfB.episodes, D1: sfD && sfD.episodes, epD: (epD.body.episodes || []).map(e => e.name) });
+  delete H.env.TV_FOLDER;
+
+  delete H.env.TMDB_API_KEY;
+  H.tv.entries = []; H.tmdb.shows = []; H.tmdb.movies = [];
+  await get('/api/tv?refresh=1'); await get('/api/refresh'); await settle();
+}
+
+console.log('\n■ v25.5：/api/auto/sync 与剧集表 —— /auto 没变不重扫不重写、TMDB 不重复查、跨 isolate 一致、Dropbox 限流先用旧回答');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  // 这一段的时间可以往前拨（memo / 新鲜度）；只用新开的模块实例（一个实例 = 一个 isolate），不碰 H.worker，结束时还原
+  const realNow = Date.now; let off = 0; Date.now = () => realNow() + off;
+  const WURL = pathToFileURL(path.join(HERE, '..', 'Stream_v25.js')).href;
+  let isoN = 0;
+  const iso = async () => (await import(`${WURL}?v255=${++isoN}`)).default;
+  // R2 / KV 替身：put 回 etag、head 带 customMetadata（和真绑定一样）
+  const r2 = () => {
+    const m = new Map(), st = { get: 0, head: 0, put: 0, bytes: 0, keys: [] }; let n = 0;
+    const meta = v => ({ etag: v.etag, httpEtag: `"${v.etag}"`, uploaded: v.at, size: v.body.length, customMetadata: { ...v.cm } });
+    return { m, st,
+      json: k => (m.get(k) ? JSON.parse(m.get(k).body) : null),
+      async get(k) { st.get++; const v = m.get(k); return v ? { ...meta(v), json: async () => JSON.parse(v.body), text: async () => v.body } : null; },
+      async head(k) { st.head++; const v = m.get(k); return v ? meta(v) : null; },
+      async put(k, body, o = {}) { st.put++; st.bytes += String(body).length; st.keys.push(k);
+        const v = { body: String(body), etag: 'e' + (++n), at: new Date(), cm: { ...(o.customMetadata || {}) } }; m.set(k, v); return meta(v); },
+      async delete(k) { m.delete(k); } };
+  };
+  const kv = () => { const m = new Map(); return { m,
+    async get(k, o) { const v = m.get(k); return v == null ? null : (o && (o === 'json' || o.type === 'json')) ? JSON.parse(v) : v; },
+    async put(k, v) { m.set(k, String(v)); } }; };
+  const mkEnv = (extra = {}) => { const e = { ...H.env, FILE_CACHE: r2(), LIB_STATE: kv() }; delete e.AUTH_SECRET; return Object.assign(e, extra); };
+  // 数 Dropbox 列目录（按目录）、TMDB；hook 可以改回包 / 拖慢
+  const baseFetch = globalThis.fetch;
+  const net = { by: {}, hook: null };
+  globalThis.fetch = async (input, init = {}) => {
+    const req = input instanceof Request ? input : new Request(input, init);
+    const u = new URL(req.url);
+    let k = u.host;
+    if (u.host === 'api.dropboxapi.com' && u.pathname.startsWith('/2/files/list_folder')) {
+      const b = await req.clone().json().catch(() => ({}));
+      k = 'list:' + (b.cursor ? 'continue' : String(b.path || '').toLowerCase());
+    }
+    net.by[k] = (net.by[k] || 0) + 1;
+    if (net.hook) { const r = await net.hook(u, k, req); if (r) return r; }
+    return baseFetch(req);
+  };
+  const reset = (...envs) => { net.by = {}; H.tmdb.calls.length = 0; for (const e of envs) Object.assign(e.FILE_CACHE.st, { get: 0, head: 0, put: 0, bytes: 0, keys: [] }); };
+  const call = async (W, E, u, method = 'GET', headers = {}, { wait = true } = {}) => {
+    const t0 = realNow();
+    const r = await W.fetch(new Request('https://w.test' + u, { method, headers }), E, H.ctx);
+    const out = { status: r.status, ms: realNow() - t0, ra: r.headers.get('Retry-After'), body: await r.json().catch(() => null) };
+    if (wait) await settle();
+    return out;
+  };
+  const f = (p, size = 1e9, at = '2026-11-24T00:00:00Z') => ({ path_display: p, size, server_modified: at });
+  const nm = p => p.split('/').pop();
+  const TVK = 'tv/list-v1.json', SNAPK = 'file-list-v2.json';
+  const autoSeasons = j => ((j && j.series) || []).filter(s => s.path.startsWith('/auto/')).map(s => s.path);
+  const season = (i, eps = 2) => {
+    const dir = `/auto/ram2/Batch.Show.${i}.S01.1080p.WEB-DL.[auto-tv${900 + i}s1-r${500 + i}]`;
+    if (!H.tmdb.shows.some(x => x.id === 900 + i)) H.tmdb.shows.push({ id: 900 + i, name: '批量剧' + i, original: 'Batch ' + i, first: '2024-01-01', seasons: [{ n: 1, air: '2024-01-01', count: eps }] });
+    return { dir, name: nm(dir), files: Array.from({ length: eps }, (_, e) => f(`${dir}/Batch.Show.${i}.S01E0${e + 1}.mkv`)) };
+  };
+  const movie = i => ({ path: `/auto/Batch.Movie.${i}.2024.1080p.[auto-m${700 + i}-r${600 + i}].mkv`, code: String(600 + i) });
+  const LIB = [f('/ram2/Fargo/Season 1/Fargo.S01E01.mkv'), f('/ram2/Fargo/Season 1/Fargo.S01E02.mkv')];
+  H.tv.pageSize = 0; H.tmdb.shows = []; H.tmdb.movies = [];
+  delete H.env.TV_FOLDER; delete H.env.AUTO_FOLDER; delete H.env.AUTO_SYNC_KEY; delete H.env.AUTO_TV_SUB;
+
+  try {
+    // ── stream-1：/auto 没变的那一下催促只列一次 /auto，不重扫剧集目录、不写 R2；只问 code= / tmdb= 的不列 Dropbox ──
+    {
+      const E = mkEnv({ TMDB_API_KEY: 'tmdb-test' });
+      const A = await iso();
+      H.tv.entries = [...LIB];
+      await call(A, E, '/api/all'); await call(A, E, '/api/tv?refresh=1');            // cron 已经热过：快照 + 剧集表都在 R2
+      const S = [0, 1, 2, 3].map(i => season(i)), M = [0, 1].map(movie);
+      H.tv.entries.push(...S.flatMap(s => s.files), ...M.map(m => f(m.path, 8e9)));     // 一批落地
+      const q = [...S.map(s => s.name), ...M.map(m => nm(m.path))].map(n => 'item=' + encodeURIComponent(n)).join('&') + '&tv=1&code=500&code=600';
+      reset(E);
+      const s1 = await call(A, E, '/api/auto/sync?' + q, 'POST');
+      const tm1 = H.tmdb.calls.filter(c => /^\/tv\/90\d$/.test(c.path)).length;
+      ok(s1.status === 200 && Object.values(s1.body.has).every(Boolean) && net.by['list:/ram2'] === 1 && E.FILE_CACHE.st.keys.includes(SNAPK) && E.FILE_CACHE.st.keys.includes(TVK),
+        `刚落地：/auto 变了 → 剧集目录重扫一次、快照和剧集表各写一次，${Object.keys(s1.body.has).length} 个都收录了`, { by: net.by, keys: E.FILE_CACHE.st.keys });
+      ok(tm1 === 4, `带追踪码的新一季只查一次 TMDB（mtById 取回来的详情直接用，不原样再取一遍）：4 季 ${tm1} 次`);
+      off += 30_000; reset(E);
+      await call(A, E, '/api/tv?refresh=1');                                // 像 cron 那样整棵重扫一遍：内容没变
+      ok(net.by['list:/ram2'] === 1 && !E.FILE_CACHE.st.keys.includes(TVK), '剧集表重扫一遍、内容没变：不重写 R2 里那 1–2 MB（cron 每分钟一轮，以前每轮都写）', E.FILE_CACHE.st.keys);
+      off += 61_000; reset(E);
+      const s2 = await call(A, E, '/api/auto/sync?' + q, 'POST');
+      const lists = Object.entries(net.by).filter(([k]) => k.startsWith('list:'));
+      ok(s2.status === 200 && Object.values(s2.body.has).every(Boolean) && s2.body.where['500'] && s2.body.where['600'] &&
+        lists.length === 1 && net.by['list:/auto'] === 1 && E.FILE_CACHE.st.put === 0 && E.FILE_CACHE.st.get === 0 && !H.tmdb.calls.length,
+        `一分钟后的催促（什么都没变）：只列一次 /auto，剧集目录不重扫、R2 不写也不读整份（${E.FILE_CACHE.st.head} 次 head）、不查 TMDB`, { by: net.by, r2: E.FILE_CACHE.st });
+      off += 11_000; reset(E);
+      const s3 = await call(A, E, '/api/auto/sync?code=500&code=601&tmdb=tv900s1&tmdb=m701', 'POST');
+      ok(s3.status === 200 && s3.body.where['500'] && s3.body.where['601'] && s3.body.found.tv900s1 && s3.body.found.m701 &&
+        !Object.keys(net.by).some(k => k.startsWith('list:')) && E.FILE_CACHE.st.put === 0,
+        '只问 code= / tmdb= 的（去重、追踪）：不列 Dropbox，查快照和存着的剧集表', { by: net.by });
+    }
+
+    // ── stream-2：TMDB 慢（超过同步接口等的 3.5 秒）：后台那一轮不把还没查完的再查一遍；查完的存进 R2 ──
+    {
+      const E = mkEnv({ TMDB_API_KEY: 'tmdb-test' });
+      const B = await iso();
+      H.tv.entries = [...LIB];
+      await call(B, E, '/api/tv?refresh=1');
+      const S = Array.from({ length: 12 }, (_, i) => season(20 + i));
+      H.tv.entries.push(...S.flatMap(s => s.files));
+      reset(E);
+      net.hook = async (u) => { if (u.host === 'api.themoviedb.org') await new Promise(r => setTimeout(r, 1300)); };
+      const s = await call(B, E, '/api/auto/sync?tv=1&' + S.map(x => 'item=' + encodeURIComponent(x.name)).join('&'), 'POST', {}, { wait: false });
+      await settle(); net.hook = null;
+      const tm = H.tmdb.calls.filter(c => /^\/tv\/9\d\d$/.test(c.path)).map(c => c.path);
+      const stored = E.FILE_CACHE.json(TVK);
+      ok(s.status === 200 && Object.values(s.body.has).every(Boolean) && s.ms < 6000, `TMDB 每次 1.3 秒：同步接口照样 ${s.ms}ms 回答（带追踪码的不等 TMDB）`);
+      ok(tm.length === 12 && new Set(tm).size === 12, `12 季、TMDB 慢到同步接口等不完：每季只查一次（共 ${tm.length} 次；以前 24–48 次）`);
+      ok(stored && S.every(x => (stored.meta['#tv:' + x.name.match(/auto-tv(\d+)s1/)[1] + '|1'] || {}).id > 0),
+        '等不完的那几季查完以后补进表里、存进 R2（别的 isolate 不用再查）');
+    }
+
+    // ── stream-3：一个 isolate 同步了，另一个 isolate 的 /api/tv 马上看得到；扫得慢的旧那一轮不拿旧的 /auto 盖掉新表 ──
+    {
+      const E = mkEnv();
+      const [A, B, C0, D] = [await iso(), await iso(), await iso(), await iso()];
+      H.tv.entries = [...LIB, f('/auto/Old.Movie.2001.mkv', 5e9)];
+      const S = season(40);
+      await call(A, E, '/api/tv?refresh=1');
+      H.tv.entries.push(...S.files);
+      const sb = await call(B, E, '/api/auto/sync?tv=1&item=' + encodeURIComponent(S.name), 'POST');
+      off += 21_000;                                                         // App 接着来拉 /api/tv（每个 isolate 20 秒和 R2 对一次）
+      const ta = await call(A, E, '/api/tv');
+      ok(sb.body.has[S.name] === true && autoSeasons(ta.body).includes(S.dir), 'B 同步完（请求添加据此告诉用户「可以播放」）：A 的 /api/tv 20 秒内就列出这一季（不用等满 10 分钟）');
+
+      // C0：/auto 列过一次（落地前），它的剧集表那一轮在剧集目录上卡住；这时 B 同步、存了新表；C0 那一轮扫完再存
+      H.tv.entries = H.tv.entries.filter(e => !e.path_display.startsWith(S.dir));
+      off += 20 * 60_000;
+      await call(C0, E, '/api/tv?refresh=1');                                // C0：落地前的表 + 落地前那份 /auto（_autoMem）
+      let release, hit; const gate = new Promise(r => { release = r; }), gateHit = new Promise(r => { hit = r; }); let armed = true;
+      net.hook = async (u, k) => { if (armed && k === 'list:/ram2') { armed = false; hit(); await gate; } };
+      off += 11 * 60_000 - 5_000;                                           // C0 的表过期了（> 10 分钟），/auto 那份还在 15 秒里
+      await call(C0, E, '/api/refresh', 'GET', {}, { wait: false });          // 预热顺手列 /auto（落地前）
+      await call(C0, E, '/api/tv', 'GET', {}, { wait: false });              // 后台那一轮开始：卡在剧集目录上
+      await Promise.race([gateHit, new Promise(r => setTimeout(r, 5000))]); armed = false;
+      await new Promise(r => setTimeout(r, 20));
+      H.tv.entries.push(...S.files);                                         // 这时落地
+      const sb2 = await call(B, E, '/api/auto/sync?tv=1&item=' + encodeURIComponent(S.name), 'POST', {}, { wait: false });
+      release(); await settle(); net.hook = null;
+      const stored = E.FILE_CACHE.json(TVK);
+      const td = await call(D, E, '/api/tv');
+      ok(sb2.body.has[S.name] === true && stored.series.some(x => x.path === S.dir) && autoSeasons(td.body).includes(S.dir),
+        'C0 那一轮（落地前开始、拿着落地前的 /auto）比 B 晚存：R2 里的表照样有这一季，新 isolate 的 /api/tv 也有', { stored: stored.series.map(x => x.path) });
+    }
+
+    // ── stream-4：同步接口改 /auto 那一层时用 R2 里现在那份快照，不拿 30 秒的内存副本把别处刚写的改动盖回去 ──
+    {
+      const E = mkEnv();
+      const [A, C, D] = [await iso(), await iso(), await iso()];
+      const FILM = 'Moved.Film.2002.1080p.[auto-m951-r951].mkv';
+      H.tv.entries = [...LIB, f('/auto/' + FILM, 8e9), f('/auto/Other.Movie.2003.mkv', 8e9)];
+      const a0 = await call(A, E, '/api/all');
+      fs.writeFileSync(path.join(H.SAMPLES, FILM), Buffer.alloc(2048));    // 工作人员把它从 /auto 挪进片库
+      H.tv.entries = H.tv.entries.filter(e => !e.path_display.endsWith(FILM));
+      try {
+        await call(C, E, '/api/refresh');                                    // 别的 isolate 的预热：R2 快照里它在 /Movies
+        H.tv.entries.push(f('/auto/New.Arrival.2024.mkv', 8e9));             // 又落地一部：A 这次同步要改 /auto 那一层、写快照
+        reset(E);
+        const s = await call(A, E, `/api/auto/sync?item=New.Arrival.2024.mkv&code=951`, 'POST');   // A 的内存副本还是 30 秒内的那份
+        const snap = E.FILE_CACHE.json(SNAPK);
+        const all = await call(D, E, '/api/all');
+        const inA0 = (a0.body.videos || []).some(v => v.path === '/auto/' + FILM);
+        const allP = (all.body.videos || []).map(v => v.path);
+        ok(inA0 && E.FILE_CACHE.st.keys.includes(SNAPK) && snap.videos.some(v => v.path === '/Movies/' + FILM) && snap.auto.videos.some(v => /New\.Arrival/.test(v.path)) &&
+          allP.includes('/Movies/' + FILM) && allP.includes('/auto/New.Arrival.2024.mkv') && s.body.has['New.Arrival.2024.mkv'] === true &&
+          s.body.where['951'] && s.body.where['951'].path === '/Movies/' + FILM && s.body.where['951'].auto === false,
+          'A 同步、改写 /auto 那一层时 R2 里已经是挪过之后的快照：写回去的是它（片子在 /Movies，没被 A 的旧副本抹掉），追踪码也回新位置', { where: s.body.where, all: allP.filter(p => /Moved|Arrival/.test(p)) });
+      } finally { fs.unlinkSync(path.join(H.SAMPLES, FILM)); }
+    }
+
+    // ── stream-5：Dropbox 出错 / 限流：先回上一次的回答（stale），记住别再去撞；剧集目录列不出来，电影的回答照样给 ──
+    {
+      const E = mkEnv();
+      const F = await iso();
+      H.tv.entries = [...LIB, f('/auto/Heat.1995.mkv', 9e9)];
+      const ok0 = await call(F, E, '/api/auto/sync?item=Heat.1995.mkv&tv=1', 'POST');
+      off += 11_000;
+      net.hook = async (u, k) => (k === 'list:/auto' ? new Response('busy', { status: 503 }) : null);
+      reset(E);
+      const e1 = await call(F, E, '/api/auto/sync?item=Heat.1995.mkv&tv=1', 'POST');
+      const n1 = net.by['list:/auto'] || 0;
+      const e2 = await call(F, E, '/api/auto/sync?item=Heat.1995.mkv&tv=1', 'POST');
+      ok(ok0.status === 200 && e1.status === 200 && e1.body.stale === 1 && e1.body.has['Heat.1995.mkv'] === true && e2.status === 200 && e2.body.stale === 1 &&
+        n1 === 2 && (net.by['list:/auto'] || 0) === 2, `Dropbox 503：回上一次的回答（200 + stale），不是 503；下一次不再去列（/auto 一共列了 ${net.by['list:/auto']} 次）`);
+
+      const G = await iso();
+      net.hook = null; await call(G, E, '/api/auto/sync?item=Heat.1995.mkv', 'POST');
+      off += 11_000; reset(E);
+      net.hook = async (u, k) => (k === 'list:/auto' ? new Response('{"error_summary":"too_many_requests/"}', { status: 429, headers: { 'Retry-After': '300' } }) : null);
+      const r1 = await call(G, E, '/api/auto/sync?item=Heat.1995.mkv', 'POST');
+      ok(r1.status === 200 && r1.body.stale === 1 && r1.ms < 3000 && net.by['list:/auto'] === 1,
+        `Dropbox 429 Retry-After: 300：不空等两次 10 秒（${r1.ms}ms），回上一次的回答，接下来 5 分钟不再去列`);
+
+      const K = await iso();
+      net.hook = null; await call(K, E, '/api/auto/sync?item=Heat.1995.mkv&tv=1', 'POST');
+      const S = season(50), M = movie(50);
+      H.tv.entries.push(...S.files, f(M.path, 8e9));
+      off += 11_000; reset(E);
+      net.hook = async (u, k) => (k === 'list:/ram2' ? new Response('{"error_summary":"too_many_requests/"}', { status: 429, headers: { 'Retry-After': '300' } }) : null);
+      const r2 = await call(K, E, `/api/auto/sync?tv=1&item=${encodeURIComponent(nm(M.path))}&item=${encodeURIComponent(S.name)}`, 'POST');
+      ok(r2.status === 200 && r2.body.has[nm(M.path)] === true && r2.ms < 3000,
+        `只有剧集目录 429（tv=1）：电影的回答照样给（${r2.ms}ms，不是 503）`, r2.body.has);
+
+      const N = await iso(), E2 = mkEnv();
+      net.hook = async (u, k) => (k === 'list:/auto' ? new Response('busy', { status: 503 }) : null);
+      const r3 = await call(N, E2, '/api/auto/sync?item=Heat.1995.mkv', 'POST');
+      ok(r3.status === 503 && +r3.ra >= 1, `一次都没答过、Dropbox 又列不出来：才回 503（Retry-After: ${r3.ra}）`);
+      net.hook = null;
+    }
+
+    // ── stream-6：剧集表后台重扫时 /auto 列不出来：/auto 里的那几季照旧留在表里（和电影那一层一样先用上一份） ──
+    {
+      const E = mkEnv();
+      const T = await iso();
+      const S = [60, 61, 62].map(i => season(i));
+      H.tv.entries = [...LIB, ...S.flatMap(s => s.files)];
+      const t0 = await call(T, E, '/api/tv?refresh=1');
+      off += 11 * 60_000;
+      net.hook = async (u, k) => (k === 'list:/auto' ? new Response('busy', { status: 503 }) : null);
+      await call(T, E, '/api/tv');                                            // 过期 → 后台重扫，/auto 503
+      net.hook = null;
+      const t1 = await call(T, E, '/api/tv');
+      const stored = E.FILE_CACHE.json(TVK);
+      ok(autoSeasons(t0.body).length === 3 && autoSeasons(t1.body).length === 3 && t1.body.at > t0.body.at &&
+        stored.series.filter(x => x.path.startsWith('/auto/')).length === 3,
+        `/auto 503 的那一轮重扫：/auto 的 3 季照旧在表里（${autoSeasons(t1.body).length}），存进 R2 的也是`);
+    }
+
+    // ── stream-7：配了 AUTO_SYNC_KEY 也不挡 App（不带口令的走便宜的路）；只收 POST ──
+    {
+      const exp = Math.floor(realNow() / 1000) + 3600;
+      const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+      const E = mkEnv({ AUTO_SYNC_KEY: 'sync-key', AUTH_SECRET: H.SECRET });
+      const P = await iso();
+      H.tv.entries = [...LIB, f('/auto/Heat.1995.mkv', 9e9)];
+      const g = await call(P, E, '/api/auto/sync?item=Heat.1995.mkv', 'GET');
+      const bad = await call(P, E, '/api/auto/sync?item=Heat.1995.mkv', 'POST', { 'x-sync-key': 'nope' });
+      const good = await call(P, E, '/api/auto/sync?item=Heat.1995.mkv&tv=1', 'POST', { 'x-sync-key': 'sync-key' });
+      const S = season(70);
+      H.tv.entries.push(...S.files);
+      off += 31_000; reset(E);
+      const app = await call(P, E, '/api/auto/sync?tv=1&item=' + encodeURIComponent(S.name), 'POST', {}, { wait: false });
+      const app2 = await call(P, E, '/api/auto/sync?tv=1&item=' + encodeURIComponent(S.name), 'POST', {}, { wait: false });
+      await settle();
+      const lists = net.by['list:/auto'] || 0;
+      const tv = await call(P, E, '/api/tv', 'GET', { Cookie: cookie });
+      ok(g.status === 405 && bad.status === 403 && good.status === 200 && app.status === 200 && app2.status === 200 && lists === 1,
+        `配了 AUTO_SYNC_KEY：GET ${g.status}、口令错 ${bad.status}、口令对 ${good.status}；App（不带口令、没登录）${app.status} 不再 403，30 秒内只真列一次 /auto（${lists}）`);
+      ok(app.body.has[S.name] === false && autoSeasons(tv.body).includes(S.dir),
+        '不带口令的：剧集目录不在前台重扫（这一次回 false），交给后台那一轮 —— 之后 /api/tv 就有这一季');
+      off += 31_000; reset(E);
+      const S2 = season(71); H.tv.entries.push(...S2.files);
+      const ck = await call(P, E, '/api/auto/sync?tv=1&item=' + encodeURIComponent(S2.name), 'POST', { Cookie: cookie });
+      ok(ck.status === 200 && ck.body.has[S2.name] === true, '带登录 Cookie 的（AUTH_SECRET 开着时）：和带口令一样，当场重扫、回 true');
+    }
+  } finally {
+    globalThis.fetch = baseFetch;
+    Date.now = realNow;
+    net.hook = null;
+    await settle();
+    H.tv.entries = []; H.tmdb.shows = []; H.tmdb.movies = [];
+  }
 }
 
 console.log('\n■ 预告片：IMDb 直链优先，被拒时退到 TMDB 登记的 YouTube 官方预告');
@@ -1177,6 +1585,270 @@ console.log('\n■ 片名匹配：文件名 → TMDB（候选打分、校验、�
   ok(byId?.original_language === 'en' && JSON.stringify(byId?.origin_country) === '["US"]',
     `剧集带原始语言与出品地区：${byId?.original_language} / ${JSON.stringify(byId?.origin_country)}`);
   delete H.env.TMDB_API_KEY; H.tmdb.movies = []; H.tmdb.shows = [];
+  await clear();
+}
+
+console.log('\n■ v25.6：/api/tmdb-batch 按 TMDB 编号批量取（App「可申请」那一行：背景、字标一次拿齐）');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const clear = async () => { await settle(); caches.default.m.clear(); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const batchRaw = async queries => {
+    const r = await H.worker.fetch(new Request('https://w.test/api/tmdb-batch', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ queries }) }), H.env, H.ctx);
+    await settle();
+    return { status: r.status, ra: r.headers.get('Retry-After'), cc: r.headers.get('Cache-Control'), body: await r.json() };
+  };
+  const batch = async queries => (await batchRaw(queries)).body;
+  const single = async qs => { const r = await H.call('/api/tmdb?' + qs, 'GET', { Cookie: cookie }); const j = await r.json(); await settle(); return j; };
+  // 键排好序再比（两边是同一段代码拼出来的，顺序本来就一样；排序只是让比较不依赖这一点）
+  const canon = v => JSON.stringify(v, (k, x) => x && typeof x === 'object' && !Array.isArray(x)
+    ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : x);
+  const keysOf = r => Object.keys(r).filter(k => !k.startsWith('__')).sort();
+  const fcImages = {
+    logos: [{ file_path: '/fc-logo.png', iso_639_1: 'en', aspect_ratio: 4 }],
+    posters: [{ file_path: '/fc-titled.jpg', iso_639_1: 'en', vote_average: 9 }, { file_path: '/fc-clean.jpg', iso_639_1: null, vote_average: 6 }],
+    backdrops: [{ file_path: '/fc-bd-clean.jpg', iso_639_1: null, vote_average: 7, width: 3840, height: 2160, aspect_ratio: 1.778 },
+      { file_path: '/fc-bd-en.jpg', iso_639_1: 'en', vote_average: 8 }],
+  };
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  H.itunes.results = null;
+  H.tmdb.movies = [{ id: 550, title: '搏击俱乐部', en: 'Fight Club', date: '1999-10-15', query: 'zzz-fight-club', backdrop: '/b550.jpg', countries: ['US', 'DE'], images: fcImages },
+                   { id: 949, title: '盗火线', en: 'Heat', date: '1995-12-15', query: 'zzz-heat' }];
+  H.tmdb.shows = [{ id: 1399, name: '权力的游戏', original: 'Game of Thrones', first: '2011-04-17', seasons: [{ n: 1, air: '2011-04-17', count: 10 }], logo: '/got-logo.png' }];
+
+  // ① 回的东西和单条接口 /api/tmdb?id=&type=[&logo=1] 一模一样（各自冷启动取一遍再比）
+  await clear();
+  const s = { mb: await single('id=550&type=movie'), mf: await single('id=550&type=movie&logo=1'),
+              tb: await single('id=1399&type=tv'), tf: await single('id=1399&type=tv&logo=1') };
+  await clear();
+  const rb = await batch([{ id: 550, type: 'movie' }, { id: 1399, type: 'tv' }]);
+  await clear();
+  const rf = await batch([{ id: 550, type: 'movie', logo: true }, { id: 1399, type: 'tv', logo: true }]);
+  ok(s.mb?.id === 550 && s.tb?.id === 1399 && JSON.stringify(keysOf(rb)) === '["movie:550","tv:1399"]' && rb.__match === 2 && rb.__byId === 1
+    && canon(rb['movie:550']) === canon(s.mb) && canon(rb['tv:1399']) === canon(s.tb),
+    `按编号取（简要）：键 movie:550 / tv:1399，值和 /api/tmdb?id=&type= 一模一样（${rb['movie:550']?.title} / ${rb['tv:1399']?.title}）；回包带 __byId: 1`);
+  ok(rb['movie:550']?.logo === null && !('logoChecked' in rb['movie:550']) && !('backdropClean' in rb['movie:550']) && !('posterClean' in rb['movie:550']),
+    '不带 logo：和单条接口不带 logo=1 一样，没有字标那几项');
+  const fm = rf['movie:550'], ft = rf['tv:1399'];
+  ok(canon(fm) === canon(s.mf) && canon(ft) === canon(s.tf), '按编号取（logo: true）：值和 /api/tmdb?id=&type=&logo=1 一模一样');
+  ok(fm?.logo === 'https://image.tmdb.org/t/p/w500/fc-logo.png' && fm.logoChecked === true && fm.backdropClean === 'https://image.tmdb.org/t/p/w1280/fc-bd-clean.jpg'
+    && fm.posterClean === 'https://image.tmdb.org/t/p/w780/fc-clean.jpg' && fm.backdrop === 'https://image.tmdb.org/t/p/w1280/b550.jpg' && fm.imdb === 'tt550'
+    && ft?.logo === 'https://image.tmdb.org/t/p/w500/got-logo.png' && ft.logoChecked === true && ft.posterClean === 'https://image.tmdb.org/t/p/w780/clean.jpg',
+    `logo: true 带上字标、无字背景、纯净海报（电影 ${fm?.logo && 'logo'} / ${fm?.backdropClean && 'backdropClean'} / ${fm?.posterClean && 'posterClean'}；剧集 logo / posterClean）`);
+
+  // ② 同一个边缘缓存键：批接口取过的单条接口直接用，单条接口取过的批接口也直接用
+  H.tmdb.calls.length = 0;
+  const again = await single('id=550&type=movie&logo=1'), againTv = await single('id=1399&type=tv&logo=1');
+  ok(H.tmdb.calls.length === 0 && canon(again) === canon(s.mf) && canon(againTv) === canon(s.tf), '批接口取过的：单条接口走缓存（0 次 TMDB）');
+  await clear();
+  await single('id=1399&type=tv&logo=1'); await single('id=550&type=movie');
+  H.tmdb.calls.length = 0;
+  const warm = await batch([{ id: 1399, type: 'tv', logo: true }, { id: 550, type: 'movie' }]);
+  ok(H.tmdb.calls.length === 0 && canon(warm['tv:1399']) === canon(s.tf) && canon(warm['movie:550']) === canon(s.mb), '单条接口取过的：批接口走缓存（0 次 TMDB）');
+
+  // ③ 编号 / 类型不对：那个键回 null，不去问 TMDB；什么都没带的照旧不理
+  H.tmdb.calls.length = 0;
+  const bad = await batch([{ id: 0, type: 'movie' }, { id: -5, type: 'tv' }, { id: 'abc', type: 'movie' }, { id: 12.5, type: 'movie' },
+    { id: 550, type: 'person' }, { id: 550 }, { type: 'tv' }, { id: 550, type: 'MOVIE' }, { id: 1e12, type: 'movie' }, { id: '0550', type: 'movie' },
+    { id: { x: 1 }, type: 'tv' }, 'movie:550', null, {}, { logo: true }, 42]);
+  const badKeys = ['movie:0', 'tv:-5', 'movie:abc', 'movie:12.5', 'person:550', ':550', 'tv:', 'MOVIE:550', 'movie:1000000000000', 'movie:0550', 'tv:'].sort();
+  ok(JSON.stringify(keysOf(bad)) === JSON.stringify([...new Set(badKeys)].sort()) && keysOf(bad).every(k => bad[k] === null) && H.tmdb.calls.length === 0,
+    `编号不是正整数 / 类型不是 movie、tv：那个键回 null（${keysOf(bad).length} 个），0 次 TMDB；字符串、null、空对象不回键`);
+
+  // ④ TMDB 上没有这个编号：null，照旧写缓存（第二次不再问）
+  H.tmdb.calls.length = 0;
+  const nf = await batch([{ id: 999999, type: 'movie' }, { id: 888888, type: 'tv', logo: true }]);
+  const n1 = H.tmdb.calls.length;
+  const nf2 = await batch([{ id: 999999, type: 'movie' }, { id: 888888, type: 'tv', logo: true }]);
+  ok('movie:999999' in nf && nf['movie:999999'] === null && nf['tv:888888'] === null && n1 === 2 && H.tmdb.calls.length === n1 && nf2['movie:999999'] === null,
+    'TMDB 上没有这部（404）：回 null 并写缓存，第二次 0 次 TMDB');
+
+  // ⑤ TMDB 出错：这个键不回、不写缓存；字标那一问没问成的半份也不回（复查 ②），不进缓存
+  await clear();
+  H.tmdb.fail = p => p === '/movie/550';
+  const er = await batch([{ id: 550, type: 'movie' }, { id: 1399, type: 'tv' }]);
+  H.tmdb.fail = null;
+  const er2 = await batch([{ id: 550, type: 'movie' }]);
+  ok(!('movie:550' in er) && er['tv:1399']?.id === 1399 && er2['movie:550']?.id === 550, 'TMDB 出错的那个键不回（App 过会儿再问），别的照常；恢复后正常取到（出错那次没被缓存成「没有」）');
+  await clear();
+  H.tmdb.fail = p => p === '/movie/550/images';
+  const half = await batchRaw([{ id: 550, type: 'movie', logo: true }]);
+  H.tmdb.fail = null;
+  H.tmdb.calls.length = 0;
+  const whole = await batch([{ id: 550, type: 'movie', logo: true }]);
+  ok(!('movie:550' in half.body) && half.status === 503 && whole['movie:550']?.logoChecked === true
+    && H.tmdb.calls.some(c => c.path === '/movie/550/images'),
+    '字标那一问没问成：这个键不回（复查 ②：以前照回 logoChecked: false 的半份，App 会记 30 天；这批只有它 → 503），不进缓存，下次重问拿到字标');
+
+  // ⑥ 同一个键问了几次：只取一次；有一条要字标就取全量（编号写成字符串 "550" 也认）
+  await clear();
+  H.tmdb.calls.length = 0;
+  const dd = await batch([{ id: 550, type: 'movie' }, { id: '550', type: 'movie', logo: true }, { id: 550, type: 'movie' }]);
+  ok(JSON.stringify(keysOf(dd)) === '["movie:550"]' && dd['movie:550']?.logoChecked === true && canon(dd['movie:550']) === canon(s.mf)
+    && H.tmdb.calls.filter(c => c.path === '/movie/550/images').length === 1 && H.tmdb.calls.filter(c => c.path === '/movie/550').length === 2,
+    '同一个编号问了三次：只取一次（按编号 1 次 + 详情 1 次 + 字标 1 次），有一条要 logo 就回全量');
+
+  // ⑦ 和文件名的混在一批：文件名那条照旧；带 name 的一律按文件名认（同时带 id 也是）；只带文件名的批次回包照旧（只多 __byId）
+  const NAME = 'Heat.1995.1080p.BluRay.[auto-m949-r2001].mkv', SAMPLE = 'Movie.Name.2019.1080p-sample.mkv';
+  const mx = await batch([{ name: NAME }, { id: 1399, type: 'tv', logo: true }, { name: SAMPLE }, { name: 'Fight.Club.1999.mkv', id: 1399, type: 'tv' }]);
+  ok(mx[NAME]?.id === 949 && mx['tv:1399']?.id === 1399 && mx[SAMPLE] === null && mx['Fight.Club.1999.mkv'] === null
+    && JSON.stringify(keysOf(mx)) === JSON.stringify(['Fight.Club.1999.mkv', NAME, SAMPLE, 'tv:1399'].sort()),
+    '文件名、编号混在一批：各回各的键；带 name 的照旧按文件名认（同时带的 id 不理）');
+  const old = await batch([{ name: NAME, logo: false }, { name: SAMPLE }]);
+  ok(JSON.stringify(Object.keys(old).sort()) === JSON.stringify([NAME, SAMPLE, '__byId', '__match'].sort()) && old[NAME]?.id === 949 && old.__match === 2,
+    '老网页 / 老 App 只带文件名：键和值照旧（只多一个 __byId 记号，App 和网页都不看 __ 开头的键）');
+
+  // ⑧ 整批最多 80 条（文件名、编号一起算）
+  H.tmdb.calls.length = 0;
+  const cap = await batch([...Array.from({ length: 80 }, (_, i) => ({ id: 0, type: 'x' + i })), { id: 550, type: 'movie' }, { name: NAME }]);
+  ok(keysOf(cap).length === 80 && !('movie:550' in cap) && !(NAME in cap) && H.tmdb.calls.length === 0, '整批最多 80 条：第 81 条起不答（编号、文件名一起算）');
+
+  // ⑨ 并发和文件名那条路一样：同一时刻最多 6 部在问
+  await clear();
+  const real = globalThis.fetch;
+  let inflight = 0, peak = 0;
+  globalThis.fetch = async (input, init) => {
+    if (new URL(typeof input === 'string' ? input : input.url).host !== 'api.themoviedb.org') return real(input, init);
+    inflight++; peak = Math.max(peak, inflight);
+    try { await new Promise(r => setTimeout(r, 15)); return await real(input, init); } finally { inflight--; }
+  };
+  let par;
+  try { par = await batch(Array.from({ length: 24 }, (_, i) => ({ id: 70000 + i, type: i % 2 ? 'tv' : 'movie' }))); }
+  finally { globalThis.fetch = real; }
+  ok(keysOf(par).length === 24 && keysOf(par).every(k => par[k] === null) && peak === 6, `24 部一批：并发上限 6（同一时刻最多 ${peak} 个 TMDB 请求在途）`);
+
+  // ⑩ App 那一行的真实用法：24 部（12 部电影 + 12 部剧）一次要齐背景和字标；80 部也不会被预算截掉
+  H.tmdb.movies = Array.from({ length: 40 }, (_, i) => ({ id: 80000 + i, title: '电影' + i, en: 'Film ' + i, date: '2020-01-01', query: 'zzz-' + i,
+    backdrop: `/bd${80000 + i}.jpg`, images: { logos: [{ file_path: `/lg${80000 + i}.png`, iso_639_1: 'zh', aspect_ratio: 3 }], posters: [], backdrops: [] } }));
+  H.tmdb.shows = Array.from({ length: 40 }, (_, i) => ({ id: 90000 + i, name: '剧' + i, original: 'Show ' + i, first: '2021-01-01', seasons: [{ n: 1, air: '2021-01-01', count: 8 }] }));
+  const row = n => Array.from({ length: n }, (_, i) => ({ id: i % 2 ? 90000 + (i >> 1) : 80000 + (i >> 1), type: i % 2 ? 'tv' : 'movie', logo: true }));
+  await clear();
+  H.tmdb.calls.length = 0;
+  const r24 = await batch(row(24));
+  ok(keysOf(r24).length === 24 && keysOf(r24).every(k => r24[k]?.logo && r24[k].backdrop && r24[k].logoChecked === true) && H.tmdb.calls.length === 24 * 4,
+    `一行 24 部（电影 + 剧集）一个请求：背景、字标全齐（${H.tmdb.calls.length} 次 TMDB = 每部 4 次，原来要 24 个 /api/tmdb 请求）`);
+  await clear();
+  const r80 = await batch(row(80));
+  ok(keysOf(r80).length === 80 && keysOf(r80).every(k => r80[k]?.logoChecked === true), '80 部都要字标：全部回答（预算 700 够 80 × 4）');
+
+  delete H.env.TMDB_API_KEY; H.tmdb.movies = []; H.tmdb.shows = []; H.tmdb.fail = null;
+  await clear();
+}
+
+console.log('\n■ v25.6 复查：按编号批量取 —— 全批没答出来回 503、半份不回、文件名的键不盖编号的键');
+{
+  const settle = async () => { while (H.pending.length) await Promise.all(H.pending.splice(0)); };
+  const clear = async () => { await settle(); caches.default.m.clear(); };
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const cookie = `auth=${exp}.${crypto.createHmac('sha256', H.SECRET).update(`sess|${exp}`).digest('hex')}`;
+  const batchRaw = async queries => {
+    const r = await H.worker.fetch(new Request('https://w.test/api/tmdb-batch', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ queries }) }), H.env, H.ctx);
+    await settle();
+    return { status: r.status, ra: r.headers.get('Retry-After'), cc: r.headers.get('Cache-Control'), cors: r.headers.get('Access-Control-Allow-Origin'), body: await r.json() };
+  };
+  /* 现在发出去的 App 怎么读这一回（照 ios/Cuven/Core/CatalogArt.swift 的 flush、API.swift 的 MetaBatch 写的）：
+     非 2xx → 这一批记「这次没问成」，1 分钟后再问；2xx 但问的键一个都没有（__ 开头的键解码时就丢了）→ 当成旧版后端、关批量 10 分钟；
+     否则回了的键（值是什么都算）记本机 30 天、不再问，没回的 1 分钟后再问 */
+  const appRead = (r, keys) => r.status < 200 || r.status >= 300 ? 'retry' : keys.some(k => !k.startsWith('__') && k in r.body) ? 'ok' : 'batch-off';
+  const searched = () => H.tmdb.calls.filter(c => /^\/search\//.test(c.path)).length;
+  const img = n => ({ logos: [{ file_path: `/lg${n}.png`, iso_639_1: 'zh', aspect_ratio: 3 }], posters: [], backdrops: [{ file_path: `/bdc${n}.jpg`, iso_639_1: null }] });
+  H.env.TMDB_API_KEY = 'tmdb-test';
+  H.itunes.results = null;
+  H.tmdb.movies = [{ id: 550, title: '搏击俱乐部', en: 'Fight Club', date: '1999-10-15', query: 'zzz-fight-club', backdrop: '/b550.jpg', images: img(550) },
+                   { id: 551, title: '片子551', en: 'Film 551', date: '2001-01-01', query: 'zzz-551', backdrop: '/b551.jpg', images: img(551) },
+                   { id: 552, title: '片子552', en: 'Film 552', date: '2002-01-01', query: 'zzz-552', backdrop: '/b552.jpg', images: img(552) },
+                   { id: 949, title: '盗火线', en: 'Heat', date: '1995-12-15', query: 'zzz-heat', images: img(949) }];
+  H.tmdb.shows = [{ id: 1399, name: '权力的游戏', original: 'Game of Thrones', first: '2011-04-17', seasons: [{ n: 1, air: '2011-04-17', count: 10 }] }];
+
+  // ① 全批编号都没答出来：503 + Retry-After（不是只有记号的 200 —— App 看不到 __byId，会当成旧版后端关批量 10 分钟）
+  await clear();
+  H.tmdb.fail = p => p === '/movie/550';
+  const one = await batchRaw([{ id: 550, type: 'movie', logo: true }]);
+  ok(one.status === 503 && one.ra === '60' && one.cc === 'no-store' && one.cors === '*' && !('movie:550' in one.body) && one.body.__byId === 1
+    && appRead(one, ['movie:550']) === 'retry',
+    `一张卡、按编号取那一问 TMDB 出错两次：回 ${one.status} + Retry-After ${one.ra}（不缓存、带 CORS 头），App 读成「这次没问成」1 分钟后再问，批量不关（以前 200 只有记号 → App 关批量 10 分钟、逐张问 /api/tmdb）`);
+  H.tmdb.fail = p => /^\/movie\/55[012]$/.test(p);
+  const three = await batchRaw([{ id: 550, type: 'movie', logo: true }, { id: 551, type: 'movie', logo: true }, { id: 552, type: 'movie', logo: true }]);
+  H.tmdb.fail = null;
+  const back = await batchRaw([{ id: 550, type: 'movie', logo: true }, { id: 551, type: 'movie', logo: true }, { id: 552, type: 'movie', logo: true }]);
+  ok(three.status === 503 && appRead(three, ['movie:550', 'movie:551', 'movie:552']) === 'retry'
+    && back.status === 200 && ['movie:550', 'movie:551', 'movie:552'].every(k => back.body[k]?.logoChecked === true),
+    '一批三张全没问成：也是 503；TMDB 好了再问一批全回（503 那次什么都没缓存）');
+  await clear();
+  H.tmdb.fail = p => p === '/movie/551';
+  const part = await batchRaw([{ id: 550, type: 'movie', logo: true }, { id: 551, type: 'movie', logo: true }]);
+  H.tmdb.fail = null;
+  const nf = await batchRaw([{ id: 999999, type: 'movie', logo: true }]);
+  const bad = await batchRaw([{ id: 0, type: 'movie' }]);
+  ok(part.status === 200 && part.body['movie:550']?.id === 550 && !('movie:551' in part.body) && appRead(part, ['movie:550', 'movie:551']) === 'ok'
+    && nf.status === 200 && 'movie:999999' in nf.body && nf.body['movie:999999'] === null && appRead(nf, ['movie:999999']) === 'ok'
+    && bad.status === 200 && bad.body['movie:0'] === null,
+    '有一个键答得出就照常 200：答出来的回、没问成的不回；TMDB 上没有这部（null）、编号不对（null）也算答出来');
+  await clear();
+  H.tmdb.fail = () => true;
+  const oldAll = await batchRaw([{ name: 'Some.Film.2012.mkv' }, { name: 'Other.Film.2013.mkv', logo: true }]);
+  const mixAll = await batchRaw([{ name: 'Some.Film.2012.mkv' }, { id: 550, type: 'movie' }]);
+  H.tmdb.fail = null;
+  ok(oldAll.status === 200 && JSON.stringify(Object.keys(oldAll.body).sort()) === '["__byId","__match"]' && mixAll.status === 503,
+    '只带文件名的批次（老网页、老 App）全没问成：照旧 200、只有记号，不走 503；文件名、编号混着的全没问成才 503');
+
+  // ② 带 logo 按编号取、字标那一问没问成的半份：这个键不回（App 会把回了的半份记 30 天）；/api/tmdb 和文件名那条路照旧回半份
+  await clear();
+  H.tmdb.calls.length = 0;
+  H.tmdb.fail = p => p === '/movie/551/images';
+  const row = await batchRaw([{ id: 550, type: 'movie', logo: true }, { id: 551, type: 'movie', logo: true }, { id: 1399, type: 'tv', logo: true }]);
+  const askedImg = H.tmdb.calls.filter(c => c.path === '/movie/551/images').length;
+  H.tmdb.fail = null;
+  ok(row.status === 200 && !('movie:551' in row.body) && askedImg === 2 && row.body['movie:550']?.logoChecked === true && row.body['tv:1399']?.logoChecked === true
+    && appRead(row, ['movie:550', 'movie:551', 'tv:1399']) === 'ok',
+    '一行里一部的字标那一问超时 / 出错两次：这部不回（App 1 分钟后再问，不把没字标、带字背景的半份记 30 天），别的照回');
+  H.tmdb.calls.length = 0;
+  const row2 = await batchRaw([{ id: 551, type: 'movie', logo: true }]);
+  ok(row2.status === 200 && row2.body['movie:551']?.logoChecked === true && row2.body['movie:551'].logo === 'https://image.tmdb.org/t/p/w500/lg551.png'
+    && row2.body['movie:551'].backdropClean === 'https://image.tmdb.org/t/p/w1280/bdc551.jpg' && H.tmdb.calls.some(c => c.path === '/movie/551/images'),
+    '再问一次：半份没进缓存，重问拿到字标和无字背景');
+  await clear();
+  H.tmdb.fail = p => p === '/movie/550/images' || p === '/movie/949/images';
+  const st = await H.call('/api/tmdb?id=550&type=movie&logo=1', 'GET', { Cookie: cookie });
+  const sj = await st.json();
+  const HEAT = 'Heat.1995.1080p.BluRay.[auto-m949-r2001].mkv';
+  const byName = await batchRaw([{ name: HEAT, logo: true }]);
+  const brief = await batchRaw([{ id: 550, type: 'movie' }]);
+  H.tmdb.fail = null;
+  await settle();
+  ok(st.status === 200 && sj?.id === 550 && sj.logoChecked === false && sj.logo === null && /max-age=120/.test(st.headers.get('Cache-Control') || '')
+    && byName.status === 200 && byName.body[HEAT]?.id === 949 && byName.body[HEAT].logoChecked === false
+    && brief.status === 200 && brief.body['movie:550']?.id === 550 && !('logoChecked' in brief.body['movie:550']),
+    '只改编号这条路：/api/tmdb?id=&logo=1 照旧回半份（logoChecked: false，浏览器只留两分钟），文件名那条路照旧回半份，不带 logo 的不问字标、照常回');
+
+  // ③ 文件名的键和编号的键撞上：这个键归编号那条，文件名那条不查；文件名是记号的也不查；只带文件名的照旧
+  await clear();
+  H.tmdb.calls.length = 0;
+  const c1 = await batchRaw([{ name: 'movie:550' }, { id: 550, type: 'movie' }]);
+  const s1 = searched();
+  await clear();
+  H.tmdb.calls.length = 0;
+  const c2 = await batchRaw([{ id: 550, type: 'movie' }, { name: 'movie:550', logo: true }, { name: 'person:7' }, { id: 7, type: 'person' }]);
+  const s2 = searched();
+  ok(c1.status === 200 && c1.body['movie:550']?.id === 550 && c1.body['movie:550'].title === '搏击俱乐部' && s1 === 0
+    && c2.body['movie:550']?.id === 550 && !('logoChecked' in c2.body['movie:550']) && c2.body['person:7'] === null && s2 === 0,
+    `文件名正好是 "movie:550"、同一批又按编号问了它：值是按编号取到的《${c1.body['movie:550']?.title}》（以前文件名那条后查完、回 null 把它盖掉），文件名那条不去搜（${s1 + s2} 次搜索）；不合法的编号键也一样`);
+  H.tmdb.calls.length = 0;
+  const marks = await batchRaw([{ name: '__byId' }, { name: '__match', logo: true }, { name: HEAT }]);
+  ok(marks.status === 200 && marks.body.__byId === 1 && marks.body.__match === 2 && marks.body[HEAT]?.id === 949
+    && JSON.stringify(Object.keys(marks.body).sort()) === JSON.stringify([HEAT, '__byId', '__match'].sort()) && searched() === 0
+    && H.tmdb.calls.length === 1 && H.tmdb.calls[0].path === '/movie/949',
+    '文件名正好是 __byId / __match：不查（键是记号，以前也是查完被记号盖掉），只花 1 次 TMDB（带追踪码那条）');
+  await clear();
+  H.tmdb.calls.length = 0;
+  const alone = await batchRaw([{ name: 'movie:550' }]);
+  ok(alone.status === 200 && 'movie:550' in alone.body && alone.body['movie:550'] === null && searched() > 0,
+    '只带文件名、没有按编号问同一个键："movie:550" 照旧按文件名认（搜不到 → null）');
+
+  delete H.env.TMDB_API_KEY; H.tmdb.movies = []; H.tmdb.shows = []; H.tmdb.fail = null;
   await clear();
 }
 

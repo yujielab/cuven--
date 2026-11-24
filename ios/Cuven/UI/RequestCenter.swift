@@ -10,11 +10,14 @@ import SwiftUI
 //   按下去直接放片库里的这部（RequestPlayback，和详情页的「立即播放」同一套）
 // 只保留最近 10 个（按提交的先后）；空的时候说下一步去哪儿（F88），给一颗「去搜索」。下拉刷新、打开时马上问一次服务器。
 // 标签栏那一格上的角标是进行中的个数。
+// 批量流程（用户要求）：最上面是「Luminous Data Flow」那张卡（RequestFlowCard：四段漏斗、入库率、批量传输的进度条），
+// 下面「待确认」是请求篮（详情页按「请求添加」放进来的，最多 50 部），按「确认请求」一次提交；进行中的全部列出来（一批最多 50 部，不止 10 个）。
 
 struct RequestCenterView: View {
     @Environment(AppModel.self) private var model
     @State private var opening: Int?
     @State private var problem: RequestPlayback.Problem?
+    @State private var basketCleared = false
 
     static let keep = 10
     private var store: RequestStore { RequestStore.shared }
@@ -30,6 +33,8 @@ struct RequestCenterView: View {
             .navigationBarTitleDisplayMode(.large)
         }
         .task { await store.refreshNow() }
+        // 开着的时候一直问传输流（凑批的进度、正在跑的那一批），关了就停
+        .task { await store.watchFlow() }
         .alert(problem?.title ?? "", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } }), presenting: problem) { _ in
             Button("好", role: .cancel) {}
         } message: { p in
@@ -37,26 +42,75 @@ struct RequestCenterView: View {
         }
     }
 
+    private var basket: RequestBasket { RequestBasket.shared }
+
+    @ViewBuilder
     private func content(_ m: DSMetrics) -> some View {
-        let recent = Array(store.mine.prefix(Self.keep))
-        let active = recent.filter { $0.state == .active }
-        let ended = recent.filter { $0.state != .active }
-        return ScrollView {
+        let active = store.mine.filter { $0.state == .active }
+        let ended = Array(store.mine.filter { $0.state != .active }.prefix(Self.keep))
+        let showFlow = !RequestFlowStats.inFlow(store.mine).isEmpty || store.flow?.batch != nil
+        if showFlow && m.width >= Self.splitWidth {
+            split(m, active: active, ended: ended)
+        } else {
+            single(m, active: active, ended: ended, showFlow: showFlow)
+        }
+    }
+
+    /// iPad 横拿（窗口宽于 1100 点：普通 iPad、Pro 11 / 13 寸横拿）：左右两栏（用户要求按 Apple 的做法给 iPad 定制）——
+    /// 左边一栏滚动：待确认、进行中（一列）、最近；右边一栏是那张 Luminous Data Flow 卡，钉在顶上不跟着滚
+    static let splitWidth: CGFloat = 1100
+
+    private func split(_ m: DSMetrics, active: [RequestStatus], ended: [RequestStatus]) -> some View {
+        let right = min(640, max(600, (m.width * 0.46).rounded()))
+        let leftW = m.width - right - m.margin
+        let lm = DSMetrics(width: leftW, leadingInset: m.leadingInset, trailingInset: 0, height: m.height)
+        let rm = DSMetrics(width: right, height: m.height)
+        return HStack(alignment: .top, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: lm.shelfGap) {
+                    if !basket.items.isEmpty { basketSection(lm) }
+                    summary(active: active, ended: ended, lm)
+                    if !active.isEmpty { activeSection(active, lm, columns: 1) }
+                    if !ended.isEmpty { recentSection(ended, lm) }
+                }
+                .padding(.top, 4)
+                .padding(.bottom, 40)
+                .padding(.leading, m.leadingInset)
+                .animation(.smooth(duration: 0.35), value: basket.items)
+            }
+            .scrollIndicators(.hidden)
+            .frame(width: leftW + m.leadingInset)
+            .refreshable { await store.refreshNow() }
+            RequestFlowCard(requests: store.mine, flow: store.flow, flowAt: store.flowAt, metrics: rm)
+                .frame(width: right)
+                .padding(.top, 4)
+                .padding(.trailing, m.margin)
+                .accessibilityIdentifier("request-flow-card")
+        }
+        .ignoresSafeArea(edges: .horizontal)
+    }
+
+    private func single(_ m: DSMetrics, active: [RequestStatus], ended: [RequestStatus], showFlow: Bool) -> some View {
+        ScrollView {
             Group {
-                if recent.isEmpty {
+                if active.isEmpty && ended.isEmpty && basket.items.isEmpty && !showFlow {
                     emptyState
                 } else {
                     VStack(alignment: .leading, spacing: m.shelfGap) {
+                        if showFlow {
+                            RequestFlowCard(requests: store.mine, flow: store.flow, flowAt: store.flowAt, metrics: m)
+                                .frame(maxWidth: 980, alignment: .leading)
+                                .padding(.horizontal, m.margin)
+                                .accessibilityIdentifier("request-flow-card")
+                        }
+                        if !basket.items.isEmpty { basketSection(m) }
                         summary(active: active, ended: ended, m)
                         if !active.isEmpty { activeSection(active, m) }
                         if !ended.isEmpty { recentSection(ended, m) }
-                        Text("请求中心只保留最近 \(Self.keep) 个请求。")
-                            .font(.footnote)
-                            .foregroundStyle(DSInk.tertiary)
-                            .padding(.horizontal, m.margin)
                     }
                     .padding(.top, 4)
                     .padding(.bottom, 40)
+                    .animation(.smooth(duration: 0.35), value: basket.items)
                 }
             }
             // 字和卡留在安全区里（和搜索页一样）
@@ -66,6 +120,133 @@ struct RequestCenterView: View {
         .scrollIndicators(.hidden)
         .ignoresSafeArea(edges: .horizontal)
         .refreshable { await store.refreshNow() }
+    }
+
+    // MARK: 待确认（请求篮）
+
+    /// 详情页按「请求添加」放进来的：一行一部，右边一颗「移除」；最下面「清空」和「确认请求 · N 部」
+    private func basketSection(_ m: DSMetrics) -> some View {
+        VStack(alignment: .leading, spacing: m.titleGap) {
+            HStack(alignment: .firstTextBaseline) {
+                DSShelfTitle(title: "待确认", metrics: m)
+                Spacer(minLength: 8)
+                Text("\(basket.items.count) / \(RequestBasket.limit)")
+                    .font(.subheadline)
+                    .monospacedDigit()
+                    .foregroundStyle(DSInk.tertiary)
+                    .padding(.trailing, m.margin)
+            }
+            VStack(spacing: 0) {
+                ForEach(Array(basket.items.enumerated()), id: \.element.key) { i, item in
+                    basketRow(item)
+                    if i < basket.items.count - 1 {
+                        Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5).padding(.leading, 16 + 44 + 14)
+                    }
+                }
+                Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5)
+                HStack(spacing: 12) {
+                    Button("清空", role: .destructive) { basketCleared = true }
+                        .font(.subheadline)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(DSInk.secondary)
+                        .disabled(basket.submitting)
+                        .accessibilityIdentifier("basket-clear")
+                    Spacer(minLength: 8)
+                    Button { confirmBasket() } label: {
+                        HStack(spacing: 8) {
+                            if basket.submitting {
+                                ProgressView().controlSize(.small).tint(.black)
+                            }
+                            Text("确认请求 · \(basket.items.count) 部")
+                                .font(.subheadline.weight(.semibold))
+                                .monospacedDigit()
+                        }
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 18)
+                        .frame(minHeight: 38)
+                        .background(Capsule().fill(Color.white))
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(PressableStyle(scale: 0.95))
+                    .disabled(basket.submitting)
+                    .accessibilityIdentifier("basket-confirm")
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
+            .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color.white.opacity(0.07)))
+            .frame(maxWidth: 720, alignment: .leading)
+            .padding(.horizontal, m.margin)
+        }
+        .confirmationDialog("清空请求中心里还没确认的 \(basket.items.count) 部？", isPresented: $basketCleared, titleVisibility: .visible) {
+            Button("清空", role: .destructive) { basket.clear() }
+            Button("取消", role: .cancel) {}
+        }
+    }
+
+    private func basketRow(_ item: RequestBasket.Item) -> some View {
+        HStack(spacing: 12) {
+            ZoomLink(route: .catalog(item.catalogTitle), slot: "request-basket", press: true) {
+                HStack(spacing: 14) {
+                    DSThumb(url: TMDBImage.url(item.poster, "w185"), width: 44)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.title.isEmpty ? "未知影片" : item.title)
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Text([item.kind == .tv ? "剧集" : "电影",
+                              item.kind == .tv && item.season > 0 ? "第 \(item.season) 季" : nil,
+                              item.year.isEmpty ? nil : item.year].compactMap { $0 }.joined(separator: " · "))
+                            .font(.subheadline)
+                            .foregroundStyle(DSInk.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                }
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+            }
+            Button {
+                withAnimation(.smooth(duration: 0.3)) { basket.remove(item) }
+                Haptics.light()
+            } label: {
+                Image(systemName: "minus.circle.fill")
+                    .font(.title3)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(DSInk.secondary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(basket.submitting)
+            .accessibilityLabel("从请求中心移除 \(item.title)")
+            .accessibilityIdentifier("basket-remove")
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 6)
+        .accessibilityIdentifier("basket-row")
+    }
+
+    private func confirmBasket() {
+        guard !basket.submitting else { return }
+        Haptics.light()
+        Task { @MainActor in
+            do {
+                let r = try await basket.submit()
+                var notes: [String] = []
+                if r.joined > 0 { notes.append("\(r.joined) 部已经有人在请求，已为你跟上。") }
+                if r.failedRecently > 0 { notes.append("\(r.failedRecently) 部刚刚没能添加，请稍后再试。") }
+                if r.refused > 0 { notes.append("\(r.refused) 部超出了同时进行的上限，已留在待确认里。") }
+                if notes.isEmpty {
+                    Haptics.success()
+                } else {
+                    problem = RequestPlayback.Problem(title: "已提交 \(r.accepted + r.joined) 部", message: notes.joined(separator: "\n"))
+                }
+            } catch {
+                Haptics.error()
+                problem = RequestPlayback.Problem(title: "没能提交", message: error.localizedDescription)
+            }
+        }
     }
 
     // MARK: 顶上一行
@@ -90,8 +271,8 @@ struct RequestCenterView: View {
 
     // MARK: 进行中
 
-    private func activeSection(_ list: [RequestStatus], _ m: DSMetrics) -> some View {
-        let columns = Array(repeating: GridItem(.flexible(), spacing: m.gutter, alignment: .top), count: m.wide ? 2 : 1)
+    private func activeSection(_ list: [RequestStatus], _ m: DSMetrics, columns n: Int? = nil) -> some View {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: m.gutter, alignment: .top), count: n ?? (m.wide ? 2 : 1))
         return VStack(alignment: .leading, spacing: m.titleGap) {
             DSShelfTitle(title: "进行中", metrics: m)
             LazyVGrid(columns: columns, alignment: .leading, spacing: m.gutter) {
@@ -217,7 +398,7 @@ struct RequestCenterView: View {
         ContentUnavailableView {
             Label("还没有请求", systemImage: "tray")
         } description: {
-            Text("在搜索里找到片库还没有的影片，打开详情页点「请求添加」。")
+            Text("在搜索里找到片库还没有的影片，打开详情页点「请求添加」，再回到这里确认。")
         } actions: {
             Button("去搜索") { model.searchRequest = "" }
                 .buttonStyle(.bordered)

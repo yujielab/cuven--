@@ -670,16 +670,38 @@ struct DetailScaffold<Episodes: View>: View {
                     hero(m, width: fullW, height: heroH, insets: insets, barBottom: barBottom)
                     // 一组一行粗体标题 + 一张卡（参考图）；分区之间同一种留白（F3、F12）
                     VStack(alignment: .leading, spacing: m.shelfGap) {
-                        if let overview, !overview.isEmpty {
+                        if Self.twoColumns(m) && hasOverview && !stats.isEmpty {
+                            // iPad 宽窗口（960 点以上）：简介和影片详细信息并排两栏，不再一张 720 宽的卡、右边空一大块。
+                            // 影片详细信息那一栏定宽，方块和单栏时一行四块（720 宽、间距 12）一样大，(720 − 3×12) / 4 = 171；简介那一栏拿剩下的。
+                            // 以前对半分，方块撑到近 300 点见方、字缩在角上，这一栏比简介高出几百点，下面整排都被往下推。
+                            // 放得下一行四块（720）、简介还剩 420 点以上（Pro 13 横拿 1376）就一行，和简介差不多高；
+                            // 再窄（普通 iPad、Pro 11 横拿，简介只剩两三百点）两块一行、两行。只有一两块时两块一行本来就只一行，不撑到 720
+                            let gap = (m.gutter * 2.5).rounded()
+                            let statTile: CGFloat = (720 - 3 * 12) / 4
+                            let tileCount = [stats.release != nil, stats.runtime != nil, stats.efficiency != nil,
+                                             DetailFacts.recommendation(stats.rating) != nil].filter { $0 }.count
+                            let statsRow = tileCount > 2 && m.width - 2 * m.margin - gap - 720 >= 420
+                            HStack(alignment: .top, spacing: gap) {
+                                column(m, "简介") {
+                                    DetailDescriptionCard(title: title, genres: genres, overview: overview ?? "",
+                                                          director: director, palette: palette)
+                                }
+                                column(m, "影片详细信息") {
+                                    DetailStatsGrid(stats: stats, palette: palette, wide: statsRow)
+                                }
+                                .frame(width: statsRow ? 720 : statTile * 2 + 12)
+                            }
+                            .padding(.horizontal, m.margin)
+                        } else if hasOverview {
                             group(m, "简介") {
-                                DetailDescriptionCard(title: title, genres: genres, overview: overview,
+                                DetailDescriptionCard(title: title, genres: genres, overview: overview ?? "",
                                                       director: director, palette: palette)
                             }
                         }
                         episodes(m)
                         if !trailers.isEmpty || stills.count >= 2 { mediaSection(m) }
                         if !cast.isEmpty { castSection(m) }
-                        if !stats.isEmpty {
+                        if !stats.isEmpty && !(Self.twoColumns(m) && hasOverview) {
                             group(m, "影片详细信息") {
                                 DetailStatsGrid(stats: stats, palette: palette, wide: m.wide)
                             }
@@ -757,11 +779,22 @@ struct DetailScaffold<Episodes: View>: View {
     /// 剧照浏览台里放出来的剧照（最多 12 张，和网页版一样）
     private var stillShown: [String] { Array(stills.prefix(12)) }
 
+    private var hasOverview: Bool { !(overview ?? "").isEmpty }
+
+    /// iPad 宽窗口（960 点以上）：简介、影片详细信息并排
+    /// 960 点（不是 1100）：13 寸横拿时侧边栏占去约 320 点，详情页只剩约 1050 点宽，1100 的门槛会把最大的 iPad 排成单栏（CI 截图）；
+    /// 960 时简介那一栏仍有约 460 点（右边 2×2 的影片详细信息 354 点）
+    static func twoColumns(_ m: DSMetrics) -> Bool {
+        UIDevice.current.userInterfaceIdiom == .pad && m.width >= 960
+    }
+
     // MARK: 头部
 
     /// 头部一样高（用户要求：统一高度，比画面稍高）：竖着的屏九成屏高，横着的屏九成二；画面只占上面那一截
     static func heroHeight(width w: CGFloat, height h: CGFloat) -> CGFloat {
-        max(420, (h * (h > w ? 0.9 : 0.92)).rounded())
+        // iPad：竖拿约三分之二、横拿约八成屏高（满屏的头部在 11 / 13 寸上太高，往下滑半天才到简介）
+        if UIDevice.current.userInterfaceIdiom == .pad { return max(420, (h * (h > w ? 0.66 : 0.78)).rounded()) }
+        return max(420, (h * (h > w ? 0.9 : 0.92)).rounded())
     }
 
     /// 左下那一列字（字标格 + 一行信息 + 按钮）大约多高
@@ -911,6 +944,14 @@ struct DetailScaffold<Episodes: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// 并排两栏里的一栏：标题 + 卡。影片详细信息那一栏外面给定宽，简介这一栏拿剩下的（外面那一层管左右边距）
+    private func column<Content: View>(_ m: DSMetrics, _ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: m.titleGap + 4) {
+            DetailGroupTitle(title: title, route: nil)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
 
     /// 预告片与剧照（用户要求：两样现在是同一种卡，合成一组、不再分开，同一横排里用间距分开）：
     /// 先是预告片（点一张全屏放，从这一段开始，左右滑换下一段），隔一段宽一点的空（卡间距的 2.5 倍），再是剧照（点一张全屏看大图，

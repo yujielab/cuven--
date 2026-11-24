@@ -87,7 +87,8 @@ struct AccountView: View {
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(PlayerCoordinator.autoplayKey) private var autoplayNext = true
     /// 改进兼容性（Compat.swift）：没选过的时候按机型（旧机型开）
-    @AppStorage(Compat.key) private var compatMode = Compat.legacyDevice
+    /// 改进兼容性的档位：关闭 / 标准 / 增强（Compat.swift）
+    @State private var compatLevel = Compat.level
     /// 影院光影（半折播放器：画面里的光映在控制卡片上）的模式，这一行显示当前是哪一种
     /// 首选音轨 / 首选字幕（用户要求，TrackPrefs.swift）
     @AppStorage(TrackPrefs.audioKey) private var audioPref = TrackPrefs.Audio.auto.rawValue
@@ -341,14 +342,19 @@ struct AccountView: View {
     /// 改进兼容性（用户要求：iPad（第 9 代）和更早的机型放不了）。说明照实写：改的是片源的规格标记，画面数据不变
     private var compatGroup: some View {
         AccountGroup(title: "兼容性") {
-            AccountRow(icon: "ipad.landscape", title: "改进兼容性", subtitle: "适用于 iPad（第 9 代）及更早机型") {
-                Toggle("改进兼容性", isOn: $compatMode)
-                    .labelsHidden()
-                    .tint(.green)
-                    .accessibilityIdentifier("account-compat")
+            AccountRow(icon: "ipad.landscape", title: "改进兼容性",
+                       subtitle: compatLevel == .enhanced ? "放不了 4K、HDR 或杜比视界的设备和屏幕" : "适用于 iPad（第 9 代）及更早机型") {
+                Picker("改进兼容性", selection: $compatLevel) {
+                    ForEach(Compat.Level.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .tint(.white.opacity(0.7))
+                .accessibilityIdentifier("account-compat")
             }
         }
-        .sensoryFeedback(.selection, trigger: compatMode)
+        .onChange(of: compatLevel) { _, l in Compat.level = l }
+        .sensoryFeedback(.selection, trigger: compatLevel)
     }
 
     // 「片库」（片子数量、刷新片库）和「关于」（版本、片源、账户服务）两组用户要求移除；片库照常在主页下拉刷新

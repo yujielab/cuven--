@@ -98,6 +98,21 @@ final class CuvenPlayerViewController: AVPlayerViewController {
         tabletop.model.visible = false
         if isBeingDismissed || presentingViewController == nil { onClose?() }
     }
+
+    // iPad 接了键盘：空格暂停 / 播放、← → 快退快进是系统播放器自带的；这里补上关掉播放器的两个键（Esc、⌘W），
+    // 按住 ⌘ 时的快捷键面板里也列出来。系统播放器自己挂在 keyCommands 上的快捷键要原样带上（只返回这两个，空格、← → 就没了）；
+    // 这两个放前面：同一个键 UIKit 取先匹配到的，Esc 才是关播放器，不是系统的退出全屏
+    override var keyCommands: [UIKeyCommand]? {
+        let esc = UIKeyCommand(title: "关闭播放器", action: #selector(closeFromKeyboard), input: UIKeyCommand.inputEscape)
+        let w = UIKeyCommand(title: "关闭播放器", action: #selector(closeFromKeyboard), input: "w", modifierFlags: .command)
+        esc.wantsPriorityOverSystemBehavior = true
+        return [w, esc] + (super.keyCommands ?? [])
+    }
+
+    @objc private func closeFromKeyboard() {
+        guard presentedViewController == nil, !isBeingDismissed else { return }
+        dismiss(animated: true)
+    }
 }
 
 // 加载画面（PlayerLoadingOverlay）在 UI/PlayerLoading.swift：和网页版一样的极光 + Cuven max + 胶囊进度条 + 提示，顶层窗口
@@ -138,9 +153,18 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     private var sourceViaPass = false
     /// 这一集已经从加速节点改走过普通线路（只改一次）
     private var passFallbackTried = false
-    /// 改进兼容性（Compat.swift）：这一集的 HLS 经本机代理改标记再给播放器。设置里开着就一开始用；
-    /// 没开的、起播就失败（不是网络错）的，自动开一次再试
-    private var compatActive = false
+    /// 改进兼容性（Compat.swift）：这一集的 HLS 经本机代理改标记再给播放器。设置里选了哪一档就从哪一档开始；
+    /// 起播就失败（不是网络错）的，一档一档往上试：原样 → 标准 → 增强 → 这部片另一个规格更低的版本
+    private var compatLevel: Compat.Level = .off
+    /// 这一次点播放以来已经试过的版本（换版本时不来回换）
+    private var versionsTried: Set<String> = []
+    /// 换了版本以后从哪一档兼容开始（不再从原样、标准重新试一遍），和接着放的位置（原来那个版本看到哪儿了）
+    private var compatFloor: Compat.Level = .off
+    private var resumeOverride: Double?
+    /// 真的经本机代理改过标记的是哪一档（代理没起来时还是原样：报错时不能说「已按增强方式试过」）
+    private var compatApplied: Compat.Level = .off
+    /// 已经为它换过一次片源的那个 item（同一个 item 又报 failed 又报播不到头时，不重试两遍）
+    private weak var fallbackItem: AVPlayerItem?
     /// 这一集的片源是 HLS / 走的是预先缓存的本机代理
     private var sourceIsHLS = false
     private var sourcePrecached = false
@@ -148,6 +172,9 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     func play(_ req: PlayRequest, model: AppModel) {
         self.model = model
         if DemoData.enabled { alert("演示模式", "演示模式下无法播放。"); return }
+        versionsTried = []
+        compatFloor = .off
+        resumeOverride = nil
         Haptics.success()
         plog("tap")
         PlayerLoadingOverlay.shared.onClose = { [weak self] in self?.cancelLoading() }
@@ -175,7 +202,8 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         loadToken += 1
         let token = loadToken
         passFallbackTried = false
-        compatActive = Compat.isOn
+        compatLevel = max(Compat.level, compatFloor)
+        compatApplied = .off
         audioOrigin = nil
         originRefresh = nil
         if TrackPrefs.audio == .natural, let model {
@@ -321,8 +349,14 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     /// HLS 主列表：「改进兼容性」开着就换成本机代理改过标记的那一份（Compat.swift）
     private func compatible(_ master: URL) async -> URL {
         sourceIsHLS = true
-        guard compatActive, let u = await PrecacheServer.shared.compatURL(master: master) else { return master }
-        plog("source compat")
+        guard compatLevel != .off else { compatApplied = .off; return master }
+        guard let u = await PrecacheServer.shared.compatURL(master: master, enhanced: compatLevel == .enhanced) else {
+            plog("compat proxy unavailable, playing as-is")
+            compatApplied = .off
+            return master
+        }
+        compatApplied = compatLevel
+        plog("source compat \(compatLevel.rawValue)")
         return u
     }
 
@@ -382,7 +416,11 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         guard let p = player else { return }
         // 本机代理的地址只在这台手机上有效：这时不投屏到别的设备（AirPlay 那头取不到 127.0.0.1）
         p.allowsExternalPlayback = !proxied
-        pendingSeek = model?.playback.resumePosition(req.path)
+        // 接着外接显示器（镜像）时画面照旧在本机放（系统默认就是这样；兼容开着时走本机代理，上面已经关了隔空播放）
+        p.usesExternalPlaybackWhileExternalScreenIsActive = false
+        // 换了版本：从原来那个版本看到的地方接着放
+        pendingSeek = resumeOverride ?? model?.playback.resumePosition(req.path)
+        resumeOverride = nil
         usage.flush(item)                            // 旧片源最后那一截先结清
         p.replaceCurrentItem(with: item)
         observe(item)
@@ -505,9 +543,10 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             let under = ((item.error as NSError?)?.userInfo[NSUnderlyingErrorKey] as? NSError).map { " ← \($0.domain) \($0.code)" } ?? ""
             let last = item.errorLog()?.events.last.map { " · log \($0.errorDomain) \($0.errorStatusCode)" } ?? ""
             plog("failed: \(code)\(under)\(last)", error: true)
-            if fallBackToCompat(item.error) { return }
-            if fallBackFromPass("failed") { return }
-            closeThenAlert("播放失败", PlayerErrorText.message(item.error) ?? msg)
+            guard fallbackItem !== item else { return }
+            if fallBackToCompat(item.error) { fallbackItem = item; return }
+            if fallBackFromPass("failed") { fallbackItem = item; return }
+            closeThenAlert("播放失败", PlayerErrorText.message(item.error, triedEnhanced: compatApplied == .enhanced) ?? msg)
         default:
             break
         }
@@ -516,17 +555,29 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     /// 播到一半断了（网络断、片源出错）：关掉播放器，说一声
     private func interrupted(_ err: NSError?) {
         plog("interrupted: \(err.map { "\($0.domain) \($0.code)" } ?? "-")", error: true)
-        if fallBackFromPass("interrupted") { return }
+        // 还没开播就「播不到头」（解码器在第一帧前出错）：和起播失败一样往上一档试
+        if let item = player?.currentItem, fallbackItem === item { return }
+        if !startedPlaying, fallBackToCompat(err) { fallbackItem = player?.currentItem; return }
+        if fallBackFromPass("interrupted") { fallbackItem = player?.currentItem; return }
         saveProgress()
         closeThenAlert("播放中断", PlayerErrorText.message(err) ?? "播放进度已保存，稍后可以继续观看。")
     }
 
-    /// 起播就失败、不是网络错、这一集还没按兼容方式试过：按「改进兼容性」的方式再试一次（旧机型照着片源的标记拒播）
+    /// 起播就失败、不是网络错：按「改进兼容性」往上一档再试（旧机型照着片源的标记拒播）；
+    /// 系统说「没有这块屏放得了的版本」（-11868）时标准级帮不上（它只改等级），直接上增强级；增强级也不行，换这部片规格更低的版本
     private func fallBackToCompat(_ err: Error?) -> Bool {
-        guard !compatActive, !startedPlaying, sourceIsHLS, let req = current else { return false }
-        if let e = err as NSError?, e.domain == NSURLErrorDomain { return false }
-        compatActive = true
-        plog("start failed, retrying with compat signaling")
+        guard !startedPlaying, sourceIsHLS, let req = current else { return false }
+        // 网络错（外面一层常常是笼统的 AVFoundation 错，底下才是网络的）：不是格式的问题，不升级、不换版本
+        if PlayerErrorText.isNetwork(err) { return false }
+        guard compatLevel < .enhanced else {
+            // 加速节点坏了不是格式的问题：先让 Pass Pro 那条改走普通线路、还是这个版本；改过以后还不行才换版本
+            if sourceViaPass && !passFallbackTried { return false }
+            // 只有格式上的问题才换版本（签名过期之类的 403 / 404 不换）
+            guard PlayerErrorText.isFormat(err) else { return false }
+            return fallBackToVersion()
+        }
+        compatLevel = (compatLevel == .off && !PlayerErrorText.noCompatibleAlternates(err)) ? .standard : .enhanced
+        plog("start failed, retrying with compat \(compatLevel.rawValue)")
         let token = loadToken
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -540,6 +591,42 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             }
         }
         return true
+    }
+
+    /// 增强兼容也放不了：这部电影还有别的版本（同一个 TMDB 编号），挑一个规格更低的（不是杜比视界 / 不是 HDR / 不是 4K / 不是 HEVC 的优先）重新开始
+    private func fallBackToVersion() -> Bool {
+        guard let model, let req = current, req.seriesPath == nil,
+              let v = model.videos.first(where: { $0.path == req.path }) else { return false }
+        let mine = Self.risk(req.name)
+        // 风险不高于这一个的（同风险的也试：比如两个 4K 杜比视界，一个 5 档一个 8 档，8 档增强级能按 HDR10 放）；
+        // 风险低的先试，同风险的挑大的（1080p 的 H.264 比 720p 的先试）
+        let alt = model.versions(of: v)
+            .filter { $0.path != req.path && !versionsTried.contains($0.path) && Self.risk($0.name) <= mine }
+            .min { a, b in
+                let ra = Self.risk(a.name), rb = Self.risk(b.name)
+                return ra != rb ? ra < rb : (a.size ?? 0) > (b.size ?? 0)
+            }
+        guard let alt else { return false }
+        versionsTried.insert(req.path)
+        versionsTried.insert(alt.path)
+        plog("start failed with enhanced compat, switching to another version (risk \(mine) → \(Self.risk(alt.name)))")
+        resumeOverride = model.playback.resumePosition(req.path)
+        compatFloor = compatLevel
+        var next = req
+        next.path = alt.path
+        next.name = alt.name
+        begin(next)
+        return true
+    }
+
+    /// 这个版本有多「挑设备」：杜比视界 4、HDR 2、4K 以上 2、HEVC 1（越小越容易放）
+    static func risk(_ name: String) -> Int {
+        let s = MediaSpec(name: name)
+        var r = 0
+        if s.range == "杜比视界" { r += 4 } else if s.range != nil { r += 2 }
+        if s.resolution == "4K" || s.resolution == "8K" { r += 2 }
+        if s.video?.hasPrefix("HEVC") == true || s.video?.hasPrefix("AV1") == true { r += 1 }
+        return r
     }
 
     /// Cuven Pass Pro 的加速节点出错（起播失败、播到一半断了）：节点 10 分钟内不再用，这一集从当前位置改走普通线路接着放。
@@ -777,14 +864,53 @@ extension Notification.Name {
 /// 系统的说明常常只有一句「无法完成操作」：比如 CI 的模拟器上 4K HDR（HEVC 10 bit、PQ）的片子报 AVFoundation -11868
 ///（没有这块屏幕放得了的码流），外接显示器、隔空播放到不支持 HDR 的电视上也是这一个
 enum PlayerErrorText {
-    static func message(_ error: Error?) -> String? {
+    /// 系统说没有这块屏放得了的版本（-11868：系统照主列表里的规格挑，连解码都不试）
+    static func noCompatibleAlternates(_ error: Error?) -> Bool {
+        guard let e = error as NSError? else { return false }
+        return [e, e.userInfo[NSUnderlyingErrorKey] as? NSError].compactMap { $0 }.contains {
+            $0.domain == AVFoundationErrorDomain && $0.code == AVError.Code.noCompatibleAlternatesForExternalDisplay.rawValue
+        }
+    }
+
+    /// 这个错（或者它底下那一层）是不是网络的
+    static func isNetwork(_ error: Error?) -> Bool {
+        guard let e = error as NSError? else { return false }
+        return [e, e.userInfo[NSUnderlyingErrorKey] as? NSError].compactMap { $0 }.contains { $0.domain == NSURLErrorDomain }
+    }
+
+    /// 格式上的问题（屏幕 / 解码器放不了这种画面）：换版本才有用
+    static func isFormat(_ error: Error?) -> Bool {
+        guard let e = error as NSError? else { return false }
+        let codes: [AVError.Code] = [.noCompatibleAlternatesForExternalDisplay, .decoderNotFound, .decodeFailed,
+                                     .undecodableMediaData, .fileFormatNotRecognized, .failedToParse]
+        let format = Set(codes.map(\.rawValue))
+        return [e, e.userInfo[NSUnderlyingErrorKey] as? NSError].compactMap { $0 }.contains {
+            $0.domain == AVFoundationErrorDomain && format.contains($0.code)
+        }
+    }
+
+    /// 现在接着外接显示器（或镜像），或者声音 / 画面在隔空播放
+    @MainActor static var externalScreen: Bool {
+        UIApplication.shared.openSessions.contains { $0.role == .windowExternalDisplayNonInteractive }
+            || AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.portType == .airPlay }
+    }
+
+    /// triedEnhanced：这一次真的按增强兼容改过标记（不是只打算改）
+    @MainActor static func message(_ error: Error?, triedEnhanced: Bool = false) -> String? {
         guard let e = error as NSError? else { return nil }
         // 外面一层常常是笼统的 AVFoundation 错误，真正的原因（网络断了、超时）在底下那一层
         for x in [e, e.userInfo[NSUnderlyingErrorKey] as? NSError].compactMap({ $0 }) {
             if x.domain == AVFoundationErrorDomain, let code = AVError.Code(rawValue: x.code) {
                 switch code {
                 case .noCompatibleAlternatesForExternalDisplay:
-                    return "当前显示屏不支持这部影片的画面格式（4K 或 HDR）。请断开外接显示器或隔空播放后再试。"
+                    // 真的接着外接屏 / 在隔空播放才这么说；别的时候是这台设备的屏（播放器已经按增强兼容、换版本都试过了）
+                    if externalScreen {
+                        return "当前显示屏不支持这部影片的画面格式（4K 或 HDR）。请断开外接显示器或隔空播放后再试。"
+                    }
+                    if triedEnhanced {
+                        return "这台设备放不了这部影片的画面格式（4K、HDR 或杜比视界），已按增强兼容方式试过。可以在详情页换一个规格低一些的版本再试。"
+                    }
+                    return "这台设备放不了这部影片的画面格式（4K、HDR 或杜比视界）。可以在「账户与设置 › 兼容性」选「增强」，或在详情页换一个规格低一些的版本再试。"
                 case .decoderNotFound, .decodeFailed, .undecodableMediaData, .fileFormatNotRecognized:
                     return "这台设备不支持这部影片的视频格式。"
                 default:

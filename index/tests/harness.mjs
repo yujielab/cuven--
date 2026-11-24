@@ -122,7 +122,8 @@ export function world() {
     img: { calls: 0, fail: false },
     /* pk：PikPak（user.mypikpak.com / api-drive.mypikpak.com）。folders: [{id,name,parent}]，files：文件夹里的普通文件，tasks：建出来的云下载任务
        开关：captchaUrl（要滑块）、driveCaptcha（建任务要验证令牌）、quotaFull、rejectKindFilter、fail(url) */
-    pk: { user: 'me@pk.test', pass: 'pk-secret', folders: [], files: [], tasks: [], access: new Set(), refresh: new Set(), captchas: new Set(),
+    /* made：云下载落成的文件（建任务时就有，GET /drive/v1/files/<id> 查得到；trashed 可以手动标） */
+    pk: { user: 'me@pk.test', pass: 'pk-secret', folders: [], files: [], tasks: [], made: [], access: new Set(), refresh: new Set(), captchas: new Set(),
           calls: 0, logins: 0, refreshes: 0, captchaInits: [], seq: 0, captchaUrl: false, driveCaptcha: false, quotaFull: false, rejectKindFilter: false, fail: null },
   };
 }
@@ -163,6 +164,22 @@ export async function pikpakMock(W, kind, url, init = {}) {
   const tok = (H.get('authorization') || '').replace(/^Bearer /, '');
   if (!P.access.has(tok)) return err(401, 'unauthenticated', 16, 'Unauthenticated');
   if (p === '/drive/v1/about') return Response.json({ kind: 'drive#about', quota: { kind: 'drive#quota', limit: '6597069766656', usage: '1099511627776' } });
+  /* 云下载任务列表（filters.phase.in 逗号分隔）：带 params.url、reference_resource.parent_id，和 App 拿到的一样 */
+  if (p === '/drive/v1/tasks' && (init.method || 'GET') === 'GET') {
+    P.taskLists = (P.taskLists || 0) + 1;
+    const f = JSON.parse(q.get('filters') || '{}');
+    const ph = f.phase && f.phase.in ? String(f.phase.in).split(',') : null;
+    const list = P.tasks.filter(t => !ph || ph.includes(t.phase)).slice().reverse()
+      .map(t => ({ kind: 'drive#task', id: t.id, name: t.name, type: 'offline', phase: t.phase, file_id: t.file_id, file_name: t.name,
+                   params: { url: t.url }, reference_resource: { kind: 'drive#file', id: t.file_id, parent_id: t.parent } }));
+    return Response.json({ tasks: list.slice(0, Number(q.get('limit') || 100)), next_page_token: '' });
+  }
+  if (p.startsWith('/drive/v1/files/') && (init.method || 'GET') === 'GET') {
+    const fid = decodeURIComponent(p.slice('/drive/v1/files/'.length));
+    const x = P.made.find(m => m.id === fid) || P.files.find(m => m.id === fid) || P.folders.find(m => m.id === fid);
+    if (!x) return err(404, 'file_not_found', 20, 'file not found');
+    return Response.json({ kind: x.kind || 'drive#file', id: x.id, name: x.name, parent_id: x.parent || '', phase: x.phase || 'PHASE_TYPE_COMPLETE', trashed: !!x.trashed });
+  }
   if (p === '/drive/v1/files' && (init.method || 'GET') === 'GET') {
     const f = JSON.parse(q.get('filters') || '{}');
     if (f.kind && P.rejectKindFilter) return err(400, 'invalid_argument', 3, 'filters.kind is not supported');
@@ -186,9 +203,10 @@ export async function pikpakMock(W, kind, url, init = {}) {
       const u = body.url && body.url.url || '';
       if (!/^magnet:\?xt=urn:btih:[0-9a-zA-Z]{32,40}/.test(u)) return err(400, 'invalid_argument', 3, 'url is invalid');
       const dn = decodeURIComponent((/[?&]dn=([^&]*)/.exec(u) || [])[1] || '');
-      const t = { id: id('task'), name: dn || 'magnet', url: u, parent: body.parent_id || '', folder_type: body.folder_type || '', phase: 'PHASE_TYPE_RUNNING' };
+      const t = { id: id('task'), name: dn || 'magnet', url: u, parent: body.parent_id || '', folder_type: body.folder_type || '', phase: 'PHASE_TYPE_RUNNING', file_id: id('fi') };
       P.tasks.push(t);
-      return Response.json({ upload_type: 'UPLOAD_TYPE_URL', url: { kind: 'upload#url' }, task: { kind: 'drive#task', id: t.id, name: t.name, type: 'offline', phase: t.phase, file_id: id('fi') } });
+      P.made.push({ id: t.file_id, name: t.name, parent: t.parent, phase: 'PHASE_TYPE_RUNNING' });
+      return Response.json({ upload_type: 'UPLOAD_TYPE_URL', url: { kind: 'upload#url' }, task: { kind: 'drive#task', id: t.id, name: t.name, type: 'offline', phase: t.phase, file_id: t.file_id, file_name: t.name } });
     }
     return err(400, 'invalid_argument', 3);
   }

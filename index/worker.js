@@ -1,4 +1,32 @@
 /**
+ * [v7.3] 目录按年份「严格」筛：/api/catalog?year=YYYY&ystrict=1 只给影片自己的年份（TMDB 上映 / 首播年）就是这一年的
+ *   原因：按年份筛一直是宽口径 —— 任何一个发行帖的年份（论坛年份版块，r.ys）是这一年就留下（queryCatalog 里
+ *   `!r.ys.includes(yr) && r.y !== yr`），一部 2019 年的片 2020 年出了新版就算 2020 年的。请求添加（tj 2.8.1）的
+ *   「全部影片 › 可申请」一年一节、App 再按影片自己的年份筛：线上 2020 那一页 24 部电影里只有 7 部是 2020 年的
+ *  （2021：6/24，2025 剧集 8/24），total 也虚高（「2020 年」电影 2179 部），一节里剩没几部、数字也不对。
+ *   修：带 ystrict=1 只认影片自己的年份（没有年份的不留），在原来那一遍扫描里筛、放在第一道（一次整数比较，不扫 r.ys）；
+ *   total / pages / 分页、三个角标计数、hidden 都按严格口径，第 N 页是满的、总数是准的；回包多带 ystrict:1。
+ *   边缘缓存键在严格模式尾部多一截 &ys=1（v7.2 不认 ystrict，部署前存下的宽结果不会被当成严格的拿出来）。
+ *   只认 ystrict=1（别的值都按宽口径）。不带 ystrict 的请求：结果、回包、缓存键都与 v7.2 一个字节都不差；
+ *   带了 ystrict 却没有像样的 year：照旧不按年份筛，回包也不带 ystrict 字段。
+ *   复查（缓存键串号）：边缘缓存键只编码参数值、参数名原样拼。一个名字解出来带「&」「=」的参数就能拼出别人的键：
+ *   /api/catalog?min=0&own%3Dall%26year=2024&ystrict=1 —— Worker 看来没有 year，回整张宽表、不带 ystrict，
+ *   却存在真请求 own=all&year=2024&ystrict=1 的键下（…&ys=1），之后 10 分钟（s-maxage）请求添加拿到的是宽的、
+ *   当成影片库没升级；宽的键、/api/cart 也能这么串（v7.2 及以前就有，严格 / 宽分开之后才要紧；设了 GATE 只有持口令的能这么做）。
+ *   修：参数名也 encodeURIComponent。真用到的参数名（q / year / ystrict / own / min / sort / page / dr / qual / src / genre /
+ *   id / ids）都是普通字母、编码前后一样，宽的、严格的键都与之前逐字节相同（已经存着的缓存照样命中）；
+ *   只有名字里带保留字符的键变了。编码之后键里每一段只有一个「=」、没有「&」，真请求（每个名字只带一次）的键只有同一组参数拼得出来。
+ * [v7.2] 请求添加一口气推 16 部以上（tj pkSlots 16、剧集推进 /auto/ram2）：给它用的几条接口扛得住突发
+ *   · /api/pikpush 幂等：同一个文件夹 + 同一个 info hash 建过任务（或结果不明：超时 / 断线 / PikPak 5xx）就记一笔，
+ *     再推同一部先在 PikPak 的任务列表里对一遍，对上就认领、不再新建（以前重试会建出第二个任务、多扣一次每日次数）；
+ *     同一次调用里重复的 tid 只推一次；整次调用有 32 秒的时限（请求添加 40 秒就断开），快到点不再去建任务，回「稍后再推」。
+ *   · 论坛账号层面的问题（登录失败、验证码、登录态失效、游客视图、积分不够）整批停下、原因交回，不再一部一部记成
+ *     「这个规格推不了」把所有规格烧光；种子拿不到而帖子里有磁力时改用磁力；解析出空帖子只缓存 60 秒。
+ *   · PikPak 5xx 一律按「暂时不通」处理（以前带 JSON 的 5xx 记成永久失败）；报错的 HTTP 状态分开：
+ *     文件夹不在了 404（推送时整批停、回 404，请求添加据此清掉缓存的文件夹编号）、限频 429、登录 / 验证码 503、参数 400。
+ *   · /api/pikpak（状态 / 列 / 建文件夹）不再排源闸门；/api/pikpush 不再算重活，用自己的一份子请求配额。
+ *   · 两个源各留一份 isolate 缓存，换源不再整份作废；影片表 / 分片读取合流、过期先比 etag；闸门公平排队；
+ *     /api/link/versions 不再顺手刷新片库（own 改成 &own=1 才算），剧集先去掉单集 / 一段再折叠，整季包不会被折掉。
  * [v7.1] 追踪码优先（用户要求：优先识别 auto 的唯一 TMDB 码，快速核对、正确添加影片和剧集）
  *   请求添加（tj 2.3）传进 Dropbox /auto 的电影文件 / 剧集文件夹名字里带着 [auto-m550-r13] / [auto-tv1399s2-r14]
  *   （m / tv + TMDB 编号、剧集带季，r + 请求编号）。片库对照时先看它：带着的就是确定的 TMDB 编号（按类型分进电影源 /
@@ -361,16 +389,29 @@ let FID = SRC.fid, YEARS = SRC.years, BUILD_ORDER = SRC.order;
 let IDX = SRC.idx, LIB = SRC.lib, PEND = SRC.pend;
 const isTV = () => SRC.kind === 'tv';
 
+/* [v7.2] isolate 上挂着的成品缓存（影片表、目录行、缺片判定表、片库成品）不带源标识，以前换一次源就整份作废 ——
+   请求添加一轮里电影、剧集交替着推，几乎每次调用都要从 R2 重读、重解析整张影片表和片库，还会顺手起一次片库后台刷新。
+   现在每个源各留一份：换源只是把这几个绑定换成那个源自己的那份（catCache / ownCache 按 state.ver 认，
+   两个源的 ver 各数各的，混用就串味，所以必须分开放）。分片缓存的键本来就带着源的前缀（idx/v4/ · idx/tv/），两个源共用。 */
+const SC = {};
 function useSrc(id){
   const s = SOURCES[id] || SRC_MOVIE;
   if (s === SRC) return SRC;
+  SC[SRC.id] = { idx: idxCache, idxJob, cat: catCache, own: ownCache, lib: libMem, libJob, libFail, libErr };
   SRC = s; FID = s.fid; YEARS = s.years; BUILD_ORDER = s.order;
   IDX = s.idx; LIB = s.lib; PEND = s.pend;
-  /* isolate 上挂着的成品缓存一律作废：它们都不带源标识，留着就是串味 */
-  idxCache = null; partCache.clear();
-  catCache = { ver:-1, rows:null, ord:null };
-  libMem = null; libFail = 0;
+  const c = SC[s.id] || {};
+  idxCache = c.idx || null; idxJob = c.idxJob || null;
+  catCache = c.cat || { ver:-1, rows:null, ord:null };
+  ownCache = c.own || { ver: -1, lib: null, src: '', res: null };
+  libMem = c.lib || null; libJob = c.libJob || null; libFail = c.libFail || 0; libErr = c.libErr || '';
   return SRC;
+}
+/** 后台任务收尾时写回「自己那个源」的缓存：跑到一半换了源（闸门 60 秒兜底放行之后），写进另一个源就串味了 */
+function slotPut(sid, key, val){
+  if (SRC.id === sid) return true;
+  if (SC[sid]) SC[sid][key] = val;
+  return false;
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -388,20 +429,56 @@ let GSRC = null, GN = 0, GWAIT = null, GDONE = null, GLAST = 0;
    但那个 Promise 永远不会 settle），GN 就永远减不到 0 —— 这个 isolate 从此对另一个源一律回 409。
    现在闸门记着最后一次进出的时刻，超过 GATE_STALE 没有任何进出就当作卡死，强制放行并记一笔 */
 const GATE_STALE = 120000;
+/* [v7.2] 公平排队：以前同源的请求随时能进，电影的一个接一个来，剧集那边就一直等到 25 秒回 409
+   （请求添加把 409 算作影片库不通，连着三次就熔断，整条队列都停）。现在另一个源已经等了 GATE_FAIR 毫秒，
+   同源新来的也先排队；闸门空出来时，排得最久的那个源先进（同源排着的一起进）。
+   排队的人每一圈都报个到：被平台掐掉的请求（客户端断开）不会再报到，三秒没报到的就不算在排了 */
+const GATE_FAIR = 2500;
+const GQ = new Map();          // 排队登记：编号 → { id, at: 开始等的时刻, seen: 最近一次报到 }
+let GQ_SEQ = 0;
+function gateQueue(){
+  const now = Date.now();
+  for (const [k, w] of GQ) if (now - w.seen > 3000) GQ.delete(k);
+  return GQ;
+}
+/** 别的源有人等得够久了（同源新来的该让一让） */
+function gateStarved(id){
+  const now = Date.now();
+  for (const w of gateQueue().values()) if (w.id !== id && now - w.at > GATE_FAIR) return true;
+  return false;
+}
+/** 别的源有人在排（片库后台刷新这类可做可不做的活，这时就不起了，免得把闸门再攥几秒） */
+const gateOthers = (id) => { for (const w of gateQueue().values()) if (w.id !== id) return true; return false; };
+function gateOldest(){
+  let o = null;
+  for (const w of gateQueue().values()) if (!o || w.at < o.at) o = w;
+  return o;
+}
 async function srcEnter(id, waitMs = 25000){
   const t0 = Date.now();
-  while (GN > 0 && GSRC !== id){
-    if (Date.now() - GLAST > GATE_STALE){
-      trace('sys', '源闸门 ' + Math.round((Date.now() - GLAST) / 1000) + ' 秒没有进出，判为卡死，强制放行（' + (SOURCES[GSRC] || {}).name + ' → ' + (SOURCES[id] || {}).name + '）', { lvl:'warn' });
-      const d = GDONE; GN = 0; GDONE = null; GWAIT = null; if (d) d();
-      break;
+  let tok = 0;
+  try {
+    for (;;){
+      if (GN === 0){ const o = gateOldest(); if (!o || o.id === id) break; }
+      else if (GSRC === id && !gateStarved(id)) break;
+      if (!tok) tok = ++GQ_SEQ;
+      const me = GQ.get(tok);                        // 卡了三秒以上会被别人当成没在排、清掉：重新登记，排队时刻不变
+      if (me) me.seen = Date.now(); else GQ.set(tok, { id, at: t0, seen: Date.now() });
+      if (GN > 0 && Date.now() - GLAST > GATE_STALE){
+        trace('sys', '源闸门 ' + Math.round((Date.now() - GLAST) / 1000) + ' 秒没有进出，判为卡死，强制放行（' + (SOURCES[GSRC] || {}).name + ' → ' + (SOURCES[id] || {}).name + '）', { lvl:'warn' });
+        const d = GDONE; GN = 0; GDONE = null; GWAIT = null; if (d) d();
+        GQ.delete(tok); tok = 0;
+        break;
+      }
+      if (Date.now() - t0 > waitMs){
+        const e = new Error('另一个源（' + (SOURCES[GSRC] || SOURCES[id === 'tv' ? 'movie' : 'tv'] || {}).name + '）正在运行，稍后再试');
+        e.busy = 1; e.wait = 5; throw e;
+      }
+      /* 闸门空着、只是让排得更久的那个源先进：等一小下就好（GWAIT 这时是空的，不能拿它来等） */
+      if (GN === 0) await sleep(30);
+      else await Promise.race([GWAIT, sleep(900)]).catch(()=>{});
     }
-    if (Date.now() - t0 > waitMs){
-      const e = new Error('另一个源（' + (SOURCES[GSRC] || {}).name + '）正在运行，稍后再试');
-      e.busy = 1; e.wait = 5; throw e;
-    }
-    await Promise.race([GWAIT, sleep(900)]).catch(()=>{});
-  }
+  } finally { if (tok) GQ.delete(tok); }
   if (GN === 0){ GSRC = id; GWAIT = new Promise(r => { GDONE = r; }); }
   GN++; GLAST = Date.now();
   useSrc(id);
@@ -486,8 +563,10 @@ const SUB = { n: 0, max: PLAN_FREE.sub, peak: 0 };
      · 轻请求（目录 / 详情 / 帖子 / 磁力 / 状态）只计数不清零；没有重活在
        跑时它们各自是独立调用，撞不到硬线，subTake 也就不设上限；
      · 海报代理不进预算（见路由）。
-   重活被平台掐掉时 finally 不会执行，所以登记带时间戳，太久的自动作废。 */
-const HEAVY_RE = /^\/api\/(build|incremental|fetch|pikpush|repair|diagnose|unlock|migrate|optimize|split|reset)$/;
+   重活被平台掐掉时 finally 不会执行，所以登记带时间戳，太久的自动作废。
+   [v7.2] /api/pikpush 不再算重活：它每次是一次独立调用，自带一份子请求配额（env.__sub）。以前和定时任务 / 建索引
+   共用 isolate 全局的计数，建索引在跑时推送一进门就看到「预算见底」，整个建索引期间每部片都回「稍后再推」。 */
+const HEAVY_RE = /^\/api\/(build|incremental|fetch|repair|diagnose|unlock|migrate|optimize|split|reset)$/;
 const HEAVY = new Map();           // token → 进门时刻
 const HEAVY_STALE = 150000;        // 超过这个时长还没离场的重活视为已被平台掐掉
 let HEAVY_SEQ = 0;
@@ -1039,8 +1118,11 @@ const RETRYABLE = new Set(['net','server','rate']);
  * 自动重试：指数退避 + 抖动，尊重 Retry-After，按错误类型决定要不要再来一次。
  * 每次失败都进 TRACE，自诊断面板能看到到底卡在哪一层。
  */
+/* [v7.2] Retry-After 最多等这么久：对方要我们等两分钟，就别在一次调用里干睡两分钟（调用方早断开了），直接按限速报出去 */
+const RETRY_AFTER_MAX = 30;
 async function autoRetry(label, fn, opt = {}){
-  const { tries = 4, gap = 500, cap = 8000, onRetry = null, left = null } = opt;
+  /* until：这次调用的截止时刻（[v7.2] 推送给「请求添加」用：它 40 秒就断开）。剩下的时间不够再等一轮、再发一次，就不重试了 */
+  const { tries = 4, gap = 500, cap = 8000, onRetry = null, left = null, until = 0 } = opt;
   let last;
   for (let i = 0; i < tries; i++){
     try { return await fn(i, last ? classify(last) : null); }
@@ -1052,9 +1134,11 @@ async function autoRetry(label, fn, opt = {}){
       if (i === tries - 1 || !RETRYABLE.has(cls)) break;
       /* 重试也要花子请求：剩不下就不必再等了 */
       if ((left ? left() : subLeft()) < 1) break;
+      if (e.retryAfter > RETRY_AFTER_MAX) break;
       let wait = Math.min(cap, gap * Math.pow(2, i)) * (0.7 + Math.random()*0.6);
       if (e.retryAfter) wait = Math.max(wait, e.retryAfter * 1000);
       if (cls === 'rate') wait = Math.max(wait, 1500 * (i+1));
+      if (until && until - Date.now() < wait + 3000) break;
       if (onRetry) { try { await onRetry(cls, i); } catch {} }
       await sleep(wait);
     }
@@ -1237,9 +1321,14 @@ async function rawReq(env, path, o = {}){
   if (o.cookie) h.Cookie = o.cookie;
   if (o.referer) h.Referer = o.referer;
   if (o.body != null) h['Content-Type'] = 'application/x-www-form-urlencoded';
+  /* [v7.2] 带截止时刻的调用（推送）：排队间隔加上一次请求都来不及了，就不发了 —— 回一个「会过去」的错，调用方回「稍后再推」 */
+  if (env.__dl && Math.max(Date.now(), GOV.last + GOV.gap) + 1500 > env.__dl) throw Object.assign(new Error('这次调用快到时限了，论坛请求留到下次'), { soft: 1, late: 1 });
   if (!o.noGate) await govGate();
+  const extra = {};
+  if (env.__sub) extra.sub = env.__sub;                                       // 自带配额的调用：记在调用自己身上
+  if (env.__dl) extra.timeoutMs = Math.max(1000, Math.min(FETCH_MS, env.__dl - Date.now() - 500));
   let r;
-  try { r = await sfetch(url, { method:o.method||'GET', headers:h, body:o.body||null, redirect:'manual' }); }
+  try { r = await sfetch(url, { method:o.method||'GET', headers:h, body:o.body||null, redirect:'manual', ...extra }); }
   catch (e){
     if (e.budget) throw e;
     govPenalize('连接失败'); throw new Error('连接论坛失败：' + (e.message||e));
@@ -1253,7 +1342,8 @@ async function rawReq(env, path, o = {}){
   if (r.status >= 500){ govPenalize('HTTP ' + r.status); throw new Error('HTTP ' + r.status); }
   return r;
 }
-const req = (env, path, o = {}) => autoRetry('fetch '+String(path).slice(0,60), () => rawReq(env, path, o));
+const req = (env, path, o = {}) => autoRetry('fetch '+String(path).slice(0,60), () => rawReq(env, path, o),
+  { left: env.__sub ? () => env.__sub.max - env.__sub.n : null, until: env.__dl || 0 });
 
 /**
  * 取正文，并把"空/过短"识别成限速 —— 这正是线上看到
@@ -1284,15 +1374,17 @@ async function session(env, force){
   try { return await SESS_JOB; }
   finally { SESS_JOB = null; }
 }
+/* [v7.2] 账号层面的错（acct）：不是「这个帖子」的事，换哪个帖子都一样 —— 推送遇到它整批停下，不把一部部片记成推不了 */
+const acctErr = (msg) => Object.assign(new Error(msg), { acct: 1 });
 async function login(env){
-  if (!env.SITE_USER || !env.SITE_PASS) throw new Error('缺少 SITE_USER / SITE_PASS');
+  if (!env.SITE_USER || !env.SITE_PASS) throw acctErr('缺少 SITE_USER / SITE_PASS');
   const B = base(env);
   const first = await reqHTML(env, 'member.php?mod=logging&action=login');
   const jar0 = setCookies(first.r), page = first.html;
   const fh = page.match(/name="formhash" value="(\w+)"/)?.[1];
   const lh = page.match(/loginhash=(\w+)"/)?.[1];
-  if (!fh || !lh) throw new Error('登录表单解析失败（论坛改版或被挡）');
-  if (/seccodeverify|seccode_/i.test(page)) throw new Error('登录页出现验证码，请先在浏览器手动登录一次');
+  if (!fh || !lh) throw acctErr('登录表单解析失败（论坛改版或被挡）');
+  if (/seccodeverify|seccode_/i.test(page)) throw acctErr('登录页出现验证码，请先在浏览器手动登录一次');
 
   const r = await req(env,'member.php?mod=logging&action=login&loginsubmit=yes&loginhash='+lh+'&inajax=1', {
     method:'POST', cookie: jarStr(jar0), referer: B+'member.php?mod=logging&action=login',
@@ -1305,11 +1397,11 @@ async function login(env){
   const reply = decodeHTML(await r.arrayBuffer(), r);
   if (!/欢迎您回来|succeedhandle_/.test(reply)){
     const why = (reply.match(/<!\[CDATA\[([\s\S]{0,220})/)?.[1]||'').replace(/<[^>]+>/g,'').trim();
-    throw new Error('论坛登录失败：'+(why||'账号或密码不正确'));
+    throw acctErr('论坛登录失败：'+(why||'账号或密码不正确'));
   }
   const cookie = jarStr(jar);
   if (!cookie)
-    throw new Error('登录成功但没拿到 Cookie —— 缓存不了会话，每个请求都会重登并很快被限速');
+    throw acctErr('登录成功但没拿到 Cookie —— 缓存不了会话，每个请求都会重登并很快被限速');
   const s = { cookie, at: Date.now() };
   await jput(env, kkey(env,'sess'), s, TTL.session);
   return s;
@@ -1324,7 +1416,7 @@ async function authed(env, path, o = {}, again = true){
   const s = await session(env);
   const r = await req(env, path, { ...o, cookie: s.cookie });
   if (r.status>=300 && r.status<400 && /action=login/.test(r.headers.get('location')||'')){
-    if (!again) throw new Error('登录态失效');
+    if (!again) throw acctErr('登录态失效');
     await dropSession(env);
     return authed(env, path, o, false);
   }
@@ -1344,6 +1436,12 @@ function loginWall(html){
   if (/您没有权限|无权访问|抱歉，本版块|本主题需要/.test(html)) return true;
   return false;
 }
+/** [v7.2] 帖子自己的权限要求（阅读权限 / 本主题需要…）：换会话也没用，只是这个帖子推不了 */
+const threadPerm = (html) => /本主题需要|阅读权限/.test(html || '');
+/** [v7.2] 游客视图：会话过期又没跳登录页，Discuz 照样给 200，只是附件那块变成「您需要 <a>登录</a> 才可以下载」，
+    loginWall 认不出（中间夹着链接）—— 于是帖子被解析成「没有种子」并缓存一小时，会话恢复了还在报错 */
+const guestView = (html) => /discuz_uid\s*=\s*'0'/.test(html || '')
+  || /您需要\s*<a[^>]*action=login[^>]*>\s*登录\s*<\/a>\s*才可以(?:下载|查看|浏览)/.test(html || '');
 
 /** 版块列表页 → [{tid,title}]；两套选择器互为兜底 */
 function parseBoard(html){
@@ -2071,16 +2169,42 @@ async function graveSweep(env, state){
 }
 
 let idxCache = null;
+/* [v7.2] 读索引合流 + 过期先比 etag：
+   · 同一时刻冷启动 / 过期的几个请求只读一次、解析一次（以前每个请求各自下载、各自解析整张影片表，
+     十几个请求同时来就是十几份几 MB 的 JSON 同时在内存里）；
+   · 45 秒过期后先只读 state.json、问一下 movies.json 的 etag：影片表没变就沿用内存里那份，不再整份重下重解析。
+     比的是 etag 不是提交号：只改 state 的提交（commitIndex(…, null, state)）也会换提交号，影片表其实没动。
+   idxGen：提交之后 dropCaches 会加一，提交前就出发的那次读取回来时不再写进缓存（它读的是旧的）。 */
+let idxJob = null, idxGen = 0;
 async function loadIndex(env, force){
-  if (!force && idxCache && idxCache.exp > Date.now()) return idxCache.v;
-  const [movies, state] = await Promise.all([
-    r2get(env, IDX.movies, blankMovies()),
-    r2get(env, IDX.state, blankState()),
-  ]);
-  movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
-  const v = { movies, state };
-  idxCache = { v, exp: Date.now()+45000 };
-  return v;
+  const c0 = idxCache;
+  if (!force && c0 && c0.exp > Date.now()) return c0.v;
+  if (!force && idxJob) return idxJob;
+  const sid = SRC.id, K = IDX, gen = idxGen;
+  const job = (async () => {
+    let v = null, metag = null;
+    if (!force && c0 && c0.metag && env.R2 && env.R2.head){
+      const [sr, h] = await Promise.all([ r2getE(env, K.state), env.R2.head(K.movies).catch(() => null) ]);
+      const et = h && (h.etag || h.httpEtag);
+      if (et && et === c0.metag && sr.val !== undefined){ v = { movies: c0.v.movies, state: sr.val }; metag = et; }
+    }
+    if (!v){
+      const [mr, sr] = await Promise.all([ r2getE(env, K.movies), r2getE(env, K.state) ]);
+      const movies = mr.val === undefined ? blankMovies() : mr.val;
+      const state = sr.val === undefined ? blankState() : sr.val;
+      movies.m = movies.m||{}; movies.k = movies.k||{}; movies.u = movies.u||{};
+      v = { movies, state }; metag = mr.etag || null;
+    }
+    if (gen === idxGen){
+      const ent = { v, exp: Date.now()+45000, metag };
+      if (slotPut(sid, 'idx', ent)) idxCache = ent;
+    }
+    return v;
+  })();
+  if (force) return job;
+  idxJob = job;
+  job.catch(() => {}).finally(() => { if (slotPut(sid, 'idxJob', null)){ if (idxJob === job) idxJob = null; } });
+  return job;
 }
 /**
  * 重活读索引：不存在才给空表。另外两种「空」都不对劲，直接拒绝往下跑：
@@ -2218,18 +2342,31 @@ async function stateMutate(env, fn){
 
 /** 分片 LRU：键就是对象名（带代号），代号一换自然不会读到旧的 */
 const partCache = new Map();
+/* [v7.2] 同一个分片同时只读一次（合流）；带代号的分片（copy-on-write，键一换内容才换）键下的内容永远不变，
+   在内存里放十分钟；老的无代号分片还是 45 秒 */
+const partJobs = new Map();
 async function loadPart(env, state, year, pi){
   const key = partKey(state, year, pi);
   const hit = partCache.get(key);
   if (hit && hit.exp > Date.now()){ partCache.delete(key); partCache.set(key, hit); return hit.v; }
-  let v;
-  try { v = await r2get(env, key, null); }
-  catch (e){ if (e.corrupt){ trace('sys', '分片 ' + key + ' 内容损坏，跳过', { lvl:'err' }); v = null; } else throw e; }
-  while (partCache.size >= PART_CACHE) partCache.delete(partCache.keys().next().value);
-  partCache.set(key, { v, exp: Date.now()+45000 });
-  return v;
+  const fly = partJobs.get(key);
+  if (fly) return fly;
+  const gen = idxGen, ttl = pgOf(state, year, pi) ? 600000 : 45000;
+  const job = (async () => {
+    let v;
+    try { v = await r2get(env, key, null); }
+    catch (e){ if (e.corrupt){ trace('sys', '分片 ' + key + ' 内容损坏，跳过', { lvl:'err' }); v = null; } else throw e; }
+    if (gen === idxGen){
+      while (partCache.size >= PART_CACHE) partCache.delete(partCache.keys().next().value);
+      partCache.set(key, { v, exp: Date.now() + ttl });
+    }
+    return v;
+  })();
+  partJobs.set(key, job);
+  job.catch(() => {}).finally(() => { if (partJobs.get(key) === job) partJobs.delete(key); });
+  return job;
 }
-const dropCaches = () => { idxCache = null; partCache.clear(); };
+const dropCaches = () => { idxCache = null; idxJob = null; idxGen++; partCache.clear(); partJobs.clear(); };
 
 /** 该年份每片的行数表。老索引（单个大分片）自动视作 [总行数] */
 function partRows(state, y){
@@ -5035,7 +5172,9 @@ function libHydrate(doc){
 
 async function libRefresh(env, alsoResolve){
   if (libJob) return libJob;
-  libJob = (async () => {
+  /* [v7.2] 记下这个任务是哪个源的：收尾时源已经换了（后台任务跑过了闸门的 60 秒兜底），结果不写进另一个源的缓存 */
+  const sid = SRC.id, mine = () => SRC.id === sid;
+  const job = libJob = (async () => {
     let via = await libSyncAny(env, false);
     /* 实时清单里有新文件要认：当场认一批。[v6.5] 翻目录时的后台刷新（轻请求）也认 —— 用自带的一小份配额
        （不碰这次调用的 50 个子请求），新进库的片几分钟内就从「缺片」里消失，不用等每天的定时任务 */
@@ -5051,6 +5190,7 @@ async function libRefresh(env, alsoResolve){
     }
     /* 成品没变（同一次写入）就沿用内存里那份：判定表按成品对象缓存，换了对象就得重算 */
     const doc = await libDoc(env);
+    if (!mine()){ trace('lib', '片库刷新跑到一半换了源（' + (SOURCES[sid] || {}).name + '），这次的结果不用', { lvl: 'warn' }); return null; }
     if (libMem && doc && doc.at && doc.at === libMem.docAt && (doc.gen || '') === (libMem.gen || '')) libMem.at = Date.now();
     else libMem = libHydrate(doc);
     /* gen 未变那一支不写 R2（省一次十几万字节的重写），所以成品里的 at
@@ -5059,9 +5199,13 @@ async function libRefresh(env, alsoResolve){
     if (libMem && via && via.unchanged) libMem.at = Date.now();
     libFail = 0; libErr = libMem ? '' : libErr;
     return libMem;
-  })().catch(e => { libFail = Date.now(); libErr = String(e && e.message || e).slice(0, 200); throw e; })
-     .finally(() => { libJob = null; });
-  return libJob;
+  })().catch(e => {
+    const at = Date.now(), why = String(e && e.message || e).slice(0, 200);
+    if (slotPut(sid, 'libFail', at)){ libFail = at; libErr = why; } else if (SC[sid]) SC[sid].libErr = why;
+    throw e;
+  }).finally(() => { if (slotPut(sid, 'libJob', null)){ if (libJob === job) libJob = null; } });
+  libJob = job;
+  return job;
 }
 
 /** 热路径：吃内存 / R2 成品，过期了后台刷新，永远不因为片库拿不到而挡住浏览 */
@@ -5086,9 +5230,17 @@ async function libLoad(env, ctx){
      后台补一次扫描，用户不用知道要去点哪个按钮。 */
   /* [v6.5] 实时清单五分钟问一次（只问几十字节的指纹）；顺带把别的 isolate 写进 R2 的认定结果也读回来 */
   const due = !libMem.scan || Date.now() - libMem.at > (libMem.src === 'live' ? LIVE_TTL : LIB.ttl);
-  if (due && Date.now() - libFail > LIB.retry && ctx && ctx.waitUntil)
+  /* [v7.2] 另一个源有请求在排队：这次就不起后台刷新了（它会把闸门再攥几秒），下一个请求再说 */
+  if (due && Date.now() - libFail > LIB.retry && ctx && ctx.waitUntil && !gateOthers(SRC.id))
     ctx.waitUntil(libRefresh(env, false).catch(e => trace('lib', e.message || String(e))));
   return libMem;
+}
+/** [v7.2] 只看一眼片库：内存里有就用，没有读一次 R2 成品；从不起后台刷新（不攥源闸门、不花子请求） */
+async function libPeek(env){
+  if (!recvBase(env)) return null;
+  if (libMem) return libMem;
+  const doc = await r2get(env, LIB.list, null).catch(() => null);
+  return doc ? (libMem = libHydrate(doc)) : null;
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -5452,10 +5604,12 @@ function relevance(r, nt){
  * 目录查询。
  * dr  动态范围： '' 全部 / dv 杜比视界 / hdr HDR 及以上 / sdr 仅 SDR
  * qual 画质：    '' 全部 / uhd 4K 及以上 / hd 1080p 及以下（低质量）
+ * ystrict [v7.3] 带 year 时：true = 只要影片自己的年份（r.y，TMDB 上映 / 首播年）就是这一年的；
+ *                 false（默认）= 原来的宽口径：任何一个发行帖的年份（r.ys）或影片自己的年份是这一年就留下
  */
 function queryCatalog(movies, q){
   const { text='', year='', genre='', min=6, sort='new', page=1, size=42,
-          lib=null, own='hide', dr='', qual='' } = q;
+          lib=null, own='hide', dr='', qual='', ystrict=false } = q;
   const nt = canon(text);
   const rows = catRows(movies, q.ver);
   /* 缺片判定整张表算好：每部片只剩一次数组读取 */
@@ -5463,13 +5617,19 @@ function queryCatalog(movies, q){
   const ix = nt ? rows.map((_, i) => i) : catOrder(movies, q.ver, sort);
   const yr = year ? Number(year) : 0;
   const gn = genre ? Number(genre) : 0;
+  /* [v7.3] 严格年份只在真有年份时生效（year 乱填 → yr 是 NaN / 0，和以前一样不按年份筛） */
+  const ys = !!(ystrict && yr);
 
   const keep = [];
   let hidden = 0, dvN = 0, hdrN = 0, lowN = 0;
   for (let k = 0; k < ix.length; k++){
     const r = rows[ix[k]];
+    /* [v7.3] 严格年份：同一遍扫描里的第一道，一次整数比较（不扫 r.ys）。这一道刷掉的最多，放在最前面，
+       后面的评分 / 类型 / 角标计数 / 片库过滤都只对这一年的片做 —— total、pages、分页、counts、hidden 都按严格口径。
+       影片自己没有年份（r.y = 0）的不留：说不清是哪一年的，不往任何一年里放 */
+    if (ys && r.y !== yr) continue;
     if (min > 0 && (r.c < 50 || r.w < min)) continue;
-    if (yr && !r.ys.includes(yr) && r.y !== yr) continue;
+    if (yr && !ys && !r.ys.includes(yr) && r.y !== yr) continue;
     if (gn && !r.g.includes(gn)) continue;
     /* 统计三个角标用的总数在筛选之前算 —— 界面上的数字才不会随筛选跳动 */
     if (r.hb === 7) dvN++;
@@ -5492,7 +5652,7 @@ function queryCatalog(movies, q){
   if (nt) keep.sort((a,b) => b[1]-a[1] || rows[b[0]].w - rows[a[0]].w);
 
   const total = keep.length, off = (page-1)*size;
-  return {
+  const out = {
     total, hidden, page, pages: Math.ceil(total/size),
     counts: { dv: dvN, hdr: hdrN, low: lowN },
     items: keep.slice(off, off+size).map(([i,,has]) => {
@@ -5502,6 +5662,10 @@ function queryCatalog(movies, q){
         hb:r.hb, rb:r.rb, own: has };
     }),
   };
+  /* [v7.3] 按严格口径筛过的才带 ystrict:1（v7.2 及以前没有这个字段：调用方据此知道还要不要自己再按年份筛）。
+     宽口径不加任何字段，回包与 v7.2 一个字节都不差 */
+  if (ys) out.ystrict = 1;
+  return out;
 }
 /** 折叠近重复片源 */
 function collapse(list){
@@ -5982,11 +6146,22 @@ async function threadDetail(env, tid, ctx){
   const k = kkey(env,'t:'+tid);
   const hit = await jget(env,k);
   if (hit) return hit;
-  const r = await authed(env,'forum.php?mod=viewthread&tid='+encodeURIComponent(tid));
-  const buf = await r.arrayBuffer();
-  if (buf.byteLength < 600){ govPenalize('帖子页空响应'); throw new Error('帖子页返回空响应（可能被限速）'); }
-  const html = decodeHTML(buf, r);
-  if (loginWall(html)) throw new Error('帖子需要登录或权限不足（登录墙）');
+  /* [v7.2] 登录墙 / 游客视图：帖子自己要阅读权限的，只是这个帖子不行；别的都是会话的事 —— 丢掉会话、
+     重新登录再看一次，还是这样就是账号层面的问题（acct），推送据此整批停下，不把这部片记成推不了 */
+  let html;
+  for (let again = true; ; again = false){
+    const r = await authed(env,'forum.php?mod=viewthread&tid='+encodeURIComponent(tid));
+    const buf = await r.arrayBuffer();
+    if (buf.byteLength < 600){ govPenalize('帖子页空响应'); throw new Error('帖子页返回空响应（可能被限速）'); }
+    html = decodeHTML(buf, r);
+    const wall = loginWall(html), guest = !wall && guestView(html);
+    if (!wall && !guest) break;
+    if (wall && threadPerm(html)) throw Object.assign(new Error('这个帖子要更高的阅读权限（本主题需要…），换一个版本'), { hard: 1 });
+    if (!again) throw acctErr('论坛登录态不对：重新登录之后帖子页还是' + (guest ? '游客视图（附件要登录才能下载）' : '登录墙'));
+    trace('auth', '帖子页是' + (guest ? '游客视图' : '登录墙') + '：丢掉会话、重新登录再看一次');
+    await dropSession(env);
+    await session(env, true);
+  }
   govReward();
   const attachments = [];
   const re = /<a href="forum\.php\?mod=attachment&amp;aid=([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
@@ -6006,7 +6181,9 @@ async function threadDetail(env, tid, ctx){
     fileSize: pick(/◎文件大小\s*([^\n]{2,40})/),
     attachments,
     magnets: [...new Set(text.match(/magnet:\?xt=urn:btih:[0-9a-zA-Z]{32,40}/g)||[])].slice(0,10) };
-  const w = jput(env,k,out,TTL.thread).catch(()=>{});
+  /* [v7.2] 一个种子、一条磁力都没解析出来的帖子只缓存 60 秒（KV 的下限）：多半是页面这会儿不对，
+     缓存一小时的话，问题过去了推送也还在拿这份空的报「没有种子」 */
+  const w = jput(env,k,out,(attachments.length || out.magnets.length) ? TTL.thread : 60).catch(()=>{});
   ctx ? ctx.waitUntil(w) : await w;
   return out;
 }
@@ -6090,7 +6267,12 @@ async function torrentBytes(env, aid){
     const head = strip(decodeHTML(buf.slice(0,300), r)).slice(0,60);
     /* 空壳页 = 被限速（会过去）；有内容的提示页 = 积分 / 权限（不会过去） */
     if (buf.length < MIN_BODY){ govPenalize('附件空响应'); throw new Error('附件返回空响应（被限速）'); }
-    throw Object.assign(new Error('返回的不是种子（可能需要积分或权限）：'+head), { hard: 1 });
+    /* [v7.2] 积分不够 / 下载次数用完 / 用户组不让下：账号层面的（acct，换哪个帖子都一样）；
+       这个附件单独标了售价的，才是这一个附件的事 */
+    const txt = strip(decodeHTML(buf.slice(0, 6000), r));
+    /* 只认「不让下」的那几句：登录后每一页的顶栏都写着「积分: 123 | 用户组: 高级会员」，光有这几个字不算 */
+    const acct = /积分不足|金币不足|下载次数.{0,8}(?:已达|用完|上限|不足)|今日.{0,12}上限|所在的用户组.{0,20}(?:无法|不能|没有权限)/.test(txt) && !/售价/.test(txt);
+    throw Object.assign(new Error('返回的不是种子（' + (acct ? '论坛账号的积分或下载次数不够' : '可能需要积分或权限') + '）：'+head), { hard: 1, acct: acct ? 1 : 0 });
   }
   /* 下载回来就验一遍：被截断 / 不完整的种子在这里就报出来，不进压缩包 */
   try { torrentMeta(buf); }
@@ -6279,10 +6461,14 @@ function pkError(j, status){
   return e;
 }
 async function pkJSON(env, method, url, body, headers){
+  /* [v7.2] 自带配额 / 截止时刻的调用（/api/pikpak、/api/pikpush）：子请求记在调用自己身上，超时不超过剩下的时间 */
+  const extra = {};
+  if (env.__sub) extra.sub = env.__sub;
+  if (env.__dl) extra.timeoutMs = Math.max(1000, Math.min(FETCH_MS, env.__dl - Date.now() - 500));
   let r;
   try {
     r = await sfetch(url, { method, body: body == null ? undefined : JSON.stringify(body),
-      headers: { 'content-type': 'application/json; charset=utf-8', accept: 'application/json', 'user-agent': PK.ua, ...(headers || {}) } });
+      headers: { 'content-type': 'application/json; charset=utf-8', accept: 'application/json', 'user-agent': PK.ua, ...(headers || {}) }, ...extra });
   } catch (e){
     if (e.budget) throw e;
     throw Object.assign(new Error('连不上 PikPak：' + (e.message || e)), { pk: 1, net: 1 });
@@ -6292,7 +6478,11 @@ async function pkJSON(env, method, url, body, headers){
   try { j = txt ? JSON.parse(txt) : {}; } catch {}
   if (j && !j.error && r.status < 400) return j;
   if (!j) throw Object.assign(new Error('PikPak 回的不是 JSON（HTTP ' + r.status + '）：' + txt.slice(0, 80)), { pk: 1, status: r.status, net: r.status >= 500 ? 1 : 0 });
-  throw pkError(j, r.status);
+  /* [v7.2] 5xx 不管带不带 JSON 都是「PikPak 这会儿不通」：以前带 JSON 的 5xx（{"error":"internal_error"}）记成这一部推不了，
+     PikPak 抖十分钟，请求添加就把十个规格当成坏的扔了 */
+  const e = pkError(j, r.status);
+  if (r.status >= 500) e.net = 1;
+  throw e;
 }
 /** 一次性的验证令牌。回了 url 而没有令牌 = PikPak 要人去过滑块，Worker 过不了 */
 async function pkCaptcha(env, action, meta){
@@ -6393,7 +6583,7 @@ async function pkList(env, parent){
     try { j = await pkCall(env, 'GET', '/drive/v1/files', { q }); }
     catch (e){
       /* 「只要文件夹」这个筛选条件万一不认：去掉它重来，文件夹自己挑 */
-      if (onlyDir && pg === 0 && e.pk && !e.auth && !e.net && !e.budget && !/not_found/i.test(e.err || '')){ onlyDir = false; pg--; continue; }
+      if (onlyDir && pg === 0 && e.pk && !e.auth && !e.net && !e.budget && e.status !== 429 && !/not_found|too_many|frequen/i.test(e.err || '')){ onlyDir = false; pg--; continue; }
       throw e;
     }
     for (const f of (j.files || [])) if (f && f.kind === 'drive#folder' && f.id) folders.push({ id: String(f.id), name: String(f.name || '') });
@@ -6406,7 +6596,7 @@ async function pkList(env, parent){
 }
 async function pkMkdir(env, parent, name){
   name = String(name || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
-  if (!name) throw Object.assign(new Error('文件夹名不能是空的'), { pk: 1 });
+  if (!name) throw Object.assign(new Error('文件夹名不能是空的'), { pk: 1, bad: 1 });
   const j = await pkCall(env, 'POST', '/drive/v1/files', { body: { kind: 'drive#folder', name, parent_id: parent || '' } });
   const f = j.file || j;
   if (!f || !f.id) throw Object.assign(new Error('PikPak 没建成这个文件夹'), { pk: 1 });
@@ -6416,49 +6606,188 @@ async function pkMkdir(env, parent, name){
 async function magnetOfThread(env, tid, ctx){
   const d = await threadDetail(env, tid, ctx);
   const att = (d.attachments || []).filter(a => a.isTorrent);
-  if (att.length){ const m = await magnetOf(env, att[0].aid, ctx); return { magnet: m.magnet, name: m.name || att[0].filename || '', btih: m.btih }; }
-  if ((d.magnets || []).length) return { magnet: d.magnets[0], name: '', btih: (d.magnets[0].match(/btih:([0-9a-zA-Z]+)/) || [])[1] || '' };
+  const mg = (d.magnets || [])[0] || '';
+  if (att.length){
+    try { const m = await magnetOf(env, att[0].aid, ctx); return { magnet: m.magnet, name: m.name || att[0].filename || '', btih: m.btih }; }
+    catch (e){
+      /* [v7.2] 种子拿不到（积分 / 权限 / 种子坏了），帖子里又贴着磁力：用磁力。
+         预算、限速、断网这类过一会儿就好的照旧往外抛（推送回「稍后再推」，下次还用种子，带 tracker 找得快） */
+      if (!mg || e.budget || (RETRYABLE.has(classify(e)) && !e.hard && !e.parse && !e.acct)) throw e;
+      trace('net', '帖子 ' + tid + ' 的种子拿不到（' + String(e.message || e).slice(0, 60) + '），改用帖子里的磁力');
+    }
+  }
+  if (mg) return { magnet: mg, name: '', btih: (mg.match(/btih:([0-9a-zA-Z]+)/) || [])[1] || '' };
   throw Object.assign(new Error('该帖没有种子附件，也没有磁力链接'), { hard: 1 });
 }
+/* ══════════════════════════════════════════════════════════════════
+   [v7.2] 推送记录：同一部别建两个云下载任务
+   ──────────────────────────────────────────────────────────────────
+   建云下载任务这一步本身不幂等：任务在 PikPak 那头已经建成、回包却丢了（PikPak 慢、20 秒超时、断线、5xx；
+   或者请求添加 40 秒就断开、影片库的回包路上出了错），调用方只看到「没推成」，过几分钟再推同一部 ——
+   同一个磁力在同一个文件夹里建出第二个任务，多扣一次每天的云下载次数，16 部一起推时 /auto/ram2 里全是重复的季。
+   现在按「PikPak 账号 + 文件夹 + info hash」记一笔（isolate 内存 + KV，6 小时）：
+     · 建成了：记下任务 / 文件编号。再推同一部，先在 PikPak 的云下载任务列表里核对这个任务还在，在就直接交回
+       （dedup），不在了（失败被删掉、下完被清掉）才新建 —— 这笔记录挡不住正常的重推；
+     · 结果不明（超时 / 断线 / 5xx）：记一笔「不确定」，交回 retry + unsure（带上 btih）。下次再推同一部，先在任务列表里
+       按 info hash（或名字）找，找到就认领（adopted），找不到才新建；
+     · 记录走 ctx.waitUntil 写：调用方断开、这次调用被收掉时，建任务的那个请求和这笔记录照样跑完（平台再给 30 秒）。
+   只有建成或结果不明才写 KV（一部一次），Free 计划每天 1000 次的 KV 写入够用；核对任务列表只在「有记录」时花一个子请求。
+   调用方也可以带 check:1（整批或单部）要求先核对一遍。
+   ══════════════════════════════════════════════════════════════════ */
+const PK_PUSH = { ttl: 6 * 3600, max: 400, mem: new Map() };
+const pkPushKey = (env, parent, btih) => 'pk:push:' + md5('u:' + String(env.PIKPAK_USER || '')).slice(0, 8) + ':' + (parent || '-') + ':' + String(btih).toLowerCase();
+async function pkPushGet(env, k){
+  const m = PK_PUSH.mem.get(k);
+  if (m){ if (m.exp > Date.now()) return m.v; PK_PUSH.mem.delete(k); }
+  const v = await jget(env, k).catch(() => null);
+  return v && v.at && Date.now() - v.at < PK_PUSH.ttl * 1000 ? v : null;
+}
+function pkPushPut(env, k, v){
+  PK_PUSH.mem.delete(k);
+  PK_PUSH.mem.set(k, { v, exp: Date.now() + PK_PUSH.ttl * 1000 });
+  while (PK_PUSH.mem.size > PK_PUSH.max) PK_PUSH.mem.delete(PK_PUSH.mem.keys().next().value);
+  return jput(env, k, v, PK_PUSH.ttl).catch(() => {});
+}
+/** 云下载任务列表里找：记录里的那个任务排第一，然后是同一个 info hash（任务的 url 里）/ 同一个名字的，最多 3 个。
+    只看进行中 / 排队 / 完成的（失败的不认领：那就该重建） */
+async function pkFindTasks(env, parent, rec, m){
+  const j = await pkCall(env, 'GET', '/drive/v1/tasks', { q: { type: 'offline', thumbnail_size: 'SIZE_SMALL', limit: '100', with: 'reference_resource',
+    filters: JSON.stringify({ phase: { in: 'PHASE_TYPE_RUNNING,PHASE_TYPE_PENDING,PHASE_TYPE_COMPLETE' } }) } });
+  const bt = String(m.btih || '').toLowerCase();
+  const byId = [], other = [];
+  for (const t of (j.tasks || [])){
+    if (!t || !t.id) continue;
+    if (rec && rec.task && String(t.id) === String(rec.task)){ byId.push(t); continue; }
+    /* 认 info hash / 名字时要是同一个文件夹（PikPak 回了 reference_resource 才核得了；默认文件夹的编号不是空串，不核） */
+    const ref = t.reference_resource || {};
+    if (parent && ref.parent_id && String(ref.parent_id) !== parent) continue;
+    const u = String((t.params && t.params.url) || '').toLowerCase();
+    if ((bt && u.includes(bt)) || (m.name && (t.name === m.name || t.file_name === m.name))) other.push(t);
+  }
+  return byId.concat(other).slice(0, 3);
+}
+/** 找到的是已完成的任务：落成的文件还在不在这个文件夹里（请求添加清洗时会挪走 / 扔进回收站；那样就该重建，不能认领） */
+async function pkTaskUsable(env, parent, t){
+  if (String(t.phase || '') !== 'PHASE_TYPE_COMPLETE' || !t.file_id) return true;
+  let f;
+  try { f = await pkCall(env, 'GET', '/drive/v1/files/' + encodeURIComponent(t.file_id), { q: { thumbnail_size: 'SIZE_SMALL' } }); }
+  catch (e){ if (e.budget) throw e; if (/not_found/i.test(e.err || '') || e.status === 404) return false; return true; }
+  if (!f || !f.id || f.trashed) return false;
+  return !(parent && f.parent_id && String(f.parent_id) !== parent);
+}
+/** 推成（或认领）的一部 → 出参 */
+const pkOkItem = (it, m, t, how) => ({ tid: it.tid, ok: 1, ...(how ? { [how]: 1 } : {}), task: String(t.id || t.task || ''),
+  name: String(t.name || t.file_name || m.name || it.name || '').slice(0, 160), phase: String(t.phase || ''), btih: m.btih,
+  /* [v7.0] 「请求添加」要盯着这个下载落成的文件（夹）做清洗 */
+  file: String(t.file_id || t.file || ''), fileName: String(t.file_name || t.fileName || '').slice(0, 200) });
+const pkOkRec = (t, m) => ({ s: 'ok', task: String(t.id || ''), file: String(t.file_id || ''), fileName: String(t.file_name || '').slice(0, 200),
+  name: String(t.name || t.file_name || m.name || '').slice(0, 160), phase: String(t.phase || ''), at: Date.now() });
+/** 建任务这一下结果不明：请求可能已经到了 PikPak（断线、超时、5xx）。预算不够是没发出去，不算 */
+const pkUnsure = (e) => !!(e && !e.budget && (e.net || e.status >= 500));
+
+/* [v7.2] 论坛账号层面的问题（登录失败、验证码、登录态失效、积分不够）：记五分钟，这期间推送直接整批停下、原因交回，
+   不再每推一部就重登一次（像机器人，也容易把账号试锁） */
+let FORUM_BAD = null;
 /**
- * 推一批：[{ tid, name }] → 每部在 parent 文件夹里建一个云下载任务。
- * 出参每部一条：{ tid, ok, task, name } / { retry }（预算到了或这会儿不通，过会儿再来）/ { err }（这部推不了）
- * PikPak 那头整个不行了（没登录上、空间满、次数用完）：stop = 原因，剩下的不再试
+ * 推一批：[{ tid, name, check? }] → 每部在 parent 文件夹里建一个云下载任务。
+ * 出参每部一条：{ tid, ok, task, name, file, fileName }（dedup / adopted：以前建过、这次认领）
+ *   / { retry }（预算到了或这会儿不通，过会儿再来；unsure：建任务那一下结果不明，下次会先核对）/ { err }（这部推不了）
+ * 整批停下：stop = 原因，剩下的标 held。PikPak 那头不行了（没登录上、空间满、次数用完）；论坛账号不行了（forum:1）；
+ *   目标文件夹不在了（gone:1，路由回 404）
+ * env.__dl：这次调用的截止时刻（路由按进门时刻算，含排闸门的时间）；env.__sub：这次调用自己的子请求配额
  */
 async function pkPush(env, parent, items, ctx){
   const t0 = Date.now(), out = [];
-  let ok = 0, stop = '';
+  const dl = env.__dl || 0;
+  const left = () => env.__sub ? env.__sub.max - env.__sub.n : subLeft();
+  const room = () => dl ? dl - Date.now() : Infinity;
+  let ok = 0, stop = '', forum = 0, gone = 0;
+  const host = hostOf(base(env));
   await pkAuth(env);                                  // 登不上就整批报错，不去白拉种子
+  if (FORUM_BAD && FORUM_BAD.host === host && Date.now() < FORUM_BAD.until){ stop = FORUM_BAD.msg; forum = 1; }
+  const bg = (w) => { if (ctx && ctx.waitUntil) ctx.waitUntil(w); return ctx && ctx.waitUntil ? null : w; };
   for (const it of items){
     if (stop){ out.push({ tid: it.tid, ok: 0, retry: 1, held: 1 }); continue; }
-    if (subLeft() < 5 || Date.now() - t0 > 22000){ out.push({ tid: it.tid, ok: 0, retry: 1 }); continue; }
+    if (left() < 5 || Date.now() - t0 > 22000 || room() < 9000){ out.push({ tid: it.tid, ok: 0, retry: 1 }); continue; }
     let m;
     try { m = await magnetOfThread(env, it.tid, ctx); }
     catch (e){
       if (e.budget){ out.push({ tid: it.tid, ok: 0, retry: 1 }); continue; }
+      /* [v7.2] 论坛账号层面的：这一部和后面的都留着待推（不记成「这个规格推不了」，否则请求添加会把所有规格烧光） */
+      if (e.acct || classify(e) === 'auth'){
+        stop = '论坛：' + (e.message || String(e)); forum = 1;
+        FORUM_BAD = { host, msg: stop, until: Date.now() + 5 * 60000 };
+        trace('auth', '推送：论坛账号层面的问题，整批停下 —— ' + (e.message || e), { lvl: 'warn' });
+        out.push({ tid: it.tid, ok: 0, retry: 1, held: 1 }); continue;
+      }
       if (RETRYABLE.has(classify(e)) && !e.hard && !e.parse) out.push({ tid: it.tid, ok: 0, retry: 1, soft: 1, err: (e.message || '暂时取不到').slice(0, 80) });
       else out.push({ tid: it.tid, ok: 0, err: (e.message || String(e)).slice(0, 120) });
       continue;
     }
+    if (FORUM_BAD && FORUM_BAD.host === host) FORUM_BAD = null;
+    const key = m.btih ? pkPushKey(env, parent, m.btih) : '';
+    const later = (err, unsure) => out.push({ tid: it.tid, ok: 0, retry: 1, soft: 1, ...(unsure ? { unsure: 1 } : {}), btih: m.btih, err: String(err).slice(0, 100) });
+    /* ① 建过 / 结果不明 / 调用方要求核对：先在任务列表里找 */
+    const rec = key ? await pkPushGet(env, key) : null;
+    if (rec || it.check){
+      if (left() < 6 || room() < 9000){ later('这次调用的配额或时间不够核对任务列表，稍后再推', rec && rec.s === 'unsure'); continue; }
+      let t = null, lookErr = null;
+      try { for (const c of await pkFindTasks(env, parent, rec, m)) if (await pkTaskUsable(env, parent, c)){ t = c; break; } }
+      catch (e){ if (e.budget){ out.push({ tid: it.tid, ok: 0, retry: 1, btih: m.btih }); continue; } lookErr = e; }
+      if (t){
+        ok++;
+        out.push(pkOkItem(it, m, t, rec && rec.s === 'ok' && String(t.id) === String(rec.task) ? 'dedup' : 'adopted'));
+        if (key){ const w = bg(pkPushPut(env, key, pkOkRec(t, m))); if (w) await w; }
+        trace('pikpak', '推送：' + (m.name || it.tid) + ' 在 PikPak 里已经有任务了（' + t.id + '），不再新建', { lvl: 'info' });
+        continue;
+      }
+      if (lookErr){
+        /* 刚建成的那一笔：任务列表查不了就信记录，不冒险建第二个（请求添加之后会自己看任务 / 文件在不在） */
+        if (rec && rec.s === 'ok'){ ok++; out.push({ ...pkOkItem(it, m, rec, 'dedup'), unverified: 1 }); continue; }
+        if (lookErr.net || lookErr.status === 429 || lookErr.auth || lookErr.captcha){ later('核对 PikPak 任务列表没成功（' + lookErr.message + '），稍后再推', 1); continue; }
+        /* PikPak 不认这个查询（4xx）：核对不了，只好照常建 */
+      }
+    }
+    /* ② 建任务。时间不够一次完整的请求就不发了：发出去又等不到回包，正是重复任务的来源 */
+    if (room() < 8000){ later('这次调用快到时限了，稍后再推', rec && rec.s === 'unsure'); continue; }
+    if (left() < 2){ out.push({ tid: it.tid, ok: 0, retry: 1, btih: m.btih }); continue; }
+    const job = pkCall(env, 'POST', '/drive/v1/files', { body: {
+      kind: 'drive#file', upload_type: 'UPLOAD_TYPE_URL', url: { url: m.magnet },
+      parent_id: parent || '', folder_type: parent ? '' : 'DOWNLOAD' } });
+    const note = key ? job.then(j => pkPushPut(env, key, pkOkRec(j.task || {}, m)),
+                                e => pkUnsure(e) ? pkPushPut(env, key, { s: 'unsure', at: Date.now() }) : null) : null;
+    const wait = note ? bg(note) : null;
     try {
-      const j = await pkCall(env, 'POST', '/drive/v1/files', { body: {
-        kind: 'drive#file', upload_type: 'UPLOAD_TYPE_URL', url: { url: m.magnet },
-        parent_id: parent || '', folder_type: parent ? '' : 'DOWNLOAD' } });
-      const t = j.task || {};
+      const j = await job;
       ok++;
-      out.push({ tid: it.tid, ok: 1, task: String(t.id || ''), name: String(t.name || t.file_name || m.name || it.name || '').slice(0, 160),
-                 phase: String(t.phase || ''), btih: m.btih,
-                 /* [v7.0] 「请求添加」要盯着这个下载落成的文件（夹）做清洗 */
-                 file: String(t.file_id || ''), fileName: String(t.file_name || '').slice(0, 200) });
+      out.push(pkOkItem(it, m, j.task || {}, ''));
     } catch (e){
-      if (e.budget){ out.push({ tid: it.tid, ok: 0, retry: 1 }); continue; }
+      if (e.budget){ out.push({ tid: it.tid, ok: 0, retry: 1, btih: m.btih }); }
       /* 账号层面的问题：这一批后面的、以及浏览器手里剩下的都不用再试了 */
-      if (e.auth || e.conf || e.captcha || /空间不够|次数用完/.test(e.message)){ stop = e.message; out.push({ tid: it.tid, ok: 0, retry: 1, held: 1 }); continue; }
-      if (e.net || e.status === 429 || e.code === 10 || /太频繁/.test(e.message)) out.push({ tid: it.tid, ok: 0, retry: 1, soft: 1, err: e.message.slice(0, 100) });
+      else if (e.auth || e.conf || e.captcha || /空间不够|次数用完/.test(e.message)){ stop = e.message; out.push({ tid: it.tid, ok: 0, retry: 1, held: 1 }); }
+      /* [v7.2] 目标文件夹不在了：整批停下（路由回 404，请求添加据此清掉缓存的文件夹编号、重建），不把这部片记成推不了 */
+      else if (parent && /not_found/i.test(e.err || '')){ stop = e.message; gone = 1; out.push({ tid: it.tid, ok: 0, retry: 1, held: 1 }); }
+      else if (pkUnsure(e)) later(e.message, 1);
+      else if (e.status === 429 || e.code === 10 || /太频繁/.test(e.message)) later(e.message, 0);
       else out.push({ tid: it.tid, ok: 0, err: e.message.slice(0, 140) });
     }
+    if (wait) await wait;
   }
-  return { items: out, ok, stop, ms: Date.now() - t0, sub: SUB.n, batch: PK.batch };
+  return { items: out, ok, stop, ...(forum ? { forum: 1 } : {}), ...(gone ? { gone: 1 } : {}),
+           ms: Date.now() - t0, sub: env.__sub ? env.__sub.n : SUB.n, batch: PK.batch };
+}
+/** [v7.2] PikPak 的错 → HTTP 状态。以前除了没配账号（400）一律 502：请求添加把 502 当成影片库不通，
+    文件夹被删了它也一直重试、熔断，缓存的文件夹编号永远不清。现在：
+      400 参数不对 / 没配账号 · 404 文件夹不在了（gone）· 429 PikPak 限频（带 Retry-After）·
+      503 登录不上 / 要人机验证 / 登录冷却中 · 502 其它（PikPak 抽风） */
+function pkResp(e){
+  if (!e.pk) throw e;
+  const gone = /not_found/i.test(e.err || '') ? 1 : 0;
+  const rate = e.status === 429 || e.code === 10 || /too_many|frequen/i.test(e.err || '');
+  const st = (e.conf || e.bad) ? 400 : gone ? 404 : rate ? 429 : (e.auth || e.captcha || e.cool) ? 503 : 502;
+  const r = json({ error: e.message, pk: 1, conf: e.conf ? 1 : 0, auth: e.auth ? 1 : 0, captcha: e.captcha ? 1 : 0, gone }, st);
+  if (rate) r.headers.set('retry-after', '30');
+  return r;
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -6568,15 +6897,45 @@ export default {
       return json({ error:'口令不正确' },401);
 
     const Q = url.searchParams;
+    const arrived = Date.now();
     /* [v5.3] 重活 / 轻活分流：只有重活参与子请求预算（见 subEnter）。 */
     const heavy = HEAVY_RE.test(p) || (p==='/api/lib' && !!(Q.get('scan')||Q.get('resolve')||Q.get('refresh')));
     const tok = subEnter(env, heavy);
 
+    /* [v7.2] PikPak 的状态 / 列文件夹 / 建文件夹：只碰 PikPak（变量 + KV 里的 pk:tok），跟哪个源没关系，不排源闸门 ——
+       以前请求添加要个文件夹编号，得等另一个源的推送 / 片库后台刷新跑完 */
+    if (p==='/api/pikpak'){
+      try {
+        const body = request.method === 'POST' ? await request.json().catch(() => null) : null;
+        const envP = Object.assign(Object.create(env), { __sub: { n: 0, max: PLAN.sub }, __dl: arrived + 35000 });
+        const act = Q.get('do') || 'status';
+        try {
+          if (act === 'status') return json(await pkStatus(envP));
+          if (act === 'ls') return json(await pkList(envP, Q.get('parent') || ''));
+          if (act === 'mkdir'){
+            if (!body) return json({ error:'请用 POST，正文是 { parent, name }' }, 405);
+            return json(await pkMkdir(envP, String(body.parent || ''), body.name));
+          }
+          return json({ error:'未知操作' }, 400);
+        } catch (e){ return pkResp(e); }
+      } catch (e){
+        trace(classify(e), p + ': ' + (e.message || e));
+        return json({ error: e.message || String(e), kind: classify(e), budget: e.budget ? 1 : 0 }, e.budget ? 503 : 500);
+      } finally { subLeave(tok); }
+    }
+
     /* 换源就是换一整套 R2 键，所以先过闸门：同源随便并发，异源排队等。
        ctx 也包一层 —— 后台任务必须算进这一批，否则它会跨到下一批里去写
-       另一个源的键。 */
-    try { await srcEnter(sid); }
-    catch (e){ subLeave(tok); return json({ error: e.message, kind:'busy', busy:1, wait: e.wait||5 }, 409); }
+       另一个源的键。
+       [v7.2] 推送少等一点（20 秒）：它整次调用只有 32 秒（请求添加 40 秒就断开），闸门等太久就来不及建任务了；
+       409 带 Retry-After，调用方照着等 */
+    try { await srcEnter(sid, p === '/api/pikpush' ? 20000 : 25000); }
+    catch (e){
+      subLeave(tok);
+      const r = json({ error: e.message, kind:'busy', busy:1, wait: e.wait||5 }, 409);
+      r.headers.set('retry-after', String(e.wait || 5));
+      return r;
+    }
     const bg = [];
     const cx = {
       /* 闸门只等后台任务 60 秒：永远不结束的 Promise 不能把闸门一直攥在手里 */
@@ -6612,7 +6971,12 @@ export default {
         const m = movies.m?.[id];
         if (!m) return json({ error:'索引里没有这部影片' }, 404);
         const ver = state.ver || 0;
-        const rows = collapse((await movieRows(env, movies, id, ver, state)).map(decorate));
+        /* [v7.2] 剧集先去掉单集 / 一段、整季包排在前面，再折叠：折叠的签名不看「全 N 集 / 第 1-12 集」，
+           同组同规格同体积的一份整季包和一份分段转帖会折成一条，留下的要是分段那条，下面一筛就整季都没了 */
+        let dec = (await movieRows(env, movies, id, ver, state)).map(decorate);
+        if (isTV()) dec = dec.filter(r => packOf(r.title) !== 'part')
+          .sort((a, b) => (packOf(a.title) === 'full' ? 0 : 1) - (packOf(b.title) === 'full' ? 0 : 1) || betterRow(a, b));
+        const rows = collapse(dec);
         let items = rows.map(r => ({ tid:r.tid, sid:r.sid, title:r.title, score:r.score, mb:r.mb||0, size:r.size||'',
           labels:r.labels||[], res:specRes(r.spec), sn:r.sn||0 }));
         let seasons = [], season = 0;
@@ -6624,33 +6988,33 @@ export default {
             .filter(x => x.pack !== 'part')
             .sort((a, b) => (a.pack === 'full' ? 0 : 1) - (b.pack === 'full' ? 0 : 1));
         }
-        const lib = await libLoad(env, cx).catch(() => null);
-        return json({ id:+id, src:SRC.id, title:m[F.N], original:m[F.O], year:m[F.Y], poster:m[F.P],
-          own: libHasId(movies, ver, lib, id), seasons, season, items: items.slice(0, 16) });
+        /* [v7.2] own（片库里有没有）改成 &own=1 才算：请求添加不看它，以前每次都要建整张缺片判定表，
+           还会顺手起一次片库后台刷新、把源闸门攥住几秒到几十秒。要的时候也只看一眼内存 / R2 里的成品，不刷新 */
+        const out = { id:+id, src:SRC.id, title:m[F.N], original:m[F.O], year:m[F.Y], poster:m[F.P], seasons, season, items: items.slice(0, 16) };
+        if (Q.get('own') === '1'){ const lib = await libPeek(env).catch(() => null); out.own = libHasId(movies, ver, lib, id); }
+        return json(out);
       }
 
-      if (p==='/api/pikpak' || p==='/api/pikpush'){
-        const pkFail = (e) => { if (!e.pk) throw e; return json({ error: e.message, pk: 1, conf: e.conf ? 1 : 0, auth: e.auth ? 1 : 0, captcha: e.captcha ? 1 : 0 }, e.conf ? 400 : 502); };
+      if (p==='/api/pikpush'){
         const body = request.method === 'POST' ? await request.json().catch(() => null) : null;
-        if (p==='/api/pikpush'){
-          if (request.method !== 'POST' || !body) return json({ error:'请用 POST，正文是 { parent, items: [...] }' }, 405);
-          const items = (Array.isArray(body.items) ? body.items : []).slice(0, PK.batch).map(x => ({
-            tid: /^\d+$/.test(String(x.tid)) ? Number(x.tid) : tidOf(x.sid||''),
-            name: String(x.name||'').slice(0,120),
-          })).filter(x => x.tid > 0);
-          if (!items.length) return json({ error:'没有要推送的片源' }, 400);
-          try { return json(await pkPush(env, String(body.parent || ''), items, cx)); } catch (e){ return pkFail(e); }
-        }
-        const act = Q.get('do') || 'status';
+        if (request.method !== 'POST' || !body) return json({ error:'请用 POST，正文是 { parent, items: [...] }' }, 405);
+        /* [v7.2] 同一次调用里重复的 tid 只推一次（以前 7 个一样的 tid 会建 4 个任务）；check:1 要求先核对 PikPak 的任务列表 */
+        const seen = new Set();
+        const items = (Array.isArray(body.items) ? body.items : []).map(x => ({
+          tid: /^\d+$/.test(String(x && x.tid)) ? Number(x.tid) : tidOf((x && x.sid)||''),
+          name: String((x && x.name)||'').slice(0,120),
+          check: (x && x.check) || body.check ? 1 : 0,
+        })).filter(x => x.tid > 0 && !seen.has(x.tid) && seen.add(x.tid)).slice(0, PK.batch);
+        if (!items.length) return json({ error:'没有要推送的片源' }, 400);
+        /* 这次调用自己的子请求配额 + 截止时刻（从进门算，排闸门的时间也算进去；调用方可以用 deadlineMs 收紧 / 放宽，8–50 秒） */
+        const span = Math.min(50000, Math.max(8000, Number(body.deadlineMs) || 32000));
+        const envP = Object.assign(Object.create(env), { __sub: { n: 0, max: PLAN.sub }, __dl: arrived + span });
         try {
-          if (act === 'status') return json(await pkStatus(env));
-          if (act === 'ls') return json(await pkList(env, Q.get('parent') || ''));
-          if (act === 'mkdir'){
-            if (!body) return json({ error:'请用 POST，正文是 { parent, name }' }, 405);
-            return json(await pkMkdir(env, String(body.parent || ''), body.name));
-          }
-          return json({ error:'未知操作' }, 400);
-        } catch (e){ return pkFail(e); }
+          const r = await pkPush(envP, String(body.parent || ''), items, cx);
+          /* 目标文件夹不在了：整批 404（请求添加看到「文件夹不在了」会清掉缓存的文件夹编号、重建；页面上整批停下） */
+          if (r.gone) return json({ ...r, error: r.stop, pk: 1 }, 404);
+          return json(r);
+        } catch (e){ return pkResp(e); }
       }
       /* v4 的服务端打包已移除：它是 CPU / 内存峰值的来源，也是"一次下载
          分出好几个 zip"的根因。老前端如果还在打这个地址，明确告诉它。 */
@@ -6663,12 +7027,20 @@ export default {
         const lib = await libLoad(env, cx).catch(()=>null);
         /* 边缘缓存键带索引版本号 + 片库版本号：片库一变（下了新片），
            旧的"已过滤"结果自然作废，不用手动清缓存。
-           构造失败就跳过缓存，绝不因此让请求失败 */
+           构造失败就跳过缓存，绝不因此让请求失败。
+           [v7.3] 目录带 ystrict=1（严格年份）时键尾再加一截 &ys=1：参数本身已经在键里，但 v7.2 不认 ystrict、
+           照样把宽口径的结果存在同一个网址下 —— 不加这一截，部署后 10 分钟内（s-maxage）同一个索引 / 片库版本
+           会把那份宽的当成严格的拿出来。宽口径的键一个字节都不变（不白白丢掉已经存着的缓存）
+           [v7.3 复查] 参数名也要编码：以前只编码值、名字原样拼，名字解出来带「&」「=」的一个参数（own%3Dall%26year=2024）
+           拼出来和好几个真参数（own=all&year=2024）一模一样 —— Worker 看来没有 year、回整张宽表，却存进真请求的键里。
+           编码之后每一段「名=值」里只剩一个「=」、段里没有「&」，真请求（每个名字只带一次）的键只有同一组参数拼得出来。
+           真用到的参数名都是普通字母，编码前后一样：宽的、严格的键都与之前逐字节相同 */
+        const ystrict = p==='/api/catalog' && Q.get('ystrict')==='1';
         let cache = null, ck = null;
         try {
           ck = new Request(new URL(url.pathname + '?' + [...Q.entries()]
-            .filter(([k])=>k!=='gate').map(([k,v])=>k+'='+encodeURIComponent(v)).sort().join('&')
-            + '&v=' + ver + '&l=' + libVer(lib), url.origin).toString());
+            .filter(([k])=>k!=='gate').map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).sort().join('&')
+            + '&v=' + ver + '&l=' + libVer(lib) + (ystrict ? '&ys=1' : ''), url.origin).toString());
           cache = caches.default;
           const hitc = await cache.match(ck);
           if (hitc) return hitc;
@@ -6684,6 +7056,8 @@ export default {
             min: Q.get('min')==null ? 6 : (Number.isFinite(Number(Q.get('min'))) ? Number(Q.get('min')) : 6),
             sort: Q.get('sort')||'new', page: Math.min(10000, Math.max(1, parseInt(Q.get('page')||'1', 10) || 1)),
             dr: Q.get('dr')||'', qual: Q.get('qual')||'',
+            /* [v7.3] ystrict=1 + year=YYYY：只要影片自己的年份就是这一年的（请求添加「全部影片 › 可申请」一年一节用） */
+            ystrict,
             lib, own,
           });
           body = { ...r, src: SRC.id, indexed: state.movies||0, at: state.at||0,
@@ -8931,7 +9305,7 @@ var PUSH = {
    目录 / 详情这类轻接口 40s；建索引 / 取件 / 认定这类重活服务端自己按
    预算收工，通常 15s 内回来，给 110s 是留给网关。 */
 var API_T = { light:40000, heavy:110000 };
-var HEAVY_API = /^\/api\/(build|incremental|fetch|pikpush|repair|diagnose|unlock|migrate|optimize|split|reset)(\?|$)|^\/api\/lib\?(scan|resolve|refresh)/;
+var HEAVY_API = /^\/api\/(build|incremental|fetch|repair|diagnose|unlock|migrate|optimize|split|reset)(\?|$)|^\/api\/lib\?(scan|resolve|refresh)/;
 function api(u, opt){
   opt = opt || {};
   var h = { 'x-gate': GATE };
