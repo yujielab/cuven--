@@ -9,6 +9,13 @@
  *   边缘缓存键在严格模式尾部多一截 &ys=1（v7.2 不认 ystrict，部署前存下的宽结果不会被当成严格的拿出来）。
  *   只认 ystrict=1（别的值都按宽口径）。不带 ystrict 的请求：结果、回包、缓存键都与 v7.2 一个字节都不差；
  *   带了 ystrict 却没有像样的 year：照旧不按年份筛，回包也不带 ystrict 字段。
+ *   复查（缓存键串号）：边缘缓存键只编码参数值、参数名原样拼。一个名字解出来带「&」「=」的参数就能拼出别人的键：
+ *   /api/catalog?min=0&own%3Dall%26year=2024&ystrict=1 —— Worker 看来没有 year，回整张宽表、不带 ystrict，
+ *   却存在真请求 own=all&year=2024&ystrict=1 的键下（…&ys=1），之后 10 分钟（s-maxage）请求添加拿到的是宽的、
+ *   当成影片库没升级；宽的键、/api/cart 也能这么串（v7.2 及以前就有，严格 / 宽分开之后才要紧；设了 GATE 只有持口令的能这么做）。
+ *   修：参数名也 encodeURIComponent。真用到的参数名（q / year / ystrict / own / min / sort / page / dr / qual / src / genre /
+ *   id / ids）都是普通字母、编码前后一样，宽的、严格的键都与之前逐字节相同（已经存着的缓存照样命中）；
+ *   只有名字里带保留字符的键变了。编码之后键里每一段只有一个「=」、没有「&」，真请求（每个名字只带一次）的键只有同一组参数拼得出来。
  * [v7.2] 请求添加一口气推 16 部以上（tj pkSlots 16、剧集推进 /auto/ram2）：给它用的几条接口扛得住突发
  *   · /api/pikpush 幂等：同一个文件夹 + 同一个 info hash 建过任务（或结果不明：超时 / 断线 / PikPak 5xx）就记一笔，
  *     再推同一部先在 PikPak 的任务列表里对一遍，对上就认领、不再新建（以前重试会建出第二个任务、多扣一次每日次数）；
@@ -7023,12 +7030,16 @@ export default {
            构造失败就跳过缓存，绝不因此让请求失败。
            [v7.3] 目录带 ystrict=1（严格年份）时键尾再加一截 &ys=1：参数本身已经在键里，但 v7.2 不认 ystrict、
            照样把宽口径的结果存在同一个网址下 —— 不加这一截，部署后 10 分钟内（s-maxage）同一个索引 / 片库版本
-           会把那份宽的当成严格的拿出来。宽口径的键一个字节都不变（不白白丢掉已经存着的缓存） */
+           会把那份宽的当成严格的拿出来。宽口径的键一个字节都不变（不白白丢掉已经存着的缓存）
+           [v7.3 复查] 参数名也要编码：以前只编码值、名字原样拼，名字解出来带「&」「=」的一个参数（own%3Dall%26year=2024）
+           拼出来和好几个真参数（own=all&year=2024）一模一样 —— Worker 看来没有 year、回整张宽表，却存进真请求的键里。
+           编码之后每一段「名=值」里只剩一个「=」、段里没有「&」，真请求（每个名字只带一次）的键只有同一组参数拼得出来。
+           真用到的参数名都是普通字母，编码前后一样：宽的、严格的键都与之前逐字节相同 */
         const ystrict = p==='/api/catalog' && Q.get('ystrict')==='1';
         let cache = null, ck = null;
         try {
           ck = new Request(new URL(url.pathname + '?' + [...Q.entries()]
-            .filter(([k])=>k!=='gate').map(([k,v])=>k+'='+encodeURIComponent(v)).sort().join('&')
+            .filter(([k])=>k!=='gate').map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).sort().join('&')
             + '&v=' + ver + '&l=' + libVer(lib) + (ystrict ? '&ys=1' : ''), url.origin).toString());
           cache = caches.default;
           const hitc = await cache.match(ck);

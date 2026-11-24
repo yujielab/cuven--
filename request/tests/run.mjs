@@ -3153,9 +3153,12 @@ env.DB.prepare = prepSt;
 }
 
 /* ── 2.8.1 按年份列带 ystrict=1：影片库按「任何一个发行帖的年份」筛（实测 year=2020 新的在前第一页 24 部电影里只有 7 部是 2020 年上映的、
-      total 虚高），/app/years 的每一格、/app/catalog 带 year 的都要影片库只给这一年上映的；不带 year、搜索、不像年份的照旧不带。
+      total 虚高），/app/years 的每一格、/app/catalog 带 year 的都要影片库只给这一年上映的；不带 year、不带 year 的搜索、不像年份的照旧不带
+      （2.8.1 复查：搜索带了像年份的 year 也带）。
       老版本影片库不认 ystrict（照旧回宽的）：这边原样转，App 照旧在本机按年份筛。
-      /app/years 两条缓存 key（目录页一格一份、拼好的回包）带版本号：部署前（tj 2.8）缓存的宽格子、拼好的回包部署后不再用 ── */
+      /app/years 两条缓存 key（目录页一格一份、拼好的回包）带版本号：部署前（tj 2.8）缓存的宽格子、拼好的回包部署后不再用。
+      2.8.1 复查：格子不记影片库筛没筛严 —— 先部署影片库 v7.3、再部署 tj 2.8.1 才一次宽的都不给；反过来的话影片库升级以后
+      缓存下的宽格子还要用到过期（最多 5 分钟），最后一段钉住这个窗口（README 写清楚了部署顺序） ── */
 {
   env.DB.db.exec('DELETE FROM tj_req');
   advance(3600e3 - (Date.now() % 3600e3) + 1000);
@@ -3189,7 +3192,8 @@ env.DB.prepare = prepSt;
   const [, vj] = await call('GET', '/version');
   ok(vj && vj.ver === 'tj 2.8.1', 'VER 是 tj 2.8.1', vj);
 
-  /* 部署之前（tj 2.8）这一个小时里缓存下的：目录页一格一份（宽的、还新鲜）、默认参数拼好的回包。key 和 2.8 算出来的一模一样 */
+  /* 部署之前（tj 2.8）这一个小时里缓存下的：目录页一格一份（宽的、还新鲜）、默认参数拼好的回包。key 和 2.8 算出来的一模一样。
+     影片库已经是认 ystrict 的（strict = true）= README 写的顺序：先影片库 v7.3、再 tj 2.8.1 */
   const oldV = encodeURIComponent('tj 2.8'), base = 'https://tj.cuven.us';
   const stale = {};
   for (const s of ['movie', 'tv']) for (let yr = Y; yr >= Y - 6; yr--)
@@ -3215,7 +3219,7 @@ env.DB.prepare = prepSt;
   const again = await years();
   ok(again.s === 200 && yq.length === 0 && JSON.stringify(again.j.years) === JSON.stringify(r.j.years), '新的缓存照常用：再要不问影片库', { calls: yq.length });
 
-  /* /app/catalog：带像年份的 year 才带 ystrict=1（翻页、明说 min 也带）；不带 year、搜索、不像年份的照旧不带 */
+  /* /app/catalog：带像年份的 year 才带 ystrict=1（翻页、明说 min 也带）；不带 year、不带 year 的搜索、不像年份的照旧不带 */
   yq.length = 0;
   let [s, c] = await call('GET', '/app/catalog?src=all&year=' + (Y - 6));
   ok(s === 200 && yq.length === 2 && yq.every(q => q.ystrict === '1' && q.year === String(Y - 6) && q.min === '0') &&
@@ -3224,6 +3228,13 @@ env.DB.prepare = prepSt;
   [s, c] = await call('GET', '/app/catalog?src=movie&year=' + Y + '&page=2&min=6');
   ok(s === 200 && W.lastCatalogQ.get('ystrict') === '1' && W.lastCatalogQ.get('page') === '2' && W.lastCatalogQ.get('min') === '6',
      '按年份翻页、明说 min：一样带 ystrict=1，page / min 照给的', String(W.lastCatalogQ));
+  /* 2.8.1 复查：搜索带了像年份的 year 也带 ystrict=1（只在这一年上映的里搜；影片库 v7.3 带了 q 照样按年份筛）。
+     以前 README 写「搜索照旧不带」，代码只看 year 像不像年份 —— 这里把这个行为钉住（App 现在不会把搜索词和 year 一起带） */
+  yq.length = 0;
+  [s, c] = await call('GET', '/app/catalog?src=all&q=' + encodeURIComponent('游戏') + '&year=' + (Y - 6));
+  ok(s === 200 && yq.length === 2 && yq.every(q => q.ystrict === '1' && q.q === '游戏' && q.year === String(Y - 6) && q.min === '0') &&
+     c.items.length === 30 && c.items.every(x => x.year === String(Y - 6)),
+     '2.8.1 复查：搜索带了像年份的 year 也带 ystrict=1（q、year 照给，min 照旧 0），只在这一年上映的里搜', { calls: yq, n: c.items && c.items.length });
   for (const qs of ['src=movie', 'src=all&q=' + encodeURIComponent('游戏'), 'src=movie&year=abc', 'src=tv&year=1850', 'src=movie&sort=vote&min=7']){
     W.lastCatalogQ = null;
     [s] = await call('GET', '/app/catalog?' + qs);
@@ -3242,6 +3253,30 @@ env.DB.prepare = prepSt;
   [s, c] = await call('GET', '/app/catalog?src=movie&year=' + Y);
   ok(s === 200 && c.items.length === 30 && c.total === 30 && c.items.filter(x => x.year === String(Y - 1)).length === 15,
      '老版本影片库：/app/catalog 带 year 也照旧原样转', { n: c.items && c.items.length, total: c.total });
+
+  /* 2.8.1 复查，部署顺序反过来：tj 2.8.1 先上、影片库还是 v7.2（上面那一次：宽的格子已经缓存在 tj 2.8.1 的 key 下），
+     然后影片库升级到 v7.3（strict = true），不清缓存。这边版本号没变：宽格子、拼好的回包照旧用到过期为止（最多 5 分钟，一个区域一份）——
+     README 因此写「先部署影片库 v7.3、再部署 tj 2.8.1」（以前写「哪个版本先部署都行」不对）；过期以后重问就是这一年上映的，窗口自己关上。
+     /app/catalog 这边不缓存，影片库一升级就是严的 */
+  strict = true;
+  yq.length = 0;
+  r = await years('?src=movie&per=40');
+  const w0 = r.j.years[Y] && r.j.years[Y].movie;
+  ok(r.s === 200 && yq.length === 0 && w0 && w0.items.length === 30 && w0.total === 30 && w0.items.filter(x => x.year === String(Y - 1)).length === 15,
+     '反过来部署（tj 2.8.1 先、影片库 v7.3 后）：影片库升级以后，缓存下的宽格子、拼好的回包照旧用（不问影片库）', { calls: yq.length, n: w0 && w0.items.length });
+  yq.length = 0;
+  r = await years('?src=movie&per=10&from=' + (Y - 2) + '&to=' + Y);
+  ok(r.s === 200 && yq.length === 0 && Object.values(r.j.years).every(c => c.movie && c.movie.total === 30 && c.movie.items.length === 10),
+     '反过来部署：换个参数（拼好的回包落空）也一样，目录页的格子还是宽的那份', { calls: yq.length });
+  [s, c] = await call('GET', '/app/catalog?src=movie&year=' + Y);
+  ok(s === 200 && c.items.length === 15 && c.total === 15 && c.items.every(x => x.year === String(Y)),
+     '反过来部署：/app/catalog 这边不缓存，影片库一升级就只给这一年上映的', { n: c.items && c.items.length, total: c.total });
+  advance(300e3 + 1000);
+  yq.length = 0;
+  r = await years('?src=movie&per=40');
+  ok(r.s === 200 && yq.length === 7 && yq.every(q => q.ystrict === '1') &&
+     Object.entries(r.j.years).every(([yr, c]) => c.movie && c.movie.total === 15 && c.movie.items.length === 15 && c.movie.items.every(x => x.year === yr)),
+     '反过来部署：5 分钟一过（格子、拼好的回包都过期）重问影片库，每一格只剩这一年上映的 —— 窗口自己关上', { calls: yq.length });
 
   W.hook = null;
   W.lastCatalogQ = null;

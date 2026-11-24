@@ -1721,6 +1721,38 @@ console.log('\n■ v7.3 目录按年份严格筛（ystrict=1）：只要这一�
        && keys.length === 2 && keys.filter(k => /ystrict=1/.test(k)).every(k => /&ys=1$/.test(k)) && keys.filter(k => !/ystrict=1/.test(k)).every(k => !/&ys=1/.test(k)),
       '边缘缓存：宽 → 严 → 宽 → 严，第二轮两个都是缓存命中、各拿各的（严格的键尾带 &ys=1，宽的键没变）');
   }
+  /* [v7.3 复查] 缓存键串号：以前只编码参数值、参数名原样拼。名字解出来是「own=all&year」的一个参数，
+     Worker 看来没有 year、回整张宽表，键却和真的 own=all&year=2024 拼得一模一样 —— 真请求 10 分钟内拿到的是它 */
+  {
+    const C = H.isolate(env, W);
+    const cache = C.caches.default;
+    const cart = async (q) => (await C.call('/api/cart?' + q)).json();
+    /* 先来造出来的三条：严格、宽、片单。own / year / ids 都藏在参数名里，Worker 看来都没带：
+       目录按默认 own=hide、不按年份筛，回所有年份的缺片（86 − 库里 6 部 = 80 部）；片单 ids 是空的 */
+    const x1 = await get(C, 'own%3Dall%26year=2024&ystrict=1'); await C.settle();
+    const x2 = await get(C, 'own%3Dall%26year=2024'); await C.settle();
+    const xc = await cart('ids%3D' + P[0].id + '%26src=movie'); await C.settle();
+    const k0 = [...cache.m.keys()];
+    /* 再来真的三条：不能命中上面那三份 */
+    let hits = 0; const m0 = cache.match.bind(cache); cache.match = async (k) => { const r = await m0(k); if (r) hits++; return r; };
+    const r1 = await get(C, 'own=all&year=2024&ystrict=1'); await C.settle();
+    const r2x = await get(C, 'own=all&year=2024'); await C.settle();
+    const rc = await cart('ids=' + P[0].id + '&src=movie'); await C.settle();
+    const keys = [...cache.m.keys()];
+    ok(x1.total === 80 && !('ystrict' in x1) && x2.total === 80 && Array.isArray(xc.items) && !xc.items.length
+       && k0.length === 3 && k0.every(k => /own%3Dall%26year=2024|ids%3D\d+%26src=movie/.test(k)),
+      `造出来的请求（参数名 own%3Dall%26year、ids%3D…%26src）：Worker 看来没有 year / ids，回所有年份的缺片（${x1.total} 部，不带 ystrict）/ 空片单 —— 照样缓存，但键里参数名是编码过的`);
+    ok(hits === 0 && keys.length === 6 && r1.total === 56 && r1.ystrict === 1 && r2x.total === 76 && !('ystrict' in r2x)
+       && rc.items.length === 1 && rc.items[0].id === P[0].id,
+      `之后真的严格 / 宽 / 片单请求不命中造出来的那几份（以前同一个键：严格 / 宽都拿到所有年份的 80 部、严格的没有 ystrict，请求添加当成影片库没升级）：严格 ${r1.total} 部${r1.ystrict === 1 ? '带' : '不带'} ystrict:1、宽 ${r2x.total} 部、片单 ${rc.items.length} 部`);
+    /* 反过来：真请求先存下，造出来的也拿不到它（各算各的） */
+    const D = H.isolate(env, W);
+    const d1 = await get(D, 'own=all&year=2024&ystrict=1'); await D.settle();
+    const d2 = await get(D, 'own%3Dall%26year=2024&ystrict=1'); await D.settle();
+    const d3 = await get(D, 'own=all&year=2024&ystrict=1'); await D.settle();
+    ok(d1.total === 56 && d2.total === 80 && d3.total === 56 && d3.ystrict === 1 && D.caches.default.m.size === 2,
+      '真请求先存、造出来的后到：两份各存各的键，真请求再来照样命中严格的那份');
+  }
   /* 部署前：v7.2 不认 ystrict，把宽的结果存在了带 ystrict=1 的网址下 —— v7.3 不能把它当成严格的拿出来 */
   const OLD = process.env.IDX_V72_WORKER;
   if (!OLD || !fs.existsSync(OLD)) ok(false, '缺 v7.2 原版（IDX_V72_WORKER）：run.mjs 开头会从 git 取');
@@ -1748,6 +1780,16 @@ console.log('\n■ v7.3 目录按年份严格筛（ystrict=1）：只要这一�
       if ((a === c) !== !/ystrict=1/.test(q)) diff.push(q);
     }
     ok(!diff.length, `不带 ystrict 的 ${qs.length - 1} 种查询（宽口径、片库过滤、排序、分页、搜索、评分、画质筛选）：v7.3 回包与 v7.2 逐字节相同；只有带 ystrict=1 的那条不同${diff.length ? '；不对：' + diff.join(' | ') : ''}`);
+    /* [v7.3 复查] 参数名也编码之后：真用到的参数名都是普通字母，键与 v7.2 逐字节相同（严格的只多键尾 &ys=1）——
+       部署前存下的缓存照样命中。目录 / 详情 / 片单三条接口、所有真参数名（gate 照旧不进键）、值里带中文和保留字符 */
+    const O3 = H.isolate(env, W, { file: OLD }), N3 = H.isolate(env, W);
+    const kq = ['/api/catalog?q=' + encodeURIComponent(P[3].cn + ' &=?') + '&year=2024&own=all&min=0&sort=vote&page=1&dr=hdr&qual=uhd&src=movie&genre=' + encodeURIComponent('剧情') + '&gate=x',
+      '/api/catalog?year=2024&ystrict=1&own=hide&min=0&sort=new&page=2&src=movie', '/api/catalog?own=all&year=2024&ystrict=0&min=0',
+      '/api/detail?id=' + P[3].id + '&src=movie&gate=x', '/api/cart?ids=' + P[0].id + ',' + P[1].id + '&src=movie'];
+    for (const q of kq) { await O3.call(q); await O3.settle(); await N3.call(q); await N3.settle(); }
+    const ok3 = [...O3.caches.default.m.keys()].map(k => /ystrict=1&/.test(k) ? k + '&ys=1' : k).sort(), nk3 = [...N3.caches.default.m.keys()].sort();
+    ok(ok3.length === kq.length && JSON.stringify(nk3) === JSON.stringify(ok3) && nk3.every(k => !/gate=/.test(k)),
+      `参数名也编码之后，真用到的参数名（q / year / ystrict / own / min / sort / page / dr / qual / src / genre / id / ids）拼出的 ${nk3.length} 个键与 v7.2 逐字节相同（严格的只多键尾 &ys=1）：部署前存下的缓存照样命中`);
   }
 
   /* 影片自己没有年份（F.Y 是空的）：严格模式不留，宽口径照旧按帖子年份留着 */

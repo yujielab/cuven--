@@ -2,6 +2,13 @@
  * Cuven 请求添加 Worker（tj.cuven.us）v2.8.1
  *
  * v2.8.1：按年份列（/app/years 的每一格、/app/catalog 带 year）问影片库的 /api/catalog 多带 ystrict=1：原因 = 影片库按「任何一个发行帖的年份」筛（r.ys），2020 那一页 24 部里只有 7 部是 2020 年上映的、total 虚高，App 在本机按年份筛完剩没几部；改成要影片库只给这一年上映的（老版本影片库不认，照旧宽的、App 照旧在本机筛）；VER 跟着改，/app/years 两条缓存 key 带版本号，部署前缓存的宽格子不再用
+ * v2.8.1 复查（审查结论两条，都只改 README 和测试，代码不变）：
+ *   · 部署顺序：原因 = 格子（yearsCells）只存 items / n / pages / total，不记影片库筛没筛严（回包里的 ystrict:1 不存），两条缓存 key 只带
+ *     这一个小时和 VER；README 却写「哪个版本先部署都行」。先上 tj 2.8.1、影片库还是 v7.2 的话，那几分钟缓存下的宽格子（key 已经是 tj 2.8.1）
+ *     影片库升级到 v7.3 以后照旧用到过期（每个区域最多 5 分钟），换版本号只扔掉 tj 2.8 的格子。改成 README 写明先部署影片库 v7.3、再部署 tj 2.8.1
+ *     （这样一次宽的都不给），反过来最多 5 分钟；不改代码（记下 ystrict、宽的少放一会儿，老版本影片库每格就要多问好几倍）。测试钉住这个窗口
+ *   · 搜索带了像年份的 year（/app/catalog?q=…&year=2020）也带 ystrict=1（只看 year 像不像年份），README 写成了「搜索照旧不带」：改成「不带 year 的搜索」，
+ *     测试钉住 q + year 带 ystrict=1（App 现在不会两个一起带）
  *
  * v2.8：用上影片库 v7.2、传输 Worker 911 新给的几处（回包里没有这些字段 = 老版本，照 2.7 原样走；D1 的表不变，App 老接口不变，多一个 /app/years）
  *   · 推送幂等：推送结果不明（影片库回 unsure）或者这一下调用暂时性失败（超时、断线、5xx），记下 r.d.pushTry = { tid, btih, at }；
@@ -2646,7 +2653,7 @@ async function appCatalog(env, Q){
   if (q) qs.set('q', q);
   if (byYear) qs.set('year', year);
   /* 2.8.1：按年份列带 ystrict=1，要影片库只给这一年上映的（以前它按「任何一个发行帖的年份」筛，一页里大半是别的年份的）。
-     老版本影片库不认它：照旧回宽的，App 照旧在本机按年份筛 */
+     老版本影片库不认它：照旧回宽的，App 照旧在本机按年份筛。只看 year 像不像年份：搜索带了 year 也带（只在这一年上映的里搜） */
   if (byYear) qs.set('ystrict', '1');
   const c = context(env, CFG_DEF, 6);
   const srcs = want === 'all' ? ['movie', 'tv'] : [want];
@@ -2737,7 +2744,8 @@ async function yearsCells(env, request, ctx, cache, cells){
   if (!need.length) return store;
   const c = context(env, CFG_DEF, LIMIT.yearsMax * 2);
   c.end = c.t0 + LIMIT.yearsMs;
-  /* 2.8.1：带 ystrict=1（只要这一年上映的，同 /app/catalog）；缓存 key 带版本号（VER），部署前缓存的宽格子换了版本就不再用 */
+  /* 2.8.1：带 ystrict=1（只要这一年上映的，同 /app/catalog）；缓存 key 带版本号（VER），部署前缓存的宽格子换了版本就不再用。
+     格子不记影片库筛没筛严：要先部署影片库 v7.3 再部署这一版，反过来的话影片库升级以后宽格子还要用到过期（最多 5 分钟，见 README） */
   const qs = (yr) => new URLSearchParams({ own: 'hide', min: '0', sort: 'new', page: '1', year: String(yr), ystrict: '1' });
   const got = await pool(6, need.map(x => () => lb(c, '/api/catalog?src=' + x.s + '&' + qs(x.yr)).then(j => ({ j }), e => ({ e }))));
   const at = now();
