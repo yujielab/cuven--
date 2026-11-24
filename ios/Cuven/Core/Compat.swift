@@ -107,8 +107,11 @@ enum CompatHLS {
         for raw in text.components(separatedBy: "\n") {
             var line = raw.hasSuffix("\r") ? String(raw.dropLast()) : raw
             if line.hasPrefix("#EXT-X-STREAM-INF:") || line.hasPrefix("#EXT-X-I-FRAME-STREAM-INF:") {
-                line = enhanced ? rewriteCodecsEnhanced(line) : rewriteCodecs(line)
-                line = dropAttribute("SUPPLEMENTAL-CODECS", in: line)
+                // I 帧列表不走代理（它的初始化分段还是杜比的样本入口）：CODECS 只照标准级改，杜比 8 档不改成 hvc1
+                let iframe = line.hasPrefix("#EXT-X-I-FRAME-STREAM-INF:")
+                line = enhanced && !iframe ? rewriteCodecsEnhanced(line) : rewriteCodecs(line)
+                // 不管排在第几个都去掉（以前只认前面有逗号的）
+                line = dropBareAttribute("SUPPLEMENTAL-CODECS", in: line)
                 if enhanced { line = relax(line) }
                 if line.hasPrefix("#EXT-X-STREAM-INF:") { nextIsVideo = true }
                 else { line = rewriteURIs(line) { absolute($0, base) } }
@@ -163,6 +166,11 @@ enum CompatHLS {
         let t = Array(type.utf8)
         var r: [(Int, Int)] = []
         var i = 4
+        // 文件头 ftyp 整个跳过：里面的兼容品牌（可能正好是 dvh1 / hvc1）不是盒子，前面的 minor_version 又可能被当成盒子的长度
+        if d.count >= 8, d[4] == 0x66, d[5] == 0x74, d[6] == 0x79, d[7] == 0x70 {
+            let s = Int(d[0]) << 24 | Int(d[1]) << 16 | Int(d[2]) << 8 | Int(d[3])
+            if s >= 8, s <= d.count { i = s + 4 }
+        }
         while i + 4 <= d.count {
             if d[i] == t[0], d[i + 1] == t[1], d[i + 2] == t[2], d[i + 3] == t[3] {
                 let size = Int(d[i - 4]) << 24 | Int(d[i - 3]) << 16 | Int(d[i - 2]) << 8 | Int(d[i - 1])
@@ -231,7 +239,7 @@ enum CompatHLS {
     }
 
     /// 杜比视界 8 档 → 普通 HEVC：样本入口 dvh1 → hvc1、dvhe → hev1，dvcC / dvvC 改名 free（字节数不变）。
-    /// 只认长度说得通的盒子（boxes），文件头 ftyp 里的兼容品牌不是盒子，不会被改到
+    /// 只认长度说得通的盒子（boxes 从 ftyp 后面开始找：文件头里的兼容品牌不会被当成盒子改掉）
     static func demoteProfile8(_ d: inout [UInt8]) {
         for (from, to) in [("dvh1", "hvc1"), ("dvhe", "hev1")] {
             for at in boxes(d, from) { d.replaceSubrange((at.payload - 4)..<at.payload, with: Array(to.utf8)) }
@@ -267,7 +275,8 @@ enum CompatHLS {
         for c in list {
             let p = c.split(separator: ".")
             if p.count >= 2, p[0] == "dvh1" || p[0] == "dvhe", Int(p[1]) == 8 {
-                if !hasHevc { out.append("hvc1.2.4.L\(maxHevcLevel).B0") }
+                // 和初始化分段里改的样本入口一致：dvh1 → hvc1、dvhe → hev1。Level 按上限写（4K 片子本来就要 5.1；1080p 的写高了也只是标记）
+                if !hasHevc { out.append("\(p[0] == "dvhe" ? "hev1" : "hvc1").2.4.L\(maxHevcLevel).B0") }
                 continue
             }
             out.append(c)
@@ -282,7 +291,11 @@ enum CompatHLS {
     /// 增强级：去掉系统拿来判断「这块屏放不放得了」的标记，分辨率、码率、帧率写成一般的屏都认的范围（只是标记，画面不变）
     static func relax(_ line: String) -> String {
         var l = line
-        for a in ["VIDEO-RANGE", "HDCP-LEVEL", "ALLOWED-CPC", "REQ-VIDEO-LAYOUT"] { l = dropBareAttribute(a, in: l) }
+        // 杜比视界 5 档没有能单独看的基础层：VIDEO-RANGE=PQ 是它的规定写法，去掉了反而成了「SDR 的杜比视界」，留着
+        let p5 = line.contains("dvh1.05") || line.contains("dvhe.05")
+        for a in ["VIDEO-RANGE", "HDCP-LEVEL", "ALLOWED-CPC", "REQ-VIDEO-LAYOUT"] where !(p5 && a == "VIDEO-RANGE") {
+            l = dropBareAttribute(a, in: l)
+        }
         l = replaceBare("RESOLUTION", in: l) { v in
             let wh = v.lowercased().split(separator: "x").compactMap { Int($0) }
             guard wh.count == 2, wh[0] > 1920 else { return v }
@@ -295,13 +308,14 @@ enum CompatHLS {
         return l
     }
 
-    /// 属性的起点（前一个字符是 : 或 ,，免得把 AVERAGE-BANDWIDTH 当成 BANDWIDTH）
+    /// 属性的起点（前一个字符是 : 或 ,，免得把 AVERAGE-BANDWIDTH 当成 BANDWIDTH；引号里面的不算，比如 URI 里的查询参数）
     private static func attributeStart(_ name: String, in line: String) -> Range<String.Index>? {
         var from = line.startIndex
         while let r = line.range(of: name + "=", range: from..<line.endIndex) {
             if r.lowerBound > line.startIndex {
                 let prev = line[line.index(before: r.lowerBound)]
-                if prev == ":" || prev == "," { return r }
+                let quotes = line[line.startIndex..<r.lowerBound].reduce(0) { $1 == "\"" ? $0 + 1 : $0 }
+                if (prev == ":" || prev == ","), quotes % 2 == 0 { return r }
             }
             from = r.upperBound
         }
@@ -357,13 +371,6 @@ enum CompatHLS {
         let vStart = line.index(start, offsetBy: name.count + 2)
         guard let close = line[vStart...].firstIndex(of: "\"") else { return line }
         return String(line[..<vStart]) + f(String(line[vStart..<close])) + String(line[close...])
-    }
-
-    private static func dropAttribute(_ name: String, in line: String) -> String {
-        guard let r = line.range(of: "," + name + "=\"") else { return line }
-        let vStart = r.upperBound
-        guard let close = line[vStart...].firstIndex(of: "\"") else { return line }
-        return String(line[..<r.lowerBound]) + String(line[line.index(after: close)...])
     }
 
     private static func rewriteURIs(_ line: String, _ f: (String) -> String) -> String {
