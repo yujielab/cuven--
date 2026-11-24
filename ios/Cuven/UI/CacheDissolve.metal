@@ -416,7 +416,7 @@ fragment float4 cd_composite_fragment(CDFullOut in [[stage_in]],
     float flood = exp(-sd / 0.10) * 0.6 * endK;
     // 收尾：从按钮往上散开一片光束（白里带一点环境光的颜色），后半程才出来
     float up = smoothstep(0.03, -0.02, d.y);
-    float rays = pow(cd_noise2(float2(ang * 30.0, U.timing.x * 0.08)), 3.0) * smoothstep(0.03, 0.14, r) * exp(-r / 0.5) * up;
+    float rays = pow(cd_noise2(float2(ang * 30.0, U.timing.x * 0.08)), 3.0) * smoothstep(0.03, 0.14, r) * exp(-r / 0.3) * up;
     float3 rayCol = mix(float3(0.9, 0.95, 1.0), ambCol * 2.5, 0.5);
     // 光斑：胶囊两边、稍微偏上，一排饱和的彩色柔光（紫、橙、粉红、青绿、琥珀），横向拉宽一点，有的带一圈棱镜色边；
     // 光源亮起来以后一颗颗出来、越来越大（参照录屏 3 秒以后）
@@ -437,7 +437,7 @@ fragment float4 cd_composite_fragment(CDFullOut in [[stage_in]],
         bokeh += (pal[k % 5] * disc * 0.30 + cd_spectral(fract(hc + dist * 9.0)) * rim * 0.18) * appear;
     }
     float3 light = float3(1.0, 0.92, 0.82) * (hug + tail + flood)
-                 + rayCol * rays * (0.05 * I + 0.30 * U.phase.z + 0.1 * endK)
+                 + rayCol * rays * (0.04 * I + 0.18 * U.phase.z + 0.06 * endK)
                  + bokeh * I;
 
     // 背景里一道道很短、很细的放射状虚线（速度感），都朝着按钮；后半程带上环境光的颜色。上面两成一直是黑的
@@ -447,7 +447,7 @@ fragment float4 cd_composite_fragment(CDFullOut in [[stage_in]],
     float px = abs(fract(la) - 0.5) * (6.2831853 / lanes) * r;
     float dash = step(0.72, cd_noise2(float2(lane * 3.1, r * 9.0 - U.timing.x * 0.4 + cd_hash11(lane) * 20.0)));
     float sk = exp(-px * px / 1.0e-6) * dash * smoothstep(0.08, 0.25, r) * (1.0 - smoothstep(0.55, 0.8, r));
-    float3 streak = sk * (float3(0.05) * max(I, 0.25 * U.trail.z) + ambCol * 0.6 * U.trail.z);
+    float3 streak = sk * (float3(0.03) * max(I, 0.25 * U.trail.z) + ambCol * 0.35 * U.trail.z);
 
     float3 c = cardC + streams + bloom + light + amb + streak;
     return float4(cd_aces(c * 1.05), 1.0);
