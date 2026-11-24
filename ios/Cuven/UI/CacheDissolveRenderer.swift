@@ -7,12 +7,12 @@ import UIKit
 //
 // 时间线（从点「清除」算起，秒；照着录屏一帧一帧量过）：
 //   0.00 – 0.75  按钮变成进度胶囊（SwiftUI 那一半）；卡往上飘约一成屏高、稍微再歪一点；平时那点晃动收掉
-//   0.50  卡从下沿开始化成一截闪烁的「数据」碎光（溶解前沿 0 → 1，差不多匀速，4.6 秒扫完）；碎光像自由落体那样
+//   0.50  卡从下沿开始化成一截闪烁的「数据」碎光（溶解前沿 0 → 1：先慢后快，5.3 秒化完）；碎光像自由落体那样
 //         0.7–0.8 秒落进胶囊，连成一根根带颜色的细光纤
-//   0.5 – 1.4  胶囊那儿先有一点点光；1.4 起光纤落到，光越来越亮（5.2 秒到顶，之后一直亮着、轻轻地呼吸）
+//   0.5 – 1.4  胶囊那儿先有一点点光；1.4 起光纤落到，光越来越亮（4.2 秒到顶，之后一直亮着、轻轻地呼吸）
 //   1.4 – 3.3  卡转到侧对着人（只剩一条边）；3.4 – 4.5 转回正面，剩下的整块都是碎光
 //   1.5+  环境光慢慢泛起来（左青蓝、中间紫、右玫瑰）；2.8+ 胶囊两边一颗颗彩色光斑；4.2+ 往上散开一片光束
-//   5.1   卡化完；5.9 最后一缕落进按钮、数字走到头；6.5 全部收完（CacheDissolveEngine.duration），SwiftUI 那边换成「已清除」
+//   5.3   卡化完；5.9 数字走到头；6.1 最后一缕落进按钮；6.5 全部收完（CacheDissolveEngine.duration），SwiftUI 那边换成「已清除」
 // 「减弱动态效果」打开时：卡不转、不放粒子，只有前沿扫过去、光源亮一下再收。
 
 /// SwiftUI 和渲染器之间共享的状态（都在主线程上动）
@@ -33,13 +33,14 @@ final class CacheDissolveEngine {
         return max(0, now - start)
     }
 
-    /// 0…1：卡上的溶解前沿走到哪儿（录屏里量出来的：0.5 秒起步，开头稍快、之后差不多匀速，4.6 秒扫完整张卡）
+    /// 0…1：卡上的溶解前沿（光点脱落的地方）走到哪儿。录屏里量出来的：一开始卡几乎完整、只有下沿一截闪着碎光、稀稀拉拉往下掉，
+    /// 越往后化得越快（1.45 秒才化掉一点，3.95 秒一半多，5.3 秒化完）
     func front(_ now: CFTimeInterval = CACurrentMediaTime()) -> Double {
         guard start != nil else { return 0 }
-        return pow(min(1, max(0, (elapsed(now) - 0.5) / 4.6)), 0.85)
+        return pow(min(1, max(0, (elapsed(now) - 0.5) / 4.9)), 1.6)
     }
 
-    /// 0…1：进度胶囊上的数字。录屏里是匀速走的（0.6 秒起步、5.9 秒到头）—— 等于前沿晚一个落下来的时间，数的是「已经落进按钮的」
+    /// 0…1：进度胶囊上的数字。录屏里是匀速走的（0.6 秒起步、5.9 秒到头），不跟卡化的快慢
     func progress(_ now: CFTimeInterval = CACurrentMediaTime()) -> Double {
         guard start != nil else { return 0 }
         return min(1, max(0, (elapsed(now) - 0.6) / 5.3))
@@ -376,11 +377,11 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
 
         let front: Float = started ? Float(engine.front(now)) * 1.16 - 0.06 : -0.2
         // 光纤：最后一缕 5.9 秒落进按钮，之后才整体变淡
-        let fade: Float = started ? Float(1 - ramp(5.9, 6.5, E)) : 1
+        let fade: Float = started ? Float(1 - ramp(6.0, 6.5, E)) : 1
         // 收尾的画面一直留着，「已清除」那 1.3 秒里才暗下去
         let out = 1 - 0.9 * ramp(6.6, 7.5, E)
-        // 光源：0.5 秒起胶囊那儿先有一点点光，1.4 秒光纤落到以后越来越亮，5.2 秒到顶；3 秒以后轻轻地呼吸（约 0.55 秒一下）
-        let light: Float = started ? Float((0.10 * ramp(0.5, 1.4, E) + 0.90 * ramp(1.4, 5.2, E)) * out) : 0
+        // 光源：0.5 秒起胶囊那儿先有一点点光，1.4 秒光纤落到以后越来越亮，4.2 秒到顶；3 秒以后轻轻地呼吸（约 0.55 秒一下）
+        let light: Float = started ? Float((0.10 * ramp(0.5, 1.4, E) + 0.90 * ramp(1.4, 4.2, E)) * out) : 0
         let breath = 1 + 0.12 * ramp(3.0, 3.6, E) * sin(2 * .pi * E / 0.55)
         let lightPulse: Float = reduce ? light * 0.8 : light * Float(breath)
         // 环境光：1.5 秒起慢慢泛起来，到结尾还在变浓
@@ -392,7 +393,7 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
         let bandW: Float = started ? Float(0.13 + 0.17 * ramp(0.5, 2.0, E) + 0.8 * ramp(2.6, 3.4, E)) : 0.13
         let bokehIn: Float = started && !reduce ? Float(ramp(2.8, 4.6, E)) : 0
         let raysIn: Float = started && !reduce ? Float(ramp(4.2, 5.8, E)) : 0
-        let cardFade: Float = started ? Float(1 - ramp(5.0, 5.4, E)) : 1
+        let cardFade: Float = started ? Float(1 - ramp(5.2, 5.5, E)) : 1
         let keep = Float(pow(0.6, Double(dt) * 60))
         // 进度胶囊的半高、半宽（占画面高的比例）：胶囊那一圈光贴着它
         let capHH = Float(engine.capsulePt.height) * 0.5 * scale / h

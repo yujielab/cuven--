@@ -218,13 +218,15 @@ vertex CDLineOut cd_line_vertex(uint vid [[vertex_id]], uint iid [[instance_id]]
     o.pos = float4(ndc, 0.0, 1.0);
     o.local = float2(side, head ? 1.0 : -1.0);
     // 一缕一个颜色（橙、青、蓝、紫……），最后一小截（按钮上面一点）并成白热的一根
-    float hue = fract(cd_hash11(p.home.w * 29.7) + p.home.z * 0.06 + U.timing.x * 0.03);
+    float hue = fract(cd_hash11(p.home.w * 29.7) + p.home.z * 0.06 + p.home.y * 2.5 + U.timing.x * 0.03);
     float near = pow(saturate(1.0 - distance(p.pos.xyz, U.target.xyz) / 0.32), 2.0);
-    float3 c = mix(float3(1.0), cd_spectral(hue), 0.5 * (1.0 - near)) * (1.0 + near * 1.5);
+    float3 c = mix(float3(1.0), cd_spectral(hue), 0.85 * (1.0 - near)) * (1.0 + near * 1.5);
     c = mix(c, float3(2.2), fresh * 0.2);
     // 一缕一缕亮暗不一（几根亮的、多数淡的），整束光才有层次、缕与缕之间看得出空
     float strandLum = 0.3 + 0.7 * pow(cd_hash11(p.home.w * 53.9), 1.6);
-    o.color = c * p.vel.w * strandLum;
+    // 一闪一闪（每秒九下换一次）：一缕光纤断成一截一截的彩色碎段，像录屏里那样，不是一根光滑的线
+    float twinkle = 0.25 + 0.75 * step(0.4, cd_hash11(p.home.z * 61.3 + floor(U.timing.x * 9.0)));
+    o.color = c * p.vel.w * strandLum * twinkle;
     return o;
 }
 
@@ -233,7 +235,7 @@ fragment float4 cd_line_fragment(CDLineOut in [[stage_in]]) {
     float along = smoothstep(-1.0, -0.1, in.local.y);
     float a = across * across * mix(0.3, 1.0, along);
     // 每一条都很淡：几十条叠在一缕上才是一根亮的光纤，缕与缕之间留黑
-    return float4(in.color * a * 0.075, 0.0);
+    return float4(in.color * a * 0.09, 0.0);
 }
 
 // MARK: 卡
@@ -291,18 +293,18 @@ fragment float4 cd_card_fragment(CDCardOut in [[stage_in]],
     float3 c = base * diff + spec + fres * float3(0.75, 0.82, 1.0) + rim;
 
     // 溶解前沿：一道亮边，上面一截（卡高的一成多）是一格格闪烁的「数据」方块（参照录屏：卡的下沿化成一片碎光）
-    // 「数据」碎光：一根根细高的竖条（一格 1/64 卡宽、1/18 卡高，亮的那截占格子四成半）一闪一闪，紧挨前沿还有一层方块碎屑；
+    // 「数据」碎光：一层细密的短竖纹（一格 1/150 卡宽、1/56 卡高）一闪一闪，卡面上的字还透得出来；紧挨前沿还有一层方块碎屑；
     // 这一截一开始只有卡高的一成多，前沿动起来以后变高，卡转到侧面以后剩下的整块都是碎光（参照录屏）。前沿没有实心的白线
     float edgeLine = 1.0 - smoothstep(0.0, 0.02, edge);
     float band = 1.0 - smoothstep(0.0, max(U.phase.x, 0.05), edge);
-    float2 barId = floor(in.uv * float2(64.0, 18.0));
-    float barOn = step(1.0 - 0.7 * pow(band, 1.3), cd_hash21(barId + floor(U.timing.x * 10.0 + cd_hash21(barId) * 3.0)));
-    float barShape = step(abs(fract(in.uv.x * 64.0) - 0.5), 0.22);
+    float2 barId = floor(in.uv * float2(150.0, 56.0));
+    float barOn = step(1.0 - (0.2 + 0.6 * band), cd_hash21(barId + floor(U.timing.x * 12.0 + cd_hash21(barId) * 3.0)));
+    float barShape = step(abs(fract(in.uv.x * 150.0) - 0.5), 0.3);
     float2 sqId = floor(in.uv * float2(40.0, 53.0));
-    float sqOn = step(0.45, cd_hash21(sqId + floor(U.timing.x * 14.0))) * (1.0 - smoothstep(0.0, 0.06, edge));
+    float sqOn = step(0.75, cd_hash21(sqId + floor(U.timing.x * 14.0))) * (1.0 - smoothstep(0.0, 0.03, edge));
     float on = max(barOn * barShape, sqOn);
     float3 tint = mix(float3(1.0), cd_spectral(fract(in.u * 1.7 + barId.y * 0.05 + U.timing.x * 0.2)), 0.3);
-    c = mix(c * (1.0 - 0.7 * band), tint * (1.4 + 1.4 * band), on * saturate(band * 1.6));
+    c = mix(c * (1.0 - 0.25 * band), tint * (1.1 + 1.0 * band), on * saturate(band * 1.6));
     c = mix(c, float3(2.0), edgeLine * edgeLine * 0.3);
     c *= U.trail.w;
     return float4(c, 1.0);
@@ -330,7 +332,7 @@ fragment float4 cd_trail_fragment(CDFullOut in [[stage_in]],
                                   constant CDUniforms &U [[buffer(1)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_zero);
     float2 uv = in.uv;
-    float2 adv = float2((uv.x - U.targetScreen.x) * 0.003, -0.003);
+    float2 adv = float2((uv.x - U.targetScreen.x) * 0.003, -0.0012);
     float3 p = prev.sample(s, uv + adv).rgb * U.trail.x;
     float3 n = lines.sample(s, uv).rgb;
     return float4(p + n * 0.1, 1.0);
@@ -381,7 +383,7 @@ fragment float4 cd_composite_fragment(CDFullOut in [[stage_in]],
 
     // 色散（棱镜那样）：沿横向取五处，红偏一边、蓝偏另一边、中间偏绿 —— 每一缕细光纤两边是一道连续的彩虹边，中间是白的；
     // 离中轴越远偏得越多。卡（尤其溶解那一截碎光）也带一点（参照录屏）
-    float ca = U.trail.y * (0.006 + 0.006 * abs(uv.x - tp.x));
+    float ca = U.trail.y * (0.002 + 0.002 * abs(uv.x - tp.x));
     const float3 W[5] = { float3(0.0, 0.05, 0.45), float3(0.0, 0.25, 0.35), float3(0.2, 0.4, 0.2), float3(0.35, 0.25, 0.0), float3(0.45, 0.05, 0.0) };
     float3 streams = float3(0.0), cardC = float3(0.0);
     for (int i = 0; i < 5; i++) {
@@ -413,7 +415,7 @@ fragment float4 cd_composite_fragment(CDFullOut in [[stage_in]],
     float sd = max(length(q) - capHH, 0.0);
     float hug = exp(-sd / 0.02) * 1.8 * pow(I, 1.6);
     float tail = exp(-sd / 0.06) * 0.20 * I * I;
-    float flood = exp(-sd / 0.10) * 0.6 * endK;
+    float flood = exp(-sd / 0.04) * 0.7 * endK;
     // 收尾：从按钮往上散开一片光束（白里带一点环境光的颜色），后半程才出来
     float up = smoothstep(0.03, -0.02, d.y);
     float rays = pow(cd_noise2(float2(ang * 30.0, U.timing.x * 0.08)), 3.0) * smoothstep(0.03, 0.14, r) * exp(-r / 0.3) * up;
@@ -436,7 +438,7 @@ fragment float4 cd_composite_fragment(CDFullOut in [[stage_in]],
         float appear = smoothstep(0.1 + 0.6 * hc, 0.3 + 0.6 * hc, bk);
         bokeh += (pal[k % 5] * disc * 0.30 + cd_spectral(fract(hc + dist * 9.0)) * rim * 0.18) * appear;
     }
-    float3 light = float3(1.0, 0.92, 0.82) * (hug + tail + flood)
+    float3 light = float3(1.0, 0.84, 0.64) * (hug + tail + flood)
                  + rayCol * rays * (0.04 * I + 0.18 * U.phase.z + 0.06 * endK)
                  + bokeh * I;
 
@@ -445,9 +447,9 @@ fragment float4 cd_composite_fragment(CDFullOut in [[stage_in]],
     float la = ang * lanes / 6.2831853;
     float lane = floor(la);
     float px = abs(fract(la) - 0.5) * (6.2831853 / lanes) * r;
-    float dash = step(0.72, cd_noise2(float2(lane * 3.1, r * 9.0 - U.timing.x * 0.4 + cd_hash11(lane) * 20.0)));
+    float dash = step(0.84, cd_noise2(float2(lane * 3.1, r * 9.0 - U.timing.x * 0.4 + cd_hash11(lane) * 20.0)));
     float sk = exp(-px * px / 1.0e-6) * dash * smoothstep(0.08, 0.25, r) * (1.0 - smoothstep(0.55, 0.8, r));
-    float3 streak = sk * (float3(0.03) * max(I, 0.25 * U.trail.z) + ambCol * 0.35 * U.trail.z);
+    float3 streak = sk * (float3(0.02) * max(I, 0.25 * U.trail.z) + ambCol * 0.25 * U.trail.z);
 
     float3 c = cardC + streams + bloom + light + amb + streak;
     return float4(cd_aces(c * 1.05), 1.0);
