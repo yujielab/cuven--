@@ -127,7 +127,9 @@ struct AllFilmsView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableStyle())
-        .accessibilityLabel("\(mode.title)的\(title)")
+        // 旁白名就是看得见的那个字（语音控制说「点按 电影」对得上），是哪一边的放进提示里
+        .accessibilityLabel(title)
+        .accessibilityHint("打开\(mode.title)的全部\(title)")
         .accessibilityIdentifier(id)
     }
 }

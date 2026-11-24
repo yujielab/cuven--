@@ -656,6 +656,11 @@ struct DetailScaffold<Episodes: View>: View {
     @Namespace private var stillsNS
     /// 演员名单里点的那一位：收起弹层以后推进去
     @State private var personPush: CastMember?
+    /// 字标粒子转场（用户要求：往下滚，头部大字标化成粒子飞进顶上那条，往回滚原路拼回来）：进度和两个框放在一个小对象里，
+    /// 每一帧只让读它的几小块（粒子层、钉住的条、头部字标）重画，整页不跟着每帧重算
+    @State private var motion = DetailLogoMotion()
+    /// 处理好的字标图（和 LogoImage 同一条管线、同一份缓存）：粒子从它的形状和颜色上取样，条里的小字标也画它；没有就是以前的样子
+    @State private var logoImage: UIImage?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -672,6 +677,8 @@ struct DetailScaffold<Episodes: View>: View {
             // 「播放」那一行滚到顶上那条底下时，顶上钉住一条：海报、片名、「播放」（参考图）
             let pinAt: CGFloat = heroH - 32 - 52 - barBottom - 66
             let palette = DetailPalette.from(edge)
+            // 头部字标实际画多大（和 LogoImage 同一个算法）；条里那一格是它的 42%，同比例、同左边距（用户要求）
+            let heroLogo: CGSize? = logoImage.map { Self.logoSize($0, box: Self.heroLogoBox(m)) }
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     hero(m, width: fullW, height: heroH, insets: insets, barBottom: barBottom)
@@ -743,22 +750,55 @@ struct DetailScaffold<Episodes: View>: View {
             } action: { _, v in
                 withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.42, dampingFraction: 0.86)) { showTitle = v }
             }
+            // 字标粒子转场的进度（用户要求：跟着滚动走，停下就停在这一帧，往回滚原路倒回去）：
+            // 0 = 没滚（字标在头部原位），1 = 滚到以前钉住那条出现的位置（字标已经落进条里）
+            .onScrollGeometryChange(for: Double.self) { g in
+                Double(min(1, max(0, (g.contentOffset.y + g.contentInsets.top) / max(1, pinAt))))
+            } action: { _, v in
+                motion.setProgress(v)
+            }
             // 钉在顶上的条：从上面滑下来（参考图的「取得」那一条）；片名在这条里，导航栏里不再写
             .overlay(alignment: .top) {
-                DetailPinnedBar(title: title, thumb: thumb,
-                                logo: art?.logo.flatMap { $0.isEmpty ? nil : TMDBImage.url($0, "w500") },
-                                playTitle: playTitle, playDisabled: playDisabled, palette: palette,
-                                topInset: barBottom, leading: insets.leading + m.margin, trailing: insets.trailing + m.margin,
-                                onPlay: onPlay)
-                    // 「减弱动态效果」时只淡入淡出、不从上面滑下来（F59；以前只换了曲线，照样滑 100 多点）
-                    .offset(y: showTitle || reduceMotion ? 0 : -(barBottom + 90))
-                    .opacity(showTitle ? 1 : 0)
+                if let logoImage, let heroLogo {
+                    // 有字标（用户要求）：条不再整条滑下来，底色、字标、「继续播放」都跟着滚动进度走；字标那一格是头部字标的 42%
+                    let slot = CGSize(width: heroLogo.width * 0.42, height: heroLogo.height * 0.42)
+                    DetailLogoBarHost(motion: motion) { p in
+                        DetailPinnedBar(title: title, thumb: thumb, logo: logoURL,
+                                        playTitle: playTitle, playDisabled: playDisabled, palette: palette,
+                                        topInset: barBottom, leading: insets.leading + m.margin, trailing: insets.trailing + m.margin,
+                                        onPlay: onPlay, logoImage: logoImage, logoSlot: slot, progress: p,
+                                        onLogoSlot: { r in if motion.slot != r { motion.slot = r } })
+                    }
                     .allowsHitTesting(showTitle)
                     .accessibilityHidden(!showTitle)
                     .ignoresSafeArea(edges: [.top, .horizontal])
+                } else {
+                    DetailPinnedBar(title: title, thumb: thumb, logo: logoURL,
+                                    playTitle: playTitle, playDisabled: playDisabled, palette: palette,
+                                    topInset: barBottom, leading: insets.leading + m.margin, trailing: insets.trailing + m.margin,
+                                    onPlay: onPlay)
+                        // 「减弱动态效果」时只淡入淡出、不从上面滑下来（F59；以前只换了曲线，照样滑 100 多点）
+                        .offset(y: showTitle || reduceMotion ? 0 : -(barBottom + 90))
+                        .opacity(showTitle ? 1 : 0)
+                        .allowsHitTesting(showTitle)
+                        .accessibilityHidden(!showTitle)
+                        .ignoresSafeArea(edges: [.top, .horizontal])
+                }
+            }
+            // 粒子层盖在整页和顶上那条上面（用户要求：字标化成细粒子，沿一条往右鼓的弧线飞进左上角再拼好）；
+            // 不接手势、旁白不念；「减弱动态效果」时不放粒子，两枚字标交叉淡入淡出
+            .overlay {
+                if let logoImage, let heroLogo, !reduceMotion {
+                    DetailLogoParticleLayer(motion: motion, image: logoImage, heroSize: heroLogo)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
             }
         }
         .background(DetailPalette.from(edge).deep)
+        // 字标粒子转场要的那张图：和 LogoImage 走同一条管线（深色反白、HDR），粒子直接从字标本身取样（用户要求）
+        .task(id: logoURL) { await loadLogo() }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         // 全部演员：一张弹层，点演员在弹层里推进去，不叠第二层（C50、C56）
@@ -787,6 +827,37 @@ struct DetailScaffold<Episodes: View>: View {
     private var stillShown: [String] { Array(stills.prefix(12)) }
 
     private var hasOverview: Bool { !(overview ?? "").isEmpty }
+
+    /// 这一页的字标地址（头部、条里、粒子层都是这一张）；没有字标是 nil
+    private var logoURL: URL? { art?.logo.flatMap { $0.isEmpty ? nil : TMDBImage.url($0, "w500") } }
+
+    /// 取处理好的字标图：和 LogoImage 同一套步骤（原图 → 判明暗 → 字标管线），都命中同一份缓存，不多走网络。
+    /// 取不到就一直是 nil：整页照以前的样子（条整条滑下来）
+    private func loadLogo() async {
+        guard let url = logoURL else { logoImage = nil; return }
+        LogoHDR.prepare()
+        if let d = LogoTone.shared.cached(url), let hit = ImagePipeline.shared.cachedLogo(url, dark: d) {
+            logoImage = hit
+            return
+        }
+        guard await ImagePipeline.shared.image(url, maxPixel: ImagePipeline.logoPixel) != nil, !Task.isCancelled else { return }
+        let d = await LogoTone.shared.isDark(url)
+        let img = await ImagePipeline.shared.logo(url, dark: d)
+        guard !Task.isCancelled else { return }
+        logoImage = img
+    }
+
+    /// 头部字标那一格：高（展开 96、折起 72）和最宽（屏宽七成、最多 360）
+    static func heroLogoBox(_ m: DSMetrics) -> (height: CGFloat, maxWidth: CGFloat) {
+        (m.wide ? 96 : 72, min(m.width * 0.7, 360))
+    }
+
+    /// 字标实际画出来多大：和 LogoImage 同一个算法（统一高度，超出最宽才按宽收）
+    static func logoSize(_ image: UIImage, box: (height: CGFloat, maxWidth: CGFloat)) -> CGSize {
+        let aspect = max(0.1, image.size.width / max(1, image.size.height))
+        let h = min(box.height, box.maxWidth / aspect)
+        return CGSize(width: h * aspect, height: h)
+    }
 
     /// iPad 宽窗口（960 点以上）：简介、影片详细信息并排
     /// 960 点（不是 1100）：13 寸横拿时侧边栏占去约 320 点，详情页只剩约 1050 点宽，1100 的门槛会把最大的 iPad 排成单栏（CI 截图）；
@@ -840,14 +911,21 @@ struct DetailScaffold<Episodes: View>: View {
     /// 左下一列：字标或片名、一行信息、播放 +「…」（F1、F2）
     private func heroInfo(_ m: DSMetrics) -> some View {
         let maxW: CGFloat = m.wide ? 560 : .infinity
-        let logoH: CGFloat = m.wide ? 96 : 72
+        let box = Self.heroLogoBox(m)
+        let logoH: CGFloat = box.height
         return VStack(alignment: .leading, spacing: 12) {
             // 字标那一格：画面和字标定下来之前空着（占住位置，下面的字不跳），定了模糊淡入；以后不再换
             ZStack(alignment: .bottomLeading) {
                 if let art {
                     if let logo = art.logo, !logo.isEmpty {
-                        LogoImage(url: TMDBImage.url(logo, "w500"), height: logoH, alignment: .leading,
-                                  fallback: title, maxWidth: min(m.width * 0.7, 360))
+                        // 字标粒子转场（用户要求）：一开始往下滚（p > 0）这枚真字标就藏起来，交给粒子层（同一张图、同一个框）；
+                        // 滚回顶上（p = 0）再亮出来。旁白照样念它（外面那层元素不跟着藏），它还是这一页的标题
+                        DetailHeroLogoGate(motion: motion, active: logoImage != nil, reduceMotion: reduceMotion) {
+                            LogoImage(url: TMDBImage.url(logo, "w500"), height: logoH, alignment: .leading,
+                                      fallback: title, maxWidth: box.maxWidth)
+                        }
+                            // 量它在窗口里的框：粒子从这里出发（跟着页面往上走）
+                            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { motion.heroBox = $0 }
                             .accessibilityElement(children: .ignore)
                             .accessibilityLabel(title)
                             .accessibilityAddTraits(.isHeader)

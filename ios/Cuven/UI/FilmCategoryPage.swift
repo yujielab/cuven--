@@ -110,7 +110,7 @@ private struct RequestableCategoryPage: View {
             _ = CatalogArt.shared
             await feed.start()
         }
-        // 顶上三张卡的剧照：排在最前那三部的（下面列表里的卡出现了也会要，这里不等它）
+        // 排在最前那三部的剧照、字标：顶上的卡没有海报时用剧照，下面那三张大卡也要（列表里的卡出现了也会要，这里不等它）
         .task(id: head.map(\.uid).joined(separator: ",")) {
             for it in head { CatalogArt.shared.want(it) }
         }
@@ -430,6 +430,11 @@ final class CatalogFeed {
     @ObservationIgnored private var fetchedAt: Date?
     /// 往后翻过（滑到底又取了一页）：再打开时不从第一页重问（一换，翻到的那些就没了）
     @ObservationIgnored private var paged = false
+    /// 正在取的时候滑到了底（那几张卡、骨架卡已经出现过，不会再出现一次）：记下来，这一次取完接着取下一页
+    @ObservationIgnored private var wantMore = false
+
+    /// tj 的 /app/catalog 最多翻到第 500 页（再往后问回的还是第 500 页）
+    private static let lastPage = 500
 
     private init(src: String) { self.src = src }
 
@@ -439,8 +444,9 @@ final class CatalogFeed {
             if !started { fillDemo() }
             return
         }
-        // 上次往后取时没问成的：再打开先不挂「重试」，滑到底照常接着取
-        if failed && !items.isEmpty { failed = false }
+        // 上次没问成的：再打开先不挂「重试」。一张都没有的从第一页重问，问的时候是骨架卡（不是整页「无法载入」、点「重试」没反应）；
+        // 有了的滑到底照常接着取。这次再没问成，fetch 会再挂上
+        failed = false
         if !started {
             await fetch(fresh: true)
         } else if !paged, let fetchedAt, Date().timeIntervalSince(fetchedAt) > 300 {
@@ -448,16 +454,23 @@ final class CatalogFeed {
         }
     }
 
-    /// 滑到底（最后几张、骨架卡出现了）：取下一页（同时只取一次）
+    /// 滑到底（最后几张、骨架卡出现了）：取下一页（同时只取一次；正在取的，取完接着取）
     func loadMore() async {
-        guard started, !done, !loading, !failed, !DemoData.enabled else { return }
+        guard started, !done, !failed, !DemoData.enabled else { return }
+        if loading {
+            wantMore = true
+            return
+        }
         await fetch(fresh: false)
     }
 
-    /// 「重试」：一张都没有就从第一页问，有了的接着往后取
+    /// 「重试」：一张都没有就从第一页问，有了的接着往后取（正在取的：取完接着往后取，不另问一次）
     func retry() async {
-        guard !loading else { return }
         failed = false
+        if loading {
+            wantMore = true
+            return
+        }
         await fetch(fresh: items.isEmpty)
     }
 
@@ -465,10 +478,10 @@ final class CatalogFeed {
     private func fetch(fresh: Bool) async {
         guard !loading else { return }
         loading = true
-        defer { loading = false }
         let page = fresh ? 1 : next
         do {
-            let r = try await RequestAPI.catalogPage(src: src, sort: "new", own: "hide", page: page)
+            // 要全部（用户要求：影片库有、片库没有的全部）：不带年份时服务器默认 min 6（首页那一刀），这里明说 0
+            let r = try await RequestAPI.catalogPage(src: src, sort: "new", own: "hide", page: page, minVote: 0)
             for i in r.items { if let s = i.req { RequestStore.shared.merge(s) } }
             var list = fresh ? [] : items
             var have = fresh ? Set<String>() : seen
@@ -479,7 +492,8 @@ final class CatalogFeed {
             items = list
             seen = have
             next = page + 1
-            done = r.items.isEmpty || (r.pages > 0 && page >= r.pages)
+            // 第 500 页就是最后一页：再往后问回的还是它（全是见过的，一张也接不上），骨架卡换了编号又出现、一页一页白问
+            done = r.items.isEmpty || (r.pages > 0 && page >= r.pages) || page >= Self.lastPage
             started = true
             failed = false
             if fresh {
@@ -489,8 +503,15 @@ final class CatalogFeed {
                 paged = true
             }
         } catch {
-            // 离开了页面（任务被取消）不算没问成
-            if !CatalogYears.cancelled(error) { failed = true }
+            // 离开了页面（任务被取消）不算没问成；已经有一列时从第一页重问（5 分钟一次）没问成也不算：
+            // 屏上的留着、照常往后翻，下次打开再重问
+            if !CatalogYears.cancelled(error) && !(fresh && !items.isEmpty) { failed = true }
+        }
+        loading = false
+        // 取的时候滑到了底、点了「重试」：接着取下一页
+        if wantMore {
+            wantMore = false
+            if started && !done && !failed && !Task.isCancelled { await fetch(fresh: false) }
         }
     }
 

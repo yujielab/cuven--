@@ -1413,16 +1413,29 @@ final class AppModel {
     /// 「全部影片 › 可立即播放」的「电影 ›」「剧集 ›」那两页（FilmCategoryPage）：片库里的全部电影（movies 已经一部一张）/
     /// 全部剧集（一部剧一张卡：showKey / preferredSeason；没取到资料的也放，卡出现了再取，和全部影片一样全面放开），
     /// 新的年份在前、同一年最新入库的在前（和专区页同一个先后）。
-    /// 几千部的片库每次重画都排一遍太费：电影按 dataVersion 缓存；剧集按剧集表和剧集资料缓存（和 clipEntries 同一个认法）
+    /// 几千部的片库每次重画都排一遍太费：电影按 dataVersion 缓存；剧集分两层缓存（见下）
     func playableEntries(series wantSeries: Bool) -> [HomeEntry] {
         if wantSeries {
-            let key = "\(series.count)-\(series.first?.path ?? "")-\(seriesMetas.count)"
-            if playableSeriesKey == key { return playableSeriesCache }
-            var out: [(year: Int, key: String, entry: HomeEntry)] = []
-            for s in uniqueShows(series) { out.append((Int(s.year ?? "") ?? 0, s.added ?? "", .series(s))) }
-            out.sort { $0.year != $1.year ? $0.year > $1.year : $0.key > $1.key }
-            playableSeriesCache = out.map(\.entry)
-            playableSeriesKey = key
+            // 第一层：排序。refreshSeries 整个换掉剧集表、不动 dataVersion：认剧集表本身，不认部数和第一部
+            // （中间换了一部、年份入库日期集数变了都认得出）。没变时两份共用一块存储，比一下是 O(1)；
+            // 一样也换成新的这一份（刷新回来一模一样的另一块），往后再比还是 O(1)
+            let list = series
+            if list != playableSeriesSource {
+                var keyed: [(year: Int, key: String, show: Series)] = []
+                keyed.reserveCapacity(list.count)
+                for s in list { keyed.append((Int(s.year ?? "") ?? 0, s.added ?? "", s)) }
+                keyed.sort { $0.year != $1.year ? $0.year > $1.year : $0.key > $1.key }
+                playableSeriesSorted = keyed.map(\.show)
+                playableSeriesMetaCount = -1
+            }
+            playableSeriesSource = list
+            // 第二层：一部剧一张卡。剧集资料是一张卡一张卡到的（卡出现了才取），到一份只重新去重一遍（过一遍字典），不重排。
+            // 先排后去重：同一部剧占它排得最前那一季的位置、换成 preferredSeason 挑的那一季，还是新的年份在前
+            let mc = seriesMetas.count
+            if mc != playableSeriesMetaCount {
+                playableSeriesCache = uniqueShows(playableSeriesSorted).map { HomeEntry.series($0) }
+                playableSeriesMetaCount = mc
+            }
             return playableSeriesCache
         }
         // 先读 movies：调用它的视图跟着片库、元数据刷新（derive 也在这里跑完，dataVersion 是新的）
@@ -1437,8 +1450,10 @@ final class AppModel {
 
     @ObservationIgnored private var playableMoviesCache: [HomeEntry] = []
     @ObservationIgnored private var playableMoviesVersion = -1
+    @ObservationIgnored private var playableSeriesSource: [Series] = []
+    @ObservationIgnored private var playableSeriesSorted: [Series] = []
+    @ObservationIgnored private var playableSeriesMetaCount = -1
     @ObservationIgnored private var playableSeriesCache: [HomeEntry] = []
-    @ObservationIgnored private var playableSeriesKey = ""
 
     /// 严苛品质区（用户要求「规格高评价好」）：片源规格够格（PremiumBar：4K 以上，再有杜比视界 / HDR、全景声 / 无损音轨或 REMUX）、
     /// TMDB 评分 7.5 以上的电影和剧集。评分高的在前，同分规格高的在前，再按年份新的在前。

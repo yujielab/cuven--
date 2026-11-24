@@ -258,13 +258,20 @@ enum RequestAPI {
         try await catalogPage(src: src, query: query, sort: sort, own: own, page: page, year: year).items
     }
 
-    /// 同上，连页数、总数一起（「全部影片」的可申请那一边翻页、标题里的部数用）
-    static func catalogPage(src: String = "all", query: String = "", sort: String = "new", own: String = "all", page: Int = 1, year: Int? = nil) async throws -> CatalogPage {
+    /// 同上，连页数、总数一起（「全部影片」的可申请那一边翻页、标题里的部数用）。
+    /// minVote：评分下限（叫 minVote 不叫 min，不遮住 Swift.min）。nil = 按服务器的默认
+    static func catalogPage(src: String = "all", query: String = "", sort: String = "new", own: String = "all", page: Int = 1,
+                            year: Int? = nil, minVote: Int? = nil) async throws -> CatalogPage {
         var q: [(String, String)] = [("src", src), ("sort", sort), ("own", own), ("page", String(page))]
         if !query.isEmpty { q.append(("q", query)) }
         // 按年份（「全部影片」的可申请那一边；tj 2.6 起转给影片库，老版本不认就在 App 里过滤）。
-        // 按年份列的是这一年的全部，不只是评分 6 分以上的那些（tj 2.8 起服务器自己这么做，这里明说一次，老版本也认 min）
-        if let year { q += [("year", String(year)), ("min", "0")] }
+        // 按年份列的是这一年的全部，不只是评分 6 分以上的那些（tj 2.8 起服务器自己这么做，这里明说一次，老版本也认 min）。
+        // 不带年份时服务器默认 min 6（首页那一刀：6 分以上、50 人以上评过）；分类页要全部，明说 0（min 只带一次）
+        if let year {
+            q += [("year", String(year)), ("min", String(minVote ?? 0))]
+        } else if let minVote {
+            q.append(("min", String(minVote)))
+        }
         return try await send(URLRequest(url: url("/app/catalog", q)))
     }
 
