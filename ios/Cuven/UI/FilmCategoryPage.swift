@@ -62,20 +62,25 @@ private struct PlayableCategoryPage: View {
         }
     }
 
-    /// 顶上三张卡的画面（用户的图还没到时）：排在最前那三部的竖版无字画面
-    /// （Apple TV 竖版主视觉 → TMDB 纯净海报 → 剧照：4 : 5 的卡竖着裁，竖版的裁掉得最少），点了进那一部
+    /// 顶上三张卡的画面（用户的图还没到时）：排在最前那三部的竖版画面，点了进那一部。
+    /// 竖版的裁得最少（4 : 5 的卡竖着裁，横的剧照只剩中间一截、还要放大），用户的图到之前可立即播放、可申请两边一个样：
+    /// 电影 Apple TV 竖版主视觉 → TMDB 纯净海报 → 海报 → 剧照；剧集纯净海报 → 海报（中文剧常常没有纯净的）→ 剧照（大一号）
     private func headerArts(_ head: [HomeEntry]) -> [CategoryCardArt] {
         head.map { (e: HomeEntry) -> CategoryCardArt in
             switch e {
             case .movie(let v):
+                let meta = model.meta(v)
                 let url = TMDBImage.url(model.tallArtString(v), "w780")
-                    ?? TMDBImage.url(model.meta(v)?.posterClean, "w780")
+                    ?? TMDBImage.url(meta?.posterClean, "w780")
+                    ?? TMDBImage.url(meta?.poster, "w780")
                     ?? model.backgroundArt(v)
                 return CategoryCardArt(url: url, route: .movie(v), label: model.title(v))
             case .series(let s):
                 let sm = model.seriesMetas[s.path]
-                return CategoryCardArt(url: TMDBImage.url(sm?.posterClean, "w780") ?? model.seriesWideArt(s).url,
-                                       route: .series(s), label: sm?.title ?? s.name)
+                let url = TMDBImage.url(sm?.posterClean, "w780")
+                    ?? TMDBImage.url(sm?.poster, "w780")
+                    ?? TMDBImage.url(sm?.backdrop, "w1280")
+                return CategoryCardArt(url: url, route: .series(s), label: sm?.title ?? s.name)
             }
         }
     }
@@ -96,8 +101,8 @@ private struct RequestableCategoryPage: View {
         // 滑到最后这几张就接着取下一页（不等滑到骨架卡）
         let tail = Set(items.suffix(4).map(\.uid))
         CollectionScaffold(title: category.title, titleBottom: { CategoryHeader.titleBottom($0) }) { m in
-            CategoryHeader(category: category, arts: head.map { Self.headerArt($0) },
-                           lead: TMDBImage.url(head.first?.poster, "w500"), metrics: m)
+            // 头单拆一个视图、只传那三部：它要读 CatalogArt 的剧照，剧照一批一批到时只重画头，不连带整列大卡
+            RequestableCategoryHeader(category: category, head: head, metrics: m)
             list(m, feed: feed, items: items, tail: tail)
         }
         // 本机存的剧照、字标先读进来（不在画卡的时候改状态），再从第一页问（问过了的：5 分钟内、往后翻过的不重问）
@@ -109,13 +114,6 @@ private struct RequestableCategoryPage: View {
         .task(id: head.map(\.uid).joined(separator: ",")) {
             for it in head { CatalogArt.shared.want(it) }
         }
-    }
-
-    /// 顶上一张卡的画面（用户的图还没到时）：影片库那一部的剧照，还没取到（或 TMDB 上没有）时是海报；点了进它的详情（请求添加）
-    private static func headerArt(_ it: CatalogItem) -> CategoryCardArt {
-        let a = CatalogArt.shared.art(it)
-        return CategoryCardArt(url: TMDBImage.url(a?.backdrop, "w1280") ?? TMDBImage.url(it.poster, "w780"),
-                               route: .catalog(it.catalogTitle), label: it.title)
     }
 
     @ViewBuilder
@@ -151,8 +149,10 @@ private struct RequestableCategoryPage: View {
                     // 骨架卡：一行（一张都还没有时两行）。编号跟着下一页走：取回来的全被滤掉了、骨架卡还在屏上时，
                     // 换了编号的骨架卡再「出现」一次，接着取；滑走了的不会出现，不会一直往后取
                     let n = m.collectionGrid.columns * (items.isEmpty ? 2 : 1)
+                    // 骨架卡旁白听不到：第一张给旁白念一句在载入（首屏一张都没有时，旁白不至于念完标题就没声了）
+                    let loadingLabel = items.isEmpty ? "正在载入可申请的\(kind)" : "正在载入更多\(kind)"
                     ForEach((0..<n).map { feed.next * 100 + $0 }, id: \.self) { k in
-                        SkeletonCollectionCard(width: w)
+                        SkeletonCollectionCard(width: w, label: k % 100 == 0 ? loadingLabel : nil)
                             .onAppear {
                                 if k % 100 == 0 { Task { await feed.loadMore() } }
                             }
@@ -204,9 +204,30 @@ private struct CatalogCollectionCard: View {
     }
 }
 
-/// 还没取到时的大卡（和 CollectionCard 一样大：宽银幕的画面 + 底条）
+/// 可申请那一页的头：顶上三张卡的画面在这里取。单拆一个视图（只拿那三部）：画面可能要读 CatalogArt 的剧照，
+/// 剧照一批一批到（列表里的卡出现了就要）时只重画这个头，不连带整页、整列大卡重算一遍
+private struct RequestableCategoryHeader: View {
+    let category: FilmCategory
+    let head: [CatalogItem]
+    let metrics: DSMetrics
+
+    var body: some View {
+        CategoryHeader(category: category, arts: head.map { Self.art($0) },
+                       lead: TMDBImage.url(head.first?.poster, "w500"), metrics: metrics)
+    }
+
+    /// 顶上一张卡的画面（用户的图还没到时），点了进它的详情（请求添加）。和可立即播放那边一样竖版的先：
+    /// 索引里本来就有的海报（马上出来，剧照到了也不换一张、不跳）；没有海报才用剧照（4 : 5 竖着裁只剩中间一截，要原图才不糊）
+    static func art(_ it: CatalogItem) -> CategoryCardArt {
+        let url = TMDBImage.url(it.poster, "w780") ?? TMDBImage.url(CatalogArt.shared.art(it)?.backdrop, "original")
+        return CategoryCardArt(url: url, route: .catalog(it.catalogTitle), label: it.title)
+    }
+}
+
+/// 还没取到时的大卡（和 CollectionCard 一样大：宽银幕的画面 + 底条）。label：给旁白念的（一排骨架卡只第一张有），没有就旁白跳过
 private struct SkeletonCollectionCard: View {
     let width: CGFloat
+    var label: String? = nil
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: DSRadius.feature, style: .continuous)
@@ -231,7 +252,9 @@ private struct SkeletonCollectionCard: View {
         .frame(width: width)
         .clipShape(shape)
         .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
-        .accessibilityHidden(true)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label ?? "")
+        .accessibilityHidden(label == nil)
     }
 }
 
@@ -317,9 +340,10 @@ private struct CategoryCardRow: View {
     private func card(_ i: Int, size: CGSize) -> some View {
         let art: CategoryCardArt? = i < arts.count ? arts[i] : nil
         if let image = Self.userImage(category, i + 1) {
+            // 三张都是用户的图：旁白念第几张（不然三张念得一模一样）
             CategoryCardFace(image: image, url: nil, size: size)
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(category.title)
+                .accessibilityLabel("\(category.title)，第 \(i + 1) 张，共 3 张")
                 .accessibilityAddTraits(.isImage)
                 .accessibilityIdentifier("category-header-card")
         } else if let art, let route = art.route {
@@ -336,9 +360,18 @@ private struct CategoryCardRow: View {
     }
 
     /// 用户的图：这一页自己的一套（CategoryCard-<页>-<n>）优先，再是四页共用的一套（CategoryCard<n>）
+    @MainActor
     static func userImage(_ c: FilmCategory, _ n: Int) -> UIImage? {
-        UIImage(named: "CategoryCard-\(c.rawValue)-\(n)") ?? UIImage(named: "CategoryCard\(n)")
+        let k = "\(c.rawValue)-\(n)"
+        if let hit = userImages[k] { return hit }
+        let image = UIImage(named: "CategoryCard-\(c.rawValue)-\(n)") ?? UIImage(named: "CategoryCard\(n)")
+        userImages.updateValue(image, forKey: k)
+        return image
     }
+
+    /// 找过的（按「页-第几张」记，没有的也记一笔 nil）：头部跟着剧照、剧集资料一直重画，每次都去资产目录里找两遍太费
+    /// （找不到的系统不记）。App 运行中资产目录不会变，不用清
+    @MainActor private static var userImages: [String: UIImage?] = [:]
 }
 
 /// 一张卡：整张是图（铺满、居中裁），连续曲率的大圆角、一圈细边（参考图）
