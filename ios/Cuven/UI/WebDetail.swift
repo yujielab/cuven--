@@ -761,7 +761,9 @@ struct DetailScaffold<Episodes: View>: View {
 
     /// 头部一样高（用户要求：统一高度，比画面稍高）：竖着的屏九成屏高，横着的屏九成二；画面只占上面那一截
     static func heroHeight(width w: CGFloat, height h: CGFloat) -> CGFloat {
-        max(420, (h * (h > w ? 0.9 : 0.92)).rounded())
+        // iPad：竖拿约三分之二、横拿约八成屏高（满屏的头部在 11 / 13 寸上太高，往下滑半天才到简介）
+        if UIDevice.current.userInterfaceIdiom == .pad { return max(420, (h * (h > w ? 0.66 : 0.78)).rounded()) }
+        return max(420, (h * (h > w ? 0.9 : 0.92)).rounded())
     }
 
     /// 左下那一列字（字标格 + 一行信息 + 按钮）大约多高

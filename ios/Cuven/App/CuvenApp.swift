@@ -115,18 +115,18 @@ struct RootView: View {
         let column = DuoLayout.isColumn(window: window)
         TabView(selection: $tab) {
             Tab("主页", systemImage: "house.fill", value: AppTab.home) {
-                HomeView().duoHidesTabBar().id(roots[.home, default: 0])
+                HomeView().duoHidesTabBar().tint(.white).id(roots[.home, default: 0])
             }
             Tab("资料库", systemImage: "square.stack.fill", value: AppTab.library) {
-                LibraryView().duoHidesTabBar().id(roots[.library, default: 0])
+                LibraryView().duoHidesTabBar().tint(.white).id(roots[.library, default: 0])
             }
             // 请求中心（用户要求）：角标是进行中的请求个数
             Tab("请求", systemImage: "tray.and.arrow.down.fill", value: AppTab.requests) {
-                RequestCenterView().duoHidesTabBar().id(roots[.requests, default: 0])
+                RequestCenterView().duoHidesTabBar().tint(.white).id(roots[.requests, default: 0])
             }
             .badge(RequestStore.shared.activeCount + RequestBasket.shared.items.count)
             Tab(value: AppTab.search, role: .search) {
-                SearchView().duoHidesTabBar().id(roots[.search, default: 0])
+                SearchView().duoHidesTabBar().tint(.white).id(roots[.search, default: 0])
             }
         }
         .environment(\.duoColumn, column)
@@ -268,7 +268,9 @@ final class AppNav {
 }
 
 /// iPad 上的标签栏：iPadOS 26 浮在顶上、能展开成侧边栏的那种（sidebarAdaptable）；特别宽的窗口默认就是侧边栏。
-/// 只认 iPad：iPhone（含展开的 Duo）照旧是底下的标签栏 / Duo 自己画的侧边导航
+/// 只认 iPad：iPhone（含展开的 Duo）照旧是底下的标签栏 / Duo 自己画的侧边导航。
+/// 选中的颜色：App 全局是白色，侧边栏却拿它整条填底、字是白的，选中那一行成了一条看不见字的白条（iPad 截图）；
+/// 标签栏、侧边栏用系统的蓝（Apple 自己的做法：顶上那一条选中的字、侧边栏选中那一行的底），页面里面每一页自己再设回白色
 private struct PadTabStyle: ViewModifier {
     let wide: Bool
 
@@ -277,6 +279,7 @@ private struct PadTabStyle: ViewModifier {
             content
                 .tabViewStyle(.sidebarAdaptable)
                 .defaultAdaptableTabBarPlacement(wide ? .sidebar : .tabBar)
+                .tint(Color(uiColor: .systemBlue))
         } else {
             content
         }

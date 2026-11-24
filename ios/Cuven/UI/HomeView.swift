@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - 主页（按 Apple HIG 重做；规则编号见 docs/ios-design.md 与 docs/hig/*.md）
 //
@@ -69,7 +70,9 @@ struct HomeView: View {
     @ViewBuilder
     private func hero(_ m: DSMetrics, fullWidth: CGFloat, fullHeight: CGFloat, insets: EdgeInsets) -> some View {
         let tall = fullHeight > fullWidth
-        let height = (fullHeight * (tall ? 0.86 : 0.94)).rounded()
+        // iPad（用户要求定制）：头图不再占满一整屏，竖拿约六成、横拿约七成半，下面那一排的标题露出来（Apple TV App 在 iPad 上的比例）
+        let pad = UIDevice.current.userInterfaceIdiom == .pad
+        let height = (fullHeight * (pad ? (tall ? 0.62 : 0.74) : (tall ? 0.86 : 0.94))).rounded()
         let pages = heroPages
         ZStack(alignment: .topLeading) {
             if !pages.isEmpty {
