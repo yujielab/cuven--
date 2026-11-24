@@ -209,6 +209,7 @@
  *               rename    剧集：传输 Worker 按发行命名改文件夹名（等 rclone 的任务跑完）
  *                         （2.6 起剧集推进、整理、改名都在 /auto/ram2 里，传 Dropbox 也传到 dropbox:auto/ram2）
  *   ④ 正在传输  ready     （2.6）加上追踪码，等凑够一批（默认 16 部）一起传；关了批量传输就直接 copy
+ *                         （2.9 智能凑批：所有人加起来凑不满 16 部时，按这会儿能凑到的几部开，最晚还是等满 30 分钟）
  *               copy      VPS 上的 rclone：webdav:auto/<名字> → dropbox:auto/<名字>（先 copy；2.6 起一批一个作业）
  *               verify    两端核对（文件数 + 字节数），对不上重新 copy（最多 3 次）
  *               purge     核对一致才删 PikPak 那份
@@ -243,6 +244,7 @@
  *   POST /app/requests { src, id, season }   请求添加（同一部 / 同一季已经有人在请求就跟上，不重复下）
  *   POST /app/requests/batch { items: [{ src, id, season, title?, year?, poster? }] }   （2.6）请求中心一次提交（最多 50 条）
  *   GET  /app/flow                     （2.6）凑批进度和正在传的那一批（请求中心的动画和进度条）
+ *                                      （2.9：gate.need = 有效的凑批数，多 full / launchBy 预计开批 / why）
  *   GET  /app/years?src=movie|tv|all&from=&to=&per=
  *        （2.8）App「全部影片」：每一年、电影 / 剧集各一份目录第一页（片库里没有的、全部评分），一次回齐；带 ETag，5 分钟缓存
  *
@@ -2066,7 +2068,7 @@ function arriveRate(a, t){
   const span = a.n >= LIMIT.arriveRows && a.first > t - LIMIT.arriveWin ? Math.max(t - a.first, 30 * MIN) : LIMIT.arriveWin;
   return a.subs / span;
 }
-const mins = (ms) => ms < HOUR ? Math.max(1, Math.round(ms / MIN)) + ' 分钟' : Math.round(ms / HOUR * 10) / 10 + ' 小时';
+const durText = (ms) => ms < HOUR ? Math.max(1, Math.round(ms / MIN)) + ' 分钟' : Math.round(ms / HOUR * 10) / 10 + ' 小时';
 /** 凑批计划：ready = 等着的（加好了追踪码，有 since、bid），pend = 还会清洗好的（长时间退避的已经去掉，有 stage、src、next、since、p）。
     回 { need, full, by, why, beyond, first }：need = 有效的凑批数；by = 预计什么时候开批（凑满的时刻和最晚开批取早的，凑满的时刻取整到分钟，
     App 的 ETag 不跟着秒数变）；beyond = 预计赶不上的几部，first = 其中最快的那一部预计什么时候清洗好 */
@@ -2092,7 +2094,7 @@ function gatePlan(c, ready, pend, t){
   const fill = k <= 0 ? t : known.length >= k ? known[k - 1] : deadline;
   const by = Math.min(deadline, Math.ceil(fill / MIN) * MIN);
   /* 一句话为什么（App 上一行放得下）：在等前面哪几部（凑满的时刻知道就带上）、预计还有几部新请求 */
-  const eta = k > 0 && fill < deadline ? '（约 ' + mins(fill - t) + '）' : '';
+  const eta = k > 0 && fill < deadline ? '（约 ' + durText(fill - t) + '）' : '';
   const wait = [exp ? '等前面 ' + exp + ' 部清洗好' + eta : '', add ? '预计还有 ' + add + ' 部新请求' : ''].filter(Boolean).join('，');
   const why = k <= 0 ? '凑够 ' + need + ' 部'
     : (need >= full ? '还差 ' + k + ' 部凑满 ' + full + ' 部：' : '所有人加起来能凑 ' + need + ' 部：') + wait;
@@ -2113,7 +2115,7 @@ function gateSmart(c, ready, untagged, up, t){
   const bids = [...new Set(ready.map(r => r.bid).filter(x => x > 0))];
   const why = bids.length && bids.every(x => !open.has(x)) ? '这' + (bids.length > 1 ? '几' : '一') + '次提交的都清洗好了'
     : ready.length >= plan.need ? '智能凑批：所有人加起来这会儿只凑得到 ' + ready.length + ' 部' +
-                                  (plan.beyond ? '（其余 ' + plan.beyond + ' 部约 ' + mins(plan.first - t) + '后才清洗好）' : '')
+                                  (plan.beyond ? '（其余 ' + plan.beyond + ' 部约 ' + durText(plan.first - t) + '后才清洗好）' : '')
     : '';
   if (why && ready.length === 1 && pend.some(x => { const at = gateEta(x, t); return at != null && at <= t + LIMIT.soonGap; }))
     return { why: '', plan: { ...plan, need: clamp(Math.max(plan.need, 2), 1, plan.full), why: '只有 1 部，还有 1 部马上清洗好，等它一起传' } };

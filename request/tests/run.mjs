@@ -3480,10 +3480,11 @@ env.DB.prepare = prepSt;
   const count = async (smart, seed) => {
     await reset29(smart);
     seed();
+    /* 不数一轮末尾那条随机（3%）删旧日志的：两边各自碰运气，和凑批无关 */
     const seen = [], prep = env.DB.prepare;
-    env.DB.prepare = function (sql){ seen.push(sql); return prep.call(this, sql); };
+    env.DB.prepare = function (sql){ if (!/^DELETE FROM tj_log WHERE id </.test(sql)) seen.push(sql); return prep.call(this, sql); };
     try { await tick(); } finally { env.DB.prepare = prep; }
-    return { n: seen.length, fetches: lastTick().fetches, arrive: seen.filter(s => /MAX\(id\)/.test(s)).length, seen };
+    return { n: seen.length, fetches: lastTick().fetches, arrive: seen.filter(s => /MAX\(id\) FROM tj_req/.test(s)).length, seen };
   };
   const shapes = {
     '在凑': () => { ready29(5, 7); down29(3, 7, 4 * M, 0.5); },

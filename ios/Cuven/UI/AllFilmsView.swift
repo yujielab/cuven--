@@ -18,6 +18,8 @@ import SwiftUI
 //   长按电影可以直接放进请求中心。一打开页面就用 /app/years 一次问完七年 × 电影 / 剧集的第一页（tj 2.8；老版本一年一年问），
 //   本机存着上次的，再打开先有画面再更新；一排滑到头再取下一页（滤掉别的年份之后不到 8 张就自己接着翻，翻到第 8 页为止）
 // 一节就是一个懒加载的块：几百部片也只建看得到的那几排。
+// · 分段控件下面一行「电影 ›」「剧集 ›」（用户要求「添加打开分类按钮，电视剧和电影分开，UI 和布局参考专区」）：跟着上面选的那一边，
+//   打开可立即播放 / 可申请的全部电影或全部剧集（FilmCategoryPage：专区那样的一页，顶上换成三张横滑的大卡）
 
 struct AllFilmsView: View {
     @Environment(AppModel.self) private var model
@@ -88,15 +90,45 @@ struct AllFilmsView: View {
         .sensoryFeedback(.selection, trigger: mode)
     }
 
-    /// 两边分开：可立即播放 / 可申请（系统的分段控件，iOS 26 上是一枚玻璃）
+    /// 两边分开：可立即播放 / 可申请（系统的分段控件，iOS 26 上是一枚玻璃）；
+    /// 下面一行「电影 ›」「剧集 ›」打开这一边的分类页（用户要求：电视剧和电影分开）
     private func picker(_ m: DSMetrics) -> some View {
-        Picker("显示", selection: $mode) {
-            ForEach(Mode.allCases) { Text($0.title).tag($0) }
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("显示", selection: $mode) {
+                ForEach(Mode.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: m.wide ? 420 : .infinity)
+            .accessibilityIdentifier("all-films-mode")
+            HStack(spacing: 10) {
+                categoryButton("电影", series: false, id: "all-films-open-movie")
+                categoryButton("剧集", series: true, id: "all-films-open-series")
+            }
         }
-        .pickerStyle(.segmented)
-        .frame(maxWidth: m.wide ? 420 : .infinity)
         .padding(.horizontal, m.margin)
-        .accessibilityIdentifier("all-films-mode")
+    }
+
+    /// 打开分类页的一颗：描边的胶囊（主页结尾「查看全部影片 ›」那一种，小一号、边淡一点：克制，不和分段控件抢），
+    /// 看上去 36 高，点按区上下各多 4 点（44：F74）
+    private func categoryButton(_ title: String, series: Bool, id: String) -> some View {
+        NavigationLink(value: Route.filmCategory(FilmCategory(playable: mode == .playable, series: series))) {
+            HStack(spacing: 4) {
+                Text(title)
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .padding(.horizontal, 16)
+            .frame(minHeight: 36)
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.4), lineWidth: 1))
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableStyle())
+        .accessibilityLabel("\(mode.title)的\(title)")
+        .accessibilityIdentifier(id)
     }
 }
 
@@ -485,12 +517,13 @@ final class CatalogYears {
         i.year.isEmpty ? loose : Int(i.year.prefix(4)) == year
     }
 
-    /// 任务被取消（离开了页面）：URLSession 回 cancelled
-    private static func cancelled(_ e: any Error) -> Bool {
+    /// 任务被取消（离开了页面）：URLSession 回 cancelled（分类页的 CatalogFeed 也用）
+    static func cancelled(_ e: any Error) -> Bool {
         Task.isCancelled || e is CancellationError || (e as? URLError)?.code == .cancelled
     }
 
-    private static func demo(_ k: Key) -> Page {
+    /// 演示数据（UI 测试用）：分类页「可申请」也用这几条（CatalogFeed）
+    static func demo(_ k: Key) -> Page {
         let names = k.src == "movie" ? ["潮汐之间", "风的形状", "远航者", "无名之城", "第二个夏天"] : ["夜航", "回声镇", "长街"]
         var p = Page()
         p.items = names.enumerated().map { i, n in
@@ -588,36 +621,62 @@ private struct RequestableCard: View {
 
     var body: some View {
         let art = CatalogArt.shared.art(item)
-        let raw = RequestStore.shared.anyStatus(src: item.src, id: item.id) ?? item.req
-        // 取消了的当没请求过（和详情页一样）
-        let st = raw?.state == .cancelled ? nil : raw
-        // 放进了请求中心就是「已加入」：上一次取消了、没能添加的也一样（长按放进去的正是这两种）
-        let queued = RequestBasket.shared.containsAny(src: item.src, id: item.id)
-        let sub = DetailText.line([String(item.year.prefix(4)), art?.genre ?? (item.vote ?? 0 >= 1 ? String(format: "★ %.1f", item.vote ?? 0) : nil)])
+        let state = CatalogRequestState(item)
         ZoomLink(route: .catalog(item.catalogTitle), slot: slot) {
             YearTrailerCard(still: TMDBImage.url(art?.backdrop, "w1280"), cover: TMDBImage.url(item.poster, "w185"),
-                            logo: TMDBImage.url(art?.logo, "w500"), title: item.title, subtitle: sub, width: width,
-                            fallback: TMDBImage.url(item.poster, "w185"), badge: Self.badge(st, queued: queued),
-                            progress: st.flatMap { $0.state == .active ? Double($0.pct) / 100 : nil })
+                            logo: TMDBImage.url(art?.logo, "w500"), title: item.title,
+                            subtitle: CatalogRequestState.line(item, art: art), width: width,
+                            fallback: TMDBImage.url(item.poster, "w185"), badge: state.badge, progress: state.progress)
         }
         .accessibilityIdentifier("all-films-request")
         .onAppear { CatalogArt.shared.want(item) }
-        .contextMenu { menu(st, queued: queued) }
+        .contextMenu { CatalogRequestMenu(item: item, state: state) }
+    }
+}
+
+/// 可申请那一部现在的请求状态：这里的横卡、分类页（FilmCategoryPage）的大卡同一条规矩
+@MainActor
+struct CatalogRequestState {
+    /// 请求的进度；取消了的当没请求过（和详情页一样）
+    let status: RequestStatus?
+    /// 放进了请求中心就是「已加入」：上一次取消了、没能添加的也一样（长按放进去的正是这两种）
+    let queued: Bool
+
+    init(_ item: CatalogItem) {
+        let raw = RequestStore.shared.anyStatus(src: item.src, id: item.id) ?? item.req
+        status = raw?.state == .cancelled ? nil : raw
+        queued = RequestBasket.shared.containsAny(src: item.src, id: item.id)
     }
 
     /// 进行中、已就绪的照写；其余（没请求过、取消了、没能添加）放进了请求中心就是「已加入」
-    static func badge(_ s: RequestStatus?, queued: Bool) -> YearCardBadge {
-        if let s, s.state == .done { return YearCardBadge(text: "已就绪", tone: .plain) }
-        if let s, s.state == .active { return YearCardBadge(text: s.stage == "release" ? "发行审批" : "已请求 \(s.pct)%", tone: .plain) }
+    var badge: YearCardBadge {
+        if let s = status, s.state == .done { return YearCardBadge(text: "已就绪", tone: .plain) }
+        if let s = status, s.state == .active { return YearCardBadge(text: s.stage == "release" ? "发行审批" : "已请求 \(s.pct)%", tone: .plain) }
         if queued { return YearCardBadge(text: "已加入", tone: .plain) }
-        if s?.state == .failed { return YearCardBadge(text: "未能添加", tone: .alert) }
+        if status?.state == .failed { return YearCardBadge(text: "未能添加", tone: .alert) }
         return YearCardBadge(text: "申请", tone: .accent)
     }
 
-    /// 长按：电影直接放进 / 拿出请求中心（剧集要先在详情页挑季，这里只给「去请求中心」）。st 里取消了的已经当没有
-    @ViewBuilder
-    private func menu(_ st: RequestStatus?, queued: Bool) -> some View {
+    /// 请求进行中：剧照底边那道细进度
+    var progress: Double? {
+        status.flatMap { $0.state == .active ? Double($0.pct) / 100 : nil }
+    }
+
+    /// 卡上那一行灰字：年份 · 类型（类型还没取到时有评分写评分）
+    static func line(_ item: CatalogItem, art: CatalogArt.Art?) -> String {
+        DetailText.line([String(item.year.prefix(4)), art?.genre ?? (item.vote ?? 0 >= 1 ? String(format: "★ %.1f", item.vote ?? 0) : nil)])
+    }
+}
+
+/// 可申请那一部的长按菜单：电影直接放进 / 拿出请求中心（剧集要先在详情页挑季，这里只给「去请求中心」）。
+/// state 里取消了的已经当没有
+struct CatalogRequestMenu: View {
+    let item: CatalogItem
+    let state: CatalogRequestState
+
+    var body: some View {
         let basket = RequestBasket.shared
+        let st = state.status
         if item.src != "tv" && (st == nil || st?.state == .failed) {
             if basket.contains(item.catalogTitle, season: 0) {
                 Button("从请求中心拿掉", systemImage: "minus.circle") {
@@ -634,7 +693,7 @@ private struct RequestableCard: View {
                 .disabled(basket.items.count >= RequestBasket.limit)
             }
         }
-        if queued || st != nil {
+        if state.queued || st != nil {
             Button("前往请求中心", systemImage: "arrow.down.circle") { basket.openCenter = true }
         }
     }
