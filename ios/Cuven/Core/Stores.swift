@@ -1410,6 +1410,36 @@ final class AppModel {
         return out.prefix(limit).map(\.entry)
     }
 
+    /// 「全部影片 › 可立即播放」的「电影 ›」「剧集 ›」那两页（FilmCategoryPage）：片库里的全部电影（movies 已经一部一张）/
+    /// 全部剧集（一部剧一张卡：showKey / preferredSeason；没取到资料的也放，卡出现了再取，和全部影片一样全面放开），
+    /// 新的年份在前、同一年最新入库的在前（和专区页同一个先后）。
+    /// 几千部的片库每次重画都排一遍太费：电影按 dataVersion 缓存；剧集按剧集表和剧集资料缓存（和 clipEntries 同一个认法）
+    func playableEntries(series wantSeries: Bool) -> [HomeEntry] {
+        if wantSeries {
+            let key = "\(series.count)-\(series.first?.path ?? "")-\(seriesMetas.count)"
+            if playableSeriesKey == key { return playableSeriesCache }
+            var out: [(year: Int, key: String, entry: HomeEntry)] = []
+            for s in uniqueShows(series) { out.append((Int(s.year ?? "") ?? 0, s.added ?? "", .series(s))) }
+            out.sort { $0.year != $1.year ? $0.year > $1.year : $0.key > $1.key }
+            playableSeriesCache = out.map(\.entry)
+            playableSeriesKey = key
+            return playableSeriesCache
+        }
+        // 先读 movies：调用它的视图跟着片库、元数据刷新（derive 也在这里跑完，dataVersion 是新的）
+        let list = movies
+        if playableMoviesVersion == dataVersion { return playableMoviesCache }
+        var out: [(year: Int, key: String, entry: HomeEntry)] = list.map { (year($0) ?? 0, $0.addedKey, .movie($0)) }
+        out.sort { $0.year != $1.year ? $0.year > $1.year : $0.key > $1.key }
+        playableMoviesCache = out.map(\.entry)
+        playableMoviesVersion = dataVersion
+        return playableMoviesCache
+    }
+
+    @ObservationIgnored private var playableMoviesCache: [HomeEntry] = []
+    @ObservationIgnored private var playableMoviesVersion = -1
+    @ObservationIgnored private var playableSeriesCache: [HomeEntry] = []
+    @ObservationIgnored private var playableSeriesKey = ""
+
     /// 严苛品质区（用户要求「规格高评价好」）：片源规格够格（PremiumBar：4K 以上，再有杜比视界 / HDR、全景声 / 无损音轨或 REMUX）、
     /// TMDB 评分 7.5 以上的电影和剧集。评分高的在前，同分规格高的在前，再按年份新的在前。
     /// 电影看这部片的所有文件（同一个 TMDB 编号的各个版本），有一个版本够格就算；卡还是平常那张（规格最高的那个版本）

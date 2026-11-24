@@ -504,6 +504,48 @@ enum Route: Hashable {
     case person(CastMember)
     /// 影片库索引里有、片库里没有的那部：详情页的「播放」换成「请求添加」（RequestViews.swift）
     case catalog(CatalogTitle)
+    /// 「全部影片」的分类页：可立即播放 / 可申请 × 电影 / 剧集（FilmCategoryPage.swift）
+    case filmCategory(FilmCategory)
+}
+
+/// 「全部影片」下面「电影 ›」「剧集 ›」打开的分类页（用户要求：可立即播放、可申请各自一页，电视剧和电影分开，UI 和布局照专区）。
+/// rawValue 也是用户那三张卡片图的名字的一段（CategoryCard-<rawValue>-1…3，见 FilmCategoryPage.swift）
+enum FilmCategory: String, CaseIterable, Hashable, Sendable {
+    case playableMovie, playableSeries, requestableMovie, requestableSeries
+
+    init(playable: Bool, series: Bool) {
+        switch (playable, series) {
+        case (true, false): self = .playableMovie
+        case (true, true): self = .playableSeries
+        case (false, false): self = .requestableMovie
+        case (false, true): self = .requestableSeries
+        }
+    }
+
+    /// 片库里的（按下去就放）；否则是影片库索引里有、片库里还没有的（点开是「请求添加」）
+    var playable: Bool { self == .playableMovie || self == .playableSeries }
+    var series: Bool { self == .playableSeries || self == .requestableSeries }
+    /// 影片库索引的类别（/app/catalog 的 src）
+    var src: String { series ? "tv" : "movie" }
+
+    var title: String {
+        switch self {
+        case .playableMovie: return "可立即播放 · 电影"
+        case .playableSeries: return "可立即播放 · 剧集"
+        case .requestableMovie: return "可申请 · 电影"
+        case .requestableSeries: return "可申请 · 剧集"
+        }
+    }
+
+    /// 大标题下那一句灰字（专区的说明那一句）
+    var blurb: String {
+        switch self {
+        case .playableMovie: return "片库中的全部电影，新上映的在前。"
+        case .playableSeries: return "片库中的全部剧集，新上映的在前。"
+        case .requestableMovie: return "片库中还没有、可申请添加的电影。"
+        case .requestableSeries: return "片库中还没有、可申请添加的剧集。"
+        }
+    }
 }
 
 /// 演员个人页（/api/tmdb/person）：简介、出生、出生地、全部作品的编号（App 拿去和片库对，列出「库中作品」）

@@ -411,6 +411,8 @@ struct RouteView: View {
         case .shelf(let s): if s == .all { AllFilmsView() } else { ShelfView(shelf: s) }
         case .person(let m): ActorPage(member: m)
         case .catalog(let t): CatalogDetailView(title: t)
+        // 全部影片下面「电影 ›」「剧集 ›」进来的分类页（用户要求；版式照专区：FilmCategoryPage.swift）
+        case .filmCategory(let c): FilmCategoryPage(category: c)
         }
     }
 }
