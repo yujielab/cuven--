@@ -3591,6 +3591,17 @@ env.DB.prepare = prepSt;
   ready29(3, 0); down29(1, 9, 60 * M, 0, 59 * M);
   r = await runT(4);
   ok(r.at === 1 && r.n === 3 && /^智能凑批：/.test(r.why), '2.9 复查：老版本 App 的 3 部、别人推了 60 分钟还是 0% 的死种：第一轮就开，不等满 10 分钟', r);
+  /* 停住要「看过了、还是没进度」：一部 15 分钟前到 50%，可 12 分钟前就该再看、一直没轮上（这一轮也跑过 22 秒、一条都没推进）→
+     没看过的那几分钟不算停住，照样等它（审查结论 ① 的改法自己的回归：别把没轮上看的当成死种） */
+  await reset29(true);
+  ready29(5, 7);
+  const sv = down29(1, 7, 20 * M, 0.5, 15 * M);
+  env.DB.db.prepare('UPDATE tj_req SET next = ? WHERE id = ?').run(Date.now() + 3.1 * M - 12 * M, sv[0].id);
+  { const prep = env.DB.prepare;
+    env.DB.prepare = function (sql){ if (/INDEXED BY tj_req_stnext WHERE stage IN/.test(sql)) advance(23000); return prep.call(this, sql); };
+    try { await tick(); } finally { env.DB.prepare = prep; } }
+  g = await gate();
+  ok(launched() === 0 && g.need === 6 && /^所有人加起来能凑 6 部：等前面 1 部清洗好/.test(g.why), '2.9 复查：12 分钟没轮上看的那一部不当成停住，照样等它', g);
 
   /* 复查 ②（没看的那几分钟也被乘上 (1 − p) ÷ p）：同一次提交 3 部开始 1 分钟就到 10%（照这个速度还要 9 分钟），3 分钟后才又看：
      预计赶得上，等它们，8 部一起开（复查之前算成 38 分钟、当成赶不上，先开了 5 部） */
