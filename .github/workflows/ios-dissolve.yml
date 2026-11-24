@@ -11,7 +11,8 @@ on:
     paths: ['ios/Cuven/UI/CacheDissolve*', 'ios/Cuven/UI/FlowFunnel*', 'ios/Cuven/UI/RequestFlowCard.swift', 'ios/Cuven/UI/RequestCenter.swift',
             'ios/Cuven/Core/RequestBatch.swift', 'ios/Cuven/UI/AllFilmsView.swift', 'ios/CuvenUITests/DissolveTests.swift', 'ios/CuvenUITests/RequestFlowTests.swift',
             'ios/CuvenUITests/AllFilmsTests.swift', 'ios/Cuven/UI/Login*', 'ios/CuvenUITests/LoginLandingTests.swift', '.github/workflows/ios-dissolve.yml',
-            'ios/Cuven/UI/RequestViews.swift', 'ios/Cuven/**/RequestSend*', 'ios/Cuven/**/SendGlow*', 'ios/CuvenUITests/RequestSendTests.swift']
+            'ios/Cuven/UI/RequestViews.swift', 'ios/Cuven/**/RequestSend*', 'ios/Cuven/**/SendGlow*', 'ios/CuvenUITests/RequestSendTests.swift',
+            'ios/Cuven/UI/LogoParticle*', 'ios/Cuven/UI/WebDetail.swift', 'ios/Cuven/UI/FilmCategoryPage.swift', 'ios/CuvenUITests/DetailLogoTests.swift']
   workflow_dispatch:
 
 permissions:
@@ -85,7 +86,7 @@ jobs:
           run() {
             xcrun simctl boot "$2" 2>/dev/null; xcrun simctl bootstatus "$2" -b > /dev/null 2>&1; sleep 10
             xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
-              -destination "id=$2" -only-testing:CuvenUITests/DissolveTests -only-testing:CuvenUITests/RequestFlowTests -only-testing:CuvenUITests/AllFilmsTests -only-testing:CuvenUITests/LoginLandingTests -only-testing:CuvenUITests/RequestSendTests \
+              -destination "id=$2" -only-testing:CuvenUITests/DissolveTests -only-testing:CuvenUITests/RequestFlowTests -only-testing:CuvenUITests/AllFilmsTests -only-testing:CuvenUITests/LoginLandingTests -only-testing:CuvenUITests/RequestSendTests -only-testing:CuvenUITests/DetailLogoTests \
               -resultBundlePath "$RUNNER_TEMP/$1.xcresult" > "$RUNNER_TEMP/$1.log" 2>&1
             echo "$1 exit $?"
             grep -E "Test Case|passed|failed|error:" "$RUNNER_TEMP/$1.log" | tail -10
@@ -124,7 +125,7 @@ jobs:
                       for v in x: walk(v)
               walk(json.load(open(m)))
               for human, f in sorted(found):
-                  if not human.startswith(('dissolve-', 'flow-', 'films-', 'login-', 'send-')):
+                  if not human.startswith(('dissolve-', 'flow-', 'films-', 'login-', 'send-', 'detail-logo-')):
                       continue
                   name = dev + '-' + human.split('_')[0]
                   subprocess.run(['sips', '-s', 'format', 'jpeg', '-s', 'formatOptions', '80', '--resampleWidth', '480',
