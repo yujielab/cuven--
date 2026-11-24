@@ -1,4 +1,14 @@
 /**
+ * [v7.3] 目录按年份「严格」筛：/api/catalog?year=YYYY&ystrict=1 只给影片自己的年份（TMDB 上映 / 首播年）就是这一年的
+ *   原因：按年份筛一直是宽口径 —— 任何一个发行帖的年份（论坛年份版块，r.ys）是这一年就留下（queryCatalog 里
+ *   `!r.ys.includes(yr) && r.y !== yr`），一部 2019 年的片 2020 年出了新版就算 2020 年的。请求添加（tj 2.8.1）的
+ *   「全部影片 › 可申请」一年一节、App 再按影片自己的年份筛：线上 2020 那一页 24 部电影里只有 7 部是 2020 年的
+ *  （2021：6/24，2025 剧集 8/24），total 也虚高（「2020 年」电影 2179 部），一节里剩没几部、数字也不对。
+ *   修：带 ystrict=1 只认影片自己的年份（没有年份的不留），在原来那一遍扫描里筛、放在第一道（一次整数比较，不扫 r.ys）；
+ *   total / pages / 分页、三个角标计数、hidden 都按严格口径，第 N 页是满的、总数是准的；回包多带 ystrict:1。
+ *   边缘缓存键在严格模式尾部多一截 &ys=1（v7.2 不认 ystrict，部署前存下的宽结果不会被当成严格的拿出来）。
+ *   只认 ystrict=1（别的值都按宽口径）。不带 ystrict 的请求：结果、回包、缓存键都与 v7.2 一个字节都不差；
+ *   带了 ystrict 却没有像样的 year：照旧不按年份筛，回包也不带 ystrict 字段。
  * [v7.2] 请求添加一口气推 16 部以上（tj pkSlots 16、剧集推进 /auto/ram2）：给它用的几条接口扛得住突发
  *   · /api/pikpush 幂等：同一个文件夹 + 同一个 info hash 建过任务（或结果不明：超时 / 断线 / PikPak 5xx）就记一笔，
  *     再推同一部先在 PikPak 的任务列表里对一遍，对上就认领、不再新建（以前重试会建出第二个任务、多扣一次每日次数）；
@@ -5587,10 +5597,12 @@ function relevance(r, nt){
  * 目录查询。
  * dr  动态范围： '' 全部 / dv 杜比视界 / hdr HDR 及以上 / sdr 仅 SDR
  * qual 画质：    '' 全部 / uhd 4K 及以上 / hd 1080p 及以下（低质量）
+ * ystrict [v7.3] 带 year 时：true = 只要影片自己的年份（r.y，TMDB 上映 / 首播年）就是这一年的；
+ *                 false（默认）= 原来的宽口径：任何一个发行帖的年份（r.ys）或影片自己的年份是这一年就留下
  */
 function queryCatalog(movies, q){
   const { text='', year='', genre='', min=6, sort='new', page=1, size=42,
-          lib=null, own='hide', dr='', qual='' } = q;
+          lib=null, own='hide', dr='', qual='', ystrict=false } = q;
   const nt = canon(text);
   const rows = catRows(movies, q.ver);
   /* 缺片判定整张表算好：每部片只剩一次数组读取 */
@@ -5598,13 +5610,19 @@ function queryCatalog(movies, q){
   const ix = nt ? rows.map((_, i) => i) : catOrder(movies, q.ver, sort);
   const yr = year ? Number(year) : 0;
   const gn = genre ? Number(genre) : 0;
+  /* [v7.3] 严格年份只在真有年份时生效（year 乱填 → yr 是 NaN / 0，和以前一样不按年份筛） */
+  const ys = !!(ystrict && yr);
 
   const keep = [];
   let hidden = 0, dvN = 0, hdrN = 0, lowN = 0;
   for (let k = 0; k < ix.length; k++){
     const r = rows[ix[k]];
+    /* [v7.3] 严格年份：同一遍扫描里的第一道，一次整数比较（不扫 r.ys）。这一道刷掉的最多，放在最前面，
+       后面的评分 / 类型 / 角标计数 / 片库过滤都只对这一年的片做 —— total、pages、分页、counts、hidden 都按严格口径。
+       影片自己没有年份（r.y = 0）的不留：说不清是哪一年的，不往任何一年里放 */
+    if (ys && r.y !== yr) continue;
     if (min > 0 && (r.c < 50 || r.w < min)) continue;
-    if (yr && !r.ys.includes(yr) && r.y !== yr) continue;
+    if (yr && !ys && !r.ys.includes(yr) && r.y !== yr) continue;
     if (gn && !r.g.includes(gn)) continue;
     /* 统计三个角标用的总数在筛选之前算 —— 界面上的数字才不会随筛选跳动 */
     if (r.hb === 7) dvN++;
@@ -5627,7 +5645,7 @@ function queryCatalog(movies, q){
   if (nt) keep.sort((a,b) => b[1]-a[1] || rows[b[0]].w - rows[a[0]].w);
 
   const total = keep.length, off = (page-1)*size;
-  return {
+  const out = {
     total, hidden, page, pages: Math.ceil(total/size),
     counts: { dv: dvN, hdr: hdrN, low: lowN },
     items: keep.slice(off, off+size).map(([i,,has]) => {
@@ -5637,6 +5655,10 @@ function queryCatalog(movies, q){
         hb:r.hb, rb:r.rb, own: has };
     }),
   };
+  /* [v7.3] 按严格口径筛过的才带 ystrict:1（v7.2 及以前没有这个字段：调用方据此知道还要不要自己再按年份筛）。
+     宽口径不加任何字段，回包与 v7.2 一个字节都不差 */
+  if (ys) out.ystrict = 1;
+  return out;
 }
 /** 折叠近重复片源 */
 function collapse(list){
@@ -6998,12 +7020,16 @@ export default {
         const lib = await libLoad(env, cx).catch(()=>null);
         /* 边缘缓存键带索引版本号 + 片库版本号：片库一变（下了新片），
            旧的"已过滤"结果自然作废，不用手动清缓存。
-           构造失败就跳过缓存，绝不因此让请求失败 */
+           构造失败就跳过缓存，绝不因此让请求失败。
+           [v7.3] 目录带 ystrict=1（严格年份）时键尾再加一截 &ys=1：参数本身已经在键里，但 v7.2 不认 ystrict、
+           照样把宽口径的结果存在同一个网址下 —— 不加这一截，部署后 10 分钟内（s-maxage）同一个索引 / 片库版本
+           会把那份宽的当成严格的拿出来。宽口径的键一个字节都不变（不白白丢掉已经存着的缓存） */
+        const ystrict = p==='/api/catalog' && Q.get('ystrict')==='1';
         let cache = null, ck = null;
         try {
           ck = new Request(new URL(url.pathname + '?' + [...Q.entries()]
             .filter(([k])=>k!=='gate').map(([k,v])=>k+'='+encodeURIComponent(v)).sort().join('&')
-            + '&v=' + ver + '&l=' + libVer(lib), url.origin).toString());
+            + '&v=' + ver + '&l=' + libVer(lib) + (ystrict ? '&ys=1' : ''), url.origin).toString());
           cache = caches.default;
           const hitc = await cache.match(ck);
           if (hitc) return hitc;
@@ -7019,6 +7045,8 @@ export default {
             min: Q.get('min')==null ? 6 : (Number.isFinite(Number(Q.get('min'))) ? Number(Q.get('min')) : 6),
             sort: Q.get('sort')||'new', page: Math.min(10000, Math.max(1, parseInt(Q.get('page')||'1', 10) || 1)),
             dr: Q.get('dr')||'', qual: Q.get('qual')||'',
+            /* [v7.3] ystrict=1 + year=YYYY：只要影片自己的年份就是这一年的（请求添加「全部影片 › 可申请」一年一节用） */
+            ystrict,
             lib, own,
           });
           body = { ...r, src: SRC.id, indexed: state.movies||0, at: state.at||0,

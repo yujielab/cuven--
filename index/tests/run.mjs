@@ -37,6 +37,15 @@ if (!process.env.IDX_V61_WORKER) {
     process.env.IDX_V61_WORKER = '/tmp/idx-test/worker-v61.js';
   } catch {}
 }
+/* v7.2 原版：v7.3「目录按年份严格筛」那项用它比「不带 ystrict 的回包一个字节都不变」、造部署前存下的宽缓存 */
+if (!process.env.IDX_V72_WORKER) {
+  try {
+    const src = execFileSync('git', ['show', '4c09d23:index/worker.js'], { cwd: new URL('..', import.meta.url).pathname, maxBuffer: 1 << 26 }).toString();
+    fs.mkdirSync('/tmp/idx-test', { recursive: true });
+    fs.writeFileSync('/tmp/idx-test/worker-v72.js', src);
+    process.env.IDX_V72_WORKER = '/tmp/idx-test/worker-v72.js';
+  } catch {}
+}
 const ok = (cond, msg) => { if (cond) { pass++; console.log('  ✓', msg); } else { fail++; console.log('  ✗', msg); } };
 const NS = 'idx/v4/';
 const LOCK_MS = 40000;
@@ -1618,6 +1627,191 @@ console.log('\n■ v7.2 影片库接口扛突发：版本表、换源不清缓�
     clearInterval(iv);
     srcLeave();
     ok(busy.status === 409 && busy.headers.get('retry-after') === '5' && (await busy.json()).busy === 1, '另一个源一直占着：25 秒后回 409，带 Retry-After: 5');
+  }
+}
+
+console.log('\n■ v7.3 目录按年份严格筛（ystrict=1）：只要这一年上映的，第 N 页是满的、总数是准的');
+{
+  const { env, r2, W } = H.makeEnv({ RECV_BASE: 'https://recv.test' });
+  /* 2024 年版块：50 部 2024 年的片（P）、20 部 2023 年的片在 2024 年出的新版（Q）、6 部 2024 年的片（R，2025 年版块也有新帖）；
+     2025 年版块另有 10 部 2025 年的片（S）。宽口径下「2024 年」= 76 部（20 部是 2023 年的），「2025 年」= 16 部（6 部是 2024 年的） */
+  const HAN = '星海山河风云月光夜雨雪花火林城桥塔湖岛龙虎鹰狼梦影歌舞剑侠春秋金银铁石'.split('');
+  const EN = ['Alpha', 'Bravo', 'Cedar', 'Delta', 'Ember', 'Falcon', 'Garnet', 'Harbor', 'Ivory', 'Juniper', 'Kestrel', 'Lumen', 'Marble', 'Nimbus', 'Onyx', 'Prairie', 'Quartz', 'Raven', 'Summit', 'Tundra'];
+  let tid = 60000, id = 760000, n = 0;
+  const boards = { 2025: [], 2024: [] };
+  const add = (y, posted) => {
+    const cn = HAN[n % HAN.length] + HAN[Math.floor(n / HAN.length) % HAN.length] + HAN[(n * 7 + 3) % HAN.length];
+    const en = EN[n % EN.length] + ' ' + EN[Math.floor(n / EN.length) % EN.length] + ' ' + EN[(n * 3 + 1) % EN.length];
+    n++;
+    const f = { id: id++, cn, en, y };
+    W.tmdb.movie.push({ id: f.id, title: cn, original_title: en, release_date: y + '-05-01', poster_path: '/p' + f.id + '.jpg', popularity: 40, vote_average: 7, vote_count: 500 });
+    for (const b of posted) boards[b].push({ tid: tid++, title: `${cn} ${en.replace(/ /g, '.')}.${y}.${n % 2 ? '1080p' : '2160p'}.WEB-DL.x265 ${8 + n % 5}.5GB`, film: f.id });
+    return f;
+  };
+  const P = Array.from({ length: 50 }, () => add(2024, [2024]));
+  const Q = Array.from({ length: 20 }, () => add(2023, [2024]));
+  const R = Array.from({ length: 6 }, () => add(2024, [2024, 2025]));
+  const S = Array.from({ length: 10 }, () => add(2025, [2025]));
+  W.forum.boards['44'] = { 'movie_nianfen=32': boards[2025].reverse(), 'movie_nianfen=31': boards[2024].reverse() };
+  /* 片库（总账，按 TMDB 编号认）：P 的前 3 部、Q 的前 2 部、R 的第 1 部 */
+  const owned = [P[0], P[1], P[2], Q[0], Q[1], R[0]];
+  W.recv.meta = { gen: 'v22-9' };
+  W.recv.doc = { gen: 'v22-9', ts: Date.now() - 86400e3, items: owned.map((f, i) => {
+    const nm = `${f.cn}.${f.en.replace(/ /g, '.')}.${f.y}.2160p.WEB-DL.x265.mkv`;
+    return { key: 'y' + i, kind: 'movie', name: nm, path: '/ram/' + nm, tmdb: f.id, type: 'movie', title: f.cn, orig: f.en, year: String(f.y),
+             guess: f.cn, guessZh: f.cn, guessEn: f.en, guessYear: String(f.y) };
+  }) };
+  const I = H.isolate(env, W);
+  const b = await buildAll(I);
+  await I.call('/api/lib?refresh=1'); await I.settle();
+  const get = async (X, q) => (await X.call('/api/catalog?min=0&' + q)).json();
+  const allPages = async (X, q) => { const all = []; let first = null; for (let pg = 1; pg < 20; pg++) { const c = await get(X, q + '&page=' + pg); first = first || c; all.push(...c.items); if (pg >= c.pages) break; } return { first, all }; };
+  const mv0 = r2.json(NS + 'movies.json');
+  ok(!b.err && Object.keys(mv0.m).length === 86 && Q.every(f => mv0.m[f.id][2] === '2023' && mv0.m[f.id][7].join() === '2024') && R.every(f => mv0.m[f.id][7].length === 2),
+    '造好的索引：Q 的 20 部自己是 2023 年、帖子只在 2024 年版块（r.ys = [2024]）；R 的 6 部两个年份版块都有帖子');
+
+  /* 问题本身：宽口径（不带 ystrict，行为与 v7.2 相同） */
+  const L = await allPages(I, 'own=all&year=2024');
+  const loose1 = L.all.slice(0, 42).filter(x => x.year === '2024').length;
+  ok(L.first.total === 76 && L.first.pages === 2 && loose1 < 42 && !('ystrict' in L.first),
+    `宽口径（不带 ystrict，与 v7.2 一样）：「2024 年」total ${L.first.total}，第 1 页 42 部里只有 ${loose1} 部是 2024 年的 —— 线上那个问题（App 在本机筛完剩没几部、数字虚高）`);
+
+  /* 严格：total / pages / 分页都按影片自己的年份 */
+  const want24 = new Set([...P, ...R].map(f => f.id));
+  const S1 = await get(I, 'own=all&year=2024&ystrict=1'), S2 = await get(I, 'own=all&year=2024&ystrict=1&page=2'), S3 = await get(I, 'own=all&year=2024&ystrict=1&page=3');
+  const sAll = [...S1.items, ...S2.items];
+  ok(S1.ystrict === 1 && S1.total === 56 && S1.pages === 2 && S1.items.length === 42 && S2.items.length === 14 && S2.total === 56 && !S3.items.length
+     && sAll.every(x => x.year === '2024') && new Set(sAll.map(x => x.id)).size === 56 && sAll.every(x => want24.has(x.id)),
+    `严格（ystrict=1）：total ${S1.total}（50 + 6，不含 2023 年的 20 部）、${S1.pages} 页，第 1 页满 ${S1.items.length} 部、第 2 页 ${S2.items.length} 部，全是 2024 年的、不重不漏，回包带 ystrict:1`);
+  ok(sAll.map(x => x.id).join() === L.all.filter(x => x.year === '2024').map(x => x.id).join(),
+    '严格的顺序 = 宽口径整张表按年份筛出来的顺序（排序不变，只是筛在服务端、分页之前）');
+  const S25 = await get(I, 'own=all&year=2025&ystrict=1'), L25 = await get(I, 'own=all&year=2025');
+  const S23 = await get(I, 'own=all&year=2023&ystrict=1');
+  ok(S25.total === 10 && S25.items.every(x => x.year === '2025') && L25.total === 16 && S23.total === 20 && S23.items.every(x => x.year === '2023'),
+    `2025 年：严格 ${S25.total} 部（宽口径 ${L25.total}，多出来的 6 部是 2024 年的片在 2025 年的新帖）；2023 年：严格 ${S23.total} 部（帖子都在 2024 年版块，按影片自己的年份照样归 2023）`);
+  const low = (xs) => xs.filter(x => x.rb && x.rb <= 4).length, hdr = (xs) => xs.filter(x => x.hb >= 3).length;
+  ok(S1.counts.low === low(sAll) && S1.counts.hdr === hdr(sAll) && L.first.counts.low === low(L.all) && S1.counts.low < L.first.counts.low,
+    `三个角标计数也按严格口径：低质量 ${S1.counts.low} 部（宽口径 ${L.first.counts.low}）`);
+
+  /* 片库过滤（请求添加用 own=hide）：hidden 也只数这一年的 */
+  const H1 = await get(I, 'year=2024&ystrict=1'), H2 = await get(I, 'year=2024&ystrict=1&page=2'), HL = await get(I, 'year=2024');
+  const O1 = await get(I, 'year=2024&ystrict=1&own=only');
+  ok(H1.hidden === 4 && H1.total === 52 && H1.pages === 2 && H1.items.length === 42 && H2.items.length === 10 && H1.items.concat(H2.items).every(x => !x.own && x.year === '2024')
+     && HL.hidden === 6 && HL.total === 70 && O1.total === 4 && O1.items.every(x => x.own && x.year === '2024'),
+    `只看缺片（own=hide）：严格 total ${H1.total}、已隐藏 ${H1.hidden}（库里那 2 部 2023 年的片不算进 2024 年），第 2 页 ${H2.items.length} 部；宽口径 ${HL.total} / 已隐藏 ${HL.hidden}；own=only 严格 ${O1.total} 部`);
+
+  /* 只认 ystrict=1；没有像样的年份就和以前一样 */
+  const N0 = await (await I.call('/api/catalog?min=0&own=all')).text();
+  const N1 = await (await I.call('/api/catalog?min=0&own=all&ystrict=1')).text();
+  const NB = await (await I.call('/api/catalog?min=0&own=all&year=abc&ystrict=1')).text();
+  const Z0 = await get(I, 'own=all&year=2024&ystrict=0'), ZT = await get(I, 'own=all&year=2024&ystrict=true');
+  ok(N1 === N0 && NB === N0 && Z0.total === 76 && ZT.total === 76 && !('ystrict' in Z0) && !('ystrict' in ZT),
+    'ystrict=1 不带年份 / 年份乱填：照旧不按年份筛、回包与不带 ystrict 的逐字节相同；ystrict=0 / true：宽口径');
+
+  /* 边缘缓存（Cache API）：严格和宽的各存各的；严格的键尾多一截 &ys=1，宽的键没变 */
+  {
+    const C = H.isolate(env, W);
+    const cache = C.caches.default;
+    let puts = 0; const put0 = cache.put.bind(cache); cache.put = async (k, r) => { puts++; return put0(k, r); };
+    const a1 = await get(C, 'own=all&year=2024'), b1 = await get(C, 'own=all&year=2024&ystrict=1'); await C.settle();
+    const p1 = puts;
+    const a2 = await get(C, 'own=all&year=2024'), b2 = await get(C, 'own=all&year=2024&ystrict=1'); await C.settle();
+    const keys = [...cache.m.keys()];
+    ok(a1.total === 76 && b1.total === 56 && a2.total === 76 && b2.total === 56 && b2.ystrict === 1 && !('ystrict' in a2) && p1 === 2 && puts === 2
+       && keys.length === 2 && keys.filter(k => /ystrict=1/.test(k)).every(k => /&ys=1$/.test(k)) && keys.filter(k => !/ystrict=1/.test(k)).every(k => !/&ys=1/.test(k)),
+      '边缘缓存：宽 → 严 → 宽 → 严，第二轮两个都是缓存命中、各拿各的（严格的键尾带 &ys=1，宽的键没变）');
+  }
+  /* 部署前：v7.2 不认 ystrict，把宽的结果存在了带 ystrict=1 的网址下 —— v7.3 不能把它当成严格的拿出来 */
+  const OLD = process.env.IDX_V72_WORKER;
+  if (!OLD || !fs.existsSync(OLD)) ok(false, '缺 v7.2 原版（IDX_V72_WORKER）：run.mjs 开头会从 git 取');
+  else {
+    const O = H.isolate(env, W, { file: OLD });
+    const o1 = await get(O, 'own=all&year=2024&ystrict=1'); await O.settle();
+    const ol = await get(O, 'own=all&year=2024'); await O.settle();
+    const shared = O.caches.default;
+    let sp = 0; const sput = shared.put.bind(shared); shared.put = async (k, r) => { sp++; return sput(k, r); };
+    const N = H.isolate(env, W, { cache: shared });
+    const n1 = await get(N, 'own=all&year=2024&ystrict=1'); await N.settle();
+    const sp1 = sp;
+    const nl = await get(N, 'own=all&year=2024'); await N.settle();
+    ok(o1.total === 76 && !('ystrict' in o1) && n1.total === 56 && n1.ystrict === 1 && sp1 === 1,
+      `部署前 v7.2 把宽的结果（${o1.total} 部）存在了带 ystrict=1 的网址下：v7.3 不拿它（键尾多一截 &ys=1），回严格的 ${n1.total} 部、另存一份`);
+    ok(JSON.stringify(nl) === JSON.stringify(ol) && sp === sp1, '宽口径的缓存键没变：v7.2 存下的宽结果 v7.3 直接命中（不重算、不另存）');
+    /* 不带 ystrict 的回包：v7.3 与 v7.2 逐字节相同（各用各的缓存，都是现算的） */
+    const O2 = H.isolate(env, W, { file: OLD }), N2 = H.isolate(env, W);
+    const qs = ['own=all&year=2024', 'year=2024', 'own=only&year=2024', 'own=all&year=2025&sort=vote', 'own=all', 'own=all&year=2024&page=2',
+      'own=all&year=2023&ystrict=0', 'own=all&year=2024&q=' + encodeURIComponent(P[3].cn), 'year=2024&min=6', 'own=all&year=2024&dr=hdr&qual=uhd', 'own=all&year=2024&ystrict=1'];
+    const diff = [];
+    for (const q of qs) {
+      const a = await (await O2.call('/api/catalog?' + q)).text(), c = await (await N2.call('/api/catalog?' + q)).text();
+      /* 最后一条带 ystrict=1：只有它该不一样 */
+      if ((a === c) !== !/ystrict=1/.test(q)) diff.push(q);
+    }
+    ok(!diff.length, `不带 ystrict 的 ${qs.length - 1} 种查询（宽口径、片库过滤、排序、分页、搜索、评分、画质筛选）：v7.3 回包与 v7.2 逐字节相同；只有带 ystrict=1 的那条不同${diff.length ? '；不对：' + diff.join(' | ') : ''}`);
+  }
+
+  /* 影片自己没有年份（F.Y 是空的）：严格模式不留，宽口径照旧按帖子年份留着 */
+  {
+    const J = H.isolate(env, W, { expose: ['F'] });
+    const mv = r2.json(NS + 'movies.json');
+    mv.m[P[5].id][J.k.F.Y] = '';
+    await r2.put(NS + 'movies.json', JSON.stringify(mv));
+    const U = await allPages(J, 'own=all&year=2024&ystrict=1'), UL = await allPages(J, 'own=all&year=2024');
+    ok(U.first.total === 55 && U.all.length === 55 && !U.all.some(x => x.id === P[5].id) && UL.first.total === 76 && UL.all.some(x => x.id === P[5].id),
+      `影片自己没有年份的：严格模式不留（2024 年 ${U.first.total} 部）；宽口径照旧按帖子年份留着（${UL.first.total} 部）`);
+  }
+
+  /* 同一遍扫描、不比宽口径慢：3 万部的合成影片表直接调 queryCatalog */
+  {
+    const X = H.isolate(env, W, { expose: ['queryCatalog', 'F'] });
+    const { queryCatalog, F } = X.k;
+    let calls = 0;
+    const counted = function (v) { calls++; return Array.prototype.includes.call(this, v); };
+    const synth = (count) => {
+      const m = {};
+      for (let i = 0; i < 30000; i++) {
+        const y = 2018 + (i % 9), ys = [y + (i % 3 === 0 ? 1 : 0)];
+        if (i % 5 === 0) ys.push(y + 2);
+        if (count) Object.defineProperty(ys, 'includes', { value: counted });
+        const row = [];
+        row[F.N] = '片' + i; row[F.Y] = String(y); row[F.YS] = ys; row[F.C] = 60 + (i % 900); row[F.T] = 5 + (i % 5); row[F.B] = i % 400;
+        row[F.Q] = i % 2 ? '1080p' : '2160p'; row[F.HB] = i % 8; row[F.G] = [18];
+        m[1000000 + i] = row;
+      }
+      return { m };
+    };
+    const base = { year: '2024', min: 0, own: 'all', sort: 'new', page: 1 };
+    const mc = synth(true);
+    calls = 0; const lq = queryCatalog(mc, { ...base, ver: 'cnt' }); const lc = calls;
+    calls = 0; const sq = queryCatalog(mc, { ...base, ver: 'cnt', ystrict: true }); const sc = calls;
+    const exp = Object.values(mc.m).filter(r => r[F.Y] === '2024').length;
+    ok(sc === 0 && lc === 30000 && sq.total === exp && sq.items.length === 42 && sq.items.every(x => x.year === '2024') && lq.total > exp,
+      `3 万部：严格那一遍一次都不扫 r.ys（includes ${sc} 次，宽口径 ${lc} 次），total ${sq.total} = 影片自己是 2024 年的部数（宽口径 ${lq.total}）`);
+    const mt = synth(false);
+    const time = (q) => { let best = Infinity; for (let i = 0; i < 15; i++) { const t = performance.now(); queryCatalog(mt, q); best = Math.min(best, performance.now() - t); } return best; };
+    queryCatalog(mt, { ...base, ver: 'time' });                     // 行和排序先建好（两种口径共用同一份）
+    const tl = time({ ...base, ver: 'time' }), ts = time({ ...base, ver: 'time', ystrict: true });
+    ok(ts <= tl * 1.5 + 0.5, `3 万部：严格 ${ts.toFixed(2)}ms，宽口径 ${tl.toFixed(2)}ms（各取 15 次里最快的一次）—— 不比宽口径慢`);
+  }
+
+  /* 剧集源一样：按首播年份。2025 年版块里的《权力的游戏》第八季（首播 2011）、《龙之家族》第二季（首播 2022）不算 2025 年的 */
+  {
+    const { env: e2, W: W2 } = H.makeEnv();
+    W2.tmdb.tv.push({ id: 1399, name: '权力的游戏', original_name: 'Game of Thrones', first_air_date: '2011-04-17', vote_count: 9000, vote_average: 8.4, poster_path: '/g.jpg', popularity: 80 },
+                    { id: 94997, name: '龙之家族', original_name: 'House of the Dragon', first_air_date: '2022-08-21', vote_count: 4000, vote_average: 8.4, poster_path: '/h.jpg', popularity: 80 },
+                    { id: 510002, name: '长夜将明', original_name: 'Long Dawn', first_air_date: '2025-03-01', vote_count: 900, vote_average: 8, poster_path: '/ld.jpg', popularity: 50 });
+    W2.forum.boards['2'] = { 'tv_shangyingshijian_3=22': [
+      { tid: 20201, title: '龙之家族 第二季 全8集 House.of.the.Dragon.S02.2024.2160p.WEB-DL.DDP5.1.HEVC 40GB' },
+      { tid: 20202, title: '权力的游戏 第八季 全6集 Game.of.Thrones.S08.2019.1080p.BluRay.x264 30GB' },
+      { tid: 20203, title: '长夜将明 第一季 全10集 Long.Dawn.S01.2025.2160p.WEB-DL.H265 38GB' },
+    ] };
+    const T = H.isolate(e2, W2);
+    for (let i = 0; i < 12; i++) await T.cron();
+    const tl = await (await T.call('/api/catalog?src=tv&min=0&own=all&year=2025')).json();
+    const ts = await (await T.call('/api/catalog?src=tv&min=0&own=all&year=2025&ystrict=1')).json();
+    const t11 = await (await T.call('/api/catalog?src=tv&min=0&own=all&year=2011&ystrict=1')).json();
+    ok(tl.total === 3 && ts.total === 1 && ts.items[0].id === 510002 && ts.ystrict === 1 && t11.total === 1 && t11.items[0].id === 1399,
+      `剧集：2025 年版块里 3 部，宽口径 ${tl.total} 部；严格只剩首播 2025 的 ${ts.total} 部；《权力的游戏》归首播的 2011 年`);
   }
 }
 
