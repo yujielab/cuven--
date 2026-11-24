@@ -16,7 +16,7 @@ import SwiftUI
 // · 可申请（用户要求「布局和 UI 和可立即播放的一致，2026 至 2020 年影片库里的全部」）：同一张横卡，剧照、字标按 TMDB 编号
 //   一排一次取（CatalogArt）；右边那颗胶囊是请求的状态（申请 / 已加入 / 已请求 42% / 已就绪），请求进行中剧照底边一道进度线；
 //   长按电影可以直接放进请求中心。一打开页面就用 /app/years 一次问完七年 × 电影 / 剧集的第一页（tj 2.8；老版本一年一年问），
-//   本机存着上次的，再打开先有画面再更新；一排滑到头再取下一页（滤掉别的年份之后不到 8 张就自己接着翻）
+//   本机存着上次的，再打开先有画面再更新；一排滑到头再取下一页（滤掉别的年份之后不到 8 张就自己接着翻，翻到第 8 页为止）
 // 一节就是一个懒加载的块：几百部片也只建看得到的那几排。
 
 struct AllFilmsView: View {
@@ -66,6 +66,22 @@ struct AllFilmsView: View {
         .task {
             _ = CatalogArt.shared     // 本机存的剧照、字标先读进来
             await catalog.prefetch(years: years)
+        }
+        // 可申请里整节不出的那几年（两格都没问成，或者问到了、滤掉之后一张都看不到）：节里什么都没有，挂不了重问
+        // （挂一层空的上去，节与节之间就多一道空）。第一轮问完、切到「可申请」时在这里替它们问；出了的那几节各自问（滑到了才问）
+        .task(id: "\(mode.rawValue)-\(catalog.prefetching)") {
+            guard mode == .requestable, !catalog.prefetching else { return }
+            let owned = model.ownedMovieIDs, shows = model.ownedSeasons
+            let hidden = years.flatMap { y -> [CatalogYears.Key] in
+                let ks = [CatalogYears.Key(year: y, src: "movie"), CatalogYears.Key(year: y, src: "tv")]
+                // 和 RequestableYear 出不出同一个判断：两格都问过了、两排都一张看不到
+                let gone = ks.allSatisfy { k in
+                    let p = catalog.page(k)
+                    return (p.started || p.failed) && !p.items.contains { !model.owns($0, movies: owned, shows: shows) }
+                }
+                return gone ? ks : []
+            }
+            await catalog.ensure(hidden: hidden)
         }
         .navigationTitle("全部影片")
         .navigationBarTitleDisplayMode(.large)
@@ -203,6 +219,11 @@ private struct PlayableYear: View {
 @Observable
 final class CatalogYears {
     static let shared = CatalogYears()
+    /// 一排看得到的不到这么多张、又没翻完：自己接着往后翻（不等滑到头）
+    static let enough = 8
+    /// 自己接着翻（不是用户滑到头）最多翻到第几页：不认年份的老版本是在本机从所有年份里滤，冷门的年份几百页也凑不齐 8 张，
+    /// 这一节每出现一次就再翻几页，不设上限就一直往深里翻。刷新（从第一页重来）之后重新算
+    static let autoDepth = 8
 
     struct Key: Hashable { var year: Int; var src: String }
     struct Page {
@@ -214,19 +235,23 @@ final class CatalogYears {
         var pages = 0
         /// 影片库按年份给了、这里滤掉的别的年份（按 uid 记）：论坛分区的年份对得上影片库就给，它的总数里也算着这些
         var off: Set<String> = []
-        /// 总数是这一年的（服务器认年份：有 /app/years 的版本）。老版本可能不认年份，总数是所有年份的，不能用
+        /// 总数是按年份数的（服务器认年份：有 /app/years 的版本）。老版本可能不认年份，总数是所有年份的，不能用；
+        /// 认年份的也要影片库只给这一年上映的才准（见 count）
         var counted = false
         var done = false
         var loading = false
         var failed = false
         /// 问过第一页了（问成没问成都算；/app/years 一次问完，或者一年一年问）
         var started = false
-        /// 往后翻过（滑到头又取了一页，或者第一页没给全又取了一次）：刷新时不换掉这一排（一换，看着的那几张就没了）
+        /// 用户往后翻过（滑到这一排的头又取了一页）：刷新时不换掉这一排（一换，看着的那几张就没了）。
+        /// 自己接着翻的（看得到的不到 8 张）不算：那样的一排刷新照换（不然再也不刷新），换完不到 8 张再自己翻
         var paged = false
 
-        /// 标题、小标题里写的部数（不说多）：翻完了就是这一排的张数；没翻完、总数可信：总数扣掉已经滤掉的别的年份
+        /// 标题、小标题里写的部数（不说多）：翻完了就是这一排的张数；没翻完的，影片库只给了这一年的（问到的几页里一部别的年份都没有）
+        /// 才用它的总数。夹着别的年份的（老版本影片库不认 ystrict，按「任何一个发行帖的年份」筛），总数里还算着没问到的那几页里
+        /// 别的年份的，扣不干净：只写看得到的张数
         func count(shown: Int) -> Int {
-            done || !counted ? shown : max(shown, total - off.count)
+            done || !counted || !off.isEmpty ? shown : max(shown, total)
         }
     }
 
@@ -297,20 +322,25 @@ final class CatalogYears {
         // 一年一年问（老版本、网络不好）：每一格都从第一页重问、问到了才换掉 —— 再打开（过了 5 分钟）也是一次刷新，
         // 新收录的、数目变了的都跟上；往后翻过的、正在取的不打断
         let keys = years.flatMap { y in ["movie", "tv"].map { Key(year: y, src: $0) } }.filter { !page($0).paged && !page($0).loading }
+        await each(keys) { await self.fetch($0, fresh: true, user: false) }
+        // 离开了页面：不记时刻。有一格没问成：下次打开（或滑到那一节）再问，不等 5 分钟
+        guard !Task.isCancelled else { return }
+        if !anyFailed(years) { fetchedAt = Date() }
+    }
+
+    /// 每一格各问各的，同时最多 4 个
+    private func each(_ keys: [Key], _ run: @escaping @Sendable (Key) async -> Void) async {
         await withTaskGroup(of: Void.self) { g in
             var i = 0
             func add() {
                 guard i < keys.count else { return }
                 let k = keys[i]
                 i += 1
-                g.addTask { await self.fetch(k, fresh: true) }
+                g.addTask { await run(k) }
             }
             for _ in 0..<4 { add() }
             while await g.next() != nil { add() }
         }
-        // 离开了页面：不记时刻。有一格没问成：下次打开（或滑到那一节）再问，不等 5 分钟
-        guard !Task.isCancelled else { return }
-        if !anyFailed(years) { fetchedAt = Date() }
     }
 
     private func anyFailed(_ years: [Int]) -> Bool {
@@ -368,27 +398,36 @@ final class CatalogYears {
     }
 
     /// 这一节出现时、第一轮问完时：没问过、没问成的问（还没往后翻过的从第一页重问；翻过的接着翻）；
-    /// 问过了的：滤掉别的年份、片库里有的之后看得到的不到 8 张，又没翻完 —— 自己接着翻（一次最多 4 页），不等滑到头
+    /// 问过了的：滤掉别的年份、片库里有的之后看得到的不到 8 张，又没翻完 —— 自己接着翻（一次最多 4 页，翻到第 autoDepth 页为止），不等滑到头
     func ensure(_ k: Key, visible: Int) async {
         let p = page(k)
         if !p.started || p.failed {
-            await fetch(k, fresh: !p.paged)
-        } else if visible < 8 && !p.done {
-            await fetch(k, fresh: false)
+            await fetch(k, fresh: !p.paged, user: false)
+        } else if visible < Self.enough && !p.done {
+            await fetch(k, fresh: false, user: false)
         }
     }
 
-    /// 滑到这一排最后几张：取下一页（同一格同时只取一次）
-    func loadMore(_ k: Key) async {
-        await fetch(k, fresh: false)
+    /// 整节不出的那几年（AllFilmsView 替它们问）：同 ensure，两排看得到的都是 0 张
+    func ensure(hidden keys: [Key]) async {
+        await each(keys) { await self.ensure($0, visible: 0) }
+    }
+
+    /// 滑到这一排最后几张：取下一页（同一格同时只取一次）。user = 这一排够长、最后几张是用户滑出来的
+    /// （短的一排一出来最后几张就在屏幕上，那是自己接着翻，不算用户翻过）
+    func loadMore(_ k: Key, user: Bool) async {
+        await fetch(k, fresh: false, user: user)
     }
 
     /// 问 /app/catalog。fresh：从第一页重问，问到了才换掉这一排（第一次问、没问成重问、老版本刷新）；
     /// 否则从 next 接着翻、按 uid 去重接上。一次最多翻 4 页：滤掉别的年份之后新添的不到 8 部就接着翻。
+    /// user：用户滑到头才取的，记下 paged（刷新时不换掉这一排）；自己接着翻的不记，翻到第 autoDepth 页为止。
     /// 每一页回来都重新读一次这一格、接在现在的上面写回去（不拿出门前的那份写回去）
-    private func fetch(_ k: Key, fresh: Bool) async {
+    private func fetch(_ k: Key, fresh: Bool, user: Bool) async {
         let start = page(k)
-        guard !start.loading, !(fresh && start.paged), fresh || !start.done else { return }
+        // 自己接着翻：不是从第一页重问、不是用户滑到头、这一排也没被用户翻过（翻过的没问成重问照接着翻）
+        let auto = !fresh && !user && !start.paged
+        guard !start.loading, !(fresh && start.paged), fresh || !start.done, !auto || start.next <= Self.autoDepth else { return }
         pages[k, default: Page()].loading = true
         // 有 /app/years 的版本认年份：没有年份的条目是这一年分区里的，留着；老版本可能不认年份，留着会每一年都出一次
         let loose = !noYears
@@ -419,7 +458,7 @@ final class CatalogYears {
             }
             fetched += 1
             cur.next = max(cur.next, next)
-            if !fresh { cur.paged = true }
+            if user { cur.paged = true }
             if r.pages > 0 || r.total > 0 {
                 cur.total = r.total
                 cur.pages = r.pages
@@ -429,7 +468,7 @@ final class CatalogYears {
             cur.started = true
             cur.failed = false
             pages[k] = cur                      // loading 还是 true：这一次还没完
-            if cur.done || fetched >= 4 || added >= 8 || Task.isCancelled { break }
+            if cur.done || fetched >= 4 || added >= Self.enough || Task.isCancelled || (auto && next > Self.autoDepth) { break }
         }
         var end = page(k)
         end.loading = false
@@ -481,31 +520,28 @@ private struct RequestableYear: View {
         let series = tp.items.filter { !model.owns($0, movies: owned, shows: shows) }
         let settled = (mp.started || mp.failed) && (tp.started || tp.failed)
         let vm = movies.count, vt = series.count
-        // 外面这一层一直在（两格都没问成、整节不出的时候也在）：重问挂在它上面。挂在空的 Group 上一次也不会跑
-        VStack(alignment: .leading, spacing: 0) {
-            Color.clear.frame(height: 0).accessibilityHidden(true)
-            if !movies.isEmpty || !series.isEmpty || !settled {
-                VStack(alignment: .leading, spacing: metrics.titleGap + 6) {
-                    YearHeader(year: year, subtitle: settled ? Self.line(mp, tp, movies.count, series.count) : "正在查询…",
-                               metrics: metrics, link: false)
-                    row("电影", key: mk, page: mp, items: movies)
-                    row("剧集", key: tk, page: tp, items: series)
-                }
+        // 两排都没有的整节不出（不留空的一层：LazyVStack 每一层之间都隔一道空）。整节不出的那几年由 AllFilmsView 替它们重问
+        if !movies.isEmpty || !series.isEmpty || !settled {
+            VStack(alignment: .leading, spacing: metrics.titleGap + 6) {
+                YearHeader(year: year, subtitle: settled ? Self.line(mp, tp, movies.count, series.count) : "正在查询…",
+                           metrics: metrics, link: false)
+                row("电影", key: mk, page: mp, items: movies)
+                row("剧集", key: tk, page: tp, items: series)
             }
-        }
-        // 第一轮（/app/years）没给到、没问成的（网络不好、老版本）：滑到这一节、或者第一轮问完了再问一次（从第一页）；
-        // 问到了、可滤掉别的年份和片库里有的之后不到 8 张：接着往后翻（一次最多 4 页），不等滑到头
-        .task(id: "\(year)-\(catalog.prefetching)") {
-            guard !catalog.prefetching else { return }
-            let c = catalog
-            async let a: Void = c.ensure(mk, visible: vm)
-            async let b: Void = c.ensure(tk, visible: vt)
-            _ = await (a, b)
+            // 第一轮（/app/years）没给到、没问成的（网络不好、老版本）：滑到这一节、或者第一轮问完了再问一次（从第一页）；
+            // 问到了、可滤掉别的年份和片库里有的之后不到 8 张：接着往后翻（一次最多 4 页，有上限），不等滑到头
+            .task(id: "\(year)-\(catalog.prefetching)") {
+                guard !catalog.prefetching else { return }
+                let c = catalog
+                async let a: Void = c.ensure(mk, visible: vm)
+                async let b: Void = c.ensure(tk, visible: vt)
+                _ = await (a, b)
+            }
         }
     }
 
-    /// 「128 部电影 · 54 部剧集」：不说多 —— 翻完了就是这一排的张数，没翻完用影片库的总数扣掉滤掉的别的年份（总数可信才用）。
-    /// 这一节里没出的那一排（一张都没有）不写
+    /// 「128 部电影 · 54 部剧集」：不说多 —— 翻完了就是这一排的张数；没翻完的，影片库只给了这一年的才用它的总数，
+    /// 夹着别的年份的只写看得到的张数（见 Page.count）。这一节里没出的那一排（一张都没有）不写
     static func line(_ mp: CatalogYears.Page, _ tp: CatalogYears.Page, _ m: Int, _ s: Int) -> String {
         let mc = m > 0 ? mp.count(shown: m) : 0, sc = s > 0 ? tp.count(shown: s) : 0
         let parts = [mc > 0 ? "\(mc) 部电影" : nil, sc > 0 ? "\(sc) 部剧集" : nil].compactMap { $0 }
@@ -521,10 +557,11 @@ private struct RequestableYear: View {
                 DSShelf(metrics: metrics) {
                     ForEach(items, id: \.uid) { it in
                         RequestableCard(item: it, width: w, slot: "all-request-\(year)")
-                            // 滑到这一排最后几张：取下一页
+                            // 滑到这一排最后几张：取下一页。不到 8 张的一排一出来最后几张就在屏幕上：那是自己接着翻（有上限），不算用户翻过
                             .onAppear {
                                 if items.suffix(3).contains(where: { $0.uid == it.uid }), !catalog.page(key).done {
-                                    Task { await catalog.loadMore(key) }
+                                    let user = items.count >= CatalogYears.enough
+                                    Task { await catalog.loadMore(key, user: user) }
                                 }
                             }
                     }

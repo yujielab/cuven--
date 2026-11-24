@@ -671,7 +671,7 @@ struct DetailScaffold<Episodes: View>: View {
                     // 一组一行粗体标题 + 一张卡（参考图）；分区之间同一种留白（F3、F12）
                     VStack(alignment: .leading, spacing: m.shelfGap) {
                         if Self.twoColumns(m) && hasOverview && !stats.isEmpty {
-                            // iPad 横拿（窗口 1100 点以上）：简介和影片详细信息并排两栏，不再一张 720 宽的卡、右边空一大块。
+                            // iPad 宽窗口（960 点以上）：简介和影片详细信息并排两栏，不再一张 720 宽的卡、右边空一大块。
                             // 影片详细信息那一栏定宽，方块和单栏时一行四块（720 宽、间距 12）一样大，(720 − 3×12) / 4 = 171；简介那一栏拿剩下的。
                             // 以前对半分，方块撑到近 300 点见方、字缩在角上，这一栏比简介高出几百点，下面整排都被往下推。
                             // 放得下一行四块（720）、简介还剩 420 点以上（Pro 13 横拿 1376）就一行，和简介差不多高；
@@ -781,9 +781,11 @@ struct DetailScaffold<Episodes: View>: View {
 
     private var hasOverview: Bool { !(overview ?? "").isEmpty }
 
-    /// iPad 横拿（大一档以上、窗口 1100 点以上）：简介、影片详细信息并排
+    /// iPad 宽窗口（960 点以上）：简介、影片详细信息并排
+    /// 960 点（不是 1100）：13 寸横拿时侧边栏占去约 320 点，详情页只剩约 1050 点宽，1100 的门槛会把最大的 iPad 排成单栏（CI 截图）；
+    /// 960 时简介那一栏仍有约 460 点（右边 2×2 的影片详细信息 354 点）
     static func twoColumns(_ m: DSMetrics) -> Bool {
-        UIDevice.current.userInterfaceIdiom == .pad && m.width >= 1100
+        UIDevice.current.userInterfaceIdiom == .pad && m.width >= 960
     }
 
     // MARK: 头部
