@@ -72,7 +72,7 @@ const W = {
   pushSeq: [],               // /api/pikpush 接下来几次怎么回：'unsure'（建成了、回 unsure）/ 'lost'（建成了、回包路上断了）/ 'busy'（409 + Retry-After）/
                              //   'gone'（404 文件夹不在了）/ 'forum'（stop + forum: 1）/ 'auth'（503 PikPak 登录不上）；空 = 照常建
                              //   2.8 复查：'pk502'（502 + pk，没建）/ 'bad'（ok: 0 推不了）/ 'empty' / 'bodyerr' / 'cut'（建成了，200 的回包是空的 / 断了 / 半截）/
-                             //   'crash'（建成了，500 没有 pk）
+                             //   'crash'（建成了，500 没有 pk）/ 'othertid'（建成了，200 可回包里只有别的 tid 的结果）
   pushRec: {},               // 影片库记着的推送（parent:tid → 任务）：带 check 的先按它认领（adopted）
   pushNew: 0,                // 影片库真建了几个云下载任务
   busyWait: 7,               // 409 的 Retry-After（秒）
@@ -156,6 +156,7 @@ globalThis.fetch = async (url, init = {}) => {
       if (mode === 'bodyerr') return new Response(new ReadableStream({ start(c){ c.error(new Error('stream reset')); } }), { status: 200, headers: { 'content-type': 'application/json' } });
       if (mode === 'cut') return new Response('{"items":[{"tid":' + it.tid + ',"ok":1,"task":"', { status: 200, headers: { 'content-type': 'application/json' } });
       if (mode === 'crash') return J({ error: 'Worker threw exception' }, 500);
+      if (mode === 'othertid') return J({ items: [{ tid: it.tid + 1000, ok: 1, task: 'TX', name: 'other', file: 'FX', fileName: 'other' }], ok: 1, stop: '' });
       return J({ items: [{ tid: it.tid, ok: 1, task, name, file: fid, fileName: name }], ok: 1, stop: '' });
     }
     if (p === '/api/pikpak'){
@@ -2362,7 +2363,7 @@ const mv28 = (tmdb, tids) => { W.versions['movie:' + tmdb] = tids.map(tid => ({ 
 {
   reset26(); W.caps = ['sub', 'batch']; W.pushSeq = [];
   await call('POST', '/admin/api/cfg', { admin: true, body: { pkUser: 'pk@x.com', pkPass: 'pkpass', batch: false, autoReady: false, pkSlots: 16, vpsSlots: 4 } });
-  for (const [mode, tmdb, tid] of [['bodyerr', 9850, 60], ['empty', 9851, 62], ['cut', 9852, 64]]){
+  for (const [mode, tmdb, tid] of [['bodyerr', 9850, 60], ['empty', 9851, 62], ['cut', 9852, 64], ['othertid', 9854, 68]]){
     mv28(tmdb, [tid, tid + 1]);
     const a = ins27('queued', { dup: 0 }, { tmdb });
     const p0 = W.push.length, n0 = W.pushNew;
