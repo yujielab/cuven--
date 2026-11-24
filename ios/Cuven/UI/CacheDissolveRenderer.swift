@@ -5,12 +5,14 @@ import UIKit
 
 // MARK: - 清除缓存的动画：Metal 那一半（着色器在 CacheDissolve.metal）
 //
-// 时间线（从点「清除」算起，秒）：
-//   0.00  卡照常浮着、慢慢转；按钮变成进度胶囊（SwiftUI 那一半）
-//   0.35  卡从下沿开始化成光点（溶解前沿 0 → 1，3.6 秒，先慢后快再慢）
-//   0.8+  光点被流场带着往下流、拉成光纤，汇进底部的光源；光源和环境光慢慢变亮
-//   4.6   光流整体变淡、变细；剩下的被光源收进去
-//   6.2   全部收完（CacheDissolveEngine.duration），SwiftUI 那边换成「已清除」
+// 时间线（从点「清除」算起，秒；照着录屏一秒一秒对过）：
+//   0.00  按钮变成进度胶囊（SwiftUI 那一半）；卡往上飘一点
+//   0.45  卡从下沿开始化成一片闪烁的碎光（溶解前沿 0 → 1，差不多匀速，4.45 秒扫完）；碎光往下落、连成光纤，全都收进胶囊那一点
+//   0.9+  胶囊那儿的光慢慢变亮（光纤越多越亮），底下泛起青蓝 / 暖紫的环境光
+//   0.9 – 4.1  卡一边化一边转到几乎侧对着人（2.5 秒左右最侧），再转回来
+//   4.9   卡化完；最后一批光纤 1 秒左右落进按钮
+//   4.4 – 5.6  收尾：按钮那儿往上散开一片光束、两边一排彩色光斑
+//   5.8   数字走到头；6.2 全部收完（CacheDissolveEngine.duration），SwiftUI 那边换成「已清除」
 // 「减弱动态效果」打开时：卡不转、不放粒子，只有前沿扫过去、光源亮一下再收。
 
 /// SwiftUI 和渲染器之间共享的状态（都在主线程上动）
@@ -29,20 +31,20 @@ final class CacheDissolveEngine {
         return max(0, now - start)
     }
 
-    /// 0…1：卡上的溶解前沿走到哪儿（3.6 秒扫完整张卡）
+    /// 0…1：卡上的溶解前沿走到哪儿（录屏里差不多匀速往上爬：4.45 秒扫完整张卡，两头稍微缓一点）
     func front(_ now: CFTimeInterval = CACurrentMediaTime()) -> Double {
         guard start != nil else { return 0 }
-        return Self.ease(min(1, max(0, (elapsed(now) - 0.35) / 3.6)))
+        return Self.soft(min(1, max(0, (elapsed(now) - 0.45) / 4.45)))
     }
 
-    /// 0…1：进度胶囊上的数字。跟着整股光流走（光流快收完才到头），不跟卡的前沿 —— 卡化完了光还在往下流
+    /// 0…1：进度胶囊上的数字。录屏里是差不多匀速走的（0.4 秒起步、5.8 秒到头），比卡的前沿慢一点 —— 卡化完了光还在往下流
     func progress(_ now: CFTimeInterval = CACurrentMediaTime()) -> Double {
         guard start != nil else { return 0 }
-        let x = min(1, max(0, (elapsed(now) - 0.35) / 5.1))
-        return 1 - pow(1 - x, 2.2)
+        return Self.soft(min(1, max(0, (elapsed(now) - 0.4) / 5.4)))
     }
 
-    static func ease(_ x: Double) -> Double { x < 0.5 ? 4 * x * x * x : 1 - pow(-2 * x + 2, 3) / 2 }
+    /// 七成匀速 + 三成 smoothstep：基本匀速，起步和到头不生硬
+    static func soft(_ x: Double) -> Double { x * 0.7 + x * x * (3 - 2 * x) * 0.3 }
 }
 
 final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
@@ -145,13 +147,13 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
         let n = Compat.legacyDevice ? 16_384 : 32_768
         count = n
         var rng = SplitMix(seed: 0xC0FFEE)
-        let columns = 96
+        let columns = 60
         var ps: [Particle] = []
         ps.reserveCapacity(n)
         for i in 0..<n {
             let col = i % columns
             let colU = (Float(col) + 0.5) / Float(columns)
-            let u = min(0.999, max(0.001, colU + (rng.float() - 0.5) * 0.004))
+            let u = min(0.999, max(0.001, colU + (rng.float() - 0.5) * 0.005))
             let v = rng.float()
             let seed = rng.float()
             let hue = Float(col) / Float(columns) * 0.9 + rng.float() * 0.1
@@ -356,9 +358,10 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
         // 卡：浮着、慢慢转；开始清除以后往上飘一点、更竖一点地转向一边（参照录屏）
         let go = started ? Float(ramp(0, 1.6, Double(e))) : 0
         let wobble: Float = reduce ? 0 : 1
-        // 化的时候卡慢慢转到几乎侧对着人、再转回来一点（参照录屏）
-        let swing = go * sin(min(e, 4.2) * 0.75) * 0.85
-        let yaw = (0.32 * sin(t * 0.47) + 0.22) * wobble + swing * wobble
+        // 化的时候卡慢慢转到几乎侧对着人（2.5 秒左右最侧，只剩一条边）、4.1 秒转回来（参照录屏）；转的时候平时那点晃动收掉
+        let swingX = min(1, max(0, (e - 0.9) / 3.2))
+        let swing = started ? sin(.pi * swingX) * 1.2 : 0
+        let yaw = (0.32 * sin(t * 0.47) + 0.22) * (1 - 0.7 * go) * wobble + swing * wobble
         let pitch = (0.10 * sin(t * 0.36) - 0.10) * wobble - go * 0.12 * wobble
         let roll = (0.05 * sin(t * 0.29) - 0.06) * wobble + go * 0.10 * wobble
         let bob = 0.035 * sin(t * 0.9) * wobble
@@ -371,23 +374,26 @@ final class CacheDissolveRenderer: NSObject, MTKViewDelegate {
         let target = SIMD3<Float>((tx * 2 - 1) * halfVis * aspect, (1 - ty * 2) * halfVis, 0)
 
         let front: Float = started ? Float(engine.front(now)) * 1.18 - 0.09 : -0.2
-        let fade: Float = started ? Float(1 - ramp(4.6, 5.9, Double(e))) : 1
-        let light: Float = started ? Float(ramp(0.7, 2.3, Double(e)) * (1 - 0.92 * ramp(4.9, 6.2, Double(e)))) : 0
+        let fade: Float = started ? Float(1 - ramp(5.2, 6.1, Double(e))) : 1
+        // 光源：光纤落到按钮才开始亮，越来越亮；收尾以后慢慢暗下去（「已清除」那 1.3 秒里还留一点）
+        let light: Float = started ? Float(ramp(0.9, 4.2, Double(e)) * (1 - 0.65 * ramp(5.4, 7.4, Double(e)))) : 0
         let lightPulse: Float = reduce ? light * 0.8 : light
-        let cardFade: Float = started ? Float(1 - ramp(3.6, 4.4, Double(e))) : 1
-        let keep = Float(pow(0.72, Double(dt) * 60))
+        let ambient: Float = started ? Float(0.5 * ramp(2.4, 5.4, Double(e)) * (1 - 0.5 * ramp(6.4, 7.5, Double(e)))) : 0
+        let endBurst: Float = started && !reduce ? Float(ramp(4.4, 5.6, Double(e)) * (1 - 0.4 * ramp(6.6, 7.5, Double(e)))) : 0
+        let cardFade: Float = started ? Float(1 - ramp(4.7, 5.1, Double(e))) : 1
+        let keep = Float(pow(0.6, Double(dt) * 60))
 
         return Uniforms(
             viewProj: proj * view,
             cardModel: model,
-            camera: SIMD4(Self.eye, 1),
+            camera: SIMD4(Self.eye, endBurst),
             timing: SIMD4(t, dt, front, fade),
             target: SIMD4(target, 0.12),
             screen: SIMD4(w, h, 0.45 * scale, lightPulse),       // 光线半宽（像素）：屏上约 0.9 点
-            params: SIMD4(1.15, 2.4, 0.05, Float(count)),    // 落到按钮约 1.15 秒、一路拧约 2.4 弧度、扰动幅度
+            params: SIMD4(1.05, 0.9, 0.12, Float(count)),    // 落到按钮约 1.05 秒、一路拧约 0.9 弧度、每缕横向摆动幅度
             targetScreen: SIMD4(tx, ty, aspect, t),
             cardInfo: SIMD4(Self.halfW, Self.halfH, Self.halfT, reduce ? 1 : 0),
-            trail: SIMD4(keep, 1.0, 0.38 * lightPulse, cardFade)
+            trail: SIMD4(keep, 1.0, ambient, cardFade)
         )
     }
 
