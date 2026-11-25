@@ -407,21 +407,26 @@ struct ClipsGlyph: Shape {
 //
 // 主页、片段、请求、光学扫描同一套：线条约 2 点、圆头圆角，设计框 24 × 24，只用最少的笔画说清是什么。
 
-/// 主页：圆顶的房子（屋脊和屋檐都是圆的），里面靠下一道短横——照用户给的参考（不画烟囱、不画门）
+/// 主页：圆顶的房子，里面靠下一道短横——照用户给的参考（不画烟囱、不画门）。
+/// 屋脊、屋檐（屋顶和墙接上的两个角，用户圈出来要圆角）、墙脚都是圆角
 struct HomeGlyph: Shape {
     func path(in rect: CGRect) -> Path {
         let s = min(rect.width, rect.height) / 24
         let ox = rect.midX - 12 * s, oy = rect.midY - 12 * s
         func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * s, y: oy + y * s) }
         var p = Path()
-        p.move(to: pt(3.6, 10.6))
-        p.addLine(to: pt(3.6, 18))
-        p.addQuadCurve(to: pt(6.6, 21), control: pt(3.6, 21))
-        p.addLine(to: pt(17.4, 21))
-        p.addQuadCurve(to: pt(20.4, 18), control: pt(20.4, 21))
-        p.addLine(to: pt(20.4, 10.6))
-        p.addLine(to: pt(13.4, 4.2))
-        p.addQuadCurve(to: pt(10.6, 4.2), control: pt(12, 3.0))
+        // 从左屋檐圆角的上端起，沿屋顶到屋脊（圆）、右屋檐（圆）、右墙、墙脚（圆）、左墙，回到左屋檐（圆）
+        p.move(to: pt(5.12, 9.30))
+        p.addLine(to: pt(10.6, 4.2))
+        p.addQuadCurve(to: pt(13.4, 4.2), control: pt(12, 3.0))
+        p.addLine(to: pt(18.88, 9.30))
+        p.addQuadCurve(to: pt(20.4, 12.6), control: pt(20.4, 10.6))
+        p.addLine(to: pt(20.4, 18))
+        p.addQuadCurve(to: pt(17.4, 21), control: pt(20.4, 21))
+        p.addLine(to: pt(6.6, 21))
+        p.addQuadCurve(to: pt(3.6, 18), control: pt(3.6, 21))
+        p.addLine(to: pt(3.6, 12.6))
+        p.addQuadCurve(to: pt(5.12, 9.30), control: pt(3.6, 10.6))
         p.closeSubpath()
         p.move(to: pt(9.4, 16.4))
         p.addLine(to: pt(14.6, 16.4))
@@ -436,8 +441,9 @@ struct RequestGlyph: Shape {
         let ox = rect.midX - 12 * s, oy = rect.midY - 12 * s
         func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * s, y: oy + y * s) }
         var p = Path()
+        // 圆角大一点（用户圈出来要更圆）：14 × 18 的卡、圆角 5
         p.addRoundedRect(in: CGRect(origin: pt(5, 3), size: CGSize(width: 14 * s, height: 18 * s)),
-                         cornerSize: CGSize(width: 3.5 * s, height: 3.5 * s), style: .continuous)
+                         cornerSize: CGSize(width: 5 * s, height: 5 * s), style: .continuous)
         p.move(to: pt(9.2, 12))
         p.addLine(to: pt(14.8, 12))
         p.move(to: pt(12, 9.2))
