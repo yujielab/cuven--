@@ -18,8 +18,9 @@ import SwiftUI
 //   长按电影可以直接放进请求中心。一打开页面就用 /app/years 一次问完七年 × 电影 / 剧集的第一页（tj 2.8；老版本一年一年问），
 //   本机存着上次的，再打开先有画面再更新；一排滑到头再取下一页（滤掉别的年份之后不到 8 张就自己接着翻，翻到第 8 页为止）
 // 一节就是一个懒加载的块：几百部片也只建看得到的那几排。
-// · 分段控件下面一行「电影 ›」「剧集 ›」（用户要求「添加打开分类按钮，电视剧和电影分开，UI 和布局参考专区」）：跟着上面选的那一边，
-//   打开可立即播放 / 可申请的全部电影或全部剧集（FilmCategoryPage：专区那样的一页，顶上换成三张横滑的大卡）
+// · 每一年里「电影 ›」「剧集 ›」那两个小标题就是打开分类的按钮（用户要求「更新按钮的功能和位置」：以前分段控件下面单独一行两颗胶囊，
+//   打开的是所有年份的；现在挪到每一年的小标题上，打开这一年的电影 / 剧集）：跟着上面选的那一边，
+//   打开可立即播放 / 可申请这一年的电影或剧集（FilmCategoryPage(year:)：专区那样的一页，顶上是这一年排在最前的三部）
 
 struct AllFilmsView: View {
     @Environment(AppModel.self) private var model
@@ -94,48 +95,16 @@ struct AllFilmsView: View {
         .sensoryFeedback(.selection, trigger: mode)
     }
 
-    /// 两边分开：可立即播放 / 可申请（系统的分段控件，iOS 26 上是一枚玻璃）；
-    /// 下面一行「电影 ›」「剧集 ›」打开这一边的分类页（用户要求：电视剧和电影分开）
+    /// 两边分开：可立即播放 / 可申请（系统的分段控件，iOS 26 上是一枚玻璃）。
+    /// 打开分类的按钮不在这里了：每一年的「电影 ›」「剧集 ›」小标题就是（用户要求，见 KindLabel）
     private func picker(_ m: DSMetrics) -> some View {
-        // 分段控件到下面那两颗胶囊：和分区标题到那一排同一个距离（以前 10，贴着）
-        VStack(alignment: .leading, spacing: m.titleGap) {
-            Picker("显示", selection: $mode) {
-                ForEach(Mode.allCases) { Text($0.title).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: m.wide ? 420 : .infinity)
-            .accessibilityIdentifier("all-films-mode")
-            HStack(spacing: 10) {
-                categoryButton("电影", series: false, id: "all-films-open-movie")
-                categoryButton("剧集", series: true, id: "all-films-open-series")
-            }
+        Picker("显示", selection: $mode) {
+            ForEach(Mode.allCases) { Text($0.title).tag($0) }
         }
+        .pickerStyle(.segmented)
+        .frame(maxWidth: m.wide ? 420 : .infinity)
+        .accessibilityIdentifier("all-films-mode")
         .padding(.horizontal, m.margin)
-    }
-
-    /// 打开分类页的一颗：描边的胶囊（主页结尾「查看全部影片 ›」那一种，小一号、边淡一点：克制，不和分段控件抢），
-    /// 看上去 36 高，点按区上下各多 4 点（44：F74）
-    private func categoryButton(_ title: String, series: Bool, id: String) -> some View {
-        NavigationLink(value: Route.filmCategory(FilmCategory(playable: mode == .playable, series: series))) {
-            HStack(spacing: 4) {
-                Text(title)
-                Image(systemName: "chevron.right")
-                    .font(.footnote.weight(.semibold))
-            }
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.white)
-            .lineLimit(1)
-            .padding(.horizontal, 16)
-            .frame(minHeight: 36)
-            .overlay(Capsule().strokeBorder(Color.white.opacity(0.4), lineWidth: 1))
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressableStyle())
-        // 旁白名就是看得见的那个字（语音控制说「点按 电影」对得上），是哪一边的放进提示里
-        .accessibilityLabel(title)
-        .accessibilityHint("打开\(mode.title)的全部\(title)")
-        .accessibilityIdentifier(id)
     }
 }
 
@@ -163,17 +132,36 @@ private struct YearHeader: View {
     }
 }
 
-/// 一节里的小标题：「电影」「剧集」（用户要求不带数字）
+/// 一节里的小标题：「电影 ›」「剧集 ›」（用户要求不带数字）。点了打开这一年的电影 / 剧集那一页（用户要求：打开分类的按钮挪到这里，
+/// 打开的是这一年的）：字和后面那个「›」和分区标题一样（「›」退一级颜色）；字后面那一截空白不接点按
 private struct KindLabel: View {
     let title: String
+    /// 点了去哪（这一年的分类页）
+    let route: Route
+    let id: String
+    /// 给旁白的提示：打开哪一边、哪一年的
+    let hint: String
     let metrics: DSMetrics
 
     var body: some View {
-        Text(title)
-            .font(.headline)
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, metrics.margin)
+        NavigationLink(value: route) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                Image(systemName: "chevron.forward")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(DSInk.tertiary)
+                    .accessibilityHidden(true)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableStyle(scale: 0.97))
+        .accessibilityLabel(title)
+        .accessibilityHint(hint)
+        .accessibilityIdentifier(id)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, metrics.margin)
     }
 }
 
@@ -195,7 +183,8 @@ private struct PlayableYear: View {
                 VStack(alignment: .leading, spacing: metrics.subsectionGap) {
                     if !movies.isEmpty {
                         VStack(alignment: .leading, spacing: metrics.titleGap) {
-                            KindLabel(title: "电影", metrics: metrics)
+                            KindLabel(title: "电影", route: .filmYear(.playableMovie, year), id: "all-films-kind-movie-\(year)",
+                                  hint: "打开 \(year) 年可立即播放的电影", metrics: metrics)
                             DSShelf(metrics: metrics) {
                                 ForEach(movies, id: \.path) { v in movieCard(v) }
                             }
@@ -203,7 +192,8 @@ private struct PlayableYear: View {
                     }
                     if !shows.isEmpty {
                         VStack(alignment: .leading, spacing: metrics.titleGap) {
-                            KindLabel(title: "剧集", metrics: metrics)
+                            KindLabel(title: "剧集", route: .filmYear(.playableSeries, year), id: "all-films-kind-series-\(year)",
+                                  hint: "打开 \(year) 年可立即播放的剧集", metrics: metrics)
                             DSShelf(metrics: metrics) {
                                 ForEach(shows, id: \.path) { s in seriesCard(s) }
                             }
@@ -567,12 +557,20 @@ private struct RequestableYear: View {
     }
 
 
+    /// 「电影 ›」「剧集 ›」：打开这一年可申请的电影 / 剧集
+    private func kindLabel(_ title: String, key: CatalogYears.Key) -> some View {
+        let series = key.src == "tv"
+        return KindLabel(title: title, route: .filmYear(FilmCategory(playable: false, series: series), year),
+                         id: "all-films-kind-\(series ? "series" : "movie")-\(year)",
+                         hint: "打开 \(year) 年可申请的\(title)", metrics: metrics)
+    }
+
     @ViewBuilder
     private func row(_ title: String, key: CatalogYears.Key, page p: CatalogYears.Page, items: [CatalogItem]) -> some View {
         let w = metrics.trailerCardWidth
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: metrics.titleGap) {
-                KindLabel(title: title, metrics: metrics)
+                kindLabel(title, key: key)
                 DSShelf(metrics: metrics) {
                     ForEach(items, id: \.uid) { it in
                         RequestableCard(item: it, width: w, slot: "all-request-\(year)")
@@ -589,7 +587,7 @@ private struct RequestableYear: View {
             }
         } else if !p.started {
             VStack(alignment: .leading, spacing: metrics.titleGap) {
-                KindLabel(title: title, metrics: metrics)
+                kindLabel(title, key: key)
                 DSShelf(metrics: metrics) {
                     ForEach(0..<3, id: \.self) { _ in SkeletonTrailerCard(width: w) }
                 }
