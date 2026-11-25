@@ -4,7 +4,8 @@ import SwiftUI
 //
 // 放在「网络」卡里网络速度、自动调整下面（NetworkSpeedCard），三行（AccountRow）：
 // · Cuven Pass Pro：开关（绿色）。开了以后影片经 Cuven 的加速节点传输（PassPro.swift）
-// · 加速节点：开着时才有——「已连接 · 延迟 38 毫秒」/「正在检测…」/「暂时不可用，正在使用普通线路」；点一下重新检测
+// · 加速节点：开着时才有——「已优选最快节点 · 延迟 38 毫秒 · 62 Mbps」/「正在优选最快的节点…」/「暂时不可用，正在使用普通线路」；
+//   点一下重新优选（PassPro：Cloudflare 边缘入口 + 加速节点，先比延迟、再比实测速度）
 // · 测速对比：普通线路和 Pass Pro 各测一次，写「普通线路 23 Mbps · Pass Pro 61 Mbps」，快的那个是白字
 // 不说 Worker / VPS 这些技术词（发行版文案规则）。
 
@@ -31,7 +32,7 @@ struct PassProRows: View {
                     }
                 }
                 .buttonStyle(AccountRowPress())
-                .accessibilityHint("重新检测加速节点")
+                .accessibilityHint("重新优选最快的节点")
                 .accessibilityIdentifier("account-pass-status")
             }
             AccountDivider()
@@ -63,8 +64,11 @@ struct PassProRows: View {
     private var statusLine: String {
         switch pass.state {
         case .off: return "未开启"
-        case .checking: return "正在检测…"
-        case .ready(let rtt): return "已连接 · 延迟 \(rtt) 毫秒"
+        case .checking: return "正在优选最快的节点…"
+        case .ready(let rtt):
+            // 优选出来的入口（用户要求「智能优选最快的 Cloudflare 边缘节点」）：延迟 + 测出来的速度
+            if let m = pass.bestMbps { return "已优选最快节点 · 延迟 \(rtt) 毫秒 · \(Self.mbps(m))" }
+            return "已优选最快节点 · 延迟 \(rtt) 毫秒"
         case .down: return "暂时不可用，正在使用普通线路"
         }
     }

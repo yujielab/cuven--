@@ -7012,7 +7012,10 @@ function pickEdgeHost(request, env, selfHost) {
  *
  *   回一份运行时配置，App 拿到就生效、存在本机（下次启动直接用），不用重装：
  *     version   整数，改了内容就加 1（App 据此说「已更新到第 N 版」/「已是最新」）
- *     pass      { nodes: ['pass.cuven.us', …] }  Cuven Pass Pro 的加速节点，按优先顺序，App 用第一个通的；
+ *     pass      { nodes: ['pass.cuven.us', …], edges?: ['s2.cuven.us:2053', …] }
+ *               nodes 是加速节点（VPS），edges 是额外的 Cloudflare 边缘入口（绑到本 Worker 的优选主机名）。
+ *               App 的 Cuven Pass Pro 把它们和 /api/edge 列出来的入口（EDGE_HOSTS）放在一起优选：先同时比延迟，
+ *               再在最快的三个里实测下载速度，用最快的那个（6 小时 / 换网络重选）。
  *               App 只认 cuven.us / cuven.online 下面的主机名（下发错了也不会把影片送去别处）
  *     compat    改进兼容性改「标记」时的上限（App 会再按安全范围收住）：
  *               maxHevcLevel（level_idc，153 = 5.1）、maxDvLevel、maxWidth、maxBandwidth（bps）、maxFrameRate

@@ -18,8 +18,10 @@ struct RuntimeConfig: Codable, Equatable {
     var compat: CompatRules?
 
     struct PassNodes: Codable, Equatable {
-        /// 加速节点的主机名，按优先顺序
+        /// 加速节点（VPS）的主机名，按优先顺序
         var nodes: [String]
+        /// 额外的 Cloudflare 边缘入口（绑到同一个 stream Worker 的优选主机名，可带端口）：和 /api/edge 列出来的一起参加优选
+        var edges: [String]?
     }
 
     struct CompatRules: Codable, Equatable {
@@ -117,8 +119,19 @@ final class RuntimeUpdate {
         return nodes.isEmpty ? (RuntimeConfig.builtIn.pass?.nodes ?? ["pass.cuven.us"]) : nodes
     }
 
-    /// 只认这两个域名下面的主机名（字母、数字、点、连字符）
-    static func allowedHost(_ h: String) -> Bool {
+    /// 额外的 Cloudflare 边缘入口（下发的；不能用的去掉）
+    var passEdges: [String] {
+        (config.pass?.edges ?? []).map { $0.lowercased() }.filter(Self.allowedHost)
+    }
+
+    /// 只认这两个域名下面的主机名（字母、数字、点、连字符），可以带 Cloudflare 认的 HTTPS 端口
+    static func allowedHost(_ entry: String) -> Bool {
+        let parts = entry.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 1 || parts.count == 2 else { return false }
+        if parts.count == 2 {
+            guard let port = Int(parts[1]), [443, 2053, 2083, 2087, 2096, 8443].contains(port) else { return false }
+        }
+        let h = String(parts[0])
         guard h.count <= 100, !h.isEmpty,
               h.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") }) else { return false }
         return h == "cuven.us" || h.hasSuffix(".cuven.us") || h == "cuven.online" || h.hasSuffix(".cuven.online")
