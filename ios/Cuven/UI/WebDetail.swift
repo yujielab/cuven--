@@ -33,9 +33,8 @@ private struct MovieDetailChrome: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            // 景深：整页模糊一点、缩到 96.5%（「减弱动态效果」时只模糊、不缩）；弧形菜单那一层在上面，清清楚楚
+            // 景深：整页模糊一点（用户后来要求不往后退、不压暗：只留模糊）；「+」展开的那一层在上面，清清楚楚
             .blur(radius: arcOpen ? 7 : 0)
-            .scaleEffect(arcOpen && !reduceMotion ? 0.965 : 1)
             .animation(DSMotion.adapt(.smooth(duration: 0.4), reduce: reduceMotion), value: arcOpen)
             .toolbar {
                 // 「分享」用户要求移除：只剩「下载」
