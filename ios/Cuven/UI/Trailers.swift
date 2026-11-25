@@ -229,6 +229,18 @@ struct TrailerPlayerView: View {
                     .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.scale.combined(with: .opacity))
             }
 
+            // 上下两道压暗（设计复查）：横屏、iPad、Duo 展开时画面铺满，顶上的「预告片」和底下的片名直接压在画面上，
+            // 亮的镜头、白底的字卡上看不清；竖屏时落在上下的黑边上看不出来。不挡点按
+            LinearGradient(stops: [.init(color: .black.opacity(0.35), location: 0),
+                                   .init(color: .clear, location: 0.16),
+                                   .init(color: .clear, location: 0.68),
+                                   .init(color: .black.opacity(0.2), location: 0.84),
+                                   .init(color: .black.opacity(0.5), location: 1)],
+                           startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+
             VStack(spacing: 0) {
                 HStack {
                     Button { leave() } label: {
@@ -262,7 +274,7 @@ struct TrailerPlayerView: View {
                 VStack(spacing: 6) {
                     Text(movieTitle.uppercased())
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Theme.secondary)
+                        .foregroundStyle(DSInk.secondary)
                         .lineLimit(1)
                     // 换到下一段：名字交叉淡过去，不是直接换字
                     Text(deck.current?.title ?? "预告片")

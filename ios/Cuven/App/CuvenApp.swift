@@ -135,9 +135,12 @@ struct RootView: View {
                 Label { Text("主页") } icon: { Image(uiImage: NavGlyphImage.home) }
             }
             // 探索（以前叫资料库，用户要求改名）：随机、高分优先的预告片流
-            Tab("探索", systemImage: "square.stack.fill", value: AppTab.library) {
+            // 图标和侧边那一列里的一样（设计复查：片段图标，NavGlyphImage）
+            Tab(value: AppTab.library) {
                 // 换一轮（种子变了）就整页重建：从第一部开始放新的顺序
                 LibraryView().duoHidesTabBar().tint(.white).id("\(roots[.library, default: 0])-\(model.exploreSeed)")
+            } label: {
+                Label { Text("探索") } icon: { Image(uiImage: NavGlyphImage.clips) }
             }
             // 请求中心（用户要求）：角标是进行中的请求个数
             // 图标和侧边那一列里的一样（用户要求更新：海报卡 + 右上角的「+」，NavGlyphImage）

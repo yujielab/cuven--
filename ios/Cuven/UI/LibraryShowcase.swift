@@ -167,12 +167,14 @@ struct ShowcaseHeader: View {
                 .font(.subheadline)
                 .foregroundStyle(DSInk.secondary)
         }
-        .padding(.top, top + 10)
+        // 上边距和「主页」同一个下限 24（设计复查）：iPhone Duo 折起时没有状态栏的安全区，
+        // 以前 0 + 10，「探索」贴着屏幕顶，和主页切换时标题跳一截
+        .padding(.top, max(top, 24) + 10)
         .padding(.horizontal, margin)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(alignment: .top) {
             LinearGradient(stops: Self.shade, startPoint: .top, endPoint: .bottom)
-                .frame(height: top + 150)
+                .frame(height: max(top, 24) + 150)
         }
     }
 
@@ -277,8 +279,9 @@ struct ShowcaseChapter: View {
 
                 // 右上角：预告片的播放 / 暂停 + 进度环（拿到预告片才出现：F77 自动播放的预览要有看得见的停止钮）
                 if controlOn {
+                    // 和「探索」标题同一个下限 24（设计复查）：+9 让圆环的中心对上标题那一行
                     ShowcaseControl(trailer: trailer)
-                        .padding(.top, top + 12)
+                        .padding(.top, max(top, 24) + 9)
                         .padding(.trailing, max(8, margin - 5) + trail)
                         .frame(width: vw, alignment: .topTrailing)
                         .visualEffect { content, proxy in

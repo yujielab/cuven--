@@ -83,7 +83,8 @@ struct NetworkSpeedRow: View {
         HStack(alignment: .firstTextBaseline, spacing: AccountMetrics.gap) {
             Image(systemName: "speedometer")
                 .font(.system(size: iconSize, weight: .regular))
-                .foregroundStyle(.white.opacity(0.6))
+                // 和 AccountRow 的符号同一级灰（DSInk.secondary）：比下面的说明亮一级（设计复查）
+                .foregroundStyle(DSInk.secondary)
                 .frame(width: iconColumn)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -183,8 +184,9 @@ private struct NetworkAutoRow: View {
             }
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(auto ? Color.black : Color.white)
-            .padding(.horizontal, 18)
-            .frame(minHeight: 34)
+            // 和「更改」「测速」同一号胶囊（30 高、左右 13；以前 34 / 18：设计复查），点按区仍 44
+            .padding(.horizontal, 13)
+            .frame(minHeight: 30)
             .background { if auto { Capsule().fill(Color.white) } }
             .glassEffect(.regular.interactive(), in: Capsule())
             .frame(minHeight: 44)
@@ -391,14 +393,15 @@ struct UsageInsightsCard: View {
                 Spacer(minLength: 0)
                 togglePill
             }
+            // 卡里的标题和账户页的行同一号（17 半粗）：以前 Title 3，和上面的组名「使用洞察」差不多大（设计复查）
             Text("流量概览")
-                .font(.title3.weight(.semibold))
+                .font(.headline)
                 .foregroundStyle(.white)
                 .accessibilityAddTraits(.isHeader)
         }
     }
 
-    /// 和头部「个人档案」同一种玻璃胶囊：看上去 34 高，点按区 44（F74）
+    /// 和头部「个人档案」同一种玻璃胶囊：看上去 30 高、左右 13（和「更改」「重设」同一号：设计复查），点按区 44（F74）
     private var togglePill: some View {
         Button {
             taps += 1
@@ -407,8 +410,8 @@ struct UsageInsightsCard: View {
             Text(expanded ? "收起" : "展开")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 18)
-                .frame(minHeight: 34)
+                .padding(.horizontal, 13)
+                .frame(minHeight: 30)
                 .glassEffect(.regular.interactive(), in: Capsule())
                 .frame(minHeight: 44)
                 .contentShape(Capsule())
@@ -450,8 +453,8 @@ struct UsageInsightsCard: View {
             }
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(.white)
-            .padding(.horizontal, 18)
-            .frame(minHeight: 34)
+            .padding(.horizontal, 13)
+            .frame(minHeight: 30)
             .glassEffect(.regular.interactive(), in: Capsule())
             .frame(minHeight: 44)
             .contentShape(Capsule())
@@ -911,7 +914,7 @@ private struct UsageEmptyState: View {
                 .font(.headline)
                 .foregroundStyle(.white)
             Text("播放或浏览后，这里会按小时显示流量使用情况。")
-                .font(.callout)
+                .font(.subheadline)
                 .foregroundStyle(DSInk.tertiary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)

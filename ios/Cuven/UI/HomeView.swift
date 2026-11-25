@@ -74,7 +74,10 @@ struct HomeView: View {
         let tall = fullHeight > fullWidth
         // iPad（用户要求定制）：头图不再占满一整屏，竖拿约六成、横拿约七成半，下面那一排的标题露出来（Apple TV App 在 iPad 上的比例）
         let pad = UIDevice.current.userInterfaceIdiom == .pad
-        let height = (fullHeight * (pad ? (tall ? 0.62 : 0.74) : (tall ? 0.86 : 0.94))).rounded()
+        let ratio: CGFloat = pad ? (tall ? 0.62 : 0.74) : (tall ? 0.86 : 0.94)
+        // 设计复查：有标签栏的 iPhone 竖拿（下边距 > 60）时，86% 让下一排的标题一大半压在标签栏底下；
+        // 最多到「屏高 − 下边距 − 72」（28 间距 + 28 标题 + 16 留白），标题整行露在标签栏上面。折起的 Duo、iPad 不变
+        let height = ((!pad && tall && insets.bottom > 60) ? min(fullHeight * ratio, fullHeight - insets.bottom - 72) : fullHeight * ratio).rounded()
         let pages = heroPages
         ZStack(alignment: .topLeading) {
             if !pages.isEmpty {

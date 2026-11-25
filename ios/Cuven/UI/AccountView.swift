@@ -348,7 +348,8 @@ struct AccountView: View {
             model.playback.clearAll()
             Haptics.success()
         } label: {
-            AccountRow(icon: "clock.arrow.circlepath", title: "清除继续观看", titleColor: Color(red: 1, green: 0.42, blue: 0.38)) { EmptyView() }
+            // 和别的页「未能添加」、系统深色下的红同一种（以前是偏粉的 #FF6B61：设计复查）
+            AccountRow(icon: "clock.arrow.circlepath", title: "清除继续观看", titleColor: Color(red: 1.0, green: 0.27, blue: 0.23)) { EmptyView() }
         }
         .buttonStyle(AccountRowPress())
         .disabled(empty)
@@ -475,7 +476,8 @@ struct AccountView: View {
                 Button { confirmSignOut = true } label: {
                     Text("退出登录")
                         .font(.body.weight(.semibold))
-                        .foregroundStyle(Color(red: 1, green: 0.42, blue: 0.38))
+                        // 系统深色下的红（以前偏粉的 #FF6B61：设计复查）
+                        .foregroundStyle(Color(red: 1.0, green: 0.27, blue: 0.23))
                         .frame(maxWidth: .infinity, minHeight: 54)
                         .contentShape(Rectangle())
                 }
@@ -644,7 +646,8 @@ struct AccountRow<Trailing: View>: View {
         HStack(spacing: AccountMetrics.gap) {
             Image(systemName: icon)
                 .font(.system(size: iconSize, weight: .regular))
-                .foregroundStyle(.white.opacity(0.6))
+                // 符号比下面的说明（0.55）亮一级、比标题暗一级：三级分得开（以前 0.6，和说明差不多：设计复查）
+                .foregroundStyle(DSInk.secondary)
                 .frame(width: iconColumn)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
@@ -684,10 +687,10 @@ struct AccountDivider: View {
 }
 
 /// 行尾的「›」：和系统列表的一样小（Footnote 半粗，跟着动态字体走），和「首选音轨」那种上下箭头一个大小。
-/// 以前写死 17 点，和标题一样大，比旁边的上下箭头粗一圈
+/// 以前写死 17 点，和标题一样大，比旁边的上下箭头粗一圈。符号用 chevron.forward（和请求中心的行尾同一个：设计复查）
 struct AccountChevron: View {
     var body: some View {
-        Image(systemName: "chevron.right")
+        Image(systemName: "chevron.forward")
             .font(.footnote.weight(.semibold))
             .foregroundStyle(.white.opacity(0.45))
             .accessibilityHidden(true)

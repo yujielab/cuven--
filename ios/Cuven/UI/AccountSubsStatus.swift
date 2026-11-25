@@ -83,7 +83,8 @@ struct SubsStatusRow: View {
             HStack(spacing: AccountMetrics.gap) {
                 Image(systemName: "captions.bubble.fill")
                     .font(.system(size: iconSize, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.6))
+                    // 和 AccountRow 的符号同一级灰（设计复查）
+                    .foregroundStyle(DSInk.secondary)
                     .frame(width: iconColumn)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {

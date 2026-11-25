@@ -442,9 +442,10 @@ struct RequestProgressCard: View {
             HStack(alignment: .top, spacing: 6) {
                 ForEach(0..<RequestStatus.labels.count, id: \.self) { i in
                     let reached = status.state == .done || i + 1 <= status.step
-                    Text(RequestStatus.labels[i])
+                    Text(Self.stacked(RequestStatus.labels[i]))
                         .font(.caption2.weight(i + 1 == status.step ? .semibold : .regular))
                         .foregroundStyle(reached ? Color.white : DSInk.tertiary)
+                        .multilineTextAlignment(.leading)
                         .lineLimit(2)
                         .minimumScaleFactor(0.85)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -458,6 +459,12 @@ struct RequestProgressCard: View {
         .padding(18)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("请求添加，第 \(status.step) 步，共 \(status.steps) 步：\(RequestStatus.labels[max(0, min(4, status.step - 1))])。\(trailing)。\(footnote)")
+    }
+
+    /// 五步的名字都是两个字的动词加对象（等待… / 最终…），在动词后面断行，五个都是整齐的两行；
+    /// 以前让系统自己断，窄的时候有的一行、有的两行，还会断成「等待品质 / 管理」（设计复查）
+    private static func stacked(_ s: String) -> String {
+        s.count > 3 ? String(s.prefix(2)) + "\n" + String(s.dropFirst(2)) : s
     }
 
     /// 卡底下那一行小字（进行中的是用户定的说法）

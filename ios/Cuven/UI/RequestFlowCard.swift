@@ -87,7 +87,8 @@ struct RequestFlowCard: View {
                     VStack(spacing: 6) {
                         Text(c.title)
                             .font(.subheadline.weight(category == c ? .semibold : .regular))
-                            .foregroundStyle(category == c ? Color.white : Color.white.opacity(0.42))
+                            // 没选中的用 App 最轻一级灰字（以前 42% 白，近黑卡上对比不到 4.5 : 1：设计复查）
+                            .foregroundStyle(category == c ? Color.white : DSInk.tertiary)
                         ZStack {
                             Capsule().fill(Color.clear).frame(height: 1.5)
                             if category == c {
@@ -138,7 +139,8 @@ struct RequestFlowCard: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(RequestFlowStats.stageNames[i])
                                 .font(.caption2)
-                                .foregroundStyle(Color.white.opacity(0.5))
+                                // 段名 / 百分比用 App 的两级灰字（以前 50% / 38% 白，比下面列表的灰还暗：设计复查）
+                                .foregroundStyle(DSInk.secondary)
                             Text("\(Int(c[i].rounded()))")
                                 .font(.system(size: big ? 22 : 17, weight: .semibold))
                                 .monospacedDigit()
@@ -146,7 +148,7 @@ struct RequestFlowCard: View {
                             Text(percent(c[0] > 0.5 ? c[i] / top : 0))
                                 .font(.caption2)
                                 .monospacedDigit()
-                                .foregroundStyle(Color.white.opacity(0.38))
+                                .foregroundStyle(DSInk.tertiary)
                         }
                         .padding(.leading, i == 0 ? 2 : 4)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -207,7 +209,7 @@ struct RequestFlowCard: View {
                 // 窄的屏（折起的 Duo）放不下时只收这一句（和「凑批」那一行一样缩一点、不折行），两头的「批量传输」和百分比不动
                 Text(b.mine.isEmpty ? "\(b.items) 部" : "\(b.items) 部 · 其中 \(b.mine.count) 部是你的")
                     .font(.footnote)
-                    .foregroundStyle(Color.white.opacity(0.5))
+                    .foregroundStyle(DSInk.tertiary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
                 Spacer(minLength: 8)
@@ -235,7 +237,7 @@ struct RequestFlowCard: View {
             }
             .font(.caption)
             .monospacedDigit()
-            .foregroundStyle(Color.white.opacity(0.5))
+            .foregroundStyle(DSInk.tertiary)
             .lineLimit(1)
             // 放不下时两头各缩一点，不截成「…」
             .minimumScaleFactor(0.85)
@@ -252,7 +254,7 @@ struct RequestFlowCard: View {
                     .foregroundStyle(.white)
                 Text("已清洗 \(g.ready) 部 · 满 \(need) 部开始批量传输")
                     .font(.footnote)
-                    .foregroundStyle(Color.white.opacity(0.5))
+                    .foregroundStyle(DSInk.tertiary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
             }

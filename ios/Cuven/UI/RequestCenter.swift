@@ -7,7 +7,7 @@ import SwiftUI
 // · 进行中：一张一张液态玻璃卡，上面一行小海报 + 片名 + 「电影 · 2026」，下面就是详情页那张五步进度卡（RequestProgressCard 原样复用：
 //   STEP X OF 5、绿色百分比、五段胶囊、五步的名字、那一行固定的说明）。展开的屏两张一排。点整张卡进那部的详情页
 // · 最近：一行一部（和搜索结果的列表行同一个样子：小海报、片名、一行灰字），成功和出错的分开两张卡（用户要求「错误和成功的列表分离」）：
-//   「已就绪」一张（右边一颗白色「播放」，按下去直接放片库里的这部：RequestPlayback，和详情页的「立即播放」同一套），
+//   「已就绪」一张（右边一颗半透明「播放」，按下去直接放片库里的这部：RequestPlayback，和详情页的「立即播放」同一套），
 //   「未能添加」一张（没能添加的、取消了的；点进去是那部的详情页，可以再请求一次）
 // 只保留最近 10 个（按提交的先后）；空的时候说下一步去哪儿（F88），给一颗「去搜索」。下拉刷新、打开时马上问一次服务器。
 // 标签栏那一格上的角标是进行中的个数。
@@ -192,6 +192,8 @@ struct RequestCenterView: View {
                 basketFooter
             }
             .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color.white.opacity(0.07)))
+            // 和上面那张流程卡、账户页的卡一样有一圈细边（以前只有底色，没有边：设计复查）
+            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(DSFill.hairline, lineWidth: 1))
             .frame(maxWidth: 720, alignment: .leading)
             .padding(.horizontal, m.margin)
         }
@@ -360,6 +362,8 @@ struct RequestCenterView: View {
                 }
             }
             .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color.white.opacity(0.07)))
+            // 和上面那张流程卡、账户页的卡一样有一圈细边（以前只有底色，没有边：设计复查）
+            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(DSFill.hairline, lineWidth: 1))
             .frame(maxWidth: 720, alignment: .leading)
             .padding(.horizontal, m.margin)
         }
@@ -402,7 +406,8 @@ struct RequestCenterView: View {
         .padding(.horizontal, 20)
     }
 
-    /// 已就绪的：白色胶囊「播放」（和详情页的主操作同一种颜色），直接放片库里的这部
+    /// 已就绪的：半透明胶囊「播放」，直接放片库里的这部。
+    /// 以前是白胶囊黑字，几部就绪时右边一列白胶囊，抢了「确认请求」那颗主操作；一行一颗的操作改成轻的（16% 白底白字，和详情页相关卡的胶囊一样：设计复查）
     private func playButton(_ s: RequestStatus) -> some View {
         Button {
             guard opening == nil else { return }
@@ -417,15 +422,15 @@ struct RequestCenterView: View {
                 Image(systemName: "play.fill").font(.footnote.weight(.bold))
                     .opacity(opening == s.id ? 0 : 1)
                     .overlay {
-                        if opening == s.id { ProgressView().controlSize(.small).tint(.black) }
+                        if opening == s.id { ProgressView().controlSize(.small).tint(.white) }
                     }
                     .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: opening)
                 Text("播放").font(.subheadline.weight(.semibold))
             }
-            .foregroundStyle(.black)
+            .foregroundStyle(.white)
             .padding(.horizontal, 14)
             .frame(minHeight: 34)
-            .background(Capsule().fill(Color.white))
+            .background(Capsule().fill(Color.white.opacity(0.16)))
             .frame(minHeight: 44)
             .contentShape(Capsule())
         }

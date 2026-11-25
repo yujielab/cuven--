@@ -187,13 +187,16 @@ struct EditorsPick: View {
                     .animation(.easeInOut(duration: 0.8), value: trailer.showing)
                     .allowsHitTesting(false)
             }
-            // 上沿一层淡暗：「编辑推荐」压在上面看得清（F34）
-            LinearGradient(stops: [.init(color: .black.opacity(0.45), location: 0),
-                                   .init(color: .black.opacity(0), location: 0.32)],
+            // 上沿一层淡暗：「编辑推荐」压在上面看得清（F34）。
+            // 设计复查：上下两头都融进页面的黑（和头图一样），不再是横穿整屏的两道硬边
+            LinearGradient(stops: [.init(color: .black, location: 0),
+                                   .init(color: .black.opacity(0.45), location: 0.10),
+                                   .init(color: .black.opacity(0), location: 0.34)],
                            startPoint: .top, endPoint: .bottom)
             // 下沿也压一点：面板和画面分得开
             LinearGradient(stops: [.init(color: .black.opacity(0), location: 0.55),
-                                   .init(color: .black.opacity(0.32), location: 1)],
+                                   .init(color: .black.opacity(0.32), location: 0.86),
+                                   .init(color: .black, location: 1)],
                            startPoint: .top, endPoint: .bottom)
         }
         .clipped()
@@ -598,12 +601,15 @@ struct YearTrailerCard: View {
             .frame(width: width, height: h)
             .overlay(alignment: .bottomLeading) {
                 if let progress {
-                    // 和「继续观看」那排同一种：剧照底边一道细线
+                    // 和「继续观看」那排同一种：缩进的细胶囊（DSPercentProgress 的尺寸）。
+                    // 设计复查：以前贴底边通栏的细线，两头被圆角切掉，进度小时看不见
                     ZStack(alignment: .leading) {
-                        Rectangle().fill(Color.white.opacity(0.22))
-                        Rectangle().fill(Color.white).frame(width: (width * min(1, max(0, progress))).rounded())
+                        Capsule().fill(Color.white.opacity(0.3))
+                        Capsule().fill(Color.white).frame(width: max(4, ((width - 24) * min(1, max(0, progress))).rounded()))
                     }
-                    .frame(width: width, height: 3)
+                    .frame(width: width - 24, height: 4)
+                    .padding(.leading, 12)
+                    .padding(.bottom, 10)
                     .animation(.smooth(duration: 0.6), value: progress)
                 }
             }
@@ -851,7 +857,8 @@ struct TileRow: View, Equatable {
             ForEach(0..<(tiles.count * 3), id: \.self) { i in
                 let t = tiles[i % tiles.count]
                 ZStack(alignment: .bottom) {
-                    Color(white: 0.12)
+                    // 设计复查：底色、细边换成全 App 同一种（以前 0.12 灰、0.5 点边，最后一排载入时深浅不一）
+                    DSFill.placeholder
                     RemoteImage(url: t.art, maxPixel: tileW * 3)
                         .frame(width: tileW, height: h)
                     if let logo = t.logo {
@@ -862,7 +869,7 @@ struct TileRow: View, Equatable {
                 }
                 .frame(width: tileW, height: h)
                 .clipShape(shape)
-                .overlay(shape.strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
+                .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
             }
         }
     }

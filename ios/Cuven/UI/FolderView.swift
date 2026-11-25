@@ -6,18 +6,25 @@ import SwiftUI
 // 新的年份在前，同一年按片名。不再按年份分组、不用高低错落的瀑布流（T23：只用标准的排与网格），
 // 也不再在画面上压片名与规格（F1：画面归画面，字在卡下）。
 
-/// 文件夹卡：系统的 folder.fill 图标 + 文件夹名。不垫底板、不描边（F3），不用玻璃（F38），不用强调色（F32）。
+/// 文件夹卡：一块占位色的底（和占位卡同一套圆角、细边：设计复查）上一个 folder.fill 图标 + 左对齐的文件夹名。不用玻璃（F38），不用强调色（F32）。
 /// 宽度跟着所在那一排（文件夹页里是 DSMetrics 的海报宽），图标按宽度等比放大（S1：展开是同一张卡长大）
 struct FolderCard: View {
     let folder: LibraryFolder
     var width: CGFloat = 191
 
     var body: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: max(28, (width * 0.4).rounded())))
-                .foregroundStyle(.secondary)
+        // 图标放进一块和占位卡同一套的底（设计复查）：以前一个灰图标居中飘在列里，离左边线 30 多点，字也居中，
+        // 和上面的标题、下面的海报都对不上
+        let shape = RoundedRectangle(cornerRadius: DSRadius.card(width), style: .continuous)
+        VStack(alignment: .leading, spacing: 8) {
+            shape.fill(DSFill.placeholder)
                 .frame(width: width, height: max(44, (width * 0.62).rounded()))
+                .overlay {
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: max(22, (width * 0.26).rounded())))
+                        .foregroundStyle(DSInk.tertiary)
+                }
+                .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
             Text(folder.name)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.primary)
@@ -25,7 +32,7 @@ struct FolderCard: View {
                 // 放不下从中间省（和系统「文件」App 一样）：同一个开头的几个文件夹（「…第一季」「…第二季」）靠结尾分得出，
                 // 以前从尾巴省，几张卡截成一模一样的字
                 .truncationMode(.middle)
-                .frame(width: width)
+                .frame(width: width, alignment: .leading)
         }
         .frame(width: width)
         .contentShape(Rectangle())

@@ -629,7 +629,7 @@ private struct RequestableCard: View {
     let width: CGFloat
     let slot: String
     /// 电影那一排：竖版海报（用户要求，图二）。影片库的海报本来就印着片名，不再压字标；
-    /// 请求的状态是左上角一颗小胶囊，请求进行中海报底边一道细进度
+    /// 请求的状态（默认的「申请」不标）是左上角一颗小胶囊，请求进行中海报底边一道细进度
     var poster = false
     /// 竖版海报的画面滑动时那一点视差按这一页的边距、卡距算
     var metrics = DSMetrics(width: 400)
@@ -642,7 +642,10 @@ private struct RequestableCard: View {
             if poster {
                 DSPosterLockup(art: TMDBImage.url(item.poster, "w342"), title: item.title,
                                subtitle: CatalogRequestState.line(item, art: art), metrics: metrics, width: width)
-                    .overlay(alignment: .topLeading) { statusPill(state.badge).padding(8) }
+                    .overlay(alignment: .topLeading) {
+                        // 只标例外（设计复查）：默认的「申请」每张都一样，上面的分段已经写着可申请，不再每张海报压一颗蓝胶囊
+                        if state.badge.tone != .accent { statusPill(state.badge).padding(8) }
+                    }
                     .overlay(alignment: .bottom) {
                         if let p = state.progress {
                             PosterRequestProgress(value: p)

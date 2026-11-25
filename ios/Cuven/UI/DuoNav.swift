@@ -485,6 +485,27 @@ struct ScanGlyph: Shape {
 enum NavGlyphImage {
     static let home: UIImage = template(HomeGlyph())
     static let request: UIImage = template(RequestGlyph())
+    /// 「探索」：和侧边那一列同一个「片段」图标（设计复查：以前系统标签栏上是实心的 square.stack.fill，和别的线条图标不是一家）
+    static let clips: UIImage = clipsImage()
+
+    /// 片段图标：外框按 template 的线条规矩描边，里面的播放键实心；画在 26 × 26 里正中那块 17 × 22.5（和侧边胶囊里一样的比例）
+    private static func clipsImage() -> UIImage {
+        let size: CGFloat = 26
+        let r = CGRect(x: 4.5, y: 1.75, width: 17, height: 22.5)
+        let img = UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { ctx in
+            let c = ctx.cgContext
+            c.addPath(ClipsGlyph().path(in: r).cgPath)
+            c.setLineWidth(1.9)
+            c.setLineCap(.round)
+            c.setLineJoin(.round)
+            c.setStrokeColor(UIColor.black.cgColor)
+            c.strokePath()
+            c.addPath(ClipsGlyph.Play().path(in: r).cgPath)
+            c.setFillColor(UIColor.black.cgColor)
+            c.fillPath()
+        }
+        return img.withRenderingMode(.alwaysTemplate)
+    }
 
     private static func template<S: Shape>(_ shape: S) -> UIImage {
         let size: CGFloat = 26

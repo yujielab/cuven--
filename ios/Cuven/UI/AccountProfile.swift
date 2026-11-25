@@ -30,7 +30,8 @@ extension AccountStore {
 
 /// 弹层里的几种颜色（网页版的红、绿、琥珀，放到深色上提亮一些）
 enum ProfileInk {
-    static let bad = Color(red: 1, green: 0.42, blue: 0.38)
+    /// 和账户页「退出登录」、别的页「未能添加」同一种红（系统深色下的红；以前偏粉的 #FF6B61：设计复查）
+    static let bad = Color(red: 1.0, green: 0.27, blue: 0.23)
     static let good = Color(red: 0.25, green: 0.84, blue: 0.5)
     static let check = Color(red: 0.2, green: 0.78, blue: 0.35)
     static let warnText = Color(red: 1, green: 0.85, blue: 0.6)
