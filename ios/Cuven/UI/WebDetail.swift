@@ -24,6 +24,9 @@ private struct MovieDetailChrome: ViewModifier {
     let tmdbID: Int?
     let column: Bool
     @Binding var alert: PrecacheAlert?
+    /// 弧形菜单的「+」摆在哪（那一行操作里「…」原来那一格）、「从头播放」（有进度才有）
+    let anchor: DetailArcAnchor
+    let onRestart: (() -> Void)?
 
     func body(content: Content) -> some View {
         content
@@ -39,7 +42,8 @@ private struct MovieDetailChrome: ViewModifier {
             .toolbar(column ? .hidden : .automatic, for: .navigationBar)
             .overlay {
                 if column {
-                    DetailArcMenuLayer(video: video, title: title, runtime: runtime, tmdbID: tmdbID, alert: $alert)
+                    DetailArcMenuLayer(video: video, title: title, runtime: runtime, tmdbID: tmdbID, alert: $alert,
+                                       anchor: anchor, onRestart: onRestart)
                 }
             }
     }
@@ -57,6 +61,8 @@ struct MovieDetailView: View {
     @State private var art: DetailArt?
     /// 预先缓存、下载开不了（空间不够、演示数据）时说一声
     @State private var precacheAlert: PrecacheAlert?
+    /// 「侧边一列」时弧形菜单的「+」顶替「…」：那一格在屏幕上的框（DetailArcAnchor）
+    @State private var arcAnchor = DetailArcAnchor()
 
     var body: some View {
         let meta = full ?? model.meta(video)
@@ -82,13 +88,15 @@ struct MovieDetailView: View {
             trailerArt: trailerArt(meta),
             stills: DetailText.stills(meta),
             precache: precacheState(meta),
-            downloadPath: video.path
+            downloadPath: video.path,
+            arcAnchor: column ? arcAnchor : nil
         ) { _ in
             EmptyView()
         }
         // 「下载」「分享」：别的 iPhone、iPad 在右上角。iPhone Duo「侧边一列」的形态里系统把返回、下载、分享竖着排进那一列，
         // 下载 / 分享那一组压到了底下的导航胶囊上（用户截图）：这时导航栏整个收起，换成一颗展开成弧形菜单的「+」（DetailArcMenuLayer）
-        .modifier(MovieDetailChrome(video: video, title: model.title(video), runtime: meta?.runtime, tmdbID: meta?.id, column: column, alert: $precacheAlert))
+        .modifier(MovieDetailChrome(video: video, title: model.title(video), runtime: meta?.runtime, tmdbID: meta?.id, column: column,
+                                    alert: $precacheAlert, anchor: arcAnchor, onRestart: restartAction(meta)))
         .alert(precacheAlert?.title ?? "", isPresented: Binding(get: { precacheAlert != nil }, set: { if !$0 { precacheAlert = nil } }),
                presenting: precacheAlert) { _ in
             Button("好", role: .cancel) {}
@@ -673,6 +681,8 @@ struct DetailScaffold<Episodes: View>: View {
     var downloadPath: String? = nil
     /// 换掉「播放」的那一块（片库里没有的那部：「请求添加」按钮 / 五步进度卡，RequestViews.swift）
     var customAction: AnyView? = nil
+    /// iPhone Duo「侧边一列」：弧形菜单的「+」顶替「…」（用户要求），这一行只留出那一格、把它的框记下来
+    var arcAnchor: DetailArcAnchor? = nil
     /// 分集那一段（电影没有）：拿到当前宽度的版面尺寸再排
     @ViewBuilder var episodes: (DSMetrics) -> Episodes
 
@@ -1040,8 +1050,16 @@ struct DetailScaffold<Episodes: View>: View {
                 } else {
                     playButton(m)
                 }
-                // 「…」里只剩「从头播放」：有进度才出现（发行版不再有「分享」「复制直链」这类站外操作）
-                if onRestart != nil { moreMenu }
+                // 「…」里只剩「从头播放」：有进度才出现（发行版不再有「分享」「复制直链」这类站外操作）。
+                // iPhone Duo「侧边一列」时这一格让给弧形菜单的「+」（一直在；「从头播放」挪到弧上）：只占位、记下框，「+」由那一层画
+                if let arcAnchor {
+                    Color.clear
+                        .frame(width: 48, height: 48)
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { arcAnchor.rect = $0 }
+                        .accessibilityHidden(true)
+                } else if onRestart != nil {
+                    moreMenu
+                }
             }
             .padding(.top, 4)
         }

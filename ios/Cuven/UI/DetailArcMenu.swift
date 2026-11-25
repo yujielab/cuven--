@@ -5,12 +5,21 @@ import UIKit
 //
 // 用户要求「把详情页的返回按钮换成展开弧形菜单按钮（参考图 2）以解决重叠问题」：
 // 系统把详情页的返回、下载、分享竖着放进侧边那一列，下载 / 分享那一组往下压到了底下的导航胶囊上。
-// 现在这几种形态里这三颗都收起来，换成一颗 48 点的玻璃圆钮（「+」）：摆在返回钮原来的地方（状态栏中线上、状态栏和导航胶囊之间）；
+// 现在这几种形态里这三颗都收起来，换成一颗 48 点的玻璃圆钮（「+」）。用户后来要求「更新展开按钮位置并替换更多按钮」：
+// 「+」摆在「播放」那一行里「…」原来那一格（跟着页面滚，滚到顶上那一截就藏起来），「…」里的「从头播放」挪到弧上最后一项；
 // 点一下，三颗圆形的玻璃从它左边沿一道弧展开（参考图 2）：上「返回」、中「下载」、下「分享」，「+」转成「×」，后面的页面压暗一点；
 // 再点一下或点空白处收起。三颗从上到下一颗接一颗地从圆钮那儿长出来，收起也是从上到下一颗接一颗；
 // 三颗各是各的正圆玻璃（用户要求：不互相粘连、改成圆形○），整颗都点得到。
 // 折起横拿那种矮的一列放不下：圆钮挪到页面左上角，弧往右下展开。别的 iPhone、iPad 照旧是系统右上角的那几颗。
 // 系统返回钮藏起来以后边缘右滑返回会失灵：同一页里把它接回来（SwipeBackEnabler）。
+
+/// 详情页那一行操作里「…」原来的位置（用户要求「更新展开按钮位置并替换更多按钮」：「+」挪到这里）：
+/// 那一格每次排版、每次跟着页面滚动都把自己在屏幕上的框记在这里。单独一个可观察的小对象：
+/// 滚动时只有弧形菜单那一层跟着重画，整页的 body 不跟着每帧重算
+@MainActor @Observable
+final class DetailArcAnchor {
+    var rect: CGRect = .zero
+}
 
 struct DetailArcMenuLayer: View {
     let video: Video
@@ -18,12 +27,16 @@ struct DetailArcMenuLayer: View {
     let runtime: Int?
     let tmdbID: Int?
     @Binding var alert: PrecacheAlert?
+    /// 「+」摆在哪（详情页那一行里「…」原来那一格）；还没量到就按以前的摆法放进侧边那一列
+    let anchor: DetailArcAnchor
+    /// 「从头播放」（有进度才有）：以前在「…」菜单里，「…」被「+」顶替以后作为弧上最后一项
+    var onRestart: (() -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var open = false
-    /// 三块弧各自出来了没有（上、中、下）：展开、收起都是从上到下一块接一块
-    @State private var shown = [false, false, false]
+    /// 弧上各项出来了没有（从上到下）：展开、收起都是从上到下一项接一项
+    @State private var shown = [false, false, false, false]
     /// 一块接一块的节拍：中途再点一下就停掉它，从眼下的样子接着走
     @State private var stepper: Task<Void, Never>?
 
@@ -50,19 +63,36 @@ struct DetailArcMenuLayer: View {
         var toward: Double
     }
 
+    /// 弧上一共几项：返回、下载、分享，有进度时再加「从头播放」
+    private var count: Int { onRestart == nil ? 3 : 4 }
+
     var body: some View {
         GeometryReader { safe in
             let sf = safe.frame(in: .global)
             GeometryReader { full in
                 let ff = full.frame(in: .global)
-                let spot = place(in: full.size, lead: max(0, sf.minX - ff.minX), trail: max(0, ff.maxX - sf.maxX),
-                                 top: max(0, sf.minY - ff.minY))
+                let a = anchor.rect
+                // 「+」在「…」原来那一格：跟着页面滚；滚到顶上那一截（钉住的条、状态栏）或者滚出屏幕底就藏起来
+                let anchored = a.width > 0
+                let center = anchored
+                    ? CGPoint(x: a.midX - ff.minX, y: a.midY - ff.minY)
+                    : place(in: full.size, lead: max(0, sf.minX - ff.minX), trail: max(0, ff.maxX - sf.maxX),
+                            top: max(0, sf.minY - ff.minY)).center
+                let toward = anchored ? 180 : place(in: full.size, lead: max(0, sf.minX - ff.minX),
+                                                    trail: max(0, ff.maxX - sf.maxX), top: max(0, sf.minY - ff.minY)).toward
+                // 还没量到那一格（第一帧）也先藏着：不先在侧边那一列里闪一下再跳过去
+                let visible = anchored && center.y > max(sf.minY - ff.minY, 0) + 96 && center.y < full.size.height - 24
                 ZStack(alignment: .topLeading) {
                     if open { scrim }
-                    fan(toward: spot.toward)
-                        .position(spot.center)
+                    fan(toward: toward)
+                        .position(center)
+                        .opacity(visible ? 1 : 0)
+                        .allowsHitTesting(visible)
+                        .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: visible)
                 }
                 .frame(width: full.size.width, height: full.size.height, alignment: .topLeading)
+                // 开着的时候滚走了：收起来（压暗还盖着整页，弧却跟着「+」不见了）
+                .onChange(of: visible) { _, v in if !v && open { setOpen(false) } }
             }
             .ignoresSafeArea()
         }
@@ -107,7 +137,7 @@ struct DetailArcMenuLayer: View {
         if reduceMotion {
             withAnimation(curve) {
                 open = on
-                shown = [on, on, on]
+                shown = [on, on, on, on]
             }
             return
         }
@@ -118,7 +148,7 @@ struct DetailArcMenuLayer: View {
         }
         let beat = on ? 110 : 80
         stepper = Task { @MainActor in
-            for i in 1..<3 {
+            for i in 1..<count {
                 try? await Task.sleep(for: .milliseconds(beat))
                 if Task.isCancelled { return }
                 withAnimation(curve) { shown[i] = on }
@@ -140,7 +170,7 @@ struct DetailArcMenuLayer: View {
     /// 三块的玻璃会粘成连着的一整条（用户要求：三块不能粘连）
     private func fan(toward: Double) -> some View {
         ZStack {
-            ForEach(0..<3, id: \.self) { i in
+            ForEach(0..<count, id: \.self) { i in
                 if shown[i] {
                     segment(i, toward: toward)
                         // 正在收起的那几项不再接点按
@@ -175,7 +205,8 @@ struct DetailArcMenuLayer: View {
     @ViewBuilder
     private func segment(_ i: Int, toward: Double) -> some View {
         // 中间那项正对着展开的方向，上下两项各偏一个 step。屏幕坐标 y 往下：往右展开时「上」是角度减，往左展开时是角度加
-        let offset = Double(i - 1) * Self.step
+        // 几项一起以展开的方向为中线左右对开（三项时中间那项正对着；四项时中线落在第二、三项之间）
+        let offset = (Double(i) - Double(count - 1) / 2) * Self.step
         let deg = toward > 90 && toward < 270 ? toward - offset : toward + offset
         if i == 1 {
             let slot = ArcSlot(band: ArcBand(midDegrees: deg, spanDegrees: Self.span, radius: Self.radius, thickness: Self.thickness))
@@ -220,6 +251,20 @@ struct DetailArcMenuLayer: View {
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(.white)
                 .tint(.white)
+        case 3:
+            Button {
+                Haptics.light()
+                setOpen(false)
+                onRestart?()
+            } label: {
+                Image(systemName: "arrow.counterclockwise")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .detailHit(Self.button)
+            }
+            .buttonStyle(PressableStyle(scale: 0.9))
+            .accessibilityLabel("从头播放")
+            .accessibilityIdentifier("detail-restart")
         default:
             DetailShareButton(video: video, title: title, tmdbID: tmdbID, hit: Self.button)
                 .font(.system(size: 18, weight: .semibold))

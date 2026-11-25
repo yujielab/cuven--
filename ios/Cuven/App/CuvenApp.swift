@@ -158,19 +158,14 @@ struct RootView: View {
                 SearchView().duoHidesTabBar().tint(.white).id(roots[.search, default: 0])
             }
         }
-        .environment(\.duoColumn, column)
-        // 换标签：一下选择触感（系统标签栏和侧边那一列自己画的导航都走这里）
+        // 换标签：一下选择触感（系统标签栏和自己画的导航都走这里）
         .sensoryFeedback(.selection, trigger: tab)
-        // 侧边一列的形态：自己画的导航，搜索单独一颗
-        .overlay {
-            if column {
-                DuoNavLayer(tab: $tab, edge: barEdge) { t in
-                    roots[t, default: 0] += 1
-                    // 在「探索」上再点一下「探索」：换一轮（新的随机顺序）
-                    if t == .library { model.reshuffleExplore() }
-                }
-            }
-        }
+        // 自己画的导航：侧边一列的形态竖着那枚；别的 iPhone 形态底下横着那枚（NavShell）
+        .modifier(NavShell(tab: $tab, column: column, edge: barEdge) { t in
+            roots[t, default: 0] += 1
+            // 在「探索」上再点一下「探索」：换一轮（新的随机顺序）
+            if t == .library { model.reshuffleExplore() }
+        })
         // 量整个窗口、左右安全区，iOS 27.1 起再问系统竖栏在哪一边（SideColumnProbe）
         .modifier(SideColumnProbe(window: $window, sideInsets: $sideInsets, probeEdge: $probeEdge,
                                   barEdge: $barEdge, barWindow: $barWindow))
@@ -274,6 +269,33 @@ enum LayoutLog {
 
 /// 认 iPhone Duo「侧边一列」要的几样都在这里量（单独一个修饰器：RootView 那一长串修饰器再长，编译器就推不动类型了）：
 /// 整个窗口的大小（连安全区，折起 / 展开、横竖一变就重新判断）、左右安全区、iOS 27.1 起系统说的竖栏在哪一边
+/// 自己画的导航放在哪、怎么放（单独一个修饰器：RootView 那一串再长，编译器就推不动了）。
+/// · 侧边一列的形态：竖着的 DuoNav 摆进那一列（DuoNavLayer）；
+/// · 别的 iPhone 形态（展开竖拿、普通 iPhone）：用户要求「更新导航栏和 iPhone Duo 设计一致并拥有光线反射」——
+///   系统标签栏收起（DuoHidesTabBar 看 duoBottomBar），底下正中换成横着的同一枚胶囊（DuoBottomNavLayer），页面底下给它留出高度；
+/// · iPad 照旧是系统的标签栏 / 侧边栏
+private struct NavShell: ViewModifier {
+    @Binding var tab: AppTab
+    let column: Bool
+    let edge: HorizontalEdge?
+    let reselect: (AppTab) -> Void
+
+    func body(content: Content) -> some View {
+        let bottomBar = !column && UIDevice.current.userInterfaceIdiom == .phone
+        content
+            .environment(\.duoColumn, column)
+            .environment(\.duoBottomBar, bottomBar)
+            .modifier(DuoBottomInset(on: bottomBar))
+            .overlay {
+                if column {
+                    DuoNavLayer(tab: $tab, edge: edge, reselect: reselect)
+                } else if bottomBar {
+                    DuoBottomNavLayer(tab: $tab, reselect: reselect)
+                }
+            }
+    }
+}
+
 private struct SideColumnProbe: ViewModifier {
     @Binding var window: CGSize
     @Binding var sideInsets: (leading: CGFloat, trailing: CGFloat)

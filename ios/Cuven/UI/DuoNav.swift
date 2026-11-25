@@ -68,22 +68,35 @@ private struct DuoColumnKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+private struct DuoBottomBarKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 extension EnvironmentValues {
     /// 现在是不是「侧边一列」的形态（系统标签栏收起，用 DuoNav）
     var duoColumn: Bool {
         get { self[DuoColumnKey.self] }
         set { self[DuoColumnKey.self] = newValue }
     }
+
+    /// 别的 iPhone 形态（展开竖拿、普通 iPhone）：系统标签栏也收起，底下用横着的那枚 DuoNav（用户要求和 iPhone Duo 的设计一致）
+    var duoBottomBar: Bool {
+        get { self[DuoBottomBarKey.self] }
+        set { self[DuoBottomBarKey.self] = newValue }
+    }
 }
 
 /// 「侧边一列」的形态里收起系统标签栏。各标签页的根视图和推进去的每一页都要挂：推进去的页面不挂，系统会把栏带回来
 struct DuoHidesTabBar: ViewModifier {
     @Environment(\.duoColumn) private var column
+    @Environment(\.duoBottomBar) private var bottomBar
 
     func body(content: Content) -> some View {
+        // 底下那枚横着的胶囊顶替系统标签栏的时候也收起（用户要求 iPhone 上都和 iPhone Duo 的设计一致）
+        let hide = column || bottomBar
         content
-            .toolbar(column ? .hidden : .automatic, for: .tabBar)
-            .background { TabBarGuard(hidden: column) }
+            .toolbar(hide ? .hidden : .automatic, for: .tabBar)
+            .background { TabBarGuard(hidden: hide) }
     }
 }
 
@@ -124,7 +137,7 @@ private struct TabBarGuard: UIViewControllerRepresentable {
             }
         }
 
-        /// 排到下一轮再看：SwiftUI 这一轮自己也在改标签栏，等它改完
+        /// 排到下一轮再看：SwiftUI 这一轮自己也在改标签栏，等它改完（这个 App 只在用自己画的导航时藏系统标签栏）
         func apply() {
             Task { @MainActor [weak self] in
                 guard let self, self.viewIfLoaded?.window != nil, let tabs = self.tabBarController else { return }
@@ -153,6 +166,8 @@ struct DuoNav: View {
     var pitch: CGFloat = DuoNav.pitch
     /// 内容在胶囊的哪一边（胶囊在后缘时内容在前缘）：环境反光从这一边打过来
     var contentLeading = true
+    /// 竖着（侧边那一列）还是横着（别的 iPhone 形态，压在页面底下）
+    var axis: Axis = .vertical
     @Namespace private var ns
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(AccountStore.self) private var account
@@ -201,13 +216,15 @@ struct DuoNav: View {
         let p = pitch
         let e = Self.endPad(p)
         let h = Self.height(pitch: p)
-        VStack(spacing: 0) {
+        let vertical = axis == .vertical
+        let stack = vertical ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
+        stack {
             ForEach(Self.items) { item in
                 itemButton(item, pitch: p)
             }
         }
-        .padding(.vertical, e - p / 2)
-        .frame(width: Self.width, height: Self.height(pitch: p))
+        .padding(vertical ? Edge.Set.vertical : Edge.Set.horizontal, e - p / 2)
+        .frame(width: vertical ? Self.width : h, height: vertical ? h : Self.width)
         // 深色的身子：Netflix 那枚比系统标签栏暗得多（量到约是底下画面 × 0.4，画面照样透得过来），
         // 可最外一圈边是亮的、带着旁边海报的颜色（用户指出的：目标图里胶囊左边缘泛着旁边画面的蓝紫、往下一点泛红）——
         // 那是 Liquid Glass 的边在折射、反射周围的画面。所以玻璃本身不染色（整块压黑会把这圈边也压掉），
@@ -220,8 +237,10 @@ struct DuoNav: View {
                     .fill(DuoNavInk.body)
                     .padding(3.5)
                     .blur(radius: 2)
-                // 环境反光（用户要求「边缘应该反射蓝色区域中的各种主要颜色混合渐变光线」）：里面一层柔光
-                NavAmbientGlow(layer: .inner, height: h, contentLeading: contentLeading)
+                // 环境反光（用户要求「边缘应该反射蓝色区域中的各种主要颜色混合渐变光线」）：里面一层柔光。
+                // 只有竖着的要：侧边那一列底下是黑的，玻璃折射不到旁边的画面，得自己取色；
+                // 横着的压在页面上面，画面就在玻璃后面，玻璃自己在 GPU 上折射、反射它（不用取色，不占主线程）
+                if vertical { NavAmbientGlow(layer: .inner, height: h, contentLeading: contentLeading) }
             }
             .allowsHitTesting(false)
         }
@@ -230,7 +249,7 @@ struct DuoNav: View {
                 Capsule()
                     .strokeBorder(DuoNavInk.rim, lineWidth: 1)
                 // 边上一道反光
-                NavAmbientGlow(layer: .rim, height: h, contentLeading: contentLeading)
+                if vertical { NavAmbientGlow(layer: .rim, height: h, contentLeading: contentLeading) }
             }
             .allowsHitTesting(false)
         }
@@ -242,14 +261,17 @@ struct DuoNav: View {
 
     private func itemButton(_ item: Item, pitch p: CGFloat) -> some View {
         let on = tab == item.tab
-        // 选中垫的那块：40 × 52（离胶囊两边 8，比格子矮 2）
-        let pillW = Self.width - 16
-        let pillH = min(52, p - 2)
+        let vertical = axis == .vertical
+        // 选中垫的那块：横跨 40（离胶囊两边 8），顺着 52（比格子短 2）；横着的胶囊里转过来
+        let across = Self.width - 16
+        let along = min(52, p - 2)
+        let pillW = vertical ? across : along
+        let pillH = vertical ? along : across
         return Button {
             if on { reselect(item.tab); Haptics.light() } else { tab = item.tab }
         } label: {
             glyph(item.glyph, on: on)
-                .frame(width: Self.width, height: p)
+                .frame(width: vertical ? Self.width : p, height: vertical ? p : Self.width)
                 .background {
                     if on {
                         Capsule()
@@ -722,6 +744,54 @@ private final class NavAmbientTick: NSObject {
             return
         }
         owner.tick(link)
+    }
+}
+
+/// 别的 iPhone 形态（展开竖拿、普通 iPhone）：横着的那枚 DuoNav 压在页面底下正中（用户要求「更新导航栏和 iPhone Duo 设计一致，
+/// 并拥有光线反射」）。同一套：深色的身子、白色的高光边、选中垫一块、线条图标、头像、角标；
+/// 反光交给 Liquid Glass 自己：画面就在这枚胶囊后面，玻璃在 GPU 上折射、反射它，不取色、不占主线程。
+/// 离底：有 Home 指示条的屏离底 24（比安全区高 10），没有的离底 14。页面底下留出这一截（DuoBottomInset），最后一排滚得上来。
+/// 键盘起来时不跟着挪：和系统标签栏一样被键盘盖住
+struct DuoBottomNavLayer: View {
+    @Binding var tab: AppTab
+    var reselect: (AppTab) -> Void
+
+    /// 横着的每格多宽（放得下就 64；窄屏往下压，最小 DuoNav.minPitch）
+    static func pitch(width: CGFloat) -> CGFloat {
+        let room = width - 2 * 24
+        let fit = room / (CGFloat(DuoNav.items.count - 1) + 2 * 36 / 58)
+        return min(64, max(DuoNav.minPitch, fit.rounded(.down)))
+    }
+
+    /// 胶囊底边离屏幕底多远
+    static func bottomGap(safeBottom: CGFloat) -> CGFloat { max(safeBottom - 10, 14) }
+
+    var body: some View {
+        GeometryReader { safe in
+            let sf = safe.frame(in: .global)
+            GeometryReader { full in
+                let ff = full.frame(in: .global)
+                let bottom = max(0, ff.maxY - sf.maxY)
+                let p = Self.pitch(width: full.size.width)
+                DuoNav(tab: $tab, reselect: reselect, pitch: p, axis: .horizontal)
+                    .position(x: full.size.width / 2,
+                              y: full.size.height - Self.bottomGap(safeBottom: bottom) - DuoNav.width / 2)
+            }
+            .ignoresSafeArea()
+        }
+        .ignoresSafeArea(.keyboard)
+    }
+}
+
+/// 底下那枚横着的胶囊顶替了系统标签栏：页面底下留出它的高度（56 + 8），最后一排滚得上来、不被胶囊盖住
+/// （系统标签栏收起以后页面的安全区只剩 Home 指示条那一截）。只在用它的时候留
+struct DuoBottomInset: ViewModifier {
+    let on: Bool
+
+    func body(content: Content) -> some View {
+        content.safeAreaInset(edge: .bottom, spacing: 0) {
+            if on { Color.clear.frame(height: DuoNav.width + 8).allowsHitTesting(false) }
+        }
     }
 }
 
