@@ -662,6 +662,8 @@ struct DetailScaffold<Episodes: View>: View {
     @State private var motion = DetailLogoMotion()
     /// 处理好的字标图（和 LogoImage 同一条管线、同一份缓存）：粒子从它的形状和颜色上取样，条里的小字标也画它；没有就是以前的样子
     @State private var logoImage: UIImage?
+    /// logoImage 是哪一枚字标的（回到这一页时同一枚就不重取，见 loadLogo）
+    @State private var logoImageURL: URL?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -812,7 +814,8 @@ struct DetailScaffold<Episodes: View>: View {
             let slot = CGSize(width: heroLogo.width * 0.42, height: heroLogo.height * 0.42)
             let particles = logoParticles
             DetailLogoBarHost(motion: motion) { p, ready in
-                // 粒子层画不出来（「减弱动态效果」、没有 Metal、框还没量到）时条里那枚跟着进度淡入，不会到 1 才突然冒出来
+                // 粒子层画不出来（「减弱动态效果」、没有 Metal、框还没量到、粒子还没切好或画布出错：ready 是 DetailLogoMotion.handoff）时
+                // 条里那枚跟着进度淡入，不会到 1 才突然冒出来
                 DetailPinnedBar(title: title, thumb: thumb, logo: logoURL,
                                 playTitle: playTitle, playDisabled: playDisabled, palette: palette,
                                 topInset: barBottom, leading: insets.leading + m.margin, trailing: insets.trailing + m.margin,
@@ -857,17 +860,29 @@ struct DetailScaffold<Episodes: View>: View {
     /// 取处理好的字标图：和 LogoImage 同一套步骤（原图 → 判明暗 → 字标管线），都命中同一份缓存，不多走网络。
     /// 取不到就一直是 nil：整页照以前的样子（条整条滑下来）
     private func loadLogo() async {
-        guard let url = logoURL else { logoImage = nil; return }
+        guard let url = logoURL else { logoImage = nil; logoImageURL = nil; return }
+        // .task 每回到这一页都会再跑一遍：这一枚字标图已经在手就不换。内存里那份被清过的话拿回来的是另一张，
+        // 粒子层得重切一遍，这段时间里只能交叉淡入淡出
+        if logoImage != nil, logoImageURL == url { return }
         LogoHDR.prepare()
         if let d = LogoTone.shared.cached(url), let hit = ImagePipeline.shared.cachedLogo(url, dark: d) {
-            logoImage = hit
+            setLogoImage(hit, for: url)
             return
         }
         guard await ImagePipeline.shared.image(url, maxPixel: ImagePipeline.logoPixel) != nil, !Task.isCancelled else { return }
         let d = await LogoTone.shared.isDark(url)
         let img = await ImagePipeline.shared.logo(url, dark: d)
         guard !Task.isCancelled else { return }
+        setLogoImage(img, for: url)
+    }
+
+    private func setLogoImage(_ img: UIImage?, for url: URL) {
         logoImage = img
+        logoImageURL = img == nil ? nil : url
+        // 设备日志里看得出这一页为什么没有粒子（用户真机「详情页海报 logo 没有粒子特效」）：只记三个开关，不记片名、地址
+        if let img, reduceMotion || !DetailLogoGPU.available || img.cgImage == nil {
+            Perf.log("detail logo: particles off (reduce motion \(reduceMotion), metal \(DetailLogoGPU.available), bitmap \(img.cgImage != nil))")
+        }
     }
 
     /// 头部字标那一格：高（展开 96、折起 72）和最宽（屏宽七成、最多 360）
@@ -1138,14 +1153,51 @@ final class DetailLogoMotion {
     private(set) var heroBox: CGRect = .zero
     /// 顶上条里字标那一格在窗口里的框（粒子的落点）
     private(set) var slot: CGRect = .zero
-    /// 两个框都量到了，粒子层画得出来。没量到之前头部字标不藏（跟着进度淡出），不会半路上两头都没有。
+    /// 两个框都量到了。没量到之前头部字标不藏（跟着进度淡出），不会半路上两头都没有。
     /// 单独一个开关：头部那一块、条只在它翻转时重画，不跟着每帧的框
     private(set) var ready = false
+    /// 粒子层自己说画得出来（LogoParticleField 的 onReady：Metal 建好、粒子切好、这块画布真交出去过一帧）。
+    /// 以前只看两个框量到没有：粒子层哪一步没过（用户真机 iPhone Duo），往下滚头部字标照样藏起来，粒子却没出来——字标凭空没了，
+    /// 条里那枚到 1 才突然冒出来。现在没到 true 之前、或者画到一半说了 false，两枚真字标都跟着进度交叉淡入淡出
+    private(set) var canvasReady = false
+    /// 粒子层说画得出来的时候正滚在半路上（0 < p < 1）：等回到顶上或者落定再换成粒子，不从交叉淡入淡出半路上一下跳成粒子
+    @ObservationIgnored private var canvasPending = false
+    /// 「这一页在交叉淡入淡出」只记一次日志
+    @ObservationIgnored private var loggedFallback = false
+
+    /// 头部字标在 p > 0 时藏起来、条里那枚等到 1 才出来（交给粒子层）：两个框都量到了，粒子层也画得出来
+    var handoff: Bool { ready && canvasReady }
 
     func setProgress(_ p: Double) {
         if progress != p { progress = p }
         let m = p > 0
-        if moving != m { moving = m }
+        if moving != m {
+            moving = m
+            // 设备日志里看得出这一页为什么没有粒子（只记开关，不记片名）
+            if m, !handoff, !loggedFallback {
+                loggedFallback = true
+                Perf.log("detail logo: cross-fading the real logos (frames measured \(ready), particle canvas ready \(canvasReady))")
+            }
+        }
+        if canvasPending, p <= 0 || p >= 1 {
+            canvasPending = false
+            canvasReady = true
+        }
+    }
+
+    /// LogoParticleField.onReady：false 马上生效（两枚真字标交叉淡入淡出）；true 在半路上就等到两头再生效
+    func setCanvasReady(_ r: Bool) {
+        guard r else {
+            canvasPending = false
+            if canvasReady { canvasReady = false }
+            return
+        }
+        guard !canvasReady else { return }
+        if progress > 0 && progress < 1 {
+            canvasPending = true
+        } else {
+            canvasReady = true
+        }
     }
 
     func setHeroBox(_ r: CGRect) {
@@ -1164,8 +1216,8 @@ final class DetailLogoMotion {
     }
 }
 
-/// 头部的真字标：p > 0 时藏起来（粒子层在画同一张图）；不放粒子（「减弱动态效果」、画不了）或粒子层还画不出来（框没量到）时
-/// 不藏，跟着进度淡出（条里那枚同时淡入）
+/// 头部的真字标：p > 0 时藏起来（粒子层在画同一张图）；不放粒子（「减弱动态效果」、画不了）或粒子层还画不出来
+/// （框没量到、粒子还在切、画布出错）时不藏，跟着进度淡出（条里那枚同时淡入）
 private struct DetailHeroLogoGate<Content: View>: View {
     let motion: DetailLogoMotion
     /// 转场开着（字标图到手了）；没开就和以前一样一直显示
@@ -1187,27 +1239,28 @@ private struct DetailHeroLogoGate<Content: View>: View {
 
     private var shown: Double {
         guard active else { return 1 }
-        if crossFade || !motion.ready { return 1 - motion.progress }
+        if crossFade || !motion.handoff { return 1 - motion.progress }
         return motion.moving ? 0 : 1
     }
 }
 
-/// 有字标时钉住的那一条：按当下的进度现做（只有这一小块每帧重画）；第二个参数是粒子层画不画得出来（两个框量到没有）
+/// 有字标时钉住的那一条：按当下的进度现做（只有这一小块每帧重画）；第二个参数是粒子层画不画得出来
+/// （两个框量到了、粒子层也说画得出来：DetailLogoMotion.handoff）
 private struct DetailLogoBarHost: View {
     let motion: DetailLogoMotion
     let bar: (Double, Bool) -> DetailPinnedBar
 
     var body: some View {
         let p = motion.progress
-        bar(p, motion.ready)
+        bar(p, motion.handoff)
             // 字标落定、「继续播放」出齐了才接手势、旁白才念这一条（没有字标时是看钉住那条有没有出来）
             .allowsHitTesting(p >= 1)
             .accessibilityHidden(p < 1)
     }
 }
 
-/// 粒子层：从头部字标（跟着页面走的那个框）飞到条里那一格；两个框都是窗口坐标。
-/// 框还没量到时进度给 0（什么都不画；头部字标这时也不藏）
+/// 粒子层：从头部字标（跟着页面走的那个框）飞到条里那一格；两个框都是 SwiftUI 的 .global。
+/// 框还没量到、或者粒子层还没说画得出来时进度给 0（什么都不画；头部字标这时也不藏，两枚真字标交叉淡入淡出）
 private struct DetailLogoParticleLayer: View {
     let motion: DetailLogoMotion
     let image: UIImage
@@ -1218,9 +1271,15 @@ private struct DetailLogoParticleLayer: View {
         let box = motion.heroBox
         let slot = motion.slot
         let p = motion.progress
-        let ready = motion.ready && heroSize.width > 0 && heroSize.height > 0
+        let live = motion.handoff && heroSize.width > 0 && heroSize.height > 0
         let from = CGRect(x: box.minX, y: box.maxY - heroSize.height, width: heroSize.width, height: heroSize.height)
-        LogoParticleField(image: image, from: from, to: slot, progress: ready ? p : 0)
+        // 画布自己的左上角也在 .global 里量（和两个框同一个坐标系）：详情页嵌在别的宿主里（导航栈、缩放转场、Duo 侧边一列）时，
+        // UIKit 的窗口坐标和 SwiftUI 的 .global 可能差一截，粒子和两枚字标会整体偏出画布
+        GeometryReader { g in
+            LogoParticleField(image: image, from: from, to: slot, progress: live ? p : 0,
+                              origin: g.frame(in: .global).origin,
+                              onReady: { motion.setCanvasReady($0) })
+        }
     }
 }
 

@@ -659,7 +659,8 @@ struct DetailPinnedBar: View {
     var progress: Double? = nil
     /// 那一格在窗口里的框（粒子的落点；和这里画的字标同一个框，p 到 1 时从粒子层换手看不出来）
     var onLogoSlot: (CGRect) -> Void = { _ in }
-    /// 没有粒子层（「减弱动态效果」、设备画不了、框还没量到）：条里的字标跟着进度和头部字标交叉淡入淡出，不等到 1 才冒出来
+    /// 没有粒子层接手（「减弱动态效果」、设备画不了、框还没量到、粒子层还没说画得出来或画布出错：DetailLogoMotion.handoff）：
+    /// 条里的字标跟着进度和头部字标交叉淡入淡出，不等到 1 才冒出来——粒子层哪一步没过，这一枚都不会在半路上缺着
     var crossFade = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
