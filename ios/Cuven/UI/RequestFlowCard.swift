@@ -34,6 +34,10 @@ struct RequestFlowCard: View {
     /// 宽屏（iPad、展开的 Duo）：漏斗高一点、四段的数大一号
     private var big: Bool { metrics.wide }
     private var funnelHeight: CGFloat { big ? 150 : 112 }
+    /// 卡里的边距（漏斗的画布往两边伸出这么多，铺到卡边）
+    private var cardPadding: CGFloat { big ? 20 : 16 }
+    /// 漏斗上下给辉光多留的高（溢出到数那一行、卡底的留白里）
+    private static let spill: CGFloat = 24
 
     var body: some View {
         VStack(alignment: .leading, spacing: big ? 16 : 14) {
@@ -46,7 +50,7 @@ struct RequestFlowCard: View {
                 .accessibilityValue(accessibilityRate)
             footer
         }
-        .padding(big ? 20 : 16)
+        .padding(cardPadding)
         .background(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(Color(white: Double(FlowFunnelRenderer.background)))
@@ -147,10 +151,14 @@ struct RequestFlowCard: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             }
-            // 不裁圆角：左右两头在着色器里虚化、淡进卡的底色（FlowFunnel.metal），看不到一条边
-            FlowFunnelCanvas(engine: engine, active: visible)
+            // 用户要求「允许光效溢出，拉长主体不用留间隙」：画布左右伸到卡边（主体接着往外伸，到卡边虚化淡掉）、
+            // 上下各多出 spill 给辉光（版面上还是 funnelHeight 那么高）；底是透明的，压在数那一行下面（zIndex），字不被辉光盖住
+            FlowFunnelCanvas(engine: engine, active: visible, inset: cardPadding, spill: Self.spill)
                 .frame(maxWidth: .infinity)
-                .frame(height: funnelHeight)
+                .frame(height: funnelHeight + Self.spill * 2)
+                .padding(.horizontal, -cardPadding)
+                .padding(.vertical, -Self.spill)
+                .zIndex(-1)
                 .accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

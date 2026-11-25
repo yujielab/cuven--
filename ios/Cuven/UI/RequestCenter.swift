@@ -6,8 +6,9 @@ import SwiftUI
 // 和搜索页一样是系统大标题「请求」（C13，往上滚收成小标题），下面两段：
 // · 进行中：一张一张液态玻璃卡，上面一行小海报 + 片名 + 「电影 · 2026」，下面就是详情页那张五步进度卡（RequestProgressCard 原样复用：
 //   STEP X OF 5、绿色百分比、五段胶囊、五步的名字、那一行固定的说明）。展开的屏两张一排。点整张卡进那部的详情页
-// · 最近：已就绪 / 没能添加 / 取消了的，一行一部（和搜索结果的列表行同一个样子：小海报、片名、一行灰字），已就绪的右边一颗白色「播放」，
-//   按下去直接放片库里的这部（RequestPlayback，和详情页的「立即播放」同一套）
+// · 最近：一行一部（和搜索结果的列表行同一个样子：小海报、片名、一行灰字），成功和出错的分开两张卡（用户要求「错误和成功的列表分离」）：
+//   「已就绪」一张（右边一颗白色「播放」，按下去直接放片库里的这部：RequestPlayback，和详情页的「立即播放」同一套），
+//   「未能添加」一张（没能添加的、取消了的；点进去是那部的详情页，可以再请求一次）
 // 只保留最近 10 个（按提交的先后）；空的时候说下一步去哪儿（F88），给一颗「去搜索」。下拉刷新、打开时马上问一次服务器。
 // 标签栏那一格上的角标是进行中的个数。
 // 批量流程（用户要求）：最上面是「Luminous Data Flow」那张卡（RequestFlowCard：四段的数和漏斗占满整张卡、批量传输的进度条），
@@ -47,7 +48,9 @@ struct RequestCenterView: View {
     @ViewBuilder
     private func content(_ m: DSMetrics) -> some View {
         let active = store.mine.filter { $0.state == .active }
-        let ended = Array(store.mine.filter { $0.state != .active }.prefix(Self.keep))
+        // 已就绪、没成的各留最近 10 个（分开两张卡，一边多了不挤掉另一边）
+        let ended = Array(store.mine.filter { $0.state == .done }.prefix(Self.keep))
+            + Array(store.mine.filter { $0.state != .active && $0.state != .done }.prefix(Self.keep))
         let showFlow = !RequestFlowStats.inFlow(store.mine).isEmpty || store.flow?.batch != nil
         if showFlow && m.width >= Self.splitWidth {
             split(m, active: active, ended: ended)
@@ -72,9 +75,8 @@ struct RequestCenterView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: lm.shelfGap) {
                     if !basket.items.isEmpty { basketSection(lm) }
-                    summary(active: active, ended: ended, lm)
                     if !active.isEmpty { activeSection(active, lm, columns: 1) }
-                    if !ended.isEmpty { recentSection(ended, lm) }
+                    if !ended.isEmpty { recentSections(ended, lm) }
                 }
                 // 上下留白用全页统一的 pageTop / pageBottom（以前 4 / 40，大标题下面贴得太紧）；两栏用同一个 m，顶上对齐
                 .padding(.top, m.pageTop)
@@ -108,9 +110,8 @@ struct RequestCenterView: View {
                                 .accessibilityIdentifier("request-flow-card")
                         }
                         if !basket.items.isEmpty { basketSection(m) }
-                        summary(active: active, ended: ended, m)
                         if !active.isEmpty { activeSection(active, m) }
-                        if !ended.isEmpty { recentSection(ended, m) }
+                        if !ended.isEmpty { recentSections(ended, m) }
                     }
                     // 大标题到第一块、页底留白和别的页一样（以前 4 / 40）
                     .padding(.top, m.pageTop)
@@ -256,26 +257,6 @@ struct RequestCenterView: View {
         }
     }
 
-    // MARK: 顶上一行
-
-    /// 「3 个进行中 · 2 部已就绪」：一眼看到现在的情况（只写有的）
-    @ViewBuilder
-    private func summary(active: [RequestStatus], ended: [RequestStatus], _ m: DSMetrics) -> some View {
-        let waiting = active.filter { $0.stage == "release" }.count
-        let ready = ended.filter { $0.state == .done }.count
-        let parts = [
-            active.count - waiting > 0 ? "\(active.count - waiting) 个进行中" : nil,
-            waiting > 0 ? "\(waiting) 个等待最终发行审批" : nil,
-            ready > 0 ? "\(ready) 部已就绪" : nil,
-        ].compactMap { $0 }
-        if !parts.isEmpty {
-            Text(parts.joined(separator: " · "))
-                .font(.subheadline)
-                .foregroundStyle(DSInk.secondary)
-                .padding(.horizontal, m.margin)
-        }
-    }
-
     // MARK: 进行中
 
     private func activeSection(_ list: [RequestStatus], _ m: DSMetrics, columns n: Int? = nil) -> some View {
@@ -294,11 +275,22 @@ struct RequestCenterView: View {
         }
     }
 
-    // MARK: 最近
+    // MARK: 最近：成功和出错分开
 
-    private func recentSection(_ list: [RequestStatus], _ m: DSMetrics) -> some View {
+    /// 「已就绪」「未能添加」两张卡（用户要求「错误和成功的列表分离」）；哪一边没有就不出那一张。两张之间隔一道排距
+    @ViewBuilder
+    private func recentSections(_ ended: [RequestStatus], _ m: DSMetrics) -> some View {
+        let done = ended.filter { $0.state == .done }
+        let other = ended.filter { $0.state != .done }
+        VStack(alignment: .leading, spacing: m.shelfGap) {
+            if !done.isEmpty { recentSection("已就绪", done, m) }
+            if !other.isEmpty { recentSection("未能添加", other, m) }
+        }
+    }
+
+    private func recentSection(_ title: String, _ list: [RequestStatus], _ m: DSMetrics) -> some View {
         VStack(alignment: .leading, spacing: m.blockTitleGap) {
-            DSShelfTitle(title: "最近", metrics: m)
+            DSShelfTitle(title: title, metrics: m)
             VStack(spacing: 0) {
                 ForEach(Array(list.enumerated()), id: \.element.id) { i, s in
                     recentRow(s)
