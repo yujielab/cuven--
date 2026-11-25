@@ -140,8 +140,8 @@ struct AccountView: View {
                         NetworkSpeedCard()
                         // 使用洞察 · 流量概览（网页版的第三张卡；数是这台设备真的下载了多少，不是网页版的随机数）
                         UsageInsightsCard()
+                        // 通知并进了「观看」那一组（用户要求）
                         watchingGroup
-                        notifyGroup
                         playbackGroup
                         compatGroup
                         securityGroup
@@ -272,7 +272,11 @@ struct AccountView: View {
             }
             .buttonStyle(AccountRowPress())
             AccountDivider()
-            // 以前在「存储」那一组；「清除缓存」挪进「使用洞察」那张卡以后，这一组只剩它，挪到这里和继续观看放在一起
+            // 新片上架通知（以前单独一组「通知」，用户要求并进「观看」）
+            notifyRows
+            AccountDivider()
+            // 以前在「存储」那一组；「清除缓存」挪进「使用洞察」那张卡以后，这一组只剩它，挪到这里和继续观看放在一起；
+            // 会清掉东西的放在这一组最后（C44）
             Button { model.playback.clearAll() } label: {
                 AccountRow(icon: "clock.arrow.circlepath", title: "清除继续观看", titleColor: Color(red: 1, green: 0.42, blue: 0.38)) { EmptyView() }
             }
@@ -282,23 +286,23 @@ struct AccountView: View {
 
     /// 新片上架通知：打开开关的那一刻才向系统要通知权限，不在启动时、也不在隐私闸门里问（C78、C79）。
     /// 系统里关着就多一行「打开设置」，直接跳到系统里 Cuven 的通知设置，不描述路径（C97、F89）
-    private var notifyGroup: some View {
-        AccountGroup(title: "通知") {
-            AccountRow(icon: "bell", title: "新片上架通知",
-                       subtitle: notifyWanted && notifyBlocked ? "已在“设置”中关闭通知" : "有新影片上架时通知你") {
-                Toggle("新片上架通知", isOn: notifyBinding)
-                    .labelsHidden()
-                    .tint(.green)
-                    .accessibilityIdentifier("account-notify")
+    /// 并在「观看」那一组里（用户要求）
+    @ViewBuilder
+    private var notifyRows: some View {
+        AccountRow(icon: "bell", title: "新片上架通知",
+                   subtitle: notifyWanted && notifyBlocked ? "已在“设置”中关闭通知" : "有新影片上架时通知你") {
+            Toggle("新片上架通知", isOn: notifyBinding)
+                .labelsHidden()
+                .tint(.green)
+                .accessibilityIdentifier("account-notify")
+        }
+        if notifyWanted && notifyBlocked {
+            AccountDivider()
+            Button { openNotificationSettings() } label: {
+                AccountRow(icon: "gearshape", title: "打开设置") { AccountChevron() }
             }
-            if notifyWanted && notifyBlocked {
-                AccountDivider()
-                Button { openNotificationSettings() } label: {
-                    AccountRow(icon: "gearshape", title: "打开设置") { AccountChevron() }
-                }
-                .buttonStyle(AccountRowPress())
-                .accessibilityIdentifier("account-notify-settings")
-            }
+            .buttonStyle(AccountRowPress())
+            .accessibilityIdentifier("account-notify-settings")
         }
     }
 

@@ -176,8 +176,10 @@ struct DuoNav: View {
         case clips
         /// 自己的头像（原色、圆角方块）
         case avatar
-        /// 请求中心：一张海报卡，右上角一枚圆圈里的「+」（请求添加一部片）
+        /// 请求中心：一张圆角竖卡，中间一个「+」（请求添加一部片）
         case request
+        /// 主页：圆顶的房子，里面靠下一道短横（照用户给的参考）
+        case home
     }
 
     struct Item: Identifiable {
@@ -188,7 +190,7 @@ struct DuoNav: View {
     }
 
     static let items: [Item] = [
-        Item(tab: .home, glyph: .symbol("house"), label: "主页", id: "nav-home"),
+        Item(tab: .home, glyph: .home, label: "主页", id: "nav-home"),
         Item(tab: .library, glyph: .clips, label: "探索", id: "nav-library"),
         Item(tab: .requests, glyph: .request, label: "请求", id: "nav-requests"),
         Item(tab: .search, glyph: .symbol("magnifyingglass"), label: "搜索", id: "nav-search"),
@@ -307,6 +309,10 @@ struct DuoNav: View {
             RequestGlyph()
                 .stroke(ink, style: StrokeStyle(lineWidth: 1.9, lineCap: .round, lineJoin: .round))
                 .frame(width: 23, height: 23)
+        case .home:
+            HomeGlyph()
+                .stroke(ink, style: StrokeStyle(lineWidth: 1.9, lineCap: .round, lineJoin: .round))
+                .frame(width: 23, height: 23)
         case .avatar:
             // 头像一直是原色（Netflix 那颗没选中也不压暗）；还没有头像就是线条的人像
             if let img = AvatarCache.shared.avatar(for: account.session?.username) {
@@ -397,75 +403,76 @@ struct ClipsGlyph: Shape {
     }
 }
 
-/// 请求中心的图标（用户要求更新：以前是收件盒加向下的箭头，读着像「下载」）：一张竖着的海报卡，
-/// 右上角一枚圆圈里的「+」——请求添加一部片。线条和「片段」那枚一样（圆头、约 2 点）。设计框 24 × 24
+// MARK: - 图标（用户要求「Apple 风格，克制、优雅、简洁、大方」）
+//
+// 主页、片段、请求、光学扫描同一套：线条约 2 点、圆头圆角，设计框 24 × 24，只用最少的笔画说清是什么。
+
+/// 主页：圆顶的房子（屋脊和屋檐都是圆的），里面靠下一道短横——照用户给的参考（不画烟囱、不画门）
+struct HomeGlyph: Shape {
+    func path(in rect: CGRect) -> Path {
+        let s = min(rect.width, rect.height) / 24
+        let ox = rect.midX - 12 * s, oy = rect.midY - 12 * s
+        func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * s, y: oy + y * s) }
+        var p = Path()
+        p.move(to: pt(3.6, 10.6))
+        p.addLine(to: pt(3.6, 18))
+        p.addQuadCurve(to: pt(6.6, 21), control: pt(3.6, 21))
+        p.addLine(to: pt(17.4, 21))
+        p.addQuadCurve(to: pt(20.4, 18), control: pt(20.4, 21))
+        p.addLine(to: pt(20.4, 10.6))
+        p.addLine(to: pt(13.4, 4.2))
+        p.addQuadCurve(to: pt(10.6, 4.2), control: pt(12, 3.0))
+        p.closeSubpath()
+        p.move(to: pt(9.4, 16.4))
+        p.addLine(to: pt(14.6, 16.4))
+        return p
+    }
+}
+
+/// 请求中心：一张圆角竖卡，中间一个「+」——请求添加一部片（和「片段」那几张竖卡是一家）
 struct RequestGlyph: Shape {
     func path(in rect: CGRect) -> Path {
         let s = min(rect.width, rect.height) / 24
         let ox = rect.midX - 12 * s, oy = rect.midY - 12 * s
         func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * s, y: oy + y * s) }
         var p = Path()
-        // 海报卡 (3,5)–(17,22)、圆角 3；右上角让给那枚圆圈（上沿停在 11.2，右边从 13.2 起）
-        p.move(to: pt(11.2, 5))
-        p.addLine(to: pt(6, 5))
-        p.addQuadCurve(to: pt(3, 8), control: pt(3, 5))
-        p.addLine(to: pt(3, 19))
-        p.addQuadCurve(to: pt(6, 22), control: pt(3, 22))
-        p.addLine(to: pt(14, 22))
-        p.addQuadCurve(to: pt(17, 19), control: pt(17, 22))
-        p.addLine(to: pt(17, 13.2))
-        // 右上角的圆圈和「+」
-        p.addEllipse(in: CGRect(x: ox + 12.9 * s, y: oy + 1.9 * s, width: 9.2 * s, height: 9.2 * s))
-        p.move(to: pt(15.6, 6.5))
-        p.addLine(to: pt(19.4, 6.5))
-        p.move(to: pt(17.5, 4.6))
-        p.addLine(to: pt(17.5, 8.4))
+        p.addRoundedRect(in: CGRect(origin: pt(5, 3), size: CGSize(width: 14 * s, height: 18 * s)),
+                         cornerSize: CGSize(width: 3.5 * s, height: 3.5 * s), style: .continuous)
+        p.move(to: pt(9.2, 12))
+        p.addLine(to: pt(14.8, 12))
+        p.move(to: pt(12, 9.2))
+        p.addLine(to: pt(12, 14.8))
         return p
     }
 }
 
-/// 光学扫描的图标（用户要求更新：以前是取景框里一个「+」）：取景框的四个角，中间一小团粒子
-/// （光学配对扫的就是一团粒子云）。四个角用线（ScanGlyph），粒子用实心点（ScanGlyph.Dots）。设计框 24 × 24
+/// 光学扫描：取景框的四个角，中间一个小圆（镜头）。以前中间是一团粒子，太碎
 struct ScanGlyph: Shape {
     func path(in rect: CGRect) -> Path {
         let s = min(rect.width, rect.height) / 24
         let ox = rect.midX - 12 * s, oy = rect.midY - 12 * s
         func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * s, y: oy + y * s) }
         var p = Path()
-        p.move(to: pt(2.5, 9)); p.addLine(to: pt(2.5, 5.5)); p.addQuadCurve(to: pt(5.5, 2.5), control: pt(2.5, 2.5)); p.addLine(to: pt(9, 2.5))
-        p.move(to: pt(15, 2.5)); p.addLine(to: pt(18.5, 2.5)); p.addQuadCurve(to: pt(21.5, 5.5), control: pt(21.5, 2.5)); p.addLine(to: pt(21.5, 9))
-        p.move(to: pt(21.5, 15)); p.addLine(to: pt(21.5, 18.5)); p.addQuadCurve(to: pt(18.5, 21.5), control: pt(21.5, 21.5)); p.addLine(to: pt(15, 21.5))
-        p.move(to: pt(9, 21.5)); p.addLine(to: pt(5.5, 21.5)); p.addQuadCurve(to: pt(2.5, 18.5), control: pt(2.5, 21.5)); p.addLine(to: pt(2.5, 15))
+        p.move(to: pt(2.8, 8.6)); p.addLine(to: pt(2.8, 5.8)); p.addQuadCurve(to: pt(5.8, 2.8), control: pt(2.8, 2.8)); p.addLine(to: pt(8.6, 2.8))
+        p.move(to: pt(15.4, 2.8)); p.addLine(to: pt(18.2, 2.8)); p.addQuadCurve(to: pt(21.2, 5.8), control: pt(21.2, 2.8)); p.addLine(to: pt(21.2, 8.6))
+        p.move(to: pt(21.2, 15.4)); p.addLine(to: pt(21.2, 18.2)); p.addQuadCurve(to: pt(18.2, 21.2), control: pt(21.2, 21.2)); p.addLine(to: pt(15.4, 21.2))
+        p.move(to: pt(8.6, 21.2)); p.addLine(to: pt(5.8, 21.2)); p.addQuadCurve(to: pt(2.8, 18.2), control: pt(2.8, 21.2)); p.addLine(to: pt(2.8, 15.4))
+        p.addEllipse(in: CGRect(x: ox + 8.6 * s, y: oy + 8.6 * s, width: 6.8 * s, height: 6.8 * s))
         return p
-    }
-
-    /// 中间那团粒子：一圈 7 颗（大小交替）加中间一颗
-    struct Dots: Shape {
-        func path(in rect: CGRect) -> Path {
-            let s = min(rect.width, rect.height) / 24
-            let cx = rect.midX, cy = rect.midY
-            var p = Path()
-            for i in 0..<7 {
-                let a = (-90 + Double(i) * 360 / 7) * .pi / 180
-                let r: CGFloat = (i % 2 == 0 ? 1.15 : 0.85) * s
-                let x = cx + 4.6 * s * CGFloat(cos(a)), y = cy + 4.6 * s * CGFloat(sin(a))
-                p.addEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
-            }
-            let c = 1.5 * s
-            p.addEllipse(in: CGRect(x: cx - c, y: cy - c, width: c * 2, height: c * 2))
-            return p
-        }
     }
 }
 
-/// 系统标签栏（别的 iPhone、iPad、展开竖拿的 Duo）上「请求」那一格用同一枚图标：把 RequestGlyph 画成模板图（跟着标签栏的颜色走）
+/// 系统标签栏（别的 iPhone、iPad、展开竖拿的 Duo）上「主页」「请求」两格用同一套图标：画成模板图（跟着标签栏的颜色走）
 @MainActor
 enum NavGlyphImage {
-    static let request: UIImage = {
+    static let home: UIImage = template(HomeGlyph())
+    static let request: UIImage = template(RequestGlyph())
+
+    private static func template<S: Shape>(_ shape: S) -> UIImage {
         let size: CGFloat = 26
         let img = UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { ctx in
             let c = ctx.cgContext
-            c.addPath(RequestGlyph().path(in: CGRect(x: 0, y: 0, width: size, height: size)).cgPath)
+            c.addPath(shape.path(in: CGRect(x: 0, y: 0, width: size, height: size)).cgPath)
             c.setLineWidth(1.9)
             c.setLineCap(.round)
             c.setLineJoin(.round)
@@ -473,7 +480,7 @@ enum NavGlyphImage {
             c.strokePath()
         }
         return img.withRenderingMode(.alwaysTemplate)
-    }()
+    }
 }
 
 /// 侧边胶囊的环境反光（用户要求「黄色边缘位置应该反射蓝色区域中的各种主要颜色混合渐变光线」）：

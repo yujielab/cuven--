@@ -128,8 +128,11 @@ struct RootView: View {
         let column = barEdge != nil || DuoLayout.isColumn(window: window)
             || DuoLayout.hasSideColumn(leading: sideInsets.leading, trailing: sideInsets.trailing)
         TabView(selection: $tab) {
-            Tab("主页", systemImage: "house.fill", value: AppTab.home) {
+            // 图标和侧边那一列里的一样（用户要求 Apple 风格：圆顶房子 + 一道短横，NavGlyphImage）
+            Tab(value: AppTab.home) {
                 HomeView().duoHidesTabBar().tint(.white).id(roots[.home, default: 0])
+            } label: {
+                Label { Text("主页") } icon: { Image(uiImage: NavGlyphImage.home) }
             }
             // 探索（以前叫资料库，用户要求改名）：随机、高分优先的预告片流
             Tab("探索", systemImage: "square.stack.fill", value: AppTab.library) {

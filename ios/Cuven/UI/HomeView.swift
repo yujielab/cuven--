@@ -121,10 +121,9 @@ struct HomeView: View {
     /// 点开就是账户页里那张扫描（将图案放在圆圈中 → 看是哪台设备 → 面容 ID 批准）
     private var scanButton: some View {
         Button { pairScanning = true } label: {
-            // 图标（用户要求更新）：取景框四个角 + 中间一小团粒子（光学配对扫的是一团粒子云），见 ScanGlyph
+            // 图标（用户要求 Apple 风格、克制简洁）：取景框四个角 + 中间一个小圆（镜头），见 ScanGlyph
             ScanGlyph()
-                .stroke(.white, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                .overlay { ScanGlyph.Dots().fill(.white) }
+                .stroke(.white, style: StrokeStyle(lineWidth: 1.9, lineCap: .round, lineJoin: .round))
                 .frame(width: 23, height: 23)
                 .frame(width: 46, height: 46)
                 .glassEffect(.regular.interactive(), in: Circle())
