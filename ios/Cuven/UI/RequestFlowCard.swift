@@ -5,7 +5,8 @@ import SwiftUI
 // 近黑的卡（圆角 22、1 点细边），三层：
 // · 导航：全部 / 电影 / 剧集（选中那个下面一条细线滑过去）
 // · 数据：四段（已确认 → 已下载 → 已清洗 → 已入库）的数，下面一行灰的百分比（都是等宽数字，跳的时候不左右晃）；每一段正对着下面漏斗的那一段
-// · 可视化：一整块连续的发光漏斗（FlowFunnelCanvas，Metal）；左下一颗小标签说落差最大的那一步
+// · 可视化：一整块连续的发光漏斗（FlowFunnelCanvas，Metal）。左右两头没有边界：靠近左右边缘时点阵、边线越来越虚、越来越淡，
+//   融进卡的底色（用户要求「粒子没有边界，靠近左右边缘时使用模糊淡出」）；以前下面那颗「最大落差」小标签用户要求移除
 // 数那一行和漏斗都占满卡里的整个宽度（用户要求：去掉右上角的发光小点 +「传输流 · 24 小时」和漏斗右边的「入库率 · 共 N 部」，
 // 让框起来的这块撑满整张卡）；入库率和「近 24 小时」改在读屏的 value 里念，批量到了哪一步看下面的进度条。
 // 批量传输时下面多一条发光的进度条（几部、多少 GB、速度、还要多久）；还在凑批时是一排 16 格的「凑批」进度。
@@ -39,13 +40,10 @@ struct RequestFlowCard: View {
             header
             Rectangle().fill(Color.white.opacity(0.07)).frame(height: 0.5)
             // 数和漏斗是一整块：读屏念一句总结（分类按钮、进度条单独念）
-            VStack(alignment: .leading, spacing: big ? 16 : 14) {
-                dataAndFunnel
-                badge
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(accessibilitySummary)
-            .accessibilityValue(accessibilityRate)
+            dataAndFunnel
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(accessibilitySummary)
+                .accessibilityValue(accessibilityRate)
             footer
         }
         .padding(big ? 20 : 16)
@@ -149,48 +147,17 @@ struct RequestFlowCard: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             }
+            // 不裁圆角：左右两头在着色器里虚化、淡进卡的底色（FlowFunnel.metal），看不到一条边
             FlowFunnelCanvas(engine: engine, active: visible)
                 .frame(maxWidth: .infinity)
                 .frame(height: funnelHeight)
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// 左下那颗小标签：落差最大的那一步（按目标值算，变的时候淡入淡出）
-    @ViewBuilder
-    private var badge: some View {
-        if let gap = biggestGap(counts.map(Double.init)) {
-            HStack(spacing: 6) {
-                Text("−" + percent(gap.drop))
-                    .monospacedDigit()
-                Text("最大落差 · \(RequestFlowStats.gapNames[gap.index])")
-            }
-            .font(.caption2.weight(.medium))
-            .foregroundStyle(accent.mix(with: .white, by: 0.35))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Capsule().fill(accent.opacity(0.14)))
-            .overlay(Capsule().strokeBorder(accent.opacity(0.35), lineWidth: 0.5))
-            .transition(.opacity)
-            .animation(.smooth(duration: 0.3), value: gap.index)
-        }
-    }
-
     private func percent(_ x: Double) -> String {
         String(format: "%.1f%%", max(0, min(1, x)) * 100)
-    }
-
-    /// 落差最大的那一步（相对第一段）：至少 1% 才说
-    private func biggestGap(_ c: [Double]) -> (index: Int, drop: Double)? {
-        guard c[0] >= 1 else { return nil }
-        var best: (Int, Double)?
-        for i in 0..<3 {
-            let d = (c[i] - c[i + 1]) / c[0]
-            if d > (best?.1 ?? 0.01) { best = (i, d) }
-        }
-        return best.map { (index: $0.0, drop: $0.1) }
     }
 
     // MARK: 进度条（批量传输）/ 凑批
