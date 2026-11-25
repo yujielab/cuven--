@@ -541,12 +541,15 @@ private struct NavAmbientGlow: View {
             switch layer {
             case .inner:
                 // 靠内容那一边亮，往中间淡掉（像旁边画面的光打进玻璃里）
+                // 以前再糊 5 点（blur）：颜色一变整层就要重新糊一遍，滑的时候每帧都在糊，是卡的大头。
+                // 遮罩本来就是从亮边到中线的软渐变，三段式的渐变（亮、半亮、无）看上去和糊过的一样软，省掉那一层滤镜
                 Capsule()
                     .fill(LinearGradient(colors: stops, startPoint: top, endPoint: bottom))
-                    .mask(LinearGradient(colors: [.white, .white.opacity(0)], startPoint: lit, endPoint: .center))
-                    .blur(radius: 5)
-                    // 糊开的光不出胶囊：外面那一条正是取色的地方，漏出去会把自己的光又取回来
-                    .clipShape(Capsule())
+                    .mask(LinearGradient(stops: [
+                        .init(color: .white, location: 0),
+                        .init(color: .white.opacity(0.45), location: 0.22),
+                        .init(color: .white.opacity(0), location: 0.5),
+                    ], startPoint: lit, endPoint: contentLeading ? .trailing : .leading))
                     .opacity(0.6)
             case .rim:
                 // 旁边画面的主要颜色从上到下混成一条渐变，靠内容那一边最亮，绕到另一边淡掉
@@ -554,7 +557,6 @@ private struct NavAmbientGlow: View {
                     .strokeBorder(LinearGradient(colors: stops, startPoint: top, endPoint: bottom), lineWidth: 1.8)
                     .mask(LinearGradient(colors: [.white, .white, .white.opacity(0)], startPoint: lit,
                                          endPoint: contentLeading ? UnitPoint(x: 0.75, y: 0.5) : UnitPoint(x: 0.25, y: 0.5)))
-                    .blur(radius: 0.5)
             }
         }
     }
@@ -568,9 +570,10 @@ private struct NavAmbientGlow: View {
 /// 用户反馈「现在有延时」，以前慢在三处，这一版都改了：
 /// · 以前用 Timer：它只在默认的 run loop 模式里走，手指按着滑的时候（tracking 模式）根本不取样，松手才追上来。
 ///   现在是显示链，加在 .common 模式里，滑着也照样取；
-/// · 以前一秒四次，每次还和上一次各混一半，再叠 0.45 秒的动画：颜色落后半秒到一秒。现在画面在变的时候一秒 30 次
-///   （一次取样太贵就降到 15、8 次），停下来以后一秒四次只看看变没变；
-/// · 两次取样之间不跳：显示出来的颜色每一帧往最新取到的颜色上走（时间常数 60 毫秒，约 0.15 秒走完），走到了就不再动。
+/// · 以前一秒四次，每次还和上一次各混一半，再叠 0.45 秒的动画：颜色落后半秒到一秒。现在画面在变的时候一秒 12 次
+///   （一次取样太贵就降到 8、5 次；30 次的时候用户反馈「有点卡」），停下来以后一秒两次只看看变没变；
+/// · 两次取样之间不跳：显示出来的颜色以 30 帧往最新取到的颜色上走（时间常数 90 毫秒），差不到 1/255 不重画，走到了就不再动；
+/// · 反光那两层不再加模糊滤镜（颜色一变就要重新糊一遍）：遮罩本身就是软渐变。
 /// 只在胶囊出现、App 在前台时取
 @MainActor
 @Observable
@@ -597,6 +600,8 @@ final class NavAmbient {
     /// 一次取样平均花多久（秒）：太贵就放慢
     @ObservationIgnored private var cost: Double = 0.003
     @ObservationIgnored private var fast: Bool?
+    /// 上一次真的交给画面的颜色：差得够多（1/255 左右）才再交一次，不为看不出来的变化重画
+    @ObservationIgnored private var published: [SIMD4<Double>] = []
 
     private static let cols = 4, rows = 16, outStops = 8
 
@@ -622,13 +627,14 @@ final class NavAmbient {
         link = nil
     }
 
-    /// 显示链的帧率：画面在变、颜色还在走的时候 60（不跟 ProMotion 上 120：取色用不着），停下来降到 10 左右
+    /// 显示链的帧率：画面在变、颜色还在走的时候 30（渐变的颜色慢慢流过去，30 帧看不出和 60 帧的差别；
+    /// 以前 60，ProMotion 上每帧都在重画反光），停下来降到 5 左右
     private func pace(fast on: Bool) {
         guard fast != on, let link else { return }
         fast = on
         link.preferredFrameRateRange = on
-            ? CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
-            : CAFrameRateRange(minimum: 8, maximum: 15, preferred: 10)
+            ? CAFrameRateRange(minimum: 24, maximum: 30, preferred: 30)
+            : CAFrameRateRange(minimum: 4, maximum: 8, preferred: 5)
     }
 
     fileprivate func tick(_: CADisplayLink) {
@@ -636,8 +642,10 @@ final class NavAmbient {
         let dt = lastTick == 0 ? 1.0 / 60 : min(0.1, max(0.001, now - lastTick))
         lastTick = now
         let hot = now < hotUntil
-        // 画面在变：一秒 30 次（一次取样平均超过 5 毫秒降到 15 次，超过 10 毫秒降到 8 次）；停着：一秒 4 次
-        let gap: Double = hot ? (cost > 0.010 ? 0.125 : cost > 0.005 ? 0.066 : 0.033) : 0.25
+        // 画面在变：一秒 12 次（一次取样平均超过 4 毫秒降到 8 次，超过 8 毫秒降到 5 次）；停着：一秒 2 次只看变没变。
+        // 以前一秒 30 次：每次都要整窗截一张，滑的时候主线程隔一帧就被占几毫秒，看着一顿一顿的（用户真机反馈「有点卡」）。
+        // 两次取样之间颜色照样每帧往新颜色上走（ease），流过去的样子不变
+        let gap: Double = hot ? (cost > 0.008 ? 0.2 : cost > 0.004 ? 0.125 : 0.083) : 0.5
         if now - lastSample >= gap {
             lastSample = now
             sample(now: now)
@@ -653,15 +661,24 @@ final class NavAmbient {
         if shown.count != target.count {
             shown = target
         } else {
-            let k = 1 - exp(-dt / 0.06)
+            // 时间常数 90 毫秒（取样间隔拉长了，走得稍慢一点，正好接上下一次取样，不停顿）
+            let k = 1 - exp(-dt / 0.09)
             shown = zip(shown, target).map { (s, t) -> SIMD4<Double> in
                 let d = t - s
                 if max(abs(d.x), max(abs(d.y), abs(d.z))) > 0.004 { moving = true; return s + d * k }
                 return t
             }
         }
-        let colors = shown.map(Self.glow)
-        if colors != stops { stops = colors }
+        // 和上次交出去的差不到 1/255 左右：不重画
+        if published.count == shown.count {
+            let delta = zip(published, shown).map { (a, b) -> Double in
+                let d = b - a
+                return max(abs(d.x), max(abs(d.y), abs(d.z)))
+            }.max() ?? 0
+            if delta < 0.004 { return moving }
+        }
+        published = shown
+        stops = shown.map(Self.glow)
         return moving
     }
 
