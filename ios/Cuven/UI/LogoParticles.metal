@@ -8,7 +8,9 @@ using namespace metal;
 // （中间那一条主字标先到 0.65–0.80，上面的厂牌、下面的副标题随后，最晚 0.90）。一帧三样东西：
 //   1. 大字标（这一帧的框）上还没走的格子；2. 小字标上已经落定的格子；3. 正在路上的格子：每格一到三粒，颜色取这一格的平均色，
 //      画成一颗软的小点，顺着速度拖一截很短、越往后越淡的尾巴。两枚字标底下还有和 LogoImage 一样的影子。
-// 颜色都是线性的扩展 Display P3、预乘 alpha（和字标管线 LogoHDR 一致：能显示 HDR 的屏上亮部照样比 SDR 白亮）。
+// 颜色都是预乘 alpha 的 Display P3，空间和画布一致：能显示 HDR 的屏上是线性的扩展 Display P3（和字标管线 LogoHDR 一致，
+// 亮部照样比 SDR 白亮）；SDR 屏上是编码过的（8 位画布、贴图都不带 _srgb），和 SwiftUI / Core Animation 画真字标一样
+// 在编码空间里预乘、叠加，半透明的边和粒子的软边不会比真字标亮一圈。着色器里不用分两种情况，只有提亮的幅度看 LPUniforms.tone。
 // 所有函数名带 lp_ 前缀。
 
 #define LP_PI 3.14159265
@@ -21,6 +23,7 @@ struct LPUniforms {
     float4 path;     // x 往右鼓多少（像素），y 中段收窄（0…1），z 横向抖动（像素），w 摆动（像素）
     float4 anchor;   // xy 光流的起点（像素，跟着溶解的前沿往左挪），zw 终点（小字标里偏右一点）
     float4 extra;    // x 尾巴最长（像素），y 刚离开时散开多少（像素），z 快落定时收拢前散开多少（像素），w 弧线高度至少多少（像素）
+    float4 tone;     // x 路上提亮多少，y 闪一下提亮多少，z 颜色上限（SDR 是 1：预乘的颜色不超过 alpha），w 不用
 };
 
 struct LPQuad {
@@ -31,7 +34,7 @@ struct LPQuad {
 
 struct LPParticle {
     float4 cell;     // xy 在字标上的位置（0…1，y 向下），z 离开大字标的进度，w 落进小字标的进度
-    float4 color;    // rgb 这一格的平均色（线性、去掉预乘），a 不透明度
+    float4 color;    // rgb 这一格的平均色（和画布同一个空间、去掉预乘），a 不透明度
     float4 seed;     // x 横向抖动，y 摆动的相位，z 散开的方向，w 散开的幅度（都是 0…1）
     float4 shape;    // x 直径（点），y 比同一格的领头那粒落后多少，z 闪烁的种子，w 不用
 };
@@ -212,10 +215,12 @@ vertex LPDotOut lp_dot_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     o.local = float2(atHead ? len + R : -R, side * R);
     o.len = len;
     o.rad = rad;
-    // 颜色：这一格的平均色，路上稍微亮一点；少数几粒路过时闪一下（按路程，不按时间：停住就停在那一下）
-    float3 c = P.color.rgb * (1.0 + 0.25 * env);
-    float sparkle = step(0.86, lp_hash(P.shape.z * 97.0 + floor(s * 16.0))) * env;
-    c += float3(0.55) * sparkle;
+    // 颜色：这一格的平均色，路上稍微亮一点；少数几粒（约 7%）路过时闪一下（按路程，不按时间：停住就停在那一下）。
+    // 闪只提亮、不掺白：颜色都是从字标上取的（用户要求红、蓝的细粒子夹几粒黄，不能冒出粉白、淡紫的）
+    float3 c = P.color.rgb * (1.0 + U.tone.x * env);
+    float sparkle = step(0.93, lp_hash(P.shape.z * 97.0 + floor(s * 16.0))) * env;
+    c *= 1.0 + U.tone.y * sparkle;
+    c = min(c, float3(U.tone.z));
     float fadeIn = smoothstep(d, d + U.grid.z, p);
     float fadeOut = 1.0 - smoothstep(a - U.grid.z, a, p);
     float alpha = saturate(P.color.a) * fadeIn * fadeOut;
