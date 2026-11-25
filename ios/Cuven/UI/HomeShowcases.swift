@@ -632,7 +632,7 @@ struct YearTrailerCard: View {
                 }
                 .lineLimit(1)
                 Spacer(minLength: compact ? 6 : 8)
-                // 白底蓝字（DSViewPill；用户要求全局同类型的按钮都是白底蓝字）
+                // 白色磨砂玻璃 + 蓝字（DSViewPill；用户要求全局同类型的按钮都是这样）
                 if let badge {
                     badge.view(compact: compact)
                 } else {
@@ -663,7 +663,7 @@ struct YearTrailerCard: View {
     }
 }
 
-/// 年份卡右边那颗胶囊换成的状态：和「查看」同一个样子（白底），只是字不同：申请、进度这些是主题蓝，没能添加是红的
+/// 年份卡右边那颗胶囊换成的状态：和「查看」同一个样子（白色磨砂玻璃），只是字不同：申请、进度这些是主题蓝，没能添加是红的
 struct YearCardBadge: Equatable {
     enum Tone: Equatable { case accent, plain, alert }
     var text: String
@@ -680,7 +680,7 @@ struct YearCardBadge: Equatable {
             .minimumScaleFactor(0.6)
             .padding(.horizontal, compact ? 12 : 16)
             .frame(minHeight: 32)
-            .background(Capsule().fill(Color.white))
+            .glassEffect(DSGlass.whiteFrost, in: Capsule())
             // 只定高、不定宽：以前 .fixedSize() 连宽也定死，放不下时整行冲到旁边那张卡上
             .fixedSize(horizontal: false, vertical: true)
             // 宁可片名截断，状态不被挤扁（和「查看」同一条规矩）：排的时候先给它宽，放得下就是原来的大小，放不下才缩字

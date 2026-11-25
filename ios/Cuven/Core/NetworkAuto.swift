@@ -109,6 +109,8 @@ final class NetworkAuto {
     var enabled: Bool { NetworkSpeed.isAuto }
     /// 现在是不是按流量计费的网络（蜂窝、个人热点）：测速别下太多（Cuven Pass Pro 的测速对比也看它）
     var metered: Bool { path?.metered ?? false }
+    /// 现在的网络（Cuven Pass Pro 的优选结果按网络分开记）；还没收到系统的第一条通知时是 nil
+    var currentPath: NetworkPath? { path }
 
     /// 启动时调一次：开始看网络变化
     func start() {
@@ -151,6 +153,8 @@ final class NetworkAuto {
 
     private func pathChanged(_ info: NetworkPath) {
         path = info
+        // Cuven Pass Pro 全自动（用户要求）：换了网络就看要不要重新优选入口（和「自动调整」开没开无关）
+        PassPro.shared.networkChanged(online: info.online)
         guard enabled else { return }
         guard info.online else {
             if phase != .measuring { phase = .offline }

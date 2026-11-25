@@ -256,6 +256,8 @@ struct AccountView: View {
             .task {
                 seedNotifyPreference()
                 await refreshNotify()
+                // 离上次「获取软件更新」超过一天：悄悄取一次（加速节点表、兼容性组件）
+                await RuntimeUpdate.shared.checkIfStale()
             }
             // 账户资料（设置、电子邮件）：每次打开都刷新，缓存先上屏（网页版每次进账户屏都刷新）
             .task(id: account.session?.username) {
@@ -448,6 +450,9 @@ struct AccountView: View {
                 .tint(.white.opacity(0.7))
                 .accessibilityIdentifier("account-compat")
             }
+            AccountDivider()
+            // 获取软件更新（用户要求）：热更新兼容性组件（改标记时用的上限）
+            RuntimeUpdateRow(scope: .compat)
         }
         .onChange(of: compatLevel) { _, l in Compat.level = l }
         .sensoryFeedback(.selection, trigger: compatLevel)

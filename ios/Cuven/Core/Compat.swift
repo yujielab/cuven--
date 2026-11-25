@@ -80,10 +80,10 @@ enum Compat {
 // MARK: - 改标记（纯函数，PrecacheServer 调用）
 
 enum CompatHLS {
-    /// HEVC 的 level_idc 上限：5.1（3840 × 2160 · 60 帧够用）
-    static let maxHevcLevel = 153
-    /// 杜比视界的 level 上限：苹果规范是 7
-    static let maxDvLevel = 7
+    /// HEVC 的 level_idc 上限：默认 5.1（3840 × 2160 · 60 帧够用）。「获取软件更新」可以改（RuntimeRules，按安全范围收住）
+    static var maxHevcLevel: Int { RuntimeRules.shared.current.maxHevcLevel }
+    /// 杜比视界的 level 上限：默认是苹果规范的 7
+    static var maxDvLevel: Int { RuntimeRules.shared.current.maxDvLevel }
 
     /// CODECS 里的一项
     static func codec(_ c: String) -> String {
@@ -291,6 +291,9 @@ enum CompatHLS {
     /// 增强级：去掉系统拿来判断「这块屏放不放得了」的标记，分辨率、码率、帧率写成一般的屏都认的范围（只是标记，画面不变）
     static func relax(_ line: String) -> String {
         var l = line
+        // 上限默认 1920 宽、40 Mbps、60 帧；「获取软件更新」可以改（RuntimeRules）
+        let lim = RuntimeRules.shared.current
+        let maxW = lim.maxWidth
         // 杜比视界 5 档没有能单独看的基础层：VIDEO-RANGE=PQ 是它的规定写法，去掉了反而成了「SDR 的杜比视界」，留着
         let p5 = line.contains("dvh1.05") || line.contains("dvhe.05")
         for a in ["VIDEO-RANGE", "HDCP-LEVEL", "ALLOWED-CPC", "REQ-VIDEO-LAYOUT"] where !(p5 && a == "VIDEO-RANGE") {
@@ -298,13 +301,13 @@ enum CompatHLS {
         }
         l = replaceBare("RESOLUTION", in: l) { v in
             let wh = v.lowercased().split(separator: "x").compactMap { Int($0) }
-            guard wh.count == 2, wh[0] > 1920 else { return v }
-            return "1920x\(Int((Double(wh[1]) * 1920 / Double(wh[0])).rounded()) & ~1)"
+            guard wh.count == 2, wh[0] > maxW else { return v }
+            return "\(maxW)x\(Int((Double(wh[1]) * Double(maxW) / Double(wh[0])).rounded()) & ~1)"
         }
         for a in ["BANDWIDTH", "AVERAGE-BANDWIDTH"] {
-            l = replaceBare(a, in: l) { v in Int(v).map { String(min($0, 40_000_000)) } ?? v }
+            l = replaceBare(a, in: l) { v in Int(v).map { String(min($0, lim.maxBandwidth)) } ?? v }
         }
-        l = replaceBare("FRAME-RATE", in: l) { v in Double(v).map { $0 > 60 ? "60.000" : v } ?? v }
+        l = replaceBare("FRAME-RATE", in: l) { v in Double(v).map { $0 > lim.maxFrameRate ? String(format: "%.3f", lim.maxFrameRate) : v } ?? v }
         return l
     }
 

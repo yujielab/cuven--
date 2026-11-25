@@ -1,6 +1,10 @@
 /**
- * Dropbox Video Proxy — Cloudflare Worker (v25.6 · 2026-11-24)
+ * Dropbox Video Proxy — Cloudflare Worker (v25.7 · 2026-11-25)
  * ────────────────────────────────────────────────────────────────
+ * v25.7 —— /api/app/runtime：App「获取软件更新」的运行时配置（加速节点表、兼容性组件参数），见 handleAppRuntime。
+ *   ▸ 默认回 APP_RUNTIME_DEFAULT；在 Worker 变量里设 APP_RUNTIME（JSON）就能改，不用重新部署代码。
+ *
+ * ────────────────────────────────────────────────────
  * v25.6 —— /api/tmdb-batch 按 TMDB 编号批量取（App「可申请」那一行：约 24 部的背景、字标一次拿齐）
  *
  *   ▸ 原因：批接口只认文件名（q.name）。「可申请」的片子还不在片库里、没有文件名，App 手里只有 TMDB 编号，
@@ -774,6 +778,8 @@ export default {
         case '/health':         return handleHealth(env, request);
         // 优选入口：自检（打到哪个 PoP、RTT 多少）与浏览器侧测速探针
         case '/api/edge':       return cors(handleEdge(request, env));
+        // v25.7：App「获取软件更新」——加速节点表、兼容性组件的参数（热更新，不用重装 App）
+        case '/api/app/runtime': return cors(handleAppRuntime(env));
         case EDGE_PING_PATH:    return handleEdgePing(url);
         case '/auth':           return await handleAuthLogin(request, env);
         case '/api/list':       return cors(await handleList(url, request, env, ctx));
@@ -6999,6 +7005,37 @@ function pickEdgeHost(request, env, selfHost) {
   if (hosts.length < 2) return hosts[0] || selfHost;
   const want = parseCookies(request.headers.get('Cookie') || '')[EDGE_COOKIE];
   return want && hosts.includes(want) ? want : hosts[0];
+}
+
+/**
+ * /api/app/runtime —— App 账户页「网络」「兼容性」两组里的「获取软件更新」（v25.7）
+ *
+ *   回一份运行时配置，App 拿到就生效、存在本机（下次启动直接用），不用重装：
+ *     version   整数，改了内容就加 1（App 据此说「已更新到第 N 版」/「已是最新」）
+ *     pass      { nodes: ['pass.cuven.us', …], edges?: ['s2.cuven.us:2053', …] }
+ *               nodes 是加速节点（VPS），edges 是额外的 Cloudflare 边缘入口（绑到本 Worker 的优选主机名）。
+ *               App 的 Cuven Pass Pro 把它们和 /api/edge 列出来的入口（EDGE_HOSTS）放在一起优选：先同时比延迟，
+ *               再在最快的三个里实测下载速度，用最快的那个（6 小时 / 换网络重选）。
+ *               App 只认 cuven.us / cuven.online 下面的主机名（下发错了也不会把影片送去别处）
+ *     compat    改进兼容性改「标记」时的上限（App 会再按安全范围收住）：
+ *               maxHevcLevel（level_idc，153 = 5.1）、maxDvLevel、maxWidth、maxBandwidth（bps）、maxFrameRate
+ *   要改：在 Worker 的变量里设 APP_RUNTIME（一整段 JSON），不用改代码、不用重新部署；没设就用下面这份默认的。
+ */
+const APP_RUNTIME_DEFAULT = {
+  version: 1,
+  pass: { nodes: ['pass.cuven.us'] },
+  compat: { maxHevcLevel: 153, maxDvLevel: 7, maxWidth: 1920, maxBandwidth: 40000000, maxFrameRate: 60 },
+};
+
+function handleAppRuntime(env) {
+  let cfg = APP_RUNTIME_DEFAULT;
+  if (env.APP_RUNTIME) {
+    try {
+      const parsed = JSON.parse(env.APP_RUNTIME);
+      if (parsed && Number.isInteger(parsed.version) && parsed.version >= 1) cfg = parsed;
+    } catch (_) { /* 变量写坏了：照旧回默认的那份 */ }
+  }
+  return jsonResponse(cfg, 200, { 'Cache-Control': 'public, max-age=300', ...CORS_HEADERS });
 }
 
 /**
