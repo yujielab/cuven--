@@ -13,21 +13,57 @@ import UIKit
 //   65–90%  在小字标的位置拼回来：中间的主字标先到，然后上面的厂牌、下面的黄色副标题
 //   90–100% 拼好的小字标从稍大一点、低一点的地方落定进条里那一格（这一层到 1 就藏起来，换成条里的真字标；「继续播放」由调用方淡入）
 // 两头都用同一张处理好的字标图（ImagePipeline.logo，和 LogoImage 显示的是同一张，含反白 / HDR），粒子的形状、颜色都从它取。
-// 没有时钟：只在输入变了时画一帧（滚动停住就停在这一帧），进度不在 0…1 之间时整层藏起来、什么都不做。
-// 颜色：能显示 HDR 的屏上画布是扩展线性的浮点（和 LogoHDR 的字标一样）；SDR 屏上是 8 位、不带 _srgb 的 Display P3，
-// 贴图和粒子的颜色也留在编码空间里预乘、叠加——和 SwiftUI / Core Animation 画真字标是同一种算法，
-// 半透明的边、粒子的软边和尾巴不会比真字标亮一圈，两头交接时字标边的粗细不跳。
-// 切格子、定门槛、撒粒子在后台做（LogoParticleBaker），推进详情页的那几帧主线程不卡；切好了才画，调用方可以从 onReady 知道。
-// 不在转场时（停住 1.5 秒以后）画布只留 1×1：整窗大小的浮点画布一张就几十 MB，详情页一层层推进去，每一页都留着太占内存。
-// 画不出来的时候（用户真机 iPhone Duo：往下滚，头部字标直接没了，也没有粒子）不能让字标凭空消失：
-//   · 切好粒子以后先趁藏着交一帧 1×1 的空白，真交出去了才从 onReady 说「画得出来」；调用方在这之前一直让两枚真字标交叉淡入淡出；
-//   · 每一帧都在 SwiftUI 这次更新里明着画（直接向 CAMetalLayer 取画布），不等 Core Animation 来叫；取不到画布就下一轮主线程再画，
-//     连着几次都不行、等画布等了很久、GPU 报错：EDR 的画布先换成 SDR 的重切、重试，再不行就说 false（这一页只交叉淡入淡出）；
-//   · 哪一步没过、跳过了哪一帧、为什么，都记一行诊断日志（lpLog，同一件事一页只记一次），下次真机上看设备日志就知道是哪一步。
+// 画面只看进度，不看时钟：0 < p < 1 时 MTKView 自己的时钟每秒画 60 帧（旧机型 30），每帧取最新的输入；p 是 0 或 1 时整层藏起来、停着，什么都不画。
+//
+// 画法照着这个 App 里在用户真机上画得出来的那几个（CacheDissolveRenderer、FlowFunnelRenderer、SendGlowRenderer）：
+// 普通的 MTKView、bgra8Unorm，由 view 自己叫 draw(in:)，用 currentDrawable / currentRenderPassDescriptor，cb.present 以后再 commit；
+// 不用 presentsWithTransaction，画布不缩成 1×1，也不先试画一帧。以前那一套（EDR 的浮点透明画布、跟 SwiftUI 同一个事务交画布、
+// 藏着的时候先交一帧 1×1 的空白、GPU 生成 mip）在用户真机 iPhone Duo（IPA 335）上一直没说过「画得出来」：
+// 往下滚只有两枚真字标交叉淡入淡出，一粒粒子都没有。
+// 颜色：现在只有 SDR。画布是 8 位、不带 _srgb 的 Display P3，不开 EDR（wantsExtendedDynamicRangeContent）——
+// EDR 的透明画布在真机上从来没验证过画得出来，先走一条确定能画的路。LogoHDR 的字标照样能用：画进 8 位的 Display P3，
+// 比 SDR 白还亮的部分截到 1（粒子层比真字标的亮部暗一点，可以接受）。贴图和粒子的颜色留在编码空间里预乘、叠加——
+// 和 SwiftUI / Core Animation 画真字标是同一种算法，半透明的边、粒子的软边和尾巴不会比真字标亮一圈。
+// 切格子、定门槛、撒粒子、缩 mip 都在后台做（LogoParticleBaker），主线程只把它们拷进共享存储的贴图和缓冲
+// （不经过 GPU：不用 blit 生成 mip，贴图也不当渲染目标）。拷好了、管线也在，就从 onReady 说「画得出来」。
+// 画不出来的时候字标不能凭空消失：没有 Metal、管线建不起来、切不出来 / 拷不上去，onReady 就一直是 false（调用方让两枚真字标交叉淡入淡出）；
+// 画到一半 GPU 报错、露出来以后一直画不上，也改说 false。每一步失败和第一帧都记一行 lpLog，同时进 LogoParticleDiag（详情页的诊断浮层读它）。
+
+/// 粒子层的诊断：最近十几行 lpLog 和一行现状，给详情页的诊断浮层看（UserDefaults「cuven_particle_diag」打开时由那边显示）。
+/// 只有哪一步、尺寸、格式、进度，不含片名和地址（仓库公开）
+@MainActor @Observable
+final class LogoParticleDiag {
+    static let shared = LogoParticleDiag()
+    /// 最近 12 行 lpLog（最新的在最后），每行前面一个短的时间
+    private(set) var lines: [String] = []
+    /// 一行现状：字标图多大、切好没有（几格、几粒）、说过画得出来没有、GPU 做完过一帧没有、画过没有、放弃了没有、
+    /// 画布格式和大小、露着没有、进度、最近一次跳过的原因
+    private(set) var state: String = ""
+
+    private static let keep = 12
+    private static let clock: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "HH:mm:ss.S"
+        return f
+    }()
+
+    func push(_ line: String) {
+        var l = lines
+        l.append(Self.clock.string(from: Date()) + " " + line)
+        if l.count > Self.keep { l.removeFirst(l.count - Self.keep) }
+        lines = l
+    }
+
+    func setState(_ s: String) {
+        if state != s { state = s }
+    }
+}
 
 /// 粒子层的诊断日志：只有哪一步、像素格式、尺寸、进度，不含片名和地址（仓库公开）。
 /// 进系统日志（装到手机上的发行版也有，Console 里搜「logo particles」；画不上、放弃这一类记成 error，系统会留着），
-/// Debug 构建另外写进诊断文件（Perf.file）
+/// Debug 构建另外写进诊断文件（Perf.file）；同时推进 LogoParticleDiag（失败的那几行前面带「! 」）。
+/// 后台切格子时也会叫：推进 LogoParticleDiag 一律排到主线程（在 SwiftUI 更新中途叫的也不就地改可观察的状态）
 private func lpLog(_ s: String, failure: Bool = false) {
     let line = "logo particles: " + s
     if failure {
@@ -36,6 +72,13 @@ private func lpLog(_ s: String, failure: Bool = false) {
     } else {
         Perf.log(line)
     }
+    let entry = failure ? "! " + s : s
+    Task { @MainActor in LogoParticleDiag.shared.push(entry) }
+}
+
+/// LogoParticleDiag 的那一行现状（同样排到主线程）
+private func lpDiagState(_ s: String) {
+    Task { @MainActor in LogoParticleDiag.shared.setState(s) }
 }
 
 private func lpFormatName(_ f: MTLPixelFormat) -> String {
@@ -50,23 +93,33 @@ private func lpRect(_ r: SIMD4<Float>) -> String {
     "\(Int(r.x)),\(Int(r.y)) \(Int(r.z))x\(Int(r.w))"
 }
 
-/// GPU 那边报的错：命令做完时在 Metal 的线程上写，主线程画下一帧之前取（不留着命令缓冲本身：它拽着画布，池子里的画布会不够用）
-private final class LPGPUErrors: @unchecked Sendable {
-    private let lock = NSLock()
-    private var message: String?
+private func lpYN(_ b: Bool) -> String { b ? "y" : "n" }
 
-    func record(_ s: String) {
+/// GPU 那边的结果：命令做完时在 Metal 的线程上写，主线程画下一帧之前（和每次 SwiftUI 更新时）取。
+/// 不留着命令缓冲本身：它拽着画布，池子里的画布会不够用
+private final class LPGPUStatus: @unchecked Sendable {
+    private let lock = NSLock()
+    private var error: String?
+    private var completed = false
+
+    func record(failed: Bool, message: String?) {
         lock.lock()
-        if message == nil { message = s }
+        if failed {
+            if error == nil { error = message ?? "unknown error" }
+        } else {
+            completed = true
+        }
         lock.unlock()
     }
 
-    func take() -> String? {
+    /// 上次取过以后：有没有哪一帧在 GPU 上出错、有没有哪一帧顺利做完
+    func take() -> (error: String?, completed: Bool) {
         lock.lock()
         defer { lock.unlock() }
-        let m = message
-        message = nil
-        return m
+        let r = (error: error, completed: completed)
+        error = nil
+        completed = false
+        return r
     }
 }
 
@@ -83,9 +136,9 @@ struct LogoParticleField: UIViewRepresentable {
     /// 画布自己的左上角，和 from / to 在同一个 SwiftUI 坐标系里量（例如 GeometryReader 的 frame(in: .global).origin）。
     /// 不给就用 UIKit 的窗口坐标：宿主视图贴着窗口原点时两者一样，嵌在别的宿主里（弹层、iPad 侧边栏旁边那一栏）时可能差一截
     var origin: CGPoint? = nil
-    /// 这一层能不能画这张字标：有 Metal、粒子已经在后台切好、这块画布也真交出去过一帧（切好以后趁藏着试画一帧 1×1 的空白）。
-    /// 一建好先说一次（还在切：false），以后变了才回调，在主线程、这次视图更新以后。画到一半出错（取不到画布、GPU 报错）会再说一次 false；EDR 的画布出错先换成 SDR 的
-    /// 重切，好了再说 true。调用方在不是 true 的时候不该藏头部的真字标（改成交叉淡入淡出），字标不会在半路上没了
+    /// 这一层能不能画这张字标：有 Metal、管线建好了、粒子已经在后台切好并拷上了 GPU。
+    /// 一建好先说一次（还在切：false），以后变了才回调，在主线程、这次视图更新以后。画到一半 GPU 报错、露出来以后一直画不上，
+    /// 会再说一次 false（这一页不再试）。调用方在不是 true 的时候不该藏头部的真字标（改成交叉淡入淡出），字标不会在半路上没了
     var onReady: ((Bool) -> Void)? = nil
 
     final class Coordinator {
@@ -97,16 +150,18 @@ struct LogoParticleField: UIViewRepresentable {
 
     func makeUIView(context: Context) -> MTKView {
         let v = MTKView()
+        // 先停着：设了 delegate 以后不会马上开始每秒 60 帧（不在转场时什么都不画）
+        v.isPaused = true
+        v.enableSetNeedsDisplay = false
+        v.colorPixelFormat = .bgra8Unorm
         v.framebufferOnly = true
+        // 和 FlowFunnelCanvas 一样：旧机型（改进兼容性那一档）30 帧
+        v.preferredFramesPerSecond = Compat.legacyDevice ? 30 : 60
+        // 画布跟着视图的大小走（MTKView 自己撑），不缩成 1×1
+        v.autoResizeDrawable = true
         v.isOpaque = false
         v.backgroundColor = .clear
         v.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        // 只在 LogoParticleRenderer.sync 里明着画（直接向 CAMetalLayer 取画布、交画布）：输入变了才画一帧（停住就停在这一帧），
-        // 就在 SwiftUI 这次更新里画。以前靠 setNeedsDisplay 等 Core Animation 来叫 draw(in:)：没画上也没人知道，滚动一停那一帧就一直缺着
-        v.isPaused = true
-        v.enableSetNeedsDisplay = false
-        // 这一帧和 SwiftUI 同一个事务提交：真字标藏起来的那一刻，画布上正好是同一张图，不会空一帧或叠一帧
-        v.presentsWithTransaction = true
         v.isUserInteractionEnabled = false
         v.isAccessibilityElement = false
         v.accessibilityElementsHidden = true
@@ -115,20 +170,15 @@ struct LogoParticleField: UIViewRepresentable {
         v.isHidden = true
         if let layer = v.layer as? CAMetalLayer {
             layer.isOpaque = false
-            layer.presentsWithTransaction = true
+            // 8 位、编码过的 Display P3（和贴图一样）；只有 SDR，不开 EDR（见文件头）
+            layer.colorspace = CGColorSpace(name: CGColorSpace.displayP3)
         }
-        // 能显示 HDR 的屏上字标是 HDR 的（LogoHDR：亮部最多到 SDR 白的两倍）：画布也开 EDR，不然真字标一藏起来亮的地方就暗一截。
-        // 这台设备上 EDR 的画布出过错就直接用 SDR 的（LogoParticleRenderer.edrFailed）
-        if let r = LogoParticleRenderer(hdr: LogoHDR.enabled) {
+        if let r = LogoParticleRenderer(legacy: Compat.legacyDevice) {
             v.device = r.device
-            r.configure(v)
             v.delegate = r
             r.view = v
             context.coordinator.renderer = r
         }
-        // 不在转场时画布只留 1×1（见文件头）：要画的时候 LogoParticleRenderer.sync 再撑回整窗大小
-        v.autoResizeDrawable = false
-        v.drawableSize = CGSize(width: 1, height: 1)
         update(v, context.coordinator)
         return v
     }
@@ -138,10 +188,12 @@ struct LogoParticleField: UIViewRepresentable {
     private func update(_ v: MTKView, _ c: Coordinator) {
         guard let r = c.renderer else {
             if !v.isHidden { v.isHidden = true }
+            if !v.isPaused { v.isPaused = true }
             // 没有 Metal：告诉调用方这一层画不了（只说一次，放到这次视图更新以后）
-            if !c.reportedNoMetal, let onReady {
+            if !c.reportedNoMetal {
                 c.reportedNoMetal = true
-                Task { @MainActor in onReady(false) }
+                lpDiagState("no Metal renderer on this page (see the log lines)")
+                if let onReady { Task { @MainActor in onReady(false) } }
             }
             return
         }
@@ -188,32 +240,54 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
         let firstArrive: Float
         let lastDepart: Float
     }
-    /// 三条管线：按画布的像素格式建（EDR 的画布换成 SDR 的时候重建）
+    /// 三条管线（bgra8Unorm）
     private struct Pipes {
         let quad: MTLRenderPipelineState
         let shadow: MTLRenderPipelineState
         let dot: MTLRenderPipelineState
     }
+    /// LogoParticleDiag 那一行现状由这些决定：都没变就不重拼字符串
+    private struct DiagKey: Equatable {
+        var hasImage: Bool
+        var imgW: Int
+        var imgH: Int
+        var baking: Bool
+        var cols: Int
+        var rows: Int
+        var particles: Int
+        var ready: Bool
+        var gpuOK: Bool
+        var drawn: Bool
+        var broken: String
+        var shown: Bool
+        var dsW: Int
+        var dsH: Int
+        var p: Int
+        var skip: String
+    }
 
+    /// 画布的像素格式：只有 SDR（见文件头）
+    private static let format: MTLPixelFormat = .bgra8Unorm
     /// 格子和粒子交接的那一小段（进度）：格子淡出 / 淡入的同时同一处的粒子淡入 / 淡出
     private static let handoff: Float = 0.012
-    /// 连着几次画不上（取不到画布、视图还没大小……）就不再等：EDR 换 SDR，或者告诉调用方画不了
-    private static let maxMisses = 4
-    /// 这台设备上 EDR 的画布出过错：以后的详情页一开始就用 SDR 的，不再每一页都先错一次
-    nonisolated(unsafe) static var edrFailed = false
+    /// 露出来以后连着这么多帧没画上（拿不到画布、视图没有大小……）就放弃这一页：还一帧都没画过时 12 帧（约 0.2 秒），
+    /// 画过以后 90 帧（展开 / 折起的中途画布和视图会对不上几帧，不算坏）
+    private static let missesBeforeFirstFrame = 12
+    private static let missesAfterFirstFrame = 90
 
     let device: MTLDevice
     private let queue: MTLCommandQueue
-    private let library: MTLLibrary
-    private var pipes: Pipes
-    /// 画布是不是 EDR 的浮点（否则 8 位、编码空间）。EDR 的画布出错时换成 false
-    private(set) var hdr: Bool
-    /// 画在哪一块画布上（显隐、画布大小、切好以后重画都由这里管）
+    private let pipes: Pipes
+    /// 旧机型：每格少撒一粒
+    private let legacy: Bool
+    /// 画在哪一块画布上（显隐、停走都由这里管）
     weak var view: MTKView?
     /// 见 LogoParticleField.onReady
     var onReady: ((Bool) -> Void)?
 
     private var image: UIImage?
+    /// 字标图的像素大小（诊断用）
+    private var imagePx = (w: 0, h: 0)
     private var built: Built?
     /// 最近一次按多大的字标切的（还在切的也算）：失败了也记着，不每帧重试
     private var bakedSize = CGSize.zero
@@ -226,32 +300,24 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
     private var fieldOrigin: CGPoint?
     private var progress: Double = 0
     private var reduceMotion = false
-    /// 输入变了、还没画
-    private var dirty = true
-    /// 画布露着（整窗大小）
+    /// 画布露着、MTKView 的时钟在走
     private var shown = false
-    /// 层里留着一张整窗大小的图
-    private var presented = false
-    /// 每次露出 / 藏起加一：藏起来 1.5 秒后缩画布时对得上才缩（中途又露出来了就不缩）
-    private var idleToken = 0
-    /// 这块画布真交出去过一帧（试画的 1×1 空白，或者真的一帧）：之前不对调用方说「画得出来」
-    private var verified = false
-    /// 画不了了（SDR 的画布也不行、视图一直没有大小……）：这一页不再试，调用方交叉淡入淡出两枚真字标
-    private var broken = false
-    /// 连着画不上的次数（画上一帧就清零）
+    /// 这一页画过（交出去）几帧
+    private var frames = 0
+    /// 有一帧在 GPU 上顺利做完了
+    private var gpuOK = false
+    /// 放弃了（为什么）：这一页不再画，调用方交叉淡入淡出两枚真字标
+    private var broken: String?
+    /// 露着的时候连着没画上的帧数（画上一帧就清零）
     private var misses = 0
-    /// 画这一帧时出的错：这一帧收完尾、回到 sync 再处理（换画布格式不在画的中途做）
-    private var failure: (why: String, sdrMayHelp: Bool)?
-    /// 下一轮主线程再 sync 一次（画不上时重试、画布大小变了以后重画）
-    private var redrawPending = false
-    private let gpuErrors = LPGPUErrors()
-    /// 切好以后生成 mip 的那一次：试画时看一眼它在 GPU 上有没有出错（只留到试画为止）
-    private var mipBuffer: MTLCommandBuffer?
+    /// 最近一次没画的原因（诊断用）
+    private var skip = ""
+    private let gpu = LPGPUStatus()
     /// 同一件事一页只记一次日志
     private var noted = Set<String>()
-    private var loggedFirstFrame = false
+    private var lastDiag: DiagKey?
 
-    init?(hdr wantHDR: Bool) {
+    init?(legacy: Bool) {
         guard let dev = MTLCreateSystemDefaultDevice() else {
             lpLog("no Metal device", failure: true)
             return nil
@@ -264,26 +330,17 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
             lpLog("no default Metal library", failure: true)
             return nil
         }
-        var hdr = wantHDR && !LogoParticleRenderer.edrFailed
-        var made = LogoParticleRenderer.makePipes(dev, lib, hdr ? .rgba16Float : .bgra8Unorm)
-        if made == nil, hdr {
-            // EDR 的管线建不起来：这一页（和以后的页）用 SDR 的
-            lpLog("EDR pipelines unavailable, using the SDR canvas", failure: true)
-            LogoParticleRenderer.edrFailed = true
-            hdr = false
-            made = LogoParticleRenderer.makePipes(dev, lib, .bgra8Unorm)
-        }
-        guard let p = made else { return nil }
+        guard let p = LogoParticleRenderer.makePipes(dev, lib) else { return nil }
         device = dev
         queue = q
-        library = lib
         pipes = p
-        self.hdr = hdr
+        self.legacy = legacy
         super.init()
     }
 
     /// 预乘 alpha 的「盖上去」：叠在页面上，和 SwiftUI 画真字标一样
-    private static func makePipes(_ dev: MTLDevice, _ lib: MTLLibrary, _ format: MTLPixelFormat) -> Pipes? {
+    private static func makePipes(_ dev: MTLDevice, _ lib: MTLLibrary) -> Pipes? {
+        let format = LogoParticleRenderer.format
         func pipe(_ v: String, _ f: String) -> MTLRenderPipelineState? {
             guard let vf = lib.makeFunction(name: v), let ff = lib.makeFunction(name: f) else {
                 lpLog("shader \(v) / \(f) missing from the default library", failure: true)
@@ -314,36 +371,23 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
         return Pipes(quad: qp, shadow: sp, dot: dp)
     }
 
-    /// 画布的像素格式、色彩空间、EDR 跟着这一套走（makeUIView 时、EDR 换成 SDR 时）
-    func configure(_ v: MTKView) {
-        let format: MTLPixelFormat = hdr ? .rgba16Float : .bgra8Unorm
-        v.colorPixelFormat = format
-        if let layer = v.layer as? CAMetalLayer {
-            // 画布直接向这一层取（不经过 MTKView.draw()）：设备、格式在层上也写一遍，不靠 MTKView 转过去
-            layer.device = device
-            layer.pixelFormat = format
-            // HDR：着色器里是扩展线性的 Display P3（和字标管线一致）；SDR：编码过的 Display P3（和 8 位的字标图一样）
-            layer.colorspace = CGColorSpace(name: hdr ? CGColorSpace.extendedLinearDisplayP3 : CGColorSpace.displayP3)
-            layer.wantsExtendedDynamicRangeContent = hdr
-        }
-    }
-
     /// 这一帧要不要画（藏起来的时候什么都不做）
     var active: Bool {
-        !broken && built != nil && !reduceMotion && progress > 0 && progress < 1
+        broken == nil && built != nil && !reduceMotion && progress > 0 && progress < 1
             && from.width >= 2 && from.height >= 2 && to.width >= 1 && to.height >= 1
     }
 
-    /// SwiftUI 每次更新都会调：只在真变了时标记重画；换了图（或大字标大小变了两成五以上）才在后台重新切格子
+    /// SwiftUI 每次更新都会调：只记下最新的输入（露着的时候 MTKView 每一帧都按它画）；
+    /// 换了图（或大字标大小变了两成五以上）才在后台重新切格子
     func set(image: UIImage?, from: CGRect, to: CGRect, origin: CGPoint?, progress: Double, reduceMotion: Bool) {
         if image !== self.image {
             // 换了图：旧的那一套不能再画，还在切的也作废
             self.image = image
+            imagePx = (w: image?.cgImage?.width ?? 0, h: image?.cgImage?.height ?? 0)
             built = nil
             bakedSize = .zero
             generation &+= 1
             baking = false
-            dirty = true
         }
         if let image, from.width >= 2, from.height >= 2 {
             let s = bakedSize
@@ -352,93 +396,83 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
                 || abs(from.height - s.height) > s.height * 0.25
             if stale { bake(image, size: from.size) }
         }
-        if from != self.from || to != self.to || origin != fieldOrigin || progress != self.progress || reduceMotion != self.reduceMotion {
-            self.from = from
-            self.to = to
-            fieldOrigin = origin
-            self.progress = progress
-            self.reduceMotion = reduceMotion
-            dirty = true
-        }
+        self.from = from
+        self.to = to
+        fieldOrigin = origin
+        self.progress = progress
+        self.reduceMotion = reduceMotion
         reportReady()
     }
 
-    /// 后台切格子；切完回到主线程建贴图、缓冲。按新大小重切时，原来那一套接着画到新的切好为止（转屏时不会空一下）
+    /// 后台切格子、缩 mip；切完回到主线程拷进贴图、缓冲。按新大小重切时，原来那一套接着画到新的切好为止（转屏时不会空一下）
     private func bake(_ image: UIImage, size: CGSize) {
         bakedSize = size
         generation &+= 1
         baking = true
         let gen = generation
-        let hdr = self.hdr
-        let legacy = Compat.legacyDevice
+        let legacy = self.legacy
         Task { @MainActor [weak self] in
             let baked = await Task.detached(priority: .userInitiated) {
-                LogoParticleBaker.bake(image, size: size, hdr: hdr, legacy: legacy)
+                LogoParticleBaker.bake(image, size: size, legacy: legacy)
             }.value
             guard let self, self.generation == gen else { return }
             self.baking = false
             // 按新大小重切失败：留着原来那一套（同一张图，只是格子大小差一点）
             if let baked {
-                if let b = self.upload(baked) { self.built = b }
+                if let b = self.upload(baked) {
+                    self.built = b
+                    lpLog("baked \(b.cols)x\(b.rows) cells, \(b.particleCount) particles, \(baked.w)x\(baked.h) px texture"
+                          + " with \(baked.levels.count) mip levels for a \(Int(size.width))x\(Int(size.height)) pt logo")
+                }
             } else {
-                lpLog("bake failed for a \(Int(size.width))x\(Int(size.height)) pt logo (hdr \(hdr))", failure: true)
+                lpLog("bake failed for a \(Int(size.width))x\(Int(size.height)) pt logo", failure: true)
             }
-            self.dirty = true
             self.reportReady()
             self.sync()
         }
     }
 
-    /// 能不能画变了才告诉调用方。「能」= 切好了、这块画布真交出去过一帧、没放弃。
+    /// 能不能画变了才告诉调用方。「能」= 切好了、拷上了 GPU（管线在 init 里就建好了），也没放弃。
     /// 一建好就先说一次（多半是 false：还在切）：SwiftUI 换了一块新画布时，调用方手里不会还留着上一块说过的 true
     private func reportReady() {
-        guard let cb = onReady else { return }
-        let ready = !broken && built != nil && verified
-        if ready == reportedReady { return }
+        let ready = broken == nil && built != nil
+        updateDiag()
+        guard let cb = onReady, ready != reportedReady else { return }
+        let before = reportedReady
         reportedReady = ready
+        if ready {
+            lpLog("ready — \(canvasState)")
+        } else if before == true {
+            let why = broken ?? "re-baking for a new logo image"
+            lpLog("no longer ready (\(why)) — \(canvasState)")
+        }
         // 放到这次视图更新以后再说：回调里通常会改 SwiftUI 的状态
         Task { @MainActor in cb(ready) }
     }
 
-    /// 按现在的输入定画布：要画时露出来（闲着缩成了 1×1 就先撑回整窗大小）就地画这一帧；不画时藏起来，
-    /// 停住一会儿（1.5 秒）还不画，才缩回 1×1 并换掉层里那张整窗的旧图，放掉那几十 MB
-    /// （在顶上附近来回滚时不用每次重新分配整窗的画布）。切好了还没试画过：趁藏着试画一帧
+    /// 按现在的输入定画布：要画时露出来、就地先画一帧，再让 MTKView 自己的时钟接着画；不画时停下、藏起来
     func sync() {
         guard let v = view else { return }
+        checkGPU()
         let show = active
         if show != shown {
             shown = show
-            idleToken &+= 1
             if show {
-                // 先不露出来：这一帧真交出去了（draw(in:) 里）才露，画不上时不会露出层里上一次转场留下的旧图
+                misses = 0
                 fitScale(v)
+                v.isHidden = false
+                // 露出来的这一下先就地画一帧（停着的 MTKView 由 draw() 明着叫 draw(in:)），
+                // 不让层里上一次转场留下的那张先露出来一下，再交给 view 自己的时钟
+                v.draw()
+                // 上面这一帧里可能已经放弃了（GPU 报错、画布格式不对）
+                if shown { v.isPaused = false }
             } else {
+                v.isPaused = true
                 v.isHidden = true
-                let token = idleToken
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(for: .milliseconds(1500))
-                    guard let self, self.idleToken == token, !self.shown else { return }
-                    self.releaseCanvas()
-                }
             }
         }
-        if !show {
-            // 藏着的时候层里留的不是这一帧：下次露出来先重画
-            dirty = true
-            explainIdle()
-            if built != nil, !verified, !broken { probeFrame(v) }
-        } else if dirty {
-            // 就在这次更新里画（presentsWithTransaction：和 SwiftUI 藏起真字标的那一下同一个事务）
-            if fitDrawable(v) {
-                render(v)
-            } else {
-                missed("bounds", "the canvas has no size yet", sdrMayHelp: false)
-            }
-        }
-        if let f = failure {
-            failure = nil
-            fail(f.why, sdrMayHelp: f.sdrMayHelp)
-        }
+        if !show { explainIdle() }
+        updateDiag()
     }
 
     /// 倍数按窗口所在的那块屏（UIScreen.main 在折叠屏、外接屏上不一定是这块）
@@ -448,38 +482,6 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
         guard s > 0 else { return }
         let k = min(s, Compat.legacyDevice ? 2 : 3)
         if abs(v.contentScaleFactor - k) > 0.01 { v.contentScaleFactor = k }
-    }
-
-    /// 画之前画布对上视图现在的大小 × 倍数：闲着缩成了 1×1、转屏 / 展开折起以后和视图对不上，都在这里撑回来。视图还没大小就是 false
-    private func fitDrawable(_ v: MTKView) -> Bool {
-        let b = v.bounds.size
-        guard b.width > 0, b.height > 0 else { return false }
-        let k = v.contentScaleFactor
-        let want = CGSize(width: b.width * k, height: b.height * k)
-        let ds = v.drawableSize
-        if abs(ds.width - want.width) > 1 || abs(ds.height - want.height) > 1 { v.drawableSize = want }
-        // 之后视图再变大小由 MTKView 自己跟着撑（drawableSizeWillChange 里下一轮重画）
-        if !v.autoResizeDrawable { v.autoResizeDrawable = true }
-        return true
-    }
-
-    /// 画布缩回 1×1；层里还留着整窗大小的那张，就交一帧 1×1 的空白换掉它（池子里大的那几张随之放掉）
-    private func releaseCanvas() {
-        guard let v = view, v.autoResizeDrawable || presented else { return }
-        v.autoResizeDrawable = false
-        v.drawableSize = CGSize(width: 1, height: 1)
-        if presented { clear(v) }
-    }
-
-    /// 下一轮主线程再 sync 一次（合并成一次）
-    private func redrawSoon() {
-        guard !redrawPending else { return }
-        redrawPending = true
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.redrawPending = false
-            self.sync()
-        }
     }
 
     // MARK: 画不上的时候
@@ -495,16 +497,16 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
         let b = view?.bounds.size ?? .zero
         let ds = view?.drawableSize ?? .zero
         let k = view?.contentScaleFactor ?? 0
-        return "\(lpFormatName(hdr ? .rgba16Float : .bgra8Unorm)) hdr \(hdr) bounds \(Int(b.width))x\(Int(b.height))"
+        return "\(lpFormatName(Self.format)) bounds \(Int(b.width))x\(Int(b.height))"
             + " drawable \(Int(ds.width))x\(Int(ds.height)) scale \(k) window \(view?.window != nil)"
             + " p \(String(format: "%.3f", progress))"
     }
 
-    /// 要画（0 < p < 1）却不画：为什么（日志用）
+    /// 要画（0 < p < 1）却不画：为什么（日志、诊断用）
     private func explainIdle() {
         guard progress > 0, progress < 1 else { return }
         let why: String
-        if broken {
+        if broken != nil {
             why = "gave up earlier on this page"
         } else if reduceMotion {
             why = "reduce motion"
@@ -517,124 +519,102 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
         } else {
             return
         }
+        skip = why
         note("idle:" + why, "skipping frames: \(why) — \(canvasState)")
     }
 
-    /// 这一次没画上：下一轮主线程再画；连着几次（或者等画布等了很久）就算失败（只记下，这一帧收完尾回到 sync 再处理）
-    private func missed(_ key: String, _ why: @autoclosure () -> String, sdrMayHelp: Bool = true, slow: Bool = false) {
+    /// 露着却没画上这一帧：MTKView 下一帧自己会再来；连着太多帧都不行就放弃这一页
+    private func skipped(_ why: String) {
         misses += 1
-        note("miss:" + key, "frame skipped: \(why()) — \(canvasState)", failure: true)
-        if slow || misses >= Self.maxMisses {
-            misses = 0
-            failure = (why: "\(key): \(why())", sdrMayHelp: sdrMayHelp)
-        } else {
-            redrawSoon()
+        skip = why
+        note("skip:" + why, "frame skipped: \(why) — \(canvasState)", failure: true)
+        let limit = frames == 0 ? Self.missesBeforeFirstFrame : Self.missesAfterFirstFrame
+        if misses >= limit {
+            fail("\(misses) frames in a row not drawn (last: \(why))")
         }
+        updateDiag()
     }
 
-    /// 画不了：EDR 的画布先换成 SDR 的重来；已经是 SDR（或者换了也没用）就放弃这一页，告诉调用方（两枚真字标交叉淡入淡出）
-    private func fail(_ why: String, sdrMayHelp: Bool) {
-        if sdrMayHelp, hdr, dropEDR(why) { return }
-        if !broken { lpLog("giving up, the page cross-fades the real logos instead: \(why) — \(canvasState)", failure: true) }
-        broken = true
-        sync()
+    /// GPU 那边的结果：第一帧顺利做完记一行；哪一帧出了错就放弃这一页
+    private func checkGPU() {
+        let s = gpu.take()
+        if s.completed, !gpuOK {
+            gpuOK = true
+            lpLog("first frame finished on the GPU — \(canvasState)")
+        }
+        if let err = s.error { fail("the GPU failed a frame: \(err)") }
+    }
+
+    /// 画不了：这一页不再画，停下、藏起来，告诉调用方（两枚真字标交叉淡入淡出）
+    private func fail(_ why: String) {
+        guard broken == nil else { return }
+        broken = why
+        lpLog("giving up, the page cross-fades the real logos instead: \(why) — \(canvasState)", failure: true)
+        shown = false
+        if let v = view {
+            v.isPaused = true
+            v.isHidden = true
+        }
         reportReady()
     }
 
-    /// EDR 的画布换成 8 位 SDR 的（管线、画布格式、色彩空间），按原来的大小重切一套 8 位的贴图；切好、试画过再接着放粒子
-    private func dropEDR(_ why: String) -> Bool {
-        guard let v = view, let p = Self.makePipes(device, library, .bgra8Unorm) else { return false }
-        lpLog("EDR canvas failed (\(why)), switching to SDR — \(canvasState)", failure: true)
-        Self.edrFailed = true
-        hdr = false
-        pipes = p
-        configure(v)
-        built = nil
-        verified = false
-        misses = 0
-        mipBuffer = nil
-        _ = gpuErrors.take()
-        generation &+= 1
-        baking = false
-        let size = bakedSize
-        bakedSize = .zero
-        if let image, size.width >= 2, size.height >= 2 { bake(image, size: size) }
-        sync()
-        reportReady()
-        return true
+    /// LogoParticleDiag 的那一行现状：决定它的那几样变了才重拼（进度按 0.01 算）
+    private func updateDiag() {
+        let ds = view?.drawableSize ?? .zero
+        let k = DiagKey(hasImage: image != nil, imgW: imagePx.w, imgH: imagePx.h, baking: baking,
+                        cols: built?.cols ?? 0, rows: built?.rows ?? 0, particles: built?.particleCount ?? 0,
+                        ready: broken == nil && built != nil, gpuOK: gpuOK, drawn: frames > 0, broken: broken ?? "",
+                        shown: shown, dsW: Int(ds.width), dsH: Int(ds.height),
+                        p: Int((progress * 100).rounded()), skip: skip)
+        guard k != lastDiag else { return }
+        lastDiag = k
+        var s = k.hasImage ? "img \(k.imgW)x\(k.imgH)" : "no image"
+        if k.cols > 0 {
+            s += " | baked y (\(k.cols)x\(k.rows) cells, \(k.particles) particles)"
+        } else {
+            s += k.baking ? " | baked n (baking)" : " | baked n"
+        }
+        s += " | ready \(lpYN(k.ready)) | verified \(lpYN(k.gpuOK)) | drawn \(lpYN(k.drawn))"
+        s += " | broken " + (k.broken.isEmpty ? "n" : "y: " + k.broken)
+        s += " | \(lpFormatName(Self.format)) \(k.dsW)x\(k.dsH) " + (k.shown ? "on" : "off")
+        s += " | p " + String(format: "%.2f", Double(k.p) / 100)
+        if !k.skip.isEmpty { s += " | skip: " + k.skip }
+        lpDiagState(s)
     }
 
     // MARK: 一帧
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        dirty = true
-        // 画布大小变了（转屏、展开 / 折起）：这里大小还没换完，下一轮主线程按新的大小重画
-        if shown { redrawSoon() }
+        // 画布大小变了（转屏、展开 / 折起）：露着的时候下一帧就按新的大小画，这里只更新诊断
+        updateDiag()
     }
 
-    /// 明着画的模式（isPaused、不响应 setNeedsDisplay）下 MTKView 自己不会来叫；万一叫了，照现在的输入同步一次
-    func draw(in view: MTKView) { sync() }
-
-    /// 画布底下那一层（取画布、交画布都直接对它：不经过 MTKView.draw()，藏着的时候也照样取得到，不靠它内部怎么判断要不要画）
-    private func metalLayer(_ view: MTKView) -> CAMetalLayer? {
-        guard let layer = view.layer as? CAMetalLayer else {
-            note("layer", "the view is not backed by a CAMetalLayer", failure: true)
-            return nil
-        }
-        return layer
-    }
-
-    /// 画布这一帧的贴图：格式不对（管线是按另一种格式建的）不画
-    private func nextDrawable(_ layer: CAMetalLayer, key: String) -> CAMetalDrawable? {
-        let t0 = CACurrentMediaTime()
-        guard let drawable = layer.nextDrawable() else {
-            missed(key, "no drawable", slow: CACurrentMediaTime() - t0 > 0.25)
-            return nil
-        }
-        let want: MTLPixelFormat = hdr ? .rgba16Float : .bgra8Unorm
-        guard drawable.texture.pixelFormat == want else {
-            failure = (why: "\(key): the drawable is \(lpFormatName(drawable.texture.pixelFormat)), the pipelines are \(lpFormatName(want))",
-                       sdrMayHelp: true)
-            return nil
-        }
-        return drawable
-    }
-
-    private static func clearPass(_ texture: MTLTexture) -> MTLRenderPassDescriptor {
-        let rpd = MTLRenderPassDescriptor()
-        rpd.colorAttachments[0].texture = texture
-        rpd.colorAttachments[0].loadAction = .clear
-        rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        rpd.colorAttachments[0].storeAction = .store
-        return rpd
-    }
-
-    /// 这一帧：sync 里要画（露着、输入变了）时就地叫
-    private func render(_ view: MTKView) {
-        guard active, let b = built, let layer = metalLayer(view) else { return }
+    /// MTKView 自己的时钟（露着的时候每秒 60 帧，旧机型 30）或 sync 里露出来的那一下明着叫：按最新的输入画一帧
+    func draw(in view: MTKView) {
+        checkGPU()
+        guard active, let b = built else { return }
         let bounds = view.bounds.size
-        let ds = layer.drawableSize
-        guard bounds.width > 0, bounds.height > 0 else {
-            missed("bounds", "the canvas has no size yet", sdrMayHelp: false)
+        let ds = view.drawableSize
+        guard bounds.width > 0, bounds.height > 0, ds.width >= 2, ds.height >= 2 else {
+            skipped("the canvas has no size yet")
             return
         }
-        guard ds.width >= 2, ds.height >= 2 else {
-            missed("drawable-size", "the drawable is still 1x1", sdrMayHelp: false)
-            return
-        }
-        // 画布和视图的宽高比对不上（展开 / 折起的中途）：位置全会错，下一轮 sync 先把画布撑对再画
+        // 画布和视图的宽高比对不上（展开 / 折起的中途）：位置全会错，等 MTKView 把画布撑对再画
         let sx = ds.width / bounds.width, sy = ds.height / bounds.height
         guard abs(sx - sy) <= 0.02 * max(sx, sy) else {
-            missed("aspect", "drawable and view disagree on the aspect ratio", sdrMayHelp: false)
+            skipped("drawable and view disagree on the aspect ratio")
             return
         }
-        if let err = gpuErrors.take() {
-            failure = (why: "the GPU failed a frame: \(err)", sdrMayHelp: true)
+        guard let drawable = view.currentDrawable, let rpd = view.currentRenderPassDescriptor else {
+            skipped("no drawable")
             return
         }
-        guard let drawable = nextDrawable(layer, key: "drawable") else { return }
+        guard drawable.texture.pixelFormat == Self.format else {
+            fail("the drawable is \(lpFormatName(drawable.texture.pixelFormat)), the pipelines are \(lpFormatName(Self.format))")
+            return
+        }
         guard let cb = queue.makeCommandBuffer() else {
-            missed("command-buffer", "no command buffer")
+            skipped("no command buffer")
             return
         }
         // 按真拿到的这张画布的像素算（和 drawableSize 本该一样）
@@ -677,12 +657,15 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
             anchor: SIMD4(sa.x, sa.y, da.x, da.y),
             // 尾巴最长 14 点；刚离开散开 14 点、落定前散开 5 点；弧线至少按 40 点高算（大字标滚到很上面时也有弧度）
             extra: SIMD4(14 * pt, 14 * pt, 5 * pt, 40 * pt),
-            // 粒子路上提亮多少、闪一下提亮多少、颜色上限：编码空间里同样的亮度变化数值小一些；SDR 不超过 1（预乘的颜色不超过 alpha）
-            tone: hdr ? SIMD4<Float>(0.25, 0.9, LogoHDR.peak, 0) : SIMD4<Float>(0.10, 0.35, 1, 0)
+            // 粒子路上提亮多少、闪一下提亮多少、颜色上限：编码空间里的幅度；SDR 不超过 1（预乘的颜色不超过 alpha）
+            tone: SIMD4<Float>(0.10, 0.35, 1, 0)
         )
 
-        guard let e = cb.makeRenderCommandEncoder(descriptor: Self.clearPass(drawable.texture)) else {
-            missed("encoder", "no render command encoder")
+        rpd.colorAttachments[0].loadAction = .clear
+        rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        rpd.colorAttachments[0].storeAction = .store
+        guard let e = cb.makeRenderCommandEncoder(descriptor: rpd) else {
+            skipped("no render command encoder")
             return
         }
         e.setFragmentBuffer(b.cells, offset: 0, index: 2)
@@ -705,70 +688,19 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
             e.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: b.particleCount)
         }
         e.endEncoding()
-        // GPU 报错只记下来，下一帧开始前看（不留着命令缓冲本身）
-        let errors = gpuErrors
+        // GPU 的结果只记下来，下一帧开始前（和下一次 SwiftUI 更新时）看（不留着命令缓冲本身）
+        let status = gpu
         cb.addCompletedHandler { @Sendable done in
-            if done.status == .error { errors.record(done.error.map { "\($0)" } ?? "unknown error") }
+            status.record(failed: done.status == .error, message: done.error.map { "\($0)" })
         }
-        // presentsWithTransaction：排进 GPU 以后再在这个事务里交出去
+        cb.present(drawable)
         cb.commit()
-        cb.waitUntilScheduled()
-        drawable.present()
-        // 和这一帧同一个事务露出来（sync 里不先露）
-        if view.isHidden { view.isHidden = false }
-        presented = true
-        dirty = false
         misses = 0
-        if !loggedFirstFrame {
-            loggedFirstFrame = true
-            lpLog("first frame — \(canvasState) src \(lpRect(src)) dst \(lpRect(dst)) px, \(b.cols)x\(b.rows) cells, \(b.particleCount) particles")
+        frames &+= 1
+        if frames == 1 {
+            lpLog("first frame drawn — \(canvasState) src \(lpRect(src)) dst \(lpRect(dst)) px, \(b.cols)x\(b.rows) cells, \(b.particleCount) particles")
         }
-        if !verified {
-            verified = true
-            reportReady()
-        }
-    }
-
-    /// 试画：切好以后、露出来之前交一帧空白（画布闲着是 1×1），确认这块画布真取得到、交得出去，GPU 也没报错（连切好时生成 mip 的那一次），
-    /// 再对调用方说「画得出来」。等它真做完（一次，零点几毫秒）
-    private func probeFrame(_ view: MTKView) {
-        guard let layer = metalLayer(view), let drawable = nextDrawable(layer, key: "probe-drawable") else { return }
-        guard let cb = queue.makeCommandBuffer(), let e = cb.makeRenderCommandEncoder(descriptor: Self.clearPass(drawable.texture)) else {
-            missed("probe-command-buffer", "no command buffer / encoder for the test frame")
-            return
-        }
-        e.endEncoding()
-        cb.commit()
-        cb.waitUntilCompleted()
-        if cb.status == .error {
-            failure = (why: "the test frame failed on the GPU: \(cb.error.map { "\($0)" } ?? "unknown error")", sdrMayHelp: true)
-            return
-        }
-        if let mip = mipBuffer, mip.status == .error {
-            mipBuffer = nil
-            failure = (why: "generating the logo mipmaps failed: \(mip.error.map { "\($0)" } ?? "unknown error")", sdrMayHelp: true)
-            return
-        }
-        mipBuffer = nil
-        drawable.present()
-        presented = drawable.texture.width > 1 || drawable.texture.height > 1
-        misses = 0
-        verified = true
-        reportReady()
-    }
-
-    /// 交一帧 1×1 的空白（画布刚缩回 1×1）：层里不再留着整窗大小的那张
-    private func clear(_ view: MTKView) {
-        guard let layer = view.layer as? CAMetalLayer, let drawable = layer.nextDrawable(),
-              let cb = queue.makeCommandBuffer() else {
-            note("flush", "could not flush the canvas back to 1x1 — \(canvasState)", failure: true)
-            return
-        }
-        cb.makeRenderCommandEncoder(descriptor: Self.clearPass(drawable.texture))?.endEncoding()
-        cb.commit()
-        cb.waitUntilScheduled()
-        drawable.present()
-        presented = false
+        updateDiag()
     }
 
     private func drawQuad(_ e: MTLRenderCommandEncoder, _ pipe: MTLRenderPipelineState, _ uniforms: Uniforms, _ quad: Quad) {
@@ -793,57 +725,37 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
                     shadow: SIMD4(drop / h, 1.1 * sigma / w, 1.1 * sigma / h, 0.55))
     }
 
-    /// 后台切好的那一套传上 GPU（主线程，几百 KB 到几 MB 的拷贝）：贴图带 mip（小字标靠它缩小，影子靠它模糊）
+    /// 后台切好的那一套传上 GPU（主线程，几百 KB 到几 MB 的拷贝）：贴图带后台缩好的整条 mip（小字标靠它缩小，影子靠它模糊）。
+    /// 共享存储、只给着色器读：每一级都由 CPU 直接写，不用 GPU 生成 mip，也不当渲染目标（以前那样在真机上没验证过）
     private func upload(_ k: LogoParticleBake) -> Built? {
-        let format: MTLPixelFormat = k.hdr ? .rgba16Float : .rgba8Unorm
-        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: k.w, height: k.h, mipmapped: true)
-        // 共享存储：CPU 直接写第 0 级；renderTarget：有的 GPU 生成 mip 走的是渲染
+        guard !k.levels.isEmpty else {
+            lpLog("upload: no mip levels for a \(k.w)x\(k.h) texture", failure: true)
+            return nil
+        }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: k.w, height: k.h, mipmapped: false)
+        desc.mipmapLevelCount = k.levels.count
         desc.storageMode = .shared
-        desc.usage = [.shaderRead, .renderTarget]
+        desc.usage = .shaderRead
         guard let texture = device.makeTexture(descriptor: desc) else {
-            lpLog("upload: no \(k.w)x\(k.h) texture (hdr \(k.hdr))", failure: true)
+            lpLog("upload: no \(k.w)x\(k.h) texture with \(k.levels.count) mip levels", failure: true)
             return nil
         }
-        let region = MTLRegionMake2D(0, 0, k.w, k.h)
-        let texels = k.w * k.h * 4
-        if k.hdr {
-            guard k.half.count == texels else {
-                lpLog("upload: \(k.half.count) half floats for a \(k.w)x\(k.h) texture", failure: true)
+        var lw = k.w, lh = k.h
+        for (i, level) in k.levels.enumerated() {
+            guard level.count == lw * lh * 4 else {
+                lpLog("upload: mip \(i) has \(level.count) bytes for \(lw)x\(lh)", failure: true)
                 return nil
             }
-            k.half.withUnsafeBytes { raw in
+            let region = MTLRegionMake2D(0, 0, lw, lh)
+            let rowBytes = lw * 4
+            level.withUnsafeBytes { raw in
                 if let base = raw.baseAddress {
-                    texture.replace(region: region, mipmapLevel: 0, withBytes: base, bytesPerRow: k.w * 8)
+                    texture.replace(region: region, mipmapLevel: i, withBytes: base, bytesPerRow: rowBytes)
                 }
             }
-        } else {
-            guard k.bytes.count == texels else {
-                lpLog("upload: \(k.bytes.count) bytes for a \(k.w)x\(k.h) texture", failure: true)
-                return nil
-            }
-            k.bytes.withUnsafeBytes { raw in
-                if let base = raw.baseAddress {
-                    texture.replace(region: region, mipmapLevel: 0, withBytes: base, bytesPerRow: k.w * 4)
-                }
-            }
+            lw = max(1, lw / 2)
+            lh = max(1, lh / 2)
         }
-        // 没有 mip 小字标和影子都取不到（是空的）：生成不了就当这一套没切好
-        guard let cb = queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else {
-            lpLog("upload: no blit encoder for the mipmaps", failure: true)
-            return nil
-        }
-        blit.generateMipmaps(for: texture)
-        blit.endEncoding()
-        if verified {
-            // 画布已经试画过（这是按新大小重切的一套）：出错了下一帧开始前看
-            let errors = gpuErrors
-            cb.addCompletedHandler { @Sendable done in
-                if done.status == .error { errors.record(done.error.map { "\($0)" } ?? "unknown error") }
-            }
-        }
-        cb.commit()
-        // 还没试画过：试画时直接看它做完没出错（同一条队列，试画那一帧做完时它早做完了）
-        mipBuffer = verified ? nil : cb
         guard let cells = k.cells.withUnsafeBytes({ raw -> MTLBuffer? in
             guard let base = raw.baseAddress else { return nil }
             return device.makeBuffer(bytes: base, length: raw.count, options: .storageModeShared)
@@ -875,7 +787,7 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
 }
 
 
-// MARK: - 切格子、定门槛、撒粒子（后台线程；只用值类型，主线程拿到以后再建贴图和缓冲）
+// MARK: - 切格子、定门槛、撒粒子、缩 mip（后台线程；只用值类型，主线程拿到以后再建贴图和缓冲）
 
 /// 和 LogoParticles.metal 里的 LPParticle 一一对应
 fileprivate struct LPParticleData: Sendable {
@@ -885,13 +797,11 @@ fileprivate struct LPParticleData: Sendable {
     var shape: SIMD4<Float>
 }
 
-/// 后台切好的一套：贴图第 0 级的像素（HDR 是半精度浮点、线性；SDR 是 8 位、编码过的，都是预乘的 Display P3）、每格的两个门槛、粒子
+/// 后台切好的一套：贴图每一级 mip 的像素（8 位、预乘过的 Display P3，编码空间；第 0 级在最前，一直缩到 1×1）、每格的两个门槛、粒子
 fileprivate struct LogoParticleBake: Sendable {
     let w: Int
     let h: Int
-    let hdr: Bool
-    let half: [UInt16]
-    let bytes: [UInt8]
+    let levels: [[UInt8]]
     let cells: [SIMD2<Float>]
     let particles: [LPParticleData]
     let cols: Int
@@ -907,18 +817,15 @@ fileprivate enum LogoParticleBaker {
     /// 一格多大（点，按大字标）
     static let cellPt: CGFloat = 2.4
 
-    /// 解出来的字标：data 是预乘的 RGBA 浮点（HDR 线性、SDR 编码空间，和画布一致；第一行是最上面一行），
-    /// half / bytes 是传上贴图的那一份（只有一份不空）
+    /// 解出来的字标：8 位、预乘过的 RGBA（Display P3 编码空间，第一行是最上面一行），原样当贴图的第 0 级
     private struct Decoded {
-        let data: [Float]
-        let half: [UInt16]
         let bytes: [UInt8]
         let w: Int
         let h: Int
     }
 
-    static func bake(_ image: UIImage, size: CGSize, hdr: Bool, legacy: Bool) -> LogoParticleBake? {
-        guard let px = decode(image, hdr: hdr) else { return nil }
+    static func bake(_ image: UIImage, size: CGSize, legacy: Bool) -> LogoParticleBake? {
+        guard let px = decode(image) else { return nil }
         let w = px.w, h = px.h
 
         // 格子：大字标上约 2.4 点一格（小字标上一点出头）
@@ -928,15 +835,16 @@ fileprivate enum LogoParticleBaker {
         var sum = [SIMD4<Float>](repeating: .zero, count: n)
         var peak = [Float](repeating: 0, count: n)
         var count = [Float](repeating: 0, count: n)
-        px.data.withUnsafeBufferPointer { d in
+        let inv: Float = 1 / 255
+        px.bytes.withUnsafeBufferPointer { d in
             for y in 0..<h {
                 let cy = min(rows - 1, y * rows / h)
                 let rowBase = y * w * 4
                 for x in 0..<w {
                     let ci = cy * cols + min(cols - 1, x * cols / w)
                     let o = rowBase + x * 4
-                    let a = d[o + 3]
-                    sum[ci] += SIMD4(d[o], d[o + 1], d[o + 2], a)
+                    let a = Float(d[o + 3]) * inv
+                    sum[ci] += SIMD4(Float(d[o]) * inv, Float(d[o + 1]) * inv, Float(d[o + 2]) * inv, a)
                     count[ci] += 1
                     if a > peak[ci] { peak[ci] = a }
                 }
@@ -1024,7 +932,7 @@ fileprivate enum LogoParticleBaker {
 
         let firstArrive = alive.map { arrive[$0] }.min() ?? arriveWindows[0].0
         let lastDepart = alive.map { depart[$0] }.max() ?? d1
-        return LogoParticleBake(w: w, h: h, hdr: hdr, half: px.half, bytes: px.bytes, cells: cellData, particles: parts,
+        return LogoParticleBake(w: w, h: h, levels: mips(px.bytes, w: w, h: h), cells: cellData, particles: parts,
                                 cols: cols, rows: rows, firstArrive: firstArrive, lastDepart: lastDepart)
     }
 
@@ -1081,10 +989,10 @@ fileprivate enum LogoParticleBaker {
         return band
     }
 
-    /// 字标图 → 预乘的 RGBA（第一行是最上面一行），最长边不超过 1024 像素。
-    /// HDR：线性扩展 Display P3 的浮点，亮部（> 1）原样留着；浮点的画布建不起来就退回 8 位、自己换成线性。
-    /// SDR：8 位 Display P3，预乘本来就在编码空间里（和 SwiftUI / Core Animation 画这张图一样），原样当贴图
-    private static func decode(_ image: UIImage, hdr: Bool) -> Decoded? {
+    /// 字标图 → 8 位、预乘过的 Display P3（第一行是最上面一行），最长边不超过 1024 像素。
+    /// 预乘本来就在编码空间里（和 SwiftUI / Core Animation 画这张图一样），原样当贴图。
+    /// LogoHDR 的字标（16 位浮点、扩展线性 Display P3）也画进这块 8 位的：CoreGraphics 换回编码空间，比 SDR 白还亮的截到 1（只有 SDR，见文件头）
+    private static func decode(_ image: UIImage) -> Decoded? {
         guard let cg = image.cgImage, cg.width > 0, cg.height > 0 else {
             lpLog("decode: the logo has no bitmap (cgImage \(image.cgImage != nil))", failure: true)
             return nil
@@ -1092,54 +1000,57 @@ fileprivate enum LogoParticleBaker {
         let k = min(1.0, 1024.0 / Double(max(cg.width, cg.height)))
         let w = max(1, Int((Double(cg.width) * k).rounded()))
         let h = max(1, Int((Double(cg.height) * k).rounded()))
-        let count = w * h * 4
-        let rect = CGRect(x: 0, y: 0, width: w, height: h)
-        if hdr, let space = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3) {
-            var data = [Float](repeating: 0, count: count)
-            let info = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.floatComponents.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-            let ok: Bool = data.withUnsafeMutableBytes { buf in
-                guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 32, bytesPerRow: w * 16,
-                                          space: space, bitmapInfo: info) else { return false }
-                ctx.interpolationQuality = .high
-                ctx.draw(cg, in: rect)
-                return true
-            }
-            if ok { return Decoded(data: data, half: data.map { Self.halfBits($0) }, bytes: [], w: w, h: h) }
-            lpLog("decode: no float context for a \(w)x\(h) logo (\(cg.bitsPerComponent) bpc source), using the 8-bit one")
-        }
         guard let p3 = CGColorSpace(name: CGColorSpace.displayP3) else {
             lpLog("decode: no Display P3 color space", failure: true)
             return nil
         }
-        var bytes = [UInt8](repeating: 0, count: count)
-        let ok8: Bool = bytes.withUnsafeMutableBytes { buf in
+        var bytes = [UInt8](repeating: 0, count: w * h * 4)
+        let ok: Bool = bytes.withUnsafeMutableBytes { buf in
             guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
                                       space: p3, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
             ctx.interpolationQuality = .high
-            ctx.draw(cg, in: rect)
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
             return true
         }
-        guard ok8 else {
-            lpLog("decode: no 8-bit context for a \(w)x\(h) logo", failure: true)
+        guard ok else {
+            lpLog("decode: no 8-bit context for a \(w)x\(h) logo (\(cg.bitsPerComponent) bpc source)", failure: true)
             return nil
         }
-        if !hdr {
-            return Decoded(data: bytes.map { Float($0) / 255 }, half: [], bytes: bytes, w: w, h: h)
-        }
-        var data = [Float](repeating: 0, count: count)
-        for i in stride(from: 0, to: count, by: 4) {
-            let a8 = bytes[i + 3]
-            guard a8 > 0 else { continue }
-            let a = Float(a8) / 255
-            for ch in 0..<3 {
-                // 8 位的预乘是在伽马空间里做的：先除回去，换成线性，再在线性里预乘
-                let v = min(1, Float(bytes[i + ch]) / 255 / a)
-                let lin = v <= 0.04045 ? v / 12.92 : powf((v + 0.055) / 1.055, 2.4)
-                data[i + ch] = lin * a
+        return Decoded(bytes: bytes, w: w, h: h)
+    }
+
+    /// 整条 mip：第 0 级是原图，往下每一级取上一级 2×2 的平均（预乘过的值直接平均就对），一直缩到 1×1。
+    /// 每一级的大小和 Metal 的约定一样（max(1, 上一级 / 2)），级数 = floor(log2(最长边)) + 1
+    private static func mips(_ base: [UInt8], w: Int, h: Int) -> [[UInt8]] {
+        var levels: [[UInt8]] = [base]
+        var pw = w, ph = h
+        while pw > 1 || ph > 1 {
+            let nw = max(1, pw / 2), nh = max(1, ph / 2)
+            var next = [UInt8](repeating: 0, count: nw * nh * 4)
+            let prev = levels[levels.count - 1]
+            let srcW = pw, srcH = ph
+            prev.withUnsafeBufferPointer { s in
+                next.withUnsafeMutableBufferPointer { d in
+                    for y in 0..<nh {
+                        let y0 = min(2 * y, srcH - 1), y1 = min(2 * y + 1, srcH - 1)
+                        for x in 0..<nw {
+                            let x0 = min(2 * x, srcW - 1), x1 = min(2 * x + 1, srcW - 1)
+                            let i00 = (y0 * srcW + x0) * 4, i01 = (y0 * srcW + x1) * 4
+                            let i10 = (y1 * srcW + x0) * 4, i11 = (y1 * srcW + x1) * 4
+                            let o = (y * nw + x) * 4
+                            for ch in 0..<4 {
+                                let total = UInt16(s[i00 + ch]) + UInt16(s[i01 + ch]) + UInt16(s[i10 + ch]) + UInt16(s[i11 + ch])
+                                d[o + ch] = UInt8((total + 2) / 4)
+                            }
+                        }
+                    }
+                }
             }
-            data[i + 3] = a
+            levels.append(next)
+            pw = nw
+            ph = nh
         }
-        return Decoded(data: data, half: data.map { Self.halfBits($0) }, bytes: [], w: w, h: h)
+        return levels
     }
 
     /// 固定的整数哈希 → 0…1：同一枚字标每次切出来的门槛、抖动都一样（倒着滚原路回去）
@@ -1151,23 +1062,5 @@ fileprivate enum LogoParticleBaker {
         x = x &* 0x846C_A68B
         x ^= x >> 16
         return Float(x >> 8) / 16_777_216
-    }
-
-    /// 32 位浮点 → 16 位浮点的位（和 LogoHDR.halfBits 一样：四舍五入；太小的当 0，超出范围的取最大的有限值）
-    private static func halfBits(_ value: Float) -> UInt16 {
-        let x = value.bitPattern
-        let sign = UInt16(truncatingIfNeeded: (x >> 16) & 0x8000)
-        let e = Int((x >> 23) & 0xFF) - 127 + 15
-        if e <= 0 { return sign }
-        if e >= 31 { return sign | 0x7BFF }
-        var mant = x & 0x7F_FFFF
-        var exp = UInt32(e)
-        mant += 0x1000
-        if mant & 0x80_0000 != 0 {
-            mant = 0
-            exp += 1
-            if exp >= 31 { return sign | 0x7BFF }
-        }
-        return sign | UInt16(truncatingIfNeeded: (exp << 10) | (mant >> 13))
     }
 }

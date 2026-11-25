@@ -8,10 +8,11 @@ using namespace metal;
 // （中间那一条主字标先到 0.65–0.80，上面的厂牌、下面的副标题随后，最晚 0.90）。一帧三样东西：
 //   1. 大字标（这一帧的框）上还没走的格子；2. 小字标上已经落定的格子；3. 正在路上的格子：每格一到三粒，颜色取这一格的平均色，
 //      画成一颗软的小点，顺着速度拖一截很短、越往后越淡的尾巴。两枚字标底下还有和 LogoImage 一样的影子。
-// 颜色都是预乘 alpha 的 Display P3，空间和画布一致：能显示 HDR 的屏上是线性的扩展 Display P3（和字标管线 LogoHDR 一致，
-// 亮部照样比 SDR 白亮）；SDR 屏上是编码过的（8 位画布、贴图都不带 _srgb），和 SwiftUI / Core Animation 画真字标一样
-// 在编码空间里预乘、叠加，半透明的边和粒子的软边不会比真字标亮一圈。着色器里不用分两种情况，只有提亮的幅度看 LPUniforms.tone。
-// 所有函数名带 lp_ 前缀。
+// 颜色都是预乘 alpha、编码过的 Display P3，空间和画布一致（8 位 bgra8Unorm 画布、rgba8Unorm 贴图，都不带 _srgb）：
+// 和 SwiftUI / Core Animation 画真字标一样在编码空间里预乘、叠加，半透明的边和粒子的软边不会比真字标亮一圈。
+// 现在只有 SDR（EDR 的透明画布在用户真机上从没验证过画得出来，见 LogoParticleField.swift 的文件头）：LogoHDR 字标比 SDR 白还亮的部分
+// 在后台解图时就截到 1 了。提亮的幅度、颜色上限看 LPUniforms.tone。
+// 贴图的整条 mip 是后台用 CPU 缩好、拷进去的（不靠 GPU 生成）。所有函数名带 lp_ 前缀。
 
 #define LP_PI 3.14159265
 
@@ -23,7 +24,7 @@ struct LPUniforms {
     float4 path;     // x 往右鼓多少（像素），y 中段收窄（0…1），z 横向抖动（像素），w 摆动（像素）
     float4 anchor;   // xy 光流的起点（像素，跟着溶解的前沿往左挪），zw 终点（小字标里偏右一点）
     float4 extra;    // x 尾巴最长（像素），y 刚离开时散开多少（像素），z 快落定时收拢前散开多少（像素），w 弧线高度至少多少（像素）
-    float4 tone;     // x 路上提亮多少，y 闪一下提亮多少，z 颜色上限（SDR 是 1：预乘的颜色不超过 alpha），w 不用
+    float4 tone;     // x 路上提亮多少，y 闪一下提亮多少，z 颜色上限（1：预乘的颜色不超过 alpha），w 不用
 };
 
 struct LPQuad {
@@ -91,7 +92,7 @@ fragment float4 lp_logo_fragment(LPQuadOut in [[stage_in]],
     if (any(uv < float2(0.0)) || any(uv > float2(1.0))) discard_fragment();
     float k = lp_visible(cells, U, uv, Q.info.y);
     if (k <= 0.0) discard_fragment();
-    // 小字标只有大字标四成多宽：靠 mip 缩小，边缘不闪、不起锯齿（和系统画缩小的图一样平滑）
+    // 小字标只有大字标四成多宽：靠 mip（后台 CPU 缩好的 2×2 平均）缩小，边缘不闪、不起锯齿（和系统画缩小的图一样平滑）
     constexpr sampler s(filter::linear, mip_filter::linear, address::clamp_to_edge);
     return logo.sample(s, uv) * k;
 }
