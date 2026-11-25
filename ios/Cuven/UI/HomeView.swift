@@ -18,6 +18,7 @@ struct HomeView: View {
     /// 这一栈推进去的页（分享来的链接打开详情页时往里推）
     @State private var path = NavigationPath()
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.duoColumn) private var column
 
     var body: some View {
         let _ = Perf.count("home")
@@ -50,6 +51,7 @@ struct HomeView: View {
                 .settledRefreshable { await model.refreshAll() }
             }
             .background(Theme.bg)
+            .overlay { columnScan }
             .toolbar(.hidden, for: .navigationBar)
         }
         .sheet(isPresented: $pairScanning) { PairScanSheet().environment(account).environment(\.colorScheme, .light) }
@@ -103,7 +105,8 @@ struct HomeView: View {
                     .allowsHitTesting(false)
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 12)
-                if canScan { scanButton }
+                // iPhone Duo「侧边一列」的形态：光学扫描挪到侧边那一列里、导航胶囊上面（columnScan）
+                if canScan && !column { scanButton }
             }
             // 没有状态栏留的安全区时（iPhone Duo 折起，状态栏在侧边那一列）至少离上沿 24 + 8：
             // 以前是 12 + 8，大标题贴着屏幕顶（用户要求「保持一定的留白，整个界面看上去不会拥挤」）
@@ -115,6 +118,15 @@ struct HomeView: View {
         .frame(width: fullWidth, alignment: .topLeading)
         // 占位 → 头图淡过去（以前灰的占位一下子换成黑底，画面再从黑里出来）；只是淡入淡出，「减弱动态效果」下也合适
         .animation(DSMotion.fade, value: pages.isEmpty)
+    }
+
+    /// iPhone Duo「侧边一列」的形态（只有这时）：光学扫描摆在侧边那一列里、导航胶囊的正上方（用户要求，真机截图圈的位置）。
+    /// 挂在主页这一页上：推进详情页以后它跟着主页一起走开，不和详情页那颗弧形菜单的「+」挤在同一列里
+    @ViewBuilder
+    private var columnScan: some View {
+        if column && canScan {
+            DuoColumnSlot(size: 46) { scanButton }
+        }
     }
 
     /// 能扫：配对的解码器在（PairSpec），登录了、不是演示数据（和账户页「扫描登录其他设备」同一个条件）

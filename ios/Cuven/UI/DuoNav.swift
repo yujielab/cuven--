@@ -725,6 +725,32 @@ private final class NavAmbientTick: NSObject {
     }
 }
 
+/// iPhone Duo「侧边一列」的形态：把一颗圆钮摆进侧边那一列、导航胶囊的正上方（中线对着状态栏的中线，离胶囊顶 gap）。
+/// 主页的光学扫描用它（用户要求挪到侧导航栏上方）。只有钮本身接点按，别处照常点得到下面的页面
+struct DuoColumnSlot<Content: View>: View {
+    /// 钮多大（直径）、离胶囊顶多远
+    var size: CGFloat = 46
+    var gap: CGFloat = 14
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        GeometryReader { safe in
+            let sf = safe.frame(in: .global)
+            GeometryReader { full in
+                let ff = full.frame(in: .global)
+                let lead = max(0, sf.minX - ff.minX)
+                let trail = max(0, ff.maxX - sf.maxX)
+                let onLeading = lead > trail && lead >= 44
+                let rail = max(DuoRail.shared.fromTrailing ?? DuoNavLayer.statusAxis, DuoNavLayer.statusAxis)
+                let cap = DuoNavLayer.capsule(columnHeight: full.size.height)
+                content()
+                    .position(x: onLeading ? rail : full.size.width - rail, y: cap.top - gap - size / 2)
+            }
+            .ignoresSafeArea()
+        }
+    }
+}
+
 /// 把 DuoNav 摆进侧边那一列：哪边的安全区宽就放哪边（系统说了竖栏在哪边就听系统的；没有像样的一列时贴右缘，按 64 点宽的一条摆），
 /// 中线对着那一列的中线（状态栏的中线），离底 18。键盘起来时不跟着挪：和系统标签栏一样被键盘盖住。
 /// 那一列矮（折起横拿）时每格往下压：胶囊顶上要给状态栏留出约 200 点。
