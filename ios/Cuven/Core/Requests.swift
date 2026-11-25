@@ -458,14 +458,11 @@ final class RequestStore {
     private(set) var items: [RequestStatus] = []
     /// 只有我自己的请求（/app/requests 和刚提交的），新的在前：请求中心用
     private(set) var mine: [RequestStatus] = []
-    /// 主页「可请求添加」那一排（十分钟内不重取）
-    private(set) var shelf: [CatalogItem] = []
     /// 凑批的进度、正在跑的那一批（/app/flow；请求中心开着时才问）
     private(set) var flow: RequestFlowInfo?
     /// 上一次拿到 flow 的时刻：进度条按速度往前推算到「现在」
     private(set) var flowAt = Date()
     @ObservationIgnored private var flowTag: String?
-    @ObservationIgnored private var shelfAt: Date?
 
     @ObservationIgnored private var user: String?
     @ObservationIgnored private var loop: Task<Void, Never>?
@@ -732,16 +729,6 @@ final class RequestStore {
             merge(done)
         }
         return s
-    }
-
-    // MARK: 主页那一排
-
-    func loadShelf() async {
-        if DemoData.enabled || (shelfAt.map { Date().timeIntervalSince($0) < 600 } ?? false) { return }
-        guard let list = try? await RequestAPI.catalog(src: "all", sort: "new", own: "hide") else { return }
-        shelf = list
-        shelfAt = Date()
-        for i in list { if let r = i.req { merge(r) } }
     }
 
     // MARK: 后台刷新（App 不在前台时偶尔看一眼，发通知）
