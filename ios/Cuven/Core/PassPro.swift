@@ -18,9 +18,10 @@ import Foundation
 final class PassPro {
     static let shared = PassPro()
 
-    /// 加速节点（VPS，DNS 只解析、不经 Cloudflare 代理）
-    static let host = "pass.cuven.us"
-    static var origin: String { "https://" + host }
+    /// 加速节点（VPS，DNS 只解析、不经 Cloudflare 代理）：从「获取软件更新」下发的节点表里挑（RuntimeUpdate），
+    /// 检测时按顺序试、用第一个通的；没下发过就是 pass.cuven.us
+    private(set) var host: String = "pass.cuven.us"
+    var origin: String { "https://" + host }
     private static let enabledKey = "cuven_pass_pro"
 
     enum State: Equatable {
@@ -66,6 +67,7 @@ final class PassPro {
     }()
 
     private init() {
+        host = RuntimeUpdate.shared.passNodes.first ?? host
         if enabled { state = .checking; Task { await check() } }
     }
 
@@ -73,8 +75,8 @@ final class PassPro {
     func mediaBase() async -> (base: String, viaPass: Bool) {
         guard enabled, !DemoData.enabled else { return (APIClient.base, false) }
         if let u = downUntil, u > Date() { return (APIClient.base, false) }
-        if let ok = lastOK, Date().timeIntervalSince(ok) < 300 { return (Self.origin, true) }
-        return await probe(timeout: 2.5) != nil ? (Self.origin, true) : (APIClient.base, false)
+        if let ok = lastOK, Date().timeIntervalSince(ok) < 300 { return (origin, true) }
+        return await probe(host: host, timeout: 2.5) != nil ? (origin, true) : (APIClient.base, false)
     }
 
     /// 播放中节点出错：10 分钟内不再用（这期间走普通线路），之后再试
@@ -84,16 +86,27 @@ final class PassPro {
         if enabled { state = .down }
     }
 
-    /// 账户页：重新看一眼节点
+    /// 账户页：重新看一眼节点。节点表里按顺序试，用第一个通的（「获取软件更新」可以换节点表）
     func check() async {
         guard enabled else { state = .off; return }
         state = .checking
-        if let rtt = await probe(timeout: 4) {
-            downUntil = nil
-            state = .ready(rttMs: rtt)
-        } else {
-            state = .down
+        for h in RuntimeUpdate.shared.passNodes {
+            if let rtt = await probe(host: h, timeout: 4) {
+                host = h
+                downUntil = nil
+                state = .ready(rttMs: rtt)
+                return
+            }
         }
+        state = .down
+    }
+
+    /// 「获取软件更新」换了节点表：从新表的第一个开始，开着就马上重新检测
+    func nodesChanged() {
+        host = RuntimeUpdate.shared.passNodes.first ?? host
+        lastOK = nil
+        downUntil = nil
+        if enabled { Task { await check() } }
     }
 
     /// 测速对比：普通线路和 Pass Pro 各测一次（同一个探针、同样的大小；按流量计费的网络最多 1 MB，别的最多 4 MB）
@@ -103,14 +116,14 @@ final class PassPro {
         defer { testing = false }
         let cap = NetworkAuto.shared.metered ? 1 << 20 : 4 << 20
         let direct = await NetworkProbe.run(maxBytes: cap, base: APIClient.base)
-        let pass = await NetworkProbe.run(maxBytes: cap, base: Self.origin)
+        let pass = await NetworkProbe.run(maxBytes: cap, base: origin)
         speed = Speed(direct: direct.mbps, pass: pass.mbps, at: Date())
         if pass.mbps != nil { lastOK = Date(); downUntil = nil; if enabled, let r = pass.rttMs { state = .ready(rttMs: Int(r.rounded())) } }
     }
 
     /// 经节点转发到 Worker 的那一条通不通：通了回延迟（毫秒）
-    private func probe(timeout: TimeInterval) async -> Int? {
-        guard let url = URL(string: Self.origin + "/api/edge/ping?b=0") else { return nil }
+    private func probe(host h: String, timeout: TimeInterval) async -> Int? {
+        guard let url = URL(string: "https://" + h + "/api/edge/ping?b=0") else { return nil }
         var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         req.httpMethod = "GET"
         let t0 = Date()

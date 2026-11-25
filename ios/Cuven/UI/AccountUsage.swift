@@ -19,6 +19,9 @@ struct NetworkSpeedCard: View {
             NetworkSpeedRow()
             AccountDivider()
             PassProRows()
+            AccountDivider()
+            // 获取软件更新（用户要求）：热更新 Cuven Pass 的加速节点
+            RuntimeUpdateRow(scope: .network)
         }
     }
 }
