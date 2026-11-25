@@ -1,18 +1,19 @@
 import SwiftUI
 
-// MARK: - 详情页的「下载」「分享」（用户给的图：iPhone Duo 侧边那一列，返回钮下面一枚竖着的玻璃胶囊，↓ 和分享）
+// MARK: - 详情页的「下载」
 //
-// 放在导航栏右边的一组工具栏按钮里：侧边一列的形态下系统把它们排在返回钮下面、包进一枚玻璃胶囊；别的 iPhone 上在右上角。
+// 别的 iPhone、iPad 上在导航栏右上角；iPhone Duo 侧边一列的形态里在弧形菜单上（DetailArcMenu.swift）。
 // · 下载（用户要求「下载指的是预先缓存 100%」：Precache.download）：整部缓存到本机，在 App 里放（离线也行）。
 //   ↓ → 一圈进度 + 停止方块（下载中，点开是「暂停 / 取消」）→ 一圈进度 + ↓（暂停了、断了，点开是「继续 / 取消」）→ ✓（点开是「删除下载」）；
-// · 分享（用户要求「分享仅让对方打开相同的详情页就可以了」）：系统的分享面板，发出去的是一条 cuven://movie/<TMDB 编号> 的链接，
-//   对方装了 Cuven max 一点就打开同一部的详情页（DeepLink）；可以直接隔空投送。不分享文件、签名地址或片库路径。
+// · 以前还有一颗「分享」（发一条 cuven://movie/<TMDB 编号> 的链接）：用户要求移除。别人发来的这种链接照样打得开（DeepLink）。
 
 struct DetailDownloadButton: View {
     let video: Video
     let title: String
     let runtime: Int?
     @Binding var alert: PrecacheAlert?
+    /// 弧形菜单里的那一段弧带：图标摆在它的中线上，整段弧带都点得到（工具栏里不用给，系统自己管）
+    var slot: ArcSlot? = nil
 
     var body: some View {
         let it = Precache.shared.item(path: video.path)
@@ -23,7 +24,7 @@ struct DetailDownloadButton: View {
                 Menu {
                     Button("删除下载", systemImage: "trash", role: .destructive) { Precache.shared.delete(path: video.path) }
                 } label: {
-                    Image(systemName: "checkmark")
+                    Image(systemName: "checkmark").detailHit(slot: slot)
                 }
                 .accessibilityLabel("已下载")
                 .accessibilityIdentifier("detail-download")
@@ -32,7 +33,7 @@ struct DetailDownloadButton: View {
                     Button("暂停下载", systemImage: "pause") { Precache.shared.pause(path: video.path) }
                     Button("取消下载", systemImage: "xmark", role: .destructive) { Precache.shared.delete(path: video.path) }
                 } label: {
-                    DownloadRing(progress: it.progress, running: true)
+                    DownloadRing(progress: it.progress, running: true).detailHit(slot: slot)
                 }
                 .accessibilityLabel("正在下载")
                 .accessibilityValue("\(Int((it.progress * 100).rounded()))%")
@@ -42,7 +43,7 @@ struct DetailDownloadButton: View {
                     Button("继续下载", systemImage: "arrow.down") { Precache.shared.resume(path: video.path) }
                     Button("取消下载", systemImage: "xmark", role: .destructive) { Precache.shared.delete(path: video.path) }
                 } label: {
-                    DownloadRing(progress: it.progress, running: false)
+                    DownloadRing(progress: it.progress, running: false).detailHit(slot: slot)
                 }
                 .accessibilityLabel(it.phase == .noSpace ? "储存空间不足" : "下载已暂停")
                 .accessibilityValue("\(Int((it.progress * 100).rounded()))%")
@@ -52,7 +53,7 @@ struct DetailDownloadButton: View {
             Button {
                 alert = DetailDownloadStarter.start(video: video, title: title, runtime: runtime)
             } label: {
-                Image(systemName: "arrow.down")
+                Image(systemName: "arrow.down").detailHit(slot: slot)
             }
             .accessibilityLabel("下载")
             .accessibilityHint("把整部影片缓存到这台 iPhone")
@@ -61,22 +62,28 @@ struct DetailDownloadButton: View {
     }
 }
 
-/// 分享：一条打开同一部详情页的链接（隔空投送给附近装了 Cuven max 的人，对方点开就是这一页）
-struct DetailShareButton: View {
-    let video: Video
-    let title: String
-    let tmdbID: Int?
-
-    var body: some View {
-        ShareLink(item: DeepLink.movie(path: video.path, tmdbID: tmdbID),
-                  subject: Text(title),
-                  message: Text("在 Cuven max 中查看《\(title)》"),
-                  preview: SharePreview(title)) {
-            Image(systemName: "square.and.arrow.up")
+extension View {
+    /// 弧形菜单里的一项：按钮撑到那颗圆玻璃那么大，图标在正中，点得到的范围是整颗圆（不给就原样）
+    @ViewBuilder
+    func detailHit(_ size: CGFloat?) -> some View {
+        if let size {
+            frame(width: size, height: size)
+                .contentShape(Circle())
+        } else {
+            self
         }
-        .accessibilityLabel("分享")
-        .accessibilityHint("发给别人，对方可以打开这部影片的详情页")
-        .accessibilityIdentifier("detail-share")
+    }
+
+    /// 弧形菜单里「下载」那一项：按钮撑到弧带的外接矩形那么大，图标摆在弧带的中线上，点得到的范围是整段弧带（不给就原样）
+    @ViewBuilder
+    func detailHit(slot: ArcSlot?) -> some View {
+        if let slot {
+            offset(slot.glyph)
+                .frame(width: slot.frameSize.width, height: slot.frameSize.height)
+                .contentShape(slot)
+        } else {
+            self
+        }
     }
 }
 
@@ -133,38 +140,49 @@ struct DownloadRing: View {
 struct DownloadBadge: View {
     let path: String
     var size: CGFloat = 22
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        if let it = Precache.shared.item(path: path), it.isFull {
-            Group {
-                if it.phase == .done {
-                    Image(systemName: "arrow.down")
-                        .font(.system(size: size * 0.5, weight: .bold))
-                        .foregroundStyle(.black)
+        let it = Precache.shared.item(path: path)
+        let full = it?.isFull == true
+        // 外面一层一直在（空的时候不占地方）：动画挂在它上面，里面那颗冒出来 / 收回去才有人带
+        ZStack {
+            if let it, full {
+                Group {
+                    if it.phase == .done {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: size * 0.5, weight: .bold))
+                            .foregroundStyle(.black)
+                            .frame(width: size, height: size)
+                            .background(Circle().fill(Color(white: 0.72)))
+                    } else {
+                        let p = max(0.001, min(1, it.progress))
+                        let running = it.phase == .downloading || it.phase == .queued || it.phase == .preparing
+                        ZStack {
+                            Circle().fill(Color.black.opacity(0.45))
+                            Circle().stroke(Color.white.opacity(0.22), lineWidth: size * 0.14)
+                            // 刚开始那一点也看得见：圆头的线，进度为 0 时就是一个白点
+                            Circle()
+                                .trim(from: 0, to: p)
+                                .stroke(Color.white, style: StrokeStyle(lineWidth: size * 0.14, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                        }
+                        .padding(size * 0.07)
                         .frame(width: size, height: size)
-                        .background(Circle().fill(Color(white: 0.72)))
-                } else {
-                    let p = max(0.001, min(1, it.progress))
-                    let running = it.phase == .downloading || it.phase == .queued || it.phase == .preparing
-                    ZStack {
-                        Circle().fill(Color.black.opacity(0.45))
-                        Circle().stroke(Color.white.opacity(0.22), lineWidth: size * 0.14)
-                        // 刚开始那一点也看得见：圆头的线，进度为 0 时就是一个白点
-                        Circle()
-                            .trim(from: 0, to: p)
-                            .stroke(Color.white, style: StrokeStyle(lineWidth: size * 0.14, lineCap: .round))
-                            .rotationEffect(.degrees(-90))
+                        .opacity(running ? 1 : 0.6)
+                        .animation(.easeInOut(duration: 0.4), value: p)
                     }
-                    .padding(size * 0.07)
-                    .frame(width: size, height: size)
-                    .opacity(running ? 1 : 0.6)
-                    .animation(.easeInOut(duration: 0.4), value: p)
                 }
+                .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
+                // 「减弱动态效果」时只淡入淡出、不缩放（F59）
+                .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .scale(scale: 0.8)))
+                .accessibilityHidden(true)
             }
-            .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
-            .transition(.opacity.combined(with: .scale(scale: 0.8)))
-            .accessibilityHidden(true)
         }
+        // 角标冒出来 / 收回去、那一圈换成下好了的那一颗，都带过渡。以前只写了 transition、没有动画带它：
+        // 按下「下载」角标是直接跳出来的，下完那一下也是直接换
+        .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: full)
+        .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: it?.phase == Precache.Phase.done)
     }
 }
 

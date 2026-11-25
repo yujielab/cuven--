@@ -30,7 +30,8 @@ struct NetworkSpeedRow: View {
     @AppStorage(NetworkSpeed.autoValueKey) private var autoValue = -1
     /// 正在拖：松手才写回设置（拖一下不存几十次）
     @State private var dragValue: Int?
-    @ScaledMetric(relativeTo: .title3) private var iconSize: CGFloat = 24
+    /// 和 AccountRow 的符号一样大（21 点；以前这里还是 24）
+    @ScaledMetric(relativeTo: .title3) private var iconSize: CGFloat = 21
     @ScaledMetric(relativeTo: .title3) private var iconColumn: CGFloat = AccountMetrics.iconColumn
 
     static let hint = "调高更流畅，调低更省流量。"
@@ -75,21 +76,24 @@ struct NetworkSpeedRow: View {
         .padding(.bottom, 16)
     }
 
-    /// 符号、「网络速度」、右边的百分比；下面一行灰色提示（和账户页的行同一套字、同一条左边线）
+    /// 符号、「网络速度」、右边的百分比；下面一行灰色提示（和账户页的行同一套字、同一条左边线）。
+    /// AccountRow 收过一轮（标题 Title 3 → Body 半粗、说明 Callout → Subheadline、符号 24 → 21）以后这一行没跟上，
+    /// 同一张卡里它比下面「自动调整」「Cuven Pass Pro」大一号、细一级：现在是同一套；百分比仍比标题大一级（Title 3 半粗）
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: AccountMetrics.gap) {
             Image(systemName: "speedometer")
                 .font(.system(size: iconSize, weight: .regular))
-                .foregroundStyle(.white.opacity(0.6))
+                // 和 AccountRow 的符号同一级灰（DSInk.secondary）：比下面的说明亮一级（设计复查）
+                .foregroundStyle(DSInk.secondary)
                 .frame(width: iconColumn)
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text("网络速度")
-                        .font(.title3.weight(.medium))
+                        .font(.body.weight(.semibold))
                         .foregroundStyle(.white)
                     Spacer(minLength: 0)
                     Text(verbatim: "\(shown)%")
-                        .font(.title2.weight(.semibold))
+                        .font(.title3.weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(.white)
                         // 自动调整选了新的数：数字滚过去（手指拖的时候不滚，跟手）
@@ -97,7 +101,7 @@ struct NetworkSpeedRow: View {
                         .animation(dragValue == nil ? Animation.smooth(duration: 0.5) : nil, value: shown)
                 }
                 Text(Self.hint)
-                    .font(.callout)
+                    .font(.subheadline)
                     .foregroundStyle(DSInk.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -180,8 +184,9 @@ private struct NetworkAutoRow: View {
             }
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(auto ? Color.black : Color.white)
-            .padding(.horizontal, 18)
-            .frame(minHeight: 34)
+            // 和「更改」「测速」同一号胶囊（30 高、左右 13；以前 34 / 18：设计复查），点按区仍 44
+            .padding(.horizontal, 13)
+            .frame(minHeight: 30)
             .background { if auto { Capsule().fill(Color.white) } }
             .glassEffect(.regular.interactive(), in: Capsule())
             .frame(minHeight: 44)
@@ -388,14 +393,15 @@ struct UsageInsightsCard: View {
                 Spacer(minLength: 0)
                 togglePill
             }
+            // 卡里的标题和账户页的行同一号（17 半粗）：以前 Title 3，和上面的组名「使用洞察」差不多大（设计复查）
             Text("流量概览")
-                .font(.title3.weight(.semibold))
+                .font(.headline)
                 .foregroundStyle(.white)
                 .accessibilityAddTraits(.isHeader)
         }
     }
 
-    /// 和头部「个人档案」同一种玻璃胶囊：看上去 34 高，点按区 44（F74）
+    /// 和头部「个人档案」同一种玻璃胶囊：看上去 30 高、左右 13（和「更改」「重设」同一号：设计复查），点按区 44（F74）
     private var togglePill: some View {
         Button {
             taps += 1
@@ -404,8 +410,8 @@ struct UsageInsightsCard: View {
             Text(expanded ? "收起" : "展开")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 18)
-                .frame(minHeight: 34)
+                .padding(.horizontal, 13)
+                .frame(minHeight: 30)
                 .glassEffect(.regular.interactive(), in: Capsule())
                 .frame(minHeight: 44)
                 .contentShape(Capsule())
@@ -447,8 +453,8 @@ struct UsageInsightsCard: View {
             }
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(.white)
-            .padding(.horizontal, 18)
-            .frame(minHeight: 34)
+            .padding(.horizontal, 13)
+            .frame(minHeight: 30)
             .glassEffect(.regular.interactive(), in: Capsule())
             .frame(minHeight: 44)
             .contentShape(Capsule())
@@ -908,7 +914,7 @@ private struct UsageEmptyState: View {
                 .font(.headline)
                 .foregroundStyle(.white)
             Text("播放或浏览后，这里会按小时显示流量使用情况。")
-                .font(.callout)
+                .font(.subheadline)
                 .foregroundStyle(DSInk.tertiary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)

@@ -104,6 +104,8 @@ struct CastPhoto: View {
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
+        // 一圈细边（和海报、小海报那一圈同一种）：深色的照片在深色的底上也看得出圆的轮廓
+        .overlay(Circle().strokeBorder(DetailSurface.line, lineWidth: 0.5))
         .accessibilityHidden(true)
     }
 }

@@ -77,7 +77,7 @@ struct CuvenApp: App {
         .commands {
             CommandMenu("前往") {
                 Button("主页") { AppNav.shared.go(.home) }.keyboardShortcut("1", modifiers: .command)
-                Button("资料库") { AppNav.shared.go(.library) }.keyboardShortcut("2", modifiers: .command)
+                Button("探索") { AppNav.shared.go(.library) }.keyboardShortcut("2", modifiers: .command)
                 Button("请求") { AppNav.shared.go(.requests) }.keyboardShortcut("3", modifiers: .command)
                 Button("搜索") { AppNav.shared.go(.search) }.keyboardShortcut("4", modifiers: .command)
                 Button("我的") { AppNav.shared.go(.account) }.keyboardShortcut("5", modifiers: .command)
@@ -128,11 +128,19 @@ struct RootView: View {
         let column = barEdge != nil || DuoLayout.isColumn(window: window)
             || DuoLayout.hasSideColumn(leading: sideInsets.leading, trailing: sideInsets.trailing)
         TabView(selection: $tab) {
-            Tab("主页", systemImage: "house.fill", value: AppTab.home) {
+            // 图标和侧边那一列里的一样（用户要求 Apple 风格：圆顶房子 + 一道短横，NavGlyphImage）
+            Tab(value: AppTab.home) {
                 HomeView().duoHidesTabBar().tint(.white).id(roots[.home, default: 0])
+            } label: {
+                Label { Text("主页") } icon: { Image(uiImage: NavGlyphImage.home) }
             }
-            Tab("资料库", systemImage: "square.stack.fill", value: AppTab.library) {
-                LibraryView().duoHidesTabBar().tint(.white).id(roots[.library, default: 0])
+            // 探索（以前叫资料库，用户要求改名）：随机、高分优先的预告片流
+            // 图标和侧边那一列里的一样（设计复查：片段图标，NavGlyphImage）
+            Tab(value: AppTab.library) {
+                // 换一轮（种子变了）就整页重建：从第一部开始放新的顺序
+                LibraryView().duoHidesTabBar().tint(.white).id("\(roots[.library, default: 0])-\(model.exploreSeed)")
+            } label: {
+                Label { Text("探索") } icon: { Image(uiImage: NavGlyphImage.clips) }
             }
             // 请求中心（用户要求）：角标是进行中的请求个数
             // 图标和侧边那一列里的一样（用户要求更新：海报卡 + 右上角的「+」，NavGlyphImage）
@@ -150,20 +158,19 @@ struct RootView: View {
                 SearchView().duoHidesTabBar().tint(.white).id(roots[.search, default: 0])
             }
         }
-        .environment(\.duoColumn, column)
-        // 换标签：一下选择触感（系统标签栏和侧边那一列自己画的导航都走这里）
+        // 换标签：一下选择触感（系统标签栏和自己画的导航都走这里）
         .sensoryFeedback(.selection, trigger: tab)
-        // 侧边一列的形态：自己画的导航，搜索单独一颗
-        .overlay {
-            if column {
-                DuoNavLayer(tab: $tab, edge: barEdge) { roots[$0, default: 0] += 1 }
-            }
-        }
+        // 自己画的导航：侧边一列的形态竖着那枚；别的 iPhone 形态底下横着那枚（NavShell）
+        .modifier(NavShell(tab: $tab, column: column, edge: barEdge) { t in
+            roots[t, default: 0] += 1
+            // 在「探索」上再点一下「探索」：换一轮（新的随机顺序）
+            if t == .library { model.reshuffleExplore() }
+        })
         // 量整个窗口、左右安全区，iOS 27.1 起再问系统竖栏在哪一边（SideColumnProbe）
         .modifier(SideColumnProbe(window: $window, sideInsets: $sideInsets, probeEdge: $probeEdge,
                                   barEdge: $barEdge, barWindow: $barWindow))
-        // 标签栏不在滚动时缩小：HIG 只在标签栏带附件（迷你播放器之类）时这么做（C10）；标签名一字一词（C8）
-        .onChange(of: tab) { _, _ in Haptics.selection() }
+        // 标签栏不在滚动时缩小：HIG 只在标签栏带附件（迷你播放器之类）时这么做（C10）；标签名一字一词（C8）。
+        // 换标签的触感只有上面 .sensoryFeedback 那一下：以前这里还多一句 onChange 里的 Haptics.selection()，每换一次震两下
         .onChange(of: model.searchRequest) { _, q in if q != nil { tab = .search } }
         .modifier(BasketOpensRequests(tab: $tab))
         // iPad：标签栏能展开成侧边栏（iPadOS 26 浮在顶上的那一条）；13 寸横拿这种特别宽的窗口一打开就是侧边栏
@@ -236,6 +243,8 @@ struct RootView: View {
             RequestStore.shared.start(user: account.session?.username)
         }
         .onChange(of: scenePhase) { _, phase in
+            // 探索：离开半小时以上回来换一轮
+            model.exploreScene(active: phase == .active)
             if phase == .active {
                 Task { @MainActor in await account.refreshAvatar() }
                 NetworkAuto.shared.appBecameActive()
@@ -260,6 +269,33 @@ enum LayoutLog {
 
 /// 认 iPhone Duo「侧边一列」要的几样都在这里量（单独一个修饰器：RootView 那一长串修饰器再长，编译器就推不动类型了）：
 /// 整个窗口的大小（连安全区，折起 / 展开、横竖一变就重新判断）、左右安全区、iOS 27.1 起系统说的竖栏在哪一边
+/// 自己画的导航放在哪、怎么放（单独一个修饰器：RootView 那一串再长，编译器就推不动了）。
+/// · 侧边一列的形态：竖着的 DuoNav 摆进那一列（DuoNavLayer）；
+/// · 别的 iPhone 形态（展开竖拿、普通 iPhone）：用户要求「更新导航栏和 iPhone Duo 设计一致并拥有光线反射」——
+///   系统标签栏收起（DuoHidesTabBar 看 duoBottomBar），底下正中换成横着的同一枚胶囊（DuoBottomNavLayer），页面底下给它留出高度；
+/// · iPad 照旧是系统的标签栏 / 侧边栏
+private struct NavShell: ViewModifier {
+    @Binding var tab: AppTab
+    let column: Bool
+    let edge: HorizontalEdge?
+    let reselect: (AppTab) -> Void
+
+    func body(content: Content) -> some View {
+        let bottomBar = !column && UIDevice.current.userInterfaceIdiom == .phone
+        content
+            .environment(\.duoColumn, column)
+            .environment(\.duoBottomBar, bottomBar)
+            .modifier(DuoBottomInset(on: bottomBar))
+            .overlay {
+                if column {
+                    DuoNavLayer(tab: $tab, edge: edge, reselect: reselect)
+                } else if bottomBar {
+                    DuoBottomNavLayer(tab: $tab, reselect: reselect)
+                }
+            }
+    }
+}
+
 private struct SideColumnProbe: ViewModifier {
     @Binding var window: CGSize
     @Binding var sideInsets: (leading: CGFloat, trailing: CGFloat)

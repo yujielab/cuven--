@@ -68,22 +68,35 @@ private struct DuoColumnKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+private struct DuoBottomBarKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 extension EnvironmentValues {
     /// 现在是不是「侧边一列」的形态（系统标签栏收起，用 DuoNav）
     var duoColumn: Bool {
         get { self[DuoColumnKey.self] }
         set { self[DuoColumnKey.self] = newValue }
     }
+
+    /// 别的 iPhone 形态（展开竖拿、普通 iPhone）：系统标签栏也收起，底下用横着的那枚 DuoNav（用户要求和 iPhone Duo 的设计一致）
+    var duoBottomBar: Bool {
+        get { self[DuoBottomBarKey.self] }
+        set { self[DuoBottomBarKey.self] = newValue }
+    }
 }
 
 /// 「侧边一列」的形态里收起系统标签栏。各标签页的根视图和推进去的每一页都要挂：推进去的页面不挂，系统会把栏带回来
 struct DuoHidesTabBar: ViewModifier {
     @Environment(\.duoColumn) private var column
+    @Environment(\.duoBottomBar) private var bottomBar
 
     func body(content: Content) -> some View {
+        // 底下那枚横着的胶囊顶替系统标签栏的时候也收起（用户要求 iPhone 上都和 iPhone Duo 的设计一致）
+        let hide = column || bottomBar
         content
-            .toolbar(column ? .hidden : .automatic, for: .tabBar)
-            .background { TabBarGuard(hidden: column) }
+            .toolbar(hide ? .hidden : .automatic, for: .tabBar)
+            .background { TabBarGuard(hidden: hide) }
     }
 }
 
@@ -124,7 +137,7 @@ private struct TabBarGuard: UIViewControllerRepresentable {
             }
         }
 
-        /// 排到下一轮再看：SwiftUI 这一轮自己也在改标签栏，等它改完
+        /// 排到下一轮再看：SwiftUI 这一轮自己也在改标签栏，等它改完（这个 App 只在用自己画的导航时藏系统标签栏）
         func apply() {
             Task { @MainActor [weak self] in
                 guard let self, self.viewIfLoaded?.window != nil, let tabs = self.tabBarController else { return }
@@ -144,13 +157,17 @@ extension View {
 // MARK: - 导航本身
 
 /// 竖向玻璃导航（照 Netflix）：一枚胶囊里 主页 / 资料库 / 请求 / 搜索 / 头像，只有图标。
-/// 点一格就切过去（触感由 RootView 的 onChange 统一给）；再点一下当前那一格，这一格回到根页面（系统标签栏自带这个行为，自己画的要自己做）
+/// 点一格就切过去（触感由 RootView 统一给：.sensoryFeedback，只那一下）；再点一下当前那一格，这一格回到根页面（系统标签栏自带这个行为，自己画的要自己做）
 struct DuoNav: View {
     @Binding var tab: AppTab
     /// 再点一下当前那一格：回到这一格的根页面
     var reselect: (AppTab) -> Void
     /// 每格多高（DuoNavLayer 按那一列的高给：放得下就 58）
     var pitch: CGFloat = DuoNav.pitch
+    /// 内容在胶囊的哪一边（胶囊在后缘时内容在前缘）：环境反光从这一边打过来
+    var contentLeading = true
+    /// 竖着（侧边那一列）还是横着（别的 iPhone 形态，压在页面底下）
+    var axis: Axis = .vertical
     @Namespace private var ns
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(AccountStore.self) private var account
@@ -174,8 +191,10 @@ struct DuoNav: View {
         case clips
         /// 自己的头像（原色、圆角方块）
         case avatar
-        /// 请求中心：一张海报卡，右上角一枚圆圈里的「+」（请求添加一部片）
+        /// 请求中心：一张圆角竖卡，中间一个「+」（请求添加一部片）
         case request
+        /// 主页：圆顶的房子，里面靠下一道短横（照用户给的参考）
+        case home
     }
 
     struct Item: Identifiable {
@@ -186,8 +205,8 @@ struct DuoNav: View {
     }
 
     static let items: [Item] = [
-        Item(tab: .home, glyph: .symbol("house"), label: "主页", id: "nav-home"),
-        Item(tab: .library, glyph: .clips, label: "资料库", id: "nav-library"),
+        Item(tab: .home, glyph: .home, label: "主页", id: "nav-home"),
+        Item(tab: .library, glyph: .clips, label: "探索", id: "nav-library"),
         Item(tab: .requests, glyph: .request, label: "请求", id: "nav-requests"),
         Item(tab: .search, glyph: .symbol("magnifyingglass"), label: "搜索", id: "nav-search"),
         Item(tab: .account, glyph: .avatar, label: "我的", id: "nav-account"),
@@ -196,13 +215,16 @@ struct DuoNav: View {
     var body: some View {
         let p = pitch
         let e = Self.endPad(p)
-        VStack(spacing: 0) {
+        let h = Self.height(pitch: p)
+        let vertical = axis == .vertical
+        let stack = vertical ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
+        stack {
             ForEach(Self.items) { item in
                 itemButton(item, pitch: p)
             }
         }
-        .padding(.vertical, e - p / 2)
-        .frame(width: Self.width, height: Self.height(pitch: p))
+        .padding(vertical ? Edge.Set.vertical : Edge.Set.horizontal, e - p / 2)
+        .frame(width: vertical ? Self.width : h, height: vertical ? h : Self.width)
         // 深色的身子：Netflix 那枚比系统标签栏暗得多（量到约是底下画面 × 0.4，画面照样透得过来），
         // 可最外一圈边是亮的、带着旁边海报的颜色（用户指出的：目标图里胶囊左边缘泛着旁边画面的蓝紫、往下一点泛红）——
         // 那是 Liquid Glass 的边在折射、反射周围的画面。所以玻璃本身不染色（整块压黑会把这圈边也压掉），
@@ -210,42 +232,57 @@ struct DuoNav: View {
         // 用户要求「明显化侧面导航栏的反射光线」：边留宽一点（离边 3.5 点、柔边 2），玻璃用 .clear（更通透、边上的折射更强，
         // 身子靠里面那层黑照样是暗的），再沿边描一道很细的高光（左上亮、右下弱一点，像光从左上照过来打在玻璃边上）
         .background {
-            Capsule()
-                .fill(DuoNavInk.body)
-                .padding(3.5)
-                .blur(radius: 2)
-                .allowsHitTesting(false)
+            ZStack {
+                Capsule()
+                    .fill(DuoNavInk.body)
+                    .padding(3.5)
+                    .blur(radius: 2)
+                // 环境反光（用户要求「边缘应该反射蓝色区域中的各种主要颜色混合渐变光线」）：里面一层柔光。
+                // 只有竖着的要：侧边那一列底下是黑的，玻璃折射不到旁边的画面，得自己取色；
+                // 横着的压在页面上面，画面就在玻璃后面，玻璃自己在 GPU 上折射、反射它（不用取色，不占主线程）
+                if vertical { NavAmbientGlow(layer: .inner, height: h, contentLeading: contentLeading) }
+            }
+            .allowsHitTesting(false)
         }
         .overlay {
-            Capsule()
-                .strokeBorder(DuoNavInk.rim, lineWidth: 1)
-                .allowsHitTesting(false)
+            ZStack {
+                Capsule()
+                    .strokeBorder(DuoNavInk.rim, lineWidth: 1)
+                // 边上一道反光
+                if vertical { NavAmbientGlow(layer: .rim, height: h, contentLeading: contentLeading) }
+            }
+            .allowsHitTesting(false)
         }
         .glassEffect(.clear.interactive(), in: Capsule())
-        // 选中的那块在格子之间滑过去；「减弱动态效果」打开时直接换过去，不带弹性（F59）
-        .animation(reduceMotion ? nil : .snappy(duration: 0.32), value: tab)
+        // 选中的那块在格子之间滑过去；「减弱动态效果」打开时不滑、不弹，原地短短地淡过去（F59，DSMotion.adapt 的规矩；
+        // 以前是一下子跳过去）
+        .animation(DSMotion.adapt(Animation.snappy(duration: 0.32), reduce: reduceMotion), value: tab)
     }
 
     private func itemButton(_ item: Item, pitch p: CGFloat) -> some View {
         let on = tab == item.tab
-        // 选中垫的那块：40 × 52（离胶囊两边 8，比格子矮 2）
-        let pillW = Self.width - 16
-        let pillH = min(52, p - 2)
+        let vertical = axis == .vertical
+        // 选中垫的那块：横跨 40（离胶囊两边 8），顺着 52（比格子短 2）；横着的胶囊里转过来
+        let across = Self.width - 16
+        let along = min(52, p - 2)
+        let pillW = vertical ? across : along
+        let pillH = vertical ? along : across
         return Button {
             if on { reselect(item.tab); Haptics.light() } else { tab = item.tab }
         } label: {
             glyph(item.glyph, on: on)
-                .frame(width: Self.width, height: p)
+                .frame(width: vertical ? Self.width : p, height: vertical ? p : Self.width)
                 .background {
                     if on {
                         Capsule()
                             .fill(DuoNavInk.selection)
                             .frame(width: pillW, height: pillH)
-                            .matchedGeometryEffect(id: "duo-nav-selection", in: ns)
+                            // 「减弱动态效果」时每格各用各的 id：不配对就不滑，旧的淡出、新的淡入
+                            .matchedGeometryEffect(id: reduceMotion ? item.id : "duo-nav-selection", in: ns)
                     }
                 }
                 .overlay {
-                    if item.tab == .requests { badge }
+                    if item.tab == .requests { DuoNavBadge(count: badgeCount) }
                 }
                 .contentShape(Rectangle())
         }
@@ -274,6 +311,10 @@ struct DuoNav: View {
             RequestGlyph()
                 .stroke(ink, style: StrokeStyle(lineWidth: 1.9, lineCap: .round, lineJoin: .round))
                 .frame(width: 23, height: 23)
+        case .home:
+            HomeGlyph()
+                .stroke(ink, style: StrokeStyle(lineWidth: 1.9, lineCap: .round, lineJoin: .round))
+                .frame(width: 23, height: 23)
         case .avatar:
             // 头像一直是原色（Netflix 那颗没选中也不压暗）；还没有头像就是线条的人像
             if let img = AvatarCache.shared.avatar(for: account.session?.username) {
@@ -293,22 +334,32 @@ struct DuoNav: View {
 
     /// 请求那一格的角标：进行中的请求 + 请求中心里还没确认的（和系统标签栏上的一样）
     private var badgeCount: Int { RequestStore.shared.activeCount + RequestBasket.shared.items.count }
+}
 
-    @ViewBuilder
-    private var badge: some View {
-        let n = badgeCount
-        if n > 0 {
-            Text(n > 99 ? "99+" : "\(n)")
-                .font(.system(size: 11, weight: .bold))
-                .monospacedDigit()
-                .foregroundStyle(.white)
-                .padding(.horizontal, 4.5)
-                .frame(minWidth: 17, minHeight: 17)
-                .background(Capsule().fill(DuoNavInk.badge))
-                .offset(x: 10, y: -9)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
+/// 请求那一格的角标。以前有了就冒出来、没了就消失、数字直接跳：现在冒出来 / 收回去带一点缩放（像系统标签栏的角标），
+/// 数字变的时候滚过去；「减弱动态效果」打开时只淡入淡出（F59）
+private struct DuoNavBadge: View {
+    let count: Int
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            if count > 0 {
+                Text(count > 99 ? "99+" : "\(count)")
+                    .font(.system(size: 11, weight: .bold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                    .contentTransition(.numericText())
+                    .padding(.horizontal, 4.5)
+                    .frame(minWidth: 17, minHeight: 17)
+                    .background(Capsule().fill(DuoNavInk.badge))
+                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .scale(scale: 0.5)))
+            }
         }
+        .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: count)
+        .offset(x: 10, y: -9)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -364,75 +415,103 @@ struct ClipsGlyph: Shape {
     }
 }
 
-/// 请求中心的图标（用户要求更新：以前是收件盒加向下的箭头，读着像「下载」）：一张竖着的海报卡，
-/// 右上角一枚圆圈里的「+」——请求添加一部片。线条和「片段」那枚一样（圆头、约 2 点）。设计框 24 × 24
+// MARK: - 图标（用户要求「Apple 风格，克制、优雅、简洁、大方」）
+//
+// 主页、片段、请求、光学扫描同一套：线条约 2 点、圆头圆角，设计框 24 × 24，只用最少的笔画说清是什么。
+
+/// 主页：圆顶的房子，里面靠下一道短横——照用户给的参考（不画烟囱、不画门）。
+/// 屋脊、屋檐（屋顶和墙接上的两个角，用户圈出来要圆角）、墙脚都是圆角
+struct HomeGlyph: Shape {
+    func path(in rect: CGRect) -> Path {
+        let s = min(rect.width, rect.height) / 24
+        let ox = rect.midX - 12 * s, oy = rect.midY - 12 * s
+        func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * s, y: oy + y * s) }
+        var p = Path()
+        // 从左屋檐圆角的上端起，沿屋顶到屋脊（圆）、右屋檐（圆）、右墙、墙脚（圆）、左墙，回到左屋檐（圆）
+        p.move(to: pt(5.12, 9.30))
+        p.addLine(to: pt(10.6, 4.2))
+        p.addQuadCurve(to: pt(13.4, 4.2), control: pt(12, 3.0))
+        p.addLine(to: pt(18.88, 9.30))
+        p.addQuadCurve(to: pt(20.4, 12.6), control: pt(20.4, 10.6))
+        p.addLine(to: pt(20.4, 18))
+        p.addQuadCurve(to: pt(17.4, 21), control: pt(20.4, 21))
+        p.addLine(to: pt(6.6, 21))
+        p.addQuadCurve(to: pt(3.6, 18), control: pt(3.6, 21))
+        p.addLine(to: pt(3.6, 12.6))
+        p.addQuadCurve(to: pt(5.12, 9.30), control: pt(3.6, 10.6))
+        p.closeSubpath()
+        p.move(to: pt(9.4, 16.4))
+        p.addLine(to: pt(14.6, 16.4))
+        return p
+    }
+}
+
+/// 请求中心：一张圆角竖卡，中间一个「+」——请求添加一部片（和「片段」那几张竖卡是一家）
 struct RequestGlyph: Shape {
     func path(in rect: CGRect) -> Path {
         let s = min(rect.width, rect.height) / 24
         let ox = rect.midX - 12 * s, oy = rect.midY - 12 * s
         func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * s, y: oy + y * s) }
         var p = Path()
-        // 海报卡 (3,5)–(17,22)、圆角 3；右上角让给那枚圆圈（上沿停在 11.2，右边从 13.2 起）
-        p.move(to: pt(11.2, 5))
-        p.addLine(to: pt(6, 5))
-        p.addQuadCurve(to: pt(3, 8), control: pt(3, 5))
-        p.addLine(to: pt(3, 19))
-        p.addQuadCurve(to: pt(6, 22), control: pt(3, 22))
-        p.addLine(to: pt(14, 22))
-        p.addQuadCurve(to: pt(17, 19), control: pt(17, 22))
-        p.addLine(to: pt(17, 13.2))
-        // 右上角的圆圈和「+」
-        p.addEllipse(in: CGRect(x: ox + 12.9 * s, y: oy + 1.9 * s, width: 9.2 * s, height: 9.2 * s))
-        p.move(to: pt(15.6, 6.5))
-        p.addLine(to: pt(19.4, 6.5))
-        p.move(to: pt(17.5, 4.6))
-        p.addLine(to: pt(17.5, 8.4))
+        // 圆角大一点（用户圈出来要更圆）：14 × 18 的卡、圆角 5
+        p.addRoundedRect(in: CGRect(origin: pt(5, 3), size: CGSize(width: 14 * s, height: 18 * s)),
+                         cornerSize: CGSize(width: 5 * s, height: 5 * s), style: .continuous)
+        p.move(to: pt(9.2, 12))
+        p.addLine(to: pt(14.8, 12))
+        p.move(to: pt(12, 9.2))
+        p.addLine(to: pt(12, 14.8))
         return p
     }
 }
 
-/// 光学扫描的图标（用户要求更新：以前是取景框里一个「+」）：取景框的四个角，中间一小团粒子
-/// （光学配对扫的就是一团粒子云）。四个角用线（ScanGlyph），粒子用实心点（ScanGlyph.Dots）。设计框 24 × 24
+/// 光学扫描：取景框的四个角，中间一个小圆（镜头）。以前中间是一团粒子，太碎
 struct ScanGlyph: Shape {
     func path(in rect: CGRect) -> Path {
         let s = min(rect.width, rect.height) / 24
         let ox = rect.midX - 12 * s, oy = rect.midY - 12 * s
         func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * s, y: oy + y * s) }
         var p = Path()
-        p.move(to: pt(2.5, 9)); p.addLine(to: pt(2.5, 5.5)); p.addQuadCurve(to: pt(5.5, 2.5), control: pt(2.5, 2.5)); p.addLine(to: pt(9, 2.5))
-        p.move(to: pt(15, 2.5)); p.addLine(to: pt(18.5, 2.5)); p.addQuadCurve(to: pt(21.5, 5.5), control: pt(21.5, 2.5)); p.addLine(to: pt(21.5, 9))
-        p.move(to: pt(21.5, 15)); p.addLine(to: pt(21.5, 18.5)); p.addQuadCurve(to: pt(18.5, 21.5), control: pt(21.5, 21.5)); p.addLine(to: pt(15, 21.5))
-        p.move(to: pt(9, 21.5)); p.addLine(to: pt(5.5, 21.5)); p.addQuadCurve(to: pt(2.5, 18.5), control: pt(2.5, 21.5)); p.addLine(to: pt(2.5, 15))
+        p.move(to: pt(2.8, 8.6)); p.addLine(to: pt(2.8, 5.8)); p.addQuadCurve(to: pt(5.8, 2.8), control: pt(2.8, 2.8)); p.addLine(to: pt(8.6, 2.8))
+        p.move(to: pt(15.4, 2.8)); p.addLine(to: pt(18.2, 2.8)); p.addQuadCurve(to: pt(21.2, 5.8), control: pt(21.2, 2.8)); p.addLine(to: pt(21.2, 8.6))
+        p.move(to: pt(21.2, 15.4)); p.addLine(to: pt(21.2, 18.2)); p.addQuadCurve(to: pt(18.2, 21.2), control: pt(21.2, 21.2)); p.addLine(to: pt(15.4, 21.2))
+        p.move(to: pt(8.6, 21.2)); p.addLine(to: pt(5.8, 21.2)); p.addQuadCurve(to: pt(2.8, 18.2), control: pt(2.8, 21.2)); p.addLine(to: pt(2.8, 15.4))
+        p.addEllipse(in: CGRect(x: ox + 8.6 * s, y: oy + 8.6 * s, width: 6.8 * s, height: 6.8 * s))
         return p
-    }
-
-    /// 中间那团粒子：一圈 7 颗（大小交替）加中间一颗
-    struct Dots: Shape {
-        func path(in rect: CGRect) -> Path {
-            let s = min(rect.width, rect.height) / 24
-            let cx = rect.midX, cy = rect.midY
-            var p = Path()
-            for i in 0..<7 {
-                let a = (-90 + Double(i) * 360 / 7) * .pi / 180
-                let r: CGFloat = (i % 2 == 0 ? 1.15 : 0.85) * s
-                let x = cx + 4.6 * s * CGFloat(cos(a)), y = cy + 4.6 * s * CGFloat(sin(a))
-                p.addEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
-            }
-            let c = 1.5 * s
-            p.addEllipse(in: CGRect(x: cx - c, y: cy - c, width: c * 2, height: c * 2))
-            return p
-        }
     }
 }
 
-/// 系统标签栏（别的 iPhone、iPad、展开竖拿的 Duo）上「请求」那一格用同一枚图标：把 RequestGlyph 画成模板图（跟着标签栏的颜色走）
+/// 系统标签栏（别的 iPhone、iPad、展开竖拿的 Duo）上「主页」「请求」两格用同一套图标：画成模板图（跟着标签栏的颜色走）
 @MainActor
 enum NavGlyphImage {
-    static let request: UIImage = {
+    static let home: UIImage = template(HomeGlyph())
+    static let request: UIImage = template(RequestGlyph())
+    /// 「探索」：和侧边那一列同一个「片段」图标（设计复查：以前系统标签栏上是实心的 square.stack.fill，和别的线条图标不是一家）
+    static let clips: UIImage = clipsImage()
+
+    /// 片段图标：外框按 template 的线条规矩描边，里面的播放键实心；画在 26 × 26 里正中那块 17 × 22.5（和侧边胶囊里一样的比例）
+    private static func clipsImage() -> UIImage {
+        let size: CGFloat = 26
+        let r = CGRect(x: 4.5, y: 1.75, width: 17, height: 22.5)
+        let img = UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { ctx in
+            let c = ctx.cgContext
+            c.addPath(ClipsGlyph().path(in: r).cgPath)
+            c.setLineWidth(1.9)
+            c.setLineCap(.round)
+            c.setLineJoin(.round)
+            c.setStrokeColor(UIColor.black.cgColor)
+            c.strokePath()
+            c.addPath(ClipsGlyph.Play().path(in: r).cgPath)
+            c.setFillColor(UIColor.black.cgColor)
+            c.fillPath()
+        }
+        return img.withRenderingMode(.alwaysTemplate)
+    }
+
+    private static func template<S: Shape>(_ shape: S) -> UIImage {
         let size: CGFloat = 26
         let img = UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { ctx in
             let c = ctx.cgContext
-            c.addPath(RequestGlyph().path(in: CGRect(x: 0, y: 0, width: size, height: size)).cgPath)
+            c.addPath(shape.path(in: CGRect(x: 0, y: 0, width: size, height: size)).cgPath)
             c.setLineWidth(1.9)
             c.setLineCap(.round)
             c.setLineJoin(.round)
@@ -440,7 +519,306 @@ enum NavGlyphImage {
             c.strokePath()
         }
         return img.withRenderingMode(.alwaysTemplate)
-    }()
+    }
+}
+
+/// 胶囊的环境反光（两层：里面一层柔光、边上一道反光）。只有这一小块读 NavAmbient 的颜色：
+/// 颜色每一帧都在往新取到的颜色上走，胶囊的按钮、角标不跟着重画
+private struct NavAmbientGlow: View {
+    enum Layer { case inner, rim }
+    let layer: Layer
+    let height: CGFloat
+    let contentLeading: Bool
+
+    var body: some View {
+        // NavAmbient 从胶囊靠内容那一边外面取的颜色，从上到下一串；取样的那一条比胶囊上下各长 NavAmbient.overhang，
+        // 渐变也一样往外伸，颜色和旁边对得上
+        let stops = NavAmbient.shared.stops
+        let ext = NavAmbient.overhang / max(1, height)
+        let top = UnitPoint(x: 0.5, y: -ext), bottom = UnitPoint(x: 0.5, y: 1 + ext)
+        let lit = contentLeading ? UnitPoint.leading : UnitPoint.trailing
+        if stops.count >= 2 {
+            switch layer {
+            case .inner:
+                // 靠内容那一边亮，往中间淡掉（像旁边画面的光打进玻璃里）
+                Capsule()
+                    .fill(LinearGradient(colors: stops, startPoint: top, endPoint: bottom))
+                    .mask(LinearGradient(colors: [.white, .white.opacity(0)], startPoint: lit, endPoint: .center))
+                    .blur(radius: 5)
+                    // 糊开的光不出胶囊：外面那一条正是取色的地方，漏出去会把自己的光又取回来
+                    .clipShape(Capsule())
+                    .opacity(0.6)
+            case .rim:
+                // 旁边画面的主要颜色从上到下混成一条渐变，靠内容那一边最亮，绕到另一边淡掉
+                Capsule()
+                    .strokeBorder(LinearGradient(colors: stops, startPoint: top, endPoint: bottom), lineWidth: 1.8)
+                    .mask(LinearGradient(colors: [.white, .white, .white.opacity(0)], startPoint: lit,
+                                         endPoint: contentLeading ? UnitPoint(x: 0.75, y: 0.5) : UnitPoint(x: 0.25, y: 0.5)))
+                    .blur(radius: 0.5)
+            }
+        }
+    }
+}
+
+/// 侧边胶囊的环境反光（用户要求「黄色边缘位置应该反射蓝色区域中的各种主要颜色混合渐变光线」）：
+/// 胶囊挨着的那片画面（海报、剧照）不在胶囊正后面——后面是侧边那一列的黑——玻璃自己折射不到，所以自己取色：
+/// 把胶囊靠内容那一边外面 64 点宽、上下各长 overhang 的一条，用 drawHierarchy 缩成 4 × 16 像素画下来，
+/// 每一行取平均 → 从上到下 8 个颜色；颜色提一点饱和、亮度，黑的地方不发光（透明）。
+///
+/// 用户反馈「现在有延时」，以前慢在三处，这一版都改了：
+/// · 以前用 Timer：它只在默认的 run loop 模式里走，手指按着滑的时候（tracking 模式）根本不取样，松手才追上来。
+///   现在是显示链，加在 .common 模式里，滑着也照样取；
+/// · 以前一秒四次，每次还和上一次各混一半，再叠 0.45 秒的动画：颜色落后半秒到一秒。现在画面在变的时候一秒 30 次
+///   （一次取样太贵就降到 15、8 次），停下来以后一秒四次只看看变没变；
+/// · 两次取样之间不跳：显示出来的颜色每一帧往最新取到的颜色上走（时间常数 60 毫秒，约 0.15 秒走完），走到了就不再动。
+/// 只在胶囊出现、App 在前台时取
+@MainActor
+@Observable
+final class NavAmbient {
+    static let shared = NavAmbient()
+    /// 取样那一条比胶囊上下各长多少（渐变也往外伸这么多）
+    static let overhang: CGFloat = 48
+
+    /// 从上到下的反光颜色（空的：还没取到，不画反光）
+    private(set) var stops: [Color] = []
+
+    /// 胶囊在窗口里的位置、内容在它哪一边（DuoNavLayer 给）
+    @ObservationIgnored var capsule: CGRect = .zero
+    @ObservationIgnored var contentLeading = true
+    @ObservationIgnored private var link: CADisplayLink?
+    @ObservationIgnored private var users = 0
+    /// 最新取到的颜色、眼下显示的颜色（0…1 的 RGB）
+    @ObservationIgnored private var target: [SIMD4<Double>] = []
+    @ObservationIgnored private var shown: [SIMD4<Double>] = []
+    @ObservationIgnored private var lastSample: CFTimeInterval = 0
+    @ObservationIgnored private var lastTick: CFTimeInterval = 0
+    /// 画面在变：这个时刻之前都按快的节奏取
+    @ObservationIgnored private var hotUntil: CFTimeInterval = 0
+    /// 一次取样平均花多久（秒）：太贵就放慢
+    @ObservationIgnored private var cost: Double = 0.003
+    @ObservationIgnored private var fast: Bool?
+
+    private static let cols = 4, rows = 16, outStops = 8
+
+    func start() {
+        users += 1
+        guard link == nil else { return }
+        let proxy = NavAmbientTick()
+        proxy.owner = self
+        let l = CADisplayLink(target: proxy, selector: #selector(NavAmbientTick.tick(_:)))
+        // .common：手指按着滑的时候也走（Timer 在默认模式里，滑动时停）
+        l.add(to: .main, forMode: .common)
+        link = l
+        fast = nil
+        pace(fast: true)
+        lastSample = 0
+        lastTick = 0
+    }
+
+    func stop() {
+        users = max(0, users - 1)
+        guard users == 0 else { return }
+        link?.invalidate()
+        link = nil
+    }
+
+    /// 显示链的帧率：画面在变、颜色还在走的时候 60（不跟 ProMotion 上 120：取色用不着），停下来降到 10 左右
+    private func pace(fast on: Bool) {
+        guard fast != on, let link else { return }
+        fast = on
+        link.preferredFrameRateRange = on
+            ? CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+            : CAFrameRateRange(minimum: 8, maximum: 15, preferred: 10)
+    }
+
+    fileprivate func tick(_: CADisplayLink) {
+        let now = CACurrentMediaTime()
+        let dt = lastTick == 0 ? 1.0 / 60 : min(0.1, max(0.001, now - lastTick))
+        lastTick = now
+        let hot = now < hotUntil
+        // 画面在变：一秒 30 次（一次取样平均超过 5 毫秒降到 15 次，超过 10 毫秒降到 8 次）；停着：一秒 4 次
+        let gap: Double = hot ? (cost > 0.010 ? 0.125 : cost > 0.005 ? 0.066 : 0.033) : 0.25
+        if now - lastSample >= gap {
+            lastSample = now
+            sample(now: now)
+        }
+        let moving = ease(dt: dt)
+        pace(fast: hot || moving)
+    }
+
+    /// 显示的颜色往最新取到的颜色上走一帧；还没走到返回 true
+    private func ease(dt: Double) -> Bool {
+        guard !target.isEmpty else { return false }
+        var moving = false
+        if shown.count != target.count {
+            shown = target
+        } else {
+            let k = 1 - exp(-dt / 0.06)
+            shown = zip(shown, target).map { (s, t) -> SIMD4<Double> in
+                let d = t - s
+                if max(abs(d.x), max(abs(d.y), abs(d.z))) > 0.004 { moving = true; return s + d * k }
+                return t
+            }
+        }
+        let colors = shown.map(Self.glow)
+        if colors != stops { stops = colors }
+        return moving
+    }
+
+    private func sample(now: CFTimeInterval) {
+        guard UIApplication.shared.applicationState == .active, capsule.width > 1,
+              let win = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+                .flatMap(\.windows).first(where: \.isKeyWindow) else { return }
+        let w: CGFloat = 64
+        let r = CGRect(x: contentLeading ? capsule.minX - 2 - w : capsule.maxX + 2, y: capsule.minY - Self.overhang,
+                       width: w, height: capsule.height + Self.overhang * 2).intersection(win.bounds)
+        guard r.width > 4, r.height > 16 else { return }
+        let cols = Self.cols, rows = Self.rows
+        let began = CACurrentMediaTime()
+        var px = [UInt8](repeating: 0, count: cols * rows * 4)
+        let ok: Bool = px.withUnsafeMutableBytes { buf in
+            guard let ctx = CGContext(data: buf.baseAddress, width: cols, height: rows, bitsPerComponent: 8, bytesPerRow: cols * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            // UIKit 的坐标是 y 往下：先翻过来，再把这一条缩进 cols × rows
+            ctx.translateBy(x: 0, y: CGFloat(rows))
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.scaleBy(x: CGFloat(cols) / r.width, y: CGFloat(rows) / r.height)
+            ctx.translateBy(x: -r.minX, y: -r.minY)
+            UIGraphicsPushContext(ctx)
+            let done = win.drawHierarchy(in: win.bounds, afterScreenUpdates: false)
+            UIGraphicsPopContext()
+            return done
+        }
+        cost = cost * 0.8 + (CACurrentMediaTime() - began) * 0.2
+        guard ok else { return }
+        // 每一行取平均（0…1），两行并一个
+        var rowsAvg: [SIMD4<Double>] = []
+        for y in 0..<rows {
+            var acc = SIMD4<Double>(0, 0, 0, 0)
+            for x in 0..<cols {
+                let i = (y * cols + x) * 4
+                acc += SIMD4(Double(px[i]), Double(px[i + 1]), Double(px[i + 2]), 0) / 255
+            }
+            rowsAvg.append(acc / Double(cols))
+        }
+        let per = rows / Self.outStops
+        var fresh: [SIMD4<Double>] = []
+        for k in 0..<Self.outStops {
+            var acc = SIMD4<Double>(0, 0, 0, 0)
+            for j in 0..<per { acc += rowsAvg[k * per + j] }
+            fresh.append(acc / Double(per))
+        }
+        // 和上一次取到的比：变了（滑动、换页、预告片在放）就接下来 0.6 秒都按快的节奏取
+        if target.count == fresh.count {
+            let change = zip(target, fresh).map { (a, b) -> Double in
+                let d = b - a
+                return max(abs(d.x), max(abs(d.y), abs(d.z)))
+            }.max() ?? 0
+            if change > 0.012 { hotUntil = now + 0.6 }
+        } else {
+            hotUntil = now + 0.6
+        }
+        target = fresh
+    }
+
+    /// 一段画面的平均色 → 反光的颜色：饱和度 × 1.35、亮度提一点；暗的地方（亮度低于 0.08）不发光
+    private static func glow(_ c: SIMD4<Double>) -> Color {
+        let ui = UIColor(red: c.x, green: c.y, blue: c.z, alpha: 1)
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        ui.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        let alpha = min(1, max(0, (b - 0.08) / 0.25))
+        return Color(hue: Double(h), saturation: Double(min(1, s * 1.35)), brightness: Double(min(1, b * 1.25 + 0.1)))
+            .opacity(Double(alpha) * 0.95)
+    }
+}
+
+/// 显示链的目标：弱引用 NavAmbient（显示链强引用它的目标）
+@MainActor
+private final class NavAmbientTick: NSObject {
+    weak var owner: NavAmbient?
+
+    @objc func tick(_ link: CADisplayLink) {
+        guard let owner else {
+            link.invalidate()
+            return
+        }
+        owner.tick(link)
+    }
+}
+
+/// 别的 iPhone 形态（展开竖拿、普通 iPhone）：横着的那枚 DuoNav 压在页面底下正中（用户要求「更新导航栏和 iPhone Duo 设计一致，
+/// 并拥有光线反射」）。同一套：深色的身子、白色的高光边、选中垫一块、线条图标、头像、角标；
+/// 反光交给 Liquid Glass 自己：画面就在这枚胶囊后面，玻璃在 GPU 上折射、反射它，不取色、不占主线程。
+/// 离底：有 Home 指示条的屏离底 24（比安全区高 10），没有的离底 14。页面底下留出这一截（DuoBottomInset），最后一排滚得上来。
+/// 键盘起来时不跟着挪：和系统标签栏一样被键盘盖住
+struct DuoBottomNavLayer: View {
+    @Binding var tab: AppTab
+    var reselect: (AppTab) -> Void
+
+    /// 横着的每格多宽（放得下就 64；窄屏往下压，最小 DuoNav.minPitch）
+    static func pitch(width: CGFloat) -> CGFloat {
+        let room = width - 2 * 24
+        let fit = room / (CGFloat(DuoNav.items.count - 1) + 2 * 36 / 58)
+        return min(64, max(DuoNav.minPitch, fit.rounded(.down)))
+    }
+
+    /// 胶囊底边离屏幕底多远
+    static func bottomGap(safeBottom: CGFloat) -> CGFloat { max(safeBottom - 10, 14) }
+
+    var body: some View {
+        GeometryReader { safe in
+            let sf = safe.frame(in: .global)
+            GeometryReader { full in
+                let ff = full.frame(in: .global)
+                let bottom = max(0, ff.maxY - sf.maxY)
+                let p = Self.pitch(width: full.size.width)
+                DuoNav(tab: $tab, reselect: reselect, pitch: p, axis: .horizontal)
+                    .position(x: full.size.width / 2,
+                              y: full.size.height - Self.bottomGap(safeBottom: bottom) - DuoNav.width / 2)
+            }
+            .ignoresSafeArea()
+        }
+        .ignoresSafeArea(.keyboard)
+    }
+}
+
+/// 底下那枚横着的胶囊顶替了系统标签栏：页面底下留出它的高度（56 + 8），最后一排滚得上来、不被胶囊盖住
+/// （系统标签栏收起以后页面的安全区只剩 Home 指示条那一截）。只在用它的时候留
+struct DuoBottomInset: ViewModifier {
+    let on: Bool
+
+    func body(content: Content) -> some View {
+        content.safeAreaInset(edge: .bottom, spacing: 0) {
+            if on { Color.clear.frame(height: DuoNav.width + 8).allowsHitTesting(false) }
+        }
+    }
+}
+
+/// iPhone Duo「侧边一列」的形态：把一颗圆钮摆进侧边那一列、导航胶囊的正上方（中线对着状态栏的中线，离胶囊顶 gap）。
+/// 主页的光学扫描用它（用户要求挪到侧导航栏上方）。只有钮本身接点按，别处照常点得到下面的页面
+struct DuoColumnSlot<Content: View>: View {
+    /// 钮多大（直径）、离胶囊顶多远
+    var size: CGFloat = 46
+    var gap: CGFloat = 14
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        GeometryReader { safe in
+            let sf = safe.frame(in: .global)
+            GeometryReader { full in
+                let ff = full.frame(in: .global)
+                let lead = max(0, sf.minX - ff.minX)
+                let trail = max(0, ff.maxX - sf.maxX)
+                let onLeading = lead > trail && lead >= 44
+                let rail = max(DuoRail.shared.fromTrailing ?? DuoNavLayer.statusAxis, DuoNavLayer.statusAxis)
+                let cap = DuoNavLayer.capsule(columnHeight: full.size.height)
+                content()
+                    .position(x: onLeading ? rail : full.size.width - rail, y: cap.top - gap - size / 2)
+            }
+            .ignoresSafeArea()
+        }
+    }
 }
 
 /// 把 DuoNav 摆进侧边那一列：哪边的安全区宽就放哪边（系统说了竖栏在哪边就听系统的；没有像样的一列时贴右缘，按 64 点宽的一条摆），
@@ -462,6 +840,15 @@ struct DuoNavLayer: View {
     /// 模拟器上是 97、一半正好 48.5，所以那时候看着是对的。现在至少对着 48.5，那一列更宽时再按它的一半
     static let statusAxis: CGFloat = 48.5
 
+    /// 一列多高时胶囊每格多高、整枚多高、顶在哪（详情页的弧形菜单钮要摆在状态栏和胶囊之间，同一套算法）
+    static func capsule(columnHeight H: CGFloat) -> (pitch: CGFloat, height: CGFloat, top: CGFloat) {
+        let room = H - DuoNav.margin - statusReserve
+        let fit = room / (CGFloat(DuoNav.items.count - 1) + 2 * 36 / 58)
+        let pitch = min(DuoNav.pitch, max(DuoNav.minPitch, fit.rounded(.down)))
+        let h = DuoNav.height(pitch: pitch)
+        return (pitch, h, H - DuoNav.margin - h)
+    }
+
     var body: some View {
         GeometryReader { safe in
             let sf = safe.frame(in: .global)
@@ -474,13 +861,19 @@ struct DuoNavLayer: View {
                 let strip = column >= 44 ? column : 64
                 let rail = max(strip / 2, Self.statusAxis)
                 let x = onLeading ? rail : full.size.width - rail
-                let room = full.size.height - DuoNav.margin - Self.statusReserve
-                let fit = room / (CGFloat(DuoNav.items.count - 1) + 2 * 36 / 58)
-                let pitch = min(DuoNav.pitch, max(DuoNav.minPitch, fit.rounded(.down)))
-                let h = DuoNav.height(pitch: pitch)
-                let y = full.size.height - DuoNav.margin - h / 2
-                DuoNav(tab: $tab, reselect: reselect, pitch: pitch)
+                let cap = Self.capsule(columnHeight: full.size.height)
+                let pitch = cap.pitch, h = cap.height
+                let y = cap.top + h / 2
+                DuoNav(tab: $tab, reselect: reselect, pitch: pitch, contentLeading: !onLeading)
                     .position(x: x, y: y)
+                    // 环境反光要知道胶囊在窗口里的哪儿、内容在哪一边（NavAmbient 在这一条外面取色）
+                    .onChange(of: CGRect(x: ff.minX + x - DuoNav.width / 2, y: ff.minY + y - h / 2, width: DuoNav.width, height: h),
+                              initial: true) { _, r in
+                        NavAmbient.shared.capsule = r
+                        NavAmbient.shared.contentLeading = !onLeading
+                    }
+                    .onAppear { NavAmbient.shared.start() }
+                    .onDisappear { NavAmbient.shared.stop() }
                     // 记下这条线（DuoRail：刷视频页的关闭钮、页码点也对着它）：列在前缘时记负数，只认后缘的
                     .onChange(of: onLeading ? -rail : rail, initial: true) { _, v in
                         let r: CGFloat? = v > 0 ? v : nil

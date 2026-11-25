@@ -11,7 +11,8 @@ import SwiftUI
 // · 往下按年份一节一节：2026、2025 … 2020（今年往前数七年）。每一节的标题和主页年份那两排同一个样子（大一级的「2026 ›」，
 //   点进年份页）。用户要求哪里都不写有几部：标题下面不再有「128 部电影 · 54 部剧集」那行灰字
 // · 每一节里电影一排、剧集一排（小标题「电影」「剧集」，不带数字），没有的那排不出、两排都没有的年份整节不出
-// · 可立即播放：卡和主页年份那两排同一张（YearTrailerCard：上面剧照，下面小海报 + 字标 + 片名 + 一行灰字）；
+// · 电影那一排（用户要求）：主页分类区那种竖版海报 + 字标（DSPosterLockup，可立即播放 / 可申请都是）；剧集那一排照旧是下面这张横卡。
+// · 可立即播放：剧集的卡和主页年份那两排同一张（YearTrailerCard：上面剧照，下面小海报 + 字标 + 片名 + 一行灰字）；
 //   全面放开：主页那两排只放有字标的，这里片库里这一年的全部都放（没字标的就是片名），剧集还没取到资料的先取
 // · 可申请（用户要求「布局和 UI 和可立即播放的一致，2026 至 2020 年影片库里的全部」）：同一张横卡，剧照、字标按 TMDB 编号
 //   一排一次取（CatalogArt）；右边那颗胶囊是请求的状态（申请 / 已加入 / 已请求 42% / 已就绪），请求进行中剧照底边一道进度线；
@@ -123,8 +124,11 @@ private struct YearHeader: View {
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
         if link {
-            NavigationLink(value: Route.year(year)) { label }
+            // 点按区上下各多 8 点（折起一行 Title 1 只有 34 点高，不到 44：F74），外面再收回去，版面一点不动
+            // （和别处的分区标题同一个做法：DSShelfTitle）
+            NavigationLink(value: Route.year(year)) { label.dsTallHitArea() }
                 .buttonStyle(PressableStyle(scale: 0.98))
+                .padding(.vertical, -8)
                 .accessibilityIdentifier("all-films-\(year)")
         } else {
             label
@@ -133,7 +137,8 @@ private struct YearHeader: View {
 }
 
 /// 一节里的小标题：「电影 ›」「剧集 ›」（用户要求不带数字）。点了打开这一年的电影 / 剧集那一页（用户要求：打开分类的按钮挪到这里，
-/// 打开的是这一年的）：字和后面那个「›」和分区标题一样（「›」退一级颜色）；字后面那一截空白不接点按
+/// 打开的是这一年的）。用户要求用白底胶囊包起来：白底、黑字、黑色的「›」，看上去 34 高，点按区上下各多 5 点（44：F74）；
+/// 胶囊后面那一截空白不接点按
 private struct KindLabel: View {
     let title: String
     /// 点了去哪（这一年的分类页）
@@ -145,16 +150,20 @@ private struct KindLabel: View {
 
     var body: some View {
         NavigationLink(value: route) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
                 Text(title)
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                Image(systemName: "chevron.forward")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(DSInk.tertiary)
+                Image(systemName: "chevron.forward")
+                    .font(.caption.weight(.bold))
+                    .opacity(0.55)
                     .accessibilityHidden(true)
             }
-            .contentShape(Rectangle())
+            .foregroundStyle(.black)
+            .padding(.horizontal, 14)
+            .frame(minHeight: 34)
+            .background(Capsule().fill(Color.white))
+            .padding(.vertical, 5)
+            .contentShape(Capsule())
         }
         .buttonStyle(PressableStyle(scale: 0.97))
         .accessibilityLabel(title)
@@ -204,13 +213,15 @@ private struct PlayableYear: View {
         }
     }
 
+    /// 电影：主页分类区那种竖版海报 + 字标（用户要求，图二）。纯净画面 + 字标、本来就印着片名的海报不再压字标，
+    /// 先后和主页同一条规矩（AppModel.posterArt）；在下载 / 下好了的右上角一颗下载角标，长按是播放 / 想看
     private func movieCard(_ v: Video) -> some View {
-        let sub = DetailText.line([model.year(v).map { String($0) }, model.meta(v)?.genres?.first])
+        let w = metrics.posterWidth
+        let art = model.posterArt(v, width: w)
         return ZoomLink(route: .movie(v), slot: "all-\(year)") {
-            YearTrailerCard(still: TMDBImage.url(model.backgroundArtString(v), "w1280"),
-                            cover: model.thumbArt(v), logo: model.wideLockupArt(v).logo,
-                            title: model.title(v), subtitle: sub, width: metrics.trailerCardWidth)
-                .downloadBadge(v.path, inset: 10)
+            DSPosterLockup(art: art.url, title: model.title(v), subtitle: model.year(v).map { String($0) },
+                           metrics: metrics, width: w, logo: art.logo)
+                .downloadBadge(v.path)
         }
         .accessibilityIdentifier("all-films-movie")
         .movieMenu(v)
@@ -557,6 +568,19 @@ private struct RequestableYear: View {
     }
 
 
+    /// 还没取到时的卡：电影是一张竖版海报那么大的暗块，剧集是横卡的骨架
+    @ViewBuilder
+    private func skeleton(poster: Bool, width w: CGFloat) -> some View {
+        if poster {
+            RoundedRectangle(cornerRadius: DSRadius.card(w), style: .continuous)
+                .fill(DSFill.placeholder)
+                .frame(width: w, height: (w * 1.5).rounded())
+                .accessibilityHidden(true)
+        } else {
+            SkeletonTrailerCard(width: w)
+        }
+    }
+
     /// 「电影 ›」「剧集 ›」：打开这一年可申请的电影 / 剧集
     private func kindLabel(_ title: String, key: CatalogYears.Key) -> some View {
         let series = key.src == "tv"
@@ -567,13 +591,15 @@ private struct RequestableYear: View {
 
     @ViewBuilder
     private func row(_ title: String, key: CatalogYears.Key, page p: CatalogYears.Page, items: [CatalogItem]) -> some View {
-        let w = metrics.trailerCardWidth
+        // 电影那一排是竖版海报（用户要求，图二），剧集那一排照旧是横卡
+        let poster = key.src != "tv"
+        let w = poster ? metrics.posterWidth : metrics.trailerCardWidth
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: metrics.titleGap) {
                 kindLabel(title, key: key)
                 DSShelf(metrics: metrics) {
                     ForEach(items, id: \.uid) { it in
-                        RequestableCard(item: it, width: w, slot: "all-request-\(year)")
+                        RequestableCard(item: it, width: w, slot: "all-request-\(year)", poster: poster, metrics: metrics)
                             // 滑到这一排最后几张：取下一页。不到 8 张的一排一出来最后几张就在屏幕上：那是自己接着翻（有上限），不算用户翻过
                             .onAppear {
                                 if items.suffix(3).contains(where: { $0.uid == it.uid }), !catalog.page(key).done {
@@ -582,14 +608,14 @@ private struct RequestableYear: View {
                                 }
                             }
                     }
-                    if p.loading { SkeletonTrailerCard(width: w) }
+                    if p.loading { skeleton(poster: poster, width: w) }
                 }
             }
         } else if !p.started {
             VStack(alignment: .leading, spacing: metrics.titleGap) {
                 kindLabel(title, key: key)
                 DSShelf(metrics: metrics) {
-                    ForEach(0..<3, id: \.self) { _ in SkeletonTrailerCard(width: w) }
+                    ForEach(0..<3, id: \.self) { _ in skeleton(poster: poster, width: w) }
                 }
             }
             .accessibilityHidden(true)
@@ -602,19 +628,79 @@ private struct RequestableCard: View {
     let item: CatalogItem
     let width: CGFloat
     let slot: String
+    /// 电影那一排：竖版海报（用户要求，图二）。影片库的海报本来就印着片名，不再压字标；
+    /// 请求的状态（默认的「申请」不标）是左上角一颗小胶囊，请求进行中海报底边一道细进度
+    var poster = false
+    /// 竖版海报的画面滑动时那一点视差按这一页的边距、卡距算
+    var metrics = DSMetrics(width: 400)
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let art = CatalogArt.shared.art(item)
         let state = CatalogRequestState(item)
         ZoomLink(route: .catalog(item.catalogTitle), slot: slot) {
-            YearTrailerCard(still: TMDBImage.url(art?.backdrop, "w1280"), cover: TMDBImage.url(item.poster, "w185"),
-                            logo: TMDBImage.url(art?.logo, "w500"), title: item.title,
-                            subtitle: CatalogRequestState.line(item, art: art), width: width,
-                            fallback: TMDBImage.url(item.poster, "w185"), badge: state.badge, progress: state.progress)
+            if poster {
+                DSPosterLockup(art: TMDBImage.url(item.poster, "w342"), title: item.title,
+                               subtitle: CatalogRequestState.line(item, art: art), metrics: metrics, width: width)
+                    .overlay(alignment: .topLeading) {
+                        // 只标例外（设计复查）：默认的「申请」每张都一样，上面的分段已经写着可申请，不再每张海报压一颗蓝胶囊
+                        if state.badge.tone != .accent { statusPill(state.badge).padding(8) }
+                    }
+                    .overlay(alignment: .bottom) {
+                        if let p = state.progress {
+                            PosterRequestProgress(value: p)
+                                .padding(.horizontal, 8)
+                                .padding(.bottom, 8)
+                        }
+                    }
+            } else {
+                YearTrailerCard(still: TMDBImage.url(art?.backdrop, "w1280"), cover: TMDBImage.url(item.poster, "w185"),
+                                logo: TMDBImage.url(art?.logo, "w500"), title: item.title,
+                                subtitle: CatalogRequestState.line(item, art: art), width: width,
+                                fallback: TMDBImage.url(item.poster, "w185"), badge: state.badge, progress: state.progress)
+            }
         }
         .accessibilityIdentifier("all-films-request")
         .onAppear { CatalogArt.shared.want(item) }
         .contextMenu { CatalogRequestMenu(item: item, state: state) }
+    }
+
+    /// 海报左上角的状态：玻璃上的小胶囊（申请是主题色，没能添加是红的，别的白字）
+    private func statusPill(_ b: YearCardBadge) -> some View {
+        // 分两句写：上面那一串和以前一样长（里面那个三选一的颜色本来就费类型检查），动画另起一句
+        let pill = Text(b.text)
+            .font(.caption2.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(b.tone == .accent ? Theme.accent : b.tone == .alert ? Color(red: 1.0, green: 0.27, blue: 0.23) : Color.white)
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .glassEffect(.regular, in: Capsule())
+            .environment(\.colorScheme, .dark)
+            .contentTransition(.numericText())
+        // 数字滚动要在动画里才走：以前没挂，「已请求 41%」→「42%」是直接跳过去的
+        return pill.animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: b.text)
+    }
+}
+
+/// 竖版海报底边那道请求进度：和网格里「看到哪儿」同一条细胶囊（4 点高、底 30% 白、离左右下各 8），
+/// 进度变了滑过去（横卡剧照底边那道也是 0.6 秒），不再一跳一跳；进度按 0–1 收住，不会画出海报外面
+private struct PosterRequestProgress: View {
+    let value: Double
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let p = min(1, max(0, value))
+        GeometryReader { g in
+            Capsule().fill(Color.white.opacity(0.3))
+                .overlay(alignment: .leading) {
+                    Capsule().fill(Color.white).frame(width: max(4, g.size.width * p))
+                }
+        }
+        .frame(height: 4)
+        // 「减弱动态效果」时换成短的一下（F59）
+        .animation(DSMotion.adapt(.smooth(duration: 0.6), reduce: reduceMotion), value: p)
+        .accessibilityHidden(true)
     }
 }
 

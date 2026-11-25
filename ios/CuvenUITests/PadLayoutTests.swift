@@ -20,7 +20,7 @@ final class PadLayoutTests: XCTestCase {
         snap("pad-\(tag)-2-home-down")
         app.swipeUp(); sleep(2)
         snap("pad-\(tag)-3-home-more")
-        for (i, name) in [(4, "资料库"), (5, "请求")] {
+        for (i, name) in [(4, "探索"), (5, "请求")] {
             if open(app, name) { sleep(3); snap("pad-\(tag)-\(i)-\(name == "请求" ? "requests" : "library")") }
         }
         app.terminate()

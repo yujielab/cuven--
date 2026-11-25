@@ -56,7 +56,8 @@ struct ActorPage: View {
                         aboutCard(m, palette: palette)
                     }
                     .padding(.top, 26)
-                    .padding(.bottom, 44)
+                    // 页面最底下和详情页留一样多（DSMetrics.pageBottom；以前写死 44，比详情页少一截）
+                    .padding(.bottom, m.pageBottom)
                     .padding(.leading, insets.leading)
                     .padding(.trailing, insets.trailing)
                     .animation(.spring(response: 0.5, dampingFraction: 0.88), value: works.count)
@@ -154,10 +155,11 @@ struct ActorPage: View {
         return ZStack(alignment: .trailing) {
             ZoomLink(route: item.route, slot: "actor-latest") {
                 HStack(spacing: 16) {
+                    // 圆角按缩略图的规矩 DSRadius.thumb（76 宽是 15）：以前 12，压在 34 的大圆角卡里显得方（设计复查）
                     RemoteImage(url: item.thumb, maxPixel: 300)
                         .frame(width: 76, height: 114)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(DetailSurface.line, lineWidth: 0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: DSRadius.thumb(76), style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: DSRadius.thumb(76), style: .continuous).strokeBorder(DetailSurface.line, lineWidth: 0.5))
                         .shadow(color: .black.opacity(0.28), radius: 6, y: 3)
                     VStack(alignment: .leading, spacing: 4) {
                         if let d = ActorText.longDate(w.date) {
@@ -232,20 +234,26 @@ struct ActorPage: View {
                     .font(.dsSectionTitle)
                     .foregroundStyle(.white)
                     .accessibilityAddTraits(.isHeader)
-                Button { showBio = true } label: {
+                Button {
+                    // 和详情页点开简介一样，弹层出来时一下轻触感
+                    Haptics.light()
+                    showBio = true
+                } label: {
                     VStack(alignment: .leading, spacing: 10) {
-                        // 五行简介：松一点的行距（F21）
+                        // 和详情页的「简介」卡同一套（设计复查）：Callout 松行距、染色的灰字、四行，上下留白 18；
+                        // 以前 Body、近白、五行，同一种卡在这一页更高更亮
                         Text(bio)
-                            .font(.dsReading)
-                            .foregroundStyle(.white.opacity(0.88))
-                            .lineLimit(5)
+                            .font(.callout.leading(.loose))
+                            .foregroundStyle(palette.ink2)
+                            .lineLimit(4)
                             .multilineTextAlignment(.leading)
                         Text("更多")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.white)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(DetailSurface.inset)
+                    .padding(.horizontal, DetailSurface.inset)
+                    .padding(.vertical, 18)
                     // 设计轮 2：和详情页的「简介」卡同一种面（圆角 26 → 34、底 8% → 10%、加 14% 的细边）
                     .background(RoundedRectangle(cornerRadius: DetailSurface.radius, style: .continuous).fill(DetailSurface.fill))
                     .overlay(RoundedRectangle(cornerRadius: DetailSurface.radius, style: .continuous).strokeBorder(DetailSurface.line, lineWidth: 1))
@@ -323,13 +331,14 @@ struct ActorWorkCard: View {
     var body: some View {
         let h = (width * 1.5).rounded()
         VStack(alignment: .leading, spacing: 8) {
-            RemoteImage(url: poster, maxPixel: width * 3)
+            // 圆角、细边、占位色和主页 / 搜索的海报一样（设计复查：以前是旧的 14 点圆角、半粗的边、偏亮的占位）
+            RemoteImage(url: poster, maxPixel: width * 3, placeholder: DSFill.placeholder)
                 .frame(width: width, height: h)
                 .overlay {
                     if let logo { DSPosterLogo(logo: logo, size: CGSize(width: width, height: h), title: title) }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous).strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
+                .clipShape(RoundedRectangle(cornerRadius: DSRadius.card(width), style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: DSRadius.card(width), style: .continuous).strokeBorder(DSFill.hairline, lineWidth: 1))
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
@@ -406,10 +415,10 @@ struct ActorBioSheet: View {
                                 .padding(.trailing, trail)
                                 .padding(.top, 34)
                                 .accessibilityAddTraits(.isHeader)
+                            // 全文用 dsReading（Body 松行距），和影片的简介弹层一样（设计复查：以前 Title 3 加行距，一行只放十几个字）
                             Text(bio)
-                                .font(.title3)
+                                .font(.dsReading)
                                 .foregroundStyle(.white.opacity(0.9))
-                                .lineSpacing(5)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .padding(.leading, lead)
                                 .padding(.trailing, trail)
@@ -466,7 +475,7 @@ struct ActorBioSheet: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(palette.ink2.opacity(0.8))
                     Text(r.1)
-                        .font(.title3)
+                        .font(.body)
                         .foregroundStyle(.white)
                 }
                 .accessibilityElement(children: .combine)

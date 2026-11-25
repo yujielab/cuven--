@@ -229,6 +229,18 @@ struct TrailerPlayerView: View {
                     .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.scale.combined(with: .opacity))
             }
 
+            // 上下两道压暗（设计复查）：横屏、iPad、Duo 展开时画面铺满，顶上的「预告片」和底下的片名直接压在画面上，
+            // 亮的镜头、白底的字卡上看不清；竖屏时落在上下的黑边上看不出来。不挡点按
+            LinearGradient(stops: [.init(color: .black.opacity(0.35), location: 0),
+                                   .init(color: .clear, location: 0.16),
+                                   .init(color: .clear, location: 0.68),
+                                   .init(color: .black.opacity(0.2), location: 0.84),
+                                   .init(color: .black.opacity(0.5), location: 1)],
+                           startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+
             VStack(spacing: 0) {
                 HStack {
                     Button { leave() } label: {
@@ -241,7 +253,10 @@ struct TrailerPlayerView: View {
                     Spacer()
                     Text("预告片").font(.headline)
                     Spacer()
-                    Button { deck.toggleMute() } label: {
+                    Button {
+                        Haptics.light()
+                        deck.toggleMute()
+                    } label: {
                         Image(systemName: deck.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                             .font(.system(size: 17, weight: .semibold))
                             .contentTransition(.symbolEffect(.replace))
@@ -259,13 +274,16 @@ struct TrailerPlayerView: View {
                 VStack(spacing: 6) {
                     Text(movieTitle.uppercased())
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Theme.secondary)
+                        .foregroundStyle(DSInk.secondary)
                         .lineLimit(1)
+                    // 换到下一段：名字交叉淡过去，不是直接换字
                     Text(deck.current?.title ?? "预告片")
                         .font(.headline)
                         .lineLimit(1)
+                        .contentTransition(.opacity)
                 }
                 .padding(.horizontal, 24)
+                .animation(DSMotion.snap, value: deck.index)
                 if deck.trailers.count > 1 {
                     TrailerDots(count: deck.trailers.count, index: deck.index, progress: deck.progress)
                         .padding(.top, 16)
@@ -275,6 +293,7 @@ struct TrailerPlayerView: View {
         }
         .foregroundStyle(.white)
         .animation(.snappy(duration: 0.25), value: deck.paused)
+        .animation(.snappy(duration: 0.25), value: deck.failed)
         .onAppear { deck.start() }
         .onDisappear { deck.stop() }
         .preferredColorScheme(.dark)
@@ -290,15 +309,13 @@ struct TrailerDots: View {
     var body: some View {
         HStack(spacing: 7) {
             ForEach(0..<count, id: \.self) { i in
-                if i == index {
-                    Capsule().fill(Color.white.opacity(0.3))
-                        .frame(width: 28, height: 7)
-                        .overlay(alignment: .leading) {
-                            Capsule().fill(.white).frame(width: max(7, 28 * progress))
-                        }
-                } else {
-                    Circle().fill(Color.white.opacity(0.45)).frame(width: 7, height: 7)
-                }
+                // 每一段都是同一颗胶囊：换段时圆点长成胶囊、胶囊收回圆点（以前是圆和胶囊两种形状，换段时互相淡入淡出）
+                let on = i == index
+                Capsule().fill(Color.white.opacity(on ? 0.3 : 0.45))
+                    .frame(width: on ? 28 : 7, height: 7)
+                    .overlay(alignment: .leading) {
+                        if on { Capsule().fill(.white).frame(width: max(7, 28 * progress)) }
+                    }
             }
         }
         .padding(.horizontal, 12)

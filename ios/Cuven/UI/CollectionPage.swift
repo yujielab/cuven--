@@ -196,11 +196,17 @@ struct CollectionCard: View {
     var body: some View {
         let artH = (width / 1.85).rounded()
         let shape = RoundedRectangle(cornerRadius: DSRadius.feature, style: .continuous)
+        let fill = tone ?? Color(white: 0.16)
         VStack(spacing: 0) {
             ZStack {
                 DSFill.placeholder
                 RemoteImage(url: art, maxPixel: width * 3, placeholder: .clear)
                     .frame(width: width, height: artH)
+                // 画面最下面一截融进底条的颜色（和展开时打头的横向大卡 WideLeadCard 同一个做法）：
+                // 以前亮的画面和暗的底条之间是一道硬线
+                LinearGradient(stops: [.init(color: fill.opacity(0), location: 0.8),
+                                       .init(color: fill, location: 1)],
+                               startPoint: .top, endPoint: .bottom)
             }
             .frame(width: width, height: artH)
             .clipped()
@@ -232,8 +238,9 @@ struct CollectionCard: View {
             DSThumb(url: cover, width: 44)
             VStack(alignment: .leading, spacing: 1) {
                 if !kicker.isEmpty {
+                    // 和编辑推荐、分集卡、展开时的横向大卡同一个字重（以前这里是常规）
                     Text(kicker)
-                        .font(.footnote)
+                        .font(.footnote.weight(.medium))
                         .foregroundStyle(DSInk.secondary)
                 }
                 Text(title)

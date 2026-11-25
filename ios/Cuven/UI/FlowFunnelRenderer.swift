@@ -133,9 +133,13 @@ final class FlowFunnelRenderer: NSObject, MTKViewDelegate {
         var c1: SIMD4<Float>
         var wave: SIMD4<Float>
         var extra: SIMD4<Float>
+        var layout: SIMD4<Float>
     }
 
     let device: MTLDevice
+    /// 主体左右各缩进多少点（画布铺到卡边，主体的四段仍对着上面那一行数）、上下给辉光留多少点（FlowFunnelCanvas 给）
+    var insetPt: Float = 0
+    var spillPt: Float = 0
     private let queue: MTLCommandQueue
     private let pipe: MTLRenderPipelineState
     private let engine: FlowFunnelEngine
@@ -175,7 +179,9 @@ final class FlowFunnelRenderer: NSObject, MTKViewDelegate {
             c0: SIMD4(Float(s.primary.x), Float(s.primary.y), Float(s.primary.z), 1),
             c1: SIMD4(Float(s.secondary.x), Float(s.secondary.y), Float(s.secondary.z), 1),
             wave: SIMD4(Float(FlowFunnelEngine.wavePosition(t)), Float(reduce ? s.wave * 0.4 : s.wave), Float(t), reduce ? 0.35 : 1),
-            extra: SIMD4(Float(s.appear), reduce ? 1 : 0, Self.background, Float(s.progress))
+            extra: SIMD4(Float(s.appear), reduce ? 1 : 0, Self.background, Float(s.progress)),
+            // 左右淡出的宽：伸出去的那一截再往里 14 点
+            layout: SIMD4(insetPt * scale, spillPt * scale, (insetPt + 14) * scale, 0)
         )
         rpd.colorAttachments[0].loadAction = .dontCare
         if let e = cb.makeRenderCommandEncoder(descriptor: rpd) {
@@ -193,6 +199,9 @@ final class FlowFunnelRenderer: NSObject, MTKViewDelegate {
 struct FlowFunnelCanvas: UIViewRepresentable {
     let engine: FlowFunnelEngine
     var active: Bool
+    /// 主体左右各缩进多少点、上下给辉光留多少点（画布比卡里的那一块大，见 RequestFlowCard）
+    var inset: CGFloat = 0
+    var spill: CGFloat = 0
 
     final class Coordinator { var renderer: FlowFunnelRenderer? }
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -203,14 +212,17 @@ struct FlowFunnelCanvas: UIViewRepresentable {
         v.framebufferOnly = true
         // 旧机型（改进兼容性那一档）30 帧就够顺，省电省发热
         v.preferredFramesPerSecond = Compat.legacyDevice ? 30 : 60
-        v.isOpaque = true
-        let bg = Double(FlowFunnelRenderer.background)
-        v.backgroundColor = UIColor(white: bg, alpha: 1)
-        v.clearColor = MTLClearColor(red: bg, green: bg, blue: bg, alpha: 1)
+        // 透明的底（着色器出预乘 alpha）：画布铺到卡边、辉光溢出到数那一行上下，下面的卡、细边照样透出来
+        v.isOpaque = false
+        v.layer.isOpaque = false
+        v.backgroundColor = .clear
+        v.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         v.contentScaleFactor = min(UIScreen.main.scale, 2)
         if let r = FlowFunnelRenderer(engine: engine) {
             v.device = r.device
             v.delegate = r
+            r.insetPt = Float(inset)
+            r.spillPt = Float(spill)
             context.coordinator.renderer = r
         } else {
             v.isPaused = true
@@ -220,7 +232,11 @@ struct FlowFunnelCanvas: UIViewRepresentable {
     }
 
     func updateUIView(_ v: MTKView, context: Context) {
-        if context.coordinator.renderer != nil { v.isPaused = !active }
+        if let r = context.coordinator.renderer {
+            v.isPaused = !active
+            r.insetPt = Float(inset)
+            r.spillPt = Float(spill)
+        }
         engine.visible = active
     }
 

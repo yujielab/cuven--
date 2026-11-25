@@ -395,6 +395,8 @@ struct RemoteImage: View {
     let placeholder: Color
     /// 解码后的处理（分集卡、预告片卡底部的渐进式模糊）
     let effect: ImageEffect
+    /// 图到了（或者内存里本来就有）：给外面收骨架屏用（探索的画幅）
+    let onLoad: (() -> Void)?
 
     @State private var image: UIImage?
     @State private var loadedURL: URL?
@@ -407,12 +409,13 @@ struct RemoteImage: View {
 
     /// 内存里已经有这张图：第一次画就直接是它（不闪占位、不再淡入一遍）
     init(url: URL?, maxPixel: CGFloat = 900, contentMode: ContentMode = .fill,
-         placeholder: Color = Color.white.opacity(0.06), effect: ImageEffect = .none) {
+         placeholder: Color = Color.white.opacity(0.06), effect: ImageEffect = .none, onLoad: (() -> Void)? = nil) {
         self.url = url
         self.maxPixel = maxPixel
         self.contentMode = contentMode
         self.placeholder = placeholder
         self.effect = effect
+        self.onLoad = onLoad
         let hit = maxPixel < Self.minPixel ? nil : url.flatMap { ImagePipeline.shared.cached($0, maxPixel: maxPixel, effect: effect) }
         _image = State(initialValue: hit)
         _loadedURL = State(initialValue: hit == nil ? nil : url)
@@ -436,6 +439,7 @@ struct RemoteImage: View {
                     .transition(reduceMotion ? .opacity : .dsBlurFade(radius: 8))
             }
         }
+        .onAppear { if image != nil { onLoad?() } }
         .task(id: LoadKey(url: url, pixel: maxPixel.isFinite ? Int(maxPixel) : 0)) {
             guard let url else { image = nil; loadedURL = nil; loadedPixel = 0; return }
             guard maxPixel.isFinite, maxPixel >= Self.minPixel else { return }
@@ -452,6 +456,7 @@ struct RemoteImage: View {
                 withAnimation(.easeOut(duration: 0.32)) { image = img }
                 loadedURL = url
                 loadedPixel = img == nil ? 0 : maxPixel
+                if img != nil { onLoad?() }
             }
         }
     }
