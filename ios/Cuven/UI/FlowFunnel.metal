@@ -176,7 +176,7 @@ fragment float4 ff_fragment(FFOut in [[stage_in]], constant FFUniforms &U [[buff
 
     c *= U.extra.x * fade;
     // 柔和的色调映射（亮的地方不会一片死白）；底是透明的（预乘 alpha）：画布可以盖过卡边、数那一行，下面的卡照样透出来
-    float3 lit = 1.0 - exp(-c * 1.15);
-    float a = saturate(max(lit.r, max(lit.g, lit.b)));
-    return float4(lit, a);
+    float3 mapped = 1.0 - exp(-c * 1.15);
+    float a = saturate(max(mapped.r, max(mapped.g, mapped.b)));
+    return float4(mapped, a);
 }
