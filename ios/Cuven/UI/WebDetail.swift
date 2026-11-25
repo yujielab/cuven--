@@ -27,14 +27,21 @@ private struct MovieDetailChrome: ViewModifier {
     /// 弧形菜单的「+」摆在哪（那一行操作里「…」原来那一格）、「从头播放」（有进度才有）
     let anchor: DetailArcAnchor
     let onRestart: (() -> Void)?
+    /// 弧形菜单开着：后面的页面轻微模糊、往后退一点（用户要求「展开时轻微模糊和景深下方背景和元素，类似 Vision Pro」）
+    @State private var arcOpen = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         content
+            // 景深：整页模糊一点、缩到 96.5%（「减弱动态效果」时只模糊、不缩）；弧形菜单那一层在上面，清清楚楚
+            .blur(radius: arcOpen ? 7 : 0)
+            .scaleEffect(arcOpen && !reduceMotion ? 0.965 : 1)
+            .animation(DSMotion.adapt(.smooth(duration: 0.4), reduce: reduceMotion), value: arcOpen)
             .toolbar {
+                // 「分享」用户要求移除：只剩「下载」
                 if !column {
-                    ToolbarItemGroup(placement: .topBarTrailing) {
+                    ToolbarItem(placement: .topBarTrailing) {
                         DetailDownloadButton(video: video, title: title, runtime: runtime, alert: $alert)
-                        DetailShareButton(video: video, title: title, tmdbID: tmdbID)
                     }
                 }
             }
@@ -43,7 +50,7 @@ private struct MovieDetailChrome: ViewModifier {
             .overlay {
                 if column {
                     DetailArcMenuLayer(video: video, title: title, runtime: runtime, tmdbID: tmdbID, alert: $alert,
-                                       anchor: anchor, onRestart: onRestart)
+                                       open: $arcOpen, anchor: anchor, onRestart: onRestart)
                 }
             }
     }
@@ -1055,7 +1062,9 @@ struct DetailScaffold<Episodes: View>: View {
                 if let arcAnchor {
                     Color.clear
                         .frame(width: 48, height: 48)
-                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { arcAnchor.rect = $0 }
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { r in
+                            if !arcAnchor.frozen { arcAnchor.rect = r }
+                        }
                         .accessibilityHidden(true)
                 } else if onRestart != nil {
                     moreMenu

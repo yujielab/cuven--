@@ -1,12 +1,11 @@
 import SwiftUI
 
-// MARK: - 详情页的「下载」「分享」（用户给的图：iPhone Duo 侧边那一列，返回钮下面一枚竖着的玻璃胶囊，↓ 和分享）
+// MARK: - 详情页的「下载」
 //
-// 放在导航栏右边的一组工具栏按钮里：侧边一列的形态下系统把它们排在返回钮下面、包进一枚玻璃胶囊；别的 iPhone 上在右上角。
+// 别的 iPhone、iPad 上在导航栏右上角；iPhone Duo 侧边一列的形态里在弧形菜单上（DetailArcMenu.swift）。
 // · 下载（用户要求「下载指的是预先缓存 100%」：Precache.download）：整部缓存到本机，在 App 里放（离线也行）。
 //   ↓ → 一圈进度 + 停止方块（下载中，点开是「暂停 / 取消」）→ 一圈进度 + ↓（暂停了、断了，点开是「继续 / 取消」）→ ✓（点开是「删除下载」）；
-// · 分享（用户要求「分享仅让对方打开相同的详情页就可以了」）：系统的分享面板，发出去的是一条 cuven://movie/<TMDB 编号> 的链接，
-//   对方装了 Cuven max 一点就打开同一部的详情页（DeepLink）；可以直接隔空投送。不分享文件、签名地址或片库路径。
+// · 以前还有一颗「分享」（发一条 cuven://movie/<TMDB 编号> 的链接）：用户要求移除。别人发来的这种链接照样打得开（DeepLink）。
 
 struct DetailDownloadButton: View {
     let video: Video
@@ -60,26 +59,6 @@ struct DetailDownloadButton: View {
             .accessibilityHint("把整部影片缓存到这台 iPhone")
             .accessibilityIdentifier("detail-download")
         }
-    }
-}
-
-/// 分享：一条打开同一部详情页的链接（隔空投送给附近装了 Cuven max 的人，对方点开就是这一页）
-struct DetailShareButton: View {
-    let video: Video
-    let title: String
-    let tmdbID: Int?
-    var hit: CGFloat? = nil
-
-    var body: some View {
-        ShareLink(item: DeepLink.movie(path: video.path, tmdbID: tmdbID),
-                  subject: Text(title),
-                  message: Text("在 Cuven max 中查看《\(title)》"),
-                  preview: SharePreview(title)) {
-            Image(systemName: "square.and.arrow.up").detailHit(hit)
-        }
-        .accessibilityLabel("分享")
-        .accessibilityHint("发给别人，对方可以打开这部影片的详情页")
-        .accessibilityIdentifier("detail-share")
     }
 }
 

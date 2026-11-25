@@ -4,10 +4,11 @@ import UIKit
 // MARK: - 详情页的弧形菜单（iPhone Duo「侧边一列」的形态）
 //
 // 用户要求「把详情页的返回按钮换成展开弧形菜单按钮（参考图 2）以解决重叠问题」：
-// 系统把详情页的返回、下载、分享竖着放进侧边那一列，下载 / 分享那一组往下压到了底下的导航胶囊上。
+// 系统把详情页的返回、下载、分享竖着放进侧边那一列，下载 / 分享那一组往下压到了底下的导航胶囊上（「分享」后来用户要求移除）。
 // 现在这几种形态里这三颗都收起来，换成一颗 48 点的玻璃圆钮（「+」）。用户后来要求「更新展开按钮位置并替换更多按钮」：
 // 「+」摆在「播放」那一行里「…」原来那一格（跟着页面滚，滚到顶上那一截就藏起来），「…」里的「从头播放」挪到弧上最后一项；
-// 点一下，三颗圆形的玻璃从它左边沿一道弧展开（参考图 2）：上「返回」、中「下载」、下「分享」，「+」转成「×」，后面的页面压暗一点；
+// 点一下，从它左边沿一道弧展开（参考图 2）：上「返回」（正圆玻璃）、「下载」（圆头弧带），有进度时最下面「从头播放」（正圆），
+// 「+」转成「×」；后面的页面轻微模糊、往后退一点、压暗一点（用户要求，像 Vision Pro 的景深）；
 // 再点一下或点空白处收起。三颗从上到下一颗接一颗地从圆钮那儿长出来，收起也是从上到下一颗接一颗；
 // 三颗各是各的正圆玻璃（用户要求：不互相粘连、改成圆形○），整颗都点得到。
 // 折起横拿那种矮的一列放不下：圆钮挪到页面左上角，弧往右下展开。别的 iPhone、iPad 照旧是系统右上角的那几颗。
@@ -19,6 +20,8 @@ import UIKit
 @MainActor @Observable
 final class DetailArcAnchor {
     var rect: CGRect = .zero
+    /// 菜单开着（和刚收起那一会儿）：后面的页面往后退（缩一点），那一格的框跟着变，「+」不能跟着挪——这时不再更新 rect
+    @ObservationIgnored var frozen = false
 }
 
 struct DetailArcMenuLayer: View {
@@ -27,6 +30,8 @@ struct DetailArcMenuLayer: View {
     let runtime: Int?
     let tmdbID: Int?
     @Binding var alert: PrecacheAlert?
+    /// 开没开：详情页那一层也要知道（开着时后面的页面轻微模糊、往后退，像 Vision Pro 的景深）
+    @Binding var open: Bool
     /// 「+」摆在哪（详情页那一行里「…」原来那一格）；还没量到就按以前的摆法放进侧边那一列
     let anchor: DetailArcAnchor
     /// 「从头播放」（有进度才有）：以前在「…」菜单里，「…」被「+」顶替以后作为弧上最后一项
@@ -34,14 +39,13 @@ struct DetailArcMenuLayer: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var open = false
     /// 弧上各项出来了没有（从上到下）：展开、收起都是从上到下一项接一项
     @State private var shown = [false, false, false, false]
     /// 一块接一块的节拍：中途再点一下就停掉它，从眼下的样子接着走
     @State private var stepper: Task<Void, Never>?
 
-    /// 圆钮多大（中间的「+」和弧上的「返回」「分享」一样大）、三项离「+」的圆心多远、相邻两项隔多少度。
-    /// 用户要求（真机截图）：「返回」「分享」的玻璃改成正圆，「下载」保留原来那段圆头的弧带（厚 42、看得见的弧长 50°）。
+    /// 圆钮多大（中间的「+」和弧上的圆钮一样大）、各项离「+」的圆心多远、相邻两项隔多少度。
+    /// 用户要求（真机截图）：「返回」「从头播放」是正圆玻璃，「下载」保留原来那段圆头的弧带（厚 42、看得见的弧长 50°）。
     /// 都摆在同一道弧上，位置照旧——离圆心 62、隔 62°，相邻两项之间、和「+」之间都空出约 14 点
     private static let button: CGFloat = 48
     private static let radius: CGFloat = 62
@@ -63,8 +67,8 @@ struct DetailArcMenuLayer: View {
         var toward: Double
     }
 
-    /// 弧上一共几项：返回、下载、分享，有进度时再加「从头播放」
-    private var count: Int { onRestart == nil ? 3 : 4 }
+    /// 弧上一共几项：返回、下载，有进度时再加「从头播放」（「分享」用户要求移除）
+    private var count: Int { onRestart == nil ? 2 : 3 }
 
     var body: some View {
         GeometryReader { safe in
@@ -133,32 +137,45 @@ struct DetailArcMenuLayer: View {
     /// 「减弱动态效果」打开时三块一起、一小段淡入淡出（以前是直接跳出来）
     private func setOpen(_ on: Bool) {
         stepper?.cancel()
+        // 开着的时候后面的页面缩一点：「+」那一格的框跟着变，先定住，收完了再放开
+        if on { anchor.frozen = true }
         let curve = DSMotion.adapt(on ? Self.spring : DSMotion.snap, reduce: reduceMotion)
         if reduceMotion {
             withAnimation(curve) {
                 open = on
                 shown = [on, on, on, on]
             }
+            if !on { stepper = Task { @MainActor in await release() } }
             return
         }
-        // 最上面那块和「+」同一下动，后两块各隔一拍
+        // 最上面那项和「+」同一下动，后面的各隔一拍
         withAnimation(curve) {
             open = on
             shown[0] = on
         }
         let beat = on ? 110 : 80
+        let n = count
         stepper = Task { @MainActor in
-            for i in 1..<count {
+            for i in 1..<n {
                 try? await Task.sleep(for: .milliseconds(beat))
                 if Task.isCancelled { return }
                 withAnimation(curve) { shown[i] = on }
             }
+            if !on { await release() }
         }
+    }
+
+    /// 收完、后面的页面也回到原大以后再让「+」跟着那一格走
+    private func release() async {
+        try? await Task.sleep(for: .milliseconds(450))
+        if Task.isCancelled || open { return }
+        anchor.frozen = false
     }
 
     /// 后面压暗一点，点空白处收起
     private var scrim: some View {
-        Color.black.opacity(0.28)
+        // 后面的页面已经模糊、往后退了（详情页那一层），压暗轻一点
+        Color.black.opacity(0.2)
             .contentShape(Rectangle())
             .onTapGesture { toggle() }
             .transition(.opacity)
@@ -193,14 +210,16 @@ struct DetailArcMenuLayer: View {
                 .frame(width: Self.button, height: Self.button)
                 .contentShape(Circle())
         }
-        .buttonStyle(PressableStyle(scale: 0.92))
+        // 不套 PressableStyle：它在按钮里多压一层缩放、调亮度，玻璃隔着那一层折射，圆钮里看得出第二道圆边（用户截图：要正圆）。
+        // 按下的回弹交给玻璃自己（interactive）
+        .buttonStyle(.plain)
         .glassEffect(Self.glassInk, in: Circle())
         .accessibilityLabel(open ? "收起菜单" : "更多操作")
-        .accessibilityHint(open ? "" : "返回、下载、分享")
+        .accessibilityHint(open ? "" : "返回、下载")
         .accessibilityIdentifier("detail-arc-menu")
     }
 
-    /// 第 i 项（上、中、下）：「返回」「分享」是一颗 48 点的正圆玻璃，「下载」是一段圆头的弧带玻璃（用户要求保留原来的样子）。
+    /// 第 i 项（从上到下）：「返回」「从头播放」是一颗 48 点的正圆玻璃，「下载」是一段圆头的弧带玻璃（用户要求保留原来的样子）。
     /// 整块玻璃就是这一项的按钮；玻璃贴在按钮自己身上：按在哪儿，玻璃的回弹和这一项的动作都是同一下
     @ViewBuilder
     private func segment(_ i: Int, toward: Double) -> some View {
@@ -243,7 +262,7 @@ struct DetailArcMenuLayer: View {
                     .foregroundStyle(.white)
                     .detailHit(Self.button)
             }
-            .buttonStyle(PressableStyle(scale: 0.9))
+            .buttonStyle(.plain)
             .accessibilityLabel("返回")
             .accessibilityIdentifier("detail-arc-back")
         case 1:
@@ -251,7 +270,7 @@ struct DetailArcMenuLayer: View {
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(.white)
                 .tint(.white)
-        case 3:
+        default:
             Button {
                 Haptics.light()
                 setOpen(false)
@@ -262,14 +281,9 @@ struct DetailArcMenuLayer: View {
                     .foregroundStyle(.white)
                     .detailHit(Self.button)
             }
-            .buttonStyle(PressableStyle(scale: 0.9))
+            .buttonStyle(.plain)
             .accessibilityLabel("从头播放")
             .accessibilityIdentifier("detail-restart")
-        default:
-            DetailShareButton(video: video, title: title, tmdbID: tmdbID, hit: Self.button)
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.white)
-                .tint(.white)
         }
     }
 }
