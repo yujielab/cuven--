@@ -201,12 +201,6 @@ struct DuoNav: View {
         let p = pitch
         let e = Self.endPad(p)
         let h = Self.height(pitch: p)
-        // 环境反光（用户要求「边缘应该反射蓝色区域中的各种主要颜色混合渐变光线」）：NavAmbient 从胶囊靠内容那一边外面取的颜色，
-        // 从上到下一串；取样的那一条比胶囊上下各长 NavAmbient.overhang，渐变也一样往外伸，颜色和旁边对得上
-        let stops = NavAmbient.shared.stops
-        let ext = NavAmbient.overhang / max(1, h)
-        let along = (top: UnitPoint(x: 0.5, y: -ext), bottom: UnitPoint(x: 0.5, y: 1 + ext))
-        let lit = contentLeading ? UnitPoint.leading : UnitPoint.trailing
         VStack(spacing: 0) {
             ForEach(Self.items) { item in
                 itemButton(item, pitch: p)
@@ -226,16 +220,8 @@ struct DuoNav: View {
                     .fill(DuoNavInk.body)
                     .padding(3.5)
                     .blur(radius: 2)
-                if stops.count >= 2 {
-                    // 里面一层柔光：靠内容那一边亮，往中间淡掉（像旁边画面的光打进玻璃里）
-                    Capsule()
-                        .fill(LinearGradient(colors: stops, startPoint: along.top, endPoint: along.bottom))
-                        .mask(LinearGradient(colors: [.white, .white.opacity(0)], startPoint: lit, endPoint: .center))
-                        .blur(radius: 5)
-                        // 糊开的光不出胶囊：外面那一条正是取色的地方，漏出去会把自己的光又取回来
-                        .clipShape(Capsule())
-                        .opacity(0.6)
-                }
+                // 环境反光（用户要求「边缘应该反射蓝色区域中的各种主要颜色混合渐变光线」）：里面一层柔光
+                NavAmbientGlow(layer: .inner, height: h, contentLeading: contentLeading)
             }
             .allowsHitTesting(false)
         }
@@ -243,20 +229,12 @@ struct DuoNav: View {
             ZStack {
                 Capsule()
                     .strokeBorder(DuoNavInk.rim, lineWidth: 1)
-                if stops.count >= 2 {
-                    // 边上一道反光：旁边画面的主要颜色从上到下混成一条渐变，靠内容那一边最亮，绕到另一边淡掉
-                    Capsule()
-                        .strokeBorder(LinearGradient(colors: stops, startPoint: along.top, endPoint: along.bottom), lineWidth: 1.8)
-                        .mask(LinearGradient(colors: [.white, .white, .white.opacity(0)], startPoint: lit,
-                                             endPoint: contentLeading ? UnitPoint(x: 0.75, y: 0.5) : UnitPoint(x: 0.25, y: 0.5)))
-                        .blur(radius: 0.5)
-                }
+                // 边上一道反光
+                NavAmbientGlow(layer: .rim, height: h, contentLeading: contentLeading)
             }
             .allowsHitTesting(false)
         }
         .glassEffect(.clear.interactive(), in: Capsule())
-        // 颜色一变就慢慢过渡过去（取样一秒几次，不会一闪一闪）
-        .animation(.easeInOut(duration: 0.45), value: stops)
         // 选中的那块在格子之间滑过去；「减弱动态效果」打开时不滑、不弹，原地短短地淡过去（F59，DSMotion.adapt 的规矩；
         // 以前是一下子跳过去）
         .animation(DSMotion.adapt(Animation.snappy(duration: 0.32), reduce: reduceMotion), value: tab)
@@ -522,11 +500,56 @@ enum NavGlyphImage {
     }
 }
 
+/// 胶囊的环境反光（两层：里面一层柔光、边上一道反光）。只有这一小块读 NavAmbient 的颜色：
+/// 颜色每一帧都在往新取到的颜色上走，胶囊的按钮、角标不跟着重画
+private struct NavAmbientGlow: View {
+    enum Layer { case inner, rim }
+    let layer: Layer
+    let height: CGFloat
+    let contentLeading: Bool
+
+    var body: some View {
+        // NavAmbient 从胶囊靠内容那一边外面取的颜色，从上到下一串；取样的那一条比胶囊上下各长 NavAmbient.overhang，
+        // 渐变也一样往外伸，颜色和旁边对得上
+        let stops = NavAmbient.shared.stops
+        let ext = NavAmbient.overhang / max(1, height)
+        let top = UnitPoint(x: 0.5, y: -ext), bottom = UnitPoint(x: 0.5, y: 1 + ext)
+        let lit = contentLeading ? UnitPoint.leading : UnitPoint.trailing
+        if stops.count >= 2 {
+            switch layer {
+            case .inner:
+                // 靠内容那一边亮，往中间淡掉（像旁边画面的光打进玻璃里）
+                Capsule()
+                    .fill(LinearGradient(colors: stops, startPoint: top, endPoint: bottom))
+                    .mask(LinearGradient(colors: [.white, .white.opacity(0)], startPoint: lit, endPoint: .center))
+                    .blur(radius: 5)
+                    // 糊开的光不出胶囊：外面那一条正是取色的地方，漏出去会把自己的光又取回来
+                    .clipShape(Capsule())
+                    .opacity(0.6)
+            case .rim:
+                // 旁边画面的主要颜色从上到下混成一条渐变，靠内容那一边最亮，绕到另一边淡掉
+                Capsule()
+                    .strokeBorder(LinearGradient(colors: stops, startPoint: top, endPoint: bottom), lineWidth: 1.8)
+                    .mask(LinearGradient(colors: [.white, .white, .white.opacity(0)], startPoint: lit,
+                                         endPoint: contentLeading ? UnitPoint(x: 0.75, y: 0.5) : UnitPoint(x: 0.25, y: 0.5)))
+                    .blur(radius: 0.5)
+            }
+        }
+    }
+}
+
 /// 侧边胶囊的环境反光（用户要求「黄色边缘位置应该反射蓝色区域中的各种主要颜色混合渐变光线」）：
 /// 胶囊挨着的那片画面（海报、剧照）不在胶囊正后面——后面是侧边那一列的黑——玻璃自己折射不到，所以自己取色：
-/// 一秒四次，把胶囊靠内容那一边外面 64 点宽、上下各长 overhang 的一条，用 drawHierarchy 缩成 4 × 16 像素画下来，
-/// 每一行取平均 → 从上到下 8 个颜色；颜色提一点饱和、亮度，黑的地方不发光（透明），和上一次的混一半，不会跳。
-/// 只在胶囊出现、App 在前台时取；一次取样太慢（超过 12 毫秒）就放慢到一秒两次、一次
+/// 把胶囊靠内容那一边外面 64 点宽、上下各长 overhang 的一条，用 drawHierarchy 缩成 4 × 16 像素画下来，
+/// 每一行取平均 → 从上到下 8 个颜色；颜色提一点饱和、亮度，黑的地方不发光（透明）。
+///
+/// 用户反馈「现在有延时」，以前慢在三处，这一版都改了：
+/// · 以前用 Timer：它只在默认的 run loop 模式里走，手指按着滑的时候（tracking 模式）根本不取样，松手才追上来。
+///   现在是显示链，加在 .common 模式里，滑着也照样取；
+/// · 以前一秒四次，每次还和上一次各混一半，再叠 0.45 秒的动画：颜色落后半秒到一秒。现在画面在变的时候一秒 30 次
+///   （一次取样太贵就降到 15、8 次），停下来以后一秒四次只看看变没变；
+/// · 两次取样之间不跳：显示出来的颜色每一帧往最新取到的颜色上走（时间常数 60 毫秒，约 0.15 秒走完），走到了就不再动。
+/// 只在胶囊出现、App 在前台时取
 @MainActor
 @Observable
 final class NavAmbient {
@@ -540,35 +563,87 @@ final class NavAmbient {
     /// 胶囊在窗口里的位置、内容在它哪一边（DuoNavLayer 给）
     @ObservationIgnored var capsule: CGRect = .zero
     @ObservationIgnored var contentLeading = true
-    @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var link: CADisplayLink?
     @ObservationIgnored private var users = 0
-    @ObservationIgnored private var interval: TimeInterval = 0.25
-    @ObservationIgnored private var last: [SIMD4<Double>] = []
+    /// 最新取到的颜色、眼下显示的颜色（0…1 的 RGB）
+    @ObservationIgnored private var target: [SIMD4<Double>] = []
+    @ObservationIgnored private var shown: [SIMD4<Double>] = []
+    @ObservationIgnored private var lastSample: CFTimeInterval = 0
+    @ObservationIgnored private var lastTick: CFTimeInterval = 0
+    /// 画面在变：这个时刻之前都按快的节奏取
+    @ObservationIgnored private var hotUntil: CFTimeInterval = 0
+    /// 一次取样平均花多久（秒）：太贵就放慢
+    @ObservationIgnored private var cost: Double = 0.003
+    @ObservationIgnored private var fast: Bool?
 
     private static let cols = 4, rows = 16, outStops = 8
 
     func start() {
         users += 1
-        guard timer == nil else { return }
-        schedule()
-        sample()
+        guard link == nil else { return }
+        let proxy = NavAmbientTick()
+        proxy.owner = self
+        let l = CADisplayLink(target: proxy, selector: #selector(NavAmbientTick.tick(_:)))
+        // .common：手指按着滑的时候也走（Timer 在默认模式里，滑动时停）
+        l.add(to: .main, forMode: .common)
+        link = l
+        fast = nil
+        pace(fast: true)
+        lastSample = 0
+        lastTick = 0
     }
 
     func stop() {
         users = max(0, users - 1)
         guard users == 0 else { return }
-        timer?.invalidate()
-        timer = nil
+        link?.invalidate()
+        link = nil
     }
 
-    private func schedule() {
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sample() }
+    /// 显示链的帧率：画面在变、颜色还在走的时候 60（不跟 ProMotion 上 120：取色用不着），停下来降到 10 左右
+    private func pace(fast on: Bool) {
+        guard fast != on, let link else { return }
+        fast = on
+        link.preferredFrameRateRange = on
+            ? CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+            : CAFrameRateRange(minimum: 8, maximum: 15, preferred: 10)
+    }
+
+    fileprivate func tick(_: CADisplayLink) {
+        let now = CACurrentMediaTime()
+        let dt = lastTick == 0 ? 1.0 / 60 : min(0.1, max(0.001, now - lastTick))
+        lastTick = now
+        let hot = now < hotUntil
+        // 画面在变：一秒 30 次（一次取样平均超过 5 毫秒降到 15 次，超过 10 毫秒降到 8 次）；停着：一秒 4 次
+        let gap: Double = hot ? (cost > 0.010 ? 0.125 : cost > 0.005 ? 0.066 : 0.033) : 0.25
+        if now - lastSample >= gap {
+            lastSample = now
+            sample(now: now)
         }
+        let moving = ease(dt: dt)
+        pace(fast: hot || moving)
     }
 
-    private func sample() {
+    /// 显示的颜色往最新取到的颜色上走一帧；还没走到返回 true
+    private func ease(dt: Double) -> Bool {
+        guard !target.isEmpty else { return false }
+        var moving = false
+        if shown.count != target.count {
+            shown = target
+        } else {
+            let k = 1 - exp(-dt / 0.06)
+            shown = zip(shown, target).map { (s, t) -> SIMD4<Double> in
+                let d = t - s
+                if max(abs(d.x), max(abs(d.y), abs(d.z))) > 0.004 { moving = true; return s + d * k }
+                return t
+            }
+        }
+        let colors = shown.map(Self.glow)
+        if colors != stops { stops = colors }
+        return moving
+    }
+
+    private func sample(now: CFTimeInterval) {
         guard UIApplication.shared.applicationState == .active, capsule.width > 1,
               let win = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
                 .flatMap(\.windows).first(where: \.isKeyWindow) else { return }
@@ -593,11 +668,7 @@ final class NavAmbient {
             UIGraphicsPopContext()
             return done
         }
-        // 太慢就放慢（一秒四次 → 两次 → 一次）
-        if CACurrentMediaTime() - began > 0.012, interval < 1 {
-            interval = min(1, interval * 2)
-            schedule()
-        }
+        cost = cost * 0.8 + (CACurrentMediaTime() - began) * 0.2
         guard ok else { return }
         // 每一行取平均（0…1），两行并一个
         var rowsAvg: [SIMD4<Double>] = []
@@ -616,13 +687,17 @@ final class NavAmbient {
             for j in 0..<per { acc += rowsAvg[k * per + j] }
             fresh.append(acc / Double(per))
         }
-        // 和上一次的混一半：滑动时颜色流过去，不是一跳一跳
-        if last.count == fresh.count {
-            fresh = zip(last, fresh).map { $0 * 0.5 + $1 * 0.5 }
+        // 和上一次取到的比：变了（滑动、换页、预告片在放）就接下来 0.6 秒都按快的节奏取
+        if target.count == fresh.count {
+            let change = zip(target, fresh).map { (a, b) -> Double in
+                let d = b - a
+                return max(abs(d.x), max(abs(d.y), abs(d.z)))
+            }.max() ?? 0
+            if change > 0.012 { hotUntil = now + 0.6 }
+        } else {
+            hotUntil = now + 0.6
         }
-        last = fresh
-        let colors = fresh.map(Self.glow)
-        if colors != stops { stops = colors }
+        target = fresh
     }
 
     /// 一段画面的平均色 → 反光的颜色：饱和度 × 1.35、亮度提一点；暗的地方（亮度低于 0.08）不发光
@@ -633,6 +708,20 @@ final class NavAmbient {
         let alpha = min(1, max(0, (b - 0.08) / 0.25))
         return Color(hue: Double(h), saturation: Double(min(1, s * 1.35)), brightness: Double(min(1, b * 1.25 + 0.1)))
             .opacity(Double(alpha) * 0.95)
+    }
+}
+
+/// 显示链的目标：弱引用 NavAmbient（显示链强引用它的目标）
+@MainActor
+private final class NavAmbientTick: NSObject {
+    weak var owner: NavAmbient?
+
+    @objc func tick(_ link: CADisplayLink) {
+        guard let owner else {
+            link.invalidate()
+            return
+        }
+        owner.tick(link)
     }
 }
 
