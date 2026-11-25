@@ -73,9 +73,9 @@ final class DuoDeviceTests: XCTestCase {
         snap("duo-01-home")
         // 下拉刷新：在最上面拉一下、松手，转圈要自己收起、整页回到原位。以前刷新瞬间做完（演示数据）时转圈卡住不走、
         // 整页被顶下去一截，之后 XCUITest 每一步都要等两分钟 App 空闲（整个测试跑了 43 分钟）
-        let avatarBefore = app.onScreenFrames(skipBars: false) { $0.identifier == "home-account" }.first
+        let avatarBefore = app.onScreenFrames(skipBars: false) { $0.elementType == .staticText && $0.label == "主页" }.first
         app.swipeDown(); sleep(4)
-        let avatarAfter = app.onScreenFrames(skipBars: false) { $0.identifier == "home-account" }.first
+        let avatarAfter = app.onScreenFrames(skipBars: false) { $0.elementType == .staticText && $0.label == "主页" }.first
         snap("duo-01b-home-refreshed")
         if let b = avatarBefore, let a = avatarAfter {
             print("DUO refresh: avatar y \(Int(b.minY)) -> \(Int(a.minY))")
@@ -364,11 +364,10 @@ final class DuoDeviceTests: XCTestCase {
         }
         app.scrollHomeToTop(maxSwipes: 12)
 
-        // 账户与设置：主页标题那一行右边的头像（从侧边导航里分出来了）
+        // 账户与设置：导航最后一格「我的」（照 Netflix，头像是导航的一格）
         snap("duo-02d-home-avatar")
-        let avatar = app.buttons["home-account"].firstMatch
-        if avatar.waitForExistence(timeout: 5) {
-            avatar.tap(); sleep(2)
+        if app.tapTab(named: "我的") {
+            sleep(2)
             snap("duo-06-account")
             // 网络速度：滑块下面「自动调整」那一行（演示数据不测速，只按网络类型估）；开一下看结果，再关回去（停在现在的数上）
             if let auto = reveal(app, "account-network-auto", swipes: 4) {
@@ -415,11 +414,11 @@ final class DuoDeviceTests: XCTestCase {
             } else {
                 print("DUO subs status: none")
             }
-            let done = app.buttons["account-done"].firstMatch
-            if done.waitForExistence(timeout: 3) { done.tap() } else { app.swipeDown() }
+            // 标签页没有关闭钮：回到主页
+            app.tapTab(named: "主页")
             sleep(1)
         } else {
-            XCTFail("主页右上没有头像")
+            XCTFail("导航里没有「我的」")
         }
 
         tab(app, "搜索"); sleep(2)

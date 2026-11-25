@@ -13,8 +13,6 @@ import UIKit
 struct HomeView: View {
     @Environment(AppModel.self) private var model
     @Environment(AccountStore.self) private var account
-    /// 右上头像点开的账户与设置（用户要求：头像从侧边导航里拿出来，放在主页标题这一行的右边）
-    @State private var showAccount = false
     /// 头像左边那颗「光学扫描」（用户要求）：扫另一台设备上的粒子云，让它登录这个账户
     @State private var pairScanning = false
     /// 这一栈推进去的页（分享来的链接打开详情页时往里推）
@@ -54,7 +52,6 @@ struct HomeView: View {
             .background(Theme.bg)
             .toolbar(.hidden, for: .navigationBar)
         }
-        .sheet(isPresented: $showAccount) { AccountView() }
         .sheet(isPresented: $pairScanning) { PairScanSheet().environment(account).environment(\.colorScheme, .light) }
         // 分享来的链接（cuven://movie/…）：推进那一部的详情页
         .onChange(of: model.openRequest) { _, r in
@@ -92,8 +89,8 @@ struct HomeView: View {
                 Color.clear.frame(width: fullWidth, height: max(insets.top, 12) + 64)
             }
             // 最上面一行：左边白字「主页」（Apple TV 主页那样的大标题，压在画面上、跟着头图一起滚走：C13、F34；
-            // 发行前从英文「Home」改成中文，和标签栏的「主页」一致），
-            // 右边一枚头像（玻璃圈里的圆头像），点开是账户与设置——头像不再放在侧边导航里（用户要求）
+            // 发行前从英文「Home」改成中文，和标签栏的「主页」一致），右边光学扫描。
+            // 账户与设置不在这里了：用户要求照 Netflix，头像是导航的最后一格（标签栏「我的」）
             HStack(alignment: .center, spacing: 12) {
                 Text("主页")
                     .font(.largeTitle.bold())
@@ -103,7 +100,6 @@ struct HomeView: View {
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 12)
                 if canScan { scanButton }
-                accountButton
             }
             .padding(.top, max(insets.top, 12) + 8)
             .padding(.leading, insets.leading + m.margin)
@@ -133,19 +129,6 @@ struct HomeView: View {
         .accessibilityLabel("光学扫描")
         .accessibilityHint("扫描另一台设备上的粒子云，让它登录你的账户")
         .accessibilityIdentifier("home-pair-scan")
-    }
-
-    /// 头像：38 点的圆头像套在一圈 Liquid Glass 里（共 46 点，点得到的范围够大：F74）
-    private var accountButton: some View {
-        Button { showAccount = true } label: {
-            AvatarView(size: 38)
-                .padding(4)
-                .glassEffect(.regular.interactive(), in: Circle())
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("账户与设置")
-        .accessibilityIdentifier("home-account")
     }
 
     /// 头图的每一页（T30–T32）：只放拿到了无字背景 + 字标的，最多 5 部（AppModel.resolveHeroes 挑）。
