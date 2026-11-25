@@ -629,14 +629,14 @@ struct DetailRelatedCard: View {
     }
 
     /// 「查看」：小一号（30 高、左右 14；以前 34 高、左右 18），只是样子——点的是整行。
-    /// 白底蓝字（用户要求全局同类型的按钮都是白底蓝字）
+    /// 白色磨砂玻璃 + 蓝字（用户要求全局同类型的按钮都是这样，DSGlass.whiteFrost）
     private var pill: some View {
         Text("查看")
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(Theme.accent)
             .padding(.horizontal, 14)
             .frame(minHeight: 30)
-            .background(Capsule().fill(Color.white))
+            .glassEffect(DSGlass.whiteFrost, in: Capsule())
             .accessibilityHidden(true)
     }
 }

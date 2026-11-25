@@ -258,12 +258,17 @@ struct DSThumb: View {
 /// 以前四处各写一份：高 30 / 32、两边 12 / 16 / 18、底 12% / 18% / 20%。
 /// 压在画面、取色面板、磨砂条上（onArt）：白字、20% 白的底；在黑的页面上（年份卡下面那一行）：蓝字、12% 白的底
 /// （App Store「获取」那样；底再亮，蓝字的对比度反而掉到 4.5 : 1 以下）。宁可片名截断，胶囊不被挤扁
+/// 白色磨砂玻璃（用户要求「查看」这一类小胶囊是白色磨砂玻璃）：染白八成的液态玻璃，底下的画面隐约透一点
+enum DSGlass {
+    static let whiteFrost = Glass.regular.tint(Color.white.opacity(0.82))
+}
+
 struct DSViewPill: View {
     var onArt = true
     var compact = false
 
     var body: some View {
-        // 用户要求「全局同类型的按钮为白底蓝字」（App Store「获取」那种）：画面上、黑页面上都是白底 + 主题蓝的字。
+        // 用户要求「全局同类型的按钮为白底蓝字」，再改成「白色磨砂玻璃」：一块染白的液态玻璃（底下的画面隐约透一点）+ 主题蓝的字。
         // onArt 留着（调用处不动），两种现在一个样子
         Text("查看")
             .font(.subheadline.weight(.semibold))
@@ -271,7 +276,7 @@ struct DSViewPill: View {
             .lineLimit(1)
             .padding(.horizontal, compact ? 12 : 16)
             .frame(minHeight: 32)
-            .background(Capsule().fill(Color.white))
+            .glassEffect(DSGlass.whiteFrost, in: Capsule())
             .fixedSize()
             .accessibilityHidden(true)
     }
