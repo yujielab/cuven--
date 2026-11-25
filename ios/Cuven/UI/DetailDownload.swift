@@ -13,8 +13,8 @@ struct DetailDownloadButton: View {
     let title: String
     let runtime: Int?
     @Binding var alert: PrecacheAlert?
-    /// 点得到的范围多大（弧形菜单里给 46 点；工具栏里不用给，系统自己管）
-    var hit: CGFloat? = nil
+    /// 弧形菜单里的那一块弧带：图标摆在它的中线上，整块弧带都点得到（工具栏里不用给，系统自己管）
+    var slot: ArcSlot? = nil
 
     var body: some View {
         let it = Precache.shared.item(path: video.path)
@@ -25,7 +25,7 @@ struct DetailDownloadButton: View {
                 Menu {
                     Button("删除下载", systemImage: "trash", role: .destructive) { Precache.shared.delete(path: video.path) }
                 } label: {
-                    Image(systemName: "checkmark").detailHit(hit)
+                    Image(systemName: "checkmark").detailHit(slot)
                 }
                 .accessibilityLabel("已下载")
                 .accessibilityIdentifier("detail-download")
@@ -34,7 +34,7 @@ struct DetailDownloadButton: View {
                     Button("暂停下载", systemImage: "pause") { Precache.shared.pause(path: video.path) }
                     Button("取消下载", systemImage: "xmark", role: .destructive) { Precache.shared.delete(path: video.path) }
                 } label: {
-                    DownloadRing(progress: it.progress, running: true).detailHit(hit)
+                    DownloadRing(progress: it.progress, running: true).detailHit(slot)
                 }
                 .accessibilityLabel("正在下载")
                 .accessibilityValue("\(Int((it.progress * 100).rounded()))%")
@@ -44,7 +44,7 @@ struct DetailDownloadButton: View {
                     Button("继续下载", systemImage: "arrow.down") { Precache.shared.resume(path: video.path) }
                     Button("取消下载", systemImage: "xmark", role: .destructive) { Precache.shared.delete(path: video.path) }
                 } label: {
-                    DownloadRing(progress: it.progress, running: false).detailHit(hit)
+                    DownloadRing(progress: it.progress, running: false).detailHit(slot)
                 }
                 .accessibilityLabel(it.phase == .noSpace ? "储存空间不足" : "下载已暂停")
                 .accessibilityValue("\(Int((it.progress * 100).rounded()))%")
@@ -54,7 +54,7 @@ struct DetailDownloadButton: View {
             Button {
                 alert = DetailDownloadStarter.start(video: video, title: title, runtime: runtime)
             } label: {
-                Image(systemName: "arrow.down").detailHit(hit)
+                Image(systemName: "arrow.down").detailHit(slot)
             }
             .accessibilityLabel("下载")
             .accessibilityHint("把整部影片缓存到这台 iPhone")
@@ -68,14 +68,14 @@ struct DetailShareButton: View {
     let video: Video
     let title: String
     let tmdbID: Int?
-    var hit: CGFloat? = nil
+    var slot: ArcSlot? = nil
 
     var body: some View {
         ShareLink(item: DeepLink.movie(path: video.path, tmdbID: tmdbID),
                   subject: Text(title),
                   message: Text("在 Cuven max 中查看《\(title)》"),
                   preview: SharePreview(title)) {
-            Image(systemName: "square.and.arrow.up").detailHit(hit)
+            Image(systemName: "square.and.arrow.up").detailHit(slot)
         }
         .accessibilityLabel("分享")
         .accessibilityHint("发给别人，对方可以打开这部影片的详情页")
@@ -84,11 +84,13 @@ struct DetailShareButton: View {
 }
 
 extension View {
-    /// 给了多大就把点得到的范围撑到多大（不给就原样）
+    /// 弧形菜单里的一项：按钮撑到弧带的外接矩形那么大，图标摆在弧带的中线上，点得到的范围是整块弧带（不给就原样）
     @ViewBuilder
-    func detailHit(_ size: CGFloat?) -> some View {
-        if let size {
-            frame(width: size, height: size).contentShape(Rectangle())
+    func detailHit(_ slot: ArcSlot?) -> some View {
+        if let slot {
+            offset(slot.glyph)
+                .frame(width: slot.frameSize.width, height: slot.frameSize.height)
+                .contentShape(slot)
         } else {
             self
         }
@@ -148,38 +150,49 @@ struct DownloadRing: View {
 struct DownloadBadge: View {
     let path: String
     var size: CGFloat = 22
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        if let it = Precache.shared.item(path: path), it.isFull {
-            Group {
-                if it.phase == .done {
-                    Image(systemName: "arrow.down")
-                        .font(.system(size: size * 0.5, weight: .bold))
-                        .foregroundStyle(.black)
+        let it = Precache.shared.item(path: path)
+        let full = it?.isFull == true
+        // 外面一层一直在（空的时候不占地方）：动画挂在它上面，里面那颗冒出来 / 收回去才有人带
+        ZStack {
+            if let it, full {
+                Group {
+                    if it.phase == .done {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: size * 0.5, weight: .bold))
+                            .foregroundStyle(.black)
+                            .frame(width: size, height: size)
+                            .background(Circle().fill(Color(white: 0.72)))
+                    } else {
+                        let p = max(0.001, min(1, it.progress))
+                        let running = it.phase == .downloading || it.phase == .queued || it.phase == .preparing
+                        ZStack {
+                            Circle().fill(Color.black.opacity(0.45))
+                            Circle().stroke(Color.white.opacity(0.22), lineWidth: size * 0.14)
+                            // 刚开始那一点也看得见：圆头的线，进度为 0 时就是一个白点
+                            Circle()
+                                .trim(from: 0, to: p)
+                                .stroke(Color.white, style: StrokeStyle(lineWidth: size * 0.14, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                        }
+                        .padding(size * 0.07)
                         .frame(width: size, height: size)
-                        .background(Circle().fill(Color(white: 0.72)))
-                } else {
-                    let p = max(0.001, min(1, it.progress))
-                    let running = it.phase == .downloading || it.phase == .queued || it.phase == .preparing
-                    ZStack {
-                        Circle().fill(Color.black.opacity(0.45))
-                        Circle().stroke(Color.white.opacity(0.22), lineWidth: size * 0.14)
-                        // 刚开始那一点也看得见：圆头的线，进度为 0 时就是一个白点
-                        Circle()
-                            .trim(from: 0, to: p)
-                            .stroke(Color.white, style: StrokeStyle(lineWidth: size * 0.14, lineCap: .round))
-                            .rotationEffect(.degrees(-90))
+                        .opacity(running ? 1 : 0.6)
+                        .animation(.easeInOut(duration: 0.4), value: p)
                     }
-                    .padding(size * 0.07)
-                    .frame(width: size, height: size)
-                    .opacity(running ? 1 : 0.6)
-                    .animation(.easeInOut(duration: 0.4), value: p)
                 }
+                .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
+                // 「减弱动态效果」时只淡入淡出、不缩放（F59）
+                .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .scale(scale: 0.8)))
+                .accessibilityHidden(true)
             }
-            .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
-            .transition(.opacity.combined(with: .scale(scale: 0.8)))
-            .accessibilityHidden(true)
         }
+        // 角标冒出来 / 收回去、那一圈换成下好了的那一颗，都带过渡。以前只写了 transition、没有动画带它：
+        // 按下「下载」角标是直接跳出来的，下完那一下也是直接换
+        .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: full)
+        .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: it?.phase == Precache.Phase.done)
     }
 }
 

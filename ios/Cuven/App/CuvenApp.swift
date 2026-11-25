@@ -171,8 +171,8 @@ struct RootView: View {
         // 量整个窗口、左右安全区，iOS 27.1 起再问系统竖栏在哪一边（SideColumnProbe）
         .modifier(SideColumnProbe(window: $window, sideInsets: $sideInsets, probeEdge: $probeEdge,
                                   barEdge: $barEdge, barWindow: $barWindow))
-        // 标签栏不在滚动时缩小：HIG 只在标签栏带附件（迷你播放器之类）时这么做（C10）；标签名一字一词（C8）
-        .onChange(of: tab) { _, _ in Haptics.selection() }
+        // 标签栏不在滚动时缩小：HIG 只在标签栏带附件（迷你播放器之类）时这么做（C10）；标签名一字一词（C8）。
+        // 换标签的触感只有上面 .sensoryFeedback 那一下：以前这里还多一句 onChange 里的 Haptics.selection()，每换一次震两下
         .onChange(of: model.searchRequest) { _, q in if q != nil { tab = .search } }
         .modifier(BasketOpensRequests(tab: $tab))
         // iPad：标签栏能展开成侧边栏（iPadOS 26 浮在顶上的那一条）；13 寸横拿这种特别宽的窗口一打开就是侧边栏

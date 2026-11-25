@@ -364,10 +364,10 @@ struct SeriesDetailView: View {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
                 } else {
-                    // F87：说清楚怎么了，不怪人
+                    // F87：说清楚怎么了，不怪人。字和页上别的第二行同一级灰（DSInk.secondary；系统的 .secondary 在染色的底上偏暗）
                     Text(failed ?? "暂无可播放的剧集")
                         .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DSInk.secondary)
                         .padding(.horizontal, m.margin)
                         .padding(.vertical, 8)
                 }
@@ -381,6 +381,8 @@ struct SeriesDetailView: View {
                 }
             }
         }
+        // 占位卡换成真的分集卡（换季时再换回占位卡）：淡过去，不是一下子换掉
+        .animation(DSMotion.fade, value: files.isEmpty)
     }
 
     /// 一集：16:9 剧照，字压在底部的渐进式模糊上（Apple TV 的分集卡）：「第 1 集 · 集名」和「▶ 45 分钟」；
@@ -1145,6 +1147,8 @@ struct DetailScaffold<Episodes: View>: View {
         let d = (m.posterWidth * 0.86).rounded()
         return VStack(alignment: .leading, spacing: m.titleGap) {
             DetailLinkHeader(title: "演员", metrics: m, id: "cast-link") {
+                // 和点开简介一样，弹层出来时一下轻触感
+                Haptics.light()
                 castSheet = CastSheetRequest(start: nil)
             }
             DSShelf(metrics: m) {

@@ -25,7 +25,12 @@ struct ShelfView: View {
             let metrics = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing, height: geo.size.height)
             ScrollView {
                 if entries.isEmpty {
-                    emptyState.padding(.top, 60)
+                    // 空状态摆在看得见的那一块的正中偏上（以前钉在离顶 60 点，iPad 上大半屏空着），也留在安全区里：
+                    // 折起的 Duo 上以前按整个窗口居中，偏到侧边那一列底下去了
+                    emptyState
+                        .frame(maxWidth: .infinity, minHeight: (geo.size.height * 0.8).rounded())
+                        .padding(.leading, insets.leading)
+                        .padding(.trailing, insets.trailing)
                 } else {
                     EntryGrid(entries: entries, metrics: metrics, slot: "shelf-" + shelf.key,
                               movieID: "shelf-movie", seriesID: "shelf-series")

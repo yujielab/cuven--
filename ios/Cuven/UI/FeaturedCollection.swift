@@ -436,8 +436,8 @@ struct FeaturedCollectionCard: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .frame(width: width)
-            .background(.ultraThinMaterial)
-            .background(Color.black.opacity(0.3))
+            // 磨砂条的上沿渐进式地糊起来（用户要求不留硬边界线）：底比条往上多伸一截，那一截由清楚慢慢糊到满
+            .background { FeaturedBarBackdrop().padding(.top, -FeaturedBarBackdrop.rise) }
             .environment(\.colorScheme, .dark)
         }
         .frame(width: width, height: h)
@@ -446,5 +446,25 @@ struct FeaturedCollectionCard: View {
         .contentShape(shape)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel([title, subtitle].filter { !$0.isEmpty }.joined(separator: "，"))
+    }
+}
+
+/// 精选卡底条的底：磨砂 + 一层淡黑（和以前同一种材质、同一层黑），只是上沿不再是一道横在画面上的硬线——
+/// 两层都按同一条渐变淡掉（DSProgressiveBar 的做法），最上面全透明，往下 36% 处才是满的；片名和灰字都压在满的那一段里
+private struct FeaturedBarBackdrop: View {
+    /// 比条本身往上多伸多少（淡出去的那一截）
+    static let rise: CGFloat = 24
+
+    var body: some View {
+        let fade = LinearGradient(stops: [
+            .init(color: .clear, location: 0),
+            .init(color: .black, location: 0.36),
+            .init(color: .black, location: 1),
+        ], startPoint: .top, endPoint: .bottom)
+        ZStack {
+            Rectangle().fill(.ultraThinMaterial).mask(fade)
+            Rectangle().fill(Color.black.opacity(0.3)).mask(fade)
+        }
+        .allowsHitTesting(false)
     }
 }

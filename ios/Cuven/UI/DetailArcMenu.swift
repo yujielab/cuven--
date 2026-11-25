@@ -7,8 +7,8 @@ import UIKit
 // 系统把详情页的返回、下载、分享竖着放进侧边那一列，下载 / 分享那一组往下压到了底下的导航胶囊上。
 // 现在这几种形态里这三颗都收起来，换成一颗 48 点的玻璃圆钮（「+」）：摆在返回钮原来的地方（状态栏中线上、状态栏和导航胶囊之间）；
 // 点一下，三块弧形的玻璃从它左边展开成一道弧（参考图 2）：上「返回」、中「下载」、下「分享」，「+」转成「×」，后面的页面压暗一点；
-// 再点一下或点空白处收起。三块是同一个玻璃容器里的，从圆钮里长出来、收回去（glassEffectID）。
-// 折起横拿那种矮的一列放不下：圆钮挪到页面左上角，弧往右展开。别的 iPhone、iPad 照旧是系统右上角的那几颗。
+// 再点一下或点空白处收起。三块和圆钮在同一个玻璃容器里，从圆钮那儿长出来、收回去；停下来是分开的三块圆头弧，整块弧带都点得到。
+// 折起横拿那种矮的一列放不下：圆钮挪到页面左上角，弧往右下展开。别的 iPhone、iPad 照旧是系统右上角的那几颗。
 // 系统返回钮藏起来以后边缘右滑返回会失灵：同一页里把它接回来（SwipeBackEnabler）。
 
 struct DetailArcMenuLayer: View {
@@ -30,45 +30,28 @@ struct DetailArcMenuLayer: View {
     /// 三块各占多少度、中间隔多少度（看得见的弧长，含圆头）
     private static let span: Double = 56
     private static let gap: Double = 7
+    /// 玻璃容器那一块多大：圆钮在正中，弧的最外沿（离圆心 radius + thickness / 2）外面再留一圈
+    private static let box: CGFloat = (radius + thickness) * 2 + 40
+    /// 展开：带一点回弹。收起用 DSMotion.snap：干脆利落、不弹
+    private static let spring = Animation.bouncy(duration: 0.42, extraBounce: 0.08)
+
+    /// 圆钮摆在哪、弧朝哪边展开（屏幕坐标的角度：0° 朝右，90° 朝下）
+    private struct Spot {
+        var center: CGPoint
+        var toward: Double
+    }
 
     var body: some View {
         GeometryReader { safe in
             let sf = safe.frame(in: .global)
             GeometryReader { full in
                 let ff = full.frame(in: .global)
-                let lead = max(0, sf.minX - ff.minX)
-                let trail = max(0, ff.maxX - sf.maxX)
-                let columnLeading = lead > trail && lead >= 44
-                let rail = max(DuoRail.shared.fromTrailing ?? DuoNavLayer.statusAxis, DuoNavLayer.statusAxis)
-                let cap = DuoNavLayer.capsule(columnHeight: full.size.height)
-                // 侧边那一列里放得下（状态栏下面、胶囊上面留得出这一颗）：摆在返回钮原来的地方；放不下就挪到页面左上角
-                let inColumn = cap.top - 40 >= 236
-                let center: CGPoint = inColumn
-                    ? CGPoint(x: columnLeading ? rail : full.size.width - rail, y: min(288, cap.top - 40))
-                    : CGPoint(x: (columnLeading ? 0 : lead) + 20 + Self.button / 2, y: max(sf.minY - ff.minY, 12) + 12 + Self.button / 2)
-                // 弧往内容那一边展开：圆钮在后缘那一列里就往左（180°），在前缘那一列里往右（0°）；挪到左上角时往右下（45°），不出屏幕
-                let toward: Double = inColumn ? (columnLeading ? 0 : 180) : 45
+                let spot = place(in: full.size, lead: max(0, sf.minX - ff.minX), trail: max(0, ff.maxX - sf.maxX),
+                                 top: max(0, sf.minY - ff.minY))
                 ZStack(alignment: .topLeading) {
-                    if open {
-                        // 后面压暗一点，点空白处收起
-                        Color.black.opacity(0.28)
-                            .contentShape(Rectangle())
-                            .onTapGesture { toggle() }
-                            .transition(.opacity)
-                            .accessibilityHidden(true)
-                    }
-                    GlassEffectContainer(spacing: 18) {
-                        ZStack(alignment: .topLeading) {
-                            if open {
-                                ForEach(0..<3, id: \.self) { i in
-                                    segment(i, center: center, toward: toward, size: full.size)
-                                }
-                            }
-                            mainButton
-                                .position(center)
-                        }
-                        .frame(width: full.size.width, height: full.size.height, alignment: .topLeading)
-                    }
+                    if open { scrim }
+                    fan(toward: spot.toward)
+                        .position(spot.center)
                 }
                 .frame(width: full.size.width, height: full.size.height, alignment: .topLeading)
             }
@@ -77,12 +60,63 @@ struct DetailArcMenuLayer: View {
         .background { SwipeBackEnabler() }
     }
 
+    private func place(in size: CGSize, lead: CGFloat, trail: CGFloat, top: CGFloat) -> Spot {
+        let columnLeading = lead > trail && lead >= 44
+        let rail = max(DuoRail.shared.fromTrailing ?? DuoNavLayer.statusAxis, DuoNavLayer.statusAxis)
+        let cap = DuoNavLayer.capsule(columnHeight: size.height)
+        // 侧边那一列里放得下（状态栏下面、胶囊上面留得出这一颗）：摆在返回钮原来的地方，
+        // 弧往内容那一边展开：圆钮在后缘那一列里就往左（180°），在前缘那一列里往右（0°）
+        if cap.top - 40 >= 236 {
+            return Spot(center: CGPoint(x: columnLeading ? rail : size.width - rail, y: min(288, cap.top - 40)),
+                        toward: columnLeading ? 0 : 180)
+        }
+        // 放不下（折起横拿那种矮的一列）：挪到页面左上角，往右下（45°）展开。三块一共占 182°，两头那两块会绕到圆钮的上面和左边：
+        // 圆钮离上、左两边要留够这一截再加 10 点。以前离左 44、离上 48，「分享」那块出了屏幕左边 6 点、「返回」那块顶出屏幕上沿；
+        // 那一列在前缘时还把前缘的安全区当成 0，圆钮正压在那一列顶上的状态栏上
+        let inset = (Self.cornerReach + 10).rounded()
+        return Spot(center: CGPoint(x: lead + inset, y: top + inset), toward: 45)
+    }
+
+    /// 往右下 45° 展开时，两头那两块最靠上 / 最靠左的地方离圆心多远：那一头圆头的圆心，再加半个厚度（约 50 点）
+    private static var cornerReach: CGFloat {
+        let capDeg = Double(thickness / 2 / radius) * 180 / .pi
+        let core = max(1, span - capDeg * 2)
+        let edge = (span + gap - 45 + core / 2) * .pi / 180
+        return radius * CGFloat(sin(edge)) + thickness / 2
+    }
+
     private func toggle() {
         Haptics.light()
-        if reduceMotion {
-            open.toggle()
-        } else {
-            withAnimation(.bouncy(duration: 0.42, extraBounce: 0.08)) { open.toggle() }
+        setOpen(!open)
+    }
+
+    /// 展开带一点回弹，收起干脆利落；「减弱动态效果」打开时都是一小段淡入淡出（以前是直接跳出来）
+    private func setOpen(_ on: Bool) {
+        withAnimation(DSMotion.adapt(on ? Self.spring : DSMotion.snap, reduce: reduceMotion)) { open = on }
+    }
+
+    /// 后面压暗一点，点空白处收起
+    private var scrim: some View {
+        Color.black.opacity(0.28)
+            .contentShape(Rectangle())
+            .onTapGesture { toggle() }
+            .transition(.opacity)
+            .accessibilityHidden(true)
+    }
+
+    /// 圆钮和三块弧：同一个玻璃容器（弧从圆钮那儿长出来、收回去），只占圆钮周围这一块，不铺满整页。
+    /// 容器的间距比两块弧之间的缝（约 6 点）小：停下来是分开的三块圆头弧，不化成连着的一整条（以前 18，比缝宽，三块会粘在一起）
+    private func fan(toward: Double) -> some View {
+        GlassEffectContainer(spacing: 6) {
+            ZStack {
+                if open {
+                    ForEach(0..<3, id: \.self) { i in
+                        segment(i, toward: toward)
+                    }
+                }
+                mainButton
+            }
+            .frame(width: Self.box, height: Self.box)
         }
     }
 
@@ -104,59 +138,56 @@ struct DetailArcMenuLayer: View {
         .accessibilityIdentifier("detail-arc-menu")
     }
 
-    /// 第 i 块（上、中、下）：一段圆头的弧形玻璃，中间放这一项的按钮
-    @ViewBuilder
-    private func segment(_ i: Int, center: CGPoint, toward: Double, size: CGSize) -> some View {
+    /// 第 i 块（上、中、下）：一段圆头的弧形玻璃，整块就是这一项的按钮（图标在弧带的中线上、这一块的正中）。
+    /// 玻璃贴在按钮自己身上：按在弧带的哪儿，玻璃的回弹和这一项的动作都是同一下
+    private func segment(_ i: Int, toward: Double) -> some View {
         // 中间那块正对着展开的方向，上下两块各偏一个（跨度 + 间隔）。屏幕坐标 y 往下：往右展开时「上」是角度减，往左展开时是角度加
         let offset = Double(i - 1) * (Self.span + Self.gap)
-        let mid = toward > 90 && toward < 270 ? -offset : offset
-        let angle = (toward + mid) * .pi / 180
-        let r = Self.radius
-        let box = (r + Self.thickness) * 2
-        let p = CGPoint(x: center.x + r * CGFloat(cos(angle)), y: center.y + r * CGFloat(sin(angle)))
-        ZStack {
-            ArcBand(midDegrees: toward + mid, spanDegrees: Self.span, radius: r, thickness: Self.thickness)
-                .fill(Color.clear)
-                .glassEffect(.regular.interactive(), in: ArcBand(midDegrees: toward + mid, spanDegrees: Self.span, radius: r, thickness: Self.thickness))
-                .glassEffectID("arc-\(i)", in: glass)
-                .frame(width: box, height: box)
-                .position(center)
-            item(i)
-                .position(p)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        // 从圆钮那儿长出来，一块接一块（各晚 35 毫秒）
-        .transition(
-            AnyTransition.opacity
-                .combined(with: .scale(scale: 0.55, anchor: UnitPoint(x: center.x / max(1, size.width), y: center.y / max(1, size.height))))
-                .animation(reduceMotion ? .easeInOut(duration: 0.2) : .bouncy(duration: 0.42, extraBounce: 0.08).delay(0.035 * Double(i)))
-        )
+        let mid = toward > 90 && toward < 270 ? toward - offset : toward + offset
+        let slot = ArcSlot(band: ArcBand(midDegrees: mid, spanDegrees: Self.span, radius: Self.radius, thickness: Self.thickness))
+        return item(i, slot: slot)
+            .glassEffect(.regular.interactive(), in: slot)
+            .glassEffectID("arc-\(i)", in: glass)
+            .position(x: Self.box / 2 + slot.middle.x, y: Self.box / 2 + slot.middle.y)
+            .transition(grow(i))
+    }
+
+    /// 从圆钮那儿长出来，一块接一块（各晚 35 毫秒）；收起时倒过来，「分享」先走、「返回」最后。
+    /// 「减弱动态效果」打开时只淡入淡出：不缩放、不错开（以前照样从 55% 放大）
+    private func grow(_ i: Int) -> AnyTransition {
+        if reduceMotion { return AnyTransition.opacity.animation(.easeInOut(duration: 0.2)) }
+        // 这一块铺满容器那一块（position），缩放的中心就是圆钮
+        let pop = AnyTransition.opacity.combined(with: .scale(scale: 0.55, anchor: .center))
+        return AnyTransition.asymmetric(
+            insertion: pop.animation(Self.spring.delay(0.035 * Double(i))),
+            removal: pop.animation(DSMotion.snap.delay(0.03 * Double(2 - i))))
     }
 
     @ViewBuilder
-    private func item(_ i: Int) -> some View {
+    private func item(_ i: Int, slot: ArcSlot) -> some View {
         switch i {
         case 0:
             Button {
                 Haptics.light()
+                // 菜单跟着这一页一起收：返回的转场里不拖着一层压暗和三块弧
+                setOpen(false)
                 dismiss()
             } label: {
                 Image(systemName: "chevron.backward")
                     .font(.system(size: 19, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 46, height: 46)
-                    .contentShape(Rectangle())
+                    .detailHit(slot)
             }
             .buttonStyle(PressableStyle(scale: 0.9))
             .accessibilityLabel("返回")
             .accessibilityIdentifier("detail-arc-back")
         case 1:
-            DetailDownloadButton(video: video, title: title, runtime: runtime, alert: $alert, hit: 46)
+            DetailDownloadButton(video: video, title: title, runtime: runtime, alert: $alert, slot: slot)
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(.white)
                 .tint(.white)
         default:
-            DetailShareButton(video: video, title: title, tmdbID: tmdbID, hit: 46)
+            DetailShareButton(video: video, title: title, tmdbID: tmdbID, slot: slot)
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(.white)
                 .tint(.white)
@@ -181,6 +212,38 @@ struct ArcBand: Shape {
         arc.addArc(center: c, radius: radius,
                    startAngle: .degrees(midDegrees - core / 2), endAngle: .degrees(midDegrees + core / 2), clockwise: false)
         return arc.strokedPath(StrokeStyle(lineWidth: thickness, lineCap: .round))
+    }
+}
+
+/// 一块弧带和它自己的小框。小框是弧带的外接矩形：按钮就这么大（「下载」的菜单从这儿弹出来），
+/// 点得到的范围和玻璃的形状都是弧带本身。以前按钮只有正中 46 点见方，弧带两头按下去玻璃有反应、却什么都不做
+struct ArcSlot: Shape {
+    let band: ArcBand
+    /// 弧带的外接矩形（原点是弧的圆心）
+    let bounds: CGRect
+
+    init(band: ArcBand) {
+        self.band = band
+        let side = (band.radius + band.thickness) * 2
+        let whole = band.path(in: CGRect(x: 0, y: 0, width: side, height: side))
+        bounds = whole.boundingRect.offsetBy(dx: -side / 2, dy: -side / 2)
+    }
+
+    /// 小框多大
+    var frameSize: CGSize { bounds.size }
+    /// 小框的中心离圆心多远
+    var middle: CGPoint { CGPoint(x: bounds.midX, y: bounds.midY) }
+    /// 图标离小框的中心多远：正落在弧带的中线上、这一块的正中（弧带是弯的，外接矩形的中心差一点点）
+    var glyph: CGSize {
+        let a = band.midDegrees * .pi / 180
+        return CGSize(width: band.radius * CGFloat(cos(a)) - bounds.midX, height: band.radius * CGFloat(sin(a)) - bounds.midY)
+    }
+
+    func path(in rect: CGRect) -> Path {
+        // 圆心在小框外面：按它相对小框的位置放回去，弧带正好落进小框
+        let side = (band.radius + band.thickness) * 2
+        return band.path(in: CGRect(x: rect.minX - bounds.minX - side / 2, y: rect.minY - bounds.minY - side / 2,
+                                    width: side, height: side))
     }
 }
 

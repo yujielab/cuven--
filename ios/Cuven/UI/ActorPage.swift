@@ -56,7 +56,8 @@ struct ActorPage: View {
                         aboutCard(m, palette: palette)
                     }
                     .padding(.top, 26)
-                    .padding(.bottom, 44)
+                    // 页面最底下和详情页留一样多（DSMetrics.pageBottom；以前写死 44，比详情页少一截）
+                    .padding(.bottom, m.pageBottom)
                     .padding(.leading, insets.leading)
                     .padding(.trailing, insets.trailing)
                     .animation(.spring(response: 0.5, dampingFraction: 0.88), value: works.count)
@@ -232,7 +233,11 @@ struct ActorPage: View {
                     .font(.dsSectionTitle)
                     .foregroundStyle(.white)
                     .accessibilityAddTraits(.isHeader)
-                Button { showBio = true } label: {
+                Button {
+                    // 和详情页点开简介一样，弹层出来时一下轻触感
+                    Haptics.light()
+                    showBio = true
+                } label: {
                     VStack(alignment: .leading, spacing: 10) {
                         // 五行简介：松一点的行距（F21）
                         Text(bio)

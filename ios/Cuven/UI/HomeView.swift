@@ -110,6 +110,8 @@ struct HomeView: View {
             .frame(width: fullWidth)
         }
         .frame(width: fullWidth, alignment: .topLeading)
+        // 占位 → 头图淡过去（以前灰的占位一下子换成黑底，画面再从黑里出来）；只是淡入淡出，「减弱动态效果」下也合适
+        .animation(DSMotion.fade, value: pages.isEmpty)
     }
 
     /// 能扫：配对的解码器在（PairSpec），登录了、不是演示数据（和账户页「扫描登录其他设备」同一个条件）
@@ -120,7 +122,11 @@ struct HomeView: View {
     /// 光学扫描（用户要求「在头像旁边添加 + 光学扫描按钮」）：和头像一样大的一颗 Liquid Glass 圆钮，
     /// 点开就是账户页里那张扫描（将图案放在圆圈中 → 看是哪台设备 → 面容 ID 批准）
     private var scanButton: some View {
-        Button { pairScanning = true } label: {
+        Button {
+            // 和别的玻璃钮一样，点下去有一下轻的触感
+            Haptics.light()
+            pairScanning = true
+        } label: {
             // 图标（用户要求 Apple 风格、克制简洁）：取景框四个角 + 中间一个小圆（镜头），见 ScanGlyph
             ScanGlyph()
                 .stroke(.white, style: StrokeStyle(lineWidth: 1.9, lineCap: .round, lineJoin: .round))
@@ -181,10 +187,19 @@ struct HomeView: View {
         return [y, y - 1]
     }
 
+    /// 货架那一列。片库到了，占位淡出、真货架淡入（以前是一下子换掉）；只是淡入淡出，「减弱动态效果」下也合适。
+    /// 外面套一层 VStack 只为挂这个动画：里面始终只有一块，版面不变
+    private func shelves(_ m: DSMetrics, fullHeight: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            shelfContent(m, fullHeight: fullHeight)
+        }
+        .animation(DSMotion.fade, value: model.movies.isEmpty)
+    }
+
     /// 顺序：继续观看 → 今年 → 探索片段合集 → 去年（预告片卡）→ 精选电影 → 编辑推荐 → 精选剧集 → 四个大类 → 结尾（两排字标卡 + 查看全部影片）
     /// （docs/ios-design.md「主页」；F1：最要紧的在上）
     @ViewBuilder
-    private func shelves(_ m: DSMetrics, fullHeight: CGFloat) -> some View {
+    private func shelfContent(_ m: DSMetrics, fullHeight: CGFloat) -> some View {
         if model.movies.isEmpty {
             switch model.phase {
             case .failed(let msg):

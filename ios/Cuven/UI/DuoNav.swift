@@ -144,7 +144,7 @@ extension View {
 // MARK: - 导航本身
 
 /// 竖向玻璃导航（照 Netflix）：一枚胶囊里 主页 / 资料库 / 请求 / 搜索 / 头像，只有图标。
-/// 点一格就切过去（触感由 RootView 的 onChange 统一给）；再点一下当前那一格，这一格回到根页面（系统标签栏自带这个行为，自己画的要自己做）
+/// 点一格就切过去（触感由 RootView 统一给：.sensoryFeedback，只那一下）；再点一下当前那一格，这一格回到根页面（系统标签栏自带这个行为，自己画的要自己做）
 struct DuoNav: View {
     @Binding var tab: AppTab
     /// 再点一下当前那一格：回到这一格的根页面
@@ -257,8 +257,9 @@ struct DuoNav: View {
         .glassEffect(.clear.interactive(), in: Capsule())
         // 颜色一变就慢慢过渡过去（取样一秒几次，不会一闪一闪）
         .animation(.easeInOut(duration: 0.45), value: stops)
-        // 选中的那块在格子之间滑过去；「减弱动态效果」打开时直接换过去，不带弹性（F59）
-        .animation(reduceMotion ? nil : .snappy(duration: 0.32), value: tab)
+        // 选中的那块在格子之间滑过去；「减弱动态效果」打开时不滑、不弹，原地短短地淡过去（F59，DSMotion.adapt 的规矩；
+        // 以前是一下子跳过去）
+        .animation(DSMotion.adapt(Animation.snappy(duration: 0.32), reduce: reduceMotion), value: tab)
     }
 
     private func itemButton(_ item: Item, pitch p: CGFloat) -> some View {
@@ -276,11 +277,12 @@ struct DuoNav: View {
                         Capsule()
                             .fill(DuoNavInk.selection)
                             .frame(width: pillW, height: pillH)
-                            .matchedGeometryEffect(id: "duo-nav-selection", in: ns)
+                            // 「减弱动态效果」时每格各用各的 id：不配对就不滑，旧的淡出、新的淡入
+                            .matchedGeometryEffect(id: reduceMotion ? item.id : "duo-nav-selection", in: ns)
                     }
                 }
                 .overlay {
-                    if item.tab == .requests { badge }
+                    if item.tab == .requests { DuoNavBadge(count: badgeCount) }
                 }
                 .contentShape(Rectangle())
         }
@@ -332,22 +334,32 @@ struct DuoNav: View {
 
     /// 请求那一格的角标：进行中的请求 + 请求中心里还没确认的（和系统标签栏上的一样）
     private var badgeCount: Int { RequestStore.shared.activeCount + RequestBasket.shared.items.count }
+}
 
-    @ViewBuilder
-    private var badge: some View {
-        let n = badgeCount
-        if n > 0 {
-            Text(n > 99 ? "99+" : "\(n)")
-                .font(.system(size: 11, weight: .bold))
-                .monospacedDigit()
-                .foregroundStyle(.white)
-                .padding(.horizontal, 4.5)
-                .frame(minWidth: 17, minHeight: 17)
-                .background(Capsule().fill(DuoNavInk.badge))
-                .offset(x: 10, y: -9)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
+/// 请求那一格的角标。以前有了就冒出来、没了就消失、数字直接跳：现在冒出来 / 收回去带一点缩放（像系统标签栏的角标），
+/// 数字变的时候滚过去；「减弱动态效果」打开时只淡入淡出（F59）
+private struct DuoNavBadge: View {
+    let count: Int
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            if count > 0 {
+                Text(count > 99 ? "99+" : "\(count)")
+                    .font(.system(size: 11, weight: .bold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                    .contentTransition(.numericText())
+                    .padding(.horizontal, 4.5)
+                    .frame(minWidth: 17, minHeight: 17)
+                    .background(Capsule().fill(DuoNavInk.badge))
+                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .scale(scale: 0.5)))
+            }
         }
+        .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: count)
+        .offset(x: 10, y: -9)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 

@@ -182,7 +182,8 @@ struct EditorsPick: View {
             if trailer.path == video.path {
                 VideoSurface(player: trailer.player, gravity: .resizeAspectFill, background: .clear)
                     .opacity(trailer.showing ? 1 : 0)
-                    .blur(radius: trailer.showing ? 0 : 18)
+                    // 「减弱动态效果」时只淡入、不从模糊里出来（F59；和头图换画面 DSBlurFadeImage 同一条规矩）
+                    .blur(radius: (trailer.showing || reduceMotion) ? 0 : 18)
                     .animation(.easeInOut(duration: 0.8), value: trailer.showing)
                     .allowsHitTesting(false)
             }
@@ -489,8 +490,10 @@ struct WideLeadCard: View {
                     }
                 }
                 Spacer(minLength: 14)
+                // 片名上面那一行小字全 App 一个字重（Footnote 中等：编辑推荐、分集卡、合集卡）；以前这里半粗、合集卡常规，
+                // 展开时这张大卡和下面两张合集卡挨着，同一行「电影」「剧集」粗细不一
                 Text(kicker)
-                    .font(.footnote.weight(.semibold))
+                    .font(.footnote.weight(.medium))
                     .foregroundStyle(DSInk.secondary)
                 Text(title)
                     .font(logo != nil ? .title3.bold() : .title2.bold())
@@ -756,7 +759,8 @@ struct HomeFinale: View {
         .frame(width: metrics.width)
         .onScrollVisibilityChange(threshold: 0.1) { v in
             onScreen = v
-            if v { built = true }
+            // 第一次滑到：两排卡淡进来，不是一下子冒出来
+            if v, !built { withAnimation(DSMotion.fade) { built = true } }
         }
     }
 
@@ -786,12 +790,15 @@ struct HomeFinale: View {
                 .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(.white)
                 .contentTransition(.symbolEffect(.replace))
+                // 符号替换要在动画里才走（ShowcaseControl 也是这样挂的）：以前没挂，暂停 ↔ 播放是直接跳的
+                .animation(DSMotion.snap, value: userPaused)
                 .frame(width: 36, height: 36)
                 .background(Circle().fill(Color.white.opacity(0.16)))
                 .frame(width: 44, height: 44)
                 .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        // 和编辑推荐右上那颗播放 / 暂停同一个按压手感（以前 .plain：按下去没有任何反应）
+        .buttonStyle(PressableStyle(scale: 0.94))
         .accessibilityLabel(userPaused ? "继续播放滚动画面" : "暂停滚动画面")
         .accessibilityIdentifier("home-finale-pause")
     }
