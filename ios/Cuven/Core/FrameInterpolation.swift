@@ -875,7 +875,9 @@ final class FrameInterpolationOverlay {
             verdict("\(w)×\(h) 超过 1080p：原样播放")
             return
         }
-        if let md = VTLowLatencyFrameInterpolationConfiguration.maximumDimension(forSpatialScaleFactor: 1),
+        // 上限查询 iOS 27 起才有；iOS 26 上超出范围时下面建配置会失败
+        if #available(iOS 27.0, *),
+           let md = VTLowLatencyFrameInterpolationConfiguration.maximumDimension(forSpatialScaleFactor: 1),
            let mp = VTLowLatencyFrameInterpolationConfiguration.maximumPixelCount(forSpatialScaleFactor: 1),
            max(w, h) > md || w * h > mp {
             verdict("超出系统插帧上限：\(w)×\(h)")
@@ -1008,9 +1010,13 @@ final class FrameInterpolationOverlay {
         let llfi = VTLowLatencyFrameInterpolationConfiguration.self
         var lines = ["流畅插帧 · \(status)"]
         if llfi.isSupported {
-            let md = llfi.maximumDimension(forSpatialScaleFactor: 1).map { String($0) } ?? "?"
-            let mp = llfi.maximumPixelCount(forSpatialScaleFactor: 1).map { String($0) } ?? "?"
-            lines.append("系统上限 最长边 \(md) · 最多 \(mp) 像素")
+            if #available(iOS 27.0, *) {
+                let md = llfi.maximumDimension(forSpatialScaleFactor: 1).map { String($0) } ?? "?"
+                let mp = llfi.maximumPixelCount(forSpatialScaleFactor: 1).map { String($0) } ?? "?"
+                lines.append("系统上限 最长边 \(md) · 最多 \(mp) 像素")
+            } else {
+                lines.append("系统上限：iOS 27 起才能查询")
+            }
         } else {
             lines.append("低延迟插帧：不支持")
         }
