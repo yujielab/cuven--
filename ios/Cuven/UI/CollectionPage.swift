@@ -74,7 +74,8 @@ struct CollectionScaffold<Content: View>: View {
                 VStack(alignment: .leading, spacing: 0) {
                     content(m)
                 }
-                .padding(.bottom, 44)
+                // 页底留一道排距（和别的页同一个 pageBottom，以前写死 44）
+                .padding(.bottom, m.pageBottom)
                 // 卡留在安全区里；头部的颜色自己铺到侧边那一列底下
                 .padding(.leading, insets.leading)
                 .padding(.trailing, insets.trailing)
@@ -115,9 +116,10 @@ struct CollectionGrid<Content: View>: View {
 
     var body: some View {
         let g = metrics.collectionGrid
-        // 设计轮 2：行距就是列距（m.gutter），宽的屏上不再一个 24、一个按宽算
+        // 列距还是 gutter；行距比列距宽一些（gridRowGap）：一列大卡带着底下那条色条，行距和列距一样时上下连成一条
+        // （用户要求「保持一定的留白，整个界面看上去不会拥挤」）
         LazyVGrid(columns: Array(repeating: GridItem(.fixed(g.width), spacing: metrics.gutter, alignment: .top), count: g.columns),
-                  alignment: .leading, spacing: metrics.gutter) {
+                  alignment: .leading, spacing: metrics.gridRowGap) {
             content(g.width)
         }
         .padding(.horizontal, metrics.margin)

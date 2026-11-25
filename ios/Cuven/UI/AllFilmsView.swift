@@ -44,18 +44,22 @@ struct AllFilmsView: View {
             let insets = geo.safeAreaInsets
             let m = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing, height: geo.size.height)
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: m.shelfGap + 8, pinnedViews: []) {
+                // 用户要求「保持一定的留白，整个界面看上去不会拥挤」：分段控件那一块不放进年份的懒加载列表里，
+                // 它到第一年是一道排距（shelfGap）；年与年之间再宽 8 点，一年一节读得出来
+                VStack(alignment: .leading, spacing: m.shelfGap) {
                     picker(m)
-                    ForEach(years, id: \.self) { y in
-                        switch mode {
-                        case .playable: PlayableYear(year: y, metrics: m)
-                        case .requestable: RequestableYear(year: y, metrics: m, catalog: catalog)
+                    LazyVStack(alignment: .leading, spacing: m.shelfGap + 8, pinnedViews: []) {
+                        ForEach(years, id: \.self) { y in
+                            switch mode {
+                            case .playable: PlayableYear(year: y, metrics: m)
+                            case .requestable: RequestableYear(year: y, metrics: m, catalog: catalog)
+                            }
                         }
+                        .id(mode)
                     }
-                    .id(mode)
                 }
-                .padding(.top, 4)
-                .padding(.bottom, 48)
+                .padding(.top, m.pageTop)
+                .padding(.bottom, m.pageBottom)
                 .padding(.leading, insets.leading)
                 .padding(.trailing, insets.trailing)
                 .animation(.smooth(duration: 0.3), value: mode)
@@ -93,7 +97,8 @@ struct AllFilmsView: View {
     /// 两边分开：可立即播放 / 可申请（系统的分段控件，iOS 26 上是一枚玻璃）；
     /// 下面一行「电影 ›」「剧集 ›」打开这一边的分类页（用户要求：电视剧和电影分开）
     private func picker(_ m: DSMetrics) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        // 分段控件到下面那两颗胶囊：和分区标题到那一排同一个距离（以前 10，贴着）
+        VStack(alignment: .leading, spacing: m.titleGap) {
             Picker("显示", selection: $mode) {
                 ForEach(Mode.allCases) { Text($0.title).tag($0) }
             }
@@ -185,19 +190,23 @@ private struct PlayableYear: View {
         if !movies.isEmpty || !shows.isEmpty {
             VStack(alignment: .leading, spacing: metrics.titleGap + 6) {
                 YearHeader(year: year, metrics: metrics)
-                if !movies.isEmpty {
-                    VStack(alignment: .leading, spacing: metrics.titleGap) {
-                        KindLabel(title: "电影", metrics: metrics)
-                        DSShelf(metrics: metrics) {
-                            ForEach(movies, id: \.path) { v in movieCard(v) }
+                // 「电影」那一排的底到「剧集」那个小标题隔开一段（subsectionGap）：以前和年份标题到「电影」一样近，
+                // 「剧集」读着像是挂在电影那一排底下的
+                VStack(alignment: .leading, spacing: metrics.subsectionGap) {
+                    if !movies.isEmpty {
+                        VStack(alignment: .leading, spacing: metrics.titleGap) {
+                            KindLabel(title: "电影", metrics: metrics)
+                            DSShelf(metrics: metrics) {
+                                ForEach(movies, id: \.path) { v in movieCard(v) }
+                            }
                         }
                     }
-                }
-                if !shows.isEmpty {
-                    VStack(alignment: .leading, spacing: metrics.titleGap) {
-                        KindLabel(title: "剧集", metrics: metrics)
-                        DSShelf(metrics: metrics) {
-                            ForEach(shows, id: \.path) { s in seriesCard(s) }
+                    if !shows.isEmpty {
+                        VStack(alignment: .leading, spacing: metrics.titleGap) {
+                            KindLabel(title: "剧集", metrics: metrics)
+                            DSShelf(metrics: metrics) {
+                                ForEach(shows, id: \.path) { s in seriesCard(s) }
+                            }
                         }
                     }
                 }
@@ -539,8 +548,11 @@ private struct RequestableYear: View {
         if !movies.isEmpty || !series.isEmpty || !settled {
             VStack(alignment: .leading, spacing: metrics.titleGap + 6) {
                 YearHeader(year: year, metrics: metrics, link: false)
-                row("电影", key: mk, page: mp, items: movies)
-                row("剧集", key: tk, page: tp, items: series)
+                // 和可立即播放一样：电影、剧集两排之间隔开一段（不出的那一排不占这一段）
+                VStack(alignment: .leading, spacing: metrics.subsectionGap) {
+                    row("电影", key: mk, page: mp, items: movies)
+                    row("剧集", key: tk, page: tp, items: series)
+                }
             }
             // 第一轮（/app/years）没给到、没问成的（网络不好、老版本）：滑到这一节、或者第一轮问完了再问一次（从第一页）；
             // 问到了、可滤掉别的年份和片库里有的之后不到 8 张：接着往后翻（一次最多 4 页，有上限），不等滑到头
@@ -680,7 +692,8 @@ private struct SkeletonTrailerCard: View {
     var body: some View {
         let h = (width * 9 / 16).rounded()
         let compact = width < 300
-        VStack(alignment: .leading, spacing: 10) {
+        // 和 YearTrailerCard 一样：剧照到下面那一行 12（那边从 10 改成 12，这里跟着改，加载完卡不跳）
+        VStack(alignment: .leading, spacing: 12) {
             RoundedRectangle(cornerRadius: DSRadius.card(width), style: .continuous)
                 .fill(DSFill.placeholder)
                 .frame(width: width, height: h)

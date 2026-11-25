@@ -273,6 +273,9 @@ struct DetailStatsGrid: View {
     let palette: DetailPalette
     /// 宽的屏一行四块
     let wide: Bool
+    /// 方块与方块之间（左右、上下一样）：详情页传全局卡距（折起 18 起、展开 24 起）进来，和页上别的卡一样松；
+    /// 以前写死 12，方块挤成一面墙（用户要求「保持一定的留白，整个界面看上去不会拥挤」）
+    var spacing: CGFloat = 12
 
     private enum Tile: String, Identifiable {
         case release, runtime, efficiency, rating
@@ -290,8 +293,8 @@ struct DetailStatsGrid: View {
     }
 
     var body: some View {
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: wide ? 4 : 2)
-        LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: spacing, alignment: .top), count: wide ? 4 : 2)
+        LazyVGrid(columns: columns, alignment: .leading, spacing: spacing) {
             ForEach(tiles) { t in
                 tile(t)
             }
@@ -620,7 +623,8 @@ struct DetailRelatedCard: View {
             if !pillBelow { pill }
         }
         .padding(.horizontal, pillBelow ? 18 : DetailSurface.inset)
-        .padding(.vertical, pillBelow ? 18 : 11)
+        // 折起时一行一部：上下 11 → 14，海报上下不贴着卡边和细线（展开的 18 不变）
+        .padding(.vertical, pillBelow ? 18 : 14)
         .contentShape(Rectangle())
     }
 

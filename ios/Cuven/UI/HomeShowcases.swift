@@ -317,7 +317,8 @@ struct YearTrailerRow: View {
         let cap = metrics.height > 0 ? (metrics.height * 0.55).rounded() : 420
         let leadH = min(max(300, (full * 0.36).rounded()), max(300, cap))
         let rest = Array(items.dropFirst().prefix(2))
-        return VStack(alignment: .leading, spacing: metrics.titleGap + 2) {
+        // 标题到大卡：大卡不是横排的 DSShelf、没有那 4 点回弹，比折起那一排多给一些，看上去不贴着标题
+        return VStack(alignment: .leading, spacing: metrics.titleGap + 6) {
             header
             VStack(alignment: .leading, spacing: metrics.gutter) {
                 if let lead = items.first {
@@ -330,6 +331,8 @@ struct YearTrailerRow: View {
                 }
             }
             .padding(.horizontal, metrics.margin)
+            // 补上 DSShelf 下面那 4 点：下一节和每个横排后面一样，离这里 shelfGap + 4
+            .padding(.bottom, 4)
         }
     }
 
@@ -575,7 +578,8 @@ struct YearTrailerCard: View {
         let rowFixed: CGFloat = compact ? 76 : 92
         let logoShare: CGFloat = badge != nil ? 0.3 : 0.55
         let logoMax = min(120, max(36, ((width - rowFixed) * logoShare).rounded()))
-        VStack(alignment: .leading, spacing: 10) {
+        // 剧照和下面那一行（小海报 + 字标 + 片名）之间 12：以前 10，那一行贴着剧照
+        VStack(alignment: .leading, spacing: 12) {
             ZStack {
                 DSFill.placeholder
                 // 剧照地址到了也先垫着：剧照那张的占位是透明的，地址一到就拿掉会先露灰底、再淡入剧照（糊 → 灰 → 剧照闪一下）；
@@ -704,7 +708,8 @@ struct HomeFinale: View {
     var body: some View {
         let tileW: CGFloat = metrics.wide ? 300 : 220
         let tileH = (tileW * 9 / 16).rounded()
-        let gap: CGFloat = metrics.wide ? 16 : 12
+        // 卡与卡、两排之间都用全局的卡间距（折起 18 起、展开 24 起）：以前 12 / 16，比别的排挤（用户要求「保持一定的留白」）
+        let gap: CGFloat = metrics.gutter
         let half = (tiles.count + 1) / 2
         // 整个窗口宽（连同侧边那一列）：两排卡铺满它；按钮在内容区（metrics.width）里
         let fullW = metrics.width + metrics.leadingInset + metrics.trailingInset

@@ -176,7 +176,8 @@ private struct RequestableCategoryPage: View {
                 }
                 .buttonStyle(PressableStyle())
                 .frame(maxWidth: .infinity)
-                .padding(.top, m.gutter)
+                // 和上面那一列大卡的行距一样远（gridRowGap）：看着是网格的下一行，不是贴在最后一张卡底下
+                .padding(.top, m.gridRowGap)
                 .accessibilityIdentifier("category-retry")
             }
         }

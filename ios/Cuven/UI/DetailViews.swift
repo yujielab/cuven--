@@ -22,8 +22,9 @@ struct YearView: View {
                         .padding(.top, 60)
                 } else {
                     EntryGrid(entries: entries, metrics: metrics, slot: "year-\(year)", movieID: "year-movie", seriesID: "year-series")
-                        .padding(.top, 8)
-                        .padding(.bottom, 40)
+                        // 大标题到网格、页底留多少：各页同一套（pageTop / pageBottom），以前 8 / 40
+                        .padding(.top, metrics.pageTop)
+                        .padding(.bottom, metrics.pageBottom)
                         .padding(.leading, insets.leading)
                         .padding(.trailing, insets.trailing)
                 }

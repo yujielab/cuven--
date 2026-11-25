@@ -62,10 +62,13 @@ struct RequestCenterView: View {
 
     private func split(_ m: DSMetrics, active: [RequestStatus], ended: [RequestStatus]) -> some View {
         let right = min(640, max(600, (m.width * 0.46).rounded()))
-        let leftW = m.width - right - m.margin
+        // 两栏之间留一道缝（一个半卡距）：以前左栏的卡右边直接贴着流程卡，读着像一整块（用户要求「保持一定的留白，整个界面看上去不会拥挤」）。
+        // 缝从左栏里扣，HStack 的间距补回去，两栏加起来还是原来那么宽
+        let columnGap = (m.gutter * 1.5).rounded()
+        let leftW = m.width - right - m.margin - columnGap
         let lm = DSMetrics(width: leftW, leadingInset: m.leadingInset, trailingInset: 0, height: m.height)
         let rm = DSMetrics(width: right, height: m.height)
-        return HStack(alignment: .top, spacing: 0) {
+        return HStack(alignment: .top, spacing: columnGap) {
             ScrollView {
                 VStack(alignment: .leading, spacing: lm.shelfGap) {
                     if !basket.items.isEmpty { basketSection(lm) }
@@ -73,8 +76,9 @@ struct RequestCenterView: View {
                     if !active.isEmpty { activeSection(active, lm, columns: 1) }
                     if !ended.isEmpty { recentSection(ended, lm) }
                 }
-                .padding(.top, 4)
-                .padding(.bottom, 40)
+                // 上下留白用全页统一的 pageTop / pageBottom（以前 4 / 40，大标题下面贴得太紧）；两栏用同一个 m，顶上对齐
+                .padding(.top, m.pageTop)
+                .padding(.bottom, m.pageBottom)
                 .padding(.leading, m.leadingInset)
                 .animation(.smooth(duration: 0.35), value: basket.items)
             }
@@ -83,7 +87,7 @@ struct RequestCenterView: View {
             .refreshable { await store.refreshNow() }
             RequestFlowCard(requests: store.mine, flow: store.flow, flowAt: store.flowAt, metrics: rm)
                 .frame(width: right)
-                .padding(.top, 4)
+                .padding(.top, m.pageTop)
                 .padding(.trailing, m.margin)
                 .accessibilityIdentifier("request-flow-card")
         }
@@ -108,8 +112,9 @@ struct RequestCenterView: View {
                         if !active.isEmpty { activeSection(active, m) }
                         if !ended.isEmpty { recentSection(ended, m) }
                     }
-                    .padding(.top, 4)
-                    .padding(.bottom, 40)
+                    // 大标题到第一块、页底留白和别的页一样（以前 4 / 40）
+                    .padding(.top, m.pageTop)
+                    .padding(.bottom, m.pageBottom)
                     .animation(.smooth(duration: 0.35), value: basket.items)
                 }
             }
@@ -126,7 +131,8 @@ struct RequestCenterView: View {
 
     /// 详情页按「请求添加」放进来的：一行一部，右边一颗「移除」；最下面「清空」和「确认请求 · N 部」
     private func basketSection(_ m: DSMetrics) -> some View {
-        VStack(alignment: .leading, spacing: m.titleGap) {
+        // 标题下面是一张卡（不是横排的 DSShelf，没有那 4 点回弹的余量）：用 blockTitleGap，看上去和别的页标题到一排卡一样远
+        VStack(alignment: .leading, spacing: m.blockTitleGap) {
             HStack(alignment: .firstTextBaseline) {
                 DSShelfTitle(title: "待确认", metrics: m)
                 Spacer(minLength: 8)
@@ -140,7 +146,7 @@ struct RequestCenterView: View {
                 ForEach(Array(basket.items.enumerated()), id: \.element.key) { i, item in
                     basketRow(item)
                     if i < basket.items.count - 1 {
-                        Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5).padding(.leading, 16 + 44 + 14)
+                        Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5).padding(.leading, 20 + 44 + 14)
                     }
                 }
                 Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5)
@@ -171,7 +177,8 @@ struct RequestCenterView: View {
                     .disabled(basket.submitting)
                     .accessibilityIdentifier("basket-confirm")
                 }
-                .padding(.horizontal, 16)
+                // 卡里的字离卡边 20（以前 16）：圆角 22 的卡里字贴着边，看着挤
+                .padding(.horizontal, 20)
                 .padding(.vertical, 12)
             }
             .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color.white.opacity(0.07)))
@@ -222,7 +229,7 @@ struct RequestCenterView: View {
             .accessibilityLabel("从请求中心移除 \(item.title)")
             .accessibilityIdentifier("basket-remove")
         }
-        .padding(.leading, 16)
+        .padding(.leading, 20)
         .padding(.trailing, 6)
         .accessibilityIdentifier("basket-row")
     }
@@ -273,7 +280,7 @@ struct RequestCenterView: View {
 
     private func activeSection(_ list: [RequestStatus], _ m: DSMetrics, columns n: Int? = nil) -> some View {
         let columns = Array(repeating: GridItem(.flexible(), spacing: m.gutter, alignment: .top), count: n ?? (m.wide ? 2 : 1))
-        return VStack(alignment: .leading, spacing: m.titleGap) {
+        return VStack(alignment: .leading, spacing: m.blockTitleGap) {
             DSShelfTitle(title: "进行中", metrics: m)
             LazyVGrid(columns: columns, alignment: .leading, spacing: m.gutter) {
                 ForEach(list) { s in
@@ -290,14 +297,14 @@ struct RequestCenterView: View {
     // MARK: 最近
 
     private func recentSection(_ list: [RequestStatus], _ m: DSMetrics) -> some View {
-        VStack(alignment: .leading, spacing: m.titleGap) {
+        VStack(alignment: .leading, spacing: m.blockTitleGap) {
             DSShelfTitle(title: "最近", metrics: m)
             VStack(spacing: 0) {
                 ForEach(Array(list.enumerated()), id: \.element.id) { i, s in
                     recentRow(s)
                     if i < list.count - 1 {
                         // 细线从字的左边线开始（C51）
-                        Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5).padding(.leading, 16 + 44 + 14)
+                        Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5).padding(.leading, 20 + 44 + 14)
                     }
                 }
             }
@@ -338,7 +345,8 @@ struct RequestCenterView: View {
             .accessibilityIdentifier("request-center-row")
             if s.state == .done { playButton(s) }
         }
-        .padding(.horizontal, 16)
+        // 和待确认那张卡一样离卡边 20，细线也跟着从 20 + 44 + 14 起
+        .padding(.horizontal, 20)
     }
 
     /// 已就绪的：白色胶囊「播放」（和详情页的主操作同一种颜色），直接放片库里的这部
