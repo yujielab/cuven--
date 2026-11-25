@@ -7,7 +7,8 @@ import UIKit
 // （主页 / 片段 / 搜索 / 头像，搜索就在胶囊里，头像是最后一格）。我们的五格：主页 / 资料库（片段图标）/ 请求 / 搜索 / 头像
 // （用户选的：「请求」保留为一格；上面那组投屏 / 下载 / 通知按钮不要）。
 // 量 Netflix 截图（折起竖拿，3 倍图）：
-//   · 胶囊宽 60、离后缘 18、离底 18（中线离后缘 48，和状态栏同一条线）；深色玻璃（比系统标签栏暗得多）；
+//   · 胶囊宽 60、离后缘 18、离底 18（中线离后缘 48，和状态栏同一条线）；身子是深色（比系统标签栏暗得多），
+//     最外一圈边留给玻璃：边上反射、折射着旁边海报的颜色（用户指出的）；
 //   · 每格 58 点（第一格、最后一格的中心离胶囊两头 36）；矮的横屏按那一列的高往下压，最小 46；
 //   · 图标是白色线条（约 22 点、2 点粗），没选中的白色 45%；头像 24 点、圆角 7，一直是原色；
 //   · 选中那一格垫一块平的、亮一点的竖胶囊（44 × 56，离胶囊两边 8），没有玻璃边，在格子之间滑过去。
@@ -199,8 +200,18 @@ struct DuoNav: View {
         }
         .padding(.vertical, e - p / 2)
         .frame(width: Self.width, height: Self.height(pitch: p))
-        // 深色玻璃：Netflix 那枚比系统标签栏暗得多（量到约是底下画面 × 0.4），画面照样透得过来
-        .glassEffect(.regular.tint(DuoNavInk.tint).interactive(), in: Capsule())
+        // 深色的身子：Netflix 那枚比系统标签栏暗得多（量到约是底下画面 × 0.4，画面照样透得过来），
+        // 可最外一圈边是亮的、带着旁边海报的颜色（用户指出的：目标图里胶囊左边缘泛着旁边画面的蓝紫、往下一点泛红）——
+        // 那是 Liquid Glass 的边在折射、反射周围的画面。所以玻璃本身不染色（整块压黑会把这圈边也压掉），
+        // 只在里面垫一层黑，离边 2 点、边上柔一点，把那圈边留给玻璃
+        .background {
+            Capsule()
+                .fill(DuoNavInk.body)
+                .padding(2)
+                .blur(radius: 1.5)
+                .allowsHitTesting(false)
+        }
+        .glassEffect(.regular.interactive(), in: Capsule())
         // 选中的那块在格子之间滑过去；「减弱动态效果」打开时直接换过去，不带弹性（F59）
         .animation(reduceMotion ? nil : .snappy(duration: 0.32), value: tab)
     }
@@ -288,8 +299,9 @@ struct DuoNav: View {
 }
 
 private enum DuoNavInk {
-    /// 胶囊的深色：玻璃上压一层黑
-    static let tint = Color.black.opacity(0.55)
+    /// 胶囊身子的深色：垫在玻璃里面的一层黑（离边 2 点，边留给玻璃去反射周围画面的颜色）。
+    /// 普通玻璃压在黑底上量到约 31，Netflix 那枚是 12：× 0.4
+    static let body = Color.black.opacity(0.6)
     /// 选中垫的那块：平的、亮一点
     static let selection = Color.white.opacity(0.1)
     static let idle = Color.white.opacity(0.45)
