@@ -58,19 +58,22 @@ final class AccountHeaderScroll {
 private struct AccountScrollTracking: ViewModifier {
     @Binding var showName: Bool
     let header: AccountHeaderScroll
+    /// 头部往下让了多少（AccountView.headerLift）：名字滚出去的那一下跟着往后挪
+    var lift: CGFloat = 0
 
     func body(content: Content) -> some View {
-        content
+        let lift = lift
+        return content
             // 头部（头像 88 + 16 + 名字）约 150 点高：名字滚出去了才接到导航栏里（以前还有一颗胶囊，是 200）
             .onScrollGeometryChange(for: Bool.self) { g in
-                g.contentOffset.y + g.contentInsets.top > 150
+                g.contentOffset.y + g.contentInsets.top > 150 + lift
             } action: { _, v in
                 withAnimation(.easeOut(duration: 0.2)) { showName = v }
             }
             // 取整、封顶：滚过头部以后这个数不再变，不白白重画
             .onScrollGeometryChange(for: CGFloat.self) { g in
                 let d = g.contentOffset.y + g.contentInsets.top
-                return min(160, max(0, d.rounded()))
+                return min(160 + lift, max(0, d.rounded()))
             } action: { _, v in
                 header.offset = v
             }
@@ -227,7 +230,7 @@ struct AccountView: View {
                 }
             }
             // 名字滚出去了才接到导航栏里；头部跟着滚动淡出去（两件事都在 AccountScrollTracking 里）
-            .modifier(AccountScrollTracking(showName: $showName, header: headerScroll))
+            .modifier(AccountScrollTracking(showName: $showName, header: headerScroll, lift: headerLift))
             // 顶上那一截：滚过头部以后，渐进式模糊的底 + 左边「头像 + 名字」（用户要求：以前这里只有名字，底下是一块实色、一条硬边）
             .overlay(alignment: .top) {
                 if showName {
@@ -277,12 +280,16 @@ struct AccountView: View {
         VStack(spacing: 0) {
             // 头像、名字各自滚到导航栏那一截底下时淡出去（头像占 6–94 点、名字 110–151 点）；
             // 名字淡完正好接上顶上的「头像 + 名字」（滚过 150 点出现）
-            AccountHeaderFade(scroll: headerScroll, from: 8, to: 90) { headerAvatar }
-            AccountHeaderFade(scroll: headerScroll, from: 104, to: 150) { headerName }
+            AccountHeaderFade(scroll: headerScroll, from: 8 + headerLift, to: 90 + headerLift) { headerAvatar }
+            AccountHeaderFade(scroll: headerScroll, from: 104 + headerLift, to: 150 + headerLift) { headerName }
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 6)
+        .padding(.top, 6 + headerLift)
     }
+
+    /// 头部往下让多少：iPhone Duo「侧边一列」的形态里顶上没有安全区（状态栏在侧边那一列里），头像以前离屏幕顶只有 6 点、贴着顶边；
+    /// 用户要求（真机截图）头像顶落在离屏幕顶约 58 点。顶上有导航栏那一截的（普通 iPhone、弹层）照旧
+    private var headerLift: CGFloat { max(0, 52 - navTop) }
 
     private var headerAvatar: some View {
         Button { profileSheet = .avatar } label: {
