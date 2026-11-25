@@ -65,12 +65,13 @@ enum SendGlowTimeline {
             let a = smooth(0, 0.35, t)
             return Sending(arrowY: 0.70, arrowScale: 0.85, arrowAlpha: a, cloudTop: 0.50, cloudAmp: a, soft: 0.3)
         }
-        // 0.55 秒：箭头从屏幕下沿穿过云升上来（设计说明 armed release 450–650 ms）；之后等结果时慢慢往上、慢慢变小
+        // 0.55 秒：箭头从屏幕下沿穿过云升上来（设计说明 armed release 450–650 ms）；之后等结果时稳稳地慢慢往上、慢慢变小。
+        // 往上的那一段 0.25 秒起、平滑接上（乘一个 smoothstep，速度不跳）：照录屏量的 0.5 秒 0.69、0.7 秒 0.66、1.1 秒 0.64、1.7 秒 0.61 屏高
         let e = easeOut(t / 0.55)
-        let rise = 1 - exp(-max(0, t - 0.55) / 1.1)
+        let rise = (1 - exp(-max(0, t - 0.25) / 0.85)) * smooth(0.25, 0.55, t)
         let shrink = 1 - exp(-max(0, t - 0.35) / 1.1)
         return Sending(
-            arrowY: 1.02 + (0.745 - 1.02) * e - 0.11 * rise,
+            arrowY: 1.02 + (0.72 - 1.02) * e - 0.13 * rise,
             arrowScale: (0.8 + 0.2 * e) * (1 - 0.38 * shrink),
             arrowAlpha: smooth(0.04, 0.36, t),
             cloudTop: 0.95 + (0.50 - 0.95) * easeOut(t / 0.6) - 0.05 * (1 - exp(-max(0, t - 0.6) / 1.5)),
@@ -78,20 +79,22 @@ enum SendGlowTimeline {
             soft: 1 - exp(-max(0, t - 0.4) / 1.4))
     }
 
-    /// 成功以后发送的光怎么收：箭头再往上一点、变小、0.15 秒淡掉，云 0.2 秒淡掉、往下沉（录屏 4.63 → 4.80 秒：结果出来时已经黑了）
-    static func exitAfterSuccess(_ s: inout Sending, _ u: Double, reduceMotion: Bool) {
+    /// 成功以后发送的光怎么收（录屏 4.63 → 4.80 秒：箭头先往上、变小变柔，再淡掉；云和那一行字几乎没了，勾才从黑下来的中间出来）。
+    /// x：从开始收算起几秒；window：收完要多久（浮层提前 0.2 秒切到成功时就是 0.2，没有提前时 0.06：折射最强那几帧中间已经黑了）
+    static func exitAfterSuccess(_ s: inout Sending, _ x: Double, window: Double = 0.2, reduceMotion: Bool) {
         if reduceMotion {
-            let k = 1 - smooth(0, 0.3, u)
+            let k = 1 - smooth(0, 0.3, x)
             s.arrowAlpha *= k
             s.cloudAmp *= k
             return
         }
-        let m = easeOut(u / 0.3)
-        s.arrowY -= 0.05 * m
-        s.arrowScale *= 1 - 0.2 * m
-        s.soft = min(1, s.soft + 0.3 * m)
-        s.arrowAlpha *= 1 - smooth(0, 0.15, u)
-        s.cloudAmp *= 1 - smooth(0, 0.2, u)
+        let w = max(0.03, window)
+        let m = easeOut(x / w, power: 2)
+        s.arrowY -= min(0.06, 0.3 * w) * m
+        s.arrowScale *= 1 - 0.3 * m
+        s.soft = min(1, s.soft + 0.4 * m)
+        s.arrowAlpha *= 1 - smooth(0.15 * w, 0.9 * w, x)
+        s.cloudAmp *= 1 - smooth(0, 0.85 * w, x)
         s.cloudTop += 0.12 * m
     }
 
