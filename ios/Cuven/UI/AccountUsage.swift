@@ -14,12 +14,11 @@ import SwiftUI
 /// 「网络」一组：标题 + 一张卡（「网络速度」那一行）+ 卡下一行说明这个设置在 iOS 上管什么。直接放进账户页的组里用
 struct NetworkSpeedCard: View {
     var body: some View {
-        // 网络速度 + 自动调整，下面接着 Cuven Pass Pro（用户要求并进「网络」这一张卡）
+        // 网络速度 + 自动调整，下面是获取软件更新（Cuven Pass Pro 全自动，不在这里出现了）
         AccountGroup(title: "网络") {
             NetworkSpeedRow()
             AccountDivider()
-            PassProRows()
-            AccountDivider()
+            // Cuven Pass Pro 的开关、加速节点、测速对比三行用户要求移除：是否走 Pass、走哪个入口全自动（PassPro）
             // 获取软件更新（用户要求）：热更新 Cuven Pass 的加速节点
             RuntimeUpdateRow(scope: .network)
         }

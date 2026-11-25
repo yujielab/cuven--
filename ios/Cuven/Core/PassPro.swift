@@ -1,9 +1,12 @@
 import Foundation
 
-// MARK: - Cuven Pass Pro（账户页「Cuven Pass Pro」开关）
+// MARK: - Cuven Pass Pro（全自动，不再有开关）
 //
-// 用户要求：在设置中允许启用 Cuven Pass Pro 服务，提高速度。后来要求「更新 Cuven Pass 逻辑，智能优选最快的 Cloudflare 边缘节点」。
-// 开着时，影片（HLS 主列表 / 二级列表 / 分段、直链）走「优选出来的那个入口」：
+// 用户要求：在设置中允许启用 Cuven Pass Pro 服务，提高速度；后来要求「智能优选最快的 Cloudflare 边缘节点」；
+// 再后来要求「移除 Cuven Pass Pro 开关和测速对比，智能调整是否开 Pass、自动管理网络」：
+// 现在一直是自动的。普通线路（Worker 直连）本身就是候选之一，优选出来是它就走普通线路，是别的入口就走那个入口——
+// 「开不开 Pass」由测出来的速度决定，用户不用管。换了网络（Wi‑Fi / 蜂窝 / 热点）或者结果超过 6 小时，后台自己重新优选。
+// 影片（HLS 主列表 / 二级列表 / 分段、直链）走「优选出来的那个入口」：
 //   · Cloudflare 边缘入口：绑到同一个 stream Worker 的几个主机名（Worker 变量 EDGE_HOSTS；DNS 里各自指向一批优选 IP /
 //     优选域名，见 Stream_v25.js 开头「优选」那一节）。/api/edge 会把这几个列出来（当前这个排第一）；
 //     「获取软件更新」下发的 pass.edges 也算；
@@ -25,23 +28,18 @@ import Foundation
 final class PassPro {
     static let shared = PassPro()
 
-    /// 现在用的入口（主机名，可能带端口）：优选出来的那个；还没优选过是节点表的第一个
-    private(set) var host: String = "pass.cuven.us"
+    /// 现在用的入口（主机名，可能带端口）：优选出来的那个；还没优选过是普通线路（Worker 直连）
+    private(set) var host: String = PassPro.defaultHost
     var origin: String { "https://" + host }
-    private static let enabledKey = "cuven_pass_pro"
     private static let bestKey = "cuven_pass_best"
+    /// 还没优选过时用的：普通线路（Worker 直连）——不先把影片送去一个没测过的节点
+    nonisolated static let defaultHost = URL(string: APIClient.base)?.host?.lowercased() ?? "stream.cuven.online"
 
     enum State: Equatable {
         case off
         case checking
         case ready(rttMs: Int)
         case down
-    }
-
-    struct Speed: Equatable {
-        var direct: Double?
-        var pass: Double?
-        var at: Date
     }
 
     /// 存在本机的优选结果
@@ -53,24 +51,7 @@ final class PassPro {
         var rtt: Int
     }
 
-    private(set) var enabled: Bool = UserDefaults.standard.bool(forKey: PassPro.enabledKey)
-
-    /// 账户页的开关：存在本机；打开就马上优选一次
-    func setEnabled(_ on: Bool) {
-        guard on != enabled else { return }
-        enabled = on
-        UserDefaults.standard.set(on, forKey: Self.enabledKey)
-        if on {
-            downUntil = nil
-            Task { await check() }
-        } else {
-            state = .off
-        }
-    }
-
     private(set) var state: State = .off
-    private(set) var speed: Speed?
-    private(set) var testing = false
     /// 赢的那个入口测出来的下载速度（账户页「加速节点」那一行写）
     private(set) var bestMbps: Double?
     @ObservationIgnored private var lastOK: Date?
@@ -83,14 +64,14 @@ final class PassPro {
     @ObservationIgnored private var edgeList: (hosts: [String], at: Date)?
 
     private init() {
-        host = RuntimeUpdate.shared.passNodes.first ?? host
         if let d = UserDefaults.standard.data(forKey: Self.bestKey), let b = try? JSONDecoder().decode(Best.self, from: d),
            RuntimeUpdate.allowedHost(b.host) {
             best = b
             host = b.host
             bestMbps = b.mbps
         }
-        if enabled { state = .checking; Task { await check() } }
+        // 一开始就在后台优选一次（结果新的、同一种网络就不测）
+        if isStale { startOptimizing() } else if let b = best { state = .ready(rttMs: b.rtt) }
     }
 
     /// 优选结果多久算旧（换了网络也算旧）
@@ -110,11 +91,11 @@ final class PassPro {
     }
 
     /// Worker 直连的那个主机名（优选出来是它，就当普通线路用：出错时不必改道）
-    private static let directHost = URL(string: APIClient.base)?.host?.lowercased()
+    private static let directHost: String? = defaultHost
 
-    /// 播放用哪个地址：开着、入口能用 → 优选出来的入口；否则普通线路（Worker 直连）
+    /// 播放用哪个地址：优选出来的入口能用就用它（是普通线路就是普通线路）；不能用走普通线路
     func mediaBase() async -> (base: String, viaPass: Bool) {
-        guard enabled, !DemoData.enabled else { return (APIClient.base, false) }
+        guard !DemoData.enabled else { return (APIClient.base, false) }
         if let u = downUntil, u > Date() { return (APIClient.base, false) }
         // 优选结果旧了（6 小时、或者换了网络）：这一次先用着现在的，后台重新优选
         if isStale { startOptimizing() }
@@ -136,14 +117,22 @@ final class PassPro {
         lastOK = nil
         badUntil[host] = Date().addingTimeInterval(600)
         downUntil = Date().addingTimeInterval(60)
-        if enabled { state = .down }
+        state = .down
         startOptimizing()
     }
 
-    /// 账户页（打开开关、点「加速节点」那一行）：马上优选一次
+    /// 马上优选一次
     func check() async {
-        guard enabled else { state = .off; return }
         await optimize()
+    }
+
+    /// 网络变了（NetworkAuto 通知）：换了一种网络、或者结果旧了，等 2 秒（刚换过来常常还不稳）后台重新优选
+    func networkChanged(online: Bool) {
+        guard online, !DemoData.enabled, isStale, optimizing == nil else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            if self.isStale { self.startOptimizing() }
+        }
     }
 
     /// 「获取软件更新」换了节点表：重新优选
@@ -151,7 +140,7 @@ final class PassPro {
         best = nil
         lastOK = nil
         downUntil = nil
-        if enabled { startOptimizing() }
+        startOptimizing()
     }
 
     private func startOptimizing() {
@@ -172,7 +161,7 @@ final class PassPro {
     }
 
     private func runOptimize() async {
-        guard enabled, !DemoData.enabled else { return }
+        guard !DemoData.enabled else { return }
         // 已经有能用的入口时不把状态改成「正在检测」（账户页那一行不闪），只有第一次、或者不通了才显示
         if case .ready = state {} else { state = .checking }
         let hosts = await candidates()
@@ -198,7 +187,8 @@ final class PassPro {
         }
         rtts.sort { $0.rtt < $1.rtt }
         // 2. 速度：延迟最低的三个，一个接一个下（同时下会互相抢带宽，测不准）
-        let cap = NetworkAuto.shared.metered ? 512 << 10 : 2 << 20
+        // 全自动以后每换一种网络都会测：测得省一点（Wi‑Fi 每个最多 1 MB，按流量计费的网络 256 KB）
+        let cap = NetworkAuto.shared.metered ? 256 << 10 : 1 << 20
         var winner: (host: String, rtt: Int, mbps: Double?) = (rtts[0].host, rtts[0].rtt, nil)
         for c in rtts.prefix(3) {
             let r = await NetworkProbe.run(maxBytes: cap, base: "https://" + c.host)
@@ -244,22 +234,6 @@ final class PassPro {
         let hosts = await EdgeProbe.edgeHosts() ?? Self.directHost.map { [$0] } ?? []
         edgeList = (hosts, Date())
         return hosts
-    }
-
-    /// 测速对比：普通线路和 Pass Pro（优选出来的入口）各测一次（同一个探针、同样的大小；按流量计费的网络最多 1 MB，别的最多 4 MB）
-    func compare() async {
-        guard !testing, !DemoData.enabled else { return }
-        testing = true
-        defer { testing = false }
-        let cap = NetworkAuto.shared.metered ? 1 << 20 : 4 << 20
-        let direct = await NetworkProbe.run(maxBytes: cap, base: APIClient.base)
-        let pass = await NetworkProbe.run(maxBytes: cap, base: origin)
-        speed = Speed(direct: direct.mbps, pass: pass.mbps, at: Date())
-        if pass.mbps != nil {
-            lastOK = Date()
-            downUntil = nil
-            if enabled, let r = pass.rttMs { state = .ready(rttMs: Int(r.rounded())) }
-        }
     }
 }
 

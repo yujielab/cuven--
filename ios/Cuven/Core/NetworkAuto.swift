@@ -153,6 +153,8 @@ final class NetworkAuto {
 
     private func pathChanged(_ info: NetworkPath) {
         path = info
+        // Cuven Pass Pro 全自动（用户要求）：换了网络就看要不要重新优选入口（和「自动调整」开没开无关）
+        PassPro.shared.networkChanged(online: info.online)
         guard enabled else { return }
         guard info.online else {
             if phase != .measuring { phase = .offline }
