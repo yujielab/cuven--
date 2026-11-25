@@ -229,12 +229,10 @@ struct HomeView: View {
                 featuredShelf(m)
                 editorsPickBlock(m, fullHeight: fullHeight)
                 featuredSeriesShelf(m)
-                // 影片库里有、片库里还没有的（用户要求：主页一排「可请求添加」）
-                RequestableShelf(metrics: m)
+                // 主页不放「可申请」那一排（用户要求移除）：可申请的在「全部影片 › 可申请」和搜索里
                 ForEach(HomeCategory.allCases) { c in categoryShelf(c, m) }
                 finale(m)
             }
-            .task { await RequestStore.shared.loadShelf() }
         }
     }
 

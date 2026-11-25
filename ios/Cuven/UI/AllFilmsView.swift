@@ -8,9 +8,9 @@ import SwiftUI
 // 版式（干净、克制）：
 // · 大标题「全部影片」，下面一枚分段控件：「可立即播放」（片库里的，按下去就放）/「可申请」（影片库索引里有、片库里还没有的，
 //   点开是「请求添加」的详情页）。两边各是一整页，互不混在一起
-// · 往下按年份一节一节：2026、2025 … 2020（今年往前数七年）。每一节的标题和主页年份那两排同一个样子（大一级的「2026 ›」+ 一行灰字，
-//   点进年份页），灰字写这一年有几部电影、几部剧集
-// · 每一节里电影一排、剧集一排（小标题「电影 · 12」「剧集 · 5」），没有的那排不出、两排都没有的年份整节不出
+// · 往下按年份一节一节：2026、2025 … 2020（今年往前数七年）。每一节的标题和主页年份那两排同一个样子（大一级的「2026 ›」，
+//   点进年份页）。用户要求哪里都不写有几部：标题下面不再有「128 部电影 · 54 部剧集」那行灰字
+// · 每一节里电影一排、剧集一排（小标题「电影」「剧集」，不带数字），没有的那排不出、两排都没有的年份整节不出
 // · 可立即播放：卡和主页年份那两排同一张（YearTrailerCard：上面剧照，下面小海报 + 字标 + 片名 + 一行灰字）；
 //   全面放开：主页那两排只放有字标的，这里片库里这一年的全部都放（没字标的就是片名），剧集还没取到资料的先取
 // · 可申请（用户要求「布局和 UI 和可立即播放的一致，2026 至 2020 年影片库里的全部」）：同一张横卡，剧照、字标按 TMDB 编号
@@ -138,12 +138,12 @@ struct AllFilmsView: View {
 
 private struct YearHeader: View {
     let year: Int
-    let subtitle: String
     let metrics: DSMetrics
     var link = true
 
     var body: some View {
-        let label = DSSectionLabel(title: String(year), subtitle: subtitle, chevron: link, showcase: true, wide: metrics.wide)
+        // 只有年份（用户要求不写有几部电影、几部剧集）
+        let label = DSSectionLabel(title: String(year), chevron: link, showcase: true, wide: metrics.wide)
             .padding(.horizontal, metrics.margin)
             .contentShape(Rectangle())
             .accessibilityElement(children: .combine)
@@ -158,26 +158,17 @@ private struct YearHeader: View {
     }
 }
 
-/// 一节里的小标题：「电影 · 12」
+/// 一节里的小标题：「电影」「剧集」（用户要求不带数字）
 private struct KindLabel: View {
     let title: String
-    let count: Int?
     let metrics: DSMetrics
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(title)
-                .font(.headline)
-                .foregroundStyle(.white)
-            if let count {
-                Text("\(count)")
-                    .font(.subheadline)
-                    .monospacedDigit()
-                    .foregroundStyle(DSInk.tertiary)
-            }
-        }
-        .padding(.horizontal, metrics.margin)
-        .accessibilityElement(children: .combine)
+        Text(title)
+            .font(.headline)
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, metrics.margin)
     }
 }
 
@@ -193,10 +184,10 @@ private struct PlayableYear: View {
         let shows = model.seriesInYear(year).sorted { ($0.added ?? "") > ($1.added ?? "") }
         if !movies.isEmpty || !shows.isEmpty {
             VStack(alignment: .leading, spacing: metrics.titleGap + 6) {
-                YearHeader(year: year, subtitle: Self.line(movies.count, shows.count), metrics: metrics)
+                YearHeader(year: year, metrics: metrics)
                 if !movies.isEmpty {
                     VStack(alignment: .leading, spacing: metrics.titleGap) {
-                        KindLabel(title: "电影", count: movies.count, metrics: metrics)
+                        KindLabel(title: "电影", metrics: metrics)
                         DSShelf(metrics: metrics) {
                             ForEach(movies, id: \.path) { v in movieCard(v) }
                         }
@@ -204,7 +195,7 @@ private struct PlayableYear: View {
                 }
                 if !shows.isEmpty {
                     VStack(alignment: .leading, spacing: metrics.titleGap) {
-                        KindLabel(title: "剧集", count: shows.count, metrics: metrics)
+                        KindLabel(title: "剧集", metrics: metrics)
                         DSShelf(metrics: metrics) {
                             ForEach(shows, id: \.path) { s in seriesCard(s) }
                         }
@@ -212,10 +203,6 @@ private struct PlayableYear: View {
                 }
             }
         }
-    }
-
-    static func line(_ m: Int, _ s: Int) -> String {
-        [m > 0 ? "\(m) 部电影" : nil, s > 0 ? "\(s) 部剧集" : nil].compactMap { $0 }.joined(separator: " · ")
     }
 
     private func movieCard(_ v: Video) -> some View {
@@ -280,13 +267,6 @@ final class CatalogYears {
         /// 用户往后翻过（滑到这一排的头又取了一页）：刷新时不换掉这一排（一换，看着的那几张就没了）。
         /// 自己接着翻的（看得到的不到 8 张）不算：那样的一排刷新照换（不然再也不刷新），换完不到 8 张再自己翻
         var paged = false
-
-        /// 标题、小标题里写的部数（不说多）：翻完了就是这一排的张数；没翻完的，影片库只给了这一年的（问到的几页里一部别的年份都没有）
-        /// 才用它的总数。夹着别的年份的（老版本影片库不认 ystrict，按「任何一个发行帖的年份」筛），总数里还算着没问到的那几页里
-        /// 别的年份的，扣不干净：只写看得到的张数
-        func count(shown: Int) -> Int {
-            done || !counted || !off.isEmpty ? shown : max(shown, total)
-        }
     }
 
     private(set) var pages: [Key: Page] = [:]
@@ -558,8 +538,7 @@ private struct RequestableYear: View {
         // 两排都没有的整节不出（不留空的一层：LazyVStack 每一层之间都隔一道空）。整节不出的那几年由 AllFilmsView 替它们重问
         if !movies.isEmpty || !series.isEmpty || !settled {
             VStack(alignment: .leading, spacing: metrics.titleGap + 6) {
-                YearHeader(year: year, subtitle: settled ? Self.line(mp, tp, movies.count, series.count) : "正在查询…",
-                           metrics: metrics, link: false)
+                YearHeader(year: year, metrics: metrics, link: false)
                 row("电影", key: mk, page: mp, items: movies)
                 row("剧集", key: tk, page: tp, items: series)
             }
@@ -575,20 +554,13 @@ private struct RequestableYear: View {
         }
     }
 
-    /// 「128 部电影 · 54 部剧集」：不说多 —— 翻完了就是这一排的张数；没翻完的，影片库只给了这一年的才用它的总数，
-    /// 夹着别的年份的只写看得到的张数（见 Page.count）。这一节里没出的那一排（一张都没有）不写
-    static func line(_ mp: CatalogYears.Page, _ tp: CatalogYears.Page, _ m: Int, _ s: Int) -> String {
-        let mc = m > 0 ? mp.count(shown: m) : 0, sc = s > 0 ? tp.count(shown: s) : 0
-        let parts = [mc > 0 ? "\(mc) 部电影" : nil, sc > 0 ? "\(sc) 部剧集" : nil].compactMap { $0 }
-        return parts.isEmpty ? "片库里还没有、可以申请添加的" : parts.joined(separator: " · ") + " 可申请"
-    }
 
     @ViewBuilder
     private func row(_ title: String, key: CatalogYears.Key, page p: CatalogYears.Page, items: [CatalogItem]) -> some View {
         let w = metrics.trailerCardWidth
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: metrics.titleGap) {
-                KindLabel(title: title, count: p.count(shown: items.count), metrics: metrics)
+                KindLabel(title: title, metrics: metrics)
                 DSShelf(metrics: metrics) {
                     ForEach(items, id: \.uid) { it in
                         RequestableCard(item: it, width: w, slot: "all-request-\(year)")
@@ -605,7 +577,7 @@ private struct RequestableYear: View {
             }
         } else if !p.started {
             VStack(alignment: .leading, spacing: metrics.titleGap) {
-                KindLabel(title: title, count: nil, metrics: metrics)
+                KindLabel(title: title, metrics: metrics)
                 DSShelf(metrics: metrics) {
                     ForEach(0..<3, id: \.self) { _ in SkeletonTrailerCard(width: w) }
                 }

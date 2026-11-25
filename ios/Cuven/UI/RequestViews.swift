@@ -963,7 +963,7 @@ enum RequestPlayback {
     }
 }
 
-// MARK: - 目录卡（主页「可请求添加」、搜索结果）
+// MARK: - 目录卡（搜索结果「可请求添加」）
 
 struct CatalogPosterLink: View {
     let item: CatalogItem
@@ -1001,24 +1001,6 @@ struct CatalogPosterLink: View {
             .padding(.vertical, 4)
             .glassEffect(.regular, in: Capsule())
             .environment(\.colorScheme, .dark)
-    }
-}
-
-/// 主页：「可请求添加」一排（影片库里最新收录、片库里还没有的；数据由 RequestStore.loadShelf 取）
-struct RequestableShelf: View {
-    @Environment(AppModel.self) private var model
-    let metrics: DSMetrics
-
-    var body: some View {
-        let movies = model.ownedMovieIDs, shows = model.ownedSeasons
-        let items = Array(RequestStore.shared.shelf.filter { !model.owns($0, movies: movies, shows: shows) }.prefix(20))
-        if !items.isEmpty {
-            DSSection(title: "可请求添加", metrics: metrics) {
-                DSShelf(metrics: metrics) {
-                    ForEach(items, id: \.uid) { it in CatalogPosterLink(item: it, metrics: metrics, slot: "home-request") }
-                }
-            }
-        }
     }
 }
 
