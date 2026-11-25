@@ -199,7 +199,9 @@ vertex LPDotOut lp_dot_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float len = length(seg);
     float maxLen = U.extra.x;
     if (len > maxLen) {
-        tail = head - seg * (maxLen / len);
+        // seg 跟着一起截短：下面的 dir 要是单位向量，不然尾巴被截时点会被拉宽、拉长（用户要的是 1–2 点的细粒子）
+        seg *= maxLen / len;
+        tail = head - seg;
         len = maxLen;
     }
     float2 dir = len > 1.0e-3 ? seg / len : float2(1.0, 0.0);
