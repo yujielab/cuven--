@@ -6,7 +6,9 @@ using namespace metal;
 // 显示「已添加至请求中心」和时间；参照用户发来的录屏和 Swipe-to-Send 设计说明，一帧一帧对过）。
 // 这一个文件有两样东西：
 //   1. sg_vertex / sg_fragment：SendGlowCanvas 那块全屏 MTKView 的一遍全屏片元着色器 —— 近黑的圆角视口、
-//      发送中的蓝紫色云 + 发光的粒子箭头（白芯 + 柔的外光，一路往上、慢慢变小变柔）+ 往箭头里汇过去的一粒粒火星、
+//      发送中极光一样的气雾（几层域扭曲的分形噪声，慢慢往上流；上沿一团团地羽化成黑；箭头那一带最亮、
+//      青 / 梅紫的色块；整体不爆白）+ 发光的箭头（一笔平滑的「^」+ 竖杆，白芯 + 很窄的柔光；竖杆尽头一团粉紫光，
+//      往下拖一道淡紫的尾雾：「腾云驾雾」；一路往上、慢慢变小变柔）、
 //      添加成功那一下从结果那一组中心往外走的一道环（走到屏幕圆角边上时带一点绿 / 琥珀色边）、
 //      然后贴着圆角边的一圈内光（亮边是短边的 3%，往里羽化），颜色慢慢从紫往青漂。
 //   2. cuvenSendRefraction：SwiftUI layerEffect 用的 [[ stitchable ]] 函数 —— 环扫过结果那一组时，
@@ -17,7 +19,20 @@ constant float3 kSGInk = float3(0.0431, 0.0431, 0.0706);     // #0B0B12
 constant float3 kSGBlue = float3(0.259, 0.388, 1.0);          // #4263FF
 constant float3 kSGViolet = float3(0.510, 0.408, 1.0);        // #8268FF
 constant float3 kSGCyan = float3(0.443, 0.851, 1.0);          // #71D9FF
-constant float3 kSGMagenta = float3(0.78, 0.36, 0.95);        // 云两边一缕缕偏玫紫的光（录屏里有）
+
+// 发送中的气雾和箭头（照用户发来的录屏一帧一帧量的颜色；画布是 bgra8Unorm，这些 sRGB 值直接写出去）
+constant float3 kSGNavy = float3(0.110, 0.173, 0.439);        // #1C2C70 气雾上沿羽化的那一圈
+constant float3 kSGUpper = float3(0.188, 0.188, 0.604);       // #30309A 箭头上面那一片
+constant float3 kSGAzure = float3(0.227, 0.314, 0.753);       // #3A50C0 箭头那一带（最亮）
+constant float3 kSGIndigo = float3(0.267, 0.212, 0.784);      // #4436C8 箭头下面
+constant float3 kSGDeepViolet = float3(0.247, 0.196, 0.659);  // #3F32A8 屏幕最下面
+constant float3 kSGPeri = float3(0.353, 0.392, 0.886);        // #5A64E2 浓的那几团
+constant float3 kSGTeal = float3(0.122, 0.627, 0.847);        // #1FA0D8 青的色块
+constant float3 kSGPlum = float3(0.478, 0.322, 0.753);        // #7A52C0 两边偏上的梅紫色块
+constant float3 kSGLavHi = float3(0.847, 0.659, 0.973);       // #D8A8F8 竖杆尽头那一团粉紫光
+constant float3 kSGLav = float3(0.557, 0.486, 0.965);         // #8E7CF6 往下拖的尾雾
+constant float3 kSGHalo = float3(0.239, 0.384, 0.914);        // #3D62E9 箭头笔画外面那一点光
+constant float3 kSGCore = float3(0.933, 0.965, 1.0);          // #EEF6FF 箭头的白芯（偏冷）
 
 struct SGUniforms {
     float4 size;    // x 宽（像素），y 高，z 圆角半径（像素），w 慢漂的时间（秒；减弱动态效果时停住）
@@ -25,7 +40,7 @@ struct SGUniforms {
     float4 arrow;   // xy 箭头尖（像素），z 箭头半宽（像素），w 箭头亮度 0…1
     float4 cloud;   // x 云顶（像素：再往上羽化成黑），y 云的亮度 0…1，z 箭头和光核变柔了几成 0…1，w 闲置时底边那一点光 0…1
     float4 ring;    // x 环半径（像素），y 环的亮度 0…1，z 环宽（像素，高斯 σ），w 绿 / 琥珀色边 0…1
-    float4 edge;    // x 边缘光亮度 0…1，y 往青色漂了几成 0…1，z 结果出来那一下中心的闪光 0…1，w 粒子的时间（秒，从松手算起）
+    float4 edge;    // x 边缘光亮度 0…1，y 往青色漂了几成 0…1，z 结果出来那一下中心的闪光 0…1，w 从松手算起的时间（秒；着色器现在不用，留着对齐）
 };
 
 struct SGOut {
@@ -49,13 +64,6 @@ static float sg_hash21(float2 p) {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-static float sg_hash11(float p) {
-    p = fract(p * 0.1031);
-    p *= p + 33.33;
-    p *= p + p;
-    return fract(p);
-}
-
 static float sg_noise(float2 p) {
     float2 i = floor(p), f = fract(p);
     float2 u = f * f * (3.0 - 2.0 * f);
@@ -64,10 +72,10 @@ static float sg_noise(float2 p) {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
-/// 四层的分形噪声（0…1）：云的一团团、一缕缕
-static float sg_fbm(float2 p) {
+/// oct 层的分形噪声（0…1）：气雾的一团团（调用处都传常数 2 或 3，编译器展开）
+static float sg_fbm(float2 p, int oct) {
     float s = 0.0, a = 0.5, n = 0.0;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < oct; i++) {
         s += a * sg_noise(p);
         n += a;
         p = p * 2.03 + float2(17.1, 9.2);
@@ -109,111 +117,112 @@ static float3 sg_tone(float3 c) {
     return min(c, 0.6) + 0.4 * (1.0 - exp(-k / 0.4));
 }
 
+/// 发送中的光用的软肩：每个通道 0.82 以下照原样，往上慢慢压到 1；不往白里溢（录屏里只有箭头的芯是白的，气雾一直是饱和的蓝紫）
+static float3 sg_knee(float3 c) {
+    float3 e = max(c - 0.82, 0.0);
+    return min(c, 0.82) + 0.18 * (1.0 - exp(-e / 0.18));
+}
+
+/// 按最亮的那个通道一起软压（色相不变）：c0 以下照原样，往上最多到 c0 + room。亮的气雾还是饱和的蓝，不被压成青或白
+static float3 sg_soft_cap(float3 c, float c0, float room) {
+    float m = max(c.r, max(c.g, c.b));
+    if (m <= c0) return c;
+    return c * ((c0 + room * (1.0 - exp(-(m - c0) / room))) / m);
+}
+
 // MARK: 发送中
 
-/// 云：屏幕下面一大片蓝紫色的光，一缕一缕竖着的（像极光的帘子），慢慢往上飘；往上羽化成黑，中间高、两边低一点（一个圆顶）；
-/// 箭头底下一团发白的光核，再往下一点偏青（参照录屏 3.27 秒那一帧）
+/// 气雾（照用户发来的录屏量的）：几层域扭曲的分形噪声，一团团的、略带一点竖的帘子，整片每秒往上飘 0.1 个短边；
+/// 上沿在 cloud.x 附近一团团地羽化成黑（羽化宽度按屏高算，Duo 折起和手机一样）；箭头那一带最亮、偏蔚蓝，
+/// 往下转靛蓝、再到深紫，箭头上面两边有青和梅紫的色块；亮的地方按最亮的通道一起软压，不往白里溢。
+/// 箭头竖杆的尽头往下拖一道淡紫的尾雾（「腾云驾雾」），也是一缕一缕的气雾，越往下越宽越淡
 static float3 sg_cloud(float2 px, constant SGUniforms &U, float S, float T) {
-    float W = U.size.x;
-    float2 q = float2((px.x - 0.5 * W) / S, px.y / S);
-    float xr = (px.x - U.arrow.x) / S;
-    float top = U.cloud.x / S + 0.35 * xr * xr;
-    float mask = smoothstep(top, top + 0.42, q.y);
-    float3 c = float3(0.0);
-    if (mask > 0.0) {
-        float t = T * 0.16;
-        float2 w = float2(sg_fbm(q * 1.3 + float2(0.0, t)), sg_fbm(q * 1.3 + float2(4.7, -t * 0.8)));
-        // 横向频率比竖向高：一缕一缕竖着的；整片慢慢往上走（采样的 y 随时间往下挪）
-        float n1 = sg_fbm(float2(q.x * 2.0, q.y * 0.75 + t * 1.5) + w * 1.4);
-        float n2 = sg_fbm(float2(q.x * 1.2 + 3.1, q.y * 1.1 + t) + w * 0.8);
-        // 大团的明暗（录屏里云是一大团一大团的，不是细碎的）
-        float blob = sg_fbm(float2(q.x * 0.9 - 2.3, q.y * 0.8 + t * 0.9) + w * 0.6);
-        float3 tint = mix(kSGBlue, kSGViolet, smoothstep(0.30, 0.70, n2));
-        tint = mix(tint, kSGMagenta, smoothstep(0.60, 0.85, n1) * smoothstep(0.12, 0.45, abs(xr)) * 0.55);
-        tint = mix(tint, kSGCyan, smoothstep(0.58, 0.85, n2) * 0.35);
-        float body = (0.35 + 0.75 * smoothstep(0.25, 0.80, n1)) * (0.45 + 0.95 * smoothstep(0.30, 0.72, blob));
-        float depth = smoothstep(top, top + 0.9, q.y);
-        float centre = 0.6 + 0.4 * exp(-xr * xr / 0.20);
-        c = tint * body * mask * (0.70 + 0.45 * depth) * centre;
-    }
-    // 光核：箭头正下方一团发白的光（随箭头一起变小），再往下一点偏青
+    float W = U.size.x, H = U.size.y;
+    float ax = U.arrow.x, ay = U.arrow.y;
     float hw = max(U.arrow.z, 1.0);
-    float soft = U.cloud.z;
-    float2 dc = (px - float2(U.arrow.x, U.arrow.y + hw * 0.75)) / (hw * (1.25 + 0.35 * soft));
-    float core = exp(-dot(dc * float2(1.0, 1.2), dc * float2(1.0, 1.2)));
-    float2 dh = (px - float2(U.arrow.x, U.arrow.y + hw * 1.35)) / (hw * 0.45);
-    float hot = exp(-dot(dh, dh));
-    c += mix(float3(0.62, 0.62, 1.0), kSGCyan, 0.15) * core * (0.75 - 0.2 * soft);
-    c += kSGCyan * hot * 0.45;
-    return c;
+    float2 q = float2((px.x - 0.5 * W) / S, px.y / S + 0.10 * T);
+    float2 w = float2(sg_fbm(q * 1.1 + float2(0.0, 0.03 * T), 3),
+                      sg_fbm(q * 1.1 + float2(5.2, 1.3 - 0.02 * T), 3));
+    float d1 = sg_fbm(q * 1.8 + 1.2 * (w - 0.5), 3);
+    float cu = sg_fbm(float2(q.x * 2.4, q.y * 0.9) + 0.6 * (w - 0.5) + float2(3.3, 7.7), 3);
+    float dens = 0.8 * d1 + 0.2 * cu;
+    float dn = clamp((dens - 0.50) / 0.12, -2.0, 2.0);
+
+    // 上沿：一团团的、不是圆顶；浓的地方往上多探一点
+    float edge = U.cloud.x + 0.045 * H * (2.0 * sg_fbm(float2(q.x * 2.6 + 0.02 * T, 2.0), 2) - 1.0);
+    float mask = smoothstep(edge - 0.02 * H, edge + 0.20 * H, px.y + 0.10 * H * (2.0 * dens - 1.0));
+    mask = pow(mask, 1.3);
+    float k = 1.15 * max(1.0 + 0.45 * dn, 0.0);
+
+    // 箭头那一带（略低于箭头尖）最亮，越靠箭头越亮：箭头「骑」在云上；屏幕最下面淡一点
+    float yw = px.y + 0.10 * H * (2.0 * d1 - 1.0);
+    float bz = (yw - (ay + 0.02 * H)) / (0.10 * H);
+    float band = exp(-bz * bz);
+    float cx = (px.x - ax) / (0.45 * S);
+    float cen = exp(-cx * cx);
+    float env = mix(1.0, 0.40, smoothstep(0.84 * H, H, px.y)) * (1.0 + 0.6 * band * (0.1 + 0.9 * cen)) * (1.0 - 0.1 * (1.0 - cen));
+
+    // 颜色：上沿深蓝 → 靛 → 箭头那一带蔚蓝 → 往下靛蓝 → 最下面深紫；浓的几团偏长春花蓝；青 / 梅紫的色块
+    float a1 = sg_fbm(q * 1.2 + float2(11.0, 0.05 * T), 2);
+    float a2 = sg_fbm(q * 1.2 + float2(23.0, 4.0 - 0.04 * T), 2);
+    float3 tint = mix(kSGNavy, kSGUpper, smoothstep(edge, edge + 0.08 * H, px.y));
+    tint = mix(tint, kSGAzure, band * (0.35 + 0.45 * smoothstep(0.35, 0.65, a1)));
+    tint = mix(tint, kSGIndigo, smoothstep(ay + 0.04 * H, ay + 0.14 * H, yw));
+    tint = mix(tint, kSGDeepViolet, smoothstep(0.80 * H, H, yw));
+    tint = mix(tint, kSGPeri, smoothstep(0.8, 1.8, dn) * 0.5);
+    float upper = 1.0 - smoothstep(ay - 0.02 * H, ay + 0.06 * H, px.y);
+    float an1 = (a1 - 0.51) / 0.115;
+    float an2 = (a2 - 0.50) / 0.115;
+    tint = mix(tint, kSGTeal, smoothstep(0.9, 1.9, an1) * 0.6 * max(band, 0.25 * upper));
+    float side = smoothstep(0.12 * S, 0.32 * S, abs(px.x - ax));
+    tint = mix(tint, kSGPlum, smoothstep(0.6, 1.6, an2) * 0.75 * upper * side);
+
+    // 上沿的羽化乘在软压之后：先乘的话亮的地方被压平，0.2 屏高的羽化看着只剩一道硬边（不像录屏里那样慢慢透成黑）
+    float3 mist = sg_soft_cap(tint * k, 0.75, 0.30) * (env * mask);
+    mist = sg_soft_cap(mist, 0.90, 0.10);
+
+    // 尾雾：从竖杆尽头往下，越往下越宽越淡，几缕竖的；颜色从粉紫过到淡紫
+    float sl = 0.5 * hw + 0.11 * S;
+    float below = px.y - (ay + 0.9 * sl);
+    float wob = 0.02 * S * sin(px.y / H * 7.0 - T * 0.9) * smoothstep(0.0, 0.2 * H, below);
+    float pw = 0.06 * S + 0.30 * S * saturate(below / (0.30 * H));
+    float u = (px.x - ax - wob) / pw;
+    float pil = sg_fbm(float2(u * 0.9, px.y / S * 0.8 + 0.10 * T), 2);
+    pil = 0.5 + 0.5 * smoothstep(0.30, 0.70, pil);
+    float pl = exp(-u * u) * smoothstep(-0.04 * S, 0.04 * S, below) * (1.0 - 0.55 * smoothstep(0.0, 0.45 * H, below))
+             * pil * (0.45 + 0.8 * dens);
+    float3 pc = mix(kSGLavHi, kSGLav, smoothstep(-0.02 * S, 0.15 * S, below));
+    // 托着箭头的那一团亮雾（录屏里箭头两臂下面一片发亮的云：「骑」在云上），跟着箭头一起淡入淡出
+    float2 g = float2((px.x - ax) / (1.15 * hw), (px.y - (ay + 0.30 * hw + 0.04 * H * (2.0 * d1 - 1.0))) / (0.075 * H));
+    float cush = exp(-dot(g, g)) * (0.55 + 0.9 * dens) * 0.40 * U.arrow.w;
+    float3 gc = mix(kSGPeri, kSGLavHi, 0.35 + 0.3 * smoothstep(0.3, 0.7, a1));
+    return mist + pc * (pl * 0.6) + gc * cush;
 }
 
-/// 一颗颗沿着箭头笔画往箭头尖跑的亮点（「粒子箭头」：芯不是一根光滑的线，是一串往上流的光点）
-static float sg_beads(float h, float n, float t, float seed) {
-    float ph = h * n + t * 2.2 + seed * 0.37;     // t 越大，同一颗亮点的 h 越小：往箭头尖跑
-    float f = fract(ph);
-    float z = (f - 0.5) / 0.17;
-    float g = exp(-z * z);
-    float b = 0.45 + 0.55 * sg_hash11(floor(ph) * 13.7 + seed * 5.1);
-    return g * b;
-}
-
-/// 箭头：一个扁的「^」加一根往下渐隐的竖杆；白芯（一串往上流的光点）+ 柔的蓝紫外光
-static float3 sg_arrow(float2 px, constant SGUniforms &U) {
+/// 箭头：扁的「^」两条臂 + 一根竖杆，一笔平滑的白芯（没有一颗颗的珠子，两头圆的），外面只有很窄的一点蓝光；
+/// 竖杆的尽头一团粉紫的光，接着尾雾往下拖。笔画的宽度跟着箭头一起变小，越往后越柔一点
+static float3 sg_arrow(float2 px, constant SGUniforms &U, float S) {
     float2 A = U.arrow.xy;
     float hw = max(U.arrow.z, 1.0);
     float soft = U.cloud.z;
-    float t = U.edge.w;
-    float2 L = A + float2(-hw, 0.52 * hw);
-    float2 R = A + float2(hw, 0.52 * hw);
-    float2 B = A + float2(0.0, 1.0 * hw);
-    float2 sl = sg_segment(px, A, L);
-    float2 sr = sg_segment(px, A, R);
-    float2 sb = sg_segment(px, A, B);
-    float cw = hw * (0.072 + 0.050 * soft);
-    float bw = hw * (0.30 + 0.20 * soft);
-    // 两条臂到头那一截淡一点、钝一点；竖杆越往下越淡，没进光核里
-    float tl = 1.0 - 0.55 * smoothstep(0.55, 1.0, sl.y);
-    float tr = 1.0 - 0.55 * smoothstep(0.55, 1.0, sr.y);
-    float tb = mix(1.0, 0.12, sb.y);
-    float cl = exp(-(sl.x * sl.x) / (cw * cw)) * tl * (0.45 + 0.9 * sg_beads(sl.y, 7.0, t, 1.0));
-    float cr = exp(-(sr.x * sr.x) / (cw * cw)) * tr * (0.45 + 0.9 * sg_beads(sr.y, 7.0, t, 2.0));
-    float cb = exp(-(sb.x * sb.x) / (cw * cw * 0.7225)) * tb * (0.45 + 0.9 * sg_beads(sb.y, 6.0, t, 3.0));
-    float core = max(max(cl, cr), cb);
-    float d = min(min(sl.x, sr.x), sb.x + hw * 0.25 * sb.y);
-    float bloom = exp(-d / bw);
-    // 箭头尖上一点最亮的光
-    float tip = exp(-dot(px - A, px - A) / (cw * cw * 9.0));
-    return float3(1.0, 0.98, 1.0) * (core * (2.1 - 0.5 * soft) + tip * 0.6) + float3(0.55, 0.55, 1.0) * bloom * (0.50 - 0.15 * soft);
-}
-
-/// 火星：云里一粒粒小光点往上飘，越往上越往箭头那条竖轴收（像被吸进箭头里）；过了箭头尖就没了
-static float3 sg_sparks(float2 px, constant SGUniforms &U, float S) {
-    float2 rel = (px - U.arrow.xy) / S;
-    if (rel.y < -0.08) return float3(0.0);
-    float t = U.edge.w;
-    // 同一粒火星在「收拢后的坐标」里是固定的，整块坐标往上卷：在屏幕上看就是一边往上飘、一边往竖轴靠
-    float w = mix(0.28, 1.0, saturate(rel.y / 0.8));
-    float2 Q = float2(rel.x / w, rel.y + t * 0.30);
-    const float cs = 0.05;
-    float2 cell = floor(Q / cs);
-    float acc = 0.0;
-    for (int j = -1; j <= 1; j++) {
-        for (int i = -1; i <= 1; i++) {
-            float2 id = cell + float2(float(i), float(j));
-            float h3 = sg_hash21(id + 41.9);
-            if (h3 < 0.70) continue;                   // 七成的格子空着：疏疏落落
-            float h1 = sg_hash21(id), h2 = sg_hash21(id + 17.3);
-            float2 p = (id + 0.15 + 0.7 * float2(h1, h2)) * cs;
-            // 竖着拉长一点：往上飞的一道道细光，不是一片雪
-            float2 dd = float2((Q.x - p.x) * w, (Q.y - p.y) * 0.4);
-            float r = 0.003 + 0.0035 * h1;
-            float tw = 0.55 + 0.45 * sin(t * (5.0 + 6.0 * h2) + h1 * 40.0);
-            acc += exp(-dot(dd, dd) / (r * r)) * tw * (h3 - 0.70) * 2.2;
-        }
-    }
-    float fade = smoothstep(-0.08, 0.03, rel.y) * (1.0 - smoothstep(0.6, 1.15, rel.y));
-    return float3(0.82, 0.86, 1.0) * acc * fade;
+    float sl = 0.5 * hw + 0.11 * S;
+    float2 sa = sg_segment(px, A, A + float2(-hw, 0.5 * hw));
+    float2 sr = sg_segment(px, A, A + float2(hw, 0.5 * hw));
+    float2 sb = sg_segment(px, A, A + float2(0.0, sl));
+    float sig = hw * (0.16 + 0.03 * soft);
+    float d = min(sa.x, sr.x);
+    float ta = d / sig;
+    float arms = saturate(1.05 * exp(-ta * ta * ta));
+    float tb = sb.x / (sig * (1.3 - 0.2 * sb.y));
+    float stem = saturate(1.05 * exp(-tb * tb * tb)) * (1.0 - 0.7 * smoothstep(0.5, 1.0, sb.y));
+    float3 scol = mix(kSGCore, kSGLavHi, smoothstep(0.35, 1.0, sb.y));
+    float3 core = max(kSGCore * (arms * 0.97), scol * (stem * 0.95));
+    float halo = (0.6 * exp(-d / (0.16 * hw)) + 0.6 * exp(-(d * d) / (0.09 * hw * hw)))
+               * (1.0 - 0.6 * smoothstep(-0.1 * hw, 0.6 * hw, px.y - A.y));
+    float2 du = float2((px.x - A.x) / (0.04 * S), (px.y - (A.y + 0.85 * sl)) / (0.06 * S));
+    float under = exp(-dot(du, du));
+    float3 glow = kSGHalo * (halo * 0.05) + kSGLavHi * (under * 0.6);
+    return core + glow * (1.0 - core);
 }
 
 // MARK: 一遍画完
@@ -237,9 +246,11 @@ fragment float4 sg_fragment(SGOut in [[stage_in]], constant SGUniforms &U [[buff
     float wob = (sg_noise(fdir * 1.7 + float2(T * 0.35, 3.0)) - 0.5) * min(S * (0.03 + 0.09 * saturate(U.ring.x / S)), 0.35 * U.ring.x);
     float rw = fr + wob;
 
-    // 底色：近黑，结果那一组周围再暗一点（字最清楚）
+    // 底色：近黑，结果那一组周围再暗一点（字最清楚）；发送中再压暗六成，气雾外面是纯黑的天（录屏里那样），气雾收掉就回到原来的底色
     float3 base = kSGInk * (1.0 - 0.5 * exp(-(fr * fr) / (0.2025 * S * S)));
+    base *= 1.0 - 0.6 * saturate(U.cloud.y);
     float3 light = float3(0.0);
+    float3 send = float3(0.0);
 
     // 闲置：底边一点很淡的青紫光（胶囊那儿）
     if (U.cloud.w > 0.001) {
@@ -248,11 +259,11 @@ fragment float4 sg_fragment(SGOut in [[stage_in]], constant SGUniforms &U [[buff
         light += mix(kSGCyan, kSGViolet, smoothstep(0.2 * W, 0.8 * W, px.x)) * g * 0.35 * U.cloud.w;
     }
 
-    // 发送中：云、火星、箭头
-    if (U.cloud.y > 0.001) light += sg_cloud(px, U, S, T) * U.cloud.y;
+    // 发送中：气雾（上沿再往上 0.16 屏高、又在箭头尖上面的地方一定是黑的，不算噪声），箭头按「滤色」叠在气雾上（不相加，不爆白）
+    if (U.cloud.y > 0.001 && px.y > min(U.cloud.x - 0.16 * H, U.arrow.y)) send += sg_cloud(px, U, S, T) * U.cloud.y;
     if (U.arrow.w > 0.001) {
-        light += sg_sparks(px, U, S) * U.arrow.w;
-        light += sg_arrow(px, U) * U.arrow.w;
+        float3 a = sg_arrow(px, U, S) * U.arrow.w;
+        send += a * (1.0 - saturate(send));
     }
 
     // 成功：中心闪一下，一道环往外走，走到边上时外沿带一点绿 / 琥珀
@@ -310,7 +321,9 @@ fragment float4 sg_fragment(SGOut in [[stage_in]], constant SGUniforms &U [[buff
         }
     }
 
-    float3 c = base + sg_tone(light);
+    // 环、闪光、边缘光照旧走 sg_tone；发送的光走 sg_knee（不溢白），两者按滤色合在一起（重叠的那几帧也不会超过 1）
+    float3 lt = sg_tone(light);
+    float3 c = base + lt + sg_knee(send) * (1.0 - lt);
     c *= clip;
     // 抖动半个色阶：暗处的大片渐变不出色带
     c += (sg_hash21(px + float2(U.focus.z * 7.31, U.focus.z * 3.17)) - 0.5) * (1.5 / 255.0);

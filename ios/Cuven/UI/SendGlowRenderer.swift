@@ -7,10 +7,10 @@ import UIKit
 // 用户要求：可申请添加的影片 / 剧集，上滑或按下「申请添加」→ 粒子箭头飞行动效、屏幕显示「正在发往请求中心」→ 打勾、
 // 「已添加至请求中心，等待您进一步操作」和添加的时间。光照着用户发来的录屏和 Swipe-to-Send 设计说明做：
 //   发送中（从松手算起，秒）：
-//     0.00 – 0.55  光从底下胶囊那儿往上漫开（云顶 0.95 → 0.50 屏高，ease-out），箭头从屏幕下沿穿过云升到约 0.69 屏高、淡入
-//     0.55 以后    等结果：箭头继续稳稳地慢慢往上（0.7 秒 0.67、1.1 秒 0.64、1.7 秒 0.61，照录屏量的）、慢慢变小变柔，云一直慢慢飘
+//     0.00 – 0.80  极光一样的气雾从底下往上漫开（上沿 0.70 → 0.40 屏高，ease-out），箭头 0.13 秒从屏幕下沿出来、穿过气雾升到约 0.64 屏高
+//     之后          等结果：箭头继续稳稳地慢慢往上（1.02 秒 0.63、1.42 秒 0.61、1.77 秒 0.59，照录屏量的）、一直慢慢变小变柔，气雾慢慢往上飘
 //   成功：先收发送的光，再从结果到的那一刻（at）算起：
-//     收光       箭头再往上一点、变小变柔、淡掉，云往下沉着淡掉（录屏 4.63 → 4.80 秒：勾出来的时候中间已经黑了）。
+//     收光       箭头再往上一点、变小变柔、淡掉，气雾往中间收着淡掉（录屏 4.63 → 4.80 秒：勾出来的时候中间已经黑了）。
 //                浮层可以把 at 放到 0.2 秒以后（先切到 .success、先收光），收光就用这 0.2 秒；at 就是现在时 0.06 秒收完
 //     0.00 – 0.20  中心闪一下（青绿 → 紫）
 //     0.04 – 0.75  一道环从结果那一组的中心往外走（ease-out），0.16 – 0.85 外沿带一点绿 / 琥珀色边，0.45 – 0.82 淡掉
@@ -63,19 +63,20 @@ enum SendGlowTimeline {
     static func sending(_ t: Double, reduceMotion: Bool) -> Sending {
         if reduceMotion {
             let a = smooth(0, 0.35, t)
-            return Sending(arrowY: 0.70, arrowScale: 0.85, arrowAlpha: a, cloudTop: 0.50, cloudAmp: a, soft: 0.3)
+            return Sending(arrowY: 0.63, arrowScale: 0.8, arrowAlpha: a, cloudTop: 0.40, cloudAmp: a, soft: 0.3)
         }
-        // 0.55 秒：箭头从屏幕下沿穿过云升上来（设计说明 armed release 450–650 ms）；之后等结果时稳稳地慢慢往上、慢慢变小。
-        // 往上的那一段 0.25 秒起、平滑接上（乘一个 smoothstep，速度不跳）：照录屏量的 0.5 秒 0.69、0.7 秒 0.66、1.1 秒 0.64、1.7 秒 0.61 屏高
-        let e = easeOut(t / 0.55)
-        let rise = (1 - exp(-max(0, t - 0.25) / 0.85)) * smooth(0.25, 0.55, t)
-        let shrink = 1 - exp(-max(0, t - 0.35) / 1.1)
+        // 都照用户发来的录屏一帧一帧量的（松手算 0 秒）：
+        //   箭头尖 0.13 秒从屏幕下沿出来，0.42 秒 0.74、0.72 秒 0.64、1.02 秒 0.63、1.42 秒 0.61、1.77 秒 0.59 屏高；
+        //   等得久了再慢慢往上一点（最多 0.14），不会顶到那一行字
+        //   箭头一出来就是全尺寸（两头 0.53 个屏宽），0.65 秒以后一直慢慢变小：1.02 秒 0.81、1.42 秒 0.68，久了到 0.45
+        //   气雾上沿 0.70 → 0.40 屏高（0.8 秒到位，ease-out），0.55 秒亮满，之后慢慢暗两成
+        let shrink = 1 - exp(-max(0, t - 0.645) / 0.88)
         return Sending(
-            arrowY: 1.02 + (0.72 - 1.02) * e - 0.13 * rise,
-            arrowScale: (0.8 + 0.2 * e) * (1 - 0.38 * shrink),
-            arrowAlpha: smooth(0.04, 0.36, t),
-            cloudTop: 0.95 + (0.50 - 0.95) * easeOut(t / 0.6) - 0.05 * (1 - exp(-max(0, t - 0.6) / 1.5)),
-            cloudAmp: smooth(0, 0.42, t),
+            arrowY: 1.02 + (0.645 - 1.02) * easeOut((t - 0.13) / 0.89, power: 3.4) - 0.14 * (1 - exp(-max(0, t - 1.0) / 2.5)),
+            arrowScale: 1 - 0.55 * shrink,
+            arrowAlpha: smooth(0.10, 0.30, t),
+            cloudTop: 0.70 + (0.40 - 0.70) * easeOut(t / 0.80, power: 1.65),
+            cloudAmp: smooth(0, 0.55, t) * (1 - 0.18 * (1 - exp(-max(0, t - 0.6) / 1.2))),
             soft: 1 - exp(-max(0, t - 0.4) / 1.4))
     }
 
@@ -95,7 +96,8 @@ enum SendGlowTimeline {
         s.soft = min(1, s.soft + 0.4 * m)
         s.arrowAlpha *= 1 - smooth(0.15 * w, 0.9 * w, x)
         s.cloudAmp *= 1 - smooth(0, 0.85 * w, x)
-        s.cloudTop += 0.12 * m
+        // 录屏里气雾是往中间收着淡掉的，不往下沉：上沿再往上一点点
+        s.cloudTop -= 0.03 * m
     }
 
     /// 失败：箭头往下沉一点淡掉，云慢一点淡掉
@@ -306,7 +308,7 @@ final class SendGlowRenderer: NSObject, MTKViewDelegate {
             var look = TL.sending(max(0, t), reduceMotion: reduce)
             if let x = exitX { TL.exitAfterSuccess(&look, x, window: exitWindow, reduceMotion: reduce) }
             if let f = failureU { TL.exitAfterFailure(&look, f, reduceMotion: reduce) }
-            arrow = SIMD4(fx, Float(look.arrowY) * H, Float(look.arrowScale) * 0.24 * S, Float(look.arrowAlpha))
+            arrow = SIMD4(fx, Float(look.arrowY) * H, Float(look.arrowScale) * 0.23 * S, Float(look.arrowAlpha))
             cloud.x = Float(look.cloudTop) * H
             cloud.y = Float(look.cloudAmp)
             cloud.z = Float(look.soft)
