@@ -7,7 +7,8 @@ import UIKit
 // （主页 / 片段 / 搜索 / 头像，搜索就在胶囊里，头像是最后一格）。我们的五格：主页 / 资料库（片段图标）/ 请求 / 搜索 / 头像
 // （用户选的：「请求」保留为一格；上面那组投屏 / 下载 / 通知按钮不要）。
 // 量 Netflix 截图（折起竖拿，3 倍图）：
-//   · 胶囊宽 60、离后缘 18、离底 18（中线离后缘 48，和状态栏同一条线）；身子是深色（比系统标签栏暗得多），
+//   · 胶囊宽 60、离后缘 18、离底 18（中线离后缘 48，和状态栏同一条线）；用户后来要「稍微小一点点」：现在宽 56、每格 54，
+//     中线对着状态栏的中线（真机量的 48.5）；身子是深色（比系统标签栏暗得多），
 //     最外一圈边留给玻璃：边上反射、折射着旁边海报的颜色（用户指出的）；
 //   · 每格 58 点（第一格、最后一格的中心离胶囊两头 36）；矮的横屏按那一列的高往下压，最小 46；
 //   · 图标是白色线条（约 22 点、2 点粗），没选中的白色 45%；头像 24 点、圆角 7，一直是原色；
@@ -154,14 +155,14 @@ struct DuoNav: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(AccountStore.self) private var account
 
-    /// 胶囊宽 60、每格 58，离后缘、离底各 18（Netflix 截图量的）
-    static let width: CGFloat = 60
-    static let pitch: CGFloat = 58
-    /// 矮的横屏往下压到这里为止（点得到的范围仍超过 44：C33）
-    static let minPitch: CGFloat = 46
+    /// 胶囊宽 56、每格 54，离底 18（Netflix 截图量的是 60 / 58；用户要求「导航栏可以稍微小一点点」）
+    static let width: CGFloat = 56
+    static let pitch: CGFloat = 54
+    /// 矮的横屏往下压到这里为止（点得到的范围仍有 44：C33）
+    static let minPitch: CGFloat = 44
     static let margin: CGFloat = 18
 
-    /// 第一格、最后一格的中心离胶囊两头多远（58 的时候是 36）
+    /// 第一格、最后一格的中心离胶囊两头多远（每格 54 的时候是 34；比例照 Netflix 的 36 / 58）
     static func endPad(_ p: CGFloat) -> CGFloat { (p * 36 / 58).rounded() }
 
     /// 整枚胶囊的高
@@ -173,6 +174,8 @@ struct DuoNav: View {
         case clips
         /// 自己的头像（原色、圆角方块）
         case avatar
+        /// 请求中心：一张海报卡，右上角一枚圆圈里的「+」（请求添加一部片）
+        case request
     }
 
     struct Item: Identifiable {
@@ -185,7 +188,7 @@ struct DuoNav: View {
     static let items: [Item] = [
         Item(tab: .home, glyph: .symbol("house"), label: "主页", id: "nav-home"),
         Item(tab: .library, glyph: .clips, label: "资料库", id: "nav-library"),
-        Item(tab: .requests, glyph: .symbol("tray.and.arrow.down"), label: "请求", id: "nav-requests"),
+        Item(tab: .requests, glyph: .request, label: "请求", id: "nav-requests"),
         Item(tab: .search, glyph: .symbol("magnifyingglass"), label: "搜索", id: "nav-search"),
         Item(tab: .account, glyph: .avatar, label: "我的", id: "nav-account"),
     ]
@@ -225,9 +228,9 @@ struct DuoNav: View {
 
     private func itemButton(_ item: Item, pitch p: CGFloat) -> some View {
         let on = tab == item.tab
-        // 选中垫的那块：44 × 56（离胶囊两边 8，比格子矮 2）
+        // 选中垫的那块：40 × 52（离胶囊两边 8，比格子矮 2）
         let pillW = Self.width - 16
-        let pillH = min(56, p - 2)
+        let pillH = min(52, p - 2)
         return Button {
             if on { reselect(item.tab); Haptics.light() } else { tab = item.tab }
         } label: {
@@ -260,13 +263,17 @@ struct DuoNav: View {
         switch g {
         case .symbol(let name):
             Image(systemName: name)
-                .font(.system(size: 20, weight: .medium))
+                .font(.system(size: 19, weight: .medium))
                 .foregroundStyle(ink)
         case .clips:
             ClipsGlyph()
-                .stroke(ink, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .stroke(ink, style: StrokeStyle(lineWidth: 1.9, lineCap: .round, lineJoin: .round))
                 .overlay { ClipsGlyph.Play().fill(ink) }
-                .frame(width: 18, height: 24)
+                .frame(width: 17, height: 22.5)
+        case .request:
+            RequestGlyph()
+                .stroke(ink, style: StrokeStyle(lineWidth: 1.9, lineCap: .round, lineJoin: .round))
+                .frame(width: 23, height: 23)
         case .avatar:
             // 头像一直是原色（Netflix 那颗没选中也不压暗）；还没有头像就是线条的人像
             if let img = AvatarCache.shared.avatar(for: account.session?.username) {
@@ -274,11 +281,11 @@ struct DuoNav: View {
                     .resizable()
                     .interpolation(.high)
                     .scaledToFill()
-                    .frame(width: 24, height: 24)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .frame(width: 22, height: 22)
+                    .clipShape(RoundedRectangle(cornerRadius: 6.5, style: .continuous))
             } else {
                 Image(systemName: "person.crop.circle")
-                    .font(.system(size: 21, weight: .medium))
+                    .font(.system(size: 20, weight: .medium))
                     .foregroundStyle(ink)
             }
         }
@@ -298,7 +305,7 @@ struct DuoNav: View {
                 .padding(.horizontal, 4.5)
                 .frame(minWidth: 17, minHeight: 17)
                 .background(Capsule().fill(DuoNavInk.badge))
-                .offset(x: 11, y: -10)
+                .offset(x: 10, y: -9)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
         }
@@ -357,6 +364,85 @@ struct ClipsGlyph: Shape {
     }
 }
 
+/// 请求中心的图标（用户要求更新：以前是收件盒加向下的箭头，读着像「下载」）：一张竖着的海报卡，
+/// 右上角一枚圆圈里的「+」——请求添加一部片。线条和「片段」那枚一样（圆头、约 2 点）。设计框 24 × 24
+struct RequestGlyph: Shape {
+    func path(in rect: CGRect) -> Path {
+        let s = min(rect.width, rect.height) / 24
+        let ox = rect.midX - 12 * s, oy = rect.midY - 12 * s
+        func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * s, y: oy + y * s) }
+        var p = Path()
+        // 海报卡 (3,5)–(17,22)、圆角 3；右上角让给那枚圆圈（上沿停在 11.2，右边从 13.2 起）
+        p.move(to: pt(11.2, 5))
+        p.addLine(to: pt(6, 5))
+        p.addQuadCurve(to: pt(3, 8), control: pt(3, 5))
+        p.addLine(to: pt(3, 19))
+        p.addQuadCurve(to: pt(6, 22), control: pt(3, 22))
+        p.addLine(to: pt(14, 22))
+        p.addQuadCurve(to: pt(17, 19), control: pt(17, 22))
+        p.addLine(to: pt(17, 13.2))
+        // 右上角的圆圈和「+」
+        p.addEllipse(in: CGRect(x: ox + 12.9 * s, y: oy + 1.9 * s, width: 9.2 * s, height: 9.2 * s))
+        p.move(to: pt(15.6, 6.5))
+        p.addLine(to: pt(19.4, 6.5))
+        p.move(to: pt(17.5, 4.6))
+        p.addLine(to: pt(17.5, 8.4))
+        return p
+    }
+}
+
+/// 光学扫描的图标（用户要求更新：以前是取景框里一个「+」）：取景框的四个角，中间一小团粒子
+/// （光学配对扫的就是一团粒子云）。四个角用线（ScanGlyph），粒子用实心点（ScanGlyph.Dots）。设计框 24 × 24
+struct ScanGlyph: Shape {
+    func path(in rect: CGRect) -> Path {
+        let s = min(rect.width, rect.height) / 24
+        let ox = rect.midX - 12 * s, oy = rect.midY - 12 * s
+        func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * s, y: oy + y * s) }
+        var p = Path()
+        p.move(to: pt(2.5, 9)); p.addLine(to: pt(2.5, 5.5)); p.addQuadCurve(to: pt(5.5, 2.5), control: pt(2.5, 2.5)); p.addLine(to: pt(9, 2.5))
+        p.move(to: pt(15, 2.5)); p.addLine(to: pt(18.5, 2.5)); p.addQuadCurve(to: pt(21.5, 5.5), control: pt(21.5, 2.5)); p.addLine(to: pt(21.5, 9))
+        p.move(to: pt(21.5, 15)); p.addLine(to: pt(21.5, 18.5)); p.addQuadCurve(to: pt(18.5, 21.5), control: pt(21.5, 21.5)); p.addLine(to: pt(15, 21.5))
+        p.move(to: pt(9, 21.5)); p.addLine(to: pt(5.5, 21.5)); p.addQuadCurve(to: pt(2.5, 18.5), control: pt(2.5, 21.5)); p.addLine(to: pt(2.5, 15))
+        return p
+    }
+
+    /// 中间那团粒子：一圈 7 颗（大小交替）加中间一颗
+    struct Dots: Shape {
+        func path(in rect: CGRect) -> Path {
+            let s = min(rect.width, rect.height) / 24
+            let cx = rect.midX, cy = rect.midY
+            var p = Path()
+            for i in 0..<7 {
+                let a = (-90 + Double(i) * 360 / 7) * .pi / 180
+                let r: CGFloat = (i % 2 == 0 ? 1.15 : 0.85) * s
+                let x = cx + 4.6 * s * CGFloat(cos(a)), y = cy + 4.6 * s * CGFloat(sin(a))
+                p.addEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
+            }
+            let c = 1.5 * s
+            p.addEllipse(in: CGRect(x: cx - c, y: cy - c, width: c * 2, height: c * 2))
+            return p
+        }
+    }
+}
+
+/// 系统标签栏（别的 iPhone、iPad、展开竖拿的 Duo）上「请求」那一格用同一枚图标：把 RequestGlyph 画成模板图（跟着标签栏的颜色走）
+@MainActor
+enum NavGlyphImage {
+    static let request: UIImage = {
+        let size: CGFloat = 26
+        let img = UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { ctx in
+            let c = ctx.cgContext
+            c.addPath(RequestGlyph().path(in: CGRect(x: 0, y: 0, width: size, height: size)).cgPath)
+            c.setLineWidth(1.9)
+            c.setLineCap(.round)
+            c.setLineJoin(.round)
+            c.setStrokeColor(UIColor.black.cgColor)
+            c.strokePath()
+        }
+        return img.withRenderingMode(.alwaysTemplate)
+    }()
+}
+
 /// 把 DuoNav 摆进侧边那一列：哪边的安全区宽就放哪边（系统说了竖栏在哪边就听系统的；没有像样的一列时贴右缘，按 64 点宽的一条摆），
 /// 中线对着那一列的中线（状态栏的中线），离底 18。键盘起来时不跟着挪：和系统标签栏一样被键盘盖住。
 /// 那一列矮（折起横拿）时每格往下压：胶囊顶上要给状态栏留出约 200 点。
@@ -371,6 +457,10 @@ struct DuoNavLayer: View {
 
     /// 状态栏（连灵动岛、实时活动）在那一列顶上大约占多高
     private static let statusReserve: CGFloat = 200
+    /// 状态栏那一列的中线离屏边多远：真机截图量的是 48.5（时间、电量圈、实时活动都对着它；Netflix 那一列也是 48）。
+    /// 用户截图（红线）：以前按侧边安全区的一半摆，真机上那一列安全区是 84、一半是 42，胶囊比状态栏偏外 6 点；
+    /// 模拟器上是 97、一半正好 48.5，所以那时候看着是对的。现在至少对着 48.5，那一列更宽时再按它的一半
+    static let statusAxis: CGFloat = 48.5
 
     var body: some View {
         GeometryReader { safe in
@@ -382,7 +472,8 @@ struct DuoNavLayer: View {
                 let onLeading = edge.map { $0 == .leading } ?? (lead > trail && lead >= 44)
                 let column = onLeading ? lead : trail
                 let strip = column >= 44 ? column : 64
-                let x = onLeading ? strip / 2 : full.size.width - strip / 2
+                let rail = max(strip / 2, Self.statusAxis)
+                let x = onLeading ? rail : full.size.width - rail
                 let room = full.size.height - DuoNav.margin - Self.statusReserve
                 let fit = room / (CGFloat(DuoNav.items.count - 1) + 2 * 36 / 58)
                 let pitch = min(DuoNav.pitch, max(DuoNav.minPitch, fit.rounded(.down)))
@@ -390,12 +481,12 @@ struct DuoNavLayer: View {
                 let y = full.size.height - DuoNav.margin - h / 2
                 DuoNav(tab: $tab, reselect: reselect, pitch: pitch)
                     .position(x: x, y: y)
-                    // 记下这条线（DuoRail）：列在前缘时记负数，只认后缘的
-                    .onChange(of: onLeading ? -strip : strip, initial: true) { _, v in
-                        let rail: CGFloat? = v > 0 ? v / 2 : nil
-                        guard DuoRail.shared.fromTrailing != rail else { return }
-                        DuoRail.shared.fromTrailing = rail
-                        Perf.log("duo rail \(Int(abs(v))) pt column on the \(v > 0 ? "trailing" : "leading") edge")
+                    // 记下这条线（DuoRail：刷视频页的关闭钮、页码点也对着它）：列在前缘时记负数，只认后缘的
+                    .onChange(of: onLeading ? -rail : rail, initial: true) { _, v in
+                        let r: CGFloat? = v > 0 ? v : nil
+                        guard DuoRail.shared.fromTrailing != r else { return }
+                        DuoRail.shared.fromTrailing = r
+                        Perf.log("duo rail \(abs(v)) pt from the \(v > 0 ? "trailing" : "leading") edge (column \(Int(strip)) pt)")
                     }
             }
             .ignoresSafeArea()
