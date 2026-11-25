@@ -151,6 +151,8 @@ struct DuoNav: View {
     var reselect: (AppTab) -> Void
     /// 每格多高（DuoNavLayer 按那一列的高给：放得下就 58）
     var pitch: CGFloat = DuoNav.pitch
+    /// 内容在胶囊的哪一边（胶囊在后缘时内容在前缘）：环境反光从这一边打过来
+    var contentLeading = true
     @Namespace private var ns
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(AccountStore.self) private var account
@@ -196,6 +198,13 @@ struct DuoNav: View {
     var body: some View {
         let p = pitch
         let e = Self.endPad(p)
+        let h = Self.height(pitch: p)
+        // 环境反光（用户要求「边缘应该反射蓝色区域中的各种主要颜色混合渐变光线」）：NavAmbient 从胶囊靠内容那一边外面取的颜色，
+        // 从上到下一串；取样的那一条比胶囊上下各长 NavAmbient.overhang，渐变也一样往外伸，颜色和旁边对得上
+        let stops = NavAmbient.shared.stops
+        let ext = NavAmbient.overhang / max(1, h)
+        let along = (top: UnitPoint(x: 0.5, y: -ext), bottom: UnitPoint(x: 0.5, y: 1 + ext))
+        let lit = contentLeading ? UnitPoint.leading : UnitPoint.trailing
         VStack(spacing: 0) {
             ForEach(Self.items) { item in
                 itemButton(item, pitch: p)
@@ -210,18 +219,42 @@ struct DuoNav: View {
         // 用户要求「明显化侧面导航栏的反射光线」：边留宽一点（离边 3.5 点、柔边 2），玻璃用 .clear（更通透、边上的折射更强，
         // 身子靠里面那层黑照样是暗的），再沿边描一道很细的高光（左上亮、右下弱一点，像光从左上照过来打在玻璃边上）
         .background {
-            Capsule()
-                .fill(DuoNavInk.body)
-                .padding(3.5)
-                .blur(radius: 2)
-                .allowsHitTesting(false)
+            ZStack {
+                Capsule()
+                    .fill(DuoNavInk.body)
+                    .padding(3.5)
+                    .blur(radius: 2)
+                if stops.count >= 2 {
+                    // 里面一层柔光：靠内容那一边亮，往中间淡掉（像旁边画面的光打进玻璃里）
+                    Capsule()
+                        .fill(LinearGradient(colors: stops, startPoint: along.top, endPoint: along.bottom))
+                        .mask(LinearGradient(colors: [.white, .white.opacity(0)], startPoint: lit, endPoint: .center))
+                        .blur(radius: 5)
+                        // 糊开的光不出胶囊：外面那一条正是取色的地方，漏出去会把自己的光又取回来
+                        .clipShape(Capsule())
+                        .opacity(0.6)
+                }
+            }
+            .allowsHitTesting(false)
         }
         .overlay {
-            Capsule()
-                .strokeBorder(DuoNavInk.rim, lineWidth: 1)
-                .allowsHitTesting(false)
+            ZStack {
+                Capsule()
+                    .strokeBorder(DuoNavInk.rim, lineWidth: 1)
+                if stops.count >= 2 {
+                    // 边上一道反光：旁边画面的主要颜色从上到下混成一条渐变，靠内容那一边最亮，绕到另一边淡掉
+                    Capsule()
+                        .strokeBorder(LinearGradient(colors: stops, startPoint: along.top, endPoint: along.bottom), lineWidth: 1.8)
+                        .mask(LinearGradient(colors: [.white, .white, .white.opacity(0)], startPoint: lit,
+                                             endPoint: contentLeading ? UnitPoint(x: 0.75, y: 0.5) : UnitPoint(x: 0.25, y: 0.5)))
+                        .blur(radius: 0.5)
+                }
+            }
+            .allowsHitTesting(false)
         }
         .glassEffect(.clear.interactive(), in: Capsule())
+        // 颜色一变就慢慢过渡过去（取样一秒几次，不会一闪一闪）
+        .animation(.easeInOut(duration: 0.45), value: stops)
         // 选中的那块在格子之间滑过去；「减弱动态效果」打开时直接换过去，不带弹性（F59）
         .animation(reduceMotion ? nil : .snappy(duration: 0.32), value: tab)
     }
@@ -443,6 +476,120 @@ enum NavGlyphImage {
     }()
 }
 
+/// 侧边胶囊的环境反光（用户要求「黄色边缘位置应该反射蓝色区域中的各种主要颜色混合渐变光线」）：
+/// 胶囊挨着的那片画面（海报、剧照）不在胶囊正后面——后面是侧边那一列的黑——玻璃自己折射不到，所以自己取色：
+/// 一秒四次，把胶囊靠内容那一边外面 64 点宽、上下各长 overhang 的一条，用 drawHierarchy 缩成 4 × 16 像素画下来，
+/// 每一行取平均 → 从上到下 8 个颜色；颜色提一点饱和、亮度，黑的地方不发光（透明），和上一次的混一半，不会跳。
+/// 只在胶囊出现、App 在前台时取；一次取样太慢（超过 12 毫秒）就放慢到一秒两次、一次
+@MainActor
+@Observable
+final class NavAmbient {
+    static let shared = NavAmbient()
+    /// 取样那一条比胶囊上下各长多少（渐变也往外伸这么多）
+    static let overhang: CGFloat = 48
+
+    /// 从上到下的反光颜色（空的：还没取到，不画反光）
+    private(set) var stops: [Color] = []
+
+    /// 胶囊在窗口里的位置、内容在它哪一边（DuoNavLayer 给）
+    @ObservationIgnored var capsule: CGRect = .zero
+    @ObservationIgnored var contentLeading = true
+    @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var users = 0
+    @ObservationIgnored private var interval: TimeInterval = 0.25
+    @ObservationIgnored private var last: [SIMD4<Double>] = []
+
+    private static let cols = 4, rows = 16, outStops = 8
+
+    func start() {
+        users += 1
+        guard timer == nil else { return }
+        schedule()
+        sample()
+    }
+
+    func stop() {
+        users = max(0, users - 1)
+        guard users == 0 else { return }
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func schedule() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sample() }
+        }
+    }
+
+    private func sample() {
+        guard UIApplication.shared.applicationState == .active, capsule.width > 1,
+              let win = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+                .flatMap(\.windows).first(where: \.isKeyWindow) else { return }
+        let w: CGFloat = 64
+        let r = CGRect(x: contentLeading ? capsule.minX - 2 - w : capsule.maxX + 2, y: capsule.minY - Self.overhang,
+                       width: w, height: capsule.height + Self.overhang * 2).intersection(win.bounds)
+        guard r.width > 4, r.height > 16 else { return }
+        let cols = Self.cols, rows = Self.rows
+        let began = CACurrentMediaTime()
+        var px = [UInt8](repeating: 0, count: cols * rows * 4)
+        let ok: Bool = px.withUnsafeMutableBytes { buf in
+            guard let ctx = CGContext(data: buf.baseAddress, width: cols, height: rows, bitsPerComponent: 8, bytesPerRow: cols * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            // UIKit 的坐标是 y 往下：先翻过来，再把这一条缩进 cols × rows
+            ctx.translateBy(x: 0, y: CGFloat(rows))
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.scaleBy(x: CGFloat(cols) / r.width, y: CGFloat(rows) / r.height)
+            ctx.translateBy(x: -r.minX, y: -r.minY)
+            UIGraphicsPushContext(ctx)
+            let done = win.drawHierarchy(in: win.bounds, afterScreenUpdates: false)
+            UIGraphicsPopContext()
+            return done
+        }
+        // 太慢就放慢（一秒四次 → 两次 → 一次）
+        if CACurrentMediaTime() - began > 0.012, interval < 1 {
+            interval = min(1, interval * 2)
+            schedule()
+        }
+        guard ok else { return }
+        // 每一行取平均（0…1），两行并一个
+        var rowsAvg: [SIMD4<Double>] = []
+        for y in 0..<rows {
+            var acc = SIMD4<Double>(0, 0, 0, 0)
+            for x in 0..<cols {
+                let i = (y * cols + x) * 4
+                acc += SIMD4(Double(px[i]), Double(px[i + 1]), Double(px[i + 2]), 0) / 255
+            }
+            rowsAvg.append(acc / Double(cols))
+        }
+        let per = rows / Self.outStops
+        var fresh: [SIMD4<Double>] = []
+        for k in 0..<Self.outStops {
+            var acc = SIMD4<Double>(0, 0, 0, 0)
+            for j in 0..<per { acc += rowsAvg[k * per + j] }
+            fresh.append(acc / Double(per))
+        }
+        // 和上一次的混一半：滑动时颜色流过去，不是一跳一跳
+        if last.count == fresh.count {
+            fresh = zip(last, fresh).map { $0 * 0.5 + $1 * 0.5 }
+        }
+        last = fresh
+        let colors = fresh.map(Self.glow)
+        if colors != stops { stops = colors }
+    }
+
+    /// 一段画面的平均色 → 反光的颜色：饱和度 × 1.35、亮度提一点；暗的地方（亮度低于 0.08）不发光
+    private static func glow(_ c: SIMD4<Double>) -> Color {
+        let ui = UIColor(red: c.x, green: c.y, blue: c.z, alpha: 1)
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        ui.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        let alpha = min(1, max(0, (b - 0.08) / 0.25))
+        return Color(hue: Double(h), saturation: Double(min(1, s * 1.35)), brightness: Double(min(1, b * 1.25 + 0.1)))
+            .opacity(Double(alpha) * 0.95)
+    }
+}
+
 /// 把 DuoNav 摆进侧边那一列：哪边的安全区宽就放哪边（系统说了竖栏在哪边就听系统的；没有像样的一列时贴右缘，按 64 点宽的一条摆），
 /// 中线对着那一列的中线（状态栏的中线），离底 18。键盘起来时不跟着挪：和系统标签栏一样被键盘盖住。
 /// 那一列矮（折起横拿）时每格往下压：胶囊顶上要给状态栏留出约 200 点。
@@ -479,8 +626,16 @@ struct DuoNavLayer: View {
                 let pitch = min(DuoNav.pitch, max(DuoNav.minPitch, fit.rounded(.down)))
                 let h = DuoNav.height(pitch: pitch)
                 let y = full.size.height - DuoNav.margin - h / 2
-                DuoNav(tab: $tab, reselect: reselect, pitch: pitch)
+                DuoNav(tab: $tab, reselect: reselect, pitch: pitch, contentLeading: !onLeading)
                     .position(x: x, y: y)
+                    // 环境反光要知道胶囊在窗口里的哪儿、内容在哪一边（NavAmbient 在这一条外面取色）
+                    .onChange(of: CGRect(x: ff.minX + x - DuoNav.width / 2, y: ff.minY + y - h / 2, width: DuoNav.width, height: h),
+                              initial: true) { _, r in
+                        NavAmbient.shared.capsule = r
+                        NavAmbient.shared.contentLeading = !onLeading
+                    }
+                    .onAppear { NavAmbient.shared.start() }
+                    .onDisappear { NavAmbient.shared.stop() }
                     // 记下这条线（DuoRail：刷视频页的关闭钮、页码点也对着它）：列在前缘时记负数，只认后缘的
                     .onChange(of: onLeading ? -rail : rail, initial: true) { _, v in
                         let r: CGFloat? = v > 0 ? v : nil
