@@ -16,8 +16,38 @@ import UIKit
 
 // MARK: - 电影
 
+/// 详情页右上角的「下载」「分享」，和 iPhone Duo「侧边一列」时换上的弧形菜单（单独一个修饰器：MovieDetailView 的链太长，编译器会算不过来）
+private struct MovieDetailChrome: ViewModifier {
+    let video: Video
+    let title: String
+    let runtime: Int?
+    let tmdbID: Int?
+    let column: Bool
+    @Binding var alert: PrecacheAlert?
+
+    func body(content: Content) -> some View {
+        content
+            .toolbar {
+                if !column {
+                    ToolbarItemGroup(placement: .topBarTrailing) {
+                        DetailDownloadButton(video: video, title: title, runtime: runtime, alert: $alert)
+                        DetailShareButton(video: video, title: title, tmdbID: tmdbID)
+                    }
+                }
+            }
+            .navigationBarBackButtonHidden(column)
+            .toolbar(column ? .hidden : .automatic, for: .navigationBar)
+            .overlay {
+                if column {
+                    DetailArcMenuLayer(video: video, title: title, runtime: runtime, tmdbID: tmdbID, alert: $alert)
+                }
+            }
+    }
+}
+
 struct MovieDetailView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.duoColumn) private var column
     let video: Video
     @State private var full: Meta?
     /// Apple TV 上对上的那一部：有就用它的无字背景、竖版全屏图、字标和预告片（对不上就是 TMDB 的）
@@ -56,13 +86,9 @@ struct MovieDetailView: View {
         ) { _ in
             EmptyView()
         }
-        // 「下载」「分享」（用户要求：iPhone Duo 侧边那一列返回钮下面；别的 iPhone 在右上角）：分享的是下好的文件，可以直接隔空投送
-        .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                DetailDownloadButton(video: video, title: model.title(video), runtime: meta?.runtime, alert: $precacheAlert)
-                DetailShareButton(video: video, title: model.title(video), tmdbID: meta?.id)
-            }
-        }
+        // 「下载」「分享」：别的 iPhone、iPad 在右上角。iPhone Duo「侧边一列」的形态里系统把返回、下载、分享竖着排进那一列，
+        // 下载 / 分享那一组压到了底下的导航胶囊上（用户截图）：这时导航栏整个收起，换成一颗展开成弧形菜单的「+」（DetailArcMenuLayer）
+        .modifier(MovieDetailChrome(video: video, title: model.title(video), runtime: meta?.runtime, tmdbID: meta?.id, column: column, alert: $precacheAlert))
         .alert(precacheAlert?.title ?? "", isPresented: Binding(get: { precacheAlert != nil }, set: { if !$0 { precacheAlert = nil } }),
                presenting: precacheAlert) { _ in
             Button("好", role: .cancel) {}

@@ -622,6 +622,15 @@ struct DuoNavLayer: View {
     /// 模拟器上是 97、一半正好 48.5，所以那时候看着是对的。现在至少对着 48.5，那一列更宽时再按它的一半
     static let statusAxis: CGFloat = 48.5
 
+    /// 一列多高时胶囊每格多高、整枚多高、顶在哪（详情页的弧形菜单钮要摆在状态栏和胶囊之间，同一套算法）
+    static func capsule(columnHeight H: CGFloat) -> (pitch: CGFloat, height: CGFloat, top: CGFloat) {
+        let room = H - DuoNav.margin - statusReserve
+        let fit = room / (CGFloat(DuoNav.items.count - 1) + 2 * 36 / 58)
+        let pitch = min(DuoNav.pitch, max(DuoNav.minPitch, fit.rounded(.down)))
+        let h = DuoNav.height(pitch: pitch)
+        return (pitch, h, H - DuoNav.margin - h)
+    }
+
     var body: some View {
         GeometryReader { safe in
             let sf = safe.frame(in: .global)
@@ -634,11 +643,9 @@ struct DuoNavLayer: View {
                 let strip = column >= 44 ? column : 64
                 let rail = max(strip / 2, Self.statusAxis)
                 let x = onLeading ? rail : full.size.width - rail
-                let room = full.size.height - DuoNav.margin - Self.statusReserve
-                let fit = room / (CGFloat(DuoNav.items.count - 1) + 2 * 36 / 58)
-                let pitch = min(DuoNav.pitch, max(DuoNav.minPitch, fit.rounded(.down)))
-                let h = DuoNav.height(pitch: pitch)
-                let y = full.size.height - DuoNav.margin - h / 2
+                let cap = Self.capsule(columnHeight: full.size.height)
+                let pitch = cap.pitch, h = cap.height
+                let y = cap.top + h / 2
                 DuoNav(tab: $tab, reselect: reselect, pitch: pitch, contentLeading: !onLeading)
                     .position(x: x, y: y)
                     // 环境反光要知道胶囊在窗口里的哪儿、内容在哪一边（NavAmbient 在这一条外面取色）

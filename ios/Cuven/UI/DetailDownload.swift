@@ -13,6 +13,8 @@ struct DetailDownloadButton: View {
     let title: String
     let runtime: Int?
     @Binding var alert: PrecacheAlert?
+    /// 点得到的范围多大（弧形菜单里给 46 点；工具栏里不用给，系统自己管）
+    var hit: CGFloat? = nil
 
     var body: some View {
         let it = Precache.shared.item(path: video.path)
@@ -23,7 +25,7 @@ struct DetailDownloadButton: View {
                 Menu {
                     Button("删除下载", systemImage: "trash", role: .destructive) { Precache.shared.delete(path: video.path) }
                 } label: {
-                    Image(systemName: "checkmark")
+                    Image(systemName: "checkmark").detailHit(hit)
                 }
                 .accessibilityLabel("已下载")
                 .accessibilityIdentifier("detail-download")
@@ -32,7 +34,7 @@ struct DetailDownloadButton: View {
                     Button("暂停下载", systemImage: "pause") { Precache.shared.pause(path: video.path) }
                     Button("取消下载", systemImage: "xmark", role: .destructive) { Precache.shared.delete(path: video.path) }
                 } label: {
-                    DownloadRing(progress: it.progress, running: true)
+                    DownloadRing(progress: it.progress, running: true).detailHit(hit)
                 }
                 .accessibilityLabel("正在下载")
                 .accessibilityValue("\(Int((it.progress * 100).rounded()))%")
@@ -42,7 +44,7 @@ struct DetailDownloadButton: View {
                     Button("继续下载", systemImage: "arrow.down") { Precache.shared.resume(path: video.path) }
                     Button("取消下载", systemImage: "xmark", role: .destructive) { Precache.shared.delete(path: video.path) }
                 } label: {
-                    DownloadRing(progress: it.progress, running: false)
+                    DownloadRing(progress: it.progress, running: false).detailHit(hit)
                 }
                 .accessibilityLabel(it.phase == .noSpace ? "储存空间不足" : "下载已暂停")
                 .accessibilityValue("\(Int((it.progress * 100).rounded()))%")
@@ -52,7 +54,7 @@ struct DetailDownloadButton: View {
             Button {
                 alert = DetailDownloadStarter.start(video: video, title: title, runtime: runtime)
             } label: {
-                Image(systemName: "arrow.down")
+                Image(systemName: "arrow.down").detailHit(hit)
             }
             .accessibilityLabel("下载")
             .accessibilityHint("把整部影片缓存到这台 iPhone")
@@ -66,17 +68,30 @@ struct DetailShareButton: View {
     let video: Video
     let title: String
     let tmdbID: Int?
+    var hit: CGFloat? = nil
 
     var body: some View {
         ShareLink(item: DeepLink.movie(path: video.path, tmdbID: tmdbID),
                   subject: Text(title),
                   message: Text("在 Cuven max 中查看《\(title)》"),
                   preview: SharePreview(title)) {
-            Image(systemName: "square.and.arrow.up")
+            Image(systemName: "square.and.arrow.up").detailHit(hit)
         }
         .accessibilityLabel("分享")
         .accessibilityHint("发给别人，对方可以打开这部影片的详情页")
         .accessibilityIdentifier("detail-share")
+    }
+}
+
+extension View {
+    /// 给了多大就把点得到的范围撑到多大（不给就原样）
+    @ViewBuilder
+    func detailHit(_ size: CGFloat?) -> some View {
+        if let size {
+            frame(width: size, height: size).contentShape(Rectangle())
+        } else {
+            self
+        }
     }
 }
 
