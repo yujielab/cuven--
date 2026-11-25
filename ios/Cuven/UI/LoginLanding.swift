@@ -5,7 +5,8 @@ import SwiftUI
 // 用户要求新登录页的内容：标题「ideas in motion.」、说明「Cuven Max为充满好奇心的灵魂而专门设计并精心调整以提供超高品质的影片内容」、
 // 两颗按钮「使用光学配对登录」「使用账号密码登录」；UI、动效和其他细节照用户发的 Brink 录屏和 PDF 做。
 // 三层，从下往上：
-// · LoginCoverPlane（LoginCoverPlane.swift）：黑底、顶部柔光（1.27 秒）、三列海报从灵动岛下面沿一个斜平面推过来（1.33 秒起，一直流动），
+// · LoginCoverPlane（LoginCoverPlane.swift）：黑底、顶部柔光（1.27 秒）、三列海报从灵动岛下面钻出来，沿一条先窄后向外弯开、
+//   再竖直往下的花瓶形通道流下来（1.30 秒起，一直流动），
 //   上面压着从 40% 屏高开始变暗、65%–72% 收黑的渐变。
 // · 前景（这个文件）：标题、说明、两颗胶囊按钮。0.5 秒起整组从屏底带模糊上浮，约 0.72 秒越过落点、0.83 秒高出约 2% 屏高，
 //   1.17 秒落稳（PDF「登录组上浮与回落」；中间值是录屏 60 帧逐帧量的主按钮上沿）。
@@ -129,12 +130,14 @@ struct LoginLanding: View {
     }
 
     private func scene(t: Double, size: CGSize, layout: LoginLandingLayout, covers: [URL]) -> some View {
-        // 用户要的封面从图标那条中轴涌出：iPhone Duo 折起时前景在安全区里居中，平面跟着挪，两边加宽不露边
+        // 用户要的封面从图标那条中轴涌出：iPhone Duo 折起时前景在安全区里居中，平面跟着挪，两边加宽不露边；
+        // 通道的宽窄照中轴到近处屏边那一段排（reach），和同样宽的手机一个样子
         let dx = layout.centerX - size.width / 2
         let plane = CGSize(width: size.width + abs(dx) * 2, height: size.height)
+        let reach = min(layout.centerX, size.width - layout.centerX)
         return ZStack(alignment: .topLeading) {
             Color.black
-            LoginCoverPlane(t: t, size: plane, covers: covers, reduceMotion: reduceMotion)
+            LoginCoverPlane(t: t, size: plane, reach: reach, covers: covers, reduceMotion: reduceMotion)
                 .frame(width: plane.width, height: plane.height)
                 .offset(x: dx - abs(dx))
                 .allowsHitTesting(false)

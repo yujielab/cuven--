@@ -2,100 +2,181 @@ import SwiftUI
 import UIKit
 import QuartzCore
 
-// MARK: - 登录页背景：海报沿一个斜向纵深平面从灵动岛下面推向镜头
+// MARK: - 登录页背景：海报沿一条「花瓶形」的通道从灵动岛下面流下来
 //
 // 用户要求新登录页照 Brink 的录屏和动效文档（第 2、3 页）做背景：黑底，顶端中轴一团柔灰光晕（1.27 秒亮起）；
-// 1.33 秒起三列圆角封面从灵动岛下缘（X 50%、Y 6%）露出，沿同一个斜向纵深平面推向镜头——远处小、扁、密，
-// 近处大、开，两侧列向外展开、跨过屏边被裁掉，中列纵向错开半格；约 2.3–2.6 秒铺满，之后一直往前流
-// （底下暗区回收、顶上补入）。封面上压一层黑色渐变：Y 40% 起变暗、68% 全黑，正文和按钮背后是纯黑。
-// 我们的封面是影片海报（2 : 3 竖版），黑缝隔开。
+// 1.30 秒起三列圆角封面从灵动岛平的下缘（Y 5.7%，X 39%–61%）底下钻出来，一直往下流（底下暗区回收、顶上补入）。
+// 用户在录屏上画的线（「海报流的动线不对」）：两侧列走的不是汇聚到一点的直线，而是花瓶的轮廓——出口窄（约三分之一屏宽），
+// 往下先向外弯开，Y 31% 左右外沿碰到屏边，再往下几乎竖直；近处的卡大、正、被屏边裁掉。中列纵向错开半格。
+// 封面上压一层黑色渐变：Y 40% 起变暗、68% 全黑，正文和按钮背后是纯黑。我们的封面是影片海报（2 : 3 竖版），黑缝隔开。
 //
-// 做法：一个 CALayer 当平面，每张封面一个子图层；每帧按平面上的位置算出四个角在屏上的位置，用透视变换
-// （矩形 → 四边形）贴上去。CA 在 GPU 上画，手机上一屏最多十七张、每帧只改 transform，旧机型 60 / 120 帧也顺；
+// 形状和节奏是按录屏逐帧量出来拟合的（屏上的比例；不是一个斜平面）：
+//   · 横向：x = 中轴 + v × L(y)。v 以卡宽计，第 c 列卡的两边在 c × 1.105 ± 0.5（列缝 0.105 卡宽）；三列共用一个宽度函数 L(y)：
+//     灵动岛下面 0.069 屏宽、斜率 0.4（窄脖子），Y 9%–31% 斜率涨到 1.15（向外弯开），Y 36% 往下只剩 0.125（几乎竖直）；
+//   · 纵向：y = Y(u)，u 是沿流向走过的距离（以录屏的一排计），匀速时每秒 1 排。上面慢、往下越来越快
+//     （Y 33% 以上近似指数，往下基本匀速），一张卡从灵动岛走到 Y 68% 全黑约 5.85 秒；
+//   · 每张卡上下沿的 u 定下来，四个角就在所在那列的两条边上取：远处窄、扁，近处大、正，两侧列先甩开再竖直往下；
+//   · 入场：6.6 倍速冲出来，1.31 → 3.47 秒平滑减到 1 倍（录屏领头一排下沿：1.70 秒 18%、2.00 秒 37%、2.30 秒 65%）。
+// 录屏里的方形卡占 0.91 排、排缝 0.09 排；海报按 2 : 3 占 1.365 排，一排 1.455 秒。
+//
+// 做法：一个 CALayer 当平面，每张封面一个容器图层，里面几条横切的子图层；每帧按上面的函数算出每一条四个角在屏上的位置，
+// 用透视变换（矩形 → 四边形）贴上去。录屏里过弯的卡是跟着列边弯的：卡过弯那一段切成 2–6 条（每条一段直边，离真正的列边
+// 不超过 0.75 点、列缝不变窄），直道上一条就够。手机上一屏最多十七张、三十来条，每帧只改 transform，旧机型 60 / 120 帧也顺；
 // 封面滑进暗区就回收，换下一张海报从顶上再进来。图走 ImagePipeline（解码在后台，内存 / 磁盘缓存全 App 共用）。
-// 图层顺序照 PDF 第 3 页：光晕在平面下面；平面自带一块黑底（卡缝是黑的、上半屏的封面不被光晕冲灰），顶上一条用遮罩淡入。
-//
-// 形状和节奏是按录屏逐帧量的（屏高、屏宽的比例）：
-//   · 列线汇聚点（地平线）在屏顶以上 15% 屏高：卡宽、两侧列的偏移都和「到这条线的距离」成正比（录屏里量出来是一条直线）；
-//   · Y 35% 以上就是平面透视（屏上速度 ∝ 距离²，录屏各高度一致）；再往下录屏明显放缓、近处的卡也没那么拉长，
-//     那一段按距离软收（CoverPlaneModel.g），近端不会一下冲出屏外；
-//   · 匀速时一张封面从灵动岛下面走到屏底约 6.6 秒；入场先 6 倍速，1.78 秒起平滑减到 1 倍（3.12 秒），
-//     对得上录屏：1.73 秒领头一排下沿在 18%、2.03 秒在 40%、2.2 秒进暗区。
+// 图层顺序照 PDF 第 3 页：光晕在平面下面；平面自带一块黑底（卡缝是黑的、上半屏的封面不被光晕冲灰），出口以上用遮罩切掉。
+// 宽窗口（iPad、展开的 Duo）：花瓶的轮廓不变（出口约 22% 屏宽、Y 31% 碰到屏边），多铺几列；iPhone Duo 折起时照安全区那一段宽排。
 
 /// 登录页的封面背景（全屏；放在最底下，前景、状态栏都在它上面）。t：登录页出现以来的秒数（LoginLanding 的时间线给）
 struct LoginCoverPlane: View {
     let t: Double
     let size: CGSize
+    /// 中轴（平面的竖中线）到较近那条看得见的屏边有多远（点）。iPhone Duo 折起时前景在安全区里居中、平面两边加宽了，
+    /// 通道照安全区那一段宽排（和同样宽的手机一个样子），不照加宽以后的平面。nil：半个平面宽
+    var reach: CGFloat? = nil
     let covers: [URL]
     var reduceMotion = false
 
     var body: some View {
-        CoverPlaneCanvas(t: t, size: size, covers: covers, reduceMotion: reduceMotion)
+        CoverPlaneCanvas(t: t, size: size, reach: reach ?? size.width / 2, covers: covers, reduceMotion: reduceMotion)
             .frame(width: size.width, height: size.height)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
     }
 }
 
-// MARK: - 平面的几何和节奏
+// MARK: - 通道的几何和节奏
 
-/// 屏上的 Y 都是屏高的比例（从顶往下），深度是平面上的相对距离（越大越远）
+/// 屏上的 Y 都是屏高的比例（从顶往下）；横向以「参考屏宽」lateral（点）为单位，录屏那台手机就是屏宽。u：沿流向的距离（排）
 private enum CoverPlaneModel {
-    /// 地平线：屏顶以上 15% 屏高
-    static let horizon = -0.15
-    /// 一个卡宽在屏上占「平面宽」的 0.63 ×（到地平线的距离）
-    static let lateral = 0.63
-    /// 相邻两列中心隔几个卡宽（多出来的是黑缝）
-    static let columnPitch = 1.08
-    /// 一排占多深、卡本身多深（剩下的是排间的黑缝）。录屏里的方形卡约 0.68 深，海报竖版，长一些
-    static let rowPitch = 1.0
-    static let cardDepth = 0.92
-    /// 近端软收：到地平线的距离过了 0.45（约 Y 30%）以后按 x / (1 + 1.3x) 收（录屏 Y 35% 往下的放缓）
-    static let knee = 0.45
-    static let soften = 1.3
-    /// 匀速：每秒 0.7 个深度单位（从 Y 6% 走到屏底约 6.6 秒）
-    static let speed = 0.7
-    /// 入场：1.33 秒起，领头一排下沿在 Y 6.5%（灵动岛下缘）；先 6 倍速，1.78 → 3.12 秒平滑减到 1 倍
-    static let start = 1.33
-    static let leadY = 0.065
-    static let rush = 6.0
-    static let easeFrom = 1.78
-    static let easeTo = 3.12
-    /// 卡的上沿过了 Y 80%（早就全黑了）就回收
-    static let recycleY = 0.80
-    /// 顶上淡入：3.5% 以上看不见（灵动岛、状态栏那一条），8.5% 起完全露出来
-    static let fadeTop = 0.035
-    static let fadeFull = 0.085
-    /// 「平面宽」：手机就是屏宽；宽窗口（iPad、展开的 Duo）按屏高收，不至于一张卡比手机整屏还大
-    static func planeWidth(_ s: CGSize) -> Double { Double(min(s.width, s.height * 0.62)) }
+    /// 录屏那台手机的屏宽 : 屏高（402 × 874）
+    static let refAspect = 0.46
+    /// 封面露头的那条线：灵动岛平的下缘
+    static let emerge = 0.0569
 
-    /// 中列两边各铺几列：宽窗口多铺几列，Y 55% 处要盖到屏边（手机上算出来就是左右各一列）
-    static func sides(_ s: CGSize) -> Int {
-        let reach = Double(s.width) / 2 / (lateral * (0.55 - horizon) * planeWidth(s))
-        return max(1, min(3, Int(((reach - 0.5) / columnPitch).rounded(.up))))
+    // 宽度 L(y)（参考屏宽的比例）= l0 + k(y − emerge) + 两段软折线（softplus）：Y 8.4% 附近斜率往上加 1.04，Y 31% 附近再减回去。
+    // 和录屏量的差最多 0.0016
+    static let widthBase = 0.0694
+    static let widthSlope = 0.1249
+    static let flare = 1.0389
+    static let flareY = 0.0841
+    static let flareSoft = 0.0240
+    static let settleY = 0.3132
+    static let settleSoft = 0.0265
+
+    // 走过 u 排以后在屏上的 Y：起步每排 3% 屏高，u ≈ 3.5 附近软转到每排 13.9%，再加一点匀加速。和录屏量的差最多 0.0007
+    static let crawl = 0.0299
+    static let cruise = 0.1391
+    static let rampU = 3.544
+    static let rampSoft = 0.437
+    static let drift = 0.0115
+
+    /// 相邻两列中心隔几个卡宽（多出来的 0.105 是黑缝）
+    static let columnPitch = 1.105
+    /// 一张海报沿流向占几排（录屏的方形卡 0.91 排，2 : 3 竖版 × 1.5），排间黑缝几排（和列缝一样宽）
+    static let cardLength = 1.365
+    static let rowGap = 0.09
+    /// 匀速每秒 1 排；入场：1.30 秒起，先 6.6 倍速，1.309 → 3.474 秒平滑减到 1 倍
+    static let start = 1.300
+    static let rush = 6.6
+    static let easeFrom = 1.309
+    static let easeTo = 3.474
+    /// 卡的上沿过了 Y 70%（渐变 68% 已经全黑）就回收
+    static let recycleY = 0.70
+    /// 出口：灵动岛下缘往上一点点看不见，往下一点点完全露出来（没有灵动岛的机型像从光晕里钻出来）
+    static let fadeTop = emerge - 0.005
+    static let fadeFull = emerge + 0.006
+    /// 海报沿流向的长度跟着横向一起缩放（宽高比不变），但别缩放得太离谱
+    static let minScale = 0.75
+    static let maxScale = 1.35
+    /// 中列两边最多各铺几列
+    static let maxSides = 3
+    /// 一张卡最多切几条、每条直边离列边最多差几点、相邻两条往下多盖多少（卡长的比例；接缝不露底）
+    static let maxStrips = 6
+    static let bendTolerance = 0.75
+    static let stripOverlap = 0.012
+
+    static func softplus(_ z: Double) -> Double { z > 20 ? z : log1p(exp(z)) }
+
+    private static func widthTerm(_ y: Double) -> Double {
+        widthSlope * (y - emerge)
+            + flare * flareSoft * softplus((y - flareY) / flareSoft)
+            - flare * settleSoft * softplus((y - settleY) / settleSoft)
+    }
+    private static let widthAtEmerge = widthTerm(emerge)
+
+    /// Y 处一个卡宽占几个参考屏宽
+    static func width(_ y: Double) -> Double { widthBase + widthTerm(y) - widthAtEmerge }
+
+    private static let rampAtZero = softplus(-rampU / rampSoft)
+    private static let slopeAtZero = crawl + (cruise - crawl) / (1 + exp(rampU / rampSoft))
+
+    /// 走过 u 排的那条线在屏上的 Y。u < 0（还在灵动岛底下）按出口的速度直线外推：卡整张贴上去，出口以上的部分由遮罩挡住，
+    /// 看上去是从底下滑出来，不是被压扁了挤出来
+    static func screenY(_ u: Double) -> Double {
+        guard u > 0 else { return emerge + slopeAtZero * u }
+        return emerge + crawl * u + (cruise - crawl) * rampSoft * (softplus((u - rampU) / rampSoft) - rampAtZero)
+            + drift * u * u / 2
     }
 
-    /// 到地平线的「透视距离」q（= 1 / 深度）→ 屏上到地平线的距离：上半段原样，过了 knee 软收
-    static func g(_ q: Double) -> Double {
-        guard q > knee else { return q }
-        let e = q - knee
-        return knee + e / (1 + soften * e)
+    /// screenY 的反函数（二分；只在初始化时用）
+    static func along(atY y: Double) -> Double {
+        var lo = -3.0, hi = 12.0
+        for _ in 0..<60 {
+            let m = (lo + hi) / 2
+            if screenY(m) < y { lo = m } else { hi = m }
+        }
+        return (lo + hi) / 2
     }
 
-    static func gInverse(_ y: Double) -> Double {
-        guard y > knee else { return y }
-        let e = y - knee
-        let den = 1 - soften * e
-        return den > 0 ? knee + e / den : .infinity
+    /// 上沿走过这里就回收
+    static let cutU = along(atY: recycleY)
+    /// 下沿走过这里（遮罩还全透明的那条线）就把卡贴上去：露头是从全透明慢慢显出来，不是半透明的一截一下子冒出来
+    static let appearU = along(atY: fadeTop)
+
+    /// 录屏里两侧列的外沿（v = 1.605）在 L = 0.3115（Y 31%）处碰到屏边（离中轴 0.5 个屏宽）
+    static let edgeWidth = 0.5 / (columnPitch + 0.5)
+
+    struct Layout {
+        /// 参考屏宽（点）
+        let lateral: Double
+        /// 海报沿流向的长度乘几
+        let scale: Double
+        /// 中列两边各几列
+        let sides: Int
     }
 
-    /// 深度 d 处在屏上的 Y
-    static func screenY(_ d: Double) -> Double { horizon + g(1 / d) }
+    /// 按中轴到近处屏边的距离排：最外一列的外沿要在 Y 31% 碰到屏边（花瓶的轮廓和录屏一样），列数挑卡的大小最接近录屏的那个
+    /// （手机竖拿就是左右各一列、参考屏宽 = 屏宽；iPad 竖拿两列、横拿三列）。海报的长度跟着横向一起缩放，宽高比不变
+    static func layout(_ size: CGSize, reach: Double) -> Layout {
+        let ref = refAspect * Double(size.height)
+        let r = max(1, reach)
+        var best = (sides: 1, lateral: 2 * r, score: Double.infinity)
+        for s in 1...maxSides {
+            let lx = r / ((Double(s) * columnPitch + 0.5) * edgeWidth)
+            let score = abs(log(lx / ref))
+            if score < best.score { best = (sides: s, lateral: lx, score: score) }
+        }
+        return Layout(lateral: best.lateral, scale: min(maxScale, max(minScale, best.lateral / ref)), sides: best.sides)
+    }
 
-    /// 屏上 Y 处的深度
-    static func depth(atY y: Double) -> Double { 1 / max(1e-6, gInverse(y - horizon)) }
+    /// 一张卡（沿流向 top…bottom）切几条才跟得上列边的弯：拿直边连它上下沿的两个角，量它离真正的列边差几点
+    /// （列边在屏外的按屏边算）；差 bendTolerance 以内一条就够，差得多就切细（误差约按条数的平方缩小）
+    static func strips(top: Double, bottom: Double, edge: Double, lateral: Double, half: Double) -> Int {
+        let yt = screenY(top), yb = screenY(bottom)
+        guard yb - yt > 1e-6 else { return 1 }
+        let lt = width(yt), lb = width(yb)
+        var miss = 0.0
+        for f in stride(from: 0.25, through: 0.75, by: 0.25) {
+            let y = screenY(top + (bottom - top) * f)
+            let l = width(y)
+            let chord = lt + (lb - lt) * (y - yt) / (yb - yt)
+            miss = max(miss, abs(l - chord) * min(edge * lateral, half / max(l, 1e-6)))
+        }
+        let n = (miss / bendTolerance).squareRoot().rounded(.up)
+        return n.isFinite ? Int(min(Double(maxStrips), max(1, n))) : 1
+    }
 
-    /// 1.33 秒起平面一共往前走了多少：速度 = 匀速 ×（1 + 5 ×（1 − smoothstep(1.78…3.12)）），这里是它的积分
+    /// 1.30 秒起一共走了几排：速度 = 1 ×（1 + 5.6 ×（1 − smoothstep(1.309…3.474)）），这里是它的积分
     static func travel(_ t: Double) -> Double {
         guard t > start else { return 0 }
         let w = easeTo - easeFrom
@@ -103,7 +184,7 @@ private enum CoverPlaneModel {
         // smoothstep 从 easeFrom 积到 t：w·(p³ − p⁴/2)，过了 easeTo 以后每秒都是 1
         let eased = w * (p * p * p - p * p * p * p / 2) + max(0, t - easeTo)
         let s = t - start
-        return speed * (s + (rush - 1) * (s - eased))
+        return s + (rush - 1) * (s - eased)
     }
 
     /// 减弱动态效果：不推进，停在铺满以后的样子（第 6 秒那一帧）
@@ -120,6 +201,7 @@ private func planeSmooth(_ x: Double) -> Double {
 private struct CoverPlaneCanvas: UIViewRepresentable {
     let t: Double
     let size: CGSize
+    let reach: CGFloat
     let covers: [URL]
     let reduceMotion: Bool
 
@@ -128,22 +210,31 @@ private struct CoverPlaneCanvas: UIViewRepresentable {
     }
 
     func updateUIView(_ view: CoverPlaneView, context: Context) {
-        view.update(t: t, size: size, covers: covers, reduceMotion: reduceMotion)
+        view.update(t: t, size: size, reach: reach, covers: covers, reduceMotion: reduceMotion)
     }
 }
 
 private final class CoverPlaneView: UIView {
-    /// 平面上的一格：第几列（中间是 0）、第几排（领头一排是 0，往远处数）
+    /// 通道上的一格：第几列（中间是 0）、第几排（领头一排是 0，往后数）
     private struct Slot: Hashable {
         let column: Int
         let row: Int
     }
 
     private final class Card {
+        /// 容器（不变形）；里面 maxStrips 条横切的子图层，用到几条显示几条（见 shape）
         let layer: CALayer
+        let strips: [CALayer]
         var url: URL?
         var hasImage = false
-        init(layer: CALayer) { self.layer = layer }
+        /// 图上取哪一块（单位坐标，按 2 : 3 居中裁，等于 aspect fill）：每一条再取其中自己那一段
+        var crop = CGRect(x: 0, y: 0, width: 1, height: 1)
+        /// 现在切成几条（0：还没配过）
+        var cut = 0
+        init(layer: CALayer, strips: [CALayer]) {
+            self.layer = layer
+            self.strips = strips
+        }
     }
 
     /// 认的是哪一份海报单子（换了单子，预取从头记）
@@ -153,11 +244,11 @@ private final class CoverPlaneView: UIView {
     }
 
     private let plane = CALayer()
-    /// 平面自己的黑底（只铺平面那块梯形）：卡之间的缝是黑的，平面外面透出底下的光晕（录屏第 6 秒顶上就是这样）。
+    /// 平面自己的黑底（只铺通道那块花瓶形）：卡之间的缝是黑的，通道外面透出底下的光晕（录屏第 6 秒顶上就是这样）。
     /// 外面套一层裁切，只往下伸到领头一排：入场时黑底跟着封面一起往下铺，还没铺到的地方照旧是光晕
     private let sheetClip = CALayer()
     private let sheet = CAShapeLayer()
-    /// 平面的遮罩：顶上一条看不见，往下淡入（封面从灵动岛下面「冒」出来；光晕不在平面里，不受它影响）
+    /// 平面的遮罩：出口以上看不见（封面从灵动岛下面钻出来；光晕不在平面里，不受它影响）
     private let topFade = CAGradientLayer()
     private let glow = CAGradientLayer()
     private let shade = CAGradientLayer()
@@ -172,15 +263,19 @@ private final class CoverPlaneView: UIView {
     private var lastList: CoverList?
 
     private var laidOut: CGSize = .zero
-    /// 中列两边各几列（CoverPlaneModel.sides）
+    private var laidReach: CGFloat = 0
+    /// 中列两边各几列、参考屏宽（点）、海报长度乘几（CoverPlaneModel.layout）
     private var side = 1
-    /// 用户的 iPad 布局：平面宽过 500 点，上半屏还亮着的卡比 w342 大（拉伸 1.3–1.7 倍会发虚），改要 w500、按 760 像素解码。
+    private var lateral = 0.0
+    private var scale = 1.0
+    /// 用户的 iPad 布局：参考屏宽过 500 点，上半屏还亮着的卡比 w342 大（拉伸 1.3–1.7 倍会发虚），改要 w500、按 760 像素解码。
     /// 旧机型不换（省内存、省流量）
     private var hiRes = false
     private var placed: (travel: Double, count: Int, first: URL?)?
 
-    /// 卡在自己坐标系里的大小（2 : 3）：透视变换把它贴到屏上的四边形，圆角跟着透视一起缩放
+    /// 卡在自己坐标系里的大小（2 : 3）：透视变换把它（的每一条）贴到屏上的四边形，圆角跟着透视一起缩放
     private static let cardSize = CGSize(width: 100, height: 150)
+    fileprivate static let fullCrop = CGRect(x: 0, y: 0, width: 1, height: 1)
     /// 没网、图还没到：暗色占位
     private static let placeholder = UIColor(white: 0.1, alpha: 1).cgColor
 
@@ -192,7 +287,7 @@ private final class CoverPlaneView: UIView {
         isOpaque = true
         backgroundColor = .black
 
-        // 顶上：遮罩透明 → 不透明，封面（连同平面的黑底）从灵动岛下面「冒」出来；只遮平面，光晕的亮心照旧露着
+        // 出口：遮罩透明 → 不透明，封面（连同平面的黑底）从灵动岛下面钻出来；只遮平面，光晕的亮心照旧露着
         topFade.colors = [UIColor.clear.cgColor, UIColor.clear.cgColor, UIColor.black.cgColor]
         topFade.locations = [0, NSNumber(value: CoverPlaneModel.fadeTop), NSNumber(value: CoverPlaneModel.fadeFull)]
         topFade.startPoint = CGPoint(x: 0.5, y: 0)
@@ -229,25 +324,32 @@ private final class CoverPlaneView: UIView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func update(t: Double, size: CGSize, covers: [URL], reduceMotion: Bool) {
+    func update(t: Double, size: CGSize, reach: CGFloat, covers: [URL], reduceMotion: Bool) {
         guard size.width > 1, size.height > 1 else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
 
-        if size != laidOut {
+        let near = min(max(1, reach), size.width / 2)
+        if size != laidOut || near != laidReach {
             laidOut = size
+            laidReach = near
             let r = CGRect(origin: .zero, size: size)
             for l in [glow, plane, shade, sheetClip, sheet] as [CALayer] { l.frame = r }
             // 遮罩不在图层树里，单独给（平面自己的坐标，和屏幕一样）
             topFade.frame = r
-            side = CoverPlaneModel.sides(size)
+            for card in active.values { card.layer.frame = r }
+            for card in pool { card.layer.frame = r }
+            let fit = CoverPlaneModel.layout(size, reach: Double(near))
+            side = fit.sides
+            lateral = fit.lateral
+            scale = fit.scale
             sheet.path = footprint(size)
-            hiRes = CoverPlaneModel.planeWidth(size) > 500 && !Compat.legacyDevice
+            hiRes = lateral > 500 && !Compat.legacyDevice
             // 下次打开要用的那份海报按同一个尺寸先下（LoginCovers.prefetch）
             LoginCovers.shared.hiRes = hiRes
-            // 光晕的横向半径约平面宽的 0.58，纵向到 Y 22%
-            glow.endPoint = CGPoint(x: 0.5 + 0.58 * CoverPlaneModel.planeWidth(size) / Double(size.width), y: 0.22)
+            // 光晕的横向半径约参考屏宽的 0.58，纵向到 Y 22%
+            glow.endPoint = CGPoint(x: 0.5 + 0.58 * lateral / Double(size.width), y: 0.22)
             prefetchedTo = [:]
             placed = nil
         }
@@ -264,7 +366,7 @@ private final class CoverPlaneView: UIView {
         let travel: Double
         let show: Bool
         if reduceMotion {
-            // 减弱动态效果：封面不推进，停在铺满的样子，1.33 秒起淡入
+            // 减弱动态效果：封面不推进，停在铺满的样子，1.30 秒起淡入
             plane.opacity = Float(planeSmooth((t - CoverPlaneModel.start) / 0.4))
             travel = CoverPlaneModel.restTravel
             show = plane.opacity > 0
@@ -274,28 +376,32 @@ private final class CoverPlaneView: UIView {
             show = t > CoverPlaneModel.start
         }
 
-        // 平面没动、海报单子也没变（减弱动态效果、停住的那几帧）：不用重排
+        // 没往前走、海报单子也没变（减弱动态效果、停住的那几帧）：不用重排
         let key = (travel: show ? travel : -1, count: covers.count, first: covers.first)
         if let p = placed, p.travel == key.travel, p.count == key.count, p.first == key.first { return }
         placed = key
-        // 往后预取几排：入场前先取开场冲过来的那六排（三列就是 18 张）；之后每列多取看得见的下一两排；
+        // 往后预取几排：入场前先取开场冲过来的那六排（三列就是 18 张）；之后每列多取还没露头的下一两排；
         // 减弱动态效果不动，只取看得见的
         let ahead = reduceMotion ? 0 : (show ? 2 : 5)
         place(travel: travel, show: show, ahead: ahead, size: size, covers: covers)
     }
 
-    /// 平面在屏上的那块梯形（两侧列的外沿之间，顶上从 fadeTop 起、一直到屏底）：屏上的横向位置和屏上的 Y 成正比，边是直线
+    /// 通道在屏上的那块花瓶形（最外两列的外沿之间，从出口一直到屏底）
     private func footprint(_ size: CGSize) -> CGPath {
         let W = Double(size.width), H = Double(size.height)
-        let half = CoverPlaneModel.planeWidth(size) * CoverPlaneModel.lateral * (Double(side) * CoverPlaneModel.columnPitch + 0.5)
-        func corner(_ s: Double, _ y: Double) -> CGPoint {
-            CGPoint(x: CGFloat(W / 2 + s * half * (y - CoverPlaneModel.horizon)), y: CGFloat(y * H))
+        let half = Double(side) * CoverPlaneModel.columnPitch + 0.5
+        var right: [CGPoint] = []
+        var left: [CGPoint] = []
+        let n = 48
+        for i in 0...n {
+            // 上面弯得急，点排密一些
+            let y = CoverPlaneModel.fadeTop + (1 - CoverPlaneModel.fadeTop) * pow(Double(i) / Double(n), 1.6)
+            let dx = half * CoverPlaneModel.width(y) * lateral
+            right.append(CGPoint(x: W / 2 + dx, y: y * H))
+            left.append(CGPoint(x: W / 2 - dx, y: y * H))
         }
         let path = CGMutablePath()
-        path.move(to: corner(-1, CoverPlaneModel.fadeTop))
-        path.addLine(to: corner(1, CoverPlaneModel.fadeTop))
-        path.addLine(to: corner(1, 1))
-        path.addLine(to: corner(-1, 1))
+        path.addLines(between: right + left.reversed())
         path.closeSubpath()
         return path
     }
@@ -306,30 +412,27 @@ private final class CoverPlaneView: UIView {
     private func place(travel: Double, show: Bool, ahead: Int, size: CGSize, covers: [URL]) {
         var seen = Set<Slot>()
         let W = Double(size.width), H = Double(size.height)
-        let wp = CoverPlaneModel.planeWidth(size)
+        let lx = lateral
         let columns = side * 2 + 1
-        let lead = CoverPlaneModel.depth(atY: CoverPlaneModel.leadY)
-        let cut = CoverPlaneModel.depth(atY: CoverPlaneModel.recycleY)
-        let top = CoverPlaneModel.depth(atY: CoverPlaneModel.fadeTop)
+        let length = CoverPlaneModel.cardLength * scale
+        let pitch = (CoverPlaneModel.cardLength + CoverPlaneModel.rowGap) * scale
+        let cut = CoverPlaneModel.cutU
         let px = pixel
 
-        func screenX(_ lateral: Double, _ y: Double) -> CGFloat {
-            CGFloat(W / 2 + wp * CoverPlaneModel.lateral * lateral * (y - CoverPlaneModel.horizon))
-        }
-
-        // 平面的黑底跟着领头一排（两侧列）的近边往下铺；领头那排走远以后就一直铺到屏底
+        // 平面的黑底跟着领头一排往下铺，按落后半格的中列算（中间那张还没出来的地方照旧透出光晕，录屏 1.36 秒就是这样）；
+        // 那一排走进暗区以后就一直铺到屏底
         sheetClip.isHidden = !show
         if show {
-            let front = lead - travel
-            let bottom = front > 0.02 ? min(1, CoverPlaneModel.screenY(front)) : 1
+            let front = travel - 0.5 * pitch
+            let bottom = front < cut ? min(1, max(0, CoverPlaneModel.screenY(front))) : 1
             sheetClip.frame = CGRect(x: 0, y: 0, width: size.width, height: CGFloat(bottom * H))
         }
 
         for c in -side...side {
-            // 中列（和隔一列的）往远处错开半格，两侧列对齐
+            // 中列（和隔一列的）往后错开半格，两侧列对齐。第 r 排的下沿走到了 travel − (r + phase) × pitch
             let phase = c % 2 == 0 ? 0.5 : 0
-            let lo = max(0, Int(((cut - CoverPlaneModel.cardDepth + travel - lead) / CoverPlaneModel.rowPitch - phase).rounded(.up)))
-            let hi = Int(((top + travel - lead) / CoverPlaneModel.rowPitch - phase).rounded(.down))
+            let lo = max(0, Int(((travel - length - cut) / pitch - phase).rounded(.down)))
+            let hi = Int(((travel - CoverPlaneModel.appearU) / pitch - phase).rounded(.up))
 
             // 用户要求上半屏的封面是亮的：新的一排从顶上露头前图就先取好（多半已经解码完），不是暗块一路走过最亮的那段。
             // 每列记着取到了第几排，每排只问一次；内存里已经有的不再取
@@ -348,10 +451,12 @@ private final class CoverPlaneView: UIView {
             guard show, lo <= hi else { continue }
             let center = Double(c) * CoverPlaneModel.columnPitch
             for r in lo...hi {
-                let near = lead + (Double(r) + phase) * CoverPlaneModel.rowPitch - travel
-                guard near > 0.02 else { continue }
-                let yn = CoverPlaneModel.screenY(near), yf = CoverPlaneModel.screenY(near + CoverPlaneModel.cardDepth)
-                guard yf < CoverPlaneModel.recycleY, yn > CoverPlaneModel.fadeTop else { continue }
+                let bottom = travel - (Double(r) + phase) * pitch
+                let top = bottom - length
+                // 下沿还在遮罩全透明的地方，或者上沿已经进了暗区
+                guard bottom > CoverPlaneModel.appearU, top < cut else { continue }
+                // 整张卡都在平面外面（宽窗口最外几列的近处）：不占图层
+                if c != 0, (abs(center) - 0.5) * CoverPlaneModel.width(CoverPlaneModel.screenY(top)) * lx > W / 2 { continue }
                 let slot = Slot(column: c, row: r)
                 seen.insert(slot)
                 let index = r * columns + c + side
@@ -362,24 +467,31 @@ private final class CoverPlaneView: UIView {
                     card.url = url
                     fill(card, url)
                 }
-                card.layer.transform = Self.quad(
-                    Self.cardSize,
-                    CGPoint(x: screenX(center - 0.5, yf), y: CGFloat(yf * H)),
-                    CGPoint(x: screenX(center + 0.5, yf), y: CGFloat(yf * H)),
-                    CGPoint(x: screenX(center + 0.5, yn), y: CGFloat(yn * H)),
-                    CGPoint(x: screenX(center - 0.5, yn), y: CGFloat(yn * H))
-                )
+                let n = CoverPlaneModel.strips(top: top, bottom: bottom, edge: abs(center) + 0.5, lateral: lx, half: W / 2)
+                shape(card, n)
+                // 每一条：沿流向取卡上 f0…f1 那一段，四个角落在所在那列的两条边上
+                for i in 0..<n {
+                    let (f0, f1) = Self.span(i, n)
+                    let ya = CoverPlaneModel.screenY(top + length * f0)
+                    let yb = CoverPlaneModel.screenY(top + length * f1)
+                    let wa = CoverPlaneModel.width(ya) * lx
+                    let wb = CoverPlaneModel.width(yb) * lx
+                    card.strips[i].transform = Self.quad(
+                        CGSize(width: Self.cardSize.width, height: Self.cardSize.height * CGFloat(f1 - f0)),
+                        CGPoint(x: W / 2 + (center - 0.5) * wa, y: ya * H),
+                        CGPoint(x: W / 2 + (center + 0.5) * wa, y: ya * H),
+                        CGPoint(x: W / 2 + (center + 0.5) * wb, y: yb * H),
+                        CGPoint(x: W / 2 + (center - 0.5) * wb, y: yb * H)
+                    )
+                }
             }
         }
         // 滑进暗区（或者还没入场）的卡回收，留给后面补进来的
         let gone = active.keys.filter { !seen.contains($0) }
         for slot in gone {
             guard let card = active.removeValue(forKey: slot) else { continue }
-            card.layer.removeAllAnimations()
-            card.layer.contents = nil
+            wipe(card)
             card.layer.isHidden = true
-            card.url = nil
-            card.hasImage = false
             pool.append(card)
         }
     }
@@ -387,36 +499,125 @@ private final class CoverPlaneView: UIView {
     private func claim(_ slot: Slot) -> Card {
         let card = pool.popLast() ?? makeCard()
         card.layer.isHidden = false
-        card.layer.contents = nil
-        card.url = nil
-        card.hasImage = false
+        wipe(card)
         active[slot] = card
         return card
     }
 
+    /// 卡回收或者重新领用：图、裁切、条数都清掉（下次用的时候重新配条，contentsRect 跟着新图的裁切）
+    private func wipe(_ card: Card) {
+        for l in card.strips {
+            l.removeAllAnimations()
+            l.contents = nil
+        }
+        card.url = nil
+        card.hasImage = false
+        card.crop = Self.fullCrop
+        card.cut = 0
+    }
+
     private func makeCard() -> Card {
-        let l = CALayer()
-        // 锚点在左上、position 为 0：transform 直接把卡上的点映到平面图层的坐标（见 quad）
-        l.anchorPoint = .zero
-        l.bounds = CGRect(origin: .zero, size: Self.cardSize)
-        l.position = .zero
-        l.cornerRadius = 8
-        l.cornerCurve = .continuous
-        l.masksToBounds = true
-        l.allowsEdgeAntialiasing = true
-        l.contentsGravity = .resizeAspectFill
-        // 远处的卡缩得很小：带 mipmap 的三线性过滤，不闪烁
-        l.minificationFilter = .trilinear
-        l.backgroundColor = Self.placeholder
-        plane.addSublayer(l)
-        return Card(layer: l)
+        let container = CALayer()
+        container.frame = CGRect(origin: .zero, size: laidOut)
+        var strips: [CALayer] = []
+        for _ in 0..<CoverPlaneModel.maxStrips {
+            let l = CALayer()
+            // 锚点在左上、position 为 0：transform 直接把这一条上的点映到平面图层的坐标（见 quad）
+            l.anchorPoint = .zero
+            l.bounds = CGRect(origin: .zero, size: Self.cardSize)
+            l.position = .zero
+            l.cornerRadius = 8
+            l.cornerCurve = .continuous
+            l.masksToBounds = true
+            l.allowsEdgeAntialiasing = true
+            // 裁切自己算（crop + contentsRect），每一条按自己那一段拉满
+            l.contentsGravity = .resize
+            // 远处的卡缩得很小：带 mipmap 的三线性过滤，不闪烁
+            l.minificationFilter = .trilinear
+            l.backgroundColor = Self.placeholder
+            l.isHidden = true
+            // 后加的在上面：每一条往下多盖的那一点被下一条压住
+            container.addSublayer(l)
+            strips.append(l)
+        }
+        plane.addSublayer(container)
+        return Card(layer: container, strips: strips)
+    }
+
+    /// 切成 n 条：第 i 条管卡上 [i/n, (i+1)/n] 那一段，往下多盖 stripOverlap（接缝不露底）；
+    /// 只有第一条带上面两个圆角、最后一条带下面两个，抗锯齿也只开卡的外沿（中间的接缝不描边）
+    private func shape(_ card: Card, _ n: Int) {
+        guard card.cut != n else { return }
+        card.cut = n
+        for (i, l) in card.strips.enumerated() {
+            guard i < n else {
+                l.isHidden = true
+                continue
+            }
+            let (f0, f1) = Self.span(i, n)
+            l.isHidden = false
+            l.bounds = CGRect(x: 0, y: 0, width: Self.cardSize.width, height: Self.cardSize.height * CGFloat(f1 - f0))
+            var corners: CACornerMask = []
+            var edges: CAEdgeAntialiasingMask = [.layerLeftEdge, .layerRightEdge]
+            if i == 0 {
+                corners.formUnion([.layerMinXMinYCorner, .layerMaxXMinYCorner])
+                // minY 那条边（CA 叫它 bottom）：卡的上沿
+                edges.insert(.layerBottomEdge)
+            }
+            if i == n - 1 {
+                corners.formUnion([.layerMinXMaxYCorner, .layerMaxXMaxYCorner])
+                // maxY 那条边（CA 叫它 top）：卡的下沿
+                edges.insert(.layerTopEdge)
+            }
+            l.maskedCorners = corners
+            l.edgeAntialiasingMask = edges
+            l.contentsRect = Self.slice(card.crop, f0, f1)
+        }
+    }
+
+    /// 第 i 条（共 n 条）管卡上沿流向的哪一段（0 是上沿、1 是下沿）
+    private static func span(_ i: Int, _ n: Int) -> (Double, Double) {
+        let f0 = Double(i) / Double(n)
+        let f1 = i == n - 1 ? 1 : min(1, Double(i + 1) / Double(n) + CoverPlaneModel.stripOverlap)
+        return (f0, f1)
+    }
+
+    private static func slice(_ crop: CGRect, _ f0: Double, _ f1: Double) -> CGRect {
+        CGRect(x: crop.minX, y: crop.minY + crop.height * CGFloat(f0),
+               width: crop.width, height: crop.height * CGFloat(f1 - f0))
+    }
+
+    /// 图按 2 : 3 居中裁（aspect fill）：宽了裁两边，长了裁上下
+    private static func crop(_ image: CGImage) -> CGRect {
+        let w = CGFloat(image.width), h = CGFloat(image.height)
+        guard w > 0, h > 0 else { return fullCrop }
+        let card = cardSize.width / cardSize.height
+        let aspect = w / h
+        if aspect > card {
+            let cw = card / aspect
+            return CGRect(x: (1 - cw) / 2, y: 0, width: cw, height: 1)
+        }
+        let ch = aspect / card
+        return CGRect(x: 0, y: (1 - ch) / 2, width: 1, height: ch)
+    }
+
+    /// 贴图：每一条都是同一张图（不多占内存），各取自己那一段
+    private func paint(_ card: Card, _ image: CGImage) {
+        card.crop = Self.crop(image)
+        for (i, l) in card.strips.enumerated() {
+            l.contents = image
+            if i < card.cut {
+                let (f0, f1) = Self.span(i, card.cut)
+                l.contentsRect = Self.slice(card.crop, f0, f1)
+            }
+        }
+        card.hasImage = true
     }
 
     /// 内存里有就直接贴（不淡入）；没有就去取，到了淡入
     private func fill(_ card: Card, _ url: URL) {
         if let img = ImagePipeline.shared.cached(url, maxPixel: pixel)?.cgImage {
-            card.layer.contents = img
-            card.hasImage = true
+            paint(card, img)
             return
         }
         load(url)
@@ -443,19 +644,18 @@ private final class CoverPlaneView: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         for card in active.values where card.url == url && !card.hasImage {
-            // 从暗色占位淡入海报（录屏里封面是一张张亮起来的）
+            // 从暗色占位淡入海报（录屏里封面是一张张亮起来的）；每一条都淡，没露出来的那几条换条数时接着淡
             let fade = CATransition()
             fade.type = .fade
             fade.duration = 0.45
-            card.layer.add(fade, forKey: "fade")
-            card.layer.contents = cg
-            card.hasImage = true
+            for l in card.strips { l.add(fade, forKey: "fade") }
+            paint(card, cg)
         }
         CATransaction.commit()
     }
 
-    /// 把卡（0…w × 0…h）贴到屏上的四边形（左上、右上、右下、左下）：单位正方形 → 四边形的透视映射（Heckbert），
-    /// 再按卡的宽高缩放。CA 是行向量乘矩阵：[x y 0 1]·M，第 4 列（m14、m24）是透视的分母
+    /// 把一条（0…w × 0…h）贴到屏上的四边形（左上、右上、右下、左下）：单位正方形 → 四边形的透视映射（Heckbert），
+    /// 再按这一条的宽高缩放。CA 是行向量乘矩阵：[x y 0 1]·M，第 4 列（m14、m24）是透视的分母
     private static func quad(_ size: CGSize, _ p0: CGPoint, _ p1: CGPoint, _ p2: CGPoint, _ p3: CGPoint) -> CATransform3D {
         let dx1 = p1.x - p2.x, dx2 = p3.x - p2.x, dx3 = p0.x - p1.x + p2.x - p3.x
         let dy1 = p1.y - p2.y, dy2 = p3.y - p2.y, dy3 = p0.y - p1.y + p2.y - p3.y
