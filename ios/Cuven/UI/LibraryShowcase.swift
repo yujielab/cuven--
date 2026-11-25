@@ -481,8 +481,9 @@ struct ShowcaseIntro: View {
             .padding(.leading, metrics.margin + lead).padding(.trailing, metrics.margin + trail)
 
             if !stills.isEmpty {
-                // 剧照：一排 16:9（网页版 sc-gallery），停在左边线上、右边露出下一张一截（S8）
-                VStack(alignment: .leading, spacing: metrics.titleGap) {
+                // 剧照：一排 16:9（网页版 sc-gallery），停在左边线上、右边露出下一张一截（S8）。
+                // 这一排不是 DSShelf（上下没有那 4 点回弹的空）：标题到剧照用 blockTitleGap，看上去和别处标题到一排卡一样远
+                VStack(alignment: .leading, spacing: metrics.blockTitleGap) {
                     Text("剧照")
                         .font(.dsSectionTitle)
                         .foregroundStyle(.white)
@@ -510,7 +511,7 @@ struct ShowcaseIntro: View {
                     .contentMargins(.trailing, metrics.margin + trail, for: .scrollContent)
                     .scrollTargetBehavior(.viewAligned)
                 }
-                // 「剧照」是新的一组：钮到标题 20 → 28（标题到剧照 12），和「播放」那一行分得开（F3、F12）
+                // 「剧照」是新的一组：钮到标题 20 → 28（标题到剧照 blockTitleGap），和「播放」那一行分得开（F3、F12）
                 .padding(.top, 8)
             }
 

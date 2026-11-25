@@ -44,22 +44,40 @@ struct DSMetrics {
     var margin: CGFloat { max(20, (width * 80 / 1920).rounded()) }
     /// 卡与卡的间距：折起至少 18、展开至少 24（留白分组：F3、F12）
     var gutter: CGFloat { max(wide ? 24 : 18, (width * 48 / 1920).rounded()) }
-    /// 排与排之间（T24「行距至少 100」按比例缩，再给标题留位：F12）；
-    /// 展开时按屏高定（约屏高的 8.5%，52–58）：展开横拿只有六百多点高，一屏要看得到不止一排；
-    /// 展开竖拿也不比横拿松太多（以前按宽算是 66，比横拿的 55 还大：用户要求展开竖拿的间距也要合适）
+    /// 排与排之间（T24「行距至少 100」按比例缩，再给标题留位：F12）。用户要求「保持一定的留白，整个界面看上去不会拥挤」：
+    /// 折起 / 手机 48 → 56（高的大卡、编辑推荐之间以前读着像一整面墙）；
+    /// 展开时按屏高定（约屏高的 8.5%，56–62）：展开横拿只有六百多点高，一屏要看得到不止一排；
+    /// 展开竖拿也不比横拿松太多（以前按宽算是 66，比横拿的 55 还大：用户要求展开竖拿的间距也要合适）。
+    /// 没给高的页（搜索：键盘弹出来版面不跟着变）也按 62 封顶，不会比别的页松一截（以前 iPad 上是 75）
     var shelfGap: CGFloat {
-        let byWidth = max(wide ? 56 : 44, (width * 120 / 1920).rounded() + 24)
-        guard wide, height > 0 else { return byWidth }
-        return min(byWidth, clamp((height * 0.085).rounded(), 52, 58))
+        let byWidth = max(wide ? 56 : 52, (width * 120 / 1920).rounded() + (wide ? 24 : 32))
+        guard wide else { return byWidth }
+        let cap = height > 0 ? clamp((height * 0.085).rounded(), 56, 62) : 62
+        return min(byWidth, cap)
     }
-    /// 分区标题到那一排卡
-    var titleGap: CGFloat { wide ? 16 : 12 }
+    /// 分区标题到那一排卡（排自己上下还有 4 点给按下去的回弹：看到的是 18 / 22）
+    var titleGap: CGFloat { wide ? 18 : 14 }
+    /// 标题到一张卡、一块列表（不是横排的 DSShelf，没有那 4 点）：看上去和标题到一排卡一样远
+    var blockTitleGap: CGFloat { titleGap + 4 }
+    /// 同一节里的两排（全部影片一年里的「电影」「剧集」）：比标题到卡远一倍多，看得出下一个标题管的是下一排（F12）
+    var subsectionGap: CGFloat { wide ? 40 : 32 }
+    /// 网格的行距：比卡与卡的左右间距宽一些（T24：竖着的间距大于横着的），大卡带色条的网格不会连成一条
+    var gridRowGap: CGFloat { gutter + (wide ? 10 : 8) }
+    /// 大标题到页面第一块、页面最底下留多少（各页以前各写各的：4、8、12 / 40、44、48）
+    var pageTop: CGFloat { titleGap }
+    var pageBottom: CGFloat { shelfGap }
 
     /// 竖版海报宽：折起一排两张半；展开约 124–190 点（屏宽的 15%），Duo 展开竖拿四张多、横拿五张半（S6、S8）。
     /// 只看宽：各页（有没有导航栏、键盘弹没弹出来）同一种卡一样大
     var posterWidth: CGFloat {
         guard wide else { return cardWidth(visible: width < 500 ? 2.6 : 4.4) }
         return fit(target: clamp(width * 0.15, 124, 190), min: 112)
+    }
+    /// 主页四个分类区（动画片区 …）的竖版海报：比别处大一成；展开时也按 fit 排，最后露出下一张一截
+    /// （以前直接 × 1.1：iPad 竖拿 5 张刚好排到右边 10 点处、第 6 张一点不露，右边挤着、看不出还能往右滑：S8）
+    var categoryPosterWidth: CGFloat {
+        guard wide else { return posterWidth }
+        return fit(target: (posterWidth * 1.1).rounded(.down), min: posterWidth)
     }
     /// 16:9 卡宽（继续观看、资料库、预告片）：折起一张多一点；展开约 283–400 点（屏宽的 36%），Duo 展开两张半（S6）
     var wideCardWidth: CGFloat {

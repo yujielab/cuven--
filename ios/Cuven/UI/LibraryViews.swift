@@ -24,8 +24,9 @@ struct EntryGrid: View {
     var body: some View {
         let n = metrics.gridColumns()
         let w = max(40, metrics.gridCardWidth())
+        // 行距比列距宽一些（gridRowGap：竖着的间距大于横着的），一面海报墙看着不挤（以前 gutter + 6）
         LazyVGrid(columns: Array(repeating: GridItem(.fixed(w), spacing: metrics.gutter, alignment: .top), count: n),
-                  alignment: .leading, spacing: metrics.gutter + 6) {
+                  alignment: .leading, spacing: metrics.gridRowGap) {
             ForEach(entries) { e in cell(e, width: w) }
         }
         .padding(.horizontal, metrics.margin)
@@ -230,15 +231,17 @@ struct SearchView: View {
                     }
                 }
                 if !recent.isEmpty {
-                    VStack(alignment: .leading, spacing: metrics.titleGap) {
+                    // 下面是网格不是横排（没有横排上下那 4 点）：用 blockTitleGap，看上去和「文件夹」标题到那一排一样远
+                    VStack(alignment: .leading, spacing: metrics.blockTitleGap) {
                         DSShelfTitle(title: "最近添加", metrics: metrics)
                         LibraryGrid(videos: recent, metrics: metrics, slot: "search-recent", identifier: "search-movie")
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 8)
-            .padding(.bottom, 40)
+            // 大标题到第一块、页底：各页同一套（pageTop / pageBottom），以前 8 / 40
+            .padding(.top, metrics.pageTop)
+            .padding(.bottom, metrics.pageBottom)
         }
     }
 
@@ -248,8 +251,8 @@ struct SearchView: View {
             // 片库里没有：看影片库索引里有没有（「可请求添加」）；也没有才说「没有找到」——
             // F87、F88：不怪人，说怎么办，再给一颗钮直接去做（设计轮 2（并行·library）：以前只有一句话；年份举今年的）
             RequestableSearchSection(query: q, metrics: metrics, showEmpty: true)
-                .padding(.top, 8)
-                .padding(.bottom, 40)
+                .padding(.top, metrics.pageTop)
+                .padding(.bottom, metrics.pageBottom)
         } else {
             let movies = hits.compactMap { h -> Video? in if case .movie(let v) = h.kind { return v } else { return nil } }
             let shows = hits.compactMap { h -> Series? in if case .series(let s) = h.kind { return s } else { return nil } }
@@ -277,8 +280,8 @@ struct SearchView: View {
             }
             .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: shown)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 8)
-            .padding(.bottom, 40)
+            .padding(.top, metrics.pageTop)
+            .padding(.bottom, metrics.pageBottom)
         }
     }
 
@@ -455,7 +458,8 @@ struct SearchResultRow: View {
                 }
                 .accessibilityLabel("更多")
             }
-            .padding(.vertical, 10)
+            // 行高松一点（上下 10 → 12）：一行一部的列表读着不挤
+            .padding(.vertical, 12)
             .padding(.leading, metrics.margin)
             // 「•••」的点按区 44 往边距里伸，符号本身的右沿落在边距线上，和行间细线的右端对齐
             // （设计轮 2（并行·library）：以前符号缩在边距线里 14 点：F2）

@@ -150,7 +150,9 @@ struct CollectionHeader<Top: View>: View {
                 .padding(.top, 10)
         }
         .padding(.horizontal, metrics.margin)
-        .padding(.bottom, 34)
+        // 合集页、分类页：说明到下面那一列大卡差不多一道排距（以前 34，卡顶着说明）；
+        // 主页里那条带照旧 34（带下面的分区自己还隔着一道排距）
+        .padding(.bottom, page ? metrics.shelfGap - 8 : 34)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background { backdrop }
         .task(id: lead) { await loadTint() }

@@ -130,7 +130,9 @@ struct AccountView: View {
             ScrollView {
                 VStack(spacing: 0) {
                     header
-                    VStack(alignment: .leading, spacing: 34) {
+                    // 组与组之间 34 → 窄屏 44、宽屏 52（用户要求「保持一定的留白，整个界面看上去不会拥挤」）：
+                    // 以前一张卡的底和下一个组名只隔 34，组名读着像贴在上一张卡下面
+                    VStack(alignment: .leading, spacing: hsc == .compact ? 44 : 52) {
                         // 个人资料卡（账户页移植（网页版）：网页版账户页的第一张卡）
                         ProfileCard { profileSheet = $0 }
                         // 网络（网页版的第二张卡：45 根竖条的滑块，在 iOS 上管正片缓冲多少秒，AccountUsage.swift）；
@@ -150,7 +152,8 @@ struct AccountView: View {
                 }
                 // 卡更宽一点（用户要求卡片更精致）：窄屏（iPhone、折起的 Duo）左右 24 → 16 点，和系统分组列表一样；宽屏照旧 24
                 .padding(.horizontal, hsc == .compact ? 16 : 24)
-                .padding(.bottom, 44)
+                // 页底多留一点（44 → 56，和别的页的 pageBottom 差不多）：最后一组不贴着屏底的标签栏
+                .padding(.bottom, 56)
                 .frame(maxWidth: 680)
                 .frame(maxWidth: .infinity)
             }
@@ -494,9 +497,12 @@ struct AccountView: View {
 struct AccountGroup<Rows: View>: View {
     let title: String
     @ViewBuilder var rows: () -> Rows
+    /// 在这里读尺寸类别：各处（账户页、网络、使用洞察）调用时不用多传一个参数
+    @Environment(\.horizontalSizeClass) private var hsc
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        // 组名到卡 14 → 窄屏 18、宽屏 22：和别的页标题到一张卡（blockTitleGap）一样远，组名不挤着卡
+        VStack(alignment: .leading, spacing: hsc == .compact ? 18 : 22) {
             Text(title)
                 .font(.dsSectionTitle)
                 .foregroundStyle(.white)

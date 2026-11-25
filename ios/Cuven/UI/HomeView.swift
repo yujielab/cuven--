@@ -86,7 +86,8 @@ struct HomeView: View {
                     .frame(width: fullWidth, height: height)
                     .accessibilityHidden(true)
             } else {
-                Color.clear.frame(width: fullWidth, height: max(insets.top, 12) + 64)
+                // 和下面「主页」那一行的上边距同一个下限（24），占的高度跟着一起变
+                Color.clear.frame(width: fullWidth, height: max(insets.top, 24) + 64)
             }
             // 最上面一行：左边白字「主页」（Apple TV 主页那样的大标题，压在画面上、跟着头图一起滚走：C13、F34；
             // 发行前从英文「Home」改成中文，和标签栏的「主页」一致），右边光学扫描。
@@ -101,7 +102,9 @@ struct HomeView: View {
                 Spacer(minLength: 12)
                 if canScan { scanButton }
             }
-            .padding(.top, max(insets.top, 12) + 8)
+            // 没有状态栏留的安全区时（iPhone Duo 折起，状态栏在侧边那一列）至少离上沿 24 + 8：
+            // 以前是 12 + 8，大标题贴着屏幕顶（用户要求「保持一定的留白，整个界面看上去不会拥挤」）
+            .padding(.top, max(insets.top, 24) + 8)
             .padding(.leading, insets.leading + m.margin)
             .padding(.trailing, insets.trailing + m.margin)
             .frame(width: fullWidth)
@@ -330,11 +333,11 @@ struct HomeView: View {
     }
 
     /// 四个大类之一：电影和剧集一起（动画、动作、喜剧新的在前，严苛品质区评分高的在前）；标题「›」进这一类的全部。
-    /// 展开时海报比别处大 10%（用户要求，只在展开时）
+    /// 展开时海报比别处大 10%（用户要求，只在展开时）；按 fit 排，最后露出下一张一截（DSMetrics.categoryPosterWidth）
     @ViewBuilder
     private func categoryShelf(_ c: HomeCategory, _ m: DSMetrics) -> some View {
         let items = model.categoryEntries(c, limit: 20)
-        let w = m.wide ? (m.posterWidth * 1.1).rounded(.down) : m.posterWidth
+        let w = m.categoryPosterWidth
         if !items.isEmpty {
             DSSection(title: c.title, metrics: m, route: .shelf(.category(c))) {
                 DSShelf(metrics: m) {
