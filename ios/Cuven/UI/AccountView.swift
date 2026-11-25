@@ -88,6 +88,8 @@ struct AccountView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(PlayerCoordinator.autoplayKey) private var autoplayNext = true
+    /// 流畅插帧（系统自带的低延迟插帧，Core/FrameInterpolation.swift）：关闭 / 开启 / 开启 · 显示诊断
+    @AppStorage(FrameInterpolation.key) private var interpolationMode = FrameInterpolation.Mode.off.rawValue
     /// 改进兼容性（Compat.swift）：没选过的时候按机型（旧机型开）
     /// 改进兼容性的档位：关闭 / 标准 / 增强（Compat.swift）
     @State private var compatLevel = Compat.level
@@ -305,12 +307,28 @@ struct AccountView: View {
     private var playbackGroup: some View {
         let audio = TrackPrefs.Audio(rawValue: audioPref) ?? .auto
         let subtitle = TrackPrefs.Subtitle(rawValue: subtitlePref) ?? .auto
+        let interpolation = FrameInterpolation.Mode(rawValue: interpolationMode) ?? .off
         return AccountGroup(title: "播放") {
             AccountRow(icon: "forward.end", title: "自动播放下一集", subtitle: "看完自动继续") {
                 Toggle("自动播放下一集", isOn: $autoplayNext)
                     .labelsHidden()
                     .tint(.green)
             }
+            AccountDivider()
+            // 流畅插帧（用户要求「系统自带插帧」，先做 1080p 及以下的普通画面）：整行是一颗系统弹出菜单
+            Menu {
+                Picker("流畅插帧", selection: $interpolationMode) {
+                    ForEach(FrameInterpolation.Mode.allCases) { Text($0.label).tag($0.rawValue) }
+                }
+            } label: {
+                AccountRow(icon: "film.stack", title: "流畅插帧", subtitle: "1080p 及以下的普通画面补到屏幕刷新率") {
+                    AccountMenuValue(interpolation.label)
+                }
+            }
+            .menuStyle(.button)
+            .buttonStyle(AccountRowPress())
+            .accessibilityLabel("流畅插帧")
+            .accessibilityValue(interpolation.label)
             AccountDivider()
             // 「影院光影」「光影实验室」两行按用户要求移除（参数固定，模式在播放器 Touch Bar 的「光效」上换）
             // 首选音轨 / 首选字幕（用户要求「允许设置字幕和音轨首选项」）：整行是一颗系统弹出菜单，勾着当前那一项（C11）
@@ -349,6 +367,7 @@ struct AccountView: View {
         }
         .sensoryFeedback(.selection, trigger: audioPref)
         .sensoryFeedback(.selection, trigger: subtitlePref)
+        .sensoryFeedback(.selection, trigger: interpolationMode)
     }
 
     /// 改进兼容性（用户要求：iPad（第 9 代）和更早的机型放不了）。说明照实写：改的是片源的规格标记，画面数据不变
