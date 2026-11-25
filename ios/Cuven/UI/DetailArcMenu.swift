@@ -29,11 +29,16 @@ struct DetailArcMenuLayer: View {
 
     /// 圆钮多大、弧离圆心多远、多厚
     private static let button: CGFloat = 48
-    private static let radius: CGFloat = 64
-    private static let thickness: CGFloat = 46
-    /// 三块各占多少度、中间隔多少度（看得见的弧长，含圆头）
-    private static let span: Double = 56
-    private static let gap: Double = 7
+    private static let radius: CGFloat = 62
+    private static let thickness: CGFloat = 42
+    /// 三块各占多少度、中间隔多少度（看得见的弧长，含圆头）。缝 12°：里沿也隔开约 9 点，三块一眼看得出是分开的
+    /// （真机上以前 7°、里沿只有 5 点，看上去还是连着的）
+    private static let span: Double = 50
+    private static let gap: Double = 12
+    /// 弧最外沿离圆心多远（两头那两块的圆头会绕到圆钮正上方、正下方）
+    private static let reach: CGFloat = radius + thickness / 2
+    /// 三块的玻璃压暗一点：亮的海报上白色图标也看得清（真机截图：返回、下载几乎看不见）
+    private static let glassInk = Glass.regular.tint(Color.black.opacity(0.32)).interactive()
     /// 圆钮周围那一块多大：圆钮在正中，三块弧（最外沿离圆心 radius + thickness / 2）都落在里面，外面再留一圈
     private static let box: CGFloat = (radius + thickness) * 2 + 40
     /// 展开：带一点回弹。收起用 DSMotion.snap：干脆利落、不弹
@@ -68,20 +73,22 @@ struct DetailArcMenuLayer: View {
         let columnLeading = lead > trail && lead >= 44
         let rail = max(DuoRail.shared.fromTrailing ?? DuoNavLayer.statusAxis, DuoNavLayer.statusAxis)
         let cap = DuoNavLayer.capsule(columnHeight: size.height)
-        // 侧边那一列里放得下（状态栏下面、胶囊上面留得出这一颗）：摆在返回钮原来的地方，
-        // 弧往内容那一边展开：圆钮在后缘那一列里就往左（180°），在前缘那一列里往右（0°）
-        if cap.top - 40 >= 236 {
-            return Spot(center: CGPoint(x: columnLeading ? rail : size.width - rail, y: min(288, cap.top - 40)),
+        // 侧边那一列里放得下：摆在返回钮原来的地方，弧往内容那一边展开（圆钮在后缘那一列里就往左 180°，在前缘那一列里往右 0°）。
+        // 最下面那块的圆头会绕到圆钮正下方：圆钮离胶囊顶至少留 reach + 9 点，展开了也碰不到导航胶囊；
+        // 最上面那块同样绕到正上方：圆钮不高过 250，弧顶不压到状态栏
+        let y = min(288, cap.top - Self.reach - 9)
+        if y >= 250 {
+            return Spot(center: CGPoint(x: columnLeading ? rail : size.width - rail, y: y),
                         toward: columnLeading ? 0 : 180)
         }
-        // 放不下（折起横拿那种矮的一列）：挪到页面左上角，往右下（45°）展开。三块一共占 182°，两头那两块会绕到圆钮的上面和左边：
+        // 放不下（折起横拿那种矮的一列）：挪到页面左上角，往右下（45°）展开。三块一共占 174°，两头那两块会绕到圆钮的上面和左边：
         // 圆钮离上、左两边要留够这一截再加 10 点。以前离左 44、离上 48，「分享」那块出了屏幕左边 6 点、「返回」那块顶出屏幕上沿；
         // 那一列在前缘时还把前缘的安全区当成 0，圆钮正压在那一列顶上的状态栏上
         let inset = (Self.cornerReach + 10).rounded()
         return Spot(center: CGPoint(x: lead + inset, y: top + inset), toward: 45)
     }
 
-    /// 往右下 45° 展开时，两头那两块最靠上 / 最靠左的地方离圆心多远：那一头圆头的圆心，再加半个厚度（约 50 点）
+    /// 往右下 45° 展开时，两头那两块最靠上 / 最靠左的地方离圆心多远：那一头圆头的圆心，再加半个厚度（约 45 点）
     private static var cornerReach: CGFloat {
         let capDeg = Double(thickness / 2 / radius) * 180 / .pi
         let core = max(1, span - capDeg * 2)
@@ -132,7 +139,7 @@ struct DetailArcMenuLayer: View {
     }
 
     /// 圆钮和三块弧：只占圆钮周围这一块，不铺满整页。四块各是各的玻璃——
-    /// 以前放在同一个玻璃容器里（间距 18，比两块弧之间约 6 点的缝还宽）、再用 glassEffectID 互相形变，
+    /// 以前放在同一个玻璃容器里（间距 18，比两块弧之间的缝还宽）、再用 glassEffectID 互相形变，
     /// 三块的玻璃会粘成连着的一整条（用户要求：三块不能粘连）
     private func fan(toward: Double) -> some View {
         ZStack {
@@ -155,7 +162,7 @@ struct DetailArcMenuLayer: View {
                 .contentShape(Circle())
         }
         .buttonStyle(PressableStyle(scale: 0.92))
-        .glassEffect(.regular.interactive(), in: Circle())
+        .glassEffect(Self.glassInk, in: Circle())
         .accessibilityLabel(open ? "收起菜单" : "更多操作")
         .accessibilityHint(open ? "" : "返回、下载、分享")
         .accessibilityIdentifier("detail-arc-menu")
@@ -169,7 +176,7 @@ struct DetailArcMenuLayer: View {
         let mid = toward > 90 && toward < 270 ? toward - offset : toward + offset
         let slot = ArcSlot(band: ArcBand(midDegrees: mid, spanDegrees: Self.span, radius: Self.radius, thickness: Self.thickness))
         return item(i, slot: slot)
-            .glassEffect(.regular.interactive(), in: slot)
+            .glassEffect(Self.glassInk, in: slot)
             .position(x: Self.box / 2 + slot.middle.x, y: Self.box / 2 + slot.middle.y)
             // 正在收起的那几块不再接点按
             .allowsHitTesting(open)
