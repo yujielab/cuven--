@@ -22,6 +22,8 @@ struct RequestCenterView: View {
     @State private var basketCleared = false
 
     static let keep = 10
+    /// 请求中心底上那片颜色：淡紫（不跟头像取色，固定这一种）
+    static let tint = Color(hue: 0.74, saturation: 0.42, brightness: 0.6)
     private var store: RequestStore { RequestStore.shared }
 
     var body: some View {
@@ -30,7 +32,8 @@ struct RequestCenterView: View {
                 let insets = geo.safeAreaInsets
                 content(DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing, height: geo.size.height))
             }
-            .background(Theme.bg)
+            // 和「我的」同一种渐变底（AccountBackdrop：顶上一片颜色往下沉到深灰），颜色固定是淡紫（用户要求）
+            .background { AccountBackdrop(tint: Self.tint).ignoresSafeArea() }
             .navigationTitle("请求")
             .navigationBarTitleDisplayMode(.large)
         }
