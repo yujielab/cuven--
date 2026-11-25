@@ -27,43 +27,11 @@ import UIKit
 // 切格子、定门槛、撒粒子、缩 mip 都在后台做（LogoParticleBaker），主线程只把它们拷进共享存储的贴图和缓冲
 // （不经过 GPU：不用 blit 生成 mip，贴图也不当渲染目标）。拷好了、管线也在，就从 onReady 说「画得出来」。
 // 画不出来的时候字标不能凭空消失：没有 Metal、管线建不起来、切不出来 / 拷不上去，onReady 就一直是 false（调用方让两枚真字标交叉淡入淡出）；
-// 画到一半 GPU 报错、露出来以后一直画不上，也改说 false。每一步失败和第一帧都记一行 lpLog，同时进 LogoParticleDiag（详情页的诊断浮层读它）。
-
-/// 粒子层的诊断：最近十几行 lpLog 和一行现状，给详情页的诊断浮层看（UserDefaults「cuven_particle_diag」打开时由那边显示）。
-/// 只有哪一步、尺寸、格式、进度，不含片名和地址（仓库公开）
-@MainActor @Observable
-final class LogoParticleDiag {
-    static let shared = LogoParticleDiag()
-    /// 最近 12 行 lpLog（最新的在最后），每行前面一个短的时间
-    private(set) var lines: [String] = []
-    /// 一行现状：字标图多大、切好没有（几格、几粒）、说过画得出来没有、GPU 做完过一帧没有、画过没有、放弃了没有、
-    /// 画布格式和大小、露着没有、进度、最近一次跳过的原因
-    private(set) var state: String = ""
-
-    private static let keep = 12
-    private static let clock: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "HH:mm:ss.S"
-        return f
-    }()
-
-    func push(_ line: String) {
-        var l = lines
-        l.append(Self.clock.string(from: Date()) + " " + line)
-        if l.count > Self.keep { l.removeFirst(l.count - Self.keep) }
-        lines = l
-    }
-
-    func setState(_ s: String) {
-        if state != s { state = s }
-    }
-}
+// 画到一半 GPU 报错、露出来以后一直画不上，也改说 false。每一步失败和第一帧都记一行 lpLog。
 
 /// 粒子层的诊断日志：只有哪一步、像素格式、尺寸、进度，不含片名和地址（仓库公开）。
 /// 进系统日志（装到手机上的发行版也有，Console 里搜「logo particles」；画不上、放弃这一类记成 error，系统会留着），
-/// Debug 构建另外写进诊断文件（Perf.file）；同时推进 LogoParticleDiag（失败的那几行前面带「! 」）。
-/// 后台切格子时也会叫：推进 LogoParticleDiag 一律排到主线程（在 SwiftUI 更新中途叫的也不就地改可观察的状态）
+/// Debug 构建另外写进诊断文件（Perf.file）
 private func lpLog(_ s: String, failure: Bool = false) {
     let line = "logo particles: " + s
     if failure {
@@ -72,13 +40,6 @@ private func lpLog(_ s: String, failure: Bool = false) {
     } else {
         Perf.log(line)
     }
-    let entry = failure ? "! " + s : s
-    Task { @MainActor in LogoParticleDiag.shared.push(entry) }
-}
-
-/// LogoParticleDiag 的那一行现状（同样排到主线程）
-private func lpDiagState(_ s: String) {
-    Task { @MainActor in LogoParticleDiag.shared.setState(s) }
 }
 
 private func lpFormatName(_ f: MTLPixelFormat) -> String {
@@ -93,7 +54,6 @@ private func lpRect(_ r: SIMD4<Float>) -> String {
     "\(Int(r.x)),\(Int(r.y)) \(Int(r.z))x\(Int(r.w))"
 }
 
-private func lpYN(_ b: Bool) -> String { b ? "y" : "n" }
 
 /// GPU 那边的结果：命令做完时在 Metal 的线程上写，主线程画下一帧之前（和每次 SwiftUI 更新时）取。
 /// 不留着命令缓冲本身：它拽着画布，池子里的画布会不够用
@@ -192,7 +152,7 @@ struct LogoParticleField: UIViewRepresentable {
             // 没有 Metal：告诉调用方这一层画不了（只说一次，放到这次视图更新以后）
             if !c.reportedNoMetal {
                 c.reportedNoMetal = true
-                lpDiagState("no Metal renderer on this page (see the log lines)")
+                lpLog("no Metal renderer on this page", failure: true)
                 if let onReady { Task { @MainActor in onReady(false) } }
             }
             return
@@ -246,25 +206,6 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
         let shadow: MTLRenderPipelineState
         let dot: MTLRenderPipelineState
     }
-    /// LogoParticleDiag 那一行现状由这些决定：都没变就不重拼字符串
-    private struct DiagKey: Equatable {
-        var hasImage: Bool
-        var imgW: Int
-        var imgH: Int
-        var baking: Bool
-        var cols: Int
-        var rows: Int
-        var particles: Int
-        var ready: Bool
-        var gpuOK: Bool
-        var drawn: Bool
-        var broken: String
-        var shown: Bool
-        var dsW: Int
-        var dsH: Int
-        var p: Int
-        var skip: String
-    }
 
     /// 画布的像素格式：只有 SDR（见文件头）
     private static let format: MTLPixelFormat = .bgra8Unorm
@@ -310,12 +251,9 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
     private var broken: String?
     /// 露着的时候连着没画上的帧数（画上一帧就清零）
     private var misses = 0
-    /// 最近一次没画的原因（诊断用）
-    private var skip = ""
     private let gpu = LPGPUStatus()
     /// 同一件事一页只记一次日志
     private var noted = Set<String>()
-    private var lastDiag: DiagKey?
 
     init?(legacy: Bool) {
         guard let dev = MTLCreateSystemDefaultDevice() else {
@@ -436,7 +374,6 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
     /// 一建好就先说一次（多半是 false：还在切）：SwiftUI 换了一块新画布时，调用方手里不会还留着上一块说过的 true
     private func reportReady() {
         let ready = broken == nil && built != nil
-        updateDiag()
         guard let cb = onReady, ready != reportedReady else { return }
         let before = reportedReady
         reportedReady = ready
@@ -472,7 +409,6 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
             }
         }
         if !show { explainIdle() }
-        updateDiag()
     }
 
     /// 倍数按窗口所在的那块屏（UIScreen.main 在折叠屏、外接屏上不一定是这块）
@@ -519,20 +455,17 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
         } else {
             return
         }
-        skip = why
         note("idle:" + why, "skipping frames: \(why) — \(canvasState)")
     }
 
     /// 露着却没画上这一帧：MTKView 下一帧自己会再来；连着太多帧都不行就放弃这一页
     private func skipped(_ why: String) {
         misses += 1
-        skip = why
         note("skip:" + why, "frame skipped: \(why) — \(canvasState)", failure: true)
         let limit = frames == 0 ? Self.missesBeforeFirstFrame : Self.missesAfterFirstFrame
         if misses >= limit {
             fail("\(misses) frames in a row not drawn (last: \(why))")
         }
-        updateDiag()
     }
 
     /// GPU 那边的结果：第一帧顺利做完记一行；哪一帧出了错就放弃这一页
@@ -558,35 +491,11 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
         reportReady()
     }
 
-    /// LogoParticleDiag 的那一行现状：决定它的那几样变了才重拼（进度按 0.01 算）
-    private func updateDiag() {
-        let ds = view?.drawableSize ?? .zero
-        let k = DiagKey(hasImage: image != nil, imgW: imagePx.w, imgH: imagePx.h, baking: baking,
-                        cols: built?.cols ?? 0, rows: built?.rows ?? 0, particles: built?.particleCount ?? 0,
-                        ready: broken == nil && built != nil, gpuOK: gpuOK, drawn: frames > 0, broken: broken ?? "",
-                        shown: shown, dsW: Int(ds.width), dsH: Int(ds.height),
-                        p: Int((progress * 100).rounded()), skip: skip)
-        guard k != lastDiag else { return }
-        lastDiag = k
-        var s = k.hasImage ? "img \(k.imgW)x\(k.imgH)" : "no image"
-        if k.cols > 0 {
-            s += " | baked y (\(k.cols)x\(k.rows) cells, \(k.particles) particles)"
-        } else {
-            s += k.baking ? " | baked n (baking)" : " | baked n"
-        }
-        s += " | ready \(lpYN(k.ready)) | verified \(lpYN(k.gpuOK)) | drawn \(lpYN(k.drawn))"
-        s += " | broken " + (k.broken.isEmpty ? "n" : "y: " + k.broken)
-        s += " | \(lpFormatName(Self.format)) \(k.dsW)x\(k.dsH) " + (k.shown ? "on" : "off")
-        s += " | p " + String(format: "%.2f", Double(k.p) / 100)
-        if !k.skip.isEmpty { s += " | skip: " + k.skip }
-        lpDiagState(s)
-    }
 
     // MARK: 一帧
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         // 画布大小变了（转屏、展开 / 折起）：露着的时候下一帧就按新的大小画，这里只更新诊断
-        updateDiag()
     }
 
     /// MTKView 自己的时钟（露着的时候每秒 60 帧，旧机型 30）或 sync 里露出来的那一下明着叫：按最新的输入画一帧
@@ -700,7 +609,6 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
         if frames == 1 {
             lpLog("first frame drawn — \(canvasState) src \(lpRect(src)) dst \(lpRect(dst)) px, \(b.cols)x\(b.rows) cells, \(b.particleCount) particles")
         }
-        updateDiag()
     }
 
     private func drawQuad(_ e: MTLRenderCommandEncoder, _ pipe: MTLRenderPipelineState, _ uniforms: Uniforms, _ quad: Quad) {

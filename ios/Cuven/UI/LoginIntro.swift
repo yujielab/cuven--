@@ -10,11 +10,12 @@ import SwiftUI
 //   压扁最狠的那几帧字标两端略出底板（参考里就是这样）。
 // · 关键帧按参考屏 403 × 877、落点 85 × 85 记。换到别的屏：比落点大的那段按「整屏 → 落点」的比例换算，
 //   比落点小的那段（压扁、越位）按落点尺寸的倍数换算，下探按屏高换算。关键帧之间用单调三次插值，不会多出参考里没有的晃动。
-// · 最后 0.12 秒淡到真正的 BrandIcon 图：落稳以后就是那张图（和 App 图标、账户页头像角上的小图标一样）。
-// · 减弱动态效果：不做形变，0.5 秒起整屏品牌 0.3 秒淡成图标。
+// · 落稳以后就停在落点上当图标：用户要求直接用开场收束出来的这一枚，不再换成 BrandIcon 图（以前最后 0.12 秒淡到图上，
+//   画出来的字标和图上的字差一点点，换的那一下看得出在抖）。
+// · 减弱动态效果：不做形变，0.5 秒起整屏品牌 0.3 秒淡成落点上的同一枚图标。
 
 /// 全屏一层：坐标和 size 同一套（左上角是屏幕左上角，要铺到安全区外面），target 是图标的落点。
-/// 不接触摸、不进旁白（标题和按钮在下面那层；字标只是品牌画面）
+/// 不接触摸、不进旁白（标题和按钮在下面那层；字标只是品牌画面）。落稳以后画的就是落点上的图标
 struct BrandCollapseLayer: View {
     /// 落地页出现以后过了多少秒
     let t: Double
@@ -22,7 +23,7 @@ struct BrandCollapseLayer: View {
     let target: CGRect
     var reduceMotion = false
 
-    /// 从这一刻起画面不再变（就是落点上的 BrandIcon）：落地页可以据此判断开场放完了
+    /// 从这一刻起画面不再变（就是落点上的图标）：落地页可以据此判断开场放完了
     nonisolated static func settleTime(reduceMotion: Bool) -> Double {
         reduceMotion ? BrandCollapseTrack.reducedEnd : BrandCollapseTrack.end
     }
@@ -48,7 +49,7 @@ private struct BrandCollapsePose: Equatable {
     var markScale: CGFloat = 1
     /// 底板 + 字标这一组的不透明度
     var morph: Double = 0
-    /// 真正的 BrandIcon 图（收尾时盖在底板上淡入）
+    /// 减弱动态效果：落点上的那一枚（同样的底板 + 字标）淡入，整屏那一组同时淡出
     var icon: CGRect = .zero
     var iconRadius: CGFloat = 0
     var iconOpacity: Double = 0
@@ -93,21 +94,15 @@ private struct BrandCollapsePose: Equatable {
         radius = r
         markScale = K.mark(tt) / K.markStart
         morph = 1
-        // 收尾时真图跟着底板一起走（这时已经几乎是方的），淡完正好落稳
-        icon = panel
-        iconRadius = r
-        iconOpacity = K.smooth((tt - K.fadeIn) / (K.end - K.fadeIn))
     }
 
-    /// 落稳：只剩落点上的 BrandIcon
+    /// 落稳：收束出来的这一枚停在落点上（关键帧最后一帧就是这个样子，接得上，不跳）
     private mutating func settle(_ target: CGRect, _ r0: CGFloat) {
         panel = target
         radius = r0
         markScale = 1 / BrandCollapseTrack.markStart
-        morph = 0
-        icon = target
-        iconRadius = r0
-        iconOpacity = 1
+        morph = 1
+        iconOpacity = 0
     }
 }
 
@@ -126,8 +121,6 @@ private enum BrandCollapseTrack {
     static let iconRadius: CGFloat = 0.2237
     /// 首屏停留到这里（减弱动态效果时从这里开始淡）
     static let hold = 0.5
-    /// 真图从这里开始淡入（底板这时已经接近正方）
-    static let fadeIn = 1.05
     static let end = 1.17
     static let reducedEnd = 0.8
 
@@ -249,14 +242,17 @@ private struct BrandCollapseCanvas: View {
                 .opacity(pose.morph)
             }
             if pose.iconOpacity > 0.001 {
-                Image("BrandIcon")
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: pose.icon.width, height: pose.icon.height)
-                    .clipShape(RoundedRectangle(cornerRadius: pose.iconRadius, style: .continuous))
-                    .position(x: pose.icon.midX, y: pose.icon.midY)
-                    .frame(width: size.width, height: size.height, alignment: .topLeading)
-                    .opacity(pose.iconOpacity)
+                // 减弱动态效果淡入的那一枚：和收束落稳的样子一模一样（同一块底板、同一个字标、同样的缩放）
+                ZStack(alignment: .topLeading) {
+                    BrandCollapsePanel(radius: pose.iconRadius)
+                        .frame(width: pose.icon.width, height: pose.icon.height)
+                        .position(x: pose.icon.midX, y: pose.icon.midY)
+                    BrandCollapseWordmark(side: pose.markSide)
+                        .scaleEffect(1 / BrandCollapseTrack.markStart)
+                        .position(x: pose.icon.midX, y: pose.icon.midY)
+                }
+                .frame(width: size.width, height: size.height, alignment: .topLeading)
+                .opacity(pose.iconOpacity)
             }
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
@@ -276,7 +272,7 @@ private struct BrandCollapsePanel: View {
 }
 
 /// 「Cuven max」白字标：和登录页的字标同一套写法（圆体，「Cuven」中等粗、「max」特粗而大、字距收紧），
-/// 字号和两行的基线按 BrandIcon 图上量的比例摆（边长 side 的方块里），收尾淡到真图时几乎对得上
+/// 字号和两行的基线按 BrandIcon 图上量的比例摆（边长 side 的方块里）：落稳以后看上去就是 App 图标
 private struct BrandCollapseWordmark: View {
     let side: CGFloat
 

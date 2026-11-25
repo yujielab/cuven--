@@ -95,8 +95,6 @@ struct AccountView: View {
     @AppStorage(TrackPrefs.subtitleKey) private var subtitlePref = TrackPrefs.Subtitle.auto.rawValue
     /// 「新片上架通知」：自己选的开 / 关。系统那边的通知权限另看（notifyBlocked）
     @AppStorage(AccountView.notifyKey) private var notifyWanted = false
-    /// 「粒子诊断」（调试用，默认关）：开着时详情页底部一块小面板写字标粒子层的状态（DetailParticleDiagPanel）
-    @AppStorage(AccountView.particleDiagKey) private var particleDiag = false
     /// 和账户设置同步的两个本机设置（网络速度、流量概览展开；「使用」那两张卡改它们）：一变就防抖存回账户
     @AppStorage(ProfileKeys.networkSpeed) private var networkSpeed = 80
     @AppStorage(ProfileKeys.trafficExpanded) private var trafficExpanded = true
@@ -116,8 +114,6 @@ struct AccountView: View {
     @State private var showName = false
 
     static let notifyKey = "cuven_notify_new_titles"
-    /// 详情页底部的字标粒子诊断面板开不开（Bool，默认关）
-    nonisolated static let particleDiagKey = "cuven_particle_diag"
     @Environment(\.horizontalSizeClass) private var hsc
 
     private var displayName: String { account.displayName.isEmpty ? "访客" : account.displayName }
@@ -355,14 +351,6 @@ struct AccountView: View {
                 .labelsHidden()
                 .tint(.white.opacity(0.7))
                 .accessibilityIdentifier("account-compat")
-            }
-            AccountDivider()
-            // 粒子诊断（调试用，默认关）：真机上看详情页字标粒子为什么没出来（读 LogoParticleDiag，见 WebDetail.swift）
-            AccountRow(icon: "sparkles", title: "粒子诊断", subtitle: "详情页底部显示字标粒子层的状态，调试用") {
-                Toggle("粒子诊断", isOn: $particleDiag)
-                    .labelsHidden()
-                    .tint(.green)
-                    .accessibilityIdentifier("account-particle-diag")
             }
         }
         .onChange(of: compatLevel) { _, l in Compat.level = l }

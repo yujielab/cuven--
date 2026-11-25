@@ -2,23 +2,22 @@ import SwiftUI
 
 // MARK: - 新登录页：落地页「ideas in motion.」
 //
-// 用户要求新登录页的内容：标题「ideas in motion.」、说明「Cuven Max为充满好奇心的灵魂而专门设计并精心调整以提供超高品质的影片内容」、
-// 两颗按钮「使用光学配对登录」「使用账号密码登录」；UI、动效和其他细节照用户发的 Brink 录屏和 PDF 做。
+// 用户要求新登录页的内容：标题「ideas in motion.」、两颗按钮「使用光学配对登录」「使用账号密码登录」；
+// UI、动效和其他细节照用户发的 Brink 录屏和 PDF 做。原来标题下面还有一句说明，用户在真机截图上圈掉了（图标和标题留在原来的位置）。
 // 三层，从下往上：
-// · LoginCoverPlane（LoginCoverPlane.swift）：黑底、顶部柔光（1.27 秒）、三列海报从灵动岛下面钻出来，沿一条先窄后向外弯开、
-//   再竖直往下的花瓶形通道流下来（1.30 秒起，一直流动），
-//   上面压着从 40% 屏高开始变暗、65%–72% 收黑的渐变。
-// · 前景（这个文件）：标题、说明、两颗胶囊按钮。0.5 秒起整组从屏底带模糊上浮，约 0.72 秒越过落点、0.83 秒高出约 2% 屏高，
+// · LoginCoverPlane（LoginCoverPlane.swift）：黑底、顶部柔光（1.27 秒）、三列海报从灵动岛下面钻出来（iPhone Duo 折起时顶上没有灵动岛，
+//   从屏幕上沿出来），沿一条先窄后向外弯开、再竖直往下的花瓶形通道流下来（1.30 秒起，一直流动），
+//   上面压着从 40% 屏高开始变暗、65%–72% 收黑的渐变。封面自己跟着屏幕刷新走（显示链），不靠这里的时间线。
+// · 前景（这个文件）：标题、两颗胶囊按钮。0.5 秒起整组从屏底带模糊上浮，约 0.72 秒越过落点、0.83 秒高出约 2% 屏高，
 //   1.17 秒落稳（PDF「登录组上浮与回落」；中间值是录屏 60 帧逐帧量的主按钮上沿）。
-// · BrandCollapseLayer（LoginIntro.swift）：整屏品牌蓝 + 白色「Cuven max」字标，0.5 秒起收束成落在 iconRect 的图标。
+// · BrandCollapseLayer（LoginIntro.swift）：整屏品牌蓝 + 白色「Cuven max」字标，0.5 秒起收束成落在 iconRect 的图标（收完就停在那里，不换成图片）。
 //   底板压在前景上面（录屏 0.67 秒：底板挡住标题中间那几个字）。
-// 只有一条时间线（TimelineView）：开场 1.17 秒里三层一起按它走；之后前景和图标不再变（不重算），只有封面平面接着走；
+// 一个时钟（start / pausedAt）：前景和图标按 TimelineView 走，开场放完（3 秒）时间线就停掉（它们不再变）；封面平面拿同一个时钟自己按帧算。
 // 场景不在前台、落地页被账号密码流程或粒子云盖住时停下来，停着的那段不算时间（回来接着放，开场不会被跳过）。
-// 减弱动态效果：画面定下来以后时间线整个停掉。
 // 落点（占整屏，Y 从屏顶算；PDF 第 3 页 D）：图标中心 54%、宽 21% 屏宽；标题中心 64%；按钮宽 86%，主按钮上沿 80%、次按钮上沿 87%。
 // 宽窗口（iPad、iPhone Duo 展开）：图标最大 120、按钮最宽 440、文字最宽 520，竖向比例不变；iPhone Duo 折起照手机的比例
 // （横向在安全区里居中，侧边那一列不算；宽度、字号都按安全区里那一段宽算，和同样大小的 SE 一样）；矮横屏（高不到 500）从按钮往上排。
-// 旁白：只念标题、说明、两颗按钮（开场和封面不进旁白）。动态字体放到 xxLarge 为止。
+// 旁白：只念标题、两颗按钮（开场和封面不进旁白）。动态字体放到 xxLarge 为止。
 // 减弱动态效果：不做形变（整屏品牌 0.3 秒淡成图标）、前景同时淡入、不上浮不模糊；封面静止（或很慢）。
 
 /// UI 测试 / 截图：-CuvenLoginLanding YES —— 演示数据、已登录时也盖上登录层，从落地页开始（和 -CuvenWelcome 一样读启动参数）
@@ -39,13 +38,12 @@ struct LoginLanding: View {
     /// 时间线停下的那一刻；停着的时候时间就截在这里
     @State private var pausedAt: Date?
     @State private var begun = false
-    /// 开场和封面入场都放完了（按放了多久算，停着的不算）：减弱动态效果时画面从此不变，时间线停掉
+    /// 开场放完了（按放了多久算，停着的不算）：前景和图标从此不变，时间线停掉（封面平面自己按帧走）
     @State private var introDone = false
     /// 时间线走不走：active 变 false 以后再走半秒（落地页淡出、粒子云往上盖的那一段里封面还在流动），然后停
     @State private var running = true
-    /// 量到的标题一行高、标题 + 说明整块高（动态字体放大、说明折成好几行时据此把字和图标往上挪，不压到按钮）
+    /// 量到的标题一行高（动态字体放大时据此把字和图标往上挪，不压到按钮）
     @State private var titleHeight: CGFloat = 0
-    @State private var textHeight: CGFloat = 0
 
     init(onPair: @escaping () -> Void, onAccount: @escaping () -> Void, active: Bool = true) {
         self.onPair = onPair
@@ -56,18 +54,20 @@ struct LoginLanding: View {
     var body: some View {
         // 海报单子在时间线外面读：减弱动态效果时时间线停了，单子后到也要把那一帧刷新一次
         let covers = LoginCovers.shared.urls
+        let clock = LandingClock(start: start, pausedAt: pausedAt)
         GeometryReader { geo in
             // 按整个屏幕排（PDF 的百分比都是整屏的）：把安全区加回来，整块摆回屏幕原点（和 LoginScreen 同一种做法）
             let ins = geo.safeAreaInsets
             let size = CGSize(width: geo.size.width + ins.leading + ins.trailing,
                               height: geo.size.height + ins.top + ins.bottom)
-            let layout = LoginLandingLayout(size: size, safe: ins).fitted(titleHeight: titleHeight, textHeight: textHeight)
-            let still = reduceMotion && introDone
-            TimelineView(.animation(minimumInterval: frameInterval, paused: !running || scenePhase != .active || still)) { tl in
+            let layout = LoginLandingLayout(size: size, safe: ins).fitted(titleHeight: titleHeight)
+            // 用户要求 iPhone Duo 上海报从屏幕边上出来：折起时顶上没有灵动岛、状态栏在侧边那一列（顶上没有安全区，侧边有一大块）
+            let edgeStart = ins.top < 30 && max(ins.leading, ins.trailing) > 30
+            TimelineView(.animation(minimumInterval: frameInterval, paused: !running || scenePhase != .active || introDone)) { tl in
                 // 停着的时候时间截在停下那一刻（恢复的那一帧 start 还没挪，也不会跳一下）；
-                // 减弱动态效果放完以后画面不再变，给一个放完以后的固定时间（不靠停住的时间线给的日期）
-                let t = still ? 3 : max(0, (pausedAt ?? tl.date).timeIntervalSince(start))
-                scene(t: t, size: size, layout: layout, covers: covers)
+                // 放完以后前景和图标不再变，给一个放完以后的固定时间（不靠停住的时间线给的日期）
+                let t = introDone ? 3 : clock.time(at: tl.date)
+                scene(t: t, clock: clock, edgeStart: edgeStart, size: size, layout: layout, covers: covers)
             }
             .frame(width: size.width, height: size.height)
             .position(x: geo.size.width / 2 + (ins.trailing - ins.leading) / 2,
@@ -129,7 +129,8 @@ struct LoginLanding: View {
         Compat.legacyDevice ? 1.0 / 60 : nil
     }
 
-    private func scene(t: Double, size: CGSize, layout: LoginLandingLayout, covers: [URL]) -> some View {
+    private func scene(t: Double, clock: LandingClock, edgeStart: Bool, size: CGSize, layout: LoginLandingLayout,
+                       covers: [URL]) -> some View {
         // 用户要的封面从图标那条中轴涌出：iPhone Duo 折起时前景在安全区里居中，平面跟着挪，两边加宽不露边；
         // 通道的宽窄照中轴到近处屏边那一段排（reach），和同样宽的手机一个样子
         let dx = layout.centerX - size.width / 2
@@ -137,7 +138,8 @@ struct LoginLanding: View {
         let reach = min(layout.centerX, size.width - layout.centerX)
         return ZStack(alignment: .topLeading) {
             Color.black
-            LoginCoverPlane(t: t, size: plane, reach: reach, covers: covers, reduceMotion: reduceMotion)
+            // 封面跟着屏幕刷新自己算位置（同一个时钟）：不跟 SwiftUI 什么时候刷新走，每帧走的距离一样，不抖
+            LoginCoverPlane(clock: clock, size: plane, reach: reach, edgeStart: edgeStart, covers: covers, reduceMotion: reduceMotion)
                 .frame(width: plane.width, height: plane.height)
                 .offset(x: dx - abs(dx))
                 .allowsHitTesting(false)
@@ -145,24 +147,17 @@ struct LoginLanding: View {
             // 前景只在开场那 1.17 秒里变：时间截住以后每帧传进去的都一样，SwiftUI 不再重算它（Equatable）
             LoginLandingForeground(t: min(t, LandingRise.frozen), layout: layout, reduceMotion: reduceMotion,
                                    onPair: onPair, onAccount: onAccount,
-                                   measured: { kind, v in measure(kind, v) })
+                                   measured: { v in if abs(titleHeight - v) > 0.5 { titleHeight = v } })
                 .equatable()
                 // 动态字体放到 xxLarge 为止（标题一行、按钮一行，再大就挤了）
                 .dynamicTypeSize(...DynamicTypeSize.xxLarge)
-            // 品牌底板压在前景上面；落稳以后姿态不变，时间同样截住
+            // 品牌底板压在前景上面；落稳以后就停在落点上当图标（不换成图片，不会跳一下），时间同样截住
             BrandCollapseLayer(t: min(t, 2), size: size, target: layout.iconRect, reduceMotion: reduceMotion)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
         .clipped()
-    }
-
-    private func measure(_ kind: LandingMeasure, _ v: CGFloat) {
-        switch kind {
-        case .title: if abs(titleHeight - v) > 0.5 { titleHeight = v }
-        case .text: if abs(textHeight - v) > 0.5 { textHeight = v }
-        }
     }
 }
 
@@ -185,13 +180,10 @@ struct LoginLandingLayout: Equatable, Sendable {
     /// 前景的中轴：安全区里居中（iPhone Duo 折起时侧边那一列不算）
     var centerX: CGFloat
     var textWidth: CGFloat
-    /// 标题 + 说明这一块的上沿
+    /// 标题这一行的上沿
     var textTop: CGFloat
-    /// 标题和说明之间
-    var textGap: CGFloat
     /// 字号（动态字体在前景里再乘上去）
     var titleSize: CGFloat
-    var bodySize: CGFloat
     var labelSize: CGFloat
     /// 矮横屏：从按钮往上排
     var compact: Bool
@@ -212,9 +204,8 @@ struct LoginLandingLayout: Equatable, Sendable {
         // 内容区只有 374——以前字号按整屏短边算，标题 32、说明 18，比 402 宽的手机（28 / 16）还大，图标按整屏宽的 21% 也偏大，
         // 一屏挤得满满的（用户截图）。现在折起的 Duo 和同样 375 × 667 的 SE 一个比例；手机竖拿、横拿（取短边）、iPad 算出来和原来一样
         let ref = min(minSide, avail)
-        // 参考是 402 宽的手机：标题 28 粗、说明 16、按钮字 17 半粗；iPad 上到 34 / 18 / 18 为止
+        // 参考是 402 宽的手机：标题 28 粗、按钮字 17 半粗；iPad 上到 34 / 18 为止
         let titleSize = min(34, max(24, ref * 0.07))
-        let bodySize = min(18, max(15, ref * 0.04))
         // 按钮高约 6.3% 屏高（参考 55 点），两颗之间约 0.75% 屏高（参考 6.6 点）
         let bh = min(56, max(compact ? 44 : 50, H * 0.063))
         let gap = min(10, max(6, H * 0.0075))
@@ -239,10 +230,7 @@ struct LoginLandingLayout: Equatable, Sendable {
         self.compact = compact
         self.centerX = cx
         self.titleSize = titleSize
-        self.bodySize = bodySize
         self.labelSize = min(18, max(16, ref * 0.043))
-        // 标题和说明之间：照用户发的录屏量（标题基线到说明第一行基线约 41 点），手机上约 19 点
-        self.textGap = (titleSize * 0.66).rounded()
         self.buttonWidth = min(440, avail * 0.86)
         self.textWidth = min(520, avail * 0.86)
         self.buttonHeight = bh
@@ -255,17 +243,16 @@ struct LoginLandingLayout: Equatable, Sendable {
         self.nominalTitleY = H * 0.64
         self.nominalIcon = icon
         // 还没量到字的时候按估计的高先排一遍
-        self = fitted(titleHeight: 0, textHeight: 0)
+        self = fitted(titleHeight: 0)
     }
 
     private var estimatedTitleHeight: CGFloat { titleSize * 1.2 }
-    private var estimatedTextHeight: CGFloat { estimatedTitleHeight + textGap + bodySize * 1.45 * 2 }
 
-    /// 按量到的字高再排一遍：说明折成好几行（动态字体放大、窄窗口）时字往上让，图标跟着让，都不压到按钮
-    func fitted(titleHeight: CGFloat, textHeight: CGFloat) -> LoginLandingLayout {
+    /// 按量到的字高再排一遍：标题（动态字体放大、矮窗口）压到按钮时字往上让，图标跟着让
+    func fitted(titleHeight: CGFloat) -> LoginLandingLayout {
         var L = self
         let th = titleHeight > 1 ? titleHeight : estimatedTitleHeight
-        let block = max(th, textHeight > 1 ? textHeight : estimatedTextHeight)
+        let block = th
         let iconGap: CGFloat = compact ? 12 : 14
         L.iconRect = nominalIcon
         if compact {
@@ -294,9 +281,7 @@ struct LoginLandingLayout: Equatable, Sendable {
     }
 }
 
-// MARK: - 前景：标题、说明、两颗按钮
-
-private enum LandingMeasure { case title, text }
+// MARK: - 前景：标题、两颗按钮
 
 private struct LoginLandingForeground: View, Equatable {
     /// 截住的时间（开场放完以后恒定）
@@ -305,14 +290,16 @@ private struct LoginLandingForeground: View, Equatable {
     let reduceMotion: Bool
     let onPair: () -> Void
     let onAccount: () -> Void
-    let measured: (LandingMeasure, CGFloat) -> Void
+    /// 量到的标题一行高
+    let measured: (CGFloat) -> Void
 
     /// 动态字体：字号按系统设置放大（外面限到 xxLarge）
     @ScaledMetric(relativeTo: .title) private var titleScale: CGFloat = 100
+    /// 按钮上的字跟正文一起放大
     @ScaledMetric(relativeTo: .body) private var bodyScale: CGFloat = 100
 
     init(t: Double, layout: LoginLandingLayout, reduceMotion: Bool, onPair: @escaping () -> Void,
-         onAccount: @escaping () -> Void, measured: @escaping (LandingMeasure, CGFloat) -> Void) {
+         onAccount: @escaping () -> Void, measured: @escaping (CGFloat) -> Void) {
         self.t = t
         self.layout = layout
         self.reduceMotion = reduceMotion
@@ -332,27 +319,16 @@ private struct LoginLandingForeground: View, Equatable {
         let kb = bodyScale / 100
         let fx = LandingRise.fx(t, reduceMotion: reduceMotion)
         ZStack(alignment: .topLeading) {
-            VStack(spacing: (L.textGap * kb).rounded()) {
-                Text("ideas in motion.")
-                    .font(.system(size: L.titleSize * kt, weight: .bold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                    .accessibilityAddTraits(.isHeader)
-                    .accessibilitySortPriority(4)
-                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { v in measured(.title, v) }
-                Text("Cuven Max为充满好奇心的灵魂而专门设计并精心调整以提供超高品质的影片内容")
-                    .font(.system(size: L.bodySize * kb))
-                    .foregroundStyle(LandingInk.body)
-                    .multilineTextAlignment(.center)
-                    .lineSpacing(L.bodySize * kb * 0.22)
-                    .lineLimit(6)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilitySortPriority(3)
-            }
-            .frame(width: L.textWidth)
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { v in measured(.text, v) }
-            .offset(x: L.centerX - L.textWidth / 2, y: L.textTop)
+            Text("ideas in motion.")
+                .font(.system(size: L.titleSize * kt, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .accessibilityAddTraits(.isHeader)
+                .accessibilitySortPriority(3)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { v in measured(v) }
+                .frame(width: L.textWidth)
+                .offset(x: L.centerX - L.textWidth / 2, y: L.textTop)
 
             LandingButton(title: "使用光学配对登录", primary: true, fontSize: L.labelSize * kb,
                           width: L.buttonWidth, height: L.buttonHeight, action: onPair)
@@ -366,7 +342,7 @@ private struct LoginLandingForeground: View, Equatable {
                 .offset(x: L.centerX - L.buttonWidth / 2, y: L.secondaryTop)
         }
         .frame(width: L.size.width, height: L.size.height, alignment: .topLeading)
-        // 整组一起上浮、去模糊、淡入（PDF：文案和按钮带模糊从底部上浮，主按钮越过落点约 2% 屏高再回落）
+        // 整组一起上浮、去模糊、淡入（PDF：标题和按钮带模糊从底部上浮，主按钮越过落点约 2% 屏高再回落）
         .offset(y: CGFloat(fx.dy) * L.size.height)
         .blur(radius: CGFloat(fx.blur))
         .opacity(fx.opacity)
@@ -419,8 +395,6 @@ private struct LandingButtonStyle: ButtonStyle {
 }
 
 private enum LandingInk {
-    /// 说明用中灰（参考里量到约 #818181）
-    static let body = LoginInk.rgb(0x86868B)
     static let primary = LoginInk.rgb(0xFAFAFA)
     static let primaryDown = LoginInk.rgb(0xD9D9DD)
     /// 次按钮：用户发的录屏里量到是平的 #161616（不带蓝），按下亮一档、对比不变

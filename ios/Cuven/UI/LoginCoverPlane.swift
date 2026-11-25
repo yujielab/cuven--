@@ -25,19 +25,40 @@ import QuartzCore
 // 封面滑进暗区就回收，换下一张海报从顶上再进来。图走 ImagePipeline（解码在后台，内存 / 磁盘缓存全 App 共用）。
 // 图层顺序照 PDF 第 3 页：光晕在平面下面；平面自带一块黑底（卡缝是黑的、上半屏的封面不被光晕冲灰），出口以上用遮罩切掉。
 // 宽窗口（iPad、展开的 Duo）：花瓶的轮廓不变（出口约 22% 屏宽、Y 31% 碰到屏边），多铺几列；iPhone Duo 折起时照安全区那一段宽排。
+// iPhone Duo 折起（顶上没有灵动岛，状态栏在侧边那一列）：用户要求瀑布从屏幕上沿出来——平面当成往上多出 5.7% 的高屏来排，
+// 出口那条线正好落在屏幕上沿，花瓶的样子、卡的宽高比都不变；底下的黑色渐变照旧按屏幕算。
+// 不抖（用户真机反馈「海报封面抖动的有点明显」）：
+//   · 每帧的位置按这一帧真正上屏的时刻算（CADisplayLink 的 targetTimestamp），不跟 SwiftUI 什么时候刷新走——
+//     以前每帧拿 TimelineView 给的日期，主线程早一点晚一点，卡每帧走的距离就忽长忽短；
+//   · 每列的卡切几条在排版时就定下来（按这一列一路上最弯的那一段算），飞的途中不变——以前按位置随时改条数，
+//     改的那一下卡边跳零点几个点。
 
-/// 登录页的封面背景（全屏；放在最底下，前景、状态栏都在它上面）。t：登录页出现以来的秒数（LoginLanding 的时间线给）
+/// 登录页的时钟：从哪一刻算起、停在哪一刻（LoginLanding 的 start / pausedAt；停着的那段不算时间，恢复时 start 往后挪）
+struct LandingClock: Equatable {
+    var start: Date
+    var pausedAt: Date?
+
+    /// 某一刻是登录页出现以来的第几秒（停着的时候截在停下那一刻）
+    func time(at date: Date) -> Double {
+        max(0, (pausedAt ?? date).timeIntervalSince(start))
+    }
+}
+
+/// 登录页的封面背景（全屏；放在最底下，前景、状态栏都在它上面）。自己跟着屏幕刷新按 clock 算每一帧（停着的时候不走）
 struct LoginCoverPlane: View {
-    let t: Double
+    let clock: LandingClock
     let size: CGSize
     /// 中轴（平面的竖中线）到较近那条看得见的屏边有多远（点）。iPhone Duo 折起时前景在安全区里居中、平面两边加宽了，
     /// 通道照安全区那一段宽排（和同样宽的手机一个样子），不照加宽以后的平面。nil：半个平面宽
     var reach: CGFloat? = nil
+    /// 出口放在屏幕上沿（iPhone Duo 折起：顶上没有灵动岛）；false 是灵动岛平的下缘
+    var edgeStart = false
     let covers: [URL]
     var reduceMotion = false
 
     var body: some View {
-        CoverPlaneCanvas(t: t, size: size, reach: reach ?? size.width / 2, covers: covers, reduceMotion: reduceMotion)
+        CoverPlaneCanvas(clock: clock, size: size, reach: reach ?? size.width / 2, edgeStart: edgeStart, covers: covers,
+                         reduceMotion: reduceMotion)
             .frame(width: size.width, height: size.height)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
@@ -199,9 +220,10 @@ private func planeSmooth(_ x: Double) -> Double {
 // MARK: - 画布（UIKit / Core Animation）
 
 private struct CoverPlaneCanvas: UIViewRepresentable {
-    let t: Double
+    let clock: LandingClock
     let size: CGSize
     let reach: CGFloat
+    let edgeStart: Bool
     let covers: [URL]
     let reduceMotion: Bool
 
@@ -210,7 +232,25 @@ private struct CoverPlaneCanvas: UIViewRepresentable {
     }
 
     func updateUIView(_ view: CoverPlaneView, context: Context) {
-        view.update(t: t, size: size, reach: reach, covers: covers, reduceMotion: reduceMotion)
+        view.configure(clock: clock, size: size, reach: reach, edgeStart: edgeStart, covers: covers, reduceMotion: reduceMotion)
+    }
+
+    static func dismantleUIView(_ view: CoverPlaneView, coordinator: ()) {
+        view.stop()
+    }
+}
+
+/// 显示链的目标：弱引用平面（显示链强引用它的目标，平面不在了它自己停）
+@MainActor
+private final class CoverPlaneTick: NSObject {
+    weak var owner: CoverPlaneView?
+
+    @objc func tick(_ link: CADisplayLink) {
+        guard let owner else {
+            link.invalidate()
+            return
+        }
+        owner.tick(link)
     }
 }
 
@@ -262,8 +302,27 @@ private final class CoverPlaneView: UIView {
     private var prefetchedTo: [Int: Int] = [:]
     private var lastList: CoverList?
 
+    /// 平面按多大排（出口贴屏幕上沿时比屏幕高 lift，往上伸出去）
     private var laidOut: CGSize = .zero
+    private var laidScreen: CGSize = .zero
     private var laidReach: CGFloat = 0
+    private var laidEdge = false
+    private var lift: CGFloat = 0
+    /// 每列的卡切几条（下标是离中列几列）：排版时定下来，飞的途中不变
+    private var columnStrips: [Int] = [1]
+
+    // SwiftUI 给的设置（configure）；显示链每帧按它们画
+    private var clock = LandingClock(start: Date(), pausedAt: Date())
+    private var screen: CGSize = .zero
+    private var reachIn: CGFloat = 0
+    private var edgeStart = false
+    private var covers: [URL] = []
+    private var reduceMotion = false
+    private var link: CADisplayLink?
+    /// CACurrentMediaTime 的秒数 + 这个 = Date 的秒数（显示链给的时刻在 CACurrentMediaTime 的时间轴上）
+    private var mediaToDate: Double = 0
+    /// 减弱动态效果：光晕 1.36 秒亮完、封面 1.7 秒淡完，过了这里画面不再变，显示链停掉
+    private static let restAfter = 1.8
     /// 中列两边各几列、参考屏宽（点）、海报长度乘几（CoverPlaneModel.layout）
     private var side = 1
     private var lateral = 0.0
@@ -324,19 +383,78 @@ private final class CoverPlaneView: UIView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func update(t: Double, size: CGSize, reach: CGFloat, covers: [URL], reduceMotion: Bool) {
-        guard size.width > 1, size.height > 1 else { return }
+    /// SwiftUI 每次更新给一遍设置。显示链在走：下一帧自己按新的设置画；没在走（停着、还没进窗口、减弱动态效果已经定住）就现在画一帧
+    func configure(clock: LandingClock, size: CGSize, reach: CGFloat, edgeStart: Bool, covers: [URL], reduceMotion: Bool) {
+        self.clock = clock
+        screen = size
+        reachIn = reach
+        self.edgeStart = edgeStart
+        self.covers = covers
+        self.reduceMotion = reduceMotion
+        syncLink()
+        if link == nil { render(t: clock.time(at: Date())) }
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        syncLink()
+    }
+
+    func stop() {
+        link?.invalidate()
+        link = nil
+    }
+
+    /// 显示链只在看得见、没停、画面还在变的时候走
+    private func syncLink() {
+        let want = window != nil && clock.pausedAt == nil && !(reduceMotion && clock.time(at: Date()) > Self.restAfter)
+        if want, link == nil {
+            mediaToDate = Date().timeIntervalSinceReferenceDate - CACurrentMediaTime()
+            let target = CoverPlaneTick()
+            target.owner = self
+            let l = CADisplayLink(target: target, selector: #selector(CoverPlaneTick.tick(_:)))
+            // 旧机型（Compat.legacyDevice）最多 60 帧；别的跟屏幕走（ProMotion 120）
+            l.preferredFrameRateRange = Compat.legacyDevice
+                ? CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+                : CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+            l.add(to: .main, forMode: .common)
+            link = l
+        } else if !want {
+            stop()
+        }
+    }
+
+    /// 一帧：按这一帧真正上屏的时刻（targetTimestamp）算，每帧走的距离一样，不跟着主线程什么时候被叫到忽快忽慢
+    fileprivate func tick(_ l: CADisplayLink) {
+        let t = clock.time(at: Date(timeIntervalSinceReferenceDate: l.targetTimestamp + mediaToDate))
+        render(t: t)
+        if reduceMotion, t > Self.restAfter { syncLink() }
+    }
+
+    private func render(t: Double) {
+        let screenSize = screen
+        guard screenSize.width > 1, screenSize.height > 1 else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
 
-        let near = min(max(1, reach), size.width / 2)
-        if size != laidOut || near != laidReach {
-            laidOut = size
+        let near = min(max(1, reachIn), screenSize.width / 2)
+        if screenSize != laidScreen || near != laidReach || edgeStart != laidEdge {
+            laidScreen = screenSize
             laidReach = near
+            laidEdge = edgeStart
+            // 出口贴屏幕上沿：平面当成往上多出一截的高屏来排，出口那条线（emerge）正好落在屏幕上沿
+            let modelH = edgeStart ? screenSize.height / (1 - CoverPlaneModel.emerge) : screenSize.height
+            lift = modelH - screenSize.height
+            let size = CGSize(width: screenSize.width, height: modelH)
+            laidOut = size
             let r = CGRect(origin: .zero, size: size)
-            for l in [glow, plane, shade, sheetClip, sheet] as [CALayer] { l.frame = r }
-            // 遮罩不在图层树里，单独给（平面自己的坐标，和屏幕一样）
+            // 平面和光晕往上伸出去 lift（屏外那截被 clipsToBounds 裁掉）；平面里面的东西都按平面自己的坐标
+            for l in [glow, plane] as [CALayer] { l.frame = r.offsetBy(dx: 0, dy: -lift) }
+            for l in [sheetClip, sheet] as [CALayer] { l.frame = r }
+            // 黑色渐变按屏幕算（Y 40% 起变暗、68% 全黑，和图标、标题的位置对得上）
+            shade.frame = CGRect(origin: .zero, size: screenSize)
+            // 遮罩不在图层树里，单独给（平面自己的坐标）
             topFade.frame = r
             for card in active.values { card.layer.frame = r }
             for card in pool { card.layer.frame = r }
@@ -345,6 +463,7 @@ private final class CoverPlaneView: UIView {
             lateral = fit.lateral
             scale = fit.scale
             sheet.path = footprint(size)
+            columnStrips = (0...side).map { stripCount(column: $0, half: Double(size.width) / 2) }
             hiRes = lateral > 500 && !Compat.legacyDevice
             // 下次打开要用的那份海报按同一个尺寸先下（LoginCovers.prefetch）
             LoginCovers.shared.hiRes = hiRes
@@ -353,6 +472,7 @@ private final class CoverPlaneView: UIView {
             prefetchedTo = [:]
             placed = nil
         }
+        let size = laidOut
         let list = CoverList(count: covers.count, first: covers.first)
         if list != lastList {
             lastList = list
@@ -384,6 +504,20 @@ private final class CoverPlaneView: UIView {
         // 减弱动态效果不动，只取看得见的
         let ahead = reduceMotion ? 0 : (show ? 2 : 5)
         place(travel: travel, show: show, ahead: ahead, size: size, covers: covers)
+    }
+
+    /// 第 column 列（离中列几列）的卡切几条：沿整条路（从露头到回收）每 0.05 排量一次，取最多的那次。
+    /// 这样一张卡飞的途中条数不变，卡边不会在改条数的那一下跳一点
+    private func stripCount(column: Int, half: Double) -> Int {
+        let edge = Double(column) * CoverPlaneModel.columnPitch + 0.5
+        let length = CoverPlaneModel.cardLength * scale
+        var n = 1
+        var top = CoverPlaneModel.appearU - length
+        while top < CoverPlaneModel.cutU, n < CoverPlaneModel.maxStrips {
+            n = max(n, CoverPlaneModel.strips(top: top, bottom: top + length, edge: edge, lateral: lateral, half: half))
+            top += 0.05
+        }
+        return n
     }
 
     /// 通道在屏上的那块花瓶形（最外两列的外沿之间，从出口一直到屏底）
@@ -467,7 +601,7 @@ private final class CoverPlaneView: UIView {
                     card.url = url
                     fill(card, url)
                 }
-                let n = CoverPlaneModel.strips(top: top, bottom: bottom, edge: abs(center) + 0.5, lateral: lx, half: W / 2)
+                let n = columnStrips[min(abs(c), columnStrips.count - 1)]
                 shape(card, n)
                 // 每一条：沿流向取卡上 f0…f1 那一段，四个角落在所在那列的两条边上
                 for i in 0..<n {

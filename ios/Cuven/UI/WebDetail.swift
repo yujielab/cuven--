@@ -664,8 +664,6 @@ struct DetailScaffold<Episodes: View>: View {
     @State private var logoImage: UIImage?
     /// logoImage 是哪一枚字标的（回到这一页时同一枚就不重取，见 loadLogo）
     @State private var logoImageURL: URL?
-    /// 账户页「粒子诊断」（调试用，默认关）：开着才在底部放一块面板，写字标粒子层走到哪一步了
-    @AppStorage(AccountView.particleDiagKey) private var particleDiag = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -774,17 +772,6 @@ struct DetailScaffold<Episodes: View>: View {
             // 粒子层盖在整页和顶上那条上面（用户要求：字标化成细粒子，沿一条往右鼓的弧线飞进左上角再拼好）
             .overlay {
                 particleLayer(heroLogo)
-            }
-            // 粒子诊断（账户页「粒子诊断」打开才有）：底部安全区上面一块半透明小面板，不接手势、旁白不念；
-            // 关着时这里什么都没有，也不碰 LogoParticleDiag
-            .overlay(alignment: .bottom) {
-                if particleDiag {
-                    DetailParticleDiagPanel(motion: motion, particles: logoParticles, hasLogo: logoImage != nil)
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 8)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                }
             }
         }
         .background(DetailPalette.from(edge).deep)
@@ -1294,46 +1281,6 @@ private struct DetailLogoParticleLayer: View {
                               onReady: { motion.setCanvasReady($0) })
         }
     }
-}
-
-/// 粒子诊断面板（账户页「粒子诊断」，调试用）：放不放粒子、两个框量到没有、画布说画得出来没有、进度，
-/// 加上粒子层自己报的状态和最近几行日志（LogoParticleDiag）。单独一小块：每帧只有它跟着进度重画
-private struct DetailParticleDiagPanel: View {
-    let motion: DetailLogoMotion
-    /// 这一页放不放粒子（DetailScaffold.logoParticles）
-    let particles: Bool
-    /// 字标图到手了没有
-    let hasLogo: Bool
-
-    var body: some View {
-        let diag = LogoParticleDiag.shared
-        let state = diag.state
-        let tail = Array(diag.lines.suffix(6))
-        VStack(alignment: .leading, spacing: 3) {
-            Text(summary)
-            if !state.isEmpty {
-                Text(state)
-            }
-            if !tail.isEmpty {
-                Text(tail.joined(separator: "\n"))
-                    .foregroundStyle(Color.white.opacity(0.7))
-            }
-        }
-        .font(.system(size: 10, design: .monospaced))
-        .foregroundStyle(Color.white)
-        .multilineTextAlignment(.leading)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(8)
-        .background(Color.black.opacity(0.62), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .frame(maxWidth: 560)
-    }
-
-    private var summary: String {
-        let p = String(format: "%.3f", motion.progress)
-        return "particles \(Self.yn(particles)) · logo \(Self.yn(hasLogo)) · frames \(Self.yn(motion.ready)) · canvas \(Self.yn(motion.canvasReady)) · p \(p)"
-    }
-
-    private static func yn(_ b: Bool) -> String { b ? "y" : "n" }
 }
 
 // MARK: - 小部件
