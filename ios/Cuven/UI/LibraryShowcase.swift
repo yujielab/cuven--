@@ -1,9 +1,11 @@
 import SwiftUI
 import AVFoundation
 
-// MARK: - 资料库：和网页版的「展映」（lib-showcase）同一套逻辑，一部电影一章
+// MARK: - 探索（以前叫「资料库」，用户要求改名）：和网页版的「展映」（lib-showcase）同一套版式，一部电影一章
 //
-// · 顺序：上映新的在前，同一天按入库时间（AppModel.showcaseOrder，和网页版 sortOrder 一样）；全片库查过一轮以后首尾相接、一直往下放（网页版的环形队列）。
+// · 顺序（用户要求「随机排序，高分和值得一看的优先，允许不同年份，每次打开都不一样」）：AppModel.exploreMovies——
+//   按这一轮的种子加权随机排（分高的大概率在前），同一类型、同一年不挨着；每次启动、离开半小时以上回来、再点一下「探索」换一轮。
+//   全片库放完一轮以后首尾相接、一直往下放（网页版的环形队列）。
 // · 只放有预告片的电影：预告片就是详情页拿到的那一份（Apple TV 上的公开预告，AppModel.trailers(for:)）；
 //   哪部有、哪部没有在后台查（AppModel.scanTrailers），查到的记在本地；还没查到的那一部后面先不放，查到了再往后接。
 // · 每一章：
@@ -90,13 +92,15 @@ struct LibraryView: View {
         }
         .onChange(of: covered) { _, c in trailer.setCovered(c) }
         .onChange(of: base.map(\.path), initial: true) { _, paths in joined = paths }
+        // 换了一轮（种子变了）：按新的顺序从头排，不再守着上一轮排好的位置
+        .onChange(of: model.exploreSeed) { _, _ in joined = [] }
         // 打开资料库时把没查过的接着查（单独起一个任务：切走标签不打断它，正在查就什么也不做）
         .onAppear { Task { await model.scanTrailers() } }
     }
 
     /// 有预告片的电影：按资料库的顺序；这一屏上已经排好的保持原位，新查到的接在后面
     private var base: [Video] {
-        let live = model.showcaseMovies
+        let live = model.exploreMovies
         guard !joined.isEmpty else { return live }
         var fresh: [String: Video] = [:]
         for v in live { fresh[v.path] = v }
@@ -117,7 +121,7 @@ struct LibraryView: View {
     @ViewBuilder private var emptyState: some View {
         if case .failed(let message) = model.phase {
             ContentUnavailableView {
-                Label("无法载入资料库", systemImage: "wifi.exclamationmark")
+                Label("无法载入影片", systemImage: "wifi.exclamationmark")
             } description: {
                 Text(message)
             } actions: {
@@ -155,7 +159,7 @@ struct ShowcaseHeader: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("资料库")
+            Text("探索")
                 .font(.largeTitle.bold())
                 .foregroundStyle(.white)
                 .accessibilityAddTraits(.isHeader)
@@ -340,8 +344,7 @@ struct ShowcaseChapter: View {
         var parts: [String] = []
         if let y = model.year(video) { parts.append(String(y)) }
         if let g = m?.genres, !g.isEmpty { parts.append(g.prefix(2).joined(separator: " · ")) }
-        // 片长和详情页同一种写法（设计轮 1：以前这里「116 分钟」、详情页「1 小时 56 分钟」）
-        if let r = m?.runtime, r > 0 { parts.append(Format.runtime(r)) }
+        // 不写片长（用户要求移除）
         return parts.joined(separator: " · ")
     }
 }

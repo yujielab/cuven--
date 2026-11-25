@@ -77,7 +77,7 @@ struct CuvenApp: App {
         .commands {
             CommandMenu("前往") {
                 Button("主页") { AppNav.shared.go(.home) }.keyboardShortcut("1", modifiers: .command)
-                Button("资料库") { AppNav.shared.go(.library) }.keyboardShortcut("2", modifiers: .command)
+                Button("探索") { AppNav.shared.go(.library) }.keyboardShortcut("2", modifiers: .command)
                 Button("请求") { AppNav.shared.go(.requests) }.keyboardShortcut("3", modifiers: .command)
                 Button("搜索") { AppNav.shared.go(.search) }.keyboardShortcut("4", modifiers: .command)
                 Button("我的") { AppNav.shared.go(.account) }.keyboardShortcut("5", modifiers: .command)
@@ -131,8 +131,10 @@ struct RootView: View {
             Tab("主页", systemImage: "house.fill", value: AppTab.home) {
                 HomeView().duoHidesTabBar().tint(.white).id(roots[.home, default: 0])
             }
-            Tab("资料库", systemImage: "square.stack.fill", value: AppTab.library) {
-                LibraryView().duoHidesTabBar().tint(.white).id(roots[.library, default: 0])
+            // 探索（以前叫资料库，用户要求改名）：随机、高分优先的预告片流
+            Tab("探索", systemImage: "square.stack.fill", value: AppTab.library) {
+                // 换一轮（种子变了）就整页重建：从第一部开始放新的顺序
+                LibraryView().duoHidesTabBar().tint(.white).id("\(roots[.library, default: 0])-\(model.exploreSeed)")
             }
             // 请求中心（用户要求）：角标是进行中的请求个数
             // 图标和侧边那一列里的一样（用户要求更新：海报卡 + 右上角的「+」，NavGlyphImage）
@@ -156,7 +158,11 @@ struct RootView: View {
         // 侧边一列的形态：自己画的导航，搜索单独一颗
         .overlay {
             if column {
-                DuoNavLayer(tab: $tab, edge: barEdge) { roots[$0, default: 0] += 1 }
+                DuoNavLayer(tab: $tab, edge: barEdge) { t in
+                    roots[t, default: 0] += 1
+                    // 在「探索」上再点一下「探索」：换一轮（新的随机顺序）
+                    if t == .library { model.reshuffleExplore() }
+                }
             }
         }
         // 量整个窗口、左右安全区，iOS 27.1 起再问系统竖栏在哪一边（SideColumnProbe）
@@ -236,6 +242,8 @@ struct RootView: View {
             RequestStore.shared.start(user: account.session?.username)
         }
         .onChange(of: scenePhase) { _, phase in
+            // 探索：离开半小时以上回来换一轮
+            model.exploreScene(active: phase == .active)
             if phase == .active {
                 Task { @MainActor in await account.refreshAvatar() }
                 NetworkAuto.shared.appBecameActive()

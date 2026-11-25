@@ -187,7 +187,7 @@ struct DuoNav: View {
 
     static let items: [Item] = [
         Item(tab: .home, glyph: .symbol("house"), label: "主页", id: "nav-home"),
-        Item(tab: .library, glyph: .clips, label: "资料库", id: "nav-library"),
+        Item(tab: .library, glyph: .clips, label: "探索", id: "nav-library"),
         Item(tab: .requests, glyph: .request, label: "请求", id: "nav-requests"),
         Item(tab: .search, glyph: .symbol("magnifyingglass"), label: "搜索", id: "nav-search"),
         Item(tab: .account, glyph: .avatar, label: "我的", id: "nav-account"),
