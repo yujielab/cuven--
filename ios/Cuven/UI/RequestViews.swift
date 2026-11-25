@@ -76,6 +76,8 @@ struct RequestMorphControl: View {
             }
         }()
         let hint: String = isSend ? "轻点两下发往请求中心" : ""
+        // 旁白念「请求添加」（用户要求），语音控制说屏上的「上滑申请添加」也能按
+        let voiceLabels: [Text] = isSend ? [Text("请求添加"), Text("上滑申请添加"), Text("申请添加")] : []
         let soften: Bool = launched && !reduceMotion
         let rise: CGFloat = -shownLift * Self.travel
         // 外面单独一层容器给测试认胶囊（用户要求的上滑发送）：同一串修饰器里再来一次 accessibilityElement 可能把里面那颗
@@ -114,8 +116,7 @@ struct RequestMorphControl: View {
             .accessibilityElement(children: card ? .contain : .combine)
             .accessibilityAddTraits(card ? [] : .isButton)
             .accessibilityHint(Text(hint))
-            // 旁白念「请求添加」（用户要求），语音控制说屏上的「上滑申请添加」也能按
-            .accessibilityInputLabels(isSend ? [Text("请求添加"), Text("上滑申请添加"), Text("申请添加")] : [])
+            .accessibilityInputLabels(voiceLabels)
             .accessibilityAction { tap() }
             // 「request-add」留着：DuoUnfoldedTests 用它找这颗钮
             .accessibilityIdentifier(card ? "request-card" : (isPlay ? "request-play" : "request-add"))
@@ -137,6 +138,7 @@ struct RequestMorphControl: View {
             withTransaction(t) {
                 dragLift = 0
                 armed = false
+                armedAt = nil
             }
         }
         .onChange(of: isSend) { _, now in
@@ -263,10 +265,13 @@ struct RequestMorphControl: View {
             return
         }
         if onSend() {
-            // 发出去了：胶囊升到上沿停住（按一下的也一样），在那一屏底下化开淡出
-            withAnimation(armAnimation) {
-                armed = true
-                dragLift = max(dragLift, Self.travel)
+            // 发出去了：胶囊升到上沿停住（按一下的也一样），在那一屏底下化开淡出。
+            // 减弱动态效果（用户要求）：按一下发出只原地淡出，不往上飞（上滑过线的本来就停在上沿）
+            if !reduceMotion {
+                withAnimation(armAnimation) {
+                    armed = true
+                    dragLift = max(dragLift, Self.travel)
+                }
             }
         } else {
             settle()
@@ -275,6 +280,7 @@ struct RequestMorphControl: View {
 
     /// 没过线就松手：短促、带一点阻尼地回到原位（规格：160–220 ms）
     private func settle() {
+        armedAt = nil
         guard dragLift != 0 || armed else { return }
         withAnimation(reduceMotion ? .easeOut(duration: 0.16) : .spring(response: 0.2, dampingFraction: 0.86)) {
             dragLift = 0
@@ -291,16 +297,22 @@ struct RequestMorphControl: View {
 /// 「上滑申请添加」那颗胶囊的手势（用户要求：上滑发往请求中心，但往下拖、横着拖、从别处拖都照常滚页面）。
 /// SwiftUI 的 DragGesture 一接住就不再让给外面的滚动视图，也没法按方向放弃，所以用一个先看方向的 UIKit 手势：
 /// 一开始往上（竖着为主）走过几点才接住，同时停掉外面那个滚动视图的拖动（结束 / 取消时还原）；
-/// 往下、横着的直接放弃，交给页面滚动；没怎么动就松手的也放弃，交给按一下（onTapGesture）
+/// 往下、横着的直接放弃，交给页面滚动；没怎么动就松手的也放弃，交给按一下（onTapGesture）；
+/// 一按下就飞快往上甩的（滚页面的那一甩）也放弃，交给页面滚动
 final class RequestSwipeUpRecognizer: UIGestureRecognizer {
     /// 往上拖了多少点（往上为正）。新的一下开始时才清零：结束那一下的值留给动作回调读
     private(set) var lift: CGFloat = 0
+    /// 整段手势里手指离按下那一点最远走了多远（用户要求：拖上去又拖回原位松手要弹回，不能当成按了一下）
+    private(set) var reach: CGFloat = 0
     private var tracked: UITouch?
     private var start: CGPoint = .zero
+    private var startTime: TimeInterval = 0
     /// 拖动期间停掉的那个滚动视图（只在往上拖着胶囊时停，结束就还原）
     private weak var heldScroll: UIScrollView?
     /// 认方向之前要走多少点
     private static let slop: CGFloat = 6
+    /// 从按下到走过 slop 的平均速度比这还快（点/秒）：是往上甩着滚页面，不是拖胶囊
+    private static let flickSpeed: CGFloat = 1500
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         super.touchesBegan(touches, with: event)
@@ -311,7 +323,9 @@ final class RequestSwipeUpRecognizer: UIGestureRecognizer {
         }
         tracked = t
         start = t.location(in: nil)
+        startTime = t.timestamp
         lift = 0
+        reach = 0
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -323,7 +337,14 @@ final class RequestSwipeUpRecognizer: UIGestureRecognizer {
         switch state {
         case .possible:
             if dy <= -Self.slop && -dy > abs(dx) {
+                // 用户要求上滑申请添加，但往上甩着滚页面不该误发：一按下就飞快往上走的交还给页面滚动
+                let dt = CGFloat(t.timestamp - startTime)
+                if dt > 0 && -dy / dt > Self.flickSpeed {
+                    state = .failed
+                    return
+                }
                 lift = -dy
+                reach = hypot(dx, dy)
                 holdScroll(from: t)
                 state = .began
             } else if dy >= Self.slop || abs(dx) >= Self.slop * 2 {
@@ -331,6 +352,7 @@ final class RequestSwipeUpRecognizer: UIGestureRecognizer {
             }
         case .began, .changed:
             lift = -dy
+            reach = max(reach, hypot(dx, dy))
             state = .changed
         default:
             break
@@ -370,6 +392,7 @@ final class RequestSwipeUpRecognizer: UIGestureRecognizer {
 struct RequestSwipeUpGesture: UIGestureRecognizerRepresentable {
     var isEnabled: Bool
     var onChanged: (CGFloat) -> Void
+    /// 松手：给的是整段手势里手指最远走了多远（recognizer.reach），用来分「按了一下」和「拖了又拖回来」
     var onEnded: (CGFloat) -> Void
     var onCancelled: () -> Void
 
@@ -386,7 +409,7 @@ struct RequestSwipeUpGesture: UIGestureRecognizerRepresentable {
     func handleUIGestureRecognizerAction(_ recognizer: RequestSwipeUpRecognizer, context: Context) {
         switch recognizer.state {
         case .began, .changed: onChanged(recognizer.lift)
-        case .ended: onEnded(recognizer.lift)
+        case .ended: onEnded(recognizer.reach)
         case .cancelled: onCancelled()
         default: break
         }
@@ -523,6 +546,8 @@ struct CatalogDetailView: View {
     @State private var sendLaunched = false
     /// 那一屏按的是「前往请求中心」：关掉以后切过去
     @State private var sendOpensCenter = false
+    /// 用户要求先「正在发往请求中心」再「已添加」：那一屏盖着的时候胶囊还是上滑那颗（光也在），关掉、放回原位以后才换成「已加入请求中心」
+    @State private var sendHold = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     struct DetailAlert: Identifiable { let title: String; let message: String; var id: String { title + message } }
@@ -540,7 +565,8 @@ struct CatalogDetailView: View {
         let done = inLibrary || status?.state == .done
         let available = (detail?.count ?? 0) > 0 && !inLibrary
         let queued = basket.contains(title, season: seasonKey)
-        let mode = buttonMode(status: status, done: done, available: available, queued: queued)
+        // 头部那颗：发出去、那一屏还盖着时不换成「已加入」（见 sendHold）；底下固定条照旧按 queued
+        let mode = buttonMode(status: status, done: done, available: available, queued: queued && !sendHold)
         let playing: Bool = { if case .play = mode { return true }; return false }()
         DetailScaffold(
             title: displayTitle,
@@ -790,26 +816,39 @@ struct CatalogDetailView: View {
         var t = Transaction()
         t.disablesAnimations = true
         withTransaction(t) { sendShowing = true }
+        // 和 basket.add 同一次更新：胶囊不换成「已加入」，还是上滑那颗、光最亮，在那一屏底下化开淡出
+        sendHold = true
         withAnimation(DSMotion.adapt(.easeOut(duration: 0.5), reduce: reduceMotion)) { sendLaunched = true }
         let hold = reduceMotion ? 700 : 1500
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(hold))
             guard sendShowing else { return }
+            // 打勾那一下的震动由 RequestSendOverlay 给（和打勾同一刻）：用户要求的成功反馈只要一次，这里不再重复
             sendResult = result
-            if case .failed = result { Haptics.error() } else { Haptics.success() }
         }
     }
 
     /// 那一屏上的「好」/「前往请求中心」：关掉回到详情页（这时已经是「已加入请求中心」）；前往的话关掉以后切到请求中心
     private func closeSend(openCenter: Bool) {
         sendOpensCenter = openCenter
-        sendShowing = false
+        // 那一屏已经自己淡出了（用户要求的收起）：不要系统再往下滑一次，那一下看不见却挡着点按
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) { sendShowing = false }
     }
 
     private func sendDismissed() {
         sendItem = nil
         sendResult = nil
+        // 胶囊先不带动画地放回原位（RequestMorphControl 的 onChange(of: launched)）再淡回来；
+        // 下一拍才换成「已加入请求中心」，免得那颗胶囊从上沿掉下来（用户要求的顺序：先发送，回来时才是已加入）
         withAnimation(DSMotion.adapt(.easeOut(duration: 0.35), reduce: reduceMotion)) { sendLaunched = false }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(50))
+            // 这 50 毫秒里又发了一次（那一屏又盖上了）：留给那一次关掉时再放开
+            guard !sendShowing else { return }
+            sendHold = false
+        }
         if sendOpensCenter {
             sendOpensCenter = false
             basket.openCenter = true

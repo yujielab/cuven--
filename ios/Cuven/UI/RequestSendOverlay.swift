@@ -108,6 +108,9 @@ struct RequestSendOverlay: View {
         .onAppear { begin() }
         .onChange(of: item) { _, _ in begin() }
         .onChange(of: result) { _, _ in resolveIfReady() }
+        // 飞够 1.1 秒以后在这里看结果：onChange 拿的是当下的视图（result 是新的）；
+        // task 里抓的是它开始那一刻的视图，result 还是旧的 nil（结果早到时会一直卡在「正在发往请求中心」）
+        .onChange(of: held) { _, h in if h { resolveIfReady() } }
         .task(id: run) { await hold(run) }
     }
 
@@ -138,16 +141,47 @@ struct RequestSendOverlay: View {
         return UnitPoint(x: (p.x + insets.leading) / full.width, y: (p.y + insets.top) / full.height)
     }
 
-    /// 屏幕圆角（点）：边上那圈光要贴着它走。系统没有公开的读法（UIScreen._displayCornerRadius 是私有接口，不用），按机型估：
-    /// 带 Home 指示条的 iPhone 约短边的 14%（X 39 点 … Pro Max 62 点），圆角屏的 iPad 18 点；有 Home 键的方屏 0
+    /// 屏幕圆角（点）：边上那圈光要贴着它走（用户要的「光贴着圆角屏走」；估错十几点，边角会露出一道暗缝）。
+    /// 系统没有公开的读法（UIScreen._displayCornerRadius 是私有接口，不用）：iPhone 按屏幕物理像素查已知机型，
+    /// 查不到的新机型才按短边的 14% 估；圆角屏的 iPad 18 点；有 Home 键的方屏 0
+    @MainActor
     private static func screenCorner(full: CGSize, insets: EdgeInsets) -> CGFloat {
         let short = min(full.width, full.height)
         guard short > 0, insets.bottom > 0 else { return 0 }
         switch UIDevice.current.userInterfaceIdiom {
-        case .phone: return min(62, max(39, (short * 0.14).rounded()))
+        case .phone: return knownPhoneCorner() ?? min(62, max(39, (short * 0.14).rounded()))
         case .pad: return 18
         default: return 0
         }
+    }
+
+    /// 已知 iPhone 的屏幕圆角：按物理像素（竖拿，短 × 长）认机型。「放大显示」时同一块屏点数变少，
+    /// 同样的物理圆角折成的点数也按比例变小（标准显示下比例是 1）
+    @MainActor
+    private static func knownPhoneCorner() -> CGFloat? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let screen = (scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first)?.screen else { return nil }
+        let px = screen.nativeBounds.size
+        let w = Int(min(px.width, px.height).rounded())
+        let h = Int(max(px.width, px.height).rounded())
+        // 圆角点数，标准显示下的短边点数
+        let known: (radius: CGFloat, short: CGFloat)
+        switch (w, h) {
+        case (1125, 2436): known = (39, 375)     // X / XS / 11 Pro
+        case (1242, 2688): known = (39, 414)     // XS Max / 11 Pro Max
+        case (828, 1792): known = (41.5, 414)    // XR / 11
+        case (1080, 2340): known = (44, 375)     // 12 mini / 13 mini
+        case (1170, 2532): known = (47.33, 390)  // 12 / 12 Pro / 13 / 13 Pro / 14 / 16e
+        case (1284, 2778): known = (53.33, 428)  // 12 Pro Max / 13 Pro Max / 14 Plus
+        case (1179, 2556): known = (55, 393)     // 14 Pro / 15 / 15 Pro / 16
+        case (1290, 2796): known = (55, 430)     // 14 Pro Max / 15 Plus / 15 Pro Max / 16 Plus
+        case (1206, 2622): known = (62, 402)     // 16 Pro
+        case (1320, 2868): known = (62, 440)     // 16 Pro Max
+        default: return nil
+        }
+        let short = min(screen.bounds.width, screen.bounds.height)
+        guard short > 0 else { return known.radius }
+        return known.radius * min(1, max(0.7, short / known.short))
     }
 
     // MARK: 中间那一组
@@ -216,20 +250,26 @@ struct RequestSendOverlay: View {
         leaving = false
         ringFocus = nil
         sendStart = CACurrentMediaTime()
+        // 状态行先不带动画地归零；淡入放到 hold() 里（这一下提交以后才跑），重来一遍时也照样从下面淡入升起（用户要的那一段）
+        var reset = Transaction()
+        reset.disablesAnimations = true
+        withTransaction(reset) { labelIn = false }
         withAnimation(.easeOut(duration: RequestSendTiming.enter)) { visible = true }
-        let label: Animation = reduceMotion ? Animation.easeOut(duration: 0.3) : Animation.easeOut(duration: 0.45).delay(0.15)
-        withAnimation(label) { labelIn = true }
-        // 等全屏盖上来、旁白念完换屏那一下再说
-        announce("正在发往请求中心", after: 0.5)
+        // 第一次盖上来时旁白自己会落到「正在发往请求中心」那一行上念出来，不再另外念一遍；
+        // 换了一部重来时原先那一组没了，焦点无处可落，才念一声
+        if run > 1 { announce("正在发往请求中心", after: 0.3) }
     }
 
-    /// 至少飞 1.1 秒再看结果；8 秒多还没有结果就露出「关闭」
+    /// 状态行淡入；至少飞 1.1 秒再看结果（交给 onChange(of: held)）；8 秒多还没有结果就露出「关闭」
     private func hold(_ id: Int) async {
         guard id > 0 else { return }
+        // 说明：松手后 0.15 秒起、0.45 秒里状态行淡入并略升
+        let label: Animation = reduceMotion ? Animation.easeOut(duration: 0.3) : Animation.easeOut(duration: 0.45).delay(0.15)
+        withAnimation(label) { labelIn = true }
         try? await Task.sleep(for: .seconds(RequestSendTiming.minSending))
         guard !Task.isCancelled, id == run else { return }
+        // 只记下「飞够了」，不在这里读 result（这个 task 抓的是旧视图）
         held = true
-        resolveIfReady()
         try? await Task.sleep(for: .seconds(RequestSendTiming.stuckAfter))
         guard !Task.isCancelled, id == run, stage == .sending else { return }
         withAnimation(.easeOut(duration: 0.3)) { stuck = true }
@@ -241,14 +281,12 @@ struct RequestSendOverlay: View {
         resolvedAt = CACurrentMediaTime()
         resolvedDate = Date()
         switch r {
-        case .added:
-            withAnimation(.easeOut(duration: reduceMotion ? 0.3 : 0.15)) { stage = .success }
+        case .added, .already:
+            // 说明：0–150 毫秒里勾和片名就到位，「浮现」那一下交给折射（最强在 60–90 毫秒），所以这一组几乎立刻淡入
+            withAnimation(.easeOut(duration: reduceMotion ? 0.3 : 0.06)) { stage = .success }
             Haptics.success()
+            // 两种都照用户给的那句说（早就在里面的，时间那一行写「添加于 …」）
             announce("已添加至请求中心：\(item.spoken)", after: 0.1)
-        case .already:
-            withAnimation(.easeOut(duration: reduceMotion ? 0.3 : 0.15)) { stage = .success }
-            Haptics.success()
-            announce("已在请求中心：\(item.spoken)", after: 0.1)
         case .failed(let why):
             withAnimation(.easeInOut(duration: 0.35)) { stage = .failure }
             Haptics.error()
@@ -270,7 +308,9 @@ struct RequestSendOverlay: View {
     private func announce(_ text: String, after delay: Double) {
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(delay))
-            UIAccessibility.post(notification: .announcement, argument: text)
+            // 排队念：旁白正在念（换屏后重新落焦点）时不打断、也不被吞掉
+            let queued = NSAttributedString(string: text, attributes: [.accessibilitySpeechQueueAnnouncement: true])
+            UIAccessibility.post(notification: .announcement, argument: queued)
         }
     }
 }
@@ -288,6 +328,8 @@ private struct RequestSendConfirmation: View {
     let openCenter: () -> Void
     /// 片名的正中在整个浮层（安全区）里的位置：交给画布，让环从这儿出发
     let onFocus: (CGPoint) -> Void
+    /// 时间那一行（用户要求显示添加的时间）：建这一组时排一次；折射那半秒里每帧都重画，不要每帧新建 DateFormatter
+    private let timeLine: String
 
     // 写明初始化器：下面有 private 的存储属性，自动合成的成员初始化器会变成 private，同一文件里的 RequestSendOverlay 用不了
     init(item: RequestSendItem, added: Date, already: Bool, since: Date, reduceMotion: Bool,
@@ -300,6 +342,9 @@ private struct RequestSendConfirmation: View {
         self.done = done
         self.openCenter = openCenter
         self.onFocus = onFocus
+        let t = RequestSendTime.text(added)
+        // 早就在请求中心里的：只在时间前面写「添加于」点明是先前加的
+        self.timeLine = already ? "添加于 \(t)" : t
     }
 
     @State var onset = false
@@ -350,16 +395,16 @@ private struct RequestSendConfirmation: View {
         .padding(.horizontal, 28)
     }
 
-    /// 勾：成功后 0.3 秒画出来（说明：0–150 毫秒里勾和金额出现），带一点紫的光晕
+    /// 勾：成功后 0.12 秒画出来（说明：0–150 毫秒里勾和金额出现，60–90 毫秒折射最强时已经差不多画完），带一点紫的光晕
     private var check: some View {
         let size = tight ? min(checkSize, 34) : checkSize
-        let draw: Animation? = reduceMotion ? nil : Animation.easeOut(duration: 0.3)
+        let draw: Animation? = reduceMotion ? nil : Animation.easeOut(duration: 0.12)
         return RequestSendCheck(size: size, drawn: onset || reduceMotion ? 1 : 0, cyan: drift ? 0.8 : 0)
             .animation(draw, value: onset)
             .animation(.easeInOut(duration: 3.1), value: drift)
             .scaleEffect(onset || reduceMotion ? 1 : 0.82)
             .opacity(onset ? 1 : 0)
-            .animation(motion(.spring(response: 0.36, dampingFraction: 0.68)), value: onset)
+            .animation(motion(.spring(response: 0.18, dampingFraction: 0.72)), value: onset)
             .padding(.bottom, tight ? 10 : 18)
             .accessibilityHidden(true)
     }
@@ -369,14 +414,10 @@ private struct RequestSendConfirmation: View {
         return Text("\(Text(item.title)) \(Text("第 \(s) 季").foregroundStyle(RequestSendPalette.dim))")
     }
 
+    /// 用户给的原话：「已添加至请求中心，等待您进一步操作」（早就在里面的也一样，时间那一行写「添加于」）
     private var lineText: Text {
         let centre = Text("请求中心").foregroundStyle(Color.white).fontWeight(.semibold)
-        return already ? Text("已在\(centre)，等待您进一步操作") : Text("已添加至\(centre)，等待您进一步操作")
-    }
-
-    private var timeText: String {
-        let t = RequestSendTime.text(added)
-        return already ? "添加于 \(t)" : t
+        return Text("已添加至\(centre)，等待您进一步操作")
     }
 
     private var texts: some View {
@@ -396,23 +437,24 @@ private struct RequestSendConfirmation: View {
                     let f = proxy.frame(in: .named(requestSendRootSpace))
                     return CGPoint(x: f.midX, y: f.midY)
                 } action: { onFocus($0) }
+                // 0.1 秒就清楚（只带一点点模糊）：折射最强那一刻（60–90 毫秒）片名已经看得见，RGB 错开才显得出来
                 .opacity(onset ? 1 : 0)
-                .blur(radius: onset || reduceMotion ? 0 : 10)
+                .blur(radius: onset || reduceMotion ? 0 : 3)
                 .scaleEffect(onset || reduceMotion ? 1 : 0.97)
-                .animation(motion(.easeOut(duration: 0.24)), value: onset)
+                .animation(motion(.easeOut(duration: 0.1)), value: onset)
                 .padding(.bottom, 10)
             VStack(spacing: 4) {
                 lineText
                     .font(.subheadline)
                     .foregroundStyle(DSInk.secondary)
-                Text(timeText)
+                Text(timeLine)
                     .font(.footnote)
                     .monospacedDigit()
                     .foregroundStyle(DSInk.tertiary)
             }
             .multilineTextAlignment(.center)
             .opacity(onset ? 1 : 0)
-            .animation(motion(.easeOut(duration: 0.3)).delay(reduceMotion ? 0 : 0.08), value: onset)
+            .animation(motion(.easeOut(duration: 0.12)).delay(reduceMotion ? 0 : 0.02), value: onset)
         }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
@@ -437,9 +479,10 @@ private struct RequestSendConfirmation: View {
             .accessibilityIdentifier("request-send-open-center")
         }
         .padding(.top, tight ? 16 : 30)
+        // 波大约 0.12–0.16 秒扫到「好」：那时它得已经亮出来，才有录屏里「Got it」被折射、发亮的那一下
         .opacity(onset ? 1 : 0)
         .offset(y: onset || reduceMotion ? 0 : 10)
-        .animation(motion(.spring(response: 0.45, dampingFraction: 0.86)).delay(reduceMotion ? 0 : 0.16), value: onset)
+        .animation(motion(.easeOut(duration: 0.14)).delay(reduceMotion ? 0 : 0.04), value: onset)
     }
 }
 
