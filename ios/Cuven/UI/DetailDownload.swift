@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - 详情页的「下载」
 //
-// 别的 iPhone、iPad 上在导航栏右上角；iPhone Duo 侧边一列的形态里在弧形菜单上（DetailArcMenu.swift）。
+// 别的 iPhone、iPad 上在导航栏右上角；iPhone Duo 侧边一列的形态里是「+」展开的滑块上的一档（DetailArcMenu.swift）。
 // · 下载（用户要求「下载指的是预先缓存 100%」：Precache.download）：整部缓存到本机，在 App 里放（离线也行）。
 //   ↓ → 一圈进度 + 停止方块（下载中，点开是「暂停 / 取消」）→ 一圈进度 + ↓（暂停了、断了，点开是「继续 / 取消」）→ ✓（点开是「删除下载」）；
 // · 以前还有一颗「分享」（发一条 cuven://movie/<TMDB 编号> 的链接）：用户要求移除。别人发来的这种链接照样打得开（DeepLink）。
@@ -12,8 +12,6 @@ struct DetailDownloadButton: View {
     let title: String
     let runtime: Int?
     @Binding var alert: PrecacheAlert?
-    /// 弧形菜单里的那一段弧带：图标摆在它的中线上，整段弧带都点得到（工具栏里不用给，系统自己管）
-    var slot: ArcSlot? = nil
 
     var body: some View {
         let it = Precache.shared.item(path: video.path)
@@ -24,7 +22,7 @@ struct DetailDownloadButton: View {
                 Menu {
                     Button("删除下载", systemImage: "trash", role: .destructive) { Precache.shared.delete(path: video.path) }
                 } label: {
-                    Image(systemName: "checkmark").detailHit(slot: slot)
+                    Image(systemName: "checkmark")
                 }
                 .accessibilityLabel("已下载")
                 .accessibilityIdentifier("detail-download")
@@ -33,7 +31,7 @@ struct DetailDownloadButton: View {
                     Button("暂停下载", systemImage: "pause") { Precache.shared.pause(path: video.path) }
                     Button("取消下载", systemImage: "xmark", role: .destructive) { Precache.shared.delete(path: video.path) }
                 } label: {
-                    DownloadRing(progress: it.progress, running: true).detailHit(slot: slot)
+                    DownloadRing(progress: it.progress, running: true)
                 }
                 .accessibilityLabel("正在下载")
                 .accessibilityValue("\(Int((it.progress * 100).rounded()))%")
@@ -43,7 +41,7 @@ struct DetailDownloadButton: View {
                     Button("继续下载", systemImage: "arrow.down") { Precache.shared.resume(path: video.path) }
                     Button("取消下载", systemImage: "xmark", role: .destructive) { Precache.shared.delete(path: video.path) }
                 } label: {
-                    DownloadRing(progress: it.progress, running: false).detailHit(slot: slot)
+                    DownloadRing(progress: it.progress, running: false)
                 }
                 .accessibilityLabel(it.phase == .noSpace ? "储存空间不足" : "下载已暂停")
                 .accessibilityValue("\(Int((it.progress * 100).rounded()))%")
@@ -53,36 +51,11 @@ struct DetailDownloadButton: View {
             Button {
                 alert = DetailDownloadStarter.start(video: video, title: title, runtime: runtime)
             } label: {
-                Image(systemName: "arrow.down").detailHit(slot: slot)
+                Image(systemName: "arrow.down")
             }
             .accessibilityLabel("下载")
             .accessibilityHint("把整部影片缓存到这台 iPhone")
             .accessibilityIdentifier("detail-download")
-        }
-    }
-}
-
-extension View {
-    /// 弧形菜单里的一项：按钮撑到那颗圆玻璃那么大，图标在正中，点得到的范围是整颗圆（不给就原样）
-    @ViewBuilder
-    func detailHit(_ size: CGFloat?) -> some View {
-        if let size {
-            frame(width: size, height: size)
-                .contentShape(Circle())
-        } else {
-            self
-        }
-    }
-
-    /// 弧形菜单里「下载」那一项：按钮撑到弧带的外接矩形那么大，图标摆在弧带的中线上，点得到的范围是整段弧带（不给就原样）
-    @ViewBuilder
-    func detailHit(slot: ArcSlot?) -> some View {
-        if let slot {
-            offset(slot.glyph)
-                .frame(width: slot.frameSize.width, height: slot.frameSize.height)
-                .contentShape(slot)
-        } else {
-            self
         }
     }
 }
