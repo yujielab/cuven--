@@ -203,15 +203,22 @@ struct DuoNav: View {
         // 深色的身子：Netflix 那枚比系统标签栏暗得多（量到约是底下画面 × 0.4，画面照样透得过来），
         // 可最外一圈边是亮的、带着旁边海报的颜色（用户指出的：目标图里胶囊左边缘泛着旁边画面的蓝紫、往下一点泛红）——
         // 那是 Liquid Glass 的边在折射、反射周围的画面。所以玻璃本身不染色（整块压黑会把这圈边也压掉），
-        // 只在里面垫一层黑，离边 2 点、边上柔一点，把那圈边留给玻璃
+        // 只在里面垫一层黑，把那圈边留给玻璃。
+        // 用户要求「明显化侧面导航栏的反射光线」：边留宽一点（离边 3.5 点、柔边 2），玻璃用 .clear（更通透、边上的折射更强，
+        // 身子靠里面那层黑照样是暗的），再沿边描一道很细的高光（左上亮、右下弱一点，像光从左上照过来打在玻璃边上）
         .background {
             Capsule()
                 .fill(DuoNavInk.body)
-                .padding(2)
-                .blur(radius: 1.5)
+                .padding(3.5)
+                .blur(radius: 2)
                 .allowsHitTesting(false)
         }
-        .glassEffect(.regular.interactive(), in: Capsule())
+        .overlay {
+            Capsule()
+                .strokeBorder(DuoNavInk.rim, lineWidth: 1)
+                .allowsHitTesting(false)
+        }
+        .glassEffect(.clear.interactive(), in: Capsule())
         // 选中的那块在格子之间滑过去；「减弱动态效果」打开时直接换过去，不带弹性（F59）
         .animation(reduceMotion ? nil : .snappy(duration: 0.32), value: tab)
     }
@@ -301,7 +308,14 @@ struct DuoNav: View {
 private enum DuoNavInk {
     /// 胶囊身子的深色：垫在玻璃里面的一层黑（离边 2 点，边留给玻璃去反射周围画面的颜色）。
     /// 普通玻璃压在黑底上量到约 31，Netflix 那枚是 12：× 0.4
-    static let body = Color.black.opacity(0.6)
+    static let body = Color.black.opacity(0.62)
+    /// 边上那道高光：左上最亮，中段几乎看不见，右下再亮一点
+    static let rim = LinearGradient(stops: [
+        .init(color: .white.opacity(0.5), location: 0),
+        .init(color: .white.opacity(0.12), location: 0.3),
+        .init(color: .white.opacity(0.06), location: 0.6),
+        .init(color: .white.opacity(0.28), location: 1),
+    ], startPoint: .topLeading, endPoint: .bottomTrailing)
     /// 选中垫的那块：平的、亮一点
     static let selection = Color.white.opacity(0.1)
     static let idle = Color.white.opacity(0.45)

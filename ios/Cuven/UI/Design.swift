@@ -1252,8 +1252,11 @@ struct DSHeroBackdrop: View {
         let art = tall ? (page.tallArt ?? page.wideArt) : (page.wideArt ?? page.tallArt)
         ZStack {
             Color.black
+            // 竖版画面顶部对齐（用户要求：iPhone Duo 上头图海报用顶部对齐）：折起的 Duo 头图比 2 : 3 的竖图宽，
+            // 按宽铺满要裁掉一百多点高，居中裁时上面那一截（人物的头）被切掉；从顶上排，裁掉的都在底下（底下本来就压暗了）。
+            // 普通 iPhone 竖图按高铺满、只裁左右，对齐不起作用；横图仍居中
             DSBlurFadeImage(url: TMDBImage.url(art, "w1280"), maxPixel: 2000)
-                .frame(width: width, height: height)
+                .frame(width: width, height: height, alignment: tall ? .top : .center)
                 .clipped()
             if let trailer, trailer.path == page.id {
                 VideoSurface(player: trailer.player, gravity: .resizeAspectFill, background: .clear)
