@@ -6,7 +6,7 @@ import UIKit
 // 和 Apple TV 的主页一样只有两样东西：最上面一张铺满的轮播头图（S15–S17），下面一排排海报（T23、S8）。
 // 头图几乎占满一屏，连同 iPhone Duo 侧边那一列一起平铺（画面在系统栏底下过去，不做镜像模糊：F6、S19），
 // 左上一行白色大字「Home」、右上一枚头像（点开账户与设置），页码点浮在画面底部。
-// 下面的顺序：继续观看（有才有）→ 今年 → 去年（电影和剧集一起，最新入库的在前）→ 精选电影 → 精选剧集 → 四个大类（用户要求：动画片区、
+// 下面的顺序：继续观看（有才有）→ 精选电影 → 今年 → 去年（电影和剧集一起，最新入库的在前）→ 精选剧集 → 四个大类（用户要求：动画片区、
 // 动作片区、喜剧片区、严苛品质区）。卡上只有画面：无字主视觉 + 官方字标，或本来就印着片名的海报，卡下不写字（T20、F80）。
 // 分区之间只靠留白（F3、F12、F38）。折起的外屏、展开的竖拿 / 横拿是同一套部件，只按可用宽度长大（S1、D2、F9）。
 
@@ -199,7 +199,7 @@ struct HomeView: View {
         .animation(DSMotion.fade, value: model.movies.isEmpty)
     }
 
-    /// 顺序：继续观看 → 今年 → 探索片段合集 → 去年（预告片卡）→ 精选电影 → 编辑推荐 → 精选剧集 → 四个大类 → 结尾（两排字标卡 + 查看全部影片）
+    /// 顺序：继续观看 → 精选电影 → 今年 → 探索片段合集 → 去年（预告片卡）→ 编辑推荐 → 精选剧集 → 四个大类 → 结尾（两排字标卡 + 查看全部影片）
     /// （docs/ios-design.md「主页」；F1：最要紧的在上）
     @ViewBuilder
     private func shelfContent(_ m: DSMetrics, fullHeight: CGFloat) -> some View {
@@ -226,12 +226,13 @@ struct HomeView: View {
         } else {
             VStack(alignment: .leading, spacing: m.shelfGap) {
                 continueWatching(m)
+                // 精选电影紧跟在继续观看下面（用户要求：从编辑推荐上面挪上来）
+                featuredShelf(m)
                 // 今年那一排下面是「探索片段合集」（用户要求：2026 年份下；ClipCollections.swift），再是去年
                 let years = homeYears
                 yearShelf(years[0], m)
                 ClipCollectionsShelf(metrics: m)
                 ForEach(years.dropFirst(), id: \.self) { y in yearShelf(y, m) }
-                featuredShelf(m)
                 editorsPickBlock(m, fullHeight: fullHeight)
                 featuredSeriesShelf(m)
                 // 主页不放「可申请」那一排（用户要求移除）：可申请的在「全部影片 › 可申请」和搜索里

@@ -263,13 +263,15 @@ struct DSViewPill: View {
     var compact = false
 
     var body: some View {
+        // 用户要求「全局同类型的按钮为白底蓝字」（App Store「获取」那种）：画面上、黑页面上都是白底 + 主题蓝的字。
+        // onArt 留着（调用处不动），两种现在一个样子
         Text("查看")
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(onArt ? Color.white : Theme.accent)
+            .foregroundStyle(Theme.accent)
             .lineLimit(1)
             .padding(.horizontal, compact ? 12 : 16)
             .frame(minHeight: 32)
-            .background(Capsule().fill(Color.white.opacity(onArt ? 0.2 : 0.12)))
+            .background(Capsule().fill(Color.white))
             .fixedSize()
             .accessibilityHidden(true)
     }

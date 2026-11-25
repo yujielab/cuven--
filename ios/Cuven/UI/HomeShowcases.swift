@@ -632,7 +632,7 @@ struct YearTrailerCard: View {
                 }
                 .lineLimit(1)
                 Spacer(minLength: compact ? 6 : 8)
-                // 在黑的页面上：蓝字、12% 白的底（DSViewPill）
+                // 白底蓝字（DSViewPill；用户要求全局同类型的按钮都是白底蓝字）
                 if let badge {
                     badge.view(compact: compact)
                 } else {
@@ -663,7 +663,7 @@ struct YearTrailerCard: View {
     }
 }
 
-/// 年份卡右边那颗胶囊换成的状态：和「查看」同一个样子（12% 白的底），只是字和颜色不同
+/// 年份卡右边那颗胶囊换成的状态：和「查看」同一个样子（白底），只是字不同：申请、进度这些是主题蓝，没能添加是红的
 struct YearCardBadge: Equatable {
     enum Tone: Equatable { case accent, plain, alert }
     var text: String
@@ -674,13 +674,13 @@ struct YearCardBadge: Equatable {
         Text(text)
             .font(.subheadline.weight(.semibold))
             .monospacedDigit()
-            .foregroundStyle(tone == .accent ? Theme.accent : tone == .alert ? Color(red: 1.0, green: 0.27, blue: 0.23) : Color.white)
+            .foregroundStyle(tone == .alert ? Color(red: 1.0, green: 0.27, blue: 0.23) : Theme.accent)
             .lineLimit(1)
             // 这一行实在放不下（窄窗口里 200 出头的卡、特大字号）：字缩一点，不再把整行撑得比卡还宽
             .minimumScaleFactor(0.6)
             .padding(.horizontal, compact ? 12 : 16)
             .frame(minHeight: 32)
-            .background(Capsule().fill(Color.white.opacity(0.12)))
+            .background(Capsule().fill(Color.white))
             // 只定高、不定宽：以前 .fixedSize() 连宽也定死，放不下时整行冲到旁边那张卡上
             .fixedSize(horizontal: false, vertical: true)
             // 宁可片名截断，状态不被挤扁（和「查看」同一条规矩）：排的时候先给它宽，放得下就是原来的大小，放不下才缩字
