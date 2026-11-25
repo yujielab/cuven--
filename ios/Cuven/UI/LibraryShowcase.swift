@@ -356,16 +356,23 @@ struct ShowcaseMedia: View {
     let trailer: ShowcaseTrailer
     let isActive: Bool
     @State private var drift = false
+    /// 画面到了：骨架屏收掉（没有画面的那一部一直是黑的，不挂骨架）
+    @State private var artLoaded = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let mine = isActive && trailer.path == video.path
         ZStack {
-            RadialGradient(colors: [Color(red: 27 / 255, green: 39 / 255, blue: 64 / 255), Color(red: 10 / 255, green: 15 / 255, blue: 24 / 255), .black],
-                           center: UnitPoint(x: 0.5, y: 0.38), startRadius: 0, endRadius: 400)
+            // 底是纯黑（用户要求：以前是一团深蓝的径向渐变，还没加载时整块发蓝）；画面还没到时是骨架屏：一道很淡的光扫过去
+            Color.black
+            if !artLoaded && art != nil {
+                ShowcaseSkeleton()
+                    .transition(.opacity)
+            }
             // 放在 Color.clear 的 overlay 里：图按 fill 铺，比例不是正好 16:9 时也不会把这一层撑大、画到画幅外面去
             Color.clear.overlay {
-                RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1280, placeholder: .clear)
+                RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1280, placeholder: .clear,
+                            onLoad: { withAnimation(.easeOut(duration: 0.3)) { artLoaded = true } })
                     .scaleEffect(drift ? 1.12 : 1.02)
             }
             if mine {
@@ -395,6 +402,36 @@ struct ShowcaseMedia: View {
             let s = 1 - t * t * (3 - 2 * t)
             return Gradient.Stop(color: .black.opacity(peak * s), location: span * t)
         } + [Gradient.Stop(color: .clear, location: 1)]
+    }
+}
+
+/// 探索画幅的骨架屏（用户要求「未加载时底色为黑色并有骨架屏」）：黑底上一块极淡的灰，
+/// 一道柔和的光斜着从左扫到右（1.6 秒一趟）；「减弱动态效果」时不扫，只留那一层淡灰
+struct ShowcaseSkeleton: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var phase: CGFloat = 0
+
+    var body: some View {
+        GeometryReader { g in
+            ZStack {
+                Color.white.opacity(0.035)
+                if !reduceMotion {
+                    LinearGradient(colors: [.clear, Color.white.opacity(0.07), .clear],
+                                   startPoint: .leading, endPoint: .trailing)
+                        .frame(width: g.size.width * 0.55)
+                        .rotationEffect(.degrees(12))
+                        .offset(x: g.size.width * (phase * 1.7 - 0.85))
+                        .frame(width: g.size.width, height: g.size.height)
+                }
+            }
+            .clipped()
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) { phase = 1 }
+        }
     }
 }
 
