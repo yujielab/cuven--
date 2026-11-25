@@ -1,3 +1,4 @@
+import Metal
 import SwiftUI
 import UIKit
 
@@ -732,6 +733,9 @@ struct DetailScaffold<Episodes: View>: View {
                     .padding(.leading, insets.leading)
                     .padding(.trailing, insets.trailing)
                 }
+                // 有字标转场时（用户要求：字标要能一路滚到落进条里）：页面再短也至少能滚 pinAt 那么远，
+                // 进度只看滚了多远，简介、演员这些后到的内容把页面撑高时不会让停住的那一帧自己跳
+                .frame(minHeight: logoImage != nil ? fullH + max(0, pinAt) : nil, alignment: .topLeading)
                 // 整页的颜色：头部下面从画面的主色开始，往下慢慢沉到同色相的深色（参考图）
                 .background(alignment: .top) {
                     VStack(spacing: 0) {
@@ -752,12 +756,10 @@ struct DetailScaffold<Episodes: View>: View {
             }
             // 字标粒子转场的进度（用户要求：跟着滚动走，停下就停在这一帧，往回滚原路倒回去）：
             // 0 = 没滚（字标在头部原位），1 = 滚到以前钉住那条出现的位置（字标已经落进条里）。
-            // 页面短、滚不到那么远时，就在滚到底的地方落定：粒子不会停在半路上
+            // 只看滚动距离、不看页面多高（停住就是同一帧）；页面短的时候上面那个最小高度保证滚得到 1，粒子不会停在半路上
             .onScrollGeometryChange(for: Double.self) { g in
                 let d = g.contentOffset.y + g.contentInsets.top
-                let reach = g.contentSize.height + g.contentInsets.top + g.contentInsets.bottom - g.containerSize.height
-                let range = max(1, reach > 120 ? min(pinAt, reach) : pinAt)
-                return Double(min(1, max(0, d / range)))
+                return Double(min(1, max(0, d / max(1, pinAt))))
             } action: { _, v in
                 motion.setProgress(v)
             }
@@ -808,12 +810,14 @@ struct DetailScaffold<Episodes: View>: View {
     private func pinnedBar(_ m: DSMetrics, insets: EdgeInsets, barBottom: CGFloat, palette: DetailPalette, heroLogo: CGSize?) -> some View {
         if let logoImage, let heroLogo {
             let slot = CGSize(width: heroLogo.width * 0.42, height: heroLogo.height * 0.42)
-            DetailLogoBarHost(motion: motion) { p in
+            let particles = logoParticles
+            DetailLogoBarHost(motion: motion) { p, ready in
+                // 粒子层画不出来（「减弱动态效果」、没有 Metal、框还没量到）时条里那枚跟着进度淡入，不会到 1 才突然冒出来
                 DetailPinnedBar(title: title, thumb: thumb, logo: logoURL,
                                 playTitle: playTitle, playDisabled: playDisabled, palette: palette,
                                 topInset: barBottom, leading: insets.leading + m.margin, trailing: insets.trailing + m.margin,
                                 onPlay: onPlay, logoImage: logoImage, logoSlot: slot, progress: p,
-                                onLogoSlot: { r in if motion.slot != r { motion.slot = r } })
+                                onLogoSlot: { r in motion.setSlot(r) }, crossFade: !(particles && ready))
             }
             .ignoresSafeArea(edges: [.top, .horizontal])
         } else {
@@ -830,15 +834,21 @@ struct DetailScaffold<Episodes: View>: View {
         }
     }
 
-    /// 字标的粒子层：铺满整个窗口，不接手势、旁白不念；「减弱动态效果」时不放粒子（两枚字标交叉淡入淡出），没有字标就没有这一层
+    /// 字标的粒子层：铺满整个窗口，不接手势、旁白不念；「减弱动态效果」或画不出来时不放粒子（两枚字标交叉淡入淡出），没有字标就没有这一层
     @ViewBuilder
     private func particleLayer(_ heroLogo: CGSize?) -> some View {
-        if let logoImage, let heroLogo, !reduceMotion {
+        if let logoImage, let heroLogo, logoParticles {
             DetailLogoParticleLayer(motion: motion, image: logoImage, heroSize: heroLogo)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
         }
+    }
+
+    /// 放不放粒子（用户要求的字标粒子转场）：没开「减弱动态效果」、这台设备有 Metal、字标图能取样（粒子层要 CGImage）。
+    /// 放不了就是两枚真字标跟着进度交叉淡入淡出：头部字标不会在半路上藏起来却没有粒子顶上
+    private var logoParticles: Bool {
+        !reduceMotion && DetailLogoGPU.available && logoImage?.cgImage != nil
     }
 
     /// 这一页的字标地址（头部、条里、粒子层都是这一张）；没有字标是 nil
@@ -932,13 +942,18 @@ struct DetailScaffold<Episodes: View>: View {
                 if let art {
                     if let logo = art.logo, !logo.isEmpty {
                         // 字标粒子转场（用户要求）：一开始往下滚（p > 0）这枚真字标就藏起来，交给粒子层（同一张图、同一个框）；
-                        // 滚回顶上（p = 0）再亮出来。旁白照样念它（外面那层元素不跟着藏），它还是这一页的标题
-                        DetailHeroLogoGate(motion: motion, active: logoImage != nil, reduceMotion: reduceMotion) {
+                        // 滚回顶上（p = 0）再亮出来。粒子层画不出来时不藏，跟着进度淡出。旁白照样念它（外面那层元素不跟着藏），它还是这一页的标题
+                        DetailHeroLogoGate(motion: motion, active: logoImage != nil, crossFade: !logoParticles) {
                             LogoImage(url: TMDBImage.url(logo, "w500"), height: logoH, alignment: .leading,
                                       fallback: title, maxWidth: box.maxWidth)
                         }
-                        // 量它在窗口里的框：粒子从这里出发（跟着页面往上走）
-                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { motion.heroBox = $0 }
+                        // 量它在窗口里的框：粒子从这里出发（跟着页面往上走）。
+                        // 字标已经落进条里、这一块又滚出了屏幕顶上（在看演员、分集）时不再每帧写：粒子层不跟着整页滚动重算；
+                        // 滚回来一露头就接着写（那时进度还是 1，粒子层要用它之前已经是新的）
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { r in
+                            if motion.progress >= 1, r.maxY < 0, r.size == motion.heroBox.size { return }
+                            motion.setHeroBox(r)
+                        }
                         .accessibilityElement(children: .ignore)
                         .accessibilityLabel(title)
                         .accessibilityAddTraits(.isHeader)
@@ -1106,6 +1121,11 @@ struct DetailScaffold<Episodes: View>: View {
 
 // MARK: - 字标粒子转场（用户要求：滚动驱动，头部大字标 → 顶上条里的小字标）
 
+/// 这台设备能不能跑粒子层（有 Metal）：没有就不放粒子，两枚真字标交叉淡入淡出（用户要求：半路上字标不能凭空没了）
+enum DetailLogoGPU {
+    static let available: Bool = MTLCreateSystemDefaultDevice() != nil
+}
+
 /// 转场的滚动状态：DetailScaffold 在滚动 / 排版回调里写，粒子层、钉住的条、头部字标读。
 /// 单独一个可观察的小对象：每一帧只有读它的那几小块重画，整页（DetailScaffold）不跟着每帧重算
 @MainActor @Observable
@@ -1115,29 +1135,49 @@ final class DetailLogoMotion {
     /// 已经离开原位（p > 0）：头部真字标藏起来，交给粒子层。单独一个开关：头部那一块只在它翻转时重画
     private(set) var moving = false
     /// 头部字标（LogoImage 那一块，字标靠左下画在里面）在窗口里的框
-    var heroBox: CGRect = .zero
+    private(set) var heroBox: CGRect = .zero
     /// 顶上条里字标那一格在窗口里的框（粒子的落点）
-    var slot: CGRect = .zero
+    private(set) var slot: CGRect = .zero
+    /// 两个框都量到了，粒子层画得出来。没量到之前头部字标不藏（跟着进度淡出），不会半路上两头都没有。
+    /// 单独一个开关：头部那一块、条只在它翻转时重画，不跟着每帧的框
+    private(set) var ready = false
 
     func setProgress(_ p: Double) {
         if progress != p { progress = p }
         let m = p > 0
         if moving != m { moving = m }
     }
+
+    func setHeroBox(_ r: CGRect) {
+        if heroBox != r { heroBox = r }
+        syncReady()
+    }
+
+    func setSlot(_ r: CGRect) {
+        if slot != r { slot = r }
+        syncReady()
+    }
+
+    private func syncReady() {
+        let r = heroBox.width > 0 && heroBox.height > 0 && slot.width > 0 && slot.height > 0
+        if ready != r { ready = r }
+    }
 }
 
-/// 头部的真字标：p > 0 时藏起来（粒子层在画同一张图）；「减弱动态效果」时不放粒子，跟着进度淡出（条里那枚同时淡入）
+/// 头部的真字标：p > 0 时藏起来（粒子层在画同一张图）；不放粒子（「减弱动态效果」、画不了）或粒子层还画不出来（框没量到）时
+/// 不藏，跟着进度淡出（条里那枚同时淡入）
 private struct DetailHeroLogoGate<Content: View>: View {
     let motion: DetailLogoMotion
     /// 转场开着（字标图到手了）；没开就和以前一样一直显示
     let active: Bool
-    let reduceMotion: Bool
+    /// 不放粒子：两枚真字标交叉淡入淡出
+    let crossFade: Bool
     let content: Content
 
-    init(motion: DetailLogoMotion, active: Bool, reduceMotion: Bool, @ViewBuilder content: () -> Content) {
+    init(motion: DetailLogoMotion, active: Bool, crossFade: Bool, @ViewBuilder content: () -> Content) {
         self.motion = motion
         self.active = active
-        self.reduceMotion = reduceMotion
+        self.crossFade = crossFade
         self.content = content()
     }
 
@@ -1147,19 +1187,19 @@ private struct DetailHeroLogoGate<Content: View>: View {
 
     private var shown: Double {
         guard active else { return 1 }
-        if reduceMotion { return 1 - motion.progress }
+        if crossFade || !motion.ready { return 1 - motion.progress }
         return motion.moving ? 0 : 1
     }
 }
 
-/// 有字标时钉住的那一条：按当下的进度现做（只有这一小块每帧重画）
+/// 有字标时钉住的那一条：按当下的进度现做（只有这一小块每帧重画）；第二个参数是粒子层画不画得出来（两个框量到没有）
 private struct DetailLogoBarHost: View {
     let motion: DetailLogoMotion
-    let bar: (Double) -> DetailPinnedBar
+    let bar: (Double, Bool) -> DetailPinnedBar
 
     var body: some View {
         let p = motion.progress
-        bar(p)
+        bar(p, motion.ready)
             // 字标落定、「继续播放」出齐了才接手势、旁白才念这一条（没有字标时是看钉住那条有没有出来）
             .allowsHitTesting(p >= 1)
             .accessibilityHidden(p < 1)
@@ -1167,7 +1207,7 @@ private struct DetailLogoBarHost: View {
 }
 
 /// 粒子层：从头部字标（跟着页面走的那个框）飞到条里那一格；两个框都是窗口坐标。
-/// 框还没量到时进度给 0（什么都不画）
+/// 框还没量到时进度给 0（什么都不画；头部字标这时也不藏）
 private struct DetailLogoParticleLayer: View {
     let motion: DetailLogoMotion
     let image: UIImage
@@ -1178,7 +1218,7 @@ private struct DetailLogoParticleLayer: View {
         let box = motion.heroBox
         let slot = motion.slot
         let p = motion.progress
-        let ready = box.width > 0 && slot.width > 0 && heroSize.width > 0
+        let ready = motion.ready && heroSize.width > 0 && heroSize.height > 0
         let from = CGRect(x: box.minX, y: box.maxY - heroSize.height, width: heroSize.width, height: heroSize.height)
         LogoParticleField(image: image, from: from, to: slot, progress: ready ? p : 0)
     }

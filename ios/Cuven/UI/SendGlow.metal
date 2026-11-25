@@ -21,7 +21,7 @@ constant float3 kSGMagenta = float3(0.78, 0.36, 0.95);        // 云两边一缕
 
 struct SGUniforms {
     float4 size;    // x 宽（像素），y 高，z 圆角半径（像素），w 慢漂的时间（秒；减弱动态效果时停住）
-    float4 focus;   // xy 结果那一组的中心（像素），z 帧号（抖动用），w 1 = 失败那种平静的边缘光
+    float4 focus;   // xy 结果那一组的中心（像素），z 帧号（抖动用），w 1 = 失败那种平静的边缘光（灰紫、不呼吸）
     float4 arrow;   // xy 箭头尖（像素），z 箭头半宽（像素），w 箭头亮度 0…1
     float4 cloud;   // x 云顶（像素：再往上羽化成黑），y 云的亮度 0…1，z 箭头和光核变柔了几成 0…1，w 闲置时底边那一点光 0…1
     float4 ring;    // x 环半径（像素），y 环的亮度 0…1，z 环宽（像素，高斯 σ），w 绿 / 琥珀色边 0…1
@@ -284,7 +284,8 @@ fragment float4 sg_fragment(SGOut in [[stage_in]], constant SGUniforms &U [[buff
             float passed = U.ring.x - rw;
             float arrive = smoothstep(-0.02 * S, 0.16 * S, passed);
             float boost = 1.0 + 0.7 * U.ring.y * exp(-max(passed, 0.0) / (0.2 * S));
-            float breathe = 0.93 + 0.07 * sin(T * 0.9 + ang * 2.0);
+            // 失败那一圈不呼吸：平静、不动（画面落定以后画布就停下不画了）
+            float breathe = U.focus.w > 0.5 ? 1.0 : 0.93 + 0.07 * sin(T * 0.9 + ang * 2.0);
             light += (rcol * rim * 1.15 + fcol * feather * 0.55 + fcol * haze * 0.10) * U.edge.x * arrive * boost * breathe;
         }
     }

@@ -659,8 +659,8 @@ struct DetailPinnedBar: View {
     var progress: Double? = nil
     /// 那一格在窗口里的框（粒子的落点；和这里画的字标同一个框，p 到 1 时从粒子层换手看不出来）
     var onLogoSlot: (CGRect) -> Void = { _ in }
-    /// 字标落定（p = 1）以后才慢慢放出 HDR 的亮和影子：粒子层是普通动态范围、没有影子，落定那一下先和它一模一样
-    @State private var settled = false
+    /// 没有粒子层（「减弱动态效果」、设备画不了、框还没量到）：条里的字标跟着进度和头部字标交叉淡入淡出，不等到 1 才冒出来
+    var crossFade = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -728,39 +728,24 @@ struct DetailPinnedBar: View {
                 // 有字标转场：底色跟着滚动进度慢慢铺上来（用户要求），粒子往左上角聚的时候条已经在了
                 .opacity(progress == nil ? 1 : Self.ramp(p, from: 0.55, to: 1))
         }
-        .onChange(of: driven && p >= 1, initial: true) { _, docked in
-            // 落定：HDR 的亮和影子慢慢出来（字标「落稳」）；一离开就马上收，粒子层接手时和它一模一样
-            if docked {
-                withAnimation(.easeOut(duration: 0.45)) { settled = true }
-            } else {
-                withAnimation(nil) { settled = false }
-            }
-        }
     }
 
-    /// 条里的字标（用户要求：头部字标的 42%、同比例、同左边距）。普通动态范围的那一张和粒子层画的一模一样（p 到 1 时接手不跳），
-    /// 落定以后换成 HDR + 影子的那一张（和 LogoImage 一样）。平常到 p = 1 才出现（之前是粒子层在画它）；
-    /// 「减弱动态效果」不放粒子，跟着进度和头部字标交叉淡入淡出。旁白念片名，还是标题
+    /// 条里的字标（用户要求：头部字标的 42%、同比例、同左边距）。只画一张、画法和 LogoImage 一样（允许 HDR、同一个影子）：
+    /// 粒子层落定前最后一帧画的小字标就是 HDR（能显示的屏上）+ 这个影子，p 到 1 换成这一枚时一模一样，不跳（用户要求）。
+    /// 平常到 p = 1 才出现（之前是粒子层在画它）；没有粒子层时跟着进度和头部字标交叉淡入淡出。旁白念片名，还是标题
     private func dockedLogo(_ image: UIImage, p: Double) -> some View {
-        ZStack {
-            Image(uiImage: image)
-                .resizable()
-                .allowedDynamicRange(.standard)
-                .opacity(settled ? 0 : 1)
-            Image(uiImage: image)
-                .resizable()
-                .allowedDynamicRange(.high)
-                .shadow(color: .black.opacity(0.55), radius: 12, y: 4)
-                .opacity(settled ? 1 : 0)
-        }
-        .frame(width: logoSlot.width, height: logoSlot.height)
-        .opacity(reduceMotion ? p : (p >= 1 ? 1 : 0))
-        // 量这一格在窗口里的框：粒子的落点就是它
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { onLogoSlot($0) }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(title)
-        .accessibilityAddTraits(.isHeader)
-        .accessibilityIdentifier("detail-pinned-logo")
+        Image(uiImage: image)
+            .resizable()
+            .allowedDynamicRange(.high)
+            .frame(width: logoSlot.width, height: logoSlot.height)
+            .shadow(color: .black.opacity(0.55), radius: 12, y: 4)
+            .opacity(reduceMotion || crossFade ? p : (p >= 1 ? 1 : 0))
+            // 量这一格在窗口里的框：粒子的落点就是它
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { onLogoSlot($0) }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(title)
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier("detail-pinned-logo")
     }
 
     /// p 在 a…b 之间从 0 平滑升到 1（smoothstep），外面是 0 / 1

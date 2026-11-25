@@ -123,6 +123,16 @@ enum SendGlowTimeline {
     /// 边缘光往青色漂了几成（录屏 7.0 秒：勾和边都偏青了）
     static func cyanDrift(_ u: Double) -> Double { smooth(0.9, 4.0, u) }
 
+    /// 环从起点走到最远要走多远（点或像素，和 size、focus 同一种单位）：结果那一组的中心到最远的屏幕角、再出去短边的 12%，
+    /// 减去起点的半径（短边的 3%）。画布的环和折射的带子都按这个数走，带子才跟得上环（13 寸 iPad 上差不多是手机的两倍）
+    static func ringReach(size: CGSize, focus: CGPoint) -> CGFloat {
+        let s = max(1, min(size.width, size.height))
+        func dist(_ x: CGFloat, _ y: CGFloat) -> CGFloat { (x * x + y * y).squareRoot() }
+        let far = max(dist(focus.x, focus.y), dist(size.width - focus.x, focus.y),
+                      dist(focus.x, size.height - focus.y), dist(size.width - focus.x, size.height - focus.y))
+        return far + 0.12 * s - 0.03 * s
+    }
+
     /// 折射那一条带子（点）：半径跟着环走，最强在成功后 0.07–0.09 秒，0.4 秒以前没了
     struct Refraction {
         var radius: Double
@@ -130,9 +140,10 @@ enum SendGlowTimeline {
         var amount: Double
     }
 
-    static func refraction(_ u: Double) -> Refraction {
+    /// reach：环要走多远（点，见 ringReach）；不给就按手机屏的 560
+    static func refraction(_ u: Double, reach: Double = 560) -> Refraction {
         guard u >= 0 else { return Refraction(radius: 0, width: 1, amount: 0) }
-        let r = 10 + 560 * ringProgress(u)
+        let r = 10 + max(0, reach) * ringProgress(u)
         return Refraction(radius: r, width: 26 + 0.3 * r, amount: 24 * smooth(0, 0.07, u) * (1 - smooth(0.09, 0.40, u)))
     }
 
@@ -157,7 +168,9 @@ final class SendGlowRenderer: NSObject, MTKViewDelegate {
     private let pipe: MTLRenderPipelineState
 
     var phase: SendGlowPhase = .idle {
-        didSet { rememberSendStart() }
+        didSet {
+            if phase != oldValue { noteChange(from: oldValue) }
+        }
     }
     var reduceMotion = false
     /// 屏幕圆角（点）
@@ -165,7 +178,13 @@ final class SendGlowRenderer: NSObject, MTKViewDelegate {
     /// 结果那一组的中心（占画布的比例）
     var focus = CGPoint(x: 0.5, y: 0.44)
 
+    /// 每画完一帧：画面还会不会变、要不要降帧（SendGlowCanvas 接到 SendGlowMetalView.settle）
+    var onFrame: ((_ still: Bool, _ calmFPS: Int) -> Void)?
+
     private var lastSendStart: CFTimeInterval?
+    /// 成功那一下发送的光从什么时候开始收、收多久（见 SendGlowTimeline.exitAfterSuccess）
+    private var exitBegin: CFTimeInterval = 0
+    private var exitWindow: Double = 0.06
     private let t0 = CACurrentMediaTime()
     private var frame: UInt32 = 0
 
@@ -182,16 +201,49 @@ final class SendGlowRenderer: NSObject, MTKViewDelegate {
         pipe = p
         self.phase = phase
         super.init()
-        rememberSendStart()
+        noteChange(from: nil)
     }
 
-    /// 失败那一步不带松手的时刻：记住上一次，发送的光才能从当时的样子收掉
-    private func rememberSendStart() {
+    /// 换了阶段：
+    ///   · 失败那一步不带松手的时刻：记住上一次，发送的光才能从当时的样子收掉
+    ///   · 新的一次成功：记下从什么时候开始收发送的光。浮层可以把 at 放到将来（先切过来，0.2 秒后才出勾），
+    ///     这时就用这段提前量慢慢收；at 已经到了就 0.06 秒收完（折射最强的 60–90 毫秒里，中间已经是黑的）
+    private func noteChange(from old: SendGlowPhase?) {
         switch phase {
-        case .sending(let s): lastSendStart = s
-        case .success(let s, _): lastSendStart = s
-        case .idle, .failure: break
+        case .sending(let s):
+            lastSendStart = s
+        case .success(let s, let at):
+            lastSendStart = s
+            var same = false
+            if case .some(.success(_, let oldAt)) = old { same = oldAt == at }
+            if !same {
+                exitBegin = min(CACurrentMediaTime(), at)
+                exitWindow = min(0.25, max(0.06, at - exitBegin))
+            }
+        case .idle, .failure:
+            break
         }
+    }
+
+    /// 画面已经不会再变了（等下一次换阶段再画）：闲置；减弱动态效果时淡完以后；失败落定以后（边缘光不呼吸）
+    func isStatic(now: CFTimeInterval) -> Bool {
+        switch phase {
+        case .idle:
+            return true
+        case .sending(let s):
+            return reduceMotion && now - s > 0.45
+        case .success(_, let at):
+            return reduceMotion && now - at > 0.5 && now - exitBegin > 0.35
+        case .failure(let at):
+            return now - at > 1.0
+        }
+    }
+
+    /// 成功落定以后只剩边上慢慢漂的颜色（每秒 0.22 弧度）：1.3 秒后 30 帧，4.2 秒漂到青以后 20 帧；0 = 照常
+    func calmFrameRate(now: CFTimeInterval) -> Int {
+        guard !reduceMotion, case .success(_, let at) = phase else { return 0 }
+        let u = now - at
+        return u > 4.2 ? 20 : (u > 1.3 ? 30 : 0)
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
@@ -201,7 +253,8 @@ final class SendGlowRenderer: NSObject, MTKViewDelegate {
         guard size.width >= 2, size.height >= 2, let drawable = view.currentDrawable,
               let rpd = view.currentRenderPassDescriptor, let cb = queue.makeCommandBuffer() else { return }
         frame &+= 1
-        var U = uniforms(now: CACurrentMediaTime(), width: Float(size.width), height: Float(size.height),
+        let now = CACurrentMediaTime()
+        var U = uniforms(now: now, width: Float(size.width), height: Float(size.height),
                          scale: Float(view.contentScaleFactor))
         rpd.colorAttachments[0].loadAction = .dontCare
         if let e = cb.makeRenderCommandEncoder(descriptor: rpd) {
@@ -212,6 +265,8 @@ final class SendGlowRenderer: NSObject, MTKViewDelegate {
         }
         cb.present(drawable)
         cb.commit()
+        // 浮层一直等「好」：画面不再变就停下，只剩慢漂就降帧（省电省发热）
+        onFrame?(isStatic(now: now), calmFrameRate(now: now))
     }
 
     private func uniforms(now: CFTimeInterval, width W: Float, height H: Float, scale: Float) -> Uniforms {
@@ -223,7 +278,10 @@ final class SendGlowRenderer: NSObject, MTKViewDelegate {
         let fx = Float(focus.x) * W, fy = Float(focus.y) * H
 
         var sendT: Double?
+        /// 成功后几秒；at 放在将来（浮层先收光）时是负的：环、闪光、边缘光都等它到 0 再出来
         var successU: Double?
+        /// 开始收发送的光以后几秒
+        var exitX: Double?
         var failureU: Double?
         var idle: Float = 0
         switch phase {
@@ -234,7 +292,8 @@ final class SendGlowRenderer: NSObject, MTKViewDelegate {
             idle = Float(1 - TL.smooth(0, 0.35, now - s))
         case .success(let s, let at):
             sendT = now - s
-            successU = max(0, now - at)
+            successU = now - at
+            exitX = max(0, now - exitBegin)
         case .failure(let at):
             failureU = max(0, now - at)
             if let s = lastSendStart { sendT = now - s }
@@ -245,7 +304,7 @@ final class SendGlowRenderer: NSObject, MTKViewDelegate {
         var particleT: Float = 0
         if let t = sendT {
             var look = TL.sending(max(0, t), reduceMotion: reduce)
-            if let u = successU { TL.exitAfterSuccess(&look, u, reduceMotion: reduce) }
+            if let x = exitX { TL.exitAfterSuccess(&look, x, window: exitWindow, reduceMotion: reduce) }
             if let f = failureU { TL.exitAfterFailure(&look, f, reduceMotion: reduce) }
             arrow = SIMD4(fx, Float(look.arrowY) * H, Float(look.arrowScale) * 0.24 * S, Float(look.arrowAlpha))
             cloud.x = Float(look.cloudTop) * H
@@ -258,17 +317,19 @@ final class SendGlowRenderer: NSObject, MTKViewDelegate {
         var ring = SIMD4<Float>(1.0e6, 0, 1, 0)
         var edge = SIMD4<Float>(0, 0, 0, particleT)
         var calm: Float = 0
-        if let u = successU {
+        if let u = successU, u >= 0 {
             if reduce {
                 edge.x = Float(0.9 * TL.smooth(0, 0.45, u))
                 edge.y = 0.3
             } else {
                 let p = Float(TL.ringProgress(u))
-                func dist(_ x: Float, _ y: Float) -> Float { (x * x + y * y).squareRoot() }
-                let far = max(dist(fx, fy), dist(W - fx, fy), dist(fx, H - fy), dist(W - fx, H - fy))
+                // 和折射同一个走法（SendGlowTimeline.ringReach），这里按像素算
+                let reach = Float(TL.ringReach(size: CGSize(width: CGFloat(W), height: CGFloat(H)),
+                                               focus: CGPoint(x: CGFloat(fx), y: CGFloat(fy))))
                 let r0 = 0.03 * S
-                let rMax = far + 0.12 * S
-                ring = SIMD4(r0 + (rMax - r0) * p, Float(TL.ringAmp(u)), S * (0.05 + 0.10 * p), Float(TL.fringe(u)))
+                // 环淡掉以后半径再往外推半个短边：最远那个角的边缘光也亮满（不然那一角一直只亮一半，还跟着起伏闪）
+                let past = 0.6 * S * Float(TL.smooth(0.8, 1.3, u))
+                ring = SIMD4(r0 + reach * p + past, Float(TL.ringAmp(u)), S * (0.05 + 0.10 * p), Float(TL.fringe(u)))
                 edge.x = Float(TL.edgeAmp(u))
                 edge.y = Float(TL.cyanDrift(u))
                 edge.z = Float(TL.flash(u))
@@ -288,19 +349,56 @@ final class SendGlowRenderer: NSObject, MTKViewDelegate {
     }
 }
 
-/// 只在挂在窗口上的时候跑（看不见就停，省电）
+/// 只在挂在窗口上的时候跑（看不见就停，省电）；画面不再变时停下（只在 setNeedsDisplay 时补画一帧），只剩慢漂时降帧
 final class SendGlowMetalView: MTKView {
     var canRun = false {
-        didSet { syncPaused() }
+        didSet { sync() }
     }
+    /// 平时的帧率：旧机型、减弱动态效果 30，否则 60
+    var baseFPS = 60 {
+        didSet { if baseFPS != oldValue { sync() } }
+    }
+    /// 画面不再变了：停下来
+    private var still = false
+    /// 只剩慢漂时降到的帧率；0 = 照常
+    private var calmFPS = 0
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        syncPaused()
+        // 重新挂上窗口：先照常画，画完再看要不要停
+        still = false
+        calmFPS = 0
+        sync()
     }
 
-    private func syncPaused() {
-        isPaused = !(canRun && window != nil)
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // 停着的时候转屏、改大小：照新尺寸补画一帧
+        if still { setNeedsDisplay() }
+    }
+
+    /// 外面换了阶段（或圆角、中心、减弱动态效果）：先跑起来，画完一帧渲染器再说要不要停
+    func wake() {
+        guard still || calmFPS != 0 else { return }
+        still = false
+        calmFPS = 0
+        sync()
+    }
+
+    /// 渲染器每画完一帧告诉它：画面还会不会变、要不要降帧
+    func settle(still s: Bool, calmFPS c: Int) {
+        guard s != still || c != calmFPS else { return }
+        still = s
+        calmFPS = c
+        sync()
+    }
+
+    private func sync() {
+        let live = canRun && window != nil
+        enableSetNeedsDisplay = live && still
+        isPaused = !live || still
+        let fps = calmFPS > 0 ? min(baseFPS, calmFPS) : baseFPS
+        if preferredFramesPerSecond != fps { preferredFramesPerSecond = fps }
     }
 }
 
@@ -325,7 +423,7 @@ struct SendGlowCanvas: UIViewRepresentable {
         v.colorPixelFormat = .bgra8Unorm
         v.framebufferOnly = true
         // 旧机型（改进兼容性那一档）30 帧、1 倍像素：光都是软的，看不出差别，省电省发热
-        v.preferredFramesPerSecond = frameRate(context)
+        v.baseFPS = frameRate(context)
         v.contentScaleFactor = Compat.legacyDevice ? 1 : min(2, max(1, context.environment.displayScale))
         v.isOpaque = true
         v.isUserInteractionEnabled = false
@@ -336,6 +434,7 @@ struct SendGlowCanvas: UIViewRepresentable {
             v.delegate = renderer
             context.coordinator.renderer = renderer
             apply(to: renderer, context: context)
+            renderer.onFrame = { [weak v] still, fps in v?.settle(still: still, calmFPS: fps) }
             v.canRun = true
         } else {
             v.canRun = false
@@ -345,9 +444,9 @@ struct SendGlowCanvas: UIViewRepresentable {
 
     func updateUIView(_ v: SendGlowMetalView, context: Context) {
         guard let r = context.coordinator.renderer else { return }
-        apply(to: r, context: context)
-        let fps = frameRate(context)
-        if v.preferredFramesPerSecond != fps { v.preferredFramesPerSecond = fps }
+        v.baseFPS = frameRate(context)
+        // 有东西变了（多半是换了阶段）：停着的画布先跑起来
+        if apply(to: r, context: context) { v.wake() }
     }
 
     /// 减弱动态效果时画面几乎不动，30 帧就够
@@ -355,16 +454,24 @@ struct SendGlowCanvas: UIViewRepresentable {
         Compat.legacyDevice || reduceMotion || context.environment.accessibilityReduceMotion ? 30 : 60
     }
 
-    private func apply(to r: SendGlowRenderer, context: Context) {
+    /// 返回：有没有哪一样变了
+    @discardableResult
+    private func apply(to r: SendGlowRenderer, context: Context) -> Bool {
+        let reduce = reduceMotion || context.environment.accessibilityReduceMotion
+        let corner = max(0, cornerRadius)
+        let f = CGPoint(x: focus.x, y: focus.y)
+        let changed = r.phase != phase || r.reduceMotion != reduce || r.cornerRadius != corner || r.focus != f
         r.phase = phase
-        r.reduceMotion = reduceMotion || context.environment.accessibilityReduceMotion
-        r.cornerRadius = max(0, cornerRadius)
-        r.focus = CGPoint(x: focus.x, y: focus.y)
+        r.reduceMotion = reduce
+        r.cornerRadius = corner
+        r.focus = f
+        return changed
     }
 
     static func dismantleUIView(_ v: SendGlowMetalView, coordinator: Coordinator) {
         v.canRun = false
         v.delegate = nil
+        coordinator.renderer?.onFrame = nil
         coordinator.renderer = nil
     }
 }
@@ -374,9 +481,11 @@ struct SendGlowCanvas: UIViewRepresentable {
 extension View {
     /// 成功那一道环扫过结果那一组时的折射 + 色散（用户要求的动效，设计说明「Refraction follows the wave」）。
     /// time：成功后几秒；center：环的中心，用这个视图自己的坐标（点）；active = false 或波已经过去时什么都不做。
+    /// reach：环要走多远（点）——和画布用同一个数，带子才跟得上环：SendGlowTimeline.ringReach(size: 整屏大小, focus: 环的中心在整屏里的位置)；
+    /// 不给就按手机屏的 560（iPad 上会比环慢一半）。
     /// 被挪出去的像素只能画在这个视图的范围里：给这一组四周留一点空（比如 .padding(36)）再套这个，勾和按钮被拉长时不会被裁掉
-    func sendRefraction(time: Double, center: CGPoint, active: Bool) -> some View {
-        let w = SendGlowTimeline.refraction(time)
+    func sendRefraction(time: Double, center: CGPoint, active: Bool, reach: CGFloat = 560) -> some View {
+        let w = SendGlowTimeline.refraction(time, reach: Double(reach))
         let on = active && w.amount > 0.01
         let m = SendGlowTimeline.refractionMaxOffset
         return layerEffect(
