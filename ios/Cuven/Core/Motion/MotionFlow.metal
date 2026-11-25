@@ -312,7 +312,7 @@ static float3 mf_ycc(texture2d<float, access::sample> Y, texture2d<float, access
     return float3(Y.sample(mfLinear, uv, level(0)).r, C.sample(mfLinear, uv, level(0)).rg);
 }
 
-fragment float4 mf_present(MFVertexOut in,
+fragment float4 mf_present(MFVertexOut in [[stage_in]],
                            texture2d<float, access::sample> yA [[texture(0)]],
                            texture2d<float, access::sample> cA [[texture(1)]],
                            texture2d<float, access::sample> yB [[texture(2)]],
