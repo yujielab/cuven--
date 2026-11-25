@@ -19,6 +19,7 @@ struct HomeView: View {
     @State private var pairScanning = false
     /// 这一栈推进去的页（分享来的链接打开详情页时往里推）
     @State private var path = NavigationPath()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         let _ = Perf.count("home")
@@ -60,6 +61,10 @@ struct HomeView: View {
             guard let r else { return }
             model.openRequest = nil
             path.append(r)
+        }
+        // 头图每 6 小时换一轮（AppModel.resolveHeroes）：从后台回来时跨过了整点，就换上这一轮的
+        .onChange(of: scenePhase) { _, p in
+            if p == .active { Task { await model.heroSlotCheck() } }
         }
     }
 
@@ -156,7 +161,8 @@ struct HomeView: View {
                               meta: heroMeta(p),
                               playTitle: model.playback.resumePosition(v.path) != nil ? "继续播放" : "播放",
                               play: { playHero(p) },
-                              detail: .movie(v))
+                              detail: .movie(v),
+                              trailerHLS: model.heroTrailers[p.id])
         }
     }
 
@@ -273,7 +279,8 @@ struct HomeView: View {
         }
     }
 
-    /// 主页结尾（用户要求，照 Apple TV+ 那一页的结尾）：两排反向慢慢走的 16:9 字标卡、「查看全部影片 ›」+ 暂停，手机上再加「立即观看」
+    /// 主页结尾（用户要求，照 Apple TV+ 那一页的结尾）：两排反向慢慢走的 16:9 字标卡、「查看全部影片 ›」+ 暂停；
+    /// 手机上原先再加的「立即观看」用户要求去掉了（截图里是不该出现的按钮），手机和展开一样到这一行就完
     @ViewBuilder
     private func finale(_ m: DSMetrics) -> some View {
         let tiles = model.finaleTiles(limit: 20)
@@ -410,6 +417,8 @@ struct RouteView: View {
         case .shelf(let s): if s == .all { AllFilmsView() } else { ShelfView(shelf: s) }
         case .person(let m): ActorPage(member: m)
         case .catalog(let t): CatalogDetailView(title: t)
+        // 全部影片下面「电影 ›」「剧集 ›」进来的分类页（用户要求；版式照专区：FilmCategoryPage.swift）
+        case .filmCategory(let c): FilmCategoryPage(category: c)
         }
     }
 }

@@ -13,7 +13,10 @@ import UIKit
 //   100% 不设上限（4K / HDR，挑得到的最好那一档）；75–99% 1080p；50–74% 720p；25–49% 540p；25% 以下是省流量，不下。
 //   调高了（比如从 80% 拉到 100%），本机那份比现在要的档低就重下一份，下好了才换掉旧的；调低了不重下（本机那份放起来不费流量）；
 // · 只在 Wi-Fi 下（蜂窝、个人热点、低数据模式都不下：后台悄悄下不该花流量）；演示数据（UI 测试）不下；
-// · 本机最多留 3 段（有 4K 那一档的时候 2 段：一段几百兆），按下好的先后，旧的连文件一起删；本机那份不完整（系统清掉了、没下完）就当没有，照样从网上放；
+// · 主页头图（用户要求「hero区自动缓存和使用预告片背景」）：头图那 5 部的预告片也交过来（wantHeroes），和编辑推荐排成一队，
+//   一次只下一段，下完一段接着下下一段（头图第一页 → 编辑推荐 → 头图其余几页）；头图只放本机下好的那份（不从网上放）；
+// · 本机最多留 6 段（头图 5 部 + 编辑推荐；有 4K 那一档的时候 3 段：一段几百兆，只下排在最前的 3 段），
+//   超了先删现在不要的（换轮以后的旧头图、换掉的编辑推荐），再按下好的先后删旧的，连文件一起删；本机那份不完整（系统清掉了、没下完）就当没有，照样从网上放；
 // · 只下画面和默认的那一条声音，不下字幕：预告片是静音的背景画面，不显示字幕，放的时候也不去选字幕（ShowcaseTrailer），
 //   不会因为系统「字幕与隐藏式字幕」的设置跑去网上拉字幕。
 // 放的时候：ShowcaseTrailer.mount 先问 localURL，有就直接放本机那份（一开始就是清楚的，马上露出来）。
@@ -82,12 +85,14 @@ final class TrailerCache {
     private var streaming: [WeakTrailer] = []
     private var observers: [NSObjectProtocol] = []
     private var started = false
-    /// 系统交回上次的任务之前先别新建（免得同一段又从头下一遍）：这期间交过来的先记着
+    /// 系统交回上次的任务之前先别新建（免得同一段又从头下一遍）：交回来以后再按 editor / heroes 排一遍
     private var adopted = false
-    private var waiting: (key: String, hls: String)?
-    /// 最近一次交过来的（「网络速度」一改，按新的档位再看一遍）
-    private var lastWant: (key: String, hls: String)?
+    /// 编辑推荐交过来的那一段、头图交过来的那几段（「网络速度」一改、下完一段，都按它们再排一遍）
+    private var editor: (key: String, hls: String)?
+    private var heroes: [(key: String, hls: String)] = []
     private var lastTier: Tier?
+    /// 这回打开 App 每一段排过几次（下完一段就自动排下一段：哪一段老是下不成、下完了又放不了，最多试 3 次，不一直重下）
+    private var attempts: [String: Int] = [:]
 
     private final class WeakTrailer {
         weak var value: AnyObject?
@@ -139,21 +144,68 @@ final class TrailerCache {
         return nil
     }
 
-    /// 编辑推荐的这一部（key = 视频路径）有这段预告片：本机还没有（或者本机那份比「网络速度」要的档低）就开始下（空闲时才真的在下）
+    /// 编辑推荐的这一部（key = 视频路径）有这段预告片：本机还没有（或者本机那份比「网络速度」要的档低）就排进队里下（空闲时才真的在下）
     func want(key: String, hls: String) {
-        guard !DemoData.enabled, let url = URL(string: hls), url.scheme?.hasPrefix("http") == true else { return }
+        guard !DemoData.enabled else { return }
+        editor = (key, hls)
+        pump()
+    }
+
+    /// 头图这几部（按页的顺序）的预告片：一样排进队里下；不在这里的旧头图那几段，本机放不下时先删
+    func wantHeroes(_ list: [(key: String, hls: String)]) {
+        guard !DemoData.enabled else { return }
+        heroes = list
+        pump()
+    }
+
+    /// 本机要留的那几段，排得越前越先下：头图第一页 → 编辑推荐 → 头图其余几页；放不下的（4K 时只留 3 段）不下
+    private var wanted: [(key: String, hls: String)] {
+        var out: [(key: String, hls: String)] = []
+        var all: [(key: String, hls: String)] = []
+        if let first = heroes.first { all.append(first) }
+        if let e = editor { all.append(e) }
+        all += heroes.dropFirst()
+        for w in all where !out.contains(where: { $0.key == w.key }) {
+            guard let url = URL(string: w.hls), url.scheme?.hasPrefix("http") == true else { continue }
+            out.append(w)
+        }
+        return Array(out.prefix(keepLimit))
+    }
+
+    /// 本机最多留几段：头图 5 部 + 编辑推荐；要下 4K（或者本机已经有 4K 的）时 3 段
+    private var keepLimit: Int {
+        let best = Tier.of(NetworkSpeed.current) == .best || entries.contains { $0.done && $0.level == .best }
+        return best ? 3 : 6
+    }
+
+    /// 排一遍队：不要的（换了一部、换了预告片、换了档）没下完的取消；正在下的还要就接着下；没有在下的，就下排在最前、本机还没有的那一段
+    private func pump() {
+        guard !DemoData.enabled else { return }
         start()
-        lastWant = (key, hls)
+        guard adopted else { return }
         guard let tier = Tier.of(NetworkSpeed.current) else { return }
-        guard adopted else { waiting = (key, hls); return }
-        // 本机已有同一段、档位不比现在要的低：不用再下
-        if let have = bestDone(key: key, hls: hls), have.level >= tier { return }
-        // 正在下同一段同一档：接着下
-        if tasks[key] != nil, let p = entries.first(where: { $0.key == key && !$0.done }), p.hls == hls, p.level == tier { return }
-        // 编辑推荐换了一部：前一部没下完的不再下；这一部没下完的（换了预告片、换了档）也重来
-        for (k, t) in tasks where k != key { t.cancel(); tasks[k] = nil }
-        if let t = tasks[key] { t.cancel(); tasks[key] = nil }
-        entries.removeAll { $0.key == key && !$0.done }
+        let list = wanted
+        for (k, t) in tasks {
+            let w = list.first { $0.key == k }
+            let p = entries.first { $0.key == k && !$0.done }
+            if let w, let p, p.hls == w.hls, p.level == tier { continue }
+            // 编辑推荐还没交过来（主页还没滑到那一块；刚启动、系统刚交回上次的任务）：不在头图里的那一段可能是它的，先接着下
+            if w == nil, editor == nil, let p, p.level == tier { continue }
+            t.cancel()
+            tasks[k] = nil
+            entries.removeAll { $0.key == k && !$0.done }
+        }
+        // 记录里还在等、却没有任务的（上次的任务系统没交回来）：不算
+        entries.removeAll { !$0.done && tasks[$0.key] == nil }
+        // 一次只下一段：正在下的那段下完了（completed）再排下一段
+        guard tasks.isEmpty else { save(); apply(); return }
+        guard let next = list.first(where: { w in
+            if (attempts[w.key + "|" + w.hls] ?? 0) >= 3 { return false }
+            guard let have = bestDone(key: w.key, hls: w.hls) else { return true }
+            return have.level < tier
+        }), let url = URL(string: next.hls) else { save(); return }
+        let key = next.key, hls = next.hls
+        attempts[key + "|" + hls, default: 0] += 1
         // 换了预告片：旧的那段删掉（同一段的低档那份留着，新的下好了才换）
         for e in entries where e.key == key && e.hls != hls { remove(e) }
         entries.removeAll { $0.key == key && $0.hls != hls }
@@ -217,8 +269,8 @@ final class TrailerCache {
             for (k, t) in tasks { t.cancel(); tasks[k] = nil }
             entries.removeAll { !$0.done }
             save()
-        } else if let w = lastWant {
-            want(key: w.key, hls: w.hls)
+        } else {
+            pump()
         }
     }
 
@@ -243,10 +295,7 @@ final class TrailerCache {
         }
         adopted = true
         apply()
-        if let w = waiting {
-            waiting = nil
-            want(key: w.key, hls: w.hls)
-        }
+        pump()
     }
 
     fileprivate func located(task id: Int, location: URL) {
@@ -280,13 +329,21 @@ final class TrailerCache {
         }
         prune()
         save()
+        // 头图停在这一页的话马上换成预告片（记录存好了再说）
+        if ok { NotificationCenter.default.post(name: .cuvenTrailerCached, object: nil, userInfo: ["key": key]) }
+        // 接着下队里的下一段
+        pump()
     }
 
-    /// 最多留 3 段下好的，有 4K 那一档的时候 2 段（旧的删掉）
+    /// 最多留 keepLimit 段下好的：现在要的（头图、编辑推荐，排在前面的优先）留着，别的按下好的先后，旧的删掉
     private func prune() {
-        let done = entries.filter(\.done).sorted { $0.at > $1.at }
-        let limit = done.contains { $0.level == .best } ? 2 : 3
-        for e in done.dropFirst(limit) {
+        let want = wanted
+        func rank(_ e: Entry) -> Int { want.firstIndex { $0.key == e.key && $0.hls == e.hls } ?? Int.max }
+        let done = entries.filter(\.done).sorted { a, b in
+            let ra = rank(a), rb = rank(b)
+            return ra != rb ? ra < rb : a.at > b.at
+        }
+        for e in done.dropFirst(keepLimit) {
             remove(e)
             entries.removeAll { $0.key == e.key && $0.done && $0.rel == e.rel }
         }
@@ -328,4 +385,9 @@ private final class TrailerCacheDelegate: NSObject, AVAssetDownloadDelegate {
         let ok = error == nil
         Task { @MainActor in TrailerCache.shared.completed(task: id, key: key, ok: ok) }
     }
+}
+
+extension Notification.Name {
+    /// TrailerCache 下好了一段（userInfo["key"] 是哪一部）：主页头图停在这一页的话，马上换成预告片
+    static let cuvenTrailerCached = Notification.Name("cuven.trailer.cached")
 }

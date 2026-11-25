@@ -94,7 +94,14 @@ final class DuoUnfoldedTests: XCTestCase {
         guard size.width > 500 else { return }
         snap("duo-3q-request-a-button")
         add.tap()
-        sleep(1)
+        // 上滑发送（用户要求）：按下「请求添加」以后整屏是「正在发往请求中心 → 已添加至请求中心」，截一张结果页再按「好」回到详情页
+        let done = app.descendants(matching: .any)["request-send-done"]
+        if done.waitForExistence(timeout: 6) {
+            sleep(1)
+            snap("duo-3q-request-b-sent")
+            done.tap()
+            sleep(1)
+        }
         snap("duo-3q-request-b-added")
         app.swipeUp(); sleep(2)
         snap("duo-3q-request-c-sections")

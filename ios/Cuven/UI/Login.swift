@@ -23,6 +23,10 @@ import UIKit
 //        · 用户名不存在   → 建立账户：验证邮箱 → 设定密码 → 面容 ID（可以暂不启用）
 //   ② 电子邮件 ③ 验证码 ④ 设定密码 ⑤ 面容 ID ⑥ 完成
 // 登录状态在最后一步才写进钥匙串（写进去登录层就淡出了）。
+//
+// 新登录页（用户要求，照 Brink 录屏和 PDF 做）：登录层先出落地页 LoginLanding（「ideas in motion.」，LoginLanding.swift）。
+//   「使用光学配对登录」→ 粒子云（PairShowView）；它下面的「使用账户密码登录」关掉粒子云，照那颗钮的字进下面这套账户 / 密码流程。
+//   「使用账号密码登录」→ 下面这套流程（自己的入场动效照旧）；第一页左上角的返回回到落地页。选了账号密码就不再自动弹粒子云。
 
 @MainActor
 @Observable
@@ -96,6 +100,8 @@ final class LoginFlow {
     private(set) var successAt: Date?
     private(set) var successFrom: Pane = .signin
     var reduceMotion = false
+    /// 退回了落地页（用户要求新登录页先出落地页）：还在路上的查询回来也不再放光标、不把键盘叫出来；再进来时放开
+    var onLanding = false
 
     private(set) var intent: Intent = .login
     private(set) var passMode: PassMode = .register
@@ -810,19 +816,70 @@ enum LoginFocus: Hashable { case input, password, email, code, pw1, pw2 }
 struct LoginView: View {
     @Environment(AccountStore.self) private var account
     @State private var flow: LoginFlow?
+    /// 用户要求新登录页先出落地页：点了「使用账号密码登录」才进账户 / 密码流程（返回回到落地页）
+    @State private var showAccount = false
+    /// 落地页上的「使用光学配对登录」：这台设备显示粒子云，让另一台已登录的 iPhone 扫
+    @State private var pairShowing = false
+    /// 打开粒子云那一刻的会话：关掉时会话没换，就是点了它下面的「使用账户密码登录」。
+    /// 不看 isLoggedIn：预览时会话本来就在（-CuvenLoginLanding 盖在已登录 / 演示会话上），比的是这次有没有换
+    @State private var pairBase: AccountSession?
 
     var body: some View {
         ZStack {
-            // 第一帧（流程还没建好）垫的底：iPhone Duo 折起时整页是白色的表单，垫白的，不先闪一下黑
-            (DuoLayout.isFolded(window: DuoLayout.initialWindowSize) ? Color.white : Color.black).ignoresSafeArea()
-            if let flow { LoginScreen(flow: flow) }
+            // 垫底：落地页是黑底（iPhone Duo 折起时也一样，折起的白色表单要点进账号密码才出来）
+            (showAccount && DuoLayout.isFolded(window: DuoLayout.initialWindowSize) ? Color.white : Color.black).ignoresSafeArea()
+            if showAccount, let flow {
+                // 进来时垫在落地页下面、落地页淡出时它自己的入场正好在放；退回落地页时等落地页淡入盖住了再撤
+                LoginScreen(flow: flow, onBack: closeAccount)
+                    .transition(AnyTransition.asymmetric(insertion: .identity,
+                                                         removal: AnyTransition.opacity.animation(.linear(duration: 0.12).delay(0.4))))
+            }
+            // 落地页一直留着（只是淡出、时间线停下）：从账号密码退回来时开场不重放，封面接着流动
+            LoginLanding(onPair: openPair, onAccount: openAccount, active: !showAccount && !pairShowing)
+                .opacity(showAccount ? 0 : 1)
+                .allowsHitTesting(!showAccount)
+                .accessibilityHidden(showAccount)
+                .zIndex(1)
         }
-        .onAppear {
-            guard flow == nil else { return }
+        .fullScreenCover(isPresented: $pairShowing) { PairShowView().environment(account).environment(\.colorScheme, .light) }
+        .onChange(of: pairShowing) { was, now in
+            // 粒子云没换会话就关掉，只能是点了它下面的「使用账户密码登录」（配对成功时登录层整个淡出）：照那颗钮的字进账号密码流程。
+            // 粒子云往下退的时候露出来的已经是表单，落地页不再淡一遍
+            guard was, !now, account.session == pairBase else { return }
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) { enterAccount(animated: false) }
+        }
+    }
+
+    private func openPair() {
+        // 粒子云要配对模型；万一没有（不该发生）就退回账号密码流程
+        guard PairSpec.shared != nil else { openAccount(); return }
+        pairBase = account.session
+        pairShowing = true
+    }
+
+    private func openAccount() { enterAccount(animated: true) }
+
+    private func enterAccount(animated: Bool) {
+        // 流程等用户选了账号密码才建（查预填账户要联网，落地页上不先查）；退回落地页再进来，输过的还在
+        if flow == nil {
             let f = LoginFlow(account: account)
             flow = f
             f.start()
         }
+        flow?.onLanding = false
+        if animated {
+            withAnimation(CSSBezier.ios.animation(0.45)) { showAccount = true }
+        } else {
+            showAccount = true
+        }
+    }
+
+    private func closeAccount() {
+        // 表单还要留 0.5 秒放淡出：这段里查询回来不能把键盘叫到落地页上
+        flow?.onLanding = true
+        withAnimation(CSSBezier.ios.animation(0.45)) { showAccount = false }
     }
 }
 
@@ -862,6 +919,8 @@ private struct LoginMetrics {
 
 private struct LoginScreen: View {
     @Bindable var flow: LoginFlow
+    /// 回到落地页（用户要求新登录页先出落地页；选了「使用账号密码登录」进来，第一页左上角的返回回去）
+    var onBack: (() -> Void)? = nil
     @FocusState private var focus: LoginFocus?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// 打开的那一刻（第一帧就在动效里：不会先闪一帧终态）
@@ -874,10 +933,9 @@ private struct LoginScreen: View {
     @State private var keyboardTop = CGFloat.greatestFiniteMagnitude
     @State private var passRevealed = false
     @State private var pwRevealed = false
-    /// 光学配对：这台设备显示粒子云，让另一台已登录的 iPhone 扫
+    /// 光学配对：这台设备显示粒子云，让另一台已登录的 iPhone 扫（「用 iPhone 扫描登录」那一行）。
+    /// 以前登录页一出来就先自动弹粒子云（pairAuto）；现在落地页上光学配对单独一颗按钮，用户选了「使用账号密码登录」就直接是表单，不再自动弹
     @State private var pairShowing = false
-    /// 登录页一出来就先显示粒子云（优先光学配对；粒子云下面「使用账户密码登录」回到这一页）
-    @State private var pairAuto = false
 
     var body: some View {
         GeometryReader { geo in
@@ -904,11 +962,6 @@ private struct LoginScreen: View {
         .onAppear {
             flow.reduceMotion = reduceMotion
             scheduleFxStop()
-            if !pairAuto, PairCloudRenderer.canShow {
-                pairAuto = true
-                var t = Transaction(); t.disablesAnimations = true
-                withTransaction(t) { pairShowing = true }
-            }
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(760))
                 settled = true
@@ -922,7 +975,8 @@ private struct LoginScreen: View {
         .onChange(of: flow.focusRequest) { _, r in
             Task { @MainActor in
                 if r.delay > 0 { try? await Task.sleep(for: .seconds(r.delay)) }
-                guard flow.focusRequest == r else { return }
+                // 退回落地页（用户要求）以后，还在路上的查询不再把键盘叫出来
+                guard !flow.onLanding, flow.focusRequest == r else { return }
                 focus = r.field
             }
         }
@@ -967,6 +1021,24 @@ private struct LoginScreen: View {
         return LoginFx(opened: opened, success: success, reduce: reduceMotion)
     }
 
+    /// 左上角的返回：流程里的几页照旧退一页；第一页（登录页）有落地页可回时退回落地页
+    /// （用户要求新登录页先出落地页）。已经成功的时候不给退
+    private var showsBack: Bool {
+        flow.navShowsBack || (onBack != nil && flow.pane == .signin && flow.successAt == nil)
+    }
+
+    private func backTapped() {
+        if flow.navShowsBack {
+            flow.navTapped()
+            return
+        }
+        // 验证中不能退（晚到的成功会在落地页后面把人登进去），但钮不闪：一直留着，验证中点了不理
+        guard !flow.busy else { return }
+        Haptics.selection()
+        focus = nil
+        onBack?()
+    }
+
     // MARK: 整层
 
     private func stage(_ m: LoginMetrics, _ fx: LoginFx) -> some View {
@@ -990,12 +1062,14 @@ private struct LoginScreen: View {
                     .allowsHitTesting(false)
                 pulses(m, fx)
                 head(m, fx)
-                if flow.navShowsBack {
-                    Button { flow.navTapped() } label: { LoginNavGlyph() }
+                if showsBack {
+                    Button { backTapped() } label: { LoginNavGlyph() }
                         .buttonStyle(LoginNavStyle())
                         .accessibilityLabel("返回")
                         .accessibilityIdentifier("login-back")
-                        .offset(x: 16, y: m.safe.top + 12)
+                        // 横拿时让开灵动岛那一侧的安全区；入场时跟着暗幕一起淡入
+                        .opacity(fx.scrim)
+                        .offset(x: max(16, m.safe.leading + 4), y: m.safe.top + 12)
                 }
             }
             dock(m, fx)
@@ -1118,8 +1192,8 @@ private struct LoginScreen: View {
             if m.folded {
                 // 折起时品牌区不画，返回钮放在面板最上面这一行（深色的那一种）；这一行总留着，换页时下面不跳
                 ZStack(alignment: .leading) {
-                    if flow.navShowsBack {
-                        Button { flow.navTapped() } label: { LoginNavGlyph(onLight: true) }
+                    if showsBack {
+                        Button { backTapped() } label: { LoginNavGlyph(onLight: true) }
                             .buttonStyle(LoginNavStyle(onLight: true))
                             .accessibilityLabel("返回")
                             .accessibilityIdentifier("login-back")
@@ -1128,7 +1202,7 @@ private struct LoginScreen: View {
                 }
                 .frame(height: 44)
                 .padding(.bottom, 10)
-                .animation(CSSBezier.easeOut.animation(0.2), value: flow.navShowsBack)
+                .animation(CSSBezier.easeOut.animation(0.2), value: showsBack)
             }
             LoginMark()
                 .padding(.top, 2)

@@ -260,10 +260,13 @@ final class DuoDeviceTests: XCTestCase {
         app.swipeUp(); sleep(2); snap("duo-08d-home-year-2")
         // 四个大类（动画片区、动作片区、喜剧片区、严苛品质区）在精选和编辑推荐下面
         app.swipeUp(); sleep(2); snap("duo-08e-home-categories")
-        // 主页结尾（照 Apple TV+ 那一页的结尾）：两排反向走的 16:9 字标卡、「查看全部影片 ›」+ 暂停钮（手机上还有「立即观看」）→ 全部影片
+        // 主页结尾（照 Apple TV+ 那一页的结尾）：两排反向走的 16:9 字标卡、「查看全部影片 ›」+ 暂停钮 → 全部影片
         if let all = reveal(app, "home-show-all", swipes: 12) {
             sleep(2)
             snap("duo-08h-home-finale")
+            // 用户截图说折起时这里那颗铺满宽的白色「立即观看」是不该出现的按钮，要求去掉：不能再回来
+            XCTAssertFalse(app.buttons["home-watch-now"].exists || app.buttons["立即观看"].firstMatch.exists,
+                           "主页结尾又出现了「立即观看」（用户要求去掉）")
             all.tap(); sleep(2)
             snap("duo-08i-all")
             back(app)
@@ -467,12 +470,23 @@ final class DuoDeviceTests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
-    /// 没登录：整屏登录页（只在确认登录页出现时才截图，免得截到后面的真实片库）
+    /// 没登录：整屏登录层（只在确认登录层出现时才截图，免得截到后面的真实片库）。
+    /// 用户要求新登录页先出落地页（「ideas in motion.」，LoginLanding），点「使用账号密码登录」才是原来的表单（LoginScreen）
     func testLoginScreen() {
         XCUIDevice.shared.orientation = .portrait
         let app = launch(demo: false)
+        // 落地页：等开场放完（约 2.6 秒）再截，然后点「使用账号密码登录」。
+        // 点正中的坐标（tapCenter），不等 isHittable：海报平面一直在流，元素永远「没停稳」
+        let landingAccount = app.descendants(matching: .any).matching(identifier: "login-account-button").firstMatch
+        if landingAccount.waitForExistence(timeout: 20) {
+            sleep(3)
+            snap("duo-20-login-landing")
+            if landingAccount.isOnScreen(in: app) { landingAccount.tapCenter() } else { landingAccount.tap() }
+        } else {
+            XCTFail("没登录时应当先出现登录落地页（login-account-button）")
+        }
         let subtitle = app.staticTexts["使用你的 Cuven 账户登录 Cuven max。"]
-        XCTAssertTrue(subtitle.waitForExistence(timeout: 20), "没登录时应当先出现登录页")
+        XCTAssertTrue(subtitle.waitForExistence(timeout: 20), "点「使用账号密码登录」以后应当出现账号密码登录页")
         // 截图前再确认一次登录页还盖着（登录页不透明，后面的片库露不出来）
         if subtitle.exists && app.textFields.count > 0 {
             sleep(2)

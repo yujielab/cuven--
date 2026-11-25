@@ -1,11 +1,16 @@
 // 请求添加 Worker 回归测试：node request/tests/run.mjs
 // 不需要网络：D1 用 node:sqlite 的内存库模拟；影片库 / 传输 / PikPak / TMDB 分季 / 账户核对全部在这里模拟。
 // 时钟是假的（Date.now 可拨），定时任务一轮一轮手动跑。
+// 2.9：整套跑两遍 —— 先照默认开着「智能凑批」跑，最后再开一个子进程（TJ_SMART=0）把智能凑批关掉、从头再跑一遍：
+// 关了就该和 2.8 一模一样，2.8 以前的每一条检查都照原样过（只有几条结果因为智能凑批本来就该变的，开着时换成 2.9 的检查，旁边写着为什么）。
 import { DatabaseSync } from 'node:sqlite';
+import { spawnSync } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+/** 2.9：这一遍智能凑批开没开（子进程那一遍 TJ_SMART=0 = 关了，2.8 的样子） */
+const SMART = process.env.TJ_SMART !== '0';
 let pass = 0, failN = 0;
 const ok = (cond, name, extra) => { if (cond) pass++; else { failN++; console.log('✗', name, extra !== undefined ? JSON.stringify(extra) : ''); } };
 
@@ -293,7 +298,7 @@ globalThis.fetch = async (url, init = {}) => {
   if (u.host === 'user.mypikpak.com'){
     if (p === '/v1/shield/captcha/init') return J({ captcha_token: 'ct' });
     if (p === '/v1/auth/signin'){ W.signins++; return body.password === 'pkpass' ? J({ access_token: 'AT', refresh_token: 'RT', sub: 'S', expires_in: 7200 }) : J({ error: 'invalid_account_or_password' }, 400); }
-    if (p === '/v1/auth/token') return J({ access_token: 'AT2', refresh_token: 'RT', expires_in: 7200 });
+    if (p === '/v1/auth/token'){ W.refreshes = (W.refreshes || 0) + 1; return J({ access_token: 'AT2', refresh_token: 'RT', expires_in: 7200 }); }
   }
   if (u.host === 'api-drive.mypikpak.com'){
     if (!String(H.authorization || '').startsWith('Bearer AT')) return J({ error: 'unauthenticated', error_code: 16 }, 401);
@@ -357,8 +362,9 @@ const one = async (id) => (await call('GET', '/admin/api/state', { admin: true }
   ok(s1 === 401, '面板：错口令 401');
   // 前面几段测的是「等工作人员发行」那条老路：先关掉「抵达 /auto 自动通过」，到 v2.2 那一段再打开。
   // 2.6 以前的几段测的都是一部一部传的那条路：关掉批量传输（batch:false），限额用 2.5 的默认值（5 / 30），到 2.6 那几段再打开
+  // 2.9：smart = 这一遍智能凑批开不开（之后各段的 cfg 都不碰它，2.9 那一段自己开关、用完放回来）
   const [s2, st] = await call('POST', '/admin/api/cfg', { admin: true, body: { pkUser: 'pk@x.com', pkPass: 'pkpass', grp: 'Cuven®', autoReady: false,
-    batch: false, userCap: 5, globalCap: 30 } });
+    batch: false, userCap: 5, globalCap: 30, smart: SMART } });
   ok(s2 === 200 && st.cfg.pkSet && st.cfg.pkUser === 'pk***@x.com', '面板：保存 PikPak 账号（只回打码的）', st.cfg);
   const raw = env.DB.db.prepare("SELECT v FROM tj_kv WHERE k = 'cfg'").get().v;
   ok(!raw.includes('pkpass') && raw.includes('pkPassEnc'), 'D1 里的 PikPak 密码是加密的');
@@ -1090,7 +1096,9 @@ const flowGet = async (user, tag) => {
   let app = (await mine()).filter(r => r.batch === bid1);
   ok(app.length === 16 && app.every(r => r.step === 4 && r.pct === 69 && r.label === '等待传输'), '成员的进度一起改：一半 → STEP 4 / 69%（带 batch）', app.map(r => r.pct));
   const waiting = (await mine()).filter(r => r.stage === 'ready');
-  ok(waiting.length === 2 && waiting.every(r => r.step === 4 && r.pct === 60 && r.wait && r.wait.ready === 2 && r.wait.need === 16), '多的两部等下一批：STEP 4「等待传输」，带 wait', waiting);
+  /* 2.9 改了这一条的 need（只在智能凑批开着时）：前面什么都没有了，这一批传完下一批就是这两部（2.6 的「前面没有」退路），
+     need 说实话是 2；关了智能凑批照旧是固定的 16 */
+  ok(waiting.length === 2 && waiting.every(r => r.step === 4 && r.pct === 60 && r.wait && r.wait.ready === 2 && r.wait.need === (SMART ? 2 : 16)), '多的两部等下一批：STEP 4「等待传输」，带 wait', waiting);
   ok(W.copyWhileBatch === 0 && !W.tf.slice(tf0).some(([op]) => op === 'copy'), '批量在传：没有一个单个传输');
 
   /* /app/flow：凑批进度和正在传的那一批；没变 304；实时进度缓存 5 秒 */
@@ -1099,10 +1107,13 @@ const flowGet = async (user, tag) => {
   const [fs1, ft1, f1] = await flowGet('alice');
   const [fs2] = await flowGet('alice', ft1);
   const files = bc.items.reduce((s, x) => s + (x.kind === 'dir' ? 4 : 1), 0);
-  ok(fs1 === 200 && f1.at > 0 && f1.poll === 5 && f1.gate.ready === 2 && f1.gate.need === 16 && f1.gate.mine === 2 &&
+  /* 2.9 同上：智能凑批开着 need = 2（full 照旧 16，why 写着前面没有了、等这一批传完）；关了是 2.8 的 16、没有 full / why */
+  ok(fs1 === 200 && f1.at > 0 && f1.poll === 5 && f1.gate.ready === 2 && f1.gate.mine === 2 &&
+     (SMART ? f1.gate.need === 2 && f1.gate.full === 16 && /前面没有.*批量 #\d+ 在传/.test(f1.gate.why)
+            : f1.gate.need === 16 && f1.gate.full === undefined && f1.gate.why === undefined) &&
      f1.batch && f1.batch.id === bid1 && f1.batch.stage === 'copy' && f1.batch.items === 16 && f1.batch.mine.length === 16 &&
      f1.batch.bytes === 8e9 && f1.batch.total === 16e9 && f1.batch.pct === 50 && f1.batch.speed === 50 * 1048576 && f1.batch.eta === 160 &&
-     f1.batch.files.done === 5 && f1.batch.files.total === files && f1.batch.started > 0, '/app/flow：这一批 16 部、字节 / 速度 / 剩余时间 / 文件数、我的是哪几条，凑批 2 / 16', f1);
+     f1.batch.files.done === 5 && f1.batch.files.total === files && f1.batch.started > 0, '/app/flow：这一批 16 部、字节 / 速度 / 剩余时间 / 文件数、我的是哪几条，凑批 2 / ' + (SMART ? 2 : 16), f1);
   ok(fs2 === 304, '/app/flow 没变：304', fs2);
   ok(nLive() - l0 === 1, '实时进度缓存 5 秒：两次只问了一次传输 Worker', nLive() - l0);
   const [, , fb] = await flowGet('bob');
@@ -1204,20 +1215,35 @@ const flowGet = async (user, tag) => {
   const reset = () => { reset26(); for (const k of [...W.tasks.keys()]) if (k.startsWith('Tup')) W.tasks.delete(k); W.caps = ['sub', 'batch']; };
   await call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, batchMin: 16, batchMax: 16, batchWait: 30, vpsSlots: 2 } });
   const launched = () => W.batchCalls.length;
+  /* 2.9：第几轮开的批、为什么（开批那一轮的 tick:last.batch） */
+  const runTicks = async (n) => { let at = 0, why = ''; for (let i = 1; i <= n; i++){ await tick(); if (!at && launched()){ at = i; why = (lastTick().batch || {}).why || ''; } } return { at, why }; };
 
-  /* 老版本 App 一部一部提交的（bid = 0）：前面还有在下载的 → 最多等 10 分钟 */
+  /* 老版本 App 一部一部提交的（bid = 0）：前面还有在下载的 → 最多等 10 分钟。
+     2.9 曾经改了开着智能凑批时的结果（第 2 轮就开：卡在 50% 的那一部按开始下载以来的平均速度推，停住的时间也揉进速度里，6 分钟起预计 14 分钟）。
+     2.9 复查改回 2.8 的结果（两遍都是这两条）：seedUp 那一部 3 分钟就到 50%，之后停住；速度现在量到最后一次有进度为止
+     （没看的那几分钟不再乘上 (1 − p) ÷ p，见审查结论 ②），停了 6 分钟还不到「停住了」的 10 分钟（dlQuiet），预计照样赶得上；
+     第 3 轮（9 分钟）它已经「该好了还没好」，预计比最晚开批晚 1 分钟，可离最晚开批只剩不到 1 分钟，早开省不了几分钟，
+     算它赶得上（smartGain，审查结论 ④）→ 等到 10 分钟。老版本 App 最多就等 10 分钟，停住要 10 分钟才认得出来，这种情形和 2.8 一样 */
   reset(); seedReady(3); seedUp();
   for (let i = 0; i < 3; i++) await tick();
   ok(launched() === 0, '老版本 App 提交的 3 部、前面还有在下载的：先等（9 分钟）', lastTick());
   await tick();
   ok(launched() === 1 && W.batchCalls[0].items.length === 3 && /最早的一部等了 1[0-9] 分钟/.test(lastTick().batch.why), '等了 10 分钟以上：有几部传几部', lastTick().batch);
 
-  /* 请求中心提交的（bid > 0）、这一次提交的还有在下载的 → 等 30 分钟 */
+  /* 请求中心提交的（bid > 0）、这一次提交的还有在下载的 → 等 30 分钟。
+     2.9：卡在 50% 的那一部第 5 轮（15 分钟）就不等了 → 那时就开（2.8 干等到 30 分钟）。
+     2.9 复查：断言不变，原因换了 —— 以前是停住的时间揉进平均速度、越推越晚，过了最晚开批；现在是最后一次有进度到现在超过 10 分钟 = 停住了 */
   reset(); seedReady(3, 7); seedUp(7);
-  for (let i = 0; i < 9; i++) await tick();
-  ok(launched() === 0, '请求中心提交的、同一次提交还有在下载的：等（28 分钟）');
-  await tick();
-  ok(launched() === 1 && /最早的一部等了 3[0-9] 分钟/.test(lastTick().batch.why), '等了 30 分钟以上：有几部传几部', lastTick().batch);
+  if (!SMART){
+    for (let i = 0; i < 9; i++) await tick();
+    ok(launched() === 0, '请求中心提交的、同一次提交还有在下载的：等（28 分钟）');
+    await tick();
+    ok(launched() === 1 && /最早的一部等了 3[0-9] 分钟/.test(lastTick().batch.why), '等了 30 分钟以上：有几部传几部', lastTick().batch);
+  } else {
+    const r = await runTicks(10);
+    ok(r.at === 5 && /^智能凑批：/.test(r.why), '2.9 智能凑批：同一次提交还有一部卡在 50%，预计 30 分钟里清洗不好的那一刻就开（第 5 轮），不干等到 30 分钟', r);
+    ok(launched() === 1 && W.batchCalls[0].items.length === 3, '2.9：开了就是一批，后面几轮不再开', W.batchCalls.length);
+  }
 
   /* 这一次提交的都清洗好了（别人的提交还在下载）：不用等 */
   reset(); seedReady(3, 9); seedUp(10);
@@ -3190,7 +3216,8 @@ env.DB.prepare = prepSt;
     return { s: r.status, j: await r.json() };
   };
   const [, vj] = await call('GET', '/version');
-  ok(vj && vj.ver === 'tj 2.8.1', 'VER 是 tj 2.8.1', vj);
+  /* 2.9 改了：VER 是 tj 2.9（下面几条都按 vj.ver 比，部署前的 tj 2.8 缓存照旧不用） */
+  ok(vj && vj.ver === 'tj 2.9', 'VER 是 tj 2.9', vj);
 
   /* 部署之前（tj 2.8）这一个小时里缓存下的：目录页一格一份（宽的、还新鲜）、默认参数拼好的回包。key 和 2.8 算出来的一模一样。
      影片库已经是认 ystrict 的（strict = true）= README 写的顺序：先影片库 v7.3、再 tj 2.8.1 */
@@ -3283,6 +3310,434 @@ env.DB.prepare = prepSt;
   delete globalThis.caches;
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   2.9：智能凑批（用户：「有的时候所有用户加起来的请求也没有凑满16个，所以需要智能调整来解决」）
+   有效的凑批数 need = clamp(等着的 + 预计赶得上的 + 预计新来的, 1, batchMin)；硬上限（30 分钟 / 老版本 10 分钟）和 2.6 的退路照旧。
+   这一段自己开关智能凑批（两遍都跑），最后放回这一遍的样子（SMART）
+   ══════════════════════════════════════════════════════════════════ */
+{
+  const M = 60000;
+  let seq = 0;
+  const setCfg = (body) => call('POST', '/admin/api/cfg', { admin: true, body: { batch: true, batchMin: 16, batchMax: 16, batchWait: 30, vpsSlots: 2, tagNames: true, ...body } });
+  const reset29 = async (smart) => {
+    reset26(); W.caps = ['sub', 'batch']; W.copyJobs = [];
+    for (const k of [...W.tasks.keys()]) if (k.startsWith('Ts')) W.tasks.delete(k);
+    await setCfg({ smart });
+    await call('POST', '/admin/api/links', { admin: true, body: {} });       // 先记下传输 Worker 会批量（每一轮都一样，不算进下面数的语句）
+  };
+  /* 等着凑批的（加好了追踪码） */
+  const ready29 = (n, bid, since) => {
+    const out = [];
+    for (let i = 0; i < n; i++){
+      const tmdb = 29000 + (seq++), t = Date.now();
+      out.push(Number(env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+        VALUES ('movie', ?, 0, 's', '["alice"]', 'ready', '', ?, ?, ?, ?, ?, ?)`)
+        .run(tmdb, JSON.stringify({ item: 'Ready' + tmdb + '.[auto-m' + tmdb + '-r0].mkv', kind: 'file', tag: '' }), t, t, since ?? t, t + 3600e3, bid).lastInsertRowid));
+    }
+    return out;
+  };
+  /* 前面还在云下载的：开始下载 ago 以前，PikPak 的进度 p（0 = 还没有进度：不知道多快）；下完了是一个带视频的文件夹，清洗得了。
+     2.9 复查：pat = 最后一次进度往上走是多久以前（默认 1 分钟；p = 0 时给了 pat 就是「看过了、还是 0%」） */
+  const down29 = (n, bid, ago, p, pat) => {
+    const out = [];
+    for (let i = 0; i < n; i++){
+      const tmdb = 29000 + (seq++), t = Date.now(), name = 'Smart' + tmdb + '.2021.1080p.BluRay', task = 'Ts' + tmdb;
+      const fid = pkFolderWith(name, [[name + '.mkv', 3e9]]);
+      W.tasks.set(task, { id: task, phase: 'PHASE_TYPE_RUNNING', progress: Math.round(p * 100), file_id: fid, file_name: name });
+      const d = { task, file: fid, fname: name, cur: { tid: 1, t: 'x' }, tried: [], ...(p > 0 || pat != null ? { pmax: p, pat: t - (pat ?? M) } : {}) };
+      out.push({ task, id: Number(env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+        VALUES ('movie', ?, 0, 'd', '["bob"]', 'download', '', ?, ?, ?, ?, 0, ?)`).run(tmdb, JSON.stringify(d), t, t, t - ago, bid).lastInsertRowid) });
+    }
+    return out;
+  };
+  /* 2.9 复查：前面一部一直在改名（rclone 作业一直在跑，这一段里不会因为 30 分钟没进展被停掉）：每一轮都「2 分钟就好」，其实一直不好 */
+  const ren29 = (bid) => {
+    const tmdb = 29000 + (seq++), t = Date.now(), job = 59000 + seq;
+    W.job[job] = { finished: false, success: false, bytes: 1, total: 10 };
+    env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+      VALUES ('tv', ?, 1, 'rn', '["bob"]', 'rename', '', ?, ?, ?, ?, 0, ?)`)
+      .run(tmdb, JSON.stringify({ fname: 'Ren' + tmdb, fkind: 'dir', org: 1, job, newname: 'Ren' + tmdb + '.S01', rb: 1, rbAt: t + 3600e3, cur: { tid: 1, t: 'x' }, tried: [] }), t, t, t, bid);
+    return job;
+  };
+  /* 来速的历史：n 次提交（每次一部，老版本 App 的 bid = 0；或者同一个 bid），建于最近 span 之内，已经就绪了。
+     2.9 复查：bid = 0 的一部一个人（zed0、zed1…），真是 n 个人各提交一次；给了 user 就都是这一个人一部一部提交的（来速里 10 分钟算一次） */
+  const hist29 = (n, span, bid = 0, user) => {
+    const t = Date.now();
+    for (let i = 0; i < n; i++) env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+      VALUES ('movie', ?, 0, 'h', ?, 'done', '', '{}', ?, ?, ?, 0, ?)`).run(29000 + (seq++), JSON.stringify([user || 'zed' + i]), t - span + Math.round(span * i / n), t, t, bid);
+  };
+  const launched = () => W.batchCalls.length;
+  const runTicks = async (n) => { let at = 0, why = ''; for (let i = 1; i <= n && !at; i++){ await tick(); if (launched()){ at = i; why = (lastTick().batch || {}).why || ''; } } return { at, why }; };
+  /* 2.9 复查：第几轮开的批、开的时候几点、几部、为什么；each(i) = 每一轮之前做点什么（让慢种往前走一点） */
+  const runT = async (n, each) => {
+    for (let i = 1; i <= n; i++){
+      if (each) each(i);
+      await tick();
+      if (launched()) return { at: i, when: Date.now(), n: W.batchCalls[0].items.length, why: (lastTick().batch || {}).why || '' };
+    }
+    return { at: 0, n: 0, why: '' };
+  };
+  /* 慢种：每一轮之前往前走一点（0.5%），一直有进度，不算停住（2.9 复查：10 分钟没有进度算停住了） */
+  const slow = (task) => () => { const x = W.tasks.get(task); if (x) x.progress += 0.5; };
+  const gate = async () => (await flowGet('alice'))[2].gate;
+
+  /* ① 所有人加起来只有 5 部、前面什么都没有、最近也没人提交：马上开（2.6 的「前面没有」，两种都一样；有效的凑批数是 5） */
+  for (const smart of [true, false]){
+    await reset29(smart);
+    ready29(5, 0);
+    const r = await runTicks(1);
+    ok(r.at === 1 && W.batchCalls[0].items.length === 5 && /前面没有/.test(r.why), (smart ? '2.9' : '（关了智能凑批）') + '：所有人加起来只有 5 部、前面没有了：第一轮就开 5 部', r);
+  }
+  /* 一个人刚一次提交了 30 部（同一个 bid，都结束了）：来速算一次提交，不当成「以后每两小时还有 30 部」——照样马上开 */
+  await reset29(true);
+  hist29(30, 20 * M, 99);
+  ready29(3, 7); down29(1, 7, 30 * M, 0.15);             // 同一次提交还有一部要 3 小时：2.6 的两条退路都不成立，看有效的凑批数
+  let r = await runTicks(1);
+  /* 2.9 复查：「约 3 小时」改成「约 2–3 小时」：速度现在量到最后一次有进度（1 分钟前）为止、再扣掉那以后的几分钟，算出来 2.7 小时
+     （以前把没看的那 4 分钟也乘上 (1 − p) ÷ p，3.2 小时） */
+  ok(r.at === 1 && W.batchCalls[0].items.length === 3 && /^智能凑批：所有人加起来这会儿只凑得到 3 部（其余 1 部约 [23](\.\d)? 小时后才清洗好）$/.test(r.why),
+     '2.9：一次提交 30 部算一次提交（来速不虚高）；前面那一部要 3 小时：不等，马上开 3 部', r);
+
+  /* ② 5 部等着 + 同一次提交还有 3 部在下载、按速度 4 分钟左右下完：等它们，凑成 8 部一起开；App 上是「已凑 5 / 8」 */
+  for (const smart of [true, false]){
+    await reset29(smart);
+    const t0 = Date.now();
+    ready29(5, 7); const dl = down29(3, 7, 4 * M, 0.5);
+    await tick();
+    const g = await gate();
+    const fb = (await flowGet('bob'))[2].gate;
+    const w = (await mine()).filter(x => x.stage === 'ready');
+    if (smart){
+      ok(launched() === 0 && g.ready === 5 && g.need === 8 && g.full === 16 && /^所有人加起来能凑 8 部：等前面 3 部清洗好（约 \d+ 分钟）$/.test(g.why) &&
+         g.launchBy > Date.now() && g.launchBy < t0 + 30 * M && g.launchBy % M === 0,
+         '2.9 /app/flow：5 部等着、前面 3 部预计 10 分钟内清洗好 → need 8、full 16、why、launchBy（预计凑满的时刻，早于最晚开批）', g);
+      ok(fb.need === 8 && fb.why === g.why && w.length === 5 && w.every(x => x.wait && x.wait.ready === 5 && x.wait.need === 8), '2.9：别人看到的一样；我的请求里等着的 wait 也是 5 / 8', { fb, w: w.map(x => x.wait) });
+      const st = (await call('GET', '/admin/api/state', { admin: true }))[1];
+      ok(st.gate.need === 8 && st.gate.full === 16 && st.gate.why === g.why && st.cfg.smart === true, '2.9 面板：凑批 5 / 8、满批 16、为什么、智能凑批开着', st.gate);
+    } else {
+      ok(launched() === 0 && g.need === 16 && g.full === undefined && g.why === undefined && g.launchBy === g.oldest + 30 * M,
+         '（关了智能凑批）/app/flow 和 2.8 一样：need 16、最晚开批，没有 full / why', g);
+    }
+    for (const x of dl) finishTask(x.task);
+    const r2 = await runTicks(4);
+    ok(r2.at === 3 && W.batchCalls[0].items.length === 8 && /前面没有/.test(r2.why),
+       (smart ? '2.9' : '（关了智能凑批）') + '：那 3 部下完、清洗好、加好追踪码（又过了 3 轮）：8 部一起开，没有先开 5 部的', { r2, n: W.batchCalls.map(b => b.items.length) });
+  }
+
+  /* ③ 5 部等着 + 同一次提交还有 3 部在下载、按速度要 3 小时：不等，马上开 5 部（关了智能凑批：干等到 30 分钟） */
+  for (const smart of [true, false]){
+    await reset29(smart);
+    ready29(5, 7); down29(3, 7, 30 * M, 0.15);
+    const r3 = await runTicks(10);
+    /* 2.9 复查：「约 3 小时」→「约 2–3 小时」，原因同上（2.7 小时） */
+    if (smart) ok(r3.at === 1 && W.batchCalls[0].items.length === 5 && /^智能凑批：所有人加起来这会儿只凑得到 5 部（其余 3 部约 [23](\.\d)? 小时后才清洗好）$/.test(r3.why),
+                  '2.9：前面 3 部要 3 小时才下完：不等它们，第一轮就开 5 部', r3);
+    else ok(r3.at === 10 && /最早的一部等了 3\d 分钟/.test(r3.why), '（关了智能凑批）前面 3 部要 3 小时：照 2.8 干等到 30 分钟', r3);
+  }
+
+  /* ④ 来得很密（最近 1 小时 64 个人各提交一次）：预计 30 分钟里还会来够，等着凑满 16 部；越往后新来的越赶不上，赶不上了就开（不等到 30 分钟）。
+     同样的情形最近没人提交：第一轮就开。
+     2.9 复查改了两处：64 次提交原来都是同一个人（zed）一部一部提交的，复查起这算一阵（10 分钟算一次，见下面复查 ⑧），
+     改成 64 个人各提交一次（hist29 的 bid = 0 一部一个人），说的还是「来得很密」；
+     launchBy 原来断言 = 最晚开批（要靠新来的才凑得满就一律写最晚开批），复查起是预计新来的赶不上了、就开的那一刻（复查 ⑤），
+     改成断言它早于最晚开批、和真开的那一轮差不到一轮（3 分钟一轮 + 取整的 1 分钟） */
+  await reset29(true);
+  hist29(64, 60 * M);
+  ready29(6, 7); down29(1, 7, 30 * M, 0.15);
+  await tick();
+  let g = await gate();
+  ok(launched() === 0 && g.need === 16 && /^还差 10 部凑满 16 部：预计还有 \d+ 部新请求$/.test(g.why) && g.launchBy < g.oldest + 30 * M,
+     '2.9：来得很密，预计最晚开批之前还会来 10 部以上：等着凑满 16 部（2.9 复查：launchBy 是预计新来的赶不上了的那一刻，早于最晚开批）', g);
+  r = await runT(9, slow('Ts' + (29000 + seq - 1)));
+  ok(r.at >= 3 && r.at <= 8 && r.n === 6 && /^智能凑批：/.test(r.why),
+     '2.9：新来的（从提交到清洗好至少 10 分钟）赶不上最晚开批了 → 就开，不干等到 30 分钟', { at: r.at + 1, why: r.why });
+  ok(Math.abs(r.when - g.launchBy) <= 4 * M, '2.9 复查：launchBy 和真开批的时刻差不到一轮（以前写的是最晚开批，晚 8 分钟）',
+     { launchBy: new Date(g.launchBy).toISOString(), launched: new Date(r.when).toISOString() });
+  await reset29(true);
+  ready29(6, 7); down29(1, 7, 30 * M, 0.15);
+  r = await runTicks(1);
+  ok(r.at === 1 && W.batchCalls[0].items.length === 6, '2.9：同样的情形最近没人提交：第一轮就开 6 部', r);
+
+  /* ⑤ 前面的刚开始下载、还没有进度（不知道多快）→ 照 2.8 当它赶得上，等。
+     2.9 复查改了后半段（审查结论 ⑥）：以前断言它们一直 0% 也等满 30 分钟（第 10 轮）——那正是用户说的「等永远不会来的那几部」。
+     现在开始下载 10 分钟还是 0% = 停住了（死种），不等：第 3 轮（开始下载 11 分钟）就开。
+     硬上限换了一种「一直预计马上就好、其实一直不好」的来测（前面一季一直在改名、每一轮都「2 分钟就好」）：等满 30 分钟（老版本 App 10 分钟）照样开 */
+  await reset29(true);
+  ready29(3, 7); down29(2, 7, 2 * M, 0);
+  await tick();
+  g = await gate();
+  ok(launched() === 0 && g.need === 5 && g.why === '所有人加起来能凑 5 部：等前面 2 部清洗好' && g.launchBy === g.oldest + 30 * M,
+     '2.9：前面 2 部刚开始下载、还没有进度：照 2.8 等它们，need 5，launchBy = 最晚开批', g);
+  r = await runTicks(9);
+  ok(r.at === 2 && W.batchCalls[0].items.length === 3 && r.why === '智能凑批：所有人加起来这会儿只凑得到 3 部（其余 2 部一时半会儿清洗不好）',
+     '2.9 复查：那 2 部开始下载 10 分钟还是 0%（死种）：不再等，第 3 轮就开', { at: r.at + 1, why: r.why });
+  await reset29(true);
+  ready29(3, 7); ren29(7);
+  r = await runTicks(10);
+  ok(r.at === 10 && W.batchCalls[0].items.length === 3 && /最早的一部等了 3\d 分钟/.test(r.why), '2.9 硬上限：前面那一部一直「马上就好」，等满 30 分钟照样开（第 10 轮）', r);
+  await reset29(true);
+  ready29(3, 0); ren29(0);
+  r = await runTicks(4);
+  ok(r.at === 4 && /最早的一部等了 1\d 分钟/.test(r.why), '2.9 硬上限：老版本 App 一部一部提交的等满 10 分钟照样开', r);
+
+  /* ⑥ 只有 1 部、2 分钟里还有一部清洗好：先不开，等它一起（关了智能凑批：2.6 的「这一次提交的都清洗好了」先开 1 部）。
+     到了最晚开批不等 */
+  for (const smart of [true, false]){
+    await reset29(smart);
+    ready29(1, 21);
+    const tmdb = 29000 + (seq++), fid = 'hz' + tmdb, name = 'Hyst' + tmdb + '.2019.1080p.mkv', t = Date.now();
+    W.files.set(fid, { id: fid, name, kind: 'drive#file', parent_id: 'AUTO', size: '100', phase: 'PHASE_TYPE_COMPLETE', trashed: false });
+    env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+      VALUES ('movie', ?, 0, 'h', '["bob"]', 'ready', '', ?, ?, ?, ?, 0, 22)`).run(tmdb, JSON.stringify({ item: name, kind: 'file', file: fid }), t, t, t);
+    const r6 = await runTicks(1);
+    if (smart) ok(r6.at === 1 && W.batchCalls.length === 1 && W.batchCalls[0].items.length === 2 && /前面没有/.test(r6.why),
+                  '2.9：只有 1 部、另一次提交的一部这一轮就加好追踪码：先不开，等它一起开 2 部（不开两个一部的批）', { r6, n: W.batchCalls.map(b => b.items.length) });
+    else ok(r6.at === 1 && W.batchCalls[0].items.length === 1 && /这一次提交的都清洗好了/.test(r6.why), '（关了智能凑批）2.6 的样子：先开 1 部', r6);
+  }
+  await reset29(true);
+  ready29(1, 21, Date.now() - 31 * M);
+  const tz = Date.now();
+  env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+    VALUES ('movie', ?, 0, 'h', '["bob"]', 'clean', '', '{"file":"nope","cur":{"tid":1,"t":"x"},"tried":[]}', ?, ?, ?, ?, 22)`).run(29000 + (seq++), tz, tz, tz, tz);
+  r = await runTicks(1);
+  ok(r.at === 1 && W.batchCalls[0].items.length === 1 && /最早的一部等了 3\d 分钟/.test(r.why), '2.9：只有 1 部、到了最晚开批：不再等「马上清洗好」的那一部（硬上限）', r);
+
+  /* ⑦ 凑批计划存在 tick:last（不多写），定时任务 5 分钟没跑就照 2.8 给（need 16、最晚开批，没有 why） */
+  await reset29(true);
+  ready29(5, 7); down29(3, 7, 4 * M, 0.5);
+  await tick();
+  ok(lastTick().gate && lastTick().gate.need === 8 && lastTick().gate.full === 16, '2.9：这一轮的凑批计划跟着 tick:last 存', lastTick().gate);
+  advance(6 * M);
+  g = await gate();
+  ok(g.need === 16 && g.full === 16 && g.why === undefined && g.launchBy === g.oldest + 30 * M, '2.9：计划旧了（定时任务 5 分钟没跑）：照 2.8 给', g);
+
+  /* ⑧ 省：子请求一个不多；D1 语句——在凑（每轮开头、末尾各看一次）一条不多（顶替 2.8 那一条），一批在传 / 单个传输在跑时一轮多一条；
+     来速一轮只算一次；新的语句不读整张表 */
+  const count = async (smart, seed) => {
+    await reset29(smart);
+    seed();
+    /* 不数一轮末尾那条随机（3%）删旧日志的：两边各自碰运气，和凑批无关。
+       2.9 复查：也不数换 PikPak 令牌的（令牌 2 小时一换，假时钟走到哪一轮赶上算哪一轮：那一轮多 1 个子请求、读写 pk:tok 2 条 D1，
+       和凑批无关）。复查改了前面几段跑几轮，换令牌正好落在关着的那一遍上，所以这里扣掉 */
+    const seen = [], prep = env.DB.prepare, r0 = W.refreshes || 0, s0 = W.signins;
+    env.DB.prepare = function (sql){ if (!/^DELETE FROM tj_log WHERE id </.test(sql)) seen.push(sql); return prep.call(this, sql); };
+    try { await tick(); } finally { env.DB.prepare = prep; }
+    const ref = (W.refreshes || 0) - r0;
+    return { n: seen.length - 2 * ref, fetches: lastTick().fetches - ref, signin: W.signins - s0, arrive: seen.filter(s => /MAX\(id\) FROM tj_req/.test(s)).length, seen };
+  };
+  const shapes = {
+    '在凑': () => { ready29(5, 7); down29(3, 7, 4 * M, 0.5); },
+    '一批在传': () => {
+      ready29(2, 0);
+      const t = Date.now();
+      const b = Number(env.DB.db.prepare("INSERT INTO tj_batch (stage, items, data, created, updated) VALUES ('copy', '[]', ?, ?, ?)")
+        .run(JSON.stringify({ job: 4901, started: t, cbAt: t, cb: 1, total: 4e9 }), t, t).lastInsertRowid);
+      W.job[4901] = { finished: false, success: false, bytes: 1e9, total: 4e9, speed: 1e7, eta: 600 }; W.batchRun[String(b)] = 4901;
+    },
+    '单个传输在跑': () => {
+      ready29(2, 0);
+      env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next)
+        VALUES ('movie', ?, 0, 'solo', '["bob"]', 'copy', '', '{"item":"solo.mkv","kind":"file","tag":"","job":4902}', 1, 1, 1, ?)`).run(29000 + (seq++), Date.now() + 3600e3);
+      W.job[4902] = { finished: false, success: false, bytes: 1, total: 10 };
+    },
+  };
+  for (const [name, seed] of Object.entries(shapes)){
+    const off = await count(false, seed), on = await count(true, seed);
+    const extra = name === '在凑' ? 0 : 1;
+    ok(on.n - off.n === extra && on.fetches === off.fetches && !on.signin && !off.signin && off.arrive === 0 && on.arrive === 1 && launched() === 0,
+       '2.9 省（' + name + '）：子请求一样多（' + on.fetches + '），D1 语句多 ' + extra + ' 条，来速只算一次', { on: on.n, off: off.n, fetches: [on.fetches, off.fetches], arrive: on.arrive });
+    const fresh = [...new Set(on.seen)].filter(s => !off.seen.includes(s) && /\btj_req\b/.test(s));
+    const plans = fresh.map(s => env.DB.db.prepare('EXPLAIN QUERY PLAN ' + s).all().map(x => x.detail));
+    ok(fresh.length >= 1 && plans.every(p => !p.some(d => /^SCAN tj_req\b/.test(d)) && p.some(d => /USING INDEX tj_req_stage\b/.test(d))),
+       '2.9 省（' + name + '）：新的语句走 stage 的索引、来速按主键取最新几行，不读整张表', plans);
+    if (name === '一批在传'){
+      g = await gate();
+      ok(g.need === 2 && /^前面没有还会清洗好的了；批量 #\d+ 在传，传完再开下一批$/.test(g.why) && g.launchBy >= Date.now() + 9 * M,
+         '2.9：一批在传时也算一份下一批的计划：need 2，预计开批不早于这一批传完（还要 10 分钟）', g);
+    }
+    if (name === '单个传输在跑') ok(/；单个传输在传，传完再开$/.test((await gate()).why), '2.9：单个传输在跑：计划里写着在等它', (await gate()).why);
+  }
+
+  /* ⑨ 面板：「智能凑批」开关（默认开）、存得住 */
+  const [, html] = await call('GET', '/');
+  ok(/id="smart" type="checkbox"/.test(html) && /智能凑批/.test(html) && /smart:\$\('smart'\)\.checked/.test(html), '2.9 面板：有「智能凑批」开关，保存时带上');
+  ok((await setCfg({ smart: false }))[1].cfg.smart === false && (await setCfg({ smart: true }))[1].cfg.smart === true, '2.9 面板：开关存得住');
+
+  /* ══ 2.9 复查（审查结论十条）：每一条一个回归测试，复查之前的 2.9 在这里每一条都挂（先对着没改的 worker 跑过一遍确认了） ══ */
+  /* 排队中的（还没推送）：d = data 里多放的（wait、vers…），next = 下一次推进的时刻 */
+  const q29 = (bid, d = {}, next) => {
+    const tmdb = 29000 + (seq++), t = Date.now();
+    return Number(env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+      VALUES ('movie', ?, 0, 'q', '["carol"]', 'queued', '', ?, ?, ?, ?, ?, ?)`)
+      .run(tmdb, JSON.stringify({ vers: [], versAt: 0, tried: [], ...d }), t, t, t, next ?? t, bid).lastInsertRowid);
+  };
+  const vers29 = (tid) => ({ vers: [{ tid, t: 'Heat.1995.1080p.BluRay', mb: 0, size: '', res: '', labels: [], total: 0 }], versAt: Date.now() + 3600e3 });
+
+  /* 复查 ①（停住的下载照旧当赶得上）：同一次提交的一部推了 60 分钟还是 0%（死种）/ 卡在 99%、35 分钟没动；老版本 App 的 3 部等着别人的死种
+     → 都第一轮就开，不再等满 30 / 10 分钟。关了智能凑批照 2.8 干等 */
+  for (const smart of [true, false]){
+    await reset29(smart);
+    ready29(5, 7); down29(1, 7, 60 * M, 0, 59 * M);
+    r = await runT(10);
+    if (smart) ok(r.at === 1 && r.n === 5 && r.why === '智能凑批：所有人加起来这会儿只凑得到 5 部（其余 1 部一时半会儿清洗不好）',
+                  '2.9 复查：同一次提交的那一部推了 60 分钟还是 0%（死种）：不等它，第一轮就开 5 部', r);
+    else ok(r.at === 10 && r.n === 5 && /最早的一部等了 3\d 分钟/.test(r.why), '（关了智能凑批）死种：照 2.8 干等 30 分钟', r);
+  }
+  await reset29(true);
+  ready29(5, 7); down29(1, 7, 60 * M, 0.99, 35 * M);
+  r = await runT(10);
+  ok(r.at === 1 && r.n === 5 && /（其余 1 部一时半会儿清洗不好）$/.test(r.why), '2.9 复查：卡在 99%、35 分钟没有进度：不等它，第一轮就开', r);
+  await reset29(true);
+  ready29(3, 0); down29(1, 9, 60 * M, 0, 59 * M);
+  r = await runT(4);
+  ok(r.at === 1 && r.n === 3 && /^智能凑批：/.test(r.why), '2.9 复查：老版本 App 的 3 部、别人推了 60 分钟还是 0% 的死种：第一轮就开，不等满 10 分钟', r);
+  /* 停住要「看过了、还是没进度」：一部 15 分钟前到 50%，可 12 分钟前就该再看、一直没轮上（这一轮也跑过 22 秒、一条都没推进）→
+     没看过的那几分钟不算停住，照样等它（审查结论 ① 的改法自己的回归：别把没轮上看的当成死种） */
+  await reset29(true);
+  ready29(5, 7);
+  const sv = down29(1, 7, 20 * M, 0.5, 15 * M);
+  env.DB.db.prepare('UPDATE tj_req SET next = ? WHERE id = ?').run(Date.now() + 3.1 * M - 12 * M, sv[0].id);
+  { const prep = env.DB.prepare;
+    env.DB.prepare = function (sql){ if (/INDEXED BY tj_req_stnext WHERE stage IN/.test(sql)) advance(23000); return prep.call(this, sql); };
+    try { await tick(); } finally { env.DB.prepare = prep; } }
+  g = await gate();
+  ok(launched() === 0 && g.need === 6 && /^所有人加起来能凑 6 部：等前面 1 部清洗好/.test(g.why), '2.9 复查：12 分钟没轮上看的那一部不当成停住，照样等它', g);
+
+  /* 复查 ②（没看的那几分钟也被乘上 (1 − p) ÷ p）：同一次提交 3 部开始 1 分钟就到 10%（照这个速度还要 9 分钟），3 分钟后才又看：
+     预计赶得上，等它们，8 部一起开（复查之前算成 38 分钟、当成赶不上，先开了 5 部） */
+  await reset29(true);
+  ready29(5, 7);
+  const lag = down29(3, 7, 0.9 * M, 0.1, -0.1 * M);
+  await tick();
+  g = await gate();
+  ok(launched() === 0 && g.need === 8 && /^所有人加起来能凑 8 部：等前面 3 部清洗好（约 \d+ 分钟）$/.test(g.why),
+     '2.9 复查：开始 1 分钟就到 10%、3 分钟没再看：按到最后一次有进度的速度推，预计赶得上，等它们（need 8）', g);
+  for (const x of lag) finishTask(x.task);
+  r = await runT(4);
+  ok(r.at === 3 && r.n === 8 && /前面没有/.test(r.why), '2.9 复查：那 3 部下完、清洗好：8 部一起开，没有先开 5 部', r);
+
+  /* 复查 ③（排队中的一律当赶得上）：
+     (a) 排队等 PikPak 的位子（只有 1 个位子，被同一次提交要 3 小时的慢种占着）→ 轮不到，不等 */
+  const pk0 = (await call('GET', '/admin/api/state', { admin: true }))[1].cfg.pkSlots;
+  await reset29(true); await setCfg({ smart: true, pkSlots: 1 });
+  ready29(5, 7); down29(1, 7, 30 * M, 0.15); q29(7, { wait: 'pk' }, Date.now() + 2 * M);
+  r = await runT(1);
+  ok(r.at === 1 && r.n === 5 && /^智能凑批：所有人加起来这会儿只凑得到 5 部（其余 2 部约 \d(\.\d)? 小时后才清洗好）$/.test(r.why),
+     '2.9 复查：排队等 PikPak 位子、位子被要 3 小时的慢种占着：不等它，第一轮就开', r);
+  await setCfg({ smart: true, pkSlots: pk0 });
+  /* (b) 推送碰上影片库那边的 PikPak 登录不上（503，pushHold 10 分钟一等）：记下 wait: 'hold'，凑批不等它（这一轮末尾就开）；
+     恢复了推出去，wait 跟着清掉。关了智能凑批照 2.8 等满 30 分钟（wait 一样记，只是 2.8 的凑批不看它） */
+  for (const smart of [true, false]){
+    await reset29(smart);
+    ready29(5, 7);
+    const qid = q29(7, vers29(30));
+    W.pushSeq = ['auth'];
+    r = await runT(10);
+    const qd = () => { const x = env.DB.db.prepare('SELECT stage, data FROM tj_req WHERE id = ?').get(qid); return { stage: x.stage, ...JSON.parse(x.data) }; };
+    if (smart){
+      ok(r.at === 1 && r.n === 5 && /（其余 1 部一时半会儿清洗不好）$/.test(r.why) && qd().wait === 'hold' && qd().stage === 'queued',
+         '2.9 复查：推送卡在影片库的 PikPak 账号上（记下 wait: hold）：不等它，这一轮就开 5 部', { r, q: qd() });
+      for (let i = 0; i < 4; i++) await tick();
+      ok(qd().stage === 'download' && qd().wait === undefined, '2.9 复查：恢复了推出去，wait: hold 清掉了', qd());
+    } else ok(r.at === 10 && r.n === 5 && /最早的一部等了 3\d 分钟/.test(r.why), '（关了智能凑批）推送卡住：照 2.8 等满 30 分钟', r);
+    W.pushSeq = [];
+  }
+  /* (c) 离最晚开批不到 10 分钟才提交的新请求（还在排队）：从提交到清洗好至少 10 分钟（和「预计新来的」一样），赶不上，不等它 */
+  await reset29(true);
+  ready29(5, 7, Date.now() - 20 * M); down29(1, 7, 30 * M, 0.15); q29(9, vers29(31));
+  r = await runT(4);
+  ok(r.at === 1 && r.n === 5 && /（其余 2 部约 10 分钟后才清洗好）$/.test(r.why), '2.9 复查：离最晚开批 7 分钟才提交的新请求赶不上：不等它，第一轮就开', r);
+
+  /* 复查 ④（离最晚开批只剩几分钟，粗估「只晚一点」的被丢下）：5 部等了 27 分钟，同一次提交的一季在核对整季、预计比最晚开批晚 3 分钟
+     → 不为省 3 分钟丢下它：等到最晚开批（赶上了一起走）；预计晚得多（要 3 小时）的照样马上开 */
+  await reset29(true);
+  ready29(5, 7, Date.now() - 24 * M);
+  { const t = Date.now();
+    env.DB.db.prepare(`INSERT INTO tj_req (src, tmdb, season, title, users, stage, note, data, created, updated, since, next, bid)
+      VALUES ('tv', ?, 1, 'ck', '["bob"]', 'check', '', '{"cur":{"tid":1,"t":"x"},"tried":[]}', ?, ?, ?, ?, 7)`).run(29000 + (seq++), t, t, t, t + 4 * M); }
+  await tick();
+  g = await gate();
+  ok(launched() === 0 && g.need === 6 && g.why === '所有人加起来能凑 6 部：等前面 1 部清洗好' && g.launchBy === g.oldest + 30 * M,
+     '2.9 复查：离最晚开批 3 分钟、那一季预计晚 3 分钟：算它赶得上（need 6），等到最晚开批', g);
+  r = await runT(1);
+  ok(r.at === 1 && r.n === 5 && /最早的一部等了 30 分钟/.test(r.why), '2.9 复查：最晚开批照样开（那一季没赶上就下一批）', r);
+  await reset29(true);
+  ready29(5, 7, Date.now() - 24 * M); down29(1, 7, 30 * M, 0.15);
+  r = await runT(1);
+  ok(r.at === 1 && r.n === 5 && /^智能凑批：/.test(r.why), '2.9 复查：离最晚开批 3 分钟、前面那一部要 3 小时：照样马上开', r);
+
+  /* 复查 ⑤（要靠新来的才凑得满时 launchBy 一律写最晚开批）：见上面 ④ 的 launchBy（预计新来的赶不上的那一刻，和真开的差不到一轮） */
+
+  /* 复查 ⑥（谁的一个死种都让智能凑批整个失灵）：3 部等着 + 同一次提交一部要 3 小时 → 本来第一轮就开；
+     再加一个不相干的（bid 9）推了 60 分钟还是 0% 的：照样第一轮就开 */
+  await reset29(true);
+  ready29(3, 7); down29(1, 7, 30 * M, 0.15); down29(1, 9, 60 * M, 0, 59 * M);
+  r = await runT(10);
+  ok(r.at === 1 && r.n === 3 && /^智能凑批：所有人加起来这会儿只凑得到 3 部（其余 2 部约 \d(\.\d)? 小时后才清洗好）$/.test(r.why),
+     '2.9 复查：别人一个 0% 的死种不再让智能凑批干等 30 分钟', r);
+
+  /* 复查 ⑦（只有 1 部时「等马上清洗好的那一部」没有记性）：另一次提交的一季一直在改名（每一轮都「2 分钟就好」）→
+     只先不开一会儿（进等待凑批 4 分钟以内），第 2 轮就开 1 部（复查之前一直等到最晚开批）。关了：2.6 的样子第一轮就开 */
+  for (const smart of [true, false]){
+    await reset29(smart);
+    ready29(1, 21);
+    const rj = ren29(22);
+    /* 问改名作业那一下慢（VPS 忙）：这一轮跑过 22 秒，末尾那一次凑批不再看 —— 审查说的那种，复查之前一直等到最晚开批 */
+    W.hook = (u, m, body) => { if (u.pathname === '/api/link/job' && body && body.jobid === rj) advance(23000); return null; };
+    r = await runT(10);
+    W.hook = null;
+    if (smart){
+      ok(r.at === 2 && r.n === 1 && /这一次提交的都清洗好了/.test(r.why), '2.9 复查：「马上清洗好」的那一部一直没好：只等一会儿，第 2 轮就开 1 部', r);
+    } else ok(r.at === 1 && r.n === 1, '（关了智能凑批）2.6 的样子：第一轮就开 1 部', r);
+  }
+
+  /* 复查 ⑧（一个人一部一部提交的一阵被当成好多次提交）：一个人 15 分钟里一部一部提交了 20 部（bid = 0，老版本 App / Windows）：
+     来速里 10 分钟算一次，不让后面两个小时的每一批都多等。（64 个人各提交一次照样算 64 次，见上面 ④） */
+  await reset29(true);
+  hist29(20, 15 * M, 0, 'dora');
+  ready29(5, 7); down29(1, 7, 30 * M, 0.15);
+  r = await runT(1);
+  ok(r.at === 1 && r.n === 5 && /^智能凑批：/.test(r.why), '2.9 复查：一个人一部一部提交的 20 部不算 20 次提交：第一轮就开', r);
+
+  /* 复查 ⑨（头几条 2.9 测试走的都是 2.6 的退路）：智能凑批本身那一条 —— 同一次提交里前面 3 部约 4 分钟好、还有 1 部要 3 小时：
+     等那 3 部，到齐了 8 部「智能凑批」开；关了照 2.8 等满 30 分钟。来速再高，前面什么都没有了照样马上开（来速只在等着的提交还有没好的时才让它多等） */
+  for (const smart of [true, false]){
+    await reset29(smart);
+    ready29(5, 7);
+    const soon = down29(3, 7, 4 * M, 0.5), far = down29(1, 7, 30 * M, 0.15);
+    await tick();
+    for (const x of soon) finishTask(x.task);
+    r = await runT(10, slow(far[0].task));
+    if (smart) ok(r.at === 3 && r.n === 8 && /^智能凑批：所有人加起来这会儿只凑得到 8 部（其余 1 部约 \d(\.\d)? 小时后才清洗好）$/.test(r.why),
+                  '2.9 复查：赶得上的 3 部到齐了：8 部按智能凑批开，不等要 3 小时的那一部', r);
+    else ok(r.at === 9 && r.n === 8 && /最早的一部等了 3\d 分钟/.test(r.why), '（关了智能凑批）照 2.8 等满 30 分钟（8 部）', r);
+  }
+  await reset29(true);
+  hist29(64, 60 * M);
+  ready29(5, 7);
+  r = await runT(1);
+  ok(r.at === 1 && r.n === 5 && /前面没有/.test(r.why), '2.9 复查：来速再高，前面什么都没有了照样马上开', r);
+
+  /* 复查 ⑩：一批在传、rclone 没给剩余时间：不给 launchBy（复查之前给的是凑满的时刻，可能比这一批传完还早）；
+     面板只在计划是新的（有 why）时写「预计」，照 2.8 给的（定时任务没在跑）写「最晚」 */
+  await reset29(true);
+  ready29(2, 7); down29(1, 7, 2 * M, 0.5, 0);
+  { const t = Date.now();
+    const b = Number(env.DB.db.prepare("INSERT INTO tj_batch (stage, items, data, created, updated) VALUES ('copy', '[]', ?, ?, ?)")
+      .run(JSON.stringify({ job: 4903, started: t, cbAt: t, cb: 1, total: 4e9 }), t, t).lastInsertRowid);
+    W.job[4903] = { finished: false, success: false, bytes: 1e9, total: 4e9 }; W.batchRun[String(b)] = 4903; }
+  await tick();
+  g = await gate();
+  ok(launched() === 0 && g.need === 3 && /；批量 #\d+ 在传，传完再开下一批$/.test(g.why) && g.launchBy === undefined,
+     '2.9 复查：一批在传、不知道它还要多久：不给 launchBy', g);
+  W.job[4903] = { finished: true, success: true, bytes: 4e9, total: 4e9 };
+  const [, html29] = await call('GET', '/');
+  ok(/\(g\.why\?'预计 ':'最晚 '\)/.test(html29), '2.9 复查面板：计划是新的（有 why）才写「预计」，照 2.8 给的写「最晚」');
+
+  await reset29(SMART);
+  await setCfg({ smart: SMART, batchWait: 30 });
+}
+
 /* ── 共用的 D1：别人的表原样不动，自己的表缺的列补上了 ── */
 {
   const theirs = env.DB.db.prepare("SELECT v FROM kv WHERE k = 'theirs'").get();
@@ -3293,5 +3748,16 @@ env.DB.prepare = prepSt;
   ok(tjCols.includes('exp'), '缺 exp 列的 tj_kv 自己补上了', tjCols);
 }
 
+/* 2.9：开着智能凑批跑完了，再开一个子进程把它关掉（TJ_SMART=0）从头跑一遍：关了就该和 2.8 一模一样，2.8 以前的检查照原样过。
+   子进程那一遍的 ✗ 前面加「（关了智能凑批）」，两遍的数加在一起 */
+if (!process.env.TJ_SMART){
+  const sub = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], { env: { ...process.env, TJ_SMART: '0' }, encoding: 'utf8', maxBuffer: 64 << 20 });
+  const out = String(sub.stdout || '');
+  for (const line of out.split('\n')) if (line.startsWith('✗')) console.log('（关了智能凑批）' + line);
+  const m = /(\d+) 项通过，(\d+) 项失败/.exec(out);
+  if (m){ pass += +m[1]; failN += +m[2]; }
+  else { failN++; console.log('✗ 关了智能凑批的那一遍没跑完', String(sub.stderr || '').split('\n').filter(l => !/ExperimentalWarning|trace-warnings/.test(l)).slice(-12).join('\n')); }
+  console.log(`\n智能凑批开着的一遍 + 关了（2.8 的样子）的一遍${m ? '（关了的那一遍：' + m[1] + ' 项通过，' + m[2] + ' 项失败）' : ''}`);
+}
 console.log(`\n请求添加 Worker：${pass} 项通过，${failN} 项失败`);
 process.exit(failN ? 1 : 0);

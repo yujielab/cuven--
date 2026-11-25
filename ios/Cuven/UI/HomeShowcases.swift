@@ -681,8 +681,8 @@ struct YearCardBadge: Equatable {
 // 两排 16:9 的卡（带片名字标：Apple 带片名排版的成品图，没有的用无字背景 + 字标：AppModel.finaleTiles），
 // 上一排往左、下一排往右，慢慢横着走（不在屏上、「减弱动态效果」、按了暂停时停：F59）；
 // 下面正中一颗描边的胶囊「查看全部影片 ›」进全部影片（AllFilmsView：2026 → 2020 按年份，电影 / 剧集、可立即播放 / 可申请分开），同一行最右边一颗圆的暂停 / 继续
-// （参考图：会自己动的内容要停得下来）；手机（折起）上再加一颗铺满宽的白色「立即观看」（参考图手机版的「Stream now」），
-// 直接放今天的编辑推荐
+// （参考图：会自己动的内容要停得下来）。以前手机（折起）上这一行下面还有一颗铺满宽的白色「立即观看」，
+// 用户截图说是不该出现的按钮、要求去掉：手机和展开一样，这一行就是主页的最后一样东西
 
 /// 结尾那两排里的一张：画面 +（片名没有印在图上时）字标
 struct FinaleTile: Hashable, Identifiable {
@@ -692,7 +692,6 @@ struct FinaleTile: Hashable, Identifiable {
 }
 
 struct HomeFinale: View {
-    @Environment(AppModel.self) private var model
     let tiles: [FinaleTile]
     let metrics: DSMetrics
     @State private var onScreen = false
@@ -746,21 +745,8 @@ struct HomeFinale: View {
             }
             .padding(.horizontal, metrics.margin)
             .padding(.top, metrics.wide ? 32 : 26)
-            if !metrics.wide, let pick = model.editorsPick() {
-                Button { watchNow(pick) } label: {
-                    Text("立即观看")
-                        .font(.headline)
-                        .foregroundStyle(.black)
-                        .frame(maxWidth: .infinity, minHeight: 50)
-                        .background(Capsule().fill(Color.white))
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(PressableStyle())
-                .padding(.horizontal, metrics.margin)
-                .padding(.top, 20)
-                .accessibilityHint("播放今天的编辑推荐")
-                .accessibilityIdentifier("home-watch-now")
-            }
+            // 用户要求去掉手机上的「立即观看」后，这一行就收尾：底下不另垫，留白是主页那一列统一的底边距
+            // （HomeView 的 shelfGap，再往下是底部安全区：标签栏，或 Duo 侧边一列时只有主屏指示条），和展开时一样
         }
         .frame(width: metrics.width)
         .onScrollVisibilityChange(threshold: 0.1) { v in
@@ -803,13 +789,6 @@ struct HomeFinale: View {
         .buttonStyle(.plain)
         .accessibilityLabel(userPaused ? "继续播放滚动画面" : "暂停滚动画面")
         .accessibilityIdentifier("home-finale-pause")
-    }
-
-    /// 「立即观看」：直接放今天的编辑推荐（看了一半的从上次的地方接着放）
-    private func watchNow(_ v: Video) {
-        PlayerCoordinator.shared.play(PlayRequest(path: v.path, name: v.name, title: model.title(v),
-                                                  subtitle: model.year(v).map { String($0) },
-                                                  artwork: model.backgroundArtString(v)), model: model)
     }
 }
 

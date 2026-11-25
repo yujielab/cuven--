@@ -478,39 +478,185 @@ final class AppModel {
     private(set) var heroResolved = false
     @ObservationIgnored private var heroResolving = false
 
-    /// 挑头图：候选是 Apple TV 头图池（/api/atv/hero）的顺序，再是最新加入的；每一部都要有
-    /// 无字的横图（Apple TV 无字背景 → TMDB 没有字的剧照）和字标（Apple → TMDB），两样缺一就不上；按候选顺序取前 5 部。
+    /// 头图每一部的预告片（视频路径 → hls）：头图挑好以后去问（和详情页同一次 Apple TV 查询），问到的交给 TrailerCache 在后台下到本机
+    private(set) var heroTrailers: [String: String] = [:]
+    /// 这一轮头图是哪一个 6 小时（heroSlotNow）
+    @ObservationIgnored private var heroSlot: Int?
+    /// 这回打开 App 里试过、拿不到无字横图或字标的（不再算进头图池）
+    @ObservationIgnored private var heroMisses: Set<String> = []
+    @ObservationIgnored private var heroTimer: Task<Void, Never>?
+
+    /// 一轮 6 小时，按钟点切（时间戳整除 21600：同一轮里重开 App 还是那几部）
+    static let heroSlotLength: Double = 21_600
+    static var heroSlotNow: Int { Int(Date().timeIntervalSince1970 / heroSlotLength) }
+
+    /// 记在本机的轮换：这一轮挑了哪几部、之前几轮放过哪些（seen，放过的先不再上，池子快轮完了才清）、上一轮那几部（清的时候也躲开）
+    private struct HeroRotation: Codable {
+        var slot: Int
+        var picks: [String]
+        var seen: [String]
+        var previous: [String]
+    }
+
+    private static let heroRotationKey = "hero-rotation.v1"
+
+    /// 挑头图（用户要求「每 6 小时更新一次，从高分的影片池中随机挑选，按照年份排序，尽可能不要在轮换中出现相同的影片」）：
+    /// 池子是 TMDB 评分 7 分以上的电影（不到 15 部就放宽到 6.5 分；Apple TV 头图池里的片子也在里面，用它带的素材），
+    /// 每一部都要有无字的横图（Apple TV 无字背景 → TMDB 没有字的剧照）和字标（Apple → TMDB），两样缺一就不上。
+    /// 每一轮（6 小时）按这一轮的编号当种子打乱，放过的往后排：先挑没放过的，再挑早先放过的，上一轮那几部排最后；
+    /// 没放过的不到 5 部就把记录清掉（只留上一轮的照样躲开）。挑出 5 部按年份新的在前。
     /// 片名要先认出来（Apple TV 按英文名查），所以元数据到了以后才挑
     func resolveHeroes() async {
         guard metaReady, !heroResolving else { return }
         heroResolving = true
         defer { heroResolving = false }
-        var seen = Set<String>()
-        var cands: [(video: Video, hero: Hero?)] = []
-        for h in heroes { if let v = video(path: h.path), seen.insert(v.path).inserted { cands.append((v, h)) } }
-        for v in newest where seen.insert(v.path).inserted { cands.append((v, nil)) }
-        cands = Array(cands.prefix(12))
+        let slot = Self.heroSlotNow
         if DemoData.enabled {
-            // 演示数据：合成的头图本来就是无字背景 + 字标
+            // 演示数据：合成的头图本来就是无字背景 + 字标（照旧按头图池的顺序，不轮换、不读写本机记录）
+            var seen = Set<String>()
+            var cands: [(video: Video, hero: Hero?)] = []
+            for h in heroes { if let v = video(path: h.path), seen.insert(v.path).inserted { cands.append((v, h)) } }
             heroPicks = Array(cands.compactMap { c -> HeroPick? in
                 guard let h = c.hero, let w = h.background, let l = h.logo else { return nil }
                 return HeroPick(video: c.video, hero: h, wide: w, tall: h.poster, logo: l)
             }.prefix(5))
             heroResolved = true
+            heroSlot = slot
             return
         }
-        let picked = await withTaskGroup(of: (Int, HeroPick?).self) { g in
-            for (i, c) in cands.enumerated() {
-                g.addTask { (i, await self.heroPick(c.video, hero: c.hero)) }
+        var heroArt: [String: Hero] = [:]
+        for h in heroes where heroArt[h.path] == nil { heroArt[h.path] = h }
+
+        // 池子：Apple TV 头图池里的片子 + 全片库电影（同一部片的几个版本只算一次），评分够、知道有字标的
+        var keys = Set<String>()
+        var all: [Video] = []
+        for h in heroes { if let v = video(path: h.path), keys.insert(atvArtKey(v)).inserted { all.append(v) } }
+        for v in movies where keys.insert(atvArtKey(v)).inserted { all.append(v) }
+        func rated(_ least: Double) -> [Video] {
+            all.filter { v in
+                guard !heroMisses.contains(v.path), let r = meta(v)?.rating, r >= least else { return false }
+                return Self.nonEmpty(heroArt[v.path]?.logo) != nil || Self.nonEmpty(appleArt(v)?.logo) != nil
+                    || Self.nonEmpty(meta(v)?.logo) != nil
             }
-            var out = [HeroPick?](repeating: nil, count: cands.count)
-            for await (i, p) in g { out[i] = p }
-            return out
         }
-        let picks = Array(picked.compactMap { $0 }.prefix(5))
+        var pool = rated(7.0)
+        if pool.count < 15 { pool = rated(6.5) }
+
+        // 这一轮的记录：换了一轮，上一轮挑的记进「放过的」
+        var rot = Self.loadHeroRotation() ?? HeroRotation(slot: slot, picks: [], seen: [], previous: [])
+        if rot.slot != slot {
+            rot = HeroRotation(slot: slot, picks: [], seen: rot.seen + rot.picks, previous: rot.picks)
+        }
+        let poolPaths = Set(pool.map(\.path))
+        var seenSet = Set(rot.seen)
+        let prevSet = Set(rot.previous)
+        // 池子里没放过的不到 5 部：从头再轮（上一轮那几部照样躲开）
+        if poolPaths.subtracting(seenSet).subtracting(prevSet).count < 5 {
+            rot.seen = rot.previous
+            seenSet = prevSet
+        }
+
+        // 候选顺序：这一轮已经挑好的（同一轮里重开 App 不变）→ 没放过的 → 早先放过的 → 上一轮的
+        let shuffled = Self.shuffle(pool, seed: UInt32(truncatingIfNeeded: slot &* 7919 &+ 17))
+        var order: [Video] = rot.picks.compactMap { p in pool.first { $0.path == p } ?? video(path: p) }
+        order += shuffled.filter { !seenSet.contains($0.path) && !prevSet.contains($0.path) }
+        order += shuffled.filter { seenSet.contains($0.path) && !prevSet.contains($0.path) }
+        order += shuffled.filter { prevSet.contains($0.path) }
+        // 池子里凑不够 5 部（池子太小、元数据还不全、素材拿不到）：照旧拿头图池和最新加入的补上，排在最后
+        order += heroes.compactMap { video(path: $0.path) }
+        order += newest
+        var orderSeen = Set<String>()
+        order = order.filter { orderSeen.insert($0.path).inserted }
+
+        // 按顺序一批 8 部去拿素材，凑够 5 部就停（池子可能有上百部，不一口气全查）
+        var picks: [HeroPick] = []
+        var misses: [String] = []
+        var i = 0
+        while picks.count < 5 && i < order.count && i < 60 {
+            let batch = Array(order[i..<min(i + 8, order.count)])
+            i += batch.count
+            let got = await withTaskGroup(of: (Int, HeroPick?).self) { g in
+                for (j, v) in batch.enumerated() {
+                    let h = heroArt[v.path]
+                    g.addTask { (j, await self.heroPick(v, hero: h)) }
+                }
+                var out = [HeroPick?](repeating: nil, count: batch.count)
+                for await (j, p) in g { out[j] = p }
+                return out
+            }
+            for (j, p) in got.enumerated() {
+                if let p { if picks.count < 5 { picks.append(p) } } else { misses.append(batch[j].path) }
+            }
+        }
+        // 拿得到别的素材（网是通的）才把拿不到的记下来：断网时一部都拿不到，不能把整个池子都记成「没有」
+        if !picks.isEmpty { heroMisses.formUnion(misses) }
+
+        // 按年份排，新的在前（同一年的按挑出来的先后）
+        var ranked: [(i: Int, p: HeroPick, y: Int)] = []
+        for (n, p) in picks.enumerated() { ranked.append((n, p, p.hero?.year ?? year(p.video) ?? 0)) }
+        ranked.sort { a, b in a.y != b.y ? a.y > b.y : a.i < b.i }
+        picks = ranked.map { $0.p }
+
+        if !picks.isEmpty {
+            rot.picks = picks.map(\.video.path)
+            // 记录别越记越长：只留还在片库里的，最多 300 部
+            let known = Set(videos.map(\.path))
+            rot.seen = Array(rot.seen.filter { known.contains($0) && !rot.picks.contains($0) }.suffix(300))
+            Self.saveHeroRotation(rot)
+        }
         if picks != heroPicks { heroPicks = picks }
         heroResolved = true
-        Perf.log("hero: \(picks.count) of \(cands.count) candidates have a clean background and a logo")
+        heroSlot = slot
+        scheduleHeroSlot()
+        Perf.log("hero: slot \(slot), \(picks.count) picks from a pool of \(pool.count) (\(seenSet.count) shown recently)")
+        let chosen = picks
+        Task { await self.loadHeroTrailers(chosen) }
+    }
+
+    /// 换轮了（App 开着跨过了 6 小时的整点、或者从后台回来）：重新挑
+    func heroSlotCheck() async {
+        guard heroResolved, let s = heroSlot, s != Self.heroSlotNow else { return }
+        await resolveHeroes()
+    }
+
+    /// 到下一轮的整点叫一次 heroSlotCheck（App 在后台时睡着的不算：回到前台时 HomeView 再叫一次）
+    private func scheduleHeroSlot() {
+        guard heroTimer == nil, !DemoData.enabled else { return }
+        heroTimer = Task { [weak self] in
+            while !Task.isCancelled {
+                let now = Date().timeIntervalSince1970
+                let len = AppModel.heroSlotLength
+                let next = (floor(now / len) + 1) * len
+                try? await Task.sleep(nanoseconds: UInt64(max(1, next - now + 2) * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                await self.heroSlotCheck()
+            }
+        }
+    }
+
+    /// 头图每一部的预告片：问到的交给 TrailerCache 在后台下到本机（只在 Wi-Fi、空闲时）；头图只放本机下好的那份
+    private func loadHeroTrailers(_ picks: [HeroPick]) async {
+        let found = await withTaskGroup(of: (String, String?).self, returning: [String: String].self) { g in
+            for p in picks {
+                let v = p.video
+                g.addTask { (v.path, await self.trailers(for: v).first?.hls) }
+            }
+            var out: [String: String] = [:]
+            for await (k, h) in g { if let h { out[k] = h } }
+            return out
+        }
+        guard picks == heroPicks else { return }
+        if found != heroTrailers { heroTrailers = found }
+        TrailerCache.shared.wantHeroes(picks.compactMap { p in found[p.video.path].map { (key: p.video.path, hls: $0) } })
+    }
+
+    private static func loadHeroRotation() -> HeroRotation? {
+        guard let data = UserDefaults.standard.data(forKey: heroRotationKey) else { return nil }
+        return try? JSONDecoder().decode(HeroRotation.self, from: data)
+    }
+
+    private static func saveHeroRotation(_ r: HeroRotation) {
+        if let data = try? JSONEncoder().encode(r) { UserDefaults.standard.set(data, forKey: heroRotationKey) }
     }
 
     /// 一部能不能上头图：无字横图 + 字标都拿到才算（Apple TV 素材表 → 这一部的 Apple TV 查询 → TMDB 全量结果）
@@ -778,7 +924,8 @@ final class AppModel {
         if let m = clipMembers[c] {
             members = m
         } else {
-            members = ClipCollection.members(c, model: self, movies: list)
+            // 同一部剧的几季 / 两份只出一张（用户反馈重复影片）；这一层有缓存，片库变了才重算
+            members = uniqueShows(ClipCollection.members(c, model: self, movies: list))
             clipMembers[c] = members
         }
         let out = ClipCollection.ordered(members, model: self)
@@ -1117,8 +1264,13 @@ final class AppModel {
         if let credits = info?.credits, !credits.isEmpty {
             var movieIndex: [Int: Video] = [:]
             for v in movies { if let id = meta(v)?.id, movieIndex[id] == nil { movieIndex[id] = v } }
+            // 同一部剧有几季 / 两份时留哪一季，和主页的卡同一条规矩（preferredSeason）
             var seriesIndex: [Int: Series] = [:]
-            for s in series { if let id = s.tmdbId ?? seriesMetas[s.path]?.id, seriesIndex[id] == nil { seriesIndex[id] = s } }
+            for s in series {
+                guard let id = Self.showID(s, meta: seriesMetas[s.path]) else { continue }
+                if let cur = seriesIndex[id], !Self.preferredSeason(s, over: cur) { continue }
+                seriesIndex[id] = s
+            }
             for c in credits {
                 if c.mediaType == "movie", let v = movieIndex[c.id], seen.insert("m\(c.id)").inserted {
                     out.append(ActorWork(entry: .movie(v), character: c.character, date: c.date))
@@ -1140,12 +1292,17 @@ final class AppModel {
                 out.append(ActorWork(entry: .movie(v), character: c.character, date: mm?.releaseDate ?? mm?.year))
             }
         }
+        // 剧集：先挑出有这位演员的季，再一部只留一张（和主页同一条去重规矩）
+        var shows: [ActorWork] = []
         for s in series {
             let sm = seriesMetas[s.path]
-            let key = (s.tmdbId ?? sm?.id).map { "t\($0)" } ?? "n" + s.name
-            if let c = role(sm?.cast), seen.insert(key).inserted {
-                out.append(ActorWork(entry: .series(s), character: c.character, date: sm?.releaseDate ?? sm?.year ?? s.year))
+            if let c = role(sm?.cast) {
+                shows.append(ActorWork(entry: .series(s), character: c.character, date: sm?.releaseDate ?? sm?.year ?? s.year))
             }
+        }
+        out += dedupeShows(shows) { w in
+            if case .series(let s) = w.entry { return s }
+            return nil
         }
         out.sort { ($0.date ?? "") > ($1.date ?? "") }
         return out
@@ -1204,17 +1361,16 @@ final class AppModel {
 
     /// 主页「精选剧集」：评分 6 分以上、有海报也有剧照的剧，评分高的在前（同分的新的在前）；同一部剧的几季只出一次
     func featuredSeries(limit: Int = .max) -> [Series] {
-        var seen = Set<String>()
         var list: [(series: Series, rating: Double, year: String)] = []
         for s in series {
             let m = seriesMetas[s.path]
             guard let r = m?.rating, r >= 6,
                   Self.nonEmpty(m?.poster) != nil || Self.nonEmpty(m?.posterClean) != nil,
                   Self.nonEmpty(m?.backdrop) != nil else { continue }
-            let key = (s.tmdbId ?? m?.id).map { "t\($0)" } ?? "n" + s.name
-            guard seen.insert(key).inserted else { continue }
             list.append((s, r, s.year ?? m?.year ?? ""))
         }
+        // 和其它几排同一条去重规矩（showKey / preferredSeason）：留哪一季不再看谁先排到
+        list = dedupeShows(list, by: { $0.series })
         list.sort { a, b in a.rating != b.rating ? a.rating > b.rating : a.year > b.year }
         return list.prefix(limit).map(\.series)
     }
@@ -1300,6 +1456,76 @@ final class AppModel {
             .sorted { $0.count != $1.count ? $0.count > $1.count : $0.name < $1.name }
     }
 
+    // MARK: 同一部剧只出一张卡（用户反馈：「严苛品质区」里「铁拳教育 · 第 1 季」出了两张一模一样的卡）
+
+    /// 剧集的 TMDB 编号，和详情页季菜单（SeriesDetailView.seasons）同一个取法：剧集表里记了就用它，没记才看剧集资料的。
+    /// 剧集表记的 0（还没认出来）不再拿资料的编号顶上：详情页认它是 0，主页要是把它并进别的季又留了它，
+    /// 点进去季菜单里没有被并掉的那几季，那几季就哪儿都点不到了。0 也不算编号（不然没认出来的剧会全并成一部）
+    nonisolated static func showID(_ s: Series, meta: Meta?) -> Int? {
+        guard let id = s.tmdbId ?? meta?.id, id > 0 else { return nil }
+        return id
+    }
+
+    /// 同一部剧的认法：同一个 TMDB 编号；没有编号的按剧名。
+    /// 几季各一个目录、同一季有两份（/auto 里请求添加来的那份和整理进剧集目录的那份）都算同一部。
+    /// 详情页的季菜单还是自己认（编号相同；记 0 的是所有记 0 的季；没编号的是同名的季），和这里不完全一样，
+    /// 所以记 0 的和完全没编号的分开按剧名认：这里每一组都落在详情页的一组里，留下哪张卡，季菜单里都有被并掉的那几季。
+    /// 这几个是纯函数（nonisolated）：详情页改成直接用 showKey 认最好（记 0 的季菜单就不会混进别的剧）
+    nonisolated static func showKey(_ s: Series, meta: Meta?) -> String {
+        if let id = Self.showID(s, meta: meta) { return "t\(id)" }
+        return ((s.tmdbId ?? meta?.id) == nil ? "n" : "z") + s.name
+    }
+
+    func showKey(_ s: Series) -> String { Self.showKey(s, meta: seriesMetas[s.path]) }
+
+    /// 这一季在 /auto 里（请求添加传进来、还没整理进剧集目录的那份）
+    nonisolated static func inAutoFolder(_ s: Series) -> Bool { s.path.localizedCaseInsensitiveContains("/auto/") }
+
+    /// 同一部剧几张卡留哪一张（用户要求）：季新的；同一季留 /auto 外面的、集数多的、最新入库的；
+    /// 再都一样按路径（留哪张不随剧集表的先后变）
+    nonisolated static func preferredSeason(_ a: Series, over b: Series) -> Bool {
+        let sa = a.season ?? 0, sb = b.season ?? 0
+        if sa != sb { return sa > sb }
+        let aa = Self.inAutoFolder(a), ab = Self.inAutoFolder(b)
+        if aa != ab { return ab }
+        let ea = a.episodes ?? 0, eb = b.episodes ?? 0
+        if ea != eb { return ea > eb }
+        let da = a.added ?? "", db = b.added ?? ""
+        if da != db { return da > db }
+        return a.path < b.path
+    }
+
+    /// list 里同一部剧只留一项（showKey 认、preferredSeason 挑），留下的占这部剧第一次出现的位置，别的先后不动；
+    /// 取不出剧集的（电影）原样留着。只过一遍字典：主页每次重画都跑也不费
+    func dedupeShows<T>(_ list: [T], by seriesOf: (T) -> Series?) -> [T] {
+        var slot: [String: Int] = [:]
+        var out: [T] = []
+        out.reserveCapacity(list.count)
+        for x in list {
+            guard let s = seriesOf(x) else { out.append(x); continue }
+            let k = showKey(s)
+            if let i = slot[k] {
+                if let cur = seriesOf(out[i]), Self.preferredSeason(s, over: cur) { out[i] = x }
+                continue
+            }
+            slot[k] = out.count
+            out.append(x)
+        }
+        return out
+    }
+
+    func uniqueShows(_ list: [Series]) -> [Series] { dedupeShows(list) { $0 } }
+
+    func uniqueShows(_ list: [HomeEntry]) -> [HomeEntry] {
+        dedupeShows(list) { e in
+            if case .series(let s) = e { return s }
+            return nil
+        }
+    }
+
+    /// 全部剧集，一部一张卡（剧集表的顺序：最新入库的在前）
+    var uniqueSeries: [Series] { uniqueShows(series) }
+
     // MARK: 主页的分区：今年、去年的电影和剧集，然后四个大类
 
     /// 剧集能上主页的卡：TMDB 取到了（有海报或剧照）
@@ -1308,10 +1534,12 @@ final class AppModel {
         return m.hasArt || !(m.backdrop ?? "").isEmpty
     }
 
-    /// 某一年的电影和剧集，最新入库的在前（主页「2026」「2025」两排，年份页一样的顺序）
+    /// 某一年的电影和剧集，最新入库的在前（主页「2026」「2025」两排，年份页一样的顺序）。
+    /// 剧集先挑能上卡的再去重：只有一份取到了 TMDB 的时候，这部剧不至于被另一份挤掉
     func homeYear(_ y: Int, limit: Int = .max) -> [HomeEntry] {
         var out: [(key: String, entry: HomeEntry)] = movies(inYear: y).map { ($0.addedKey, .movie($0)) }
-        for s in seriesInYear(y) where seriesCardReady(s) { out.append((s.added ?? "", .series(s))) }
+        let shows = uniqueShows(series.filter { Int($0.year ?? "") == y && seriesCardReady($0) })
+        for s in shows { out.append((s.added ?? "", .series(s))) }
         out.sort { $0.key > $1.key }
         return out.prefix(limit).map(\.entry)
     }
@@ -1321,12 +1549,57 @@ final class AppModel {
         if c == .premium { return premiumEntries(limit: limit) }
         var out: [(year: Int, key: String, entry: HomeEntry)] = []
         for v in movies where c.matches(meta(v)?.genres) { out.append((year(v) ?? 0, v.addedKey, .movie(v))) }
-        for s in series where seriesCardReady(s) && c.matches(seriesMetas[s.path]?.genres) {
-            out.append((Int(s.year ?? "") ?? 0, s.added ?? "", .series(s)))
-        }
+        // 同一部剧只出一张卡（用户反馈重复影片）
+        let shows = uniqueShows(series.filter { seriesCardReady($0) && c.matches(seriesMetas[$0.path]?.genres) })
+        for s in shows { out.append((Int(s.year ?? "") ?? 0, s.added ?? "", .series(s))) }
         out.sort { $0.year != $1.year ? $0.year > $1.year : $0.key > $1.key }
         return out.prefix(limit).map(\.entry)
     }
+
+    /// 「全部影片 › 可立即播放」的「电影 ›」「剧集 ›」那两页（FilmCategoryPage）：片库里的全部电影（movies 已经一部一张）/
+    /// 全部剧集（一部剧一张卡：showKey / preferredSeason；没取到资料的也放，卡出现了再取，和全部影片一样全面放开），
+    /// 新的年份在前、同一年最新入库的在前（和专区页同一个先后）。
+    /// 几千部的片库每次重画都排一遍太费：电影按 dataVersion 缓存；剧集分两层缓存（见下）
+    func playableEntries(series wantSeries: Bool) -> [HomeEntry] {
+        if wantSeries {
+            // 第一层：排序。refreshSeries 整个换掉剧集表、不动 dataVersion：认剧集表本身，不认部数和第一部
+            // （中间换了一部、年份入库日期集数变了都认得出）。没变时两份共用一块存储，比一下是 O(1)；
+            // 一样也换成新的这一份（刷新回来一模一样的另一块），往后再比还是 O(1)
+            let list = series
+            if list != playableSeriesSource {
+                var keyed: [(year: Int, key: String, show: Series)] = []
+                keyed.reserveCapacity(list.count)
+                for s in list { keyed.append((Int(s.year ?? "") ?? 0, s.added ?? "", s)) }
+                keyed.sort { $0.year != $1.year ? $0.year > $1.year : $0.key > $1.key }
+                playableSeriesSorted = keyed.map(\.show)
+                playableSeriesMetaCount = -1
+            }
+            playableSeriesSource = list
+            // 第二层：一部剧一张卡。剧集资料是一张卡一张卡到的（卡出现了才取），到一份只重新去重一遍（过一遍字典），不重排。
+            // 先排后去重：同一部剧占它排得最前那一季的位置、换成 preferredSeason 挑的那一季，还是新的年份在前
+            let mc = seriesMetas.count
+            if mc != playableSeriesMetaCount {
+                playableSeriesCache = uniqueShows(playableSeriesSorted).map { HomeEntry.series($0) }
+                playableSeriesMetaCount = mc
+            }
+            return playableSeriesCache
+        }
+        // 先读 movies：调用它的视图跟着片库、元数据刷新（derive 也在这里跑完，dataVersion 是新的）
+        let list = movies
+        if playableMoviesVersion == dataVersion { return playableMoviesCache }
+        var out: [(year: Int, key: String, entry: HomeEntry)] = list.map { (year($0) ?? 0, $0.addedKey, .movie($0)) }
+        out.sort { $0.year != $1.year ? $0.year > $1.year : $0.key > $1.key }
+        playableMoviesCache = out.map(\.entry)
+        playableMoviesVersion = dataVersion
+        return playableMoviesCache
+    }
+
+    @ObservationIgnored private var playableMoviesCache: [HomeEntry] = []
+    @ObservationIgnored private var playableMoviesVersion = -1
+    @ObservationIgnored private var playableSeriesSource: [Series] = []
+    @ObservationIgnored private var playableSeriesSorted: [Series] = []
+    @ObservationIgnored private var playableSeriesMetaCount = -1
+    @ObservationIgnored private var playableSeriesCache: [HomeEntry] = []
 
     /// 严苛品质区（用户要求「规格高评价好」）：片源规格够格（PremiumBar：4K 以上，再有杜比视界 / HDR、全景声 / 无损音轨或 REMUX）、
     /// TMDB 评分 7.5 以上的电影和剧集。评分高的在前，同分规格高的在前，再按年份新的在前。
@@ -1345,12 +1618,17 @@ final class AppModel {
             guard sc > 0 else { continue }
             out.append((r, sc, year(v) ?? 0, .movie(v)))
         }
+        // 剧集：先挑出够格的季，再一部只留一张卡（用户反馈：同一季在 /auto 和剧集目录里各一份，出了两张一样的卡）
+        var shows: [(series: Series, rating: Double, score: Int)] = []
         for s in series where seriesCardReady(s) {
             guard let r = seriesMetas[s.path]?.rating, r >= PremiumBar.minRating else { continue }
             let remux = ([s.path] + (s.tags ?? [])).contains { $0.localizedCaseInsensitiveContains("remux") }
             let sc = PremiumBar.score(MediaSpec.series(s, firstFile: nil), remux: remux)
             guard sc > 0 else { continue }
-            out.append((r, sc, Int(s.year ?? "") ?? 0, .series(s)))
+            shows.append((s, r, sc))
+        }
+        for x in dedupeShows(shows, by: { $0.series }) {
+            out.append((x.rating, x.score, Int(x.series.year ?? "") ?? 0, .series(x.series)))
         }
         out.sort { a, b in
             if a.rating != b.rating { return a.rating > b.rating }
@@ -1371,7 +1649,8 @@ final class AppModel {
     }
 
     func movies(inGenre g: String) -> [Video] { movies.filter { meta($0)?.genres?.contains(g) == true } }
-    func series(inGenre g: String) -> [Series] { series.filter { seriesMetas[$0.path]?.genres?.contains(g) == true } }
+    /// 同一部剧的几季 / 两份只出一张卡（用户反馈重复影片）
+    func series(inGenre g: String) -> [Series] { uniqueShows(series.filter { seriesMetas[$0.path]?.genres?.contains(g) == true }) }
 
     /// 详情页「你可能还喜欢」：和这部片同类型的几部，同的类型越多越靠前，再按评分；不含它自己（同一个 TMDB 编号的别的版本也不算）
     func related(to video: Video, limit: Int = 12) -> [Video] {
@@ -1395,14 +1674,15 @@ final class AppModel {
 
     func movies(inYear y: Int) -> [Video] { yearGroups.first { $0.year == y }?.videos ?? [] }
 
-    func seriesInYear(_ y: Int) -> [Series] { series.filter { Int($0.year ?? "") == y } }
+    /// 这一年的剧集（全部影片、年份页）：同一部剧一张卡（用户反馈重复影片）
+    func seriesInYear(_ y: Int) -> [Series] { uniqueShows(series.filter { Int($0.year ?? "") == y }) }
 
-    /// 首页只出有字标的剧集（与网页版同一条规矩）
+    /// 首页只出有字标的剧集（与网页版同一条规矩）；先挑有字标的再去重，同一部剧一张卡
     var homeSeries: [Series] {
-        series.filter { s in
+        uniqueShows(series.filter { s in
             guard let m = seriesMetas[s.path], let logo = m.logo, !logo.isEmpty else { return false }
             return m.hasArt || !(m.backdrop ?? "").isEmpty
-        }
+        })
     }
 
     /// 今日推荐：上午 / 下午 / 晚上 每日三换；同一个种子打乱（与网页版同一个算法），取 15 部按评分排
@@ -1489,6 +1769,7 @@ final class AppModel {
             hits.append(SearchHit(kind: .movie(v), title: title(v), subtitle: sub.isEmpty ? "电影" : sub,
                                   image: thumbArt(v), score: s))
         }
+        var showHits: [SearchHit] = []
         for se in series {
             let m = seriesMetas[se.path]
             var s = score([se.title, se.zh, se.en, m?.title, m?.en, se.folder])
@@ -1496,8 +1777,13 @@ final class AppModel {
             guard s > 0 else { continue }
             // 不写集数（用户要求全局去掉计数）
             let sub = [se.year, se.seasonLabel].compactMap { $0 }.joined(separator: " · ")
-            hits.append(SearchHit(kind: .series(se), title: se.name, subtitle: sub,
-                                  image: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), score: s + 1))
+            showHits.append(SearchHit(kind: .series(se), title: se.name, subtitle: sub,
+                                      image: TMDBImage.url(m?.poster ?? m?.posterClean, "w185"), score: s + 1))
+        }
+        // 同一部剧只出一行（用户反馈重复影片）：别的季在详情页的季菜单里切
+        hits += dedupeShows(showHits) { h in
+            if case .series(let s) = h.kind { return s }
+            return nil
         }
         return hits.sorted { $0.score != $1.score ? $0.score > $1.score : $0.title < $1.title }.prefix(80).map { $0 }
     }

@@ -12,8 +12,14 @@ struct RequestFlowInfo: Decodable, Equatable, Sendable {
     struct Gate: Decodable, Equatable, Sendable {
         /// 已经清洗完、等着凑批的有几部（所有人的）
         var ready: Int
-        /// 凑满几部开始传（16）
+        /// 凑满几部开始传：tj 2.9 起是「智能凑批」算出来的（所有人加起来不到 16 部时按实际能凑到的；老版本固定 16）
         var need: Int
+        /// 一批最多几部（16）；老版本没有
+        var full: Int?
+        /// 最晚什么时候开始传（毫秒）；老版本没有
+        var launchBy: Double?
+        /// 为什么是这个数（一句话）；老版本没有
+        var why: String?
     }
 
     struct Batch: Decodable, Equatable, Sendable {

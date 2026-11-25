@@ -67,9 +67,6 @@ struct FeaturedCollectionHeader: View {
     /// 合集页的头（整页最上面）：主色从最顶上开始、铺到状态栏和导航栏底下，往下沉到黑（参考图）；
     /// 主页里的是一条由黑浮上来、再沉回黑的带
     var page = false
-    /// 主色的色相、饱和度：排在最前那张海报的平均色；取到之前是灰，取到了慢慢染上
-    @State private var hue: Double = 0
-    @State private var sat: Double = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// 排在最前那部的海报（带的颜色从它取）
@@ -94,7 +91,8 @@ struct FeaturedCollectionHeader: View {
         let posterW = Self.posterWidth(metrics)
         // 视差只在合集页：主页的立体海报跟着整页走，不再上下错开（用户要求）
         let lag: CGFloat = (reduceMotion || !page) ? 0 : 0.08
-        VStack(alignment: .leading, spacing: 0) {
+        // 染色的带、大标题和说明是 CollectionHeader（分类页那三张卡的头也用它）；这里只管上面那一扇立体海报
+        CollectionHeader(title: title, blurb: blurb, lead: lead, metrics: metrics, page: page) {
             if !covers.isEmpty {
                 PosterFan(covers: Array(covers.prefix(3)), width: posterW)
                     .frame(maxWidth: .infinity)
@@ -106,6 +104,39 @@ struct FeaturedCollectionHeader: View {
                         return c.offset(y: max(-28, min(28, -y * lag)))
                     }
             }
+        }
+    }
+}
+
+// MARK: - 合集式的头：染色的带 + 上面一块（立体海报 / 三张卡）+ 大标题 + 一句说明
+
+/// 专区页（立体海报）和「全部影片」的分类页（三张横滑的卡，用户要求替换立体海报）共用的头：
+/// 底色从 lead 那张图取主色；top 是标题上面那一块，放在页边距里面（要铺满宽的自己往外伸，见 CategoryCardRow）
+struct CollectionHeader<Top: View>: View {
+    let title: String
+    let blurb: String
+    /// 底色从哪一张取（排在最前那部的海报）
+    let lead: URL?
+    let metrics: DSMetrics
+    /// 合集页的头（整页最上面）：主色从最顶上开始、铺到状态栏和导航栏底下；主页里的是一条由黑浮上来、再沉回黑的带
+    let page: Bool
+    let top: Top
+    /// 主色的色相、饱和度：排在最前那张海报的平均色；取到之前是灰，取到了慢慢染上
+    @State private var hue: Double = 0
+    @State private var sat: Double = 0
+
+    init(title: String, blurb: String, lead: URL?, metrics: DSMetrics, page: Bool, @ViewBuilder top: () -> Top) {
+        self.title = title
+        self.blurb = blurb
+        self.lead = lead
+        self.metrics = metrics
+        self.page = page
+        self.top = top()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            top
             Text(title)
                 .font(.dsDisplay(wide: metrics.wide))
                 .foregroundStyle(.white)

@@ -1,5 +1,58 @@
 /**
- * Cuven 请求添加 Worker（tj.cuven.us）v2.8.1
+ * Cuven 请求添加 Worker（tj.cuven.us）v2.9
+ *
+ * v2.9：智能凑批（用户要求：「有的时候所有用户加起来的请求也没有凑满 16 个，所以需要智能调整来解决」）
+ *   · 原因：凑批固定要 batchMin（16）部。所有人加起来不到 16 部时，2.6 的退路只在「前面什么都没有了」「这几次提交都清洗好了」才马上开；
+ *     只要前面还有一部在下载（哪怕是要好几个小时的慢种），或者等着的是老版本 App 一部一部提交的（bid = 0，不算「这一次提交」），
+ *     清洗好的就一直等到最早的一部等满 30 分钟（老版本 10 分钟），等的是永远不会来的那几部。App 上一直是「满 16 部开始批量传输」
+ *   · 改成按有效的凑批数开：need = clamp(等着的 + 预计赶得上的 + 预计新来的, 1, batchMin)，等着的够 need 就开（gatePlan）
+ *       - 预计赶得上的：前面下载 / 清洗 / 核对整季 / 改名中的、刚进 ready 还没加追踪码的（长时间退避的照 2.6 不算），
+ *         预计在「最晚开批」（最早的一部等满 batchWait，老版本 10 分钟）之前清洗好、加好追踪码的。云下载有进度的
+ *         按下载的速度往后推（stDownload 记下的 pmax），再加清洗的那几轮（gateEta）；云下载还没有进度的不知道多快，照 2.8 当它赶得上
+ *         （复查改了：速度量到最后一次有进度为止、停住 10 分钟的不等、排队中的按 PikPak 的位子和 10 分钟算，见下面「v2.9 复查」）
+ *       - 预计新来的：最近 2 小时平均每分钟几次提交（请求中心一次提交算一次：一个人一次提交 18 部不等于以后每两小时来 18 部）
+ *         × 离最晚开批还剩的时间（扣掉一部新请求从提交到清洗好最少要的 10 分钟），向下取整
+ *         （复查：一个人一部一部提交的 10 分钟之内算一次）
+ *   · 硬上限不变：最早的一部最多等 batchWait（老版本 10 分钟）；2.6 的两条退路（前面没有了、这几次提交都清洗好了）照旧先看，
+ *     所以智能凑批只会比 2.8 早开。只有一处会晚（最多 3 分钟、也不过最晚开批）：只有 1 部、预计 2 分钟里还有一部清洗好 → 等它一起，
+ *     原因 = 一部一批开出去，下一部就要等这一批传完才开下一批（一次只跑一批）。开了就是一批，不回头改
+ *     （复查：以前写「最多 2 分钟」，其实没有记性、能一直等到最晚开批；现在只等到这一部进等待凑批以后 4 分钟）
+ *   · 省：前面的那几行（几列，不读整行）和来速是同一条语句；来速一轮只算一次（c.memo.arrive），按编号倒着取最新 64 行，不读整张表。
+ *     一轮下来比 2.8 最多多一条 D1 语句（一批在传、开不了批的时候顺手算一份凑批计划给 App 看，一轮一次），子请求一个不多
+ *   · App / 面板：/app/flow 的 gate、我的请求里等待凑批的 wait 的 need = 有效的凑批数（「已凑 x / need」说的是实话）；
+ *     gate 多三个字段（老版本 App 不认也没关系）：full = 固定的凑批数（batchMin）、launchBy = 预计什么时候开（凑满的时刻和最晚开批取早的）、
+ *     why = 一句话为什么是这个数。凑批计划每轮算一份，跟着 tick:last 存（不多写一次），App 来问只多读一行；定时任务 5 分钟没跑就照 2.8 给
+ *   · 面板「智能凑批」开关（默认开）：关了和 2.8 一模一样（同样的查询、同样的判断，gate 也只有 2.8 的那几个字段）
+ *   · VER 改成 tj 2.9：/app/years 的两条缓存 key 带版本号，部署以后重问一次影片库（和缓存过期一样，最多 20 次）
+ * v2.9 复查（审查结论十条，都认了；只改这个 Worker 的凑批，接口、D1 的表不变，老版本 App 照旧，关了智能凑批照旧是 2.8）：
+ *   · 停住的下载当成赶得上（gateEta）：原因 = 0% 的一律「不知道多快、赶得上」，停在 99% 的按开始下载以来的平均速度推、停一分钟只往后推
+ *     0.01 分钟 —— 死种（2 小时才换规格）、卡在 99% 的让每一批都等满 30 分钟（老版本 10 分钟），正是用户说的「等永远不会来的那几部」。
+ *     改成最后一次有进度（stDownload 记的 pat；还是 0% 的从开始下载算）到现在超过 dlQuiet（10 分钟）= 停住了，凑批不等它
+ *   · 剩余时间把没看的那几分钟也乘上 (1 − p) ÷ p（gateEta）：原因 = 进度 50% 以下 3 分钟才看一次，开始 1 分钟就到 10% 的（还要 9 分钟）
+ *     被算成 38 分钟、当成赶不上，先开了一批小的，它们要等这一批传完（比 2.8 还差）。改成速度量到 pat 为止：
+ *     剩下的 =（pat − 开始下载）×（1 − p）÷ p −（现在 − pat）；停住的交给上一条
+ *   · 排队中的一律当赶得上（gateEtas）：原因 = PikPak 的位子被几个小时的慢种占着的、推送卡在影片库 / 论坛账号上的（pushHold 10 分钟一等，
+ *     next 从来到不了「长时间退避」的 10 分钟以上）、离最晚开批只剩 5 分钟才提交的，都让凑批等满 30 分钟。
+ *     改成 pushHold 记下 r.d.wait = 'hold'（排队中的，和等位子的 'pk' 同一个字段，凑批不等它）；别的从推得出去的时候
+ *     （有空位就是现在，没有就等正在下载的一部下完）起至少 arriveLead（10 分钟，和「预计新来的」一样），轮不到位子的不等
+ *   · 离最晚开批只剩几分钟时丢下按粗估「只晚一点」的（gatePlan）：原因 = 核对整季粗估 5 分钟、离最晚开批 4 分钟的那一季被当成赶不上，
+ *     先开了，省下不到 4 分钟，那一季（估得悲观的话本来赶得上）要等这一批传完。改成离最晚开批不到 smartGain（5 分钟）时，
+ *     预计只晚 5 分钟以内的也算赶得上，让最晚开批去开；晚得多的（要几个小时、停住了）照样马上开
+ *   · 要靠新来的、不知道多快的才凑得满时 launchBy 一律写最晚开批（gatePlan）：原因 = 来得很密时 need 一轮一轮往下掉、20 分钟左右就开了，
+ *     App 上一直写着 30 分钟。改成预计开批的那一刻：前面赶得上的到齐、预计新来的降到 0（离最晚开批不到 arriveLead + 1 ÷ 来速）的时候，
+ *     或者凑满 full 的时候，取早的，不过最晚开批
+ *   · 只有 1 部时的「等它一起」没有记性（gateSmart）：原因 = 计划一轮一算，「马上清洗好」的那一部老是没好（改名作业一直在跑、每轮都到期；
+ *     预算不够没推进到它），这一轮末尾那一次凑批又没看（一轮跑过 22 秒），这一部就一直等到最晚开批，比 2.8 晚快 30 分钟。
+ *     改成只在它进等待凑批 soloHold（4 分钟）以内这样等
+ *   · 来速被一个人一部一部提交的一阵撑大（gateRows）：原因 = bid = 0 的（老版本 App、Windows 一次一部、面板）一部算一次提交，
+ *     一个人十几分钟里加了 20 部，后面两个小时里每一批都当「还会来好几部」多等十几分钟。改成同一个人（users 的第一个）
+ *     arriveBurst（10 分钟）之内的算一次，还是同一条语句
+ *   · 头几条 2.9 测试走的都是 2.6 的退路、开 / 关一样，没测到智能凑批本身：测试补上「前面赶得上的到齐了、同一次提交还有一部赶不上」
+ *     按智能凑批开的那一条；README 写明来速只算在 need 里：前面没有了、这几次提交都好了，来速再高也不让它多等（代码本来就是这样）
+ *   · 一批在传、不知道它还要多久（rclone 没给剩余时间、b.d.live 停在几轮以前）时照样给凑满 / 最晚开批的时刻（gateShow）：
+ *     原因 = 可能比这一批传完还早、甚至已经过了。改成挡着的那件事不知道什么时候完就不给 launchBy（单个传输在传 / 排队也一样；
+ *     VPS 熔断按熔断到几点）。面板「预计 / 最晚」以前看 full，计划旧了照 2.8 给的硬上限也写「预计」，改成看 why
+ *   · 用量不变：子请求一个不多、D1 语句一条不多（前面那几行多取两列 pat / wait，来速那一行多一个 json_extract，同一条语句）
  *
  * v2.8.1：按年份列（/app/years 的每一格、/app/catalog 带 year）问影片库的 /api/catalog 多带 ystrict=1：原因 = 影片库按「任何一个发行帖的年份」筛（r.ys），2020 那一页 24 部里只有 7 部是 2020 年上映的、total 虚高，App 在本机按年份筛完剩没几部；改成要影片库只给这一年上映的（老版本影片库不认，照旧宽的、App 照旧在本机筛）；VER 跟着改，/app/years 两条缓存 key 带版本号，部署前缓存的宽格子不再用
  * v2.8.1 复查（审查结论两条，都只改 README 和测试，代码不变）：
@@ -187,6 +240,7 @@
  *               rename    剧集：传输 Worker 按发行命名改文件夹名（等 rclone 的任务跑完）
  *                         （2.6 起剧集推进、整理、改名都在 /auto/ram2 里，传 Dropbox 也传到 dropbox:auto/ram2）
  *   ④ 正在传输  ready     （2.6）加上追踪码，等凑够一批（默认 16 部）一起传；关了批量传输就直接 copy
+ *                         （2.9 智能凑批：所有人加起来凑不满 16 部时，按这会儿能凑到的几部开，最晚还是等满 30 分钟）
  *               copy      VPS 上的 rclone：webdav:auto/<名字> → dropbox:auto/<名字>（先 copy；2.6 起一批一个作业）
  *               verify    两端核对（文件数 + 字节数），对不上重新 copy（最多 3 次）
  *               purge     核对一致才删 PikPak 那份
@@ -221,13 +275,14 @@
  *   POST /app/requests { src, id, season }   请求添加（同一部 / 同一季已经有人在请求就跟上，不重复下）
  *   POST /app/requests/batch { items: [{ src, id, season, title?, year?, poster? }] }   （2.6）请求中心一次提交（最多 50 条）
  *   GET  /app/flow                     （2.6）凑批进度和正在传的那一批（请求中心的动画和进度条）
+ *                                      （2.9：gate.need = 有效的凑批数，多 full / launchBy 预计开批 / why）
  *   GET  /app/years?src=movie|tv|all&from=&to=&per=
  *        （2.8）App「全部影片」：每一年、电影 / 剧集各一份目录第一页（片库里没有的、全部评分），一次回齐；带 ETag，5 分钟缓存
  *
  * 控制面板接口（x-admin-key: ADMIN_KEY）：/admin/api/state · cfg · pk · links · req · add · tick
  */
 
-const VER = 'tj 2.8.1';
+const VER = 'tj 2.9';
 const MIN = 60000, HOUR = 3600000, DAY = 86400000;
 const LIMIT = {
   userActive: 50,         // 一个用户同时进行中的请求（2.6：请求中心一次能提交 50 部）
@@ -283,6 +338,17 @@ const LIMIT = {
   yearsMs: 20000,         // /app/years 问影片库最多等多久
   yearsCache: 300,        // /app/years 拼好的回包在 Cache API 里放几秒
   yearsCachePartial: 30,  // 有格子没问到的只放这么久
+  /* 2.9 智能凑批 */
+  soonGap: 2 * MIN,       // 只有 1 部、预计这么久里还有一部清洗好：先不开（一部一批开出去，下一部就要等它传完），最多等到最晚开批
+  arriveWin: 2 * HOUR,    // 新请求的来速：看最近这么久里来了几次提交
+  arriveRows: 64,         // 来速最多看最新的这么多行（按编号倒着取，不读整张表；来得很密时按这几行跨了多久算）
+  arriveLead: 10 * MIN,   // 一部新请求从提交到清洗好、加好追踪码最少要这么久：离最晚开批不到这么久才来的赶不上（2.9 复查：还在排队的也按这个算）
+  gateFresh: 5 * MIN,     // App / 面板用定时任务记下的凑批计划（tick:last 的 gate）：比这个旧 = 定时任务没在跑，照 2.8 给
+  /* 2.9 复查 */
+  dlQuiet: 10 * MIN,      // 云下载这么久没有进度（还是 0% 的从开始下载算）= 停住了，凑批不等它（换规格照旧是 dlStall 的 2 小时）
+  smartGain: 5 * MIN,     // 离最晚开批不到这么久：早开省不了几分钟，预计只晚这么久以内的也算赶得上（最晚开批照样开）
+  soloHold: 4 * MIN,      // 只有 1 部、等「马上清洗好」的那一部：最多等到它进等待凑批以后这么久（下一轮加追踪码 + soonGap + 一轮的误差）
+  arriveBurst: 10 * MIN,  // 来速：一个人一部一部提交的（bid = 0）这么久之内算一次提交
 };
 const ACTIVE = ['queued', 'download', 'clean', 'check', 'rename', 'ready', 'copy', 'verify', 'purge', 'release'];
 const ENDED = ['done', 'failed', 'cancelled'];
@@ -439,7 +505,8 @@ const CFG_DEF = { pkUser: '', pkPass: '', tpl: 'rel', lang: 'en', grp: 'Cuven®'
                   batchMin: 16,       // 凑够几部开一批
                   batchMax: 16,       // 一批最多几部
                   batchWait: 30,      // 最早的一部最多等几分钟（老版本 App 一部一部提交的最多 10 分钟）
-                  xfers: 16,          // 批量传输：并行传输几个文件（rclone Transfers）
+                  smart: true,        // 2.9 智能凑批：所有人加起来凑不满 batchMin 时按这会儿能凑到的几部开（关了 = 2.8：固定凑够 batchMin）
+                  xfers: 16,         // 批量传输：并行传输几个文件（rclone Transfers）
                   checkers: 16,       // 批量传输：并发核对几个（rclone Checkers）
                   basketMax: 50,      // 请求中心一次最多提交几条
                   tvSub: 'ram2' };    // 剧集放在 /auto 下面哪个文件夹（PikPak 和 Dropbox 一样；空 = 直接放 /auto；2.8：片库也说认得才用）
@@ -492,6 +559,7 @@ async function saveCfg(env, patch){
   /* 批量（2.6） */
   const num = (k, lo, hi) => { if (patch[k] != null) next[k] = clamp(parseInt(patch[k], 10) || CFG_DEF[k], lo, hi); };
   if (patch.batch != null) next.batch = !!patch.batch;
+  if (patch.smart != null) next.smart = !!patch.smart;          // 2.9 智能凑批
   num('batchMax', 1, LIMIT.batchMax); num('batchMin', 1, LIMIT.batchMax); num('batchWait', 1, 24 * 60);
   num('xfers', 1, 16); num('checkers', 1, 16); num('basketMax', 1, LIMIT.basketMax);
   if (typeof patch.tvSub === 'string'){ const s = patch.tvSub.trim(); if (!s || subOK(s)) next.tvSub = s; }
@@ -1126,6 +1194,8 @@ async function libHasAlready(c, r){
 
 async function stQueued(c, r){
   const t = now();
+  /* 2.9 复查：wait: 'hold' = 上一次推进时推送卡在影片库 / PikPak / 论坛账号的问题上（pushHold）。这一次重新看，还卡着再记上 */
+  if (r.d.wait === 'hold') delete r.d.wait;
   if (await libHasAlready(c, r)) return;
   /* 2.8：这一轮前面那条碰上影片库 409（同一个源的闸门忙）：照它的 Retry-After 一起等，不算出错 */
   const busy = c.memo.lbBusy && c.memo.lbBusy[r.src];
@@ -1148,7 +1218,7 @@ async function stQueued(c, r){
   if (!v) return fail(r, r.d.vers.length ? '所有规格都试过了，没有一个能完整下完' : (r.src === 'tv' ? '影片库里还没有这一季的整季资源' : '影片库里还没有这部片的资源'));
   if (pt && pt.tid !== v.tid) delete r.d.pushTry;          // 那个规格已经不在版本表里了 / 试过了
   /* 2.8：这一轮前面那条推送刚碰上论坛账号 / PikPak 账号层面的问题：这一条也先不推（结果一样，白花一个子请求） */
-  if (c.memo.lbHold){ r.note = c.memo.lbHold + '，等它恢复（不换规格）'; r.next = t + LIMIT.pushHold; return; }
+  if (c.memo.lbHold){ r.d.wait = 'hold'; r.note = c.memo.lbHold + '，等它恢复（不换规格）'; r.next = t + LIMIT.pushHold; return; }
   if (!slotFree(c, 'pk')){
     r.d.wait = 'pk';
     r.note = '排队：PikPak 同时云下载已满（' + c.slots.pk.used + ' / ' + c.slots.pk.max + '），轮到就推送';
@@ -1240,8 +1310,12 @@ function lbHoldWhy(e){
   const b = e.body || {};
   return (b.auth || b.captcha ? '影片库那边 PikPak 登录不上' : '影片库那边暂时推不了') + '（' + String(b.error || e.message).replace(/^影片库：/, '').slice(0, 80) + '）';
 }
-/** 论坛账号 / PikPak 账号层面的问题（2.8）：依赖出了问题 —— 原地等，不烧规格、不算出错次数；这一轮后面排队的也不再去推 */
+/** 论坛账号 / PikPak 账号层面的问题（2.8）：依赖出了问题 —— 原地等，不烧规格、不算出错次数；这一轮后面排队的也不再去推。
+    2.9 复查：排队中的记下 r.d.wait = 'hold'（和等 PikPak 位子的 'pk' 同一个字段，换规格时一起忘掉）。原因 = 凑批要分得清
+    「10 分钟后再推一次」是账号坏了（一时推不了，不等它）还是普通的排队（从推送起算 arriveLead）；只看 next 分不清。
+    2.8 的凑批不看它（关了智能凑批照旧），只是 data 里多一个字段 */
 function pushHold(c, r, why){
+  if (r.stage === 'queued') r.d.wait = 'hold';
   c.memo.lbHold = why;
   r.note = why + '，等它恢复（不换规格）';
   r.next = now() + LIMIT.pushHold;
@@ -1462,7 +1536,8 @@ async function stReady(c, r){
   if (r.d.tag === undefined) await tagItem(c, r);
   const caps = await tfCaps(c);
   if (c.cfg.batch === false || (caps.known && !caps.batch)) return go(r, 'copy');
-  r.note = '等待凑批：清洗好的凑够 ' + gateNeed(c.cfg) + ' 部一起传';
+  r.note = smartOn(c.cfg) ? '等待凑批（智能凑批：最多凑 ' + gateNeed(c.cfg) + ' 部，所有人加起来不够就按这会儿能凑到的几部开）'
+                          : '等待凑批：清洗好的凑够 ' + gateNeed(c.cfg) + ' 部一起传';
   r.next = now() + LIMIT.readyPark;
 }
 
@@ -2003,6 +2078,213 @@ const gateNeed = (cfg) => clamp(cfg.batchMin || CFG_DEF.batchMin, 1, clamp(cfg.b
 /** 最早的一部最多等多久：请求中心提交的按面板设的（默认 30 分钟），老版本 App 一部一部提交的（bid = 0）最多 10 分钟 */
 const waitOf = (cfg, bid) => { const w = (cfg.batchWait || CFG_DEF.batchWait) * MIN; return bid > 0 ? w : Math.min(w, LIMIT.oldWait); };
 
+/* ── 2.9 智能凑批 ──
+   有效的凑批数 need = clamp(等着的 + 预计赶得上的 + 预计新来的, 1, batchMin)：所有人加起来凑不满一批时，不再等永远不会来的那几部。
+   硬上限（最早的一部等满 batchWait / 老版本 10 分钟）和 2.6 的退路照旧，所以只会比 2.8 早开（只有 1 部时最多晚 3 分钟，见 gateSmart） */
+const smartOn = (cfg) => cfg.batch !== false && cfg.smart !== false;
+/** 前面的每一步离「清洗好、加好追踪码」还要多久（预计）：定时任务一分钟一轮，每一步至少一轮。
+    ready = 刚进来还没加追踪码的（下一轮就加）；clean = 电影挪一下（一轮）+ 加追踪码；rename = rclone 改名作业（一般几秒）+ 加追踪码；
+    check = 整理、核对整季、改名、加追踪码 */
+const PREP = { ready: MIN, clean: 2 * MIN, rename: 2 * MIN, check: 5 * MIN };
+/** 云下载完了以后还要多久：电影清洗（clean 那一串），剧集整理、核对整季、改名（check 那一串） */
+const PREP_DL = { movie: 2 * MIN, tv: 6 * MIN };
+const prepDl = (x) => x.src === 'tv' ? PREP_DL.tv : PREP_DL.movie;
+/** 前面这一部（不是排队中的，那个见 gateEtas）预计什么时候清洗好、加好追踪码（毫秒时刻）。
+    null = 不知道多快（开始下载不到 dlQuiet、还是 0%）：照 2.8 当它赶得上（最多等到最晚开批）；
+    Infinity = 一时半会儿清洗不好：云下载停住了 —— 最后一次有进度（pat；还是 0% 的从开始下载算）到现在（没轮上看的到 next）超过 dlQuiet（10 分钟）。
+    云下载有进度的：速度量到最后一次有进度为止，再扣掉那以后过去的时间（那几分钟没看过），
+      剩下的 =（pat − 开始下载）×（1 − p）÷ p −（现在 − pat），p = stDownload 记下的最大进度（pmax），再加清洗的那几轮。
+    2.9 复查（审查结论两条，都是「等的是永远不会来的那几部」）：
+    · 以前按（现在 − 开始下载）÷ p 推：进度 50% 以下 3 分钟才看一次，没看的那几分钟也被乘上（1 − p）÷ p（10% 时 9 倍）——
+      开始 1 分钟就到 10%（照这个速度还要 9 分钟）的被算成 38 分钟、当成赶不上，先开了一批小的，它们要等这一批传完；
+      反过来停在 99% 的，停一分钟只往后推 0.01 分钟，卡了 35 分钟还算「3 分钟后好」。停住的另外判（dlQuiet），速度不再把停住的时间揉进去
+    · 以前 0% 的一律「不知道多快、赶得上」：死种推了几个小时（dlStall 2 小时才换规格，换了又从 0% 开始）还是 0%，
+      谁的一个死种都让每一批等满 30 分钟（老版本 10 分钟）。现在开始下载 10 分钟还是 0% = 停住了。
+    在退避里的（next 还没到）从 next 算起 */
+function gateEta(x, t){
+  const at = Math.max(Number(x.next) || 0, t);
+  if (PREP[x.stage]) return at + PREP[x.stage];
+  if (x.stage !== 'download') return null;
+  const p = Number(x.p) || 0, since = Number(x.since) || 0, pat = Number(x.pa) || 0;
+  if (!since) return null;
+  /* 最后一次有进度：0% 的从开始下载算；有进度、没记 pat 的（不该有）不判停住，照 2.9 的老算法。
+     停住要「看过了、还是没进度」：一轮推进不过来（一轮 24 条、跑过 22 秒、预算不够）、过了 next 还没轮上看的，只算到 next 为止 ——
+     没看过的那几分钟不算停住（看一次就知道了，这一轮末尾那一次凑批照样会看） */
+  const last = p > 0 ? (pat >= since ? pat : 0) : since;
+  const nx = Number(x.next) || 0, seen = nx > 0 ? Math.min(t, nx) : t;
+  if (last && seen - last > LIMIT.dlQuiet) return Infinity;
+  if (!(p > 0)) return null;
+  const left = p >= 1 ? 0 : last ? Math.max(last - since, MIN) * (1 - p) / p - (t - last) : Math.max(t - since, MIN) * (1 - p) / p;
+  return Math.max(t + clamp(left, 0, 7 * DAY), at) + prepDl(x);
+}
+/** 前面每一部的预计（和 pend 一一对应，同 gateEta：null 不知道、Infinity 一时半会儿清洗不好）。排队中的（2.9 复查）：
+    · 推送卡在影片库 / PikPak / 论坛账号的问题上（r.d.wait = 'hold'，pushHold 10 分钟一等）→ Infinity
+    · 别的都要先推出去：推的时候 PikPak 有空位（空着的先给，排队中的按 next 先后）就从现在（在退避里的从 next）起，
+      没有就等正在下载的一部一部下完（预计下完 = 它的预计 − 清洗那几轮），再加 arriveLead（从提交到清洗好最少要的，和「预计新来的」一样）；
+      轮不到（正在下载的都下不完、不知道多快）→ Infinity
+    原因 = 以前排队中的一律「不知道多快、赶得上」：PikPak 的位子被几个小时的慢种占着、影片库 / 论坛账号坏了、
+    离最晚开批只剩 5 分钟才提交的，都让凑批等满 30 分钟。c.slots 是这一轮的资源位（loadSlots，推进的时候跟着改） */
+function gateEtas(c, pend, t){
+  const out = pend.map(x => x.stage === 'queued' ? null : gateEta(x, t));
+  const frees = [];
+  pend.forEach((x, i) => { if (x.stage === 'download' && out[i] != null && out[i] < Infinity) frees.push(out[i] - prepDl(x)); });
+  frees.sort((a, b) => a - b);
+  const s = c.slots && c.slots.pk;
+  let free = s ? Math.max(0, s.max - s.used) : Infinity, k = 0;
+  const qs = pend.map((x, i) => i).filter(i => pend[i].stage === 'queued').sort((a, b) => (Number(pend[a].next) || 0) - (Number(pend[b].next) || 0));
+  for (const i of qs){
+    const x = pend[i], from = Math.max(Number(x.next) || 0, t);
+    if (x.w === 'hold') out[i] = Infinity;
+    else if (free > 0){ free--; out[i] = from + LIMIT.arriveLead; }
+    else out[i] = k < frees.length ? Math.max(from, frees[k++]) + LIMIT.arriveLead : Infinity;
+  }
+  return out;
+}
+/** 新请求的来速（每毫秒几次提交）。a = gateRows 拼进去的那一行聚合：最新 arriveRows 行里 arriveWin 之内来了几次提交（subs）、
+    取到几行（n）、最早的那行什么时候建的（first）。请求中心一次提交算一次（同一个 bid）；一次提交至少一部，按一部算是往少里估。
+    老版本 App / Windows / 面板一部一部提交的（bid = 0）：同一个人 arriveBurst（10 分钟）之内的算一次（2.9 复查：以前一部算一次，
+    一个人十几分钟里一部一部加了 20 部，后面两个小时里每一批都当「还会来好几部」多等十几分钟）。
+    一个人一次提交 18 部不等于以后每两小时来 18 部。最新的那几行都在窗口里（来得很密，n 取满了）= 只看到了一段：按这一段跨了多久算（至少 30 分钟） */
+function arriveRate(a, t){
+  if (!a || !(a.subs > 0)) return 0;
+  const span = a.n >= LIMIT.arriveRows && a.first > t - LIMIT.arriveWin ? Math.max(t - a.first, 30 * MIN) : LIMIT.arriveWin;
+  return a.subs / span;
+}
+const durText = (ms) => ms < HOUR ? Math.max(1, Math.round(ms / MIN)) + ' 分钟' : Math.round(ms / HOUR * 10) / 10 + ' 小时';
+/** 凑批计划：ready = 等着的（加好了追踪码，有 since、bid），pend = 还会清洗好的（长时间退避的已经去掉，有 stage、src、next、since、p、pa、w）。
+    回 { need, full, by, why, beyond, first, soon, deadline }：need = 有效的凑批数；by = 预计什么时候开批（取整到分钟，App 的 ETag 不跟着秒数变）；
+    beyond = 预计赶不上的几部，first = 其中最快的那一部预计什么时候清洗好（都是「一时半会儿清洗不好」的就是 0）；
+    soon = 最快的那一部预计什么时候清洗好（soonGap 以内的才给，只有 1 部时用，见 gateSmart）；deadline = 最晚开批 */
+function gatePlan(c, ready, pend, t){
+  const cfg = c.cfg, full = gateNeed(cfg);
+  /* 最晚开批 = 最早的那一部等满（请求中心 batchWait、老版本 10 分钟）：硬上限，下面的预计只是看等不等得到 */
+  const deadline = Math.min(...ready.map(r => (r.since || t) + waitOf(cfg, r.bid)));
+  /* 2.9 复查：离最晚开批不到 smartGain，早开也省不了几分钟 → 预计只晚 smartGain 以内的也算赶得上（多等这一会儿，赶上了一起走；
+     最晚开批照样开）。原因 = 每一步还要多久是按一分钟一轮粗估的（核对整季 5 分钟、剧集下完再 6 分钟）：离最晚开批 4 分钟、
+     预计 5 分钟后清洗好的那一季被当成赶不上，先开了，省下不到 4 分钟，它却要等这一批传完（估得悲观的话它本来赶得上） */
+  const edge = deadline - t < LIMIT.smartGain ? deadline + LIMIT.smartGain : deadline;
+  const known = [];
+  let unknown = 0, beyond = 0, first = 0, near = 0, soon = 0;
+  for (const at of gateEtas(c, pend, t)){
+    if (at != null && at <= t + LIMIT.soonGap) soon = soon ? Math.min(soon, at) : at;
+    if (at != null && at > deadline && at <= deadline + LIMIT.smartGain) near++;
+    if (at == null) unknown++;                                   // 不知道多快：照 2.8 当它赶得上（最多等到最晚开批）
+    else if (at <= edge) known.push(at);
+    else { beyond++; if (at < Infinity) first = first ? Math.min(first, at) : at; }
+  }
+  known.sort((a, b) => a - b);
+  const exp = known.length + unknown;
+  /* 预计新来的：从提交到清洗好最少要 arriveLead，离最晚开批不到这么久才来的赶不上；向下取整（宁可少等） */
+  const rate = arriveRate(c.memo.arrive, t);
+  const add = Math.floor(rate * Math.max(0, deadline - t - LIMIT.arriveLead));
+  const need = clamp(ready.length + exp + add, 1, full);
+  const k = need - ready.length;
+  /* 预计开批的时刻：等着的 + 到了的 ≥ need 的那一刻（前面的照预计一部一部到；need 跟着「预计新来的」变少）。两条路：
+     · 凑满 full：前面预计赶得上的第（full − 等着的）个到的时候
+     · 前面赶得上的都到了（不能有不知道多快的）、预计新来的降到 0（离最晚开批不到 arriveLead + 1 ÷ 来速）的时候 ——
+       那一刻离最晚开批不到 smartGain、又有预计只晚一点的：那时不开（见上面 edge），照最晚开批
+     2.9 复查：以前要靠新来的、不知道多快的才凑得满就一律写最晚开批：来得很密时 need 一轮一轮往下掉、20 分钟左右就开了，
+     App 上一直写着 30 分钟 */
+  let fill = t, tExp = 0;
+  if (k > 0){
+    const toFull = full - ready.length;
+    const viaFull = toFull <= known.length ? known[toFull - 1] : Infinity;
+    let viaAll = unknown ? Infinity : Math.max(known.length ? known[known.length - 1] : t, rate > 0 ? deadline - LIMIT.arriveLead - 1 / rate : t);
+    if (near && deadline - viaAll < LIMIT.smartGain) viaAll = deadline;
+    fill = Math.min(viaFull, viaAll, deadline);
+    if (exp && !unknown) tExp = Math.min(known[known.length - 1], viaFull);   // 等的前面那几部预计什么时候到齐
+  }
+  const by = Math.min(deadline, Math.ceil(fill / MIN) * MIN);
+  /* 一句话为什么（App 上一行放得下）：在等前面哪几部（到齐的时刻知道就带上）、预计还有几部新请求 */
+  const eta = tExp && tExp < deadline ? '（约 ' + durText(tExp - t) + '）' : '';
+  const wait = [exp ? '等前面 ' + exp + ' 部清洗好' + eta : '', add ? '预计还有 ' + add + ' 部新请求' : ''].filter(Boolean).join('，');
+  const why = k <= 0 ? '凑够 ' + need + ' 部'
+    : (need >= full ? '还差 ' + k + ' 部凑满 ' + full + ' 部：' : '所有人加起来能凑 ' + need + ' 部：') + wait;
+  return { need, full, by, why, beyond, first, soon, deadline };
+}
+/** 智能凑批开着时，「凑够了」「等到头了」之外的几条（ready / untagged / up 的行见 gatePlan；up 带长时间退避的）。回 { why, plan }：why 不空 = 现在开。
+    · 2.6 的两条退路照旧先看：前面没有还会清洗好的了；等着的这几次提交（bid）每一部都清洗好了
+    · 再看有效的凑批数：等着的够 need 就开。来速只算在 need 里，所以前面没有了、这几次提交都好了的时候，来速再高也不让它多等
+    · 只有 1 部、预计 soonGap（2 分钟）里还有一部清洗好：先不开（后两条都是），等它一起。原因 = 一部一批开出去，
+      下一部就要等这一批传完才开下一批（一次只跑一批）。「等到头了」不受这条管：最晚开批照样开。
+      2.9 复查：只在这一部进等待凑批 soloHold（4 分钟）以内这样等。原因 = 计划一轮一算、不记上一轮：「马上清洗好」的那一部老是没好
+      （改名作业一直在跑、next 每轮都到了；预算不够这一轮没推进到它），而这一轮末尾那一次凑批又没看（一轮跑过 22 秒），
+      这一部就一直等到最晚开批 —— 比 2.8 晚了快 30 分钟 */
+function gateSmart(c, ready, untagged, up, t){
+  const stuck = (x) => x.next > t + LIMIT.stuck;
+  const pend = untagged.concat(up).filter(x => !stuck(x));
+  const plan = gatePlan(c, ready, pend, t);
+  if (!untagged.length && !up.some(x => !stuck(x))) return { why: '前面没有还会清洗好的了', plan };
+  /* 和 2.6 一样：前面的那几行属于哪几次提交（长时间退避的也算没清洗好） */
+  const open = new Set(up.map(x => x.bid).concat(untagged.map(r => r.bid)));
+  const bids = [...new Set(ready.map(r => r.bid).filter(x => x > 0))];
+  /* 赶不上的那几部：知道多久的说最快的那一部多久，都是停住了 / 推不了 / 排不上 PikPak 的就说一时半会儿清洗不好 */
+  const rest = plan.beyond ? '（其余 ' + plan.beyond + ' 部' + (plan.first ? '约 ' + durText(plan.first - t) + '后才清洗好' : '一时半会儿清洗不好') + '）' : '';
+  const why = bids.length && bids.every(x => !open.has(x)) ? '这' + (bids.length > 1 ? '几' : '一') + '次提交的都清洗好了'
+    : ready.length >= plan.need ? '智能凑批：所有人加起来这会儿只凑得到 ' + ready.length + ' 部' + rest
+    : '';
+  const holdTill = ready.length === 1 ? (ready[0].since || t) + LIMIT.soloHold : 0;
+  if (why && plan.soon && t < holdTill)
+    return { why: '', plan: { ...plan, need: clamp(Math.max(plan.need, 2), 1, plan.full), by: Math.min(plan.deadline, Math.ceil(Math.min(plan.soon, holdTill) / MIN) * MIN),
+                              why: '只有 1 部，还有 1 部马上清洗好，等它一起传' } };
+  return { why, plan };
+}
+/** 「凑够了」「最早的一部等到头了」（2.6；不用看前面的） */
+function gateFirst(cfg, ready, t){
+  const need = gateNeed(cfg);
+  if (ready.length >= need) return '凑够 ' + need + ' 部';
+  const late = ready.find(r => t - (r.since || t) >= waitOf(cfg, r.bid));
+  if (late) return '最早的一部等了 ' + Math.round((t - late.since) / MIN) + ' 分钟';
+  return '';
+}
+/** 智能凑批要看的前面那几行（几列，不读整行；withReady = 连等待凑批的一起取：一批在传时没读过它们的整行），
+    外加新请求的来速：一轮里头一回问的时候拼进同一条语句（LEFT JOIN 一行聚合，前面一行都没有也回这一行），之后用 c.memo.arrive。
+    来速按编号倒着取最新 arriveRows 行（主键的范围，不读整张表）。json 先看一眼合不合法：坏了的一行不该让凑批整个出错。
+    2.9 复查：多取两列 —— pa = 最后一次有进度的时刻（stDownload 记的 pat，量速度、判停住），w = 排队中的在等什么（r.d.wait：'pk' / 'hold'）；
+    来速里 bid = 0 的按「谁（users 的第一个）+ 哪 10 分钟」算一次提交。还是同一条语句，不多问 */
+async function gateRows(c, withReady){
+  const d = await db(c.env), t = now();
+  const j = (path) => `CASE WHEN json_valid(data) THEN json_extract(data, '${path}') END`;
+  const rows = `SELECT stage, src, bid, next, since, ${j('$.pmax')} AS p, ${j('$.pat')} AS pa, ${j('$.wait')} AS w,
+      CASE WHEN json_valid(data) THEN json_type(data, '$.tag') END AS tg
+      FROM tj_req INDEXED BY tj_req_stage WHERE ${inList(withReady ? UPSTREAM.concat('ready') : UPSTREAM)}`;
+  if (c.memo.arrive) return (await d.prepare(rows).all()).results || [];
+  const res = (await d.prepare(`SELECT a.subs AS a_subs, a.n AS a_n, a.first AS a_first, u.* FROM
+      (SELECT COUNT(DISTINCT CASE WHEN created > ? THEN (CASE WHEN bid > 0 THEN 'b' || bid
+                ELSE 'u' || COALESCE(CASE WHEN json_valid(users) THEN json_extract(users, '$[0]') END, 'r' || id) || '@' || CAST(created / ${LIMIT.arriveBurst} AS INTEGER) END) END) AS subs,
+              COUNT(*) AS n, MIN(created) AS first FROM tj_req WHERE id > (SELECT MAX(id) FROM tj_req) - ?) a
+      LEFT JOIN (${rows}) u ON 1`).bind(t - LIMIT.arriveWin, LIMIT.arriveRows).all()).results || [];
+  const a = res[0] || {};
+  c.memo.arrive = { subs: Number(a.a_subs) || 0, n: Number(a.a_n) || 0, first: Number(a.a_first) || 0 };
+  return res.filter(x => x.stage != null);
+}
+/** 这一轮开不了批（一批在传、VPS 熔断中、单个传输在跑 / 排队、还不知道传输 Worker 会不会批量…）：智能凑批开着就照样算一份凑批计划，
+    给 App / 面板看（一轮最多一次，一条语句）。all = 等待凑批的整行（没读过就是 null，和前面的一起取几列）；
+    wait = 为什么这一轮开不了（接在 why 后面）；until = 挡着的那件事预计什么时候完（一批在传时按它的剩余时间）：
+    不传 = 没有挡着的（只是这一轮看不了），开批时刻照计划；传了、不知道（0）或者已经过了 = 不给开批时刻。
+    2.9 复查：以前一批在传、rclone 没给剩余时间（或者 VPS 熔断中、作业丢了，b.d.live 停在几轮以前）时照样给凑满 / 最晚开批的时刻，
+    比这一批传完还早、甚至已经过了；README 说的是「一批在传时不早于它传完」 */
+async function gateShow(c, all, wait, until){
+  if (c.memo.planned) return;
+  c.memo.planned = 1;
+  const t = now();
+  const rows = await gateRows(c, !all);
+  const list = all || rows.filter(x => x.stage === 'ready');
+  const tagged = all ? (r) => r.d.tag !== undefined : (x) => x.tg != null;
+  const ready = list.filter(tagged), untagged = list.filter(r => !tagged(r));
+  if (!ready.length){ c.memo.plan = null; return; }
+  const up = all ? rows : rows.filter(x => x.stage !== 'ready');
+  const first = gateFirst(c.cfg, ready, t);
+  const g = first ? { why: first, plan: gatePlan(c, ready, [], t) } : gateSmart(c, ready, untagged, up, t);
+  const full = g.plan.full, blocked = until !== undefined, at = until > t ? Math.ceil(until / MIN) * MIN : 0;
+  /* 现在就该开（只是这一轮开不了）：这一批就是等着的这几部，开批时刻 = 能开的时候（不知道就不给）；
+     还在凑：开批时刻是凑满 / 最晚开批和能开的时候取晚的（挡着的那件事不知道什么时候完就不给） */
+  c.memo.plan = g.why ? { need: clamp(ready.length, 1, full), full, by: at, why: g.why }
+                      : { need: g.plan.need, full, by: blocked && !at ? 0 : Math.max(g.plan.by, at), why: g.plan.why };
+  if (!c.memo.plan.by) delete c.memo.plan.by;
+  if (wait) c.memo.plan.why += '；' + wait;
+}
+
 /** 每轮开头：问一次正在传的那一批（一个作业），传完的成员一起去核对；传完了的批次看看成员都核对、删完了没有 */
 async function batchStep(c){
   const d = await db(c.env);
@@ -2188,16 +2470,32 @@ function batchNext(c, b){
     · 最早的一部等了 batchWait（老版本 App 一部一部提交的 10 分钟）
     · 前面没有还会清洗好的了（下载 / 清洗中的都在长时间退避，或者根本没有）
     · 等着的这几次提交（bid），每一部都清洗好了或者结束了
-    VPS 熔断中、有一批在传、单个传输还在跑或者在排队（批量里对不上的补传先传完，不然一批接一批开，它们一直排不上）：不开。
+    · （2.9 智能凑批）等着的够有效的凑批数了：所有人加起来这会儿只凑得到这几部（gateSmart / gatePlan）
+    VPS 熔断中、有一批在传、单个传输还在跑或者在排队（批量里对不上的补传先传完，不然一批接一批开，它们一直排不上）：不开
+    （2.9：智能凑批开着就照样算一份凑批计划给 App / 面板看，gateShow）。
     关了批量 / 传输 Worker 不会批量：等着的直接去单个传输 */
 async function batchGate(c){
   /* batch === undefined = 这一轮没问成在传的批次（batchStep 出错）：不知道有没有一批在传，不开 */
-  if (c.memo.gated || c.memo.batch || c.memo.batch === undefined) return;
-  const cfg = c.cfg, d = await db(c.env), t = now();
+  if (c.memo.gated || c.memo.batch === undefined) return;
+  const cfg = c.cfg, smart = smartOn(cfg);
+  const showErr = (e) => console.error('凑批计划：', e && e.message);     // 只是给 App 看的，算不成不耽误这一轮
+  if (c.memo.batch){
+    /* 一批在传：不开。2.9：下一批的凑批计划照样算（开批时刻不早于这一批传完：按它的剩余时间，不知道就不给。
+       2.9 复查：rclone 没给剩余时间、b.d.live 停在好几轮以前（VPS 熔断中、作业丢了没更新）算出来已经过了的，都是「不知道」） */
+    if (smart){
+      const b = c.memo.batch, l = b.d.live;
+      await gateShow(c, null, '批量 #' + b.id + ' 在传，传完再开下一批', l && l.eta != null ? (l.at || now()) + l.eta * 1000 : 0).catch(showErr);
+    }
+    return;
+  }
+  const d = await db(c.env), t = now();
   const all = ((await d.prepare("SELECT * FROM tj_req WHERE stage = 'ready' ORDER BY since, id LIMIT 200").all()).results || []).map(rowOf);
   const ready = all.filter(r => r.d.tag !== undefined);
   c.memo.gateSaw = ready.length;                     // 一个加好追踪码的都没有：这一轮末尾不用再来一次（除非这一轮刚加好）
-  if (!ready.length || depOpenUntil(c, 'vps')) return;
+  /* until：挡着开批的那件事预计什么时候完（VPS 熔断到几点）；0 = 不知道（单个传输在传 / 排队）；不传 = 没有挡着的（2.9 复查，见 gateShow） */
+  const show = (wait, until) => smart ? gateShow(c, all, wait, until).catch(showErr) : undefined;
+  if (!ready.length) return;
+  if (depOpenUntil(c, 'vps')) return show('传输（VPS）暂时不可用，恢复了再开', depOpenUntil(c, 'vps'));
   const caps = await tfCaps(c);
   if (cfg.batch === false || (caps.known && !caps.batch)){
     const why = cfg.batch === false ? '批量传输关了' : '传输 Worker 不会批量传输（老版本，或者 rclone 不认筛选规则）';
@@ -2205,13 +2503,14 @@ async function batchGate(c){
     c.memo.gated = 1;
     return;
   }
-  if (!caps.known || c.slots.vps.used > 0 || c.n > c.max - 3) return;
+  if (!caps.known || c.slots.vps.used > 0 || c.n > c.max - 3) return c.slots.vps.used > 0 ? show('单个传输在传，传完再开', 0) : show('');
   /* 排着队的单个传输（补传、老路的；长时间退避的不算）：等它们先传完。
      +bat：别用 bat 的索引（bat = 0 差不多是整张表），走 stage 的 */
   const solo = await d.prepare("SELECT COUNT(*) AS n FROM tj_req WHERE stage = 'copy' AND +bat = 0 AND next <= ?").bind(t + LIMIT.stuck).first();
-  if (solo && solo.n) return;
+  if (solo && solo.n) return show('排队的单个传输先传，传完再开', 0);
   const why = await gateWhy(c, all, ready);
   if (!why) return;
+  c.memo.plan = null;                                // 2.9：开了 = 等着的已经走了，这一轮记下的凑批计划作废
   const max = clamp(cfg.batchMax || CFG_DEF.batchMax, 1, LIMIT.batchMax);
   const pick = ready.slice().sort((a, b) => (a.since || 0) - (b.since || 0) || b.users.length - a.users.length || a.id - b.id).slice(0, max);
   /* 一次只跑一批，在库里也挡住：已经有一批在 copy 就不插（2.6 的面板「推进一轮」不拿租约，和定时任务撞上时两边都走到这儿；
@@ -2242,14 +2541,19 @@ async function batchGate(c){
   await batchLaunch(c, b);
 }
 async function gateWhy(c, all, ready){
-  const cfg = c.cfg, t = now(), need = gateNeed(cfg);
-  if (ready.length >= need) return '凑够 ' + need + ' 部';
-  const late = ready.find(r => t - (r.since || t) >= waitOf(cfg, r.bid));
-  if (late) return '最早的一部等了 ' + Math.round((t - late.since) / MIN) + ' 分钟';
-  const up = (await (await db(c.env)).prepare(`SELECT bid, COUNT(*) AS n, SUM(CASE WHEN next > ? THEN 1 ELSE 0 END) AS stuck
-      FROM tj_req WHERE stage IN (${UPSTREAM.map(() => '?').join(',')}) GROUP BY bid`).bind(t + LIMIT.stuck, ...UPSTREAM).all()).results || [];
+  const cfg = c.cfg, t = now();
+  const first = gateFirst(cfg, ready, t);
+  if (first) return first;
   /* 刚进 ready、下一轮才加追踪码的也算「还会清洗好的」（不然差一部凑满的时候先开了一批小的） */
   const untagged = all.filter(r => r.d.tag === undefined);
+  /* 2.9 智能凑批：前面的那几行（几列）和来速同一条语句取（顶替下面 2.8 的那一条）；这一轮不开就把计划记下，跟着 tick:last 给 App 看 */
+  if (smartOn(cfg)){
+    const g = gateSmart(c, ready, untagged, await gateRows(c, false), t);
+    c.memo.plan = g.why ? null : g.plan;
+    return g.why;
+  }
+  const up = (await (await db(c.env)).prepare(`SELECT bid, COUNT(*) AS n, SUM(CASE WHEN next > ? THEN 1 ELSE 0 END) AS stuck
+      FROM tj_req WHERE stage IN (${UPSTREAM.map(() => '?').join(',')}) GROUP BY bid`).bind(t + LIMIT.stuck, ...UPSTREAM).all()).results || [];
   if (!untagged.length && !up.some(x => x.n > (x.stuck || 0))) return '前面没有还会清洗好的了';
   /* 还没清洗好的（下载 / 清洗中，或者刚进来还没加追踪码）属于哪几次提交 */
   const open = new Set(up.map(x => x.bid).concat(untagged.map(r => r.bid)));
@@ -2257,13 +2561,31 @@ async function gateWhy(c, all, ready){
   if (bids.length && bids.every(x => !open.has(x))) return '这' + (bids.length > 1 ? '几' : '一') + '次提交的都清洗好了';
   return '';
 }
-/** 凑批进度（App 的 /app/flow、我的请求里 ready 那几条的 wait、面板）：等着几部、要几部、最早的什么时候进来、最晚什么时候开 */
+/** 凑批进度（App 的 /app/flow、我的请求里 ready 那几条的 wait、面板）：等着几部、要几部、最早的什么时候进来、最晚什么时候开。
+    2.9 智能凑批开着：need = 定时任务算的有效的凑批数（「已凑 x / need」说的是实话），多给 full（固定的凑批数 batchMin）、
+    why（一句话为什么是这个数），launchBy = 预计什么时候开（凑满的时刻和最晚开批取早的；一批在传时不早于它传完）。
+    计划跟着 tick:last 存（每轮写一次，不多写），这里只多读一行；比 gateFresh 旧（定时任务没在跑）、还没算过就照 2.8 给。
+    关了智能凑批：和 2.8 一模一样（字段也一样） */
 async function gateInfo(env, cfg){
   const w = (cfg.batchWait || CFG_DEF.batchWait) * MIN;
   const g = await (await db(env)).prepare(`SELECT COUNT(*) AS n, MIN(since) AS oldest, MIN(since + CASE WHEN bid > 0 THEN ? ELSE ? END) AS lb
       FROM tj_req WHERE stage = 'ready'`).bind(w, Math.min(w, LIMIT.oldWait)).first();
   const out = { ready: (g && g.n) || 0, need: gateNeed(cfg) };
-  if (out.ready){ out.oldest = g.oldest || 0; if (out.ready < out.need) out.launchBy = g.lb || 0; }
+  if (!smartOn(cfg)){
+    if (out.ready){ out.oldest = g.oldest || 0; if (out.ready < out.need) out.launchBy = g.lb || 0; }
+    return out;
+  }
+  const full = out.need;
+  out.full = full;
+  if (!out.ready) return out;
+  out.oldest = g.oldest || 0;
+  const last = await kvGet(env, 'tick:last').catch(() => null);
+  const p = last && last.gate && now() - (Number(last.at) || 0) < LIMIT.gateFresh ? last.gate : null;
+  if (!p){ if (out.ready < out.need) out.launchBy = g.lb || 0; return out; }
+  /* 那一轮之后又有等着的（面板重试的）：比计划的多，这一批就是它们（最多 full） */
+  out.need = clamp(Math.max(Number(p.need) || 0, Math.min(out.ready, full)), 1, full);
+  if (p.by) out.launchBy = Number(p.by) || 0;
+  if (p.why) out.why = String(p.why).slice(0, 120);
   return out;
 }
 
@@ -2380,7 +2702,11 @@ async function tickRun(env, cfg, t){
   if (c.healthDirty) await kvPut(env, 'health', c.health).catch(() => {});
   if (Math.random() < 0.03) await d.prepare('DELETE FROM tj_log WHERE id < (SELECT MAX(id) - 4000 FROM tj_log)').run().catch(() => {});
   out.fetches = c.n; out.over = c.over || 0; out.ms = now() - c.t0; out.slots = c.slots; out.batch = c.memo.launch || null;
-  await kvPut(env, 'tick:last', { at: t, done: out.done, due: out.due, fetches: c.n, over: out.over, ms: out.ms, batch: out.batch }).catch(() => {});
+  /* 2.9：这一轮算的凑批计划跟着 tick:last 存（gateInfo 给 App / 面板用；不多写一次）。没算（关了智能凑批、没有等着的、这一轮开了批）就不带 */
+  const p = c.memo.plan;
+  if (p) out.gate = { need: p.need, full: p.full, ...(p.by ? { by: p.by } : {}), why: p.why };
+  await kvPut(env, 'tick:last', { at: t, done: out.done, due: out.due, fetches: c.n, over: out.over, ms: out.ms, batch: out.batch,
+                                  ...(out.gate ? { gate: out.gate } : {}) }).catch(() => {});
   return out;
 }
 
@@ -2946,7 +3272,7 @@ async function adminState(env){
     cfg: { pkUser: mask(cfg.pkUser), pkSet: !!(cfg.pkUser && cfg.pkPass), tpl: cfg.tpl, lang: cfg.lang, grp: cfg.grp,
            userCap: cfg.userCap, globalCap: cfg.globalCap, paused: !!cfg.paused, pkToken: tok ? { exp: tok.exp } : null,
            pkSlots: cfg.pkSlots, vpsSlots: cfg.vpsSlots, autoReady: cfg.autoReady !== false, tagNames: cfg.tagNames !== false,
-           batch: cfg.batch !== false, batchMin: cfg.batchMin, batchMax: cfg.batchMax, batchWait: cfg.batchWait, xfers: cfg.xfers,
+           batch: cfg.batch !== false, smart: cfg.smart !== false, batchMin: cfg.batchMin, batchMax: cfg.batchMax, batchWait: cfg.batchWait, xfers: cfg.xfers,
            checkers: cfg.checkers, basketMax: cfg.basketMax, tvSub: cfg.tvSub || '' },
     env: { LB_GATE: !!env.LB_GATE, LINK_KEY: !!env.LINK_KEY, LB_BASE: base(env, 'LB_BASE', 'https://lb.cuven.us'),
            TRANSFER_BASE: base(env, 'TRANSFER_BASE', 'https://transfer.cuven.us'), AUTO_DIR: String(env.AUTO_DIR || 'auto'),
@@ -3186,6 +3512,7 @@ th{color:var(--dim);font-weight:500;font-size:12px}td .t{font-weight:600}.mono{f
   <div class="row"><div style="flex:1"><label>凑够几部开一批</label><input id="batchMin" type="number" min="1" max="16"></div>
    <div style="flex:1"><label>一批最多几部</label><input id="batchMax" type="number" min="1" max="16"></div>
    <div style="flex:1"><label>最多等（分钟）</label><input id="batchWait" type="number" min="1" max="1440"></div></div>
+  <label class="row" style="margin-top:8px;color:var(--text)"><input id="smart" type="checkbox" style="width:auto"> 智能凑批：所有人加起来凑不满一批时，按这会儿能凑到的几部开（不等赶不上的；最多等的分钟照旧。关了就是固定凑够上面的数）</label>
   <div class="row"><div style="flex:1"><label>并行传输（Transfers）</label><input id="xfers" type="number" min="1" max="16"></div>
    <div style="flex:1"><label>并发核对（Checkers）</label><input id="checkers" type="number" min="1" max="16"></div>
    <div style="flex:1"><label>请求中心一次最多</label><input id="basketMax" type="number" min="1" max="50"></div></div>
@@ -3211,11 +3538,14 @@ function api(op,body){return fetch('/admin/api/'+op,{method:body?'POST':'GET',he
 function show(on){$('login').classList.toggle('hide',on);$('app').classList.toggle('hide',!on)}
 function gbs(n){return ((n||0)/1073741824).toFixed(1)+' GB'}
 function dur(sec){if(sec==null)return'—';sec=Math.max(0,Math.round(sec));if(sec<60)return sec+' 秒';if(sec<3600)return Math.round(sec/60)+' 分钟';return (sec/3600).toFixed(1)+' 小时'}
-/* 系统卡里的凑批和批量传输（2.6） */
+/* 系统卡里的凑批和批量传输（2.6）。2.9：智能凑批开着，need 是有效的凑批数（full = 固定的），带一句为什么、预计什么时候开。
+   2.9 复查：「预计」只在有 why（定时任务这一轮算的计划）时写；定时任务没在跑、照 2.8 给的是硬上限，写「最晚」（以前看 full，智能凑批开着就一律写「预计」） */
 function flowHtml(s){
  var g=s.gate||{},b=s.batch,cp=s.caps||{},c=s.cfg||{};
  var h='<div style="margin-top:6px">凑批 <b>'+(g.ready||0)+' / '+(g.need||0)+'</b>'+(c.batch?'':' <span class="warn">（批量传输关了）</span>')+
-  (g.oldest?' · 最早的 '+ago(g.oldest)+'进来':'')+(g.launchBy?' · 最晚 '+new Date(g.launchBy).toLocaleTimeString()+' 开批':'')+'</div>';
+  (c.batch?(c.smart?' <span class="dim">（智能凑批'+(g.full&&g.need!==g.full?'，满批 '+g.full+' 部':'')+'）</span>':' <span class="dim">（智能凑批关了：固定凑够 '+(g.need||0)+' 部）</span>'):'')+
+  (g.oldest?' · 最早的 '+ago(g.oldest)+'进来':'')+(g.launchBy?' · '+(g.why?'预计 ':'最晚 ')+new Date(g.launchBy).toLocaleTimeString()+' 开批':'')+
+  (g.why?'<div class="dim">'+esc(g.why)+'</div>':'')+'</div>';
  if(b){var run=b.stage==='copy'&&!b.ended;
   h+='<div>批量 #'+b.id+' · '+(run?'<span class="ok">传输中'+(b.jobless?'（作业号未知）':'')+'</span>':b.ended?'已收尾':b.stage==='purge'?'删 PikPak':'核对中')+' · '+b.items+' 部'+
    (run?' · <b>'+gbs(b.bytes)+' / '+gbs(b.total)+'</b>（'+b.pct+'%）· '+((b.speed||0)/1048576).toFixed(1)+' MB/s · 还要 '+dur(b.eta):'')+
@@ -3233,7 +3563,7 @@ function render(s){
  $('pkline').innerHTML=c.pkSet?'<span class="ok">已填</span> '+esc(c.pkUser)+(c.pkToken?' · 令牌到 '+new Date(c.pkToken.exp).toLocaleTimeString():''):'<span class="warn">还没填 PikPak 账号</span>';
  $('tpl').value=c.tpl;$('lang').value=c.lang;$('grp').value=c.grp;$('userCap').value=c.userCap;$('globalCap').value=c.globalCap;$('paused').checked=c.paused;$('autoReady').checked=c.autoReady;$('tagNames').checked=c.tagNames;
  $('pkSlots').value=c.pkSlots;$('vpsSlots').value=c.vpsSlots;
- $('batch').checked=c.batch;$('batchMin').value=c.batchMin;$('batchMax').value=c.batchMax;$('batchWait').value=c.batchWait;
+ $('batch').checked=c.batch;$('smart').checked=c.smart;$('batchMin').value=c.batchMin;$('batchMax').value=c.batchMax;$('batchWait').value=c.batchWait;
  $('xfers').value=c.xfers;$('checkers').value=c.checkers;$('basketMax').value=c.basketMax;$('tvSub').value=c.tvSub;
  var NAMES={lb:'影片库',vps:'传输（VPS）',pikpak:'PikPak',stream:'片库 / TMDB'};
  var hs=Object.keys(NAMES).map(function(k){var h=s.health[k]||{};var open=h.open&&h.open>s.now;
@@ -3262,7 +3592,7 @@ $('savePk').onclick=function(){var u=$('pkUser').value.trim(),p=$('pkPass').valu
 $('testPk').onclick=function(){$('pkres').textContent='…';api('pk',{}).then(function(r){$('pkres').innerHTML=r.ok?'<span class="ok">登录成功</span> '+(r.limit?(r.usage/1073741824).toFixed(1)+' / '+(r.limit/1073741824).toFixed(0)+' GB':'')+(r.auto?(r.auto.same?' · /auto 对得上':' <span class="bad">'+esc(r.auto.hint||r.auto.err||'')+'</span>'):''):'<span class="bad">'+esc(r.err||'')+'</span>'}).catch(function(e){$('pkres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
 $('testLinks').onclick=function(){$('links').textContent='…';api('links',{}).then(function(r){$('links').innerHTML='影片库：'+(r.lb.ok?'<span class="ok">通</span> · PikPak '+esc(r.lb.pikpak):'<span class="bad">'+esc(r.lb.err)+'</span>')+'<br>传输：'+(r.transfer.ok?'<span class="ok">通</span> · rclone '+esc(r.transfer.rclone)+' · '+esc(r.transfer.core):'<span class="bad">'+esc(r.transfer.err)+'</span>')+'<br>片库：'+(r.stream.ok?(r.stream.off?'<span class="warn">不收录 /auto</span> · '+esc(r.stream.why):'<span class="ok">通</span> · 收录 '+esc(r.stream.root)+'，传完就能播放')+('tvSub' in r.stream?' · '+stLine(r.stream.want,r.stream.tvSub,r.stream.tvWhy):''):'<span class="bad">'+esc(r.stream.err)+'</span>')}).catch(function(e){$('links').textContent=e.message})};
 $('saveCfg').onclick=function(){api('cfg',{tpl:$('tpl').value,lang:$('lang').value,grp:$('grp').value,userCap:$('userCap').value,globalCap:$('globalCap').value,pkSlots:$('pkSlots').value,vpsSlots:$('vpsSlots').value,paused:$('paused').checked,autoReady:$('autoReady').checked,tagNames:$('tagNames').checked,
- batch:$('batch').checked,batchMin:$('batchMin').value,batchMax:$('batchMax').value,batchWait:$('batchWait').value,xfers:$('xfers').value,checkers:$('checkers').value,basketMax:$('basketMax').value,tvSub:$('tvSub').value}).then(function(s){$('cfgres').innerHTML='<span class="ok">已保存</span>';render(s)}).catch(function(e){$('cfgres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
+ batch:$('batch').checked,smart:$('smart').checked,batchMin:$('batchMin').value,batchMax:$('batchMax').value,batchWait:$('batchWait').value,xfers:$('xfers').value,checkers:$('checkers').value,basketMax:$('basketMax').value,tvSub:$('tvSub').value}).then(function(s){$('cfgres').innerHTML='<span class="ok">已保存</span>';render(s)}).catch(function(e){$('cfgres').innerHTML='<span class="bad">'+esc(e.message)+'</span>'})};
 $('add').onclick=function(){api('add',{src:$('addSrc').value,id:$('addId').value,season:$('addSeason').value}).then(function(r){$('addres').textContent=r.joined?'已经在进行中':'已添加';load()}).catch(function(e){$('addres').textContent=e.message})};
 $('reqs').onclick=function(e){var b=e.target.closest('button[data-a]');if(!b)return;var a=b.dataset.a,id=+b.dataset.id;
  if(a==='log'){api('log?id='+id).then(function(r){alert(r.items.map(function(l){return new Date(l.at).toLocaleString()+'  '+l.msg}).join('\\n')||'没有日志')});return}
