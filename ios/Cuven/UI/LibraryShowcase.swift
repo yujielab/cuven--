@@ -633,6 +633,17 @@ final class ShowcaseTrailer {
         }
     }
 
+    /// 主页头图：只放 TrailerCache 下好的本机那份（不从网上放）。只在允许自动放的时候挂（HomeView / DSHeroCarousel 先看过系统设置）
+    func mountLocal(key: String, file: URL) {
+        guard path != key else { return }
+        unmount()
+        path = key
+        attach(file, local: true)
+    }
+
+    /// 放到头了（主页头图用它翻到下一页）；不设就照旧回到起点接着放
+    @ObservationIgnored var onEnd: (() -> Void)?
+
     func unmount() {
         TrailerFocus.shared.drop(self)
         TrailerCache.shared.trailer(self, streaming: false)
@@ -713,6 +724,10 @@ final class ShowcaseTrailer {
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                let ended = self.player.currentItem
+                self.onEnd?()
+                // onEnd 里可能已经换了一段（翻到下一页）：那就不再回到起点
+                guard ended != nil, self.player.currentItem === ended else { return }
                 self.player.seek(to: CMTime(seconds: self.start, preferredTimescale: 600)) { _ in
                     Task { @MainActor [weak self] in self?.sync() }
                 }

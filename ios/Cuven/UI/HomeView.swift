@@ -19,6 +19,7 @@ struct HomeView: View {
     @State private var pairScanning = false
     /// 这一栈推进去的页（分享来的链接打开详情页时往里推）
     @State private var path = NavigationPath()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         let _ = Perf.count("home")
@@ -60,6 +61,10 @@ struct HomeView: View {
             guard let r else { return }
             model.openRequest = nil
             path.append(r)
+        }
+        // 头图每 6 小时换一轮（AppModel.resolveHeroes）：从后台回来时跨过了整点，就换上这一轮的
+        .onChange(of: scenePhase) { _, p in
+            if p == .active { Task { await model.heroSlotCheck() } }
         }
     }
 
@@ -156,7 +161,8 @@ struct HomeView: View {
                               meta: heroMeta(p),
                               playTitle: model.playback.resumePosition(v.path) != nil ? "继续播放" : "播放",
                               play: { playHero(p) },
-                              detail: .movie(v))
+                              detail: .movie(v),
+                              trailerHLS: model.heroTrailers[p.id])
         }
     }
 

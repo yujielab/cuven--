@@ -1,4 +1,6 @@
 import SwiftUI
+import UIKit
+import AVFoundation
 
 // MARK: - 设计系统：按 Apple HIG 收拾过的一套（规则出处见 docs/ios-design.md，编号 F = 基础、T = tvOS、S = 触屏上的 tvOS、D = iPhone Duo）
 //
@@ -968,6 +970,8 @@ struct DSHeroPage: Identifiable {
     var playTitle: String = "播放"
     var play: () -> Void
     var detail: Route
+    /// 这一页的预告片（hls）：TrailerCache 下好了本机那份，这一页的背景就换成它（静音、循环）；没下好就只放画面
+    var trailerHLS: String? = nil
 }
 
 /// 全屏轮播：一页一部，左右翻。画面单独一层、不跟着页走：换页时旧画面模糊淡出、新画面从模糊里淡入，
@@ -989,6 +993,10 @@ struct DSHeroCarousel: View {
     @State private var touched = false
     /// 这一页开始停留的时刻（页码胶囊按它填满）；不自己翻页时是 nil
     @State private var pageStart: Date?
+    /// 背景的预告片（用户要求「hero区自动缓存和使用预告片背景」）：只放 TrailerCache 下好的本机那份（主页不为头图从网上拉流），
+    /// 第一次要放时才建（别在每次重绘时白建一个播放器）
+    @State private var trailer: ShowcaseTrailer?
+    @State private var onScreen = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.zoomNamespace) private var zoomNamespace
@@ -1003,7 +1011,7 @@ struct DSHeroCarousel: View {
             // 后面一层：当前这一页的画面 + 渐暗。不接点按——只有「详情」钮进详情页（用户要求：翻页、滑动时不会误进），
             // 详情页仍从这张画面上放大出来、返回时缩回去（F57：这张画面是缩放转场的起点）
             if let shown {
-                DSHeroBackdrop(page: shown, tall: tall, width: w, height: height)
+                DSHeroBackdrop(page: shown, tall: tall, width: w, height: height, trailer: trailer)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
@@ -1054,9 +1062,29 @@ struct DSHeroCarousel: View {
             }
         }
         .frame(width: w, height: height)
-        .task(id: touched) {
+        // 预告片：换页了、这几页的预告片问到了、TrailerCache 刚下好一段，都再看一遍这一页有没有本机那份
+        .onAppear {
+            trailer?.setVisible(true)
+            syncTrailer()
+        }
+        .onDisappear { trailer?.setVisible(false) }
+        .onChange(of: current) { syncTrailer() }
+        .onChange(of: trailerSignature) { syncTrailer() }
+        .onChange(of: reduceMotion) { syncTrailer() }
+        .onReceive(NotificationCenter.default.publisher(for: .cuvenTrailerCached)) { _ in syncTrailer() }
+        // 头图滑出屏幕：停（全 App 同一时刻只放一段：TrailerFocus；编辑推荐放起来，这里就停在当前那一帧）
+        .onScrollVisibilityChange(threshold: 0.3) { visible in
+            onScreen = visible
+            trailer?.setCovered(!visible)
+        }
+        .task(id: [touched, holding]) {
             // 自己翻页：没被碰过、没开「减弱动态效果」和旁白时才翻
             guard !touched, !reduceMotion, !voiceOver, pages.count > 1 else {
+                pageStart = nil
+                return
+            }
+            // 这一页的预告片在放：不按 7 秒翻，放完了再翻（advanceAfterTrailer）
+            if holding {
                 pageStart = nil
                 return
             }
@@ -1075,6 +1103,46 @@ struct DSHeroCarousel: View {
                 withAnimation(.smooth(duration: 0.8)) { current = ids[(i + 1) % ids.count] }
             }
         }
+    }
+
+    /// 这一页的预告片真的出画面了（自己翻页这时停下，等它放完）
+    private var holding: Bool {
+        guard let t = trailer, t.showing, let p = t.path else { return false }
+        return p == (current ?? pages.first?.id)
+    }
+
+    private var trailerSignature: [String] { pages.map { $0.id + "|" + ($0.trailerHLS ?? "") } }
+
+    /// 这一页（id 不给就是当前这一页）有本机下好的预告片、又允许自动放（没开「减弱动态效果」、系统「自动播放视频预览」开着、
+    /// 不是省流量）：挂上，静音放；不然卸下，停在画面上。只放本机那份：头图不从网上拉流，主页保持轻
+    private func syncTrailer(_ id: String? = nil) {
+        let key = id ?? current ?? pages.first?.id
+        guard let page = pages.first(where: { $0.id == key }) ?? pages.first,
+              !reduceMotion, UIAccessibility.isVideoAutoplayEnabled, !NetworkSpeed.dataSaver,
+              let hls = page.trailerHLS, let file = TrailerCache.shared.localURL(key: page.id, hls: hls) else {
+            if trailer?.path != nil { trailer?.unmount() }
+            return
+        }
+        let t: ShowcaseTrailer
+        if let existing = trailer {
+            t = existing
+        } else {
+            t = ShowcaseTrailer()
+            trailer = t
+        }
+        t.onEnd = { advanceAfterTrailer() }
+        t.mountLocal(key: page.id, file: file)
+        t.setCovered(!onScreen)
+    }
+
+    /// 预告片放完：自己翻页的时候翻到下一页（下一页有本机的预告片就接着放它）；不自己翻（碰过、减弱动态效果、旁白、只有一页）就回到起点接着放
+    private func advanceAfterTrailer() {
+        guard !touched, !reduceMotion, !voiceOver, pages.count > 1 else { return }
+        let ids = pages.map(\.id)
+        let i = ids.firstIndex(of: current ?? ids[0]) ?? 0
+        let next = ids[(i + 1) % ids.count]
+        withAnimation(.smooth(duration: 0.8)) { current = next }
+        syncTrailer(next)
     }
 
     /// 前面一层：字标、信息、按钮（左对齐：F1、F2）。字本身不接手势
@@ -1159,6 +1227,8 @@ struct DSHeroBackdrop: View {
     let tall: Bool
     let width: CGFloat
     let height: CGFloat
+    /// 头图背景的预告片（挂着这一页的时候画在画面上面，第一帧出来以后淡入；之前一直是画面）
+    var trailer: ShowcaseTrailer? = nil
 
     var body: some View {
         let art = tall ? (page.tallArt ?? page.wideArt) : (page.wideArt ?? page.tallArt)
@@ -1167,6 +1237,14 @@ struct DSHeroBackdrop: View {
             DSBlurFadeImage(url: TMDBImage.url(art, "w1280"), maxPixel: 2000)
                 .frame(width: width, height: height)
                 .clipped()
+            if let trailer, trailer.path == page.id {
+                VideoSurface(player: trailer.player, gravity: .resizeAspectFill, background: .clear)
+                    .frame(width: width, height: height)
+                    .clipped()
+                    .opacity(trailer.showing ? 1 : 0)
+                    .animation(.easeInOut(duration: 0.8), value: trailer.showing)
+                    .allowsHitTesting(false)
+            }
             // 顶上浅浅压暗：状态栏和左上的标题停在画面上也看得清（F34）
             LinearGradient(colors: [.black.opacity(0.45), .clear], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.22))
             // 底部渐暗，最后融进页面的黑：字和页码点在画面上的对比度靠它（S17、F34、C58）

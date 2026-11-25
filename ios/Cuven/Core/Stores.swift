@@ -478,39 +478,185 @@ final class AppModel {
     private(set) var heroResolved = false
     @ObservationIgnored private var heroResolving = false
 
-    /// 挑头图：候选是 Apple TV 头图池（/api/atv/hero）的顺序，再是最新加入的；每一部都要有
-    /// 无字的横图（Apple TV 无字背景 → TMDB 没有字的剧照）和字标（Apple → TMDB），两样缺一就不上；按候选顺序取前 5 部。
+    /// 头图每一部的预告片（视频路径 → hls）：头图挑好以后去问（和详情页同一次 Apple TV 查询），问到的交给 TrailerCache 在后台下到本机
+    private(set) var heroTrailers: [String: String] = [:]
+    /// 这一轮头图是哪一个 6 小时（heroSlotNow）
+    @ObservationIgnored private var heroSlot: Int?
+    /// 这回打开 App 里试过、拿不到无字横图或字标的（不再算进头图池）
+    @ObservationIgnored private var heroMisses: Set<String> = []
+    @ObservationIgnored private var heroTimer: Task<Void, Never>?
+
+    /// 一轮 6 小时，按钟点切（时间戳整除 21600：同一轮里重开 App 还是那几部）
+    static let heroSlotLength: Double = 21_600
+    static var heroSlotNow: Int { Int(Date().timeIntervalSince1970 / heroSlotLength) }
+
+    /// 记在本机的轮换：这一轮挑了哪几部、之前几轮放过哪些（seen，放过的先不再上，池子快轮完了才清）、上一轮那几部（清的时候也躲开）
+    private struct HeroRotation: Codable {
+        var slot: Int
+        var picks: [String]
+        var seen: [String]
+        var previous: [String]
+    }
+
+    private static let heroRotationKey = "hero-rotation.v1"
+
+    /// 挑头图（用户要求「每 6 小时更新一次，从高分的影片池中随机挑选，按照年份排序，尽可能不要在轮换中出现相同的影片」）：
+    /// 池子是 TMDB 评分 7 分以上的电影（不到 15 部就放宽到 6.5 分；Apple TV 头图池里的片子也在里面，用它带的素材），
+    /// 每一部都要有无字的横图（Apple TV 无字背景 → TMDB 没有字的剧照）和字标（Apple → TMDB），两样缺一就不上。
+    /// 每一轮（6 小时）按这一轮的编号当种子打乱，放过的往后排：先挑没放过的，再挑早先放过的，上一轮那几部排最后；
+    /// 没放过的不到 5 部就把记录清掉（只留上一轮的照样躲开）。挑出 5 部按年份新的在前。
     /// 片名要先认出来（Apple TV 按英文名查），所以元数据到了以后才挑
     func resolveHeroes() async {
         guard metaReady, !heroResolving else { return }
         heroResolving = true
         defer { heroResolving = false }
-        var seen = Set<String>()
-        var cands: [(video: Video, hero: Hero?)] = []
-        for h in heroes { if let v = video(path: h.path), seen.insert(v.path).inserted { cands.append((v, h)) } }
-        for v in newest where seen.insert(v.path).inserted { cands.append((v, nil)) }
-        cands = Array(cands.prefix(12))
+        let slot = Self.heroSlotNow
         if DemoData.enabled {
-            // 演示数据：合成的头图本来就是无字背景 + 字标
+            // 演示数据：合成的头图本来就是无字背景 + 字标（照旧按头图池的顺序，不轮换、不读写本机记录）
+            var seen = Set<String>()
+            var cands: [(video: Video, hero: Hero?)] = []
+            for h in heroes { if let v = video(path: h.path), seen.insert(v.path).inserted { cands.append((v, h)) } }
             heroPicks = Array(cands.compactMap { c -> HeroPick? in
                 guard let h = c.hero, let w = h.background, let l = h.logo else { return nil }
                 return HeroPick(video: c.video, hero: h, wide: w, tall: h.poster, logo: l)
             }.prefix(5))
             heroResolved = true
+            heroSlot = slot
             return
         }
-        let picked = await withTaskGroup(of: (Int, HeroPick?).self) { g in
-            for (i, c) in cands.enumerated() {
-                g.addTask { (i, await self.heroPick(c.video, hero: c.hero)) }
+        var heroArt: [String: Hero] = [:]
+        for h in heroes where heroArt[h.path] == nil { heroArt[h.path] = h }
+
+        // 池子：Apple TV 头图池里的片子 + 全片库电影（同一部片的几个版本只算一次），评分够、知道有字标的
+        var keys = Set<String>()
+        var all: [Video] = []
+        for h in heroes { if let v = video(path: h.path), keys.insert(atvArtKey(v)).inserted { all.append(v) } }
+        for v in movies where keys.insert(atvArtKey(v)).inserted { all.append(v) }
+        func rated(_ least: Double) -> [Video] {
+            all.filter { v in
+                guard !heroMisses.contains(v.path), let r = meta(v)?.rating, r >= least else { return false }
+                return Self.nonEmpty(heroArt[v.path]?.logo) != nil || Self.nonEmpty(appleArt(v)?.logo) != nil
+                    || Self.nonEmpty(meta(v)?.logo) != nil
             }
-            var out = [HeroPick?](repeating: nil, count: cands.count)
-            for await (i, p) in g { out[i] = p }
-            return out
         }
-        let picks = Array(picked.compactMap { $0 }.prefix(5))
+        var pool = rated(7.0)
+        if pool.count < 15 { pool = rated(6.5) }
+
+        // 这一轮的记录：换了一轮，上一轮挑的记进「放过的」
+        var rot = Self.loadHeroRotation() ?? HeroRotation(slot: slot, picks: [], seen: [], previous: [])
+        if rot.slot != slot {
+            rot = HeroRotation(slot: slot, picks: [], seen: rot.seen + rot.picks, previous: rot.picks)
+        }
+        let poolPaths = Set(pool.map(\.path))
+        var seenSet = Set(rot.seen)
+        let prevSet = Set(rot.previous)
+        // 池子里没放过的不到 5 部：从头再轮（上一轮那几部照样躲开）
+        if poolPaths.subtracting(seenSet).subtracting(prevSet).count < 5 {
+            rot.seen = rot.previous
+            seenSet = prevSet
+        }
+
+        // 候选顺序：这一轮已经挑好的（同一轮里重开 App 不变）→ 没放过的 → 早先放过的 → 上一轮的
+        let shuffled = Self.shuffle(pool, seed: UInt32(truncatingIfNeeded: slot &* 7919 &+ 17))
+        var order: [Video] = rot.picks.compactMap { p in pool.first { $0.path == p } ?? video(path: p) }
+        order += shuffled.filter { !seenSet.contains($0.path) && !prevSet.contains($0.path) }
+        order += shuffled.filter { seenSet.contains($0.path) && !prevSet.contains($0.path) }
+        order += shuffled.filter { prevSet.contains($0.path) }
+        // 池子里凑不够 5 部（池子太小、元数据还不全、素材拿不到）：照旧拿头图池和最新加入的补上，排在最后
+        order += heroes.compactMap { video(path: $0.path) }
+        order += newest
+        var orderSeen = Set<String>()
+        order = order.filter { orderSeen.insert($0.path).inserted }
+
+        // 按顺序一批 8 部去拿素材，凑够 5 部就停（池子可能有上百部，不一口气全查）
+        var picks: [HeroPick] = []
+        var misses: [String] = []
+        var i = 0
+        while picks.count < 5 && i < order.count && i < 60 {
+            let batch = Array(order[i..<min(i + 8, order.count)])
+            i += batch.count
+            let got = await withTaskGroup(of: (Int, HeroPick?).self) { g in
+                for (j, v) in batch.enumerated() {
+                    let h = heroArt[v.path]
+                    g.addTask { (j, await self.heroPick(v, hero: h)) }
+                }
+                var out = [HeroPick?](repeating: nil, count: batch.count)
+                for await (j, p) in g { out[j] = p }
+                return out
+            }
+            for (j, p) in got.enumerated() {
+                if let p { if picks.count < 5 { picks.append(p) } } else { misses.append(batch[j].path) }
+            }
+        }
+        // 拿得到别的素材（网是通的）才把拿不到的记下来：断网时一部都拿不到，不能把整个池子都记成「没有」
+        if !picks.isEmpty { heroMisses.formUnion(misses) }
+
+        // 按年份排，新的在前（同一年的按挑出来的先后）
+        var ranked: [(i: Int, p: HeroPick, y: Int)] = []
+        for (n, p) in picks.enumerated() { ranked.append((n, p, p.hero?.year ?? year(p.video) ?? 0)) }
+        ranked.sort { a, b in a.y != b.y ? a.y > b.y : a.i < b.i }
+        picks = ranked.map { $0.p }
+
+        if !picks.isEmpty {
+            rot.picks = picks.map(\.video.path)
+            // 记录别越记越长：只留还在片库里的，最多 300 部
+            let known = Set(videos.map(\.path))
+            rot.seen = Array(rot.seen.filter { known.contains($0) && !rot.picks.contains($0) }.suffix(300))
+            Self.saveHeroRotation(rot)
+        }
         if picks != heroPicks { heroPicks = picks }
         heroResolved = true
-        Perf.log("hero: \(picks.count) of \(cands.count) candidates have a clean background and a logo")
+        heroSlot = slot
+        scheduleHeroSlot()
+        Perf.log("hero: slot \(slot), \(picks.count) picks from a pool of \(pool.count) (\(seenSet.count) shown recently)")
+        let chosen = picks
+        Task { await self.loadHeroTrailers(chosen) }
+    }
+
+    /// 换轮了（App 开着跨过了 6 小时的整点、或者从后台回来）：重新挑
+    func heroSlotCheck() async {
+        guard heroResolved, let s = heroSlot, s != Self.heroSlotNow else { return }
+        await resolveHeroes()
+    }
+
+    /// 到下一轮的整点叫一次 heroSlotCheck（App 在后台时睡着的不算：回到前台时 HomeView 再叫一次）
+    private func scheduleHeroSlot() {
+        guard heroTimer == nil, !DemoData.enabled else { return }
+        heroTimer = Task { [weak self] in
+            while !Task.isCancelled {
+                let now = Date().timeIntervalSince1970
+                let len = AppModel.heroSlotLength
+                let next = (floor(now / len) + 1) * len
+                try? await Task.sleep(nanoseconds: UInt64(max(1, next - now + 2) * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                await self.heroSlotCheck()
+            }
+        }
+    }
+
+    /// 头图每一部的预告片：问到的交给 TrailerCache 在后台下到本机（只在 Wi-Fi、空闲时）；头图只放本机下好的那份
+    private func loadHeroTrailers(_ picks: [HeroPick]) async {
+        let found = await withTaskGroup(of: (String, String?).self, returning: [String: String].self) { g in
+            for p in picks {
+                let v = p.video
+                g.addTask { (v.path, await self.trailers(for: v).first?.hls) }
+            }
+            var out: [String: String] = [:]
+            for await (k, h) in g { if let h { out[k] = h } }
+            return out
+        }
+        guard picks == heroPicks else { return }
+        if found != heroTrailers { heroTrailers = found }
+        TrailerCache.shared.wantHeroes(picks.compactMap { p in found[p.video.path].map { (key: p.video.path, hls: $0) } })
+    }
+
+    private static func loadHeroRotation() -> HeroRotation? {
+        guard let data = UserDefaults.standard.data(forKey: heroRotationKey) else { return nil }
+        return try? JSONDecoder().decode(HeroRotation.self, from: data)
+    }
+
+    private static func saveHeroRotation(_ r: HeroRotation) {
+        if let data = try? JSONEncoder().encode(r) { UserDefaults.standard.set(data, forKey: heroRotationKey) }
     }
 
     /// 一部能不能上头图：无字横图 + 字标都拿到才算（Apple TV 素材表 → 这一部的 Apple TV 查询 → TMDB 全量结果）
