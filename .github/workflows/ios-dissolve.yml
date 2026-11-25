@@ -6,13 +6,7 @@
 name: iOS Dissolve Preview
 
 on:
-  push:
-    branches: ['claude/**']
-    paths: ['ios/Cuven/UI/CacheDissolve*', 'ios/Cuven/UI/FlowFunnel*', 'ios/Cuven/UI/RequestFlowCard.swift', 'ios/Cuven/UI/RequestCenter.swift',
-            'ios/Cuven/Core/RequestBatch.swift', 'ios/Cuven/UI/AllFilmsView.swift', 'ios/CuvenUITests/DissolveTests.swift', 'ios/CuvenUITests/RequestFlowTests.swift',
-            'ios/CuvenUITests/AllFilmsTests.swift', 'ios/Cuven/UI/Login*', 'ios/CuvenUITests/LoginLandingTests.swift', '.github/workflows/ios-dissolve.yml',
-            'ios/Cuven/UI/RequestViews.swift', 'ios/Cuven/**/RequestSend*', 'ios/Cuven/**/SendGlow*', 'ios/CuvenUITests/RequestSendTests.swift',
-            'ios/Cuven/UI/LogoParticle*', 'ios/Cuven/UI/WebDetail.swift', 'ios/Cuven/UI/FilmCategoryPage.swift', 'ios/CuvenUITests/DetailLogoTests.swift']
+  # 用户要求（2026-11-25）：不再自动做 CI 屏幕截图，改用真机配合调试；只在手动运行（workflow_dispatch）时截图
   workflow_dispatch:
 
 permissions:

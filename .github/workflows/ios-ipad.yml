@@ -4,9 +4,7 @@
 name: iOS iPad Preview
 
 on:
-  push:
-    branches: ['claude/**']
-    paths: ['ios/Cuven/**', 'ios/CuvenUITests/PadLayoutTests.swift', '.github/workflows/ios-ipad.yml']
+  # 用户要求（2026-11-25）：不再自动做 CI 屏幕截图，改用真机配合调试；只在手动运行（workflow_dispatch）时截图
   workflow_dispatch:
 
 permissions:
