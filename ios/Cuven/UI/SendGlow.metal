@@ -301,10 +301,12 @@ fragment float4 sg_fragment(SGOut in [[stage_in]], constant SGUniforms &U [[buff
             // 失败那一圈不呼吸：平静、不动（画面落定以后画布就停下不画了）
             float breathe = U.focus.w > 0.5 ? 1.0 : 0.93 + 0.07 * sin(T * 0.9 + ang * 2.0);
             float3 el = (rcol * rim * 1.15 + fcol * feather * 0.55 + fcol * haze * 0.10) * U.edge.x * arrive * boost * breathe;
-            // 封顶（色相不变，只按最亮的那个通道一起压）：不封的话亮边叠到 1.8 左右，sg_tone 把它往白里溢，整圈是死白，
-            // 圆角那一段看着就是「爆白」（用户 iPhone Duo 截图）。压到 1.1：边上是淡紫 / 淡青的亮线，只带一丝白
+            // 封顶（色相不变，按最亮的那个通道一起压，0.7 以上软压、最多到 1.1）：不封的话亮边叠到 1.8 左右，sg_tone 把它往白里溢，
+            // 整圈是死白，圆角那一段看着就是「爆白」（用户 iPhone Duo 截图）。现在边上是淡紫 / 淡青的亮线，只带一丝白；
+            // 软压不硬截，亮边往里是一路渐暗的，不是一条平平的色带
             float em = max(el.r, max(el.g, el.b));
-            light += el * min(1.0, 1.1 / max(em, 1.0e-4));
+            float ek = em < 0.7 ? em : 0.7 + 0.4 * (1.0 - exp(-(em - 0.7) / 0.4));
+            light += el * (ek / max(em, 1.0e-4));
         }
     }
 
