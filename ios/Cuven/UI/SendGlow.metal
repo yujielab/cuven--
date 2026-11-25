@@ -262,7 +262,8 @@ fragment float4 sg_fragment(SGOut in [[stage_in]], constant SGUniforms &U [[buff
     }
 
     // 边缘光：贴着圆角边的一圈亮边（短边的 3%）往里羽化；环走到哪儿，哪一段边就亮起来（刚亮的那一下更亮）；
-    // 之后慢慢从紫往青漂，左右两边颜色不一样（参照录屏 5.6、7.0 秒）
+    // 之后慢慢从紫往青漂，左右两边颜色不一样（参照录屏 5.6、7.0 秒）。
+    // 离边多远一律按圆角矩形的有向距离 sd 量（不是横竖两条边各量一份再加起来）：圆角那一段亮边和直边一样宽，角上不叠成两份
     if (U.edge.x > 0.001) {
         float e = max(-sd, 0.0);
         if (e < 0.5 * S) {
@@ -286,7 +287,11 @@ fragment float4 sg_fragment(SGOut in [[stage_in]], constant SGUniforms &U [[buff
             float boost = 1.0 + 0.7 * U.ring.y * exp(-max(passed, 0.0) / (0.2 * S));
             // 失败那一圈不呼吸：平静、不动（画面落定以后画布就停下不画了）
             float breathe = U.focus.w > 0.5 ? 1.0 : 0.93 + 0.07 * sin(T * 0.9 + ang * 2.0);
-            light += (rcol * rim * 1.15 + fcol * feather * 0.55 + fcol * haze * 0.10) * U.edge.x * arrive * boost * breathe;
+            float3 el = (rcol * rim * 1.15 + fcol * feather * 0.55 + fcol * haze * 0.10) * U.edge.x * arrive * boost * breathe;
+            // 封顶（色相不变，只按最亮的那个通道一起压）：不封的话亮边叠到 1.8 左右，sg_tone 把它往白里溢，整圈是死白，
+            // 圆角那一段看着就是「爆白」（用户 iPhone Duo 截图）。压到 1.1：边上是淡紫 / 淡青的亮线，只带一丝白
+            float em = max(el.r, max(el.g, el.b));
+            light += el * min(1.0, 1.1 / max(em, 1.0e-4));
         }
     }
 

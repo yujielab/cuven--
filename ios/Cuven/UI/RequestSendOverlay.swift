@@ -78,23 +78,31 @@ struct RequestSendOverlay: View {
                               height: geo.size.height + insets.top + insets.bottom)
             // 状态行按整屏的比例放（画布的云按整屏画），换算成安全区里的比例
             let statusY = (RequestSendTiming.statusY * full.height - insets.top) / max(1, geo.size.height)
+            // 字按整屏居中，和光（箭头、云、环）在同一条中线上：iPhone Duo 侧边那一列这里是空的（状态栏藏了），
+            // 按安全区居中字会往左偏半列（用户截图：「正在发往请求中心」在箭头左边约 42 点）。
+            // 只让掉左右对称的那一截安全区（横拿的手机），两边的留白交给各组自己的 padding
+            let shift = (insets.trailing - insets.leading) / 2
+            let lane = max(1, full.width - 2 * min(insets.leading, insets.trailing))
             ZStack {
                 RequestSendPalette.ink.ignoresSafeArea()
-                canvas(corner: Self.screenCorner(full: full, insets: insets), focus: ringUnit(full: full, insets: insets))
+                canvas(corner: ScreenCorner.radius(size: full, bottomInset: insets.bottom),
+                       focus: ringUnit(full: full, insets: insets))
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
                 // 状态行和结果各放各的高度（各自一层）：交叉淡入淡出时，淡出去的那一行不跟着挪
-                RequestSendCenterLayout(y: statusY) {
+                RequestSendCenterLayout(y: statusY, dx: shift, width: lane) {
                     if stage == .sending { statusLine.transition(.opacity) }
                 }
                 .dynamicTypeSize(...DynamicTypeSize.accessibility2)
-                RequestSendCenterLayout(y: RequestSendTiming.focusY) {
+                RequestSendCenterLayout(y: RequestSendTiming.focusY, dx: shift, width: lane) {
                     outcome
                 }
                 .dynamicTypeSize(...DynamicTypeSize.accessibility2)
                 if stuck && stage == .sending {
-                    closeHint.transition(.opacity)
+                    closeHint
+                        .offset(x: shift)
+                        .transition(.opacity)
                 }
             }
             .coordinateSpace(.named(requestSendRootSpace))
@@ -139,49 +147,6 @@ struct RequestSendOverlay: View {
     private func ringUnit(full: CGSize, insets: EdgeInsets) -> UnitPoint? {
         guard let p = ringFocus, full.width > 0, full.height > 0 else { return nil }
         return UnitPoint(x: (p.x + insets.leading) / full.width, y: (p.y + insets.top) / full.height)
-    }
-
-    /// 屏幕圆角（点）：边上那圈光要贴着它走（用户要的「光贴着圆角屏走」；估错十几点，边角会露出一道暗缝）。
-    /// 系统没有公开的读法（UIScreen._displayCornerRadius 是私有接口，不用）：iPhone 按屏幕物理像素查已知机型，
-    /// 查不到的新机型才按短边的 14% 估；圆角屏的 iPad 18 点；有 Home 键的方屏 0
-    @MainActor
-    private static func screenCorner(full: CGSize, insets: EdgeInsets) -> CGFloat {
-        let short = min(full.width, full.height)
-        guard short > 0, insets.bottom > 0 else { return 0 }
-        switch UIDevice.current.userInterfaceIdiom {
-        case .phone: return knownPhoneCorner() ?? min(62, max(39, (short * 0.14).rounded()))
-        case .pad: return 18
-        default: return 0
-        }
-    }
-
-    /// 已知 iPhone 的屏幕圆角：按物理像素（竖拿，短 × 长）认机型。「放大显示」时同一块屏点数变少，
-    /// 同样的物理圆角折成的点数也按比例变小（标准显示下比例是 1）
-    @MainActor
-    private static func knownPhoneCorner() -> CGFloat? {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        guard let screen = (scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first)?.screen else { return nil }
-        let px = screen.nativeBounds.size
-        let w = Int(min(px.width, px.height).rounded())
-        let h = Int(max(px.width, px.height).rounded())
-        // 圆角点数，标准显示下的短边点数
-        let known: (radius: CGFloat, short: CGFloat)
-        switch (w, h) {
-        case (1125, 2436): known = (39, 375)     // X / XS / 11 Pro
-        case (1242, 2688): known = (39, 414)     // XS Max / 11 Pro Max
-        case (828, 1792): known = (41.5, 414)    // XR / 11
-        case (1080, 2340): known = (44, 375)     // 12 mini / 13 mini
-        case (1170, 2532): known = (47.33, 390)  // 12 / 12 Pro / 13 / 13 Pro / 14 / 16e
-        case (1284, 2778): known = (53.33, 428)  // 12 Pro Max / 13 Pro Max / 14 Plus
-        case (1179, 2556): known = (55, 393)     // 14 Pro / 15 / 15 Pro / 16
-        case (1290, 2796): known = (55, 430)     // 14 Pro Max / 15 Plus / 15 Pro Max / 16 Plus
-        case (1206, 2622): known = (62, 402)     // 16 Pro
-        case (1320, 2868): known = (62, 440)     // 16 Pro Max
-        default: return nil
-        }
-        let short = min(screen.bounds.width, screen.bounds.height)
-        guard short > 0 else { return known.radius }
-        return known.radius * min(1, max(0.7, short / known.short))
     }
 
     // MARK: 中间那一组
@@ -594,20 +559,24 @@ private struct RequestSendPillStyle: ButtonStyle {
     }
 }
 
-/// 把子视图的正中放在容器高度的 y 处（放不下就贴着上下边），横向居中：录屏里内容在屏幕正中略偏上
+/// 把子视图的正中放在容器高度的 y 处（放不下就贴着上下边），横向居中：录屏里内容在屏幕正中略偏上。
+/// dx：中线从容器（安全区）正中往右挪多少——挪到整屏正中，和画布的光同一条线；width：给子视图的宽（nil = 容器宽）
 private struct RequestSendCenterLayout: Layout {
     var y: CGFloat
+    var dx: CGFloat = 0
+    var width: CGFloat? = nil
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         proposal.replacingUnspecifiedDimensions()
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let w = max(1, width ?? bounds.width)
         for s in subviews {
-            let fit = s.sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+            let fit = s.sizeThatFits(ProposedViewSize(width: w, height: nil))
             let h = min(fit.height, bounds.height)
             let top = min(max(bounds.minY, bounds.minY + bounds.height * y - h / 2), bounds.maxY - h)
-            s.place(at: CGPoint(x: bounds.midX, y: top), anchor: .top, proposal: ProposedViewSize(width: bounds.width, height: h))
+            s.place(at: CGPoint(x: bounds.midX + dx, y: top), anchor: .top, proposal: ProposedViewSize(width: w, height: h))
         }
     }
 }

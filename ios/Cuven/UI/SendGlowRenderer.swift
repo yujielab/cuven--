@@ -339,8 +339,10 @@ final class SendGlowRenderer: NSObject, MTKViewDelegate {
             calm = 1
         }
 
+        // 画布按比屏幕圆角小 1 点的圆角裁：宁小勿大——差一点点时裁出去的那一圈黑落在屏幕边框外面，不在玻璃里露出暗楔
+        let corner = max(0, Float(cornerRadius) - 1) * scale
         return Uniforms(
-            size: SIMD4(W, H, min(Float(cornerRadius) * scale, S * 0.5), drift),
+            size: SIMD4(W, H, min(corner, S * 0.5), drift),
             focus: SIMD4(fx, fy, Float(frame % 4096), calm),
             arrow: arrow,
             cloud: cloud,
@@ -406,7 +408,7 @@ final class SendGlowMetalView: MTKView {
 struct SendGlowCanvas: UIViewRepresentable {
     let phase: SendGlowPhase
     var reduceMotion = false
-    /// 屏幕圆角（点）：边缘光沿着它走。系统没有公开读屏幕圆角的接口，由外面传进来；0 = 直角
+    /// 屏幕圆角（点）：边缘光沿着它走。由外面传进来（RequestSendOverlay 用 ScreenCorner 读屏幕真实的圆角）；0 = 直角
     var cornerRadius: CGFloat = 0
     /// 结果那一组（勾、片名、按钮）的中心，占画布的比例：成功那一道环从这儿往外走
     var focus = UnitPoint(x: 0.5, y: 0.44)

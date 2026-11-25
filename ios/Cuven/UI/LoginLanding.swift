@@ -16,7 +16,7 @@ import SwiftUI
 // 减弱动态效果：画面定下来以后时间线整个停掉。
 // 落点（占整屏，Y 从屏顶算；PDF 第 3 页 D）：图标中心 54%、宽 21% 屏宽；标题中心 64%；按钮宽 86%，主按钮上沿 80%、次按钮上沿 87%。
 // 宽窗口（iPad、iPhone Duo 展开）：图标最大 120、按钮最宽 440、文字最宽 520，竖向比例不变；iPhone Duo 折起照手机的比例
-// （横向在安全区里居中，侧边那一列不算）；矮横屏（高不到 500）从按钮往上排。
+// （横向在安全区里居中，侧边那一列不算；宽度、字号都按安全区里那一段宽算，和同样大小的 SE 一样）；矮横屏（高不到 500）从按钮往上排。
 // 旁白：只念标题、说明、两颗按钮（开场和封面不进旁白）。动态字体放到 xxLarge 为止。
 // 减弱动态效果：不做形变（整屏品牌 0.3 秒淡成图标）、前景同时淡入、不上浮不模糊；封面静止（或很慢）。
 
@@ -205,14 +205,18 @@ struct LoginLandingLayout: Equatable, Sendable {
         let minSide = min(W, H)
         let compact = W > H && H < 500
         let cx = left + avail / 2
+        // 字号、图标、按钮都按同一块内容区（安全区里那一段宽）算：iPhone Duo 折起竖拿时整屏 458 宽，可侧边那一列占掉 84，
+        // 内容区只有 374——以前字号按整屏短边算，标题 32、说明 18，比 402 宽的手机（28 / 16）还大，图标按整屏宽的 21% 也偏大，
+        // 一屏挤得满满的（用户截图）。现在折起的 Duo 和同样 375 × 667 的 SE 一个比例；手机竖拿、横拿（取短边）、iPad 算出来和原来一样
+        let ref = min(minSide, avail)
         // 参考是 402 宽的手机：标题 28 粗、说明 16、按钮字 17 半粗；iPad 上到 34 / 18 / 18 为止
-        let titleSize = min(34, max(24, minSide * 0.07))
-        let bodySize = min(18, max(15, minSide * 0.04))
+        let titleSize = min(34, max(24, ref * 0.07))
+        let bodySize = min(18, max(15, ref * 0.04))
         // 按钮高约 6.3% 屏高（参考 55 点），两颗之间约 0.75% 屏高（参考 6.6 点）
         let bh = min(56, max(compact ? 44 : 50, H * 0.063))
         let gap = min(10, max(6, H * 0.0075))
-        // 图标宽 21% 屏宽，最大 120；矮的窗口按高再限一下
-        let side = max(44, min(W * 0.21, 120, H * 0.15))
+        // 图标宽 21% 内容区宽，最大 120；矮的窗口按高再限一下
+        let side = max(44, min(avail * 0.21, 120, H * 0.15))
         let bottomLimit = H - max(safe.bottom + 10, 20)
         var primary: CGFloat
         var secondary: CGFloat
@@ -233,7 +237,7 @@ struct LoginLandingLayout: Equatable, Sendable {
         self.centerX = cx
         self.titleSize = titleSize
         self.bodySize = bodySize
-        self.labelSize = min(18, max(16, minSide * 0.043))
+        self.labelSize = min(18, max(16, ref * 0.043))
         // 标题和说明之间：照用户发的录屏量（标题基线到说明第一行基线约 41 点），手机上约 19 点
         self.textGap = (titleSize * 0.66).rounded()
         self.buttonWidth = min(440, avail * 0.86)
