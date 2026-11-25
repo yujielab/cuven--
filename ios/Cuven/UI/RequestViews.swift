@@ -74,49 +74,55 @@ struct RequestMorphControl: View {
         let hint: String = isSend ? "轻点两下发往请求中心" : ""
         let soften: Bool = launched && !reduceMotion
         let rise: CGFloat = -shownLift * Self.travel
-        ZStack(alignment: .topLeading) {
-            switch mode {
-            case .progress(let status):
-                RequestProgressCard(status: status)
-                    .transition(.opacity)
-            case .request(let title, let symbol, let enabled):
-                buttonLabel(title, symbol: symbol, dark: enabled)
-                    .transition(.opacity)
-            case .send:
-                sendLabel
-                    .transition(.opacity)
-            case .play(let busy):
-                buttonLabel(busy ? "正在准备…" : "立即播放", symbol: "play.fill", dark: true)
-                    .transition(.opacity)
+        // 外面单独一层容器给测试认胶囊（用户要求的上滑发送）：同一串修饰器里再来一次 accessibilityElement 可能把里面那颗
+        // 「请求添加」按钮改成容器、换掉它的标识；包一层 ZStack，里面的按钮和旁白提示不受影响
+        ZStack {
+            ZStack(alignment: .topLeading) {
+                switch mode {
+                case .progress(let status):
+                    RequestProgressCard(status: status)
+                        .transition(.opacity)
+                case .request(let title, let symbol, let enabled):
+                    buttonLabel(title, symbol: symbol, dark: enabled)
+                        .transition(.opacity)
+                case .send:
+                    sendLabel
+                        .transition(.opacity)
+                case .play(let busy):
+                    buttonLabel(busy ? "正在准备…" : "立即播放", symbol: "play.fill", dark: true)
+                        .transition(.opacity)
+                }
             }
+            .frame(minWidth: wide ? 180 : 0, maxWidth: maxW, alignment: .topLeading)
+            .fixedSize(horizontal: wide && !card, vertical: false)
+            .clipShape(shape)
+            .contentShape(shape)
+            .glassEffect(card ? .regular : (tappable || isPlay ? .regular.tint(.white.opacity(0.92)).interactive() : .regular), in: shape)
+            // 胶囊底下那层青紫光（用户要求，参考视频）：挂在胶囊上、跟着它往上走，拖得越高越亮
+            .background { glow }
+            .environment(\.colorScheme, .dark)
+            // 只认往上的拖：往下、横着的照常滚页面（见 RequestSwipeUpRecognizer）
+            .gesture(RequestSwipeUpGesture(isEnabled: isSend && !launched,
+                                           onChanged: { dragChanged($0) },
+                                           onEnded: { dragEnded(reach: $0) },
+                                           onCancelled: { settle() }))
+            .onTapGesture { tap() }
+            .accessibilityElement(children: card ? .contain : .combine)
+            .accessibilityAddTraits(card ? [] : .isButton)
+            .accessibilityHint(Text(hint))
+            // 旁白念「请求添加」（用户要求），语音控制说屏上的「上滑申请添加」也能按
+            .accessibilityInputLabels(isSend ? [Text("请求添加"), Text("上滑申请添加"), Text("申请添加")] : [])
+            .accessibilityAction { tap() }
+            // 「request-add」留着：DuoUnfoldedTests 用它找这颗钮
+            .accessibilityIdentifier(card ? "request-card" : (isPlay ? "request-play" : "request-add"))
+            // 发出去了：停在上沿化开、淡出（减弱动态效果时只淡出）
+            .scaleEffect(soften ? 1.05 : 1)
+            .blur(radius: soften ? 8 : 0)
+            .opacity(launched ? 0 : 1)
+            .offset(y: rise)
+            // 「松手即可申请」留在原位：胶囊升到上沿以后正好在它底下（规格：Release to send 出现在胶囊下面）
+            .overlay { releaseHint }
         }
-        .frame(minWidth: wide ? 180 : 0, maxWidth: maxW, alignment: .topLeading)
-        .fixedSize(horizontal: wide && !card, vertical: false)
-        .clipShape(shape)
-        .contentShape(shape)
-        .glassEffect(card ? .regular : (tappable || isPlay ? .regular.tint(.white.opacity(0.92)).interactive() : .regular), in: shape)
-        // 胶囊底下那层青紫光（用户要求，参考视频）：挂在胶囊上、跟着它往上走，拖得越高越亮
-        .background { glow }
-        .environment(\.colorScheme, .dark)
-        // 只认往上的拖：往下、横着的照常滚页面（见 RequestSwipeUpRecognizer）
-        .gesture(RequestSwipeUpGesture(isEnabled: isSend && !launched,
-                                       onChanged: { dragChanged($0) },
-                                       onEnded: { dragEnded($0) },
-                                       onCancelled: { settle() }))
-        .onTapGesture { tap() }
-        .accessibilityElement(children: card ? .contain : .combine)
-        .accessibilityAddTraits(card ? [] : .isButton)
-        .accessibilityHint(Text(hint))
-        .accessibilityAction { tap() }
-        // 「request-add」留着：DuoUnfoldedTests 用它找这颗钮
-        .accessibilityIdentifier(card ? "request-card" : (isPlay ? "request-play" : "request-add"))
-        // 发出去了：停在上沿化开、淡出（减弱动态效果时只淡出）
-        .scaleEffect(soften ? 1.05 : 1)
-        .blur(radius: soften ? 8 : 0)
-        .opacity(launched ? 0 : 1)
-        .offset(y: rise)
-        // 「松手即可申请」留在原位：胶囊升到上沿以后正好在它底下（规格：Release to send 出现在胶囊下面）
-        .overlay { releaseHint }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(isSend ? "request-send-capsule" : "request-control")
         .onChange(of: launched) { _, now in

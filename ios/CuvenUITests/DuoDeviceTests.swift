@@ -470,12 +470,23 @@ final class DuoDeviceTests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
-    /// 没登录：整屏登录页（只在确认登录页出现时才截图，免得截到后面的真实片库）
+    /// 没登录：整屏登录层（只在确认登录层出现时才截图，免得截到后面的真实片库）。
+    /// 用户要求新登录页先出落地页（「ideas in motion.」，LoginLanding），点「使用账号密码登录」才是原来的表单（LoginScreen）
     func testLoginScreen() {
         XCUIDevice.shared.orientation = .portrait
         let app = launch(demo: false)
+        // 落地页：等开场放完（约 2.6 秒）再截，然后点「使用账号密码登录」。
+        // 点正中的坐标（tapCenter），不等 isHittable：海报平面一直在流，元素永远「没停稳」
+        let landingAccount = app.descendants(matching: .any).matching(identifier: "login-account-button").firstMatch
+        if landingAccount.waitForExistence(timeout: 20) {
+            sleep(3)
+            snap("duo-20-login-landing")
+            if landingAccount.isOnScreen(in: app) { landingAccount.tapCenter() } else { landingAccount.tap() }
+        } else {
+            XCTFail("没登录时应当先出现登录落地页（login-account-button）")
+        }
         let subtitle = app.staticTexts["使用你的 Cuven 账户登录 Cuven max。"]
-        XCTAssertTrue(subtitle.waitForExistence(timeout: 20), "没登录时应当先出现登录页")
+        XCTAssertTrue(subtitle.waitForExistence(timeout: 20), "点「使用账号密码登录」以后应当出现账号密码登录页")
         // 截图前再确认一次登录页还盖着（登录页不透明，后面的片库露不出来）
         if subtitle.exists && app.textFields.count > 0 {
             sleep(2)

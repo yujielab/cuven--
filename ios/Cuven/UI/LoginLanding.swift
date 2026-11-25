@@ -12,7 +12,8 @@ import SwiftUI
 // · BrandCollapseLayer（LoginIntro.swift）：整屏品牌蓝 + 白色「Cuven max」字标，0.5 秒起收束成落在 iconRect 的图标。
 //   底板压在前景上面（录屏 0.67 秒：底板挡住标题中间那几个字）。
 // 只有一条时间线（TimelineView）：开场 1.17 秒里三层一起按它走；之后前景和图标不再变（不重算），只有封面平面接着走；
-// 场景不在前台、落地页被账号密码流程或粒子云盖住时停下来。
+// 场景不在前台、落地页被账号密码流程或粒子云盖住时停下来，停着的那段不算时间（回来接着放，开场不会被跳过）。
+// 减弱动态效果：画面定下来以后时间线整个停掉。
 // 落点（占整屏，Y 从屏顶算；PDF 第 3 页 D）：图标中心 54%、宽 21% 屏宽；标题中心 64%；按钮宽 86%，主按钮上沿 80%、次按钮上沿 87%。
 // 宽窗口（iPad、iPhone Duo 展开）：图标最大 120、按钮最宽 440、文字最宽 520，竖向比例不变；iPhone Duo 折起照手机的比例
 // （横向在安全区里居中，侧边那一列不算）；矮横屏（高不到 500）从按钮往上排。
@@ -32,10 +33,12 @@ struct LoginLanding: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
-    /// 落地页出现的那一刻：所有时间都从这里算
+    /// 落地页出现的那一刻：所有时间都从这里算（停着的那段时间不算：恢复时把它往后挪，见 hold）
     @State private var start = Date()
+    /// 时间线停下的那一刻；停着的时候时间就截在这里
+    @State private var pausedAt: Date?
     @State private var begun = false
-    /// 开场和封面入场都放完了（减弱动态效果时封面不怎么动，帧率可以降下来）
+    /// 开场和封面入场都放完了（按放了多久算，停着的不算）：减弱动态效果时画面从此不变，时间线停掉
     @State private var introDone = false
     /// 时间线走不走：active 变 false 以后再走半秒（落地页淡出、粒子云往上盖的那一段里封面还在流动），然后停
     @State private var running = true
@@ -50,14 +53,20 @@ struct LoginLanding: View {
     }
 
     var body: some View {
+        // 海报单子在时间线外面读：减弱动态效果时时间线停了，单子后到也要把那一帧刷新一次
+        let covers = LoginCovers.shared.urls
         GeometryReader { geo in
             // 按整个屏幕排（PDF 的百分比都是整屏的）：把安全区加回来，整块摆回屏幕原点（和 LoginScreen 同一种做法）
             let ins = geo.safeAreaInsets
             let size = CGSize(width: geo.size.width + ins.leading + ins.trailing,
                               height: geo.size.height + ins.top + ins.bottom)
             let layout = LoginLandingLayout(size: size, safe: ins).fitted(titleHeight: titleHeight, textHeight: textHeight)
-            TimelineView(.animation(minimumInterval: frameInterval, paused: !running || scenePhase != .active)) { tl in
-                scene(t: max(0, tl.date.timeIntervalSince(start)), size: size, layout: layout)
+            let still = reduceMotion && introDone
+            TimelineView(.animation(minimumInterval: frameInterval, paused: !running || scenePhase != .active || still)) { tl in
+                // 停着的时候时间截在停下那一刻（恢复的那一帧 start 还没挪，也不会跳一下）；
+                // 减弱动态效果放完以后画面不再变，给一个放完以后的固定时间（不靠停住的时间线给的日期）
+                let t = still ? 3 : max(0, (pausedAt ?? tl.date).timeIntervalSince(start))
+                scene(t: t, size: size, layout: layout, covers: covers)
             }
             .frame(width: size.width, height: size.height)
             .position(x: geo.size.width / 2 + (ins.trailing - ins.leading) / 2,
@@ -67,16 +76,32 @@ struct LoginLanding: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("login-landing")
         .onAppear {
-            // 冷启动时第一帧可能晚一点才上屏：时钟从真正出现时开始走，0.5 秒的品牌整屏不被吃掉
-            guard !begun else { return }
-            begun = true
-            start = Date()
+            if !begun {
+                // 冷启动时第一帧可能晚一点才上屏、场景也可能还没到前台：时钟从真正出现、到了前台才开始走，0.5 秒的品牌整屏不被吃掉
+                let now = Date()
+                begun = true
+                start = now
+                pausedAt = scenePhase == .active ? nil : now
+            } else {
+                hold(!running || scenePhase != .active)
+            }
         }
+        // 粒子云整屏盖上来时这一层会被移出窗口：那段也不算时间
+        .onDisappear { hold(true) }
+        .onChange(of: scenePhase) { _, p in hold(p != .active || !running) }
+        .onChange(of: running) { _, r in hold(scenePhase != .active || !r) }
         // 封面：本机缓存的海报地址先用上（下次打开立刻有），后台再刷新（LoginCovers）
         .task { await LoginCovers.shared.load() }
         .task {
-            try? await Task.sleep(for: .seconds(3))
-            introDone = true
+            // 开场按「放了多久」算：停着的时候不往前走，放够 3 秒才算放完
+            while !introDone && !Task.isCancelled {
+                let left = 3 - (pausedAt ?? Date()).timeIntervalSince(start)
+                if left <= 0 {
+                    introDone = true
+                    break
+                }
+                try? await Task.sleep(for: .seconds(max(0.2, left)))
+            }
         }
         .task(id: active) {
             if active {
@@ -88,18 +113,30 @@ struct LoginLanding: View {
         }
     }
 
-    /// 旧机型（Compat.legacyDevice）最多 60 帧；减弱动态效果、入场放完以后 30 帧够了；别的跟屏幕走（ProMotion 120）
-    private var frameInterval: Double? {
-        if reduceMotion && introDone { return 1.0 / 30 }
-        if Compat.legacyDevice { return 1.0 / 60 }
-        return nil
+    /// 用户要的开场不能被打断吃掉：停着的那段时间不算（首次联网的系统弹窗、拉下控制中心、进了账号密码流程），回来接着放
+    private func hold(_ paused: Bool) {
+        if paused {
+            if pausedAt == nil { pausedAt = Date() }
+        } else if let p = pausedAt {
+            start = start.addingTimeInterval(Date().timeIntervalSince(p))
+            pausedAt = nil
+        }
     }
 
-    private func scene(t: Double, size: CGSize, layout: LoginLandingLayout) -> some View {
-        ZStack(alignment: .topLeading) {
+    /// 旧机型（Compat.legacyDevice）最多 60 帧；别的跟屏幕走（ProMotion 120）
+    private var frameInterval: Double? {
+        Compat.legacyDevice ? 1.0 / 60 : nil
+    }
+
+    private func scene(t: Double, size: CGSize, layout: LoginLandingLayout, covers: [URL]) -> some View {
+        // 用户要的封面从图标那条中轴涌出：iPhone Duo 折起时前景在安全区里居中，平面跟着挪，两边加宽不露边
+        let dx = layout.centerX - size.width / 2
+        let plane = CGSize(width: size.width + abs(dx) * 2, height: size.height)
+        return ZStack(alignment: .topLeading) {
             Color.black
-            LoginCoverPlane(t: t, size: size, covers: LoginCovers.shared.urls, reduceMotion: reduceMotion)
-                .frame(width: size.width, height: size.height)
+            LoginCoverPlane(t: t, size: plane, covers: covers, reduceMotion: reduceMotion)
+                .frame(width: plane.width, height: plane.height)
+                .offset(x: dx - abs(dx))
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
             // 前景只在开场那 1.17 秒里变：时间截住以后每帧传进去的都一样，SwiftUI 不再重算它（Equatable）
@@ -197,7 +234,8 @@ struct LoginLandingLayout: Equatable, Sendable {
         self.titleSize = titleSize
         self.bodySize = bodySize
         self.labelSize = min(18, max(16, minSide * 0.043))
-        self.textGap = (titleSize * 0.36).rounded()
+        // 标题和说明之间：照用户发的录屏量（标题基线到说明第一行基线约 41 点），手机上约 19 点
+        self.textGap = (titleSize * 0.66).rounded()
         self.buttonWidth = min(440, avail * 0.86)
         self.textWidth = min(520, avail * 0.86)
         self.buttonHeight = bh
@@ -378,8 +416,9 @@ private enum LandingInk {
     static let body = LoginInk.rgb(0x86868B)
     static let primary = LoginInk.rgb(0xFAFAFA)
     static let primaryDown = LoginInk.rgb(0xD9D9DD)
-    static let secondary = LoginInk.rgb(0x1C1C1E)
-    static let secondaryDown = LoginInk.rgb(0x2C2C2E)
+    /// 次按钮：用户发的录屏里量到是平的 #161616（不带蓝），按下亮一档、对比不变
+    static let secondary = LoginInk.rgb(0x161616)
+    static let secondaryDown = LoginInk.rgb(0x262626)
 }
 
 // MARK: - 登录组的上浮与回落

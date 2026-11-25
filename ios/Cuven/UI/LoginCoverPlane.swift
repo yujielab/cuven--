@@ -13,6 +13,7 @@ import QuartzCore
 // 做法：一个 CALayer 当平面，每张封面一个子图层；每帧按平面上的位置算出四个角在屏上的位置，用透视变换
 // （矩形 → 四边形）贴上去。CA 在 GPU 上画，手机上一屏最多十七张、每帧只改 transform，旧机型 60 / 120 帧也顺；
 // 封面滑进暗区就回收，换下一张海报从顶上再进来。图走 ImagePipeline（解码在后台，内存 / 磁盘缓存全 App 共用）。
+// 图层顺序照 PDF 第 3 页：光晕在平面下面；平面自带一块黑底（卡缝是黑的、上半屏的封面不被光晕冲灰），顶上一条用遮罩淡入。
 //
 // 形状和节奏是按录屏逐帧量的（屏高、屏宽的比例）：
 //   · 列线汇聚点（地平线）在屏顶以上 15% 屏高：卡宽、两侧列的偏移都和「到这条线的距离」成正比（录屏里量出来是一条直线）；
@@ -67,6 +68,12 @@ private enum CoverPlaneModel {
     static let fadeFull = 0.085
     /// 「平面宽」：手机就是屏宽；宽窗口（iPad、展开的 Duo）按屏高收，不至于一张卡比手机整屏还大
     static func planeWidth(_ s: CGSize) -> Double { Double(min(s.width, s.height * 0.62)) }
+
+    /// 中列两边各铺几列：宽窗口多铺几列，Y 55% 处要盖到屏边（手机上算出来就是左右各一列）
+    static func sides(_ s: CGSize) -> Int {
+        let reach = Double(s.width) / 2 / (lateral * (0.55 - horizon) * planeWidth(s))
+        return max(1, min(3, Int(((reach - 0.5) / columnPitch).rounded(.up))))
+    }
 
     /// 到地平线的「透视距离」q（= 1 / 深度）→ 屏上到地平线的距离：上半段原样，过了 knee 软收
     static func g(_ q: Double) -> Double {
@@ -139,7 +146,18 @@ private final class CoverPlaneView: UIView {
         init(layer: CALayer) { self.layer = layer }
     }
 
+    /// 认的是哪一份海报单子（换了单子，预取从头记）
+    private struct CoverList: Equatable {
+        let count: Int
+        let first: URL?
+    }
+
     private let plane = CALayer()
+    /// 平面自己的黑底（只铺平面那块梯形）：卡之间的缝是黑的，平面外面透出底下的光晕（录屏第 6 秒顶上就是这样）。
+    /// 外面套一层裁切，只往下伸到领头一排：入场时黑底跟着封面一起往下铺，还没铺到的地方照旧是光晕
+    private let sheetClip = CALayer()
+    private let sheet = CAShapeLayer()
+    /// 平面的遮罩：顶上一条看不见，往下淡入（封面从灵动岛下面「冒」出来；光晕不在平面里，不受它影响）
     private let topFade = CAGradientLayer()
     private let glow = CAGradientLayer()
     private let shade = CAGradientLayer()
@@ -149,8 +167,16 @@ private final class CoverPlaneView: UIView {
     private var loading: Set<URL> = []
     /// 取不到的图：这么久以内不再试（没网时不反复打）
     private var failedAt: [URL: CFTimeInterval] = [:]
+    /// 每列已经预取到第几排（见 place）
+    private var prefetchedTo: [Int: Int] = [:]
+    private var lastList: CoverList?
 
     private var laidOut: CGSize = .zero
+    /// 中列两边各几列（CoverPlaneModel.sides）
+    private var side = 1
+    /// 用户的 iPad 布局：平面宽过 500 点，上半屏还亮着的卡比 w342 大（拉伸 1.3–1.7 倍会发虚），改要 w500、按 760 像素解码。
+    /// 旧机型不换（省内存、省流量）
+    private var hiRes = false
     private var placed: (travel: Double, count: Int, first: URL?)?
 
     /// 卡在自己坐标系里的大小（2 : 3）：透视变换把它贴到屏上的四边形，圆角跟着透视一起缩放
@@ -166,12 +192,19 @@ private final class CoverPlaneView: UIView {
         isOpaque = true
         backgroundColor = .black
 
-        // 顶上：黑 → 透明，封面从灵动岛下面「冒」出来
-        let clearBlack = UIColor(white: 0, alpha: 0).cgColor
-        topFade.colors = [UIColor.black.cgColor, UIColor.black.cgColor, clearBlack]
+        // 顶上：遮罩透明 → 不透明，封面（连同平面的黑底）从灵动岛下面「冒」出来；只遮平面，光晕的亮心照旧露着
+        topFade.colors = [UIColor.clear.cgColor, UIColor.clear.cgColor, UIColor.black.cgColor]
         topFade.locations = [0, NSNumber(value: CoverPlaneModel.fadeTop), NSNumber(value: CoverPlaneModel.fadeFull)]
         topFade.startPoint = CGPoint(x: 0.5, y: 0)
         topFade.endPoint = CGPoint(x: 0.5, y: 1)
+        plane.mask = topFade
+
+        // 平面的黑底：平面最底下一层，卡都压在它上面（makeCard 往后加）
+        sheet.fillColor = UIColor.black.cgColor
+        sheetClip.masksToBounds = true
+        sheetClip.isHidden = true
+        sheetClip.addSublayer(sheet)
+        plane.addSublayer(sheetClip)
 
         // 顶端中轴的柔灰光晕（径向：中心在顶上，往下、往两边淡掉）
         glow.type = .radial
@@ -189,8 +222,9 @@ private final class CoverPlaneView: UIView {
         shade.startPoint = CGPoint(x: 0.5, y: 0)
         shade.endPoint = CGPoint(x: 0.5, y: 1)
 
-        // 光晕叠在封面上面：顶上那几排像是从一团灰雾里出来
-        for l in [plane, topFade, glow, shade] as [CALayer] { layer.addSublayer(l) }
+        // 用户要求照 PDF 第 3 页的图层顺序：A 黑底 + 顶部柔光在最下面，B 封面平面压在光晕上（中上部的封面保留亮度和饱和度、
+        // 卡缝是黑的），C 黑色渐变再压在封面上
+        for l in [glow, plane, shade] as [CALayer] { layer.addSublayer(l) }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -204,14 +238,28 @@ private final class CoverPlaneView: UIView {
         if size != laidOut {
             laidOut = size
             let r = CGRect(origin: .zero, size: size)
-            for l in [plane, topFade, glow, shade] as [CALayer] { l.frame = r }
+            for l in [glow, plane, shade, sheetClip, sheet] as [CALayer] { l.frame = r }
+            // 遮罩不在图层树里，单独给（平面自己的坐标，和屏幕一样）
+            topFade.frame = r
+            side = CoverPlaneModel.sides(size)
+            sheet.path = footprint(size)
+            hiRes = CoverPlaneModel.planeWidth(size) > 500 && !Compat.legacyDevice
+            // 下次打开要用的那份海报按同一个尺寸先下（LoginCovers.prefetch）
+            LoginCovers.shared.hiRes = hiRes
             // 光晕的横向半径约平面宽的 0.58，纵向到 Y 22%
             glow.endPoint = CGPoint(x: 0.5 + 0.58 * CoverPlaneModel.planeWidth(size) / Double(size.width), y: 0.22)
+            prefetchedTo = [:]
             placed = nil
         }
+        let list = CoverList(count: covers.count, first: covers.first)
+        if list != lastList {
+            lastList = list
+            prefetchedTo = [:]
+        }
 
-        // 1.27 秒起顶上的光先亮（减弱动态效果也只是淡入）
-        glow.opacity = Float(planeSmooth((t - 1.27) / 0.35))
+        // 顶上的光先亮、封面再露头（PDF：1.27 秒顶部先亮，1.37 秒卡片露头）。按录屏量的：1.20 秒还是黑的，
+        // 1.28 秒约一半，1.33 秒九成，1.36 秒全亮——第一排封面出来的时候光已经在了（减弱动态效果也一样，本来就只是淡入）
+        glow.opacity = Float(planeSmooth((t - 1.19) / 0.17))
 
         let travel: Double
         let show: Bool
@@ -230,56 +278,97 @@ private final class CoverPlaneView: UIView {
         let key = (travel: show ? travel : -1, count: covers.count, first: covers.first)
         if let p = placed, p.travel == key.travel, p.count == key.count, p.first == key.first { return }
         placed = key
-        place(travel: travel, show: show, size: size, covers: covers)
+        // 往后预取几排：入场前先取开场冲过来的那六排（三列就是 18 张）；之后每列多取看得见的下一两排；
+        // 减弱动态效果不动，只取看得见的
+        let ahead = reduceMotion ? 0 : (show ? 2 : 5)
+        place(travel: travel, show: show, ahead: ahead, size: size, covers: covers)
     }
 
-    private func place(travel: Double, show: Bool, size: CGSize, covers: [URL]) {
-        var seen = Set<Slot>()
-        if show {
-            let W = Double(size.width), H = Double(size.height)
-            let wp = CoverPlaneModel.planeWidth(size)
-            // 宽窗口两边多铺几列，Y 55% 处要盖到屏边（手机上算出来就是左右各一列）
-            let reach = W / 2 / (CoverPlaneModel.lateral * (0.55 - CoverPlaneModel.horizon) * wp)
-            let side = max(1, min(3, Int(((reach - 0.5) / CoverPlaneModel.columnPitch).rounded(.up))))
-            let columns = side * 2 + 1
-            let lead = CoverPlaneModel.depth(atY: CoverPlaneModel.leadY)
-            let cut = CoverPlaneModel.depth(atY: CoverPlaneModel.recycleY)
-            let top = CoverPlaneModel.depth(atY: CoverPlaneModel.fadeTop)
+    /// 平面在屏上的那块梯形（两侧列的外沿之间，顶上从 fadeTop 起、一直到屏底）：屏上的横向位置和屏上的 Y 成正比，边是直线
+    private func footprint(_ size: CGSize) -> CGPath {
+        let W = Double(size.width), H = Double(size.height)
+        let half = CoverPlaneModel.planeWidth(size) * CoverPlaneModel.lateral * (Double(side) * CoverPlaneModel.columnPitch + 0.5)
+        func corner(_ s: Double, _ y: Double) -> CGPoint {
+            CGPoint(x: CGFloat(W / 2 + s * half * (y - CoverPlaneModel.horizon)), y: CGFloat(y * H))
+        }
+        let path = CGMutablePath()
+        path.move(to: corner(-1, CoverPlaneModel.fadeTop))
+        path.addLine(to: corner(1, CoverPlaneModel.fadeTop))
+        path.addLine(to: corner(1, 1))
+        path.addLine(to: corner(-1, 1))
+        path.closeSubpath()
+        return path
+    }
 
-            func screenX(_ lateral: Double, _ y: Double) -> CGFloat {
-                CGFloat(W / 2 + wp * CoverPlaneModel.lateral * lateral * (y - CoverPlaneModel.horizon))
+    private var pixel: CGFloat { LoginCovers.pixel(hiRes: hiRes) }
+    private func source(_ url: URL) -> URL { LoginCovers.source(url, hiRes: hiRes) }
+
+    private func place(travel: Double, show: Bool, ahead: Int, size: CGSize, covers: [URL]) {
+        var seen = Set<Slot>()
+        let W = Double(size.width), H = Double(size.height)
+        let wp = CoverPlaneModel.planeWidth(size)
+        let columns = side * 2 + 1
+        let lead = CoverPlaneModel.depth(atY: CoverPlaneModel.leadY)
+        let cut = CoverPlaneModel.depth(atY: CoverPlaneModel.recycleY)
+        let top = CoverPlaneModel.depth(atY: CoverPlaneModel.fadeTop)
+        let px = pixel
+
+        func screenX(_ lateral: Double, _ y: Double) -> CGFloat {
+            CGFloat(W / 2 + wp * CoverPlaneModel.lateral * lateral * (y - CoverPlaneModel.horizon))
+        }
+
+        // 平面的黑底跟着领头一排（两侧列）的近边往下铺；领头那排走远以后就一直铺到屏底
+        sheetClip.isHidden = !show
+        if show {
+            let front = lead - travel
+            let bottom = front > 0.02 ? min(1, CoverPlaneModel.screenY(front)) : 1
+            sheetClip.frame = CGRect(x: 0, y: 0, width: size.width, height: CGFloat(bottom * H))
+        }
+
+        for c in -side...side {
+            // 中列（和隔一列的）往远处错开半格，两侧列对齐
+            let phase = c % 2 == 0 ? 0.5 : 0
+            let lo = max(0, Int(((cut - CoverPlaneModel.cardDepth + travel - lead) / CoverPlaneModel.rowPitch - phase).rounded(.up)))
+            let hi = Int(((top + travel - lead) / CoverPlaneModel.rowPitch - phase).rounded(.down))
+
+            // 用户要求上半屏的封面是亮的：新的一排从顶上露头前图就先取好（多半已经解码完），不是暗块一路走过最亮的那段。
+            // 每列记着取到了第几排，每排只问一次；内存里已经有的不再取
+            if !covers.isEmpty {
+                let to = hi + ahead
+                let from = max(0, prefetchedTo[c].map { $0 + 1 } ?? (show ? hi + 1 : lo))
+                if from <= to {
+                    prefetchedTo[c] = to
+                    for r in from...to {
+                        let url = source(covers[(r * columns + c + side) % covers.count])
+                        if ImagePipeline.shared.cached(url, maxPixel: px) == nil { load(url) }
+                    }
+                }
             }
 
-            for c in -side...side {
-                // 中列（和隔一列的）往远处错开半格，两侧列对齐
-                let phase = c % 2 == 0 ? 0.5 : 0
-                let lo = max(0, Int(((cut - CoverPlaneModel.cardDepth + travel - lead) / CoverPlaneModel.rowPitch - phase).rounded(.up)))
-                let hi = Int(((top + travel - lead) / CoverPlaneModel.rowPitch - phase).rounded(.down))
-                guard lo <= hi else { continue }
-                let center = Double(c) * CoverPlaneModel.columnPitch
-                for r in lo...hi {
-                    let near = lead + (Double(r) + phase) * CoverPlaneModel.rowPitch - travel
-                    guard near > 0.02 else { continue }
-                    let yn = CoverPlaneModel.screenY(near), yf = CoverPlaneModel.screenY(near + CoverPlaneModel.cardDepth)
-                    guard yf < CoverPlaneModel.recycleY, yn > CoverPlaneModel.fadeTop else { continue }
-                    let slot = Slot(column: c, row: r)
-                    seen.insert(slot)
-                    let index = r * columns + c + side
-                    let card = active[slot] ?? claim(slot)
-                    // 刚才没有海报单子（第一次装、没网）的占位卡：单子到了就补上图
-                    if card.url == nil, !covers.isEmpty {
-                        let url = covers[index % covers.count]
-                        card.url = url
-                        fill(card, url)
-                    }
-                    card.layer.transform = Self.quad(
-                        Self.cardSize,
-                        CGPoint(x: screenX(center - 0.5, yf), y: CGFloat(yf * H)),
-                        CGPoint(x: screenX(center + 0.5, yf), y: CGFloat(yf * H)),
-                        CGPoint(x: screenX(center + 0.5, yn), y: CGFloat(yn * H)),
-                        CGPoint(x: screenX(center - 0.5, yn), y: CGFloat(yn * H))
-                    )
+            guard show, lo <= hi else { continue }
+            let center = Double(c) * CoverPlaneModel.columnPitch
+            for r in lo...hi {
+                let near = lead + (Double(r) + phase) * CoverPlaneModel.rowPitch - travel
+                guard near > 0.02 else { continue }
+                let yn = CoverPlaneModel.screenY(near), yf = CoverPlaneModel.screenY(near + CoverPlaneModel.cardDepth)
+                guard yf < CoverPlaneModel.recycleY, yn > CoverPlaneModel.fadeTop else { continue }
+                let slot = Slot(column: c, row: r)
+                seen.insert(slot)
+                let index = r * columns + c + side
+                let card = active[slot] ?? claim(slot)
+                // 刚才没有海报单子（第一次装、没网）的占位卡：单子到了就补上图
+                if card.url == nil, !covers.isEmpty {
+                    let url = source(covers[index % covers.count])
+                    card.url = url
+                    fill(card, url)
                 }
+                card.layer.transform = Self.quad(
+                    Self.cardSize,
+                    CGPoint(x: screenX(center - 0.5, yf), y: CGFloat(yf * H)),
+                    CGPoint(x: screenX(center + 0.5, yf), y: CGFloat(yf * H)),
+                    CGPoint(x: screenX(center + 0.5, yn), y: CGFloat(yn * H)),
+                    CGPoint(x: screenX(center - 0.5, yn), y: CGFloat(yn * H))
+                )
             }
         }
         // 滑进暗区（或者还没入场）的卡回收，留给后面补进来的
@@ -325,7 +414,7 @@ private final class CoverPlaneView: UIView {
 
     /// 内存里有就直接贴（不淡入）；没有就去取，到了淡入
     private func fill(_ card: Card, _ url: URL) {
-        if let img = ImagePipeline.shared.cached(url, maxPixel: LoginCovers.posterPixel)?.cgImage {
+        if let img = ImagePipeline.shared.cached(url, maxPixel: pixel)?.cgImage {
             card.layer.contents = img
             card.hasImage = true
             return
@@ -337,7 +426,7 @@ private final class CoverPlaneView: UIView {
         guard !loading.contains(url) else { return }
         if let at = failedAt[url], CACurrentMediaTime() - at < 20 { return }
         loading.insert(url)
-        let px = LoginCovers.posterPixel
+        let px = pixel
         Task { [weak self] in
             let img = await ImagePipeline.shared.image(url, maxPixel: px)
             self?.loaded(url, img)
@@ -391,7 +480,8 @@ private final class CoverPlaneView: UIView {
 // MARK: - 海报单子
 
 /// 登录页背景用的海报：请求添加 Worker 的公开片单（/app/years，近 7 年 × 电影 / 剧集），登录前不碰影片库。
-/// 存一份在本机（Caches/cuven），下次打开立刻就有；每次进程问一次新的，新单子留到下次打开再换（不在半路换掉屏上正流着的）。
+/// 存一份在本机（Caches/cuven），下次打开立刻就有；每次进程问一次新的，新单子留到下次打开再换（不在半路换掉屏上正流着的）；
+/// 手上一张都没有又没问成的，登录页开着就隔一会儿再问。
 /// 演示数据：本地画的海报（demo://poster/N）
 @MainActor
 @Observable
@@ -401,12 +491,24 @@ final class LoginCovers {
     /// 平面上按这个顺序取海报（空的：平面上是暗色占位）
     private(set) var urls: [URL]
 
-    /// 海报按这个尺寸取（TMDB 的 w342 是 342 × 513；旧机型取小一点省内存）
-    nonisolated static let posterPixel: CGFloat = Compat.legacyDevice ? 400 : 520
+    /// 海报按这个尺寸解码：TMDB 的 w342 是 342 × 513，按 520（旧机型 400 省内存）；大图（w500，见 source）按 760
+    nonisolated static func pixel(hiRes: Bool) -> CGFloat {
+        hiRes ? 760 : (Compat.legacyDevice ? 400 : 520)
+    }
+
+    /// 用户的 iPad 布局：平面宽过 500 点时卡比 w342 大，改要 TMDB 的 w500（换的是地址里的尺寸段；演示海报、别的图床原样）
+    nonisolated static func source(_ url: URL, hiRes: Bool) -> URL {
+        hiRes ? (TMDBImage.url(url.absoluteString, "w500") ?? url) : url
+    }
+
+    /// 平面上回排的是不是大图（CoverPlaneView 按窗口大小设）：下次打开要用的那份按同一个尺寸先下
+    @ObservationIgnored var hiRes = false
 
     @ObservationIgnored private var restored = false
     @ObservationIgnored private var refreshed = false
     @ObservationIgnored private var refreshing = false
+    /// 没问成时隔多久再问（2、4、8…最多 30 秒）
+    @ObservationIgnored private var retryDelay: Double = 2
 
     private static let etagKey = "cuven_login_covers_etag"
     private static let demo: [URL] = (0..<32).compactMap { URL(string: "demo://poster/\(60 + $0)") }
@@ -422,40 +524,43 @@ final class LoginCovers {
         }
         if !restored {
             restored = true
-            // 本机存的上一份（后台读，不卡主线程）：领头几排的图顺手先取好
+            // 本机存的上一份（后台读，不卡主线程）。领头几排的图由平面自己按窗口大小先取（CoverPlaneView 的预取，尺寸对得上）
             let file = Self.file
             let saved = await Task.detached(priority: .userInitiated) { () -> [URL] in
                 guard let data = try? Data(contentsOf: file),
                       let list = try? JSONDecoder().decode([String].self, from: data) else { return [] }
                 return list.compactMap { URL(string: $0) }
             }.value
-            if urls.isEmpty, !saved.isEmpty {
-                urls = saved
-                Self.warm(saved, priority: .userInitiated)
-            }
+            if urls.isEmpty, !saved.isEmpty { urls = saved }
         }
         guard !refreshed, !refreshing else { return }
         refreshing = true
         defer { refreshing = false }
         let year = Calendar.current.component(.year, from: Date())
-        let etag = urls.isEmpty ? nil : UserDefaults.standard.string(forKey: Self.etagKey)
-        do {
-            let r = try await RequestAPI.years(from: year - 6, to: year, per: 12, etag: etag)
-            refreshed = true
-            // 304：本机那份就是最新的；404：老版本没有这个接口，留着本机的
-            guard let page = r.page else { return }
-            let fresh = Self.pick(page)
-            guard !fresh.isEmpty else { return }
-            Self.save(fresh, etag: r.etag)
-            if urls.isEmpty {
-                urls = fresh
-                Self.warm(fresh, priority: .userInitiated)
-            } else {
-                // 屏上已经在流本机那份：新的留给下次打开，先把领头几张的图下到磁盘缓存里
-                Self.warm(fresh, priority: .utility)
+        while !refreshed, !Task.isCancelled {
+            let etag = urls.isEmpty ? nil : UserDefaults.standard.string(forKey: Self.etagKey)
+            do {
+                let r = try await RequestAPI.years(from: year - 6, to: year, per: 12, etag: etag)
+                refreshed = true
+                retryDelay = 2
+                // 304：本机那份就是最新的；404：老版本没有这个接口，留着本机的
+                guard let page = r.page else { return }
+                let fresh = Self.pick(page)
+                guard !fresh.isEmpty else { return }
+                Self.save(fresh, etag: r.etag)
+                if urls.isEmpty {
+                    urls = fresh
+                } else {
+                    // 屏上已经在流本机那份：新的留给下次打开
+                    Self.prefetch(fresh, hiRes: hiRes)
+                }
+            } catch {
+                // 用户要的海报背景：第一次打开就没网（服务暂时不可用、首次联网的弹窗还没点）时别一整次都是暗块，隔一会儿再问；
+                // 登录页不在了（调用方的任务取消）就停。本机有上一份的不急，留着它，下次调用再问
+                guard urls.isEmpty, !Task.isCancelled else { return }
+                try? await Task.sleep(for: .seconds(retryDelay))
+                retryDelay = min(retryDelay * 2, 30)
             }
-        } catch {
-            // 没网 / 服务暂时不可用：留着本机的（空的就一直是暗色占位），下次调用再问
         }
     }
 
@@ -476,16 +581,13 @@ final class LoginCovers {
         return found.prefix(96).map { $0.url }.shuffled()
     }
 
-    /// 领头几排（三列 × 六排）的图先取好：第一排一露头就是海报，不是占位
-    private static func warm(_ list: [URL], priority: TaskPriority) {
-        let first = Array(list.prefix(18))
-        let px = posterPixel
-        Task.detached(priority: priority) {
-            await withTaskGroup(of: Void.self) { group in
-                for u in first {
-                    group.addTask { _ = await ImagePipeline.shared.image(u, maxPixel: px) }
-                }
-            }
+    /// 用户要求下次打开立刻有海报：新单子领头几排（三列 × 六排）的图只下到磁盘缓存（URLCache），不解码进内存（这次用不上）；
+    /// 晚几秒、一张一张下，不和屏上正在进来的那几排抢连接
+    private static func prefetch(_ list: [URL], hiRes: Bool) {
+        let first = list.prefix(18).map { source($0, hiRes: hiRes) }
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(for: .seconds(8))
+            for u in first { _ = await ImagePipeline.shared.data(u) }
         }
     }
 

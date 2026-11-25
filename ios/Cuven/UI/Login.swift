@@ -100,6 +100,8 @@ final class LoginFlow {
     private(set) var successAt: Date?
     private(set) var successFrom: Pane = .signin
     var reduceMotion = false
+    /// 退回了落地页（用户要求新登录页先出落地页）：还在路上的查询回来也不再放光标、不把键盘叫出来；再进来时放开
+    var onLanding = false
 
     private(set) var intent: Intent = .login
     private(set) var passMode: PassMode = .register
@@ -818,6 +820,9 @@ struct LoginView: View {
     @State private var showAccount = false
     /// 落地页上的「使用光学配对登录」：这台设备显示粒子云，让另一台已登录的 iPhone 扫
     @State private var pairShowing = false
+    /// 打开粒子云那一刻的会话：关掉时会话没换，就是点了它下面的「使用账户密码登录」。
+    /// 不看 isLoggedIn：预览时会话本来就在（-CuvenLoginLanding 盖在已登录 / 演示会话上），比的是这次有没有换
+    @State private var pairBase: AccountSession?
 
     var body: some View {
         ZStack {
@@ -838,9 +843,9 @@ struct LoginView: View {
         }
         .fullScreenCover(isPresented: $pairShowing) { PairShowView().environment(account).environment(\.colorScheme, .light) }
         .onChange(of: pairShowing) { was, now in
-            // 粒子云没登录就关掉，只能是点了它下面的「使用账户密码登录」（配对成功时登录层整个淡出）：照那颗钮的字进账号密码流程。
+            // 粒子云没换会话就关掉，只能是点了它下面的「使用账户密码登录」（配对成功时登录层整个淡出）：照那颗钮的字进账号密码流程。
             // 粒子云往下退的时候露出来的已经是表单，落地页不再淡一遍
-            guard was, !now, !account.isLoggedIn else { return }
+            guard was, !now, account.session == pairBase else { return }
             var t = Transaction()
             t.disablesAnimations = true
             withTransaction(t) { enterAccount(animated: false) }
@@ -850,6 +855,7 @@ struct LoginView: View {
     private func openPair() {
         // 粒子云要配对模型；万一没有（不该发生）就退回账号密码流程
         guard PairSpec.shared != nil else { openAccount(); return }
+        pairBase = account.session
         pairShowing = true
     }
 
@@ -862,6 +868,7 @@ struct LoginView: View {
             flow = f
             f.start()
         }
+        flow?.onLanding = false
         if animated {
             withAnimation(CSSBezier.ios.animation(0.45)) { showAccount = true }
         } else {
@@ -870,6 +877,8 @@ struct LoginView: View {
     }
 
     private func closeAccount() {
+        // 表单还要留 0.5 秒放淡出：这段里查询回来不能把键盘叫到落地页上
+        flow?.onLanding = true
         withAnimation(CSSBezier.ios.animation(0.45)) { showAccount = false }
     }
 }
@@ -966,7 +975,8 @@ private struct LoginScreen: View {
         .onChange(of: flow.focusRequest) { _, r in
             Task { @MainActor in
                 if r.delay > 0 { try? await Task.sleep(for: .seconds(r.delay)) }
-                guard flow.focusRequest == r else { return }
+                // 退回落地页（用户要求）以后，还在路上的查询不再把键盘叫出来
+                guard !flow.onLanding, flow.focusRequest == r else { return }
                 focus = r.field
             }
         }
@@ -1012,9 +1022,9 @@ private struct LoginScreen: View {
     }
 
     /// 左上角的返回：流程里的几页照旧退一页；第一页（登录页）有落地页可回时退回落地页
-    /// （用户要求新登录页先出落地页）。忙着验证、已经成功的时候不给退
+    /// （用户要求新登录页先出落地页）。已经成功的时候不给退
     private var showsBack: Bool {
-        flow.navShowsBack || (onBack != nil && flow.pane == .signin && flow.successAt == nil && !flow.busy)
+        flow.navShowsBack || (onBack != nil && flow.pane == .signin && flow.successAt == nil)
     }
 
     private func backTapped() {
@@ -1022,6 +1032,8 @@ private struct LoginScreen: View {
             flow.navTapped()
             return
         }
+        // 验证中不能退（晚到的成功会在落地页后面把人登进去），但钮不闪：一直留着，验证中点了不理
+        guard !flow.busy else { return }
         Haptics.selection()
         focus = nil
         onBack?()
