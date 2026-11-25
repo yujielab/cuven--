@@ -83,6 +83,17 @@ static float sg_round_box(float2 p, float2 b, float r) {
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
 }
 
+/// 往里羽化用的「离边多远」（里面是正的）：横、竖两条直边的距离做一次平滑取小，k 是圆滑的宽度（像素）。
+/// 圆角矩形的精确距离在比圆角更深的地方等距线是直角，对角线上折出一道斜缝（边缘光看着像相框的接角，不像屏幕的圆角）；
+/// 这个场深处的等距线也是圆的。k ≈ 1.17 × 圆角时贴边那一圈和那段圆弧差不到圆角的 1%
+static float sg_edge_soft(float2 p, float2 b, float k) {
+    float2 d = b - abs(p);
+    float m = min(d.x, d.y);
+    if (k <= 0.0) return m;
+    float h = max(k - abs(d.x - d.y), 0.0) / k;
+    return m - h * h * k * 0.25;
+}
+
 /// 点到线段的距离（x）和投影在线段上的位置（y：0 = a，1 = b）
 static float2 sg_segment(float2 p, float2 a, float2 b) {
     float2 pa = p - a, ba = b - a;
@@ -263,14 +274,16 @@ fragment float4 sg_fragment(SGOut in [[stage_in]], constant SGUniforms &U [[buff
 
     // 边缘光：贴着圆角边的一圈亮边（短边的 3%）往里羽化；环走到哪儿，哪一段边就亮起来（刚亮的那一下更亮）；
     // 之后慢慢从紫往青漂，左右两边颜色不一样（参照录屏 5.6、7.0 秒）。
-    // 离边多远一律按圆角矩形的有向距离 sd 量（不是横竖两条边各量一份再加起来）：圆角那一段亮边和直边一样宽，角上不叠成两份
+    // 亮边按圆角矩形的有向距离 sd 量（不是横竖两条边各量一份再加起来）：圆角那一段和直边一样宽、贴着屏幕的圆角走，角上不叠成两份；
+    // 往里的羽化和远一点的光晕按 sg_edge_soft 量：深处也是圆角，不在四个角折出斜缝（用户 iPhone Duo 截图：光的圆角不跟屏幕的角）
     if (U.edge.x > 0.001) {
         float e = max(-sd, 0.0);
         if (e < 0.5 * S) {
             float rimW = 0.03 * S;
+            float es = max(sg_edge_soft(px - mid, mid, max(1.17 * U.size.z, 0.15 * S)), 0.0);
             float rim = exp(-(e * e) / (rimW * rimW));
-            float feather = exp(-e / (rimW * 3.0));
-            float haze = exp(-e / (0.20 * S));
+            float feather = exp(-es / (rimW * 3.0));
+            float haze = exp(-es / (0.20 * S));
             float2 dm = px - mid;
             float ang = atan2(dm.y, dm.x);
             float drift = U.edge.y;
