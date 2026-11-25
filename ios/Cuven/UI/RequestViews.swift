@@ -50,14 +50,18 @@ struct RequestMorphControl: View {
     @State private var dragLift: CGFloat = 0
     /// 过没过线：过了线胶囊停在上沿，底下出「松手即可申请」
     @State private var armed = false
+    /// 什么时候过的线：过线停一下再松手才算（往上甩着滚页面的那一下不算）
+    @State private var armedAt: Date?
 
     /// 行程：1.5 个胶囊高（规格：拖动约一个半胶囊高）
     static let travel: CGFloat = 48 * 1.5
     /// 拖过行程的 72% 算过线；退回 55% 以下才算没过（停在线上抖，不会来回闪）
     private static let commit: CGFloat = 0.72
     private static let uncommit: CGFloat = 0.55
-    /// 刚动了一点（比这还少）就松手：当成按了一下
+    /// 整段手势里手指离按下那一点最远也没走到这么远就松手：当成按了一下
     private static let tapSlop: CGFloat = 10
+    /// 过线以后至少停这么久再松手才发（用户要求上滑申请添加，但往上甩着滚页面不该误发）
+    private static let armHold: TimeInterval = 0.12
 
     var body: some View {
         let card = mode.isCard
@@ -228,17 +232,22 @@ struct RequestMorphControl: View {
         let r = dragLift / Self.travel
         if !armed && r >= Self.commit {
             Haptics.selection()
+            armedAt = Date()
             withAnimation(armAnimation) { armed = true }
         } else if armed && r < Self.uncommit {
+            armedAt = nil
             withAnimation(armAnimation) { armed = false }
         }
     }
 
-    private func dragEnded(_ lift: CGFloat) {
+    /// reach：整段手势里手指离按下那一点最远走了多远（不是松手那一刻的位置）
+    private func dragEnded(reach: CGFloat) {
         guard !launched else { return }
         guard isSend else { settle(); return }
-        // 过线松手：发出去（只发一次）；几乎没动就松手的当成按了一下；其余弹回原位
-        if armed || lift < Self.tapSlop {
+        // 过线、停了一下再松手：发出去（只发一次）。用户要求上滑申请添加，但往上甩着滚页面不该误发：过线停一下再松手才算
+        let heldArmed = armed && Date().timeIntervalSince(armedAt ?? .distantFuture) >= Self.armHold
+        // 用户要求：没过线就松手要弹回；拖上去又拖回原位松手不算按一下，只有从头到尾几乎没动才当成按了一下
+        if heldArmed || reach < Self.tapSlop {
             send()
         } else {
             settle()
