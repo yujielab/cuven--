@@ -135,8 +135,11 @@ struct RootView: View {
                 LibraryView().duoHidesTabBar().tint(.white).id(roots[.library, default: 0])
             }
             // 请求中心（用户要求）：角标是进行中的请求个数
-            Tab("请求", systemImage: "tray.and.arrow.down.fill", value: AppTab.requests) {
+            // 图标和侧边那一列里的一样（用户要求更新：海报卡 + 右上角的「+」，NavGlyphImage）
+            Tab(value: AppTab.requests) {
                 RequestCenterView().duoHidesTabBar().tint(.white).id(roots[.requests, default: 0])
+            } label: {
+                Label { Text("请求") } icon: { Image(uiImage: NavGlyphImage.request) }
             }
             .badge(RequestStore.shared.activeCount + RequestBasket.shared.items.count)
             // 我的（账户与设置）：用户要求照 Netflix，头像是导航的最后一格；侧边那一列里画的是头像，系统标签栏上是人像符号
