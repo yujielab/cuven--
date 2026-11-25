@@ -84,10 +84,19 @@ fragment float4 ff_fragment(FFOut in [[stage_in]], constant FFUniforms &U [[buff
     float wI = U.wave.y * (1.0 - reduce * 0.7);
     float wave = exp(-pow((x - wx) / 0.055, 2.0)) * wI * smoothstep(-0.1, 0.06, wx) * (1.0 - 0.55 * smoothstep(0.6, 1.08, wx));
 
-    float3 c = float3(0.0);
-    float inside = 1.0 - smoothstep(-0.5, 0.5, d);
+    // 左右两头没有边界（用户要求「粒子没有边界，靠近左右边缘时使用模糊淡出，不希望看到明显的边界」）：
+    // blur：离左右边缘越近越虚（0 = 中间，1 = 贴着边），点阵变大变软、边线和辉光变宽变软；
+    // fade：最外 11% 宽里亮度平滑地降到 0，正好落在卡的底色上
+    float edgeDist = min(x, 1.0 - x);
+    float blur = 1.0 - smoothstep(0.0, 0.16, edgeDist);
+    float fade = smoothstep(0.0, 0.11, edgeDist);
+    fade = fade * fade * (3.0 - 2.0 * fade);
 
-    if (d < 0.5) {
+    float3 c = float3(0.0);
+    float soft = 0.5 + 3.0 * blur * pt;
+    float inside = 1.0 - smoothstep(-soft, soft, d);
+
+    if (d < soft) {
         // 内光：薄膜里一层淡淡的同色光，靠边线的地方亮一点，越往右越淡一点
         float v = yPx / hPx;                                    // -1…1：相对中轴的位置
         float edge = smoothstep(0.55, 1.0, abs(v));
@@ -99,7 +108,8 @@ fragment float4 ff_fragment(FFOut in [[stage_in]], constant FFUniforms &U [[buff
         float2 cc = (cid + 0.5) * cell;                         // 这一格的中心
         float2 lp = fract(g) - 0.5;
         float sq = max(abs(lp.x), abs(lp.y));
-        float dotMask = 1.0 - smoothstep(0.24, 0.24 + 1.2 / cell, sq);
+        // 靠近左右边缘：点的边越来越软、往外散开一点（虚焦），亮度不变多少，交给下面的 fade 淡掉
+        float dotMask = 1.0 - smoothstep(0.24 - 0.12 * blur, 0.24 + 1.2 / cell + 0.3 * blur, sq);
         // 格子中心那一点在不在漏斗里（不在的不画，边上不会冒出半个点）
         float xc = cc.x / W;
         float hc = max(ff_half(xc, U.heights) * maxHalf, 1.0);
@@ -140,12 +150,14 @@ fragment float4 ff_fragment(FFOut in [[stage_in]], constant FFUniforms &U [[buff
     }
 
     // 边线：一条很细、很亮的线（中间偏白），外面一层窄的辉光、一层很淡的宽辉光；能量波经过时边线也跟着亮一点
+    // 靠近左右边缘：线变宽变软（虚焦），总亮度大致不变
     float ad = abs(d);
-    float core = 1.0 - smoothstep(0.35 * pt, 1.1 * pt, ad);
-    float glowN = exp(-max(d, 0.0) / (3.5 * pt)) * step(0.0, d);
+    float spread = 1.0 + 3.0 * blur;
+    float core = 1.0 - smoothstep(0.35 * pt * spread, 1.1 * pt * spread, ad);
+    float glowN = exp(-max(d, 0.0) / (3.5 * pt * spread)) * step(0.0, d);
     float glowW = exp(-max(d, 0.0) / (16.0 * pt)) * step(0.0, d);
     float lit = 1.0 + 0.9 * wave;
-    c += mix(col, float3(1.0), 0.35) * core * 1.25 * lit;
+    c += mix(col, float3(1.0), 0.35) * core * 1.25 * lit / spread;
     c += col * (glowN * 0.32 + glowW * 0.07) * lit;
 
     // 从每一段的起点往上下各拉一条很淡的虚线（连到上面那一行数字）
@@ -156,7 +168,7 @@ fragment float4 ff_fragment(FFOut in [[stage_in]], constant FFUniforms &U [[buff
         c += float3(1.0) * vline * dash * 0.05;
     }
 
-    c *= U.extra.x;
+    c *= U.extra.x * fade;
     // 底色（和卡片一样的近黑）+ 柔和的色调映射：亮的地方不会一片死白
     float3 bg = float3(U.extra.z);
     float3 outc = bg + (1.0 - exp(-c * 1.15));
