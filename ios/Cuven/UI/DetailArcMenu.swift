@@ -27,12 +27,14 @@ struct DetailArcMenuLayer: View {
     /// 一块接一块的节拍：中途再点一下就停掉它，从眼下的样子接着走
     @State private var stepper: Task<Void, Never>?
 
-    /// 圆钮多大（中间的「+」和弧上的三颗一样大）、三颗离「+」的圆心多远、相邻两颗隔多少度。
-    /// 用户要求（真机截图）三颗的玻璃都是正圆（以前是三段圆头的弧带）：摆在同一道弧上，位置照旧——
-    /// 离圆心 62、隔 62°，相邻两颗之间、和「+」之间都空出约 14 点
+    /// 圆钮多大（中间的「+」和弧上的「返回」「分享」一样大）、三项离「+」的圆心多远、相邻两项隔多少度。
+    /// 用户要求（真机截图）：「返回」「分享」的玻璃改成正圆，「下载」保留原来那段圆头的弧带（厚 42、看得见的弧长 50°）。
+    /// 都摆在同一道弧上，位置照旧——离圆心 62、隔 62°，相邻两项之间、和「+」之间都空出约 14 点
     private static let button: CGFloat = 48
     private static let radius: CGFloat = 62
     private static let step: Double = 62
+    private static let thickness: CGFloat = 42
+    private static let span: Double = 50
     /// 弧上的圆最外沿离圆心多远（两头那两颗绕到「+」的正上方、正下方附近）
     private static let reach: CGFloat = radius + button / 2
     /// 三块的玻璃压暗一点：亮的海报上白色图标也看得清（真机截图：返回、下载几乎看不见）
@@ -139,7 +141,12 @@ struct DetailArcMenuLayer: View {
     private func fan(toward: Double) -> some View {
         ZStack {
             ForEach(0..<3, id: \.self) { i in
-                if shown[i] { segment(i, toward: toward) }
+                if shown[i] {
+                    segment(i, toward: toward)
+                        // 正在收起的那几项不再接点按
+                        .allowsHitTesting(open)
+                        .transition(grow)
+                }
             }
             mainButton
         }
@@ -163,18 +170,24 @@ struct DetailArcMenuLayer: View {
         .accessibilityIdentifier("detail-arc-menu")
     }
 
-    /// 第 i 颗（上、中、下）：一颗 48 点的正圆玻璃，整颗就是这一项的按钮。
-    /// 玻璃贴在按钮自己身上：按在圆里哪儿，玻璃的回弹和这一项的动作都是同一下
+    /// 第 i 项（上、中、下）：「返回」「分享」是一颗 48 点的正圆玻璃，「下载」是一段圆头的弧带玻璃（用户要求保留原来的样子）。
+    /// 整块玻璃就是这一项的按钮；玻璃贴在按钮自己身上：按在哪儿，玻璃的回弹和这一项的动作都是同一下
+    @ViewBuilder
     private func segment(_ i: Int, toward: Double) -> some View {
-        // 中间那颗正对着展开的方向，上下两颗各偏一个 step。屏幕坐标 y 往下：往右展开时「上」是角度减，往左展开时是角度加
+        // 中间那项正对着展开的方向，上下两项各偏一个 step。屏幕坐标 y 往下：往右展开时「上」是角度减，往左展开时是角度加
         let offset = Double(i - 1) * Self.step
-        let mid = (toward > 90 && toward < 270 ? toward - offset : toward + offset) * .pi / 180
-        return item(i)
-            .glassEffect(Self.glassInk, in: Circle())
-            .position(x: Self.box / 2 + Self.radius * CGFloat(cos(mid)), y: Self.box / 2 + Self.radius * CGFloat(sin(mid)))
-            // 正在收起的那几块不再接点按
-            .allowsHitTesting(open)
-            .transition(grow)
+        let deg = toward > 90 && toward < 270 ? toward - offset : toward + offset
+        if i == 1 {
+            let slot = ArcSlot(band: ArcBand(midDegrees: deg, spanDegrees: Self.span, radius: Self.radius, thickness: Self.thickness))
+            item(i, slot: slot)
+                .glassEffect(Self.glassInk, in: slot)
+                .position(x: Self.box / 2 + slot.middle.x, y: Self.box / 2 + slot.middle.y)
+        } else {
+            let mid = deg * .pi / 180
+            item(i, slot: nil)
+                .glassEffect(Self.glassInk, in: Circle())
+                .position(x: Self.box / 2 + Self.radius * CGFloat(cos(mid)), y: Self.box / 2 + Self.radius * CGFloat(sin(mid)))
+        }
     }
 
     /// 从圆钮那儿长出来、收回去：这一块铺满圆钮周围那一块（position），缩放的中心就是圆钮。
@@ -185,7 +198,7 @@ struct DetailArcMenuLayer: View {
     }
 
     @ViewBuilder
-    private func item(_ i: Int) -> some View {
+    private func item(_ i: Int, slot: ArcSlot?) -> some View {
         switch i {
         case 0:
             Button {
@@ -203,7 +216,7 @@ struct DetailArcMenuLayer: View {
             .accessibilityLabel("返回")
             .accessibilityIdentifier("detail-arc-back")
         case 1:
-            DetailDownloadButton(video: video, title: title, runtime: runtime, alert: $alert, hit: Self.button)
+            DetailDownloadButton(video: video, title: title, runtime: runtime, alert: $alert, slot: slot)
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(.white)
                 .tint(.white)
@@ -213,6 +226,58 @@ struct DetailArcMenuLayer: View {
                 .foregroundStyle(.white)
                 .tint(.white)
         }
+    }
+}
+
+/// 一段圆头的弧带：圆心在框的中心，半径 radius（弧带的中线），厚 thickness；看得见的弧长（含两头的圆头）是 spanDegrees，
+/// 中线对着 midDegrees（屏幕坐标：0° 朝右，90° 朝下）
+struct ArcBand: Shape {
+    var midDegrees: Double
+    var spanDegrees: Double
+    var radius: CGFloat
+    var thickness: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let c = CGPoint(x: rect.midX, y: rect.midY)
+        // 圆头往两头各伸出 thickness / 2：扣掉这一截角度，看上去整块正好 spanDegrees
+        let capDeg = Double(thickness / 2 / radius) * 180 / .pi
+        let core = max(1, spanDegrees - capDeg * 2)
+        var arc = Path()
+        arc.addArc(center: c, radius: radius,
+                   startAngle: .degrees(midDegrees - core / 2), endAngle: .degrees(midDegrees + core / 2), clockwise: false)
+        return arc.strokedPath(StrokeStyle(lineWidth: thickness, lineCap: .round))
+    }
+}
+
+/// 一块弧带和它自己的小框。小框是弧带的外接矩形：按钮就这么大（「下载」的菜单从这儿弹出来），
+/// 点得到的范围和玻璃的形状都是弧带本身。以前按钮只有正中 46 点见方，弧带两头按下去玻璃有反应、却什么都不做
+struct ArcSlot: Shape {
+    let band: ArcBand
+    /// 弧带的外接矩形（原点是弧的圆心）
+    let bounds: CGRect
+
+    init(band: ArcBand) {
+        self.band = band
+        let side = (band.radius + band.thickness) * 2
+        let whole = band.path(in: CGRect(x: 0, y: 0, width: side, height: side))
+        bounds = whole.boundingRect.offsetBy(dx: -side / 2, dy: -side / 2)
+    }
+
+    /// 小框多大
+    var frameSize: CGSize { bounds.size }
+    /// 小框的中心离圆心多远
+    var middle: CGPoint { CGPoint(x: bounds.midX, y: bounds.midY) }
+    /// 图标离小框的中心多远：正落在弧带的中线上、这一块的正中（弧带是弯的，外接矩形的中心差一点点）
+    var glyph: CGSize {
+        let a = band.midDegrees * .pi / 180
+        return CGSize(width: band.radius * CGFloat(cos(a)) - bounds.midX, height: band.radius * CGFloat(sin(a)) - bounds.midY)
+    }
+
+    func path(in rect: CGRect) -> Path {
+        // 圆心在小框外面：按它相对小框的位置放回去，弧带正好落进小框
+        let side = (band.radius + band.thickness) * 2
+        return band.path(in: CGRect(x: rect.minX - bounds.minX - side / 2, y: rect.minY - bounds.minY - side / 2,
+                                    width: side, height: side))
     }
 }
 
