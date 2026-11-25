@@ -16,6 +16,7 @@ import SwiftUI
 
 struct RequestCenterView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var opening: Int?
     @State private var problem: RequestPlayback.Problem?
     @State private var basketCleared = false
@@ -44,6 +45,35 @@ struct RequestCenterView: View {
     }
 
     private var basket: RequestBasket { RequestBasket.shared }
+
+    /// 版面跟着变的那几样：哪几部在进行中、哪几部结束了（就绪的和没成的分开记）、请求篮空没空、流程卡在不在、卡底那一条是哪一种。
+    /// 它们一变，整页一起平滑地挪过去（以前只有请求篮里增减带动画：一部走完从「进行中」换到「已就绪」、
+    /// 流程卡和卡底的进度条冒出来、最后一部清掉变回空页，都是硬切的）
+    private struct LayoutKey: Equatable {
+        let active: [Int]
+        let ended: [Int]
+        let basketEmpty: Bool
+        let showFlow: Bool
+        let footer: Int
+    }
+
+    private func layoutKey(active: [RequestStatus], ended: [RequestStatus], showFlow: Bool) -> LayoutKey {
+        // 卡底那一条：2 = 批量传输的进度条，1 = 凑批，0 = 没有（和 RequestFlowCard 的 footer 同一个判断）
+        let footer: Int
+        if store.flow?.batch != nil {
+            footer = 2
+        } else if let g = store.flow?.gate, g.ready > 0 {
+            footer = 1
+        } else {
+            footer = 0
+        }
+        return LayoutKey(active: active.map { $0.id },
+                         ended: ended.map { $0.state == .done ? $0.id : -$0.id },
+                         basketEmpty: basket.items.isEmpty, showFlow: showFlow, footer: footer)
+    }
+
+    /// 整页挪动的那条曲线；「减弱动态效果」打开时换成短淡入（DSMotion.adapt）
+    private var shift: Animation { DSMotion.adapt(.smooth(duration: 0.35), reduce: reduceMotion) }
 
     @ViewBuilder
     private func content(_ m: DSMetrics) -> some View {
@@ -82,17 +112,19 @@ struct RequestCenterView: View {
                 .padding(.top, m.pageTop)
                 .padding(.bottom, m.pageBottom)
                 .padding(.leading, m.leadingInset)
-                .animation(.smooth(duration: 0.35), value: basket.items)
+                .animation(shift, value: basket.items)
             }
             .scrollIndicators(.hidden)
             .frame(width: leftW + m.leadingInset)
-            .refreshable { await store.refreshNow() }
+            // 不用系统的 .refreshable：演示数据、没登录时刷新一瞬间就做完，转圈会卡在「刷新中」（见 SettledRefresh）
+            .settledRefreshable { await store.refreshNow() }
             RequestFlowCard(requests: store.mine, flow: store.flow, flowAt: store.flowAt, metrics: rm)
                 .frame(width: right)
                 .padding(.top, m.pageTop)
                 .padding(.trailing, m.margin)
                 .accessibilityIdentifier("request-flow-card")
         }
+        .animation(shift, value: layoutKey(active: active, ended: ended, showFlow: true))
         .ignoresSafeArea(edges: .horizontal)
     }
 
@@ -116,16 +148,19 @@ struct RequestCenterView: View {
                     // 大标题到第一块、页底留白和别的页一样（以前 4 / 40）
                     .padding(.top, m.pageTop)
                     .padding(.bottom, m.pageBottom)
-                    .animation(.smooth(duration: 0.35), value: basket.items)
+                    .animation(shift, value: basket.items)
                 }
             }
             // 字和卡留在安全区里（和搜索页一样）
             .padding(.leading, m.leadingInset)
             .padding(.trailing, m.trailingInset)
+            // 挂在外面这一层：空页和有内容的那一列互相换的时候也带得上
+            .animation(shift, value: layoutKey(active: active, ended: ended, showFlow: showFlow))
         }
         .scrollIndicators(.hidden)
         .ignoresSafeArea(edges: .horizontal)
-        .refreshable { await store.refreshNow() }
+        // 不用系统的 .refreshable：演示数据、没登录时刷新一瞬间就做完，转圈会卡在「刷新中」（见 SettledRefresh）
+        .settledRefreshable { await store.refreshNow() }
     }
 
     // MARK: 待确认（请求篮）
@@ -141,8 +176,11 @@ struct RequestCenterView: View {
                     .font(.subheadline)
                     .monospacedDigit()
                     .foregroundStyle(DSInk.tertiary)
+                    .contentTransition(.numericText())
                     .padding(.trailing, m.margin)
             }
+            // 和下面那张卡同宽（卡最宽 720）：iPad 上右边的数停在卡的右边线上，不跑到屏幕最右边去
+            .frame(maxWidth: 720 + m.margin * 2, alignment: .leading)
             VStack(spacing: 0) {
                 ForEach(Array(basket.items.enumerated()), id: \.element.key) { i, item in
                     basketRow(item)
@@ -151,45 +189,65 @@ struct RequestCenterView: View {
                     }
                 }
                 Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5)
-                HStack(spacing: 12) {
-                    Button("清空", role: .destructive) { basketCleared = true }
-                        .font(.subheadline)
-                        .buttonStyle(.plain)
-                        .foregroundStyle(DSInk.secondary)
-                        .disabled(basket.submitting)
-                        .accessibilityIdentifier("basket-clear")
-                    Spacer(minLength: 8)
-                    Button { confirmBasket() } label: {
-                        HStack(spacing: 8) {
-                            if basket.submitting {
-                                ProgressView().controlSize(.small).tint(.black)
-                            }
-                            Text("确认请求 · \(basket.items.count) 部")
-                                .font(.subheadline.weight(.semibold))
-                                .monospacedDigit()
-                        }
-                        .foregroundStyle(.black)
-                        .padding(.horizontal, 18)
-                        .frame(minHeight: 38)
-                        .background(Capsule().fill(Color.white))
-                        .contentShape(Capsule())
-                    }
-                    .buttonStyle(PressableStyle(scale: 0.95))
-                    .disabled(basket.submitting)
-                    .accessibilityIdentifier("basket-confirm")
-                }
-                // 卡里的字离卡边 20（以前 16）：圆角 22 的卡里字贴着边，看着挤
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+                basketFooter
             }
             .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color.white.opacity(0.07)))
             .frame(maxWidth: 720, alignment: .leading)
             .padding(.horizontal, m.margin)
         }
         .confirmationDialog("清空请求中心里还没确认的 \(basket.items.count) 部？", isPresented: $basketCleared, titleVisibility: .visible) {
-            Button("清空", role: .destructive) { basket.clear() }
+            Button("清空", role: .destructive) {
+                basket.clear()
+                // 和一部一部移除时同一下轻震
+                Haptics.light()
+            }
             Button("取消", role: .cancel) {}
         }
+    }
+
+    /// 请求篮最下面那一行：「清空」和「确认请求 · N 部」。
+    /// 两颗的点按区都够 44 点高（F74；以前「清空」只有那两个字那么大、白胶囊 38 高），画出来和这一行的高都没变（9 + 44 + 9 = 12 + 38 + 12）
+    private var basketFooter: some View {
+        HStack(spacing: 12) {
+            Button(role: .destructive) { basketCleared = true } label: {
+                Text("清空")
+                    .font(.subheadline)
+                    .foregroundStyle(DSInk.secondary)
+                    // 提交中按不了：字淡下去（自己的按压样式不会像系统的那样自动变淡）
+                    .opacity(basket.submitting ? 0.4 : 1)
+                    .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PressableStyle(scale: 0.95))
+            .disabled(basket.submitting)
+            .accessibilityIdentifier("basket-clear")
+            Spacer(minLength: 8)
+            Button { confirmBasket() } label: {
+                HStack(spacing: 8) {
+                    if basket.submitting {
+                        ProgressView().controlSize(.small).tint(.black)
+                    }
+                    Text("确认请求 · \(basket.items.count) 部")
+                        .font(.subheadline.weight(.semibold))
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                }
+                .foregroundStyle(.black)
+                .padding(.horizontal, 18)
+                .frame(minHeight: 38)
+                .background(Capsule().fill(Color.white))
+                .frame(minHeight: 44)
+                .contentShape(Capsule())
+            }
+            .buttonStyle(PressableStyle(scale: 0.95))
+            .disabled(basket.submitting)
+            .accessibilityIdentifier("basket-confirm")
+        }
+        // 卡里的字离卡边 20（以前 16）：圆角 22 的卡里字贴着边，看着挤
+        .padding(.horizontal, 20)
+        .padding(.vertical, 9)
+        // 转圈冒出来、收回去时白胶囊平滑地变宽，不跳
+        .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: basket.submitting)
     }
 
     private func basketRow(_ item: RequestBasket.Item) -> some View {
@@ -215,7 +273,7 @@ struct RequestCenterView: View {
                 .contentShape(Rectangle())
             }
             Button {
-                withAnimation(.smooth(duration: 0.3)) { basket.remove(item) }
+                withAnimation(DSMotion.adapt(.smooth(duration: 0.3), reduce: reduceMotion)) { basket.remove(item) }
                 Haptics.light()
             } label: {
                 Image(systemName: "minus.circle.fill")
@@ -231,7 +289,8 @@ struct RequestCenterView: View {
             .accessibilityIdentifier("basket-remove")
         }
         .padding(.leading, 20)
-        .padding(.trailing, 6)
+        // 「移除」那颗圆（约 24 点宽，在 44 点的点按区正中）右边线离卡边 20：和底下白胶囊、另外两张卡的「播放」「›」同一条线（以前 6，圆比它们靠外 4 点）
+        .padding(.trailing, 10)
         .accessibilityIdentifier("basket-row")
     }
 
@@ -326,9 +385,11 @@ struct RequestCenterView: View {
                     }
                     Spacer(minLength: 8)
                     if s.state != .done {
+                        // 只是样子，不念给旁白（和分区标题后面的「›」一样）
                         Image(systemName: "chevron.forward")
                             .font(.footnote.weight(.semibold))
                             .foregroundStyle(DSInk.tertiary)
+                            .accessibilityHidden(true)
                     }
                 }
                 .padding(.vertical, 12)
@@ -352,11 +413,13 @@ struct RequestCenterView: View {
             }
         } label: {
             HStack(spacing: 6) {
-                if opening == s.id {
-                    ProgressView().controlSize(.small).tint(.black)
-                } else {
-                    Image(systemName: "play.fill").font(.footnote.weight(.bold))
-                }
+                // 转圈压在三角那一格上（三角只是藏起来、位置还占着）：等片库的那一会儿胶囊不变宽、「播放」两个字不挪，两样交叉淡入淡出
+                Image(systemName: "play.fill").font(.footnote.weight(.bold))
+                    .opacity(opening == s.id ? 0 : 1)
+                    .overlay {
+                        if opening == s.id { ProgressView().controlSize(.small).tint(.black) }
+                    }
+                    .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: opening)
                 Text("播放").font(.subheadline.weight(.semibold))
             }
             .foregroundStyle(.black)
@@ -412,6 +475,7 @@ struct RequestCenterView: View {
 /// 整张是一块液态玻璃（和详情页那张卡同一个圆角）
 struct RequestCenterCard: View {
     let status: RequestStatus
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -432,6 +496,7 @@ struct RequestCenterCard: View {
                 Image(systemName: "chevron.forward")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(DSInk.tertiary)
+                    .accessibilityHidden(true)
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
@@ -441,6 +506,9 @@ struct RequestCenterCard: View {
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
         .environment(\.colorScheme, .dark)
         .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+        // 服务器的进度到了：百分比滚过去、那一段胶囊平滑地填上（和详情页那张卡同一条曲线）。
+        // 以前这里没有动画，卡里的 numericText 从来没跑过，数和胶囊都是跳的
+        .animation(DSMotion.adapt(.smooth(duration: 0.45), reduce: reduceMotion), value: status)
     }
 
     private var line: String {

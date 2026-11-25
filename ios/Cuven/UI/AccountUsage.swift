@@ -30,7 +30,8 @@ struct NetworkSpeedRow: View {
     @AppStorage(NetworkSpeed.autoValueKey) private var autoValue = -1
     /// 正在拖：松手才写回设置（拖一下不存几十次）
     @State private var dragValue: Int?
-    @ScaledMetric(relativeTo: .title3) private var iconSize: CGFloat = 24
+    /// 和 AccountRow 的符号一样大（21 点；以前这里还是 24）
+    @ScaledMetric(relativeTo: .title3) private var iconSize: CGFloat = 21
     @ScaledMetric(relativeTo: .title3) private var iconColumn: CGFloat = AccountMetrics.iconColumn
 
     static let hint = "调高更流畅，调低更省流量。"
@@ -75,21 +76,23 @@ struct NetworkSpeedRow: View {
         .padding(.bottom, 16)
     }
 
-    /// 符号、「网络速度」、右边的百分比；下面一行灰色提示（和账户页的行同一套字、同一条左边线）
+    /// 符号、「网络速度」、右边的百分比；下面一行灰色提示（和账户页的行同一套字、同一条左边线）。
+    /// AccountRow 收过一轮（标题 Title 3 → Body 半粗、说明 Callout → Subheadline、符号 24 → 21）以后这一行没跟上，
+    /// 同一张卡里它比下面「自动调整」「Cuven Pass Pro」大一号、细一级：现在是同一套；百分比仍比标题大一级（Title 3 半粗）
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: AccountMetrics.gap) {
             Image(systemName: "speedometer")
                 .font(.system(size: iconSize, weight: .regular))
                 .foregroundStyle(.white.opacity(0.6))
                 .frame(width: iconColumn)
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text("网络速度")
-                        .font(.title3.weight(.medium))
+                        .font(.body.weight(.semibold))
                         .foregroundStyle(.white)
                     Spacer(minLength: 0)
                     Text(verbatim: "\(shown)%")
-                        .font(.title2.weight(.semibold))
+                        .font(.title3.weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(.white)
                         // 自动调整选了新的数：数字滚过去（手指拖的时候不滚，跟手）
@@ -97,7 +100,7 @@ struct NetworkSpeedRow: View {
                         .animation(dragValue == nil ? Animation.smooth(duration: 0.5) : nil, value: shown)
                 }
                 Text(Self.hint)
-                    .font(.callout)
+                    .font(.subheadline)
                     .foregroundStyle(DSInk.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }

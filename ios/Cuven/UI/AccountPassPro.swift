@@ -10,12 +10,13 @@ import SwiftUI
 
 struct PassProRows: View {
     @State private var pass = PassPro.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         // 一个 VStack 包起来（不用 Group：Group 上的触感修饰会落到每一行上，各响一次）
         VStack(spacing: 0) {
             AccountRow(icon: "bolt.fill", title: "Cuven Pass Pro", subtitle: "影片经加速节点传输") {
-                Toggle("Cuven Pass Pro", isOn: Binding(get: { pass.enabled }, set: { pass.setEnabled($0) }))
+                Toggle("Cuven Pass Pro", isOn: enabledBinding)
                     .labelsHidden()
                     .tint(.green)
                     .accessibilityIdentifier("account-pass-pro")
@@ -26,14 +27,7 @@ struct PassProRows: View {
                     Task { await pass.check() }
                 } label: {
                     AccountRow(icon: "antenna.radiowaves.left.and.right", title: "加速节点", subtitle: statusLine) {
-                        if pass.state == .checking {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Image(systemName: statusSymbol)
-                                .font(.system(size: 17, weight: .semibold))
-                                .foregroundStyle(statusColor)
-                                .accessibilityHidden(true)
-                        }
+                        PassProStatusMark(state: pass.state, symbol: statusSymbol, color: statusColor)
                     }
                 }
                 .buttonStyle(AccountRowPress())
@@ -44,12 +38,9 @@ struct PassProRows: View {
             Button {
                 Task { await pass.compare() }
             } label: {
-                AccountRow(icon: "speedometer", title: "测速对比", subtitle: speedLine) {
-                    if pass.testing {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        AccountValue("测速")
-                    }
+                // 说明最多三行：行尾换成胶囊以后字那一列窄了一点，折起的 Duo 上「普通线路 … · Pass Pro …（快 …%）」不被截断
+                AccountRow(icon: "speedometer", title: "测速对比", subtitle: speedLine, subtitleLines: 3) {
+                    PassProTestPill(busy: pass.testing)
                 }
             }
             .buttonStyle(AccountRowPress())
@@ -58,6 +49,15 @@ struct PassProRows: View {
         }
         .sensoryFeedback(.selection, trigger: pass.enabled)
         .sensoryFeedback(.success, trigger: pass.speed?.at)
+    }
+
+    /// 开关：「加速节点」那一行跟着淡入 / 收走，卡和下面几组一起慢慢让开——以前一拨开关，卡一下子跳高一行
+    private var enabledBinding: Binding<Bool> {
+        Binding(
+            get: { pass.enabled },
+            set: { on in
+                withAnimation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion)) { pass.setEnabled(on) }
+            })
     }
 
     private var statusLine: String {
@@ -97,5 +97,68 @@ struct PassProRows: View {
 
     private static func mbps(_ v: Double) -> String {
         v < 10 ? String(format: "%.1f Mbps", v) : "\(Int(v.rounded())) Mbps"
+    }
+}
+
+/// 「加速节点」行尾：转圈和结果的符号互相淡入淡出（以前检测完一下子换掉）；转圈是白的，和这一页别的转圈一样
+private struct PassProStatusMark: View {
+    let state: PassPro.State
+    let symbol: String
+    let color: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var markTransition: AnyTransition {
+        reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.8))
+    }
+
+    /// 刚拨开开关、检测还没开始的那一瞬（.off）也算在检测：不先闪一下橙色的三角
+    private var busy: Bool { state == .checking || state == .off }
+
+    var body: some View {
+        ZStack {
+            if busy {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+                    .transition(.opacity)
+            } else {
+                Image(systemName: symbol)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(color)
+                    .contentTransition(.symbolEffect(.replace))
+                    .transition(markTransition)
+                    .accessibilityHidden(true)
+            }
+        }
+        .frame(minWidth: 24, minHeight: 24)
+        .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: state)
+    }
+}
+
+/// 「测速对比」行尾：一颗玻璃小胶囊（和资料卡的「更改」同一个大小），看得出这一行是个动作——
+/// 以前是一个灰字「测速」，和「登录方式 密码」那种只读的数值一个样子。只是样子，点的还是整行；测的时候胶囊里转圈、不变窄
+private struct PassProTestPill: View {
+    let busy: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            Text("测速")
+                .opacity(busy ? 0 : 1)
+            if busy {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+                    .transition(.opacity)
+            }
+        }
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(.white)
+        .lineLimit(1)
+        .padding(.horizontal, 13)
+        .frame(minHeight: 30)
+        .glassEffect(.regular, in: Capsule())
+        .fixedSize()
+        .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: busy)
     }
 }

@@ -124,8 +124,11 @@ private struct YearHeader: View {
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
         if link {
-            NavigationLink(value: Route.year(year)) { label }
+            // 点按区上下各多 8 点（折起一行 Title 1 只有 34 点高，不到 44：F74），外面再收回去，版面一点不动
+            // （和别处的分区标题同一个做法：DSShelfTitle）
+            NavigationLink(value: Route.year(year)) { label.dsTallHitArea() }
                 .buttonStyle(PressableStyle(scale: 0.98))
+                .padding(.vertical, -8)
                 .accessibilityIdentifier("all-films-\(year)")
         } else {
             label
@@ -630,6 +633,7 @@ private struct RequestableCard: View {
     var poster = false
     /// 竖版海报的画面滑动时那一点视差按这一页的边距、卡距算
     var metrics = DSMetrics(width: 400)
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let art = CatalogArt.shared.art(item)
@@ -641,15 +645,9 @@ private struct RequestableCard: View {
                     .overlay(alignment: .topLeading) { statusPill(state.badge).padding(8) }
                     .overlay(alignment: .bottom) {
                         if let p = state.progress {
-                            GeometryReader { g in
-                                Capsule().fill(Color.white.opacity(0.25))
-                                    .overlay(alignment: .leading) {
-                                        Capsule().fill(Color.white).frame(width: max(4, g.size.width * p))
-                                    }
-                            }
-                            .frame(height: 3)
-                            .padding(.horizontal, 10)
-                            .padding(.bottom, 8)
+                            PosterRequestProgress(value: p)
+                                .padding(.horizontal, 8)
+                                .padding(.bottom, 8)
                         }
                     }
             } else {
@@ -666,7 +664,8 @@ private struct RequestableCard: View {
 
     /// 海报左上角的状态：玻璃上的小胶囊（申请是主题色，没能添加是红的，别的白字）
     private func statusPill(_ b: YearCardBadge) -> some View {
-        Text(b.text)
+        // 分两句写：上面那一串和以前一样长（里面那个三选一的颜色本来就费类型检查），动画另起一句
+        let pill = Text(b.text)
             .font(.caption2.weight(.semibold))
             .monospacedDigit()
             .foregroundStyle(b.tone == .accent ? Theme.accent : b.tone == .alert ? Color(red: 1.0, green: 0.27, blue: 0.23) : Color.white)
@@ -676,6 +675,29 @@ private struct RequestableCard: View {
             .glassEffect(.regular, in: Capsule())
             .environment(\.colorScheme, .dark)
             .contentTransition(.numericText())
+        // 数字滚动要在动画里才走：以前没挂，「已请求 41%」→「42%」是直接跳过去的
+        return pill.animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: b.text)
+    }
+}
+
+/// 竖版海报底边那道请求进度：和网格里「看到哪儿」同一条细胶囊（4 点高、底 30% 白、离左右下各 8），
+/// 进度变了滑过去（横卡剧照底边那道也是 0.6 秒），不再一跳一跳；进度按 0–1 收住，不会画出海报外面
+private struct PosterRequestProgress: View {
+    let value: Double
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let p = min(1, max(0, value))
+        GeometryReader { g in
+            Capsule().fill(Color.white.opacity(0.3))
+                .overlay(alignment: .leading) {
+                    Capsule().fill(Color.white).frame(width: max(4, g.size.width * p))
+                }
+        }
+        .frame(height: 4)
+        // 「减弱动态效果」时换成短的一下（F59）
+        .animation(DSMotion.adapt(.smooth(duration: 0.6), reduce: reduceMotion), value: p)
+        .accessibilityHidden(true)
     }
 }
 

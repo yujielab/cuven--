@@ -7,7 +7,8 @@ import UIKit
 // 系统把详情页的返回、下载、分享竖着放进侧边那一列，下载 / 分享那一组往下压到了底下的导航胶囊上。
 // 现在这几种形态里这三颗都收起来，换成一颗 48 点的玻璃圆钮（「+」）：摆在返回钮原来的地方（状态栏中线上、状态栏和导航胶囊之间）；
 // 点一下，三块弧形的玻璃从它左边展开成一道弧（参考图 2）：上「返回」、中「下载」、下「分享」，「+」转成「×」，后面的页面压暗一点；
-// 再点一下或点空白处收起。三块和圆钮在同一个玻璃容器里，从圆钮那儿长出来、收回去；停下来是分开的三块圆头弧，整块弧带都点得到。
+// 再点一下或点空白处收起。三块从上到下一块接一块地从圆钮那儿长出来，收起也是从上到下一块接一块；
+// 三块一直是分开的三块圆头弧（各是各的玻璃，不互相粘连），整块弧带都点得到。
 // 折起横拿那种矮的一列放不下：圆钮挪到页面左上角，弧往右下展开。别的 iPhone、iPad 照旧是系统右上角的那几颗。
 // 系统返回钮藏起来以后边缘右滑返回会失灵：同一页里把它接回来（SwipeBackEnabler）。
 
@@ -21,7 +22,10 @@ struct DetailArcMenuLayer: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var open = false
-    @Namespace private var glass
+    /// 三块弧各自出来了没有（上、中、下）：展开、收起都是从上到下一块接一块
+    @State private var shown = [false, false, false]
+    /// 一块接一块的节拍：中途再点一下就停掉它，从眼下的样子接着走
+    @State private var stepper: Task<Void, Never>?
 
     /// 圆钮多大、弧离圆心多远、多厚
     private static let button: CGFloat = 48
@@ -30,7 +34,7 @@ struct DetailArcMenuLayer: View {
     /// 三块各占多少度、中间隔多少度（看得见的弧长，含圆头）
     private static let span: Double = 56
     private static let gap: Double = 7
-    /// 玻璃容器那一块多大：圆钮在正中，弧的最外沿（离圆心 radius + thickness / 2）外面再留一圈
+    /// 圆钮周围那一块多大：圆钮在正中，三块弧（最外沿离圆心 radius + thickness / 2）都落在里面，外面再留一圈
     private static let box: CGFloat = (radius + thickness) * 2 + 40
     /// 展开：带一点回弹。收起用 DSMotion.snap：干脆利落、不弹
     private static let spring = Animation.bouncy(duration: 0.42, extraBounce: 0.08)
@@ -90,9 +94,32 @@ struct DetailArcMenuLayer: View {
         setOpen(!open)
     }
 
-    /// 展开带一点回弹，收起干脆利落；「减弱动态效果」打开时都是一小段淡入淡出（以前是直接跳出来）
+    /// 展开带一点回弹，收起干脆利落。「+」和后面的压暗马上跟手；三块弧从上到下一块接一块，展开、收起都是这个顺序
+    /// （用户要求）。每一块是各自的一次状态变化，玻璃和图标同一拍；以前三块同一下插进去，只靠过渡上各晚 35 毫秒去错开。
+    /// 「减弱动态效果」打开时三块一起、一小段淡入淡出（以前是直接跳出来）
     private func setOpen(_ on: Bool) {
-        withAnimation(DSMotion.adapt(on ? Self.spring : DSMotion.snap, reduce: reduceMotion)) { open = on }
+        stepper?.cancel()
+        let curve = DSMotion.adapt(on ? Self.spring : DSMotion.snap, reduce: reduceMotion)
+        if reduceMotion {
+            withAnimation(curve) {
+                open = on
+                shown = [on, on, on]
+            }
+            return
+        }
+        // 最上面那块和「+」同一下动，后两块各隔一拍
+        withAnimation(curve) {
+            open = on
+            shown[0] = on
+        }
+        let beat = on ? 110 : 80
+        stepper = Task { @MainActor in
+            for i in 1..<3 {
+                try? await Task.sleep(for: .milliseconds(beat))
+                if Task.isCancelled { return }
+                withAnimation(curve) { shown[i] = on }
+            }
+        }
     }
 
     /// 后面压暗一点，点空白处收起
@@ -104,20 +131,17 @@ struct DetailArcMenuLayer: View {
             .accessibilityHidden(true)
     }
 
-    /// 圆钮和三块弧：同一个玻璃容器（弧从圆钮那儿长出来、收回去），只占圆钮周围这一块，不铺满整页。
-    /// 容器的间距比两块弧之间的缝（约 6 点）小：停下来是分开的三块圆头弧，不化成连着的一整条（以前 18，比缝宽，三块会粘在一起）
+    /// 圆钮和三块弧：只占圆钮周围这一块，不铺满整页。四块各是各的玻璃——
+    /// 以前放在同一个玻璃容器里（间距 18，比两块弧之间约 6 点的缝还宽）、再用 glassEffectID 互相形变，
+    /// 三块的玻璃会粘成连着的一整条（用户要求：三块不能粘连）
     private func fan(toward: Double) -> some View {
-        GlassEffectContainer(spacing: 6) {
-            ZStack {
-                if open {
-                    ForEach(0..<3, id: \.self) { i in
-                        segment(i, toward: toward)
-                    }
-                }
-                mainButton
+        ZStack {
+            ForEach(0..<3, id: \.self) { i in
+                if shown[i] { segment(i, toward: toward) }
             }
-            .frame(width: Self.box, height: Self.box)
+            mainButton
         }
+        .frame(width: Self.box, height: Self.box)
     }
 
     /// 中间那颗：「+」，展开时转 45° 成「×」
@@ -132,7 +156,6 @@ struct DetailArcMenuLayer: View {
         }
         .buttonStyle(PressableStyle(scale: 0.92))
         .glassEffect(.regular.interactive(), in: Circle())
-        .glassEffectID("arc-main", in: glass)
         .accessibilityLabel(open ? "收起菜单" : "更多操作")
         .accessibilityHint(open ? "" : "返回、下载、分享")
         .accessibilityIdentifier("detail-arc-menu")
@@ -147,20 +170,17 @@ struct DetailArcMenuLayer: View {
         let slot = ArcSlot(band: ArcBand(midDegrees: mid, spanDegrees: Self.span, radius: Self.radius, thickness: Self.thickness))
         return item(i, slot: slot)
             .glassEffect(.regular.interactive(), in: slot)
-            .glassEffectID("arc-\(i)", in: glass)
             .position(x: Self.box / 2 + slot.middle.x, y: Self.box / 2 + slot.middle.y)
-            .transition(grow(i))
+            // 正在收起的那几块不再接点按
+            .allowsHitTesting(open)
+            .transition(grow)
     }
 
-    /// 从圆钮那儿长出来，一块接一块（各晚 35 毫秒）；收起时倒过来，「分享」先走、「返回」最后。
-    /// 「减弱动态效果」打开时只淡入淡出：不缩放、不错开（以前照样从 55% 放大）
-    private func grow(_ i: Int) -> AnyTransition {
-        if reduceMotion { return AnyTransition.opacity.animation(.easeInOut(duration: 0.2)) }
-        // 这一块铺满容器那一块（position），缩放的中心就是圆钮
-        let pop = AnyTransition.opacity.combined(with: .scale(scale: 0.55, anchor: .center))
-        return AnyTransition.asymmetric(
-            insertion: pop.animation(Self.spring.delay(0.035 * Double(i))),
-            removal: pop.animation(DSMotion.snap.delay(0.03 * Double(2 - i))))
+    /// 从圆钮那儿长出来、收回去：这一块铺满圆钮周围那一块（position），缩放的中心就是圆钮。
+    /// 从 64% 起：最小的时候里沿也在圆钮外面，玻璃不压到圆钮的玻璃上。
+    /// 「减弱动态效果」打开时只淡入淡出、不缩放（以前照样从 55% 放大）
+    private var grow: AnyTransition {
+        reduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .scale(scale: 0.64, anchor: .center))
     }
 
     @ViewBuilder

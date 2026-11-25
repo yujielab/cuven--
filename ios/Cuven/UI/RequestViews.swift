@@ -429,6 +429,8 @@ struct RequestProgressCard: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .monospacedDigit()
+                    // 进到下一步时那个数滚过去（和右边的百分比同一下），不是整行硬换
+                    .contentTransition(.numericText(value: Double(status.step)))
                 Spacer(minLength: 8)
                 Text(trailing)
                     .font(.subheadline.weight(.semibold))
@@ -687,6 +689,8 @@ struct CatalogDetailView: View {
                     .padding(.vertical, 2)
                 }
                 .scrollIndicators(.hidden)
+                // 季多的时候往左滑：胶囊从页边距上滑过去，不在边距那条线上被齐齐切掉（和别的横排一样不裁）
+                .scrollClipDisabled()
             }
         }
     }
@@ -1007,6 +1011,7 @@ struct CatalogPosterLink: View {
 /// 搜索：片库之外，影片库索引里对得上的（「可请求添加」）。showEmpty：片库里一部都没搜到时，这里也没有就说「没有找到」
 struct RequestableSearchSection: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let query: String
     let metrics: DSMetrics
     var showEmpty = false
@@ -1015,6 +1020,8 @@ struct RequestableSearchSection: View {
 
     var body: some View {
         content
+            // 查到了：那一排（或「没有找到」）淡进来，不是啪地冒出来
+            .animation(DSMotion.adapt(DSMotion.fade, reduce: reduceMotion), value: items == nil)
             .task(id: query) {
                 items = nil
                 guard !DemoData.enabled else { items = []; return }
@@ -1027,6 +1034,9 @@ struct RequestableSearchSection: View {
             }
     }
 
+    /// 只淡入、不淡出：换了字重新查时旧的那一排照旧马上收掉（外面的版面不带这个动画，慢慢淡出会和挪上来的东西叠在一起）
+    private var fadeIn: AnyTransition { .asymmetric(insertion: .opacity, removal: .identity) }
+
     @ViewBuilder private var content: some View {
         let movies = model.ownedMovieIDs, shows = model.ownedSeasons
         let list = (items ?? []).filter { !model.owns($0, movies: movies, shows: shows) }
@@ -1036,6 +1046,7 @@ struct RequestableSearchSection: View {
                     ForEach(list.prefix(24), id: \.uid) { it in CatalogPosterLink(item: it, metrics: metrics, slot: "search-request") }
                 }
             }
+            .transition(fadeIn)
         } else if showEmpty && items != nil {
             ContentUnavailableView {
                 Label("没有找到“\(query)”", systemImage: "magnifyingglass")
@@ -1048,8 +1059,10 @@ struct RequestableSearchSection: View {
                 .accessibilityIdentifier("search-browse-all")
             }
             .padding(.top, 60)
+            .transition(fadeIn)
         } else if showEmpty {
             ProgressView().frame(maxWidth: .infinity, minHeight: 240)
+                .transition(fadeIn)
         } else {
             Color.clear.frame(height: 0)
         }

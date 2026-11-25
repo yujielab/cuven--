@@ -22,7 +22,9 @@ struct FolderCard: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
-                .truncationMode(.tail)
+                // 放不下从中间省（和系统「文件」App 一样）：同一个开头的几个文件夹（「…第一季」「…第二季」）靠结尾分得出，
+                // 以前从尾巴省，几张卡截成一模一样的字
+                .truncationMode(.middle)
                 .frame(width: width)
         }
         .frame(width: width)
@@ -35,6 +37,7 @@ struct FolderCard: View {
 /// 文件夹页
 struct FolderView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let folder: LibraryFolder
     @State private var subfolders: [LibraryFolder] = []
     @State private var videos: [Video] = []
@@ -67,10 +70,14 @@ struct FolderView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 8)
-                .padding(.bottom, 40)
+                // 大标题到第一块、页底留多少：各页同一套（pageTop / pageBottom），这一页以前还写死 8 / 40，
+                // 页底比年份页、搜索页紧一截
+                .padding(.top, metrics.pageTop)
+                .padding(.bottom, metrics.pageBottom)
                 .padding(.leading, insets.leading)
                 .padding(.trailing, insets.trailing)
+                // 取到了：转圈淡出、内容淡进来（以前是直接换，一整页海报「啪」地冒出来）；「减弱动态效果」时是短淡入
+                .animation(DSMotion.adapt(DSMotion.fade, reduce: reduceMotion), value: loading)
             }
             .scrollIndicators(.hidden)
             // 整页铺满（连同侧边那一列）：横着的一排滑到那一列底下，网格和字留在安全区里
@@ -97,8 +104,8 @@ struct FolderView: View {
             }
         }
         if !shown.isEmpty {
+            // 只有网格的文件夹：网格到大标题就是 pageTop（和年份页一样），不再另垫 6 点
             LibraryGrid(videos: shown, metrics: metrics, slot: "folder-grid", identifier: "folder-movie")
-                .padding(.top, subfolders.isEmpty ? 6 : 0)
         }
         if subfolders.isEmpty && shown.isEmpty && !loading {
             // F88：空的时候说下一步，再给一颗钮直接去做（设计轮 2（并行·library）：刚放进去的片子，重新载入就能看到）

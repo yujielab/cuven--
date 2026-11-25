@@ -97,9 +97,13 @@ struct RequestFlowCard: View {
                         }
                     }
                     .fixedSize()
+                    // 点按区四周各放大 9 点（两个字加一条线只有 30 × 28 点，够不到 44：F74）；外面用负的 padding 收回去，版面一点不动。
+                    // 三颗之间隔 18，各放大 9 正好挨上、不重叠
+                    .padding(9)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .padding(-9)
                 .accessibilityAddTraits(category == c ? .isSelected : [])
                 .accessibilityIdentifier("flow-tab-\(c.rawValue)")
             }
@@ -193,22 +197,32 @@ struct RequestFlowCard: View {
         let p = progress(at: now)
         let moved = b.stage == "copy" ? p * b.total : b.total
         let left = b.speed > 0 ? max(0, (b.total - moved) / b.speed) : (b.eta ?? 0)
+        let stateText: String = b.stage == "copy" ? String(format: "%.0f%%", p * 100) : (b.stage == "verify" ? "核对中" : "收尾中")
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 Text("批量传输")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.white)
+                    .layoutPriority(1)
+                // 窄的屏（折起的 Duo）放不下时只收这一句（和「凑批」那一行一样缩一点、不折行），两头的「批量传输」和百分比不动
                 Text(b.mine.isEmpty ? "\(b.items) 部" : "\(b.items) 部 · 其中 \(b.mine.count) 部是你的")
                     .font(.footnote)
                     .foregroundStyle(Color.white.opacity(0.5))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                 Spacer(minLength: 8)
-                Text(b.stage == "copy" ? String(format: "%.0f%%", p * 100) : (b.stage == "verify" ? "核对中" : "收尾中"))
+                Text(stateText)
                     .font(.footnote.weight(.semibold))
                     .monospacedDigit()
                     .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .layoutPriority(1)
                     .contentTransition(.numericText())
+                    // 这一条每秒由时间线重算一次，没有动画就没有滚动的那一下（numericText 以前从来没跑过）
+                    .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: stateText)
             }
-            FlowProgressBar(progress: b.stage == "copy" ? p : 1, palette: category.palette, live: b.stage == "copy" && !reduceMotion)
+            // 滚出屏幕、切到后台时那道扫光也停（它自己有一条 30 帧的时间线，以前卡不在眼前也一直转）
+            FlowProgressBar(progress: b.stage == "copy" ? p : 1, palette: category.palette, live: b.stage == "copy" && !reduceMotion && visible)
                 .frame(height: 4)
             HStack {
                 Text("\(Self.size(moved)) / \(Self.size(b.total))")
@@ -223,6 +237,8 @@ struct RequestFlowCard: View {
             .monospacedDigit()
             .foregroundStyle(Color.white.opacity(0.5))
             .lineLimit(1)
+            // 放不下时两头各缩一点，不截成「…」
+            .minimumScaleFactor(0.85)
         }
         .accessibilityElement(children: .combine)
     }

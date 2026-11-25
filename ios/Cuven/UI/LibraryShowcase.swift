@@ -171,13 +171,17 @@ struct ShowcaseHeader: View {
         .padding(.horizontal, margin)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(alignment: .top) {
-            LinearGradient(stops: [
-                .init(color: .black.opacity(0.55), location: 0),
-                .init(color: .black.opacity(0.25), location: 0.55),
-                .init(color: .clear, location: 1),
-            ], startPoint: .top, endPoint: .bottom)
-            .frame(height: top + 150)
+            LinearGradient(stops: Self.shade, startPoint: .top, endPoint: .bottom)
+                .frame(height: top + 150)
         }
+    }
+
+    /// 55% → 0，alpha 走 smoothstep（和画幅上下那两道同一种缓动）：以前是三个点的折线，
+    /// 渐变收尾的地方在 OLED 上看得出一道边
+    private static let shade: [Gradient.Stop] = (0...10).map { i in
+        let t = Double(i) / 10
+        let s = 1 - t * t * (3 - 2 * t)
+        return Gradient.Stop(color: .black.opacity(0.55 * s), location: t)
     }
 }
 
@@ -416,9 +420,11 @@ struct ShowcaseSkeleton: View {
             ZStack {
                 Color.white.opacity(0.035)
                 if !reduceMotion {
+                    // 光带比画幅高出一半：斜过来以后上下两头都在画幅外面（以前和画幅一样高，
+                    // 一斜，右上、左下各缺一个三角，扫过去时带着一道硬边）
                     LinearGradient(colors: [.clear, Color.white.opacity(0.07), .clear],
                                    startPoint: .leading, endPoint: .trailing)
-                        .frame(width: g.size.width * 0.55)
+                        .frame(width: g.size.width * 0.55, height: g.size.height * 1.5)
                         .rotationEffect(.degrees(12))
                         .offset(x: g.size.width * (phase * 1.7 - 0.85))
                         .frame(width: g.size.width, height: g.size.height)
@@ -435,7 +441,7 @@ struct ShowcaseSkeleton: View {
     }
 }
 
-/// 右上角那颗：播放 / 暂停 + 进度环（环 34、2.5 宽：底 34% 白、值纯白），点按区 44（C33）；
+/// 右上角那颗：播放 / 暂停 + 进度环（环 34、2.5 宽：底 34% 白、值纯白，环里垫 28% 的暗），点按区 44（C33）；
 /// 播放 ↔ 暂停用系统的符号替换动效（F57）
 struct ShowcaseControl: View {
     let trailer: ShowcaseTrailer
@@ -443,12 +449,15 @@ struct ShowcaseControl: View {
     var body: some View {
         Button { trailer.togglePause() } label: {
             ZStack {
+                // 垫一层很淡的暗：亮的画面（雪地、天空）上环和符号也看得清（F34）
+                Circle().fill(Color.black.opacity(0.28))
                 Circle().stroke(Color.white.opacity(0.34), lineWidth: 2.5)
+                // 进度每 0.25 秒报一次：动画也走 0.25 秒，环是一直在走的（以前 0.15 秒，走一下、停一下）
                 Circle()
                     .trim(from: 0, to: max(0.001, trailer.progress))
                     .stroke(Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
-                    .animation(.linear(duration: 0.15), value: trailer.progress)
+                    .animation(.linear(duration: 0.25), value: trailer.progress)
                 Image(systemName: trailer.paused ? "play.fill" : "pause.fill")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(.white)
@@ -535,13 +544,7 @@ struct ShowcaseIntro: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: metrics.gutter) {
                             ForEach(Array(stills.enumerated()), id: \.offset) { _, url in
-                                let w = metrics.wideCardWidth
-                                // 圆角和别处同宽的 16:9 卡一样（DSRadius.card：折起 283 点宽是 16，以前写死 12）
-                                DSFill.placeholder
-                                    .overlay { RemoteImage(url: url, maxPixel: w * 3, placeholder: .clear) }
-                                    .frame(width: w, height: (w * 9 / 16).rounded())
-                                    .clipShape(RoundedRectangle(cornerRadius: DSRadius.card(w), style: .continuous))
-                                    .accessibilityHidden(true)
+                                ShowcaseStill(url: url, width: metrics.wideCardWidth)
                             }
                         }
                         .scrollTargetLayout()
@@ -581,6 +584,23 @@ struct ShowcaseIntro: View {
         PlayerCoordinator.shared.play(PlayRequest(path: video.path, name: video.name, title: model.title(video),
                                                   subtitle: model.year(video).map { String($0) },
                                                   artwork: model.backgroundArtString(video)), model: model)
+    }
+}
+
+/// 介绍面板那一排剧照里的一张：16:9，圆角和别处同宽的 16:9 卡一样（DSRadius.card：折起 283 点宽是 16），
+/// 外面一圈细边——面板是纯黑的，暗的剧照没有这圈边就化进底里、看不出卡的形状（年份卡、合集卡也是这一圈）
+private struct ShowcaseStill: View {
+    let url: URL?
+    let width: CGFloat
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: DSRadius.card(width), style: .continuous)
+        DSFill.placeholder
+            .overlay { RemoteImage(url: url, maxPixel: width * 3, placeholder: .clear) }
+            .frame(width: width, height: (width * 9 / 16).rounded())
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
+            .accessibilityHidden(true)
     }
 }
 
