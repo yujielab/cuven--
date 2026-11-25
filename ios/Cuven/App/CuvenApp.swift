@@ -80,6 +80,7 @@ struct CuvenApp: App {
                 Button("资料库") { AppNav.shared.go(.library) }.keyboardShortcut("2", modifiers: .command)
                 Button("请求") { AppNav.shared.go(.requests) }.keyboardShortcut("3", modifiers: .command)
                 Button("搜索") { AppNav.shared.go(.search) }.keyboardShortcut("4", modifiers: .command)
+                Button("我的") { AppNav.shared.go(.account) }.keyboardShortcut("5", modifiers: .command)
                 Divider()
                 Button("查找影片") { AppNav.shared.go(.search) }.keyboardShortcut("f", modifiers: .command)
             }
@@ -88,15 +89,16 @@ struct CuvenApp: App {
     }
 }
 
-enum AppTab: Hashable { case home, library, requests, search }
+enum AppTab: Hashable { case home, library, requests, account, search }
 
-/// 系统标签栏：主页 / 资料库 / 请求，搜索单独一颗（搜索标签：横在底下时 iOS 26 把它拆出来）。
-/// 账户与设置不是标签：主页标题那一行右边的头像点开（用户要求：头像从侧边导航里分出来）。
+/// 系统标签栏：主页 / 资料库 / 请求 / 我的，搜索单独一颗（搜索标签：横在底下时 iOS 26 把它拆出来）。
+/// 「我的」是账户与设置（用户要求照 Netflix：头像是导航的最后一格；以前是主页标题那一行右边的头像点开的弹层）。
 ///
 /// iPhone Duo：导航栏与工具栏一律用系统的（返回在侧边那一列最上面）。标签栏在展开竖拿时也是系统的（横在底下）；
-/// 折起（外屏，横竖都算）和展开横拿时，系统把标签栏竖着放进侧边那一列、搜索和别的格挤在一枚胶囊里——
-/// 这几种形态下收起系统标签栏，换成 DuoNav（一枚竖向玻璃胶囊 + 单独一颗搜索圆钮，见 DuoNav.swift）。
-/// 是不是这几种形态只看窗口大小（DuoLayout.isColumn），不认设备型号、不看安全区。
+/// 折起（外屏，横竖都算）和展开横拿时，收起系统标签栏，换成 DuoNav（照 Netflix 的一枚深色竖向胶囊：
+/// 主页 / 资料库 / 请求 / 搜索 / 头像，见 DuoNav.swift）。
+/// 认这几种形态：iOS 27.1 起系统说的竖栏在哪一边（VerticalBarProbe），或者窗口大小（DuoLayout.isColumn），
+/// 或者左右安全区一边宽一边窄（DuoLayout.hasSideColumn）——三样有一样对上就算。
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(AccountStore.self) private var account
@@ -106,6 +108,14 @@ struct RootView: View {
     @State private var tab: AppTab = .home
     /// 窗口大小（连安全区一起）：认 iPhone Duo 的「侧边一列」形态
     @State private var window: CGSize = DuoLayout.initialWindowSize
+    /// 左右安全区（侧边那一列在哪边、多宽）
+    @State private var sideInsets: (leading: CGFloat, trailing: CGFloat) = (0, 0)
+    /// iOS 27.1 起系统说的竖栏在哪一边（VerticalBarProbe 报的原样）
+    @State private var probeEdge: HorizontalEdge?
+    /// 认下来的那一边：收起系统标签栏以后系统要是改报 nil，窗口没变就还认原来那边（不来回跳）；窗口一变（展开竖拿）才放掉
+    @State private var barEdge: HorizontalEdge?
+    /// 认下 barEdge 时的窗口大小
+    @State private var barWindow: CGSize = .zero
     /// 自己画的导航里再点一下当前那一格：这一格回到根页面（换一个 id，整页重建）
     @State private var roots: [AppTab: Int] = [:]
     /// UI 测试 / 截图（用户要求的新登录落地页）：-CuvenLoginLanding YES 演示数据、已登录时也盖上登录层，从落地页开始；
@@ -115,7 +125,8 @@ struct RootView: View {
     private var showsLogin: Bool { (account.loginRequired && !account.isLoggedIn) || loginPreview }
 
     var body: some View {
-        let column = DuoLayout.isColumn(window: window)
+        let column = barEdge != nil || DuoLayout.isColumn(window: window)
+            || DuoLayout.hasSideColumn(leading: sideInsets.leading, trailing: sideInsets.trailing)
         TabView(selection: $tab) {
             Tab("主页", systemImage: "house.fill", value: AppTab.home) {
                 HomeView().duoHidesTabBar().tint(.white).id(roots[.home, default: 0])
@@ -128,6 +139,10 @@ struct RootView: View {
                 RequestCenterView().duoHidesTabBar().tint(.white).id(roots[.requests, default: 0])
             }
             .badge(RequestStore.shared.activeCount + RequestBasket.shared.items.count)
+            // 我的（账户与设置）：用户要求照 Netflix，头像是导航的最后一格；侧边那一列里画的是头像，系统标签栏上是人像符号
+            Tab("我的", systemImage: "person.crop.circle", value: AppTab.account) {
+                AccountView(inTab: true).duoHidesTabBar().tint(.white).id(roots[.account, default: 0])
+            }
             Tab(value: AppTab.search, role: .search) {
                 SearchView().duoHidesTabBar().tint(.white).id(roots[.search, default: 0])
             }
@@ -138,15 +153,12 @@ struct RootView: View {
         // 侧边一列的形态：自己画的导航，搜索单独一颗
         .overlay {
             if column {
-                DuoNavLayer(tab: $tab) { roots[$0, default: 0] += 1 }
+                DuoNavLayer(tab: $tab, edge: barEdge) { roots[$0, default: 0] += 1 }
             }
         }
-        // 量整个窗口（连安全区）：折起 / 展开、横竖一变就重新判断
-        .background {
-            Color.clear
-                .ignoresSafeArea()
-                .onGeometryChange(for: CGSize.self) { $0.size } action: { window = $0 }
-        }
+        // 量整个窗口、左右安全区，iOS 27.1 起再问系统竖栏在哪一边（SideColumnProbe）
+        .modifier(SideColumnProbe(window: $window, sideInsets: $sideInsets, probeEdge: $probeEdge,
+                                  barEdge: $barEdge, barWindow: $barWindow))
         // 标签栏不在滚动时缩小：HIG 只在标签栏带附件（迷你播放器之类）时这么做（C10）；标签名一字一词（C8）
         .onChange(of: tab) { _, _ in Haptics.selection() }
         .onChange(of: model.searchRequest) { _, q in if q != nil { tab = .search } }
@@ -206,7 +218,9 @@ struct RootView: View {
             AllFilmsPreview.presentIfRequested(model)
             #endif
         }
-        .onChange(of: account.isLoggedIn) { _, now in if now { model.start() } }
+        .onChange(of: account.isLoggedIn) { _, now in
+            if now { model.start() } else { tab = .home }
+        }
         // 头像预先存在本机（用户要求）：一启动、一登录就在后台拉好存上，回到前台再看一眼有没有换（同一张 10 分钟内不重拉）
         .task(id: account.session?.username) { await account.refreshAvatar() }
         // 请求添加的进度：登录了就开始轮询（换账户、退出登录时换掉）
@@ -238,6 +252,51 @@ enum LayoutLog {
         guard key != last else { return }
         last = key
         Perf.log("layout " + key)
+    }
+}
+
+/// 认 iPhone Duo「侧边一列」要的几样都在这里量（单独一个修饰器：RootView 那一长串修饰器再长，编译器就推不动类型了）：
+/// 整个窗口的大小（连安全区，折起 / 展开、横竖一变就重新判断）、左右安全区、iOS 27.1 起系统说的竖栏在哪一边
+private struct SideColumnProbe: ViewModifier {
+    @Binding var window: CGSize
+    @Binding var sideInsets: (leading: CGFloat, trailing: CGFloat)
+    @Binding var probeEdge: HorizontalEdge?
+    @Binding var barEdge: HorizontalEdge?
+    @Binding var barWindow: CGSize
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                Color.clear
+                    .ignoresSafeArea()
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: { w in
+                        window = w
+                        // 窗口变了、系统这时说没有竖栏（展开竖拿）：放掉认下来的那一边
+                        if probeEdge == nil, w != barWindow { barEdge = nil }
+                    }
+            }
+            // 左右安全区：侧边那一列一边宽一边窄
+            .background {
+                Color.clear
+                    .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { i in
+                        sideInsets = (i.leading, i.trailing)
+                    }
+            }
+            // 系统说竖栏在哪一边。报 nil 时窗口没变就不清掉（收起系统标签栏以后可能报 nil），窗口变了才放掉
+            .background {
+                if #available(iOS 27.1, *) {
+                    VerticalBarProbe { e in
+                        probeEdge = e
+                        if let e {
+                            if e != barEdge { Perf.log("vertical bar on the \(e == .leading ? "leading" : "trailing") edge") }
+                            barEdge = e
+                            barWindow = window
+                        } else if window != barWindow {
+                            barEdge = nil
+                        }
+                    }
+                }
+            }
     }
 }
 

@@ -96,18 +96,11 @@ final class TourTests: XCTestCase {
         app.swipeUp(); sleep(2)
         app.swipeUp(); sleep(2)
         snap("11b-library-intro")
-        // 账户与设置：主页标题那一行右边的头像（不再是一个标签）
-        tapTab(["主页"])
-        sleep(2)
-        // 停在最上面就不再拉（连着往下甩会在顶上触发下拉刷新，真实片库整库重新拉一遍）
-        app.scrollHomeToTop(maxSwipes: 12)
-        let avatar = app.buttons["home-account"].firstMatch
-        if avatar.waitForExistence(timeout: 5) {
-            avatar.tap()
+        // 账户与设置：导航最后一格「我的」（照 Netflix，头像是导航的一格）
+        if app.tapTab(named: "我的") {
             sleep(2)
             snap("12-account")
-            let done = app.buttons["account-done"].firstMatch
-            if done.waitForExistence(timeout: 3) { done.tap() } else { app.swipeDown() }
+            tapTab(["主页"])
             sleep(1)
         } else {
             print("TOUR account: no avatar on home")

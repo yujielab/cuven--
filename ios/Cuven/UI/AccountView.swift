@@ -70,16 +70,18 @@ struct AvatarView: View {
     }
 }
 
-/// 账户与设置（主页右上的头像点开，是一张弹层）。照用户给的参考图（Apple「游戏」App 的个人页）重做：
+/// 账户与设置：标签栏的「我的」（用户要求照 Netflix，头像是导航的最后一格；以前是主页右上的头像点开的弹层）。照用户给的参考图（Apple「游戏」App 的个人页）重做：
 /// · 底：从头像取主色（取不到用紫色）往下渐暗到深灰，顶上那一截是这个颜色；
 /// · 头部居中：88 点的圆头像（右下角一枚 Cuven 小图标；点它换头像）、大号粗体的名字；
 /// · 头部下面是个人资料卡（账户页移植（网页版）：头像、姓名、电子邮件、登录面容，见 AccountProfile.swift；「订阅」那一行用户要求移除），
 ///   顶替以前那颗「个人档案」胶囊钮和它推进去的那一页（那一页的「登录方式」「登录时间」挪到「登录与安全」）；
 /// · 下面每一组是一行粗体的组名 + 一张圆角 26 的半透明卡，卡里一行一项：左边一枚灰色符号，标题 + 一行灰色说明，右边「›」、开关或数值；
-/// · 右上是系统的关闭钮（iOS 26 的玻璃圆钮），往上滚过头部，名字接到导航栏里。
+/// · 往上滚过头部，名字接到导航栏里；当弹层用时右上是系统的关闭钮（iOS 26 的玻璃圆钮），当标签页时没有。
 /// 内容：个人资料卡、网络、使用洞察（含「清除缓存」）、观看（含「清除继续观看」）、通知、播放、登录与安全（「片库」「关于」「存储」三组用户要求移除 / 并走），最底下单独一张「退出登录」（先用系统的确认：C44、C47；文案照网页版）。
 /// 「新片上架通知」打开的那一刻才向系统要权限（C78、C79）；系统里关着就多一行「打开设置」（C97）。
 struct AccountView: View {
+    /// 是标签栏「我的」那一页（不是弹层）：没有关闭钮
+    var inTab = false
     @Environment(AppModel.self) private var model
     @Environment(AccountStore.self) private var account
     @Environment(\.dismiss) private var dismiss
@@ -115,6 +117,11 @@ struct AccountView: View {
 
     static let notifyKey = "cuven_notify_new_titles"
     @Environment(\.horizontalSizeClass) private var hsc
+
+    /// 显式写出来：结构里有 private 的存储属性，自动生成的逐成员构造器在别的文件里用不了
+    init(inTab: Bool = false) {
+        self.inTab = inTab
+    }
 
     private var displayName: String { account.displayName.isEmpty ? "访客" : account.displayName }
 
@@ -157,10 +164,12 @@ struct AccountView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
-                // 系统的关闭（iOS 26 是右上一颗玻璃圆钮里的「×」：C14、C53）
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(role: .close) { dismiss() }
-                        .accessibilityIdentifier("account-done")
+                // 系统的关闭（iOS 26 是右上一颗玻璃圆钮里的「×」：C14、C53）；标签页没有
+                if !inTab {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(role: .close) { dismiss() }
+                            .accessibilityIdentifier("account-done")
+                    }
                 }
             }
             // 头部（头像 88 + 16 + 名字）约 150 点高：名字滚出去了才接到导航栏里（以前还有一颗胶囊，是 200）

@@ -119,11 +119,11 @@ extension XCUIApplication {
         sleep(1)
     }
 
-    /// 回到主页最上面：看到「Home」那一行的头像就停（多拉一下会触发下拉刷新）
+    /// 回到主页最上面：看到「主页」那行大标题就停（多拉一下会触发下拉刷新）
     func scrollHomeToTop(maxSwipes: Int = 16) {
         for _ in 0..<maxSwipes {
-            // iPad 的标签栏在最上面，头像可能落在它的框里：这里不跳过标签栏底下的
-            if !onScreenFrames(skipBars: false, where: { $0.identifier == "home-account" }).isEmpty { break }
+            // iPad 的标签栏在最上面，标题可能落在它的框里：这里不跳过标签栏底下的（标签栏上的「主页」是按钮，这里只认文字）
+            if !onScreenFrames(skipBars: false, where: { $0.elementType == .staticText && $0.label == "主页" }).isEmpty { break }
             swipeDown()
         }
         sleep(1)
