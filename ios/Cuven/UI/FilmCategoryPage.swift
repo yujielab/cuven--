@@ -16,10 +16,14 @@ import UIKit
 
 struct FilmCategoryPage: View {
     let category: FilmCategory
+    /// 只看这一年的（全部影片里那一年的「电影 ›」「剧集 ›」进来的）；nil：全部年份
+    var year: Int? = nil
 
     var body: some View {
         if category.playable {
-            PlayableCategoryPage(category: category)
+            PlayableCategoryPage(category: category, year: year)
+        } else if let year {
+            RequestableYearPage(category: category, year: year)
         } else {
             RequestableCategoryPage(category: category)
         }
@@ -31,29 +35,30 @@ struct FilmCategoryPage: View {
 private struct PlayableCategoryPage: View {
     @Environment(AppModel.self) private var model
     let category: FilmCategory
+    var year: Int? = nil
 
     var body: some View {
-        // 按片库缓存好的：几千部也不在每次重画时排一遍
-        let entries = model.playableEntries(series: category.series)
+        // 按片库缓存好的：几千部也不在每次重画时排一遍；只看某一年的：这一年的，新加入的在前（和全部影片那一排一样）
+        let entries = year.map { yearEntries($0) } ?? model.playableEntries(series: category.series)
         let head = Array(entries.prefix(3))
         // 顶上三张卡要排在最前那三部剧的画面：还没取到资料的先取（下面的卡要滑到了才取）
         let headShows = head.compactMap { (e: HomeEntry) -> Series? in
             if case .series(let s) = e { return s }
             return nil
         }
-        let kind = category.series ? "剧集" : "电影"
-        CollectionScaffold(title: category.title, titleBottom: { CategoryHeader.titleBottom($0) }) { m in
+        let kind = category.kind
+        CollectionScaffold(title: category.title(year: year), titleBottom: { CategoryHeader.titleBottom($0) }) { m in
             CategoryHeader(category: category, arts: headerArts(head),
-                           lead: head.first.flatMap { CollectionPage.cover($0, model: model) }, metrics: m)
+                           lead: head.first.flatMap { CollectionPage.cover($0, model: model) }, metrics: m, year: year)
             if entries.isEmpty {
-                ContentUnavailableView("暂无\(kind)", systemImage: category.series ? "tv" : "film",
+                ContentUnavailableView(year.map { "\($0) 年暂无\(kind)" } ?? "暂无\(kind)", systemImage: category.series ? "tv" : "film",
                                        description: Text("片库中的\(kind)会显示在这里。"))
                     .frame(maxWidth: .infinity)
                     .padding(.top, 12)
             } else {
                 CollectionGrid(metrics: m) { w in
                     ForEach(entries) { e in
-                        CollectionEntryCard(entry: e, width: w, slot: "category-" + category.rawValue)
+                        CollectionEntryCard(entry: e, width: w, slot: "category-" + category.rawValue + (year.map { "-\($0)" } ?? ""))
                     }
                 }
             }
@@ -61,6 +66,14 @@ private struct PlayableCategoryPage: View {
         .task(id: headShows.map(\.path).joined(separator: ",")) {
             for s in headShows { await model.ensureSeriesMeta(s) }
         }
+    }
+
+    /// 某一年的：片库里这一年的电影（或剧集，一部剧一张），新加入的在前
+    private func yearEntries(_ y: Int) -> [HomeEntry] {
+        if category.series {
+            return model.seriesInYear(y).sorted { ($0.added ?? "") > ($1.added ?? "") }.map { HomeEntry.series($0) }
+        }
+        return model.movies(inYear: y).sorted { $0.addedKey > $1.addedKey }.map { HomeEntry.movie($0) }
     }
 
     /// 顶上三张卡的画面（用户的图取不到时）：排在最前那三部的竖版画面，点了进那一部。
@@ -184,6 +197,105 @@ private struct RequestableCategoryPage: View {
     }
 }
 
+// MARK: - 可申请 · 某一年：影片库索引里这一年有、片库里没有的
+
+/// 全部影片里那一年「电影 ›」「剧集 ›」进来的（用户要求）。和全部影片那一排同一份数据（CatalogYears：同一年、同一类的那几页），
+/// 一进来先把已经取到的放上，不够一屏再接着取；滑到底取下一页
+private struct RequestableYearPage: View {
+    @Environment(AppModel.self) private var model
+    let category: FilmCategory
+    let year: Int
+
+    private var catalog: CatalogYears { CatalogYears.shared }
+
+    var body: some View {
+        let key = CatalogYears.Key(year: year, src: category.src)
+        let p = catalog.page(key)
+        let owned = model.ownedMovieIDs, shows = model.ownedSeasons
+        let items = p.items.filter { !model.owns($0, movies: owned, shows: shows) }
+        let head = Array(items.prefix(3))
+        let tail = Set(items.suffix(4).map(\.uid))
+        CollectionScaffold(title: category.title(year: year), titleBottom: { CategoryHeader.titleBottom($0) }) { m in
+            RequestableCategoryHeader(category: category, head: head, metrics: m, year: year)
+            list(m, key: key, page: p, items: items, tail: tail)
+        }
+        // 本机存的剧照、字标先读进来；这一年没问过、没问成的从第一页问，问过了不够一屏的接着翻
+        .task {
+            _ = CatalogArt.shared
+            await catalog.ensure(key, visible: items.count)
+        }
+        .task(id: head.map(\.uid).joined(separator: ",")) {
+            for it in head { CatalogArt.shared.want(it) }
+        }
+    }
+
+    @ViewBuilder
+    private func list(_ m: DSMetrics, key: CatalogYears.Key, page p: CatalogYears.Page, items: [CatalogItem],
+                      tail: Set<String>) -> some View {
+        let kind = category.kind
+        if items.isEmpty && p.failed {
+            ContentUnavailableView {
+                Label("无法载入", systemImage: "wifi.exclamationmark")
+            } description: {
+                Text("没能取到 \(year) 年可申请的\(kind)，请稍后再试。")
+            } actions: {
+                Button("重试") { Task { await catalog.ensure(key, visible: 0) } }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("category-retry")
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 12)
+        } else if items.isEmpty && p.done {
+            ContentUnavailableView("\(year) 年暂无可申请的\(kind)", systemImage: category.series ? "tv" : "film",
+                                   description: Text("影片库中这一年的\(kind)都已在片库里。"))
+                .frame(maxWidth: .infinity)
+                .padding(.top, 12)
+        } else {
+            let slot = "category-\(category.rawValue)-\(year)"
+            CollectionGrid(metrics: m) { w in
+                ForEach(items, id: \.uid) { it in
+                    CatalogCollectionCard(item: it, width: w, slot: slot)
+                        .onAppear {
+                            if tail.contains(it.uid) { Task { await catalog.loadMore(key, user: true) } }
+                        }
+                }
+                if !p.done && !p.failed {
+                    // 骨架卡：一行（一张都还没有时两行）；编号跟着下一页走，出现了就接着取（还没问过第一页的先问第一页）
+                    let n = m.collectionGrid.columns * (items.isEmpty ? 2 : 1)
+                    let loadingLabel = items.isEmpty ? "正在载入 \(year) 年可申请的\(kind)" : "正在载入更多\(kind)"
+                    ForEach((0..<n).map { p.next * 100 + $0 }, id: \.self) { k in
+                        SkeletonCollectionCard(width: w, label: k % 100 == 0 ? loadingLabel : nil)
+                            .onAppear {
+                                guard k % 100 == 0 else { return }
+                                Task {
+                                    if p.started { await catalog.loadMore(key, user: true) } else { await catalog.ensure(key, visible: 0) }
+                                }
+                            }
+                    }
+                }
+            }
+            if p.failed {
+                Button {
+                    Task { await catalog.loadMore(key, user: true) }
+                } label: {
+                    Label("载入失败，点按重试", systemImage: "arrow.clockwise")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 18)
+                        .frame(minHeight: 40)
+                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.4), lineWidth: 1))
+                        .padding(.vertical, 2)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PressableStyle())
+                .frame(maxWidth: .infinity)
+                .padding(.top, m.gridRowGap)
+                .accessibilityIdentifier("category-retry")
+            }
+        }
+    }
+}
+
 /// 可申请的一张大卡：和专区同一张（CollectionCard）。画面是影片库那一部的剧照（还没取到时是海报），
 /// 片名上面那一行小字不写（「Cuven 独占」是片库里的才有），右边那颗是请求的状态，请求进行中画面底边一道进度
 private struct CatalogCollectionCard: View {
@@ -212,10 +324,11 @@ private struct RequestableCategoryHeader: View {
     let category: FilmCategory
     let head: [CatalogItem]
     let metrics: DSMetrics
+    var year: Int? = nil
 
     var body: some View {
         CategoryHeader(category: category, arts: head.map { Self.art($0) },
-                       lead: TMDBImage.url(head.first?.poster, "w500"), metrics: metrics)
+                       lead: TMDBImage.url(head.first?.poster, "w500"), metrics: metrics, year: year)
     }
 
     /// 顶上一张卡的画面（用户的图取不到时），点了进它的详情（请求添加）。和可立即播放那边一样竖版的先：
@@ -300,6 +413,8 @@ private struct CategoryHeader: View {
     let arts: [CategoryCardArt]
     let lead: URL?
     let metrics: DSMetrics
+    /// 只看某一年的那一页：大标题、灰字按这一年写；顶上三张卡是这一年排在最前的那三部（不用四页共用的那三张图）
+    var year: Int? = nil
 
     /// 卡那一排上面留多少（排里上下各还有 4 点）：看上去和专区的立体海报离导航栏一样远（22）
     private static let rowTop: CGFloat = 18
@@ -310,8 +425,8 @@ private struct CategoryHeader: View {
     }
 
     var body: some View {
-        CollectionHeader(title: category.title, blurb: category.blurb, lead: lead, metrics: metrics, page: true) {
-            CategoryCardRow(category: category, arts: arts, metrics: metrics)
+        CollectionHeader(title: category.title(year: year), blurb: category.blurb(year: year), lead: lead, metrics: metrics, page: true) {
+            CategoryCardRow(category: category, arts: arts, metrics: metrics, itemsOnly: year != nil)
                 .padding(.top, Self.rowTop)
         }
     }
@@ -333,6 +448,8 @@ private struct CategoryCardRow: View {
     let category: FilmCategory
     let arts: [CategoryCardArt]
     let metrics: DSMetrics
+    /// 只用这一页排在最前那三部的画面（某一年的那一页）：不用本机资产、不用用户的那三张图
+    var itemsOnly = false
     /// 用户的图取不到的那几张（第几张）：换回那一部的画面。离开这一页再进来重试
     @State private var failed: Set<Int> = []
 
@@ -371,14 +488,14 @@ private struct CategoryCardRow: View {
     private func card(_ i: Int, size: CGSize) -> some View {
         let art: CategoryCardArt? = i < arts.count ? arts[i] : nil
         let remote: CategoryCardRemote? = i < CategoryCardRemote.all.count ? CategoryCardRemote.all[i] : nil
-        if let image = Self.userImage(category, i + 1) {
+        if !itemsOnly, let image = Self.userImage(category, i + 1) {
             // 三张都是用户的图：旁白念第几张（不然三张念得一模一样）
             CategoryCardFace(image: image, url: nil, size: size)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("\(category.title)，第 \(i + 1) 张，共 3 张")
                 .accessibilityAddTraits(.isImage)
                 .accessibilityIdentifier("category-header-card")
-        } else if let remote, let url = remote.url, !failed.contains(i) {
+        } else if !itemsOnly, let remote, let url = remote.url, !failed.contains(i) {
             // 用户给的图：一张静态的图，旁白念图上是什么；点了不做什么（不包 ZoomLink）
             CategoryCardFace(image: nil, url: nil, size: size, remote: url, onRemoteFail: { _ = failed.insert(i) })
                 .accessibilityElement(children: .ignore)

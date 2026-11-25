@@ -33,7 +33,7 @@ final class AllFilmsTests: XCTestCase {
         let mode = app.segmentedControls["all-films-mode"].firstMatch
         XCTAssertTrue(mode.waitForExistence(timeout: 20), "全部影片没打开")
         sleep(1)
-        if openCategory(app, "all-films-open-movie") {
+        if openCategory(app, "all-films-kind-movie-") {
             if !headerCard(app).waitForExistence(timeout: 8) { XCTFail("可立即播放 · 电影：顶上没有大卡（category-header-card）") }
             sleep(2)                              // 推进来的过渡、剧照读进来
             snap("films-6-cat-playable-movie")
@@ -51,7 +51,7 @@ final class AllFilmsTests: XCTestCase {
         } else {
             print("FILMS back: all-films-mode not found")
         }
-        if openCategory(app, "all-films-open-series") {
+        if openCategory(app, "all-films-kind-series-") {
             if !headerCard(app).waitForExistence(timeout: 10) { XCTFail("可申请 · 剧集：顶上没有大卡（category-header-card）") }
             sleep(3)                              // 可申请那一页先出骨架卡，剧照按编号取（演示数据是本地合成的）
             snap("films-9-cat-requestable-series")
@@ -66,8 +66,9 @@ final class AllFilmsTests: XCTestCase {
     }
 
     /// 分段控件下面那颗「电影 ›」/「剧集 ›」：在屏上就点正中（不经过 isHittable），找不到记一笔、返回 false
+    /// 打开分类页：每一年的「电影 ›」「剧集 ›」小标题（id 是 all-films-kind-movie-<年> 这样的，取最上面那一年的）
     private func openCategory(_ app: XCUIApplication, _ id: String) -> Bool {
-        let b = app.descendants(matching: .any).matching(identifier: id).firstMatch
+        let b = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", id)).firstMatch
         guard b.waitForExistence(timeout: 8) else {
             XCTFail("全部影片没有 \(id)")
             return false

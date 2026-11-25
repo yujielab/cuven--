@@ -405,6 +405,8 @@ struct RouteView: View {
         case .catalog(let t): CatalogDetailView(title: t)
         // 全部影片下面「电影 ›」「剧集 ›」进来的分类页（用户要求；版式照专区：FilmCategoryPage.swift）
         case .filmCategory(let c): FilmCategoryPage(category: c)
+        // 全部影片里某一年的「电影 ›」「剧集 ›」：同一种分类页，只看这一年的
+        case .filmYear(let c, let y): FilmCategoryPage(category: c, year: y)
         }
     }
 }

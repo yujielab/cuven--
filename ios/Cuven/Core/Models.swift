@@ -506,6 +506,8 @@ enum Route: Hashable {
     case catalog(CatalogTitle)
     /// 「全部影片」的分类页：可立即播放 / 可申请 × 电影 / 剧集（FilmCategoryPage.swift）
     case filmCategory(FilmCategory)
+    /// 同一种分类页，只看某一年的：全部影片里那一年的「电影 ›」「剧集 ›」（用户要求：按钮挪到每一年的小标题上）
+    case filmYear(FilmCategory, Int)
 }
 
 /// 「全部影片」下面「电影 ›」「剧集 ›」打开的分类页（用户要求：可立即播放、可申请各自一页，电视剧和电影分开，UI 和布局照专区）。
@@ -524,6 +526,21 @@ enum FilmCategory: String, CaseIterable, Hashable, Sendable {
 
     /// 片库里的（按下去就放）；否则是影片库索引里有、片库里还没有的（点开是「请求添加」）
     var playable: Bool { self == .playableMovie || self == .playableSeries }
+    /// 电影 / 剧集
+    var kind: String { series ? "剧集" : "电影" }
+
+    /// 只看某一年的那一页（全部影片里那一年的「电影 ›」「剧集 ›」）：大标题；nil 就是全部年份的那一页
+    func title(year: Int?) -> String {
+        guard let year else { return title }
+        return playable ? "\(year) · \(kind)" : "\(year) · 可申请\(kind)"
+    }
+
+    /// 大标题下那一句灰字（只看某一年的那一页）
+    func blurb(year: Int?) -> String {
+        guard let year else { return blurb }
+        return playable ? "片库中 \(year) 年上映的全部\(kind)，新加入的在前。"
+            : "影片库里 \(year) 年上映、片库中还没有的\(kind)，点开可以申请添加。"
+    }
     var series: Bool { self == .playableSeries || self == .requestableSeries }
     /// 影片库索引的类别（/app/catalog 的 src）
     var src: String { series ? "tv" : "movie" }
