@@ -19,7 +19,7 @@ constexpr sampler mfLinear(coord::normalized, address::clamp_to_edge, filter::li
 
 struct MFParams {
     float4 search;   // x 最粗层搜索半径（纹素），y 窗口每边几个采样点，z 零向量偏好（每纹素），w 偏离父块的代价（每纹素）
-    float4 refine;   // x 细化一步的代价（每纹素），y 1 = 再做半像素细化，z 对比度系数 kc，w 噪声底 n0
+    float4 refine;   // x 细化一步的代价（每纹素），y 再细化几步（1 到半像素，2 到四分之一像素），z 对比度系数 kc，w 噪声底 n0
     float4 extra;    // x 窗口采样点的间距（纹素），y、z 可信度的软门限，w 四个块的向量差在这以内（基层像素）就直接取平均
 };
 
@@ -154,6 +154,9 @@ kernel void mf_refine(texture2d<float, access::sample> A [[texture(0)]],
     if (P.refine.y > 0.5) {
         r = mf_step(A, B, c, r.xy, texel, win, P.extra.x, 0.5, P.refine.x);
     }
+    if (P.refine.y > 1.5) {
+        r = mf_step(A, B, c, r.xy, texel, win, P.extra.x, 0.25, P.refine.x);
+    }
     outField.write(float4(r, 1), uint2(gid));
 }
 
@@ -182,6 +185,9 @@ kernel void mf_propagate(texture2d<float, access::sample> A [[texture(0)]],
     float3 r = mf_step(A, B, c, bv, texel, win, P.extra.x, 1.0, P.refine.x);
     if (P.refine.y > 0.5) {
         r = mf_step(A, B, c, r.xy, texel, win, P.extra.x, 0.5, P.refine.x);
+    }
+    if (P.refine.y > 1.5) {
+        r = mf_step(A, B, c, r.xy, texel, win, P.extra.x, 0.25, P.refine.x);
     }
     outField.write(float4(r, 1), uint2(gid));
 }

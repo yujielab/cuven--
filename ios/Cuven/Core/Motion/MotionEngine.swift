@@ -549,8 +549,9 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
             content = atPresent - delay
             if let last = lastContent, content < last, last - content < 0.3 { content = last }
         }
+        let previous = lastContent
         lastContent = content
-        render(content: content, playing: playing, drawable: drawable)
+        render(content: content, previous: previous, playing: playing, drawable: drawable)
     }
 
     // MARK: 取帧
@@ -777,15 +778,17 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
             pair.hold = true
             return
         }
-        func params(window: Float, spacing: Float, half: Bool) -> MFParams {
+        /// sub：最后再细化几步（0 不做，1 到半像素，2 到四分之一像素）
+        func params(window: Float, spacing: Float, sub: Float) -> MFParams {
             MFParams(search: SIMD4(MotionTuning.coarseRadius, window, MotionTuning.lamZero, MotionTuning.lamDeviation),
-                     refine: SIMD4(MotionTuning.lamUpdate, half ? 1 : 0, MotionTuning.contrastGain, MotionTuning.noiseFloor),
+                     refine: SIMD4(MotionTuning.lamUpdate, sub, MotionTuning.contrastGain, MotionTuning.noiseFloor),
                      extra: SIMD4(spacing, MotionTuning.trustGate.x, MotionTuning.trustGate.y, MotionTuning.uniformSpread))
         }
         // 最粗一层用完整的 8×8 窗口（那里要稳）；细的几层用 4×4 个落在像素角上的采样点（同样盖住 8×8，省四分之三）
-        let coarse = params(window: MotionTuning.window, spacing: 1, half: false)
-        let fine = params(window: 4, spacing: 2, half: false)
-        let finest = params(window: 4, spacing: 2, half: true)
+        let coarse = params(window: MotionTuning.window, spacing: 1, sub: 0)
+        let fine = params(window: 4, spacing: 2, sub: 0)
+        // 最细一层到四分之一像素：前后两帧的细节对得更准，中点换帧时跳得更小（numpy：约小一成，画质 +0.3～0.45 dB）
+        let finest = params(window: 4, spacing: 2, sub: 2)
         // 拆成几小段各自提交：出画面的命令（另一条队列）可以插在两段之间，不被一整块分析挡住
         var buffers: [any MTLCommandBuffer] = []
         func stage(_ body: (any MTLComputeCommandEncoder) -> Void) {
@@ -885,10 +888,11 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         // 取第三大的那个：偶尔一对慢了（刚拖动完、系统忙了一下）不该把整段画面一直往后拖
         let target = needs.sorted(by: >)[2]
         let goal = min(MotionTuning.maxDelay, target + 0.003)
+        // 延后量一变，画面的速度就跟着变：变大时每次刷新最多 1 ms（晚起步会兜住这几对），放回时每次 0.1 ms（看不出来）
         if goal > delay {
-            delay += min(goal - delay, 0.002)
+            delay += min(goal - delay, 0.001)
         } else if goal < delay - 0.003 {
-            delay -= 0.0005
+            delay -= 0.0001
         }
     }
 
@@ -972,7 +976,7 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
 
     // MARK: 出画面
 
-    private func render(content: Double, playing: Bool, drawable: any CAMetalDrawable) {
+    private func render(content: Double, previous: Double?, playing: Bool, drawable: any CAMetalDrawable) {
         guard let first = frames.first else { return }
         // content 落在哪一对里
         var index = 0
@@ -1005,18 +1009,23 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
                 pair.latch = .hold
                 windowPairs += 1
             } else if pair.state == .ready, pair.dense != nil, pair.trust != nil {
-                // 估完了。准时：从 A 的时刻起步；晚了但剩下的时间还够：从这一刻起步，到 B 的时刻正好走完（不跳）
+                // 估完了。上一次刷新还没走到 A，这一下是进这一对的头一下：准时，相位照真实时间算（从 A 的时刻起步）。
+                // 头一下总会落在 A 之后不到一格刷新的地方，所以不能拿「离 A 多近」来判准不准时。
+                // 上一下已经在这一对里（当时没估完、这一对还没建好、暂停着）：晚了。剩下的时间还够就从这一刻起步，
+                // 到 B 的时刻正好走完（不跳）；不够就整对不插
                 let span = max(1e-6, pair.b.time - pair.a.time)
                 let remaining = (pair.b.time - content) / span
+                let onTime = previous.map { $0 < pair.a.time } ?? false
                 windowPairs += 1
-                if content - pair.a.time < 0.004 || remaining >= MotionTuning.lateStartShare {
-                    pair.start = max(pair.a.time, content)
-                    pair.latch = pair.neural != nil && pair.start - pair.a.time < 0.004 ? .neural : .interpolate
+                if onTime {
+                    pair.start = pair.a.time
+                    pair.latch = pair.neural != nil ? .neural : .interpolate
                     if pair.latch == .neural { windowNeural += 1 }
-                    if pair.start - pair.a.time >= 0.004 {
-                        misses += 1
-                        windowMisses += 1
-                    }
+                } else if remaining >= MotionTuning.lateStartShare {
+                    // 晚起步但照样插了：只进诊断数字，不算「跟不上」
+                    pair.start = content
+                    pair.latch = .interpolate
+                    misses += 1
                 } else {
                     pair.latch = .hold
                     misses += 1
@@ -1206,7 +1215,7 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         let w = CVPixelBufferGetWidthOfPlane(pb, 0)
         let h = CVPixelBufferGetHeightOfPlane(pb, 0)
         let row = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
-        guard w >= thumbColumns * 5, h >= thumbRows * 5 else { return nil }
+        guard w > 0, h > 0 else { return nil }
         let p = base.assumingMemoryBound(to: UInt8.self)
         // 10 bit：每个样本两个字节、小端，高字节就是高 8 位
         let stride = tenBit ? 2 : 1
