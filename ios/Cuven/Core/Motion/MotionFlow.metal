@@ -8,8 +8,9 @@ using namespace metal;
 //   对中间帧上的位置 p 找 v，使 A(p − v/2) 与 B(p + v/2) 最像）→ 块中值 → 在半尺寸那一层上逐像素从周围 2×2 个块的
 //   向量里挑最合的 → 中值 → 可信度图（匹配残差对局部对比度，2×2 取最小再柔化）。
 // 重建（屏幕每刷新一次，片元着色器直接画到屏上）：
-//   按这一刻落在 A、B 之间的位置 φ：运动可靠处取 A(p − φv) 与 B(p + (1−φ)v) 混合；不可靠或两边对不上处退回
-//   「时间上更近的原帧」（有神经中间帧时取它）；静止处两边本来就一样。
+//   按这一刻落在 A、B 之间的位置 φ：运动可靠处，细节取时间上更近的那一帧（A(p − φv) 或 B(p + (1−φ)v)，锐利取样），
+//   大块明暗在两帧之间平滑过渡；不可靠或两边对不上处退回「时间上更近的原帧」（中间那一段有神经中间帧、
+//   且它不是重影时取它）；静止处直接取原帧。
 //
 // 坐标一律归一化（0…1，纹素中心在 (i+0.5)/N），向量是 A→B 的归一化位移。算法先用 numpy 在真实 1080p50 片段上
 // 验证过（抽掉一半的帧再插回来和真实帧比），这里的每个 kernel 和那份参考实现一一对应。
@@ -303,10 +304,10 @@ kernel void mf_blur3(texture2d<float, access::read> src [[texture(0)]],
 // MARK: 重建（画到屏上）
 
 struct MFDraw {
-    float4 phase;    // x φ，y 模式（0 只画 A；1 插帧；2 插帧 + 神经中间帧），z 诊断分区图（1 = 开），w 没用
+    float4 phase;    // x φ，y 模式（0 只画 A；1 插帧；2 插帧 + 神经中间帧），z 诊断分区图（1 = 开），w 1 = 画面要放大（原帧也用锐利取样）
     float4 uv;       // xy 缩放，zw 偏移：屏上的 uv → 片源的 uv
     float4 gate;     // x、y 两边对不上的软门限，z 对比度系数 kc，w 噪声底 n0
-    float4 weights;  // x、y 运动补偿时 A→B 的过渡区间，z、w 退回原帧时的过渡区间
+    float4 weights;  // x、y 运动补偿时大块明暗从 A 过渡到 B 的区间，z、w 没用
     float4 range;    // x 亮度缩放，y 亮度偏移，z 色度缩放，w 色度偏移（码值 → 归一化）
     float4 toR;      // YCbCr → R'G'B' 的三行（xyz）
     float4 toG;
@@ -330,6 +331,38 @@ static float3 mf_ycc(texture2d<float, access::sample> Y, texture2d<float, access
     return float3(Y.sample(mfLinear, uv, level(0)).r, C.sample(mfLinear, uv, level(0)).rg);
 }
 
+/// 亮度的锐利取样（Catmull-Rom 双三次，去掉四个角的 5 次双线性采样）。按运动挪了不到一个像素、或者 1080p 放大到屏幕时，
+/// 双线性取样会把细节抹软：真机反馈「模糊」。numpy 里量过：插出来的帧的清晰度从真实帧的约 86% 回到约 95%
+static float mf_y_sharp(texture2d<float, access::sample> Y, float2 uv) {
+    float2 size = float2(Y.get_width(), Y.get_height());
+    float2 pos = uv * size;
+    float2 p1 = floor(pos - 0.5) + 0.5;
+    float2 f = pos - p1;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 t0 = (p1 - 1.0) / size;
+    float2 t3 = (p1 + 2.0) / size;
+    float2 t12 = (p1 + w2 / w12) / size;
+    float wc = w12.x * w12.y;
+    float wl = w0.x * w12.y;
+    float wr = w3.x * w12.y;
+    float wu = w12.x * w0.y;
+    float wd = w12.x * w3.y;
+    float v = Y.sample(mfLinear, float2(t12.x, t12.y), level(0)).r * wc
+            + Y.sample(mfLinear, float2(t0.x, t12.y), level(0)).r * wl
+            + Y.sample(mfLinear, float2(t3.x, t12.y), level(0)).r * wr
+            + Y.sample(mfLinear, float2(t12.x, t0.y), level(0)).r * wu
+            + Y.sample(mfLinear, float2(t12.x, t3.y), level(0)).r * wd;
+    return saturate(v / (wc + wl + wr + wu + wd));
+}
+
+static float3 mf_ycc_sharp(texture2d<float, access::sample> Y, texture2d<float, access::sample> C, float2 uv) {
+    return float3(mf_y_sharp(Y, uv), C.sample(mfLinear, uv, level(0)).rg);
+}
+
 fragment float4 mf_present(MFVertexOut in [[stage_in]],
                            texture2d<float, access::sample> yA [[texture(0)]],
                            texture2d<float, access::sample> cA [[texture(1)]],
@@ -347,8 +380,9 @@ fragment float4 mf_present(MFVertexOut in [[stage_in]],
     float3 ycc = float3(0.0);
     float3 tint = float3(0.0);
     float routed = 0.0;
+    bool sharpen = D.phase.w > 0.5;
     if (D.phase.y < 0.5) {
-        ycc = mf_ycc(yA, cA, uv);
+        ycc = sharpen ? mf_ycc_sharp(yA, cA, uv) : mf_ycc(yA, cA, uv);
     } else {
         float2 v = dense.sample(mfLinear, uv, level(0)).xy;
         bool done = false;
@@ -358,7 +392,11 @@ fragment float4 mf_present(MFVertexOut in [[stage_in]],
             float2 pb = packedB.sample(mfLinear, uv, level(0)).rg;
             float still = fabs(pa.r - pb.r) / (D.gate.z * max(pa.g, pb.g) + D.gate.w);
             if (still < D.gate.x) {
-                if (phi < 0.5) { ycc = mf_ycc(yA, cA, uv); } else { ycc = mf_ycc(yB, cB, uv); }
+                if (phi < 0.5) {
+                    ycc = sharpen ? mf_ycc_sharp(yA, cA, uv) : mf_ycc(yA, cA, uv);
+                } else {
+                    ycc = sharpen ? mf_ycc_sharp(yB, cB, uv) : mf_ycc(yB, cB, uv);
+                }
                 done = true;
             }
         }
@@ -376,20 +414,28 @@ fragment float4 mf_present(MFVertexOut in [[stage_in]],
             float r = max(conflict, 1.0 - t);
             float3 mc = float3(0.0);
             if (r < 0.999) {
-                float3 a = mf_ycc(yA, cA, ua);
-                float3 b = mf_ycc(yB, cB, ub);
-                mc = mix(a, b, smoothstep(D.weights.x, D.weights.y, phi));
+                // 分频混合：细节只取时间上更近的那一帧（按运动对好位），大块的明暗（半尺寸的亮度）在两帧之间平滑过渡。
+                // 两帧各取一半再混，稍微没对齐就糊；这样每一刻都一样清楚，大的形状也不会在中点跳一下
+                float w = smoothstep(D.weights.x, D.weights.y, phi);
+                float low = pb.r - pa.r;
+                float2 chroma = mix(cA.sample(mfLinear, ua, level(0)).rg, cB.sample(mfLinear, ub, level(0)).rg, w);
+                float luma = phi < 0.5 ? mf_y_sharp(yA, ua) + w * low : mf_y_sharp(yB, ub) - (1.0 - w) * low;
+                mc = float3(luma, chroma);
             }
             float3 fb = float3(0.0);
             if (r > 0.001) {
-                float3 a0 = mf_ycc(yA, cA, uv);
-                float3 b0 = mf_ycc(yB, cB, uv);
+                // 信不过的地方：时间上更近的那张原帧，原地不动（等于这里不插帧）
+                if (phi < 0.5) { fb = mf_ycc_sharp(yA, cA, uv); } else { fb = mf_ycc_sharp(yB, cB, uv); }
                 if (D.phase.y > 1.5) {
-                    float wa = 1.0 - smoothstep(0.2, 0.3, phi);
-                    float wb = smoothstep(0.7, 0.8, phi);
-                    fb = a0 * wa + b0 * wb + mf_ycc(yN, cN, uv) * (1.0 - wa - wb);
-                } else {
-                    fb = mix(a0, b0, smoothstep(D.weights.z, D.weights.w, phi));
+                    // 神经中间帧只在中间那一段用；它在这里要是只是 A、B 叠在一起（重影），就不用它
+                    float wn = smoothstep(0.2, 0.3, phi) * (1.0 - smoothstep(0.7, 0.8, phi));
+                    if (wn > 0.001) {
+                        float3 n = mf_ycc(yN, cN, uv);
+                        float al = packedA.sample(mfLinear, uv, level(0)).r;
+                        float bl = packedB.sample(mfLinear, uv, level(0)).r;
+                        float ghost = 1.0 - smoothstep(0.15, 0.35, fabs(n.x - 0.5 * (al + bl)) / (fabs(al - bl) + 0.02));
+                        fb = mix(fb, n, wn * (1.0 - ghost));
+                    }
                 }
             }
             ycc = mix(mc, fb, r);
