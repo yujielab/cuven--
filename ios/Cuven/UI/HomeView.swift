@@ -31,7 +31,8 @@ struct HomeView: View {
                 let fullHeight = geo.size.height + insets.top + insets.bottom
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        hero(m, fullWidth: fullWidth, fullHeight: fullHeight, insets: insets)
+                        // 头图单独成一个视图（HomeHero，卡顿）：它要读播放进度，放片时进度每 5 秒写一次，不再连累整个主页重算
+                        HomeHero(metrics: m, fullWidth: fullWidth, fullHeight: fullHeight, insets: insets, scanning: $pairScanning)
                         shelves(m, fullHeight: fullHeight)
                             // 宽度写死成内容区的宽：哪个孩子再宽（结尾的字标卡一排几千点）也撑不开这一列，
                             // 居中的东西（字标、按钮、精选区的立体海报）不会跑到屏幕外面去
@@ -63,124 +64,6 @@ struct HomeView: View {
         .onChange(of: scenePhase) { _, p in
             if p == .active { Task { await model.heroSlotCheck() } }
         }
-    }
-
-    // MARK: 头图
-
-    /// 头图（S15）：竖着的屏约 86% 屏高、用竖版全屏图（下面露出下一排的标题，告诉人还能往下滑：S8）；
-    /// 横着的屏 94% 屏高、用横版背景。宽度是整个窗口（含侧边那一列），字留在安全区里
-    @ViewBuilder
-    private func hero(_ m: DSMetrics, fullWidth: CGFloat, fullHeight: CGFloat, insets: EdgeInsets) -> some View {
-        let tall = fullHeight > fullWidth
-        // iPad（用户要求定制）：头图不再占满一整屏，竖拿约六成、横拿约七成半，下面那一排的标题露出来（Apple TV App 在 iPad 上的比例）
-        let pad = UIDevice.current.userInterfaceIdiom == .pad
-        let ratio: CGFloat = pad ? (tall ? 0.62 : 0.74) : (tall ? 0.86 : 0.94)
-        // 设计复查：有标签栏的 iPhone 竖拿（下边距 > 60）时，86% 让下一排的标题一大半压在标签栏底下；
-        // 最多到「屏高 − 下边距 − 72」（28 间距 + 28 标题 + 16 留白），标题整行露在标签栏上面。折起的 Duo、iPad 不变
-        let height = ((!pad && tall && insets.bottom > 60) ? min(fullHeight * ratio, fullHeight - insets.bottom - 72) : fullHeight * ratio).rounded()
-        let pages = heroPages
-        ZStack(alignment: .topLeading) {
-            if !pages.isEmpty {
-                DSHeroCarousel(pages: pages, metrics: m, height: height, fullWidth: fullWidth,
-                               leadingInset: insets.leading, trailingInset: insets.trailing)
-            } else if (model.movies.isEmpty || !model.heroResolved) && !loadFailed {
-                // 还在载入 / 还在挑头图：先占住头图的位置，不留白屏（C66），也不先放一张不合格的（设计轮 2：和卡的占位同一种灰）
-                LinearGradient(colors: [DSFill.placeholder, Theme.bg], startPoint: .top, endPoint: .bottom)
-                    .frame(width: fullWidth, height: height)
-                    .accessibilityHidden(true)
-            } else {
-                // 和下面「主页」那一行的上边距同一个下限（24），占的高度跟着一起变
-                Color.clear.frame(width: fullWidth, height: max(insets.top, 24) + 64)
-            }
-            // 最上面一行：左边白字「主页」（Apple TV 主页那样的大标题，压在画面上、跟着头图一起滚走：C13、F34；
-            // 发行前从英文「Home」改成中文，和标签栏的「主页」一致），右边光学扫描。
-            // 账户与设置不在这里了：用户要求照 Netflix，头像是导航的最后一格（标签栏「我的」）
-            HStack(alignment: .center, spacing: 12) {
-                Text("主页")
-                    .font(.largeTitle.bold())
-                    .foregroundStyle(.white)
-                    .shadow(color: .black.opacity(0.35), radius: 10, y: 2)
-                    .allowsHitTesting(false)
-                    .accessibilityAddTraits(.isHeader)
-                Spacer(minLength: 12)
-                // 光学扫描在「主页」右边（iPhone Duo 上也是：挪到侧边那一列里试过，用户要求放回来）
-                if canScan { scanButton }
-            }
-            // 没有状态栏留的安全区时（iPhone Duo 折起，状态栏在侧边那一列）至少离上沿 24 + 8：
-            // 以前是 12 + 8，大标题贴着屏幕顶（用户要求「保持一定的留白，整个界面看上去不会拥挤」）
-            .padding(.top, max(insets.top, 24) + 8)
-            .padding(.leading, insets.leading + m.margin)
-            .padding(.trailing, insets.trailing + m.margin)
-            .frame(width: fullWidth)
-        }
-        .frame(width: fullWidth, alignment: .topLeading)
-        // 占位 → 头图淡过去（以前灰的占位一下子换成黑底，画面再从黑里出来）；只是淡入淡出，「减弱动态效果」下也合适
-        .animation(DSMotion.fade, value: pages.isEmpty)
-    }
-
-    /// 能扫：配对的解码器在（PairSpec），登录了、不是演示数据（和账户页「扫描登录其他设备」同一个条件）
-    private var canScan: Bool {
-        PairSpec.shared != nil && (account.session.map { $0.method != "demo" } ?? false)
-    }
-
-    /// 光学扫描（用户要求「在头像旁边添加 + 光学扫描按钮」）：和头像一样大的一颗 Liquid Glass 圆钮，
-    /// 点开就是账户页里那张扫描（将图案放在圆圈中 → 看是哪台设备 → 面容 ID 批准）
-    private var scanButton: some View {
-        Button {
-            // 和别的玻璃钮一样，点下去有一下轻的触感
-            Haptics.light()
-            pairScanning = true
-        } label: {
-            // 图标（用户要求 Apple 风格、克制简洁）：取景框四个角 + 中间一个小圆（镜头），见 ScanGlyph
-            ScanGlyph()
-                .stroke(.white, style: StrokeStyle(lineWidth: 1.9, lineCap: .round, lineJoin: .round))
-                .frame(width: 23, height: 23)
-                .frame(width: 46, height: 46)
-                .glassEffect(.regular.interactive(), in: Circle())
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("光学扫描")
-        .accessibilityHint("扫描另一台设备上的粒子云，让它登录你的账户")
-        .accessibilityIdentifier("home-pair-scan")
-    }
-
-    /// 头图的每一页（T30–T32）：只放拿到了无字背景 + 字标的，最多 5 部（AppModel.resolveHeroes 挑）。
-    /// 横着的屏用无字的横图，竖着的屏用竖版无字图（没有就把横图居中裁）。看了一半的直接「继续播放」，不再问（S17、F85）
-    private var heroPages: [DSHeroPage] {
-        model.heroPicks.map { p in
-            let v = p.video
-            return DSHeroPage(id: p.id,
-                              wideArt: p.wide,
-                              tallArt: p.tall ?? p.wide,
-                              logo: p.logo,
-                              title: model.title(v),
-                              meta: heroMeta(p),
-                              playTitle: model.playback.resumePosition(v.path) != nil ? "继续播放" : "播放",
-                              play: { playHero(p) },
-                              detail: .movie(v),
-                              trailerHLS: model.heroTrailers[p.id])
-        }
-    }
-
-    /// 「电影 · 2026 · 科幻」：一行、短、平实（F84、S15）
-    private func heroMeta(_ p: HeroPick) -> String {
-        let kind = (p.hero?.type ?? "Movie").lowercased().hasPrefix("show") ? "剧集" : "电影"
-        let year = (p.hero?.year ?? model.year(p.video)).map { String($0) }
-        let genre = model.meta(p.video)?.genres?.first
-        return [kind, year, genre].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
-    }
-
-    private func playHero(_ p: HeroPick) {
-        let v = p.video
-        PlayerCoordinator.shared.play(PlayRequest(path: v.path, name: v.name, title: model.title(v),
-                                                  subtitle: model.year(v).map { String($0) },
-                                                  artwork: p.wide), model: model)
-    }
-
-    private var loadFailed: Bool {
-        if case .failed = model.phase { return true }
-        return false
     }
 
     // MARK: 货架
@@ -226,7 +109,8 @@ struct HomeView: View {
             }
         } else {
             VStack(alignment: .leading, spacing: m.shelfGap) {
-                continueWatching(m)
+                // 继续观看单独成一个视图（卡顿）：播放进度每 5 秒写一次，只让这一排跟着重算
+                HomeContinueRow(metrics: m)
                 // 精选电影紧跟在继续观看下面（用户要求：从编辑推荐上面挪上来）
                 featuredShelf(m)
                 // 今年那一排下面是「探索片段合集」（用户要求：2026 年份下；ClipCollections.swift），再是去年
@@ -239,28 +123,6 @@ struct HomeView: View {
                 // 主页不放「可申请」那一排（用户要求移除）：可申请的在「全部影片 › 可申请」和搜索里
                 ForEach(HomeCategory.allCases) { c in categoryShelf(c, m) }
                 finale(m)
-            }
-        }
-    }
-
-    /// 继续观看（T22）：16:9 画面 + 字标 + 进度条（F36）；点一下直接接着放（S17、C89）
-    @ViewBuilder
-    private func continueWatching(_ m: DSMetrics) -> some View {
-        let entries = model.playback.continueWatching
-        if !entries.isEmpty {
-            DSSection(title: "继续观看", metrics: m) {
-                DSShelf(metrics: m) {
-                    ForEach(entries) { e in
-                        let art = continueArt(e)
-                        Button { resume(e) } label: {
-                            DSWideLockup(art: art.url, title: e.title, subtitle: remainingLabel(e),
-                                         progress: e.fraction, metrics: m, logo: art.logo)
-                                .downloadBadge(e.seriesPath == nil ? e.path : nil, inset: 10)
-                        }
-                        .buttonStyle(PressableStyle())
-                        .accessibilityIdentifier("continue-card")
-                    }
-                }
             }
         }
     }
@@ -391,6 +253,176 @@ struct HomeView: View {
             .accessibilityIdentifier("series-card")
             .seriesMenu(s)
             .task { await model.ensureSeriesMeta(s) }
+        }
+    }
+}
+
+// MARK: - 主页头图
+
+/// 头图那一块（S15）。单独成一个视图（卡顿）：「继续播放 / 播放」要读播放进度，放片时（画中画、半折的面板）进度每 5 秒写一次——
+/// 以前写在 HomeView 的 body 里，每写一次整个主页（十几排货架连同全片库的筛选、排序）都要重算一遍，滑动时每 5 秒顿一下
+private struct HomeHero: View {
+    @Environment(AppModel.self) private var model
+    @Environment(AccountStore.self) private var account
+    let metrics: DSMetrics
+    let fullWidth: CGFloat
+    let fullHeight: CGFloat
+    let insets: EdgeInsets
+    /// 光学扫描那张弹层开着没有（HomeView 的状态）
+    @Binding var scanning: Bool
+
+    var body: some View {
+        hero(metrics, fullWidth: fullWidth, fullHeight: fullHeight, insets: insets)
+    }
+
+    /// 头图（S15）：竖着的屏约 86% 屏高、用竖版全屏图（下面露出下一排的标题，告诉人还能往下滑：S8）；
+    /// 横着的屏 94% 屏高、用横版背景。宽度是整个窗口（含侧边那一列），字留在安全区里
+    @ViewBuilder
+    private func hero(_ m: DSMetrics, fullWidth: CGFloat, fullHeight: CGFloat, insets: EdgeInsets) -> some View {
+        let tall = fullHeight > fullWidth
+        // iPad（用户要求定制）：头图不再占满一整屏，竖拿约六成、横拿约七成半，下面那一排的标题露出来（Apple TV App 在 iPad 上的比例）
+        let pad = UIDevice.current.userInterfaceIdiom == .pad
+        let ratio: CGFloat = pad ? (tall ? 0.62 : 0.74) : (tall ? 0.86 : 0.94)
+        // 设计复查：有标签栏的 iPhone 竖拿（下边距 > 60）时，86% 让下一排的标题一大半压在标签栏底下；
+        // 最多到「屏高 − 下边距 − 72」（28 间距 + 28 标题 + 16 留白），标题整行露在标签栏上面。折起的 Duo、iPad 不变
+        let height = ((!pad && tall && insets.bottom > 60) ? min(fullHeight * ratio, fullHeight - insets.bottom - 72) : fullHeight * ratio).rounded()
+        let pages = heroPages
+        ZStack(alignment: .topLeading) {
+            if !pages.isEmpty {
+                DSHeroCarousel(pages: pages, metrics: m, height: height, fullWidth: fullWidth,
+                               leadingInset: insets.leading, trailingInset: insets.trailing)
+            } else if (model.movies.isEmpty || !model.heroResolved) && !loadFailed {
+                // 还在载入 / 还在挑头图：先占住头图的位置，不留白屏（C66），也不先放一张不合格的（设计轮 2：和卡的占位同一种灰）
+                LinearGradient(colors: [DSFill.placeholder, Theme.bg], startPoint: .top, endPoint: .bottom)
+                    .frame(width: fullWidth, height: height)
+                    .accessibilityHidden(true)
+            } else {
+                // 和下面「主页」那一行的上边距同一个下限（24），占的高度跟着一起变
+                Color.clear.frame(width: fullWidth, height: max(insets.top, 24) + 64)
+            }
+            // 最上面一行：左边白字「主页」（Apple TV 主页那样的大标题，压在画面上、跟着头图一起滚走：C13、F34；
+            // 发行前从英文「Home」改成中文，和标签栏的「主页」一致），右边光学扫描。
+            // 账户与设置不在这里了：用户要求照 Netflix，头像是导航的最后一格（标签栏「我的」）
+            HStack(alignment: .center, spacing: 12) {
+                Text("主页")
+                    .font(.largeTitle.bold())
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.35), radius: 10, y: 2)
+                    .allowsHitTesting(false)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 12)
+                // 光学扫描在「主页」右边（iPhone Duo 上也是：挪到侧边那一列里试过，用户要求放回来）
+                if canScan { scanButton }
+            }
+            // 没有状态栏留的安全区时（iPhone Duo 折起，状态栏在侧边那一列）至少离上沿 24 + 8：
+            // 以前是 12 + 8，大标题贴着屏幕顶（用户要求「保持一定的留白，整个界面看上去不会拥挤」）
+            .padding(.top, max(insets.top, 24) + 8)
+            .padding(.leading, insets.leading + m.margin)
+            .padding(.trailing, insets.trailing + m.margin)
+            .frame(width: fullWidth)
+        }
+        .frame(width: fullWidth, alignment: .topLeading)
+        // 占位 → 头图淡过去（以前灰的占位一下子换成黑底，画面再从黑里出来）；只是淡入淡出，「减弱动态效果」下也合适
+        .animation(DSMotion.fade, value: pages.isEmpty)
+    }
+
+    /// 能扫：配对的解码器在（PairSpec），登录了、不是演示数据（和账户页「扫描登录其他设备」同一个条件）
+    private var canScan: Bool {
+        PairSpec.shared != nil && (account.session.map { $0.method != "demo" } ?? false)
+    }
+
+    /// 光学扫描（用户要求「在头像旁边添加 + 光学扫描按钮」）：和头像一样大的一颗 Liquid Glass 圆钮，
+    /// 点开就是账户页里那张扫描（将图案放在圆圈中 → 看是哪台设备 → 面容 ID 批准）
+    private var scanButton: some View {
+        Button {
+            // 和别的玻璃钮一样，点下去有一下轻的触感
+            Haptics.light()
+            scanning = true
+        } label: {
+            // 图标（用户要求 Apple 风格、克制简洁）：取景框四个角 + 中间一个小圆（镜头），见 ScanGlyph
+            ScanGlyph()
+                .stroke(.white, style: StrokeStyle(lineWidth: 1.9, lineCap: .round, lineJoin: .round))
+                .frame(width: 23, height: 23)
+                .frame(width: 46, height: 46)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("光学扫描")
+        .accessibilityHint("扫描另一台设备上的粒子云，让它登录你的账户")
+        .accessibilityIdentifier("home-pair-scan")
+    }
+
+    /// 头图的每一页（T30–T32）：只放拿到了无字背景 + 字标的，最多 5 部（AppModel.resolveHeroes 挑）。
+    /// 横着的屏用无字的横图，竖着的屏用竖版无字图（没有就把横图居中裁）。看了一半的直接「继续播放」，不再问（S17、F85）
+    private var heroPages: [DSHeroPage] {
+        model.heroPicks.map { p in
+            let v = p.video
+            return DSHeroPage(id: p.id,
+                              wideArt: p.wide,
+                              tallArt: p.tall ?? p.wide,
+                              logo: p.logo,
+                              title: model.title(v),
+                              meta: heroMeta(p),
+                              playTitle: model.playback.resumePosition(v.path) != nil ? "继续播放" : "播放",
+                              play: { playHero(p) },
+                              detail: .movie(v),
+                              trailerHLS: model.heroTrailers[p.id])
+        }
+    }
+
+    /// 「电影 · 2026 · 科幻」：一行、短、平实（F84、S15）
+    private func heroMeta(_ p: HeroPick) -> String {
+        let kind = (p.hero?.type ?? "Movie").lowercased().hasPrefix("show") ? "剧集" : "电影"
+        let year = (p.hero?.year ?? model.year(p.video)).map { String($0) }
+        let genre = model.meta(p.video)?.genres?.first
+        return [kind, year, genre].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    private func playHero(_ p: HeroPick) {
+        let v = p.video
+        PlayerCoordinator.shared.play(PlayRequest(path: v.path, name: v.name, title: model.title(v),
+                                                  subtitle: model.year(v).map { String($0) },
+                                                  artwork: p.wide), model: model)
+    }
+
+    private var loadFailed: Bool {
+        if case .failed = model.phase { return true }
+        return false
+    }
+}
+
+// MARK: - 主页「继续观看」
+
+/// 继续观看那一排单独成一个视图（卡顿）：放片时（画中画、半折的面板）播放进度每 5 秒写一次，
+/// 只让这一排跟着重算，不再把整个主页的货架连同全片库的筛选、排序都重算一遍
+private struct HomeContinueRow: View {
+    @Environment(AppModel.self) private var model
+    let metrics: DSMetrics
+
+    var body: some View {
+        continueWatching(metrics)
+    }
+
+    /// 继续观看（T22）：16:9 画面 + 字标 + 进度条（F36）；点一下直接接着放（S17、C89）
+    @ViewBuilder
+    private func continueWatching(_ m: DSMetrics) -> some View {
+        let entries = model.playback.continueWatching
+        if !entries.isEmpty {
+            DSSection(title: "继续观看", metrics: m) {
+                DSShelf(metrics: m) {
+                    ForEach(entries) { e in
+                        let art = continueArt(e)
+                        Button { resume(e) } label: {
+                            DSWideLockup(art: art.url, title: e.title, subtitle: remainingLabel(e),
+                                         progress: e.fraction, metrics: m, logo: art.logo)
+                                .downloadBadge(e.seriesPath == nil ? e.path : nil, inset: 10)
+                        }
+                        .buttonStyle(PressableStyle())
+                        .accessibilityIdentifier("continue-card")
+                    }
+                }
+            }
         }
     }
 

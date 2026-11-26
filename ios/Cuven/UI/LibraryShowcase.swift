@@ -29,11 +29,21 @@ struct LibraryView: View {
     private struct Entry: Identifiable {
         let lap: Int
         let video: Video
-        var id: String { "\(lap)|\(video.path)" }
+        /// 存下来（以前每读一次拼一次）：ForEach 比对、isActive、标题那一层都要读，几百章每次都拼一遍（卡顿）
+        let id: String
+
+        init(lap: Int, video: Video) {
+            self.lap = lap
+            self.video = video
+            id = "\(lap)|\(video.path)"
+        }
     }
 
     var body: some View {
-        let feed = self.feed
+        // base 一次 body 只取一遍：以前 feed 里取一遍、onChange 又取一遍，每遍都把全片库的预告片索引过一遍、再建一张字典；
+        // 换章（active / covered 变了）时这一页的 body 正好在跑，滑着的时候卡顿
+        let base = self.base
+        let feed = self.feed(base)
         ZoomStack {
             GeometryReader { geo in
                 let vh = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
@@ -110,8 +120,7 @@ struct LibraryView: View {
     }
 
     /// 放哪些章：全片库查完一轮以后首尾相接（网页版的环形队列），最多铺到 400 章；不到三部不循环
-    private var feed: [Entry] {
-        let base = self.base
+    private func feed(_ base: [Video]) -> [Entry] {
         guard !base.isEmpty else { return [] }
         let laps = model.trailerScanDone && base.count >= 3 ? max(1, min(12, 400 / base.count)) : 1
         return (0..<laps).flatMap { lap in base.map { Entry(lap: lap, video: $0) } }

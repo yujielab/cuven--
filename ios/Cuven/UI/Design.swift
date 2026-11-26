@@ -1133,6 +1133,15 @@ struct DSHeroCarousel: View {
                 pageStart = Date()
                 try? await Task.sleep(nanoseconds: UInt64(Self.interval * 1_000_000_000))
                 guard !Task.isCancelled, !touched else { return }
+                // 头图滑出了屏幕（往下看货架）：不在看不见的地方翻页。翻一页的活都在主线程上——横向滚过去的动画、
+                // 整屏画面的模糊淡入淡出、挂下一页的预告片——以前滑货架时每 7 秒就卡一下（卡顿）。
+                // 等它回到屏上再翻：这时页码胶囊正好是满的，一回来就翻，看上去和原来一样。
+                // 等着的时候把 pageStart 放掉：胶囊照样是满的（nil 就画满），它那一秒 30 次的 TimelineView 停下来
+                while !onScreen {
+                    if pageStart != nil { pageStart = nil }
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    guard !Task.isCancelled, !touched else { return }
+                }
                 let ids = pages.map(\.id)
                 let i = ids.firstIndex(of: current ?? ids[0]) ?? 0
                 withAnimation(.smooth(duration: 0.8)) { current = ids[(i + 1) % ids.count] }

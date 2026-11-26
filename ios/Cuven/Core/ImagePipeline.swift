@@ -186,9 +186,11 @@ actor ImagePipeline {
     }
 }
 
-/// 图的后期处理（Core Image，在后台线程做；CIContext 线程安全，全 App 共用一个）
+/// 图的后期处理（Core Image，在后台线程做；CIContext 线程安全，全 App 共用一个）。
+/// 用低优先级的 GPU 队列：渐进式模糊是在 GPU 上算的，滑一排分集卡、精选卡时每张新卡都要糊一次，
+/// 以前和系统合成画面抢同一块 GPU，滑动掉帧（卡顿）；结果一模一样，只是忙的时候让画面先走
 enum ImageEffects {
-    nonisolated(unsafe) private static let context = CIContext(options: [.cacheIntermediates: false])
+    nonisolated(unsafe) private static let context = CIContext(options: [.cacheIntermediates: false, .priorityRequestLow: true])
 
     static func apply(_ effect: ImageEffect, to image: UIImage) -> UIImage? {
         switch effect {
@@ -559,8 +561,22 @@ final class LogoTone {
         pending[k] = nil
         known[k] = v
         if known.count > 800 { known.removeAll() }
-        UserDefaults.standard.set(known, forKey: key)
+        saveSoon()
         return v
+    }
+
+    /// 判过的结果攒一会儿再写进本机：以前每判一枚就把整张表（最多 800 项）写一遍 UserDefaults——
+    /// 主线程上转属性列表、发变更通知，第一次滑过一排新片时每张新字标都来一次（卡顿）。现在 1.5 秒内的合成一次写
+    private var saveTask: Task<Void, Never>?
+
+    private func saveSoon() {
+        guard saveTask == nil else { return }
+        saveTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let self else { return }
+            self.saveTask = nil
+            UserDefaults.standard.set(self.known, forKey: self.key)
+        }
     }
 
     nonisolated static func measure(_ data: Data) -> Bool {

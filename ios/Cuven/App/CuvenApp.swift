@@ -318,6 +318,8 @@ private struct SideColumnProbe: ViewModifier {
             .background {
                 Color.clear
                     .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { i in
+                        // 只认左右：上下（键盘起落、拖着收键盘）变了不写。这是个元组，写一次整个 RootView 连同标签页、导航胶囊都要重算（卡顿）
+                        guard i.leading != sideInsets.leading || i.trailing != sideInsets.trailing else { return }
                         sideInsets = (i.leading, i.trailing)
                     }
             }

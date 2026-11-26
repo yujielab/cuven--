@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - 动效：向 Apple TV 靠拢
 //
@@ -96,15 +97,21 @@ private struct PointerLift: ViewModifier {
     }
 
     func body(content: Content) -> some View {
-        content
-            // 量的是排版的大小，scaleEffect 不改它，放大了也不会来回跳
-            .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
-            // 「减弱动态效果」打开时不缩放（DSMotion.adapt 的规矩）
-            .scaleEffect(lifts && hovering && !reduceMotion ? 1.03 : 1)
-            .onHover { h in
-                guard on else { return }
-                withAnimation(DSMotion.press) { hovering = h }
-            }
+        // iPhone 不接触控板 / 鼠标，永远停不上指针：什么都不挂。以前每张卡都挂一个量尺寸的观察，
+        // 懒加载的一排每滑出一张新卡就多写一次状态、多重算一遍（滑动时的卡顿）；iPad 照旧
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            content
+        } else {
+            content
+                // 量的是排版的大小，scaleEffect 不改它，放大了也不会来回跳
+                .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
+                // 「减弱动态效果」打开时不缩放（DSMotion.adapt 的规矩）
+                .scaleEffect(lifts && hovering && !reduceMotion ? 1.03 : 1)
+                .onHover { h in
+                    guard on else { return }
+                    withAnimation(DSMotion.press) { hovering = h }
+                }
+        }
     }
 }
 

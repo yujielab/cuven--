@@ -15,6 +15,7 @@ import UIKit
 //   卡上右边那颗是请求的状态（和全部影片可申请那排同一条规矩：CatalogRequestState），长按电影可以放进请求中心
 
 struct FilmCategoryPage: View {
+    @Environment(AppModel.self) private var model
     let category: FilmCategory
     /// 只看这一年的（全部影片里那一年的「电影 ›」「剧集 ›」进来的）；nil：全部年份
     var year: Int? = nil
@@ -22,10 +23,15 @@ struct FilmCategoryPage: View {
     var body: some View {
         if category.playable {
             PlayableCategoryPage(category: category, year: year)
-        } else if let year {
-            RequestableYearPage(category: category, year: year)
         } else {
-            RequestableCategoryPage(category: category)
+            // 片库里已经有的（TMDB 编号）在这一层算好传下去：这一层只跟着片库变。卡顿：以前在下面那一页的 body 里算，
+            // 滑到底取下一页、请求状态并进来（feed / pages 一变）都要把整个片库过一遍
+            let owned = model.ownedMovieIDs, shows = model.ownedSeasons
+            if let year {
+                RequestableYearPage(category: category, year: year, owned: owned, shows: shows)
+            } else {
+                RequestableCategoryPage(category: category, owned: owned, shows: shows)
+            }
         }
     }
 }
@@ -105,11 +111,13 @@ private struct PlayableCategoryPage: View {
 private struct RequestableCategoryPage: View {
     @Environment(AppModel.self) private var model
     let category: FilmCategory
+    /// 片库里已经有的电影 / 剧集（FilmCategoryPage 算好传进来）
+    let owned: Set<Int>
+    let shows: [Int: Set<Int>]
 
     var body: some View {
         let feed = CatalogFeed.shared(category.src)
         // 片库里已经有的滤掉（影片库按 own=hide 已经滤过一遍；刚入库、请求刚完成的这里再滤）
-        let owned = model.ownedMovieIDs, shows = model.ownedSeasons
         let items = feed.items.filter { !model.owns($0, movies: owned, shows: shows) }
         let head = Array(items.prefix(3))
         // 滑到最后这几张就接着取下一页（不等滑到骨架卡）
@@ -205,13 +213,15 @@ private struct RequestableYearPage: View {
     @Environment(AppModel.self) private var model
     let category: FilmCategory
     let year: Int
+    /// 片库里已经有的电影 / 剧集（FilmCategoryPage 算好传进来）
+    let owned: Set<Int>
+    let shows: [Int: Set<Int>]
 
     private var catalog: CatalogYears { CatalogYears.shared }
 
     var body: some View {
         let key = CatalogYears.Key(year: year, src: category.src)
         let p = catalog.page(key)
-        let owned = model.ownedMovieIDs, shows = model.ownedSeasons
         let items = p.items.filter { !model.owns($0, movies: owned, shows: shows) }
         let head = Array(items.prefix(3))
         let tail = Set(items.suffix(4).map(\.uid))

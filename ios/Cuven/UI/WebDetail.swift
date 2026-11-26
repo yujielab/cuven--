@@ -93,7 +93,8 @@ struct MovieDetailView: View {
             trailers: trailers,
             trailerArt: trailerArt(meta),
             stills: DetailText.stills(meta),
-            precache: precacheState(meta),
+            // 交一个闭包、到「播放」那一格里才算（卡顿）：这里不再读 Precache，下载进度一变不再整页重算
+            precache: DetailPrecacheSource(make: { precacheState(meta) }),
             downloadPath: video.path,
             arcAnchor: column ? arcAnchor : nil
         ) { _ in
@@ -681,8 +682,10 @@ struct DetailScaffold<Episodes: View>: View {
     let trailerArt: [String]
     /// 「剧照」那一排（TMDB 的剧照；两张以上才出这一段）
     var stills: [String] = []
-    /// 弱网预先缓存（电影才有）：有就把「播放」换成「预先画面质量处理」/「立即播放」+ 圆形进度钮（PrecachePlayRow）
-    var precache: DetailPrecache? = nil
+    /// 弱网预先缓存（电影才有）：算出来有就把「播放」换成「预先画面质量处理」/「立即播放」+ 圆形进度钮（PrecachePlayRow），nil 是平常的「播放」。
+    /// 交进来的是怎么算（DetailPrecacheSource），在那一小格（DetailPrecacheSlot）里才算（卡顿）：缓存 / 下载时每下好一段 Precache 就写一次，以前在 MovieDetailView 的 body 里读，
+    /// 每写一次整页（连同「更多同类型」那一遍全片库排序）都跟着重算，滑着滑着隔一会儿顿一下
+    var precache: DetailPrecacheSource? = nil
     /// 下载角标看哪一部（电影才有）：在下载 / 下好了，那一行信息的右端一颗角标
     var downloadPath: String? = nil
     /// 换掉「播放」的那一块（片库里没有的那部：「请求添加」按钮 / 五步进度卡，RequestViews.swift）
@@ -692,7 +695,6 @@ struct DetailScaffold<Episodes: View>: View {
     /// 分集那一段（电影没有）：拿到当前宽度的版面尺寸再排
     @ViewBuilder var episodes: (DSMetrics) -> Episodes
 
-    @State private var showTitle = false
     /// 头部画面底边的主色：整页跟着染（DetailPalette）
     @State private var edge: UIColor?
     @State private var castSheet: CastSheetRequest?
@@ -796,11 +798,6 @@ struct DetailScaffold<Episodes: View>: View {
             .background(palette.deep)
             // 画面铺到状态栏、导航栏和侧边那一列底下（F6）；字和按钮还在安全区里（F7）
             .ignoresSafeArea(edges: [.top, .horizontal])
-            .onScrollGeometryChange(for: Bool.self) { g in
-                g.contentOffset.y + g.contentInsets.top > pinAt
-            } action: { _, v in
-                withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.42, dampingFraction: 0.86)) { showTitle = v }
-            }
             // 字标粒子转场的进度（用户要求：跟着滚动走，停下就停在这一帧，往回滚原路倒回去）：
             // 0 = 没滚（字标在头部原位），1 = 滚到以前钉住那条出现的位置（字标已经落进条里）。
             // 只看滚动距离、不看页面多高（停住就是同一帧）；页面短的时候上面那个最小高度保证滚得到 1，粒子不会停在半路上
@@ -810,10 +807,12 @@ struct DetailScaffold<Episodes: View>: View {
             } action: { _, v in
                 motion.setProgress(v)
             }
-            // 钉在顶上的条：从上面滑下来（参考图的「取得」那一条）；片名在这条里，导航栏里不再写
-            .overlay(alignment: .top) {
-                pinnedBar(m, insets: insets, barBottom: barBottom, palette: palette, heroLogo: heroLogo)
-            }
+            // 钉在顶上的条：从上面滑下来（参考图的「取得」那一条）；片名在这条里，导航栏里不再写。
+            // 滚没滚过 pinAt 的开关放在这个小修饰器里（卡顿）：以前是这一层的状态，一翻过去整页（头部、简介、分集、演员……）
+            // 都要在弹簧动画那一帧里重算一遍，条滑下来（有字标时字标落定）那一下会顿
+            .modifier(DetailPinnedSlide(threshold: pinAt, reduceMotion: reduceMotion) { shown in
+                pinnedBar(m, insets: insets, barBottom: barBottom, palette: palette, heroLogo: heroLogo, shown: shown)
+            })
             // 粒子层盖在整页和顶上那条上面（用户要求：字标化成细粒子，沿一条往右鼓的弧线飞进左上角再拼好）
             .overlay {
                 particleLayer(heroLogo)
@@ -854,7 +853,8 @@ struct DetailScaffold<Episodes: View>: View {
     /// 钉在顶上的那一条。有字标（用户要求）：条不再整条滑下来，底色、字标、「继续播放」都跟着滚动进度走，
     /// 字标那一格是头部字标的 42%（同比例、同左边距）；没有字标（或字标图还没到手）和以前一样从上面滑下来
     @ViewBuilder
-    private func pinnedBar(_ m: DSMetrics, insets: EdgeInsets, barBottom: CGFloat, palette: DetailPalette, heroLogo: CGSize?) -> some View {
+    private func pinnedBar(_ m: DSMetrics, insets: EdgeInsets, barBottom: CGFloat, palette: DetailPalette, heroLogo: CGSize?,
+                           shown showTitle: Bool) -> some View {
         if let logoImage, let heroLogo {
             let slot = CGSize(width: heroLogo.width * 0.42, height: heroLogo.height * 0.42)
             let particles = logoParticles
@@ -1051,8 +1051,13 @@ struct DetailScaffold<Episodes: View>: View {
                 if let customAction {
                     customAction
                 } else if let precache {
-                    // 网络不好 / 网络速度低于 50%：「预先画面质量处理」，按了变成「立即播放」+ 右边一颗圆形进度钮（用户要求）
-                    PrecachePlayRow(precache: precache, wide: m.wide, playID: playID, playDisabled: playDisabled, onPlay: onPlay)
+                    // 网络不好 / 网络速度低于 50%：「预先画面质量处理」，按了变成「立即播放」+ 右边一颗圆形进度钮（用户要求）；
+                    // 都不是就是平常的「播放」。读 Precache 的只有这一格（卡顿）
+                    DetailPrecacheSlot(state: precache.make) { p in
+                        PrecachePlayRow(precache: p, wide: m.wide, playID: playID, playDisabled: playDisabled, onPlay: onPlay)
+                    } fallback: {
+                        playButton(m)
+                    }
                 } else {
                     playButton(m)
                 }
@@ -1062,7 +1067,12 @@ struct DetailScaffold<Episodes: View>: View {
                     Color.clear
                         .frame(width: 48, height: 48)
                         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { r in
-                            if !arcAnchor.frozen { arcAnchor.rect = r }
+                            guard !arcAnchor.frozen else { return }
+                            // 卡顿：这一格整个滚出屏幕顶上以后（在看演员、相关影片）不再每帧写，弧形菜单那一层不跟着整页滚动每帧重算；
+                            // 滚出去的那一下照写（「+」跟着藏起来），滚回来一露头就接着写
+                            let a = arcAnchor.rect
+                            if r.maxY < 0, a.maxY < 0, r.size == a.size { return }
+                            arcAnchor.rect = r
                         }
                         .accessibilityHidden(true)
                 } else if onRestart != nil {
@@ -1313,6 +1323,47 @@ private struct DetailLogoBarHost: View {
             // 字标落定、「继续播放」出齐了才接手势、旁白才念这一条（没有字标时是看钉住那条有没有出来）
             .allowsHitTesting(p >= 1)
             .accessibilityHidden(p < 1)
+    }
+}
+
+/// 钉住那一条的开关：滚过 threshold（DetailScaffold 的 pinAt）就是 true。只有这个修饰器跟着开关重算（卡顿），滚动区里的内容不动；
+/// 有字标转场时条不看它（跟着进度走），翻过去也不会连累整页
+private struct DetailPinnedSlide<Bar: View>: ViewModifier {
+    let threshold: CGFloat
+    let reduceMotion: Bool
+    let bar: (Bool) -> Bar
+    @State private var shown = false
+
+    func body(content: Content) -> some View {
+        content
+            .onScrollGeometryChange(for: Bool.self) { g in
+                g.contentOffset.y + g.contentInsets.top > threshold
+            } action: { _, v in
+                withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.42, dampingFraction: 0.86)) { shown = v }
+            }
+            .overlay(alignment: .top) { bar(shown) }
+    }
+}
+
+/// 详情页弱网预先缓存的状态，到「播放」那一格里才算（卡顿，见 DetailPrecacheSlot）。
+/// 包一层、不直接放闭包：DetailScaffold 末尾的尾随闭包（分集那一段）不会被错配到这一项上
+struct DetailPrecacheSource {
+    let make: () -> DetailPrecache?
+}
+
+/// 「播放」那一格（电影）：弱网预先缓存时是 PrecachePlayRow，不然是平常的「播放」。
+/// 在这里才算 state（卡顿）：Precache 的进度每下好一段写一次，只让这一小格跟着重画，整页不跟着重算
+private struct DetailPrecacheSlot<Row: View, Fallback: View>: View {
+    let state: () -> DetailPrecache?
+    let row: (DetailPrecache) -> Row
+    let fallback: () -> Fallback
+
+    var body: some View {
+        if let p = state() {
+            row(p)
+        } else {
+            fallback()
+        }
     }
 }
 

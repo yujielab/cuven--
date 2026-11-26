@@ -163,7 +163,6 @@ struct SearchView: View {
     @State private var query = ""
     @State private var scope: SearchScope = .all
     @Namespace private var scopeNS
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZoomStack {
@@ -171,8 +170,13 @@ struct SearchView: View {
                 // 系统栏竖在侧边（iPhone Duo 折起时 / 展开横拿时）：搜索框不挂在底部的标签栏上，得在标题下面一直显示
                 let sideBars = abs(geo.safeAreaInsets.leading - geo.safeAreaInsets.trailing) > 30
                 let insets = geo.safeAreaInsets
-                // 不带高：键盘弹出来时版面不跟着变
-                content(DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing))
+                // 不带高：键盘弹出来时版面不跟着变。
+                // 内容单拆一个视图（SearchContent）：键盘一弹一收（往下滚就收起键盘）这一层跟着重跑，传下去的字、宽、分类都没变，
+                // 里面就不重算。卡顿：以前每次都把整个片库重新搜一遍（每部都过两道正则）、没输入时把整个片库按入库时间排一遍，
+                // 正好撞在开始滚的那一下
+                SearchContent(query: query,
+                              metrics: DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing),
+                              scope: $scope, scopeNS: scopeNS)
                     .searchable(text: $query, placement: sideBars ? .navigationBarDrawer(displayMode: .always) : .automatic,
                                 prompt: "电影、剧集、年份")
             }
@@ -188,6 +192,18 @@ struct SearchView: View {
             model.searchRequest = nil
         }
     }
+}
+
+/// 搜索页的内容：没输入是文件夹 + 最近添加，输入了是结果（为什么单拆一个视图见 SearchView）
+private struct SearchContent: View {
+    @Environment(AppModel.self) private var model
+    let query: String
+    let metrics: DSMetrics
+    @Binding var scope: SearchScope
+    let scopeNS: Namespace.ID
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View { content(metrics) }
 
     private func content(_ metrics: DSMetrics) -> some View {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)

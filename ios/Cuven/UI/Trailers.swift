@@ -285,7 +285,7 @@ struct TrailerPlayerView: View {
                 .padding(.horizontal, 24)
                 .animation(DSMotion.snap, value: deck.index)
                 if deck.trailers.count > 1 {
-                    TrailerDots(count: deck.trailers.count, index: deck.index, progress: deck.progress)
+                    TrailerDotsHost(deck: deck)
                         .padding(.top, 16)
                 }
             }
@@ -297,6 +297,16 @@ struct TrailerPlayerView: View {
         .onAppear { deck.start() }
         .onDisappear { deck.stop() }
         .preferredColorScheme(.dark)
+    }
+}
+
+/// 读播放进度的只有翻页胶囊这一小块（卡顿）：deck.progress 一秒写 5 次，以前在 TrailerPlayerView 的 body 里读，
+/// 全屏预告片整页（玻璃钮、手势、旁白那一串）跟着每 0.2 秒重算一遍
+private struct TrailerDotsHost: View {
+    let deck: TrailerDeck
+
+    var body: some View {
+        TrailerDots(count: deck.trailers.count, index: deck.index, progress: deck.progress)
     }
 }
 

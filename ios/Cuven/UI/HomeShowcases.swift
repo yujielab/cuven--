@@ -19,8 +19,11 @@ struct EditorsPick: View {
     let metrics: DSMetrics
     /// 窗口的高：折起的屏这一块约是宽的 1.3 倍高，展开竖拿 0.9 倍，横着的屏 0.56 倍，最多窗口高的 82%
     let fullHeight: CGFloat
+    /// 预告片播放器装在一个盒子里、第一次用时才建（卡顿）：@State 的初值在父视图每次重算、重建这个结构体时都会再算一遍，
+    /// 以前主页每重算一次就白建一个 AVPlayer、再挂四个通知（扔掉的那个通知也不摘）；现在每次只多建一个空盒子
+    @State private var trailerBox = EditorsPickTrailerBox()
     /// 竖着的这一块按高铺满、横向裁掉两边：码流到 1080 马上露，放了 2 秒到六成、4 秒不管多少都露；本机那份一放就露（ShowcaseTrailer.tick）
-    @State private var trailer = ShowcaseTrailer(revealHeight: 1080)
+    private var trailer: ShowcaseTrailer { trailerBox.trailer }
     @State private var tone: Color?
     @State private var onScreen = false
     /// 有预告片（右上那颗「播放预告」才出现）；hls 是那一段（问本机有没有下好）
@@ -245,10 +248,21 @@ struct EditorsPick: View {
 
     /// 面板的颜色：画面最下面那一截的平均色，压暗、收一点饱和度（白字看得清；设计轮 2：和合集卡的底条同一个 DSTint.panel）
     private func loadTone(_ url: URL?) async {
-        guard let url, let img = await ImagePipeline.shared.image(url, maxPixel: 64), let cg = img.cgImage,
-              let c = ImageEffects.averageColor(cg, bottom: 0.3), let t = DSTint.panel(c) else { return }
+        guard let url, let img = await ImagePipeline.shared.image(url, maxPixel: 64) else { return }
+        // 取色放到后台（卡顿）：Core Image 渲染一个像素要同步等 GPU，以前在主线程上，这一块滑进来的那一下会顿
+        let tint = await Task.detached(priority: .userInitiated) { () -> Color? in
+            guard let cg = img.cgImage, let c = ImageEffects.averageColor(cg, bottom: 0.3) else { return nil }
+            return DSTint.panel(c)
+        }.value
+        guard let t = tint else { return }
         withAnimation(DSMotion.fade) { tone = t }
     }
+}
+
+/// 编辑推荐的预告片播放器：第一次读 trailer 时才建（见 EditorsPick.trailerBox）
+@MainActor
+final class EditorsPickTrailerBox {
+    lazy var trailer = ShowcaseTrailer(revealHeight: 1080)
 }
 
 // MARK: - 主页「2026 ›」「2025 ›」（照用户给的参考图：游戏 App「Arcade 名人堂」那一排）
@@ -530,8 +544,13 @@ struct WideLeadCard: View {
     }
 
     private func loadTone() async {
-        guard let art, let img = await ImagePipeline.shared.image(art, maxPixel: 64), let cg = img.cgImage,
-              let c = ImageEffects.averageColor(cg, bottom: 0.3), let t = DSTint.panel(c) else { return }
+        guard let art, let img = await ImagePipeline.shared.image(art, maxPixel: 64) else { return }
+        // 取色放到后台（卡顿）：Core Image 渲染一个像素要同步等 GPU，以前在主线程上，卡滑进来的那一下会顿
+        let tint = await Task.detached(priority: .userInitiated) { () -> Color? in
+            guard let cg = img.cgImage, let c = ImageEffects.averageColor(cg, bottom: 0.3) else { return nil }
+            return DSTint.panel(c)
+        }.value
+        guard let t = tint else { return }
         withAnimation(DSMotion.fade) { tone = t }
     }
 }
@@ -708,6 +727,9 @@ struct HomeFinale: View {
     let tiles: [FinaleTile]
     let metrics: DSMetrics
     @State private var onScreen = false
+    /// 这一页在前台（推进了详情页、换到别的标签时 onDisappear，滚动可见性不一定报）：不在前台两排卡就停，
+    /// 不在背后一直每秒 30 帧推（卡顿；和精选区的立体海报 PosterFan 同一个做法）
+    @State private var appeared = false
     /// 第一次滑到这里才把两排卡建出来。主页这一列不是懒加载的：一启动就建会把这里几十张图连同下载都做了，人多半还没滑到这里
     @State private var built = false
     /// 人按了暂停（右边那颗圆钮）
@@ -724,7 +746,7 @@ struct HomeFinale: View {
         let fullW = metrics.width + metrics.leadingInset + metrics.trailingInset
         // 演示数据只给 UI 测试用：不走（持续的动画会让 XCUITest 一直等不到 App 空闲）；「减弱动态效果」时也不走，暂停钮就不出
         let canMove = !reduceMotion && !DemoData.enabled
-        let running = onScreen && canMove && !userPaused
+        let running = appeared && onScreen && canMove && !userPaused
         VStack(spacing: 0) {
             Group {
                 if built {
@@ -768,6 +790,8 @@ struct HomeFinale: View {
             // 第一次滑到：两排卡淡进来，不是一下子冒出来
             if v, !built { withAnimation(DSMotion.fade) { built = true } }
         }
+        .onAppear { appeared = true }
+        .onDisappear { appeared = false }
     }
 
     /// 「查看全部影片 ›」：描边的胶囊（参考图「See full lineup ›」），看上去 44 高
