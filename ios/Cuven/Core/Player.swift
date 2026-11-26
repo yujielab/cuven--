@@ -40,6 +40,8 @@ final class CuvenPlayerViewController: AVPlayerViewController {
     private lazy var orientation = VideoOrientationLock()
     /// iPhone Duo 半折（横着的折痕）时：上面画面、下面控制面板（用户要求；UI/PlayerTabletop.swift）
     private(set) lazy var tabletop = TabletopPlayerHost()
+    /// 流畅插帧（Core/FrameInterpolation.swift）：盖在系统画面上、控件下面；半折、画中画时停下
+    let interpolation = FrameInterpolationOverlay()
 
     /// 半折面板上的「锁定屏幕」：锁在按下时的方向，转动设备不跟着转（用户要求）。解开、点「全屏」、合上 / 摊平时回到原来的规则
     private var lockedOrientation: UIInterfaceOrientation? {
@@ -64,7 +66,13 @@ final class CuvenPlayerViewController: AVPlayerViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        tabletop.install(in: self) { on in plog("tabletop \(on ? "on" : "off")") }
+        tabletop.install(in: self) { [weak self] on in
+            plog("tabletop \(on ? "on" : "off")")
+            self?.interpolation.setSuspended(on)
+        }
+        if let overlay = contentOverlayView { interpolation.install(in: overlay) }
+        interpolation.player = { [weak self] in self?.tabletop.model.player ?? self?.player }
+        interpolation.gravity = { [weak self] in self?.videoGravity ?? .resizeAspect }
         tabletop.model.onOrientationLock = { [weak self] on in
             guard let self else { return }
             self.lockedOrientation = on ? self.view.window?.windowScene?.effectiveGeometry.interfaceOrientation : nil
@@ -86,6 +94,7 @@ final class CuvenPlayerViewController: AVPlayerViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         tabletop.model.visible = true
+        interpolation.activate()
     }
 
     override func viewWillTransition(to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator) {
@@ -96,7 +105,10 @@ final class CuvenPlayerViewController: AVPlayerViewController {
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         tabletop.model.visible = false
-        if isBeingDismissed || presentingViewController == nil { onClose?() }
+        if isBeingDismissed || presentingViewController == nil {
+            interpolation.shutdown()
+            onClose?()
+        }
     }
 
     // iPad 接了键盘：空格暂停 / 播放、← → 快退快进是系统播放器自带的；这里补上关掉播放器的两个键（Esc、⌘W），
@@ -217,6 +229,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         PlayerLoadingOverlay.shared.show(title: coverTitle(req))
         // 半折时的控制面板：片名、「下一集」、下面那块（简介 / InSight / 继续观看 / 推荐）跟着换
         controller?.tabletop.show(req)
+        controller?.interpolation.prepare(name: req.name)
         configurePanel(req)
         Task { await start(req, token: token) }
     }
@@ -326,6 +339,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
             plog("source hls, info.json \(status) in \(Perf.ms(since: t1)) ms\(body?.video.map { " (\($0.summary))" } ?? "")")
             // 半折面板的光影：HDR / 杜比视界的片子不取画面的帧（见 VideoFrameProcessor）
             controller?.tabletop.updateRange(from: body?.video)
+            controller?.interpolation.setInfo(body?.video)
             PlayerLoadingOverlay.shared.stage(.meta)
             if (200..<300).contains(status) && body?.ok != false { return await compatible(await precached(req, master) ?? master) }
             if status >= 400 && status < 500 && status != 404 {
@@ -411,6 +425,7 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
         if player == nil || (controller?.presentingViewController == nil && !inPiP) {
             presentPlayer(req)                       // 兜底：没弹出来（比如当时找不到能弹的页面）就现在弹
             controller?.tabletop.show(req)
+            controller?.interpolation.prepare(name: req.name)
             configurePanel(req)
         }
         guard let p = player else { return }
@@ -782,12 +797,16 @@ final class PlayerCoordinator: NSObject, AVPlayerViewControllerDelegate {
     // MARK: 画中画
 
     nonisolated func playerViewControllerWillStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
-        Task { @MainActor in self.inPiP = true }
+        Task { @MainActor in
+            self.inPiP = true
+            self.controller?.interpolation.setPictureInPicture(true)
+        }
     }
 
     nonisolated func playerViewControllerDidStopPictureInPicture(_ playerViewController: AVPlayerViewController) {
         Task { @MainActor in
             self.inPiP = false
+            self.controller?.interpolation.setPictureInPicture(false)
             if self.controller?.presentingViewController == nil { self.closedByUser() }
         }
     }
