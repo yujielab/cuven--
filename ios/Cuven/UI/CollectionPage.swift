@@ -56,7 +56,6 @@ struct CollectionScaffold<Content: View>: View {
     let title: String
     let titleBottom: (DSMetrics) -> CGFloat
     let content: (DSMetrics) -> Content
-    @State private var titleInBar = false
 
     init(title: String, titleBottom: @escaping (DSMetrics) -> CGFloat,
          @ViewBuilder content: @escaping (DSMetrics) -> Content) {
@@ -82,16 +81,31 @@ struct CollectionScaffold<Content: View>: View {
             }
             .scrollIndicators(.hidden)
             .ignoresSafeArea(edges: .horizontal)
-            .onScrollGeometryChange(for: Bool.self) { g in
-                g.contentOffset.y + g.contentInsets.top > bottom
-            } action: { _, v in
-                withAnimation(.easeOut(duration: 0.2)) { titleInBar = v }
-            }
+            // 滚过大标题才把标题接到导航栏里：开关放在一个小修饰器里（卡顿）——以前是这一层的状态，
+            // 一翻过去整页（头部连同那一列大卡）都要重算一遍，滑过大标题那一下会顿
+            .modifier(CollectionBarTitle(title: title, threshold: bottom))
         }
         .background(Color.black)
-        .navigationTitle(titleInBar ? title : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
+    }
+}
+
+/// 合集页导航栏里的标题：滚过大标题（threshold：大标题的底边离页顶多远）才接上去。
+/// 只有这一个修饰器跟着开关重算，滚动区里的内容不动
+private struct CollectionBarTitle: ViewModifier {
+    let title: String
+    let threshold: CGFloat
+    @State private var inBar = false
+
+    func body(content: Content) -> some View {
+        content
+            .onScrollGeometryChange(for: Bool.self) { g in
+                g.contentOffset.y + g.contentInsets.top > threshold
+            } action: { _, v in
+                withAnimation(.easeOut(duration: 0.2)) { inBar = v }
+            }
+            .navigationTitle(inBar ? title : "")
     }
 }
 
@@ -268,8 +282,13 @@ struct CollectionCard: View {
 
     /// 设计轮 2：和编辑推荐的面板同一个取色（DSTint.panel）：亮度最高 0.42 → 0.36，亮的画面下面那条上灰字也有 4.5 : 1
     private func loadTone() async {
-        guard let art, let img = await ImagePipeline.shared.image(art, maxPixel: 64), let cg = img.cgImage,
-              let c = ImageEffects.averageColor(cg, bottom: 0.3), let t = DSTint.panel(c) else { return }
+        guard let art, let img = await ImagePipeline.shared.image(art, maxPixel: 64) else { return }
+        // 取色放到后台（卡顿）：Core Image 渲染一个像素要同步等 GPU，以前在主线程上——合集页往下滑，每滑进来一张卡顿一下
+        let tint = await Task.detached(priority: .userInitiated) { () -> Color? in
+            guard let cg = img.cgImage, let c = ImageEffects.averageColor(cg, bottom: 0.3) else { return nil }
+            return DSTint.panel(c)
+        }.value
+        guard let t = tint else { return }
         withAnimation(DSMotion.fade) { tone = t }
     }
 }

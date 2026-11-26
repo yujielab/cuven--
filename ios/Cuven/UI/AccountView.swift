@@ -52,11 +52,30 @@ struct AccountTopBar: View {
 @MainActor @Observable
 final class AccountHeaderScroll {
     var offset: CGFloat = 0
+    /// 头部滚出去了：名字接到导航栏里。卡顿：以前是账户页的 @State，滚过 150 点那一下整页二十几行一起重算；
+    /// 放在这里，只有顶上那一截（AccountTopBarSlot）读它
+    var showName = false
+}
+
+/// 顶上那一截出没出：单独一个小视图读 showName，滚过头部那一下只重画它
+private struct AccountTopBarSlot: View {
+    let scroll: AccountHeaderScroll
+    let name: String
+    let height: CGFloat
+    let leading: CGFloat
+    let tint: Color
+
+    var body: some View {
+        if scroll.showName {
+            AccountTopBar(name: name, height: height, leading: leading, tint: tint)
+                .ignoresSafeArea(edges: .top)
+                .transition(.opacity)
+        }
+    }
 }
 
 /// 账户页那个滚动视图上挂的两件事：滚过头部以后顶上换成「头像 + 名字」；记下头部滚出去了多少
 private struct AccountScrollTracking: ViewModifier {
-    @Binding var showName: Bool
     let header: AccountHeaderScroll
     /// 头部往下让了多少（AccountView.headerLift）：名字滚出去的那一下跟着往后挪
     var lift: CGFloat = 0
@@ -68,7 +87,7 @@ private struct AccountScrollTracking: ViewModifier {
             .onScrollGeometryChange(for: Bool.self) { g in
                 g.contentOffset.y + g.contentInsets.top > 150 + lift
             } action: { _, v in
-                withAnimation(.easeOut(duration: 0.2)) { showName = v }
+                withAnimation(.easeOut(duration: 0.2)) { header.showName = v }
             }
             // 取整、封顶：滚过头部以后这个数不再变，不白白重画
             .onScrollGeometryChange(for: CGFloat.self) { g in
@@ -163,8 +182,6 @@ struct AccountView: View {
     @State private var confirmSignOut = false
     /// 顶上那一截的颜色：头像的主色（取不到是紫色）
     @State private var tint = AccountPalette.fallback
-    /// 头部滚出去了：名字接到导航栏里
-    @State private var showName = false
 
     static let notifyKey = "cuven_notify_new_titles"
     @Environment(\.horizontalSizeClass) private var hsc
@@ -230,14 +247,11 @@ struct AccountView: View {
                 }
             }
             // 名字滚出去了才接到导航栏里；头部跟着滚动淡出去（两件事都在 AccountScrollTracking 里）
-            .modifier(AccountScrollTracking(showName: $showName, header: headerScroll, lift: headerLift))
+            .modifier(AccountScrollTracking(header: headerScroll, lift: headerLift))
             // 顶上那一截：滚过头部以后，渐进式模糊的底 + 左边「头像 + 名字」（用户要求：以前这里只有名字，底下是一块实色、一条硬边）
             .overlay(alignment: .top) {
-                if showName {
-                    AccountTopBar(name: displayName, height: navTop, leading: hsc == .compact ? 16 : 24, tint: tint)
-                        .ignoresSafeArea(edges: .top)
-                        .transition(.opacity)
-                }
+                AccountTopBarSlot(scroll: headerScroll, name: displayName, height: navTop,
+                                  leading: hsc == .compact ? 16 : 24, tint: tint)
             }
             // 文案照网页版的退出确认（logout-sheet）；仍是系统的确认（C44、C47）
             .confirmationDialog("要退出登录吗？", isPresented: $confirmSignOut, titleVisibility: .visible) {

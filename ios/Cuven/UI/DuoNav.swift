@@ -645,7 +645,10 @@ final class NavAmbient {
         // 画面在变：一秒 12 次（一次取样平均超过 4 毫秒降到 8 次，超过 8 毫秒降到 5 次）；停着：一秒 2 次只看变没变。
         // 以前一秒 30 次：每次都要整窗截一张，滑的时候主线程隔一帧就被占几毫秒，看着一顿一顿的（用户真机反馈「有点卡」）。
         // 两次取样之间颜色照样每帧往新颜色上走（ease），流过去的样子不变
-        let gap: Double = hot ? (cost > 0.008 ? 0.2 : cost > 0.004 ? 0.125 : 0.083) : 0.5
+        var gap: Double = hot ? (cost > 0.008 ? 0.2 : cost > 0.004 ? 0.125 : 0.083) : 0.5
+        // 手指按着滑、松手后还在减速（run loop 在 tracking 模式）：一秒最多 8 次（和一次取样稍贵时同一档）。
+        // 滑的时候主线程每一帧都很紧，整窗截一张最容易把那一帧挤掉（卡顿）；颜色照样每帧往新取到的上走，停下来马上回到一秒 12 次
+        if hot, RunLoop.current.currentMode == RunLoop.Mode.tracking { gap = max(gap, 0.125) }
         if now - lastSample >= gap {
             lastSample = now
             sample(now: now)
@@ -685,7 +688,7 @@ final class NavAmbient {
     private func sample(now: CFTimeInterval) {
         guard UIApplication.shared.applicationState == .active, capsule.width > 1,
               let win = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
-                .flatMap(\.windows).first(where: \.isKeyWindow) else { return }
+                .flatMap(\.windows).first(where: \.isKeyWindow), !Self.covered(win) else { return }
         let w: CGFloat = 64
         let r = CGRect(x: contentLeading ? capsule.minX - 2 - w : capsule.maxX + 2, y: capsule.minY - Self.overhang,
                        width: w, height: capsule.height + Self.overhang * 2).intersection(win.bounds)
@@ -737,6 +740,17 @@ final class NavAmbient {
             hotUntil = now + 0.6
         }
         target = fresh
+    }
+
+    /// 有全屏盖上来的页面（播放器、预告片、刷视频页）已经整个挡住 App：胶囊看不见，不取样。
+    /// 以前播放时照样整窗截图（画面一直在变，一秒 12 次，截的还是视频层），播放器跟着卡顿。进出的动画里照常取
+    private static func covered(_ win: UIWindow) -> Bool {
+        var vc = win.rootViewController?.presentedViewController
+        while let p = vc {
+            if p.modalPresentationStyle == .fullScreen, !p.isBeingPresented, !p.isBeingDismissed { return true }
+            vc = p.presentedViewController
+        }
+        return false
     }
 
     /// 一段画面的平均色 → 反光的颜色：饱和度 × 1.35、亮度提一点；暗的地方（亮度低于 0.08）不发光

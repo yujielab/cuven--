@@ -254,6 +254,22 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
     private let gpu = LPGPUStatus()
     /// 同一件事一页只记一次日志
     private var noted = Set<String>()
+    /// 上一帧是按什么画的（卡顿）：画面只看这些输入、不看时钟。停在转场半路上（往下滑一点读简介时常这样）输入不变，
+    /// 以前照样每秒 60 帧重画、重交一整屏的画布，主线程、GPU 和合成都一直忙着；现在一样就不画，层上留着的就是同一帧
+    private var drawnKey: FrameKey?
+    /// 连着跳过了几帧：一秒左右照样重画一帧（保险：层上那一帧万一被系统丢了，也不会一直空着）
+    private var idleTicks = 0
+
+    private struct FrameKey: Equatable {
+        var progress: Double
+        var from: CGRect
+        var to: CGRect
+        var origin: CGPoint
+        var bounds: CGSize
+        var drawable: CGSize
+        var windowWidth: CGFloat
+        var texture: ObjectIdentifier
+    }
 
     init?(legacy: Bool) {
         guard let dev = MTLCreateSystemDefaultDevice() else {
@@ -359,6 +375,7 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
             if let baked {
                 if let b = self.upload(baked) {
                     self.built = b
+                    self.drawnKey = nil
                     lpLog("baked \(b.cols)x\(b.rows) cells, \(b.particleCount) particles, \(baked.w)x\(baked.h) px texture"
                           + " with \(baked.levels.count) mip levels for a \(Int(size.width))x\(Int(size.height)) pt logo")
                 }
@@ -396,6 +413,8 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
             shown = show
             if show {
                 misses = 0
+                // 露出来的这一帧一定画（层里可能还是上一次转场留下的那张）
+                drawnKey = nil
                 fitScale(v)
                 v.isHidden = false
                 // 露出来的这一下先就地画一帧（停着的 MTKView 由 draw() 明着叫 draw(in:)），
@@ -514,6 +533,16 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
             skipped("drawable and view disagree on the aspect ratio")
             return
         }
+        // 画布的左上角：和 from / to 同一个坐标系（调用方量好了就用它，不然是 UIKit 的窗口坐标）
+        let o = fieldOrigin ?? view.convert(CGPoint.zero, to: nil)
+        let windowWidth = view.window?.bounds.width ?? bounds.width
+        // 输入和上一帧一模一样：不取画布、不画（卡顿；见 drawnKey）
+        let key = FrameKey(progress: progress, from: from, to: to, origin: o, bounds: bounds, drawable: ds,
+                           windowWidth: windowWidth, texture: ObjectIdentifier(b.texture as AnyObject))
+        if key == drawnKey, idleTicks < 60 {
+            idleTicks += 1
+            return
+        }
         guard let drawable = view.currentDrawable, let rpd = view.currentRenderPassDescriptor else {
             skipped("no drawable")
             return
@@ -530,8 +559,6 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
         let tw = CGFloat(drawable.texture.width), thh = CGFloat(drawable.texture.height)
 
         let scale = Float(tw / bounds.width)
-        // 画布的左上角：和 from / to 同一个坐标系（调用方量好了就用它，不然是 UIKit 的窗口坐标）
-        let o = fieldOrigin ?? view.convert(CGPoint.zero, to: nil)
         let p = Float(progress)
         func local(_ r: CGRect) -> SIMD4<Float> {
             SIMD4(Float(r.minX - o.x) * scale, Float(r.minY - o.y) * scale, Float(r.width) * scale, Float(r.height) * scale)
@@ -553,7 +580,7 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
         let pt = scale
         // 往右鼓：控制点偏屏宽的 9%，但不超过这段路长的 12%（路长按至少 300 点算）。iPhone 竖拿和以前一样（约 35 点），
         // iPad、横拿屏很宽、路不长，按屏宽算会甩出去一大截，不是「稍微往右鼓」
-        let widthPt = Float(view.window?.bounds.width ?? bounds.width)
+        let widthPt = Float(windowWidth)
         let chordPt = simd_length(da - sa) / pt
         let bowPt = min(0.09 * widthPt, 0.12 * max(chordPt, 300))
         var U = Uniforms(
@@ -604,6 +631,8 @@ final class LogoParticleRenderer: NSObject, MTKViewDelegate {
         }
         cb.present(drawable)
         cb.commit()
+        drawnKey = key
+        idleTicks = 0
         misses = 0
         frames &+= 1
         if frames == 1 {

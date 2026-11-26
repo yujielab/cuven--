@@ -340,8 +340,10 @@ struct UsageInsightsCard: View {
     @State private var taps = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(AppModel.self) private var model
-    /// 缓存占了多少（AppModel.cacheUsage：片库清单与影片信息、接口回包、海报和剧照）
-    @State private var cacheBytes: Int64 = AppModel.cacheUsage
+    /// 缓存占了多少（AppModel.cacheUsage：片库清单与影片信息、接口回包、海报和剧照）。nil = 还没量过。
+    /// 卡顿：以前写成 @State 的初值，账户页的 body 每重算一次（滚过头部那一下也算）这张卡就被重建一次，
+    /// 初值跟着在主线程上列一遍缓存目录、问两次磁盘用量；现在只在第一次画、出现时量
+    @State private var cacheBytes: Int64?
     @State private var clearing = false
     @State private var cleared = 0
     /// 清除缓存的整屏动画（CacheDissolveSheet：卡化成光流）
@@ -468,12 +470,12 @@ struct UsageInsightsCard: View {
         .accessibilityHint("清除后，片库、海报和影片信息将重新下载。")
         .accessibilityIdentifier("account-clear-cache")
         .fullScreenCover(isPresented: $dissolving) {
-            CacheDissolveSheet(bytes: cacheBytes) { await clearCache() }
+            CacheDissolveSheet(bytes: cacheBytes ?? AppModel.cacheUsage) { await clearCache() }
         }
     }
 
     private var cacheText: String {
-        let s = Format.size(cacheBytes)
+        let s = Format.size(cacheBytes ?? AppModel.cacheUsage)
         return s.isEmpty ? "0 MB" : s
     }
 

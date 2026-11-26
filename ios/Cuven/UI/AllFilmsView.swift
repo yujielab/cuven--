@@ -42,6 +42,10 @@ struct AllFilmsView: View {
     }
 
     var body: some View {
+        // 片库里已经有的（TMDB 编号）：可申请那几节在这里一起算一次再传下去。卡顿：以前每一节的 body 各把整个片库过一遍，
+        // 影片库每回来一页（CatalogYears.pages 一变）看得到的几节都重算，滑着翻页的时候正好撞上
+        let owned: Set<Int> = mode == .requestable ? model.ownedMovieIDs : []
+        let shows: [Int: Set<Int>] = mode == .requestable ? model.ownedSeasons : [:]
         GeometryReader { geo in
             let insets = geo.safeAreaInsets
             let m = DSMetrics(width: geo.size.width, leadingInset: insets.leading, trailingInset: insets.trailing, height: geo.size.height)
@@ -54,7 +58,7 @@ struct AllFilmsView: View {
                         ForEach(years, id: \.self) { y in
                             switch mode {
                             case .playable: PlayableYear(year: y, metrics: m)
-                            case .requestable: RequestableYear(year: y, metrics: m, catalog: catalog)
+                            case .requestable: RequestableYear(year: y, metrics: m, catalog: catalog, owned: owned, shows: shows)
                             }
                         }
                         .id(mode)
@@ -536,11 +540,13 @@ private struct RequestableYear: View {
     let year: Int
     let metrics: DSMetrics
     let catalog: CatalogYears
+    /// 片库里已经有的电影 / 剧集（AllFilmsView 算好传进来：pages 一变这里重算时不再把整个片库过一遍）
+    let owned: Set<Int>
+    let shows: [Int: Set<Int>]
 
     var body: some View {
         let mk = CatalogYears.Key(year: year, src: "movie"), tk = CatalogYears.Key(year: year, src: "tv")
         let mp = catalog.page(mk), tp = catalog.page(tk)
-        let owned = model.ownedMovieIDs, shows = model.ownedSeasons
         let movies = mp.items.filter { !model.owns($0, movies: owned, shows: shows) }
         let series = tp.items.filter { !model.owns($0, movies: owned, shows: shows) }
         let settled = (mp.started || mp.failed) && (tp.started || tp.failed)

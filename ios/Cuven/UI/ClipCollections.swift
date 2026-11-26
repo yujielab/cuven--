@@ -35,9 +35,11 @@ enum ClipCollection: String, CaseIterable, Identifiable, Hashable, Sendable {
     /// 一个合集里最多放几部
     static let limit = 80
 
-    /// 这一部算不算这个合集（genres：TMDB 类型名；names：英文名、原名、中文名、目录名）
+    /// 这一部算不算这个合集（genres：TMDB 类型名；names：英文名、原名、中文名、目录名）。
+    /// names 用到才算（卡顿）：只有迪士尼 / 漫威 / DC 要看片名；以前七个合集每一部都先拼一遍名字（没有英文名的还要用正则拆一遍文件名），
+    /// 剧集资料每到一份就把七个合集全片库重算一次，一启动主页滑动时一阵一阵地顿
     @MainActor
-    func matches(genres: [String]?, names: [String?]) -> Bool {
+    func matches(genres: [String]?, names: @autoclosure () -> [String?]) -> Bool {
         switch self {
         case .series, .movies:
             return true
@@ -46,7 +48,7 @@ enum ClipCollection: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .documentary:
             return (genres ?? []).contains { $0.contains("纪录") || $0.localizedCaseInsensitiveContains("Documentary") }
         case .disney, .marvel, .dc:
-            return ClipFranchise.tags(names).contains(self)
+            return ClipFranchise.tags(names()).contains(self)
         }
     }
 
@@ -57,23 +59,33 @@ enum ClipCollection: String, CaseIterable, Identifiable, Hashable, Sendable {
         if c != .series {
             for v in movies {
                 let m = model.meta(v)
-                var names: [String?] = [m?.en, m?.originalTitle, m?.title]
-                if m?.en == nil { names.append(FileName.title(v.name)) }
-                guard c.matches(genres: m?.genres, names: names) else { continue }
+                guard c.matches(genres: m?.genres, names: movieNames(v, m)) else { continue }
                 rows.append((.movie(v), model.year(v) ?? 0, v.addedKey))
             }
         }
         if c != .movies {
             for s in model.series where model.seriesCardReady(s) {
                 let m = model.seriesMetas[s.path]
-                var names: [String?] = [s.en, m?.en, m?.originalTitle, s.zh, m?.title, s.title]
-                if s.en == nil && m?.en == nil { names.append(s.folder) }
-                guard c.matches(genres: m?.genres, names: names) else { continue }
+                guard c.matches(genres: m?.genres, names: seriesNames(s, m)) else { continue }
                 rows.append((.series(s), Int(s.year ?? "") ?? 0, s.added ?? ""))
             }
         }
         rows.sort { a, b in a.year != b.year ? a.year > b.year : a.key > b.key }
         return rows.map(\.entry)
+    }
+
+    /// 一部电影认系列用的名字：英文名、原名、中文名；没有英文名再加文件名里拆出来的片名
+    private static func movieNames(_ v: Video, _ m: Meta?) -> [String?] {
+        var names: [String?] = [m?.en, m?.originalTitle, m?.title]
+        if m?.en == nil { names.append(FileName.title(v.name)) }
+        return names
+    }
+
+    /// 一部剧认系列用的名字：英文名、原名、中文名；都没有英文名再加目录名
+    private static func seriesNames(_ s: Series, _ m: Meta?) -> [String?] {
+        var names: [String?] = [s.en, m?.en, m?.originalTitle, s.zh, m?.title, s.title]
+        if s.en == nil && m?.en == nil { names.append(s.folder) }
+        return names
     }
 
     /// 刷起来都是会动的：查到有预告片的电影在前，还不知道的（剧集都算这一档）其次，查过没有的最后；每一档里照原来的顺序
@@ -456,7 +468,10 @@ struct ClipFeedView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var current: String?
-    @State private var trailer = ShowcaseTrailer(revealHeight: 1080)
+    /// 预告片播放器第一次用时才建（卡顿）：这一页开着时主页那一排每重算一次（查到预告片、剧集资料到了）就重建这个结构体，
+    /// @State 的初值跟着再算一遍——以前每次都白建一个 AVPlayer、再挂四个通知；现在只多建一个空盒子
+    @State private var trailerBox = ClipFeedTrailerBox()
+    private var trailer: ShowcaseTrailer { trailerBox.trailer }
     @State private var path: [Route] = []
 
     var body: some View {
@@ -588,6 +603,12 @@ struct ClipFeedView: View {
 
 }
 
+/// 刷视频那一页的预告片播放器：第一次读 trailer 时才建（见 ClipFeedView.trailerBox）
+@MainActor
+final class ClipFeedTrailerBox {
+    lazy var trailer = ShowcaseTrailer(revealHeight: 1080)
+}
+
 /// 一屏：一张大圆角卡。底是竖版主视觉，正对着时预告片起来就盖上去（淡入）；顶上不写分类名（用户要求移除），
 /// 底下（参考图）：高分的一颗胶囊、字标、「电影 · 2026 · 科幻」、「加入想看」+ ⓘ、预告片进度
 struct ClipFeedPage: View {
@@ -715,7 +736,9 @@ struct ClipFeedPage: View {
                 .accessibilityIdentifier("clip-feed-info")
             }
             .padding(.top, 2)
-            ClipFeedProgress(value: playing ? trailer.progress : 0)
+            // 进度单独一个小视图读（卡顿）：trailer.progress 每 0.25 秒变一次，以前在整页的 body 里读，
+            // 正放着的那一页（底图候选、字标、按钮）每秒整页重算四遍，上下刷的时候也一样
+            ClipFeedLiveProgress(trailer: trailer, playing: playing)
                 .padding(.horizontal, 22)
                 .padding(.top, 10)
         }
@@ -774,6 +797,16 @@ struct ClipFeedPage: View {
         .buttonStyle(.plain)
         .glassEffect(.regular.interactive(), in: Capsule())
         .accessibilityIdentifier("clip-feed-watchlist")
+    }
+}
+
+/// 刷视频那一屏底下的预告片进度：只有这一小块跟着 trailer.progress 重算（不在放的那几页是 0、不读它）
+private struct ClipFeedLiveProgress: View {
+    let trailer: ShowcaseTrailer
+    let playing: Bool
+
+    var body: some View {
+        ClipFeedProgress(value: playing ? trailer.progress : 0)
     }
 }
 

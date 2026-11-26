@@ -22,6 +22,10 @@ struct RequestFlowCard: View {
     @State private var category: RequestFlowStats.Category = .all
     @State private var engine = FlowFunnelEngine()
     @State private var visible = false
+    /// 数那一行还在跟着弹簧走：每次 push 起 2.5 秒（ω = 8 的弹簧那时早已到位），过了就让它的时间线停下。
+    /// 卡顿：以前数到了位也一直按 30 帧重算、重排那 12 行字，滚请求中心时白占主线程（漏斗照常是 Metal 自己画）
+    @State private var countsMoving = true
+    @State private var pushes = 0
     @Namespace private var tabs
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
@@ -73,6 +77,7 @@ struct RequestFlowCard: View {
 
     private func push() {
         engine.update(counts: counts, palette: category.palette, progress: progress(at: Date()), transferring: transferring)
+        pushes &+= 1
     }
 
     // MARK: 导航层
@@ -121,7 +126,7 @@ struct RequestFlowCard: View {
 
     /// 跟着插值走的数：每一帧从 engine 取同一份状态（和漏斗的形状、颜色是同一个时刻的值）
     private func live<Content: View>(@ViewBuilder _ content: @escaping (FlowFunnelEngine.Sample) -> Content) -> some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !visible || reduceMotion)) { ctx in
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !visible || reduceMotion || !countsMoving)) { ctx in
             let _ = ctx.date
             content(engine.sample())
         }
@@ -168,6 +173,13 @@ struct RequestFlowCard: View {
                 .accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // 数变了（push）以后跟 2.5 秒，到位了停；停下那一刻按到位的数再画一遍（body 跟着 countsMoving 重算）
+        .task(id: pushes) {
+            countsMoving = true
+            try? await Task.sleep(for: .seconds(2.5))
+            guard !Task.isCancelled else { return }
+            countsMoving = false
+        }
     }
 
     private func percent(_ x: Double) -> String {

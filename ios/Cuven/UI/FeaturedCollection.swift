@@ -193,15 +193,19 @@ struct CollectionHeader<Top: View>: View {
 
     /// 主色：排在最前那张海报的平均色（只取色相，饱和度落到参考图那种浓淡，亮度由用处定）
     private func loadTint() async {
-        guard let u = lead,
-              let img = await ImagePipeline.shared.image(u, maxPixel: 96), let cg = img.cgImage,
-              let c = ImageEffects.averageColor(cg, bottom: 1) else { return }
-        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        guard c.getHue(&h, saturation: &s, brightness: &b, alpha: &a), s > 0.1 else { return }
+        guard let u = lead, let img = await ImagePipeline.shared.image(u, maxPixel: 96) else { return }
+        // 取色放到后台（卡顿）：Core Image 渲染一个像素要同步等 GPU，以前在主线程上
+        let hs = await Task.detached(priority: .userInitiated) { () -> [Double]? in
+            guard let cg = img.cgImage, let c = ImageEffects.averageColor(cg, bottom: 1) else { return nil }
+            var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            guard c.getHue(&h, saturation: &s, brightness: &b, alpha: &a) else { return nil }
+            return [Double(h), Double(s)]
+        }.value
+        guard let hs, hs.count == 2, hs[1] > 0.1 else { return }
         // 设计复查：合集页的饱和度上限 0.72 → 0.62（和上面压暗的亮度一起，是染了色的暗而不是一块色板）
-        let ns = Double(min(page ? 0.62 : 0.68, max(0.36, s * 1.1)))
+        let ns = min(page ? 0.62 : 0.68, max(0.36, hs[1] * 1.1))
         withAnimation(.easeInOut(duration: 0.8)) {
-            hue = Double(h)
+            hue = hs[0]
             sat = ns
         }
     }

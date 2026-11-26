@@ -18,7 +18,6 @@ struct ActorPage: View {
     /// 照片底边的平均色：整页跟着染（DetailPalette）
     @State private var edge: UIColor?
     @State private var showBio = false
-    @State private var nameInBar = false
     @State private var appeared = false
 
     private var name: String {
@@ -75,14 +74,11 @@ struct ActorPage: View {
             .scrollIndicators(.hidden)
             .background(palette.deep)
             .ignoresSafeArea(edges: [.top, .horizontal])
-            .onScrollGeometryChange(for: Bool.self) { g in
-                g.contentOffset.y + g.contentInsets.top > photoH - 120
-            } action: { _, v in
-                withAnimation(.easeOut(duration: 0.2)) { nameInBar = v }
-            }
+            // 滚过名字才把名字接到导航栏里：开关放在一个小修饰器里（卡顿）——以前是这一页的状态，一翻过去整页连同
+            // model.works（把整个片库过一遍）都要重算，滑过名字那一下会顿
+            .modifier(ActorBarTitle(title: name, threshold: photoH - 120))
             .animation(.easeInOut(duration: 0.6), value: edge)
         }
-        .navigationTitle(nameInBar ? name : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .sheet(isPresented: $showBio) {
@@ -267,6 +263,23 @@ struct ActorPage: View {
             .padding(.horizontal, m.margin)
             .transition(.dsBlurFade)
         }
+    }
+}
+
+/// 演员页导航栏里的名字：滚过 threshold（照片底边往上 120 点）才接上去。只有这个修饰器跟着开关重算，滚动区里的内容不动（卡顿）
+private struct ActorBarTitle: ViewModifier {
+    let title: String
+    let threshold: CGFloat
+    @State private var inBar = false
+
+    func body(content: Content) -> some View {
+        content
+            .onScrollGeometryChange(for: Bool.self) { g in
+                g.contentOffset.y + g.contentInsets.top > threshold
+            } action: { _, v in
+                withAnimation(.easeOut(duration: 0.2)) { inBar = v }
+            }
+            .navigationTitle(inBar ? title : "")
     }
 }
 
