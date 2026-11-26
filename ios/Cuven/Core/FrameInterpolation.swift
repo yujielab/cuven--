@@ -48,6 +48,7 @@ enum FrameInterpolation {
     static let key = "frame_interpolation_v2"
     static let diagnosticsKey = "frame_interpolation_diag_v2"
     static let hdrKey = "frame_interpolation_hdr_v2"
+    static let neuralKey = "frame_interpolation_neural_v2"
 
     /// 用哪条管线：自研（Core/Motion/：自己估运动、按屏幕刷新的时刻现画，系统插帧只当神经关键帧）、
     /// 或者只用系统自带的低延迟插帧（这个文件上半部分，1080p 以下的普通画面；留着做对比）
@@ -89,6 +90,8 @@ enum FrameInterpolation {
     }
     /// HDR10 / HLG 也插帧（实验项，只有自研引擎；杜比视界不管开不开都原样播放）
     static var hdr: Bool { UserDefaults.standard.bool(forKey: hdrKey) }
+    /// 自研引擎用不用系统插帧算的中间帧（默认用；关掉可以对比效果和发热）
+    static var neural: Bool { UserDefaults.standard.object(forKey: neuralKey) as? Bool ?? true }
 
     /// 系统插帧那一路的 numberOfInterpolatedFrames：可插的点是 k / 2^depth（depth = 3 → 1/8 … 7/8）
     static let depth = 3
@@ -768,6 +771,8 @@ final class FrameInterpolationOverlay {
     private var motionRoutes = false
     private var motionShown = false
     private var motionStarted = Date()
+    private var motionNeural = true
+    private var motionHDR = false
 
     private var sourceInfo: HLSVideoInfo?
     private var nameSaysHDR = false
@@ -877,6 +882,13 @@ final class FrameInterpolationOverlay {
         // 设置里换了管线：停掉另一路，重新判断
         if (mode == .motion && engine != nil) || (mode == .system && motion != nil) {
             tearDown()
+            decided = false
+        }
+        // 自研那一路的两个开关变了：重新来
+        if mode == .motion, motionNeural != FrameInterpolation.neural || motionHDR != FrameInterpolation.hdr {
+            motionNeural = FrameInterpolation.neural
+            motionHDR = FrameInterpolation.hdr
+            if motion != nil { tearDown() }
             decided = false
         }
 
@@ -1017,7 +1029,9 @@ final class FrameInterpolationOverlay {
         var format: OSType = hdr ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         var neural: VTLowLatencyFrameInterpolationConfiguration?
         var neuralNote = "这台设备不支持"
-        if VTLowLatencyFrameInterpolationConfiguration.isSupported {
+        if !FrameInterpolation.neural {
+            neuralNote = "设置里关了"
+        } else if VTLowLatencyFrameInterpolationConfiguration.isSupported {
             if max(w, h) > FrameInterpolation.maxLongSide || w * h > FrameInterpolation.maxPixels {
                 neuralNote = "片源超过 1080p"
             } else if let config = VTLowLatencyFrameInterpolationConfiguration(frameWidth: w, frameHeight: h,

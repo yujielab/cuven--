@@ -5,8 +5,8 @@ using namespace metal;
 //
 // 分析（每对相邻的片源帧 A、B 一次，计算着色器）：
 //   亮度金字塔 L0（约 960 宽）… L3 → 最粗一层全搜索 → 逐层细化 + 邻块传播（块 8×8，「双边」匹配：以中间帧为锚，
-//   对中间帧上的位置 p 找 v，使 A(p − v/2) 与 B(p + v/2) 最像）→ 块中值 → 逐像素从周围 2×2 个块的向量里挑最合的
-//   → 中值 → 可信度图（匹配残差对局部对比度，4×4 取最小再柔化）。
+//   对中间帧上的位置 p 找 v，使 A(p − v/2) 与 B(p + v/2) 最像）→ 块中值 → 在半尺寸那一层上逐像素从周围 2×2 个块的
+//   向量里挑最合的 → 中值 → 可信度图（匹配残差对局部对比度，2×2 取最小再柔化）。
 // 重建（屏幕每刷新一次，片元着色器直接画到屏上）：
 //   按这一刻落在 A、B 之间的位置 φ：运动可靠处取 A(p − φv) 与 B(p + (1−φ)v) 混合；不可靠或两边对不上处退回
 //   「时间上更近的原帧」（有神经中间帧时取它）；静止处两边本来就一样。
@@ -17,8 +17,9 @@ using namespace metal;
 constexpr sampler mfLinear(coord::normalized, address::clamp_to_edge, filter::linear);
 
 struct MFParams {
-    float4 search;   // x 最粗层搜索半径（纹素），y 窗口边长，z 零向量偏好（每纹素），w 偏离父块的代价（每纹素）
+    float4 search;   // x 最粗层搜索半径（纹素），y 窗口每边几个采样点，z 零向量偏好（每纹素），w 偏离父块的代价（每纹素）
     float4 refine;   // x 细化一步的代价（每纹素），y 1 = 再做半像素细化，z 对比度系数 kc，w 噪声底 n0
+    float4 extra;    // x 窗口采样点的间距（纹素），y、z 可信度的软门限，w 四个块的向量差在这以内（基层像素）就直接取平均
 };
 
 // MARK: 金字塔
@@ -65,15 +66,17 @@ kernel void mf_down2(texture2d<float, access::sample> src [[texture(0)]],
 
 // MARK: 块匹配
 
-/// 窗口内的平均绝对差：A(c + o − v/2) 对 B(c + o + v/2)
+/// 窗口内的平均绝对差：A(c + o − v/2) 对 B(c + o + v/2)。win 是每边几个采样点，spacing 是它们的间距（纹素）：
+/// 8 点、间距 1 是完整的 8×8；4 点、间距 2 落在像素的角上，每个双线性采样平均 2×2 个像素，同样盖住 8×8，采样只要四分之一
+/// （真机上一对帧要 25～35 ms，太慢；numpy 里两种窗口的结果只差约 0.05 dB）
 static float mf_cost(texture2d<float, access::sample> A, texture2d<float, access::sample> B,
-                     float2 c, float2 v, float2 texel, int win) {
+                     float2 c, float2 v, float2 texel, int win, float spacing) {
     float2 h = v * 0.5;
     float s = 0.0;
     float half_win = (float(win) - 1.0) * 0.5;
     for (int j = 0; j < win; ++j) {
         for (int i = 0; i < win; ++i) {
-            float2 p = c + (float2(float(i), float(j)) - half_win) * texel;
+            float2 p = c + (float2(float(i), float(j)) - half_win) * spacing * texel;
             s += fabs(A.sample(mfLinear, p - h, level(0)).r - B.sample(mfLinear, p + h, level(0)).r);
         }
     }
@@ -97,7 +100,7 @@ kernel void mf_search_coarse(texture2d<float, access::sample> A [[texture(0)]],
         for (int dx = -R; dx <= R; ++dx) {
             float2 d = float2(float(dx), float(dy));
             float2 v = 2.0 * d * texel;
-            float e = mf_cost(A, B, c, v, texel, win) + P.search.z * 2.0 * length(d);
+            float e = mf_cost(A, B, c, v, texel, win, P.extra.x) + P.search.z * 2.0 * length(d);
             if (e < best) { best = e; bv = v; }
         }
     }
@@ -106,22 +109,22 @@ kernel void mf_search_coarse(texture2d<float, access::sample> A [[texture(0)]],
 
 /// 在 bv 周围 ±step 纹素（每帧各挪半步）找更好的。返回 xy 向量、z 代价
 static float3 mf_step(texture2d<float, access::sample> A, texture2d<float, access::sample> B,
-                      float2 c, float2 bv, float2 texel, int win, float step, float lam) {
-    float best = mf_cost(A, B, c, bv, texel, win);
+                      float2 c, float2 bv, float2 texel, int win, float spacing, float step, float lam) {
+    float best = mf_cost(A, B, c, bv, texel, win, spacing);
     float2 out = bv;
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
             if (dx == 0 && dy == 0) { continue; }
             float2 d = float2(float(dx), float(dy));
             float2 v = bv + 2.0 * step * d * texel;
-            float e = mf_cost(A, B, c, v, texel, win) + lam * 2.0 * step * length(d);
+            float e = mf_cost(A, B, c, v, texel, win, spacing) + lam * 2.0 * step * length(d);
             if (e < best) { best = e; out = v; }
         }
     }
     return float3(out, best);
 }
 
-/// 细一层：从父块和它的四邻（再加零向量）里挑，再 ±1 细化
+/// 细一层：从父块和它的四邻（再加零向量）里挑，再 ±1 细化（最细一层再 ±0.5）
 kernel void mf_refine(texture2d<float, access::sample> A [[texture(0)]],
                       texture2d<float, access::sample> B [[texture(1)]],
                       texture2d<float, access::read> parent [[texture(2)]],
@@ -143,10 +146,13 @@ kernel void mf_refine(texture2d<float, access::sample> A [[texture(0)]],
     for (int k = 0; k < 6; ++k) {
         float2 v = float2(0.0);
         if (k < 5) { v = parent.read(uint2(clamp(pj + offs[k], int2(0), psize - 1))).xy; }
-        float e = mf_cost(A, B, c, v, texel, win) + P.search.w * length((v - c0) * isize);
+        float e = mf_cost(A, B, c, v, texel, win, P.extra.x) + P.search.w * length((v - c0) * isize);
         if (e < best) { best = e; bv = v; }
     }
-    float3 r = mf_step(A, B, c, bv, texel, win, 1.0, P.refine.x);
+    float3 r = mf_step(A, B, c, bv, texel, win, P.extra.x, 1.0, P.refine.x);
+    if (P.refine.y > 0.5) {
+        r = mf_step(A, B, c, r.xy, texel, win, P.extra.x, 0.5, P.refine.x);
+    }
     outField.write(float4(r, 1), uint2(gid));
 }
 
@@ -164,17 +170,17 @@ kernel void mf_propagate(texture2d<float, access::sample> A [[texture(0)]],
     int win = int(P.search.y);
     int2 p = int2(gid);
     float2 own = field.read(uint2(p)).xy;
-    float best = mf_cost(A, B, c, own, texel, win);
+    float best = mf_cost(A, B, c, own, texel, win, P.extra.x);
     float2 bv = own;
     int2 offs[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
     for (int k = 0; k < 4; ++k) {
         float2 v = field.read(uint2(clamp(p + offs[k], int2(0), fs - 1))).xy;
-        float e = mf_cost(A, B, c, v, texel, win) + P.search.w * 0.5 * length((v - own) * isize);
+        float e = mf_cost(A, B, c, v, texel, win, P.extra.x) + P.search.w * 0.5 * length((v - own) * isize);
         if (e < best) { best = e; bv = v; }
     }
-    float3 r = mf_step(A, B, c, bv, texel, win, 1.0, P.refine.x);
+    float3 r = mf_step(A, B, c, bv, texel, win, P.extra.x, 1.0, P.refine.x);
     if (P.refine.y > 0.5) {
-        r = mf_step(A, B, c, r.xy, texel, win, 0.5, P.refine.x);
+        r = mf_step(A, B, c, r.xy, texel, win, P.extra.x, 0.5, P.refine.x);
     }
     outField.write(float4(r, 1), uint2(gid));
 }
@@ -212,38 +218,50 @@ kernel void mf_median(texture2d<float, access::read> field [[texture(0)]],
 
 // MARK: 逐像素的向量、可信度
 
-/// 分析基层的每个像素：周围 2×2 个块的向量（再加零向量）里，3×3 窗口上双边匹配最好的那个。输出 xy 向量、z 残差
+/// 逐像素的向量（在半尺寸那一层上做，A、B 是那一层的亮度）：周围 2×2 个块的向量里，3×3 窗口上双边匹配最好的那个。
+/// 四个向量本来就差不多（大多数像素）时直接取双线性平均，不逐个试。零向量总要试一下
+/// （压在运动背景上的硬字幕、台标：笔画本身没动）；要明显更合才选它。输出 xy 向量、z 残差
 kernel void mf_densify(texture2d<float, access::sample> A [[texture(0)]],
                        texture2d<float, access::sample> B [[texture(1)]],
                        texture2d<float, access::read> field [[texture(2)]],
                        texture2d<float, access::write> outDense [[texture(3)]],
+                       constant MFParams &P [[buffer(0)]],
                        ushort2 gid [[thread_position_in_grid]]) {
     float2 size = float2(outDense.get_width(), outDense.get_height());
-    float2 texel = 1.0 / float2(A.get_width(), A.get_height());
+    float2 isize = float2(A.get_width(), A.get_height());
+    float2 texel = 1.0 / isize;
     int2 fs = int2(field.get_width(), field.get_height());
     float2 u = (float2(gid) + 0.5) / size;
     float2 g = u * float2(fs) - 0.5;
     float2 g0 = floor(g);
     float2 f = g - g0;
     int2 i0 = int2(g0);
-    float best = 1e9;
-    float bestErr = 0.0;
-    float2 bv = float2(0.0);
-    for (int oy = 0; oy <= 1; ++oy) {
-        for (int ox = 0; ox <= 1; ++ox) {
-            float2 v = field.read(uint2(clamp(i0 + int2(ox, oy), int2(0), fs - 1))).xy;
-            float e = mf_cost(A, B, u, v, texel, 3);
-            float biased = e + 0.002 * length(f - float2(float(ox), float(oy)));
-            if (biased < best) { best = biased; bestErr = e; bv = v; }
+    float2 cand[4];
+    cand[0] = field.read(uint2(clamp(i0, int2(0), fs - 1))).xy;
+    cand[1] = field.read(uint2(clamp(i0 + int2(1, 0), int2(0), fs - 1))).xy;
+    cand[2] = field.read(uint2(clamp(i0 + int2(0, 1), int2(0), fs - 1))).xy;
+    cand[3] = field.read(uint2(clamp(i0 + int2(1, 1), int2(0), fs - 1))).xy;
+    float2 bv = mix(mix(cand[0], cand[1], f.x), mix(cand[2], cand[3], f.x), f.y);
+    float bestErr = mf_cost(A, B, u, bv, texel, 3, 1.0);
+    float current = bestErr;
+    // 向量差（换算成基层像素：基层是这一层的两倍）
+    float2 spread = (max(max(cand[0], cand[1]), max(cand[2], cand[3])) - min(min(cand[0], cand[1]), min(cand[2], cand[3])))
+                    * isize * 2.0;
+    if (max(spread.x, spread.y) >= P.extra.w) {
+        float best = 1e9;
+        for (int k = 0; k < 4; ++k) {
+            float e = mf_cost(A, B, u, cand[k], texel, 3, 1.0);
+            float biased = e + 0.002 * length(f - float2(float(k & 1), float(k >> 1)));
+            if (biased < best) { best = biased; bestErr = e; bv = cand[k]; }
         }
+        current = best;
     }
-    // 零向量也算一个候选（压在运动背景上的硬字幕、台标：笔画本身没动）；要明显更合才选它
-    float ez = mf_cost(A, B, u, float2(0.0), texel, 3);
-    if (ez + 0.003 < best) { bestErr = ez; bv = float2(0.0); }
+    float ez = mf_cost(A, B, u, float2(0.0), texel, 3, 1.0);
+    if (ez + 0.003 < current) { bestErr = ez; bv = float2(0.0); }
     outDense.write(float4(bv, bestErr, 1), uint2(gid));
 }
 
-/// 可信度（输出是基层的 1/4）：4×4 个像素里最差的那个；残差对「局部对比度 × kc + 噪声底」的比值过 0.6…1.6 的软门限
+/// 可信度（输出是逐像素向量那一层的一半）：2×2 个像素里最差的那个；残差对「局部对比度 × kc + 噪声底」的比值过软门限
 kernel void mf_trust(texture2d<float, access::read> dense [[texture(0)]],
                      texture2d<float, access::sample> packedA [[texture(1)]],
                      texture2d<float, access::sample> packedB [[texture(2)]],
@@ -253,15 +271,15 @@ kernel void mf_trust(texture2d<float, access::read> dense [[texture(0)]],
     int2 ds = int2(dense.get_width(), dense.get_height());
     float2 dsize = float2(ds);
     float t = 1.0;
-    for (int j = 0; j < 4; ++j) {
-        for (int i = 0; i < 4; ++i) {
-            int2 p = min(int2(gid) * 4 + int2(i, j), ds - 1);
+    for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 2; ++i) {
+            int2 p = min(int2(gid) * 2 + int2(i, j), ds - 1);
             float4 d = dense.read(uint2(p));
             float2 u = (float2(p) + 0.5) / dsize;
             float act = max(packedA.sample(mfLinear, u - d.xy * 0.5, level(0)).g,
                             packedB.sample(mfLinear, u + d.xy * 0.5, level(0)).g);
             float ratio = d.z / (P.refine.z * act + P.refine.w);
-            t = min(t, 1.0 - smoothstep(0.6, 1.6, ratio));
+            t = min(t, 1.0 - smoothstep(P.extra.y, P.extra.z, ratio));
         }
     }
     outTrust.write(float4(t, 0, 0, 1), uint2(gid));
@@ -326,46 +344,58 @@ fragment float4 mf_present(MFVertexOut in [[stage_in]],
                            constant MFDraw &D [[buffer(0)]]) {
     float2 uv = in.uv * D.uv.xy + D.uv.zw;
     float phi = D.phase.x;
-    float3 ycc;
+    float3 ycc = float3(0.0);
     float3 tint = float3(0.0);
+    float routed = 0.0;
     if (D.phase.y < 0.5) {
         ycc = mf_ycc(yA, cA, uv);
     } else {
-        // 向量场锚在中间帧上：挪到这一刻（一次不动点迭代）
-        float k = phi - 0.5;
         float2 v = dense.sample(mfLinear, uv, level(0)).xy;
-        float2 uv2 = uv - k * v;
-        v = dense.sample(mfLinear, uv2, level(0)).xy;
-        float t = trust.sample(mfLinear, uv2, level(0)).r;
-        float2 ua = uv - phi * v;
-        float2 ub = uv + (1.0 - phi) * v;
-        float2 pa = packedA.sample(mfLinear, ua, level(0)).rg;
-        float2 pb = packedB.sample(mfLinear, ub, level(0)).rg;
-        float conflict = smoothstep(D.gate.x, D.gate.y, fabs(pa.r - pb.r) / (D.gate.z * max(pa.g, pb.g) + D.gate.w));
-        float r = max(conflict, 1.0 - t);
-        float3 mc = float3(0.0);
-        if (r < 0.999) {
-            float3 a = mf_ycc(yA, cA, ua);
-            float3 b = mf_ycc(yB, cB, ub);
-            mc = mix(a, b, smoothstep(D.weights.x, D.weights.y, phi));
-        }
-        float3 fb = float3(0.0);
-        if (r > 0.001) {
-            float3 a0 = mf_ycc(yA, cA, uv);
-            float3 b0 = mf_ycc(yB, cB, uv);
-            if (D.phase.y > 1.5) {
-                float wa = 1.0 - smoothstep(0.2, 0.3, phi);
-                float wb = smoothstep(0.7, 0.8, phi);
-                fb = a0 * wa + b0 * wb + mf_ycc(yN, cN, uv) * (1.0 - wa - wb);
-            } else {
-                fb = mix(a0, b0, smoothstep(D.weights.z, D.weights.w, phi));
+        bool done = false;
+        if (dot(v, v) < 1e-8) {
+            // 这一处没动：两帧在这里本来就一样的话，直接取时间上更近的那张原帧（大多数像素走这条，省一大半采样）
+            float2 pa = packedA.sample(mfLinear, uv, level(0)).rg;
+            float2 pb = packedB.sample(mfLinear, uv, level(0)).rg;
+            float still = fabs(pa.r - pb.r) / (D.gate.z * max(pa.g, pb.g) + D.gate.w);
+            if (still < D.gate.x) {
+                if (phi < 0.5) { ycc = mf_ycc(yA, cA, uv); } else { ycc = mf_ycc(yB, cB, uv); }
+                done = true;
             }
         }
-        ycc = mix(mc, fb, r);
-        if (D.phase.z > 0.5) {
-            // 分区图：红 = 退回原帧 / 神经中间帧，绿 = 运动补偿，蓝 = 基本不动
-            float moving = smoothstep(0.0005, 0.002, length(v));
-            tint = mix(mix(float3(0.0, 0.25, 1.0), float3(0.0, 1.0, 0.2), moving), float3(1.0, 0.1, 0.0), r);
+        if (!done) {
+            // 向量场锚在中间帧上：挪到这一刻（一次不动点迭代）
+            float k = phi - 0.5;
+            float2 uv2 = uv - k * v;
+            v = dense.sample(mfLinear, uv2, level(0)).xy;
+            float t = trust.sample(mfLinear, uv2, level(0)).r;
+            float2 ua = uv - phi * v;
+            float2 ub = uv + (1.0 - phi) * v;
+            float2 pa = packedA.sample(mfLinear, ua, level(0)).rg;
+            float2 pb = packedB.sample(mfLinear, ub, level(0)).rg;
+            float conflict = smoothstep(D.gate.x, D.gate.y, fabs(pa.r - pb.r) / (D.gate.z * max(pa.g, pb.g) + D.gate.w));
+            float r = max(conflict, 1.0 - t);
+            float3 mc = float3(0.0);
+            if (r < 0.999) {
+                float3 a = mf_ycc(yA, cA, ua);
+                float3 b = mf_ycc(yB, cB, ub);
+                mc = mix(a, b, smoothstep(D.weights.x, D.weights.y, phi));
+            }
+            float3 fb = float3(0.0);
+            if (r > 0.001) {
+                float3 a0 = mf_ycc(yA, cA, uv);
+                float3 b0 = mf_ycc(yB, cB, uv);
+                if (D.phase.y > 1.5) {
+                    float wa = 1.0 - smoothstep(0.2, 0.3, phi);
+                    float wb = smoothstep(0.7, 0.8, phi);
+                    fb = a0 * wa + b0 * wb + mf_ycc(yN, cN, uv) * (1.0 - wa - wb);
+                } else {
+                    fb = mix(a0, b0, smoothstep(D.weights.z, D.weights.w, phi));
+                }
+            }
+            ycc = mix(mc, fb, r);
+            // 分区图：红 = 退回原帧 / 神经中间帧，绿 = 运动补偿；没动的地方不染色（画面原色）
+            tint = mix(float3(0.0, 1.0, 0.2), float3(1.0, 0.1, 0.0), r);
+            routed = max(r, smoothstep(0.0005, 0.002, length(v)));
         }
     }
     float y = (ycc.x - D.range.y) * D.range.x;
@@ -373,6 +403,6 @@ fragment float4 mf_present(MFVertexOut in [[stage_in]],
     float3 yuv = float3(y, c);
     float3 rgb = float3(dot(D.toR.xyz, yuv), dot(D.toG.xyz, yuv), dot(D.toB.xyz, yuv));
     rgb = saturate(rgb);
-    if (D.phase.z > 0.5 && D.phase.y > 0.5) { rgb = mix(rgb, tint, 0.35); }
+    if (D.phase.z > 0.5) { rgb = mix(rgb, tint, 0.3 * routed); }
     return float4(rgb, 1.0);
 }

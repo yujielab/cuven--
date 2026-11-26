@@ -143,6 +143,7 @@ struct AccountView: View {
     @AppStorage(FrameInterpolation.key) private var interpolationMode = FrameInterpolation.Mode.off.rawValue
     @AppStorage(FrameInterpolation.diagnosticsKey) private var interpolationDiagnostics = FrameInterpolation.Diagnostics.off.rawValue
     @AppStorage(FrameInterpolation.hdrKey) private var interpolationHDR = false
+    @AppStorage(FrameInterpolation.neuralKey) private var interpolationNeural = true
     /// 改进兼容性（Compat.swift）：没选过的时候按机型（旧机型开）
     /// 改进兼容性的档位：关闭 / 标准 / 增强（Compat.swift）
     @State private var compatLevel = Compat.level
@@ -436,6 +437,12 @@ struct AccountView: View {
                 AccountDivider()
             }
             if interpolation == .motion {
+                AccountRow(icon: "brain", title: "神经关键帧", subtitle: "拿不准的地方用系统插帧算的中间帧；关掉更省电") {
+                    Toggle("神经关键帧", isOn: $interpolationNeural)
+                        .labelsHidden()
+                        .tint(.green)
+                }
+                AccountDivider()
                 AccountRow(icon: "sun.max", title: "HDR 也插帧（实验）", subtitle: "HDR10 和 HLG；杜比视界始终原样播放") {
                     Toggle("HDR 也插帧（实验）", isOn: $interpolationHDR)
                         .labelsHidden()
