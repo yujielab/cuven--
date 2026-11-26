@@ -36,9 +36,14 @@ enum MotionTuning {
     static let gate = SIMD2<Float>(0.6, 1.6)
     static let blendEdges = SIMD2<Float>(0.1, 0.9)
     static let holdEdges = SIMD2<Float>(0.4, 0.6)
-    static let maxDelay = 0.090
-    static let maxDelayForNeural = 0.055
-    static let initialDelay = 0.030
+    /// 可信度的软门限（在半尺寸那一层上量的残差）
+    static let trustGate = SIMD2<Float>(0.45, 1.2)
+    /// 逐像素选向量时，周围四个块的向量差在这以内（基层像素）就直接取平均
+    static let uniformSpread: Float = 0.75
+    /// 画面最多晚这么多出来（真机上播放器能提前给 90～140 ms 的帧，正常用不到）
+    static let maxDelay = 0.060
+    static let maxDelayForNeural = 0.045
+    static let initialDelay = 0.020
     /// 一对帧里可信的面积不到这么多：整对不插（画面太乱，插出来是一块一块的）
     static let minTrust: Float = 0.3
 }
@@ -46,6 +51,7 @@ enum MotionTuning {
 struct MFParams {
     var search: SIMD4<Float>
     var refine: SIMD4<Float>
+    var extra: SIMD4<Float>
 }
 
 struct MFDraw {
@@ -517,7 +523,8 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     private func fetch(now: Double, host: CFTimeInterval) {
         var taken = 0
         // 手上最多留 5 帧：片源的帧来自解码器自己的缓冲池，占多了它出不了新帧
-        while taken < 4, frames.count < 5 {
+        // 一次刷新最多取两帧：刚拖动完不要一口气交上去三对分析
+        while taken < 2, frames.count < 5 {
             var probe = now
             if let lf = lastFetched {
                 // 下一帧大约在 lf + interval：问 lf + 1.5 个间隔，正好拿到下一帧、不跳帧；落后了就追到现在
@@ -658,20 +665,26 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         }
         let g3w = (a3.width + 7) / 8, g3h = (a3.height + 7) / 8
         func field(_ k: Int) -> (any MTLTexture)? { gpu.texture(.rgba16Float, g3w * k, g3h * k) }
+        // 逐像素的向量在半尺寸那一层（a1）上，可信度再小一半
+        let tw = max(1, a1.width / 2), th = max(1, a1.height / 2)
         guard let f3a = field(1), let f3b = field(1), let f2a = field(2), let f2b = field(2),
-              let f1a = field(4), let f1b = field(4), let f0a = field(8), let f0b = field(8), let f0c = field(8),
-              let d1 = gpu.texture(.rgba16Float, a0.width, a0.height),
-              let d2 = gpu.texture(.rgba16Float, a0.width, a0.height),
-              let t1 = gpu.texture(.r8Unorm, max(1, a0.width / 4), max(1, a0.height / 4)),
-              let t2 = gpu.texture(.r8Unorm, max(1, a0.width / 4), max(1, a0.height / 4), shared: true) else {
+              let f1a = field(4), let f1b = field(4), let f0a = field(8), let f0c = field(8),
+              let d1 = gpu.texture(.rgba16Float, a1.width, a1.height),
+              let d2 = gpu.texture(.rgba16Float, a1.width, a1.height),
+              let t1 = gpu.texture(.r8Unorm, tw, th),
+              let t2 = gpu.texture(.r8Unorm, tw, th, shared: true) else {
             pair.hold = true
             return
         }
-        let search = SIMD4<Float>(MotionTuning.coarseRadius, MotionTuning.window, MotionTuning.lamZero, MotionTuning.lamDeviation)
-        let p = MFParams(search: search,
-                         refine: SIMD4(MotionTuning.lamUpdate, 0, MotionTuning.contrastGain, MotionTuning.noiseFloor))
-        let pHalf = MFParams(search: search,
-                             refine: SIMD4(MotionTuning.lamUpdate, 1, MotionTuning.contrastGain, MotionTuning.noiseFloor))
+        func params(window: Float, spacing: Float, half: Bool) -> MFParams {
+            MFParams(search: SIMD4(MotionTuning.coarseRadius, window, MotionTuning.lamZero, MotionTuning.lamDeviation),
+                     refine: SIMD4(MotionTuning.lamUpdate, half ? 1 : 0, MotionTuning.contrastGain, MotionTuning.noiseFloor),
+                     extra: SIMD4(spacing, MotionTuning.trustGate.x, MotionTuning.trustGate.y, MotionTuning.uniformSpread))
+        }
+        // 最粗一层用完整的 8×8 窗口（那里要稳）；细的几层用 4×4 个落在像素角上的采样点（同样盖住 8×8，省四分之三）
+        let coarse = params(window: MotionTuning.window, spacing: 1, half: false)
+        let fine = params(window: 4, spacing: 2, half: false)
+        let finest = params(window: 4, spacing: 2, half: true)
         // 拆成几小段各自提交：出画面的命令（另一条队列）可以插在两段之间，不被一整块分析挡住
         var buffers: [any MTLCommandBuffer] = []
         func stage(_ body: (any MTLComputeCommandEncoder) -> Void) {
@@ -681,35 +694,32 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
             buffers.append(cb)
         }
         stage { enc in
-            dispatch(enc, gpu.searchCoarse, [a3, b3, f3a], params: p)
-            dispatch(enc, gpu.propagate, [a3, b3, f3a, f3b], params: p)
-            dispatch(enc, gpu.refine, [a2, b2, f3b, f2a], params: p)
-            dispatch(enc, gpu.propagate, [a2, b2, f2a, f2b], params: p)
+            dispatch(enc, gpu.searchCoarse, [a3, b3, f3a], params: coarse)
+            dispatch(enc, gpu.propagate, [a3, b3, f3a, f3b], params: coarse)
+            dispatch(enc, gpu.refine, [a2, b2, f3b, f2a], params: fine)
+            dispatch(enc, gpu.propagate, [a2, b2, f2a, f2b], params: fine)
         }
         stage { enc in
-            dispatch(enc, gpu.refine, [a1, b1, f2b, f1a], params: p)
-            dispatch(enc, gpu.propagate, [a1, b1, f1a, f1b], params: p)
+            dispatch(enc, gpu.refine, [a1, b1, f2b, f1a], params: fine)
+            dispatch(enc, gpu.propagate, [a1, b1, f1a, f1b], params: fine)
         }
-        stage { enc in dispatch(enc, gpu.refine, [a0, b0, f1b, f0a], params: p) }
-        stage { enc in dispatch(enc, gpu.propagate, [a0, b0, f0a, f0b], params: pHalf) }
+        stage { enc in dispatch(enc, gpu.refine, [a0, b0, f1b, f0a], params: finest) }
         stage { enc in
-            dispatch(enc, gpu.median, [f0b, f0c])
-            dispatch(enc, gpu.densify, [a0, b0, f0c, d1])
-        }
-        stage { enc in
+            dispatch(enc, gpu.median, [f0a, f0c])
+            dispatch(enc, gpu.densify, [a1, b1, f0c, d1], params: fine)
             dispatch(enc, gpu.median, [d1, d2])
-            dispatch(enc, gpu.trust, [d2, a0, b0, t1], params: p)
+            dispatch(enc, gpu.trust, [d2, a0, b0, t1], params: fine)
             dispatch(enc, gpu.blur3, [t1, t2])
         }
-        guard buffers.count == 6, let cb = buffers.last else {
+        guard buffers.count == 4, let cb = buffers.last else {
             pair.hold = true
-            gpu.retire([f3a, f3b, f2a, f2b, f1a, f1b, f0a, f0b, f0c, d1, d2, t1, t2], tick: tick)
+            gpu.retire([f3a, f3b, f2a, f2b, f1a, f1b, f0a, f0c, d1, d2, t1, t2], tick: tick)
             return
         }
         pair.dense = d2
         pair.trust = t2
         pendingAnalyses += 1
-        gpu.retire([f3a, f3b, f2a, f2b, f1a, f1b, f0a, f0b, f0c, d1, t1], tick: tick + 30)
+        gpu.retire([f3a, f3b, f2a, f2b, f1a, f1b, f0a, f0c, d1, t1], tick: tick + 30)
         let submitted = CACurrentMediaTime()
         let trustTexture = UncheckedTexture(t2)
         let weakPair = WeakBox(pair)
@@ -751,16 +761,18 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         let itemAtReady = now - (lastHost - readyHost)
         let need = itemAtReady + statLead + 0.004 - pair.a.time
         needs.append(min(cap, max(0, need)))
-        if needs.count > 48 { needs.removeFirst(needs.count - 48) }
+        if needs.count > 32 { needs.removeFirst(needs.count - 32) }
     }
 
     private func adjustDelay() {
-        guard let target = needs.max() else { return }
+        guard needs.count >= 4 else { return }
+        // 取第三大的那个：偶尔一对慢了（刚拖动完、系统忙了一下）不该把整段画面一直往后拖
+        let target = needs.sorted(by: >)[2]
         let goal = min(MotionTuning.maxDelay, target + 0.003)
         if goal > delay {
-            delay += min(goal - delay, 0.004)
-        } else if goal < delay - 0.004 {
-            delay -= 0.0002
+            delay += min(goal - delay, 0.002)
+        } else if goal < delay - 0.003 {
+            delay -= 0.0005
         }
     }
 
