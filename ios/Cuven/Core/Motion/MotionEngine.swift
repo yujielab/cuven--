@@ -35,7 +35,15 @@ enum MotionTuning {
     static let noiseFloor: Float = 0.02
     static let gate = SIMD2<Float>(0.6, 1.6)
     static let blendEdges = SIMD2<Float>(0.1, 0.9)
-    static let holdEdges = SIMD2<Float>(0.4, 0.6)
+    /// 重复帧（动画一拍二、一拍三，或 24 帧的片子装在 30 / 60 帧的流里）：两帧的小图平均差、最大差都在这以内。
+    /// 用 x264 编过的「一拍二」视频量的：重复帧平均 ≤ 0.23、最大 ≤ 3.84；真有变化的帧平均 ≥ 0.39、最大 ≥ 4.76
+    static let duplicateMean: Float = 0.3
+    static let duplicateMax: Float = 4.2
+    /// 一对帧里信不过的面积占「有变化的面积」这么多：整对不插（动的东西大半对不上，硬插是一块顺一块跳、还会扭）
+    static let chaosRatio: Float = 0.6
+    static let chaosRatioSticky: Float = 0.4
+    /// 一对帧估完时已经过了它的起点：剩下的时间还有这么多就从这一刻起步（到 B 的时刻正好走完），不然整对不插
+    static let lateStartShare = 0.4
     /// 可信度的软门限（在半尺寸那一层上量的残差）
     static let trustGate = SIMD2<Float>(0.45, 1.2)
     /// 逐像素选向量时，周围四个块的向量差在这以内（基层像素）就直接取平均
@@ -208,9 +216,10 @@ final class MotionFrame {
     var l1: (any MTLTexture)?
     var l2: (any MTLTexture)?
     var l3: (any MTLTexture)?
-    let thumb: [UInt8]?
+    /// 96 × 54 的亮度小图（切镜、重复帧、变化面积；CPU 上算）
+    let thumb: [Float]?
 
-    init(buffer: CVPixelBuffer, time: Double, y: any MTLTexture, c: any MTLTexture, holders: [CVMetalTexture], thumb: [UInt8]?) {
+    init(buffer: CVPixelBuffer, time: Double, y: any MTLTexture, c: any MTLTexture, holders: [CVMetalTexture], thumb: [Float]?) {
         self.buffer = buffer
         self.time = time
         self.y = y
@@ -243,10 +252,17 @@ final class MotionPair {
     /// 画面走进这一对的那一刻定下来怎么画，这一对之内不再变（中途换会跳一下）
     enum Latch { case hold, interpolate, neural }
     var latch: Latch?
+    /// 从哪一刻（片源时间）开始往 B 走：准时的话就是 A 的时刻；估完时已经晚了，就从那一刻起步
+    var start: Double
+    /// 两帧之间有变化的面积占比（小图上量的）
+    var changed: Float = 1
+    /// 中间并掉了几张重复帧
+    var merged = 0
 
     init(a: MotionFrame, b: MotionFrame) {
         self.a = a
         self.b = b
+        self.start = a.time
     }
 }
 
@@ -275,6 +291,10 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         var trusted = 0.0
         var cuts = 0
         var misses = 0
+        var chaos = 0
+        var merged = 0
+        var cadence = ""
+        var latePresents = 0.0
         var stalls = 0
         var neuralState = "关"
         var neuralMs = 0.0
@@ -305,6 +325,7 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     private var lastNow: Double?
     private var lastHost = CACurrentMediaTime()
     private var lastContent: Double?
+    private var presentTarget: CFTimeInterval = 0
     private var delay = MotionTuning.initialDelay
     private var needs: [Double] = []
     private var pendingAnalyses = 0
@@ -328,6 +349,15 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     private var statNeuralMs = 0.0
     private var cuts = 0
     private var misses = 0
+    private var chaos = 0
+    private var merged = 0
+    private var lastChaos = false
+    /// 最近一张和前一张原帧重复、先留着没放进时间线的帧
+    private var pendingDuplicate: MotionFrame?
+    private var duplicateRun = 0
+    private var runHistory: [Int] = []
+    private var windowLate = 0
+    private var latePerSecond = 0.0
     private var stalls = 0
     private var presented = 0
     private var windowStart = CACurrentMediaTime()
@@ -411,6 +441,10 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
             s.trusted = self.statTrust
             s.cuts = self.cuts
             s.misses = self.misses
+            s.chaos = self.chaos
+            s.merged = self.merged
+            s.cadence = self.cadenceLabel()
+            s.latePresents = self.latePerSecond
             s.stalls = self.stalls
             s.neuralState = self.neuralState
             s.neuralMs = self.statNeuralMs * 1000
@@ -474,6 +508,7 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     }
 
     private func step(drawable: any CAMetalDrawable, presentAt: CFTimeInterval) {
+        presentTarget = presentAt
         drainMailbox()
         tick += 1
         gpu.expire(tick: tick)
@@ -514,8 +549,9 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
             content = atPresent - delay
             if let last = lastContent, content < last, last - content < 0.3 { content = last }
         }
+        let previous = lastContent
         lastContent = content
-        render(content: content, playing: playing, drawable: drawable)
+        render(content: content, previous: previous, playing: playing, drawable: drawable)
     }
 
     // MARK: 取帧
@@ -541,8 +577,8 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     }
 
     private func accept(_ buffer: CVPixelBuffer, time: Double, now: Double, host: CFTimeInterval) {
-        if let last = frames.last {
-            let gap = time - last.time
+        if let lf = lastFetched {
+            let gap = time - lf
             if gap <= 0.0005 {
                 if gap < -0.05 { resetTimeline() } else { return }
             }
@@ -555,38 +591,102 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         if colorRows == nil { colorRows = Self.matrix(for: buffer, source: source) }
         let frame = MotionFrame(buffer: buffer, time: time, y: planes.y, c: planes.c, holders: planes.holders,
                                 thumb: Self.thumbnail(buffer, tenBit: source.tenBit))
-        guard buildPyramid(frame) else {
-            failure = "建不了分析用的纹理，已改回原样播放"
-            return
-        }
         lastFetchHost = host
         fetched += 1
         statLookahead = statLookahead * 0.9 + (time - now) * 0.1
-        if let prev = frames.last {
-            let gap = time - prev.time
-            let pair = MotionPair(a: prev, b: frame)
-            if gap > 0.25 {
-                pair.hold = true
-            } else {
-                interval = interval * 0.9 + gap * 0.1
-                if Self.isCut(prev.thumb, frame.thumb) {
-                    pair.hold = true
-                    cuts += 1
-                } else if pendingAnalyses >= 3 {
-                    // 分析积压：这一对不插
-                    pair.hold = true
-                    misses += 1
-                    windowMisses += 1
-                } else {
-                    analyse(pair)
-                    requestNeural(pair)
-                }
-            }
-            if pair.hold { pair.state = .ready }
-            pairs.append(pair)
+        if let lf = lastFetched {
+            let gap = time - lf
+            if gap > 0.0005, gap < 0.25 { interval = interval * 0.9 + gap * 0.1 }
         }
-        frames.append(frame)
         lastFetched = time
+        guard let prev = frames.last else {
+            guard buildPyramid(frame) else { failure = "建不了分析用的纹理，已改回原样播放"; return }
+            frames.append(frame)
+            return
+        }
+
+        // 和时间线上最后一张一样（重复帧）：先不放进去，留着这一张。下一张不同的帧来了再决定——
+        // 节拍规律（一拍二、一拍三、3:2）就把重复的并掉，从前一张原帧一路插到新帧，动作是匀速的；
+        // 不规律（停了一会儿才动）就把留着的这张放回去，动作只发生在最后那一格里
+        if Self.isDuplicate(prev.thumb, frame.thumb), time - prev.time < 0.2 {
+            pendingDuplicate = frame
+            duplicateRun += 1
+            return
+        }
+        let run = duplicateRun
+        var from = prev
+        if run > 0, let held = pendingDuplicate {
+            if cadenceLocked(run) {
+                merged += run
+            } else {
+                // 把最后一张重复帧放回时间线：前一张到它是不动的一对
+                guard buildPyramid(held) else { failure = "建不了分析用的纹理，已改回原样播放"; return }
+                let still = MotionPair(a: prev, b: held)
+                still.hold = true
+                still.state = .ready
+                pairs.append(still)
+                frames.append(held)
+                from = held
+            }
+        }
+        runHistory.append(run)
+        if runHistory.count > 6 { runHistory.removeFirst(runHistory.count - 6) }
+        pendingDuplicate = nil
+        duplicateRun = 0
+
+        guard buildPyramid(frame) else { failure = "建不了分析用的纹理，已改回原样播放"; return }
+        let gap = time - from.time
+        let pair = MotionPair(a: from, b: frame)
+        pair.merged = from === prev ? run : 0
+        pair.changed = Self.changedShare(from.thumb, frame.thumb)
+        if gap > 0.25 {
+            pair.hold = true
+        } else if Self.isCut(from.thumb, frame.thumb) {
+            pair.hold = true
+            cuts += 1
+        } else if pendingAnalyses >= 3 {
+            // 分析积压：这一对不插
+            pair.hold = true
+            misses += 1
+            windowMisses += 1
+        } else {
+            analyse(pair)
+            requestNeural(pair)
+        }
+        if pair.hold { pair.state = .ready }
+        pairs.append(pair)
+        frames.append(frame)
+    }
+
+    /// 重复帧的节拍是不是规律的：这一回重复了 run 张，和前一回一样（一拍二：1、1、1…；一拍三：2、2、2…），
+    /// 或者和前前一回一样且两两交替（3:2：1、2、1、2…）
+    private func cadenceLocked(_ run: Int) -> Bool {
+        guard run >= 1, run <= 3, let last = runHistory.last else { return false }
+        if last == run, runHistory.count >= 2, runHistory[runHistory.count - 2] == run { return true }
+        if runHistory.count >= 3 {
+            let n = runHistory.count
+            if runHistory[n - 2] == run, runHistory[n - 1] == runHistory[n - 3], runHistory[n - 1] >= 1, runHistory[n - 1] <= 3 {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func cadenceLabel() -> String {
+        guard runHistory.count >= 3 else { return "" }
+        let n = runHistory.count
+        let a = runHistory[n - 1], b = runHistory[n - 2], c = runHistory[n - 3]
+        if a == b, b == c {
+            switch a {
+            case 0: return "一拍一"
+            case 1: return "一拍二"
+            case 2: return "一拍三"
+            case 3: return "一拍四"
+            default: return ""
+            }
+        }
+        if a == c, a != b { return "交替 \(min(a, b) + 1):\(max(a, b) + 1)" }
+        return "不规律"
     }
 
     private func resetTimeline() {
@@ -602,6 +702,8 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         for f in frames { retire(f) }
         pairs.removeAll()
         frames.removeAll()
+        pendingDuplicate = nil
+        duplicateRun = 0
     }
 
     private func retire(_ f: MotionFrame) {
@@ -676,15 +778,17 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
             pair.hold = true
             return
         }
-        func params(window: Float, spacing: Float, half: Bool) -> MFParams {
+        /// sub：最后再细化几步（0 不做，1 到半像素，2 到四分之一像素）
+        func params(window: Float, spacing: Float, sub: Float) -> MFParams {
             MFParams(search: SIMD4(MotionTuning.coarseRadius, window, MotionTuning.lamZero, MotionTuning.lamDeviation),
-                     refine: SIMD4(MotionTuning.lamUpdate, half ? 1 : 0, MotionTuning.contrastGain, MotionTuning.noiseFloor),
+                     refine: SIMD4(MotionTuning.lamUpdate, sub, MotionTuning.contrastGain, MotionTuning.noiseFloor),
                      extra: SIMD4(spacing, MotionTuning.trustGate.x, MotionTuning.trustGate.y, MotionTuning.uniformSpread))
         }
         // 最粗一层用完整的 8×8 窗口（那里要稳）；细的几层用 4×4 个落在像素角上的采样点（同样盖住 8×8，省四分之三）
-        let coarse = params(window: MotionTuning.window, spacing: 1, half: false)
-        let fine = params(window: 4, spacing: 2, half: false)
-        let finest = params(window: 4, spacing: 2, half: true)
+        let coarse = params(window: MotionTuning.window, spacing: 1, sub: 0)
+        let fine = params(window: 4, spacing: 2, sub: 0)
+        // 最细一层到四分之一像素：前后两帧的细节对得更准，中点换帧时跳得更小（numpy：约小一成，画质 +0.3～0.45 dB）
+        let finest = params(window: 4, spacing: 2, sub: 2)
         // 拆成几小段各自提交：出画面的命令（另一条队列）可以插在两段之间，不被一整块分析挡住
         var buffers: [any MTLCommandBuffer] = []
         func stage(_ body: (any MTLComputeCommandEncoder) -> Void) {
@@ -727,6 +831,7 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
             let ok = cb.status == .completed
             let readyHost = CACurrentMediaTime()
             var mean: Float = 1
+            var doubtful: Float = 0
             if ok {
                 let t = trustTexture.texture
                 var bytes = [UInt8](repeating: 0, count: t.width * t.height)
@@ -736,8 +841,13 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
                     }
                 }
                 var sum = 0
-                for b in bytes { sum += Int(b) }
+                var low = 0
+                for b in bytes {
+                    sum += Int(b)
+                    if b < 128 { low += 1 }
+                }
                 mean = bytes.isEmpty ? 1 : Float(sum) / Float(bytes.count) / 255
+                doubtful = bytes.isEmpty ? 0 : Float(low) / Float(bytes.count)
             }
             self?.post { [weak self] in
                 guard let self else { return }
@@ -749,6 +859,15 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
                 if !ok { pair.hold = true }
                 self.statTrust = self.statTrust * 0.9 + Double(mean) * 0.1
                 if mean < MotionTuning.minTrust { pair.hold = true }
+                // 有变化的地方大半信不过（人物在不动的背景上变形、换姿势）：整对不插，照原片的节拍走。
+                // 大半个画面都在变（镜头在动）时不走这条：背景照插，人物那一块自己退回原帧
+                let limit = self.lastChaos ? MotionTuning.chaosRatioSticky : MotionTuning.chaosRatio
+                let messy = pair.changed > 0.004 && pair.changed < 0.5 && doubtful > limit * pair.changed
+                if messy, !pair.hold {
+                    pair.hold = true
+                    self.chaos += 1
+                }
+                self.lastChaos = messy
                 self.noteReady(pair, readyHost: readyHost, cap: MotionTuning.maxDelay)
             }
         }
@@ -769,10 +888,11 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         // 取第三大的那个：偶尔一对慢了（刚拖动完、系统忙了一下）不该把整段画面一直往后拖
         let target = needs.sorted(by: >)[2]
         let goal = min(MotionTuning.maxDelay, target + 0.003)
+        // 延后量一变，画面的速度就跟着变：变大时每次刷新最多 1 ms（晚起步会兜住这几对），放回时每次 0.1 ms（看不出来）
         if goal > delay {
-            delay += min(goal - delay, 0.002)
+            delay += min(goal - delay, 0.001)
         } else if goal < delay - 0.003 {
-            delay -= 0.0005
+            delay -= 0.0001
         }
     }
 
@@ -856,7 +976,7 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
 
     // MARK: 出画面
 
-    private func render(content: Double, playing: Bool, drawable: any CAMetalDrawable) {
+    private func render(content: Double, previous: Double?, playing: Bool, drawable: any CAMetalDrawable) {
         guard let first = frames.first else { return }
         // content 落在哪一对里
         var index = 0
@@ -884,21 +1004,43 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
             draw(single: pair.a, drawable: drawable)
             return
         }
-        let phi = Float((content - pair.a.time) / max(1e-6, pair.b.time - pair.a.time))
         if pair.latch == nil {
-            windowPairs += 1
             if pair.hold {
                 pair.latch = .hold
+                windowPairs += 1
             } else if pair.state == .ready, pair.dense != nil, pair.trust != nil {
-                pair.latch = pair.neural != nil ? .neural : .interpolate
-                if pair.neural != nil { windowNeural += 1 }
-            } else {
-                // 这一对还没估完：整对原样显示前一帧（等于这一小段没插帧）
+                // 估完了。上一次刷新还没走到 A，这一下是进这一对的头一下：准时，相位照真实时间算（从 A 的时刻起步）。
+                // 头一下总会落在 A 之后不到一格刷新的地方，所以不能拿「离 A 多近」来判准不准时。
+                // 上一下已经在这一对里（当时没估完、这一对还没建好、暂停着）：晚了。剩下的时间还够就从这一刻起步，
+                // 到 B 的时刻正好走完（不跳）；不够就整对不插
+                let span = max(1e-6, pair.b.time - pair.a.time)
+                let remaining = (pair.b.time - content) / span
+                let onTime = previous.map { $0 < pair.a.time } ?? false
+                windowPairs += 1
+                if onTime {
+                    pair.start = pair.a.time
+                    pair.latch = pair.neural != nil ? .neural : .interpolate
+                    if pair.latch == .neural { windowNeural += 1 }
+                } else if remaining >= MotionTuning.lateStartShare {
+                    // 晚起步但照样插了：只进诊断数字，不算「跟不上」
+                    pair.start = content
+                    pair.latch = .interpolate
+                    misses += 1
+                } else {
+                    pair.latch = .hold
+                    misses += 1
+                    windowMisses += 1
+                }
+            } else if pair.state == .failed {
                 pair.latch = .hold
-                misses += 1
-                windowMisses += 1
+                windowPairs += 1
+            } else {
+                // 还没估完：先原样显示前一帧，估完再定
+                draw(single: pair.a, drawable: drawable)
+                return
             }
         }
+        let phi = Float((content - pair.start) / max(1e-6, pair.b.time - pair.start))
         if pair.latch == .hold || phi < 0.02 {
             draw(single: pair.a, drawable: drawable)
             return
@@ -915,7 +1057,7 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         let key = DrawKey(time: pair.a.time, phi: phi, mode: neural != nil ? 2 : 1,
                           width: drawable.texture.width, height: drawable.texture.height)
         if key == lastDrawKey { return }
-        var u = uniforms(phi: phi, mode: neural != nil ? 2 : 1)
+        var u = uniforms(phi: phi, mode: neural != nil ? 2 : 1, drawable: drawable)
         guard let cb = gpu.drawQueue.makeCommandBuffer(), let enc = encoder(cb, drawable) else { return }
         enc.setFragmentTexture(pair.a.y, index: 0)
         enc.setFragmentTexture(pair.a.c, index: 1)
@@ -948,7 +1090,7 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     private func draw(single f: MotionFrame, drawable: any CAMetalDrawable) {
         let key = DrawKey(time: f.time, phi: 0, mode: 0, width: drawable.texture.width, height: drawable.texture.height)
         if key == lastDrawKey { return }
-        var u = uniforms(phi: 0, mode: 0)
+        var u = uniforms(phi: 0, mode: 0, drawable: drawable)
         guard let cb = gpu.drawQueue.makeCommandBuffer(), let enc = encoder(cb, drawable) else { return }
         for i in stride(from: 0, to: 10, by: 2) {
             enc.setFragmentTexture(f.y, index: i)
@@ -962,6 +1104,14 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     }
 
     private func finish(_ cb: any MTLCommandBuffer, _ drawable: any CAMetalDrawable, keep: [MotionFrame], interpolated: Bool) {
+        // 这一帧实际什么时候上的屏：比预定晚了大半格（或者干脆没上）就记一次。这种帧多了，画面就一顿一顿
+        let target = presentTarget
+        let slack = 0.6 / Double(max(source.displayRate, 30))
+        drawable.addPresentedHandler { [weak self] d in
+            let t = d.presentedTime
+            guard t <= 0 || t - target > slack else { return }
+            self?.post { [weak self] in self?.windowLate += 1 }
+        }
         let first = presented == 0
         presented += 1
         windowDraws += 1
@@ -982,7 +1132,10 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         cb.commit()
     }
 
-    private func uniforms(phi: Float, mode: Float) -> MFDraw {
+    private func uniforms(phi: Float, mode: Float, drawable: any CAMetalDrawable) -> MFDraw {
+        // 屏上的画面比片源大（1080p 放到 iPad 上）：原帧也用锐利取样，不然比系统播放器软
+        let shown = Float(source.width) * uvCrop.x
+        let magnified: Float = Float(drawable.texture.width) > shown * 1.02 ? 1 : 0
         let rows = colorRows ?? Self.matrixRows(.bt709)
         let s: Float = source.tenBit ? 65535.0 / 65472.0 : 1
         let range: SIMD4<Float>
@@ -993,11 +1146,10 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         } else {
             range = SIMD4(255.0 / 219.0, 16.0 / 255.0, 255.0 / 224.0, 128.0 / 255.0)
         }
-        return MFDraw(phase: SIMD4(phi, mode, showRoutes ? 1 : 0, 0),
+        return MFDraw(phase: SIMD4(phi, mode, showRoutes ? 1 : 0, magnified),
                       uv: uvCrop,
                       gate: SIMD4(MotionTuning.gate.x, MotionTuning.gate.y, MotionTuning.contrastGain, MotionTuning.noiseFloor),
-                      weights: SIMD4(MotionTuning.blendEdges.x, MotionTuning.blendEdges.y,
-                                     MotionTuning.holdEdges.x, MotionTuning.holdEdges.y),
+                      weights: SIMD4(MotionTuning.blendEdges.x, MotionTuning.blendEdges.y, 0, 0),
                       range: range, toR: rows.0, toG: rows.1, toB: rows.2)
     }
 
@@ -1005,6 +1157,8 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         let dt = host - windowStart
         guard dt >= 2 else { return }
         drawFPS = Double(windowDraws) / dt
+        latePerSecond = Double(windowLate) / dt
+        windowLate = 0
         if fetched > 24, interval > 0, 1.5 / interval > Double(source.displayRate) {
             failure = "片源约 \(Int((1 / interval).rounded())) fps、屏幕 \(source.displayRate) Hz：无需插帧"
         }
@@ -1047,12 +1201,13 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         return matrixRows(source.height >= 720 || source.width >= 1280 ? .bt709 : .bt601)
     }
 
-    // MARK: 切镜（CPU：48 × 27 的亮度取样）
+    // MARK: 小图（CPU）：切镜、重复帧、变化面积
 
-    private static let thumbColumns = 48
-    private static let thumbRows = 27
+    private static let thumbColumns = 96
+    private static let thumbRows = 54
 
-    private static func thumbnail(_ pb: CVPixelBuffer, tenBit: Bool) -> [UInt8]? {
+    /// 96 × 54 格，每格是 5 × 5 个取样点的平均（取样点铺满整个画面，所以哪儿有一点变化都看得到），0…255
+    private static func thumbnail(_ pb: CVPixelBuffer, tenBit: Bool) -> [Float]? {
         guard CVPixelBufferGetPlaneCount(pb) >= 2,
               CVPixelBufferLockBaseAddress(pb, .readOnly) == kCVReturnSuccess else { return nil }
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
@@ -1062,35 +1217,69 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         let row = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
         guard w > 0, h > 0 else { return nil }
         let p = base.assumingMemoryBound(to: UInt8.self)
-        var out = [UInt8](repeating: 0, count: thumbColumns * thumbRows)
-        for y in 0..<thumbRows {
-            let yy = (y * 2 + 1) * h / (thumbRows * 2)
-            for x in 0..<thumbColumns {
-                let xx = (x * 2 + 1) * w / (thumbColumns * 2)
-                // 10 bit：每个样本两个字节、小端，高字节就是高 8 位
-                out[y * thumbColumns + x] = tenBit ? p[yy * row + xx * 2 + 1] : p[yy * row + xx]
+        // 10 bit：每个样本两个字节、小端，高字节就是高 8 位
+        let stride = tenBit ? 2 : 1
+        let high = tenBit ? 1 : 0
+        var out = [Float](repeating: 0, count: thumbColumns * thumbRows)
+        let nx = thumbColumns * 5, ny = thumbRows * 5
+        var columns = [Int](repeating: 0, count: nx)
+        for x in 0..<nx { columns[x] = ((x * 2 + 1) * w / (nx * 2)) * stride + high }
+        for cy in 0..<thumbRows {
+            for j in 0..<5 {
+                let yy = ((cy * 5 + j) * 2 + 1) * h / (ny * 2)
+                let line = p + yy * row
+                for cx in 0..<thumbColumns {
+                    var sum: Float = 0
+                    for i in 0..<5 { sum += Float(line[columns[cx * 5 + i]]) }
+                    out[cy * thumbColumns + cx] += sum
+                }
             }
         }
+        for i in 0..<out.count { out[i] /= 25 }
         return out
     }
 
-    /// 两帧的亮度分布差得多（直方图）且逐点也差得多：当作换了镜头。快速平移时逐点差很大但分布差不多，不算
-    private static func isCut(_ la: [UInt8]?, _ lb: [UInt8]?) -> Bool {
+    /// 两帧的亮度分布差得多（直方图）且逐格也差得多：当作换了镜头。快速平移时逐格差很大但分布差不多，不算
+    private static func isCut(_ la: [Float]?, _ lb: [Float]?) -> Bool {
         guard let la, let lb, la.count == lb.count, !la.isEmpty else { return false }
-        var mad = 0
+        var mad: Float = 0
         var ha = [Int](repeating: 0, count: 16)
         var hb = [Int](repeating: 0, count: 16)
         for i in 0..<la.count {
-            mad += abs(Int(la[i]) - Int(lb[i]))
-            ha[Int(la[i] >> 4)] += 1
-            hb[Int(lb[i] >> 4)] += 1
+            mad += abs(la[i] - lb[i])
+            ha[min(15, max(0, Int(la[i]) >> 4))] += 1
+            hb[min(15, max(0, Int(lb[i]) >> 4))] += 1
         }
-        let n = Double(la.count)
-        let meanDiff = Double(mad) / n
+        let n = Float(la.count)
+        let meanDiff = mad / n
         var hd = 0
         for i in 0..<16 { hd += abs(ha[i] - hb[i]) }
-        let histDiff = Double(hd) / n
+        let histDiff = Float(hd) / n
         return (histDiff > 0.5 && meanDiff > 20) || meanDiff > 60
+    }
+
+    /// 是不是同一张画（重复帧）：平均差和最大差都只有压缩噪声那么大
+    private static func isDuplicate(_ la: [Float]?, _ lb: [Float]?) -> Bool {
+        guard let la, let lb, la.count == lb.count, !la.isEmpty else { return false }
+        var sum: Float = 0
+        var worst: Float = 0
+        for i in 0..<la.count {
+            let d = abs(la[i] - lb[i])
+            sum += d
+            if d > worst {
+                worst = d
+                if worst >= MotionTuning.duplicateMax { return false }
+            }
+        }
+        return sum / Float(la.count) < MotionTuning.duplicateMean
+    }
+
+    /// 有变化的格子占多少
+    private static func changedShare(_ la: [Float]?, _ lb: [Float]?) -> Float {
+        guard let la, let lb, la.count == lb.count, !la.isEmpty else { return 1 }
+        var n = 0
+        for i in 0..<la.count where abs(la[i] - lb[i]) > 4 { n += 1 }
+        return Float(n) / Float(la.count)
     }
 
     private static func cm(_ seconds: Double) -> CMTime {

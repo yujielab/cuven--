@@ -1333,6 +1333,8 @@ final class FrameInterpolationOverlay {
                 lines.append(String(format: "前瞻 %.0f ms · 延后 %.0f ms", s.lookaheadMs, s.delayMs))
                 lines.append(String(format: "估运动 %.1f ms · 出画面 %.1f ms", s.analysisMs, s.drawMs))
                 lines.append("可信 \(Int((s.trusted * 100).rounded()))% · 切镜 \(s.cuts) · 没赶上 \(s.misses) · 重接 \(s.stalls)")
+                lines.append("节拍 \(s.cadence.isEmpty ? "—" : s.cadence) · 并掉重复帧 \(s.merged) · 太乱不插 \(s.chaos)")
+                lines.append(String(format: "晚上屏 %.0f 次/秒", s.latePresents))
                 lines.append(String(format: "神经关键帧 %@ · 用上 %.0f%% · %.1f ms", s.neuralState, s.neuralShare * 100, s.neuralMs))
             }
         } else {
