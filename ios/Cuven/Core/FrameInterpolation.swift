@@ -767,6 +767,7 @@ final class FrameInterpolationOverlay {
     private var motionCrop = SIMD4<Float>(1, 1, 0, 0)
     private var motionRoutes = false
     private var motionShown = false
+    private var motionStarted = Date()
 
     private var sourceInfo: HLSVideoInfo?
     private var nameSaysHDR = false
@@ -897,6 +898,10 @@ final class FrameInterpolationOverlay {
                 tearDown()
                 decided = false
                 status = "暂停（\(block)）"
+            } else if !motionShown, player()?.rate == 1, Date().timeIntervalSince(motionStarted) > 6 {
+                // 播着，却一直没有一帧上屏（显示层没转起来）：这一集不插了，画面一直是系统播放器的
+                tearDown()
+                verdict("显示层没有启动，原样播放")
             } else {
                 layoutMotion()
                 let routes = FrameInterpolation.diagnostics == .routes
@@ -1070,13 +1075,16 @@ final class FrameInterpolationOverlay {
         let source = MotionEngine.Source(width: w, height: h, format: format, tenBit: hdr, fullRange: fullRange, hdr: hdr,
                                          fps: fps, displayRate: rate)
         let e = MotionEngine(gpu: gpu, output: out, layer: layer, source: source, neural: neural)
-        e.onFirstPresent = { [weak self] in
-            Task { @MainActor [weak self] in self?.firstPresent(e) }
+        e.onFirstPresent = { [weak self, weak e] in
+            Task { @MainActor [weak self, weak e] in
+                if let e { self?.firstPresent(e) }
+            }
         }
         motion = e
         motionSize = CGSize(width: w, height: h)
         motionSnapshot = nil
         motionShown = false
+        motionStarted = Date()
         motionRoutes = FrameInterpolation.diagnostics == .routes
         motionCrop = SIMD4(1, 1, 0, 0)
         layoutMotion(force: true)

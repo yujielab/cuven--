@@ -330,6 +330,7 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
     private var windowMisses = 0
     private var windowPairs = 0
     private var windowNeural = 0
+    private var fetched = 0
     private var drawFPS = 0.0
     private var interpolatedShare = 0.0
     private var neuralShare = 0.0
@@ -434,10 +435,13 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
             if stop { break }
             autoreleasepool {
                 _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.2))
+                // 显示层没在刷新时（还没排好版、被盖住）信箱也要清，不然越积越多
+                drainMailbox()
             }
         }
         link?.invalidate()
         link = nil
+        onFirstPresent = nil
         dropAll()
         if let processor {
             processor.endSession()
@@ -549,6 +553,7 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
             return
         }
         lastFetchHost = host
+        fetched += 1
         statLookahead = statLookahead * 0.9 + (time - now) * 0.1
         if let prev = frames.last {
             let gap = time - prev.time
@@ -988,6 +993,9 @@ final class MotionEngine: NSObject, CAMetalDisplayLinkDelegate, @unchecked Senda
         let dt = host - windowStart
         guard dt >= 2 else { return }
         drawFPS = Double(windowDraws) / dt
+        if fetched > 24, interval > 0, 1.5 / interval > Double(source.displayRate) {
+            failure = "片源约 \(Int((1 / interval).rounded())) fps、屏幕 \(source.displayRate) Hz：无需插帧"
+        }
         interpolatedShare = windowDraws > 0 ? Double(windowInterpolated) / Double(windowDraws) : 0
         neuralShare = windowPairs > 0 ? Double(windowNeural) / Double(windowPairs) : 0
         // 大半时间都在等分析：这台设备跟不上，再这样下去就放弃
