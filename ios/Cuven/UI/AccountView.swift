@@ -139,6 +139,10 @@ struct AccountView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(PlayerCoordinator.autoplayKey) private var autoplayNext = true
+    /// 流畅插帧（Core/FrameInterpolation.swift）：关闭 / 自研引擎 / 仅系统插帧；诊断小字；HDR 实验项
+    @AppStorage(FrameInterpolation.key) private var interpolationMode = FrameInterpolation.Mode.off.rawValue
+    @AppStorage(FrameInterpolation.diagnosticsKey) private var interpolationDiagnostics = FrameInterpolation.Diagnostics.off.rawValue
+    @AppStorage(FrameInterpolation.hdrKey) private var interpolationHDR = false
     /// 改进兼容性（Compat.swift）：没选过的时候按机型（旧机型开）
     /// 改进兼容性的档位：关闭 / 标准 / 增强（Compat.swift）
     @State private var compatLevel = Compat.level
@@ -391,6 +395,7 @@ struct AccountView: View {
     private var playbackGroup: some View {
         let audio = TrackPrefs.Audio(rawValue: audioPref) ?? .auto
         let subtitle = TrackPrefs.Subtitle(rawValue: subtitlePref) ?? .auto
+        let interpolation = FrameInterpolation.Mode(rawValue: interpolationMode) ?? .off
         return AccountGroup(title: "播放") {
             AccountRow(icon: "forward.end", title: "自动播放下一集", subtitle: "看完自动继续") {
                 Toggle("自动播放下一集", isOn: $autoplayNext)
@@ -398,6 +403,46 @@ struct AccountView: View {
                     .tint(.green)
             }
             AccountDivider()
+            // 流畅插帧（用户要求「自研管线和思路，最大化利用插帧」；「仅系统插帧」是先做的那一版，留着对比）：整行是一颗系统弹出菜单
+            Menu {
+                Picker("流畅插帧", selection: $interpolationMode) {
+                    ForEach(FrameInterpolation.Mode.allCases) { Text($0.label).tag($0.rawValue) }
+                }
+            } label: {
+                AccountRow(icon: "film.stack", title: "流畅插帧", subtitle: interpolation.hint) {
+                    AccountMenuValue(interpolation.label)
+                }
+            }
+            .menuStyle(.button)
+            .buttonStyle(AccountRowPress())
+            .accessibilityLabel("流畅插帧")
+            .accessibilityValue(interpolation.label)
+            .accessibilityHint(interpolation.hint)
+            AccountDivider()
+            if interpolation != .off {
+                Menu {
+                    Picker("插帧诊断", selection: $interpolationDiagnostics) {
+                        ForEach(FrameInterpolation.Diagnostics.allCases) { Text($0.label).tag($0.rawValue) }
+                    }
+                } label: {
+                    AccountRow(icon: "waveform.path.ecg", title: "插帧诊断", subtitle: "播放时左上角显示数据") {
+                        AccountMenuValue(interpolationDiagnosticsValue.label)
+                    }
+                }
+                .menuStyle(.button)
+                .buttonStyle(AccountRowPress())
+                .accessibilityLabel("插帧诊断")
+                .accessibilityValue(interpolationDiagnosticsValue.label)
+                AccountDivider()
+            }
+            if interpolation == .motion {
+                AccountRow(icon: "sun.max", title: "HDR 也插帧（实验）", subtitle: "HDR10 和 HLG；杜比视界始终原样播放") {
+                    Toggle("HDR 也插帧（实验）", isOn: $interpolationHDR)
+                        .labelsHidden()
+                        .tint(.green)
+                }
+                AccountDivider()
+            }
             // 「影院光影」「光影实验室」两行按用户要求移除（参数固定，模式在播放器 Touch Bar 的「光效」上换）
             // 首选音轨 / 首选字幕（用户要求「允许设置字幕和音轨首选项」）：整行是一颗系统弹出菜单，勾着当前那一项（C11）
             Menu {
@@ -435,6 +480,12 @@ struct AccountView: View {
         }
         .sensoryFeedback(.selection, trigger: audioPref)
         .sensoryFeedback(.selection, trigger: subtitlePref)
+        .sensoryFeedback(.selection, trigger: interpolationMode)
+        .sensoryFeedback(.selection, trigger: interpolationDiagnostics)
+    }
+
+    private var interpolationDiagnosticsValue: FrameInterpolation.Diagnostics {
+        FrameInterpolation.Diagnostics(rawValue: interpolationDiagnostics) ?? .off
     }
 
     /// 改进兼容性（用户要求：iPad（第 9 代）和更早的机型放不了）。说明照实写：改的是片源的规格标记，画面数据不变
