@@ -45,8 +45,9 @@ struct CacheDissolveSheet: View {
                         Spacer()
                         if phase == .idle { closeButton.transition(.opacity) }
                     }
-                    .padding(.top, 8)
-                    .padding(.horizontal, 20)
+                    // 关闭钮的点按区比看到的圆大一圈（各 2 点），这里少留 2 点：圆还在原来的位置
+                    .padding(.top, 6)
+                    .padding(.horizontal, 18)
                     Spacer(minLength: 0)
                     if phase == .idle {
                         prompt
@@ -87,6 +88,8 @@ struct CacheDissolveSheet: View {
                 .foregroundStyle(.white)
                 .frame(width: 40, height: 40)
                 .glassEffect(.regular.interactive(), in: Circle())
+                // 看上去还是 40 点的圆，点按区撑到 44（F74）
+                .frame(width: 44, height: 44)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -198,6 +201,7 @@ private struct CacheDissolvePill: ButtonStyle {
             .background(Capsule().fill(prominent ? Color.white : Color.white.opacity(0.14)))
             .contentShape(Capsule())
             .scaleEffect(configuration.isPressed ? 0.95 : 1)
-            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+            // 和全 App 的按压同一条弹簧（DSMotion.press）
+            .animation(DSMotion.press, value: configuration.isPressed)
     }
 }

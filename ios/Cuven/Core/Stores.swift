@@ -958,6 +958,51 @@ final class AppModel {
         return out
     }
 
+    // MARK: 探索（标签栏第二格，以前叫「资料库」）的顺序
+
+    /// 这一轮探索的种子（用户要求「每次打开都不一样，像 Netflix 一样」）：每次启动换一个；
+    /// 回到前台隔了 30 分钟以上换一个；在「探索」上再点一下「探索」也换。同一轮里顺序不变（切到别的标签再回来，还在原来那一部）
+    private(set) var exploreSeed = UInt64.random(in: 1...UInt64.max)
+    @ObservationIgnored private var exploreAwayAt: Date?
+    @ObservationIgnored private var exploreCache: (key: String, list: [Video])?
+
+    func reshuffleExplore() {
+        exploreSeed = UInt64.random(in: 1...UInt64.max)
+    }
+
+    /// App 进后台 / 回到前台（RootView 的 scenePhase）：离开超过 30 分钟就换一轮
+    func exploreScene(active: Bool) {
+        if active {
+            if let t = exploreAwayAt, Date().timeIntervalSince(t) > 30 * 60 { reshuffleExplore() }
+            exploreAwayAt = nil
+        } else if exploreAwayAt == nil {
+            exploreAwayAt = Date()
+        }
+    }
+
+    /// 探索里放的：有预告片的电影（showcaseMovies），按这一轮的种子加权随机排（ExploreOrder）：
+    /// 分高、值得一看的大概率在前，年份混着来，同一类型、同一年不连着出
+    var exploreMovies: [Video] {
+        let base = showcaseMovies
+        let key = "\(exploreSeed)-\(dataVersion)-\(base.count)-\(watchlist.items.count)-\(metas.count)"
+        if let c = exploreCache, c.key == key { return c.list }
+        let list = ExploreOrder.order(base, seed: exploreSeed, score: { exploreScore($0) },
+                                      genre: { meta($0)?.genres?.first }, year: { year($0) })
+        exploreCache = (key, list)
+        return list
+    }
+
+    /// 值不值得先看：TMDB 评分为主（没有评分的按 6.5 算）；7.5 分以上（高分）再加一点，近两年上映的加一点，
+    /// 在「想看」里的加一点；看了一部分的（主页「继续观看」里已经有）往后放一点
+    private func exploreScore(_ v: Video) -> Double {
+        var s = meta(v)?.rating.flatMap { $0 > 0 ? $0 : nil } ?? 6.5
+        if s >= 7.5 { s += 0.6 }
+        if let y = year(v), y >= Calendar.current.component(.year, from: Date()) - 1 { s += 0.4 }
+        if watchlist.contains(v.path) { s += 0.5 }
+        if let e = playback.entry(v.path), e.fraction > 0.03 { s -= 0.8 }
+        return s
+    }
+
     /// 后台按资料库的顺序一部一部查有没有预告片（4 部一起），边查边放出来
     func scanTrailers() async {
         if trailerScanning { return }
@@ -1798,5 +1843,54 @@ final class AppModel {
     /// 缓存一共占了多少：和 clearCaches 清的是同三样
     static var cacheUsage: Int64 {
         DiskCache.size() + Int64(URLCache.shared.currentDiskUsage) + ImagePipeline.shared.diskUsage
+    }
+}
+
+/// 探索的排法（用户要求「随机排序，高分和值得一看的影片优先，允许不同年份，每次打开都不一样」）：
+/// · 加权随机（Efraimidis–Spirakis）：每部一个 ln(u) / w，从大到小排；w = e^((分 − 7) / 0.9)：
+///   8.5 分的大约是 6.5 分的 9 倍机会排在它前面，但不是每次都在最前。u 由种子和这一部的路径算出来：
+///   同一轮里稳定，后台再查到的新片按同一个规矩插进来，不会把已经排好的打乱
+/// · 打散：同一类型（第一个类型）、同一年不挨着；往后 6 部里找一部不撞的换上来，找不到就照原样
+enum ExploreOrder {
+    static func order(_ list: [Video], seed: UInt64, score: (Video) -> Double,
+                      genre: (Video) -> String?, year: (Video) -> Int?) -> [Video] {
+        var keyed: [(key: Double, video: Video)] = []
+        keyed.reserveCapacity(list.count)
+        for v in list {
+            let w = exp((score(v) - 7) / 0.9)
+            let u = max(1e-12, unit(seed, v.path))
+            keyed.append((log(u) / w, v))
+        }
+        keyed.sort { $0.key > $1.key }
+        var pool = keyed.map(\.video)
+        var out: [Video] = []
+        out.reserveCapacity(pool.count)
+        while !pool.isEmpty {
+            var pick = 0
+            if let last = out.last {
+                let lg = genre(last), ly = year(last)
+                let pg = out.count >= 2 ? genre(out[out.count - 2]) : nil
+                for j in 0..<min(6, pool.count) {
+                    let g = genre(pool[j]), y = year(pool[j])
+                    let clash = (g != nil && (g == lg || g == pg)) || (y != nil && y == ly)
+                    if !clash { pick = j; break }
+                }
+            }
+            out.append(pool.remove(at: pick))
+        }
+        return out
+    }
+
+    /// 种子 + 路径 → [0, 1)：FNV-1a 64 再过一遍 SplitMix64 的收尾
+    private static func unit(_ seed: UInt64, _ path: String) -> Double {
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325 ^ seed
+        for b in path.utf8 {
+            h ^= UInt64(b)
+            h = h &* 0x0000_0100_0000_01b3
+        }
+        h = (h ^ (h >> 30)) &* 0xbf58_476d_1ce4_e5b9
+        h = (h ^ (h >> 27)) &* 0x94d0_49bb_1331_11eb
+        h ^= h >> 31
+        return Double(h >> 11) / Double(1 << 53)
     }
 }

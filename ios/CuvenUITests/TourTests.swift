@@ -86,7 +86,7 @@ final class TourTests: XCTestCase {
         if !relaunched { back() }
 
         // 资料库（展映）→ 我的 / 搜索（搜索放最后：键盘会盖住标签栏）
-        tapTab(["资料库"])
+        tapTab(["探索"])
         sleep(6)
         snap("11-library")
         // 展映：第一章在屏幕中间时挂上它的预告片（有的话：右上角出现播放 / 暂停钮），再往上滚到介绍面板

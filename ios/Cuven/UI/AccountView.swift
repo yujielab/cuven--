@@ -47,6 +47,57 @@ struct AccountTopBar: View {
     }
 }
 
+/// 账户页头部滚出去了多少点（0 = 原位，封顶 160）。单独一个可观察的小对象：
+/// 每滚一点只有头部那两小块（AccountHeaderFade）重画，整页的 body 不跟着重算
+@MainActor @Observable
+final class AccountHeaderScroll {
+    var offset: CGFloat = 0
+}
+
+/// 账户页那个滚动视图上挂的两件事：滚过头部以后顶上换成「头像 + 名字」；记下头部滚出去了多少
+private struct AccountScrollTracking: ViewModifier {
+    @Binding var showName: Bool
+    let header: AccountHeaderScroll
+    /// 头部往下让了多少（AccountView.headerLift）：名字滚出去的那一下跟着往后挪
+    var lift: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        let lift = lift
+        return content
+            // 头部（头像 88 + 16 + 名字）约 150 点高：名字滚出去了才接到导航栏里（以前还有一颗胶囊，是 200）
+            .onScrollGeometryChange(for: Bool.self) { g in
+                g.contentOffset.y + g.contentInsets.top > 150 + lift
+            } action: { _, v in
+                withAnimation(.easeOut(duration: 0.2)) { showName = v }
+            }
+            // 取整、封顶：滚过头部以后这个数不再变，不白白重画
+            .onScrollGeometryChange(for: CGFloat.self) { g in
+                let d = g.contentOffset.y + g.contentInsets.top
+                return min(160 + lift, max(0, d.rounded()))
+            } action: { _, v in
+                header.offset = v
+            }
+    }
+}
+
+/// 头部的一块（头像、名字）：滚到导航栏那一截底下时跟着淡出去（滚过 from 点开始、to 点淡完），滚回来原样淡回来。
+/// 这一页顶上不画系统的滚动边缘，以前头像和名字清清楚楚地从系统时间、关闭钮底下穿过去，到 150 点才被顶上那一截盖住。
+/// 只改透明度、不位移，「减弱动态效果」时也一样
+private struct AccountHeaderFade<Content: View>: View {
+    let scroll: AccountHeaderScroll
+    let from: CGFloat
+    let to: CGFloat
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        let t = min(1, max(0, (scroll.offset - from) / max(1, to - from)))
+        // 先合成一层再淡：头像的影子不会从半透明的头像里透出来
+        content()
+            .compositingGroup()
+            .opacity(1 - Double(t))
+    }
+}
+
 struct AvatarView: View {
     @Environment(AccountStore.self) private var account
     var size: CGFloat = 34
@@ -121,6 +172,9 @@ struct AccountView: View {
 
     static let notifyKey = "cuven_notify_new_titles"
     @Environment(\.horizontalSizeClass) private var hsc
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// 头部滚出去了多少：只有头部那两小块读它（AccountHeaderFade），整页不跟着每一帧重算
+    @State private var headerScroll = AccountHeaderScroll()
 
     /// 显式写出来：结构里有 private 的存储属性，自动生成的逐成员构造器在别的文件里用不了
     init(inTab: Bool = false) {
@@ -144,8 +198,8 @@ struct AccountView: View {
                         NetworkSpeedCard()
                         // 使用洞察 · 流量概览（网页版的第三张卡；数是这台设备真的下载了多少，不是网页版的随机数）
                         UsageInsightsCard()
+                        // 通知并进了「观看」那一组（用户要求）
                         watchingGroup
-                        notifyGroup
                         playbackGroup
                         compatGroup
                         securityGroup
@@ -179,12 +233,8 @@ struct AccountView: View {
                     }
                 }
             }
-            // 头部（头像 88 + 16 + 名字）约 150 点高：名字滚出去了才接到导航栏里（以前还有一颗胶囊，是 200）
-            .onScrollGeometryChange(for: Bool.self) { g in
-                g.contentOffset.y + g.contentInsets.top > 150
-            } action: { _, v in
-                withAnimation(.easeOut(duration: 0.2)) { showName = v }
-            }
+            // 名字滚出去了才接到导航栏里；头部跟着滚动淡出去（两件事都在 AccountScrollTracking 里）
+            .modifier(AccountScrollTracking(showName: $showName, header: headerScroll, lift: headerLift))
             // 顶上那一截：滚过头部以后，渐进式模糊的底 + 左边「头像 + 名字」（用户要求：以前这里只有名字，底下是一块实色、一条硬边）
             .overlay(alignment: .top) {
                 if showName {
@@ -210,6 +260,8 @@ struct AccountView: View {
             .task {
                 seedNotifyPreference()
                 await refreshNotify()
+                // 离上次「获取软件更新」超过一天：悄悄取一次（加速节点表、兼容性组件）
+                await RuntimeUpdate.shared.checkIfStale()
             }
             // 账户资料（设置、电子邮件）：每次打开都刷新，缓存先上屏（网页版每次进账户屏都刷新）
             .task(id: account.session?.username) {
@@ -232,33 +284,49 @@ struct AccountView: View {
     /// 现在由下面的个人资料卡顶替（登录方式、登录时间挪到「登录与安全」）
     private var header: some View {
         VStack(spacing: 0) {
-            Button { profileSheet = .avatar } label: {
-                AvatarView(size: 88)
-                    .overlay(alignment: .bottomTrailing) {
-                        Image("BrandIcon")
-                            .resizable()
-                            .frame(width: 30, height: 30)
-                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(.black.opacity(0.2), lineWidth: 0.5))
-                            .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
-                            .offset(x: 6, y: 4)
-                            .accessibilityHidden(true)
-                    }
-            }
-            .buttonStyle(PressableStyle(scale: 0.96))
-            .accessibilityLabel("头像")
-            .accessibilityHint("更改头像")
-            .accessibilityIdentifier("account-header-avatar")
-            Text(displayName)
-                .font(.largeTitle.bold())
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-                .padding(.top, 16)
-                .accessibilityAddTraits(.isHeader)
+            // 头像、名字各自滚到导航栏那一截底下时淡出去（头像占 6–94 点、名字 110–151 点）；
+            // 名字淡完正好接上顶上的「头像 + 名字」（滚过 150 点出现）
+            AccountHeaderFade(scroll: headerScroll, from: 8 + headerLift, to: 90 + headerLift) { headerAvatar }
+            AccountHeaderFade(scroll: headerScroll, from: 104 + headerLift, to: 150 + headerLift) { headerName }
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 6)
+        .padding(.top, 6 + headerLift)
+    }
+
+    /// 头部往下让多少：iPhone Duo「侧边一列」的形态里顶上没有安全区（状态栏在侧边那一列里），头像以前离屏幕顶只有 6 点、贴着顶边；
+    /// 用户要求（真机截图）头像顶落在离屏幕顶约 58 点。顶上有导航栏那一截的（普通 iPhone、弹层）照旧
+    private var headerLift: CGFloat { max(0, 52 - navTop) }
+
+    private var headerAvatar: some View {
+        Button { profileSheet = .avatar } label: {
+            AvatarView(size: 88)
+                // 一团很淡的软影：头像从渐变的底上浮起来一点（头像选择里的大头像也有影子）
+                .shadow(color: .black.opacity(0.25), radius: 14, y: 8)
+                .overlay(alignment: .bottomTrailing) {
+                    Image("BrandIcon")
+                        .resizable()
+                        .frame(width: 30, height: 30)
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(.black.opacity(0.2), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+                        .offset(x: 6, y: 4)
+                        .accessibilityHidden(true)
+                }
+        }
+        .buttonStyle(PressableStyle(scale: 0.96))
+        .accessibilityLabel("头像")
+        .accessibilityHint("更改头像")
+        .accessibilityIdentifier("account-header-avatar")
+    }
+
+    private var headerName: some View {
+        Text(displayName)
+            .font(.largeTitle.bold())
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .minimumScaleFactor(0.6)
+            .padding(.top, 16)
+            .accessibilityAddTraits(.isHeader)
     }
 
     // MARK: 各组
@@ -276,33 +344,51 @@ struct AccountView: View {
             }
             .buttonStyle(AccountRowPress())
             AccountDivider()
-            // 以前在「存储」那一组；「清除缓存」挪进「使用洞察」那张卡以后，这一组只剩它，挪到这里和继续观看放在一起
-            Button { model.playback.clearAll() } label: {
-                AccountRow(icon: "clock.arrow.circlepath", title: "清除继续观看", titleColor: Color(red: 1, green: 0.42, blue: 0.38)) { EmptyView() }
-            }
-            .buttonStyle(AccountRowPress())
+            // 新片上架通知（以前单独一组「通知」，用户要求并进「观看」）
+            notifyRows
+            AccountDivider()
+            // 以前在「存储」那一组；「清除缓存」挪进「使用洞察」那张卡以后，这一组只剩它，挪到这里和继续观看放在一起；
+            // 会清掉东西的放在这一组最后（C44）
+            clearContinueRow
         }
+    }
+
+    /// 清除继续观看：清完给一下成功触感，这一行淡下去、不能再点——以前点了这一页上什么都不变，看不出清没清；
+    /// 本来就没有观看记录时也是淡的（没有可清的）
+    private var clearContinueRow: some View {
+        let empty = model.playback.entries.isEmpty
+        return Button {
+            model.playback.clearAll()
+            Haptics.success()
+        } label: {
+            // 和别的页「未能添加」、系统深色下的红同一种（以前是偏粉的 #FF6B61：设计复查）
+            AccountRow(icon: "clock.arrow.circlepath", title: "清除继续观看", titleColor: Color(red: 1.0, green: 0.27, blue: 0.23)) { EmptyView() }
+        }
+        .buttonStyle(AccountRowPress())
+        .disabled(empty)
+        .opacity(empty ? 0.4 : 1)
+        .animation(.easeInOut(duration: 0.25), value: empty)
     }
 
     /// 新片上架通知：打开开关的那一刻才向系统要通知权限，不在启动时、也不在隐私闸门里问（C78、C79）。
     /// 系统里关着就多一行「打开设置」，直接跳到系统里 Cuven 的通知设置，不描述路径（C97、F89）
-    private var notifyGroup: some View {
-        AccountGroup(title: "通知") {
-            AccountRow(icon: "bell", title: "新片上架通知",
-                       subtitle: notifyWanted && notifyBlocked ? "已在“设置”中关闭通知" : "有新影片上架时通知你") {
-                Toggle("新片上架通知", isOn: notifyBinding)
-                    .labelsHidden()
-                    .tint(.green)
-                    .accessibilityIdentifier("account-notify")
+    /// 并在「观看」那一组里（用户要求）
+    @ViewBuilder
+    private var notifyRows: some View {
+        AccountRow(icon: "bell", title: "新片上架通知",
+                   subtitle: notifyWanted && notifyBlocked ? "已在“设置”中关闭通知" : "有新影片上架时通知你") {
+            Toggle("新片上架通知", isOn: notifyBinding)
+                .labelsHidden()
+                .tint(.green)
+                .accessibilityIdentifier("account-notify")
+        }
+        if notifyWanted && notifyBlocked {
+            AccountDivider()
+            Button { openNotificationSettings() } label: {
+                AccountRow(icon: "gearshape", title: "打开设置") { AccountChevron() }
             }
-            if notifyWanted && notifyBlocked {
-                AccountDivider()
-                Button { openNotificationSettings() } label: {
-                    AccountRow(icon: "gearshape", title: "打开设置") { AccountChevron() }
-                }
-                .buttonStyle(AccountRowPress())
-                .accessibilityIdentifier("account-notify-settings")
-            }
+            .buttonStyle(AccountRowPress())
+            .accessibilityIdentifier("account-notify-settings")
         }
     }
 
@@ -415,6 +501,9 @@ struct AccountView: View {
                 .tint(.white.opacity(0.7))
                 .accessibilityIdentifier("account-compat")
             }
+            AccountDivider()
+            // 获取软件更新（用户要求）：热更新兼容性组件（改标记时用的上限）
+            RuntimeUpdateRow(scope: .compat)
         }
         .onChange(of: compatLevel) { _, l in Compat.level = l }
         .sensoryFeedback(.selection, trigger: compatLevel)
@@ -450,7 +539,8 @@ struct AccountView: View {
                 Button { confirmSignOut = true } label: {
                     Text("退出登录")
                         .font(.body.weight(.semibold))
-                        .foregroundStyle(Color(red: 1, green: 0.42, blue: 0.38))
+                        // 系统深色下的红（以前偏粉的 #FF6B61：设计复查）
+                        .foregroundStyle(Color(red: 1.0, green: 0.27, blue: 0.23))
                         .frame(maxWidth: .infinity, minHeight: 54)
                         .contentShape(Rectangle())
                 }
@@ -485,7 +575,8 @@ struct AccountView: View {
         Binding(
             get: { notifyWanted },
             set: { on in
-                notifyWanted = on
+                // 系统里关着通知时，「打开设置」那一行跟着开关淡入 / 收走，卡不一下子跳高
+                withAnimation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion)) { notifyWanted = on }
                 if on { askNotify() }
             })
     }
@@ -501,7 +592,7 @@ struct AccountView: View {
                 _ = try? await center.requestAuthorization(options: [.alert, .badge, .sound])
             }
             let after = await center.notificationSettings()
-            notifyBlocked = after.authorizationStatus == .denied
+            setNotifyBlocked(after.authorizationStatus == .denied)
             notifyAsking = false
         }
     }
@@ -509,7 +600,13 @@ struct AccountView: View {
     /// 看一眼系统里的通知权限（打开这一页时、从系统设置回来时）
     private func refreshNotify() async {
         let s = await UNUserNotificationCenter.current().notificationSettings()
-        notifyBlocked = s.authorizationStatus == .denied
+        setNotifyBlocked(s.authorizationStatus == .denied)
+    }
+
+    /// 系统里的通知权限变了：「打开设置」那一行淡入 / 收走，整页一起动（没变就什么都不做）
+    private func setNotifyBlocked(_ blocked: Bool) {
+        guard blocked != notifyBlocked else { return }
+        withAnimation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion)) { notifyBlocked = blocked }
     }
 
     /// 以前在隐私闸门里开过通知的人：这里的开关一开始就是开着（只在还没有这项设置时看一次）
@@ -564,16 +661,18 @@ struct AccountGroup<Rows: View>: View {
     }
 }
 
-/// 圆角 24 的半透明卡：一层 7% 的白、一圈 9% 白的细边（行矮了以后圆角跟着收一点：26 → 24）
+/// 圆角 24 的半透明卡：一层 7% 的白、一圈白的细边（行矮了以后圆角跟着收一点：26 → 24）。
+/// 细边上亮下暗（14% → 6%，以前一圈都是 9%）：像一片玻璃的上沿接着光，卡从底上分出来，下沿不抢眼
 struct AccountCard<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+        let edge = LinearGradient(colors: [Color.white.opacity(0.14), Color.white.opacity(0.06)], startPoint: .top, endPoint: .bottom)
         VStack(spacing: 0) { content() }
             .background(shape.fill(Color.white.opacity(0.07)))
             .clipShape(shape)
-            .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
+            .overlay(shape.strokeBorder(edge, lineWidth: 1))
     }
 }
 
@@ -610,7 +709,8 @@ struct AccountRow<Trailing: View>: View {
         HStack(spacing: AccountMetrics.gap) {
             Image(systemName: icon)
                 .font(.system(size: iconSize, weight: .regular))
-                .foregroundStyle(.white.opacity(0.6))
+                // 符号比下面的说明（0.55）亮一级、比标题暗一级：三级分得开（以前 0.6，和说明差不多：设计复查）
+                .foregroundStyle(DSInk.secondary)
                 .frame(width: iconColumn)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
@@ -649,10 +749,12 @@ struct AccountDivider: View {
     }
 }
 
+/// 行尾的「›」：和系统列表的一样小（Footnote 半粗，跟着动态字体走），和「首选音轨」那种上下箭头一个大小。
+/// 以前写死 17 点，和标题一样大，比旁边的上下箭头粗一圈。符号用 chevron.forward（和请求中心的行尾同一个：设计复查）
 struct AccountChevron: View {
     var body: some View {
-        Image(systemName: "chevron.right")
-            .font(.system(size: 17, weight: .semibold))
+        Image(systemName: "chevron.forward")
+            .font(.footnote.weight(.semibold))
             .foregroundStyle(.white.opacity(0.45))
             .accessibilityHidden(true)
     }

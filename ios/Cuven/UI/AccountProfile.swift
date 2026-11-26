@@ -30,7 +30,8 @@ extension AccountStore {
 
 /// 弹层里的几种颜色（网页版的红、绿、琥珀，放到深色上提亮一些）
 enum ProfileInk {
-    static let bad = Color(red: 1, green: 0.42, blue: 0.38)
+    /// 和账户页「退出登录」、别的页「未能添加」同一种红（系统深色下的红；以前偏粉的 #FF6B61：设计复查）
+    static let bad = Color(red: 1.0, green: 0.27, blue: 0.23)
     static let good = Color(red: 0.25, green: 0.84, blue: 0.5)
     static let check = Color(red: 0.2, green: 0.78, blue: 0.35)
     static let warnText = Color(red: 1, green: 0.85, blue: 0.6)
@@ -399,6 +400,30 @@ struct ProfileResendRow: View {
             .buttonStyle(.plain)
             .disabled(countdown > 0 || disabled)
         }
+    }
+}
+
+/// 「完成」那一步的绿勾：这一页淡进来以后，勾从略小处弹出来（DSMotion.appear，晚 0.12 秒，等页面先到位）——
+/// 以前只是跟着整页淡入，成功的那一下没有分量。「减弱动态效果」时不缩放，只淡入
+private struct ProfileDoneMark: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var shown = false
+
+    var body: some View {
+        ZStack {
+            Circle().fill(ProfileInk.check)
+            Image(systemName: "checkmark")
+                .font(.system(size: 26, weight: .bold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: 56, height: 56)
+        .shadow(color: ProfileInk.check.opacity(0.35), radius: 12, y: 8)
+        .scaleEffect(shown || reduceMotion ? 1 : 0.6)
+        .opacity(shown ? 1 : 0)
+        .onAppear {
+            withAnimation(DSMotion.adapt(DSMotion.appear, reduce: reduceMotion).delay(0.12)) { shown = true }
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -1626,17 +1651,9 @@ struct IdentitySheet: View {
 
     private var doneStep: some View {
         VStack(spacing: 0) {
-            ZStack {
-                Circle().fill(ProfileInk.check)
-                Image(systemName: "checkmark")
-                    .font(.system(size: 26, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 56, height: 56)
-            .shadow(color: ProfileInk.check.opacity(0.35), radius: 12, y: 8)
-            .padding(.top, 6)
-            .padding(.bottom, 14)
-            .accessibilityHidden(true)
+            ProfileDoneMark()
+                .padding(.top, 6)
+                .padding(.bottom, 14)
             Text(doneText)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)

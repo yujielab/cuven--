@@ -2,7 +2,6 @@
 # 和 RequestFlowTests（请求中心最上面那张「Luminous Data Flow」卡：光点、能量波、进度条、切分类），演示数据，
 # 提交到 refs/ci/ios-dissolve/<分支>（不是分支；会话里 git fetch 就能取）。约 10 分钟，不用等一小时的完整预览。
 # 还跑 LoginLandingTests（用户要的新登录落地页：开场连拍、终态、账号密码页、光学配对页，截图名以 login- 开头）。
-# 还跑 RequestSendTests（用户要的「上滑或按下申请添加」：胶囊、早松手弹回、发往请求中心那一屏连拍、上滑提交，截图名以 send- 开头）。
 name: iOS Dissolve Preview
 
 on:
@@ -80,15 +79,13 @@ jobs:
           run() {
             xcrun simctl boot "$2" 2>/dev/null; xcrun simctl bootstatus "$2" -b > /dev/null 2>&1; sleep 10
             xcodebuild test-without-building -project ios/Cuven.xcodeproj -scheme Cuven -derivedDataPath "$RUNNER_TEMP/dd" \
-              -destination "id=$2" -only-testing:CuvenUITests/DissolveTests -only-testing:CuvenUITests/RequestFlowTests -only-testing:CuvenUITests/AllFilmsTests -only-testing:CuvenUITests/LoginLandingTests -only-testing:CuvenUITests/RequestSendTests -only-testing:CuvenUITests/DetailLogoTests \
+              -destination "id=$2" -only-testing:CuvenUITests/DissolveTests -only-testing:CuvenUITests/RequestFlowTests -only-testing:CuvenUITests/AllFilmsTests -only-testing:CuvenUITests/LoginLandingTests -only-testing:CuvenUITests/DetailLogoTests \
               -resultBundlePath "$RUNNER_TEMP/$1.xcresult" > "$RUNNER_TEMP/$1.log" 2>&1
             echo "$1 exit $?"
             grep -E "Test Case|passed|failed|error:" "$RUNNER_TEMP/$1.log" | tail -10
             # 用户要开场按参考视频 / PDF 的时间点对照：LoginLandingTests 打的启动用时、连拍时刻、找不到哪一步也放进日志
             #（单独 grep，不和上面那行抢 tail 的名额）
             grep -E "LOGIN " "$RUNNER_TEMP/$1.log" | head -20
-            # 用户要的上滑发送：RequestSendTests 打的手势用时、连拍时刻、胶囊位置、那一屏在不在也放进日志（日志本身不上传）
-            grep -E "SEND " "$RUNNER_TEMP/$1.log" | head -30
             xcrun simctl shutdown "$2" 2>/dev/null
           }
           if [ -n "${DUO:-}" ]; then run duo "$DUO"; fi

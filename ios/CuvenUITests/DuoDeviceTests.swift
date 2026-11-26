@@ -292,7 +292,7 @@ final class DuoDeviceTests: XCTestCase {
 
         // 资料库：展映（网页版同一套）——一部有预告片的电影一章：满屏画幅（一行信息 + 字标）→ 收成 16:9，
         // 下面的介绍面板：简介、评分、导演与主演、播放 / 影片详情、一排剧照，章与章之间一道细线（底下不留一大块黑）
-        tab(app, "资料库"); sleep(3)
+        tab(app, "探索"); sleep(3)
         report(app, "library")
         snap("duo-05-library")
         app.swipeUp(); sleep(2); snap("duo-05f-library-shrink")
@@ -464,7 +464,7 @@ final class DuoDeviceTests: XCTestCase {
             return
         }
         snap("duo-11-landscape-home")
-        tab(app, "资料库"); sleep(3)
+        tab(app, "探索"); sleep(3)
         snap("duo-12-landscape-library")
         XCUIDevice.shared.orientation = .portrait
     }

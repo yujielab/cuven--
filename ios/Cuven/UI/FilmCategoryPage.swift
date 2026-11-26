@@ -346,9 +346,17 @@ private struct SkeletonCollectionCard: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: DSRadius.feature, style: .continuous)
+        // 底条的颜色（CollectionCard 取色之前也是这一种深灰）
+        let bar = Color(white: 0.16)
         VStack(spacing: 0) {
             DSFill.placeholder
                 .frame(width: width, height: (width / 1.85).rounded())
+                // 和取到以后的大卡一样：画面最下面一截融进底条的颜色（以前骨架卡这里是一道硬线，卡一到那道线又没了）
+                .overlay {
+                    LinearGradient(stops: [.init(color: bar.opacity(0), location: 0.8),
+                                           .init(color: bar, location: 1)],
+                                   startPoint: .top, endPoint: .bottom)
+                }
             HStack(spacing: 14) {
                 RoundedRectangle(cornerRadius: DSRadius.thumb(44), style: .continuous)
                     .fill(DSFill.placeholder)
@@ -362,7 +370,7 @@ private struct SkeletonCollectionCard: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .frame(width: width, alignment: .leading)
-            .background(Color(white: 0.16))
+            .background(bar)
         }
         .frame(width: width)
         .clipShape(shape)
@@ -564,6 +572,8 @@ private struct CategoryCardFace: View {
         .frame(width: size.width, height: size.height)
         .clipShape(shape)
         .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
+        // 卡坐在页顶那片主色上：垫一团很软的影子托起来（专区那扇立体海报也有影子；以前三张卡是平贴在色块上的）
+        .shadow(color: .black.opacity(0.24), radius: 16, y: 10)
         .contentShape(shape)
     }
 }

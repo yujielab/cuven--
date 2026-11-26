@@ -185,12 +185,14 @@ extension Font {
     /// 分区标题（设计轮 1）：Title 2 粗体，折起、展开一样（App Store、游戏 App 的分区标题）。
     /// 以前折起是 Title 3 半粗，详情页的组名却是 Title 2 粗体：同一页上「简介」「预告片」「剧照」「影片详细信息」两种标题交替出现
     static let dsSectionTitle: Font = .title2.bold()
-    /// 大一级的分区标题：只给主页年份那两排「2026 ›」（折起 Title 1、展开 Large Title，粗体：S4 展开时上一级）
-    static func dsShowcaseTitle(wide: Bool) -> Font { wide ? .largeTitle.bold() : .title.bold() }
+    /// 大一级的分区标题：只给主页年份那两排「2026 ›」（Title 1 粗体）。
+    /// 设计复查：展开时以前是 Large Title，和页标题「全部影片」一样大，折起、展开都改成 Title 1（参数留着，调用处不动）
+    static func dsShowcaseTitle(wide: Bool) -> Font { .title.bold() }
     /// 分区标题下面那一行灰字（「今年上映的新片与新剧」「向左滑动查看更多」）：Body 常规，不再一个 Title 3、一个 Headline 半粗
     static let dsSectionSubtitle: Font = .body
-    /// 压在画面上的大号展示标题（「编辑推荐」「精选电影」）：字的大小跟着那一块画面走，所以是定值
-    static func dsDisplay(wide: Bool) -> Font { .system(size: wide ? 44 : 36, weight: .heavy) }
+    /// 压在画面上的大号展示标题（「编辑推荐」「精选电影」）：字的大小跟着那一块画面走，所以是定值。
+    /// 设计复查：.heavy → .bold：苹方没有比半粗更粗的字重，heavy 只让「2026」这些数字比旁边的汉字胖一圈
+    static func dsDisplay(wide: Bool) -> Font { .system(size: wide ? 44 : 36, weight: .bold) }
     /// 三行以上的正文（简介、关于）：松一点的行距，中文长段落读起来不串行（F21）
     static let dsReading: Font = .body.leading(.loose)
 }
@@ -256,18 +258,25 @@ struct DSThumb: View {
 /// 以前四处各写一份：高 30 / 32、两边 12 / 16 / 18、底 12% / 18% / 20%。
 /// 压在画面、取色面板、磨砂条上（onArt）：白字、20% 白的底；在黑的页面上（年份卡下面那一行）：蓝字、12% 白的底
 /// （App Store「获取」那样；底再亮，蓝字的对比度反而掉到 4.5 : 1 以下）。宁可片名截断，胶囊不被挤扁
+/// 白色磨砂玻璃（用户要求「查看」这一类小胶囊是白色磨砂玻璃）：染白八成的液态玻璃，底下的画面隐约透一点
+enum DSGlass {
+    static let whiteFrost = Glass.regular.tint(Color.white.opacity(0.82))
+}
+
 struct DSViewPill: View {
     var onArt = true
     var compact = false
 
     var body: some View {
+        // 用户要求「全局同类型的按钮为白底蓝字」，再改成「白色磨砂玻璃」：一块染白的液态玻璃（底下的画面隐约透一点）+ 主题蓝的字。
+        // onArt 留着（调用处不动），两种现在一个样子
         Text("查看")
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(onArt ? Color.white : Theme.accent)
+            .foregroundStyle(Theme.accent)
             .lineLimit(1)
             .padding(.horizontal, compact ? 12 : 16)
             .frame(minHeight: 32)
-            .background(Capsule().fill(Color.white.opacity(onArt ? 0.2 : 0.12)))
+            .glassEffect(DSGlass.whiteFrost, in: Capsule())
             .fixedSize()
             .accessibilityHidden(true)
     }
@@ -486,6 +495,8 @@ struct DSPosterLockup: View {
                 if let logo { DSPosterLogo(logo: logo, size: CGSize(width: w, height: h), title: title) }
             }
             .clipShape(shape)
+            // 设计复查：和年份卡、精选卡同一圈细边，暗边的海报在纯黑页面上不再糊成一片
+            .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
             .frame(width: w, height: h)
             .contentShape(shape)
             .accessibilityElement(children: .ignore)
@@ -526,6 +537,8 @@ struct DSWideLockup: View {
                 }
                 // 设计轮 2：12 → DSRadius.card（折起 283 点宽 16），和同样宽的年份卡、分集卡一样圆
                 .clipShape(RoundedRectangle(cornerRadius: DSRadius.card(w), style: .continuous))
+                // 设计复查：同一圈细边（DSFill.hairline）
+                .overlay(RoundedRectangle(cornerRadius: DSRadius.card(w), style: .continuous).strokeBorder(DSFill.hairline, lineWidth: 1))
         }
         .frame(width: w, alignment: .leading)
         .contentShape(Rectangle())
@@ -682,6 +695,8 @@ struct DSMediaCard<MenuItems: View>: View {
                 }
                 .frame(width: w, height: h)
                 .clipShape(shape)
+                // 设计复查：同一圈细边（DSFill.hairline）
+                .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
                 .contentShape(shape)
             }
             .buttonStyle(DSPressReporting(pressed: $pressed))
@@ -956,7 +971,9 @@ struct DSSecondaryButtonStyle: ButtonStyle {
             .foregroundStyle(.white)
             .padding(.horizontal, 20)
             .frame(minHeight: 48)
-            .background(.thinMaterial, in: Capsule())
+            // 设计复查：thinMaterial → 液态玻璃，和旁边的扫码、「播放预告」、详情页那颗同一种料；
+            // 不加 .interactive()：按压手感下面已经有了（同 PrecacheButton）
+            .glassEffect(.regular, in: Capsule())
             .environment(\.colorScheme, .dark)
             // 设计轮 2：和「播放」、卡片同一个按压手感（DSMotion.press，略缩略暗）
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
@@ -1165,9 +1182,10 @@ struct DSHeroCarousel: View {
 
     /// 前面一层：字标、信息、按钮（左对齐：F1、F2）。字本身不接手势
     private func foreground(_ p: DSHeroPage, width w: CGFloat) -> some View {
-        // 字标：所有页一样高，太宽的按屏宽的 45% 收（统一的视觉重量；F12）
+        // 字标：所有页一样高，太宽的按屏宽收（统一的视觉重量；F12）。
+        // 设计复查：手机上 45% 比下面那排按钮还窄，焦点落到「播放」上，窄于 600 点放到 60%；iPad、展开不变
         let logoHeight = min(132, max(84, (w * 0.2).rounded()))
-        let logoMaxWidth = (w * 0.45).rounded()
+        let logoMaxWidth = (w * (w < 600 ? 0.6 : 0.45)).rounded()
         return VStack(alignment: .leading, spacing: 14) {
             // 字标和一行信息合成旁白的一个标题：字标是图，以前旁白只念得出「电影 · 2025 · 剧情」、念不出片名（设计轮 2；F76）
             VStack(alignment: .leading, spacing: 14) {

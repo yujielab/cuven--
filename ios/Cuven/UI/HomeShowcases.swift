@@ -182,17 +182,21 @@ struct EditorsPick: View {
             if trailer.path == video.path {
                 VideoSurface(player: trailer.player, gravity: .resizeAspectFill, background: .clear)
                     .opacity(trailer.showing ? 1 : 0)
-                    .blur(radius: trailer.showing ? 0 : 18)
+                    // 「减弱动态效果」时只淡入、不从模糊里出来（F59；和头图换画面 DSBlurFadeImage 同一条规矩）
+                    .blur(radius: (trailer.showing || reduceMotion) ? 0 : 18)
                     .animation(.easeInOut(duration: 0.8), value: trailer.showing)
                     .allowsHitTesting(false)
             }
-            // 上沿一层淡暗：「编辑推荐」压在上面看得清（F34）
-            LinearGradient(stops: [.init(color: .black.opacity(0.45), location: 0),
-                                   .init(color: .black.opacity(0), location: 0.32)],
+            // 上沿一层淡暗：「编辑推荐」压在上面看得清（F34）。
+            // 设计复查：上下两头都融进页面的黑（和头图一样），不再是横穿整屏的两道硬边
+            LinearGradient(stops: [.init(color: .black, location: 0),
+                                   .init(color: .black.opacity(0.45), location: 0.10),
+                                   .init(color: .black.opacity(0), location: 0.34)],
                            startPoint: .top, endPoint: .bottom)
             // 下沿也压一点：面板和画面分得开
             LinearGradient(stops: [.init(color: .black.opacity(0), location: 0.55),
-                                   .init(color: .black.opacity(0.32), location: 1)],
+                                   .init(color: .black.opacity(0.32), location: 0.86),
+                                   .init(color: .black, location: 1)],
                            startPoint: .top, endPoint: .bottom)
         }
         .clipped()
@@ -489,8 +493,10 @@ struct WideLeadCard: View {
                     }
                 }
                 Spacer(minLength: 14)
+                // 片名上面那一行小字全 App 一个字重（Footnote 中等：编辑推荐、分集卡、合集卡）；以前这里半粗、合集卡常规，
+                // 展开时这张大卡和下面两张合集卡挨着，同一行「电影」「剧集」粗细不一
                 Text(kicker)
-                    .font(.footnote.weight(.semibold))
+                    .font(.footnote.weight(.medium))
                     .foregroundStyle(DSInk.secondary)
                 Text(title)
                     .font(logo != nil ? .title3.bold() : .title2.bold())
@@ -595,12 +601,15 @@ struct YearTrailerCard: View {
             .frame(width: width, height: h)
             .overlay(alignment: .bottomLeading) {
                 if let progress {
-                    // 和「继续观看」那排同一种：剧照底边一道细线
+                    // 和「继续观看」那排同一种：缩进的细胶囊（DSPercentProgress 的尺寸）。
+                    // 设计复查：以前贴底边通栏的细线，两头被圆角切掉，进度小时看不见
                     ZStack(alignment: .leading) {
-                        Rectangle().fill(Color.white.opacity(0.22))
-                        Rectangle().fill(Color.white).frame(width: (width * min(1, max(0, progress))).rounded())
+                        Capsule().fill(Color.white.opacity(0.3))
+                        Capsule().fill(Color.white).frame(width: max(4, ((width - 24) * min(1, max(0, progress))).rounded()))
                     }
-                    .frame(width: width, height: 3)
+                    .frame(width: width - 24, height: 4)
+                    .padding(.leading, 12)
+                    .padding(.bottom, 10)
                     .animation(.smooth(duration: 0.6), value: progress)
                 }
             }
@@ -623,7 +632,7 @@ struct YearTrailerCard: View {
                 }
                 .lineLimit(1)
                 Spacer(minLength: compact ? 6 : 8)
-                // 在黑的页面上：蓝字、12% 白的底（DSViewPill）
+                // 白色磨砂玻璃 + 蓝字（DSViewPill；用户要求全局同类型的按钮都是这样）
                 if let badge {
                     badge.view(compact: compact)
                 } else {
@@ -654,7 +663,7 @@ struct YearTrailerCard: View {
     }
 }
 
-/// 年份卡右边那颗胶囊换成的状态：和「查看」同一个样子（12% 白的底），只是字和颜色不同
+/// 年份卡右边那颗胶囊换成的状态：和「查看」同一个样子（白色磨砂玻璃），只是字不同：申请、进度这些是主题蓝，没能添加是红的
 struct YearCardBadge: Equatable {
     enum Tone: Equatable { case accent, plain, alert }
     var text: String
@@ -665,13 +674,13 @@ struct YearCardBadge: Equatable {
         Text(text)
             .font(.subheadline.weight(.semibold))
             .monospacedDigit()
-            .foregroundStyle(tone == .accent ? Theme.accent : tone == .alert ? Color(red: 1.0, green: 0.27, blue: 0.23) : Color.white)
+            .foregroundStyle(tone == .alert ? Color(red: 1.0, green: 0.27, blue: 0.23) : Theme.accent)
             .lineLimit(1)
             // 这一行实在放不下（窄窗口里 200 出头的卡、特大字号）：字缩一点，不再把整行撑得比卡还宽
             .minimumScaleFactor(0.6)
             .padding(.horizontal, compact ? 12 : 16)
             .frame(minHeight: 32)
-            .background(Capsule().fill(Color.white.opacity(0.12)))
+            .glassEffect(DSGlass.whiteFrost, in: Capsule())
             // 只定高、不定宽：以前 .fixedSize() 连宽也定死，放不下时整行冲到旁边那张卡上
             .fixedSize(horizontal: false, vertical: true)
             // 宁可片名截断，状态不被挤扁（和「查看」同一条规矩）：排的时候先给它宽，放得下就是原来的大小，放不下才缩字
@@ -756,7 +765,8 @@ struct HomeFinale: View {
         .frame(width: metrics.width)
         .onScrollVisibilityChange(threshold: 0.1) { v in
             onScreen = v
-            if v { built = true }
+            // 第一次滑到：两排卡淡进来，不是一下子冒出来
+            if v, !built { withAnimation(DSMotion.fade) { built = true } }
         }
     }
 
@@ -786,12 +796,15 @@ struct HomeFinale: View {
                 .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(.white)
                 .contentTransition(.symbolEffect(.replace))
+                // 符号替换要在动画里才走（ShowcaseControl 也是这样挂的）：以前没挂，暂停 ↔ 播放是直接跳的
+                .animation(DSMotion.snap, value: userPaused)
                 .frame(width: 36, height: 36)
                 .background(Circle().fill(Color.white.opacity(0.16)))
                 .frame(width: 44, height: 44)
                 .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        // 和编辑推荐右上那颗播放 / 暂停同一个按压手感（以前 .plain：按下去没有任何反应）
+        .buttonStyle(PressableStyle(scale: 0.94))
         .accessibilityLabel(userPaused ? "继续播放滚动画面" : "暂停滚动画面")
         .accessibilityIdentifier("home-finale-pause")
     }
@@ -844,7 +857,8 @@ struct TileRow: View, Equatable {
             ForEach(0..<(tiles.count * 3), id: \.self) { i in
                 let t = tiles[i % tiles.count]
                 ZStack(alignment: .bottom) {
-                    Color(white: 0.12)
+                    // 设计复查：底色、细边换成全 App 同一种（以前 0.12 灰、0.5 点边，最后一排载入时深浅不一）
+                    DSFill.placeholder
                     RemoteImage(url: t.art, maxPixel: tileW * 3)
                         .frame(width: tileW, height: h)
                     if let logo = t.logo {
@@ -855,7 +869,7 @@ struct TileRow: View, Equatable {
                 }
                 .frame(width: tileW, height: h)
                 .clipShape(shape)
-                .overlay(shape.strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
+                .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
             }
         }
     }

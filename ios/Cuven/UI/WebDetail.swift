@@ -16,8 +16,48 @@ import UIKit
 
 // MARK: - 电影
 
+/// 详情页右上角的「下载」「分享」，和 iPhone Duo「侧边一列」时换上的弧形菜单（单独一个修饰器：MovieDetailView 的链太长，编译器会算不过来）
+private struct MovieDetailChrome: ViewModifier {
+    let video: Video
+    let title: String
+    let runtime: Int?
+    let tmdbID: Int?
+    let column: Bool
+    @Binding var alert: PrecacheAlert?
+    /// 弧形菜单的「+」摆在哪（那一行操作里「…」原来那一格）、「从头播放」（有进度才有）
+    let anchor: DetailArcAnchor
+    let onRestart: (() -> Void)?
+    /// 弧形菜单开着：后面的页面轻微模糊、往后退一点（用户要求「展开时轻微模糊和景深下方背景和元素，类似 Vision Pro」）
+    @State private var arcOpen = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content
+            // 景深：整页模糊一点（用户后来要求不往后退、不压暗：只留模糊）；「+」展开的那一层在上面，清清楚楚
+            .blur(radius: arcOpen ? 7 : 0)
+            .animation(DSMotion.adapt(.smooth(duration: 0.4), reduce: reduceMotion), value: arcOpen)
+            .toolbar {
+                // 「分享」用户要求移除：只剩「下载」
+                if !column {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        DetailDownloadButton(video: video, title: title, runtime: runtime, alert: $alert)
+                    }
+                }
+            }
+            .navigationBarBackButtonHidden(column)
+            .toolbar(column ? .hidden : .automatic, for: .navigationBar)
+            .overlay {
+                if column {
+                    DetailArcMenuLayer(video: video, title: title, runtime: runtime, tmdbID: tmdbID, alert: $alert,
+                                       open: $arcOpen, anchor: anchor, onRestart: onRestart)
+                }
+            }
+    }
+}
+
 struct MovieDetailView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.duoColumn) private var column
     let video: Video
     @State private var full: Meta?
     /// Apple TV 上对上的那一部：有就用它的无字背景、竖版全屏图、字标和预告片（对不上就是 TMDB 的）
@@ -27,6 +67,8 @@ struct MovieDetailView: View {
     @State private var art: DetailArt?
     /// 预先缓存、下载开不了（空间不够、演示数据）时说一声
     @State private var precacheAlert: PrecacheAlert?
+    /// 「侧边一列」时弧形菜单的「+」顶替「…」：那一格在屏幕上的框（DetailArcAnchor）
+    @State private var arcAnchor = DetailArcAnchor()
 
     var body: some View {
         let meta = full ?? model.meta(video)
@@ -52,17 +94,15 @@ struct MovieDetailView: View {
             trailerArt: trailerArt(meta),
             stills: DetailText.stills(meta),
             precache: precacheState(meta),
-            downloadPath: video.path
+            downloadPath: video.path,
+            arcAnchor: column ? arcAnchor : nil
         ) { _ in
             EmptyView()
         }
-        // 「下载」「分享」（用户要求：iPhone Duo 侧边那一列返回钮下面；别的 iPhone 在右上角）：分享的是下好的文件，可以直接隔空投送
-        .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                DetailDownloadButton(video: video, title: model.title(video), runtime: meta?.runtime, alert: $precacheAlert)
-                DetailShareButton(video: video, title: model.title(video), tmdbID: meta?.id)
-            }
-        }
+        // 「下载」「分享」：别的 iPhone、iPad 在右上角。iPhone Duo「侧边一列」的形态里系统把返回、下载、分享竖着排进那一列，
+        // 下载 / 分享那一组压到了底下的导航胶囊上（用户截图）：这时导航栏整个收起，换成一颗展开成弧形菜单的「+」（DetailArcMenuLayer）
+        .modifier(MovieDetailChrome(video: video, title: model.title(video), runtime: meta?.runtime, tmdbID: meta?.id, column: column,
+                                    alert: $precacheAlert, anchor: arcAnchor, onRestart: restartAction(meta)))
         .alert(precacheAlert?.title ?? "", isPresented: Binding(get: { precacheAlert != nil }, set: { if !$0 { precacheAlert = nil } }),
                presenting: precacheAlert) { _ in
             Button("好", role: .cancel) {}
@@ -338,10 +378,10 @@ struct SeriesDetailView: View {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
                 } else {
-                    // F87：说清楚怎么了，不怪人
+                    // F87：说清楚怎么了，不怪人。字和页上别的第二行同一级灰（DSInk.secondary；系统的 .secondary 在染色的底上偏暗）
                     Text(failed ?? "暂无可播放的剧集")
                         .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DSInk.secondary)
                         .padding(.horizontal, m.margin)
                         .padding(.vertical, 8)
                 }
@@ -355,6 +395,8 @@ struct SeriesDetailView: View {
                 }
             }
         }
+        // 占位卡换成真的分集卡（换季时再换回占位卡）：淡过去，不是一下子换掉
+        .animation(DSMotion.fade, value: files.isEmpty)
     }
 
     /// 一集：16:9 剧照，字压在底部的渐进式模糊上（Apple TV 的分集卡）：「第 1 集 · 集名」和「▶ 45 分钟」；
@@ -645,6 +687,8 @@ struct DetailScaffold<Episodes: View>: View {
     var downloadPath: String? = nil
     /// 换掉「播放」的那一块（片库里没有的那部：「请求添加」按钮 / 五步进度卡，RequestViews.swift）
     var customAction: AnyView? = nil
+    /// iPhone Duo「侧边一列」：弧形菜单的「+」顶替「…」（用户要求），这一行只留出那一格、把它的框记下来
+    var arcAnchor: DetailArcAnchor? = nil
     /// 分集那一段（电影没有）：拿到当前宽度的版面尺寸再排
     @ViewBuilder var episodes: (DSMetrics) -> Episodes
 
@@ -1012,8 +1056,18 @@ struct DetailScaffold<Episodes: View>: View {
                 } else {
                     playButton(m)
                 }
-                // 「…」里只剩「从头播放」：有进度才出现（发行版不再有「分享」「复制直链」这类站外操作）
-                if onRestart != nil { moreMenu }
+                // 「…」里只剩「从头播放」：有进度才出现（发行版不再有「分享」「复制直链」这类站外操作）。
+                // iPhone Duo「侧边一列」时这一格让给弧形菜单的「+」（一直在；「从头播放」挪到弧上）：只占位、记下框，「+」由那一层画
+                if let arcAnchor {
+                    Color.clear
+                        .frame(width: 48, height: 48)
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { r in
+                            if !arcAnchor.frozen { arcAnchor.rect = r }
+                        }
+                        .accessibilityHidden(true)
+                } else if onRestart != nil {
+                    moreMenu
+                }
             }
             .padding(.top, 4)
         }
@@ -1119,6 +1173,8 @@ struct DetailScaffold<Episodes: View>: View {
         let d = (m.posterWidth * 0.86).rounded()
         return VStack(alignment: .leading, spacing: m.titleGap) {
             DetailLinkHeader(title: "演员", metrics: m, id: "cast-link") {
+                // 和点开简介一样，弹层出来时一下轻触感
+                Haptics.light()
                 castSheet = CastSheetRequest(start: nil)
             }
             DSShelf(metrics: m) {

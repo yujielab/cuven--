@@ -1,9 +1,11 @@
 import SwiftUI
 import AVFoundation
 
-// MARK: - 资料库：和网页版的「展映」（lib-showcase）同一套逻辑，一部电影一章
+// MARK: - 探索（以前叫「资料库」，用户要求改名）：和网页版的「展映」（lib-showcase）同一套版式，一部电影一章
 //
-// · 顺序：上映新的在前，同一天按入库时间（AppModel.showcaseOrder，和网页版 sortOrder 一样）；全片库查过一轮以后首尾相接、一直往下放（网页版的环形队列）。
+// · 顺序（用户要求「随机排序，高分和值得一看的优先，允许不同年份，每次打开都不一样」）：AppModel.exploreMovies——
+//   按这一轮的种子加权随机排（分高的大概率在前），同一类型、同一年不挨着；每次启动、离开半小时以上回来、再点一下「探索」换一轮。
+//   全片库放完一轮以后首尾相接、一直往下放（网页版的环形队列）。
 // · 只放有预告片的电影：预告片就是详情页拿到的那一份（Apple TV 上的公开预告，AppModel.trailers(for:)）；
 //   哪部有、哪部没有在后台查（AppModel.scanTrailers），查到的记在本地；还没查到的那一部后面先不放，查到了再往后接。
 // · 每一章：
@@ -90,13 +92,15 @@ struct LibraryView: View {
         }
         .onChange(of: covered) { _, c in trailer.setCovered(c) }
         .onChange(of: base.map(\.path), initial: true) { _, paths in joined = paths }
+        // 换了一轮（种子变了）：按新的顺序从头排，不再守着上一轮排好的位置
+        .onChange(of: model.exploreSeed) { _, _ in joined = [] }
         // 打开资料库时把没查过的接着查（单独起一个任务：切走标签不打断它，正在查就什么也不做）
         .onAppear { Task { await model.scanTrailers() } }
     }
 
     /// 有预告片的电影：按资料库的顺序；这一屏上已经排好的保持原位，新查到的接在后面
     private var base: [Video] {
-        let live = model.showcaseMovies
+        let live = model.exploreMovies
         guard !joined.isEmpty else { return live }
         var fresh: [String: Video] = [:]
         for v in live { fresh[v.path] = v }
@@ -117,7 +121,7 @@ struct LibraryView: View {
     @ViewBuilder private var emptyState: some View {
         if case .failed(let message) = model.phase {
             ContentUnavailableView {
-                Label("无法载入资料库", systemImage: "wifi.exclamationmark")
+                Label("无法载入影片", systemImage: "wifi.exclamationmark")
             } description: {
                 Text(message)
             } actions: {
@@ -155,7 +159,7 @@ struct ShowcaseHeader: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("资料库")
+            Text("探索")
                 .font(.largeTitle.bold())
                 .foregroundStyle(.white)
                 .accessibilityAddTraits(.isHeader)
@@ -163,17 +167,23 @@ struct ShowcaseHeader: View {
                 .font(.subheadline)
                 .foregroundStyle(DSInk.secondary)
         }
-        .padding(.top, top + 10)
+        // 上边距和「主页」同一个下限 24（设计复查）：iPhone Duo 折起时没有状态栏的安全区，
+        // 以前 0 + 10，「探索」贴着屏幕顶，和主页切换时标题跳一截
+        .padding(.top, max(top, 24) + 10)
         .padding(.horizontal, margin)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(alignment: .top) {
-            LinearGradient(stops: [
-                .init(color: .black.opacity(0.55), location: 0),
-                .init(color: .black.opacity(0.25), location: 0.55),
-                .init(color: .clear, location: 1),
-            ], startPoint: .top, endPoint: .bottom)
-            .frame(height: top + 150)
+            LinearGradient(stops: Self.shade, startPoint: .top, endPoint: .bottom)
+                .frame(height: max(top, 24) + 150)
         }
+    }
+
+    /// 55% → 0，alpha 走 smoothstep（和画幅上下那两道同一种缓动）：以前是三个点的折线，
+    /// 渐变收尾的地方在 OLED 上看得出一道边
+    private static let shade: [Gradient.Stop] = (0...10).map { i in
+        let t = Double(i) / 10
+        let s = 1 - t * t * (3 - 2 * t)
+        return Gradient.Stop(color: .black.opacity(0.55 * s), location: t)
     }
 }
 
@@ -269,8 +279,9 @@ struct ShowcaseChapter: View {
 
                 // 右上角：预告片的播放 / 暂停 + 进度环（拿到预告片才出现：F77 自动播放的预览要有看得见的停止钮）
                 if controlOn {
+                    // 和「探索」标题同一个下限 24（设计复查）：+9 让圆环的中心对上标题那一行
                     ShowcaseControl(trailer: trailer)
-                        .padding(.top, top + 12)
+                        .padding(.top, max(top, 24) + 9)
                         .padding(.trailing, max(8, margin - 5) + trail)
                         .frame(width: vw, alignment: .topTrailing)
                         .visualEffect { content, proxy in
@@ -340,8 +351,7 @@ struct ShowcaseChapter: View {
         var parts: [String] = []
         if let y = model.year(video) { parts.append(String(y)) }
         if let g = m?.genres, !g.isEmpty { parts.append(g.prefix(2).joined(separator: " · ")) }
-        // 片长和详情页同一种写法（设计轮 1：以前这里「116 分钟」、详情页「1 小时 56 分钟」）
-        if let r = m?.runtime, r > 0 { parts.append(Format.runtime(r)) }
+        // 不写片长（用户要求移除）
         return parts.joined(separator: " · ")
     }
 }
@@ -353,16 +363,23 @@ struct ShowcaseMedia: View {
     let trailer: ShowcaseTrailer
     let isActive: Bool
     @State private var drift = false
+    /// 画面到了：骨架屏收掉（没有画面的那一部一直是黑的，不挂骨架）
+    @State private var artLoaded = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let mine = isActive && trailer.path == video.path
         ZStack {
-            RadialGradient(colors: [Color(red: 27 / 255, green: 39 / 255, blue: 64 / 255), Color(red: 10 / 255, green: 15 / 255, blue: 24 / 255), .black],
-                           center: UnitPoint(x: 0.5, y: 0.38), startRadius: 0, endRadius: 400)
+            // 底是纯黑（用户要求：以前是一团深蓝的径向渐变，还没加载时整块发蓝）；画面还没到时是骨架屏：一道很淡的光扫过去
+            Color.black
+            if !artLoaded && art != nil {
+                ShowcaseSkeleton()
+                    .transition(.opacity)
+            }
             // 放在 Color.clear 的 overlay 里：图按 fill 铺，比例不是正好 16:9 时也不会把这一层撑大、画到画幅外面去
             Color.clear.overlay {
-                RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1280, placeholder: .clear)
+                RemoteImage(url: TMDBImage.url(art, "w1280"), maxPixel: 1280, placeholder: .clear,
+                            onLoad: { withAnimation(.easeOut(duration: 0.3)) { artLoaded = true } })
                     .scaleEffect(drift ? 1.12 : 1.02)
             }
             if mine {
@@ -395,7 +412,39 @@ struct ShowcaseMedia: View {
     }
 }
 
-/// 右上角那颗：播放 / 暂停 + 进度环（环 34、2.5 宽：底 34% 白、值纯白），点按区 44（C33）；
+/// 探索画幅的骨架屏（用户要求「未加载时底色为黑色并有骨架屏」）：黑底上一块极淡的灰，
+/// 一道柔和的光斜着从左扫到右（1.6 秒一趟）；「减弱动态效果」时不扫，只留那一层淡灰
+struct ShowcaseSkeleton: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var phase: CGFloat = 0
+
+    var body: some View {
+        GeometryReader { g in
+            ZStack {
+                Color.white.opacity(0.035)
+                if !reduceMotion {
+                    // 光带比画幅高出一半：斜过来以后上下两头都在画幅外面（以前和画幅一样高，
+                    // 一斜，右上、左下各缺一个三角，扫过去时带着一道硬边）
+                    LinearGradient(colors: [.clear, Color.white.opacity(0.07), .clear],
+                                   startPoint: .leading, endPoint: .trailing)
+                        .frame(width: g.size.width * 0.55, height: g.size.height * 1.5)
+                        .rotationEffect(.degrees(12))
+                        .offset(x: g.size.width * (phase * 1.7 - 0.85))
+                        .frame(width: g.size.width, height: g.size.height)
+                }
+            }
+            .clipped()
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) { phase = 1 }
+        }
+    }
+}
+
+/// 右上角那颗：播放 / 暂停 + 进度环（环 34、2.5 宽：底 34% 白、值纯白，环里垫 28% 的暗），点按区 44（C33）；
 /// 播放 ↔ 暂停用系统的符号替换动效（F57）
 struct ShowcaseControl: View {
     let trailer: ShowcaseTrailer
@@ -403,12 +452,15 @@ struct ShowcaseControl: View {
     var body: some View {
         Button { trailer.togglePause() } label: {
             ZStack {
+                // 垫一层很淡的暗：亮的画面（雪地、天空）上环和符号也看得清（F34）
+                Circle().fill(Color.black.opacity(0.28))
                 Circle().stroke(Color.white.opacity(0.34), lineWidth: 2.5)
+                // 进度每 0.25 秒报一次：动画也走 0.25 秒，环是一直在走的（以前 0.15 秒，走一下、停一下）
                 Circle()
                     .trim(from: 0, to: max(0.001, trailer.progress))
                     .stroke(Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
-                    .animation(.linear(duration: 0.15), value: trailer.progress)
+                    .animation(.linear(duration: 0.25), value: trailer.progress)
                 Image(systemName: trailer.paused ? "play.fill" : "pause.fill")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(.white)
@@ -495,13 +547,7 @@ struct ShowcaseIntro: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: metrics.gutter) {
                             ForEach(Array(stills.enumerated()), id: \.offset) { _, url in
-                                let w = metrics.wideCardWidth
-                                // 圆角和别处同宽的 16:9 卡一样（DSRadius.card：折起 283 点宽是 16，以前写死 12）
-                                DSFill.placeholder
-                                    .overlay { RemoteImage(url: url, maxPixel: w * 3, placeholder: .clear) }
-                                    .frame(width: w, height: (w * 9 / 16).rounded())
-                                    .clipShape(RoundedRectangle(cornerRadius: DSRadius.card(w), style: .continuous))
-                                    .accessibilityHidden(true)
+                                ShowcaseStill(url: url, width: metrics.wideCardWidth)
                             }
                         }
                         .scrollTargetLayout()
@@ -541,6 +587,23 @@ struct ShowcaseIntro: View {
         PlayerCoordinator.shared.play(PlayRequest(path: video.path, name: video.name, title: model.title(video),
                                                   subtitle: model.year(video).map { String($0) },
                                                   artwork: model.backgroundArtString(video)), model: model)
+    }
+}
+
+/// 介绍面板那一排剧照里的一张：16:9，圆角和别处同宽的 16:9 卡一样（DSRadius.card：折起 283 点宽是 16），
+/// 外面一圈细边——面板是纯黑的，暗的剧照没有这圈边就化进底里、看不出卡的形状（年份卡、合集卡也是这一圈）
+private struct ShowcaseStill: View {
+    let url: URL?
+    let width: CGFloat
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: DSRadius.card(width), style: .continuous)
+        DSFill.placeholder
+            .overlay { RemoteImage(url: url, maxPixel: width * 3, placeholder: .clear) }
+            .frame(width: width, height: (width * 9 / 16).rounded())
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
+            .accessibilityHidden(true)
     }
 }
 

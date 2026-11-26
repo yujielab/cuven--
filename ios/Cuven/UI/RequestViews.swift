@@ -12,7 +12,9 @@ import UIKit.UIGestureRecognizerSubclass
 //
 // 可以申请的那一刻（用户要求，参考 Swipe-to-Send 视频和规格）：胶囊写「↑ 上滑申请添加」，底下一层淡淡的青紫光；
 // 往上拖，胶囊和光一起跟着手指走（约 1.5 个胶囊高，到顶有点阻力），过线停在上沿、底下出「松手即可申请」；
-// 过线松手（或直接按一下）就放进请求中心，盖上 RequestSendOverlay：粒子箭头「正在发往请求中心」→ 打勾「已添加至请求中心」+ 时间。
+// 过线松手（或直接按一下）就放进请求中心：震一下，胶囊弹回原位、直接换成「已加入请求中心」。
+// 以前还会盖上一整屏「正在发往请求中心 → 打勾、已添加至请求中心 + 时间」（RequestSendOverlay）；
+// 用户要求「保留上滑光效，移除申请添加的后续动画」，那一屏去掉了，上滑时胶囊底下的光照旧。
 
 private let requestGreen = Color(red: 0.19, green: 0.82, blue: 0.35)
 private let requestRed = Color(red: 1.0, green: 0.27, blue: 0.23)
@@ -40,8 +42,8 @@ struct RequestMorphControl: View {
     let wide: Bool
     let onRequest: () -> Void
     let onPlay: () -> Void
-    /// 上滑发送（用户要求）：返回 true = 发出去了（胶囊停在上沿化开淡出，详情页接着盖上「正在发往请求中心」那一屏）；
-    /// false = 没发出去（没登录等），胶囊弹回原位。没给的话按一下就走 onRequest
+    /// 上滑发送（用户要求）：返回 true = 发出去了（胶囊弹回原位，详情页把它换成「已加入请求中心」）；
+    /// false = 没发出去（没登录等），胶囊也弹回原位。没给的话按一下就走 onRequest
     var onSend: (() -> Bool)? = nil
     /// 已经发出、那一屏正盖在上面：胶囊化开淡出；那一屏关掉（变回 false）以后回到原位再淡回来
     var launched = false
@@ -264,18 +266,10 @@ struct RequestMorphControl: View {
             settle()
             return
         }
-        if onSend() {
-            // 发出去了：胶囊升到上沿停住（按一下的也一样），在那一屏底下化开淡出。
-            // 减弱动态效果（用户要求）：按一下发出只原地淡出，不往上飞（上滑过线的本来就停在上沿）
-            if !reduceMotion {
-                withAnimation(armAnimation) {
-                    armed = true
-                    dragLift = max(dragLift, Self.travel)
-                }
-            }
-        } else {
-            settle()
-        }
+        // 发没发出去都弹回原位：用户要求去掉发出以后的那段动画（以前停在上沿化开淡出，再盖上「正在发往请求中心」那一屏）；
+        // 发出去的，详情页在同一次更新里把胶囊换成「已加入请求中心」，上滑的光跟着胶囊落回去、淡掉
+        _ = onSend()
+        settle()
     }
 
     /// 没过线就松手：短促、带一点阻尼地回到原位（规格：160–220 ms）
@@ -429,6 +423,8 @@ struct RequestProgressCard: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .monospacedDigit()
+                    // 进到下一步时那个数滚过去（和右边的百分比同一下），不是整行硬换
+                    .contentTransition(.numericText(value: Double(status.step)))
                 Spacer(minLength: 8)
                 Text(trailing)
                     .font(.subheadline.weight(.semibold))
@@ -440,9 +436,10 @@ struct RequestProgressCard: View {
             HStack(alignment: .top, spacing: 6) {
                 ForEach(0..<RequestStatus.labels.count, id: \.self) { i in
                     let reached = status.state == .done || i + 1 <= status.step
-                    Text(RequestStatus.labels[i])
+                    Text(Self.stacked(RequestStatus.labels[i]))
                         .font(.caption2.weight(i + 1 == status.step ? .semibold : .regular))
                         .foregroundStyle(reached ? Color.white : DSInk.tertiary)
+                        .multilineTextAlignment(.leading)
                         .lineLimit(2)
                         .minimumScaleFactor(0.85)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -456,6 +453,12 @@ struct RequestProgressCard: View {
         .padding(18)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("请求添加，第 \(status.step) 步，共 \(status.steps) 步：\(RequestStatus.labels[max(0, min(4, status.step - 1))])。\(trailing)。\(footnote)")
+    }
+
+    /// 五步的名字都是两个字的动词加对象（等待… / 最终…），在动词后面断行，五个都是整齐的两行；
+    /// 以前让系统自己断，窄的时候有的一行、有的两行，还会断成「等待品质 / 管理」（设计复查）
+    private static func stacked(_ s: String) -> String {
+        s.count > 3 ? String(s.prefix(2)) + "\n" + String(s.dropFirst(2)) : s
     }
 
     /// 卡底下那一行小字（进行中的是用户定的说法）
@@ -537,17 +540,6 @@ struct CatalogDetailView: View {
     @State private var showPlay = false
     /// 按了「立即播放」：片库还没刷新到这部、正在找
     @State private var opening = false
-    /// 上滑（或按下）发往请求中心以后盖上去的那一屏（用户要求：粒子箭头「正在发往请求中心」→ 打勾「已添加至请求中心」+ 时间）
-    @State private var sendItem: RequestSendItem?
-    /// 那一屏的结果：nil = 还在「正在发往请求中心」
-    @State private var sendResult: RequestSendResult?
-    @State private var sendShowing = false
-    /// 已经发出：胶囊停在上沿化开淡出；那一屏关掉以后淡回来（那时已经是「已加入请求中心」）
-    @State private var sendLaunched = false
-    /// 那一屏按的是「前往请求中心」：关掉以后切过去
-    @State private var sendOpensCenter = false
-    /// 用户要求先「正在发往请求中心」再「已添加」：那一屏盖着的时候胶囊还是上滑那颗（光也在），关掉、放回原位以后才换成「已加入请求中心」
-    @State private var sendHold = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     struct DetailAlert: Identifiable { let title: String; let message: String; var id: String { title + message } }
@@ -565,8 +557,7 @@ struct CatalogDetailView: View {
         let done = inLibrary || status?.state == .done
         let available = (detail?.count ?? 0) > 0 && !inLibrary
         let queued = basket.contains(title, season: seasonKey)
-        // 头部那颗：发出去、那一屏还盖着时不换成「已加入」（见 sendHold）；底下固定条照旧按 queued
-        let mode = buttonMode(status: status, done: done, available: available, queued: queued && !sendHold)
+        let mode = buttonMode(status: status, done: done, available: available, queued: queued)
         let playing: Bool = { if case .play = mode { return true }; return false }()
         DetailScaffold(
             title: displayTitle,
@@ -588,7 +579,7 @@ struct CatalogDetailView: View {
             stills: DetailText.stills(meta),
             customAction: AnyView(
                 RequestMorphControl(mode: mode, wide: false, onRequest: { _ = request() }, onPlay: { playNow() },
-                                    onSend: { request() }, launched: sendLaunched)
+                                    onSend: { request() })
             )
         ) { m in
             sections(m)
@@ -610,10 +601,6 @@ struct CatalogDetailView: View {
         } message: { a in
             Text(a.message)
         }
-        .modifier(RequestSendCover(showing: $sendShowing, item: sendItem, result: sendResult,
-                                   onDone: { closeSend(openCenter: false) },
-                                   onOpenCenter: { closeSend(openCenter: true) },
-                                   onDismiss: { sendDismissed() }))
     }
 
     /// 头部那颗钮现在是哪个样子：立即播放 / 五步进度卡 / 已加入请求中心 / 上滑申请添加 / 查询中、暂无可用资源
@@ -687,6 +674,8 @@ struct CatalogDetailView: View {
                     .padding(.vertical, 2)
                 }
                 .scrollIndicators(.hidden)
+                // 季多的时候往左滑：胶囊从页边距上滑过去，不在边距那条线上被齐齐切掉（和别的横排一样不裁）
+                .scrollClipDisabled()
             }
         }
     }
@@ -771,11 +760,11 @@ struct CatalogDetailView: View {
 
     /// 用户要求的批量流程：「请求添加」先放进请求中心（最多 50 部），在请求中心按「确认」才一起提交。
     /// 已经在请求中心里的，再按一下就切到请求中心去确认。
-    /// 上滑（或按下）那颗胶囊（用户要求）：放进请求中心，盖上「正在发往请求中心 → 已添加至请求中心」那一屏（RequestSendOverlay）。
-    /// 返回 true = 发出去了（胶囊停在上沿淡出）；false = 没发（没登录、已经在请求中心里、那一屏还盖着）
+    /// 上滑（或按下）那颗胶囊（用户要求）：放进请求中心，震一下，胶囊换成「已加入请求中心」（后续那一屏用户要求去掉了）。
+    /// 返回 true = 发出去了；false = 没发（没登录、已经在请求中心里）
     @discardableResult
     private func request() -> Bool {
-        guard !busy, pending == nil, !sendShowing else { return false }
+        guard !busy, pending == nil else { return false }
         if !DemoData.enabled && !account.isLoggedIn { alert = DetailAlert(title: "无法请求添加", message: "登录后才能请求添加。"); return false }
         let s = seasonKey
         if basket.contains(title, season: s) {
@@ -802,56 +791,16 @@ struct CatalogDetailView: View {
         return basket.items.first { $0.key == key }?.added
     }
 
-    /// 盖上那一屏：先是「正在发往请求中心」（粒子箭头往上飞），停一会儿再给结果（打勾 + 时间）。
-    /// 放进请求中心是本地的、一下就好；停这一下是用户要的那段飞行（规格：发送状态一直保持到结果回来）
+    /// 放进去以后：加进去了（或早就在里面）震一下成功，胶囊在同一次更新里换成「已加入请求中心」；
+    /// 没加成（请求中心满了）照旧说原因。用户要求「保留上滑光效，移除申请添加的后续动画」：
+    /// 以前这里盖上一整屏「正在发往请求中心」→ 打勾、片名、时间（RequestSendOverlay），飞够 1.5 秒才给结果
     private func launchSend(_ result: RequestSendResult) {
-        let s = seasonKey
-        sendItem = RequestSendItem(title: displayTitle,
-                                   season: title.kind == .tv && s > 0 ? s : nil,
-                                   poster: TMDBImage.url(meta?.poster ?? meta?.posterClean ?? title.poster, "w342"))
-        sendResult = nil
-        sendOpensCenter = false
-        Haptics.light()
-        // 不要系统从下往上推的那一下（那一屏自己从透明里亮起来）；底是透明的，不会闪白
-        var t = Transaction()
-        t.disablesAnimations = true
-        withTransaction(t) { sendShowing = true }
-        // 和 basket.add 同一次更新：胶囊不换成「已加入」，还是上滑那颗、光最亮，在那一屏底下化开淡出
-        sendHold = true
-        withAnimation(DSMotion.adapt(.easeOut(duration: 0.5), reduce: reduceMotion)) { sendLaunched = true }
-        let hold = reduceMotion ? 700 : 1500
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(hold))
-            guard sendShowing else { return }
-            // 打勾那一下的震动由 RequestSendOverlay 给（和打勾同一刻）：用户要求的成功反馈只要一次，这里不再重复
-            sendResult = result
-        }
-    }
-
-    /// 那一屏上的「好」/「前往请求中心」：关掉回到详情页（这时已经是「已加入请求中心」）；前往的话关掉以后切到请求中心
-    private func closeSend(openCenter: Bool) {
-        sendOpensCenter = openCenter
-        // 那一屏已经自己淡出了（用户要求的收起）：不要系统再往下滑一次，那一下看不见却挡着点按
-        var t = Transaction()
-        t.disablesAnimations = true
-        withTransaction(t) { sendShowing = false }
-    }
-
-    private func sendDismissed() {
-        sendItem = nil
-        sendResult = nil
-        // 胶囊先不带动画地放回原位（RequestMorphControl 的 onChange(of: launched)）再淡回来；
-        // 下一拍才换成「已加入请求中心」，免得那颗胶囊从上沿掉下来（用户要求的顺序：先发送，回来时才是已加入）
-        withAnimation(DSMotion.adapt(.easeOut(duration: 0.35), reduce: reduceMotion)) { sendLaunched = false }
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(50))
-            // 这 50 毫秒里又发了一次（那一屏又盖上了）：留给那一次关掉时再放开
-            guard !sendShowing else { return }
-            sendHold = false
-        }
-        if sendOpensCenter {
-            sendOpensCenter = false
-            basket.openCenter = true
+        switch result {
+        case .failed(let why):
+            Haptics.error()
+            alert = DetailAlert(title: "无法请求添加", message: why)
+        case .added, .already:
+            Haptics.success()
         }
     }
 
@@ -867,27 +816,6 @@ struct CatalogDetailView: View {
         detail = CatalogDetail(demo: title, seasons: title.kind == .tv ? [1, 2] : [], count: 3,
                                best: RequestStatus.Spec(res: "2160p", labels: ["4K", "杜比视界"], size: "58.6 GB"))
         loading = false
-    }
-}
-
-/// 详情页上滑发送以后盖上去的那一屏（用户要求）：整屏，底透明（那一屏自己画暗底和光），没有系统推上来的那一下。
-/// 单独一个修饰器：详情页那一长串修饰器再长，编译器就推不动类型了
-private struct RequestSendCover: ViewModifier {
-    @Binding var showing: Bool
-    let item: RequestSendItem?
-    let result: RequestSendResult?
-    let onDone: () -> Void
-    let onOpenCenter: () -> Void
-    let onDismiss: () -> Void
-
-    func body(content: Content) -> some View {
-        content.fullScreenCover(isPresented: $showing, onDismiss: onDismiss) {
-            if let item {
-                RequestSendOverlay(item: item, result: result, onDone: onDone, onOpenCenter: onOpenCenter)
-                    .presentationBackground(.clear)
-                    .environment(\.colorScheme, .dark)
-            }
-        }
     }
 }
 
@@ -1007,6 +935,7 @@ struct CatalogPosterLink: View {
 /// 搜索：片库之外，影片库索引里对得上的（「可请求添加」）。showEmpty：片库里一部都没搜到时，这里也没有就说「没有找到」
 struct RequestableSearchSection: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let query: String
     let metrics: DSMetrics
     var showEmpty = false
@@ -1015,6 +944,8 @@ struct RequestableSearchSection: View {
 
     var body: some View {
         content
+            // 查到了：那一排（或「没有找到」）淡进来，不是啪地冒出来
+            .animation(DSMotion.adapt(DSMotion.fade, reduce: reduceMotion), value: items == nil)
             .task(id: query) {
                 items = nil
                 guard !DemoData.enabled else { items = []; return }
@@ -1027,6 +958,9 @@ struct RequestableSearchSection: View {
             }
     }
 
+    /// 只淡入、不淡出：换了字重新查时旧的那一排照旧马上收掉（外面的版面不带这个动画，慢慢淡出会和挪上来的东西叠在一起）
+    private var fadeIn: AnyTransition { .asymmetric(insertion: .opacity, removal: .identity) }
+
     @ViewBuilder private var content: some View {
         let movies = model.ownedMovieIDs, shows = model.ownedSeasons
         let list = (items ?? []).filter { !model.owns($0, movies: movies, shows: shows) }
@@ -1036,6 +970,7 @@ struct RequestableSearchSection: View {
                     ForEach(list.prefix(24), id: \.uid) { it in CatalogPosterLink(item: it, metrics: metrics, slot: "search-request") }
                 }
             }
+            .transition(fadeIn)
         } else if showEmpty && items != nil {
             ContentUnavailableView {
                 Label("没有找到“\(query)”", systemImage: "magnifyingglass")
@@ -1048,8 +983,10 @@ struct RequestableSearchSection: View {
                 .accessibilityIdentifier("search-browse-all")
             }
             .padding(.top, 60)
+            .transition(fadeIn)
         } else if showEmpty {
             ProgressView().frame(maxWidth: .infinity, minHeight: 240)
+                .transition(fadeIn)
         } else {
             Color.clear.frame(height: 0)
         }

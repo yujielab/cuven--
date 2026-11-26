@@ -34,6 +34,10 @@ struct RequestFlowCard: View {
     /// 宽屏（iPad、展开的 Duo）：漏斗高一点、四段的数大一号
     private var big: Bool { metrics.wide }
     private var funnelHeight: CGFloat { big ? 150 : 112 }
+    /// 卡里的边距（漏斗的画布往两边伸出这么多，铺到卡边）
+    private var cardPadding: CGFloat { big ? 20 : 16 }
+    /// 漏斗上下给辉光多留的高（溢出到数那一行、卡底的留白里）
+    private static let spill: CGFloat = 24
 
     var body: some View {
         VStack(alignment: .leading, spacing: big ? 16 : 14) {
@@ -46,7 +50,7 @@ struct RequestFlowCard: View {
                 .accessibilityValue(accessibilityRate)
             footer
         }
-        .padding(big ? 20 : 16)
+        .padding(cardPadding)
         .background(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(Color(white: Double(FlowFunnelRenderer.background)))
@@ -83,7 +87,8 @@ struct RequestFlowCard: View {
                     VStack(spacing: 6) {
                         Text(c.title)
                             .font(.subheadline.weight(category == c ? .semibold : .regular))
-                            .foregroundStyle(category == c ? Color.white : Color.white.opacity(0.42))
+                            // 没选中的用 App 最轻一级灰字（以前 42% 白，近黑卡上对比不到 4.5 : 1：设计复查）
+                            .foregroundStyle(category == c ? Color.white : DSInk.tertiary)
                         ZStack {
                             Capsule().fill(Color.clear).frame(height: 1.5)
                             if category == c {
@@ -93,9 +98,13 @@ struct RequestFlowCard: View {
                         }
                     }
                     .fixedSize()
+                    // 点按区四周各放大 9 点（两个字加一条线只有 30 × 28 点，够不到 44：F74）；外面用负的 padding 收回去，版面一点不动。
+                    // 三颗之间隔 18，各放大 9 正好挨上、不重叠
+                    .padding(9)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .padding(-9)
                 .accessibilityAddTraits(category == c ? .isSelected : [])
                 .accessibilityIdentifier("flow-tab-\(c.rawValue)")
             }
@@ -130,7 +139,8 @@ struct RequestFlowCard: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(RequestFlowStats.stageNames[i])
                                 .font(.caption2)
-                                .foregroundStyle(Color.white.opacity(0.5))
+                                // 段名 / 百分比用 App 的两级灰字（以前 50% / 38% 白，比下面列表的灰还暗：设计复查）
+                                .foregroundStyle(DSInk.secondary)
                             Text("\(Int(c[i].rounded()))")
                                 .font(.system(size: big ? 22 : 17, weight: .semibold))
                                 .monospacedDigit()
@@ -138,7 +148,7 @@ struct RequestFlowCard: View {
                             Text(percent(c[0] > 0.5 ? c[i] / top : 0))
                                 .font(.caption2)
                                 .monospacedDigit()
-                                .foregroundStyle(Color.white.opacity(0.38))
+                                .foregroundStyle(DSInk.tertiary)
                         }
                         .padding(.leading, i == 0 ? 2 : 4)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -147,10 +157,14 @@ struct RequestFlowCard: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             }
-            // 不裁圆角：左右两头在着色器里虚化、淡进卡的底色（FlowFunnel.metal），看不到一条边
-            FlowFunnelCanvas(engine: engine, active: visible)
+            // 用户要求「允许光效溢出，拉长主体不用留间隙」：画布左右伸到卡边（主体接着往外伸，到卡边虚化淡掉）、
+            // 上下各多出 spill 给辉光（版面上还是 funnelHeight 那么高）；底是透明的，压在数那一行下面（zIndex），字不被辉光盖住
+            FlowFunnelCanvas(engine: engine, active: visible, inset: cardPadding, spill: Self.spill)
                 .frame(maxWidth: .infinity)
-                .frame(height: funnelHeight)
+                .frame(height: funnelHeight + Self.spill * 2)
+                .padding(.horizontal, -cardPadding)
+                .padding(.vertical, -Self.spill)
+                .zIndex(-1)
                 .accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -185,22 +199,32 @@ struct RequestFlowCard: View {
         let p = progress(at: now)
         let moved = b.stage == "copy" ? p * b.total : b.total
         let left = b.speed > 0 ? max(0, (b.total - moved) / b.speed) : (b.eta ?? 0)
+        let stateText: String = b.stage == "copy" ? String(format: "%.0f%%", p * 100) : (b.stage == "verify" ? "核对中" : "收尾中")
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 Text("批量传输")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.white)
+                    .layoutPriority(1)
+                // 窄的屏（折起的 Duo）放不下时只收这一句（和「凑批」那一行一样缩一点、不折行），两头的「批量传输」和百分比不动
                 Text(b.mine.isEmpty ? "\(b.items) 部" : "\(b.items) 部 · 其中 \(b.mine.count) 部是你的")
                     .font(.footnote)
-                    .foregroundStyle(Color.white.opacity(0.5))
+                    .foregroundStyle(DSInk.tertiary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                 Spacer(minLength: 8)
-                Text(b.stage == "copy" ? String(format: "%.0f%%", p * 100) : (b.stage == "verify" ? "核对中" : "收尾中"))
+                Text(stateText)
                     .font(.footnote.weight(.semibold))
                     .monospacedDigit()
                     .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .layoutPriority(1)
                     .contentTransition(.numericText())
+                    // 这一条每秒由时间线重算一次，没有动画就没有滚动的那一下（numericText 以前从来没跑过）
+                    .animation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion), value: stateText)
             }
-            FlowProgressBar(progress: b.stage == "copy" ? p : 1, palette: category.palette, live: b.stage == "copy" && !reduceMotion)
+            // 滚出屏幕、切到后台时那道扫光也停（它自己有一条 30 帧的时间线，以前卡不在眼前也一直转）
+            FlowProgressBar(progress: b.stage == "copy" ? p : 1, palette: category.palette, live: b.stage == "copy" && !reduceMotion && visible)
                 .frame(height: 4)
             HStack {
                 Text("\(Self.size(moved)) / \(Self.size(b.total))")
@@ -213,8 +237,10 @@ struct RequestFlowCard: View {
             }
             .font(.caption)
             .monospacedDigit()
-            .foregroundStyle(Color.white.opacity(0.5))
+            .foregroundStyle(DSInk.tertiary)
             .lineLimit(1)
+            // 放不下时两头各缩一点，不截成「…」
+            .minimumScaleFactor(0.85)
         }
         .accessibilityElement(children: .combine)
     }
@@ -228,7 +254,7 @@ struct RequestFlowCard: View {
                     .foregroundStyle(.white)
                 Text("已清洗 \(g.ready) 部 · 满 \(need) 部开始批量传输")
                     .font(.footnote)
-                    .foregroundStyle(Color.white.opacity(0.5))
+                    .foregroundStyle(DSInk.tertiary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
             }

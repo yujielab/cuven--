@@ -54,7 +54,7 @@ final class DuoUnfoldedTests: XCTestCase {
             print("DUO unfolded detail: nothing to open")
         }
 
-        tab(app, "资料库"); sleep(3)
+        tab(app, "探索"); sleep(3)
         snap("duo-34-unfolded-library")
 
         // 展开横拿

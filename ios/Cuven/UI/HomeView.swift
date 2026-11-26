@@ -6,7 +6,7 @@ import UIKit
 // 和 Apple TV 的主页一样只有两样东西：最上面一张铺满的轮播头图（S15–S17），下面一排排海报（T23、S8）。
 // 头图几乎占满一屏，连同 iPhone Duo 侧边那一列一起平铺（画面在系统栏底下过去，不做镜像模糊：F6、S19），
 // 左上一行白色大字「Home」、右上一枚头像（点开账户与设置），页码点浮在画面底部。
-// 下面的顺序：继续观看（有才有）→ 今年 → 去年（电影和剧集一起，最新入库的在前）→ 精选电影 → 精选剧集 → 四个大类（用户要求：动画片区、
+// 下面的顺序：继续观看（有才有）→ 精选电影 → 今年 → 去年（电影和剧集一起，最新入库的在前）→ 精选剧集 → 四个大类（用户要求：动画片区、
 // 动作片区、喜剧片区、严苛品质区）。卡上只有画面：无字主视觉 + 官方字标，或本来就印着片名的海报，卡下不写字（T20、F80）。
 // 分区之间只靠留白（F3、F12、F38）。折起的外屏、展开的竖拿 / 横拿是同一套部件，只按可用宽度长大（S1、D2、F9）。
 
@@ -74,7 +74,10 @@ struct HomeView: View {
         let tall = fullHeight > fullWidth
         // iPad（用户要求定制）：头图不再占满一整屏，竖拿约六成、横拿约七成半，下面那一排的标题露出来（Apple TV App 在 iPad 上的比例）
         let pad = UIDevice.current.userInterfaceIdiom == .pad
-        let height = (fullHeight * (pad ? (tall ? 0.62 : 0.74) : (tall ? 0.86 : 0.94))).rounded()
+        let ratio: CGFloat = pad ? (tall ? 0.62 : 0.74) : (tall ? 0.86 : 0.94)
+        // 设计复查：有标签栏的 iPhone 竖拿（下边距 > 60）时，86% 让下一排的标题一大半压在标签栏底下；
+        // 最多到「屏高 − 下边距 − 72」（28 间距 + 28 标题 + 16 留白），标题整行露在标签栏上面。折起的 Duo、iPad 不变
+        let height = ((!pad && tall && insets.bottom > 60) ? min(fullHeight * ratio, fullHeight - insets.bottom - 72) : fullHeight * ratio).rounded()
         let pages = heroPages
         ZStack(alignment: .topLeading) {
             if !pages.isEmpty {
@@ -100,6 +103,7 @@ struct HomeView: View {
                     .allowsHitTesting(false)
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 12)
+                // 光学扫描在「主页」右边（iPhone Duo 上也是：挪到侧边那一列里试过，用户要求放回来）
                 if canScan { scanButton }
             }
             // 没有状态栏留的安全区时（iPhone Duo 折起，状态栏在侧边那一列）至少离上沿 24 + 8：
@@ -110,6 +114,8 @@ struct HomeView: View {
             .frame(width: fullWidth)
         }
         .frame(width: fullWidth, alignment: .topLeading)
+        // 占位 → 头图淡过去（以前灰的占位一下子换成黑底，画面再从黑里出来）；只是淡入淡出，「减弱动态效果」下也合适
+        .animation(DSMotion.fade, value: pages.isEmpty)
     }
 
     /// 能扫：配对的解码器在（PairSpec），登录了、不是演示数据（和账户页「扫描登录其他设备」同一个条件）
@@ -120,11 +126,14 @@ struct HomeView: View {
     /// 光学扫描（用户要求「在头像旁边添加 + 光学扫描按钮」）：和头像一样大的一颗 Liquid Glass 圆钮，
     /// 点开就是账户页里那张扫描（将图案放在圆圈中 → 看是哪台设备 → 面容 ID 批准）
     private var scanButton: some View {
-        Button { pairScanning = true } label: {
-            // 图标（用户要求更新）：取景框四个角 + 中间一小团粒子（光学配对扫的是一团粒子云），见 ScanGlyph
+        Button {
+            // 和别的玻璃钮一样，点下去有一下轻的触感
+            Haptics.light()
+            pairScanning = true
+        } label: {
+            // 图标（用户要求 Apple 风格、克制简洁）：取景框四个角 + 中间一个小圆（镜头），见 ScanGlyph
             ScanGlyph()
-                .stroke(.white, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                .overlay { ScanGlyph.Dots().fill(.white) }
+                .stroke(.white, style: StrokeStyle(lineWidth: 1.9, lineCap: .round, lineJoin: .round))
                 .frame(width: 23, height: 23)
                 .frame(width: 46, height: 46)
                 .glassEffect(.regular.interactive(), in: Circle())
@@ -182,10 +191,19 @@ struct HomeView: View {
         return [y, y - 1]
     }
 
-    /// 顺序：继续观看 → 今年 → 探索片段合集 → 去年（预告片卡）→ 精选电影 → 编辑推荐 → 精选剧集 → 四个大类 → 结尾（两排字标卡 + 查看全部影片）
+    /// 货架那一列。片库到了，占位淡出、真货架淡入（以前是一下子换掉）；只是淡入淡出，「减弱动态效果」下也合适。
+    /// 外面套一层 VStack 只为挂这个动画：里面始终只有一块，版面不变
+    private func shelves(_ m: DSMetrics, fullHeight: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            shelfContent(m, fullHeight: fullHeight)
+        }
+        .animation(DSMotion.fade, value: model.movies.isEmpty)
+    }
+
+    /// 顺序：继续观看 → 精选电影 → 今年 → 探索片段合集 → 去年（预告片卡）→ 编辑推荐 → 精选剧集 → 四个大类 → 结尾（两排字标卡 + 查看全部影片）
     /// （docs/ios-design.md「主页」；F1：最要紧的在上）
     @ViewBuilder
-    private func shelves(_ m: DSMetrics, fullHeight: CGFloat) -> some View {
+    private func shelfContent(_ m: DSMetrics, fullHeight: CGFloat) -> some View {
         if model.movies.isEmpty {
             switch model.phase {
             case .failed(let msg):
@@ -209,12 +227,13 @@ struct HomeView: View {
         } else {
             VStack(alignment: .leading, spacing: m.shelfGap) {
                 continueWatching(m)
+                // 精选电影紧跟在继续观看下面（用户要求：从编辑推荐上面挪上来）
+                featuredShelf(m)
                 // 今年那一排下面是「探索片段合集」（用户要求：2026 年份下；ClipCollections.swift），再是去年
                 let years = homeYears
                 yearShelf(years[0], m)
                 ClipCollectionsShelf(metrics: m)
                 ForEach(years.dropFirst(), id: \.self) { y in yearShelf(y, m) }
-                featuredShelf(m)
                 editorsPickBlock(m, fullHeight: fullHeight)
                 featuredSeriesShelf(m)
                 // 主页不放「可申请」那一排（用户要求移除）：可申请的在「全部影片 › 可申请」和搜索里

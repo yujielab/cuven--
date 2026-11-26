@@ -95,6 +95,8 @@ struct LibraryGridCard: View {
                 }
             }
             .clipShape(shape)
+            // 一圈细边（设计复查）：一墙海报压在纯黑上，暗的海报没有这圈边就化进底里、和隔壁连成一片
+            .overlay(shape.strokeBorder(DSFill.hairline, lineWidth: 1))
             .contentShape(shape)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel([title, subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，"))
@@ -301,8 +303,9 @@ struct SearchView: View {
                     withAnimation(DSMotion.adapt(DSMotion.snap, reduce: reduceMotion)) { scope = s }
                 } label: {
                     // 选中的那颗是白底（App 的 tint 是白色，accentColor 跟着它）：字换黑，不然白字压白底整颗看不见（设计轮 1）
+                    // 字和 App 里别的小胶囊一样是 Subheadline 半粗（设计复查）：Headline 是 48 点大按钮的字，三颗像在抢结果的风头
                     Text(s.rawValue)
-                        .font(.headline)
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(on ? Color.black : Color.white)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 7)
@@ -413,7 +416,7 @@ struct SearchView: View {
     }
 }
 
-/// 列表里的一行：缩略图（电影竖海报 70 宽、剧集 16:9 横图）→ 片名（Title 3）和一行灰字「电影 · 动作 · 2026 年」→ 右边「•••」菜单。
+/// 列表里的一行：缩略图（电影竖海报 70 宽、剧集 16:9 横图）→ 片名（Headline）和一行灰字「电影 · 动作 · 2026 年」→ 右边「•••」菜单。
 /// 整行点了进详情（从缩略图上放大出来），「•••」单独一颗、点按区 44（F74）；行间一道细线，从字的左边线开始（C51）
 struct SearchResultRow: View {
     @Environment(AppModel.self) private var model
@@ -430,13 +433,14 @@ struct SearchResultRow: View {
                         thumbnail(width: thumbW)
                         VStack(alignment: .leading, spacing: 3) {
                             // 长片名、大字号时折成两行，不在滚动的列表里截断（F24；设计轮 2（并行·library））
+                            // Headline + 72% 白的灰字，和请求页、详情页的列表同一套（设计复查：以前 Title 3 + 系统灰）
                             Text(title)
-                                .font(.title3)
+                                .font(.headline)
                                 .foregroundStyle(.primary)
                                 .lineLimit(2)
                             Text(subtitle)
                                 .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(DSInk.secondary)
                                 .lineLimit(2)
                         }
                         Spacer(minLength: 0)
